@@ -339,6 +339,19 @@ class ShellPackageOwnershipContracts(unittest.TestCase):
 
 
 class InstalledShellCompilerContracts(unittest.TestCase):
+    def test_paired_shell_source_manifest_binds_the_changed_session_modules(self):
+        # Source-only correspondence: no Cargo, native imports or source run.
+        tree = ast.parse((SOURCE / "desktop/tools/ci_ubuntu_publication.py").read_text())
+        manifest = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "shell_source_manifest")
+        paths = next(node.value for node in manifest.body if isinstance(node, ast.Assign)
+                     and any(isinstance(target, ast.Name) and target.id == "paths" for target in node.targets))
+        names = ast.literal_eval(paths)
+        self.assertEqual(len(names), len(set(names)))
+        self.assertTrue({"desktop/src-tauri/src/" + name + ".rs" for name in (
+            "runtime", "bridge", "asset_session", "asset_source", "shell", "installed_shell_observation",
+            "supervisor", "installed_shell_shutdown_observation")} <= set(names))
+        self.assertTrue({"desktop/src-tauri/src/main.rs", "desktop/src-tauri/tests/installed_shell_observation.rs"} <= set(names))
+
     def test_one_build_exact_production_features_and_two_selected_targets(self):
         argv = S.shell_compile_argv("/tools/cargo", Path("/source"), Path("/target"))
         self.assertEqual(argv[:2], ["/tools/cargo", "build"])
@@ -893,7 +906,7 @@ def closed_project_draft_data(lifecycle):
         "callers": [{"path": name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(), "mode": 0o640 if index == 0 else 0o600}
                     for index, (name, raw) in enumerate(lifecycle.SHELL_WORKFLOW_CALLERS.items())],
         "before": {"size": 3500, "sha256": "f" * 64}, "after": {"size": 4500, "sha256": "9" * 64}}
-    return {"state": "normal-shell-installed-runtime-connection-observed", "productQualified": False,
+    observed = {"state": "normal-shell-installed-runtime-connection-observed", "productQualified": False,
             "packageLifecycleQualified": False, "shellPackageBuilt": False,
             "cases": {
                 "normal": {"case": "normal", "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": False, "maps": []},
@@ -917,6 +930,26 @@ def closed_project_draft_data(lifecycle):
                          for phase in ("before", "after")]
                       + [{"path": "lifecycle-shell-workflow-apply-" + phase + ".json", **workflow_fixture[phase]}
                          for phase in ("before", "after")]}
+    sessions = {}
+    maps = [{"role": role, "path": "/inert/" + role, "deviceMajor": 8, "deviceMinor": 2, "inode": index + 1}
+            for index, role in enumerate(sorted(lifecycle.PRIVATE_SONAMES | {"python", "ld-linux-x86-64.so.2", "libc.so.6", "libm.so.6"}))]
+    for case in lifecycle.SHELL_SESSION_CASES:
+        receipt = deepcopy(lifecycle.SHELL_SESSION_RECEIPTS[case])
+        changed = case == "session-refusals"
+        fixture = {"fixture": "four-kind-session-v1", "case": case, "rootRetained": True, "originalsAccounted": True,
+            "projectUnchanged": True, "sourcesOutsideProject": True, "noUnexpectedEntries": True, "noPendingState": True,
+            "beforeCount": 15 if changed else 9, "afterCount": 14 if changed else 9,
+            "mutations": ["changed-leaf-rename"] if changed else [],
+            "before": {"size": 4096 if changed else 3072, "sha256": "7" * 64},
+            "after": {"size": 3900 if changed else 3072, "sha256": ("8" if changed else "7") * 64}}
+        observed["cases"][case] = {"case": case, "exitCode": 0, "bootstrapReturned": True,
+                                  "domAndGtkObserved": True,
+                                  "maps": [deepcopy(maps) for _ in range(receipt["behavior"]["assessments"])], "sessionInputs": receipt}
+        sessions[case] = {"native": deepcopy(receipt), "fixture": fixture}
+        observed["files"].extend({"path": "lifecycle-shell-" + case + "-" + phase + ".json", **fixture[phase]}
+                                 for phase in ("before", "after"))
+    observed["sessionInputs"] = sessions
+    return observed
 
 
 class InstalledProjectDraftReceiptContracts(unittest.TestCase):
@@ -965,7 +998,8 @@ class InstalledProjectDraftReceiptContracts(unittest.TestCase):
         self.assertEqual(result["fixture"]["entryCount"], 7)
         self.assertEqual(result["fixture"]["sourceBytes"], 149)
         self.assertNotEqual(result["fixture"]["before"], result["fixture"]["after"])
-        self.assertEqual(set(observed["cases"]), {"normal", "positive", "quit-outstanding", "project-paths", "workflow-apply"})
+        self.assertEqual(set(observed["cases"]), {"normal", "positive", "quit-outstanding", "project-paths", "workflow-apply",
+                                                "session-inputs", "session-refusals", "session-loss", "session-deadline"})
 
     def test_rejects_legacy_partial_mistyped_or_relabelled_positive_receipts(self):
         lifecycle = S.local("ubuntu_publication_lifecycle")
@@ -1400,6 +1434,58 @@ class InstalledWorkflowApplyReceiptContracts(unittest.TestCase):
             changed = deepcopy(documents[1]); mutate(changed)
             with self.subTest(mutate=mutate), self.assertRaises(ValueError):
                 lifecycle.shell_workflow_fixture(value, before, lifecycle.canonical(changed))
+
+
+class InstalledSessionReceiptContracts(unittest.TestCase):
+    def test_all_four_session_receipts_remain_distinct_from_ordinary_twelve_methods(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        observed = closed_project_draft_data(lifecycle)
+        result = S.shell_project_draft_observation(observed, lifecycle)
+        self.assertEqual(result["native"]["methods"], "twelve-passive")
+        for name in lifecycle.SHELL_SESSION_CASES:
+            receipt = observed["sessionInputs"][name]["native"]
+            self.assertEqual(receipt["case"], name)
+            self.assertEqual(receipt["methods"], "thirteen-passive-including-supplied-input-assessment")
+            self.assertEqual(receipt["profile"], "installed-linux-session-inputs")
+            self.assertEqual(len(observed["cases"][name]["maps"]), receipt["behavior"]["assessments"])
+            self.assertTrue(all(len(rows) == 6 for rows in observed["cases"][name]["maps"]))
+            self.assertEqual(receipt["safety"], {"persistentStorage": False, "storeContacted": False, "signingVerified": False, "releaseReady": False})
+            self.assertTrue(all(value is True for value in receipt["originals"].values()))
+
+    def test_missing_originals_mixed_cases_and_unbound_private_fixture_pins_refuse(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        case = "session-inputs"
+        mutations = (
+            lambda doc: doc.pop("sessionInputs"), lambda doc: doc["cases"].pop(case),
+            lambda doc: doc["sessionInputs"].pop("session-deadline"),
+            lambda doc: doc["cases"][case].update(exitCode=True),
+            lambda doc: doc["cases"][case].update(bootstrapReturned=1),
+            lambda doc: doc["cases"][case].update(maps=[]),
+            lambda doc: doc["cases"][case]["maps"].pop(),
+            lambda doc: doc["cases"][case]["maps"].append(deepcopy(doc["cases"][case]["maps"][0])),
+            lambda doc: doc["cases"][case]["maps"][0].pop(),
+            lambda doc: doc["cases"][case]["maps"][0][0].update(inode=True),
+            lambda doc: doc["cases"][case]["maps"][0][0].update(role="not-an-admitted-role"),
+            lambda doc: doc["cases"][case]["maps"][0][0].update(privateInput="not-a-map-field"),
+            lambda doc: doc["cases"][case]["sessionInputs"].update(methods="twelve-passive"),
+            lambda doc: doc["sessionInputs"][case]["native"]["originals"].update(sourceClosed=False),
+            lambda doc: doc["sessionInputs"][case].update(native=deepcopy(doc["sessionInputs"]["session-loss"]["native"])),
+            lambda doc: doc["cases"]["normal"].update(sessionInputs=doc["cases"][case]["sessionInputs"]),
+            lambda doc: doc["sessionInputs"][case]["fixture"].update(projectUnchanged=1),
+            lambda doc: doc["sessionInputs"][case]["fixture"].update(noPendingState=False),
+            lambda doc: doc["sessionInputs"][case]["fixture"].update(sourcesOutsideProject=False),
+            lambda doc: doc["sessionInputs"][case]["fixture"].update(mutations=["changed-leaf-rename"]),
+            lambda doc: doc["sessionInputs"]["session-refusals"]["fixture"].update(mutations=[]),
+            lambda doc: doc["sessionInputs"][case]["fixture"]["before"].update(size=8193),
+            lambda doc: doc["sessionInputs"][case]["fixture"]["after"].update(sha256="0" * 64),
+            lambda doc: doc["files"].pop(8), lambda doc: doc["files"].append(deepcopy(doc["files"][8])),
+            lambda doc: doc["files"][8].update(size=True),
+            lambda doc: doc["files"][9].update(path="lifecycle-shell-session-loss-after.json"),
+        )
+        for mutate in mutations:
+            observed = closed_project_draft_data(lifecycle); mutate(observed)
+            with self.subTest(mutate=mutate), self.assertRaises((S.D.Refused, ValueError, KeyError)):
+                S.shell_project_draft_observation(observed, lifecycle)
 
 
 class InstalledFailureLabelSourceContracts(unittest.TestCase):

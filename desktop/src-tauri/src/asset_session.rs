@@ -176,6 +176,8 @@ pub(crate) struct OriginalWork {
     pub(crate) wake: Notify, coordinator: Mutex<CoordinatorBook>, child: AsyncMutex<ChildBook>,
     source: Arc<Mutex<SourceBook>>, pub(crate) gui: Arc<GuiCall>,
     retirement: Mutex<Retirement>, retired: AtomicBool,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    installed_capture: Mutex<Option<Arc<asset_source::InstalledCaptureCheckpoint>>>,
 }
 impl OriginalWork {
     fn new(id: u32, gui_needed: bool, document: Weak<Inner>) -> Arc<Self> {
@@ -183,6 +185,8 @@ impl OriginalWork {
             wake: Notify::new(), coordinator: Mutex::new(CoordinatorBook { handle: None, receipt: JoinReceipt::New }),
             child: AsyncMutex::new(ChildBook { handle: None, receipt: JoinReceipt::New }), source: Arc::new(Mutex::new(SourceBook::new())),
             retirement: Mutex::new(Retirement::default()), retired: AtomicBool::new(true),
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            installed_capture: Mutex::new(None),
             gui: Arc::new(GuiCall { owner: owner.clone(), document, facts: Mutex::new(GuiFacts { dispatched: false, constructing: false,
                 created: false, showing: false, response: false, accepted: false, declined: false, accepted_at: None,
                 destroyed: false, released: !gui_needed, not_created: !gui_needed, close_queued: false, close_ack: false, release_queued: false,
@@ -412,6 +416,7 @@ struct DocumentState {
     lifetime: DocumentLifetime, revision: u32, next_operation: u32, next_context: u32, exhausted: bool, lost_observed: bool,
     session: bool, stopping: bool, unknown: bool, quit_pending: bool, retiring: bool, lock_pending: bool,
     compatibility_picker_pending: bool,
+    session_owner_reason: Option<Reason>,
     context: Option<Arc<NativeContext>>, slot: Option<Slot>, records: Vec<Record>, assignments: Vec<Assignment>,
     quit: Option<Arc<OriginalWork>>, quit_accepted: bool, quit_cleanup_end: Option<Instant>,
     github: ConnectionState,
@@ -582,6 +587,9 @@ fn quit_question_admitted(state: &DocumentState) -> bool {
 }
 struct Inner {
     state: Mutex<DocumentState>, bridge: Arc<DesktopBridge>, changes: watch::Sender<u32>,
+    session_identity: Arc<()>,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    installed_session: Mutex<Option<installed_session_observation::Book>>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fixture: Option<Weak<Qualification>>,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -613,6 +621,14 @@ fn common_document_gate(state: &DocumentState, session: bool, owner_gate: impl F
     if state.quit_pending || state.retiring || state.lock_pending { return Err(AssetError::new(Reason::Busy)); }
     Ok(())
 }
+fn session_owner_reason(supervisor_disabled: bool, edit_disabled: bool, supervisor_stopping: bool, edit_stopping: bool) -> Option<Reason> {
+    if supervisor_disabled || edit_disabled { Some(Reason::CleanupUnknown) }
+    else if supervisor_stopping || edit_stopping { Some(Reason::Shutdown) } else { None }
+}
+fn observe_session_owner_reason(state: &mut DocumentState, reason: Option<Reason>) -> bool {
+    if state.session_owner_reason == reason { return false; }
+    state.session_owner_reason = reason; true
+}
 fn ordinary_asset_platform_gate() -> Result<(), AssetError> {
     // Private asset custody is separate from the installed project-only
     // profile. Sharing document checks must not qualify either native route.
@@ -643,16 +659,22 @@ fn android_build_document_gate(state: &DocumentState, profile: Option<crate::and
 impl DocumentBinding {
     pub(crate) fn new(bridge: Arc<DesktopBridge>) -> Self {
         let (changes, _) = watch::channel(0);
-        Self { inner: Arc::new(Inner { bridge, changes,
+        let document = Self { inner: Arc::new(Inner { bridge, changes, session_identity: Arc::new(()),
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            installed_session: Mutex::new(None),
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             fixture: None,
             #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             github_fixture: None,
             state: Mutex::new(DocumentState { lifetime: DocumentLifetime::default(), revision: 0,
             next_operation: 0, next_context: 0, exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
-            compatibility_picker_pending: false,
+            compatibility_picker_pending: false, session_owner_reason: None,
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
-            github: ConnectionState::new(), evidence: EvidenceRegistry::new() }) }) }
+            github: ConnectionState::new(), evidence: EvidenceRegistry::new() }) }) };
+        // One memory-only binding to the Supervisor created in the ordinary
+        // DesktopBridge constructor. A later document cannot rebind its lease.
+        document.inner.bridge.supervisor.bind_original_session_document(&document.inner.session_identity);
+        document
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(crate) fn for_fixture(bridge: Arc<DesktopBridge>, permit: FixtureAdmission) -> Result<Self, &'static str> {
@@ -683,9 +705,26 @@ impl DocumentBinding {
     }
     fn native_qualified(&self) -> bool {
         if NATIVE_QUALIFIED { return true; }
+        if self.inner.bridge.installed_session_available(&self.inner.session_identity) { return true; }
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         if let Some(context) = self.inner.fixture.as_ref().and_then(Weak::upgrade) { return context.permits(self); }
         false
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn admit_installed_session(&self, permit: crate::shell::installed_observation::SessionAdmission) -> Result<(), BridgeError> {
+        // Setup only, before original navigation/IPC. The ordinary constructor
+        // has already bound this exact identity to its one Supervisor.
+        let state = self.lock();
+        if state.next_operation != 0 || state.next_context != 0 || state.session || state.slot.is_some()
+            || state.context.is_some() || state.quit.is_some() || state.lost_observed || state.stopping || state.unknown
+            || self.live_session_owner_reason().is_some() { return Err(BridgeError::invalid()); }
+        let case = permit.consume()?;
+        self.inner.bridge.supervisor.admit_installed_session_once(&self.inner.session_identity)?;
+        let mut observation = self.inner.installed_session.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+        if observation.is_some() { return Err(BridgeError::invalid()); }
+        *observation = Some(installed_session_observation::Book::new(case)); Ok(())
     }
     fn project_selection_qualified(&self) -> bool {
         if self.inner.bridge.installed_project_selection_available() { return true; }
@@ -1102,9 +1141,14 @@ impl DocumentBinding {
     }
     fn gate(&self, state: &DocumentState, session: bool) -> Result<(), AssetError> {
         self.common_gate(state, session)?;
+        if let Some(reason) = self.live_session_owner_reason() { return Err(AssetError::new(reason)); }
         ordinary_asset_platform_gate()?;
         if !self.native_qualified() { return Err(AssetError::new(Reason::Unqualified)); }
         if session && !state.session { return Err(AssetError::new(Reason::Closed)); } Ok(())
+    }
+    fn live_session_owner_reason(&self) -> Option<Reason> {
+        session_owner_reason(self.inner.bridge.supervisor.disabled(), self.inner.bridge.edits.disabled(),
+            self.inner.bridge.supervisor.stopping(), self.inner.bridge.edits.stopping())
     }
     fn project_path_gate(&self, state: &DocumentState) -> Result<(), AssetError> {
         self.common_gate(state, false)?;
@@ -1366,7 +1410,11 @@ impl DocumentBinding {
         Ok(generation == context.registry_generation && root.identity == context.project.identity && root.path == context.project.path)
     }
     fn expire(&self, state: &mut DocumentState, now: Instant) {
-        let mut changed = false;
+        let owner_reason = self.live_session_owner_reason();
+        // Display changes advance the existing native revision. This is
+        // capability DATA, not a fabricated asset cleanup result, and does
+        // not block original discard/retirement/quit behind new admission.
+        let mut changed = observe_session_owner_reason(state, owner_reason);
         if let Some(slot) = state.slot.as_mut() {
             if slot.cleanup_end.is_none() && slot.phase != Phase::Idle {
                 let work = slot.owner.endpoint();
@@ -1413,6 +1461,7 @@ impl DocumentBinding {
         let redacted = !state.lifetime.original_bound();
         let capability_reason = if state.unknown { Reason::CleanupUnknown } else if state.stopping { Reason::Shutdown }
             else if state.lost_observed { Reason::DocumentLost }
+            else if let Some(reason) = state.session_owner_reason { reason }
             else if !cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")) { Reason::UnsupportedPlatform }
             else if !self.native_qualified() { Reason::Unqualified } else if redacted { Reason::Closed } else { Reason::None };
         let operation = state.slot.as_ref().map(|slot| OperationStatus { operation_id: slot.owner.id, operation: slot.operation,
@@ -2070,6 +2119,8 @@ impl DocumentBinding {
         if project_path_pending(state) { return Err(AssetError::new(Reason::Busy)); }
         settle_evidence_status(state);
         let owner = slot.owner.clone();
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        self.installed_record_original(&owner, Some(slot.operation))?;
         let old_slot = state.slot.take().map(Box::new);
         if let Err(retirement) = owner.retain_retirement(Retirement { old_slot, ..Retirement::default() }) {
             state.slot = retirement.old_slot.map(|slot| *slot); state.unknown = true;
@@ -2275,7 +2326,10 @@ async fn execute_job(document: &DocumentBinding, owner: &Arc<OriginalWork>, job:
             let result = match assemble_request(&payload, &context) {
                 Ok(request) => {
                     if owner.interrupted() { return Staged::Refused(Reason::UserCancelled); }
-                    assess_supplied(&document.inner.bridge.supervisor, request).await.map(|result| SafeAssessment(Arc::new(result))).map_err(CommandError::from)
+                    let assessor = assess_supplied(&document.inner.bridge.supervisor, request);
+                    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    let assessor = document.inner.bridge.supervisor.observe_installed_session_query(owner, assessor);
+                    assessor.await.map(|result| SafeAssessment(Arc::new(result))).map_err(CommandError::from)
                 }
                 Err(error) => Err(error),
             };
@@ -2603,6 +2657,8 @@ impl DocumentBinding {
         }
         let id = match self.next_operation(&mut state) { Ok(id) => id, Err(_) => return };
         let owner = OriginalWork::new(id, true, Arc::downgrade(&self.inner));
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if self.installed_record_original(&owner, None).is_err() { state.unknown = true; self.bump(&mut state); return; }
         let previous = state.quit.replace(owner.clone());
         state.quit_pending = true; state.quit_accepted = false; state.quit_cleanup_end = None;
         let (start, enter) = oneshot::channel();
@@ -2933,7 +2989,7 @@ mod installed_project_observation {
             && slot.project.is_none() && slot.evidence.is_none() && slot.kind.is_none()
     }
     impl DocumentBinding {
-        fn observed_source_unchanged(&self, witness: &ProjectWitness) -> bool {
+        pub(super) fn observed_source_unchanged(&self, witness: &ProjectWitness) -> bool {
             let Ok(roster) = self.inner.bridge.native_roster() else { return false; };
             let Ok((generation, root)) = self.inner.bridge.native_project(&witness.project_id) else { return false; };
             generation == witness.generation && roster.generation == witness.generation
@@ -3100,6 +3156,121 @@ mod installed_project_observation {
     target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 pub(crate) use installed_project_observation::{ProjectWitness as InstalledProjectWitness, EvidenceWitness as InstalledEvidenceWitness};
 
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+mod installed_session_observation {
+    use super::*;
+    use crate::{shell::installed_observation::SessionCase, supervisor::SessionQueryHold};
+
+    pub(super) struct Book {
+        case: SessionCase, originals: Vec<(Arc<OriginalWork>, Option<Operation>)>, choose: u8, assess: u8,
+    }
+    impl Book {
+        pub(super) fn new(case: SessionCase) -> Self { Self { case, originals: Vec::new(), choose: 0, assess: 0 } }
+    }
+    // No private material is copied. Native pointer/opaque-token equality is
+    // private comparison DATA and must never enter an exported receipt.
+    #[derive(Clone)]
+    pub(crate) struct Snapshot {
+        pub(crate) status: Value, pub(crate) owner: Option<Arc<OriginalWork>>,
+        pub(crate) review_end: Option<Instant>, pub(crate) cleanup_end: Option<Instant>, pub(crate) work_end: Option<Instant>,
+        pub(crate) payloads: Vec<(String, u32, usize)>, pub(crate) sources: Vec<(u32, asset_source::InstalledSourceFacts)>,
+        pub(crate) settled: bool, pub(crate) lost: bool, pub(crate) bound: bool, pub(crate) unknown: bool,
+        pub(crate) quit_pending: bool, pub(crate) quit_declined: bool, pub(crate) empty: bool,
+    }
+    impl Snapshot {
+        pub(crate) fn same_payloads(&self, other: &Self) -> bool { self.payloads == other.payloads }
+        pub(crate) fn same_review(&self, other: &Self) -> bool {
+            self.status["operation"]["preview"]["token"] == other.status["operation"]["preview"]["token"]
+                && self.status["context"] == other.status["context"] && self.review_end == other.review_end
+                && self.work_end == other.work_end && self.cleanup_end == other.cleanup_end
+                && self.owner.as_ref().zip(other.owner.as_ref()).is_some_and(|(a,b)| Arc::ptr_eq(a,b))
+        }
+    }
+    fn joined(owner: &OriginalWork) -> bool {
+        owner.resources_settled() && owner.retired.load(Ordering::SeqCst)
+            && owner.coordinator.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none())
+            && owner.child.try_lock().is_ok_and(|book| matches!(book.receipt, JoinReceipt::New | JoinReceipt::Returned) && book.handle.is_none())
+            && owner.source.try_lock().is_ok_and(|book| book.not_started() || book.settled())
+            && owner.gui.facts().is_some_and(|facts| facts.selected.is_none() && facts.released
+                && (facts.not_created || facts.created && facts.response && facts.destroyed && facts.close_ack && facts.refusal.is_none()))
+    }
+    impl DocumentBinding {
+        pub(super) fn installed_record_original(&self, owner: &Arc<OriginalWork>, operation: Option<Operation>) -> Result<(), AssetError> {
+            let mut book = self.inner.installed_session.lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?;
+            let Some(book) = book.as_mut() else { return Ok(()); };
+            if book.originals.len() >= 128 || book.originals.iter().any(|(old,_)| old.id == owner.id) { return Err(AssetError::new(Reason::Capacity)); }
+            book.originals.try_reserve(1).map_err(|_| AssetError::new(Reason::Capacity))?;
+            if operation == Some(Operation::ChooseFile) {
+                book.choose = book.choose.checked_add(1).ok_or_else(AssetError::invalid)?;
+                if book.case == SessionCase::Refusals && book.choose == 4 {
+                    let checkpoint = Arc::new(asset_source::InstalledCaptureCheckpoint::default());
+                    if !owner.source.lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?.installed_checkpoint(checkpoint.clone()) {
+                        return Err(AssetError::new(Reason::CleanupUnknown));
+                    }
+                    *owner.installed_capture.lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))? = Some(checkpoint);
+                }
+            }
+            if operation == Some(Operation::Prepare) {
+                book.assess = book.assess.checked_add(1).ok_or_else(AssetError::invalid)?;
+                let hold = match (book.case, book.assess) {
+                    (SessionCase::Loss,1) => SessionQueryHold::Loss, (SessionCase::Deadline,1) => SessionQueryHold::Deadline,
+                    _ => SessionQueryHold::Observe,
+                };
+                self.inner.bridge.supervisor.arm_installed_session_query(owner, hold).map_err(|_| AssetError::new(Reason::CleanupUnknown))?;
+            }
+            book.originals.push((owner.clone(),operation)); Ok(())
+        }
+        pub(crate) fn installed_session_snapshot(&self) -> Option<Snapshot> {
+            self.reconcile(); let state = self.lock();
+            let book = self.inner.installed_session.lock().ok()?; let book = book.as_ref()?;
+            let mut sources = Vec::new();
+            for (owner,kind) in &book.originals {
+                if *kind == Some(Operation::ChooseFile) {
+                    if let Ok(source) = owner.source.try_lock() { sources.push((owner.id,source.installed_facts())); }
+                }
+            }
+            let status = serde_json::to_value(self.snapshot(&state)).ok()?;
+            Some(Snapshot { status, owner: state.slot.as_ref().map(|slot| slot.owner.clone()),
+                review_end: state.slot.as_ref().and_then(|slot| slot.review_end), cleanup_end: state.slot.as_ref().and_then(|slot| slot.cleanup_end),
+                work_end: state.slot.as_ref().and_then(|slot| slot.owner.endpoint()),
+                payloads: state.records.iter().map(|r| (r.key.id.0.clone(),r.key.revision,Arc::as_ptr(&r.payload) as usize)).collect(), sources,
+                settled: state.slot.as_ref().is_none_or(|slot| joined(&slot.owner)),
+                lost: state.lost_observed, bound: state.lifetime.original_bound(), unknown: state.unknown || state.exhausted,
+                quit_pending: state.quit_pending, quit_declined: state.quit.as_ref().is_some_and(|owner| owner.normally_declined()),
+                empty: session_data_empty(&state) && !state.session && !state.lock_pending && !state.retiring,
+            })
+        }
+        pub(crate) fn installed_session_capture_checkpoint(&self) -> Option<Arc<asset_source::InstalledCaptureCheckpoint>> {
+            let state = self.lock(); state.slot.as_ref()?.owner.installed_capture.lock().ok()?.clone()
+        }
+        pub(crate) fn take_installed_session_queries(&self) -> Result<crate::supervisor::InstalledSessionQueries, BridgeError> {
+            // Forward only the original document's original Supervisor; no
+            // RuntimeConfig/owner clone can issue an observation of another R1.
+            self.inner.bridge.supervisor.take_installed_session_queries()
+        }
+        pub(crate) fn installed_session_final(&self, project: &super::installed_project_observation::ProjectWitness, loss: bool) -> bool {
+            let state = self.lock();
+            let Ok(book) = self.inner.installed_session.lock() else { return false; }; let Some(book) = book.as_ref() else { return false; };
+            !state.unknown && !state.exhausted && state.lost_observed == loss && state.lifetime.original_bound() != loss
+                // can_exit joins the original quit before the relay may clear
+                // quit_pending. The same positive originals below, not that UI
+                // admission flag's scheduling, establish finality.
+                && state.stopping && state.quit_accepted && !state.session && !state.lock_pending
+                && state.context.is_none() && state.records.is_empty() && state.assignments.is_empty() && assets_can_exit_locked(&state)
+                && state.evidence.revoked && state.evidence.selection.is_none() && state.evidence.result.is_none()
+                && !state.github.native_work_pending() && state.github.material_settled()
+                && !self.inner.bridge.supervisor.disabled() && self.inner.bridge.supervisor.stopping() && self.inner.bridge.supervisor.can_exit()
+                && !self.inner.bridge.edits.disabled() && self.inner.bridge.edits.stopping() && self.inner.bridge.edits.can_exit()
+                && self.observed_source_unchanged(project) && book.originals.len() == state.next_operation as usize
+                && book.originals.iter().enumerate().all(|(i,(owner,_))| owner.id == i as u32 + 1 && joined(owner))
+                && state.quit_cleanup_end.is_some() && state.quit.as_ref().is_some_and(|quit| joined(quit) && quit.stopped()
+                    && quit.gui.facts().is_some_and(|facts| facts.accepted && !facts.declined))
+        }
+    }
+}
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) use installed_session_observation::Snapshot as InstalledSessionSnapshot;
+
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 mod fixture_observation {
     use super::*;
@@ -3178,6 +3349,9 @@ pub(crate) use fixture_observation::Selection as FixtureSelection;
 mod android_build_wiring_tests;
 
 #[cfg(test)]
+pub(crate) fn assert_installed_session_owner_contract() { tests::live_session_owner_contract(); }
+
+#[cfg(test)]
 pub(crate) fn assert_project_path_document_contracts() {
     // Explicit-call DATA predicates/models only. No DesktopBridge/runtime,
     // task, real GUI/source original, RNG or registered project is fabricated.
@@ -3186,7 +3360,7 @@ pub(crate) fn assert_project_path_document_contracts() {
         if bound { lifetime.crash_hook_installed(); lifetime.started(true); lifetime.finished(true); }
         DocumentState { lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
-            compatibility_picker_pending: false, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+            compatibility_picker_pending: false, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
             quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new() }
     }
     fn gui(selected: bool) -> GuiFacts {
@@ -3315,7 +3489,7 @@ pub(crate) fn assert_project_selection_gate_contract() {
         if bound { lifetime.crash_hook_installed(); lifetime.started(true); lifetime.finished(true); }
         DocumentState { lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
-            compatibility_picker_pending: false, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+            compatibility_picker_pending: false, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
             quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new() }
     }
     let reason = |state: &DocumentState| common_document_gate(state, false, || Ok(())).err().map(|error| error.reason);
@@ -3404,10 +3578,36 @@ mod tests {
     pub(super) fn empty_state() -> DocumentState {
         DocumentState { lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: true, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
-            compatibility_picker_pending: false,
+            compatibility_picker_pending: false, session_owner_reason: None,
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
             github: ConnectionState::new(), evidence: EvidenceRegistry::new() }
     }
+
+    pub(super) fn live_session_owner_contract() {
+        for sd in [false,true] { for ed in [false,true] { for ss in [false,true] { for es in [false,true] {
+            let reason = session_owner_reason(sd,ed,ss,es);
+            let expected = if sd || ed { Some(Reason::CleanupUnknown) } else if ss || es { Some(Reason::Shutdown) } else { None };
+            assert_eq!(reason,expected);
+            let mut state = empty_state();
+            state.lifetime.crash_hook_installed(); state.lifetime.started(true); state.lifetime.finished(true);
+            let before = state.revision;
+            let changed = observe_session_owner_reason(&mut state,reason);
+            assert_eq!(changed,reason.is_some());
+            if changed { state.revision = state.revision.checked_add(1).unwrap(); }
+            assert_eq!(state.session_owner_reason,reason);
+            assert!(!observe_session_owner_reason(&mut state,reason));
+            assert_eq!(state.revision,before + u32::from(reason.is_some()));
+            assert_eq!(common_document_gate(&state,true,|| reason.map_or(Ok(()),|r| Err(AssetError::new(r)))).err().map(|e|e.reason),reason);
+            // Display observation cannot fabricate local Unknown/STOP or
+            // prevent teardown. These unchanged original predicates ignore it.
+            assert!(!state.unknown && !state.stopping && state.slot.is_none());
+            assert!(quit_question_admitted(&state));
+            state.session = false;
+            assert!(assets_can_exit_locked(&state));
+        } } } }
+    }
+    #[test]
+    fn actual_owner_reason_blocks_new_session_work_not_retirement() { live_session_owner_contract(); }
 
     #[test]
     fn project_selection_shares_lifecycle_checks_without_granting_an_asset_session() {

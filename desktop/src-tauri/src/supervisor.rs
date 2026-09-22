@@ -48,6 +48,9 @@ mod shell_shutdown_observation;
 #[cfg(all(test, feature = "desktop-shell", target_os = "linux", target_arch = "x86_64", target_env = "gnu",
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
 pub(crate) use shell_shutdown_observation::HeldAppInfo;
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+pub(crate) use shell_shutdown_observation::{InstalledSessionQueries, SessionQueryHold};
 
 fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
     // No user callback/serialization runs while these small bookkeeping locks
@@ -364,7 +367,8 @@ impl PassiveQuery {
 }
 
 impl Supervisor {
-    pub fn new(runtime: RuntimeConfig) -> Self {
+    pub fn new(mut runtime: RuntimeConfig) -> Self {
+        runtime.claim_original_supervisor();
         Self { inner: Arc::new(Inner {
             runtime, permits: Arc::new(Semaphore::new(ACTIVE_LIMIT)), next: AtomicU64::new(1),
             stopping: AtomicBool::new(false), disabled: AtomicBool::new(false),
@@ -378,6 +382,8 @@ impl Supervisor {
     }
     pub fn runtime_mode(&self) -> &'static str { self.inner.runtime.mode() }
     pub(crate) fn passive_method_available(&self, name: &str) -> bool { self.inner.runtime.passive_method_available(name) }
+    pub(crate) fn bind_original_session_document(&self, identity: &Arc<()>) { self.inner.runtime.bind_original_session_document(identity); }
+    pub(crate) fn installed_session_available(&self, identity: &Arc<()>) -> bool { self.inner.runtime.installed_session_available(identity) }
     pub fn disabled(&self) -> bool { self.inner.disabled.load(Ordering::SeqCst) }
     pub fn stopping(&self) -> bool { self.inner.stopping.load(Ordering::SeqCst) }
     pub fn can_exit(&self) -> bool { lock(&self.inner.owners).is_empty() }
@@ -456,6 +462,9 @@ impl Supervisor {
         // Construct before spawning, not inside the observer's first poll. This
         // also covers partial registration and an unpolled observer's loss.
         let guard = FinalObserverGuard { inner: self.inner.clone(), owner: owner.clone(), retired: false };
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        shell_shutdown_observation::register_session_query(&self.inner, &owner);
         #[cfg(all(test, feature = "development-runtime"))]
         self.inner.test.register(owner.clone());
         let watch_owner = owner.clone();
@@ -1062,12 +1071,13 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
             owner.unknown(&inner); return DriverEnd::RetainedUnknown;
         };
         let observing_inner = inner.clone();
+        let observing_key = owner.key;
         let observing_stop = owner.stop.subscribe();
         let (release, enter) = oneshot::channel();
         resources.native_observation_return = Some(ManagementJoin::Pending);
         resources.native_observation = Some(tokio::task::spawn_blocking(move || {
             enter.blocking_recv().map_err(|_| ())?;
-            installed_native_fixture::observe_original_child(id, endpoint, observing_stop, &observing_inner, observed_case)
+            installed_native_fixture::observe_original_child(id, observing_key, endpoint, observing_stop, &observing_inner, observed_case)
         }));
         let _ = release.send(());
         let result = join_slot(&mut resources.native_observation).await;
@@ -1241,7 +1251,11 @@ mod installed_native_fixture {
 
     const VERSION: &str = "/var/lib/mobile-release-kit/versions/x86_64-unknown-linux-gnu/e3375ff140d69df54b2445f756711e0245d397ba6ded76e8559732ec2e4e3801";
     #[derive(Clone, Copy, Default, Eq, PartialEq)]
-    pub(super) enum Case { #[default] None, Observe, Deadline, Shutdown, Emfile, Overlap }
+    pub(super) enum Case { #[default] None, Observe, Deadline, Shutdown, Emfile, Overlap,
+        #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))] SessionObserve,
+        #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))] SessionLoss,
+        #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))] SessionDeadline,
+    }
     #[derive(Default)]
     pub(super) struct LimitObservation {
         pub before: Option<Rlimit>, pub lowered: bool, pub restore_attempted: bool, pub restored: bool,
@@ -1255,10 +1269,14 @@ mod installed_native_fixture {
         pub shell_owner: Mutex<Option<u64>>,
         #[cfg(feature = "desktop-shell")]
         pub shell_token_issued: AtomicBool,
+        #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
+        pub session: Mutex<shell_shutdown_observation::SessionQueryBook>,
     }
     impl Hooks {
         fn case(&self) -> Case { *lock(&self.case) }
         pub(super) fn child_case(&self, _owner: &Arc<Owner>) -> Option<Case> {
+            #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
+            if let Some(case) = shell_shutdown_observation::session_child_case(self, _owner) { return Some(case); }
             let case = self.case();
             if !matches!(case, Case::Observe | Case::Shutdown | Case::Overlap) { return None; }
             #[cfg(feature = "desktop-shell")]
@@ -1450,12 +1468,17 @@ mod installed_native_fixture {
         written?;
         Ok(root.join("passive-release"))
     }
-    pub(super) fn observe_original_child(id: u32, end: Instant, stop: watch::Receiver<bool>, inner: &Inner, case: Case)
+    pub(super) fn observe_original_child(id: u32, _key: u64, end: Instant, stop: watch::Receiver<bool>, inner: &Inner, case: Case)
         -> Result<Vec<ChildObservation>, ()> {
         let mut snapshots = Vec::new();
         let Some(first) = child_snapshot(id, end, &stop)? else { return Ok(snapshots); };
         snapshots.push(first);
         match case {
+            #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
+            Case::SessionObserve | Case::SessionLoss | Case::SessionDeadline => {
+                // Same original child/IO checkpoint, no new owner or clock.
+                shell_shutdown_observation::hold_session_query(inner, _key, end, &stop, case)?;
+            },
             Case::Shutdown => {
                 inner.native_test.held.store(true, Ordering::SeqCst);
                 inner.changed.notify_waiters();

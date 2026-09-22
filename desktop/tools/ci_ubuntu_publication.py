@@ -1922,6 +1922,9 @@ def shell_source_manifest(source):
            "Shell must embed the fixed frontend, without a dev server or bundle build")
     paths = ("desktop/src-tauri/Cargo.toml", "desktop/src-tauri/Cargo.lock", "desktop/src-tauri/build.rs",
              "desktop/src-tauri/src/main.rs", "desktop/src-tauri/tests/installed_shell_observation.rs",
+             "desktop/src-tauri/src/runtime.rs", "desktop/src-tauri/src/bridge.rs", "desktop/src-tauri/src/asset_session.rs",
+             "desktop/src-tauri/src/asset_source.rs", "desktop/src-tauri/src/shell.rs", "desktop/src-tauri/src/installed_shell_observation.rs",
+             "desktop/src-tauri/src/supervisor.rs", "desktop/src-tauri/src/installed_shell_shutdown_observation.rs",
              "desktop/src-tauri/tauri.conf.json", "desktop/package.json", "desktop/package-lock.json",
              "desktop/vite.config.mjs", "desktop/tsconfig.json", "desktop/src/App.tsx",
              "desktop/tools/ci_ubuntu_publication.py", "desktop/tools/ubuntu_publication_lifecycle.py")
@@ -3095,7 +3098,7 @@ def shell_project_draft_observation(observed, lifecycle):
     cases, combined, files = observed.get("cases"), observed.get("projectDraft"), observed.get("files")
     # The unchanged root cap is 128; its exporter adds the original client's
     # stdout/stderr, not two more root evidence slots or another capture.
-    D.need(type(cases) is dict and set(cases) == {"normal", "positive", "quit-outstanding", "project-paths", "workflow-apply"}
+    D.need(type(cases) is dict and set(cases) == set(lifecycle.SHELL_CASES)
            and type(combined) is dict and set(combined) == {"native", "fixture"}
            and type(files) is list and len(files) <= 130, "Closed project/draft receipt or exported original roster is missing")
     positive = cases["positive"]
@@ -3144,6 +3147,7 @@ def shell_project_draft_observation(observed, lifecycle):
     _shell_candidate_documents_observation(positive, observed.get("candidateDocuments"), files, lifecycle)
     _shell_project_paths_observation(cases["project-paths"], observed.get("projectPaths"), files, lifecycle)
     _shell_workflow_apply_observation(cases["workflow-apply"], observed.get("workflowApply"), files, lifecycle)
+    _shell_session_inputs_observation(cases, observed.get("sessionInputs"), files, lifecycle)
     return {"native": receipt, "fixture": fixture}
 
 
@@ -3249,6 +3253,62 @@ def _shell_workflow_apply_observation(case, combined, files, lifecycle):
     D.need(fixture["before"]["sha256"] != fixture["after"]["sha256"], "Workflow inventory incorrectly claims no created callers")
 
 
+def _shell_session_inputs_observation(cases, combined, files, lifecycle):
+    """Original native receipts and exact private fixture export pins agree.
+
+    The four admitted session observers cannot relabel the unchanged ordinary
+    twelve-method cases, qualify persistence or activate the normal product.
+    """
+    D.need(type(combined) is dict and set(combined) == set(lifecycle.SHELL_SESSION_CASES),
+           "Closed four-case session observation is missing")
+    for name in lifecycle.SHELL_SESSION_CASES:
+        case, pair = cases[name], combined[name]
+        D.need(type(case) is dict and set(case) == {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps", "sessionInputs"}
+               and case["case"] == name and type(case["exitCode"]) is int and case["exitCode"] == 0
+               and case["bootstrapReturned"] is True and case["domAndGtkObserved"] is True,
+               "Closed session original result is incomplete")
+        D.need(type(pair) is dict and set(pair) == {"native", "fixture"}, "Closed session receipt or fixture is missing")
+        receipt = lifecycle.shell_session_receipt(D.canonical(case["sessionInputs"]), name)
+        D.need(D.canonical(pair["native"]) == D.canonical(receipt), "Closed session native receipt correspondence differs")
+        # The root's closed-result gate already replays every map against its
+        # independently admitted loader identities. Preserve those originals,
+        # not just a receipt count; this is DATA validation, not readmission.
+        maps = case["maps"]
+        D.need(type(maps) is list and 1 <= len(maps) <= lifecycle.SHELL_SESSION_R1_LIMIT
+               and len(maps) == receipt["behavior"]["assessments"], "Closed session original R1 map count differs")
+        for rows in maps:
+            D.need(type(rows) is list and len(rows) == 6 and all(type(row) is dict for row in rows)
+                   and [row.get("role") for row in rows] == sorted(lifecycle.PRIVATE_SONAMES | {"python", "ld-linux-x86-64.so.2", "libc.so.6", "libm.so.6"}),
+                   "Closed session original R1 map roles differ")
+            for row in rows:
+                D.need(set(row) == {"role", "path", "deviceMajor", "deviceMinor", "inode"}
+                       and type(row["path"]) is str and row["path"].startswith("/") and len(row["path"]) <= 4096 and "\0" not in row["path"]
+                       and all(type(row[key]) is int and 0 <= row[key] < 1 << 32 for key in ("deviceMajor", "deviceMinor"))
+                       and type(row["inode"]) is int and 0 < row["inode"] < 1 << 64,
+                       "Closed session original R1 map shape differs")
+        changed = name == "session-refusals"
+        expected = {"fixture": "four-kind-session-v1", "case": name, "rootRetained": True, "originalsAccounted": True,
+            "projectUnchanged": True, "sourcesOutsideProject": True, "noUnexpectedEntries": True, "noPendingState": True,
+            "beforeCount": 15 if changed else 9, "afterCount": 14 if changed else 9,
+            "mutations": ["changed-leaf-rename"] if changed else []}
+        fixture = pair["fixture"]
+        D.need(type(fixture) is dict and set(fixture) == set(expected) | {"before", "after"}
+               and D.canonical({key: fixture[key] for key in expected}) == D.canonical(expected),
+               "Closed session private fixture correspondence differs")
+        for phase in ("before", "after"):
+            pin = fixture[phase]
+            D.need(type(pin) is dict and set(pin) == {"size", "sha256"} and type(pin["size"]) is int
+                   and 0 < pin["size"] <= lifecycle.SHELL_SESSION_INVENTORY_LIMIT
+                   and type(pin["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", pin["sha256"]) is not None,
+                   "Closed session original inventory pin differs")
+            matches = [row for row in files if type(row) is dict and row.get("path") == "lifecycle-shell-" + name + "-" + phase + ".json"]
+            D.need(len(matches) == 1 and set(matches[0]) == {"path", "size", "sha256"}
+                   and type(matches[0]["size"]) is int and matches[0]["size"] == pin["size"] and matches[0]["sha256"] == pin["sha256"],
+                   "Original session before/after export pin differs")
+        D.need(fixture["before"]["sha256"] != fixture["after"]["sha256"] if changed else fixture["before"] == fixture["after"],
+               "Closed session inventory changed outside its fixed mutation")
+
+
 def verify_installed_shell():
     """One installed connection gate; reuse U, not its entire lifecycle again."""
     D.need(os.environ.get("MRK_INSTALLED_SHELL_CASE") == "observe", "Only the fixed shell observation job is accepted")
@@ -3313,12 +3373,12 @@ def verify_installed_shell():
         D.need(time.monotonic() < deadline, "Original shell result endpoint expired")
         D.write(public / "result.json", D.canonical({**source_record, "lifecycle": observed,
             "projectDraft": project_draft, "candidateDocuments": observed["candidateDocuments"], "projectPaths": observed["projectPaths"],
-            "workflowApply": observed["workflowApply"],
-            "commands": check.commands, "cases": ["normal", "positive", "quit-outstanding", "project-paths", "workflow-apply"], "compilerRerun": False,
+            "workflowApply": observed["workflowApply"], "sessionInputs": observed["sessionInputs"],
+            "commands": check.commands, "cases": list(lifecycle.SHELL_CASES), "compilerRerun": False,
             "supplierRebuilt": False, "packageBuilt": False, "upgradeOrRefusalRerun": False,
             "scope": "normal-shell-to-accepted-installed-runtime-connection-only"}))
         D.need(time.monotonic() < deadline, "Original shell result close/readback was late")
-        print("Normal window and four original observer cases retained with service finality; no product/package qualification.", flush=True)
+        print("Normal window and eight original observer cases retained with service finality; no product/package qualification.", flush=True)
     except BaseException as error:
         retain_failure(root, phase if check is None else check.phase, [] if check is None else check.commands, error)
         raise

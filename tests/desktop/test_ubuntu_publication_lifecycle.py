@@ -1048,10 +1048,13 @@ class LifecycleData(unittest.TestCase):
             baseline = (sum(row["size"] for row in candidate["packages"].values()) + candidate["library"]["size"]
                         + (12 if profile == "installed" else 68 if profile == "shell" else 0)
                         + 2 * 1024 + 1 + 2 * 2048 + (32 << 20) + (1 << 20))
-            # Five original logs plus four failure leaves retain the 64 MiB
-            # ceiling; the fixed workflow bytes and 13 nodes are additional.
-            required = baseline + ((576 << 20) + 7235 + 13 if profile == "shell" else 0)
-            inodes = 2 * 16 + 2 * 8192 + 128 + (17 if profile == "shell" else 0)
+            # Nine original logs plus eight failure leaves retain the64MiB
+            # ceiling. Four session fixtures add42 nodes; their existing GUI
+            # environments add48. Public captures retain the original128 slots.
+            session_bytes = sum(len(data) for case in L.SHELL_SESSION_CASES
+                for _, mode, _, data in L._shell_session_roster(value, case) if not stat.S_ISDIR(mode))
+            required = baseline + ((1088 << 20) + 7235 + session_bytes + 103 if profile == "shell" else 0)
+            inodes = 2 * 16 + 2 * 8192 + 128 + (111 if profile == "shell" else 0)
             for available in (required - 1, required):
                 with self.subTest(profile=profile, available=available), \
                      patch.object(Path, "stat", return_value=SimpleNamespace(st_dev=1)), \
@@ -2192,11 +2195,35 @@ def positive_capture(receipt=None, candidate=None):
 def fixture_namespace_data(value):
     suffix = value["runId"] + "-" + value["attempt"]
     return {"root": "/var/lib/mrk-ubuntu-shell-fixtures-" + suffix,
-            "identity": [1, 5, stat.S_IFDIR | 0o755, 0, 0, 7, 4096, 11, 11],
-            "children": ["candidate-evidence", "path-outside", "path-project", "positive-project", "workflow-project"],
+            "identity": [1, 5, stat.S_IFDIR | 0o755, 0, 0, 11, 4096, 11, 11],
+            "children": ["candidate-evidence", "path-outside", "path-project", "positive-project",
+                         "session-deadline", "session-inputs", "session-loss", "session-refusals", "workflow-project"],
             "control": {"path": "/var/lib/mrk-ubuntu-native-" + suffix, "identity": [1, 4, stat.S_IFDIR | 0o711, 0, 0]},
             "ancestors": [{"path": path, "identity": [1, i + 1, stat.S_IFDIR | 0o755, 0, 0]}
                           for i, path in enumerate(("/", "/var", "/var/lib"))]}
+
+
+def session_fixture_data(value, case, *, changed=False):
+    """In-memory fixture correspondence only; no native inputs are created."""
+    namespace = fixture_namespace_data(value)
+    roster = L._shell_session_roster(value, case, changed)
+    original_names = [name for name, _, _, _ in L._shell_session_roster(value, case)]
+    offset = 600 + 100 * L.SHELL_SESSION_CASES.index(case)
+    rows = []
+    for name, mode, owners, expected in roster:
+        original_name = "sources/changed-next.jks" if changed and name == "sources/changed.jks" else name
+        stamp = 22 if changed and name in ("sources", "sources/changed.jks") else 11
+        kind = "directory" if stat.S_ISDIR(mode) else "symlink" if stat.S_ISLNK(mode) else "file"
+        original = [1, offset + original_names.index(original_name), mode, *owners,
+                    2 if kind == "directory" else 1, 4096 if kind == "directory" else len(expected),
+                    22 if changed and name == "sources" else 11, stamp]
+        row = {"path": name, "kind": kind, "identity": original}
+        row.update({"children": expected} if kind == "directory" else {"target": expected} if kind == "symlink"
+                   else {"size": len(expected), "sha256": hashlib.sha256(expected).hexdigest()})
+        rows.append(row)
+    return {"schemaVersion": 1, "fixture": "four-kind-session-v1", "case": case,
+            "root": namespace["root"] + "/" + case, "changed": changed, "entries": rows,
+            "absent": L._shell_session_absent(case, changed), "namespace": namespace}
 
 
 def project_fixture_data(value, *, saved=False):
@@ -2298,6 +2325,19 @@ def workflow_capture():
             + b"MRK_INSTALLED_SHELL_OBSERVATION=workflow-apply-verified\n", b"")
 
 
+def session_capture(case, receipt=None, *, expected=None, maps=None):
+    observed = deepcopy(L.SHELL_SESSION_RECEIPTS[case]) if receipt is None else receipt
+    expected = map_data() if expected is None else expected
+    rows = [{"role": role, "path": row["paths"][0], **{key: row[key] for key in ("deviceMajor", "deviceMinor", "inode")}}
+            for role, row in sorted(expected.items())]
+    maps = [rows] * L.SHELL_SESSION_RECEIPTS[case]["behavior"]["assessments"] if maps is None else maps
+    return (b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n"
+            b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
+            + b"".join(L.CHILD_MARKER.encode("ascii") + L.canonical(rows) for rows in maps)
+            + L.SHELL_SESSION_MARKER + L.canonical(observed)
+            + b"MRK_INSTALLED_SHELL_OBSERVATION=" + case.encode("ascii") + b"-verified\n", b"")
+
+
 def workflow_fixture_data(value, *, installed=False):
     """Finite synthetic before/after DATA; no fixture construction or renderer."""
     owner = (value["runnerUid"], value["runnerGid"])
@@ -2341,7 +2381,8 @@ def closed_shell_data():
                 "positive": positive_capture(),
                 "quit-outstanding": (b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
                     + L.CHILD_MARKER.encode() + L.canonical(maps) + b"MRK_INSTALLED_SHELL_OBSERVATION=quit-outstanding-verified\n", b""),
-                "project-paths": path_capture(), "workflow-apply": workflow_capture()}
+                "project-paths": path_capture(), "workflow-apply": workflow_capture(),
+                **{case: session_capture(case, expected=expected) for case in L.SHELL_SESSION_CASES}}
     cases, files, commands = {}, {}, []
     for case, (stdout, stderr) in captures.items():
         cases[case] = L.shell_result(stdout, stderr, case, 0, expected)
@@ -2355,6 +2396,9 @@ def closed_shell_data():
         files["shell-positive-candidate-" + phase + ".json"] = L.canonical(candidate_fixture_data(value))
         files["shell-project-paths-" + phase + ".json"] = L.canonical(path_fixture_data(value, changed=phase == "after"))
         files["shell-workflow-apply-" + phase + ".json"] = L.canonical(workflow_fixture_data(value, installed=phase == "after"))
+        for case in L.SHELL_SESSION_CASES:
+            files["shell-" + case + "-" + phase + ".json"] = L.canonical(
+                session_fixture_data(value, case, changed=phase == "after" and case == "session-refusals"))
     keys = [{"phase": "key", "exitCode": 0, "stdout": "", "stderr": "",
              "argv": L._drop(value, ["/usr/bin/xdotool", "key", "--clearmodifiers", key])} for key in ("ctrl+q", "alt+o")]
     files["shell-normal-control.json"] = L.canonical({"joined": True, "inputs": 2, "workerGuardState": "RESTORED",
@@ -2449,7 +2493,7 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
                  patch.object(Path, "lstat", autospec=True, side_effect=metadata) as reading, \
                  patch.object(L, "_D", SimpleNamespace(write=writer)), patch.object(L.os, "chown") as ownership, \
                  patch.object(L.os, "chmod", side_effect=chmod) as modes, patch.object(L, "_xattrs", side_effect=attrs), \
-                 patch.object(L.os, "scandir", side_effect=scan) as scans:
+                 patch.object(L.os, "scandir", side_effect=scan) as scans, patch.object(L.os, "symlink") as links:
                 if fault is None:
                     binding = L._shell_fixtures_prepare(value)
                     self.assertIs(type(binding), bytes); self.assertEqual(L.decode(binding), namespace)
@@ -2457,7 +2501,8 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
                         root / "candidate-evidence", root / "candidate-evidence/operation",
                         *(root / name for name, directory in PATH_FIXTURE_NODES if directory),
                         root / "workflow-project", root / "workflow-project/app", root / "workflow-project/.github",
-                        root / "workflow-project/.github/workflows"])
+                        root / "workflow-project/.github/workflows",
+                        *(root / case / name for case in L.SHELL_SESSION_CASES for name in (".", "project", "project/release", "sources"))])
                     self.assertEqual([call.args for call in writer.call_args_list], [
                         (root / "positive-project/app/build.gradle.kts", L.SHELL_PROJECT_SOURCE, 0o444),
                         (root / "positive-project/version.properties", L.SHELL_PROJECT_VERSION, 0o600),
@@ -2467,7 +2512,9 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
                         (root / "workflow-project/version.properties", L.SHELL_PROJECT_VERSION, 0o600),
                         (root / "workflow-project/.gitignore", L.SHELL_WORKFLOW_IGNORE, 0o640),
                         (root / "workflow-project/.github/workflows/unrelated.yml", L.SHELL_WORKFLOW_SIBLING, 0o600),
-                        (root / "workflow-project/.github/workflows/mobile-preflight.yml", L.SHELL_WORKFLOW_CALLERS[".github/workflows/mobile-preflight.yml"], 0o640)])
+                        (root / "workflow-project/.github/workflows/mobile-preflight.yml", L.SHELL_WORKFLOW_CALLERS[".github/workflows/mobile-preflight.yml"], 0o640),
+                        *((root / case / name, data, stat.S_IMODE(mode)) for case in L.SHELL_SESSION_CASES
+                          for name, mode, _, data in L._shell_session_roster(value, case) if stat.S_ISREG(mode))])
                     self.assertEqual([call.args for call in ownership.call_args_list], [
                         (path, value["runnerUid"], value["runnerGid"]) for path in
                         (root / "positive-project/version.properties", root / "positive-project",
@@ -2477,7 +2524,11 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
                         *((root / "workflow-project" / name, value["runnerUid"], value["runnerGid"]) for name in
                           ("version.properties", ".gitignore", ".github/workflows/unrelated.yml", ".github/workflows/mobile-preflight.yml",
                            ".github/workflows", ".github")),
-                        (root / "workflow-project/app", 0, 0), (root / "workflow-project", value["runnerUid"], value["runnerGid"])])
+                        (root / "workflow-project/app", 0, 0), (root / "workflow-project", value["runnerUid"], value["runnerGid"]),
+                        *((root / case / name, *owners) for case in L.SHELL_SESSION_CASES
+                          for name, _, owners, _ in L._shell_session_roster(value, case))])
+                    links.assert_called_once_with("input.jks", root / "session-refusals/sources/link.jks")
+                    self.assertTrue(all(call.kwargs == {"follow_symlinks": False} for call in ownership.call_args_list[-42:]))
                     self.assertEqual([call.args for call in modes.call_args_list], [(root / "positive-project/app", 0o555),
                         (root / "workflow-project/.github/workflows", 0o700), (root / "workflow-project/.github", 0o700),
                         (root / "workflow-project/app", 0o555), (root / "workflow-project", 0o700), (root, 0o755)])
@@ -2636,9 +2687,11 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                          {"shell-positive-candidate-before.json", "shell-positive-candidate-after.json"})
         self.assertEqual({name for name in roster if name.startswith("shell-workflow-apply-") and name.endswith(".json")},
                          {"shell-workflow-apply-before.json", "shell-workflow-apply-after.json"})
-        self.assertEqual(len(roster), 89)
-        self.assertEqual(len(roster) + 2, 91)
-        self.assertEqual(len(L.root_phases(value)), 19)
+        self.assertEqual({name for name in roster if name.startswith("shell-session-") and name.endswith(".json")},
+                         {"shell-" + case + "-" + phase + ".json" for case in L.SHELL_SESSION_CASES for phase in ("before", "after")})
+        self.assertEqual(len(roster), 109)
+        self.assertEqual(len(roster) + 2, 111)
+        self.assertEqual(len(L.root_phases(value)), 23)
         self.assertLessEqual(len(roster), 128)
         for case in ("positive", "refuse-writable", "refuse-pth"):
             self.assertFalse(any(name.startswith("shell-positive-project-") for name in L.public_files(installed_handoff(case))))
@@ -2885,7 +2938,8 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                  patch.object(L, "_shell_project_inventory", return_value=project_fixture_data(value)) as inventory, \
                  patch.object(L, "_shell_candidate_inventory", return_value=candidate_fixture_data(value)) as candidate_inventory, \
                  patch.object(L, "_shell_paths_inventory", return_value=path_fixture_data(value)) as path_inventory, \
-                 patch.object(L, "_shell_workflow_inventory", return_value=workflow_fixture_data(value)) as workflow_inventory:
+                 patch.object(L, "_shell_workflow_inventory", return_value=workflow_fixture_data(value)) as workflow_inventory, \
+                 patch.object(L, "_shell_session_inventory", return_value={"inert": "session-fixture"}) as session_inventory:
                 self.assertEqual(L._shell_prepare(value, case, binding), (L.shell_environment(value, case), "original-log-binding"))
                 namespace_check.assert_called_once_with(value, binding)
                 prepare.assert_not_called(); chmod.assert_not_called()
@@ -2911,9 +2965,16 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                     inventory.assert_not_called(); candidate_inventory.assert_not_called(); path_inventory.assert_not_called()
                     workflow_inventory.assert_called_once_with(value, binding)
                     retain.assert_called_once_with("shell-workflow-apply-before.json", L.canonical(workflow_fixture_data(value)))
+                elif case in L.SHELL_SESSION_CASES:
+                    inventory.assert_not_called(); candidate_inventory.assert_not_called(); path_inventory.assert_not_called()
+                    workflow_inventory.assert_not_called()
+                    session_inventory.assert_called_once_with(value, binding, case)
+                    retain.assert_called_once_with("shell-" + case + "-before.json", L.canonical({"inert": "session-fixture"}))
                 else:
                     inventory.assert_not_called(); candidate_inventory.assert_not_called(); path_inventory.assert_not_called()
                     workflow_inventory.assert_not_called(); retain.assert_not_called(); chmod.assert_not_called()
+                if case not in L.SHELL_SESSION_CASES:
+                    session_inventory.assert_not_called()
         with patch.object(L, "_shell_namespace_check", side_effect=L.Refused("original namespace changed")), \
              patch.object(L, "_shell_log_prepare") as logs, patch.object(Path, "mkdir") as mkdir:
             with self.assertRaises(ValueError): L._shell_prepare(value, "normal", binding)
@@ -3217,7 +3278,7 @@ class CandidateDocumentsLifecycleContracts(unittest.TestCase):
         calls = [(node.func.id, node.lineno) for node in ast.walk(body) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)]
         gated = [line for name, line in calls if name == "shell_result"]
         inventories = sorted(line for name, line in calls if name == "_shell_candidate_inventory")
-        self.assertEqual((len(gated), len(inventories)), (1, 2))
+        self.assertEqual((len(gated), len(inventories)), (1, 3))
         self.assertLess(gated[0], inventories[0])
         loop = next(node for node in ast.walk(body) if isinstance(node, ast.For)
                     and isinstance(node.iter, ast.Name) and node.iter.id == "SHELL_CASES")
@@ -3228,7 +3289,8 @@ class CandidateDocumentsLifecycleContracts(unittest.TestCase):
         self.assertIsInstance(positive, ast.If)
         self.assertEqual(ast.unparse(positive.test), "case == 'positive'")
         # The original post-exit capture remains a direct positive-branch
-        # assignment. The only additional call is the fifth-case recheck below.
+        # assignment. The fifth-case and final nine-case checks reuse this
+        # original fixture only after their completed case gates.
         self.assertTrue(any(isinstance(node, ast.Assign) and node.lineno <= inventories[0] <= node.end_lineno for node in positive.body))
         workflow = next(node for node in branch.orelse[gate + 1:]
                         if isinstance(node, ast.If) and ast.unparse(node.test) == "case == 'workflow-apply'")
@@ -3399,7 +3461,187 @@ class ProjectPathLifecycleContracts(unittest.TestCase):
                           and isinstance(n.func, ast.Name) and n.func.id == "_shell_workflow_inventory"]
         self.assertEqual(len(workflow_calls), 1)
         self.assertEqual([(arg.arg, ast.literal_eval(arg.value)) for arg in workflow_calls[0].keywords], [("installed", True)])
-        self.assertEqual(set(L.SHELL_CASES), {"normal", "positive", "quit-outstanding", "project-paths", "workflow-apply"})
+        self.assertEqual(set(L.SHELL_CASES), {"normal", "positive", "quit-outstanding", "project-paths", "workflow-apply",
+                                            "session-inputs", "session-refusals", "session-loss", "session-deadline"})
+
+
+class SessionFixtureContracts(unittest.TestCase):
+    def test_private_fixture_config_is_valid_shared_policy_without_build_commands(self):
+        from mobile_release.config import validate_config_data
+        draft = json.loads(L.SHELL_SESSION_CONFIG)
+        validate_config_data(draft)
+        self.assertEqual(draft["android"], {"applicationId": "org.assessment.fixture", "enabled": True, "identityStatus": "unverified"})
+        self.assertEqual(draft["ios"], {"enabled": False})
+        self.assertEqual(draft["projectChecks"], {"androidArtifact": [], "iosArtifact": [], "preflight": []})
+        self.assertEqual(draft["services"], {"androidFirebase": "required", "iosFirebase": "disabled"})
+        self.assertIs(draft["source"]["projectReadTokenRequired"], True)
+        self.assertEqual(draft["version"]["source"], "version.properties")
+
+    def test_original_session_receipt_framing_profile_finality_and_redaction_are_closed(self):
+        for case in L.SHELL_SESSION_CASES:
+            mappings = map_data()
+            stdout, stderr = session_capture(case)
+            expected = deepcopy(L.SHELL_SESSION_RECEIPTS[case])
+            with self.subTest(case=case):
+                result = L.shell_result(stdout, stderr, case, 0, mappings)
+                self.assertEqual(result["sessionInputs"], expected)
+                self.assertEqual(len(result["maps"]), expected["behavior"]["assessments"])
+                self.assertTrue(all(len(rows) == 6 for rows in result["maps"]))
+                self.assertLessEqual(len(L.canonical(expected)), 4096)
+            mutations = [
+                lambda doc: doc.update(schemaVersion=True), lambda doc: doc.update(case="positive"),
+                lambda doc: doc.update(methods="twelve-passive"), lambda doc: doc.update(profile="development-runtime"),
+                lambda doc: doc["project"].update(snapshotMatched=1), lambda doc: doc.pop("behavior"),
+                lambda doc: doc.update(privateInput="fictional-private-input-must-not-be-exported"),
+                lambda doc: doc["safety"].update(signingVerified=True),
+                lambda doc: doc["behavior"].update(assessments=True),
+                lambda doc: doc["behavior"].update(assessments=17),
+            ]
+            for original in ("assetJoined", "sourceClosed", "r1Joined", "guiSettled", "relayJoined", "exit"):
+                altered = deepcopy(expected); altered["originals"][original] = False
+                with self.subTest(case=case, original=original), self.assertRaises(ValueError):
+                    L.shell_session_receipt(L.canonical(altered), case)
+            for mutate in mutations:
+                altered = deepcopy(expected); mutate(altered)
+                with self.subTest(case=case, mutate=mutate), self.assertRaises(ValueError):
+                    L.shell_result(*session_capture(case, altered), case, 0, mappings)
+            lines = stdout.splitlines(keepends=True)
+            for altered in (b"".join(lines[1:]), b"".join(reversed(lines)), stdout + lines[3], stdout.replace(b"\n", b"\r\n"),
+                            stdout.replace(case.encode() + b"-verified", b"positive-verified")):
+                with self.subTest(case=case, framing=altered[:48]), self.assertRaises(ValueError):
+                    L.shell_result(altered, b"", case, 0, mappings)
+            with self.assertRaises(ValueError): L.shell_result(stdout, stdout, case, 0, mappings)
+            with self.assertRaises(ValueError): L.shell_result(stdout, stderr, case, True, mappings)
+            with self.assertRaises(ValueError): L.shell_session_receipt(L.canonical(expected) + b" " * 4096, case)
+
+    def test_each_assessment_requires_its_original_six_loader_bound_roles(self):
+        mappings = map_data()
+        case = "session-inputs"
+        maps = L.shell_result(*session_capture(case), case, 0, mappings)["maps"]
+        mutations = (
+            lambda rows: rows.clear(), lambda rows: rows.pop(), lambda rows: rows.append(deepcopy(rows[0])),
+            lambda rows: rows[0].pop(), lambda rows: rows[0].reverse(),
+            lambda rows: rows[0][0].update(role="different"), lambda rows: rows[0][0].update(path="/unadmitted/object"),
+            lambda rows: rows[0][0].update(inode=9999), lambda rows: rows[0][0].update(deviceMajor=True),
+            lambda rows: rows[0][0].update(extra="not-a-map-field"),
+        )
+        for mutate in mutations:
+            changed = deepcopy(maps); mutate(changed)
+            with self.subTest(mutate=mutate), self.assertRaises(ValueError):
+                L.shell_result(*session_capture(case, maps=changed), case, 0, mappings)
+        with self.assertRaises(ValueError):
+            L.shell_result(*session_capture(case, maps=[deepcopy(maps[0]) for _ in range(17)]), case, 0, mappings)
+        stdout, _ = session_capture(case)
+        lines = stdout.splitlines(keepends=True)
+        for altered in (b"".join(lines[:3] + lines[4:]), b"".join(lines[:3] + [lines[3].rstrip(b"\n")] + lines[4:]),
+                        b"".join(lines[:3] + [lines[3].replace(b"\n", b"\r\n")] + lines[4:])):
+            with self.assertRaises(ValueError): L.shell_result(altered, b"", case, 0, mappings)
+        with self.assertRaises(ValueError): L.shell_result(stdout, b"", case, 0, {})
+
+    def test_closed_four_case_fixtures_and_only_original_leaf_rename_are_accounted(self):
+        value = installed_handoff(); value.update(runId="9" * 20, attempt="9" * 20)
+        self.assertEqual(L.SHELL_SESSION_CASES, ("session-inputs", "session-refusals", "session-loss", "session-deadline"))
+        self.assertEqual(sum(len(L._shell_session_roster(value, case)) for case in L.SHELL_SESSION_CASES), 42)
+        self.assertEqual(L.SHELL_SESSION_JKS, bytes.fromhex("feedfeed0000000200000000"))
+        self.assertEqual(L.SHELL_SESSION_REPLACEMENT_JKS, bytes.fromhex("feedfeed0000000100000000"))
+        for case in L.SHELL_SESSION_CASES:
+            before = L.canonical(session_fixture_data(value, case))
+            after = L.canonical(session_fixture_data(value, case, changed=case == "session-refusals"))
+            with self.subTest(case=case):
+                result = L.shell_session_fixture(value, case, before, after)
+                self.assertEqual((result["beforeCount"], result["afterCount"]), (15, 14) if case == "session-refusals" else (9, 9))
+                self.assertEqual(result["mutations"], ["changed-leaf-rename"] if case == "session-refusals" else [])
+                self.assertTrue(result["projectUnchanged"] and result["sourcesOutsideProject"] and result["originalsAccounted"])
+                self.assertEqual(result["before"] == result["after"], case != "session-refusals")
+                self.assertLessEqual(max(len(before), len(after)), 8192)
+                self.assertLess(len(L.canonical(session_fixture_data(value, case)["namespace"])), 1024)
+
+    def test_refuses_changed_private_originals_aliases_and_unaccounted_replacement(self):
+        value = installed_handoff()
+        for case in L.SHELL_SESSION_CASES:
+            before = session_fixture_data(value, case)
+            after = session_fixture_data(value, case, changed=case == "session-refusals")
+            mutations = [
+                lambda doc: doc.update(case="positive"), lambda doc: doc.update(changed=1),
+                lambda doc: doc.update(root=doc["root"] + "/project"), lambda doc: doc.update(schemaVersion=True),
+                lambda doc: doc["entries"].pop(), lambda doc: doc["entries"].reverse(),
+                lambda doc: doc["namespace"]["identity"].__setitem__(1, 90),
+                lambda doc: doc["entries"][0]["children"].append("unrelated"),
+                lambda doc: doc["entries"][1]["identity"].__setitem__(2, stat.S_IFDIR | 0o755),
+                lambda doc: doc["entries"][1]["identity"].__setitem__(1, doc["entries"][0]["identity"][1]),
+                lambda doc: next(row for row in doc["entries"] if row["path"] == "sources/input.jks").update(size=True),
+                lambda doc: next(row for row in doc["entries"] if row["path"] == "sources/input.jks")["identity"].__setitem__(2, stat.S_IFREG | 0o644),
+                lambda doc: next(row for row in doc["entries"] if row["path"] == "project/release/mobile-release.json").update(sha256="0" * 64),
+            ]
+            if case == "session-refusals":
+                mutations += [
+                    lambda doc: doc["absent"].remove("sources/changed-next.jks"),
+                    lambda doc: next(row for row in doc["entries"] if row["path"] == "sources/changed.jks")["identity"].__setitem__(1, 999),
+                    lambda doc: next(row for row in doc["entries"] if row["path"] == "sources/changed.jks")["identity"].__setitem__(7, 22),
+                    lambda doc: next(row for row in doc["entries"] if row["path"] == "sources/link.jks").update(target="../project/overlap.jks"),
+                ]
+            for mutate in mutations:
+                altered = deepcopy(after); mutate(altered)
+                with self.subTest(case=case, mutate=mutate), self.assertRaises((ValueError, KeyError)):
+                    L.shell_session_fixture(value, case, L.canonical(before), L.canonical(altered))
+        # A coherent replacement DATA document is still not the old opened
+        # original. Reusing its own before/after inventory cannot hide a rename.
+        original = session_fixture_data(value, "session-refusals")
+        with self.assertRaises(ValueError):
+            L.shell_session_fixture(value, "session-refusals", L.canonical(original), L.canonical(original))
+
+    def test_inventory_admits_all_directory_names_before_source_reads_and_does_not_follow_links(self):
+        value = installed_handoff(); case = "session-refusals"
+        namespace = fixture_namespace_data(value); binding = L.canonical(namespace)
+        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        for changed in (False, True):
+            document = session_fixture_data(value, case, changed=changed)
+            base = Path(document["root"])
+            nodes = {base if row["path"] == "." else base / row["path"]: row for row in document["entries"]}
+            def metadata(path):
+                return SimpleNamespace(**dict(zip(fields, nodes[path]["identity"])))
+            def scan(path):
+                context = Mock()
+                context.__enter__ = Mock(return_value=iter(SimpleNamespace(name=name) for name in nodes[path]["children"]))
+                context.__exit__ = Mock(return_value=False)
+                return context
+            def file_record(path, limit):
+                row = nodes[path]
+                self.assertEqual(row["kind"], "file")
+                self.assertEqual(limit, row["size"])
+                return {"path": str(path), "size": row["size"], "sha256": row["sha256"]}
+            with self.subTest(changed=changed), patch.object(L, "_ROOT", L.root_path(value)), \
+                 patch.object(L, "_shell_namespace_check", return_value=namespace), patch.object(L, "directory"), \
+                 patch.object(Path, "lstat", metadata), patch.object(L.os, "scandir", side_effect=scan), \
+                 patch.object(L, "record", side_effect=file_record) as reading, patch.object(L, "_xattrs"), \
+                 patch.object(L.os, "readlink", return_value="input.jks") as linking, patch.object(L, "_absent") as absent:
+                self.assertEqual(L._shell_session_inventory(value, binding, case, changed=changed), document)
+                self.assertEqual(reading.call_count, 9 if changed else 10)
+                linking.assert_called_once_with(base / "sources/link.jks")
+                self.assertEqual([call.args[0] for call in absent.call_args_list], [base / name for name in document["absent"]])
+                reading.reset_mock(); linking.reset_mock()
+                nodes[base / "sources"]["children"].append("unreviewed-output")
+                with self.assertRaises(ValueError):
+                    L._shell_session_inventory(value, binding, case, changed=changed)
+                reading.assert_not_called(); linking.assert_not_called()
+
+    def test_session_after_inventory_requires_original_case_gate_without_new_owner_or_deadline(self):
+        tree = ast.parse((SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_text())
+        unit = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "unit_start")
+        loop = next(node for node in ast.walk(unit) if isinstance(node, ast.For)
+                    and isinstance(node.iter, ast.Name) and node.iter.id == "SHELL_CASES")
+        branch = next(node for node in loop.body if isinstance(node, ast.If))
+        gate = next(node for node in branch.orelse if isinstance(node, ast.Assign)
+                    and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name) and node.value.func.id == "shell_result")
+        session = next(node for node in branch.orelse if isinstance(node, ast.If) and ast.unparse(node.test) == "case in SHELL_SESSION_CASES")
+        self.assertLess(gate.end_lineno, session.lineno)
+        calls = [node for node in ast.walk(session) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)]
+        self.assertEqual([node.func.id for node in calls].count("_shell_session_inventory"), 1)
+        self.assertEqual([node.func.id for node in calls].count("shell_session_fixture"), 1)
+        command = next(node for node in ast.walk(branch) if isinstance(node, ast.Call)
+                       and isinstance(node.func, ast.Name) and node.func.id == "command")
+        self.assertIn(("maximum", 60), [(arg.arg, ast.literal_eval(arg.value)) for arg in command.keywords if arg.arg == "maximum"])
+        self.assertFalse(any(isinstance(node, (ast.Try, ast.While)) for node in ast.walk(session)))
 
 
 class FailureLabelSinkContracts(unittest.TestCase):

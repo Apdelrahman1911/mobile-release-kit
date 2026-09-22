@@ -44,7 +44,8 @@ INSTALLED_TESTS = {key: "supervisor::tests::installed_candidate_a_" + suffix for
     ("overlap", "child_spans_f1_publication"))}
 CHILD_MARKER = "MRK_INSTALLED_NATIVE_CHILD="
 EMFILE_MARKER = "MRK_INSTALLED_NATIVE_EMFILE_RETAINED_UNKNOWN"
-SHELL_CASES = ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply")
+SHELL_SESSION_CASES = ("session-inputs", "session-refusals", "session-loss", "session-deadline")
+SHELL_CASES = ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply", *SHELL_SESSION_CASES)
 SHELL_FAILURE_LABEL_LIMIT = 512
 # Literal observer labels only; never a prefix parser or raw-output escape.
 SHELL_FAILURE_STEPS = (
@@ -155,6 +156,29 @@ SHELL_FAILURE_STEPS = (
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadResult\n",
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowSettings\n",
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadDraft\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionNavigate\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionOpen\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionContext\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionConfigure\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionChoose\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionSetFile\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionActivateFile\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionCapture\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionFields\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionPrepare\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionReview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionKeep\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionAssign\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionRecord\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionRemove\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionStaleAction\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionDiscard\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionReload\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionLoss\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionDeadline\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionQuitCancel\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionQuitPreserved\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionFinality\n",
 )
 SHELL_FAILURE_BOUNDARIES = (
     b"MRK_INSTALLED_SHELL_FAILURE_PHASE=bootstrap\n",
@@ -248,6 +272,60 @@ SHELL_WORKFLOW_RECEIPT = {
                   "runtimeLedgerSettled": 4, "runtimeSettlementJoined": 4},
     "quit": {"operation": 3, "pendingReview": True, "gtkSettled": True, "originalsSettled": True, "relayJoined": True, "exit": True},
 }
+# Private, entirely fictional DATA for the existing installed observer. These
+# headers establish format recognition only, never usable signing keys. Scalar
+# input stays in the original write-only controls, not in fixture files.
+SHELL_SESSION_JKS = b"\xfe\xed\xfe\xed\0\0\0\2\0\0\0\0"
+SHELL_SESSION_REPLACEMENT_JKS = b"\xfe\xed\xfe\xed\0\0\0\1\0\0\0\0"
+SHELL_SESSION_FIREBASE = b'{"client":[{"client_info":{"android_client_info":{"package_name":"org.assessment.fixture"}}}]}\n'
+SHELL_SESSION_FIREBASE_MISMATCH = b'{"client":[{"client_info":{"android_client_info":{"package_name":"org.assessment.other"}}}]}\n'
+SHELL_SESSION_CONFIG = b'''{
+  "android": {"applicationId": "org.assessment.fixture", "enabled": true, "identityStatus": "unverified"},
+  "ios": {"enabled": false},
+  "metadata": {"androidLocales": ["en-US"], "iosLocales": [], "root": "release/store"},
+  "projectChecks": {"androidArtifact": [], "iosArtifact": [], "preflight": []},
+  "schemaVersion": 1,
+  "services": {"androidFirebase": "required", "iosFirebase": "disabled"},
+  "source": {"candidateBranch": "main", "productionBranch": "main", "projectReadTokenRequired": true},
+  "version": {"buildKey": "BUILD_NUMBER", "nameKey": "VERSION_NAME", "source": "version.properties"}
+}
+'''
+SHELL_SESSION_ABSENT = ("project/.gitignore", "project/.mobile-release", "project/.mobile-release-init-prepare",
+    "project/.mobile-release-init", "project/.mobile-release-init-cleanup", "project/release/store")
+SHELL_SESSION_MARKER = b"MRK_INSTALLED_SHELL_SESSION_INPUTS="
+SHELL_SESSION_INVENTORY_LIMIT = 8192
+SHELL_SESSION_RECEIPT_LIMIT = 4096
+SHELL_SESSION_R1_LIMIT = 16
+SHELL_SESSION_RECEIPTS = {case: {
+    "schemaVersion": 1, "case": case, "profile": "installed-linux-session-inputs",
+    "methods": "thirteen-passive-including-supplied-input-assessment",
+    "project": {"cancelSettled": True, "selectedSettled": True, "snapshotMatched": True},
+    "safety": {"persistentStorage": False, "storeContacted": False, "signingVerified": False, "releaseReady": False},
+    "originals": {"assetJoined": True, "sourceClosed": True, "r1Joined": True, "guiSettled": True, "relayJoined": True, "exit": True},
+    "behavior": behavior,
+} for case, behavior in (
+    ("session-inputs", {
+        "kinds": ["android-keystore", "android-firebase", "google-wif", "project-read-token"],
+        "assessments": 7, "fileChoosers": 3, "capturedFiles": 3, "kept": 5, "assigned": 6,
+        "reassessedWithoutRecapture": True, "contextRevoked": True, "replacementSameIdNextRevision": True,
+        "removed": 1, "quitCancelPreserved": True,
+    }),
+    ("session-refusals", {
+        "assessments": 6, "fileChoosers": 9, "capturesClosed": 8,
+        "sourceRefusals": ["project-overlap", "source-refused", "source-refused", "source-changed"],
+        "missingCompanionRefused": True, "firebaseMismatchRefused": True, "staleKeepRefused": True,
+        "staleAssignRefused": True, "cancelledReplacementPreservedBytes": True,
+        "cancelledReplacementRevokedAssignment": True, "discardReopenEmpty": True,
+    }),
+    ("session-loss", {
+        "assessments": 1, "fileChoosers": 1, "navigationDenied": True, "lostStatusRedacted": True,
+        "oldCallbacksRefused": True, "noRebind": True, "noLateSuccess": True, "lossHoldReleasedByOriginalStop": True,
+    }),
+    ("session-deadline", {
+        "assessments": 1, "fileChoosers": 1, "originalDeadline": True, "firstCleanupPreserved": True,
+        "noPreview": True, "queryResult": "query_timeout", "assetReason": "deadline",
+    }),
+)}
 # Reviewed literal caller DATA, never a second runtime generator. The existing
 # focused fixture contract compares every byte with the shared core proposal and
 # shipped template resource before this source may be qualified.
@@ -1442,23 +1520,29 @@ def _capacity(value):
                 + (value["installed"]["candidate"]["size"] if "installed" in value else 0)
                 + (sum(row["size"] for row in value["shell"]["binaries"].values()) if "shell" in value else 0)
                 + 2 * capacity["runtimeBytes"] + 1 + 2 * max(capacity["installedBytes"].values()) + TOTAL_LIMIT + JSON_LIMIT)
-    # The five original Xvfb logs share the GUI per-file ceiling. Account for
+    # The original Xvfb logs share the GUI per-file ceiling. Account for
     # those private files in addition to retained output. This free-space check
     # is not a reservation, aggregate quota or a bound on every GUI cache/memfd.
     if "shell" in value:
-        # Four additional write-only failure leaves. The512-byte emitter/read
+        # One write-only failure leaf per observer. The512-byte emitter/read
         # bound is not a filesystem quota; retain the unchanged64MiB ceiling.
         required += (len(SHELL_CASES) + len(SHELL_CASES[1:])) * SHELL_WORK_FILE_LIMIT
         required += sum(map(len, SHELL_WORKFLOW_CALLERS.values())) + len(SHELL_WORKFLOW_IGNORE) + len(SHELL_WORKFLOW_SIBLING) \
             + len(SHELL_PROJECT_SOURCE) + len(SHELL_PROJECT_VERSION)
+        session_nodes = [row for case in SHELL_SESSION_CASES for row in _shell_session_roster(value, case)]
+        required += sum(len(row[3]) for row in session_nodes if not stat.S_ISDIR(row[1]))
+        # Each added existing GUI route creates eight directories, auth and
+        # bus-config files, its log, and a bus socket. The original128 output
+        # slots and TOTAL_LIMIT still cover the public before/after captures.
+        session_environment_nodes = 12 * len(SHELL_SESSION_CASES)
     inodes = 2 * max(capacity["installedEntries"].values()) + 2 * 8192 + 128
     if "shell" in value:
-        inodes += len(SHELL_CASES[1:]) + 1 + 12  # Namespace plus complete workflow fixture.
+        inodes += len(SHELL_CASES[1:]) + 1 + 12 + len(session_nodes) + session_environment_nodes
     need(len({Path(name).stat().st_dev for name in ("/", "/var", "/var/lib", "/usr")}) == 1,
          "Capacity DATA does not cover the same root package/publication filesystem")
     space = os.statvfs("/var/lib")
     if "shell" in value:
-        required += 13 * space.f_frsize  # Namespace and twelve workflow nodes, not a quota.
+        required += (13 + len(session_nodes) + session_environment_nodes) * space.f_frsize  # Finite nodes, not a quota.
     need(space.f_bavail * space.f_frsize >= required and space.f_favail >= inodes, "Insufficient original host capacity; do not clear caches")
 
 
@@ -2115,6 +2199,7 @@ def public_files(value):
                         "shell-workflow-apply-before.json", "shell-workflow-apply-after.json",
                         "published-before-upgrade.txt", "mutation-denials.txt"} \
             | {"shell-" + case + "-xvfb.stderr" for case in SHELL_CASES} \
+            | {"shell-" + case + "-" + phase + ".json" for case in SHELL_SESSION_CASES for phase in ("before", "after")} \
             | {"shell-root-data-" + str(index) + ".json" for index in range(len(SHELL_DATA_ROOTS))}
     installed = value.get("installed")
     if installed is not None:
@@ -3346,7 +3431,181 @@ def _shell_log_capture(value, case, original, result):
     return raw
 
 
-SHELL_FIXTURE_CHILDREN = ("candidate-evidence", "path-outside", "path-project", "positive-project", "workflow-project")
+SHELL_FIXTURE_CHILDREN = ("candidate-evidence", "path-outside", "path-project", "positive-project",
+    "session-deadline", "session-inputs", "session-loss", "session-refusals", "workflow-project")
+
+
+def _shell_session_roster(value, case, changed=False):
+    """Finite fictional DATA, not a supplied file plan or source selector."""
+    need(case in SHELL_SESSION_CASES and type(changed) is bool
+         and (not changed or case == "session-refusals"), "Different fixed session fixture or phase")
+    owners = value["runnerUid"], value["runnerGid"]
+    files = {
+        "project/release/mobile-release.json": (0o600, SHELL_SESSION_CONFIG),
+        "project/version.properties": (0o600, SHELL_PROJECT_VERSION),
+        "sources/input.jks": (0o600, SHELL_SESSION_JKS),
+        "sources/replacement.jks": (0o600, SHELL_SESSION_REPLACEMENT_JKS),
+        "sources/firebase.json": (0o600, SHELL_SESSION_FIREBASE),
+    }
+    if case == "session-refusals":
+        files.update({
+            "project/overlap.jks": (0o600, SHELL_SESSION_JKS),
+            "sources/changed.jks": (0o600, SHELL_SESSION_REPLACEMENT_JKS if changed else SHELL_SESSION_JKS),
+            "sources/public.jks": (0o644, SHELL_SESSION_JKS),
+            "sources/firebase-mismatch.json": (0o600, SHELL_SESSION_FIREBASE_MISMATCH),
+        })
+        if not changed:
+            files["sources/changed-next.jks"] = (0o600, SHELL_SESSION_REPLACEMENT_JKS)
+    leaves = sorted([*files, *(["sources/link.jks"] if case == "session-refusals" else [])])
+    directories = (".", "project", "project/release", "sources")
+    nodes = [*directories[1:], *leaves]
+    rows = [(name, stat.S_IFDIR | 0o700, owners,
+             sorted(Path(child).name for child in nodes if str(Path(child).parent) == name)) for name in directories]
+    rows += [(name, stat.S_IFREG | files[name][0], owners, files[name][1]) for name in sorted(files)]
+    if case == "session-refusals":
+        rows.append(("sources/link.jks", stat.S_IFLNK | 0o777, owners, "input.jks"))
+    return tuple(rows)
+
+
+def _shell_session_absent(case, changed):
+    # These finite names are checked only before launch or after actual Exit.
+    return [*SHELL_SESSION_ABSENT, *(["sources/changed-next.jks"] if changed else [])]
+
+
+def _shell_session_fixtures_prepare(value, root):
+    """Create once beneath the fresh unpublished namespace; never adopt/repair."""
+    need(_ROOT == root_path(value) and root == shell_fixture_root(value), "Different fresh session fixture route")
+    for case in SHELL_SESSION_CASES:
+        base = root / case
+        for relative, mode, owners, expected in _shell_session_roster(value, case):
+            path = base if relative == "." else base / relative
+            if stat.S_ISDIR(mode):
+                path.mkdir(mode=0o700)
+            elif stat.S_ISLNK(mode):
+                os.symlink(expected, path)
+            else:
+                _D.write(path, expected, stat.S_IMODE(mode))
+            os.chown(path, *owners, follow_symlinks=False)
+            if not stat.S_ISLNK(mode):
+                _xattrs(path, stat.S_ISDIR(mode))
+
+
+def _shell_session_inventory(value, namespace, case, *, changed=False):
+    """Exact private fixtures, only pre-launch or after original Exit/finality.
+
+    First admit every directory's complete child roster. No unknown subtree,
+    symlink target, private user input or failed/possibly-live case is read.
+    """
+    need(_ROOT == root_path(value), "Different original session service root")
+    roster = _shell_session_roster(value, case, changed)
+    binding = namespace
+    namespace = _shell_namespace_check(value, binding)
+    root = shell_fixture_root(value) / case
+    rows, originals = [], []
+    for relative, mode, owners, expected in roster:
+        path = root if relative == "." else root / relative
+        before = path.lstat()
+        need(before.st_mode == mode and (before.st_uid, before.st_gid) == owners,
+             "Session fixture ownership or mode differs")
+        if not stat.S_ISLNK(mode):
+            _xattrs(path, stat.S_ISDIR(mode))
+        if stat.S_ISDIR(mode):
+            directory(path)
+            children = []
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    need(len(children) < len(expected) and entry.name in expected, "Unexpected session fixture entry")
+                    children.append(entry.name)
+            need(sorted(children) == expected, "Session fixture child roster differs")
+            row = {"path": relative, "kind": "directory", "identity": list(identity(before)), "children": expected}
+        elif stat.S_ISLNK(mode):
+            need(before.st_nlink == 1 and before.st_size == len(expected) and os.readlink(path) == expected,
+                 "Session refusal symlink differs")
+            row = {"path": relative, "kind": "symlink", "identity": list(identity(before)), "target": expected}
+        else:
+            observed = record(path, len(expected))
+            need(observed["size"] == len(expected) and observed["sha256"] == hashlib.sha256(expected).hexdigest(),
+                 "Session fixture bytes differ")
+            row = {**observed, "path": relative, "kind": "file", "identity": list(identity(before))}
+        need(identity(path.lstat()) == identity(before), "Session fixture changed during inventory")
+        rows.append(row)
+        originals.append((path, identity(before)))
+    absent = _shell_session_absent(case, changed)
+    for relative in absent:
+        _absent(root / relative)
+    need(len({tuple(row["identity"][:2]) for row in rows}) == len(roster)
+         and all(row["identity"][0] == namespace["identity"][0] for row in rows)
+         and all(identity(path.lstat()) == original for path, original in originals),
+         "Session fixture aliases, device or original identity differs")
+    _shell_namespace_check(value, binding)
+    document = {"schemaVersion": 1, "fixture": "four-kind-session-v1", "case": case, "root": str(root),
+                "changed": changed, "entries": rows, "absent": absent, "namespace": namespace}
+    need(len(canonical(document)) <= SHELL_SESSION_INVENTORY_LIMIT, "Session inventory exceeds its fixed bound")
+    return document
+
+
+def shell_session_fixture(value, case, before_raw, after_raw):
+    """Closed original DATA correspondence; never authority to scan live work."""
+    inventories, namespaces = [], []
+    for raw, changed in ((before_raw, False), (after_raw, case == "session-refusals")):
+        document = decode(raw, SHELL_SESSION_INVENTORY_LIMIT)
+        need(type(document) is dict and set(document) == {"schemaVersion", "fixture", "case", "root", "changed", "entries", "absent", "namespace"}
+             and canonical(document) == raw and type(document["schemaVersion"]) is int and document["schemaVersion"] == 1
+             and document["fixture"] == "four-kind-session-v1" and document["case"] == case and document["changed"] is changed
+             and document["root"] == str(shell_fixture_root(value) / case)
+             and document["absent"] == _shell_session_absent(case, changed), "Session fixture inventory shape or phase differs")
+        namespace = _shell_namespace_data(value, document["namespace"])
+        namespaces.append(namespace)
+        roster, rows = _shell_session_roster(value, case, changed), document["entries"]
+        need(type(rows) is list and len(rows) == len(roster), "Session fixture node roster differs")
+        observed = {}
+        for row, (relative, mode, owners, expected) in zip(rows, roster):
+            kind = "directory" if stat.S_ISDIR(mode) else "symlink" if stat.S_ISLNK(mode) else "file"
+            fields = {"children"} if kind == "directory" else {"target"} if kind == "symlink" else {"size", "sha256"}
+            need(type(row) is dict and set(row) == {"path", "kind", "identity"} | fields
+                 and row["path"] == relative and row["kind"] == kind, "Session fixture node kind or path differs")
+            original = row["identity"]
+            need(type(original) is list and len(original) == 9 and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+                 and original[0] > 0 and original[1] > 0 and original[2] == mode and tuple(original[3:5]) == owners
+                 and 0 < original[5] <= 16 and original[6] <= 1 << 20, "Session fixture original identity differs")
+            if kind == "directory":
+                need(row["children"] == expected, "Session fixture has unexpected or pending state")
+            elif kind == "symlink":
+                need(original[5] == 1 and original[6] == len(expected) and row["target"] == expected,
+                     "Session refusal symlink target differs")
+            else:
+                need(original[5] == 1 and original[6] == len(expected) and type(row["size"]) is int
+                     and row["size"] == len(expected) and row["sha256"] == hashlib.sha256(expected).hexdigest(),
+                     "Session fixture is not the exact fictional source DATA")
+            observed[relative] = row
+        reserved = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
+        need(all(row["identity"][0] == namespace["identity"][0] and tuple(row["identity"][:2]) not in reserved for row in rows)
+             and len({tuple(row["identity"][:2]) for row in rows}) == len(rows), "Session fixture nodes alias or cross devices")
+        inventories.append(observed)
+    first, last = inventories
+    need(namespaces[0] == namespaces[1], "Session fixture original namespace changed")
+    changed = case == "session-refusals"
+    if changed:
+        need(set(first) - set(last) == {"sources/changed-next.jks"} and not set(last) - set(first),
+             "Session mutation did not consume exactly its fixed source name")
+        for name, row in last.items():
+            if name == "sources":
+                need(first[name]["identity"][:6] == row["identity"][:6], "Session source directory was replaced or chmodded")
+            elif name == "sources/changed.jks":
+                old = first["sources/changed-next.jks"]
+                # Rename can change ctime, not the original byte/mode/mtime or
+                # dev/inode. Native evidence owns the displaced open original.
+                need(old["identity"][:8] == row["identity"][:8] and old["size"] == row["size"]
+                     and old["sha256"] == row["sha256"], "Session changed leaf is not its original prepared replacement")
+            else:
+                need(first[name] == row, "Session mutation changed an unrelated original")
+    else:
+        need(first == last and before_raw == after_raw, "Read-only session changed its original fixture")
+    return {"fixture": "four-kind-session-v1", "case": case, "rootRetained": True, "originalsAccounted": True,
+            "projectUnchanged": True, "sourcesOutsideProject": True, "noUnexpectedEntries": True, "noPendingState": True,
+            "beforeCount": len(first), "afterCount": len(last), "mutations": ["changed-leaf-rename"] if changed else [],
+            "before": {"size": len(before_raw), "sha256": hashlib.sha256(before_raw).hexdigest()},
+            "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
 
 
 def _shell_fixture_ancestry(value):
@@ -3426,7 +3685,7 @@ def _shell_namespace_check(value, binding):
 
 
 def _shell_fixtures_prepare(value):
-    """Create the five fixed DATA trees once, retained on every failure.
+    """Create the fixed DATA trees once, retained on every failure.
 
     The sibling follows the existing disposable-runner retention policy; there
     is no deletion, cleanup scan, retry or permission repair of an old object.
@@ -3479,6 +3738,7 @@ def _shell_fixtures_prepare(value):
             os.chmod(path, stat.S_IMODE(mode))
             os.chown(path, *owners)
         _xattrs(path, stat.S_ISDIR(mode))
+    _shell_session_fixtures_prepare(value, root)
     _shell_namespace_roster(root)
     for name, kind in (("positive-project", True), ("positive-project/app", True),
                        ("positive-project/app/build.gradle.kts", False), ("positive-project/version.properties", False),
@@ -3852,6 +4112,14 @@ def shell_workflow_receipt(raw):
     return receipt
 
 
+def shell_session_receipt(raw, case):
+    need(type(case) is str and case in SHELL_SESSION_CASES, "Different fixed session receipt case")
+    receipt = decode(raw, SHELL_SESSION_RECEIPT_LIMIT)
+    need(raw == canonical(receipt) == canonical(SHELL_SESSION_RECEIPTS[case]),
+         "Session receipt is missing, malformed, premature or for another method profile")
+    return receipt
+
+
 def _shell_path_roster(changed):
     return tuple((SHELL_PATH_MOVES.get(name, name) if changed else name, kind) for name, kind in SHELL_PATH_NODES) + (
         (("path-project/inputs/link-input", "symlink"),) if changed else ())
@@ -4009,7 +4277,23 @@ def _shell_prepare(value, case, namespace):
         _retain("shell-project-paths-before.json", canonical(_shell_paths_inventory(value, namespace)))
     if case == "workflow-apply":
         _retain("shell-workflow-apply-before.json", canonical(_shell_workflow_inventory(value, namespace)))
+    if case in SHELL_SESSION_CASES:
+        _retain("shell-" + case + "-before.json", canonical(_shell_session_inventory(value, namespace, case)))
     return environment, log_binding
+
+
+def _shell_original_child_map(raw, expected):
+    """One actual original-child map, matched to the admitted loader identities."""
+    need(type(expected) is dict and len(expected) == 6, "Original shell admitted mapping set differs")
+    rows = decode(raw, 8192)
+    need(type(rows) is list and len(rows) == 6 and all(type(row) is dict for row in rows)
+         and [row.get("role") for row in rows] == sorted(expected), "Original shell child roles differ")
+    for row in rows:
+        need(set(row) == {"role", "path", "deviceMajor", "deviceMinor", "inode"}
+             and row["path"] in expected[row["role"]]["paths"]
+             and all(type(row[key]) is int and row[key] == expected[row["role"]][key]
+                     for key in ("deviceMajor", "deviceMinor", "inode")), "Original shell child mapping differs")
+    return rows
 
 
 def shell_result(stdout, stderr, case, code, expected):
@@ -4045,9 +4329,27 @@ def shell_result(stdout, stderr, case, code, expected):
              and output[3].startswith(receipt_marker) and output[3].endswith(b"\n")
              and output[4] == marker + b"\n" and diagnostics == [],
              "Original path/workflow bootstrap/contract/receipt/completion order differs")
-        receipt = (shell_path_receipt if case == "project-paths" else shell_workflow_receipt)(output[3][len(receipt_marker):])
+        raw = output[3][len(receipt_marker):]
+        receipt = shell_path_receipt(raw) if case == "project-paths" else shell_workflow_receipt(raw)
         return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True, "maps": [],
                 ("projectPaths" if case == "project-paths" else "workflowApply"): receipt}
+    if case in SHELL_SESSION_CASES:
+        output = [line for line in stdout.splitlines(keepends=True) if line.startswith(b"MRK_")]
+        diagnostics = [line for line in stderr.splitlines() if line.startswith(b"MRK_")]
+        need(6 <= len(output) <= SHELL_SESSION_R1_LIMIT + 5
+             and output[:3] == [b"MRK_DESKTOP_CAPABILITIES=available\n", b"MRK_DESKTOP_CATALOGUE=returned\n", contracts + b"\n"]
+             and output[-2].startswith(SHELL_SESSION_MARKER) and output[-2].endswith(b"\n")
+             and output[-1] == marker + b"\n" and diagnostics == [],
+             "Original session bootstrap/contract/maps/receipt/completion order differs")
+        receipt = shell_session_receipt(output[-2][len(SHELL_SESSION_MARKER):], case)
+        maps = output[3:-2]
+        need(len(maps) == receipt["behavior"]["assessments"]
+             and all(line.startswith(CHILD_MARKER.encode("ascii")) and line.endswith(b"\n") and b"\r" not in line
+                     and len(line) <= 8192 + len(CHILD_MARKER) for line in maps),
+             "Session assessments lack their bounded original child-map captures")
+        rows = [_shell_original_child_map(line[len(CHILD_MARKER):], expected) for line in maps]
+        return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
+                "maps": rows, "sessionInputs": receipt}
     if case == "normal":
         wanted = [b"MRK_DESKTOP_CAPABILITIES=available", b"MRK_DESKTOP_CATALOGUE=returned"]
         need(sorted(lines) == sorted(wanted), "Actual normal capabilities/catalogue or observer completion missing")
@@ -4060,14 +4362,7 @@ def shell_result(stdout, stderr, case, code, expected):
     need(sorted(remaining) in (sorted([contracts, marker]), sorted([contracts, marker, b"MRK_DESKTOP_CAPABILITIES=unavailable"]))
          and len(maps) == 1 and len(maps[0]) <= 8192 + len(CHILD_MARKER)
          and type(expected) is dict and len(expected) == 6, "Outstanding original/GUI completion differs")
-    rows = decode(maps[0][len(CHILD_MARKER):], 8192)
-    need(type(rows) is list and len(rows) == 6 and all(type(row) is dict for row in rows)
-         and [row.get("role") for row in rows] == sorted(expected), "Outstanding original child roles differ")
-    for row in rows:
-        need(set(row) == {"role", "path", "deviceMajor", "deviceMinor", "inode"}
-             and row["path"] in expected[row["role"]]["paths"]
-             and all(type(row[key]) is int and row[key] == expected[row["role"]][key]
-                     for key in ("deviceMajor", "deviceMinor", "inode")), "Outstanding original child mapping differs")
+    rows = _shell_original_child_map(maps[0][len(CHILD_MARKER):], expected)
     return {"case": case, "exitCode": 0, "bootstrapReturned": False, "domAndGtkObserved": True, "maps": [rows]}
 
 
@@ -4793,7 +5088,27 @@ def unit_start():
                          and canonical(_shell_paths_inventory(value, namespace, changed=True))
                          == read(_ROOT / "public/shell-project-paths-after.json", 8192),
                          "Workflow case changed another original fixture family")
+                if case in SHELL_SESSION_CASES:
+                    session_after = canonical(_shell_session_inventory(value, namespace, case, changed=case == "session-refusals"))
+                    _retain("shell-" + case + "-after.json", session_after)
+                    shell_session_fixture(value, case,
+                        read(_ROOT / "public" / ("shell-" + case + "-before.json"), SHELL_SESSION_INVENTORY_LIMIT), session_after)
             _shell_namespace_check(value, namespace)
+        # Every original case has returned through the same shell_result gate.
+        # Account for cross-case changes once, not by following a failed case.
+        need(canonical(_shell_project_inventory(value, namespace, saved=True))
+             == read(_ROOT / "public/shell-positive-project-after.json", 8192)
+             and canonical(_shell_candidate_inventory(value, namespace))
+             == read(_ROOT / "public/shell-positive-candidate-after.json", 8192)
+             and canonical(_shell_paths_inventory(value, namespace, changed=True))
+             == read(_ROOT / "public/shell-project-paths-after.json", 8192)
+             and canonical(_shell_workflow_inventory(value, namespace, installed=True))
+             == read(_ROOT / "public/shell-workflow-apply-after.json", 8192),
+             "Session observations changed another original fixture family")
+        for case in SHELL_SESSION_CASES:
+            need(canonical(_shell_session_inventory(value, namespace, case, changed=case == "session-refusals"))
+                 == read(_ROOT / "public" / ("shell-" + case + "-after.json"), SHELL_SESSION_INVENTORY_LIMIT),
+                 "Later session observations changed an earlier original fixture")
         need(_tree(PREFIX / M, M, published=True) == original, "Published A changed during shell observations")
         state("shell-finished", "install ok installed", "P0")
         _finish_body(value, request_sha, start, states, observations, traces, cases, loader)
@@ -5058,15 +5373,19 @@ def shell_closed_result(value, outcome, raw_files):
         need(all(type(raw) is bytes for raw in streams) and sum(map(len, streams)) <= LIMIT,
              "Closed original shell combined output differs")
         result = shell_result(raw_files[phase + ".stdout"], raw_files[phase + ".stderr"], case, commands[phase]["exitCode"], expected)
-        need(canonical(result) == canonical(cases[case]) if case in ("positive", "project-paths", "workflow-apply") else result == cases[case],
+        need(canonical(result) == canonical(cases[case]),
              "Closed original shell capture differs")
     fixture = shell_project_fixture(value, raw_files["shell-positive-project-before.json"], raw_files["shell-positive-project-after.json"])
     candidate = shell_candidate_fixture(value, raw_files["shell-positive-candidate-before.json"], raw_files["shell-positive-candidate-after.json"])
     paths = shell_paths_fixture(value, raw_files["shell-project-paths-before.json"], raw_files["shell-project-paths-after.json"])
     workflow = shell_workflow_fixture(value, raw_files["shell-workflow-apply-before.json"], raw_files["shell-workflow-apply-after.json"])
+    sessions = {case: {"native": cases[case]["sessionInputs"],
+        "fixture": shell_session_fixture(value, case, raw_files["shell-" + case + "-before.json"], raw_files["shell-" + case + "-after.json"])}
+        for case in SHELL_SESSION_CASES}
     namespaces = [decode(raw_files[name], 8192)["namespace"] for name in
-                  ("shell-positive-project-before.json", "shell-positive-candidate-before.json", "shell-project-paths-before.json", "shell-workflow-apply-before.json")]
-    need(namespaces[0] == namespaces[1] == namespaces[2] == namespaces[3], "Closed shell fixture families have different original namespaces")
+                  ("shell-positive-project-before.json", "shell-positive-candidate-before.json", "shell-project-paths-before.json", "shell-workflow-apply-before.json",
+                   *("shell-" + case + "-before.json" for case in SHELL_SESSION_CASES))]
+    need(all(namespace == namespaces[0] for namespace in namespaces), "Closed shell fixture families have different original namespaces")
     control = decode(raw_files["shell-normal-control.json"])
     need(control.get("joined") is True and control.get("inputs") == 2 and control.get("workerGuardState") == "RESTORED"
          and control.get("workerErrorCount") == 0 and control.get("errorType") is None
@@ -5086,6 +5405,7 @@ def shell_closed_result(value, outcome, raw_files):
             "candidateDocuments": {"native": cases["positive"]["candidateDocuments"], "fixture": candidate},
             "projectPaths": {"native": cases["project-paths"]["projectPaths"], "fixture": paths},
             "workflowApply": {"native": cases["workflow-apply"]["workflowApply"], "fixture": workflow},
+            "sessionInputs": sessions,
             "packageLifecycleQualified": False, "shellPackageBuilt": False}
 
 

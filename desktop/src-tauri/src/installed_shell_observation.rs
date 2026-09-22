@@ -6,13 +6,31 @@ use std::{ffi::OsStr, io::Write, path::{Path, PathBuf}, sync::{Arc, Mutex, Mutex
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tauri::Manager;
-use crate::{asset_session::{InstalledEvidenceWitness, InstalledProjectWitness}, bridge::{AppInfo, Project},
+use crate::{asset_session::{InstalledEvidenceWitness, InstalledProjectWitness, InstalledSessionSnapshot}, bridge::{AppInfo, Project},
     candidate_evidence_protocol as evidence, edit_owner::{EditOwner, InstalledConfigFinality, InstalledWorkflowFinality},
     github_workflow_edit_protocol as workflow,
     edit_protocol::{self as edit, ConfigEditStatus, EditProjection}, error::BridgeError, supervisor::{HeldAppInfo, Supervisor}};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Case { Positive, Outstanding, ProjectPaths, WorkflowApply }
+enum Case { Positive, Outstanding, ProjectPaths, WorkflowApply, Session(SessionCase) }
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionCase { Inputs, Refusals, Loss, Deadline }
+impl SessionCase {
+    fn name(self) -> &'static str { match self { Self::Inputs => "session-inputs", Self::Refusals => "session-refusals", Self::Loss => "session-loss", Self::Deadline => "session-deadline" } }
+    fn assessments(self) -> usize { match self { Self::Inputs => 7, Self::Refusals => 6, _ => 1 } }
+}
+impl Case { fn session(self) -> Option<SessionCase> { match self { Self::Session(case) => Some(case), _ => None } } }
+// A moved, private, one-use setup token, never renderer/environment authority.
+pub(crate) struct SessionAdmission { original: std::sync::Weak<Observation>, case: SessionCase }
+impl SessionAdmission {
+    pub(crate) fn consume(self) -> Result<SessionCase, BridgeError> {
+        let original = self.original.upgrade().ok_or_else(BridgeError::invalid)?;
+        let mut r = original.record().ok_or_else(BridgeError::cleanup_unknown)?;
+        if original.failed.load(Ordering::SeqCst) || !route() || original.case != Case::Session(self.case)
+            || !r.attached || r.started || !r.session.admission_issued || r.session.admitted { return Err(BridgeError::invalid()); }
+        r.session.admitted = true; Ok(self.case)
+    }
+}
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Step {
     Bootstrap, Environment, ReadEnvironment, Dashboard, ChooseCancel, Cancel, Cancelled, ReadCancelled,
@@ -25,7 +43,7 @@ enum Step {
     EnterTitle, EnterShortDescription, EnterFullDescription, ReadMetadataInputs, ValidateMetadata, ReadMetadataValidation,
     SavedSettings, ReadSavedDraft, Artifacts, ReadEvidenceEmpty, ChooseEvidenceCancel, CancelEvidence, EvidenceCancelled, ReadEvidenceCancelled,
     ChooseEvidenceSelect, SetEvidence, SelectEvidence, EvidenceSelected, ReadEvidenceSelected, InspectEvidence, EvidenceObserved, ReadEvidenceObserved,
-    CandidateSettings, ReadCandidateDraft, PrepareNoop, ReadNoopReview, Close, Quit, Exit, Paths(PathStep), Workflow(WorkflowStep),
+    CandidateSettings, ReadCandidateDraft, PrepareNoop, ReadNoopReview, Close, Quit, Exit, Paths(PathStep), Workflow(WorkflowStep), Session(SessionStep),
 }
 impl Step {
     fn failure_line(self) -> &'static [u8] {
@@ -113,6 +131,7 @@ impl Step {
             Self::Exit => b"MRK_INSTALLED_SHELL_FAILURE_STEP=Exit\n",
             Self::Paths(step) => step.failure_line(),
             Self::Workflow(step) => step.failure_line(),
+            Self::Session(step) => step.failure_line(),
         }
     }
 }
@@ -149,7 +168,178 @@ impl WorkflowStep {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Pending { Dom(Step), Project(Step), Evidence(Step), Path(PathStep), Close, Gtk }
+enum Pending { Dom(Step), Project(Step), Evidence(Step), Path(PathStep), Session(SessionStep), Close, Gtk }
+
+// A fixed recipe, not a second controller: each action uses the rendered
+// control and each read compares the actual original's safe projection.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SessionAction {
+    Open, Kind(&'static str), Platform(&'static str), Replacement(u8),
+    Choose(&'static str, &'static str, Option<&'static str>), Fields(&'static str),
+    Prepare(&'static str, &'static str), Reassess(u8, &'static str), Keep, Assign,
+    ReviewRemoval(u8), Remove, Remember(&'static str), Stale(&'static str),
+    CancelOperation, Discard, ConfirmDiscard, QuitCancel, Held,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SessionStep { Navigate, Run(u8, SessionAction), Read(u8, SessionAction), SetFile(u8), ActivateFile(u8), Capture(u8),
+    QuitCancel, QuitPreserved, Reload, Loss, Deadline, Finality }
+impl SessionStep {
+    fn failure_line(self) -> &'static [u8] {
+        match self {
+            Self::Navigate => b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionNavigate\n",
+            Self::Run(_,SessionAction::Open) | Self::Read(_,SessionAction::Open) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionOpen\n",
+            Self::Run(_,SessionAction::Platform(_)) | Self::Read(_,SessionAction::Platform(_)) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionContext\n",
+            Self::Run(_,SessionAction::Kind(_) | SessionAction::Replacement(_)) | Self::Read(_,SessionAction::Kind(_) | SessionAction::Replacement(_)) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionConfigure\n",
+            Self::Run(_,SessionAction::Choose(..)) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionChoose\n",
+            Self::SetFile(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionSetFile\n",
+            Self::ActivateFile(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionActivateFile\n",
+            Self::Capture(_) | Self::Read(_,SessionAction::Choose(..)) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionCapture\n",
+            Self::Run(_,SessionAction::Fields(_)) | Self::Read(_,SessionAction::Fields(_)) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionFields\n",
+            Self::Run(_,SessionAction::Prepare(..) | SessionAction::Reassess(..)) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionPrepare\n",
+            Self::Read(_,SessionAction::Prepare(..) | SessionAction::Reassess(..) | SessionAction::ReviewRemoval(_)) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionReview\n",
+            Self::Run(_,SessionAction::Keep) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionKeep\n",
+            Self::Run(_,SessionAction::Assign) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionAssign\n",
+            Self::Read(_,SessionAction::Keep | SessionAction::Assign | SessionAction::Remove) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionRecord\n",
+            Self::Run(_,SessionAction::ReviewRemoval(_) | SessionAction::Remove) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionRemove\n",
+            Self::Run(_,SessionAction::Remember(_) | SessionAction::Stale(_)) | Self::Read(_,SessionAction::Remember(_) | SessionAction::Stale(_)) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionStaleAction\n",
+            Self::Run(_,SessionAction::CancelOperation | SessionAction::Discard | SessionAction::ConfirmDiscard) | Self::Read(_,SessionAction::CancelOperation | SessionAction::Discard | SessionAction::ConfirmDiscard) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionDiscard\n",
+            Self::Run(_,SessionAction::QuitCancel) | Self::Read(_,SessionAction::QuitCancel) | Self::QuitCancel => b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionQuitCancel\n",
+            Self::QuitPreserved => b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionQuitPreserved\n",
+            Self::Reload => b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionReload\n",
+            Self::Loss => b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionLoss\n",
+            Self::Deadline => b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionDeadline\n",
+            Self::Run(_,SessionAction::Held) | Self::Read(_,SessionAction::Held) | Self::Finality => b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionFinality\n",
+        }
+    }
+}
+use SessionAction as SA;
+const SESSION_INPUTS: &[SA] = &[
+    SA::Open, SA::Choose("input.jks","android-keystore",None), SA::Fields("android-keystore"), SA::Prepare("android-keystore","save"), SA::Keep, SA::Assign,
+    SA::Kind("android-firebase"), SA::Choose("firebase.json","android-firebase",None), SA::Prepare("android-firebase","save"), SA::Keep, SA::Assign,
+    SA::Kind("google-wif"), SA::Fields("google-wif"), SA::Prepare("google-wif","save"), SA::Keep, SA::Assign,
+    SA::Platform("project"), SA::Kind("project-read-token"), SA::Fields("project-read-token"), SA::Prepare("project-read-token","save"), SA::Keep, SA::Assign,
+    SA::Platform("android"), SA::Reassess(0,"android-keystore"), SA::Assign,
+    SA::Kind("android-keystore"), SA::Replacement(0), SA::Choose("replacement.jks","android-keystore",None), SA::Fields("android-keystore"), SA::Prepare("android-keystore","save"), SA::Keep, SA::Assign,
+    SA::ReviewRemoval(1), SA::Remove, SA::Reassess(1,"google-wif"), SA::QuitCancel,
+];
+const SESSION_REFUSALS: &[SA] = &[
+    SA::Open, SA::Choose("overlap.jks","android-keystore",Some("project-overlap")),
+    SA::Choose("link.jks","android-keystore",Some("source-refused")), SA::Choose("public.jks","android-keystore",Some("source-refused")),
+    SA::Choose("changed.jks","android-keystore",Some("source-changed")),
+    SA::Choose("input.jks","android-keystore",None), SA::Prepare("android-keystore","missing"), SA::CancelOperation,
+    SA::Kind("android-firebase"), SA::Choose("firebase-mismatch.json","android-firebase",None), SA::Prepare("android-firebase","mismatch"), SA::CancelOperation,
+    SA::Kind("android-keystore"), SA::Choose("input.jks","android-keystore",None), SA::Fields("android-keystore"), SA::Prepare("android-keystore","save"), SA::Keep, SA::Assign,
+    SA::Reassess(0,"android-keystore"), SA::Remember("bind"), SA::Platform("project"), SA::Stale("bind"),
+    SA::Platform("android"), SA::Replacement(0), SA::Choose("replacement.jks","android-keystore",None), SA::Fields("android-keystore"), SA::Prepare("android-keystore","save"),
+    SA::Remember("save"), SA::Platform("project"), SA::Stale("save"), SA::Platform("android"), SA::Reassess(0,"android-keystore"), SA::Assign,
+    SA::Replacement(0), SA::Choose("","android-keystore",Some("user-cancelled")), SA::Discard, SA::ConfirmDiscard, SA::Open,
+];
+const SESSION_INTERRUPTION: &[SA] = &[
+    SA::Open, SA::Choose("input.jks","android-keystore",None), SA::Fields("android-keystore"), SA::Prepare("android-keystore","held"), SA::Held,
+];
+impl SessionCase { fn recipe(self) -> &'static [SA] { match self { Self::Inputs => SESSION_INPUTS, Self::Refusals => SESSION_REFUSALS, _ => SESSION_INTERRUPTION } } }
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SessionCommand { Status, Open, Context, Choose, Prepare, Delete, Commit, Bind, Discard, Lock }
+impl SessionCommand { fn index(self) -> usize { self as usize } }
+#[derive(Default)]
+struct SessionReply { status: Option<Value>, error: Option<String> }
+struct SessionFile { id: u32, index: u8, kind: &'static str, select: bool, picker: Picker }
+struct SessionRecord {
+    admission_issued: bool, admitted: bool, fixture: Option<SessionFixture>,
+    draft: Option<Value>,
+    requests: [u8;10], returns: [u8;10], base_requests: [u8;10], replies: [SessionReply;10],
+    before: Option<InstalledSessionSnapshot>, sampled: Option<InstalledSessionSnapshot>, remembered: Option<InstalledSessionSnapshot>,
+    replacement: Option<(String,u32,usize)>, files: Vec<SessionFile>,
+    kind: &'static str, platform: &'static str, recipe_done: usize, captures: u8, captures_closed: u8,
+    assessed: u8, kept: u8, assigned: u8, removed: u8, reassessed: bool, context_revoked: bool, replaced: bool,
+    refused: Vec<&'static str>, missing: bool, mismatch: bool, stale_keep: bool, stale_assign: bool,
+    cancel_preserved: bool, cancel_revoked: bool, reopened: bool,
+    quit_cancel: Picker, quit_cancel_id: Option<u32>, cancel_close_prevented: bool, quit_review: Option<InstalledSessionSnapshot>, quit_preserved: bool,
+    navigation: u8, loss: bool, loss_rendered: bool, deadline: bool, cleanup: Option<Instant>,
+    queries: Option<crate::supervisor::InstalledSessionQueries>, r1_final: bool,
+}
+impl SessionRecord {
+    fn new(_case: Option<SessionCase>) -> Self { Self {
+        admission_issued:false,admitted:false,fixture:None,draft:None,requests:[0;10],returns:[0;10],base_requests:[0;10],replies:std::array::from_fn(|_| SessionReply::default()),
+        before:None,sampled:None,remembered:None,replacement:None,files:Vec::new(),kind:"android-keystore",platform:"android",recipe_done:0,
+        captures:0,captures_closed:0,assessed:0,kept:0,assigned:0,removed:0,reassessed:false,context_revoked:false,replaced:false,refused:Vec::new(),
+        missing:false,mismatch:false,stale_keep:false,stale_assign:false,cancel_preserved:false,cancel_revoked:false,reopened:false,
+        quit_cancel:Picker::default(),quit_cancel_id:None,cancel_close_prevented:false,quit_review:None,quit_preserved:false,navigation:0,loss:false,loss_rendered:false,deadline:false,cleanup:None,
+        queries:None,r1_final:false,
+    } }
+}
+
+fn session_kind_label(kind: &str) -> Option<&'static str> {
+    match kind { "android-keystore" => Some("Android upload keystore"), "android-firebase" => Some("Android Firebase client document"),
+        "google-wif" => Some("Google workload identity federation"), "project-read-token" => Some("Private project dependency access"), _ => None }
+}
+fn session_field_names(kind: &str) -> &'static [&'static str] {
+    match kind { "android-keystore" => &["storePassword","keyAlias","keyPassword"], "google-wif" => &["provider","serviceAccount"],
+        "project-read-token" => &["token"], _ => &[] }
+}
+fn session_display(snapshot: &InstalledSessionSnapshot) -> Option<Value> {
+    let status = &snapshot.status;
+    let records: Option<Vec<_>> = status["records"].as_array()?.iter().enumerate().map(|(i,record)| {
+        let kind = record["kind"].as_str()?;
+        let availability = record["availability"].as_str()?;
+        Some(serde_json::json!({"heading":format!("{} · item {}",session_kind_label(kind)?,i+1),
+            "revision":format!("Revision {} · retained only in this session",record["revision"].as_u64()?),
+            "availability":match availability { "assigned" => "Assigned to current submitted context", "mutation-pending" => "Change pending · unavailable", "unassigned" => "Not assigned to the current draft", _ => return None }}))
+    }).collect();
+    let operation = &status["operation"];
+    let preview = &operation["preview"];
+    let review = if preview.is_null() { Value::Null } else {
+        Value::String(match preview["action"].as_str()? { "save" => "Keep for this session", "bind" => "Assign to this context", "delete" => "Remove session copy", _ => return None }.into())
+    };
+    let assessment = &operation["assessment"];
+    let assessed = if assessment.is_null() { Value::Null } else {
+        let label = |value: &Value| -> Option<&'static str> { match value.as_str()? {
+            "not-applicable" => Some("Not required here"), "missing" => Some("Missing"), "unknown" => Some("Not established"),
+            "invalid" => Some("Needs correction"), "configured" => Some("Configured only"), "format-valid" => Some("Format / identity match"), _ => None } };
+        let fields: Option<Vec<_>> = assessment["fields"].as_array()?.iter().map(|field| Some(serde_json::json!({
+            "state":label(&field["state"])?, "presence":if field["presence"].as_str()? == "supplied" { "Supplied · value not displayed" } else { "Not supplied" },
+            "issues":field["issues"].as_array()?.len(),
+        }))).collect();
+        serde_json::json!({"state":label(&assessment["state"])?,"fields":fields?,"assurance":["Native validation: not run","Service validation: not run","Release readiness: unknown"]})
+    };
+    Some(serde_json::json!({"mode":if status["mode"] == "session" { "Session open · no persistence" } else { "Session closed" },
+        "context":!status["context"].is_null() && !snapshot.lost,"records":records?,"review":review,"assessment":assessed,
+        "phase":operation.get("phase").cloned().unwrap_or(Value::Null),
+        "settlement":operation.get("settlement").cloned().unwrap_or(Value::Null)}))
+}
+fn session_action_command(action: SA) -> Option<SessionCommand> {
+    match action { SA::Open => Some(SessionCommand::Open), SA::Platform(_) => Some(SessionCommand::Context),
+        SA::Choose(..) => Some(SessionCommand::Choose), SA::Prepare(..) | SA::Reassess(..) => Some(SessionCommand::Prepare),
+        SA::Keep | SA::Remove => Some(SessionCommand::Commit), SA::Assign => Some(SessionCommand::Bind),
+        SA::ReviewRemoval(_) => Some(SessionCommand::Delete), SA::ConfirmDiscard => Some(SessionCommand::Lock), SA::CancelOperation => Some(SessionCommand::Discard), _ => None }
+}
+fn session_original_clock(original: Option<Instant>, current: Option<Instant>, settled: bool) -> bool {
+    // Retirement legitimately clears the original work clock; that is not a
+    // renewed clock. While work remains, its exact captured endpoint must stay.
+    original.is_some() && if settled { current.is_none() } else { current == original }
+}
+fn assert_session_recipe_contract() {
+    for (case, assessments, choosers) in [(SessionCase::Inputs,7,3),(SessionCase::Refusals,6,9),
+        (SessionCase::Loss,1,1),(SessionCase::Deadline,1,1)] {
+        let recipe=case.recipe();
+        assert!(recipe.len()<64 && recipe.first()==Some(&SA::Open));
+        assert_eq!(recipe.iter().filter(|a| matches!(a,SA::Prepare(..)|SA::Reassess(..))).count(),assessments);
+        assert_eq!(case.assessments(),assessments);
+        assert_eq!(recipe.iter().filter(|a| matches!(a,SA::Choose(..))).count(),choosers);
+        assert!(recipe.iter().all(|a| !matches!(a,SA::Fields("android-firebase"))));
+        if matches!(case,SessionCase::Loss|SessionCase::Deadline) {
+            assert!(recipe.last()==Some(&SA::Held));
+            assert!(recipe.iter().all(|a| !matches!(a,SA::Keep|SA::Assign|SA::Remove)));
+        }
+    }
+    let end=Instant::now();
+    assert!(session_original_clock(Some(end),Some(end),false));
+    assert!(session_original_clock(Some(end),None,true));
+    assert!(!session_original_clock(None,None,true));
+    assert!(!session_original_clock(Some(end),None,false));
+    assert!(!session_original_clock(Some(end),Some(end),true));
+    assert!(!session_original_clock(Some(end),end.checked_add(Duration::from_millis(1)),false));
+}
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Boundary { Bootstrap, Request, Result, Dom, Gtk, Settlement, Deadline, Exit }
 impl Boundary {
@@ -260,6 +450,7 @@ fn project_path() -> Option<PathBuf> {
     project_path_from_executable(&std::env::current_exe().ok()?)
 }
 fn assert_shell_fixture_path_contract() {
+    assert_session_fixture_roster_contract();
     // Pure path DATA: no filesystem access, GTK or native operation.
     for ids in ["10-2", "99999999999999999999-99999999999999999999"] {
         let control = Path::new("/var/lib").join(format!("mrk-ubuntu-native-{ids}"));
@@ -300,6 +491,10 @@ fn failure_sink(case: Case) -> Option<rustix::fd::OwnedFd> {
         Case::Outstanding => "shell-quit-outstanding-failure.labels",
         Case::ProjectPaths => "shell-project-paths-failure.labels",
         Case::WorkflowApply => "shell-workflow-apply-failure.labels",
+        Case::Session(SessionCase::Inputs) => "shell-session-inputs-failure.labels",
+        Case::Session(SessionCase::Refusals) => "shell-session-refusals-failure.labels",
+        Case::Session(SessionCase::Loss) => "shell-session-loss-failure.labels",
+        Case::Session(SessionCase::Deadline) => "shell-session-deadline-failure.labels",
     };
     let fd = fs::openat(&parent, leaf, OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
         Mode::empty()).ok()?;
@@ -1188,6 +1383,7 @@ struct Record {
     attached: bool, started: bool, loaded: bool, info: bool, methods: usize, catalog: bool, environment: bool,
     pickers: [Picker; 2], cancel_returned: bool, cancelled: bool, project: Option<Project>, selected: bool,
     project_witness: Option<InstalledProjectWitness>, candidate: Candidate, paths: Paths, workflow: WorkflowRecord,
+    session: SessionRecord,
     snapshot_requests: u8, snapshot: bool, snapshot_visible: bool, suggest_called: bool, suggested: Option<Value>, provenance: Option<Value>,
     provenance_visible: bool, adopted: bool, draft_visible: bool, guidance: Guidance,
     capability: bool, generation: Option<String>, native_revision: Option<u32>, sessions: Vec<SaveSession>, requests: [u8; 4],
@@ -1216,7 +1412,8 @@ impl Observation {
         let end = Instant::now() + Duration::from_secs(45);
         let project_path = (case != Case::Outstanding).then(project_path).flatten().map(|path|
             match case { Case::ProjectPaths => path.with_file_name("path-project"),
-                Case::WorkflowApply => path.with_file_name("workflow-project"), _ => path });
+                Case::WorkflowApply => path.with_file_name("workflow-project"),
+                Case::Session(case) => path.with_file_name(case.name()).join("project"), _ => path });
         let paths = Paths::new((case == Case::ProjectPaths).then_some(project_path.as_deref()).flatten());
         let evidence_path = project_path.as_ref().and_then(|path| path.parent()).map(|root| root.join("candidate-evidence"));
         Self { case, main: std::thread::current().id(), end,
@@ -1227,7 +1424,7 @@ impl Observation {
                 step: Step::Bootstrap, pending: None, evaluations: 0, trace: (Step::Bootstrap, Boundary::Bootstrap),
                 bootstrap: BootstrapProgress::NotSampled,
                 pickers: std::array::from_fn(|_| Picker::default()), cancel_returned: false, cancelled: false, project: None, selected: false,
-                project_witness: None, candidate: Candidate::default(), paths, workflow: WorkflowRecord::default(),
+                project_witness: None, candidate: Candidate::default(), paths, workflow: WorkflowRecord::default(), session: SessionRecord::new(case.session()),
                 snapshot_requests: 0, snapshot: false, snapshot_visible: false, suggest_called: false, suggested: None, provenance: None,
                 provenance_visible: false, adopted: false, draft_visible: false, guidance: Guidance::default(),
                 capability: false, generation: None, native_revision: None, sessions: Vec::new(), requests: [0; 4],
@@ -1271,6 +1468,14 @@ impl Observation {
         record.attached = true;
         Ok(())
     }
+    pub(super) fn attach_session(self: &Arc<Self>, document: &crate::asset_session::DocumentBinding) -> Result<(), BridgeError> {
+        let Some(case) = self.case.session() else { return Ok(()); };
+        let mut r = self.record().ok_or_else(BridgeError::cleanup_unknown)?;
+        if !r.attached || r.session.admission_issued || r.started || self.project_path().is_none() { return Err(BridgeError::invalid()); }
+        r.session.fixture = Some(SessionFixture::capture(self.project_path().ok_or_else(BridgeError::invalid)?,case).map_err(|_| BridgeError::invalid())?);
+        r.session.admission_issued = true; drop(r);
+        document.admit_installed_session(SessionAdmission { original: Arc::downgrade(self), case })
+    }
     pub(super) fn page_load(&self, trusted: bool, finished: bool) {
         let Some(mut r) = self.record_at(Boundary::Bootstrap) else { return; };
         if !trusted || !r.attached || if finished { !r.started || r.loaded } else { r.started } { self.fail(); return; }
@@ -1298,8 +1503,9 @@ impl Observation {
             && info.app_name == "Mobile Release Kit" && info.app_version == env!("CARGO_PKG_VERSION")
             && info.project_selection.available && info.project_selection.reason.is_none()
             && (self.case != Case::ProjectPaths || info.project_path_selection.available && info.project_path_selection.reason.is_none())
-            && methods.iter().filter(available).count() == METHODS.len()
+            && methods.iter().filter(available).count() == METHODS.len() + usize::from(self.case.session().is_some())
             && METHODS.iter().all(|name| methods.iter().filter(available).filter(|m| m.get("method").and_then(Value::as_str) == Some(*name)).count() == 1)
+            && (self.case.session().is_none() || methods.iter().filter(available).filter(|m| m["method"].as_str() == Some("credentials.assess")).count() == 1)
             && methods.iter().all(|m| m.get("available").and_then(Value::as_bool).is_some())
             && actions.iter().all(|a| a.get("available").and_then(Value::as_bool) == Some(false));
         let Some(mut r) = self.record_at(Boundary::Result) else { return; };
@@ -1334,7 +1540,7 @@ impl Observation {
             Ok(None) if r.step == Step::Cancelled && !r.cancel_returned && r.pickers[0].responded && r.pickers[0].returned => r.cancel_returned = true,
             Ok(Some(project)) if r.step == Step::Selected && r.cancelled && r.project.is_none() && r.pickers[1].responded && r.pickers[1].returned
                 && self.project_path().is_some_and(|path| Path::new(&project.path) == path)
-                && project.name == (match self.case { Case::ProjectPaths => "path-project", Case::WorkflowApply => "workflow-project", _ => "positive-project" })
+                && project.name == (match self.case { Case::ProjectPaths => "path-project", Case::WorkflowApply => "workflow-project", Case::Session(_) => "project", _ => "positive-project" })
                 && crate::protocol::valid_id(&project.id) => r.project = Some(project.clone()),
             _ => self.fail(),
         }
@@ -1351,6 +1557,7 @@ impl Observation {
         r.snapshot_requests += 1;
     }
     pub(super) fn snapshot(&self, project_id: &str, result: &Result<Value, BridgeError>) {
+        if self.case.session().is_some() { self.session_snapshot_result(project_id,result); return; }
         let Some(mut r) = self.record_at(Boundary::Result) else { return; };
         let saved = r.snapshot_requests == 2;
         let valid = result.as_ref().is_ok_and(|value| {
@@ -2251,7 +2458,7 @@ impl Observation {
             }
             if r.step == Step::Bootstrap && self.case != Case::Outstanding {
                 if !r.info || !r.catalog { r.bootstrap = BootstrapProgress::AppInfoCatalog; return; }
-                r.step = Step::Environment; r.bootstrap = BootstrapProgress::Advanced;
+                r.step = if self.case.session().is_some() { Step::Dashboard } else { Step::Environment }; r.bootstrap = BootstrapProgress::Advanced;
             }
             if r.step == Step::Bootstrap { r.bootstrap = BootstrapProgress::HeldAppInfo; }
             // Wait for already-requested native replies without spending DOM
@@ -2364,6 +2571,7 @@ impl Observation {
             return;
         }
         if step == Step::Exit { return; }
+        if let Step::Session(step) = step { self.session_tick(app,step); return; }
         {
             let Some(mut r) = self.record_at(Boundary::Settlement) else { return; };
             r.pending = Some(match step {
@@ -2440,6 +2648,7 @@ impl Observation {
     fn dom(&self, step: Step, raw: &str) {
         if raw.len() > 262144 || Instant::now() >= self.end { self.fail(); return; }
         let Ok(value) = crate::protocol::strict_json(raw.as_bytes()) else { self.fail(); return; };
+        if let Step::Session(session) = step { self.session_dom(session,&value); return; }
         if let Step::Paths(path) = step { self.path_dom(path,&value); return; }
         if let Step::Workflow(workflow) = step { self.workflow_dom(workflow, &value); return; }
         let Some(object) = value.as_object() else { self.fail(); return; };
@@ -2472,6 +2681,9 @@ impl Observation {
             },
             Step::ReadCancelled => object.len() == 3 && r.cancelled && value["unselected"].as_bool() == Some(true)
                 && value["chooseEnabled"].as_bool() == Some(true),
+            Step::ReadSnapshot if self.case.session().is_some() => object.len() == 4 && r.selected && r.snapshot
+                && value["configuration"].as_str() == Some("Format-valid only") && value["name"].as_str() == Some("project")
+                && value["sourceFiles"].as_str().is_some_and(|text| text.ends_with(" recognized files")),
             Step::ReadSnapshot => object.len() == 4 && r.selected && r.snapshot
                 && value["configuration"].as_str() == Some("Not configured")
                 && value["sourceFiles"].as_str() == Some(if self.case == Case::ProjectPaths { "0 recognized files" } else { "2 recognized files" })
@@ -2557,7 +2769,8 @@ impl Observation {
             Step::ChooseCancel => Step::Cancel,
             Step::ReadCancelled => Step::ChooseSelect,
             Step::ChooseSelect => Step::SetProject,
-            Step::ReadSnapshot => { r.snapshot_visible = true; Step::Settings },
+            Step::ReadSnapshot => { r.snapshot_visible = true;
+                if self.case.session().is_some() { Step::Session(SessionStep::Navigate) } else { Step::Settings } },
             Step::Settings => if self.case == Case::ProjectPaths { Step::Paths(PathStep::Start) } else { Step::Suggest },
             Step::Suggest => Step::ReadSuggestion,
             Step::ReadSuggestion => { r.provenance_visible = true; Step::Adopt },
@@ -2627,6 +2840,10 @@ impl Observation {
     }
     pub(super) fn close_prevented(&self) {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return; };
+        if r.step==Step::Session(SessionStep::QuitCancel) {
+            if r.pending.take()!=Some(Pending::Close) || r.session.cancel_close_prevented { self.fail(); return; }
+            r.session.cancel_close_prevented=true; return;
+        }
         if r.pending.take() != Some(Pending::Close) || r.step != Step::Quit || r.close_prevented { self.fail(); return; }
         r.close_prevented = true;
     }
@@ -2744,6 +2961,10 @@ impl Observation {
     }
     pub(super) fn native_created(&self, id: u32, quit: bool) {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return; };
+        if r.step==Step::Session(SessionStep::QuitCancel) {
+            if !quit || id<=2 || !r.session.cancel_close_prevented || r.session.quit_cancel_id.is_some() { self.fail(); return; }
+            r.session.quit_cancel_id=Some(id); r.session.quit_cancel.created=true; return;
+        }
         if !quit || id == 0 || self.case == Case::Positive && id != 6 || self.case == Case::ProjectPaths && id != 14
             || self.case == Case::WorkflowApply && id != 3
             || !r.close_prevented || r.step != Step::Quit || r.native_id.is_some() { self.fail(); return; }
@@ -2751,12 +2972,25 @@ impl Observation {
     }
     pub(super) fn native_activation(&self, id: u32) -> Result<(), ()> {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return Err(()); };
+        if r.step==Step::Session(SessionStep::QuitCancel) {
+            if self.failed.load(Ordering::SeqCst) || Instant::now()>=self.end || r.pending!=Some(Pending::Gtk)
+                || r.session.quit_cancel_id!=Some(id) || r.session.quit_cancel.activated { self.fail(); return Err(()); }
+            r.session.quit_cancel.activated=true; return Ok(());
+        }
         if self.failed.load(Ordering::SeqCst) || Instant::now() >= self.end || r.native_id != Some(id)
             || r.pending != Some(Pending::Gtk) || r.activated { self.fail(); return Err(()); }
         r.activated = true; Ok(())
     }
-    pub(super) fn native_response(&self, id: u32, accepted: bool, disposal: bool) {
+    pub(super) fn native_response(&self, id: u32, accepted: bool, declined: bool, disposal: bool) {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return; };
+        if r.session.quit_cancel_id==Some(id) {
+            let p=&mut r.session.quit_cancel;
+            if !p.activated || p.destroyed || p.released { self.fail(); return; }
+            if !p.responded && declined && !accepted && !disposal { p.responded=true; }
+            else if p.responded && p.returned && disposal && !accepted && !declined && !p.disposal { p.disposal=true; }
+            else { self.fail(); } return;
+        }
+        if declined { self.fail(); return; }
         if r.native_id != Some(id) || !r.activated || r.destroyed || r.released { self.fail(); return; }
         if accepted && !disposal && !r.responded { r.responded = true; }
         else if disposal && !accepted && r.responded && r.gtk_returned && !r.disposal_response {
@@ -2768,6 +3002,11 @@ impl Observation {
     fn gtk_returned(&self, result: Result<bool, ()>) {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return; };
         if r.pending.take() != Some(Pending::Gtk) { self.fail(); return; }
+        if r.step==Step::Session(SessionStep::QuitCancel) {
+            if result==Ok(false) && !r.session.quit_cancel.activated { return; }
+            if !r.session.quit_cancel.activation_returned(result) { self.fail(); return; }
+            r.step=Step::Session(SessionStep::QuitPreserved); return;
+        }
         match result {
             Ok(false) if !r.activated => {},
             Ok(true) if r.activated && r.responded => { r.gtk_returned = true; r.step = Step::Exit; },
@@ -2776,6 +3015,11 @@ impl Observation {
     }
     pub(super) fn native_destroyed(&self, id: u32, seen: bool) {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return; };
+        if self.case.session().is_some() && id>2 {
+            let p=if r.session.quit_cancel_id==Some(id) { Some(&mut r.session.quit_cancel) }
+                else { r.session.files.iter_mut().find(|file| file.id==id).map(|file| &mut file.picker) };
+            if let Some(p)=p { if !seen || !p.responded || p.destroyed { self.fail(); return; } p.destroyed=true; return; }
+        }
         if self.case != Case::Outstanding && (1..=2).contains(&id) {
             let p = &mut r.pickers[(id - 1) as usize];
             if !seen || !p.responded || p.destroyed { self.fail(); return; }
@@ -2796,6 +3040,11 @@ impl Observation {
     }
     pub(super) fn native_released(&self, id: u32, seen: bool) {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return; };
+        if self.case.session().is_some() && id>2 {
+            let p=if r.session.quit_cancel_id==Some(id) { Some(&mut r.session.quit_cancel) }
+                else { r.session.files.iter_mut().find(|file| file.id==id).map(|file| &mut file.picker) };
+            if let Some(p)=p { if !seen || !p.destroyed || p.released { self.fail(); return; } p.released=true; return; }
+        }
         if self.case != Case::Outstanding && (1..=2).contains(&id) {
             let p = &mut r.pickers[(id - 1) as usize];
             if !seen || !p.destroyed || p.released { self.fail(); return; }
@@ -2833,18 +3082,38 @@ impl Observation {
             let Some(r) = self.record_at(Boundary::Exit) else { return; };
             if self.case == Case::ProjectPaths { r.paths.complete() && r.project_witness.as_ref().is_some_and(|project| document.installed_observation_paths_final(project)) }
             else if self.case == Case::WorkflowApply { r.project_witness.is_some() && document.installed_observation_final() }
+            else if let Some(case) = self.case.session() { self.session_behavior_complete(&r)
+                && r.project_witness.as_ref().is_some_and(|project| document.installed_session_final(project,case == SessionCase::Loss)) }
             else { r.candidate.complete() && r.project_witness.as_ref().is_some_and(|project| document.installed_observation_candidate_final(project)) }
         };
         let Some(mut r) = self.record_at(Boundary::Exit) else { return; };
         if !ready || !originals_final || !r.relay_joined || !r.released || r.exit
             || self.case == Case::Positive && (r.sessions.len() != 2 || !r.sessions.iter().all(|session| session.finality.is_some()))
             || self.case == Case::WorkflowApply && !r.workflow.complete() { self.fail(); return; }
+        if let Some(case) = self.case.session() {
+            if r.session.queries.is_some() { self.fail(); return; }
+            match document.take_installed_session_queries() {
+                Ok(queries) if queries.count() == case.assessments() => r.session.queries = Some(queries),
+                Ok(queries) => { r.session.queries = Some(queries); self.fail(); return; },
+                Err(_) => { self.fail(); return; },
+            }
+        }
         r.originals_final = originals_final; r.exit = true;
     }
     fn finish(&self) -> bool {
-        let held = match self.record() { Some(mut r) => r.held.take(), None => return false };
+        let (held, queries) = match self.record() {
+            Some(mut r) if r.exit && r.originals_final => (r.held.take(),r.session.queries.take()), _ => return false,
+        };
+        let session_retired = if let Some(mut queries) = queries {
+            let retired = self.case.session().is_some_and(|case| queries.count() == case.assessments())
+                && tauri::async_runtime::block_on(queries.observe_retired(self.end));
+            let Some(mut r) = self.record() else { return false; };
+            // Retain consumed/failed originals on failure, never repoll them or
+            // replace their owner. Success also retains their final DATA here.
+            r.session.queries = Some(queries); r.session.r1_final = retired; retired
+        } else { self.case.session().is_none() };
         let retired = match (self.case, held) {
-            (Case::Positive | Case::ProjectPaths | Case::WorkflowApply, None) => true,
+            (Case::Positive | Case::ProjectPaths | Case::WorkflowApply | Case::Session(_), None) => true,
             (Case::Outstanding, Some(mut held)) => {
                 // Borrow/join the same original after the NORMAL event loop
                 // exits. No additional task, shutdown call, or replacement
@@ -2854,7 +3123,7 @@ impl Observation {
             _ => false,
         };
         let Some(r) = self.record() else { return false; };
-        retired && !self.failed.load(Ordering::SeqCst) && Instant::now() < self.end && r.attached && r.loaded
+        retired && session_retired && !self.failed.load(Ordering::SeqCst) && Instant::now() < self.end && r.attached && r.loaded
             && r.close_prevented && r.activated && r.responded && r.destroyed && r.released && r.gtk_returned
             && r.relay_joined && r.exit && r.pending.is_none() && r.step == Step::Exit
             && (self.case == Case::Outstanding || self.case == Case::ProjectPaths && r.info && r.catalog && r.environment
@@ -2873,7 +3142,55 @@ impl Observation {
                 && r.snapshot && r.snapshot_visible && r.snapshot_requests == 1 && r.suggested.is_some()
                 && r.provenance_visible && r.adopted && r.draft_visible && r.guidance.complete()
                 && r.capability && r.requests == [0; 4] && r.sessions.is_empty() && !r.open_pending && r.prepare_pending.is_none()
-                && r.workflow.complete() && r.project_witness.is_some() && r.originals_final)
+                && r.workflow.complete() && r.project_witness.is_some() && r.originals_final
+                || self.case.session().is_some() && r.info && r.catalog && !r.environment
+                && r.cancelled && r.pickers[0].settled(false) && r.selected && r.pickers[1].settled(true)
+                && r.snapshot && r.snapshot_visible && r.snapshot_requests == 1 && r.project_witness.is_some()
+                && r.requests == [0;4] && r.sessions.is_empty() && !r.open_pending && r.prepare_pending.is_none()
+                && self.session_behavior_complete(&r) && r.originals_final && r.session.r1_final)
+    }
+    fn report_session_queries(&self) -> std::io::Result<()> {
+        let mut r = self.record().ok_or_else(|| std::io::Error::other("session originals unavailable"))?;
+        if self.failed.load(Ordering::SeqCst) || Instant::now() >= self.end || !r.exit || !r.originals_final
+            || !r.session.r1_final || !self.session_behavior_complete(&r)
+            || !r.session.queries.as_mut().is_some_and(|queries| queries.report_retired()) {
+            return Err(std::io::Error::other("session originals unconfirmed"));
+        }
+        Ok(())
+    }
+    fn session_report(&self) -> Option<Vec<u8>> {
+        let case = self.case.session()?; let r = self.record()?; let s = &r.session;
+        if !r.exit || !r.originals_final || !s.r1_final || !self.session_behavior_complete(&r) { return None; }
+        let behavior = match case {
+            SessionCase::Inputs => serde_json::json!({
+                "kinds":["android-keystore","android-firebase","google-wif","project-read-token"],
+                "assessments":s.assessed,"fileChoosers":s.files.len(),"capturedFiles":s.captures,"kept":s.kept,"assigned":s.assigned,
+                "reassessedWithoutRecapture":s.reassessed,"contextRevoked":s.context_revoked,"replacementSameIdNextRevision":s.replaced,
+                "removed":s.removed,"quitCancelPreserved":s.quit_preserved,
+            }),
+            SessionCase::Refusals => serde_json::json!({
+                "assessments":s.assessed,"fileChoosers":s.files.len(),"capturesClosed":s.captures_closed,"sourceRefusals":s.refused,
+                "missingCompanionRefused":s.missing,"firebaseMismatchRefused":s.mismatch,"staleKeepRefused":s.stale_keep,
+                "staleAssignRefused":s.stale_assign,"cancelledReplacementPreservedBytes":s.cancel_preserved,
+                "cancelledReplacementRevokedAssignment":s.cancel_revoked,"discardReopenEmpty":s.reopened,
+            }),
+            SessionCase::Loss => serde_json::json!({
+                "assessments":s.assessed,"fileChoosers":s.files.len(),"navigationDenied":s.navigation == 2,"lostStatusRedacted":s.loss_rendered,
+                "oldCallbacksRefused":s.loss,"noRebind":s.loss,"noLateSuccess":s.loss && s.r1_final,
+                "lossHoldReleasedByOriginalStop":s.loss && s.r1_final,
+            }),
+            SessionCase::Deadline => serde_json::json!({
+                "assessments":s.assessed,"fileChoosers":s.files.len(),"originalDeadline":s.deadline,"firstCleanupPreserved":s.cleanup.is_some() && s.deadline,
+                "noPreview":s.deadline,"queryResult":"query_timeout","assetReason":"deadline",
+            }),
+        };
+        serde_json::to_vec(&serde_json::json!({"schemaVersion":1,"case":case.name(),"profile":"installed-linux-session-inputs",
+            "methods":"thirteen-passive-including-supplied-input-assessment",
+            "project":{"cancelSettled":r.cancelled && r.pickers[0].settled(false),"selectedSettled":r.selected && r.pickers[1].settled(true),"snapshotMatched":r.snapshot && r.snapshot_visible},
+            "safety":{"persistentStorage":false,"storeContacted":false,"signingVerified":false,"releaseReady":false},
+            "originals":{"assetJoined":r.originals_final,"sourceClosed":r.originals_final,"r1Joined":s.r1_final,
+                "guiSettled":r.destroyed && r.released && r.gtk_returned && s.files.iter().all(|f| f.picker.settled(f.select)),"relayJoined":r.relay_joined,"exit":r.exit},
+            "behavior":behavior})).ok().filter(|raw| raw.len() + 1 <= 2048)
     }
     fn workflow_report(&self) -> Option<Vec<u8>> {
         let r = self.record()?;
@@ -2984,10 +3301,657 @@ impl Observation {
     }
 }
 
-// Fixed synchronous DOM expressions. Click only existing UI controls, wait for
-// later React/effect rendering, and return actual bounded text for comparison.
-// No injected DTO, controller/invoke call, .value assignment, synthetic dispatch,
-// async Promise, substitute reply, alternate bootstrap or review owner.
+// Fixed synchronous session expressions use the separately reviewed standard
+// select change stimulus. The old recipes below remain button/insertText-only.
+// No injected DTO, controller/invoke call, async Promise, substitute reply,
+// alternate bootstrap or review owner exists on either path.
+
+impl Observation {
+    fn session_action(&self, step: Step) -> Option<(u8,SA)> {
+        let (index, action) = match step { Step::Session(SessionStep::Run(i,a) | SessionStep::Read(i,a)) => (i,a),
+            Step::Session(SessionStep::SetFile(i) | SessionStep::ActivateFile(i) | SessionStep::Capture(i)) => (i,*self.case.session()?.recipe().get(usize::from(i))?), _ => return None };
+        (self.case.session()?.recipe().get(usize::from(index)) == Some(&action)).then_some((index,action))
+    }
+    fn session_next(&self, r: &mut Record, index: u8) {
+        let Some(case) = self.case.session() else { self.fail(); return; };
+        if r.session.recipe_done != usize::from(index) { self.fail(); return; }
+        r.session.recipe_done += 1; r.session.before = None; r.session.sampled = None;
+        r.step = match case.recipe().get(r.session.recipe_done) {
+            Some(action) => Step::Session(SessionStep::Run(index + 1,*action)), None => Step::Session(SessionStep::Finality),
+        };
+    }
+    pub(super) fn session_request(&self, command: SessionCommand) {
+        if command == SessionCommand::Status { return; }
+        let Some(mut r) = self.record_at(Boundary::Request) else { return; };
+        let expected = self.session_action(r.step).is_some_and(|(_,action)| session_action_command(action) == Some(command)
+            || action == SA::Open && command == SessionCommand::Context
+            || action == SA::Stale("save") && command == SessionCommand::Commit
+            || action == SA::Stale("bind") && command == SessionCommand::Bind)
+            || self.case == Case::Session(SessionCase::Loss) && r.step == Step::Session(SessionStep::Loss) && command == SessionCommand::Discard;
+        let index = command.index();
+        if self.case.session().is_none() || !r.session.admitted || !expected || r.session.requests[index] == u8::MAX
+            || r.session.requests[index] != r.session.returns[index] { self.fail(); return; }
+        r.session.requests[index] += 1;
+    }
+    pub(super) fn session_result<E: serde::Serialize>(&self, command: SessionCommand, result: &Result<crate::asset_session::AssetStatus,E>) {
+        if command == SessionCommand::Status || self.case.session().is_none() { return; }
+        let Some(mut r) = self.record_at(Boundary::Result) else { return; }; let index = command.index();
+        if r.session.requests[index] != r.session.returns[index].saturating_add(1) { self.fail(); return; }
+        let reply = match result {
+            Ok(status) => match serde_json::to_value(status) { Ok(value) => SessionReply { status:Some(value),error:None }, Err(_) => { self.fail(); return; } },
+            Err(error) => {
+                // Both production error serializers use a fixed safe code;
+                // no message, field input or exception text is retained.
+                let code = serde_json::to_value(error).ok().and_then(|v| v["code"].as_str().filter(|s| s.len() <= 64 && s.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')).map(str::to_owned));
+                let Some(code) = code else { self.fail(); return; }; SessionReply { status:None,error:Some(code) }
+            }
+        };
+        r.session.returns[index] += 1; r.session.replies[index] = reply;
+    }
+    pub(super) fn session_context_input(&self, args: &crate::asset_commands::Context<'_>) {
+        if self.case.session().is_none() { return; }
+        let Some(r) = self.record_at(Boundary::Request) else { return; };
+        let platform = match self.session_action(r.step) { Some((_,SA::Platform(platform))) => platform, _ => r.session.platform };
+        use crate::asset_commands::{Platform,Stage,Purpose};
+        if !r.project.as_ref().is_some_and(|p| p.id == args.project_id) || r.session.draft.as_ref() != Some(args.draft)
+            || args.platform != (if platform == "android" { Platform::Android } else { Platform::Project })
+            || args.stage != Stage::Candidate || args.purpose != Purpose::Full { self.fail(); }
+    }
+    pub(super) fn session_choose_input(&self, args: &crate::asset_commands::Choose<'_>) {
+        if self.case.session().is_none() { return; }
+        let Some(r) = self.record_at(Boundary::Request) else { return; };
+        let Some((_,SA::Choose(_,kind,_))) = self.session_action(r.step) else { self.fail(); return; };
+        let expected = r.session.replacement.as_ref().map(|(id,revision,_)| (id.as_str(),*revision));
+        let actual = args.replacement.as_ref().map(|record| (record.record_id,record.expected_revision));
+        if args.kind.name() != kind || expected != actual || !r.session.before.as_ref().is_some_and(|before|
+            before.status["context"]["revision"].as_u64() == Some(u64::from(args.context_revision))) { self.fail(); }
+    }
+    pub(super) fn session_prepare_input(&self, args: &crate::asset_commands::Prepare<'_>) {
+        if self.case.session().is_none() { return; }
+        let Some(r) = self.record_at(Boundary::Request) else { return; };
+        let Some(before) = r.session.before.as_ref() else { self.fail(); return; };
+        use crate::asset_commands::Source;
+        let valid = match (self.session_action(r.step), &args.source) {
+            (Some((_,SA::Prepare(kind,_))), Source::Selection(token)) => ["android-keystore","android-firebase"].contains(&kind)
+                && before.status["operation"]["selectionToken"].as_str() == Some(*token),
+            (Some((_,SA::Prepare(kind,_))), Source::Scalar { kind: actual, replacement }) => actual.name() == kind
+                && replacement.as_ref().map(|record| (record.record_id,record.expected_revision)) == r.session.replacement.as_ref().map(|(id,revision,_)| (id.as_str(),*revision)),
+            (Some((_,SA::Reassess(index,kind))), Source::Record(record)) => before.status["records"].get(usize::from(index)).is_some_and(|value|
+                value["kind"].as_str() == Some(kind) && value["recordId"].as_str() == Some(record.record_id)
+                    && value["revision"].as_u64() == Some(u64::from(record.expected_revision))),
+            _ => false,
+        };
+        if !valid || before.status["context"]["revision"].as_u64() != Some(u64::from(args.context_revision)) { self.fail(); }
+    }
+    pub(super) fn session_confirmation_input(&self, token: &str, bind: bool) {
+        if self.case.session().is_none() { return; }
+        let Some(r) = self.record_at(Boundary::Request) else { return; };
+        let stale = self.session_action(r.step).is_some_and(|(_,a)| matches!(a,SA::Stale(_)));
+        let original = if stale { r.session.remembered.as_ref() } else { r.session.before.as_ref() };
+        if !original.is_some_and(|before| before.status["operation"]["preview"]["token"].as_str() == Some(token)
+            && (before.status["operation"]["preview"]["action"] == "bind") == bind) { self.fail(); }
+    }
+    fn session_snapshot_result(&self, project_id: &str, result: &Result<Value,BridgeError>) {
+        let Some(mut r) = self.record_at(Boundary::Result) else { return; };
+        let expected = serde_json::json!({"android":{"applicationId":"org.assessment.fixture","enabled":true,"identityStatus":"unverified"},"ios":{"enabled":false},
+            "metadata":{"androidLocales":["en-US"],"iosLocales":[],"root":"release/store"},"projectChecks":{"androidArtifact":[],"iosArtifact":[],"preflight":[]},
+            "schemaVersion":1,"services":{"androidFirebase":"required","iosFirebase":"disabled"},"source":{"candidateBranch":"main","productionBranch":"main","projectReadTokenRequired":true},
+            "version":{"buildKey":"BUILD_NUMBER","nameKey":"VERSION_NAME","source":"version.properties"}});
+        let valid = result.as_ref().is_ok_and(|value| r.project.as_ref().is_some_and(|p| p.id == project_id && value["root"].as_str() == Some(p.path.as_str()))
+            && value["observationScope"] == "single-request-non-atomic" && value["config"]["path"] == "release/mobile-release.json"
+            && value["config"]["state"] == "format-valid" && value["config"]["issues"].as_array().is_some_and(Vec::is_empty)
+            && value["config"]["data"] == expected && value["issues"].as_array().is_some_and(Vec::is_empty)
+            && value["discovery"]["state"] == "unverified" && value["discovery"]["partial"] == false && assurance(value,"static-text"));
+        if !valid || r.snapshot_requests != 1 || r.snapshot || !matches!(r.step,Step::Selected | Step::ReadSnapshot) { self.fail(); return; }
+        r.session.draft = result.as_ref().ok().and_then(|v| v["config"].get("data")).cloned(); r.snapshot = true;
+    }
+    pub(super) fn navigation(&self, trusted: bool, allowed: bool) {
+        if self.case.session().is_none() { return; }
+        let Some(mut r) = self.record_at(Boundary::Result) else { return; };
+        let valid = if r.session.navigation == 0 { trusted && allowed && !r.started }
+            else { self.case == Case::Session(SessionCase::Loss) && r.session.navigation == 1 && trusted && !allowed
+                && matches!(r.step,Step::Session(SessionStep::Reload | SessionStep::Loss)) };
+        if !valid { self.fail(); return; } r.session.navigation += 1;
+    }
+    fn session_native_ready(&self, r: &Record, action: SA, snapshot: &InstalledSessionSnapshot) -> Result<bool,()> {
+        let s = &r.session;
+        if snapshot.unknown || snapshot.lost || !snapshot.bound || snapshot.status["capability"]["available"] != true { return Err(()); }
+        for index in 1..10 {
+            let extra_context = action == SA::Open && index == SessionCommand::Context.index();
+            let expected = session_action_command(action).is_some_and(|command| command.index() == index) || extra_context;
+            let stale = matches!(action,SA::Stale("save")) && index == SessionCommand::Commit.index()
+                || matches!(action,SA::Stale("bind")) && index == SessionCommand::Bind.index();
+            let delta = s.requests[index].checked_sub(s.base_requests[index]).ok_or(())?;
+            if delta > u8::from(expected || stale) { return Err(()); }
+            if expected && delta == 0 || s.returns[index] < s.requests[index] { return Ok(false); }
+            if expected && s.replies[index].error.is_some() { return Err(()); }
+            if stale && delta != 0 && !matches!(s.replies[index].error.as_deref(),Some("asset_invalid_request"|"assessment_context_stale")) { return Err(()); }
+        }
+        if !snapshot.settled { return Ok(false); }
+        let op = &snapshot.status["operation"];
+        let stable = match action {
+            SA::Prepare(_,"save") | SA::Reassess(..) | SA::Keep | SA::ReviewRemoval(_) => op["phase"] == "preview" && op["settlement"] == "known",
+            SA::Prepare(_,"missing" | "mismatch") => op["phase"] == "selected" && op["settlement"] == "known",
+            SA::Choose(_,_,None) => op["phase"] == "selected" && op["settlement"] == "known",
+            SA::Choose(_,_,Some(_)) | SA::Assign | SA::Remove | SA::CancelOperation | SA::ConfirmDiscard | SA::Platform(_) | SA::Open => op["phase"] == "idle" && op["settlement"] == "known",
+            _ => true,
+        };
+        Ok(stable)
+    }
+    fn session_accept_action(&self, r: &mut Record, action: SA, snapshot: &InstalledSessionSnapshot) -> bool {
+        let s = &mut r.session; let Some(before) = s.before.as_ref() else { return false; };
+        let status = &snapshot.status; let old = &before.status; let op = &status["operation"];
+        let unchanged = snapshot.same_payloads(before);
+        let unassigned = |value: &Value| value["assignments"].as_array().is_some_and(|rows| rows.iter().all(|a| a["availability"] == "unavailable"));
+        let ctx = &status["context"];
+        let context = ctx["platform"].as_str() == Some(s.platform) && ctx["stage"] == "candidate" && ctx["purpose"] == "full"
+            && r.project.as_ref().is_some_and(|p| ctx["projectId"].as_str() == Some(p.id.as_str()));
+        match action {
+            SA::Open => {
+                if old["mode"] != "closed" || status["mode"] != "session" || !context || !status["records"].as_array().is_some_and(Vec::is_empty)
+                    || !status["assignments"].as_array().is_some_and(Vec::is_empty) { return false; }
+                if s.requests[SessionCommand::Open.index()] == 2 { if !before.empty { return false; } s.reopened = true; }
+            },
+            SA::Kind(kind) => { if !unchanged || old["context"] != status["context"] { return false; } s.kind=kind; s.replacement=None; },
+            SA::Platform(platform) => {
+                if !unchanged || ctx["platform"].as_str() != Some(platform) || ctx["stage"] != "candidate" || ctx["purpose"] != "full"
+                    || ctx["revision"].as_u64() != old["context"]["revision"].as_u64().and_then(|n| n.checked_add(1))
+                    || !unassigned(status) || !op["preview"].is_null() || !op["selectionToken"].is_null() { return false; }
+                if old["assignments"].as_array().is_some_and(|rows| rows.iter().any(|a| a["availability"] == "available")) { s.context_revoked=true; }
+                s.platform=platform; s.replacement=None;
+            },
+            SA::Replacement(index) => {
+                let Some(original) = before.payloads.get(usize::from(index)) else { return false; };
+                if !unchanged || old["records"][usize::from(index)]["kind"].as_str() != Some(s.kind) { return false; }
+                s.replacement=Some(original.clone());
+            },
+            SA::Choose(file,kind,refusal) => {
+                let Some(file_op) = s.files.last() else { return false; };
+                if !context || !unchanged || !file_op.picker.settled(!file.is_empty()) || file_op.kind != kind
+                    || op["operation"] != "choose-file" || op["operationId"].as_u64() != Some(u64::from(file_op.id)) { return false; }
+                let Some((_,facts)) = snapshot.sources.iter().find(|(id,_)| *id == file_op.id) else { return false; };
+                if file.is_empty() {
+                    if facts.begun || facts.originals != 0 || facts.closes != 0 || facts.reads != 0 || facts.eof { return false; }
+                } else {
+                    if !facts.begun || !facts.settled || facts.closes == 0 || facts.closes + facts.no_handle != facts.originals { return false; }
+                    s.captures_closed += 1;
+                }
+                if let Some(reason) = refusal {
+                    if op["reason"].as_str() != Some(reason) || !op["selectionToken"].is_null() || !op["preview"].is_null() { return false; }
+                    if reason == "source-changed" && (!facts.eof || facts.bytes != 12 || !facts.terminal_checked || facts.terminal_matched
+                        || !s.fixture.as_ref().is_some_and(SessionFixture::changed)) { return false; }
+                    if reason != "user-cancelled" { s.refused.push(reason); }
+                    else {
+                        let Some(original) = s.replacement.as_ref() else { return false; };
+                        if !snapshot.payloads.contains(original) || !unassigned(status) { return false; }
+                        s.cancel_preserved=true; s.cancel_revoked=true;
+                    }
+                } else {
+                    if op["reason"] != "none" || op["source"] != "captured" || !op["selectionToken"].as_str().is_some_and(|t| t.len()==32)
+                        || !facts.eof || facts.reads < 2 || !facts.terminal_checked || !facts.terminal_matched
+                        || facts.bytes != (if kind == "android-keystore" { 12 } else if file == "firebase-mismatch.json" { 93 } else { 95 }) { return false; }
+                    s.captures += 1;
+                }
+                if let Some((id,revision,_)) = &s.replacement {
+                    let admitted = &s.replies[SessionCommand::Choose.index()].status;
+                    if !admitted.as_ref().is_some_and(|reply| reply["records"].as_array().is_some_and(|rows| rows.iter().any(|record|
+                        record["recordId"].as_str()==Some(id) && record["revision"].as_u64()==Some(u64::from(*revision)) && record["availability"]=="mutation-pending"))
+                        && reply["assignments"].as_array().is_some_and(|rows| rows.iter().filter(|a| a["recordId"].as_str()==Some(id)).all(|a| a["availability"]=="unavailable"))) { return false; }
+                }
+            },
+            SA::Prepare(..) | SA::Reassess(..) => {
+                let (kind,expected) = match action { SA::Prepare(kind,expected) => (kind,expected), SA::Reassess(_,kind) => (kind,"bind"), _ => return false };
+                let assessment=&op["assessment"]; let assurance=&assessment["assurance"];
+                if !context || !unchanged || op["operation"]!="prepare" || assessment["kind"].as_str()!=Some(kind)
+                    || assessment["applicability"]["state"]!="required" || assessment["applicability"]["reason"]!="selected"
+                    || assessment["context"] != serde_json::json!({"platform":s.platform,"stage":"candidate","purpose":"full"})
+                    || assurance["basis"]!="supplied-input-only" || assurance["selectedFilesRead"]!=false || assurance["keyringAccessed"]!=false
+                    || assurance["storageWritesPerformed"]!=false || assurance["projectCodeExecuted"]!=false || assurance["nativeValidation"]!="not-run"
+                    || assurance["serviceValidation"]!="not-run" || assurance["releaseReadiness"]!="unknown" { return false; }
+                if expected == "missing" {
+                    if !op["preview"].is_null() || assessment["state"]!="missing" || !assessment["fields"].as_array().is_some_and(|fields|
+                        fields.iter().filter(|f| f["id"]!="file").all(|f| f["presence"]=="missing" && f["issues"].as_array().is_some_and(|issues| issues.iter().any(|i| i=="required-missing")))) { return false; }
+                    s.missing=true;
+                } else if expected == "mismatch" {
+                    if !op["preview"].is_null() || assessment["state"]!="invalid" || assessment["identity"]!="mismatch" { return false; } s.mismatch=true;
+                } else {
+                    if !["format-valid","configured"].contains(&assessment["state"].as_str().unwrap_or("")) || op["preview"]["action"].as_str()!=Some(expected)
+                        || op["preview"]["subject"]["kind"].as_str()!=Some(kind) || snapshot.review_end.is_none() || snapshot.cleanup_end.is_some()
+                        || snapshot.work_end.is_some() || !assessment["fields"].as_array().is_some_and(|fields| fields.iter().all(|f|
+                            f["presence"]=="supplied" && f["issues"].as_array().is_some_and(Vec::is_empty))) { return false; }
+                    if let SA::Reassess(index,_) = action {
+                        let Some(record)=old["records"].get(usize::from(index)) else { return false; };
+                        if op["preview"]["subject"]["recordId"]!=record["recordId"] || op["preview"]["subject"]["recordRevision"]!=record["revision"]
+                            || snapshot.sources!=before.sources { return false; } s.reassessed=true;
+                    }
+                }
+                s.assessed+=1;
+            },
+            SA::Keep => {
+                let previous=&old["operation"]["preview"]; let subject=&previous["subject"];
+                if previous["action"]!="save" || op["operation"]!="commit" || op["preview"]["action"]!="bind" || snapshot.review_end!=before.review_end
+                    || status["context"]!=old["context"] || op["preview"]["subject"]["kind"]!=subject["kind"] { return false; }
+                let id=&op["preview"]["subject"]["recordId"]; let revision=&op["preview"]["subject"]["recordRevision"];
+                let Some(record)=status["records"].as_array().and_then(|rows| rows.iter().find(|r| &r["recordId"]==id)) else { return false; };
+                if &record["revision"]!=revision || record["availability"]!="unassigned" || status["assignments"].as_array().is_none_or(|rows| rows.iter().any(|a| &a["recordId"]==id && a["availability"]=="available")) { return false; }
+                if subject["change"]=="replace" {
+                    if *id!=subject["recordId"] || revision.as_u64()!=subject["recordRevision"].as_u64().and_then(|n| n.checked_add(1))
+                        || snapshot.payloads.len()!=before.payloads.len() || snapshot.same_payloads(before) { return false; } s.replaced=true;
+                } else if subject["change"]!="new" || revision.as_u64()!=Some(1) || snapshot.payloads.len()!=before.payloads.len()+1 { return false; }
+                s.kept+=1;
+            },
+            SA::Assign => {
+                let subject=&old["operation"]["preview"]["subject"];
+                if !context || !unchanged || old["operation"]["preview"]["action"]!="bind" || op["operation"]!="bind" || !op["preview"].is_null()
+                    || !status["assignments"].as_array().is_some_and(|rows| rows.iter().any(|a| a["recordId"]==subject["recordId"]
+                        && a["recordRevision"]==subject["recordRevision"] && a["kind"]==subject["kind"] && a["contextRevision"]==ctx["revision"] && a["availability"]=="available")) { return false; }
+                s.assigned+=1;
+            },
+            SA::ReviewRemoval(index) => {
+                let Some(record)=old["records"].get(usize::from(index)) else { return false; };
+                if !unchanged || op["preview"]["action"]!="delete" || op["preview"]["subject"]["recordId"]!=record["recordId"]
+                    || op["preview"]["subject"]["recordRevision"]!=record["revision"] { return false; }
+            },
+            SA::Remove => {
+                let id=&old["operation"]["preview"]["subject"]["recordId"];
+                if old["operation"]["preview"]["action"]!="delete" || op["operation"]!="commit" || snapshot.payloads.len()+1!=before.payloads.len()
+                    || status["records"].as_array().is_none_or(|rows| rows.iter().any(|r| &r["recordId"]==id))
+                    || status["assignments"].as_array().is_none_or(|rows| rows.iter().any(|a| &a["recordId"]==id)) { return false; } s.removed+=1;
+            },
+            SA::Remember(action) => { if old["operation"]["preview"]["action"].as_str()!=Some(action) || !snapshot.same_review(before) { return false; } s.remembered=Some(snapshot.clone()); },
+            SA::Stale(action) => {
+                let Some(remembered)=&s.remembered else { return false; };
+                if !unchanged || !snapshot.same_payloads(remembered) || !op["preview"].is_null() || !unassigned(status)
+                    || status["context"]["revision"]==remembered.status["context"]["revision"] { return false; }
+                if action=="save" { s.stale_keep=true; } else if action=="bind" { s.stale_assign=true; } else { return false; }
+                s.remembered=None;
+            },
+            SA::CancelOperation => { if !unchanged || op["reason"]!="user-cancelled" || !op["preview"].is_null() || !op["selectionToken"].is_null() { return false; } },
+            SA::ConfirmDiscard => { if !snapshot.empty || !status["records"].as_array().is_some_and(Vec::is_empty) || !status["assignments"].as_array().is_some_and(Vec::is_empty) { return false; } },
+            SA::Discard | SA::Fields(_) => if !unchanged { return false; },
+            SA::QuitCancel | SA::Held => return false,
+        }
+        true
+    }
+}
+
+impl Observation {
+    fn session_tick(self: &Arc<Self>, app: &tauri::AppHandle, step: SessionStep) {
+        let state=app.state::<super::ShellState>();
+        if let SessionStep::Capture(index)=step {
+            if self.case==Case::Session(SessionCase::Refusals) {
+                if let Some(checkpoint)=state.document.installed_session_capture_checkpoint().filter(|c| c.reached()) {
+                    let changed = {
+                        let Some(mut r)=self.record_at(Boundary::Settlement) else { return; };
+                        let Some(fixture)=r.session.fixture.as_mut() else { self.fail(); return; };
+                        if fixture.changed() { true } else { fixture.change_source().is_ok() && checkpoint.release() }
+                    };
+                    if !changed { let _=checkpoint.release(); self.fail(); return; }
+                }
+            }
+            let Some(mut r)=self.record_at(Boundary::Settlement) else { return; };
+            let Some(action)=self.case.session().and_then(|c| c.recipe().get(usize::from(index))).copied() else { self.fail(); return; };
+            r.step=Step::Session(SessionStep::Read(index,action));
+            // Leave the original source checkpoint reachable until its same
+            // worker reaches EOF; the next read tick also checks it below.
+        }
+        let Some(snapshot)=state.document.installed_session_snapshot() else { return; };
+        if snapshot.unknown { self.fail(); return; }
+        let step=match self.record().map(|r| r.step) { Some(Step::Session(step))=>step,_=>return };
+        if matches!(step,SessionStep::Read(_,SA::Choose("changed.jks",_,_))) {
+            if let Some(checkpoint)=state.document.installed_session_capture_checkpoint().filter(|c| c.reached()) {
+                let changed = {
+                    let Some(mut r)=self.record_at(Boundary::Settlement) else { return; };
+                    let Some(fixture)=r.session.fixture.as_mut() else { self.fail(); return; };
+                    if fixture.changed() { true } else { fixture.change_source().is_ok() && checkpoint.release() }
+                };
+                if !changed { let _=checkpoint.release(); self.fail(); return; }
+            }
+        }
+        let Some(window)=app.get_webview_window(super::MAIN_WINDOW) else { self.fail(); return; };
+        if matches!(step,SessionStep::SetFile(_) | SessionStep::ActivateFile(_)) {
+            let index=match step { SessionStep::SetFile(i) | SessionStep::ActivateFile(i)=>i,_=>return };
+            {
+                let Some(mut r)=self.record_at(Boundary::Settlement) else { return; };
+                if r.pending.is_some() { self.fail(); return; } r.pending=Some(Pending::Dom(Step::Session(step)));
+            }
+            let q=self.clone(); let app=app.clone();
+            if window.run_on_main_thread(move || {
+                let result=if matches!(step,SessionStep::SetFile(_)) { super::owned_gtk::select_observed_session_file(&app,&q,index) }
+                    else { super::owned_gtk::activate_observed_session_file(&app,&q,index) };
+                q.session_file_returned(step,result);
+            }).is_err() { self.fail(); } return;
+        }
+        if step==SessionStep::QuitCancel {
+            {
+                let Some(mut r)=self.record_at(Boundary::Settlement) else { return; };
+                if r.pending.is_some() { return; } r.pending=Some(Pending::Gtk);
+            }
+            let q=self.clone(); let app=app.clone();
+            if window.run_on_main_thread(move || { let result=super::owned_gtk::activate_observed_quit(&app,&q); q.gtk_returned(result); }).is_err() { self.fail(); }
+            return;
+        }
+        let script={
+            let Some(mut r)=self.record_at(Boundary::Settlement) else { return; };
+            if r.pending.is_some() { return; }
+            match step {
+                SessionStep::Run(index,action) => {
+                    if r.session.recipe_done!=usize::from(index) || self.case.session().and_then(|c| c.recipe().get(usize::from(index)))!=Some(&action) { self.fail(); return; }
+                    if r.session.before.is_none() { r.session.base_requests=r.session.requests; r.session.before=Some(snapshot.clone()); }
+                    if action==SA::QuitCancel {
+                        if !snapshot.settled || snapshot.status["operation"]["preview"]["action"]!="bind" || snapshot.review_end.is_none() { self.fail(); return; }
+                        r.session.quit_review=Some(snapshot); r.step=Step::Session(SessionStep::QuitCancel); r.pending=Some(Pending::Close);
+                        drop(r); if window.close().is_err() { self.fail(); } return;
+                    }
+                    if action==SA::Held {
+                        if !snapshot.owner.as_ref().is_some_and(|owner| state.bridge.supervisor.installed_session_query_held(owner.id))
+                            || snapshot.settled || snapshot.work_end.is_none() || snapshot.cleanup_end.is_some()
+                            || snapshot.status["operation"]["phase"]!="assessing" || !snapshot.status["operation"]["preview"].is_null() { return; }
+                        r.session.before=Some(snapshot); r.step=Step::Session(if self.case==Case::Session(SessionCase::Loss) { SessionStep::Reload } else { SessionStep::Deadline }); return;
+                    }
+                },
+                SessionStep::Read(_,SA::Prepare(_,"held")) => {
+                    if r.session.requests[SessionCommand::Prepare.index()]!=1 || r.session.returns[SessionCommand::Prepare.index()]!=0
+                        || !snapshot.owner.as_ref().is_some_and(|owner| state.bridge.supervisor.installed_session_query_held(owner.id)) { return; }
+                },
+                SessionStep::Read(_,action) => match self.session_native_ready(&r,action,&snapshot) { Ok(true)=>{},Ok(false)=>return,Err(_)=>{self.fail();return;} },
+                SessionStep::QuitPreserved => {
+                    if !snapshot.quit_declined || snapshot.quit_pending || !r.session.quit_cancel.settled(false) { return; }
+                    if !r.session.quit_review.as_ref().is_some_and(|before| snapshot.same_review(before) && snapshot.same_payloads(before)) { self.fail(); return; }
+                },
+                SessionStep::Loss | SessionStep::Deadline => {
+                    let Some(before)=r.session.before.as_ref() else { self.fail(); return; };
+                    let original_work=before.work_end;
+                    if !snapshot.owner.as_ref().zip(before.owner.as_ref()).is_some_and(|(now,old)| Arc::ptr_eq(now,old))
+                        || !session_original_clock(original_work,snapshot.work_end,snapshot.settled)
+                        || !snapshot.status["operation"]["preview"].is_null() { self.fail(); return; }
+                    if let Some(cleanup)=snapshot.cleanup_end {
+                        if r.session.cleanup.is_some_and(|old| old!=cleanup) { self.fail(); return; } r.session.cleanup=Some(cleanup);
+                    }
+                    if !snapshot.settled || r.session.returns[SessionCommand::Prepare.index()]!=1 { return; }
+                    let valid=if step==SessionStep::Loss { r.session.navigation==2 && snapshot.lost && !snapshot.bound && snapshot.empty
+                        && snapshot.status["context"].is_null() && snapshot.status["records"]==serde_json::json!([]) && snapshot.status["assignments"]==serde_json::json!([])
+                        && snapshot.status["operation"]["selectionToken"].is_null() && snapshot.status["operation"]["assessment"].is_null()
+                        && snapshot.status["operation"]["reason"]=="document-lost" }
+                        else { !snapshot.lost && snapshot.bound && snapshot.status["operation"]["reason"]=="deadline"
+                            && snapshot.cleanup_end==original_work.and_then(|end| end.checked_add(Duration::from_secs(2))) };
+                    if !valid || snapshot.cleanup_end.is_none() || r.session.replies[SessionCommand::Prepare.index()].error.as_deref()!=Some(if step==SessionStep::Loss { "asset_document_lost" } else { "asset_deadline" }) { self.fail(); return; }
+                },
+                SessionStep::Finality => {
+                    if r.session.requests!=r.session.returns { return; }
+                    if !self.session_behavior_complete(&r) || !r.session.fixture.as_ref().is_some_and(|fixture| fixture.verify().is_ok()) { self.fail(); return; }
+                    if !snapshot.settled || snapshot.quit_pending { return; }
+                    r.step=Step::Close; return;
+                },
+                SessionStep::Navigate | SessionStep::Reload => {},
+                _ => { self.fail(); return; },
+            }
+            if r.evaluations>=128 { self.fail(); return; }
+            let replacement=if let SessionStep::Run(_,SA::Replacement(index))=step {
+                let Some(record)=snapshot.status["records"].get(usize::from(index)) else { self.fail(); return; };
+                Some(format!("Replace session item {} · revision {}",index+1,record["revision"].as_u64().unwrap_or(0)))
+            } else { None };
+            let display=session_display(&snapshot);
+            let script=session_script(step,r.session.kind,r.session.platform,replacement.as_deref(),display.as_ref());
+            if script.is_none() { self.fail(); return; }
+            r.session.sampled=Some(snapshot); r.evaluations+=1; r.pending=Some(Pending::Session(step)); script
+        };
+        let Some(script)=script else { self.fail(); return; }; let q=self.clone();
+        if window.eval_with_callback(script,move |raw| q.dom(Step::Session(step),&raw)).is_err() { self.fail(); }
+    }
+    fn session_dom(&self, step: SessionStep, value: &Value) {
+        let Some(mut r)=self.record_at(Boundary::Dom) else { return; };
+        if r.pending.take()!=Some(Pending::Session(step)) || r.step!=Step::Session(step) { self.fail(); return; }
+        if value==&serde_json::json!({"state":"wait"}) { return; }
+        if value["state"]!="ready" { self.fail(); return; }
+        let Some(snapshot)=r.session.sampled.take() else { self.fail(); return; };
+        match step {
+            SessionStep::Navigate => {
+                if !keys(value,&["state"]) { self.fail(); return; } r.step=Step::Session(SessionStep::Run(0,SA::Open));
+            },
+            SessionStep::Run(index,action) => {
+                if !keys(value,&["state"]) { self.fail(); return; }
+                if matches!(action,SA::Fields(_)) {
+                    if !self.session_accept_action(&mut r,action,&snapshot) { self.fail(); return; } self.session_next(&mut r,index);
+                } else if let SA::Choose(file,_,_)=action {
+                    r.step=Step::Session(if file.is_empty() { SessionStep::ActivateFile(index) } else { SessionStep::SetFile(index) });
+                } else { r.step=Step::Session(SessionStep::Read(index,action)); }
+            },
+            SessionStep::Reload => {
+                if !keys(value,&["state"]) { self.fail(); return; } r.step=Step::Session(SessionStep::Loss);
+            },
+            SessionStep::Read(index,action) => {
+                if !keys(value,&["state","display","controls"]) { self.fail(); return; }
+                if session_display(&snapshot).as_ref()!=value.get("display") { return; }
+                let controls=&value["controls"];
+                let valid=match action {
+                    SA::Kind(kind) => controls["kind"].as_str()==Some(kind)
+                        && controls["formNames"]==serde_json::json!(if ["android-keystore","android-firebase"].contains(&kind) { &[][..] } else { session_field_names(kind) })
+                        && controls["filePrompt"].as_str()==Some(if kind=="android-keystore" { "jks" } else if kind=="android-firebase" { "firebase" } else { "none" }),
+                    SA::Replacement(index) => snapshot.status["records"].get(usize::from(index)).is_some_and(|record| controls["replacement"].as_str()==Some(format!("Replace session item {} · revision {}",index+1,record["revision"].as_u64().unwrap_or(0)).as_str())),
+                    SA::Platform(platform) => controls["platform"].as_str()==Some(platform),
+                    SA::Discard => controls["discardConfirmation"]==true,
+                    _ => true,
+                };
+                if !valid { return; }
+                if matches!(action,SA::Prepare(_,"held")) { r.session.assessed+=1; }
+                else if !self.session_accept_action(&mut r,action,&snapshot) { self.fail(); return; }
+                self.session_next(&mut r,index);
+            },
+            SessionStep::QuitPreserved => {
+                if !keys(value,&["state","display","controls"]) || session_display(&snapshot).as_ref()!=value.get("display") { return; }
+                r.session.quit_preserved=true; let index=r.session.recipe_done as u8; self.session_next(&mut r,index);
+            },
+            SessionStep::Loss | SessionStep::Deadline => {
+                if !keys(value,&["state","display","controls"]) || session_display(&snapshot).as_ref()!=value.get("display") { return; }
+                if step==SessionStep::Loss { r.session.loss=true; r.session.loss_rendered=true; } else { r.session.deadline=true; }
+                r.session.recipe_done=self.case.session().map_or(0,|c| c.recipe().len()); r.step=Step::Session(SessionStep::Finality);
+            },
+            _=>self.fail(),
+        }
+    }
+    fn session_behavior_complete(&self, r: &Record) -> bool {
+        let Some(case)=self.case.session() else { return false; }; let s=&r.session;
+        s.admitted && s.draft.is_some() && s.requests==s.returns && s.recipe_done==case.recipe().len() && s.assessed==case.assessments() as u8
+            && s.requests[SessionCommand::Prepare.index()]==s.assessed && s.returns[SessionCommand::Prepare.index()]==s.assessed
+            && s.files.iter().all(|file| file.picker.settled(file.select))
+            && match case {
+                SessionCase::Inputs=>s.files.len()==3 && s.captures==3 && s.captures_closed==3 && s.kept==5 && s.assigned==6 && s.removed==1
+                    && s.reassessed && s.context_revoked && s.replaced && s.quit_preserved,
+                SessionCase::Refusals=>s.files.len()==9 && s.captures_closed==8 && s.refused==["project-overlap","source-refused","source-refused","source-changed"]
+                    && s.missing && s.mismatch && s.stale_keep && s.stale_assign && s.cancel_preserved && s.cancel_revoked && s.reopened,
+                SessionCase::Loss=>s.files.len()==1 && s.captures==1 && s.loss && s.loss_rendered && s.navigation==2 && s.kept==0 && s.assigned==0
+                    && s.requests[SessionCommand::Discard.index()]<=1 && (s.requests[SessionCommand::Discard.index()]==0
+                        || s.replies[SessionCommand::Discard.index()].error.as_deref()==Some("asset_document_lost")),
+                SessionCase::Deadline=>s.files.len()==1 && s.captures==1 && s.deadline && s.cleanup.is_some() && s.kept==0 && s.assigned==0,
+            }
+    }
+}
+
+impl Observation {
+    pub(super) fn session_file_created(&self, id: u32, kind: crate::credential_format::FileKind) {
+        let Some(mut r)=self.record_at(Boundary::Gtk) else { return; };
+        let Some((index,SA::Choose(file,expected,_)))=self.session_action(r.step) else { self.fail(); return; };
+        let name=match kind { crate::credential_format::FileKind::AndroidKeystore=>"android-keystore", crate::credential_format::FileKind::AndroidFirebase=>"android-firebase" };
+        if name!=expected || id<=2 || r.session.files.len()>=9 || r.session.files.iter().any(|f| f.id==id || f.index==index) { self.fail(); return; }
+        r.session.files.push(SessionFile {id,index,kind:expected,select:!file.is_empty(),picker:Picker {created:true,..Picker::default()}});
+    }
+    pub(super) fn session_file_dialog(&self, id: u32, index: u8) -> Result<(&'static str,bool),()> {
+        let Some(r)=self.record_at(Boundary::Gtk) else { return Err(()); };
+        let file=r.session.files.last().filter(|file| file.id==id && file.index==index).ok_or(())?;
+        if self.failed.load(Ordering::SeqCst) || Instant::now()>=self.end || !file.picker.created || file.picker.responded || file.picker.destroyed
+            || !matches!(r.pending,Some(Pending::Dom(Step::Session(SessionStep::SetFile(i) | SessionStep::ActivateFile(i)))) if i==index) { return Err(()); }
+        Ok((file.kind,file.select))
+    }
+    pub(super) fn session_file_target(&self, index: u8) -> Option<PathBuf> {
+        let SA::Choose(file,_,_)=*self.case.session()?.recipe().get(usize::from(index))? else { return None; };
+        if file.is_empty() { return None; }
+        let project=self.project_path()?;
+        Some(if file=="overlap.jks" { project.join(file) } else { project.parent()?.join("sources").join(file) })
+    }
+    pub(super) fn session_file_selection(&self, id: u32, index: u8) -> Result<(),()> {
+        let Some(mut r)=self.record_at(Boundary::Gtk) else { return Err(()); };
+        if self.failed.load(Ordering::SeqCst) || Instant::now()>=self.end
+            || r.pending!=Some(Pending::Dom(Step::Session(SessionStep::SetFile(index)))) { return Err(()); }
+        let file=r.session.files.last_mut().filter(|file| file.id==id && file.index==index).ok_or(())?;
+        if !file.select || file.picker.selected || file.picker.activated { return Err(()); }
+        file.picker.selected=true; Ok(())
+    }
+    pub(super) fn session_file_activation(&self, id: u32, index: u8) -> Result<(),()> {
+        let Some(mut r)=self.record_at(Boundary::Gtk) else { return Err(()); };
+        if self.failed.load(Ordering::SeqCst) || Instant::now()>=self.end
+            || r.pending!=Some(Pending::Dom(Step::Session(SessionStep::ActivateFile(index)))) { return Err(()); }
+        let file=r.session.files.last_mut().filter(|file| file.id==id && file.index==index).ok_or(())?;
+        if file.picker.selected!=file.select || file.picker.activated { return Err(()); }
+        file.picker.activated=true; Ok(())
+    }
+    pub(super) fn session_file_filename(&self, id: u32, path: Option<&Path>) {
+        let Some(mut r)=self.record_at(Boundary::Gtk) else { return; };
+        let Some(file)=r.session.files.last_mut().filter(|file| file.id==id) else { self.fail(); return; };
+        if !file.select || !file.picker.activated || file.picker.filename || file.picker.responded
+            || path.is_none() || path!=self.session_file_target(file.index).as_deref() { self.fail(); return; }
+        file.picker.filename=true;
+    }
+    pub(super) fn session_file_response(&self, id: u32, accepted: bool, cancelled: bool, disposal: bool) {
+        let Some(mut r)=self.record_at(Boundary::Gtk) else { return; };
+        let Some(file)=r.session.files.last_mut().filter(|file| file.id==id) else { self.fail(); return; }; let p=&mut file.picker;
+        if !p.activated || p.destroyed || p.released { self.fail(); return; }
+        if !p.responded && !disposal && accepted==file.select && cancelled!=file.select && p.filename==file.select { p.responded=true; }
+        else if p.responded && p.returned && disposal && !accepted && !cancelled && !p.disposal { p.disposal=true; }
+        else { self.fail(); }
+    }
+    fn session_file_returned(&self, step: SessionStep, result: Result<bool,()>) {
+        let Some(mut r)=self.record_at(Boundary::Gtk) else { return; };
+        if r.pending.take()!=Some(Pending::Dom(Step::Session(step))) || r.step!=Step::Session(step) { self.fail(); return; }
+        let index=match step { SessionStep::SetFile(i) | SessionStep::ActivateFile(i)=>i,_=>{self.fail();return;} };
+        let Some(file)=r.session.files.last_mut().filter(|file| file.index==index) else {
+            if result!=Ok(false) { self.fail(); } return;
+        };
+        match result {
+            Ok(false) if !file.picker.activated && (step!=SessionStep::SetFile(index) || !file.picker.selected)=>{},
+            Ok(true) if step==SessionStep::SetFile(index) && file.picker.selected && !file.picker.activated=>r.step=Step::Session(SessionStep::ActivateFile(index)),
+            Ok(true) if step==SessionStep::ActivateFile(index)=>{
+                if !file.picker.activation_returned(result) { self.fail(); return; } r.step=Step::Session(SessionStep::Capture(index));
+            }, _=>self.fail(),
+        }
+    }
+    pub(super) fn quit_selects_ok(&self, id: u32) -> Result<bool,()> {
+        let Some(r)=self.record_at(Boundary::Gtk) else { return Err(()); };
+        if r.step==Step::Session(SessionStep::QuitCancel) && r.session.quit_cancel_id==Some(id) { Ok(false) }
+        else if r.step==Step::Quit && r.native_id==Some(id) { Ok(true) } else { Err(()) }
+    }
+}
+
+fn session_script(step: SessionStep, kind: &str, platform: &str, replacement: Option<&str>, expected_display: Option<&Value>) -> Option<String> {
+    let body=match step {
+        SessionStep::Navigate=>r#"const b=document.querySelector('nav[aria-label="Workspace navigation"] button[aria-label="Credentials"]');
+            if(!b||b.disabled)return {state:'wait'};show(b);b.click();return {state:'ready'};"#.to_owned(),
+        SessionStep::Run(_,action)=>match action {
+            SA::Kind(next) | SA::Platform(next)=>{
+                let (label,old)=if matches!(action,SA::Kind(_)) { ("What would you like to provide?",kind) } else { ("Platform",platform) };
+                let label=serde_json::to_string(label).ok()?;let old=serde_json::to_string(old).ok()?;let next=serde_json::to_string(next).ok()?;
+                format!(r#"const s=select({label});if(!s||s.disabled)return {{state:'wait'}};if(s.options[s.selectedIndex]?.value!=={old})throw 0;
+                    const indices=[...s.options].flatMap((o,i)=>o.value==={next}?[i]:[]);if(indices.length!==1||s.options[indices[0]].disabled)throw 0;
+                    show(s);s.focus();s.selectedIndex=indices[0];s.dispatchEvent(new Event('change',{{bubbles:true}}));return {{state:'ready'}};"#)
+            },
+            SA::Replacement(_)=>{
+                let label=serde_json::to_string(replacement?).ok()?;
+                format!(r#"const s=select('New or replacement copy?');if(!s||s.disabled)return {{state:'wait'}};if(s.selectedIndex!==0)throw 0;
+                    const matches=[...s.options].flatMap((o,i)=>text(o)==={label}?[i]:[]);if(matches.length!==1||matches[0]===0||s.options[matches[0]].disabled)throw 0;
+                    show(s);s.focus();s.selectedIndex=matches[0];s.dispatchEvent(new Event('change',{{bubbles:true}}));return {{state:'ready'}};"#)
+            },
+            SA::Fields(kind)=>{
+                let fields: &[(&str,&str)]=match kind {
+                    "android-keystore"=>&[("storePassword","fictional-store-password"),("keyAlias","fixture_alias"),("keyPassword","fictional-key-password")],
+                    "google-wif"=>&[("provider","projects/123/locations/global/workloadIdentityPools/fixture/providers/fixture"),("serviceAccount","fixture@fixture-project.iam.gserviceaccount.com")],
+                    "project-read-token"=>&[("token","fictional-read-token")],_=>return None,
+                };
+                let fields=serde_json::to_string(fields).ok()?;
+                format!(r#"const forms=panel().querySelectorAll('form.session-inputs');if(forms.length!==1)return {{state:'wait'}};
+                    const form=forms[0],fields={fields},inputs=[...form.querySelectorAll('input')];if(inputs.length!==fields.length)throw 0;
+                    const pairs=fields.map(([name,fictional])=>{{const candidates=inputs.filter(i=>i.id.endsWith('-'+name));if(candidates.length!==1)throw 0;
+                        const input=candidates[0],labels=[...form.querySelectorAll('label')].filter(l=>l.htmlFor===input.id);
+                        if(labels.length!==1||input.type!=='password'||input.autocomplete!=='new-password'||input.readOnly)throw 0;return [input,fictional];}});
+                    if(pairs.some(([i])=>i.disabled))return {{state:'wait'}};
+                    for(const [input,fictional] of pairs){{show(input);input.focus();input.select();if(!document.execCommand('insertText',false,fictional))throw 0;}}
+                    return {{state:'ready'}};"#)
+            },
+            SA::Remember(action)=>{
+                let label=if action=="bind" { "Assign to this context" } else { "Keep for this session" };let label=serde_json::to_string(label).ok()?;
+                format!(r#"if(Object.prototype.hasOwnProperty.call(window,'__mrkInstalledSessionButton'))throw 0;
+                    const b=button({label},panel().querySelector('.session-review[aria-label="Explicit session review"]'));
+                    if(!b||b.disabled)return {{state:'wait'}};show(b);window.__mrkInstalledSessionButton={{button:b,label:{label}}};return {{state:'ready'}};"#)
+            },
+            SA::Stale(action)=>{
+                let label=serde_json::to_string(if action=="bind" { "Assign to this context" } else { "Keep for this session" }).ok()?;
+                format!(r#"const old=window.__mrkInstalledSessionButton;if(!old||old.label!=={label}||!(old.button instanceof HTMLButtonElement))throw 0;
+                    if(old.button.isConnected&&!old.button.disabled)throw 0;
+                    old.button.click();delete window.__mrkInstalledSessionButton;return {{state:'ready'}};"#)
+            },
+            SA::Reassess(index,_) | SA::ReviewRemoval(index)=>{
+                let label=if matches!(action,SA::Reassess(..)) { "Review assignment" } else { "Review removal…" };
+                let label=serde_json::to_string(label).ok()?;
+                format!(r#"const rows=panel().querySelectorAll('.session-records article');if(rows.length<={index})return {{state:'wait'}};
+                    return click({label},rows[{index}]);"#)
+            },
+            SA::Open=>"return click('Start session — keep inputs in memory');".into(),
+            SA::Choose(..)=>"return click('Select file…');".into(),
+            SA::Prepare(..)=>"return click('Prepare private review',panel().querySelector('form.session-inputs'));".into(),
+            SA::Keep=>"return click('Keep for this session',panel().querySelector('.session-review[aria-label=\"Explicit session review\"]'));".into(),
+            SA::Assign=>"return click('Assign to this context',panel().querySelector('.session-review[aria-label=\"Explicit session review\"]'));".into(),
+            SA::Remove=>"return click('Remove session copy',panel().querySelector('.session-review[aria-label=\"Explicit session review\"]'));".into(),
+            SA::CancelOperation=>"return click('Request cancel / discard this operation',panel().querySelector('.session-progress'));".into(),
+            SA::Discard=>"return click('Discard session…');".into(),
+            SA::ConfirmDiscard=>"return click('Discard session copies',panel().querySelector('[aria-label=\"Confirm session discard\"]'));".into(),
+            SA::QuitCancel | SA::Held=>return None,
+        },
+        SessionStep::Reload=>r#"if(Object.prototype.hasOwnProperty.call(window,'__mrkInstalledSessionButton'))throw 0;
+            const b=button('Request cancel / discard this operation',panel().querySelector('.session-progress'));
+            if(!b||b.disabled)return {state:'wait'};window.__mrkInstalledSessionButton={button:b,label:'loss-discard'};
+            window.location.reload();return {state:'ready'};"#.into(),
+        SessionStep::Read(..) | SessionStep::QuitPreserved | SessionStep::Deadline | SessionStep::Loss=>{
+            let expected=serde_json::to_string(expected_display?).ok()?;
+            let loss=if step==SessionStep::Loss { r#"const old=window.__mrkInstalledSessionButton;
+                if(!old||old.label!=='loss-discard'||!(old.button instanceof HTMLButtonElement)||!p.querySelector('.notice-warning'))throw 0;
+                if(old.button.isConnected&&!old.button.disabled)throw 0;old.button.click();delete window.__mrkInstalledSessionButton;"# } else { "" };
+            format!(r#"const p=panel(),display=readDisplay();if(!equal(display,{expected}))return {{state:'wait'}};
+                const controls=readControls();{loss}return {{state:'ready',display,controls}};"#)
+        }, _=>return None,
+    };
+    // Session selects explicitly use untrusted standard DOM change events;
+    // old recipes below retain their no-synthetic-dispatch guarantee. Neither
+    // path accesses React internals, invokes IPC, reads private input values,
+    // injects filenames/DTOs or replaces the production controller.
+    Some(format!(r#"(()=>{{try{{
+        const equal=(a,b)=>{{if(a===b)return true;if(!a||!b||typeof a!=='object'||typeof b!=='object'||Array.isArray(a)!==Array.isArray(b))return false;
+            const ak=Object.keys(a).sort(),bk=Object.keys(b).sort();return ak.length===bk.length&&ak.every((k,i)=>k===bk[i]&&equal(a[k],b[k]));}};
+        const text=e=>{{if(!e||typeof e.textContent!=='string'||e.textContent.length>4096)throw 0;return e.textContent;}};
+        const show=e=>{{if(!e)throw 0;e.scrollIntoView({{block:'center'}});const r=e.getBoundingClientRect(),s=getComputedStyle(e);
+            if(!e.isConnected||r.width<=0||r.height<=0||s.display==='none'||s.visibility!=='visible')throw 0;}};
+        const panel=()=>{{const rows=document.querySelectorAll('.credential-session');if(rows.length!==1||!document.querySelector('nav[aria-label="Workspace navigation"] button[aria-label="Credentials"][aria-current="page"]'))throw 0;return rows[0];}};
+        const button=(label,root=panel())=>{{if(!root)return null;const rows=[...root.querySelectorAll('button')].filter(b=>text(b)===label);if(rows.length>1)throw 0;return rows[0]??null;}};
+        const click=(label,root=panel())=>{{const b=button(label,root);if(!b||b.disabled)return {{state:'wait'}};show(b);b.click();return {{state:'ready'}};}};
+        const select=label=>{{const p=panel(),labels=[...p.querySelectorAll('label')].filter(l=>text(l)===label);if(labels.length===0)return null;
+            if(labels.length!==1||!labels[0].htmlFor)throw 0;const s=document.getElementById(labels[0].htmlFor);
+            if(!(s instanceof HTMLSelectElement)||!p.contains(s)||s.id!==labels[0].htmlFor||s.options.length===0||s.options.length>33)throw 0;return s;}};
+        const readDisplay=()=>{{const p=panel(),op=p.querySelector('.session-progress'),assessment=p.querySelector('.session-assessment'),review=p.querySelector('.session-review[aria-label="Explicit session review"]');
+            const context=[...p.querySelectorAll('.session-context')].find(c=>text(c.querySelector('h3'))==='Release context');if(!context)throw 0;
+            const records=[...p.querySelectorAll('.session-records article')].map(row=>{{show(row);return {{heading:text(row.querySelector('h4')),revision:text(row.querySelector('p')),availability:text(row.querySelector('.badge'))}};}});
+            let assessed=null;if(assessment){{const fields=[...assessment.querySelectorAll('.session-field-results > li')].map(row=>({{state:text(row.querySelector(':scope > .inline-heading > .badge')),presence:text(row.querySelector(':scope > p')),issues:row.querySelectorAll(':scope > ul > li').length}}));
+                assessed={{state:text(assessment.querySelector('.credential-row-heading > .badge')),fields,assurance:[...assessment.querySelectorAll('.session-assurance > .badge')].map(text)}};}}
+            let action=null;if(review){{const rows=[...review.querySelectorAll('button')].filter(b=>['Keep for this session','Assign to this context','Remove session copy'].includes(text(b)));if(rows.length!==1)return null;
+                if(rows[0].disabled)return null;action=text(rows[0]);}}
+            let phase=null,settlement=null;if(op){{phase=text(op.querySelector('.badge'));const match=/Settlement: (pending|known|unknown|late-known)(?:\s|$)/.exec(text(op.querySelector(':scope > p')));if(!match)throw 0;settlement=match[1];}}
+            return {{mode:text(p.querySelector(':scope > h3 .badge')),context:text(context.querySelector('.badge'))==='Context submitted · not yet policy-validated',records,review:action,assessment:assessed,phase,settlement}};}};
+        const readControls=()=>{{const p=panel(),kind=select('What would you like to provide?'),platform=select('Platform'),replacement=select('New or replacement copy?');
+            const names=['storePassword','keyAlias','keyPassword','provider','serviceAccount','token'];
+            const formNames=[...p.querySelectorAll('form.session-inputs input')].map(input=>{{if(input.type!=='password')throw 0;const matches=names.filter(n=>input.id.endsWith('-'+n));if(matches.length!==1)throw 0;return matches[0];}});
+            const prompts=[...p.querySelectorAll('.session-selection > p')].map(text);const filePrompt=prompts.some(p=>p.startsWith('Select a private .jks'))?'jks':prompts.some(p=>p.startsWith('Select the Android google-services.json'))?'firebase':'none';
+            return {{platform:platform?.options[platform.selectedIndex]?.value??null,kind:kind?.options[kind.selectedIndex]?.value??null,
+                replacement:replacement?text(replacement.options[replacement.selectedIndex]):null,formNames,filePrompt,discardConfirmation:!!p.querySelector('[aria-label="Confirm session discard"]')}};}};
+        {body}
+    }}catch{{return {{state:'error'}};}}}})()"#))
+}
 
 fn path_script(step: PathStep) -> Option<String> {
     let body = match step {
@@ -3202,7 +4166,7 @@ fn workflow_script(step: WorkflowStep) -> Option<String> {
 fn script(step: Step, case: Case) -> Option<String> {
     if let Step::Paths(path) = step { return path_script(path); }
     if let Step::Workflow(workflow) = step { return workflow_script(workflow); }
-    let project_name = if case == Case::WorkflowApply { "workflow-project" } else { "positive-project" };
+    let project_name = match case { Case::WorkflowApply => "workflow-project", Case::Session(_) => "project", _ => "positive-project" };
     let body = match step {
         Step::Environment | Step::GuidanceEnvironment => r#"
             const b = document.querySelector('nav[aria-label="Workspace navigation"] button[aria-label="Environment"]');
@@ -3739,6 +4703,10 @@ pub(crate) fn main() -> std::process::ExitCode {
         Some(value) if value == OsStr::new("quit-outstanding") => Some(Case::Outstanding),
         Some(value) if value == OsStr::new("project-paths") => Some(Case::ProjectPaths),
         Some(value) if value == OsStr::new("workflow-apply") => Some(Case::WorkflowApply),
+        Some(value) if value == OsStr::new("session-inputs") => Some(Case::Session(SessionCase::Inputs)),
+        Some(value) if value == OsStr::new("session-refusals") => Some(Case::Session(SessionCase::Refusals)),
+        Some(value) if value == OsStr::new("session-loss") => Some(Case::Session(SessionCase::Loss)),
+        Some(value) if value == OsStr::new("session-deadline") => Some(Case::Session(SessionCase::Deadline)),
         _ => None,
     };
     let Some(case) = case.filter(|_| args.next().is_none() && route()) else {
@@ -3760,6 +4728,11 @@ pub(crate) fn main() -> std::process::ExitCode {
     assert_file_destroyed_contract();
     assert_picker_activation_return_contract();
     assert_shell_fixture_path_contract();
+    if case.session().is_some() {
+        crate::runtime::assert_installed_session_selection_contract();
+        crate::asset_session::assert_installed_session_owner_contract();
+        assert_session_recipe_contract();
+    }
     if case == Case::Positive {
         crate::asset_session::assert_project_selection_gate_contract();
         crate::asset_session::assert_installed_evidence_gate_contract();
@@ -3794,10 +4767,24 @@ pub(crate) fn main() -> std::process::ExitCode {
         Case::Outstanding => b"MRK_INSTALLED_SHELL_OBSERVATION=quit-outstanding-verified\n",
         Case::ProjectPaths => b"MRK_INSTALLED_SHELL_OBSERVATION=project-paths-verified\n",
         Case::WorkflowApply => b"MRK_INSTALLED_SHELL_OBSERVATION=workflow-apply-verified\n",
+        Case::Session(SessionCase::Inputs) => b"MRK_INSTALLED_SHELL_OBSERVATION=session-inputs-verified\n",
+        Case::Session(SessionCase::Refusals) => b"MRK_INSTALLED_SHELL_OBSERVATION=session-refusals-verified\n",
+        Case::Session(SessionCase::Loss) => b"MRK_INSTALLED_SHELL_OBSERVATION=session-loss-verified\n",
+        Case::Session(SessionCase::Deadline) => b"MRK_INSTALLED_SHELL_OBSERVATION=session-deadline-verified\n",
     };
     let mut stdout = std::io::stdout().lock();
     if stdout.write_all(b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n")
         .and_then(|_| {
+            if case.session().is_some() {
+                let report = q.session_report().ok_or_else(|| std::io::Error::other("session receipt unavailable"))?;
+                // finish already joined/checked all original queries. Only
+                // now, after CONTRACTS, emit their retained maps in the frozen
+                // parser order; never publish an early contract to fit it.
+                stdout.flush()?;
+                q.report_session_queries()?;
+                stdout.write_all(b"MRK_INSTALLED_SHELL_SESSION_INPUTS=")?;
+                stdout.write_all(&report)?; return stdout.write_all(b"\n");
+            }
             if case == Case::WorkflowApply {
                 let report = q.workflow_report().ok_or_else(|| std::io::Error::other("workflow receipt unavailable"))?;
                 stdout.write_all(b"MRK_INSTALLED_SHELL_WORKFLOW_APPLY=")?;
@@ -3821,3 +4808,215 @@ pub(crate) fn main() -> std::process::ExitCode {
         })
         .and_then(|_| stdout.write_all(line)).is_ok() { std::process::ExitCode::SUCCESS } else { std::process::ExitCode::FAILURE }
 }
+
+// BEGIN installed session fixture inventory (root-owned)
+// Metadata and finite directory rosters only. The outside publication owner
+// hashes the fictional bytes; SourceBook alone owns any open source original.
+// This object never opens a file body, repairs a fixture, or grants cleanup.
+const SESSION_FIXTURE_NAMESPACE: [&str; 9] = [
+    "candidate-evidence", "path-outside", "path-project", "positive-project",
+    "session-deadline", "session-inputs", "session-loss", "session-refusals", "workflow-project",
+];
+const SESSION_FIXTURE_COMMON: [(&str, u64, u64); 9] = [
+    (".", 0o040700, 0), ("project", 0o040700, 0),
+    ("project/release", 0o040700, 0), ("sources", 0o040700, 0),
+    ("project/release/mobile-release.json", 0o100600, 608),
+    ("project/version.properties", 0o100600, 34),
+    ("sources/input.jks", 0o100600, 12),
+    ("sources/replacement.jks", 0o100600, 12),
+    ("sources/firebase.json", 0o100600, 95),
+];
+const SESSION_FIXTURE_REFUSALS: [(&str, u64, u64); 6] = [
+    ("project/overlap.jks", 0o100600, 12),
+    ("sources/changed.jks", 0o100600, 12),
+    ("sources/changed-next.jks", 0o100600, 12),
+    ("sources/public.jks", 0o100644, 12),
+    ("sources/firebase-mismatch.json", 0o100600, 93),
+    ("sources/link.jks", 0o120777, 9),
+];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SessionFixturePhase { Original, Attempted, Changed }
+
+struct SessionFixture {
+    case: SessionCase,
+    root: PathBuf,
+    // Namespace is first (all nine fields); protected shared ancestors and
+    // the search-only control root retain identity/mode/owner, not timestamps
+    // that unrelated activity in /var/lib can legitimately change.
+    ancestors: Vec<(PathBuf, FixtureIdentity)>,
+    originals: Vec<(&'static str, FixtureIdentity)>,
+    phase: SessionFixturePhase,
+}
+
+fn session_fixture_nodes(case: SessionCase, changed: bool) -> Vec<(&'static str, u64, u64)> {
+    let mut nodes = SESSION_FIXTURE_COMMON.to_vec();
+    if case == SessionCase::Refusals {
+        nodes.extend(SESSION_FIXTURE_REFUSALS.into_iter()
+            .filter(|(name, _, _)| !changed || *name != "sources/changed-next.jks"));
+    }
+    nodes
+}
+
+fn session_fixture_children(nodes: &[(&'static str, u64, u64)], name: &str) -> Vec<&'static str> {
+    let parent = Path::new(if name == "." { "" } else { name });
+    nodes.iter().filter_map(|(child, _, _)| {
+        let child = Path::new(*child);
+        (child.parent() == Some(parent)).then(|| child.file_name().and_then(OsStr::to_str)).flatten()
+    }).collect()
+}
+
+fn assert_session_fixture_roster_contract() {
+    // Exercise the actual bounded child-name derivation, without filesystem
+    // access or treating these synthetic rows as a native observation.
+    for case in [SessionCase::Inputs, SessionCase::Refusals, SessionCase::Loss, SessionCase::Deadline] {
+        let nodes = session_fixture_nodes(case, false);
+        assert_eq!(nodes.len(), if case == SessionCase::Refusals { 15 } else { 9 });
+        let mut names: Vec<_> = nodes.iter().map(|(name, _, _)| *name).collect();
+        names.sort(); names.dedup(); assert_eq!(names.len(), nodes.len());
+        let children = |parent| { let mut names = session_fixture_children(&nodes, parent); names.sort(); names };
+        assert_eq!(children("."), ["project", "sources"]);
+        assert_eq!(children("project/release"), ["mobile-release.json"]);
+        assert_eq!(children("project"), if case == SessionCase::Refusals {
+            vec!["overlap.jks", "release", "version.properties"]
+        } else { vec!["release", "version.properties"] });
+        assert_eq!(children("sources"), if case == SessionCase::Refusals {
+            vec!["changed-next.jks", "changed.jks", "firebase-mismatch.json", "firebase.json", "input.jks", "link.jks", "public.jks", "replacement.jks"]
+        } else { vec!["firebase.json", "input.jks", "replacement.jks"] });
+    }
+    let before = session_fixture_nodes(SessionCase::Refusals, false);
+    let after = session_fixture_nodes(SessionCase::Refusals, true);
+    assert_eq!(after.len(), 14);
+    assert_eq!(after, before.into_iter().filter(|(name, _, _)| *name != "sources/changed-next.jks").collect::<Vec<_>>());
+    assert!(!session_fixture_children(&after, "sources").contains(&"changed-next.jks"));
+}
+
+fn session_fixture_directory(path: &Path, expected: &[&str]) -> Result<(), ()> {
+    let mut found = Vec::with_capacity(expected.len());
+    for entry in std::fs::read_dir(path).map_err(|_| ())? {
+        let name = entry.map_err(|_| ())?.file_name().into_string().map_err(|_| ())?;
+        if found.len() >= expected.len() || !expected.contains(&name.as_str()) { return Err(()); }
+        found.push(name);
+    }
+    found.sort();
+    let mut expected = expected.to_vec(); expected.sort();
+    if found.iter().map(String::as_str).ne(expected) { return Err(()); }
+    Ok(())
+}
+
+impl SessionFixture {
+    fn capture(project: &Path, case: SessionCase) -> Result<Self, ()> {
+        let executable = std::env::current_exe().map_err(|_| ())?;
+        let positive = project_path_from_executable(&executable).ok_or(())?;
+        let namespace = positive.parent().ok_or(())?;
+        let root = namespace.join(case.name());
+        if project.as_os_str() != root.join("project").as_os_str()
+            || rustix::process::getuid().as_raw() == 0 || rustix::process::getgid().as_raw() == 0
+            || rustix::process::getuid() != rustix::process::geteuid()
+            || rustix::process::getgid() != rustix::process::getegid() { return Err(()); }
+        let mut ancestors: Vec<(PathBuf, FixtureIdentity)> = Vec::with_capacity(5);
+        for path in namespace.ancestors() {
+            if ancestors.len() >= 4 { return Err(()); }
+            let id = fixture_identity(path)?;
+            if id[0] == 0 || id[1] == 0 || id[2] & 0o170000 != 0o040000
+                || id[2] & 0o022 != 0 || id[3..5] != [0, 0]
+                || (if path == namespace {
+                    id[2] != 0o040755 || id[5] == 0 || id[5] > 16 || id[6] > 1 << 20
+                } else { id[2] & 0o005 != 0o005 })
+                || ancestors.iter().any(|(_, old)| old[0] != id[0] || old[..2] == id[..2]) { return Err(()); }
+            ancestors.push((path.to_path_buf(), id));
+        }
+        if ancestors.len() != 4 { return Err(()); }
+        let control = control_root_from_executable(&executable).ok_or(())?;
+        let id = fixture_identity(&control)?;
+        if id[0] != ancestors[0].1[0] || id[1] == 0 || id[2..5] != [0o040711, 0, 0]
+            || ancestors.iter().any(|(_, old)| old[..2] == id[..2]) { return Err(()); }
+        ancestors.push((control, id));
+        let mut fixture = Self { case, root, ancestors, originals: Vec::new(), phase: SessionFixturePhase::Original };
+        fixture.originals = fixture.inventory(false)?;
+        fixture.verify()?;
+        Ok(fixture)
+    }
+
+    fn namespace_unchanged(&self) -> Result<(), ()> {
+        for (index, (path, old)) in self.ancestors.iter().enumerate() {
+            let now = fixture_identity(path)?;
+            if if index == 0 { now != *old } else { now[..5] != old[..5] } { return Err(()); }
+        }
+        let (namespace, original) = &self.ancestors[0];
+        session_fixture_directory(namespace, &SESSION_FIXTURE_NAMESPACE)?;
+        if fixture_identity(namespace)? != *original { return Err(()); }
+        Ok(())
+    }
+
+    fn inventory(&self, changed: bool) -> Result<Vec<(&'static str, FixtureIdentity)>, ()> {
+        self.namespace_unchanged()?;
+        let specs = session_fixture_nodes(self.case, changed);
+        let mut rows: Vec<(&'static str, FixtureIdentity)> = Vec::with_capacity(specs.len());
+        for &(name, mode, size) in &specs {
+            let path = if name == "." { self.root.clone() } else { self.root.join(name) };
+            let id = fixture_identity(&path)?;
+            if id[0] != self.ancestors[0].1[0] || id[1] == 0 || id[2] != mode
+                || id[3] != u64::from(rustix::process::getuid().as_raw())
+                || id[4] != u64::from(rustix::process::getgid().as_raw())
+                || self.ancestors.iter().any(|(_, old)| old[..2] == id[..2])
+                || rows.iter().any(|(_, old)| old[..2] == id[..2]) { return Err(()); }
+            if mode == 0o040700 {
+                if id[5] == 0 || id[5] > 16 || id[6] > 1 << 20 { return Err(()); }
+                let children = session_fixture_children(&specs, name);
+                session_fixture_directory(&path, &children)?;
+            } else {
+                if id[5] != 1 || id[6] != size { return Err(()); }
+                if mode == 0o120777 && std::fs::read_link(&path).map_err(|_| ())?.as_os_str() != OsStr::new("input.jks") {
+                    return Err(());
+                }
+            }
+            if fixture_identity(&path)? != id { return Err(()); }
+            rows.push((name, id));
+        }
+        // Rechecking every original also catches changes during later roster
+        // observations. The exact rosters exclude all pending/unknown names.
+        for (name, id) in &rows {
+            let path = if *name == "." { self.root.clone() } else { self.root.join(name) };
+            if fixture_identity(&path)? != *id { return Err(()); }
+        }
+        self.namespace_unchanged()?;
+        Ok(rows)
+    }
+
+    fn verify(&self) -> Result<(), ()> {
+        if self.phase == SessionFixturePhase::Attempted
+            || self.inventory(self.changed())? != self.originals { return Err(()); }
+        Ok(())
+    }
+
+    fn change_source(&mut self) -> Result<(), ()> {
+        if self.case != SessionCase::Refusals || self.phase != SessionFixturePhase::Original { return Err(()); }
+        // Consume the one attempt even if precheck fails. Neither an error nor
+        // an uncertain postcheck permits a second mutation or a fresh baseline.
+        self.phase = SessionFixturePhase::Attempted;
+        if self.inventory(false)? != self.originals { return Err(()); }
+        let before_next = self.originals.iter().find(|(name, _)| *name == "sources/changed-next.jks").ok_or(())?.1;
+        std::fs::rename(self.root.join("sources/changed-next.jks"), self.root.join("sources/changed.jks")).map_err(|_| ())?;
+        let after = self.inventory(true)?;
+        if after.len().checked_add(1) != Some(self.originals.len()) { return Err(()); }
+        for (name, now) in &after {
+            let old = self.originals.iter().find(|(prior, _)| prior == name).ok_or(())?.1;
+            let accepted = match *name {
+                "sources" => now[..6] == old[..6],
+                "sources/changed.jks" => now[..8] == before_next[..8],
+                _ => *now == old,
+            };
+            if !accepted { return Err(()); }
+        }
+        // Store the observed post-rename ctime and directory metadata once;
+        // later verification may not forgive another timestamp/identity drift.
+        if self.inventory(true)? != after { return Err(()); }
+        self.originals = after;
+        self.phase = SessionFixturePhase::Changed;
+        Ok(())
+    }
+
+    fn changed(&self) -> bool { self.phase == SessionFixturePhase::Changed }
+}
+// END installed session fixture inventory (root-owned)

@@ -132,6 +132,7 @@ impl DesktopBridge {
     pub(crate) fn installed_project_selection_available(&self) -> bool { self.installed_project_selection_available }
     pub(crate) fn installed_project_path_selection_available(&self) -> bool { self.installed_project_path_selection_available }
     pub(crate) fn installed_evidence_selection_available(&self) -> bool { self.installed_evidence_selection_available }
+    pub(crate) fn installed_session_available(&self, document: &Arc<()>) -> bool { self.supervisor.installed_session_available(document) }
     pub(crate) async fn app_info(&self, document: &crate::asset_session::DocumentBinding) -> AppInfo {
         let result = match document.passive_query(self, Method::Capabilities, json!({})) {
             Ok(query) => {
