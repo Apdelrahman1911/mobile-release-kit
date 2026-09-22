@@ -757,6 +757,57 @@ fn entry(name: &str, id: [u8; 16]) -> Vec<u8> {
 }
 #[test]
 fn metadata_and_directory_keep_the_full_identity_not_a_low_half() -> Result<()> {
+    // Path equality can hide Windows separator differences. The owner compares
+    // exact DOS name text, so check the shared construction's actual spelling.
+    let directories = ordinary_owner::fixed_directories(std::path::Path::new(r"C:\owned"));
+    assert_eq!(directories.len(), 4);
+    for ((role, path), (expected_role, expected_path)) in directories.iter().zip([
+        ("target", r"C:\owned\target"),
+        ("target/x86_64-pc-windows-msvc", r"C:\owned\target\x86_64-pc-windows-msvc"),
+        ("target/x86_64-pc-windows-msvc/debug", r"C:\owned\target\x86_64-pc-windows-msvc\debug"),
+        ("target/x86_64-pc-windows-msvc/debug/deps", r"C:\owned\target\x86_64-pc-windows-msvc\debug\deps"),
+    ]) {
+        assert_eq!(*role, expected_role);
+        assert_eq!(path.to_str(), Some(expected_path));
+    }
+    // Pure first-fault DATA: no OriginalFile/close/native calls. A later cached
+    // error reset, failed predicate or phase change cannot replace the cause.
+    use ordinary_owner::{InputCheck, InputRole, InputStatus, InputTrace};
+    let mut trace = InputTrace::default();
+    assert_eq!(trace.need(false, InputCheck::NameExact), Err(Error::Unsafe));
+    assert!(trace.first.is_none()); // Existing untraced helper callers stay disabled.
+    trace.at(InputRole::Request, Some(3));
+    let mut cached_error = u32::MAX;
+    trace.record(InputCheck::ReadReturned, Some(InputStatus::Win32(cached_error)));
+    let first = trace.first;
+    cached_error = 0;
+    trace.at(InputRole::Artifact, Some(39));
+    trace.record(InputCheck::ReadReturned, Some(InputStatus::Win32(cached_error)));
+    assert_eq!(trace.need(false, InputCheck::ArtifactStable), Err(Error::Unsafe));
+    assert_eq!(trace.first, first);
+    let mut output = Vec::new();
+    ordinary_owner::write_refusal(&mut output, "original-file-close", None, true, trace.first).unwrap();
+    let text = std::str::from_utf8(&output).unwrap();
+    assert!(text.contains("\"role\":\"Request\",\"slot\":3,\"check\":\"ReadReturned\""));
+    assert!(text.contains("\"status\":{\"domain\":\"win32\",\"code\":4294967295}"));
+    assert!(text.ends_with("\"unknown\":true,\"cleanupNotRetried\":true}\n"));
+    let mut predicate = InputTrace::default(); predicate.at(InputRole::Ancestor, None);
+    assert_eq!(predicate.need(false, InputCheck::NameExact), Err(Error::Unsafe));
+    output.clear();
+    ordinary_owner::write_refusal(&mut output, "original-inputs", None, false, predicate.first).unwrap();
+    assert!(std::str::from_utf8(&output).unwrap().contains("\"check\":\"NameExact\",\"status\":null"));
+    let mut hash = InputTrace::default(); hash.at(InputRole::Command, Some(39));
+    hash.record(InputCheck::HashReturned, Some(InputStatus::NtStatus(i32::MIN)));
+    output.clear();
+    ordinary_owner::write_refusal(&mut output, "account-original-retirement",
+        Some((false, u32::MAX, Some(u32::MAX), [u32::MAX; 8])), false, hash.first).unwrap();
+    // Leaves32 bytes beyond this worst numeric record for every closed label's
+    // length difference, optional null ordinal, and all current stage strings.
+    assert!(output.len() + 32 <= 768);
+    assert!(std::str::from_utf8(&output).unwrap().contains("\"domain\":\"ntstatus\",\"code\":-2147483648"));
+    let mut too_small = [0u8; 16];
+    assert!(ordinary_owner::write_refusal(&mut std::io::Cursor::new(&mut too_small[..]),
+        "original-inputs", None, false, first).is_err());
     let stamp = ordinary_stamp();
     let raw = ordinary_request(&stamp);
     let binding = ordinary_owner::Binding::parse(raw.as_bytes())?;
