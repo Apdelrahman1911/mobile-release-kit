@@ -10,6 +10,10 @@ description = "Private original-handle Windows installed-runtime facts; no execu
 [lib]
 path = "src/lib.rs"
 
+# Qualification DATA writer only; never a default or production capability.
+[features]
+qualification-result = []
+
 [target.'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'.dependencies]
 windows-sys = { version = "=0.61.2", features = [
   "Wdk_Foundation", "Wdk_Storage_FileSystem", "Wdk_System_SystemServices",

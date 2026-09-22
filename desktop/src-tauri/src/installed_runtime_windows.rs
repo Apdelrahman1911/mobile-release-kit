@@ -45,6 +45,10 @@ impl Record {
 pub(crate) struct VersionObservation {
     pub(crate) target: &'static str,
     pub(crate) manifest_sha256: String,
+    #[cfg(test)]
+    protocol_sha256: String,
+    #[cfg(test)]
+    account_sid_sha256: String,
     pub(crate) inventory_sha256: String,
     pub(crate) core_sha256: String,
     pub(crate) files: usize,
@@ -140,8 +144,17 @@ impl WindowsVersionBook {
     fn inspect(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<VersionObservation> {
         checkpoint(end, stop)?;
         let spec = VersionSpec::compiled().map_err(|_| InspectionFailure::Binding)?;
-        method(&mut self.native, &mut self.phase, &mut self.call_pending, end, stop,
-            |book| book.observe_user_once().map(|_| ()))?;
+        #[cfg(test)]
+        let mut account_sid_sha256 = None;
+        method(&mut self.native, &mut self.phase, &mut self.call_pending, end, stop, |book| {
+            let actual = book.observe_user_once()?;
+            // Copy DATA from this existing borrower, never a second token query.
+            #[cfg(test)]
+            { account_sid_sha256 = Some(Sha256::digest(actual.user.bytes()).iter().map(|b| format!("{b:02x}")).collect()); }
+            #[cfg(not(test))]
+            let _ = actual;
+            Ok(())
+        })?;
         let locations = &mut self.locations;
         method(&mut self.native, &mut self.phase, &mut self.call_pending, end, stop, |book| {
             *locations = Some(book.known_locations_once()?); Ok(())
@@ -194,6 +207,10 @@ impl WindowsVersionBook {
             self.metadata(selected[1]?)?.identity, self.metadata(selected[2]?)?.identity];
         checkpoint(end, stop)?;
         Ok(VersionObservation { target: windows_version::TARGET, manifest_sha256: spec.manifest_sha256().to_owned(),
+            #[cfg(test)]
+            protocol_sha256: inventory.manifest.protocol_sha256.clone(),
+            #[cfg(test)]
+            account_sid_sha256: account_sid_sha256.ok_or(InspectionFailure::Unknown)?,
             inventory_sha256: inventory.manifest.inventory_sha256.clone(), core_sha256: inventory.manifest.core_sha256.clone(),
             files: inventory.manifest.files.len(), entries: self.entries, payload_bytes: inventory.payload_bytes,
             version_identity: self.metadata(version)?.identity, selected_identities })
@@ -466,16 +483,28 @@ mod tests {
         let mut book = WindowsVersionBook::new();
         let (_sender, stop) = watch::channel(false);
         let original_end = Instant::now() + Duration::from_secs(10);
-        let inspected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
-            book.inspect_once(original_end, &stop).is_ok()));
-        let good = match inspected {
-            Ok(good) => good,
-            Err(_) => { book.mark_interrupted(); false },
+        let reporting_end = original_end + Duration::from_secs(2); // no restarted reporting clock
+        let inspected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            book.inspect_once(original_end, &stop).map(|actual| native::FullwalkFacts {
+                target: actual.target.to_owned(), manifest_sha256: actual.manifest_sha256.clone(),
+                protocol_sha256: actual.protocol_sha256.clone(), inventory_sha256: actual.inventory_sha256.clone(),
+                core_sha256: actual.core_sha256.clone(), account_sid_sha256: actual.account_sid_sha256.clone(),
+                files: actual.files, entries: actual.entries, payload_bytes: actual.payload_bytes,
+                version_identity: actual.version_identity, selected_identities: actual.selected_identities,
+            }) // owned bounded DATA copied before this actual borrow ends
+        }));
+        let actual = match inspected {
+            Ok(Ok(actual)) => Some(actual),
+            Ok(Err(_)) => None,
+            Err(_) => { book.mark_interrupted(); None },
         };
-        let closed = book.settle_originals(); // always before any assertion/report
-        assert!(good, "the actual protected version was not completely inspected");
+        let closed = book.settle_originals(); // always after borrower return/unwind, before assertion/report
+        assert!(actual.is_some(), "the actual protected version was not completely inspected");
         assert!(closed == native::CloseOutcome::Settled && book.settled(), "original settlement is unconfirmed");
-        assert!(Instant::now() <= original_end + Duration::from_secs(2), "original observation/settlement window exceeded");
+        assert!(Instant::now() <= reporting_end, "original observation/settlement window exceeded");
+        let Some(actual) = actual else { unreachable!() };
+        assert!(native::write_fullwalk_result_once(&actual, reporting_end).is_ok(),
+            "the fixed original result write/close did not complete within the original boundary");
     }
 
     #[test]

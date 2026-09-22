@@ -1,86 +1,49 @@
-//! Qualification-only original owner for ONE fixed, headless libtest child.
-//! Compiled only by cfg(test); no product capability, general launcher or fullwalk.
+//! Qualification-only original owner for two closed headless libtest variants.
+//! Compiled only by cfg(test); no product capability or general launcher.
+//! The fullwalk seam stays closed until separate publication/precheck review.
 //! This same libtest thread owns every synchronous borrower. In particular, a
 //! blocked CreateProcessWithLogonW is NOT detached, timed out, or freed. Hosted
 //! step expiry is containment/Unknown, never an original-return/close receipt.
 use super::*;
-use std::path::{Path, PathBuf};
+use super::qualification_fixture::{self as fixture, Admission, AggregateClock, Wire};
+pub(super) use super::qualification_result::*;
+use std::path::Path;
 use std::time::{Duration, Instant};
 use windows_sys::Win32::NetworkManagement::NetManagement as NM;
 use windows_sys::Win32::Security::Cryptography as BC;
 
 pub(super) const CHILD: &str = "hosted_tests::hosted_native_read_only_contract";
 const OWNER: &str = "ordinary_owner::hosted_ordinary_original_handle_contract";
-const FLAGS: [&str; 4] = ["--exact", "--ignored", "--nocapture", "--test-threads=1"];
 const REQUEST: &str = "ordinary-request.txt";
 const RESULT: &str = "native-result.json";
 const OWNER_RESULT: &str = "ordinary-owner-result.private.json";
-const LIMIT: usize = 4096;
-const OWNER_LIMIT: usize = 65536;
 const NATIVE_SECONDS: u64 = 90;
 const SETTLE_MS: u32 = 10_000;
 
-fn need(value: bool) -> Result<()> { if value { Ok(()) } else { Err(Error::Unsafe) } }
-// Only closed labels, original statuses and u16 ACL control facts may leave.
-// This stack-owned snapshot is independent of FileBody.error, which close reuses.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum InputRole {
-    Ancestor, Request, Binding, Command, Directory, Artifact, Output,
-    AclRoot, AclTarget, AclTriple, AclDebug, AclDeps, AclArtifact, AclOutput, Parent,
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum InputCheck {
-    AncestorCount, FileCount, PathText, PathUnits, OpenState, OpenReturned,
-    InfoState, InfoClass, BasicInfoReturned, StandardInfoReturned, TagInfoReturned, IdInfoReturned,
-    StampDirectory, StampDeletePending, StampSize, StampAllocation, StampLinks,
-    StampAttributes, StampReparse, StampIdentity,
-    NameText, NameState, NameReturned, NameCount, NameUtf16, NameExact,
-    ReadFileKind, ReadSize, ReadLimit, ReadReturned, ReadCount, ReadStable,
-    RequestEnvelope, RequestUtf8, RequestLines, RequestHeader, RequestKey, RequestValue,
-    RequestValues, RequestArtifactPath, RequestBytes, RequestBytesRange, RequestIdentity,
-    BindingSourceAvailable, BindingSource, BindingTree, BindingRun, BindingRuntimeRun,
-    BindingRuntimeTree, BindingImage, CommandUnits, CommandDigest, HashLimit, HashReturned,
-    ArtifactIdentity, ArtifactBytes, ArtifactDigest, ArtifactStable,
-    OutputCreate, DescriptorState, DescriptorReturned, DescriptorLength,
-    AclLayout, AclOwner, AclGroup, AclAccount, AclMask, AclMutation, AclCapacity,
-    AclInitialize, AclDacl, AclControlInput, AclSetState, AclSetReturned, AclStamp, AclControl,
-    AclOwnerEqual, AclGroupEqual, AclRevision, AclAces, AclChanged, AclDeadline,
-    AclTransitions, ParentPrimary, ParentUser, ParentIdentity, ParentSettlement,
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum InputStatus { Win32(u32), NtStatus(i32) }
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct InputFault {
-    role: InputRole, slot: Option<u8>, check: InputCheck, status: Option<InputStatus>,
-    control: Option<(u16, u16)>,
-}
-#[derive(Clone, Copy, Default)]
-pub(super) struct InputTrace {
-    role: Option<InputRole>, slot: Option<u8>, pub first: Option<InputFault>,
-}
-impl InputTrace {
-    pub fn at(&mut self, role: InputRole, slot: Option<u8>) {
-        self.role = Some(role); self.slot = slot.filter(|value| *value < 40);
+// Prerequisite source is independently reviewed for this fixed synthetic batch.
+// This permits qualification attempts, never a native/product success claim.
+// The explicit synthetic-fixture profile is never ordinary or product enablement.
+// A request digest or producer's pre-close bytes cannot replace original gates.
+pub(super) const FULLWALK_PREREQUISITES_REVIEWED: bool = true;
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum OwnerVariant { Ordinary, Fullwalk }
+impl OwnerVariant {
+    fn owner(self) -> &'static str { match self { Self::Ordinary => OWNER, Self::Fullwalk => FULLWALK_OWNER } }
+    fn child(self) -> &'static str { match self { Self::Ordinary => CHILD, Self::Fullwalk => FULLWALK_CHILD } }
+    fn request(self) -> &'static str { match self { Self::Ordinary => REQUEST, Self::Fullwalk => FULLWALK_REQUEST } }
+    fn output(self) -> &'static str { match self { Self::Ordinary => "ordinary-output", Self::Fullwalk => FULLWALK_OUTPUT } }
+    fn result(self) -> &'static str { match self { Self::Ordinary => RESULT, Self::Fullwalk => FULLWALK_RESULT } }
+    fn intent(self) -> &'static str {
+        match self { Self::Ordinary => "ordinary-owner-intent.private.json", Self::Fullwalk => "fullwalk-owner-intent.private.json" }
     }
-    pub fn record(&mut self, check: InputCheck, status: Option<InputStatus>) {
-        if self.first.is_none() {
-            if let Some(role) = self.role { self.first = Some(InputFault { role, slot: self.slot, check, status, control: None }); }
-        }
+    fn owner_result(self) -> &'static str {
+        match self { Self::Ordinary => OWNER_RESULT, Self::Fullwalk => "fullwalk-owner-result.private.json" }
     }
-    fn observed<T>(&mut self, result: Result<T>, check: InputCheck) -> Result<T> {
-        if result.is_err() { self.record(check, None); }
-        result
-    }
-    pub fn need(&mut self, value: bool, check: InputCheck) -> Result<()> { self.observed(need(value), check) }
-    pub fn control(&mut self, expected: u16, observed: u16) -> Result<()> {
-        let unfaulted = self.first.is_none();
-        let result = self.need(expected == observed, InputCheck::AclControl);
-        if unfaulted {
-            if let Some(first) = self.first.as_mut() { first.control = Some((expected, observed)); }
-        }
-        result
+    fn command(self, path: &str) -> String {
+        match self { Self::Ordinary => command(path), Self::Fullwalk => fullwalk_command(path) }
     }
 }
+
 // One shared, absorbing next-effect gate. Callers supply elapsed time from the
 // original owner clock, including after synchronous observations return. This
 // does not cancel a borrower or prohibit settling an already-owned original.
@@ -88,33 +51,13 @@ pub(super) fn next_effect(elapsed: Duration, deadline_latched: &mut bool) -> Res
     *deadline_latched |= elapsed >= Duration::from_secs(NATIVE_SECONDS);
     need(!*deadline_latched)
 }
-fn hex(raw: &[u8]) -> String { raw.iter().map(|b| format!("{b:02x}")).collect() }
-fn is_hex(value: &str, size: usize) -> bool {
-    value.len() == size && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+fn owner_effect(start: Instant, latched: &mut bool, aggregate: &mut Option<AggregateClock>) -> Result<()> {
+    let local = next_effect(start.elapsed(), latched);
+    let batch = match aggregate.as_mut() { Some(clock) => clock.sample(false).map(|_| ()), None => Ok(()) };
+    local?; batch
 }
-fn decimal(value: &str) -> bool {
-    !value.is_empty() && value.len() <= 20 && !value.starts_with('0') && value.bytes().all(|b| b.is_ascii_digit())
-}
-fn unhex(value: &str) -> Result<Vec<u8>> {
-    need(value.len() <= 136 && value.len() % 2 == 0 && is_hex(value, value.len()))?;
-    value.as_bytes().chunks_exact(2).map(|pair| {
-        let digit = |b: u8| if b <= b'9' { b - b'0' } else { b - b'a' + 10 };
-        Ok(digit(pair[0]) * 16 + digit(pair[1]))
-    }).collect()
-}
-fn digest(raw: &[u8]) -> Result<String> {
-    digest_traced(raw, &mut InputTrace::default())
-}
-fn digest_traced(raw: &[u8], trace: &mut InputTrace) -> Result<String> {
-    trace.need(raw.len() <= 128 << 20, InputCheck::HashLimit)?;
-    let mut output = [0u8; 32];
-    // Documented CNG pseudo-handle: borrowed, never closed. No provider/import,
-    // key, random fallback, package dependency or hand-written hash algorithm.
-    let status = unsafe { BC::BCryptHash(BC::BCRYPT_SHA256_ALG_HANDLE, null(), 0,
-        raw.as_ptr(), raw.len() as u32, output.as_mut_ptr(), output.len() as u32) };
-    if status != 0 { trace.record(InputCheck::HashReturned, Some(InputStatus::NtStatus(status))); }
-    need(status == 0)?;
-    Ok(hex(&output))
+fn batch_return(facts: &mut ProcessFacts, aggregate: &mut Option<AggregateClock>) {
+    if aggregate.as_mut().is_some_and(|clock| clock.sample(false).is_err()) { facts.failed = true; }
 }
 fn command(path: &str) -> String { format!("\"{path}\" {CHILD} {}", FLAGS.join(" ")) }
 fn command_digest(path: &str) -> Result<String> {
@@ -124,25 +67,6 @@ fn command_digest_traced(path: &str, trace: &mut InputTrace) -> Result<String> {
     let text = command(path);
     trace.need(text.encode_utf16().count() <= 1023, InputCheck::CommandUnits)?;
     digest_traced(&text.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>(), trace)
-}
-fn fixed_path(value: &str) -> Result<PathBuf> {
-    need(value.len() <= 1024 && value.is_ascii() && !value.bytes().any(|b| b < 32 || matches!(b, b'"' | b'%' | b'=')))?;
-    let path = PathBuf::from(value);
-    need(path.is_absolute() && value.as_bytes().get(1) == Some(&b':')
-        && value.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
-        && value.as_bytes().get(2) == Some(&b'\\')
-        && !value.contains('/') && !value.starts_with("\\\\")
-        && value.split('\\').skip(1).all(|part| decode::component(part)))?;
-    Ok(path)
-}
-pub(super) fn fixed_directories(root: &Path) -> [(&'static str, PathBuf); 4] {
-    let target = root.join("target");
-    let triple = target.join("x86_64-pc-windows-msvc");
-    let debug = triple.join("debug");
-    let deps = debug.join("deps");
-    [("target", target), ("target/x86_64-pc-windows-msvc", triple),
-        ("target/x86_64-pc-windows-msvc/debug", debug),
-        ("target/x86_64-pc-windows-msvc/debug/deps", deps)]
 }
 
 // The actual native driver and existing nine inert methods use these SAME
@@ -219,9 +143,6 @@ impl ProcessFacts {
             && self.process == SlotState::Closed && self.thread == SlotState::Closed
     }
 }
-pub(super) fn complete_write(ok: bool, actual: u32, expected: usize, closed: bool) -> bool {
-    ok && expected > 0 && expected <= OWNER_LIMIT && actual as usize == expected && closed
-}
 pub(super) fn fresh_account(absent: u32, pointer_null: bool, added: u32, sid: &[u8], groups: &[Vec<u8>]) -> bool {
     absent == NM::NERR_UserNotFound && pointer_null && added == 0
         && local_account_sid(sid) && groups == [builtin(545)]
@@ -229,226 +150,7 @@ pub(super) fn fresh_account(absent: u32, pointer_null: bool, added: u32, sid: &[
 fn local_account_sid(sid: &[u8]) -> bool {
     sid.len() == 28 && sid[..8] == [1, 5, 0, 0, 0, 0, 0, 5] && sid[8..12] == 21u32.to_le_bytes()
 }
-fn builtin(rid: u32) -> Vec<u8> {
-    [vec![1, 2, 0, 0, 0, 0, 0, 5], 32u32.to_le_bytes().to_vec(), rid.to_le_bytes().to_vec()].concat()
-}
-fn system_sid() -> Vec<u8> { [vec![1, 1, 0, 0, 0, 0, 0, 5], 18u32.to_le_bytes().to_vec()].concat() }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct Stamp {
-    pub volume: u64, pub id: [u8; 16], pub creation: i64, pub write: i64, pub change: i64,
-    pub size: i64, pub allocation: i64, pub links: u32, pub attributes: u32,
-}
-impl Stamp {
-    pub fn wire(&self) -> String {
-        format!("{}:{}:{}:{}:{}:{}", self.volume, hex(&self.id), self.creation,
-            self.write, self.change, self.attributes)
-    }
-    fn json(&self) -> String {
-        format!("{{\"volume\":{},\"fileId\":\"{}\",\"creation\":{},\"write\":{},\"change\":{},\"size\":{},\"allocation\":{},\"links\":{},\"attributes\":{}}}",
-            self.volume, hex(&self.id), self.creation, self.write, self.change,
-            self.size, self.allocation, self.links, self.attributes)
-    }
-}
-pub(super) fn acl_stamp(before: &Stamp, after: &Stamp) -> bool {
-    let mut admitted = before.clone(); admitted.change = after.change;
-    admitted == *after && after.change >= before.change
-}
-
-struct FileBody {
-    path: Vec<u16>, handle: F::HANDLE, state: SlotState, active: bool,
-    error: u32, count: u32, raw: Vec<u8>, security: Box<Aligned>,
-    basic: FS::FILE_BASIC_INFO, standard: FS::FILE_STANDARD_INFO,
-    tag: FS::FILE_ATTRIBUTE_TAG_INFO, id: FS::FILE_ID_INFO,
-    final_name: Vec<u16>, _pin: PhantomPinned,
-}
-struct OriginalFile { body: Held<FileBody>, directory: bool }
-impl OriginalFile {
-    fn new(path: &Path, directory: bool) -> Result<Self> {
-        Self::new_traced(path, directory, &mut InputTrace::default())
-    }
-    fn new_traced(path: &Path, directory: bool, trace: &mut InputTrace) -> Result<Self> {
-        let value = trace.observed(path.to_str().ok_or(Error::Unsafe), InputCheck::PathText)?;
-        trace.need(value.encode_utf16().count() <= 1024, InputCheck::PathUnits)?;
-        Ok(Self { body: ManuallyDrop::new(Box::pin(FileBody {
-            path: wide(value), handle: null_mut(), state: SlotState::Reserved, active: false,
-            error: 0, count: 0, raw: Vec::new(), security: Box::new(Aligned([0; BUFFER])),
-            basic: FS::FILE_BASIC_INFO::default(), standard: FS::FILE_STANDARD_INFO::default(),
-            tag: FS::FILE_ATTRIBUTE_TAG_INFO::default(), id: FS::FILE_ID_INFO::default(),
-            final_name: vec![0; 32768], _pin: PhantomPinned,
-        })), directory })
-    }
-    fn body(&mut self) -> &mut FileBody {
-        // No movement of the pinned body; all native pointers refer to this
-        // original's retained complete buffers, never temporary output storage.
-        unsafe { self.body.as_mut().get_unchecked_mut() }
-    }
-    fn open(&mut self, access: u32, create: bool, security: *const S::SECURITY_ATTRIBUTES) -> Result<()> {
-        self.open_traced(access, create, security, &mut InputTrace::default())
-    }
-    fn open_traced(&mut self, access: u32, create: bool, security: *const S::SECURITY_ATTRIBUTES, trace: &mut InputTrace) -> Result<()> {
-        let directory = self.directory; let b = self.body();
-        if b.state != SlotState::Reserved { return trace.observed(Err(Error::State), InputCheck::OpenState); }
-        b.state = SlotState::Acquiring; b.active = true;
-        b.handle = unsafe { FS::CreateFileW(b.path.as_ptr(), access,
-            FS::FILE_SHARE_READ | if directory { FS::FILE_SHARE_WRITE } else { 0 },
-            security, if create { FS::CREATE_NEW } else { FS::OPEN_EXISTING },
-            FS::FILE_FLAG_OPEN_REPARSE_POINT | if directory { FS::FILE_FLAG_BACKUP_SEMANTICS } else { 0 }, null_mut()) };
-        b.error = if valid_handle(b.handle) { 0 } else { unsafe { F::GetLastError() } };
-        if !valid_handle(b.handle) { trace.record(InputCheck::OpenReturned, Some(InputStatus::Win32(b.error))); }
-        if valid_handle(b.handle) { b.active = false; b.state = SlotState::Owned; Ok(()) }
-        else if b.error != 0 && b.error != F::ERROR_IO_PENDING && b.handle == F::INVALID_HANDLE_VALUE {
-            b.active = false; b.state = SlotState::NoHandle; Err(Error::Unavailable)
-        } else { b.state = SlotState::Unknown; Err(Error::Unknown) }
-    }
-    fn info(&mut self, which: u8, trace: &mut InputTrace) -> Result<()> {
-        let b = self.body();
-        if b.state != SlotState::Owned || b.active { return trace.observed(Err(Error::State), InputCheck::InfoState); }
-        let (class, output, size, check) = match which {
-            0 => (FS::FileBasicInfo, (&mut b.basic as *mut FS::FILE_BASIC_INFO).cast(), size_of::<FS::FILE_BASIC_INFO>(), InputCheck::BasicInfoReturned),
-            1 => (FS::FileStandardInfo, (&mut b.standard as *mut FS::FILE_STANDARD_INFO).cast(), size_of::<FS::FILE_STANDARD_INFO>(), InputCheck::StandardInfoReturned),
-            2 => (FS::FileAttributeTagInfo, (&mut b.tag as *mut FS::FILE_ATTRIBUTE_TAG_INFO).cast(), size_of::<FS::FILE_ATTRIBUTE_TAG_INFO>(), InputCheck::TagInfoReturned),
-            3 => (FS::FileIdInfo, (&mut b.id as *mut FS::FILE_ID_INFO).cast(), size_of::<FS::FILE_ID_INFO>(), InputCheck::IdInfoReturned),
-            _ => return trace.observed(Err(Error::State), InputCheck::InfoClass),
-        };
-        b.active = true;
-        let ok = unsafe { FS::GetFileInformationByHandleEx(b.handle, class, output, size as u32) };
-        b.error = if ok != 0 { 0 } else { unsafe { F::GetLastError() } };
-        if ok == 0 { trace.record(check, Some(InputStatus::Win32(b.error))); }
-        b.active = ok == 0 && (b.error == 0 || b.error == F::ERROR_IO_PENDING);
-        if b.active { b.state = SlotState::Unknown; return Err(Error::Unknown); }
-        need(ok != 0)
-    }
-    fn stamp(&mut self) -> Result<Stamp> {
-        self.stamp_traced(&mut InputTrace::default())
-    }
-    fn stamp_traced(&mut self, trace: &mut InputTrace) -> Result<Stamp> {
-        for which in 0..4 { self.info(which, trace)?; }
-        let directory = self.directory; let b = self.body();
-        trace.need(b.standard.Directory == directory, InputCheck::StampDirectory)?;
-        trace.need(!b.standard.DeletePending, InputCheck::StampDeletePending)?;
-        trace.need(b.standard.EndOfFile >= 0, InputCheck::StampSize)?;
-        trace.need(b.standard.AllocationSize >= 0, InputCheck::StampAllocation)?;
-        trace.need(b.standard.NumberOfLinks == 1, InputCheck::StampLinks)?;
-        trace.need(b.tag.FileAttributes == b.basic.FileAttributes, InputCheck::StampAttributes)?;
-        trace.need(b.basic.FileAttributes & FS::FILE_ATTRIBUTE_REPARSE_POINT == 0, InputCheck::StampReparse)?;
-        trace.need(b.id.FileId.Identifier != [0; 16], InputCheck::StampIdentity)?;
-        Ok(Stamp { volume: b.id.VolumeSerialNumber, id: b.id.FileId.Identifier,
-            creation: b.basic.CreationTime, write: b.basic.LastWriteTime, change: b.basic.ChangeTime,
-            size: b.standard.EndOfFile, allocation: b.standard.AllocationSize,
-            links: b.standard.NumberOfLinks, attributes: b.basic.FileAttributes })
-    }
-    fn named(&mut self, expected: &Path) -> Result<()> {
-        self.named_traced(expected, &mut InputTrace::default())
-    }
-    fn named_traced(&mut self, expected: &Path, trace: &mut InputTrace) -> Result<()> {
-        let text = trace.observed(expected.to_str().ok_or(Error::Unsafe), InputCheck::NameText)?;
-        let b = self.body();
-        if b.state != SlotState::Owned || b.active { return trace.observed(Err(Error::State), InputCheck::NameState); }
-        b.active = true;
-        b.count = unsafe { FS::GetFinalPathNameByHandleW(b.handle, b.final_name.as_mut_ptr(),
-            b.final_name.len() as u32, FS::FILE_NAME_NORMALIZED | FS::VOLUME_NAME_DOS) };
-        b.error = if b.count != 0 { 0 } else { unsafe { F::GetLastError() } };
-        if b.count == 0 { trace.record(InputCheck::NameReturned, Some(InputStatus::Win32(b.error))); }
-        b.active = b.count == 0 && (b.error == 0 || b.error == F::ERROR_IO_PENDING);
-        if b.active { b.state = SlotState::Unknown; return Err(Error::Unknown); }
-        trace.need(b.count > 0 && (b.count as usize) < b.final_name.len(), InputCheck::NameCount)?;
-        let actual = trace.observed(String::from_utf16(&b.final_name[..b.count as usize]).map_err(|_| Error::Unsafe), InputCheck::NameUtf16)?;
-        trace.need(actual.strip_prefix("\\\\?\\") == Some(text), InputCheck::NameExact)
-    }
-    fn read(&mut self, limit: usize) -> Result<Vec<u8>> {
-        self.read_traced(limit, &mut InputTrace::default())
-    }
-    fn read_traced(&mut self, limit: usize, trace: &mut InputTrace) -> Result<Vec<u8>> {
-        let before = self.stamp_traced(trace)?;
-        trace.need(!self.directory, InputCheck::ReadFileKind)?;
-        trace.need(before.size >= 0 && before.size as usize <= limit, InputCheck::ReadSize)?;
-        trace.need(limit <= 128 << 20, InputCheck::ReadLimit)?;
-        let b = self.body();
-        b.raw = vec![0; before.size as usize + 1]; b.count = 0; b.active = true;
-        let ok = unsafe { FS::ReadFile(b.handle, b.raw.as_mut_ptr(), b.raw.len() as u32, &mut b.count, null_mut()) };
-        b.error = if ok != 0 { 0 } else { unsafe { F::GetLastError() } };
-        if ok == 0 { trace.record(InputCheck::ReadReturned, Some(InputStatus::Win32(b.error))); }
-        b.active = ok == 0 && (b.error == 0 || b.error == F::ERROR_IO_PENDING);
-        if b.active { b.state = SlotState::Unknown; return Err(Error::Unknown); }
-        trace.need(ok != 0 && b.count as i64 == before.size, InputCheck::ReadCount)?;
-        let value = b.raw[..b.count as usize].to_vec();
-        let after = self.stamp_traced(trace)?;
-        trace.need(after == before, InputCheck::ReadStable)?;
-        Ok(value)
-    }
-    fn descriptor(&mut self) -> Result<Vec<u8>> {
-        self.descriptor_traced(&mut InputTrace::default())
-    }
-    fn descriptor_traced(&mut self, trace: &mut InputTrace) -> Result<Vec<u8>> {
-        let b = self.body();
-        if b.state != SlotState::Owned || b.active { return trace.observed(Err(Error::State), InputCheck::DescriptorState); }
-        b.count = 0; b.active = true;
-        let ok = unsafe { S::GetKernelObjectSecurity(b.handle,
-            S::OWNER_SECURITY_INFORMATION | S::GROUP_SECURITY_INFORMATION | S::DACL_SECURITY_INFORMATION,
-            b.security.0.as_mut_ptr().cast(), BUFFER as u32, &mut b.count) };
-        b.error = if ok != 0 { 0 } else { unsafe { F::GetLastError() } };
-        if ok == 0 { trace.record(InputCheck::DescriptorReturned, Some(InputStatus::Win32(b.error))); }
-        b.active = ok == 0 && (b.error == 0 || b.error == F::ERROR_IO_PENDING);
-        if b.active { b.state = SlotState::Unknown; return Err(Error::Unknown); }
-        need(ok != 0)?;
-        trace.need(b.count as usize <= BUFFER && b.count >= 20, InputCheck::DescriptorLength)?;
-        Ok(b.security.0[..b.count as usize].to_vec())
-    }
-    fn write(&mut self, value: &[u8], limit: usize) -> Result<()> {
-        need(!value.is_empty() && value.len() <= limit && limit <= OWNER_LIMIT)?;
-        let b = self.body();
-        if b.state != SlotState::Owned || b.active || !b.raw.is_empty() { return Err(Error::State); }
-        b.raw = value.to_vec(); b.count = 0; b.active = true;
-        let ok = unsafe { FS::WriteFile(b.handle, b.raw.as_ptr(), b.raw.len() as u32, &mut b.count, null_mut()) };
-        b.error = if ok != 0 { 0 } else { unsafe { F::GetLastError() } };
-        b.active = ok == 0 && (b.error == 0 || b.error == F::ERROR_IO_PENDING);
-        if b.active { b.state = SlotState::Unknown; return Err(Error::Unknown); }
-        // Exactly one attempt. An ordinary short write is still failure; the
-        // caller must then explicitly close the same original, not retry it.
-        need(complete_write(ok != 0, b.count, value.len(), true))
-    }
-    fn close(&mut self) -> Result<()> {
-        let b = self.body();
-        match b.state {
-            SlotState::Reserved | SlotState::NoHandle | SlotState::Closed => return Ok(()),
-            SlotState::Owned if !b.active => (),
-            _ => return Err(Error::Unknown),
-        }
-        b.state = SlotState::Closing;
-        let ok = unsafe { F::CloseHandle(b.handle) };
-        b.error = if ok != 0 { 0 } else { unsafe { F::GetLastError() } };
-        b.state = if ok != 0 { SlotState::Closed } else { SlotState::Unknown };
-        if ok != 0 { Ok(()) } else { Err(Error::Unknown) }
-    }
-}
-impl Drop for OriginalFile {
-    fn drop(&mut self) {
-        let b = self.body();
-        if !b.active && matches!(b.state, SlotState::Reserved | SlotState::NoHandle | SlotState::Closed) {
-            unsafe { ManuallyDrop::drop(&mut self.body); }
-        }
-        // Never CloseHandle in Drop. Uncertain buffers/originals are retained.
-    }
-}
-fn close_files(files: &mut [OriginalFile]) -> bool {
-    // A later original can be a child of any earlier directory. On the first
-    // uncertain close stop, retaining every remaining ancestor without retry.
-    for file in files.iter_mut().rev() {
-        if file.close().is_err() { return false; }
-    }
-    true
-}
-fn owned_file(files: &mut Vec<OriginalFile>, path: &Path, directory: bool, access: u32) -> Result<usize> {
-    owned_file_traced(files, path, directory, access, &mut InputTrace::default())
-}
-fn owned_file_traced(files: &mut Vec<OriginalFile>, path: &Path, directory: bool, access: u32, trace: &mut InputTrace) -> Result<usize> {
-    trace.need(files.len() < 40, InputCheck::FileCount)?;
-    let index = files.len(); files.push(OriginalFile::new_traced(path, directory, trace)?);
-    files[index].open_traced(access, false, null(), trace)?;
-    files[index].named_traced(path, trace)?; files[index].stamp_traced(trace)?;
-    Ok(index)
-}
 
 #[derive(Clone, Eq, PartialEq)]
 pub(super) struct AclImage { owner: Vec<u8>, group: Vec<u8>, control: u16, revision: u8, aces: Vec<Vec<u8>> }
@@ -553,9 +255,12 @@ impl AclImage {
     }
 }
 fn grant(file: &mut OriginalFile, role: &str, parent: &[u8], account: &[u8], mask: u32,
-    start: Instant, deadline_latched: &mut bool, trace: &mut InputTrace) -> Result<String> {
-    trace.observed(next_effect(start.elapsed(), deadline_latched), InputCheck::AclDeadline)?;
-    let before = file.stamp_traced(trace)?; let raw_before = file.descriptor_traced(trace)?;
+    start: Instant, deadline_latched: &mut bool, aggregate: &mut Option<AggregateClock>, trace: &mut InputTrace) -> Result<String> {
+    trace.observed(owner_effect(start, deadline_latched, aggregate), InputCheck::AclDeadline)?;
+    let before = file.stamp_traced(trace)?;
+    trace.observed(owner_effect(start, deadline_latched, aggregate), InputCheck::AclDeadline)?;
+    let raw_before = file.descriptor_traced(trace)?;
+    trace.observed(owner_effect(start, deadline_latched, aggregate), InputCheck::AclDeadline)?;
     let image = AclImage::parse_traced(&raw_before, trace)?; image.base(parent, account, file.directory, trace)?;
     let (expected, acl) = image.add(account, mask, trace)?;
     let mut descriptor = Box::new(S::SECURITY_DESCRIPTOR::default());
@@ -569,7 +274,7 @@ fn grant(file: &mut OriginalFile, role: &str, parent: &[u8], account: &[u8], mas
         (&mut *descriptor as *mut S::SECURITY_DESCRIPTOR).cast(), control_interest, control_value) } != 0, InputCheck::AclControlInput)?;
     let b = file.body();
     if b.state != SlotState::Owned || b.active { return trace.observed(Err(Error::State), InputCheck::AclSetState); }
-    trace.observed(next_effect(start.elapsed(), deadline_latched), InputCheck::AclDeadline)?;
+    trace.observed(owner_effect(start, deadline_latched, aggregate), InputCheck::AclDeadline)?;
     b.active = true;
     // Same original only. No SetNamedSecurityInfo/SetSecurityInfo propagation,
     // recursion, owner/group/SACL replacement, inheritable ACE or broad trustee.
@@ -584,9 +289,12 @@ fn grant(file: &mut OriginalFile, role: &str, parent: &[u8], account: &[u8], mas
         loop { std::thread::park(); std::hint::black_box((&mut *b, &descriptor, &acl, &*trace)); }
     }
     need(ok != 0)?;
-    let after = file.stamp_traced(trace)?; let raw_after = file.descriptor_traced(trace)?;
+    trace.observed(owner_effect(start, deadline_latched, aggregate), InputCheck::AclDeadline)?;
+    let after = file.stamp_traced(trace)?;
+    trace.observed(owner_effect(start, deadline_latched, aggregate), InputCheck::AclDeadline)?;
+    let raw_after = file.descriptor_traced(trace)?;
     expected.readback(&before, &after, &raw_before, &raw_after, trace)?;
-    trace.observed(next_effect(start.elapsed(), deadline_latched), InputCheck::AclDeadline)?;
+    trace.observed(owner_effect(start, deadline_latched, aggregate), InputCheck::AclDeadline)?;
     Ok(format!("{{\"role\":\"{role}\",\"mask\":{mask},\"before\":{},\"after\":{},\"securityBefore\":\"{}\",\"securityAfter\":\"{}\",\"singleExplicitNoninheritingAce\":true}}",
         before.json(), after.json(), digest_traced(&raw_before, trace)?, digest_traced(&raw_after, trace)?))
 }
@@ -724,22 +432,25 @@ impl Account {
         if freed.is_err() { return Err(Error::Unknown); }
         observed
     }
-    fn create(&mut self, parent: &[u8], start: Instant, deadline_latched: &mut bool) -> Result<()> {
+    fn create(&mut self, parent: &[u8], start: Instant, deadline_latched: &mut bool, aggregate: &mut Option<AggregateClock>) -> Result<()> {
         if self.attempted { return Err(Error::State); }
-        next_effect(start.elapsed(), deadline_latched)?;
+        owner_effect(start, deadline_latched, aggregate)?;
         self.attempted = true; // Caller already registered durable private intent.
         need(self.query()?.is_none())?;
+        owner_effect(start, deadline_latched, aggregate)?;
         let mut information = NM::USER_INFO_1::default();
         information.usri1_name = self.name.as_mut_ptr(); information.usri1_password = self.password.as_mut_ptr();
         information.usri1_priv = NM::USER_PRIV_USER;
         information.usri1_flags = NM::UF_SCRIPT | NM::UF_NORMAL_ACCOUNT;
         let mut parameter = 0u32;
-        next_effect(start.elapsed(), deadline_latched)?;
+        owner_effect(start, deadline_latched, aggregate)?;
         self.add = unsafe { NM::NetUserAdd(null(), 1, (&information as *const NM::USER_INFO_1).cast(), &mut parameter) };
         // Any creation error/ambiguity retains intent; never delete an account
         // selected merely by this name, reuse a collision, or retry creation.
         if self.add != 0 { return Err(Error::Unknown); }
+        owner_effect(start, deadline_latched, aggregate)?;
         self.sid = self.query()?.ok_or(Error::Unknown)?;
+        owner_effect(start, deadline_latched, aggregate)?;
         // A local creation cannot adopt an alias of the parent's identity or a
         // foreign/malformed SID before changing membership or granting rights.
         if !local_account_sid(&self.sid) || !local_account_sid(parent)
@@ -748,28 +459,32 @@ impl Account {
         }
         if self.groups()?.is_empty() {
             let member = NM::LOCALGROUP_MEMBERS_INFO_0 { lgrmi0_sid: self.sid.as_mut_ptr().cast() };
-            next_effect(start.elapsed(), deadline_latched)?;
+            owner_effect(start, deadline_latched, aggregate)?;
             self.group_add = true;
             let status = unsafe { NM::NetLocalGroupAddMembers(null(), self.users.as_ptr(), 0,
                 (&member as *const NM::LOCALGROUP_MEMBERS_INFO_0).cast(), 1) };
             if status != 0 { return Err(Error::Unknown); }
+            owner_effect(start, deadline_latched, aggregate)?;
         }
         let groups = self.groups()?;
+        owner_effect(start, deadline_latched, aggregate)?;
         need(fresh_account(self.absent, self.absent_pointer_null, self.add, &self.sid, &groups))?;
-        next_effect(start.elapsed(), deadline_latched)
+        owner_effect(start, deadline_latched, aggregate)
     }
-    fn retire(&mut self, start: Instant, deadline_latched: &mut bool) -> Result<()> {
-        next_effect(start.elapsed(), deadline_latched)?;
+    fn retire(&mut self, start: Instant, deadline_latched: &mut bool, aggregate: &mut Option<AggregateClock>) -> Result<()> {
+        owner_effect(start, deadline_latched, aggregate)?;
         need(self.attempted && self.add == 0 && !self.delete_attempted && !self.removed && !self.sid.is_empty()
             && self.password.iter().all(|unit| *unit == 0))?;
         // No name-only cleanup: immediately reobserve the actual returned SID.
         need(self.query()?.as_deref() == Some(self.sid.as_slice()) && self.groups()? == [builtin(545)])?;
-        next_effect(start.elapsed(), deadline_latched)?;
+        owner_effect(start, deadline_latched, aggregate)?;
         self.delete_attempted = true; // Irreversible intent, not a success receipt.
         self.delete_status = unsafe { NM::NetUserDel(null(), self.name.as_ptr()) };
-        if self.delete_status != 0 || self.query()?.is_some() { return Err(Error::Unknown); }
+        if self.delete_status != 0 { return Err(Error::Unknown); }
+        owner_effect(start, deadline_latched, aggregate)?;
+        if self.query()?.is_some() { return Err(Error::Unknown); }
         self.removed = true;
-        next_effect(start.elapsed(), deadline_latched)
+        owner_effect(start, deadline_latched, aggregate)
     }
 }
 impl Drop for Account {
@@ -836,54 +551,7 @@ impl Binding {
             self.source, self.tree, self.run, self.bytes, self.sha, self.command_sha, sid_sha)
     }
 }
-fn args_are(target: &str, image: &Path) -> Result<()> {
-    let args: Vec<_> = std::env::args().collect();
-    need(args.len() == 6 && Path::new(&args[0]) == image && args[1] == target
-        && args[2..].iter().map(String::as_str).eq(FLAGS))
-}
-fn write_one(path: &Path, raw: &[u8], limit: usize, security: *const S::SECURITY_ATTRIBUTES) -> Result<()> {
-    let mut file = OriginalFile::new(path, false)?;
-    let observation = (|| -> Result<()> {
-        file.open(FS::FILE_GENERIC_WRITE | FS::FILE_READ_ATTRIBUTES, true, security)?;
-        file.named(path)?; file.stamp()?;
-        file.write(raw, limit)
-    })();
-    if matches!(observation, Err(Error::Unknown)) {
-        diagnostic("result-original-operation", None, true);
-        loop { std::thread::park(); std::hint::black_box((&mut file, security)); }
-    }
-    let closed = file.close();
-    if closed.is_err() {
-        diagnostic("result-original-close", None, true);
-        loop { std::thread::park(); std::hint::black_box((&mut file, security)); }
-    }
-    observation
-}
-fn child_security(parent: &[u8], account: &[u8]) -> Result<(Box<Aligned>, Box<S::SECURITY_DESCRIPTOR>)> {
-    // Only the single new result file. No inherited grant or standard Users ACE.
-    let mut acl = Box::new(Aligned([0; BUFFER]));
-    let principals = [(system_sid(), FS::FILE_ALL_ACCESS), (builtin(544), FS::FILE_ALL_ACCESS),
-        (parent.to_vec(), FS::FILE_ALL_ACCESS), (account.to_vec(), FS::FILE_GENERIC_WRITE | FS::FILE_READ_ATTRIBUTES)];
-    let size = 8 + principals.iter().map(|(sid, _)| 8 + sid.len()).sum::<usize>();
-    need(size < BUFFER && size < u16::MAX as usize)?;
-    acl.0[0] = 2; acl.0[2..4].copy_from_slice(&(size as u16).to_le_bytes());
-    acl.0[4..6].copy_from_slice(&(principals.len() as u16).to_le_bytes());
-    let mut at = 8;
-    for (sid, rights) in principals {
-        security::sid_at(&sid, 0, sid.len())?;
-        let length = 8 + sid.len();
-        acl.0[at + 2..at + 4].copy_from_slice(&(length as u16).to_le_bytes());
-        acl.0[at + 4..at + 8].copy_from_slice(&rights.to_le_bytes());
-        acl.0[at + 8..at + length].copy_from_slice(&sid); at += length;
-    }
-    let mut descriptor = Box::new(S::SECURITY_DESCRIPTOR::default());
-    need(unsafe { S::InitializeSecurityDescriptor((&mut *descriptor as *mut S::SECURITY_DESCRIPTOR).cast(), 1) } != 0
-        && unsafe { S::SetSecurityDescriptorDacl((&mut *descriptor as *mut S::SECURITY_DESCRIPTOR).cast(),
-            1, acl.0.as_ptr().cast(), 0) } != 0
-        && unsafe { S::SetSecurityDescriptorControl((&mut *descriptor as *mut S::SECURITY_DESCRIPTOR).cast(),
-            S::SE_DACL_PROTECTED, S::SE_DACL_PROTECTED) } != 0)?;
-    Ok((acl, descriptor))
-}
+
 pub(super) fn write_native_result(actual_user: &[u8]) -> Result<()> {
     let get = |name| std::env::var(name).map_err(|_| Error::State);
     let artifact = std::env::current_exe().map_err(|_| Error::Unavailable)?;
@@ -938,7 +606,8 @@ struct Launch {
     facts: ProcessFacts, _pin: PhantomPinned,
 }
 impl Launch {
-    fn new(binding: &Binding, output: &Path, account: &Account, parent: &[u8]) -> Result<Pin<Box<Self>>> {
+    fn new(variant: OwnerVariant, binding: &Binding, fullwalk_request: Option<&str>,
+        output: &Path, account: &Account, parent: &[u8]) -> Result<Pin<Box<Self>>> {
         let output = output.to_str().ok_or(Error::Unsafe)?;
         let system_root = std::env::var("SystemRoot").map_err(|_| Error::State)?;
         fixed_path(&system_root)?;
@@ -961,15 +630,32 @@ impl Launch {
             ("SystemRoot", system_root.clone()), ("TEMP", output.to_owned()), ("TMP", output.to_owned()),
             ("WINDIR", system_root),
         ];
+        match (variant, fullwalk_request) {
+            (OwnerVariant::Ordinary, None) => (), // Ordinary environment stays byte-for-byte unchanged.
+            (OwnerVariant::Fullwalk, Some(request)) => {
+                need(request.len() <= LIMIT && request.is_ascii())?;
+                environment.retain(|(name, _)| !matches!(*name,
+                    "MRK_WINDOWS_NATIVE_ARTIFACT_BYTES" | "MRK_WINDOWS_NATIVE_ARTIFACT_SHA256"
+                    | "MRK_WINDOWS_NATIVE_ARTIFACT_IDENTITY" | "MRK_WINDOWS_NATIVE_COMMAND_SHA256"
+                    | "MRK_WINDOWS_ORDINARY_OUTPUT"));
+                environment.extend([
+                    ("MRK_WINDOWS_FULLWALK_REQUEST", request.to_owned()),
+                    ("MRK_WINDOWS_FULLWALK_ARTIFACT_IDENTITY", binding.identity.clone()),
+                    ("MRK_WINDOWS_FULLWALK_OUTPUT", output.to_owned()),
+                ]);
+            },
+            _ => return Err(Error::State),
+        }
         environment.sort_by_key(|(name, _)| name.to_ascii_uppercase());
         let environment: Vec<u16> = environment.iter().flat_map(|(name, value)| wide(&format!("{name}={value}")))
             .chain(std::iter::once(0)).collect();
-        need(environment.len() <= 8192 && command(&binding.artifact).encode_utf16().count() <= 1023)?;
+        let command = variant.command(&binding.artifact);
+        need(environment.len() <= 8192 && command.encode_utf16().count() <= 1023)?;
         let mut startup = T::STARTUPINFOW::default(); startup.cb = size_of::<T::STARTUPINFOW>() as u32;
         // lpDesktop=null explicitly inherits the actual desktop/station. Their
         // access is NOT precomputed, granted, or inferred from headlessness.
         // All flags/std handles remain zero: no profile, shell or redirection.
-        Ok(Box::pin(Self { domain: [b'.' as u16, 0], application: wide(&binding.artifact), command: wide(&command(&binding.artifact)),
+        Ok(Box::pin(Self { domain: [b'.' as u16, 0], application: wide(&binding.artifact), command: wide(&command),
             environment, directory: wide(output), startup, outputs: T::PROCESS_INFORMATION::default(),
             return_recorded: false, returned: 0, error: 0, first_wait: u32::MAX,
             settle_wait: u32::MAX, first_wait_error: 0, settle_wait_error: 0, exit_output: 0,
@@ -977,9 +663,10 @@ impl Launch {
             process_close: 0, process_close_error: 0, thread_close: 0, thread_close_error: 0,
             facts: ProcessFacts::new(), _pin: PhantomPinned }))
     }
-    fn enter(self: Pin<&mut Self>, account: &mut Account, start: Instant, deadline_latched: &mut bool) -> Result<()> {
+    fn enter(self: Pin<&mut Self>, account: &mut Account, start: Instant, deadline_latched: &mut bool, aggregate: &mut Option<AggregateClock>) -> Result<()> {
         let this = unsafe { self.get_unchecked_mut() };
-        next_effect(start.elapsed(), deadline_latched)?;
+        owner_effect(start, deadline_latched, aggregate)?;
+        if let Some(clock) = aggregate.as_mut() { clock.sample(true)?; }
         this.facts.begin()?;
         // Every UTF-16 input, full STARTUPINFO, complete initialized PI and
         // return/error destinations are owned/stable BEFORE this sole entry.
@@ -991,14 +678,18 @@ impl Launch {
         this.return_recorded = true;
         // No allocation, formatting, new call or ownership adoption intervened.
         account.zero(); // Only now has its original plaintext borrower returned.
-        this.facts.creation(this.returned != 0, this.error,
+        let creation = this.facts.creation(this.returned != 0, this.error,
             (this.outputs.hProcess as usize, this.outputs.hThread as usize,
                 this.outputs.dwProcessId, this.outputs.dwThreadId),
-            start.elapsed() >= Duration::from_secs(NATIVE_SECONDS))
+            start.elapsed() >= Duration::from_secs(NATIVE_SECONDS));
+        let timely = owner_effect(start, deadline_latched, aggregate);
+        if timely.is_err() { this.facts.failed = true; }
+        creation?; timely
     }
-    fn finish(self: Pin<&mut Self>, start: Instant) {
+    fn finish(self: Pin<&mut Self>, start: Instant, aggregate: &mut Option<AggregateClock>) {
         let this = unsafe { self.get_unchecked_mut() };
         if !this.return_recorded || !this.facts.created { return; }
+        batch_return(&mut this.facts, aggregate);
         if !this.facts.failed {
             let remaining = Duration::from_secs(NATIVE_SECONDS).saturating_sub(start.elapsed());
             if remaining.is_zero() { this.facts.failed = true; }
@@ -1007,31 +698,37 @@ impl Launch {
                     remaining.as_millis().min(u128::from(u32::MAX - 1)) as u32) };
                 this.first_wait_error = if this.first_wait == F::WAIT_FAILED { unsafe { F::GetLastError() } } else { 0 };
                 let _ = this.facts.wait(this.first_wait, start.elapsed() >= Duration::from_secs(NATIVE_SECONDS));
+                batch_return(&mut this.facts, aggregate);
             }
         }
         if !this.facts.signaled && this.facts.begin_terminate().is_ok() {
             this.terminate_return = unsafe { T::TerminateProcess(this.outputs.hProcess, 125) };
             this.terminate_error = if this.terminate_return == 0 { unsafe { F::GetLastError() } } else { 0 };
             if this.terminate_return == 0 { this.facts.unknown = true; }
+            batch_return(&mut this.facts, aggregate);
             // Termination is asynchronous. Even its success is not finality.
             this.settle_wait = unsafe { T::WaitForSingleObject(this.outputs.hProcess, SETTLE_MS) };
             this.settle_wait_error = if this.settle_wait == F::WAIT_FAILED { unsafe { F::GetLastError() } } else { 0 };
             let _ = this.facts.wait(this.settle_wait, true);
+            batch_return(&mut this.facts, aggregate);
         }
         if !this.facts.signaled { this.facts.unknown = true; return; }
         this.exit_return = unsafe { T::GetExitCodeProcess(this.outputs.hProcess, &mut this.exit_output) };
         this.exit_error = if this.exit_return == 0 { unsafe { F::GetLastError() } } else { 0 };
         let _ = this.facts.exited(this.exit_return != 0, this.exit_output);
+        batch_return(&mut this.facts, aggregate);
         // Every borrower has returned before either once-only original close.
         if this.facts.begin_close(true).is_ok() {
             this.thread_close = unsafe { F::CloseHandle(this.outputs.hThread) };
             this.thread_close_error = if this.thread_close == 0 { unsafe { F::GetLastError() } } else { 0 };
             let _ = this.facts.closed(true, this.thread_close != 0);
+            batch_return(&mut this.facts, aggregate);
         }
         if this.facts.begin_close(false).is_ok() {
             this.process_close = unsafe { F::CloseHandle(this.outputs.hProcess) };
             this.process_close_error = if this.process_close == 0 { unsafe { F::GetLastError() } } else { 0 };
             let _ = this.facts.closed(false, this.process_close != 0);
+            batch_return(&mut this.facts, aggregate);
         }
     }
 }
@@ -1048,62 +745,45 @@ fn parent_user(book: &mut NativeBook) -> Result<Vec<u8>> {
     need(sid.len() == 28 && sid != system_sid() && sid != builtin(544))?;
     Ok(sid)
 }
-type LaunchDiagnostic = (bool, u32, Option<u32>, [u32; 8]);
-// DATA-only formatter, shared with the existing inert regression. The longest
-// closed stage/role/check, optional u16 control words, null slot, max u32s
-// and min NTSTATUS stay below the unchanged768-byte buffer (inert regression).
-pub(super) fn write_refusal(output: &mut impl std::io::Write, stage: &'static str,
-    launch: Option<LaunchDiagnostic>, unknown: bool, fault: Option<InputFault>) -> std::io::Result<()> {
-    let (returned, error, exit) = launch.map_or((false, 0, None), |value| (value.0, value.1, value.2));
-    write!(output, "MRK_WINDOWS_ORDINARY_OWNER_REFUSED={{\"stage\":\"{stage}\",\"createReturned\":{returned},\"createError\":{error},\"exitCode\":")?;
-    match exit { Some(code) => write!(output, "{code}")?, None => write!(output, "null")? }
-    if let Some((_, _, _, value)) = launch {
-        write!(output, ",\"wait\":{},\"waitError\":{},\"settleWait\":{},\"settleError\":{},\"exitError\":{},\"terminateError\":{},\"processCloseError\":{},\"threadCloseError\":{}",
-            value[0], value[1], value[2], value[3], value[4], value[5], value[6], value[7])?;
-    }
-    if let Some(value) = fault {
-        write!(output, ",\"firstInputFault\":{{\"role\":\"{:?}\",\"slot\":", value.role)?;
-        match value.slot { Some(slot) => write!(output, "{slot}")?, None => write!(output, "null")? }
-        write!(output, ",\"check\":\"{:?}\",\"status\":", value.check)?;
-        match value.status {
-            Some(InputStatus::Win32(code)) => write!(output, "{{\"domain\":\"win32\",\"code\":{code}}}")?,
-            Some(InputStatus::NtStatus(code)) => write!(output, "{{\"domain\":\"ntstatus\",\"code\":{code}}}")?,
-            None => write!(output, "null")?,
-        }
-        if let Some((expected, observed)) = value.control {
-            write!(output, ",\"control\":{{\"expected\":{expected},\"observed\":{observed}}}")?;
-        }
-        write!(output, "}}")?;
-    }
-    writeln!(output, ",\"unknown\":{unknown},\"cleanupNotRetried\":true}}")
-}
 fn diagnostic(stage: &'static str, launch: Option<&Launch>, unknown: bool) {
     diagnostic_with_fault(stage, launch, unknown, None);
 }
 fn diagnostic_with_fault(stage: &'static str, launch: Option<&Launch>, unknown: bool, fault: Option<InputFault>) {
-    use std::io::Write;
-    let mut raw = [0u8; 768];
-    let mut output = std::io::Cursor::new(raw.as_mut_slice());
     let facts = launch.map(|value| (value.return_recorded, value.error, value.facts.exit,
         [value.first_wait, value.first_wait_error, value.settle_wait, value.settle_wait_error,
             value.exit_error, value.terminate_error, value.process_close_error, value.thread_close_error]));
-    let formatted = write_refusal(&mut output, stage, facts, unknown, fault);
-    let size = output.position() as usize;
-    // Never publish an ignored formatting error/truncated JSON as a record.
-    // This fallback changes no owner result or settlement decision.
-    let bytes: &[u8] = if formatted.is_ok() { &raw[..size] } else if unknown {
-        b"MRK_WINDOWS_ORDINARY_OWNER_REFUSED={\"stage\":\"diagnostic-format\",\"unknown\":true,\"cleanupNotRetried\":true}\n"
-    } else {
-        b"MRK_WINDOWS_ORDINARY_OWNER_REFUSED={\"stage\":\"diagnostic-format\",\"unknown\":false,\"cleanupNotRetried\":true}\n"
-    };
-    let _ = std::io::stdout().lock().write(bytes);
+    diagnostic_data(stage, facts, unknown, fault);
 }
 
 #[test]
 #[ignore = "one original-handle ordinary-account owner on its fixed disposable Windows hosted job"]
 fn hosted_ordinary_original_handle_contract() -> Result<()> {
+    let entry_tick = unsafe { SI::GetTickCount64() }; // FIRST entry observation, never intent-publication time.
+    run_owner(OwnerVariant::Ordinary, entry_tick)
+}
+
+#[test]
+#[ignore = "closed seam: separately reviewed protected publication and headless-app precheck required"]
+fn hosted_protected_version_fullwalk_contract() -> Result<()> {
+    let entry_tick = unsafe { SI::GetTickCount64() };
+    run_owner(OwnerVariant::Fullwalk, entry_tick)
+}
+
+fn run_owner(variant: OwnerVariant, entry_tick: u64) -> Result<()> {
     let start = Instant::now();
     let mut deadline_latched = false;
+    let batch = std::env::var("MRK_DESKTOP_DISPATCH_SCOPE").as_deref() == Ok(fixture::DISPATCH);
+    // Before NativeBook observation, original inputs, account, ACL or launch.
+    need(variant == OwnerVariant::Ordinary || FULLWALK_PREREQUISITES_REVIEWED)?;
+    need(!batch || FULLWALK_PREREQUISITES_REVIEWED)?;
+    need(variant == OwnerVariant::Ordinary || batch)?;
+    if batch {
+        fixture::profile()?;
+        for key in ["MRK_WINDOWS_PUBLISHER_STEP_OUTCOME", "MRK_WINDOWS_FIXTURE_FINALIZE_STEP_OUTCOME"] { fixture::outcome(key)?; }
+    }
+    let mut aggregate = if batch && variant == OwnerVariant::Ordinary {
+        Some(AggregateClock::new(entry_tick, entry_tick, false)?)
+    } else { None };
     super::hosted_tests::hosted_source()?;
     let root_text = std::env::var("MRK_DESKTOP_CI_ROOT").map_err(|_| Error::State)?;
     let root = fixed_path(&root_text)?;
@@ -1112,7 +792,7 @@ fn hosted_ordinary_original_handle_contract() -> Result<()> {
     need(decimal(&run) && root == temp.join(format!("mrk-windows-installed-native-{run}-1"))
         && std::env::current_dir().map_err(|_| Error::Unavailable)? == root)?;
     let image = std::env::current_exe().map_err(|_| Error::Unavailable)?;
-    args_are(OWNER, &image)?;
+    args_are(variant.owner(), &image)?;
     let basename = image.file_name().and_then(|s| s.to_str()).ok_or(Error::Unsafe)?;
     let hash = basename.strip_prefix("mrk_windows_installed_native-").and_then(|s| s.strip_suffix(".exe")).ok_or(Error::Unsafe)?;
     need(is_hex(hash, 16) && image.parent() == Some(root.join("target/x86_64-pc-windows-msvc/debug/deps").as_path()))?;
@@ -1121,21 +801,26 @@ fn hosted_ordinary_original_handle_contract() -> Result<()> {
     let mut parent_settlement_attempted = false; let mut parent_settled = false;
     let mut account: Option<Account> = None; let mut launch: Option<Pin<Box<Launch>>> = None;
     let mut transitions = Vec::with_capacity(7); let mut binding = None;
+    let mut fullwalk_binding = None; let mut fullwalk_entries = None; let mut request_sha = String::new();
+    let mut prerequisites: Option<Admission> = None;
+    let mut ordinary_invocation: Option<Wire> = None; let mut intent_raw = Vec::new();
     let mut result_sha = String::new(); let mut sid_sha = String::new();
     let mut input_trace = InputTrace::default();
     let mut stage = "parent-context";
     let mut observation = (|| -> Result<()> {
         need(matches!(book.observe_user_once(), Err(Error::Unsafe)))?;
+        owner_effect(start, &mut deadline_latched, &mut aggregate)?;
         let index = book.process_token.ok_or(Error::State)?;
         super::hosted_tests::actual_elevated_primary_refusal(&mut book, index)?;
         let parent = parent_user(&mut book)?;
+        owner_effect(start, &mut deadline_latched, &mut aggregate)?;
         stage = "original-inputs";
         // Pin all actual ancestors against reparse/rename, but change ACLs ONLY
         // at/below this freshly owned root, never RUNNER_TEMP or an OS directory.
         let mut ancestors: Vec<_> = root.ancestors().map(Path::to_path_buf).collect();
         ancestors.reverse();
         input_trace.at(InputRole::Ancestor, None);
-        input_trace.need(ancestors.len() <= 24, InputCheck::AncestorCount)?;
+        input_trace.need(ancestors.len() <= if batch { 19 } else { 24 }, InputCheck::AncestorCount)?;
         let mut root_index = 0;
         for path in &ancestors {
             let access = FS::FILE_READ_ATTRIBUTES | FS::READ_CONTROL
@@ -1143,57 +828,148 @@ fn hosted_ordinary_original_handle_contract() -> Result<()> {
             input_trace.at(InputRole::Ancestor, Some(files.len() as u8));
             let index = owned_file_traced(&mut files, path, true, access, &mut input_trace)?;
             if path == &root { root_index = index; }
+            owner_effect(start, &mut deadline_latched, &mut aggregate)?;
         }
         input_trace.at(InputRole::Request, Some(files.len() as u8));
-        let request = owned_file_traced(&mut files, &root.join(REQUEST), false, FS::FILE_GENERIC_READ, &mut input_trace)?;
+        let request = owned_file_traced(&mut files, &root.join(variant.request()), false, FS::FILE_GENERIC_READ, &mut input_trace)?;
         let data = files[request].read_traced(LIMIT, &mut input_trace)?;
-        let selected = Binding::parse_traced(&data, &mut input_trace)?;
+        owner_effect(start, &mut deadline_latched, &mut aggregate)?;
+        let fullwalk = match variant {
+            OwnerVariant::Ordinary => None,
+            OwnerVariant::Fullwalk => Some(FullwalkRequest::parse_traced(&data, &mut input_trace)?),
+        };
+        let selected = match fullwalk.as_ref() {
+            None => Binding::parse_traced(&data, &mut input_trace)?,
+            Some(request) => Binding { source: request.source.clone(), tree: request.tree.clone(), run: request.run.clone(),
+                artifact: request.app.path.clone(), bytes: request.app.bytes, sha: request.app.sha.clone(),
+                command_sha: request.app.command_sha.clone(), identity: request.app.identity.clone() },
+        };
         input_trace.at(InputRole::Binding, Some(request as u8));
         selected.compiled_traced(&mut input_trace)?;
         input_trace.need(selected.run == run, InputCheck::BindingRun)?;
-        input_trace.need(Path::new(&selected.artifact) == image, InputCheck::BindingImage)?;
+        if batch { request_sha = digest_traced(&data, &mut input_trace)?; }
+        if let Some(fullwalk) = &fullwalk {
+            input_trace.observed(fullwalk.at_root(&root), InputCheck::BindingImage)?;
+            input_trace.need(image.to_str() == Some(fullwalk.owner.path.as_str())
+                && Path::new(&selected.artifact) != image, InputCheck::BindingImage)?;
+            request_sha = digest_traced(&data, &mut input_trace)?;
+        } else {
+            input_trace.need(Path::new(&selected.artifact) == image, InputCheck::BindingImage)?;
+        }
         input_trace.at(InputRole::Command, Some(request as u8));
-        let command_sha = command_digest_traced(&selected.artifact, &mut input_trace)?;
-        input_trace.need(command_sha == selected.command_sha, InputCheck::CommandDigest)?;
+        if let Some(fullwalk) = &fullwalk {
+            fullwalk.check_commands(&mut input_trace)?;
+        } else {
+            let command_sha = command_digest_traced(&selected.artifact, &mut input_trace)?;
+            input_trace.need(command_sha == selected.command_sha, InputCheck::CommandDigest)?;
+        }
         let mut directories = vec![(root_index, "root".to_owned())];
         for (name, path) in fixed_directories(&root) {
             input_trace.at(InputRole::Directory, Some(files.len() as u8));
             let index = owned_file_traced(&mut files, &path, true,
                 FS::FILE_READ_ATTRIBUTES | FS::READ_CONTROL | FS::WRITE_DAC, &mut input_trace)?;
             directories.push((index, name.to_owned()));
+            owner_effect(start, &mut deadline_latched, &mut aggregate)?;
         }
         input_trace.at(InputRole::Artifact, Some(files.len() as u8));
-        let artifact = owned_file_traced(&mut files, &image, false, FS::FILE_GENERIC_READ | FS::WRITE_DAC, &mut input_trace)?;
+        let artifact_path = if variant == OwnerVariant::Ordinary { image.as_path() } else { Path::new(&selected.artifact) };
+        let artifact = owned_file_traced(&mut files, artifact_path, false, FS::FILE_GENERIC_READ | FS::WRITE_DAC, &mut input_trace)?;
         let artifact_before = files[artifact].stamp_traced(&mut input_trace)?;
         input_trace.need(selected.matches(&artifact_before), InputCheck::ArtifactIdentity)?;
-        let bytes = files[artifact].read_traced(128 << 20, &mut input_trace)?;
+        let bytes = match variant {
+            OwnerVariant::Ordinary => files[artifact].read_traced(128 << 20, &mut input_trace)?,
+            OwnerVariant::Fullwalk => files[artifact].read_app_traced(&mut input_trace)?,
+        };
+        owner_effect(start, &mut deadline_latched, &mut aggregate)?;
         input_trace.need(bytes.len() == selected.bytes, InputCheck::ArtifactBytes)?;
-        let artifact_sha = digest_traced(&bytes, &mut input_trace)?;
+        let artifact_sha = match variant {
+            OwnerVariant::Ordinary => digest_traced(&bytes, &mut input_trace)?,
+            OwnerVariant::Fullwalk => digest_app_traced(&bytes, &mut input_trace)?,
+        };
         input_trace.need(artifact_sha == selected.sha, InputCheck::ArtifactDigest)?;
         // Hash/read does not authorize adoption of another artifact or discard
         // original ChangeTime. The exact preflight identity must still match.
         let artifact_stable = files[artifact].stamp_traced(&mut input_trace)?;
         input_trace.need(artifact_stable == artifact_before, InputCheck::ArtifactStable)?;
+        owner_effect(start, &mut deadline_latched, &mut aggregate)?;
+        let mut companion_originals = Vec::with_capacity(13);
+        if let Some(fullwalk) = &fullwalk {
+            // Distinct standalone owner original: no child substitution, copy,
+            // second compile or ACL mutation of the owner's executable here.
+            input_trace.at(InputRole::Artifact, Some(files.len() as u8));
+            let owned = owned_file_traced(&mut files, &image, false, FS::FILE_GENERIC_READ, &mut input_trace)?;
+            let before = files[owned].stamp_traced(&mut input_trace)?;
+            input_trace.need(fullwalk.owner.matches(&before)
+                && (before.volume, before.id) != (artifact_before.volume, artifact_before.id), InputCheck::ArtifactIdentity)?;
+            let raw = files[owned].read_traced(128 << 20, &mut input_trace)?;
+            input_trace.need(raw.len() == fullwalk.owner.bytes, InputCheck::ArtifactBytes)?;
+            let hash = digest_traced(&raw, &mut input_trace)?;
+            input_trace.need(hash == fullwalk.owner.sha, InputCheck::ArtifactDigest)?;
+            let stable = files[owned].stamp_traced(&mut input_trace)?;
+            input_trace.need(stable == before, InputCheck::ArtifactStable)?;
+            companion_originals.push((owned, before));
+            // Original compiler messages stay separately retained and hash-bound.
+            // Argv digests are the original compile-record DATA bound by request;
+            // this owner never compiles, manufactures or reinterprets that record.
+            for (name, expected_bytes, expected_sha) in [
+                ("compile-messages.jsonl", fullwalk.owner.messages_bytes, &fullwalk.owner.messages_sha),
+                ("app-compile-messages.jsonl", fullwalk.app.messages_bytes, &fullwalk.app.messages_sha),
+            ] {
+                input_trace.at(InputRole::Binding, Some(files.len() as u8));
+                let owned = owned_file_traced(&mut files, &root.join(name), false, FS::FILE_GENERIC_READ, &mut input_trace)?;
+                let before = files[owned].stamp_traced(&mut input_trace)?;
+                let raw = files[owned].read_traced(16 << 20, &mut input_trace)?;
+                input_trace.need(raw.len() == expected_bytes, InputCheck::ArtifactBytes)?;
+                let hash = digest_traced(&raw, &mut input_trace)?;
+                input_trace.need(hash == *expected_sha, InputCheck::ArtifactDigest)?;
+                let stable = files[owned].stamp_traced(&mut input_trace)?;
+                input_trace.need(stable == before, InputCheck::ArtifactStable)?;
+                companion_originals.push((owned, before));
+                owner_effect(start, &mut deadline_latched, &mut aggregate)?;
+            }
+            let admission = fixture::admit(fullwalk, &root, &mut files, &mut input_trace)?;
+            let mut clock = AggregateClock::new(admission.origin, entry_tick, true)?;
+            need(clock.deadline == admission.deadline && entry_tick >= admission.ordinary_prewrite)?;
+            clock.observe(unsafe { SI::GetTickCount64() }, fixture::SECOND_FLOOR_MS)?;
+            companion_originals.extend(admission.originals.iter().cloned());
+            aggregate = Some(clock); prerequisites = Some(admission);
+        } else if batch {
+            ordinary_invocation = Some(fixture::invocation(&selected.source, &selected.tree, &selected.run,
+                selected.bytes, &selected.sha, &selected.identity, &selected.command_sha, &request_sha, entry_tick)?);
+        }
         stage = "account-intent";
-        next_effect(start.elapsed(), &mut deadline_latched)?;
+        owner_effect(start, &mut deadline_latched, &mut aggregate)?;
         account = Some(Account::new()?);
         let current = account.as_mut().ok_or(Error::State)?;
         let name = String::from_utf16(&current.name[..current.name.len() - 1]).map_err(|_| Error::Unsafe)?;
-        let intent = format!("{{\"schemaVersion\":1,\"sourceSha\":\"{}\",\"runId\":\"{}\",\"attempt\":1,\"accountName\":\"{name}\",\"freshAccountIntent\":true,\"fixedNativeChildOnly\":true}}\n",
+        let intent_role = match variant {
+            OwnerVariant::Ordinary => "fixedNativeChildOnly", OwnerVariant::Fullwalk => "fixedFullwalkChildOnly",
+        };
+        let batch_intent = match (variant, ordinary_invocation.as_ref(), prerequisites.as_ref(), aggregate.as_ref()) {
+            (OwnerVariant::Ordinary, Some(invocation), None, Some(_)) =>
+                format!(",\"fullwalkBatch\":{}", fixture::invocation_json(invocation)?),
+            (OwnerVariant::Fullwalk, None, Some(admission), Some(clock)) =>
+                format!(",\"fullwalkBatch\":{}", admission.batch_json(clock)?),
+            (OwnerVariant::Ordinary, None, None, None) => String::new(),
+            _ => return Err(Error::State),
+        };
+        let intent = format!("{{\"schemaVersion\":1,\"sourceSha\":\"{}\",\"runId\":\"{}\",\"attempt\":1,\"accountName\":\"{name}\",\"freshAccountIntent\":true,\"{intent_role}\":true{batch_intent}}}\n",
             selected.source, selected.run);
-        next_effect(start.elapsed(), &mut deadline_latched)?;
-        write_one(&root.join("ordinary-owner-intent.private.json"), intent.as_bytes(), LIMIT, null())?;
+        if batch { intent_raw = intent.as_bytes().to_vec(); }
+        owner_effect(start, &mut deadline_latched, &mut aggregate)?;
+        write_one(&root.join(variant.intent()), intent.as_bytes(), LIMIT, null())?;
+        owner_effect(start, &mut deadline_latched, &mut aggregate)?;
         stage = "fresh-account";
-        current.create(&parent, start, &mut deadline_latched)?;
+        current.create(&parent, start, &mut deadline_latched, &mut aggregate)?;
         need(current.sid != parent)?;
-        next_effect(start.elapsed(), &mut deadline_latched)?;
+        owner_effect(start, &mut deadline_latched, &mut aggregate)?;
         sid_sha = digest(&current.sid)?;
         stage = "exact-acl";
         input_trace.at(InputRole::Output, Some(files.len() as u8));
-        let output = root.join("ordinary-output");
+        let output = root.join(variant.output());
         let output_name = wide(input_trace.observed(output.to_str().ok_or(Error::Unsafe), InputCheck::PathText)?);
         // CreateDirectoryW is exclusive. Collision/error never adopts output.
-        input_trace.observed(next_effect(start.elapsed(), &mut deadline_latched), InputCheck::AclDeadline)?;
+        input_trace.observed(owner_effect(start, &mut deadline_latched, &mut aggregate), InputCheck::AclDeadline)?;
         let created = unsafe { FS::CreateDirectoryW(output_name.as_ptr(), null()) };
         let creation_error = if created != 0 { 0 } else { unsafe { F::GetLastError() } };
         if created == 0 {
@@ -1205,23 +981,23 @@ fn hosted_ordinary_original_handle_contract() -> Result<()> {
             }
             return Err(if creation_error == F::ERROR_ALREADY_EXISTS { Error::Unsafe } else { Error::Unavailable });
         }
-        input_trace.observed(next_effect(start.elapsed(), &mut deadline_latched), InputCheck::AclDeadline)?;
+        input_trace.observed(owner_effect(start, &mut deadline_latched, &mut aggregate), InputCheck::AclDeadline)?;
         let output_index = owned_file_traced(&mut files, &output, true,
             FS::FILE_READ_ATTRIBUTES | FS::READ_CONTROL | FS::WRITE_DAC, &mut input_trace)?;
         for ((index, role), acl_role) in directories.into_iter().zip([
             InputRole::AclRoot, InputRole::AclTarget, InputRole::AclTriple, InputRole::AclDebug, InputRole::AclDeps]) {
             input_trace.at(acl_role, Some(index as u8));
             transitions.push(grant(&mut files[index], &role, &parent, &current.sid, FS::FILE_TRAVERSE,
-                start, &mut deadline_latched, &mut input_trace)?);
+                start, &mut deadline_latched, &mut aggregate, &mut input_trace)?);
         }
         input_trace.at(InputRole::AclArtifact, Some(artifact as u8));
         transitions.push(grant(&mut files[artifact], "artifact", &parent, &current.sid,
-            FS::FILE_GENERIC_READ | FS::FILE_GENERIC_EXECUTE, start, &mut deadline_latched, &mut input_trace)?);
+            FS::FILE_GENERIC_READ | FS::FILE_GENERIC_EXECUTE, start, &mut deadline_latched, &mut aggregate, &mut input_trace)?);
         let artifact_after = files[artifact].stamp_traced(&mut input_trace)?;
         input_trace.at(InputRole::AclOutput, Some(output_index as u8));
-        transitions.push(grant(&mut files[output_index], "ordinary-output", &parent, &current.sid,
+        transitions.push(grant(&mut files[output_index], variant.output(), &parent, &current.sid,
             FS::FILE_ADD_FILE | FS::FILE_TRAVERSE | FS::FILE_READ_ATTRIBUTES | FS::SYNCHRONIZE,
-            start, &mut deadline_latched, &mut input_trace)?);
+            start, &mut deadline_latched, &mut aggregate, &mut input_trace)?);
         input_trace.need(transitions.len() == 7, InputCheck::AclTransitions)?;
         // This exact caller still has its original elevated primary, and no
         // impersonation. Close its NativeBook explicitly before original create.
@@ -1234,21 +1010,31 @@ fn hosted_ordinary_original_handle_contract() -> Result<()> {
         input_trace.need(parent_settled, InputCheck::ParentSettlement)?;
         stage = "preowned-create";
         let mut child = selected.clone(); child.identity = artifact_after.wire();
-        launch = Some(Launch::new(&child, &output, current, &parent)?);
-        next_effect(start.elapsed(), &mut deadline_latched)?;
+        let fullwalk_request = if fullwalk.is_some() { Some(std::str::from_utf8(&data).map_err(|_| Error::Unsafe)?) } else { None };
+        launch = Some(Launch::new(variant, &child, fullwalk_request, &output, current, &parent)?);
+        owner_effect(start, &mut deadline_latched, &mut aggregate)?;
         let original = launch.as_mut().ok_or(Error::State)?;
-        let created = original.as_mut().enter(current, start, &mut deadline_latched);
-        original.as_mut().finish(start); // Always settle a definitely owned pair.
+        let created = original.as_mut().enter(current, start, &mut deadline_latched, &mut aggregate);
+        original.as_mut().finish(start, &mut aggregate); // Always settle a definitely owned pair.
         created?;
         need(original.facts.passed())?;
-        next_effect(start.elapsed(), &mut deadline_latched)?;
+        owner_effect(start, &mut deadline_latched, &mut aggregate)?;
         stage = "closed-native-result";
-        let result = owned_file(&mut files, &output.join(RESULT), false, FS::FILE_GENERIC_READ)?;
+        let result = owned_file(&mut files, &output.join(variant.result()), false, FS::FILE_GENERIC_READ)?;
         let raw = files[result].read(LIMIT)?;
-        need(raw == selected.result(&sid_sha).as_bytes())?;
+        owner_effect(start, &mut deadline_latched, &mut aggregate)?;
+        input_trace.need(files.len() == ancestors.len() + if variant == OwnerVariant::Fullwalk { 21 } else { 8 }, InputCheck::FileCount)?;
+        if let Some(fullwalk) = &fullwalk {
+            fullwalk_entries = Some(fullwalk.accept_result(&raw, &request_sha, &sid_sha)?);
+        } else { need(raw == selected.result(&sid_sha).as_bytes())?; }
         result_sha = digest(&raw)?;
         need(files[artifact].stamp()? == artifact_after)?;
-        next_effect(start.elapsed(), &mut deadline_latched)?;
+        for (owned, before) in companion_originals {
+            need(files[owned].stamp()? == before)?;
+            owner_effect(start, &mut deadline_latched, &mut aggregate)?;
+        }
+        owner_effect(start, &mut deadline_latched, &mut aggregate)?;
+        fullwalk_binding = fullwalk;
         binding = Some(selected);
         Ok(())
     })();
@@ -1271,7 +1057,7 @@ fn hosted_ordinary_original_handle_contract() -> Result<()> {
         diagnostic_with_fault("original-file-close", launch.as_deref(), true, input_trace.first);
         loop { std::thread::park(); std::hint::black_box((&mut launch, &mut account, &mut book, &mut files)); }
     }
-    if next_effect(start.elapsed(), &mut deadline_latched).is_err() { observation = Err(Error::Unsafe); }
+    if owner_effect(start, &mut deadline_latched, &mut aggregate).is_err() { observation = Err(Error::Unsafe); }
     if observation.is_err() {
         diagnostic_with_fault(stage, launch.as_deref(), false, input_trace.first);
         return observation;
@@ -1279,26 +1065,54 @@ fn hosted_ordinary_original_handle_contract() -> Result<()> {
     let current = account.as_mut().ok_or(Error::State)?;
     // Only after original child wait/exit/handle closes, result read/close and
     // every native input original settlement; failure/Unknown retains account.
-    let retired = current.retire(start, &mut deadline_latched);
+    let retired = current.retire(start, &mut deadline_latched, &mut aggregate);
     if matches!(retired, Err(Error::Unknown)) {
         diagnostic("account-original-retirement", launch.as_deref(), true);
         loop { std::thread::park(); std::hint::black_box((&mut launch, &mut account, &mut book, &mut files)); }
     }
     retired?;
     let current = account.as_ref().ok_or(Error::State)?;
-    next_effect(start.elapsed(), &mut deadline_latched)?;
+    owner_effect(start, &mut deadline_latched, &mut aggregate)?;
     need(current.removed && launch.as_ref().is_some_and(|value| value.facts.passed())
-        && files.iter().all(|file| file.body.state == SlotState::Closed))?;
+        && files.iter().all(OriginalFile::is_closed))?;
     let selected = binding.ok_or(Error::State)?;
     let original = launch.as_ref().ok_or(Error::State)?;
-    let record = format!("{{\"schemaVersion\":1,\"sourceSha\":\"{}\",\"sourceTree\":\"{}\",\"runId\":\"{}\",\"attempt\":1,\"artifactBytes\":{},\"artifactSha256\":\"{}\",\"commandSha256\":\"{}\",\"accountSidSha256\":\"{}\",\"ownerTest\":\"{OWNER}\",\"childTest\":\"{CHILD}\",\"createCalls\":1,\"createReturn\":{},\"createError\":null,\"firstWait\":{},\"exitReturn\":{},\"originalExitCode\":{},\"terminateCalls\":0,\"processCloseReturn\":{},\"threadCloseReturn\":{},\"deadlineLatched\":false,\"unknown\":false,\"parentBookSettled\":true,\"inputOriginals\":{},\"inputOriginalsClosed\":{},\"freshAccountVerified\":true,\"onlyUsersMembership\":true,\"accountRemovedAfterSettlement\":true,\"nativeResultSha256\":\"{}\",\"aclTransitions\":[{}],\"ownerResult\":{{\"createNew\":true,\"writeCalls\":1,\"closeGate\":\"original-owner-exit-zero-required\"}},\"managedSourceMappingAuthenticated\":false,\"managedOrdinaryStartAuthorized\":false,\"protectedFullwalk\":false,\"productionEnabled\":false}}\n",
+    let owner_test = variant.owner(); let child_test = variant.child();
+    let protected_fullwalk = variant == OwnerVariant::Fullwalk;
+    let mut extra = match (variant, fullwalk_binding.as_ref()) {
+        (OwnerVariant::Ordinary, None) => String::new(),
+        (OwnerVariant::Fullwalk, Some(fullwalk)) => format!(",\"requestSha256\":\"{}\",\"ownerArtifactBytes\":{},\"ownerArtifactSha256\":\"{}\",\"ownerCommandSha256\":\"{}\",\"fullwalkEntries\":{}",
+            request_sha, fullwalk.owner.bytes, fullwalk.owner.sha, fullwalk.owner.command_sha,
+            fullwalk_entries.ok_or(Error::State)?),
+        _ => return Err(Error::State),
+    };
+    if let Some(clock) = aggregate.as_mut() {
+        // PRE-WRITE fact only. The original writer/close and the same two clocks
+        // must still pass below before this foreground owner can exit zero.
+        let prewrite = clock.sample(false)?;
+        let base = match (variant, ordinary_invocation.as_ref(), prerequisites.as_ref()) {
+            (OwnerVariant::Ordinary, Some(invocation), None) => fixture::invocation_json(invocation)?,
+            (OwnerVariant::Fullwalk, None, Some(admission)) => admission.batch_json(clock)?,
+            _ => return Err(Error::State),
+        };
+        let prefix = base.strip_suffix('}').ok_or(Error::State)?;
+        let intent_sha = digest(&intent_raw)?;
+        let detail = if variant == OwnerVariant::Ordinary {
+            format!(",\"ordinaryIntentBytes\":{},\"ordinaryIntentSha256\":\"{intent_sha}\"", intent_raw.len())
+        } else {
+            format!(",\"ownerIntentBytes\":{},\"ownerIntentSha256\":\"{intent_sha}\",\"prelaunchTickMs\":{}",
+                intent_raw.len(), clock.prelaunch.ok_or(Error::State)?)
+        };
+        extra.push_str(&format!(",\"aggregate\":{prefix}{detail},\"resultPrewriteTickMs\":{prewrite}}}"));
+    }
+    let record = format!("{{\"schemaVersion\":1,\"sourceSha\":\"{}\",\"sourceTree\":\"{}\",\"runId\":\"{}\",\"attempt\":1,\"artifactBytes\":{},\"artifactSha256\":\"{}\",\"commandSha256\":\"{}\",\"accountSidSha256\":\"{}\",\"ownerTest\":\"{owner_test}\",\"childTest\":\"{child_test}\",\"createCalls\":1,\"createReturn\":{},\"createError\":null,\"firstWait\":{},\"exitReturn\":{},\"originalExitCode\":{},\"terminateCalls\":0,\"processCloseReturn\":{},\"threadCloseReturn\":{},\"deadlineLatched\":false,\"unknown\":false,\"parentBookSettled\":true,\"inputOriginals\":{},\"inputOriginalsClosed\":{},\"freshAccountVerified\":true,\"onlyUsersMembership\":true,\"accountRemovedAfterSettlement\":true,\"nativeResultSha256\":\"{}\",\"aclTransitions\":[{}],\"ownerResult\":{{\"createNew\":true,\"writeCalls\":1,\"closeGate\":\"original-owner-exit-zero-required\"}},\"managedSourceMappingAuthenticated\":false,\"managedOrdinaryStartAuthorized\":false,\"protectedFullwalk\":{protected_fullwalk},\"productionEnabled\":false{extra}}}\n",
         selected.source, selected.tree, selected.run, selected.bytes, selected.sha, selected.command_sha, sid_sha,
         original.returned, original.first_wait, original.exit_return, original.exit_output,
         original.process_close, original.thread_close, files.len(), files.len(), result_sha, transitions.join(","));
     need(record.len() <= OWNER_LIMIT)?;
-    next_effect(start.elapsed(), &mut deadline_latched)?;
-    write_one(&root.join(OWNER_RESULT), record.as_bytes(), OWNER_LIMIT, null())?;
+    owner_effect(start, &mut deadline_latched, &mut aggregate)?;
+    write_one(&root.join(variant.owner_result()), record.as_bytes(), OWNER_LIMIT, null())?;
     // Even a late complete record is not admissible: original owner exit zero
     // is a separate mandatory gate, after its own write and original close.
-    next_effect(start.elapsed(), &mut deadline_latched)
+    owner_effect(start, &mut deadline_latched, &mut aggregate)
 }

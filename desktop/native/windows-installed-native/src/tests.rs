@@ -61,6 +61,22 @@ fn own_inert(book: &mut NativeBook, original: &Original, number: usize) -> Resul
 
 #[test]
 fn original_destinations_are_stable_registered_and_book_bound() -> Result<()> {
+    {
+        use qualification_fixture::{fixture_capacity,CursorEpoch};
+        fixture_capacity(19,8,37,2)?; // Publisher peak39, not a forty-slot expansion.
+        for (a,b,held,leaves) in [(20,8,37,2),(19,9,37,2),(19,8,39,2),(19,8,37,3),(1,1,usize::MAX,1)] {
+            assert!(fixture_capacity(a,b,held,leaves).is_err());
+        }
+        let mut cursor=CursorEpoch::default();
+        assert!(!cursor.begin(0)?);
+        assert!(cursor.begin(0).is_err() && cursor.begin(1).is_err());
+        cursor.complete()?;
+        assert!(cursor.begin(0).is_err()); // known EOF alone does not authorize a restart
+        assert!(cursor.begin(1)?); cursor.complete()?;
+        assert!(cursor.begin(1).is_err() && cursor.begin(53).is_err());
+        assert!(cursor.begin(52)?);cursor.complete()?;
+        assert!(cursor.complete().is_err());
+    }
     let mut owner = ordinary_owner::ProcessFacts::new();
     assert!(!owner.passed() && !owner.returned);
     assert_eq!(owner.begin_close(false), Err(Error::State));
@@ -120,6 +136,23 @@ fn original_destinations_are_stable_registered_and_book_bound() -> Result<()> {
 
 #[test]
 fn pending_and_lost_completion_keep_the_exact_arena_and_slots() -> Result<()> {
+    {
+        use qualification_fixture::mutation_return;
+        assert_eq!(mutation_return(1,0),Ok(()));
+        assert_eq!(mutation_return(0,0),Err(Error::Unknown));
+        assert_eq!(mutation_return(0,F::ERROR_IO_PENDING),Err(Error::Unknown));
+        assert_eq!(mutation_return(0,F::ERROR_ALREADY_EXISTS),Err(Error::Unavailable));
+        assert!(mutation_return(1,F::ERROR_ALREADY_EXISTS).is_err());
+        // Same shared arena/finish for the post-mutation cursor: a pending
+        // borrowed observer cannot close/adopt the filesystem original.
+        let mut fixture=Inert::new();let book=&mut fixture.book;
+        enter_inert(book,Call::Info(FS::FileIdExtdDirectoryRestartInfo,BUFFER),71usize as F::HANDLE)?;
+        let arena=book.arena()? as *const Arena;
+        assert!(matches!(return_inert(book,Returned::Boolean(0,F::ERROR_IO_PENDING),None,
+            F::STATUS_PENDING,usize::MAX),Err(Error::Unknown)));
+        assert_eq!(book.arena()? as *const Arena,arena);
+        assert!(book.slots.is_empty() && book.is_unknown() && !book.settled());
+    }
     // Same absorbing native owner decisions; no clock/worker/API is called.
     for timeout in [false, true] {
         let mut owner = ordinary_owner::ProcessFacts::new(); owner.begin()?;
@@ -178,6 +211,33 @@ fn pending_and_lost_completion_keep_the_exact_arena_and_slots() -> Result<()> {
 
 #[test]
 fn acquisition_needs_a_definite_consistent_receipt() -> Result<()> {
+    {
+        use qualification_fixture::{AggregateClock,AGGREGATE_MS,SECOND_FLOOR_MS};
+        let origin=700u64;
+        let mut first=AggregateClock::new(origin,origin,false)?;
+        first.observe(origin+60_000,0)?;
+        assert_eq!((first.origin,first.deadline),(origin,origin+AGGREGATE_MS));
+        // The entry origin is not replaced by a delayed intent publication.
+        let before=ordinary_stamp().wire();
+        let invocation=qualification_fixture::invocation(&"1".repeat(40),&"2".repeat(40),"123456",37,
+            &"3".repeat(64),&before,&"4".repeat(64),&"5".repeat(64),origin)?;
+        assert_eq!(invocation.get("originTickMs")?,"700");
+        assert_eq!(invocation.get("deadlineTickMs")?,"210700");
+        assert!(AggregateClock::new(u64::MAX-AGGREGATE_MS+1,u64::MAX-AGGREGATE_MS+1,false).is_err());
+        assert!(AggregateClock::new(origin,origin-1,false).is_err());
+        assert!(AggregateClock::new(origin,origin+AGGREGATE_MS-SECOND_FLOOR_MS+1,true).is_err());
+        let mut second=AggregateClock::new(origin,origin+109_999,true)?;
+        assert_eq!(second.prelaunch_at(origin+110_000)?,origin+110_000);
+        assert!(second.prelaunch_at(origin+110_000).is_err()); // sole original launch
+        assert!(second.observe(origin+110_001,0).is_err());
+        let mut insufficient=AggregateClock::new(origin,origin+109_999,true)?;
+        assert!(insufficient.prelaunch_at(origin+110_001).is_err());
+        assert!(insufficient.prelaunch_at(origin+110_000).is_err()); // no renewed budget
+        let mut backward=AggregateClock::new(origin,origin,false)?;
+        backward.observe(origin+10,0)?;
+        assert!(backward.observe(origin+9,0).is_err());
+        assert!(backward.observe(origin+11,0).is_err());
+    }
     use std::time::Duration;
     // The actual next-effect gate is rechecked after an absence query returns,
     // not only before that query or after account creation has already occurred.
@@ -432,6 +492,17 @@ fn acquisition_needs_a_definite_consistent_receipt() -> Result<()> {
 
 #[test]
 fn close_retires_before_entry_and_failure_is_never_retried() -> Result<()> {
+    {
+        let mut clock=qualification_fixture::AggregateClock::new(1,1,false)?;
+        clock.observe(clock.deadline-1,0)?;
+        assert!(qualification_result::complete_fixture_write(true,131072,131072,true));
+        assert!(clock.observe(clock.deadline,0).is_err());
+        assert!(clock.observe(2,0).is_err());
+        // A known once-only close stays known, but cannot promote late success.
+        assert!(clock.latched && qualification_result::complete_fixture_write(true,131072,131072,true));
+        assert!(!qualification_result::complete_fixture_write(true,131072,131072,false));
+        assert!(!qualification_result::complete_fixture_write(false,131072,131072,true));
+    }
     use std::time::Duration;
     for closed in [false, true] {
         let mut owner = ordinary_owner::ProcessFacts::new(); owner.begin()?;
@@ -531,6 +602,26 @@ fn ordinary_descriptor(owner: &[u8], group: &[u8], aces: &[(u8, u8, u32, Vec<u8>
 
 #[test]
 fn acl_distinguishes_sibling_creation_from_replacement_and_mutation() -> Result<()> {
+    {
+        use qualification_fixture::{fixture_descriptor,check_descriptor};
+        for directory in [false,true] {
+            let trusted=fixture_descriptor(directory,false)?;
+            let sealed=fixture_descriptor(directory,true)?;
+            check_descriptor(&trusted,directory,false)?;check_descriptor(&sealed,directory,true)?;
+            assert!(check_descriptor(&trusted,directory,true).is_err());
+            assert!(check_descriptor(&sealed,directory,false).is_err());
+            let acl=decode::u32_at(&sealed,16)? as usize;
+            let users=acl+8+(8+ordinary_owner::system_sid().len())+(8+ordinary_owner::builtin(544).len());
+            for flag in [S::OBJECT_INHERIT_ACE,S::CONTAINER_INHERIT_ACE,S::INHERITED_ACE] {
+                let mut wrong=sealed.clone();wrong[users+1]=flag as u8;
+                assert!(check_descriptor(&wrong,directory,true).is_err());
+            }
+            for mask in [FS::FILE_WRITE_DATA,FS::FILE_WRITE_ATTRIBUTES,FS::DELETE,FS::FILE_DELETE_CHILD,FS::WRITE_DAC,FS::WRITE_OWNER] {
+                let mut wrong=sealed.clone();put32(&mut wrong,users+4,mask);
+                assert!(check_descriptor(&wrong,directory,true).is_err());
+            }
+        }
+    }
     use std::time::Duration;
     let mut deadline_latched = false; let mut grants = 0;
     // First mutation is timely; its original observation returns at the budget
@@ -636,6 +727,26 @@ fn acl_distinguishes_sibling_creation_from_replacement_and_mutation() -> Result<
 
 #[test]
 fn acl_bounds_and_actual_trusted_sid_are_required() -> Result<()> {
+    {
+        use qualification_fixture::{fixture_descriptor,check_descriptor};
+        let raw=fixture_descriptor(true,true)?;
+        for control in [S::SE_SELF_RELATIVE|S::SE_DACL_PRESENT,
+            S::SE_SELF_RELATIVE|S::SE_DACL_PRESENT|S::SE_DACL_PROTECTED|S::SE_OWNER_DEFAULTED,
+            S::SE_SELF_RELATIVE|S::SE_DACL_PRESENT|S::SE_DACL_PROTECTED|S::SE_DACL_AUTO_INHERITED] {
+            let mut wrong=raw.clone();put16(&mut wrong,2,control);
+            assert!(check_descriptor(&wrong,true,true).is_err());
+        }
+        let mut wrong_owner=raw.clone();let at=decode::u32_at(&raw,4)? as usize;
+        put32(&mut wrong_owner,at+12,545); // Users is not a trusted owner
+        assert!(check_descriptor(&wrong_owner,true,true).is_err());
+        let mut absent_group=raw.clone();put32(&mut absent_group,8,0);
+        assert!(check_descriptor(&absent_group,true,true).is_err());
+        let acl=decode::u32_at(&raw,16)? as usize;
+        let mut unsupported=raw.clone();unsupported[acl+8]=255;
+        assert!(check_descriptor(&unsupported,true,true).is_err());
+        let mut wrong_revision=raw.clone();wrong_revision[acl]=4;
+        assert!(check_descriptor(&wrong_revision,true,true).is_err());
+    }
     let before = ordinary_stamp();
     let mut after = before.clone(); after.change += 1;
     assert!(ordinary_owner::acl_stamp(&before, &after));
@@ -781,6 +892,23 @@ fn token_sid(header: usize, field: usize, attributes: usize, flags: u32, princip
 }
 #[test]
 fn token_context_pointer_bounds_and_enableable_authority_are_checked() -> Result<()> {
+    {
+        // The fixture's private elevated route never manufactures ordinary
+        // TokenFacts, clears refusal, or enables either public discovery route.
+        assert!(!ordinary_owner::FULLWALK_PREREQUISITES_REVIEWED);
+        let mut elevated=Inert::new();
+        let token=elevated.book.reserve(Kind::ProcessToken,None,"token","token".to_owned())?;
+        enter_inert(&mut elevated.book,Call::ProcessToken(token.index),null_mut())?;
+        return_inert(&mut elevated.book,Returned::Boolean(1,0),Some(73usize as F::HANDLE),F::STATUS_PENDING,usize::MAX)?;
+        elevated.book.process_token=Some(token.index);
+        assert!(elevated.book.user.is_none() && !elevated.book.roots_started);
+        assert!(matches!(elevated.book.known_locations_once(),Err(Error::State)));
+        let location=KnownLocation {book:Arc::clone(&elevated.book.identity),kind:LocationKind::ProgramFiles,
+            path:r"C:\Program Files".to_owned(),drive:"C:".to_owned(),device:r"\Device\HarddiskVolume3".to_owned(),
+            components:vec!["Program Files".to_owned()]};
+        assert!(matches!(elevated.book.open_volume(&location),Err(Error::State)));
+        assert!(elevated.book.user.is_none() && !elevated.book.roots_started && elevated.book.active.is_none());
+    }
     let mut wait = ordinary_owner::ProcessFacts::new(); wait.begin()?;
     wait.creation(true, 0, (101, 102, 201, 202), false)?;
     // 259 (STILL_ACTIVE) is not a wait finality receipt or a successful exit.
@@ -922,6 +1050,37 @@ fn entry(name: &str, id: [u8; 16]) -> Vec<u8> {
 }
 #[test]
 fn metadata_and_directory_keep_the_full_identity_not_a_low_half() -> Result<()> {
+    {
+        use qualification_fixture::{parse_stamp,stamp_text,same_object,child_change,payload_change,exact_entries,original_epoch};
+        let before=ordinary_stamp();assert_eq!(parse_stamp(&stamp_text(&before))?,before);
+        let mut high=before.clone();high.id[15]^=0x80;assert!(!same_object(&before,&high));
+        assert!(original_epoch(&before.wire(),&high.wire()).is_err());
+        let mut after=before.clone();after.change+=1;
+        original_epoch(&before.wire(),&after.wire())?;
+        for key in 0..9 {
+            let text=stamp_text(&before);let mut fields:Vec<_>=text.split(':').map(str::to_owned).collect();
+            match key {0|2|3|4|8=>fields[key]="0".to_owned(),1=>fields[1]="0".repeat(32),
+                5|6=>fields[key]="18446744073709551615".to_owned(),_=>fields[7]="2".to_owned()};
+            assert!(parse_stamp(&fields.join(":")).is_err());
+        }
+        assert!(payload_change(&before,&after,37));
+        let mut allocation=after.clone();allocation.allocation=1;assert!(!payload_change(&before,&allocation,37));
+        let mut directory=before.clone();directory.attributes=FS::FILE_ATTRIBUTE_DIRECTORY;directory.size=0;
+        let mut changed=directory.clone();changed.write+=1;changed.change+=1;changed.allocation+=4096;
+        assert!(child_change(&directory,&changed));
+        changed.creation+=1;assert!(!child_change(&directory,&changed));
+        let mut expected=std::collections::BTreeMap::new();expected.insert("core.zip".to_owned(),before.clone());
+        let leaf=DirectoryEntry {name:"core.zip".to_owned(),file_id:before.id,kind:FileKind::File,attributes:before.attributes};
+        assert_eq!(exact_entries(&[leaf.clone()],&expected,&directory,None)?,1);
+        for entry in [DirectoryEntry {file_id:high.id,..leaf.clone()},
+            DirectoryEntry {name:"Core.zip".to_owned(),..leaf.clone()},
+            DirectoryEntry {name:"foreign.zip".to_owned(),..leaf.clone()},
+            DirectoryEntry {attributes:FS::FILE_ATTRIBUTE_REPARSE_POINT,..leaf.clone()}] {
+            assert!(exact_entries(&[entry],&expected,&directory,None).is_err());
+        }
+        assert!(exact_entries(&[leaf.clone(),leaf],&expected,&directory,None).is_err());
+        assert!(exact_entries(&[],&expected,&directory,None).is_err());
+    }
     // Path equality can hide Windows separator differences. The owner compares
     // exact DOS name text, so check the shared construction's actual spelling.
     let directories = ordinary_owner::fixed_directories(std::path::Path::new(r"C:\owned"));
@@ -1032,6 +1191,91 @@ fn metadata_and_directory_keep_the_full_identity_not_a_low_half() -> Result<()> 
         raw.replace("artifactIdentity=", "commandSha256=")] {
         assert!(ordinary_owner::Binding::parse(altered.as_bytes()).is_err());
     }
+    // Fixed fullwalk request/result DATA reuses this existing inert control;
+    // no writer, OriginalFile, account, token query or process is entered.
+    use qualification_result::FullwalkRequest;
+    assert!(!ordinary_owner::FULLWALK_PREREQUISITES_REVIEWED);
+    let fullwalk_raw = fullwalk_request();
+    let fullwalk = FullwalkRequest::parse(fullwalk_raw.as_bytes())?;
+    fullwalk.at_root(std::path::Path::new(r"C:\owned"))?;
+    assert!(fullwalk.at_root(std::path::Path::new(r"C:\other")).is_err());
+    assert!(fullwalk.app.matches(&stamp));
+    assert!(!fullwalk.owner.matches(&stamp));
+    let mut app_after = stamp.clone(); app_after.change += 1;
+    fullwalk.app_after(&app_after.wire())?;
+    assert!(!fullwalk.app.matches(&app_after)); // pre-ACL binding is never rewritten
+    for field in 0..4 {
+        let mut changed = app_after.clone();
+        match field {
+            0 => changed.id[15] ^= 0x80, 1 => changed.change = stamp.change - 1,
+            2 => changed.attributes ^= FS::FILE_ATTRIBUTE_HIDDEN, _ => changed.creation += 1,
+        }
+        assert!(fullwalk.app_after(&changed.wire()).is_err());
+    }
+    let alias = fullwalk_raw.replace(&format!("ownerArtifactIdentity={}", fullwalk.owner.identity),
+        &format!("ownerArtifactIdentity={}", app_after.wire()));
+    assert!(FullwalkRequest::parse(alias.as_bytes()).is_err()); // same pair, distinct ChangeTime is still one original
+    for altered in [
+        fullwalk_raw.replace("role=protected-version-fullwalk", "role=ordinary"),
+        fullwalk_raw.replace(qualification_result::FULLWALK_CHILD, ordinary_owner::CHILD),
+        fullwalk_raw.replace("attempt=1", "attempt=2"),
+        fullwalk_raw.replace("appArtifactBytes=37", "appArtifactBytes=536870913"),
+        fullwalk_raw.replace("ownerArtifactBytes=37", "ownerArtifactBytes=134217729"),
+        fullwalk_raw.replace("payloadFiles=45", "payloadFiles=2048"),
+        fullwalk_raw.replace("payloadBytes=987654", "payloadBytes=1073741825"),
+        fullwalk_raw.replace("publicationReceiptBytes=233", "publicationReceiptBytes=0"),
+        fullwalk_raw.replace("appCompileArgvSha256=", "ownerCompileArgvSha256="),
+        fullwalk_raw.replace("mobile_release_desktop-", "mrk_windows_installed_native-"),
+        fullwalk_raw.replace("versionIdentity=77:", "versionIdentity=0:"),
+        fullwalk_raw.replace('\n', "\r\n"), fullwalk_raw.clone() + "extra=1\n",
+    ] { assert!(FullwalkRequest::parse(altered.as_bytes()).is_err()); }
+    for (field, value) in [("appArtifactBytes=37", "appArtifactBytes=536870912"),
+        ("ownerArtifactBytes=37", "ownerArtifactBytes=134217728")] {
+        assert!(FullwalkRequest::parse(fullwalk_raw.replace(field, value).as_bytes()).is_ok());
+    }
+    assert!(ordinary_owner::Binding::parse(raw.replace("artifactBytes=37", "artifactBytes=134217729").as_bytes()).is_err());
+    let request_hash = "5".repeat(64); let account_hash = "6".repeat(64);
+    let actual = fullwalk.expected(&account_hash, 123);
+    let record = fullwalk.result(&request_hash, &actual)?;
+    assert!(record.len() <= 4096 && record.ends_with('\n'));
+    assert_eq!(fullwalk.accept_result(record.as_bytes(), &request_hash, &account_hash)?, 123);
+    assert!(record.contains("\"entries\":123") && record.contains("\"inspectionComplete\":true,\"bookSettled\":true"));
+    assert!(record.contains(&format!("\"fileId\":\"{}\"", "22".repeat(16))));
+    assert!(!record.contains("C:\\") && !record.contains("S-1-") && !record.contains("\"closed\":true"));
+    for field in 0..15 {
+        let mut changed = actual.clone();
+        match field {
+            0 => changed.target = "aarch64-apple-darwin".to_owned(),
+            1 => changed.manifest_sha256 = "0".repeat(64),
+            2 => changed.protocol_sha256 = "0".repeat(64),
+            3 => changed.inventory_sha256 = "0".repeat(64),
+            4 => changed.core_sha256 = "0".repeat(64),
+            5 => changed.files += 1,
+            6 => changed.payload_bytes += 1,
+            7 => changed.version_identity.file_id[15] ^= 0x80,
+            8 => changed.selected_identities[0].file_id[15] ^= 0x80,
+            9 => changed.selected_identities.swap(0, 1),
+            10 => changed.account_sid_sha256 = "wrong".to_owned(),
+            11 => changed.entries = changed.files,
+            12 => changed.entries = 8193,
+            13 => changed.selected_identities[1] = changed.selected_identities[0],
+            _ => changed.version_identity.volume_serial = 0,
+        }
+        assert!(fullwalk.result(&request_hash, &changed).is_err());
+    }
+    for altered in [
+        String::new(), record[..record.len() - 1].to_owned(), record.clone() + "{}\n",
+        record.replace("\"entries\":123", "\"entries\":00123"),
+        record.replace("\"inspectionComplete\":true", "\"inspectionComplete\":false"),
+        record.replace("\"bookSettled\":true", "\"bookSettled\":false"),
+        record.replace("\"writeCalls\":1", "\"writeCalls\":2"),
+        record.replace("original-child-exit-zero-required", "self-closed"),
+        record.replace(&account_hash, &"0".repeat(64)),
+        record.replace(&format!("\"fileId\":\"{}\"", "22".repeat(16)), &format!("\"fileId\":\"{}80\"", "22".repeat(15))),
+    ] { assert!(fullwalk.accept_result(altered.as_bytes(), &request_hash, &account_hash).is_err()); }
+    assert!(fullwalk.accept_result(record.as_bytes(), &"0".repeat(64), &account_hash).is_err());
+    assert!(fullwalk.accept_result(record.as_bytes(), &request_hash, &"0".repeat(64)).is_err());
+
     let mut basic = vec![0; size_of::<FS::FILE_BASIC_INFO>()];
     let mut standard = vec![0; size_of::<FS::FILE_STANDARD_INFO>()];
     let mut tag = vec![0; size_of::<FS::FILE_ATTRIBUTE_TAG_INFO>()];
@@ -1114,6 +1358,39 @@ fn stream(name: &str) -> Vec<u8> {
 }
 #[test]
 fn stream_and_component_refusals_cannot_be_treated_as_absence() -> Result<()> {
+    {
+        use qualification_result::complete_fixture_write;
+        use qualification_fixture::{roster,number,Wire,PAYLOAD_NAMES,INVOCATION_HEADER,INVOCATION_FIELDS};
+        for bytes in [65536usize,65537,128<<20] {
+            assert!(complete_fixture_write(true,bytes as u32,bytes,true));
+            assert!(!complete_fixture_write(true,(bytes-1) as u32,bytes,true));
+            assert!(!complete_fixture_write(true,bytes as u32,bytes,false));
+        }
+        assert!(!complete_fixture_write(true,(128<<20)+1,(128<<20)+1,true));
+        assert!(!ordinary_owner::complete_write(true,65537,65537,true)); // legacy result ceiling unchanged
+        let raw="MRK_WINDOWS_FULLWALK_ROSTER_V1\n".to_owned()+&PAYLOAD_NAMES.iter()
+            .map(|name|format!("file={name}|37|{}\n","1".repeat(64))).collect::<String>();
+        let rows=roster(raw.as_bytes())?;assert_eq!(rows.len(),47);
+        assert_eq!(rows.iter().map(|p|p.path.as_str()).collect::<Vec<_>>(),PAYLOAD_NAMES.to_vec());
+        for wrong in [raw.replacen("android_build_bootstrap.py","../android_build_bootstrap.py",1),
+            raw.replacen("python/python.exe","python/Python.exe",1),
+            raw.replacen("|37|","|037|",1),raw.replacen("|37|","|0|",1),
+            raw.replacen("|37|","|134217729|",1),raw.clone()+"file=extra|1|bad\n",
+            raw.replace('\n',"\r\n")] {assert!(roster(wrong.as_bytes()).is_err());}
+        for scalar in ["", "+1", "01", "-1", "true", "18446744073709551616"] {
+            assert!(number(scalar,u64::MAX).is_err());
+        }
+        assert_eq!(number("0",u64::MAX)?,0);
+        let value=qualification_fixture::invocation(&"1".repeat(40),&"2".repeat(40),"123456",37,
+            &"3".repeat(64),&ordinary_stamp().wire(),&"4".repeat(64),&"5".repeat(64),700)?;
+        let encoded=value.encoded(INVOCATION_HEADER,&INVOCATION_FIELDS,4096)?;
+        assert_eq!(Wire::parse(&encoded,INVOCATION_HEADER,&INVOCATION_FIELDS,4096)?.get("originTickMs")?,"700");
+        let text=String::from_utf8(encoded).unwrap();
+        for wrong in [text.replace('\n',"\r\n"),text.clone()+"extra=1\n",
+            text.replacen("profile=","profile=x\nprofile=",1),text.replacen("runId=123456","runId=\0",1)] {
+            assert!(Wire::parse(wrong.as_bytes(),INVOCATION_HEADER,&INVOCATION_FIELDS,4096).is_err());
+        }
+    }
     assert!(ordinary_owner::complete_write(true, 37, 37, true));
     for (returned, count, bytes, closed) in [
         (false, 37, 37, true), (true, 36, 37, true), (true, 38, 37, true),
@@ -1121,6 +1398,20 @@ fn stream_and_component_refusals_cannot_be_treated_as_absence() -> Result<()> {
     ] {
         assert!(!ordinary_owner::complete_write(returned, count, bytes, closed));
     }
+    // The reporting path uses the same once-only write predicate and an
+    // absorbing ORIGINAL end. Synthetic time is DATA, not a native deadline run.
+    let start = std::time::Instant::now();
+    let end = start + std::time::Duration::from_secs(12);
+    let mut latched = false;
+    qualification_result::reporting_effect(start, end, &mut latched)?;
+    assert!(ordinary_owner::complete_write(true, 4096, 4096, true));
+    assert!(!ordinary_owner::complete_write(true, 4095, 4096, true)); // no short-write retry
+    assert!(!ordinary_owner::complete_write(true, 4096, 4096, false)); // no inferred close
+    assert_eq!(qualification_result::reporting_effect(end, end, &mut latched), Err(Error::Unsafe));
+    assert_eq!(qualification_result::reporting_effect(start, end, &mut latched), Err(Error::Unsafe));
+    // A same-original close may complete, but even a complete write cannot make
+    // the latched reporting boundary pass after the fact.
+    assert!(!(ordinary_owner::complete_write(true, 4096, 4096, true) && !latched));
     let unnamed = stream("::$DATA");
     assert_eq!(decode::streams(&unnamed, FileKind::File), Ok(()));
     assert_eq!(decode::streams(&[], FileKind::Directory), Ok(()));
@@ -1153,4 +1444,34 @@ fn ordinary_stamp() -> ordinary_owner::Stamp {
 fn ordinary_request(stamp: &ordinary_owner::Stamp) -> String {
     format!("MRK_WINDOWS_ORDINARY_REQUEST_V1\nsourceSha={}\nsourceTree={}\nrunId=123456\nattempt=1\nartifact=C:\\owned\\native.exe\nartifactBytes=37\nartifactSha256={}\ncommandSha256={}\nartifactIdentity={}\n",
         "1".repeat(40), "2".repeat(40), "3".repeat(64), "4".repeat(64), stamp.wire())
+}
+
+// Pure fullwalk fixture for the existing metadata control. These synthetic
+// bindings are never offered to the native writer or treated as publication.
+fn fullwalk_request() -> String {
+    let app = ordinary_stamp(); let mut owner = app.clone(); owner.id = [0x12; 16];
+    let fields = [
+        ("role", "protected-version-fullwalk".to_owned()),
+        ("test", qualification_result::FULLWALK_CHILD.to_owned()),
+        ("sourceSha", "1".repeat(40)), ("sourceTree", "2".repeat(40)), ("runId", "123456".to_owned()), ("attempt", "1".to_owned()),
+        ("appArtifact", r"C:\owned\target\x86_64-pc-windows-msvc\debug\deps\mobile_release_desktop-1111111111111111.exe".to_owned()),
+        ("appArtifactBytes", "37".to_owned()), ("appArtifactSha256", "3".repeat(64)), ("appArtifactIdentity", app.wire()),
+        ("appCommandSha256", "4".repeat(64)), ("appCompileMessagesBytes", "123".to_owned()),
+        ("appCompileMessagesSha256", "5".repeat(64)), ("appCompileArgvSha256", "6".repeat(64)),
+        ("ownerArtifact", r"C:\owned\target\x86_64-pc-windows-msvc\debug\deps\mrk_windows_installed_native-2222222222222222.exe".to_owned()),
+        ("ownerArtifactBytes", "37".to_owned()), ("ownerArtifactSha256", "7".repeat(64)), ("ownerArtifactIdentity", owner.wire()),
+        ("ownerCommandSha256", "8".repeat(64)), ("ownerCompileMessagesBytes", "234".to_owned()),
+        ("ownerCompileMessagesSha256", "9".repeat(64)), ("ownerCompileArgvSha256", "a".repeat(64)),
+        ("manifestSha256", "b".repeat(64)), ("protocolSha256", "c".repeat(64)),
+        ("inventorySha256", "d".repeat(64)), ("coreSha256", "e".repeat(64)),
+        ("payloadFiles", "45".to_owned()), ("payloadBytes", "987654".to_owned()),
+        ("publicationReceiptBytes", "233".to_owned()), ("publicationReceiptSha256", "f".repeat(64)),
+        ("versionIdentity", format!("77:{}", "21".repeat(16))),
+        ("selectedPythonIdentity", format!("77:{}", "22".repeat(16))),
+        ("selectedBootstrapIdentity", format!("77:{}", "23".repeat(16))),
+        ("selectedCoreIdentity", format!("77:{}", "24".repeat(16))),
+    ];
+    let mut raw = "MRK_WINDOWS_FULLWALK_REQUEST_V1\n".to_owned();
+    for (name, value) in fields { raw.push_str(name); raw.push('='); raw.push_str(&value); raw.push('\n'); }
+    raw
 }

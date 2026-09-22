@@ -74,6 +74,11 @@ nix = { version = "=0.30.1", default-features = false, features = ["time"] }
 [target.'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'.dependencies]
 mrk-windows-installed-native = { path = "../native/windows-installed-native" }
 
+# The fixed headless app libtest alone gets the safe qualification result seam.
+# Normal app/native units remain featureless; this is not fullwalk launch GO.
+[target.'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'.dev-dependencies]
+mrk-windows-installed-native = { path = "../native/windows-installed-native", features = ["qualification-result"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { version = "=0.18.2", optional = true, default-features = false, features = [] }
 webkit2gtk = { version = "=2.0.2", optional = true, default-features = false, features = ["v2_20"] }

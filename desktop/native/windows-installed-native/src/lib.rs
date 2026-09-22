@@ -28,6 +28,10 @@ use windows_sys::Win32::UI::Shell as SH;
 
 mod decode;
 mod security;
+#[cfg(any(test, feature = "qualification-result"))]
+mod qualification_result;
+#[cfg(feature = "qualification-result")]
+pub use qualification_result::{write_fullwalk_result_once, FullwalkFacts};
 pub use decode::{DirectoryEntry, FileIdentity, Metadata};
 pub use security::{AceFact, GroupFact, SecurityFacts, Sid, TokenFacts, TokenIdentity};
 
@@ -798,3 +802,6 @@ mod hosted_tests;
 
 #[cfg(test)]
 mod ordinary_owner;
+
+#[cfg(test)]
+mod qualification_fixture;

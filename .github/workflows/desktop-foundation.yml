@@ -37,7 +37,7 @@ on:
         required: true
         type: choice
         default: foundation
-        options: [foundation, windows-snapshot, windows-installed-native, conventional-prepare, conventional-smoke]
+        options: [foundation, windows-snapshot, windows-installed-native, windows-installed-fullwalk, conventional-prepare, conventional-smoke]
       expected_sha:
         description: Exact reviewed commit on the selected ref (verification only)
         required: true
@@ -508,7 +508,7 @@ jobs:
     name: Windows MSVC headless reader and native facts / no runtime enablement
     if: >-
       github.ref == 'refs/heads/verify/desktop-windows-installed-native' &&
-      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.scope == 'windows-installed-native'))
+      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.scope == 'windows-installed-native' || inputs.scope == 'windows-installed-fullwalk')))
     runs-on: windows-2025-vs2026
     timeout-minutes: 35
     env:
@@ -539,11 +539,11 @@ jobs:
             printf '%s\n' 'MRK_WINDOWS_INSTALLED_ROUTE_REFUSED=source' >&2; exit 1;
           }
           if [[ "${GITHUB_EVENT_NAME:-}" == workflow_dispatch ]]; then
-            [[ "${MRK_DESKTOP_DISPATCH_SCOPE:-}" == windows-installed-native && "${MRK_DESKTOP_EXPECTED_SHA:-}" == "${GITHUB_SHA:-}" ]] || {
+            [[ ( "${MRK_DESKTOP_DISPATCH_SCOPE:-}" == windows-installed-native || "${MRK_DESKTOP_DISPATCH_SCOPE:-}" == windows-installed-fullwalk ) && "${MRK_DESKTOP_EXPECTED_SHA:-}" == "${GITHUB_SHA:-}" ]] || {
               printf '%s\n' 'MRK_WINDOWS_INSTALLED_ROUTE_REFUSED=dispatch' >&2; exit 1;
             }
           else
-            [[ "${GITHUB_EVENT_NAME:-}" == push ]] || {
+            [[ "${GITHUB_EVENT_NAME:-}" == push && -z "${MRK_DESKTOP_DISPATCH_SCOPE:-}" && -z "${MRK_DESKTOP_EXPECTED_SHA:-}" ]] || {
               printf '%s\n' 'MRK_WINDOWS_INSTALLED_ROUTE_REFUSED=event' >&2; exit 1;
             }
           fi
@@ -594,8 +594,9 @@ jobs:
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-installed-native'
-      - name: Own one fixed ordinary native child by its original logon handles
-        id: ordinary-owner
+      - name: Publish one protected synthetic version and observe occupied-create refusal
+        id: fixture-publisher
+        if: success() && inputs.scope == 'windows-installed-fullwalk' && steps.ordinary-preflight.outcome == 'success'
         timeout-minutes: 4
         shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
         env:
@@ -603,6 +604,72 @@ jobs:
           MRK_WINDOWS_NATIVE_ARTIFACT: ${{ steps.ordinary-preflight.outputs.artifact }}
           MRK_WINDOWS_NATIVE_ARTIFACT_SHA256: ${{ steps.ordinary-preflight.outputs.artifactSha256 }}
           MRK_WINDOWS_SOURCE_TREE: ${{ steps.ordinary-preflight.outputs.sourceTree }}
+          MRK_WINDOWS_PRECHECK_SHA256: ${{ steps.ordinary-preflight.outputs.precheckSha256 }}
+          MRK_WINDOWS_ORDINARY_PREFLIGHT_STEP_OUTCOME: ${{ steps.ordinary-preflight.outcome }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          try {
+            $expectedRoot = [System.IO.Path]::Combine($env:RUNNER_TEMP, "mrk-windows-installed-native-$($env:GITHUB_RUN_ID)-1")
+            $expectedDeps = [System.IO.Path]::Combine($expectedRoot, 'target', 'x86_64-pc-windows-msvc', 'debug', 'deps')
+            if ($env:GITHUB_RUN_ATTEMPT -cne '1' -or $env:MRK_DESKTOP_CI_ROOT -cne $expectedRoot -or
+                $env:GITHUB_EVENT_NAME -cne 'workflow_dispatch' -or $env:MRK_DESKTOP_DISPATCH_SCOPE -cne 'windows-installed-fullwalk' -or
+                $env:MRK_DESKTOP_EXPECTED_SHA -cne $env:GITHUB_SHA -or
+                [System.IO.Path]::GetDirectoryName($env:MRK_WINDOWS_NATIVE_ARTIFACT) -cne $expectedDeps -or
+                [System.IO.Path]::GetFileName($env:MRK_WINDOWS_NATIVE_ARTIFACT) -cnotmatch '^mrk_windows_installed_native-[0-9a-f]{16}\.exe$' -or
+                $env:MRK_WINDOWS_NATIVE_ARTIFACT_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+                $env:MRK_WINDOWS_SOURCE_TREE -cnotmatch '^[0-9a-f]{40}$') { throw 'binding' }
+            if ($env:MRK_WINDOWS_PRECHECK_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:MRK_WINDOWS_ORDINARY_PREFLIGHT_STEP_OUTCOME -cne 'success') { throw 'precheck' }
+            Set-Location -LiteralPath $expectedRoot
+            # One fixed direct foreground original. No Process object, pipe, retry or timeout-kill wrapper.
+            & $env:MRK_WINDOWS_NATIVE_ARTIFACT qualification_fixture::hosted_publish_protected_version_fixture --exact --ignored --nocapture --test-threads=1
+            $originalExitCode = $LASTEXITCODE
+            if ($originalExitCode -isnot [int]) { throw 'original-exit' }
+            $receipt = [ordered]@{
+              schemaVersion = 1; sourceSha = $env:GITHUB_SHA; sourceTree = $env:MRK_WINDOWS_SOURCE_TREE
+              runId = $env:GITHUB_RUN_ID; attempt = 1
+              artifactSha256 = $env:MRK_WINDOWS_NATIVE_ARTIFACT_SHA256
+              publisherTest = 'qualification_fixture::hosted_publish_protected_version_fixture'
+              precheckSha256 = $env:MRK_WINDOWS_PRECHECK_SHA256
+              originalWaitReturned = $true; exitCode = $originalExitCode
+              writerCloseGate = 'original-publisher-step-success-required'
+            }
+            $raw = [System.Text.UTF8Encoding]::new($false, $true).GetBytes(($receipt | ConvertTo-Json -Depth 4 -Compress))
+            if ($raw.Length -eq 0 -or $raw.Length -gt 4096) { throw 'exit-bound' }
+            $path = [System.IO.Path]::Combine($expectedRoot, 'fullwalk-publisher-exit.private.json')
+            $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            try { $stream.Write($raw, 0, $raw.Length); $stream.Flush() } finally { $stream.Dispose() }
+            # Only THIS later original step success closes the preceding exit record.
+            if ($originalExitCode -ne 0) { exit $originalExitCode }
+          } catch {
+            [Console]::Error.WriteLine('MRK_WINDOWS_PUBLISHER_REFUSED=original-or-exit-record')
+            exit 1
+          }
+      - name: Validate separately closed protected-fixture evidence as DATA
+        id: fixture-finalize
+        if: success() && inputs.scope == 'windows-installed-fullwalk' && steps.fixture-publisher.outcome == 'success'
+        timeout-minutes: 2
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          MRK_WINDOWS_ORDINARY_PREFLIGHT_STEP_OUTCOME: ${{ steps.ordinary-preflight.outcome }}
+          MRK_WINDOWS_PUBLISHER_STEP_OUTCOME: ${{ steps.fixture-publisher.outcome }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-installed-fixture-finalize'
+      - name: Own one fixed ordinary native child by its original logon handles
+        id: ordinary-owner
+        if: success() && (inputs.scope != 'windows-installed-fullwalk' || steps.fixture-finalize.outcome == 'success')
+        timeout-minutes: 4
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          MRK_WINDOWS_NATIVE_ARTIFACT: ${{ steps.ordinary-preflight.outputs.artifact }}
+          MRK_WINDOWS_NATIVE_ARTIFACT_SHA256: ${{ steps.ordinary-preflight.outputs.artifactSha256 }}
+          MRK_WINDOWS_SOURCE_TREE: ${{ steps.ordinary-preflight.outputs.sourceTree }}
+          MRK_WINDOWS_PUBLISHER_STEP_OUTCOME: ${{ steps.fixture-publisher.outcome }}
+          MRK_WINDOWS_FIXTURE_FINALIZE_STEP_OUTCOME: ${{ steps.fixture-finalize.outcome }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           $ErrorActionPreference = 'Stop'
@@ -641,6 +708,7 @@ jobs:
             exit 1
           }
       - name: Validate separately closed ordinary native and parent evidence as DATA
+        id: ordinary-finalize
         if: success() && steps.ordinary-owner.outcome == 'success'
         timeout-minutes: 2
         shell: bash
@@ -648,8 +716,161 @@ jobs:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
           MRK_WINDOWS_ORDINARY_OWNER_STEP_OUTCOME: ${{ steps.ordinary-owner.outcome }}
+          MRK_WINDOWS_PUBLISHER_STEP_OUTCOME: ${{ steps.fixture-publisher.outcome }}
+          MRK_WINDOWS_FIXTURE_FINALIZE_STEP_OUTCOME: ${{ steps.fixture-finalize.outcome }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-installed-native-finalize'
+      - name: Bind original publication and ordinary finality before the fullwalk request
+        id: fullwalk-preflight
+        if: success() && inputs.scope == 'windows-installed-fullwalk' && steps.ordinary-finalize.outcome == 'success' && steps.fixture-finalize.outcome == 'success'
+        timeout-minutes: 2
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          MRK_WINDOWS_PUBLISHER_STEP_OUTCOME: ${{ steps.fixture-publisher.outcome }}
+          MRK_WINDOWS_FIXTURE_FINALIZE_STEP_OUTCOME: ${{ steps.fixture-finalize.outcome }}
+          MRK_WINDOWS_ORDINARY_OWNER_STEP_OUTCOME: ${{ steps.ordinary-owner.outcome }}
+          MRK_WINDOWS_ORDINARY_FINALIZE_STEP_OUTCOME: ${{ steps.ordinary-finalize.outcome }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-installed-fullwalk'
+      - name: Own one protected-version headless app child by its original logon handles
+        id: fullwalk-owner
+        if: success() && inputs.scope == 'windows-installed-fullwalk' && steps.fullwalk-preflight.outcome == 'success'
+        timeout-minutes: 4
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          MRK_WINDOWS_NATIVE_ARTIFACT: ${{ steps.fullwalk-preflight.outputs.artifact }}
+          MRK_WINDOWS_NATIVE_ARTIFACT_SHA256: ${{ steps.fullwalk-preflight.outputs.artifactSha256 }}
+          MRK_WINDOWS_APP_ARTIFACT_SHA256: ${{ steps.fullwalk-preflight.outputs.appArtifactSha256 }}
+          MRK_WINDOWS_REQUEST_SHA256: ${{ steps.fullwalk-preflight.outputs.requestSha256 }}
+          MRK_WINDOWS_SOURCE_TREE: ${{ steps.fullwalk-preflight.outputs.sourceTree }}
+          MRK_WINDOWS_FULLWALK_PREFLIGHT_STEP_OUTCOME: ${{ steps.fullwalk-preflight.outcome }}
+          MRK_WINDOWS_PUBLISHER_STEP_OUTCOME: ${{ steps.fixture-publisher.outcome }}
+          MRK_WINDOWS_FIXTURE_FINALIZE_STEP_OUTCOME: ${{ steps.fixture-finalize.outcome }}
+          MRK_WINDOWS_ORDINARY_OWNER_STEP_OUTCOME: ${{ steps.ordinary-owner.outcome }}
+          MRK_WINDOWS_ORDINARY_FINALIZE_STEP_OUTCOME: ${{ steps.ordinary-finalize.outcome }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          try {
+            $expectedRoot = [System.IO.Path]::Combine($env:RUNNER_TEMP, "mrk-windows-installed-native-$($env:GITHUB_RUN_ID)-1")
+            $expectedDeps = [System.IO.Path]::Combine($expectedRoot, 'target', 'x86_64-pc-windows-msvc', 'debug', 'deps')
+            if ($env:GITHUB_RUN_ATTEMPT -cne '1' -or $env:MRK_DESKTOP_CI_ROOT -cne $expectedRoot -or
+                $env:GITHUB_EVENT_NAME -cne 'workflow_dispatch' -or $env:MRK_DESKTOP_DISPATCH_SCOPE -cne 'windows-installed-fullwalk' -or
+                $env:MRK_DESKTOP_EXPECTED_SHA -cne $env:GITHUB_SHA -or
+                [System.IO.Path]::GetDirectoryName($env:MRK_WINDOWS_NATIVE_ARTIFACT) -cne $expectedDeps -or
+                [System.IO.Path]::GetFileName($env:MRK_WINDOWS_NATIVE_ARTIFACT) -cnotmatch '^mrk_windows_installed_native-[0-9a-f]{16}\.exe$' -or
+                $env:MRK_WINDOWS_NATIVE_ARTIFACT_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+                $env:MRK_WINDOWS_SOURCE_TREE -cnotmatch '^[0-9a-f]{40}$') { throw 'binding' }
+            if ($env:MRK_WINDOWS_APP_ARTIFACT_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+                $env:MRK_WINDOWS_REQUEST_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+                $env:MRK_WINDOWS_FULLWALK_PREFLIGHT_STEP_OUTCOME -cne 'success') { throw 'preflight' }
+            Set-Location -LiteralPath $expectedRoot
+            # One fixed direct foreground original. No Process object, pipe, retry or timeout-kill wrapper.
+            & $env:MRK_WINDOWS_NATIVE_ARTIFACT ordinary_owner::hosted_protected_version_fullwalk_contract --exact --ignored --nocapture --test-threads=1
+            $originalExitCode = $LASTEXITCODE
+            if ($originalExitCode -isnot [int]) { throw 'original-exit' }
+            $receipt = [ordered]@{
+              schemaVersion = 1; sourceSha = $env:GITHUB_SHA; sourceTree = $env:MRK_WINDOWS_SOURCE_TREE
+              runId = $env:GITHUB_RUN_ID; attempt = 1
+              artifactSha256 = $env:MRK_WINDOWS_APP_ARTIFACT_SHA256
+              ownerArtifactSha256 = $env:MRK_WINDOWS_NATIVE_ARTIFACT_SHA256; requestSha256 = $env:MRK_WINDOWS_REQUEST_SHA256
+              ownerTest = 'ordinary_owner::hosted_protected_version_fullwalk_contract'
+              originalWaitReturned = $true; exitCode = $originalExitCode
+              writerCloseGate = 'original-owner-step-success-required'
+            }
+            $raw = [System.Text.UTF8Encoding]::new($false, $true).GetBytes(($receipt | ConvertTo-Json -Depth 4 -Compress))
+            if ($raw.Length -eq 0 -or $raw.Length -gt 4096) { throw 'exit-bound' }
+            $path = [System.IO.Path]::Combine($expectedRoot, 'fullwalk-owner-exit.private.json')
+            $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            try { $stream.Write($raw, 0, $raw.Length); $stream.Flush() } finally { $stream.Dispose() }
+            # Only THIS later original step success closes the preceding exit record.
+            if ($originalExitCode -ne 0) { exit $originalExitCode }
+          } catch {
+            [Console]::Error.WriteLine('MRK_WINDOWS_FULLWALK_OWNER_REFUSED=original-or-exit-record')
+            exit 1
+          }
+      - name: Validate separately closed protected-version app and owner evidence as DATA
+        id: fullwalk-finalize
+        if: success() && inputs.scope == 'windows-installed-fullwalk' && steps.fullwalk-owner.outcome == 'success'
+        timeout-minutes: 2
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          MRK_WINDOWS_FULLWALK_PREFLIGHT_STEP_OUTCOME: ${{ steps.fullwalk-preflight.outcome }}
+          MRK_WINDOWS_FULLWALK_OWNER_STEP_OUTCOME: ${{ steps.fullwalk-owner.outcome }}
+          MRK_WINDOWS_PUBLISHER_STEP_OUTCOME: ${{ steps.fixture-publisher.outcome }}
+          MRK_WINDOWS_FIXTURE_FINALIZE_STEP_OUTCOME: ${{ steps.fixture-finalize.outcome }}
+          MRK_WINDOWS_ORDINARY_OWNER_STEP_OUTCOME: ${{ steps.ordinary-owner.outcome }}
+          MRK_WINDOWS_ORDINARY_FINALIZE_STEP_OUTCOME: ${{ steps.ordinary-finalize.outcome }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-installed-fullwalk-finalize'
+      - name: Retire only exact recorded fixture originals after both successful finalizers
+        id: fixture-retirement
+        if: success() && inputs.scope == 'windows-installed-fullwalk' && steps.ordinary-finalize.outcome == 'success' && steps.fullwalk-finalize.outcome == 'success'
+        timeout-minutes: 4
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          MRK_WINDOWS_NATIVE_ARTIFACT: ${{ steps.fullwalk-preflight.outputs.artifact }}
+          MRK_WINDOWS_NATIVE_ARTIFACT_SHA256: ${{ steps.fullwalk-preflight.outputs.artifactSha256 }}
+          MRK_WINDOWS_REQUEST_SHA256: ${{ steps.fullwalk-preflight.outputs.requestSha256 }}
+          MRK_WINDOWS_PUBLISHER_RECEIPT_SHA256: ${{ steps.fullwalk-preflight.outputs.publisherReceiptSha256 }}
+          MRK_WINDOWS_SOURCE_TREE: ${{ steps.fullwalk-preflight.outputs.sourceTree }}
+          MRK_WINDOWS_FULLWALK_PREFLIGHT_STEP_OUTCOME: ${{ steps.fullwalk-preflight.outcome }}
+          MRK_WINDOWS_FULLWALK_OWNER_STEP_OUTCOME: ${{ steps.fullwalk-owner.outcome }}
+          MRK_WINDOWS_FULLWALK_FINALIZE_STEP_OUTCOME: ${{ steps.fullwalk-finalize.outcome }}
+          MRK_WINDOWS_PUBLISHER_STEP_OUTCOME: ${{ steps.fixture-publisher.outcome }}
+          MRK_WINDOWS_FIXTURE_FINALIZE_STEP_OUTCOME: ${{ steps.fixture-finalize.outcome }}
+          MRK_WINDOWS_ORDINARY_OWNER_STEP_OUTCOME: ${{ steps.ordinary-owner.outcome }}
+          MRK_WINDOWS_ORDINARY_FINALIZE_STEP_OUTCOME: ${{ steps.ordinary-finalize.outcome }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          try {
+            $expectedRoot = [System.IO.Path]::Combine($env:RUNNER_TEMP, "mrk-windows-installed-native-$($env:GITHUB_RUN_ID)-1")
+            $expectedDeps = [System.IO.Path]::Combine($expectedRoot, 'target', 'x86_64-pc-windows-msvc', 'debug', 'deps')
+            if ($env:GITHUB_RUN_ATTEMPT -cne '1' -or $env:MRK_DESKTOP_CI_ROOT -cne $expectedRoot -or
+                $env:GITHUB_EVENT_NAME -cne 'workflow_dispatch' -or $env:MRK_DESKTOP_DISPATCH_SCOPE -cne 'windows-installed-fullwalk' -or
+                $env:MRK_DESKTOP_EXPECTED_SHA -cne $env:GITHUB_SHA -or
+                [System.IO.Path]::GetDirectoryName($env:MRK_WINDOWS_NATIVE_ARTIFACT) -cne $expectedDeps -or
+                [System.IO.Path]::GetFileName($env:MRK_WINDOWS_NATIVE_ARTIFACT) -cnotmatch '^mrk_windows_installed_native-[0-9a-f]{16}\.exe$' -or
+                $env:MRK_WINDOWS_NATIVE_ARTIFACT_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+                $env:MRK_WINDOWS_SOURCE_TREE -cnotmatch '^[0-9a-f]{40}$') { throw 'binding' }
+            if ($env:MRK_WINDOWS_REQUEST_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+                $env:MRK_WINDOWS_PUBLISHER_RECEIPT_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+                $env:MRK_WINDOWS_ORDINARY_FINALIZE_STEP_OUTCOME -cne 'success' -or
+                $env:MRK_WINDOWS_FULLWALK_FINALIZE_STEP_OUTCOME -cne 'success') { throw 'finality' }
+            Set-Location -LiteralPath $expectedRoot
+            # One fixed direct foreground original. No Process object, pipe, retry or timeout-kill wrapper.
+            & $env:MRK_WINDOWS_NATIVE_ARTIFACT qualification_fixture::hosted_retire_protected_version_fixture --exact --ignored --nocapture --test-threads=1
+            $originalExitCode = $LASTEXITCODE
+            if ($originalExitCode -isnot [int]) { throw 'original-exit' }
+            $receipt = [ordered]@{
+              schemaVersion = 1; sourceSha = $env:GITHUB_SHA; sourceTree = $env:MRK_WINDOWS_SOURCE_TREE
+              runId = $env:GITHUB_RUN_ID; attempt = 1
+              profile = 'windows-installed-fullwalk-v1'; artifactSha256 = $env:MRK_WINDOWS_NATIVE_ARTIFACT_SHA256
+              requestSha256 = $env:MRK_WINDOWS_REQUEST_SHA256; publisherReceiptSha256 = $env:MRK_WINDOWS_PUBLISHER_RECEIPT_SHA256
+              retirementTest = 'qualification_fixture::hosted_retire_protected_version_fixture'
+              originalWaitReturned = $true; exitCode = $originalExitCode
+              writerCloseGate = 'original-retirement-step-success-required'
+            }
+            $raw = [System.Text.UTF8Encoding]::new($false, $true).GetBytes(($receipt | ConvertTo-Json -Depth 4 -Compress))
+            if ($raw.Length -eq 0 -or $raw.Length -gt 4096) { throw 'exit-bound' }
+            $path = [System.IO.Path]::Combine($expectedRoot, 'fullwalk-retirement-exit.private.json')
+            $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            try { $stream.Write($raw, 0, $raw.Length); $stream.Flush() } finally { $stream.Dispose() }
+            # Only THIS later original step success closes the preceding exit record.
+            if ($originalExitCode -ne 0) { exit $originalExitCode }
+          } catch {
+            [Console]::Error.WriteLine('MRK_WINDOWS_RETIREMENT_REFUSED=original-or-exit-record')
+            exit 1
+          }
       - name: Observe actual PowerShell and loaded Process identity as DATA only
         id: runtime-data
         if: always() && steps.prepare.outcome == 'success'
@@ -716,6 +937,14 @@ jobs:
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           MRK_WINDOWS_RUNTIME_DATA_STEP_OUTCOME: ${{ steps.runtime-data.outcome }}
+          MRK_WINDOWS_PUBLISHER_STEP_OUTCOME: ${{ steps.fixture-publisher.outcome }}
+          MRK_WINDOWS_FIXTURE_FINALIZE_STEP_OUTCOME: ${{ steps.fixture-finalize.outcome }}
+          MRK_WINDOWS_ORDINARY_OWNER_STEP_OUTCOME: ${{ steps.ordinary-owner.outcome }}
+          MRK_WINDOWS_ORDINARY_FINALIZE_STEP_OUTCOME: ${{ steps.ordinary-finalize.outcome }}
+          MRK_WINDOWS_FULLWALK_PREFLIGHT_STEP_OUTCOME: ${{ steps.fullwalk-preflight.outcome }}
+          MRK_WINDOWS_FULLWALK_OWNER_STEP_OUTCOME: ${{ steps.fullwalk-owner.outcome }}
+          MRK_WINDOWS_FULLWALK_FINALIZE_STEP_OUTCOME: ${{ steps.fullwalk-finalize.outcome }}
+          MRK_WINDOWS_RETIREMENT_STEP_OUTCOME: ${{ steps.fixture-retirement.outcome }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py retain'
       - name: Upload bounded original verification evidence
         if: always() && steps.retain.outcome == 'success'
