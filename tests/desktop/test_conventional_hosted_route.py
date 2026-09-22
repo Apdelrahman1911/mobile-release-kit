@@ -49,8 +49,9 @@ SMOKE = {"preparedArtifact": artifact((*REVIEW_NAMES, *("source-kit/" + name for
                                      "prepared-runtime.tar", "preparation.json", "copy-result.json",
                                      "copy-report.json", "source-bindings.json", "outer.json")),
          "manifestSha256": "c" * 64, "protocolSha256": "d" * 64}
-HOST = {"trustModel": "github-hosted-platform-tcb-v1", "imageOS": "ubuntu24", "imageVersion": "20260907.300.1",
-        "python": record("/usr/bin/python3.12")}
+HOST = {"trustModel": "github-hosted-platform-tcb-v1", "imageOS": "ubuntu24", "images": {
+    "20260907.300.1": record("/usr/bin/python3.12"),
+    "20260920.314.1": {**record("/usr/bin/python3.12", "b"), "size": 7}}}
 CONTEXT = {"source": "/inert-source", "root": "/inert-root", "sourceSha": "b" * 40, "sourceTree": "e" * 40,
            "repository": "inert/repository", "runId": "1", "attempt": 1, "platform": "linux"}
 
@@ -116,7 +117,8 @@ class AdmissionContracts(unittest.TestCase):
 
     def test_literal_contract_and_copier_or_probe_pins_are_separate(self):
         copier = SimpleNamespace(APPROVED_SOURCE_OUTPUT_SHA256="a" * 64, APPROVED_SOURCE_COMPONENTS_SHA256="a" * 64,
-            APPROVED_SOURCE_NOTICES_SHA256="a" * 64, APPROVED_SOURCE_COPIER_PYTHON_SHA256="a" * 64)
+            APPROVED_SOURCE_NOTICES_SHA256="a" * 64,
+            APPROVED_SOURCE_COPIER_PYTHONS={"imageOS": HOST["imageOS"], "images": deepcopy(HOST["images"])})
         probe = SimpleNamespace(APPROVED_PREPARED_MANIFEST_SHA256="c" * 64, APPROVED_PROTOCOL_SHA256="d" * 64)
         modules = {"conventional_runtime_data": data, "prepare_cpython_source_payload": SimpleNamespace(P=copier),
                    "probe_cpython_source_runtime": probe}
@@ -124,12 +126,18 @@ class AdmissionContracts(unittest.TestCase):
                 patch.object(helper, "CONVENTIONAL_HOSTED_PYTHON", HOST), patch.object(helper, "conventional_module", side_effect=modules.__getitem__):
             self.assertIs(helper.conventional_admission(helper.CONVENTIONAL_PREPARE_SCOPE)[1], PREPARE)
             self.assertIs(helper.conventional_admission(helper.CONVENTIONAL_SMOKE_SCOPE)[1], SMOKE)
-            bad_hosts = [{"python": HOST["python"], "supportFiles": []},
-                         {"python": HOST["python"], "supportFiles": [record("/usr/lib/inert-support")]},
+            bad_hosts = [{"images": HOST["images"], "supportFiles": []},
+                         {"images": HOST["images"], "supportFiles": [record("/usr/lib/inert-support")]},
                          {**HOST, "supportFiles": []}, {**HOST, "trustModel": "complete-interpreter-closure"},
-                         {**HOST, "imageOS": "ubuntu22"}, {**HOST, "imageVersion": ""}, {**HOST, "imageVersion": True},
-                         {**HOST, "python": record("/usr/local/bin/python3.12")},
-                         {**HOST, "python": {**HOST["python"], "size": 0}}]
+                         {**HOST, "imageOS": "ubuntu22"}, {**HOST, "images": {}}, {**HOST, "images": []},
+                         {**HOST, "images": {"": record("/usr/bin/python3.12")}},
+                         {**HOST, "images": {True: record("/usr/bin/python3.12")}},
+                         {**HOST, "images": {**HOST["images"], "20260921.1.1": record("/usr/bin/python3.12")}}]
+            for field, wrong in (("path", "/usr/local/bin/python3.12"), ("size", 0), ("size", True),
+                                 ("size", (16 << 20) + 1), ("sha256", "not-a-digest")):
+                host = deepcopy(HOST)
+                host["images"]["20260920.314.1"][field] = wrong
+                bad_hosts.append(host)
             for host in bad_hosts:
                 for scope in helper.CONVENTIONAL_SCOPES:
                     with self.subTest(host=host, scope=scope), patch.object(helper, "CONVENTIONAL_HOSTED_PYTHON", host), \
@@ -156,9 +164,14 @@ class AdmissionContracts(unittest.TestCase):
                 with self.subTest(missing=leaf), patch.object(helper, "CONVENTIONAL_SMOKE_INPUTS", bad), \
                         self.assertRaises(helper.CheckFailure):
                     helper.conventional_admission(helper.CONVENTIONAL_SMOKE_SCOPE)
-            copier.APPROVED_SOURCE_COPIER_PYTHON_SHA256 = None
-            with self.assertRaises(helper.CheckFailure):
-                helper.conventional_admission(helper.CONVENTIONAL_PREPARE_SCOPE)
+            mismatched = deepcopy(copier.APPROVED_SOURCE_COPIER_PYTHONS)
+            mismatched["images"]["20260920.314.1"] = dict(HOST["images"]["20260907.300.1"])
+            crossed = {"imageOS": HOST["imageOS"], "images": dict(zip(HOST["images"], reversed(list(HOST["images"].values()))))}
+            for copy_profile in (mismatched, crossed, {"imageOS": HOST["imageOS"], "images": {
+                    "20260907.300.1": HOST["images"]["20260907.300.1"]}}, None):
+                copier.APPROVED_SOURCE_COPIER_PYTHONS = copy_profile
+                with self.subTest(copy_profile=copy_profile), self.assertRaises(helper.CheckFailure):
+                    helper.conventional_admission(helper.CONVENTIONAL_PREPARE_SCOPE)
             # A's missing copier admission does not silently authorize/close B.
             self.assertIs(helper.conventional_admission(helper.CONVENTIONAL_SMOKE_SCOPE)[1], SMOKE)
             probe.APPROVED_PROTOCOL_SHA256 = "e" * 64
@@ -180,7 +193,7 @@ class AdmissionContracts(unittest.TestCase):
                              (helper.CONVENTIONAL_SMOKE_SCOPE, "conventional-smoke")):
             ref = "refs/heads/verify/desktop-" + route
             base = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Linux",
-                    "RUNNER_ARCH": "X64", "ImageOS": "ubuntu24", "ImageVersion": HOST["imageVersion"],
+                    "RUNNER_ARCH": "X64", "ImageOS": "ubuntu24", "ImageVersion": "20260907.300.1",
                     "MRK_DESKTOP_HOSTED_CHECKS": scope,
                     "GITHUB_SHA": CONTEXT["sourceSha"], "GITHUB_REPOSITORY": CONTEXT["repository"],
                     "GITHUB_RUN_ID": "1", "GITHUB_RUN_ATTEMPT": "1", "GITHUB_WORKFLOW_SHA": CONTEXT["sourceSha"],
@@ -449,35 +462,46 @@ class ProgressionContracts(unittest.TestCase):
                     self.assertRaises(helper.CheckFailure):
                 helper.conventional_recheck(CONTEXT, data)
             if failure == "host": source.assert_not_called()
-        metadata = {"st_mode": 0o100755, "st_uid": 0, "st_gid": 0, "st_nlink": 1, "st_size": 5,
-                    "st_dev": 1, "st_ino": 2, "st_mtime_ns": 1, "st_ctime_ns": 1}
-        for failure in (None, "image-os", "image-version", "image-missing", "root", "architecture", "executable", "flags",
-                        "mode", "symlink", "uid", "gid", "nlink", "bytes", "drift"):
-            fields = dict(metadata)
-            for label, key, wrong in (("mode", "st_mode", 0o100775), ("symlink", "st_mode", 0o120755),
-                                      ("uid", "st_uid", 1001), ("gid", "st_gid", 1001), ("nlink", "st_nlink", 2)):
-                if failure == label: fields[key] = wrong
-            before = SimpleNamespace(**fields)
-            after = SimpleNamespace(**{**fields, "st_ctime_ns": 2}) if failure == "drift" else before
-            environment = {"ImageOS": "ubuntu22" if failure == "image-os" else HOST["imageOS"],
-                           "ImageVersion": "20260908.1.1" if failure == "image-version" else HOST["imageVersion"]}
-            if failure == "image-missing": environment.pop("ImageVersion")
-            flags = SimpleNamespace(isolated=1, no_site=1, dont_write_bytecode=0 if failure == "flags" else 1)
-            host_sys = SimpleNamespace(platform="linux", version_info=(3, 12, 0), flags=flags, executable="/usr/bin/python3.12")
-            with self.subTest(failure=failure), patch.object(helper, "CONVENTIONAL_HOSTED_PYTHON", HOST), \
-                    patch.dict(helper.os.environ, environment, clear=True), patch.object(helper, "sys", host_sys), \
-                    patch.object(helper.os, "geteuid", return_value=0 if failure == "root" else 1001), \
-                    patch.object(helper.os, "uname", return_value=SimpleNamespace(machine="arm64" if failure == "architecture" else "x86_64")), \
-                    patch.object(helper.os.path, "realpath", return_value="/inert/python" if failure == "executable" else "/usr/bin/python3.12"), \
-                    patch.object(Path, "lstat", side_effect=[before, after]), \
-                    patch.object(data, "file_record", return_value=record("python3.12", "b" if failure == "bytes" else "a")) as body:
-                if failure:
-                    with self.assertRaises((helper.CheckFailure, data.Refused)):
+        for version, expected in HOST["images"].items():
+            other_version = next(image for image in HOST["images"] if image != version)
+            other = HOST["images"][other_version]
+            metadata = {"st_mode": 0o100755, "st_uid": 0, "st_gid": 0, "st_nlink": 1, "st_size": expected["size"],
+                        "st_dev": 1, "st_ino": 2, "st_mtime_ns": 1, "st_ctime_ns": 1}
+            for failure in (None, "image-os", "image-version", "image-missing", "other-record", "root", "architecture",
+                            "executable", "flags", "mode", "symlink", "uid", "gid", "nlink", "bytes", "size", "crossed", "drift"):
+                fields = dict(metadata)
+                for label, key, wrong in (("mode", "st_mode", 0o100775), ("symlink", "st_mode", 0o120755),
+                                          ("uid", "st_uid", 1001), ("gid", "st_gid", 1001), ("nlink", "st_nlink", 2)):
+                    if failure == label: fields[key] = wrong
+                before = SimpleNamespace(**fields)
+                after = SimpleNamespace(**{**fields, "st_ctime_ns": 2}) if failure == "drift" else before
+                environment = {"ImageOS": "ubuntu22" if failure == "image-os" else HOST["imageOS"],
+                               "ImageVersion": "20260908.1.1" if failure == "image-version" else version}
+                if failure == "image-missing": environment.pop("ImageVersion")
+                profile = deepcopy(HOST)
+                if failure == "other-record": profile["images"][other_version]["size"] = True
+                actual = {**expected, "path": "python3.12"}
+                if failure in {"bytes", "crossed"}: actual["sha256"] = other["sha256"]
+                if failure in {"size", "crossed"}: actual["size"] = other["size"]
+                flags = SimpleNamespace(isolated=1, no_site=1, dont_write_bytecode=0 if failure == "flags" else 1)
+                host_sys = SimpleNamespace(platform="linux", version_info=(3, 12, 0), flags=flags, executable="/usr/bin/python3.12")
+                with self.subTest(image=version, failure=failure), patch.object(helper, "CONVENTIONAL_HOSTED_PYTHON", profile), \
+                        patch.dict(helper.os.environ, environment, clear=True), patch.object(helper, "sys", host_sys), \
+                        patch.object(helper.os, "geteuid", return_value=0 if failure == "root" else 1001), \
+                        patch.object(helper.os, "uname", return_value=SimpleNamespace(machine="arm64" if failure == "architecture" else "x86_64")), \
+                        patch.object(helper.os.path, "realpath", return_value="/inert/python" if failure == "executable" else "/usr/bin/python3.12") as host_path, \
+                        patch.object(Path, "lstat", side_effect=[before, after]) as metadata_read, \
+                        patch.object(data, "file_record", return_value=actual) as body:
+                    if failure:
+                        with self.assertRaises((helper.CheckFailure, data.Refused)):
+                            helper.conventional_host(data)
+                        if failure not in {"bytes", "size", "crossed", "drift"}: body.assert_not_called()
+                        if failure in {"image-os", "image-version", "image-missing", "other-record"}:
+                            host_path.assert_not_called()
+                            metadata_read.assert_not_called()
+                    else:
                         helper.conventional_host(data)
-                    if failure not in {"bytes", "drift"}: body.assert_not_called()
-                else:
-                    helper.conventional_host(data)
-                    body.assert_called_once_with(Path("/usr/bin/python3.12"), HOST["python"]["size"])
+                        body.assert_called_once_with(Path("/usr/bin/python3.12"), expected["size"])
 
     def test_probe_errors_or_changed_inputs_cannot_launch_libtest(self):
         messages = b"inert-cargo-messages"
