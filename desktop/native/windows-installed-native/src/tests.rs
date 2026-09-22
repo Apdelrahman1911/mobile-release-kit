@@ -520,6 +520,14 @@ fn descriptor(owner: &[u8], aces: &[(u8, u8, u32, Vec<u8>)]) -> Vec<u8> {
     let size = raw.len() - acl_at;
     put16(&mut raw, acl_at + offset_of!(S::ACL, AclSize), size as u16); raw
 }
+fn ordinary_descriptor(owner: &[u8], group: &[u8], aces: &[(u8, u8, u32, Vec<u8>)]) -> Vec<u8> {
+    let mut raw = descriptor(owner, aces);
+    let at = raw.len(); raw.extend_from_slice(group);
+    put32(&mut raw, offset_of!(S::SECURITY_DESCRIPTOR_RELATIVE, Group), at as u32);
+    put16(&mut raw, offset_of!(S::SECURITY_DESCRIPTOR_RELATIVE, Control),
+        S::SE_SELF_RELATIVE | S::SE_DACL_PRESENT | S::SE_DACL_PROTECTED);
+    raw
+}
 
 #[test]
 fn acl_distinguishes_sibling_creation_from_replacement_and_mutation() -> Result<()> {
@@ -567,6 +575,62 @@ fn acl_distinguishes_sibling_creation_from_replacement_and_mutation() -> Result<
     assert_eq!(security::descriptor(&unknown_mask, FileKind::File, AuthorityScope::ImmutableVersion), Err(Error::Unsafe));
     let untrusted_owner = descriptor(&everyone, &[(allow, 0, F::GENERIC_READ, everyone.clone())]);
     assert_eq!(security::descriptor(&untrusted_owner, FileKind::File, AuthorityScope::ImmutableVersion), Err(Error::Unsafe));
+
+    // Exact CPython3.14 mode0700 shape: D:P plus SY/BA/OWNER RIGHTS OICI FA.
+    // This exercises only the qualification policy, never a native grant.
+    use ordinary_owner::{AclImage, InputCheck, InputRole, InputTrace};
+    let parent = sid(5, &[21, 11, 22, 33, 500]);
+    let admins = sid(5, &[32, 544]); let owner_rights = sid(3, &[4]);
+    assert_eq!(owner_rights, [1, 1, 0, 0, 0, 0, 0, 3, 4, 0, 0, 0]);
+    let oi_ci = (S::OBJECT_INHERIT_ACE | S::CONTAINER_INHERIT_ACE) as u8;
+    let python_aces = vec![(allow, oi_ci, FS::FILE_ALL_ACCESS, owner.clone()),
+        (allow, oi_ci, FS::FILE_ALL_ACCESS, admins.clone()),
+        (allow, oi_ci, FS::FILE_ALL_ACCESS, owner_rights.clone())];
+    let fresh = || { let mut trace = InputTrace::default(); trace.at(InputRole::AclRoot, Some(3)); trace };
+    let fault = |actual: &InputTrace, check| {
+        let mut expected = fresh(); expected.record(check, None); assert_eq!(actual.first, expected.first);
+    };
+    for trusted in [&parent, &owner, &admins] {
+        for directory in [false, true] {
+            let mut trace = fresh();
+            let raw = ordinary_descriptor(trusted, &admins, &python_aces);
+            AclImage::parse_traced(&raw, &mut trace)?.base(&parent, &account, directory, &mut trace)?;
+            assert!(trace.first.is_none());
+        }
+    }
+    for (selected_owner, group, check) in [
+        (&everyone, &admins, InputCheck::AclOwner), (&account, &admins, InputCheck::AclOwner),
+        (&owner_rights, &admins, InputCheck::AclOwner), (&parent, &account, InputCheck::AclGroup),
+    ] {
+        let mut trace = fresh();
+        let raw = ordinary_descriptor(selected_owner, group, &python_aces);
+        assert_eq!(AclImage::parse_traced(&raw, &mut trace)?.base(&parent, &account, true, &mut trace), Err(Error::Unsafe));
+        fault(&trace, check);
+    }
+    // Neither a creator-authority prefix nor another effective mutator gains
+    // admission merely because exact OWNER RIGHTS is also present.
+    for foreign in [everyone.clone(), sid(3, &[0]), sid(3, &[5]), sid(3, &[4, 0]), sid(5, &[4])] {
+        let mut aces = python_aces.clone(); aces.push((allow, oi_ci, FS::FILE_ALL_ACCESS, foreign));
+        let mut trace = fresh(); let raw = ordinary_descriptor(&parent, &admins, &aces);
+        assert_eq!(AclImage::parse_traced(&raw, &mut trace)?.base(&parent, &account, true, &mut trace), Err(Error::Unsafe));
+        fault(&trace, InputCheck::AclMutation);
+    }
+    for (kind, flags, mask, principal, expected) in [
+        (allow, 0, FS::FILE_GENERIC_READ, account.clone(), Some(InputCheck::AclAccount)),
+        (deny, 0, FS::FILE_GENERIC_READ, account.clone(), Some(InputCheck::AclAccount)),
+        (allow, oi_ci, 0x02000000, owner_rights.clone(), Some(InputCheck::AclMask)),
+        (deny, oi_ci, 0x02000000, owner_rights.clone(), Some(InputCheck::AclMask)),
+        (allow, oi_ci, F::GENERIC_ALL, owner_rights, None),
+        (deny, 0, FS::FILE_ALL_ACCESS, everyone.clone(), None),
+        (allow, oi_ci | S::INHERIT_ONLY_ACE as u8, FS::FILE_ALL_ACCESS, everyone.clone(), None),
+        (allow, 0, FS::FILE_GENERIC_READ, everyone, None),
+    ] {
+        let mut aces = python_aces.clone(); aces.push((kind, flags, mask, principal));
+        let mut trace = fresh(); let raw = ordinary_descriptor(&parent, &admins, &aces);
+        let result = AclImage::parse_traced(&raw, &mut trace)?.base(&parent, &account, true, &mut trace);
+        if let Some(check) = expected { assert_eq!(result, Err(Error::Unsafe)); fault(&trace, check); }
+        else { result?; assert!(trace.first.is_none()); }
+    }
     Ok(())
 }
 
@@ -606,6 +670,78 @@ fn acl_bounds_and_actual_trusted_sid_are_required() -> Result<()> {
     assert_eq!(security::descriptor(&overlapping, FileKind::Directory, AuthorityScope::ImmutableVersion), Err(Error::Unsafe));
     let lookalike = descriptor(&sid(5, &[80, 956008885, 3418522649, 1831038044, 1853292631, 2271478465]), &[]);
     assert_eq!(security::descriptor(&lookalike, FileKind::Directory, AuthorityScope::ImmutableVersion), Err(Error::Unsafe));
+
+    use ordinary_owner::{AclImage, InputCheck, InputRole, InputTrace};
+    let parent = sid(5, &[21, 11, 22, 33, 500]); let account = sid(5, &[21, 11, 22, 33, 1001]);
+    let admins = sid(5, &[32, 544]); let allow = SS::ACCESS_ALLOWED_ACE_TYPE as u8;
+    let oi_ci = (S::OBJECT_INHERIT_ACE | S::CONTAINER_INHERIT_ACE) as u8;
+    let aces = vec![(allow, oi_ci, FS::FILE_ALL_ACCESS, system),
+        (allow, oi_ci, FS::FILE_ALL_ACCESS, admins.clone()),
+        (allow, oi_ci, FS::FILE_ALL_ACCESS, sid(3, &[4]))];
+    let raw = ordinary_descriptor(&parent, &admins, &aces);
+    let fresh = || { let mut trace = InputTrace::default(); trace.at(InputRole::AclRoot, Some(3)); trace };
+    let image = AclImage::parse_traced(&raw, &mut fresh())?;
+    let (expected, acl) = image.add(&account, FS::FILE_TRAVERSE, &mut fresh())?;
+    let mut added = aces.clone(); added.push((allow, 0, FS::FILE_TRAVERSE, account.clone()));
+    let raw_after = ordinary_descriptor(&parent, &admins, &added);
+    let acl_at = decode::u32_at(&raw_after, 16)? as usize;
+    let acl_size = decode::u16_at(&raw_after, acl_at + 2)? as usize;
+    assert_eq!(&raw_after[acl_at..acl_at + acl_size], &acl.0[..acl_size]);
+    let mut after = before.clone(); after.change += 1;
+    for stamp in [&before, &after] {
+        let mut trace = fresh(); expected.readback(&before, stamp, &raw, &raw_after, &mut trace)?;
+        assert!(trace.first.is_none()); // Exact equality remains admitted.
+    }
+    // A pre-existing inherited sequence stays byte-identical and in order;
+    // the one explicit noninheriting account ACE precedes it, never propagates.
+    let inherited: Vec<_> = aces.iter().map(|(k, f, m, s)| (*k, *f | S::INHERITED_ACE as u8, *m, s.clone())).collect();
+    let inherited_raw = ordinary_descriptor(&parent, &admins, &inherited);
+    let inherited_image = AclImage::parse_traced(&inherited_raw, &mut fresh())?;
+    let (inherited_expected, _) = inherited_image.add(&account, FS::FILE_TRAVERSE, &mut fresh())?;
+    let mut inherited_added = inherited; inherited_added.insert(0, (allow, 0, FS::FILE_TRAVERSE, account));
+    inherited_expected.readback(&before, &after, &inherited_raw,
+        &ordinary_descriptor(&parent, &admins, &inherited_added), &mut fresh())?;
+
+    for check in [InputCheck::AclStamp, InputCheck::AclControl, InputCheck::AclOwnerEqual,
+        InputCheck::AclGroupEqual, InputCheck::AclRevision, InputCheck::AclAces, InputCheck::AclChanged, InputCheck::AclLayout] {
+        let mut selected = raw_after.clone(); let mut stamp = after.clone();
+        match check {
+            InputCheck::AclStamp => stamp.id[15] ^= 0x80,
+            InputCheck::AclControl => { let value = decode::u16_at(&selected, 2)?; put16(&mut selected, 2, value ^ S::SE_DACL_AUTO_INHERITED); }
+            InputCheck::AclOwnerEqual => { let at = decode::u32_at(&selected, 4)? as usize; selected[at + parent.len() - 1] ^= 1; }
+            InputCheck::AclGroupEqual => { let at = decode::u32_at(&selected, 8)? as usize; selected[at + admins.len() - 1] ^= 1; }
+            InputCheck::AclRevision => selected[acl_at] = 4,
+            InputCheck::AclAces => { let mut reordered = added.clone(); reordered.swap(0, 2); selected = ordinary_descriptor(&parent, &admins, &reordered); }
+            InputCheck::AclLayout => selected[0] = 0,
+            InputCheck::AclChanged => (),
+            _ => unreachable!(),
+        }
+        let selected_before = if check == InputCheck::AclChanged { &selected } else { &raw };
+        let mut trace = fresh();
+        assert_eq!(expected.readback(&before, &stamp, selected_before, &selected, &mut trace), Err(Error::Unsafe));
+        let mut wanted = fresh();
+        if check == InputCheck::AclControl {
+            assert_eq!(wanted.control(decode::u16_at(&raw_after, 2)?, decode::u16_at(&selected, 2)?), Err(Error::Unsafe));
+        } else { wanted.record(check, None); }
+        assert_eq!(trace.first, wanted.first);
+    }
+    for field in [0usize, 8, acl_at, acl_at + 8] {
+        let mut malformed = raw_after.clone();
+        match field {
+            0 => malformed.truncate(19),
+            8 => put32(&mut malformed, 8, 0),
+            at if at == acl_at => put16(&mut malformed, at + 4, 1025),
+            at => malformed[at] = 255,
+        }
+        let mut trace = fresh();
+        assert!(AclImage::parse_traced(&malformed, &mut trace).is_err());
+        let mut wanted = fresh(); wanted.record(InputCheck::AclLayout, None);
+        assert_eq!(trace.first, wanted.first);
+    }
+    let mut trace = fresh();
+    assert!(matches!(image.add(&vec![0; BUFFER], FS::FILE_TRAVERSE, &mut trace), Err(Error::Unsafe)));
+    let mut wanted = fresh(); wanted.record(InputCheck::AclCapacity, None);
+    assert_eq!(trace.first, wanted.first);
     Ok(())
 }
 
@@ -784,12 +920,16 @@ fn metadata_and_directory_keep_the_full_identity_not_a_low_half() -> Result<()> 
     trace.at(InputRole::Artifact, Some(39));
     trace.record(InputCheck::ReadReturned, Some(InputStatus::Win32(cached_error)));
     assert_eq!(trace.need(false, InputCheck::ArtifactStable), Err(Error::Unsafe));
+    assert_eq!(trace.control(0, u16::MAX), Err(Error::Unsafe));
+    trace.at(InputRole::AclOutput, Some(39));
+    trace.record(InputCheck::AclSetReturned, Some(InputStatus::Win32(997)));
     assert_eq!(trace.first, first);
     let mut output = Vec::new();
     ordinary_owner::write_refusal(&mut output, "original-file-close", None, true, trace.first).unwrap();
     let text = std::str::from_utf8(&output).unwrap();
     assert!(text.contains("\"role\":\"Request\",\"slot\":3,\"check\":\"ReadReturned\""));
     assert!(text.contains("\"status\":{\"domain\":\"win32\",\"code\":4294967295}"));
+    assert!(!text.contains("\"control\"")); // A later ACL mismatch cannot attach facts to the first cause.
     assert!(text.ends_with("\"unknown\":true,\"cleanupNotRetried\":true}\n"));
     let mut predicate = InputTrace::default(); predicate.at(InputRole::Ancestor, None);
     assert_eq!(predicate.need(false, InputCheck::NameExact), Err(Error::Unsafe));
@@ -805,6 +945,45 @@ fn metadata_and_directory_keep_the_full_identity_not_a_low_half() -> Result<()> 
     // length difference, optional null ordinal, and all current stage strings.
     assert!(output.len() + 32 <= 768);
     assert!(std::str::from_utf8(&output).unwrap().contains("\"domain\":\"ntstatus\",\"code\":-2147483648"));
+    // Control facts are u16 numbers only, on the first control mismatch. Later
+    // native status/role changes cannot replace them; initializer BOOLs carry
+    // no invented GetLastError. Disabled traces still remain disabled.
+    let mut disabled = InputTrace::default();
+    assert_eq!(disabled.control(0, u16::MAX), Err(Error::Unsafe)); assert!(disabled.first.is_none());
+    let mut control = InputTrace::default(); control.at(InputRole::AclArtifact, None);
+    control.control(u16::MAX, u16::MAX)?; assert!(control.first.is_none());
+    assert_eq!(control.control(u16::MAX, u16::MAX - 1), Err(Error::Unsafe));
+    let control_first = control.first;
+    control.at(InputRole::Parent, Some(40));
+    control.record(InputCheck::DescriptorReturned, Some(InputStatus::Win32(u32::MAX)));
+    assert_eq!(control.control(0, 1), Err(Error::Unsafe)); assert_eq!(control.first, control_first);
+    output.clear();
+    ordinary_owner::write_refusal(&mut output, "account-original-retirement",
+        Some((false, u32::MAX, Some(u32::MAX), [u32::MAX; 8])), false, control.first).unwrap();
+    let text = std::str::from_utf8(&output).unwrap();
+    assert!(text.contains("\"role\":\"AclArtifact\",\"slot\":null,\"check\":\"AclControl\",\"status\":null"));
+    assert!(text.contains("\"control\":{\"expected\":65535,\"observed\":65534}"));
+    assert!(output.len() + 32 <= 768);
+    for check in [InputCheck::AclInitialize, InputCheck::AclDacl, InputCheck::AclDeadline,
+        InputCheck::AclTransitions, InputCheck::ParentPrimary, InputCheck::ParentUser,
+        InputCheck::ParentIdentity, InputCheck::ParentSettlement] {
+        let mut trace = InputTrace::default(); trace.at(InputRole::AclOutput, Some(40));
+        assert_eq!(trace.need(false, check), Err(Error::Unsafe)); output.clear();
+        ordinary_owner::write_refusal(&mut output, "exact-acl", None, false, trace.first).unwrap();
+        let text = std::str::from_utf8(&output).unwrap();
+        assert!(text.contains("\"slot\":null") && text.contains("\"status\":null") && !text.contains("\"control\""));
+    }
+    for check in [InputCheck::OutputCreate, InputCheck::AclSetReturned, InputCheck::DescriptorReturned] {
+        for code in [0, 997, u32::MAX] {
+            let mut trace = InputTrace::default(); trace.at(InputRole::AclOutput, Some(39));
+            trace.record(check, Some(InputStatus::Win32(code))); let first = trace.first;
+            trace.record(InputCheck::ParentSettlement, None); assert_eq!(trace.first, first);
+            output.clear(); ordinary_owner::write_refusal(&mut output, "original-acl-operation", None, true, first).unwrap();
+            let text = std::str::from_utf8(&output).unwrap();
+            assert!(text.contains(&format!("\"domain\":\"win32\",\"code\":{code}")));
+            assert!(text.ends_with("\"unknown\":true,\"cleanupNotRetried\":true}\n"));
+        }
+    }
     let mut too_small = [0u8; 16];
     assert!(ordinary_owner::write_refusal(&mut std::io::Cursor::new(&mut too_small[..]),
         "original-inputs", None, false, first).is_err());

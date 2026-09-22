@@ -21,10 +21,13 @@ const NATIVE_SECONDS: u64 = 90;
 const SETTLE_MS: u32 = 10_000;
 
 fn need(value: bool) -> Result<()> { if value { Ok(()) } else { Err(Error::Unsafe) } }
-// Only closed labels and original numeric statuses may leave the input phase.
+// Only closed labels, original statuses and u16 ACL control facts may leave.
 // This stack-owned snapshot is independent of FileBody.error, which close reuses.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum InputRole { Ancestor, Request, Binding, Command, Directory, Artifact }
+pub(super) enum InputRole {
+    Ancestor, Request, Binding, Command, Directory, Artifact, Output,
+    AclRoot, AclTarget, AclTriple, AclDebug, AclDeps, AclArtifact, AclOutput, Parent,
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum InputCheck {
     AncestorCount, FileCount, PathText, PathUnits, OpenState, OpenReturned,
@@ -38,12 +41,18 @@ pub(super) enum InputCheck {
     BindingSourceAvailable, BindingSource, BindingTree, BindingRun, BindingRuntimeRun,
     BindingRuntimeTree, BindingImage, CommandUnits, CommandDigest, HashLimit, HashReturned,
     ArtifactIdentity, ArtifactBytes, ArtifactDigest, ArtifactStable,
+    OutputCreate, DescriptorState, DescriptorReturned, DescriptorLength,
+    AclLayout, AclOwner, AclGroup, AclAccount, AclMask, AclMutation, AclCapacity,
+    AclInitialize, AclDacl, AclSetState, AclSetReturned, AclStamp, AclControl,
+    AclOwnerEqual, AclGroupEqual, AclRevision, AclAces, AclChanged, AclDeadline,
+    AclTransitions, ParentPrimary, ParentUser, ParentIdentity, ParentSettlement,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum InputStatus { Win32(u32), NtStatus(i32) }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct InputFault {
     role: InputRole, slot: Option<u8>, check: InputCheck, status: Option<InputStatus>,
+    control: Option<(u16, u16)>,
 }
 #[derive(Clone, Copy, Default)]
 pub(super) struct InputTrace {
@@ -55,7 +64,7 @@ impl InputTrace {
     }
     pub fn record(&mut self, check: InputCheck, status: Option<InputStatus>) {
         if self.first.is_none() {
-            if let Some(role) = self.role { self.first = Some(InputFault { role, slot: self.slot, check, status }); }
+            if let Some(role) = self.role { self.first = Some(InputFault { role, slot: self.slot, check, status, control: None }); }
         }
     }
     fn observed<T>(&mut self, result: Result<T>, check: InputCheck) -> Result<T> {
@@ -63,6 +72,14 @@ impl InputTrace {
         result
     }
     pub fn need(&mut self, value: bool, check: InputCheck) -> Result<()> { self.observed(need(value), check) }
+    pub fn control(&mut self, expected: u16, observed: u16) -> Result<()> {
+        let unfaulted = self.first.is_none();
+        let result = self.need(expected == observed, InputCheck::AclControl);
+        if unfaulted {
+            if let Some(first) = self.first.as_mut() { first.control = Some((expected, observed)); }
+        }
+        result
+    }
 }
 // One shared, absorbing next-effect gate. Callers supply elapsed time from the
 // original owner clock, including after synchronous observations return. This
@@ -361,16 +378,21 @@ impl OriginalFile {
         Ok(value)
     }
     fn descriptor(&mut self) -> Result<Vec<u8>> {
+        self.descriptor_traced(&mut InputTrace::default())
+    }
+    fn descriptor_traced(&mut self, trace: &mut InputTrace) -> Result<Vec<u8>> {
         let b = self.body();
-        if b.state != SlotState::Owned || b.active { return Err(Error::State); }
+        if b.state != SlotState::Owned || b.active { return trace.observed(Err(Error::State), InputCheck::DescriptorState); }
         b.count = 0; b.active = true;
         let ok = unsafe { S::GetKernelObjectSecurity(b.handle,
             S::OWNER_SECURITY_INFORMATION | S::GROUP_SECURITY_INFORMATION | S::DACL_SECURITY_INFORMATION,
             b.security.0.as_mut_ptr().cast(), BUFFER as u32, &mut b.count) };
         b.error = if ok != 0 { 0 } else { unsafe { F::GetLastError() } };
+        if ok == 0 { trace.record(InputCheck::DescriptorReturned, Some(InputStatus::Win32(b.error))); }
         b.active = ok == 0 && (b.error == 0 || b.error == F::ERROR_IO_PENDING);
         if b.active { b.state = SlotState::Unknown; return Err(Error::Unknown); }
-        need(ok != 0 && b.count as usize <= BUFFER && b.count >= 20)?;
+        need(ok != 0)?;
+        trace.need(b.count as usize <= BUFFER && b.count >= 20, InputCheck::DescriptorLength)?;
         Ok(b.security.0[..b.count as usize].to_vec())
     }
     fn write(&mut self, value: &[u8], limit: usize) -> Result<()> {
@@ -429,8 +451,11 @@ fn owned_file_traced(files: &mut Vec<OriginalFile>, path: &Path, directory: bool
 }
 
 #[derive(Clone, Eq, PartialEq)]
-struct AclImage { owner: Vec<u8>, group: Vec<u8>, control: u16, revision: u8, aces: Vec<Vec<u8>> }
+pub(super) struct AclImage { owner: Vec<u8>, group: Vec<u8>, control: u16, revision: u8, aces: Vec<Vec<u8>> }
 impl AclImage {
+    pub(super) fn parse_traced(raw: &[u8], trace: &mut InputTrace) -> Result<Self> {
+        trace.observed(Self::parse(raw), InputCheck::AclLayout)
+    }
     fn parse(raw: &[u8]) -> Result<Self> {
         need(raw.len() >= 20 && raw.len() <= BUFFER && raw[0] == 1 && raw[1] == 0)?;
         let control = decode::u16_at(raw, 2)?;
@@ -464,33 +489,38 @@ impl AclImage {
         need(raw[cursor..at + size].iter().all(|byte| *byte == 0))?;
         Ok(Self { owner, group, control, revision: head[0], aces })
     }
-    fn base(&self, parent: &[u8], account: &[u8], directory: bool) -> Result<()> {
-        need([system_sid(), builtin(544), parent.to_vec()].contains(&self.owner)
-            && self.owner != account && self.group != account)?;
+    pub(super) fn base(&self, parent: &[u8], account: &[u8], directory: bool, trace: &mut InputTrace) -> Result<()> {
+        trace.need([system_sid(), builtin(544), parent.to_vec()].contains(&self.owner)
+            && self.owner != account, InputCheck::AclOwner)?;
+        trace.need(self.group != account, InputCheck::AclGroup)?;
         for ace in &self.aces {
             let sid = &ace[8..];
-            need(sid != account)?;
-            let mut mask = decode::u32_at(ace, 4)?;
+            trace.need(sid != account, InputCheck::AclAccount)?;
+            let mut mask = trace.observed(decode::u32_at(ace, 4), InputCheck::AclLayout)?;
             for (generic, rights) in [(F::GENERIC_ALL, FS::FILE_ALL_ACCESS),
                 (F::GENERIC_READ, FS::FILE_GENERIC_READ), (F::GENERIC_WRITE, FS::FILE_GENERIC_WRITE),
                 (F::GENERIC_EXECUTE, FS::FILE_GENERIC_EXECUTE)] {
                 if mask & generic != 0 { mask = (mask & !generic) | rights; }
             }
-            need(mask & !FS::FILE_ALL_ACCESS == 0)?;
+            trace.need(mask & !FS::FILE_ALL_ACCESS == 0, InputCheck::AclMask)?;
+            // Exact OWNER RIGHTS (S-1-3-4) applies to the already qualified
+            // concrete owner above. Preserve the original ACE; no SID rewrite,
+            // CREATOR OWNER/prefix trust, new grant or production-policy change.
+            const OWNER_RIGHTS: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 3, 4, 0, 0, 0];
             if ace[0] == 1 || ace[1] as u32 & S::INHERIT_ONLY_ACE != 0
-                || sid == parent || sid == system_sid() || sid == builtin(544) { continue; }
+                || sid == parent || sid == system_sid() || sid == builtin(544) || sid == OWNER_RIGHTS { continue; }
             // Only the already task-owned tree is changed. Other principals may
             // read/traverse, but may not mutate/replace these exact originals.
             let mut mutation = FS::DELETE | FS::FILE_DELETE_CHILD | FS::WRITE_DAC | FS::WRITE_OWNER
                 | FS::FILE_WRITE_DATA | FS::FILE_APPEND_DATA | FS::FILE_WRITE_EA | FS::FILE_WRITE_ATTRIBUTES;
             if !directory { mutation |= FS::FILE_WRITE_DATA; }
-            need(mask & mutation == 0)?;
+            trace.need(mask & mutation == 0, InputCheck::AclMutation)?;
         }
         Ok(())
     }
-    fn add(&self, sid: &[u8], mask: u32) -> Result<(Self, Box<Aligned>)> {
+    pub(super) fn add(&self, sid: &[u8], mask: u32, trace: &mut InputTrace) -> Result<(Self, Box<Aligned>)> {
         let size = 8 + self.aces.iter().map(Vec::len).sum::<usize>() + 8 + sid.len();
-        need(size <= BUFFER && size <= u16::MAX as usize && self.aces.len() < 1024)?;
+        trace.need(size <= BUFFER && size <= u16::MAX as usize && self.aces.len() < 1024, InputCheck::AclCapacity)?;
         let mut expected = self.clone();
         let mut ace = vec![0, 0];
         ace.extend_from_slice(&((8 + sid.len()) as u16).to_le_bytes());
@@ -505,38 +535,51 @@ impl AclImage {
         for ace in &expected.aces { acl.0[at..at + ace.len()].copy_from_slice(ace); at += ace.len(); }
         Ok((expected, acl))
     }
+    pub(super) fn readback(&self, before: &Stamp, after: &Stamp, raw_before: &[u8], raw_after: &[u8],
+        trace: &mut InputTrace) -> Result<()> {
+        trace.need(acl_stamp(before, after), InputCheck::AclStamp)?;
+        let actual = Self::parse_traced(raw_after, trace)?;
+        trace.control(self.control, actual.control)?;
+        trace.need(self.owner == actual.owner, InputCheck::AclOwnerEqual)?;
+        trace.need(self.group == actual.group, InputCheck::AclGroupEqual)?;
+        trace.need(self.revision == actual.revision, InputCheck::AclRevision)?;
+        trace.need(self.aces == actual.aces, InputCheck::AclAces)?;
+        trace.need(raw_before != raw_after, InputCheck::AclChanged)
+    }
 }
 fn grant(file: &mut OriginalFile, role: &str, parent: &[u8], account: &[u8], mask: u32,
-    start: Instant, deadline_latched: &mut bool) -> Result<String> {
-    next_effect(start.elapsed(), deadline_latched)?;
-    let before = file.stamp()?; let raw_before = file.descriptor()?;
-    let image = AclImage::parse(&raw_before)?; image.base(parent, account, file.directory)?;
-    let (expected, acl) = image.add(account, mask)?;
+    start: Instant, deadline_latched: &mut bool, trace: &mut InputTrace) -> Result<String> {
+    trace.observed(next_effect(start.elapsed(), deadline_latched), InputCheck::AclDeadline)?;
+    let before = file.stamp_traced(trace)?; let raw_before = file.descriptor_traced(trace)?;
+    let image = AclImage::parse_traced(&raw_before, trace)?; image.base(parent, account, file.directory, trace)?;
+    let (expected, acl) = image.add(account, mask, trace)?;
     let mut descriptor = Box::new(S::SECURITY_DESCRIPTOR::default());
-    need(unsafe { S::InitializeSecurityDescriptor((&mut *descriptor as *mut S::SECURITY_DESCRIPTOR).cast(), 1) } != 0)?;
-    need(unsafe { S::SetSecurityDescriptorDacl((&mut *descriptor as *mut S::SECURITY_DESCRIPTOR).cast(),
-        1, acl.0.as_ptr().cast(), 0) } != 0)?;
+    // These existing Boolean observations do not query/fabricate last error.
+    trace.need(unsafe { S::InitializeSecurityDescriptor((&mut *descriptor as *mut S::SECURITY_DESCRIPTOR).cast(), 1) } != 0, InputCheck::AclInitialize)?;
+    trace.need(unsafe { S::SetSecurityDescriptorDacl((&mut *descriptor as *mut S::SECURITY_DESCRIPTOR).cast(),
+        1, acl.0.as_ptr().cast(), 0) } != 0, InputCheck::AclDacl)?;
     let b = file.body();
-    if b.state != SlotState::Owned || b.active { return Err(Error::State); }
-    next_effect(start.elapsed(), deadline_latched)?;
+    if b.state != SlotState::Owned || b.active { return trace.observed(Err(Error::State), InputCheck::AclSetState); }
+    trace.observed(next_effect(start.elapsed(), deadline_latched), InputCheck::AclDeadline)?;
     b.active = true;
     // Same original only. No SetNamedSecurityInfo/SetSecurityInfo propagation,
     // recursion, owner/group/SACL replacement, inheritable ACE or broad trustee.
     let ok = unsafe { S::SetKernelObjectSecurity(b.handle, S::DACL_SECURITY_INFORMATION,
         (&mut *descriptor as *mut S::SECURITY_DESCRIPTOR).cast()) };
     b.error = if ok != 0 { 0 } else { unsafe { F::GetLastError() } };
+    if ok == 0 { trace.record(InputCheck::AclSetReturned, Some(InputStatus::Win32(b.error))); }
     b.active = ok == 0 && (b.error == 0 || b.error == F::ERROR_IO_PENDING);
     if b.active {
         b.state = SlotState::Unknown;
-        diagnostic("original-acl-operation", None, true);
-        loop { std::thread::park(); std::hint::black_box((&mut *b, &descriptor, &acl)); }
+        diagnostic_with_fault("original-acl-operation", None, true, trace.first);
+        loop { std::thread::park(); std::hint::black_box((&mut *b, &descriptor, &acl, &*trace)); }
     }
     need(ok != 0)?;
-    let after = file.stamp()?; let raw_after = file.descriptor()?;
-    need(acl_stamp(&before, &after) && AclImage::parse(&raw_after)? == expected && raw_before != raw_after)?;
-    next_effect(start.elapsed(), deadline_latched)?;
+    let after = file.stamp_traced(trace)?; let raw_after = file.descriptor_traced(trace)?;
+    expected.readback(&before, &after, &raw_before, &raw_after, trace)?;
+    trace.observed(next_effect(start.elapsed(), deadline_latched), InputCheck::AclDeadline)?;
     Ok(format!("{{\"role\":\"{role}\",\"mask\":{mask},\"before\":{},\"after\":{},\"securityBefore\":\"{}\",\"securityAfter\":\"{}\",\"singleExplicitNoninheritingAce\":true}}",
-        before.json(), after.json(), digest(&raw_before)?, digest(&raw_after)?))
+        before.json(), after.json(), digest_traced(&raw_before, trace)?, digest_traced(&raw_after, trace)?))
 }
 
 // NetAPI allocation outputs remain original objects until their explicit single
@@ -998,8 +1041,8 @@ fn parent_user(book: &mut NativeBook) -> Result<Vec<u8>> {
 }
 type LaunchDiagnostic = (bool, u32, Option<u32>, [u32; 8]);
 // DATA-only formatter, shared with the existing inert regression. The longest
-// closed stage/role/check (27/9/22 bytes), null slot, max u32s and min NTSTATUS
-// total522 bytes including prefix/newline; the existing buffer is768 bytes.
+// closed stage/role/check, optional u16 control words, null slot, max u32s
+// and min NTSTATUS stay below the unchanged768-byte buffer (inert regression).
 pub(super) fn write_refusal(output: &mut impl std::io::Write, stage: &'static str,
     launch: Option<LaunchDiagnostic>, unknown: bool, fault: Option<InputFault>) -> std::io::Result<()> {
     let (returned, error, exit) = launch.map_or((false, 0, None), |value| (value.0, value.1, value.2));
@@ -1017,6 +1060,9 @@ pub(super) fn write_refusal(output: &mut impl std::io::Write, stage: &'static st
             Some(InputStatus::Win32(code)) => write!(output, "{{\"domain\":\"win32\",\"code\":{code}}}")?,
             Some(InputStatus::NtStatus(code)) => write!(output, "{{\"domain\":\"ntstatus\",\"code\":{code}}}")?,
             None => write!(output, "null")?,
+        }
+        if let Some((expected, observed)) = value.control {
+            write!(output, ",\"control\":{{\"expected\":{expected},\"observed\":{observed}}}")?;
         }
         write!(output, "}}")?;
     }
@@ -1134,40 +1180,49 @@ fn hosted_ordinary_original_handle_contract() -> Result<()> {
         next_effect(start.elapsed(), &mut deadline_latched)?;
         sid_sha = digest(&current.sid)?;
         stage = "exact-acl";
+        input_trace.at(InputRole::Output, Some(files.len() as u8));
         let output = root.join("ordinary-output");
-        let output_name = wide(output.to_str().ok_or(Error::Unsafe)?);
+        let output_name = wide(input_trace.observed(output.to_str().ok_or(Error::Unsafe), InputCheck::PathText)?);
         // CreateDirectoryW is exclusive. Collision/error never adopts output.
-        next_effect(start.elapsed(), &mut deadline_latched)?;
+        input_trace.observed(next_effect(start.elapsed(), &mut deadline_latched), InputCheck::AclDeadline)?;
         let created = unsafe { FS::CreateDirectoryW(output_name.as_ptr(), null()) };
         let creation_error = if created != 0 { 0 } else { unsafe { F::GetLastError() } };
         if created == 0 {
+            input_trace.record(InputCheck::OutputCreate, Some(InputStatus::Win32(creation_error)));
             if creation_error == 0 || creation_error == F::ERROR_IO_PENDING {
-                // Keep the original directory call's name on this same stack.
-                diagnostic("output-original-create", None, true);
-                loop { std::thread::park(); std::hint::black_box(&output_name); }
+                // Keep the original directory call's name/first cause on this stack.
+                diagnostic_with_fault("output-original-create", None, true, input_trace.first);
+                loop { std::thread::park(); std::hint::black_box((&output_name, &input_trace)); }
             }
             return Err(if creation_error == F::ERROR_ALREADY_EXISTS { Error::Unsafe } else { Error::Unavailable });
         }
-        next_effect(start.elapsed(), &mut deadline_latched)?;
-        let output_index = owned_file(&mut files, &output, true, FS::FILE_READ_ATTRIBUTES | FS::READ_CONTROL | FS::WRITE_DAC)?;
-        for (index, role) in directories {
+        input_trace.observed(next_effect(start.elapsed(), &mut deadline_latched), InputCheck::AclDeadline)?;
+        let output_index = owned_file_traced(&mut files, &output, true,
+            FS::FILE_READ_ATTRIBUTES | FS::READ_CONTROL | FS::WRITE_DAC, &mut input_trace)?;
+        for ((index, role), acl_role) in directories.into_iter().zip([
+            InputRole::AclRoot, InputRole::AclTarget, InputRole::AclTriple, InputRole::AclDebug, InputRole::AclDeps]) {
+            input_trace.at(acl_role, Some(index as u8));
             transitions.push(grant(&mut files[index], &role, &parent, &current.sid, FS::FILE_TRAVERSE,
-                start, &mut deadline_latched)?);
+                start, &mut deadline_latched, &mut input_trace)?);
         }
+        input_trace.at(InputRole::AclArtifact, Some(artifact as u8));
         transitions.push(grant(&mut files[artifact], "artifact", &parent, &current.sid,
-            FS::FILE_GENERIC_READ | FS::FILE_GENERIC_EXECUTE, start, &mut deadline_latched)?);
-        let artifact_after = files[artifact].stamp()?;
+            FS::FILE_GENERIC_READ | FS::FILE_GENERIC_EXECUTE, start, &mut deadline_latched, &mut input_trace)?);
+        let artifact_after = files[artifact].stamp_traced(&mut input_trace)?;
+        input_trace.at(InputRole::AclOutput, Some(output_index as u8));
         transitions.push(grant(&mut files[output_index], "ordinary-output", &parent, &current.sid,
             FS::FILE_ADD_FILE | FS::FILE_TRAVERSE | FS::FILE_READ_ATTRIBUTES | FS::SYNCHRONIZE,
-            start, &mut deadline_latched)?);
-        need(transitions.len() == 7)?;
+            start, &mut deadline_latched, &mut input_trace)?);
+        input_trace.need(transitions.len() == 7, InputCheck::AclTransitions)?;
         // This exact caller still has its original elevated primary, and no
         // impersonation. Close its NativeBook explicitly before original create.
-        super::hosted_tests::actual_elevated_primary_refusal(&mut book, index)?;
-        need(parent_user(&mut book)? == parent)?;
+        input_trace.at(InputRole::Parent, None);
+        input_trace.observed(super::hosted_tests::actual_elevated_primary_refusal(&mut book, index), InputCheck::ParentPrimary)?;
+        let parent_after = input_trace.observed(parent_user(&mut book), InputCheck::ParentUser)?;
+        input_trace.need(parent_after == parent, InputCheck::ParentIdentity)?;
         parent_settlement_attempted = true;
         parent_settled = book.settle_once() == CloseOutcome::Settled && book.settled();
-        need(parent_settled)?;
+        input_trace.need(parent_settled, InputCheck::ParentSettlement)?;
         stage = "preowned-create";
         let mut child = selected.clone(); child.identity = artifact_after.wire();
         launch = Some(Launch::new(&child, &output, current, &parent)?);
