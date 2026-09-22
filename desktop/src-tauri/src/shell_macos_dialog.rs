@@ -153,10 +153,11 @@ pub(super) mod observation {
     #[derive(Clone, Copy)]
     pub(crate) struct OpenRecheckBody {
         pub(crate) native_entered: bool, pub(crate) proof: Option<native::IdentityBinding>,
+        pub(crate) default_control: Option<native::DefaultControlProof>,
         pub(crate) admitted: Option<bool>,
     }
     impl OpenRecheckBody {
-        fn no_native(admitted: Option<bool>) -> Self { Self { native_entered: false, proof: None, admitted } }
+        fn no_native(admitted: Option<bool>) -> Self { Self { native_entered: false, proof: None, default_control: None, admitted } }
     }
     impl OpenRecheck {
         pub(crate) fn same(&self, other: &Self) -> bool {
@@ -204,9 +205,10 @@ pub(super) mod observation {
                 let after = self.admitted(false);
                 let admitted = if !native.custody_known { None } else {
                     after.map(|allowed| allowed && !self.stopped() && Instant::now() < end
-                        && native.proof.is_some_and(native::IdentityBinding::matched))
+                        && native.proof.is_some_and(native::IdentityBinding::matched)
+                        && native.default_control.is_some_and(|d| d.matched(true)))
                 };
-                OpenRecheckBody { native_entered: native.entered, proof: native.proof, admitted }
+                OpenRecheckBody { native_entered: native.entered, proof: native.proof, default_control: native.default_control, admitted }
             }); // This body's original PANEL borrow is gone before publication.
             let after = admit();
             result.admitted = result.admitted.zip(after).map(|(matched, allowed)|

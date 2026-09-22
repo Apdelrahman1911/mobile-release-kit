@@ -198,7 +198,7 @@ impl Panel {
 #[cfg(feature = "installed-observation")]
 pub use observation::{PanelAction, PanelActionDiagnostic, PanelObservation, OpenIdentity, AxDiagnostic, AxReport,
     AxInputReturn, AxProjection, IdentityConfiguration, IdentityStartReturn, IdentityBinding, IdentityBindingReturn,
-    IdentityRecheckReturn,
+    IdentityRecheckReturn, DefaultControlProof,
     installed_accessibility_trusted, installed_accessibility_press, installed_observation_flags_data_check};
 #[cfg(feature = "installed-observation")]
 mod observation {
@@ -313,16 +313,28 @@ mod observation {
         fn mrk_observation_ax_trusted() -> c_int;
         fn mrk_panel_observe_arm_open_identity(panel: *mut c_void) -> c_int;
         fn mrk_panel_observe_identity_data(panel: *mut c_void, data: *mut IdentityWire);
-        fn mrk_panel_observe_open_identity(panel: *mut c_void, parent: *mut u8, sheet: *mut u8, capacity: usize) -> c_int;
-        fn mrk_panel_observe_recheck_open_identity(panel: *mut c_void, parent: *const u8, sheet: *const u8, capacity: usize) -> c_int;
+        fn mrk_panel_observe_open_identity(panel: *mut c_void, parent: *mut u8, sheet: *mut u8, capacity: usize,
+            control: *mut DefaultPacket) -> c_int;
+        fn mrk_panel_observe_recheck_open_identity(panel: *mut c_void, parent: *const u8, sheet: *const u8, capacity: usize,
+            control: *const DefaultPacket) -> c_int;
         fn mrk_observation_ax_press(parent: *const u8, sheet: *const u8, capacity: usize,
+            control: *const DefaultPacket,
             admission: unsafe extern "C" fn(*mut c_void, u64, c_int, *mut AxTimeout) -> c_int,
             recheck: unsafe extern "C" fn(*mut c_void) -> c_int,
             context: *mut c_void, result: *mut AxWire);
     }
-    /// Copied parent anchor and actual original ID. Never an AppKit/CF object.
+    #[repr(C)]
     #[derive(Clone, Copy, PartialEq, Eq)]
-    pub struct OpenIdentity { parent: [u8; 64], panel: [u8; 64] }
+    struct DefaultPacket {
+        control_tag: [u8; 64], control_rect_bits: [u64; 4], screen_rect_bits: [u64; 4], point_bits: [u32; 2],
+    }
+    impl Default for DefaultPacket {
+        fn default() -> Self { Self { control_tag: [0; 64], control_rect_bits: [0; 4], screen_rect_bits: [0; 4], point_bits: [0; 2] } }
+    }
+    /// Copied original identity and private derived geometry. Never an AppKit/CF
+    /// object; no tag or coordinate is exposed by the public diagnostic DTOs.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub struct OpenIdentity { parent: [u8; 64], panel: [u8; 64], control: DefaultPacket }
     fn identity_tag(bytes: &[u8; 64], prefix: &[u8]) -> bool {
         let end = prefix.len() + 36;
         bytes.starts_with(prefix) && bytes[end..].iter().all(|byte| *byte == 0)
@@ -333,11 +345,25 @@ mod observation {
         let Some(end) = bytes.iter().position(|b| *b == 0).filter(|end| *end > 0) else { return false; };
         bytes[end..].iter().all(|b| *b == 0) && std::str::from_utf8(&bytes[..end]).is_ok()
     }
+    fn default_packet(p: &DefaultPacket, parent: &[u8; 64], panel: &[u8; 64]) -> bool {
+        if !identity_tag(&p.control_tag, b"mrk-default-") || p.control_tag == *parent || p.control_tag == *panel { return false; }
+        let r = p.control_rect_bits.map(f64::from_bits); let screen = p.screen_rect_bits.map(f64::from_bits);
+        if !r.into_iter().chain(screen).all(f64::is_finite)
+            || screen[0] != 0.0 || screen[1] != 0.0 || screen[2] <= 0.0 || screen[3] <= 0.0
+            || r[0] < 0.0 || r[1] < 0.0 || r[2] <= 0.0 || r[3] <= 0.0
+            || !(r[0] + r[2]).is_finite() || !(r[1] + r[3]).is_finite()
+            || r[0] + r[2] > screen[2] || r[1] + r[3] > screen[3] { return false; }
+        let x = r[0] + r[2] / 2.0; let y = screen[3] - (r[1] + r[3] / 2.0);
+        let fx = f64::from(f32::from_bits(p.point_bits[0])); let fy = f64::from(f32::from_bits(p.point_bits[1]));
+        fx.is_finite() && fy.is_finite() && fx == x && fy == y
+            && fx > r[0] && fx < r[0] + r[2] && screen[3] - fy > r[1] && screen[3] - fy < r[1] + r[3]
+    }
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct AxDiagnostic { pub site: &'static str, pub error: &'static str }
-    const AX_SITES: [&str; 17] = ["binding", "entry", "application", "windows", "parent-identity", "children",
-        "panel-identity", "panel-role", "panel-parent", "default-button", "button-role", "button-enabled",
-        "ancestry", "default-recheck", "press", "cleanup", "native-recheck"];
+    const AX_SITES: [&str; 20] = ["binding", "entry", "application", "windows", "parent-identity", "children",
+        "panel-identity", "panel-role", "panel-parent", "default-hit", "button-role", "button-enabled",
+        "ancestry", "default-hit-recheck", "press", "cleanup", "native-recheck",
+        "control-identity", "control-identity-recheck", "control-size"];
     const AX_ERRORS: [&str; 16] = ["none", "wrong-thread", "invalid-input", "ineligible", "unsupported", "ambiguous",
         "malformed", "limit", "deadline", "custody", "invalid-element", "cannot-complete", "ax-other", "changed",
         "objc-exception", "cleanup-unknown"];
@@ -348,10 +374,14 @@ mod observation {
         originals: u32, site: u32, error: u32,
     }
     #[repr(C)]
+    #[derive(Clone, Copy, Default, PartialEq, Eq)]
+    struct DefaultProofWire { flags: u32, checked: u32, matched: u32, site: u32, error: u32 }
+    #[repr(C)]
     #[derive(Clone, Copy, Default)]
     struct IdentityWire {
         flags: u32, parent: u32, site: u32, error: u32,
         binding: IdentityProofWire, recheck: IdentityProofWire,
+        default_binding: DefaultProofWire, default_recheck: DefaultProofWire,
     }
     const IDENTITY_CLASSES: [Option<&str>; 5] = [None, Some("nil"), Some("match"), Some("different"), Some("type-invalid")];
     const IDENTITY_SITES: [Option<&str>; 6] = [None, Some("objects"), Some("parent-tag"), Some("parent-set"),
@@ -361,6 +391,39 @@ mod observation {
     const PROOF_SITES: [&str; 14] = ["objects", "attachment", "directory", "parent-identifier", "panel-identifier",
         "parent-sheets", "panel-sheets", "panel-attached-sheet", "native-children", "native-parent", "native-role",
         "stable-identifier", "final-eligibility", "complete"];
+    const DEFAULT_SITES: [&str; 12] = ["objects", "default-cell", "control-view", "button-role", "button-enabled",
+        "screen", "frame", "tag-create", "tag-set", "tag-get", "stable", "complete"];
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct DefaultControlProof {
+        pub attempted: bool, pub cell_retained: bool, pub view_retained: bool,
+        pub tag_setter_entered: bool, pub tag_setter_returned: bool,
+        pub checks: [Option<bool>; 8], pub site: &'static str, pub error: &'static str,
+    }
+    impl DefaultControlProof {
+        pub fn matched(self, recheck: bool) -> bool {
+            self.attempted && self.cell_retained && self.view_retained
+                && self.tag_setter_entered == !recheck && self.tag_setter_returned == !recheck
+                && self.checks == [Some(true); 8] && self.site == "complete" && self.error == "none"
+        }
+    }
+    fn default_proof(w: DefaultProofWire, recheck: bool) -> Option<DefaultControlProof> {
+        if w.flags & !31 != 0 || w.flags & 1 == 0 || w.checked & !255 != 0 || w.matched & !w.checked != 0
+            || w.checked & 1 == 0 || w.checked & (w.checked + 1) != 0 { return None; }
+        let d = DefaultControlProof {
+            attempted: true, cell_retained: w.flags & 2 != 0, view_retained: w.flags & 4 != 0,
+            tag_setter_entered: w.flags & 8 != 0, tag_setter_returned: w.flags & 16 != 0,
+            checks: std::array::from_fn(|i| (w.checked & (1 << i) != 0).then_some(w.matched & (1 << i) != 0)),
+            site: *DEFAULT_SITES.get(w.site.checked_sub(1)? as usize)?, error: *AX_ERRORS.get(w.error as usize)?,
+        };
+        if d.view_retained && !d.cell_retained || d.tag_setter_entered && !d.view_retained
+            || d.tag_setter_returned && !d.tag_setter_entered || recheck && w.flags & 24 != 0
+            || d.checks[1] == Some(true) && !d.cell_retained || d.checks[2] == Some(true) && !d.view_retained
+            || (d.site == "complete") != (d.error == "none") || d.error == "none" && !d.matched(recheck) { return None; }
+        for bit in 1..8 {
+            if w.checked & (1 << bit) != 0 && w.matched & ((1 << bit) - 1) != (1 << bit) - 1 { return None; }
+        }
+        Some(d)
+    }
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct IdentityConfiguration {
         pub attempted: bool, pub parent_setter_entered: bool, pub parent_setter_returned: bool,
@@ -394,10 +457,13 @@ mod observation {
         }
     }
     #[derive(Clone, Copy)]
-    pub struct IdentityBindingReturn { pub configuration: IdentityConfiguration, pub binding: IdentityBinding }
+    pub struct IdentityBindingReturn {
+        pub configuration: IdentityConfiguration, pub binding: IdentityBinding, pub default_control: Option<DefaultControlProof>,
+    }
     #[derive(Clone, Copy)]
     pub struct IdentityRecheckReturn {
         pub entered: bool, pub proof: Option<IdentityBinding>, pub custody_known: bool,
+        pub default_control: Option<DefaultControlProof>,
     }
     fn identity_configuration(w: IdentityWire) -> Option<IdentityConfiguration> {
         if w.flags & !31 != 0 || w.flags & 1 == 0 { return None; }
@@ -427,6 +493,7 @@ mod observation {
         let result = match status { 0 => "ok", 1 => "permission-denied", 5 => "io", 22 => "invalid-input", 37 => "already", _ => "other" };
         let configuration = identity_configuration(wire).filter(|c|
             wire.binding == IdentityProofWire::default() && wire.recheck == IdentityProofWire::default()
+                && wire.default_binding == DefaultProofWire::default() && wire.default_recheck == DefaultProofWire::default()
                 && (status != 0 || c.complete()));
         IdentityStartReturn { result, configuration }
     }
@@ -457,10 +524,24 @@ mod observation {
             || (b.site == "complete") != (b.error == "none") || b.error == "none" && !b.matched() { return None; }
         Some(b)
     }
+    fn identity_components(status: c_int, original: IdentityProofWire, control: DefaultProofWire, recheck: bool)
+        -> Option<(IdentityBinding, Option<DefaultControlProof>)> {
+        let original_status = c_int::try_from(original.error).ok()?;
+        let proof = identity_proof(original_status, original)?;
+        if original_status != 0 {
+            return (status == original_status && control == DefaultProofWire::default()).then_some((proof, None));
+        }
+        // The original-only proof may genuinely succeed before control failure.
+        // Decode each against its own code, then bind the ACTUAL composite return.
+        let control_proof = default_proof(control, recheck)?;
+        (c_int::try_from(control.error).ok() == Some(status)).then_some((proof, Some(control_proof)))
+    }
     fn identity_binding_return(status: c_int, w: IdentityWire) -> Option<IdentityBindingReturn> {
         let configuration = identity_configuration(w)?;
-        if !configuration.complete() || w.recheck != IdentityProofWire::default() { return None; }
-        Some(IdentityBindingReturn { configuration, binding: identity_proof(status, w.binding)? })
+        if !configuration.complete() || w.recheck != IdentityProofWire::default()
+            || w.default_recheck != DefaultProofWire::default() { return None; }
+        let (binding, default_control) = identity_components(status, w.binding, w.default_binding, false)?;
+        Some(IdentityBindingReturn { configuration, binding, default_control })
     }
     fn identity_data_check() -> bool {
         // Inert scalar DATA only: no panel/owner/native call or return is made.
@@ -499,11 +580,65 @@ mod observation {
                 || identity_proof(4, IdentityProofWire { error: 4, ..changed }).is_some()
                 || identity_proof(13, IdentityProofWire { checked: 0xfff, ..changed }).is_some() { return false; }
         }
-        let configured = IdentityWire { flags: 31, parent: 2, site: 5, binding: proof, ..IdentityWire::default() };
-        identity_binding_return(0, configured).is_some_and(|r| r.binding.matched())
+        let control = DefaultProofWire { flags: 31, checked: 255, matched: 255, site: 12, error: 0 };
+        let configured = IdentityWire { flags: 31, parent: 2, site: 5, binding: proof, default_binding: control, ..IdentityWire::default() };
+        let late = DefaultProofWire { flags: 15, checked: 63, matched: 63, site: 9, error: 14 };
+        let early = IdentityProofWire { flags: 1, checked: 1, matched: 0, site: 1, error: 3, ..IdentityProofWire::default() };
+        identity_binding_return(0, configured).is_some_and(|r| r.binding.matched() && r.default_control.is_some_and(|d| d.matched(false)))
             && identity_binding_return(14, configured).is_none()
             && identity_binding_return(0, IdentityWire { recheck: proof, ..configured }).is_none()
+            && identity_binding_return(0, IdentityWire { default_binding: DefaultProofWire::default(), ..configured }).is_none()
+            && identity_binding_return(14, IdentityWire { default_binding: late, ..configured })
+                .is_some_and(|r| r.binding.matched() && r.default_control.is_some_and(|d| d.error == "objc-exception" && !d.matched(false)))
+            && identity_binding_return(0, IdentityWire { default_binding: late, ..configured }).is_none()
+            && identity_binding_return(3, IdentityWire { binding: early, default_binding: DefaultProofWire::default(), ..configured })
+                .is_some_and(|r| !r.binding.matched() && r.default_control.is_none())
+            && identity_binding_return(3, IdentityWire { binding: early, ..configured }).is_none()
             && identity_configuration(IdentityWire { flags: 63, ..configured }).is_none()
+    }
+    fn default_data_check() -> bool {
+        // Inert fixed-layout/geometry/proof DATA, not native capture or input.
+        if std::mem::size_of::<DefaultPacket>() != 136 || std::mem::size_of::<DefaultProofWire>() != 20
+            || std::mem::size_of::<IdentityWire>() != 128 { return false; }
+        let mut parent = [0; 64]; let anchor = b"mrk-parent-00000000-0000-0000-0000-000000000000";
+        parent[..anchor.len()].copy_from_slice(anchor);
+        let mut panel = [0; 64]; panel[..14].copy_from_slice(b"original-sheet");
+        let mut packet = DefaultPacket { control_rect_bits: [10.0f64, 20.0, 40.0, 20.0].map(f64::to_bits),
+            screen_rect_bits: [0.0f64, 0.0, 1024.0, 768.0].map(f64::to_bits),
+            point_bits: [30.0f32.to_bits(), 738.0f32.to_bits()], ..DefaultPacket::default() };
+        let tag = b"mrk-default-00000000-0000-0000-0000-000000000000";
+        packet.control_tag[..tag.len()].copy_from_slice(tag);
+        if !default_packet(&packet, &parent, &panel) { return false; }
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, 0.0] {
+            let mut bad = packet; bad.control_rect_bits[2] = value.to_bits();
+            if default_packet(&bad, &parent, &panel) { return false; }
+        }
+        let mut bad = packet; bad.control_tag[63] = 1;
+        if default_packet(&bad, &parent, &panel) { return false; }
+        bad = packet; bad.point_bits[1] = 739.0f32.to_bits();
+        if default_packet(&bad, &parent, &panel) { return false; }
+        bad = packet; bad.screen_rect_bits[0] = 1.0f64.to_bits();
+        if default_packet(&bad, &parent, &panel) { return false; }
+        bad = packet; bad.control_rect_bits[0] = 1024.0f64.to_bits();
+        if default_packet(&bad, &parent, &panel) { return false; }
+        let full = DefaultProofWire { flags: 31, checked: 255, matched: 255, site: 12, error: 0 };
+        for flags in 0..=63 {
+            for recheck in [false, true] {
+                if default_proof(DefaultProofWire { flags, ..full }, recheck).is_some_and(|d| d.matched(recheck))
+                    != (flags == if recheck { 7 } else { 31 }) { return false; }
+            }
+        }
+        for bit in 0..8 {
+            if default_proof(DefaultProofWire { checked: full.checked & !(1 << bit), matched: full.matched & !(1 << bit), ..full }, false).is_some()
+                || default_proof(DefaultProofWire { matched: full.matched & !(1 << bit), ..full }, false).is_some() { return false; }
+        }
+        default_proof(DefaultProofWire { flags: 1, checked: 3, matched: 1, site: 2, error: 4 }, false)
+            .is_some_and(|d| !d.cell_retained && d.checks[1] == Some(false) && !d.matched(false))
+            && default_proof(DefaultProofWire { flags: 15, checked: 63, matched: 63, site: 9, error: 14 }, false)
+                .is_some_and(|d| d.tag_setter_entered && !d.tag_setter_returned && d.checks[6].is_none())
+            && default_proof(DefaultProofWire { matched: 127, site: 11, error: 13, ..full }, false)
+                .is_some_and(|d| d.checks[..7] == [Some(true); 7] && d.checks[7] == Some(false) && !d.matched(false))
+            && default_proof(DefaultProofWire::default(), false).is_none()
     }
     #[repr(C)]
     #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -572,8 +707,8 @@ mod observation {
         } else { Some(projection(wire.final_projection, f & 1 != 0)?) };
         if error == "none" {
             let a = initial_projection?; let b = final_projection?;
-            let base = 13 + a.windows? + a.children? + b.windows? + b.children?;
-            if wire.calls % 2 != 0 || !(36..=64).contains(&wire.calls)
+            let base = 16 + a.windows? + a.children? + b.windows? + b.children?;
+            if wire.calls % 2 != 0 || !(42..=64).contains(&wire.calls)
                 || !(1..=8).contains(&wire.calls.checked_div(2)?.checked_sub(base)?) { return None; }
         }
         Some(AxReport { diagnostic: AxDiagnostic { site, error }, identity_matched: f & 1 != 0,
@@ -658,7 +793,7 @@ mod observation {
         let mut wire = AxWire::default();
         // SAFETY: only bounded copied bytes and the scoped non-unwinding
         // callback cross C. All Create/Copy results are retired there, not sent.
-        unsafe { mrk_observation_ax_press(identity.parent.as_ptr(), identity.panel.as_ptr(), identity.parent.len(),
+        unsafe { mrk_observation_ax_press(identity.parent.as_ptr(), identity.panel.as_ptr(), identity.parent.len(), &identity.control,
             ax_admission::<F, G>, ax_native_recheck::<F, G>, (&mut context as *mut AxAdmission<'_, F, G>).cast(), &mut wire); }
         let report = ax_return(wire);
         AxInputReturn { custody_known: context.custody_known && report.is_some_and(|r| r.native_rechecked == context.rechecked), report, end }
@@ -685,18 +820,22 @@ mod observation {
             if identity_actual(&actual) { return false; }
         }
         let p = ProjectionWire { windows: 2, children: 2, sheets: 2 };
-        let complete = AxWire { site: 15, error: 0, flags: 127, calls: 36, phase: 4, initial: p, final_projection: p };
+        let complete = AxWire { site: 15, error: 0, flags: 127, calls: 42, phase: 4, initial: p, final_projection: p };
         for flags in 0..=255 {
             let success = ax_return(AxWire { flags, ..complete });
             if success.is_some_and(AxReport::succeeded) != (flags == 127) { return false; }
         }
-        for calls in [0, 34, 35, 37, 52, 64, 65, u32::MAX] {
+        for calls in [0, 40, 41, 43, 58, 64, 65, u32::MAX] {
             if ax_return(AxWire { calls, ..complete }).is_some() { return false; }
         }
         let near_limit = ProjectionWire { windows: 5, children: 2, sheets: 2 };
         if !ax_return(AxWire { calls: 62, initial: near_limit, final_projection: near_limit, ..complete }).is_some_and(AxReport::succeeded)
             || ax_return(AxWire { calls: 66, initial: ProjectionWire { children: 3, ..near_limit },
                 final_projection: ProjectionWire { children: 3, ..near_limit }, ..complete }).is_some() { return false; }
+        let observed = ProjectionWire { windows: 2, children: 7, sheets: 2 };
+        if !ax_return(AxWire { calls: 56, ..complete }).is_some_and(AxReport::succeeded)
+            || !ax_return(AxWire { calls: 64, initial: observed, final_projection: observed, ..complete }).is_some_and(AxReport::succeeded)
+            || ax_return(AxWire { calls: 66, initial: observed, final_projection: observed, ..complete }).is_some() { return false; }
         for bad in [ProjectionWire { windows: 6, ..p }, ProjectionWire { children: 18, ..p },
             ProjectionWire { sheets: 3, ..p }, ProjectionWire::default()] {
             if ax_return(AxWire { final_projection: bad, ..complete }).is_some() { return false; }
@@ -710,7 +849,7 @@ mod observation {
                 .is_some_and(|r| !r.native_rechecked && !r.identity_matched && !r.attempted && r.cleanup_returned)
             && ax_return(AxWire { error: 14, flags: 103, ..complete })
                 .is_some_and(|r| r.attempted && !r.press_returned && !r.cleanup_returned)
-            && [0, 18, u32::MAX].into_iter().all(|site| ax_return(AxWire { site, error: 4, flags: 16, ..AxWire::default() }).is_none())
+            && [0, 21, u32::MAX].into_iter().all(|site| ax_return(AxWire { site, error: 4, flags: 16, ..AxWire::default() }).is_none())
             && ax_return(AxWire { error: 16, ..complete }).is_none()
     }
     fn observation_flags_valid(flags: u32) -> bool {
@@ -722,7 +861,8 @@ mod observation {
     /// Pure checks called by the existing instrumented observer entry, not a
     /// native query or a separate test executable/qualification route.
     pub fn installed_observation_flags_data_check() -> bool {
-        action_diagnostics_data_check() && ax_data_check() && identity_data_check() && [0, 0x1000, 0x2000, 0x12000, 0x3000, 0xf000, 0x1f002, 0x1ffff]
+        action_diagnostics_data_check() && ax_data_check() && identity_data_check() && default_data_check()
+            && [0, 0x1000, 0x2000, 0x12000, 0x3000, 0xf000, 0x1f002, 0x1ffff]
             .into_iter().all(observation_flags_valid)
             && [2, 0x4000, 0x8000, 0x10000, 0x14000, 0x1f000, 0x20000, u32::MAX]
                 .into_iter().all(|flags| !observation_flags_valid(flags))
@@ -742,41 +882,44 @@ mod observation {
         pub fn installed_open_identity(&mut self, returned: &mut Option<IdentityBindingReturn>) -> Result<OpenIdentity, AxDiagnostic> {
             *returned = None;
             self.usable().map_err(|_| AxDiagnostic { site: "binding", error: "ineligible" })?;
-            let mut identity = OpenIdentity { parent: [0; 64], panel: [0; 64] };
+            let mut identity = OpenIdentity { parent: [0; 64], panel: [0; 64], control: DefaultPacket::default() };
             // SAFETY: same retained main-thread original; only bounded copied
-            // parent anchor and actual original-identifier bytes return.
+            // original identifier bytes and fixed private default packet return.
             let status = unsafe { mrk_panel_observe_open_identity(self.original.as_ptr(), identity.parent.as_mut_ptr(),
-                identity.panel.as_mut_ptr(), identity.parent.len()) };
+                identity.panel.as_mut_ptr(), identity.parent.len(), &mut identity.control) };
             let mut wire = IdentityWire::default();
             // SAFETY: same immediate returned-original scalar copy, even if C
             // caught an exception. Never a subsequent AppKit observation.
             unsafe { mrk_panel_observe_identity_data(self.original.as_ptr(), &mut wire); }
             *returned = identity_binding_return(status, wire);
-            if status == 0 && returned.is_some_and(|data| data.binding.matched())
+            if status == 0 && returned.is_some_and(|data| data.binding.matched() && data.default_control.is_some_and(|d| d.matched(false)))
                 && identity_tag(&identity.parent, b"mrk-parent-") && identity_actual(&identity.panel)
-                && identity.parent != identity.panel {
+                && identity.parent != identity.panel && default_packet(&identity.control, &identity.parent, &identity.panel) {
                 return Ok(identity);
             }
-            if returned.is_none() || status == 0 || status == 14 || !(1..16).contains(&status) { self.unknown = true; }
+            if returned.is_none() || status == 0 || matches!(status, 9 | 14 | 15) || !(1..16).contains(&status) { self.unknown = true; }
             Err(AxDiagnostic { site: "binding", error: usize::try_from(status).ok().filter(|s| *s != 0)
                 .and_then(|s| AX_ERRORS.get(s)).copied().unwrap_or("malformed") })
         }
         pub fn installed_recheck_open_identity(&mut self, identity: &OpenIdentity) -> IdentityRecheckReturn {
-            let mut returned = IdentityRecheckReturn { entered: false, proof: None, custody_known: false };
+            let mut returned = IdentityRecheckReturn { entered: false, proof: None, custody_known: false, default_control: None };
             if self.usable().is_err() || !identity_tag(&identity.parent, b"mrk-parent-")
-                || !identity_actual(&identity.panel) || identity.parent == identity.panel { return returned; }
+                || !identity_actual(&identity.panel) || identity.parent == identity.panel
+                || !default_packet(&identity.control, &identity.parent, &identity.panel) { return returned; }
             returned.entered = true;
             // SAFETY: same retained main-thread original and immutable bounded
             // packet; this FFI cannot set an ID, act, reprepare or release.
             let status = unsafe { mrk_panel_observe_recheck_open_identity(self.original.as_ptr(),
-                identity.parent.as_ptr(), identity.panel.as_ptr(), identity.parent.len()) };
+                identity.parent.as_ptr(), identity.panel.as_ptr(), identity.parent.len(), &identity.control) };
             let mut wire = IdentityWire::default();
             // The SAME actual return's scalar DATA, before any later query.
             unsafe { mrk_panel_observe_identity_data(self.original.as_ptr(), &mut wire); }
-            returned.proof = identity_configuration(wire).filter(|c| c.complete())
-                .filter(|_| identity_proof(0, wire.binding).is_some_and(IdentityBinding::matched))
-                .and_then(|_| identity_proof(status, wire.recheck));
-            returned.custody_known = returned.proof.is_some() && !matches!(status, 9 | 14 | 15);
+            let components = identity_configuration(wire).filter(|c| c.complete())
+                .filter(|_| identity_components(0, wire.binding, wire.default_binding, false).is_some_and(|(p, d)|
+                    p.matched() && d.is_some_and(|d| d.matched(false))))
+                .and_then(|_| identity_components(status, wire.recheck, wire.default_recheck, true));
+            if let Some((proof, control)) = components { returned.proof = Some(proof); returned.default_control = control; }
+            returned.custody_known = components.is_some() && !matches!(status, 9 | 14 | 15);
             if !returned.custody_known { self.unknown = true; }
             returned
         }

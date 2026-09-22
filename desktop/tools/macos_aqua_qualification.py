@@ -91,7 +91,8 @@ NATIVE_ACTION_SITES = {
 }
 ACCESSIBILITY_SITES = frozenset((
     "binding entry application windows parent-identity children panel-identity panel-role panel-parent "
-    "default-button button-role button-enabled ancestry default-recheck press cleanup native-recheck"
+    "default-hit control-identity button-role button-enabled ancestry default-hit-recheck "
+    "control-identity-recheck control-size press cleanup native-recheck"
 ).split())
 ACCESSIBILITY_ERRORS = frozenset((
     "none wrong-thread invalid-input ineligible unsupported ambiguous malformed limit deadline custody "
@@ -111,6 +112,15 @@ ACCESSIBILITY_PROOF_CHECKS = (
 ACCESSIBILITY_PROOF_SITES = frozenset((
     "objects attachment directory parent-identifier panel-identifier parent-sheets panel-sheets "
     "panel-attached-sheet native-children native-parent native-role stable-identifier final-eligibility complete"
+).split())
+ACCESSIBILITY_DEFAULT_CHECKS = (
+    "eligible", "defaultCell", "controlView", "buttonUsable", "singleUnitScreen", "framePoint", "identifier", "stable",
+)
+ACCESSIBILITY_DEFAULT_FLAGS = (
+    "attempted", "cellRetained", "viewRetained", "tagSetterEntered", "tagSetterReturned",
+)
+ACCESSIBILITY_DEFAULT_SITES = frozenset((
+    "objects default-cell control-view button-role button-enabled screen frame tag-create tag-set tag-get stable complete"
 ).split())
 ACCESSIBILITY_RECHECK_FLAGS = (
     "requested", "dispatchAttempted", "bodyEntered", "nativeEntered", "bodyReturned", "receiptJoined",
@@ -208,6 +218,13 @@ def _expected_identity_proof():
             "parent": "match", "panel": "match", "children": 1, "originals": "one", "site": "complete", "error": "none"}
 
 
+def _expected_default_proof(*, capture):
+    # No coordinates, native pointers or observation tags enter public DATA.
+    return {"returned": True, "attempted": True, "cellRetained": True, "viewRetained": True,
+            "tagSetterEntered": capture, "tagSetterReturned": capture,
+            "checks": dict.fromkeys(ACCESSIBILITY_DEFAULT_CHECKS, True), "site": "complete", "error": "none"}
+
+
 def expected_result(binding, case):
     binding.checked()
     need(case in CASES, "case-binding")
@@ -241,21 +258,22 @@ def expected_result(binding, case):
             "controlReturns": [first, case != "picker-loss", case != "picker-loss", first, True],
             "accessibilityTrustedWithoutPrompt": True,
             "projectOpenInput": None if case == "picker-loss" else {
-                "mechanism": "accessibility-press-original-sheet-v1", "step": "OpenProject", "id": 2 if first else 1,
+                "mechanism": "accessibility-press-original-default-frame-v1", "step": "OpenProject", "id": 2 if first else 1,
                 "prepared": True, "entered": True, "attempted": True, "pressReturned": True, "returned": True,
                 "retired": True, "identityMatched": True, "controlMatched": True, "cleanupReturned": True,
-                "nativeRechecked": True, "phase": "control", "calls": 36,
+                "nativeRechecked": True, "phase": "control", "calls": 42,
                 "initialProjection": {"windows": 1, "children": 1, "sheets": 1, "matched": True},
                 "finalProjection": {"windows": 1, "children": 1, "sheets": 1, "matched": True},
                 "nativeRecheck": {"state": "joined", **dict.fromkeys(ACCESSIBILITY_RECHECK_FLAGS, True),
-                    "timely": True, "custodyKnown": True, "proof": _expected_identity_proof()},
+                    "timely": True, "custodyKnown": True, "proof": _expected_identity_proof(),
+                    "defaultControl": _expected_default_proof(capture=False)},
                 "site": "press", "error": "none"},
             "projectOpenBinding": None if case == "picker-loss" else {
-                "mechanism": "public-original-sheet-identity-v1", "case": case, "id": 2 if first else 1, "kind": "project",
+                "mechanism": "public-original-sheet-default-control-v1", "case": case, "id": 2 if first else 1, "kind": "project",
                 "start": {"returned": True, "result": "ok"},
                 "configuration": {"attempted": True, "parentSetterEntered": True, "parentSetterReturned": True,
                     "parent": "match", "site": "complete", "error": "none"},
-                "binding": _expected_identity_proof()},
+                "binding": _expected_identity_proof(), "defaultControl": _expected_default_proof(capture=True)},
             "quitCancelKeptOriginalReview": first, "originalDocumentAndQuitSettled": True},
         "saveSessions": sessions, "freshCoreReadback": first, "syntheticFileReadback": True,
         "staleMarkerWriterReturnedAndClosed": stale,
@@ -305,7 +323,8 @@ def parse_result(stdout, stderr, binding, case):
         need(type(value) is dict and type(value.get("native")) is dict, "native-object")
         identity = _accessibility_binding_context(value["native"].get("projectOpenBinding"), case)
         need(identity is not None and identity["start"]["result"] == "ok" and identity["binding"] is not None
-             and identity["binding"]["attempted"] and identity["binding"]["error"] == "none",
+             and identity["binding"]["attempted"] and identity["binding"]["error"] == "none"
+             and identity["defaultControl"] is not None and identity["defaultControl"]["error"] == "none",
              "project-open-binding")
         # Early parent-only configuration is diagnostic. Native preparation,
         # final native receipt and both same-original remote passes are distinct
@@ -439,6 +458,34 @@ def _accessibility_native_proof(value):
     return value
 
 
+def _accessibility_default_proof(value, *, capture):
+    """Closed facts from the original native control proof, not control identity."""
+    label = "accessibility-default-proof"
+    need(type(value) is dict and set(value) == {
+        "returned", *ACCESSIBILITY_DEFAULT_FLAGS, "checks", "site", "error"}, label)
+    need(value["returned"] is True and value["attempted"] is True
+         and all(type(value[key]) is bool for key in ACCESSIBILITY_DEFAULT_FLAGS), label)
+    checks, site, error = value["checks"], value["site"], value["error"]
+    need(type(checks) is dict and set(checks) == set(ACCESSIBILITY_DEFAULT_CHECKS)
+         and all(v is None or type(v) is bool for v in checks.values()), label)
+    need(type(site) is str and site in ACCESSIBILITY_DEFAULT_SITES
+         and type(error) is str and error in ACCESSIBILITY_ERRORS, label)
+    cell, view, setter, set_returned = (value[key] for key in ACCESSIBILITY_DEFAULT_FLAGS[1:])
+    need((not view or cell) and (not setter or cell and view) and (not set_returned or setter)
+         and (capture or not setter and not set_returned)
+         and (checks["defaultCell"] is not True or cell) and (checks["controlView"] is not True or view)
+         and checks["eligible"] is not None, label)
+    # Native proof checks form a checked prefix, ending at its first failure.
+    for index, key in enumerate(ACCESSIBILITY_DEFAULT_CHECKS):
+        if checks[key] is not None:
+            need(all(checks[earlier] is True for earlier in ACCESSIBILITY_DEFAULT_CHECKS[:index]), label)
+    need((site == "complete") == (error == "none"), label)
+    if error == "none":
+        need(cell and view and setter is capture and set_returned is capture
+             and all(v is True for v in checks.values()), label)
+    return value
+
+
 def _accessibility_projection(value):
     if value is None:
         return None
@@ -459,7 +506,7 @@ def _accessibility_projection(value):
 def _accessibility_native_recheck(value):
     label = "accessibility-native-recheck"
     need(type(value) is dict and set(value) == {"state", *ACCESSIBILITY_RECHECK_FLAGS,
-         "timely", "custodyKnown", "proof"}, label)
+         "timely", "custodyKnown", "proof", "defaultControl"}, label)
     state = value["state"]
     need(type(state) is str and state in {"unrequested", "requested", "queued", "entered", "returned", "joined",
                                         "not-dispatched", "unknown"}, label)
@@ -471,9 +518,12 @@ def _accessibility_native_recheck(value):
     if value["proof"] is not None:
         need(native and returned, label)
         _accessibility_native_proof(value["proof"])
+    if value["defaultControl"] is not None:
+        need(native and returned and value["proof"] is not None and value["proof"]["error"] == "none", label)
+        _accessibility_default_proof(value["defaultControl"], capture=False)
     if state == "unrequested":
         need(not any(value[key] for key in ACCESSIBILITY_RECHECK_FLAGS)
-             and all(value[key] is None for key in ("timely", "custodyKnown", "proof")), label)
+             and all(value[key] is None for key in ("timely", "custodyKnown", "proof", "defaultControl")), label)
     elif state in ("requested", "not-dispatched"):
         need(requested and not dispatched and not entered and not joined and value["proof"] is None, label)
     elif state == "queued":
@@ -492,7 +542,8 @@ def _accessibility_native_recheck(value):
 def _accessibility_recheck_succeeded(value):
     return (value["state"] == "joined" and all(value[key] for key in ACCESSIBILITY_RECHECK_FLAGS)
             and value["timely"] is True and value["custodyKnown"] is True
-            and value["proof"] is not None and value["proof"]["error"] == "none")
+            and value["proof"] is not None and value["proof"]["error"] == "none"
+            and value["defaultControl"] is not None and value["defaultControl"]["error"] == "none")
 
 
 def _accessibility_context(value, native, panel, *, expected_id=None):
@@ -506,7 +557,7 @@ def _accessibility_context(value, native, panel, *, expected_id=None):
         observations = ("phase", "calls", "initialProjection", "finalProjection")
         need(type(value) is dict and set(value) == {"mechanism", "step", "id", "prepared", "entered", "returned",
              "retired", "site", "error", "nativeRecheck", *observations, *flags}, "accessibility-data")
-        need(value["mechanism"] == "accessibility-press-original-sheet-v1" and value["step"] == "OpenProject"
+        need(value["mechanism"] == "accessibility-press-original-default-frame-v1" and value["step"] == "OpenProject"
              and type(value["id"]) is int and value["id"] in (1, 2), "accessibility-data")
         if expected_id is not None:
             need(value["id"] == expected_id, "accessibility-data")
@@ -567,8 +618,8 @@ def _accessibility_context(value, native, panel, *, expected_id=None):
             if error == "none":
                 need(site == "press" and all(value[key] for key in flags)
                      and initial is not None and initial["matched"] and final is not None and final["matched"]
-                     and 36 <= calls <= 64 and calls % 2 == 0, "accessibility-data")
-                edges = calls // 2 - 13 - sum(p["windows"] + p["children"] for p in (initial, final))
+                     and 42 <= calls <= 64 and calls % 2 == 0, "accessibility-data")
+                edges = calls // 2 - 16 - sum(p["windows"] + p["children"] for p in (initial, final))
                 need(1 <= edges <= 8, "accessibility-data")
         return value
     except (Refused, KeyError, TypeError, ValueError):
@@ -582,8 +633,9 @@ def _accessibility_binding_context(value, case):
     try:
         label = "accessibility-binding-data"
         need(type(case) is str and case in CASES and case != "picker-loss", label)
-        need(type(value) is dict and set(value) == {"mechanism", "case", "id", "kind", "start", "configuration", "binding"}, label)
-        need(value["mechanism"] == "public-original-sheet-identity-v1" and value["case"] == case
+        need(type(value) is dict and set(value) == {
+            "mechanism", "case", "id", "kind", "start", "configuration", "binding", "defaultControl"}, label)
+        need(value["mechanism"] == "public-original-sheet-default-control-v1" and value["case"] == case
              and type(value["id"]) is int and value["id"] == (2 if case == "first-save" else 1)
              and value["kind"] == "project", label)
         start, configured, bound = value["start"], value["configuration"], value["binding"]
@@ -616,6 +668,9 @@ def _accessibility_binding_context(value, case):
         if bound is not None:
             need(start["result"] == "ok", label)
             _accessibility_native_proof(bound)
+        if value["defaultControl"] is not None:
+            need(bound is not None and bound["error"] == "none", label)
+            _accessibility_default_proof(value["defaultControl"], capture=True)
         return value
     except (Refused, KeyError, TypeError, ValueError):
         return None

@@ -215,6 +215,14 @@ fn native_proof_value(p: mrk_macos_installed_native::IdentityBinding) -> Value {
             "panelIdentifier":c[4],"parentSingleton":c[5],"noNestedSheet":c[6],"nativeChild":c[7],
             "nativeParent":c[8],"nativeRole":c[9],"stableIdentifier":c[10],"finalEligibility":c[11]}})
 }
+fn default_control_value(p: mrk_macos_installed_native::DefaultControlProof) -> Value {
+    let c = p.checks;
+    json!({"returned":true,"attempted":p.attempted,"cellRetained":p.cell_retained,"viewRetained":p.view_retained,
+        "tagSetterEntered":p.tag_setter_entered,"tagSetterReturned":p.tag_setter_returned,
+        "checks":{"eligible":c[0],"defaultCell":c[1],"controlView":c[2],"buttonUsable":c[3],
+            "singleUnitScreen":c[4],"framePoint":c[5],"identifier":c[6],"stable":c[7]},
+        "site":p.site,"error":p.error})
+}
 fn projection_value(p: mrk_macos_installed_native::AxProjection) -> Value {
     json!({"windows":p.windows,"children":p.children,"sheets":p.sheets,"matched":p.matched})
 }
@@ -223,9 +231,9 @@ fn projection_calls_match(a: mrk_macos_installed_native::AxProjection,
     let complete = |p: mrk_macos_installed_native::AxProjection| p.matched
         && p.windows.is_some_and(|n| (1..=4).contains(&n)) && p.children.is_some_and(|n| (1..=16).contains(&n))
         && p.sheets == Some(1);
-    if !complete(a) || !complete(b) || !(36..=64).contains(&calls) || calls % 2 != 0 { return false; }
+    if !complete(a) || !complete(b) || !(42..=64).contains(&calls) || calls % 2 != 0 { return false; }
     let base = a.windows.zip(a.children).zip(b.windows.zip(b.children))
-        .map(|((w, c), (w2, c2))| 13 + w + c + w2 + c2);
+        .map(|((w, c), (w2, c2))| 16 + w + c + w2 + c2);
     base.and_then(|base| (calls / 2).checked_sub(base)).is_some_and(|depth| (1..=8).contains(&depth))
 }
 #[derive(Clone, Copy)]
@@ -233,22 +241,25 @@ struct NativeRecheckSample {
     state: &'static str, requested: bool, dispatch_attempted: bool, body_entered: bool, native_entered: bool,
     body_returned: bool, receipt_joined: bool, timely: Option<bool>, custody_known: Option<bool>,
     proof: Option<mrk_macos_installed_native::IdentityBinding>,
+    default_control: Option<mrk_macos_installed_native::DefaultControlProof>,
 }
 impl NativeRecheckSample {
     fn new() -> Self {
         Self { state: "unrequested", requested: false, dispatch_attempted: false, body_entered: false,
-            native_entered: false, body_returned: false, receipt_joined: false, timely: None, custody_known: None, proof: None }
+            native_entered: false, body_returned: false, receipt_joined: false, timely: None, custody_known: None,
+            proof: None, default_control: None }
     }
     fn succeeded(self) -> bool {
         self.state == "joined" && self.requested && self.dispatch_attempted && self.body_entered && self.native_entered
             && self.body_returned && self.receipt_joined && self.timely == Some(true) && self.custody_known == Some(true)
             && self.proof.is_some_and(mrk_macos_installed_native::IdentityBinding::matched)
+            && self.default_control.is_some_and(|d| d.matched(true))
     }
     fn value(self) -> Value {
         json!({"state":self.state,"requested":self.requested,"dispatchAttempted":self.dispatch_attempted,
             "bodyEntered":self.body_entered,"nativeEntered":self.native_entered,"bodyReturned":self.body_returned,
             "receiptJoined":self.receipt_joined,"timely":self.timely,"custodyKnown":self.custody_known,
-            "proof":self.proof.map(native_proof_value)})
+            "proof":self.proof.map(native_proof_value),"defaultControl":self.default_control.map(default_control_value)})
     }
 }
 struct NativeRecheckReceipt { token: OpenRecheck, body: OpenRecheckBody }
@@ -294,7 +305,7 @@ impl OpenInputSample {
             && self.diagnostic == Some(mrk_macos_installed_native::AxDiagnostic { site: "press", error: "none" })
     }
     fn value(self) -> Value {
-        json!({"mechanism":"accessibility-press-original-sheet-v1", "step":"OpenProject", "id":self.id,
+        json!({"mechanism":"accessibility-press-original-default-frame-v1", "step":"OpenProject", "id":self.id,
             "prepared":self.prepared, "entered":self.entered, "attempted":self.attempted, "pressReturned":self.press_returned,
             "returned":self.returned, "retired":self.retired, "identityMatched":self.identity_matched,
             "controlMatched":self.control_matched, "cleanupReturned":self.cleanup_returned,
@@ -309,6 +320,7 @@ struct IdentitySample {
     case: Case, id: u32, start_result: &'static str,
     configuration: mrk_macos_installed_native::IdentityConfiguration,
     binding: Option<mrk_macos_installed_native::IdentityBinding>,
+    default_control: Option<mrk_macos_installed_native::DefaultControlProof>,
 }
 impl IdentitySample {
     fn configured(self, id: u32) -> bool {
@@ -316,14 +328,15 @@ impl IdentitySample {
     }
     fn succeeded(self, id: u32) -> bool {
         self.configured(id) && self.binding.is_some_and(mrk_macos_installed_native::IdentityBinding::matched)
+            && self.default_control.is_some_and(|d| d.matched(false))
     }
     fn value(self) -> Value {
         let c = self.configuration;
-        json!({"mechanism":"public-original-sheet-identity-v1", "case":self.case.name(), "id":self.id, "kind":"project",
+        json!({"mechanism":"public-original-sheet-default-control-v1", "case":self.case.name(), "id":self.id, "kind":"project",
             "start":{"returned":true,"result":self.start_result},
             "configuration":{"attempted":c.attempted,"parentSetterEntered":c.parent_setter_entered,
                 "parentSetterReturned":c.parent_setter_returned,"parent":c.parent,"site":c.site,"error":c.error},
-            "binding":self.binding.map(native_proof_value)})
+            "binding":self.binding.map(native_proof_value),"defaultControl":self.default_control.map(default_control_value)})
     }
 }
 #[derive(Clone, Copy)]
@@ -622,7 +635,8 @@ impl Observation {
             self.fail_with("native-ax-custody"); return;
         }
         let Some(configuration) = returned.configuration else { self.fail_with("native-ax-binding"); return; };
-        r.identity_binding = Some(IdentitySample { case: self.case, id, start_result: returned.result, configuration, binding: None });
+        r.identity_binding = Some(IdentitySample { case: self.case, id, start_result: returned.result, configuration,
+            binding: None, default_control: None });
         // Saved original-return DATA precedes this latch/one-shot report. A
         // previous failure stays absorbing; none of this grants finality.
         if !returned.succeeded() { self.fail_with("native-ax-binding"); }
@@ -1248,7 +1262,8 @@ impl Observation {
         if !self.recheck_sample(&token, |s| {
             if s.state != "entered" || !s.body_entered || s.body_returned { return false; }
             s.state = "returned"; s.body_returned = true; s.native_entered = body.native_entered;
-            s.proof = body.proof; s.timely = Some(Instant::now() < end); s.custody_known = Some(body.admitted.is_some()); true
+            s.proof = body.proof; s.default_control = body.default_control;
+            s.timely = Some(Instant::now() < end); s.custody_known = Some(body.admitted.is_some()); true
         }) { self.recheck_unknown(&token, end); return; }
         // That publication lock may itself have waited. A late return is not
         // a usable receipt, even if the underlying getters actually returned.
@@ -1301,7 +1316,8 @@ impl Observation {
         let Ok(returned) = receipt.recv_timeout(remaining) else { self.recheck_unknown(&token, end); return None; };
         if !token.same(&returned.token) || returned.body.admitted.is_none() || Instant::now() >= end
             || returned.body.admitted == Some(true) && (!returned.body.native_entered
-                || !returned.body.proof.is_some_and(mrk_macos_installed_native::IdentityBinding::matched)) {
+                || !returned.body.proof.is_some_and(mrk_macos_installed_native::IdentityBinding::matched)
+                || !returned.body.default_control.is_some_and(|d| d.matched(true))) {
             self.recheck_unknown(&token, end); return None;
         }
         let allowed = self.recheck_admission(&token);
@@ -1310,7 +1326,8 @@ impl Observation {
         }
         if !self.recheck_sample(&token, |s| {
             if s.state != "returned" || !s.body_returned || s.receipt_joined
-                || s.native_entered != returned.body.native_entered || s.proof != returned.body.proof { return false; }
+                || s.native_entered != returned.body.native_entered || s.proof != returned.body.proof
+                || s.default_control != returned.body.default_control { return false; }
             s.state = "joined"; s.receipt_joined = true; s.timely = Some(Instant::now() < end); s.custody_known = Some(true); true
         }) || Instant::now() >= end { self.recheck_unknown(&token, end); return None; }
         Some(returned.body.admitted == Some(true) && allowed == Some(true))
@@ -1401,10 +1418,11 @@ impl Observation {
         }
         if let Some(returned) = binding_return {
             let Some(sample) = r.identity_binding.as_mut().filter(|sample|
-                sample.configured(self.case.selected_id()) && sample.binding.is_none()
+                sample.configured(self.case.selected_id()) && sample.binding.is_none() && sample.default_control.is_none()
                     && sample.configuration == returned.configuration) else { self.fail_with("native-ax-custody"); return; };
             if step != Step::OpenProject { self.fail_with("native-ax-custody"); return; }
             sample.binding = Some(returned.binding);
+            sample.default_control = returned.default_control;
         }
         // Keep the historical wrong-thread refusal conservative. Diagnostics
         // never authorize retirement; a different/unknown owner is untouched.
@@ -1474,7 +1492,7 @@ impl Observation {
             if !self.timely() { return Err("observer-deadline"); }
             {
                 let r = self.record().ok_or("observer-record-unavailable")?;
-                if !r.identity_binding.is_some_and(|sample| sample.configured(id) && sample.binding.is_none()) {
+                if !r.identity_binding.is_some_and(|sample| sample.configured(id) && sample.binding.is_none() && sample.default_control.is_none()) {
                     return Err("native-ax-binding");
                 }
             }
@@ -1895,26 +1913,29 @@ fn route() -> Option<(PathBuf,u32)> {
 // Pure regression checks in the already-required instrumented native entry.
 // These do not call AppKit, acquire files, dispatch actions, or supply receipts.
 fn native_recheck_data_check() -> bool {
-    use mrk_macos_installed_native::{AxDiagnostic, AxProjection, IdentityBinding, IdentityConfiguration};
+    use mrk_macos_installed_native::{AxDiagnostic, AxProjection, IdentityBinding, IdentityConfiguration, DefaultControlProof};
     // Inert DTOs only. These values never enter a live original/AX request.
     let proof = IdentityBinding { attempted: true, parent: Some("match"), panel: Some("match"),
         checks: [Some(true); 12], children: Some(1), originals: Some("one"), site: "complete", error: "none" };
+    let control = DefaultControlProof { attempted: true, cell_retained: true, view_retained: true,
+        tag_setter_entered: false, tag_setter_returned: false, checks: [Some(true); 8], site: "complete", error: "none" };
+    let capture = DefaultControlProof { tag_setter_entered: true, tag_setter_returned: true, ..control };
     let fresh = NativeRecheckSample::new();
     if fresh.succeeded() || fresh.value() != json!({"state":"unrequested","requested":false,"dispatchAttempted":false,
         "bodyEntered":false,"nativeEntered":false,"bodyReturned":false,"receiptJoined":false,
-        "timely":null,"custodyKnown":null,"proof":null}) { return false; }
+        "timely":null,"custodyKnown":null,"proof":null,"defaultControl":null}) { return false; }
     let joined = NativeRecheckSample { state: "joined", requested: true, dispatch_attempted: true,
         body_entered: true, native_entered: true, body_returned: true, receipt_joined: true,
-        timely: Some(true), custody_known: Some(true), proof: Some(proof) };
+        timely: Some(true), custody_known: Some(true), proof: Some(proof), default_control: Some(control) };
     if !joined.succeeded() { return false; }
     for state in ["unrequested", "requested", "queued", "entered", "returned", "not-dispatched", "unknown"] {
         if (NativeRecheckSample { state, ..joined }).succeeded() { return false; }
     }
-    let mutations: [fn(&mut NativeRecheckSample); 11] = [
+    let mutations: [fn(&mut NativeRecheckSample); 12] = [
         |s| s.requested = false, |s| s.dispatch_attempted = false, |s| s.body_entered = false,
         |s| s.native_entered = false, |s| s.body_returned = false, |s| s.receipt_joined = false,
         |s| s.timely = None, |s| s.timely = Some(false), |s| s.custody_known = None,
-        |s| s.custody_known = Some(false), |s| s.proof = None,
+        |s| s.custody_known = Some(false), |s| s.proof = None, |s| s.default_control = None,
     ];
     for mutation in mutations {
         let mut sample = joined; mutation(&mut sample);
@@ -1926,15 +1947,27 @@ fn native_recheck_data_check() -> bool {
             if (NativeRecheckSample { proof: Some(negative), ..joined }).succeeded() { return false; }
         }
     }
+    for bit in 0..8 {
+        for value in [None, Some(false)] {
+            let mut negative = control; negative.checks[bit] = value;
+            if (NativeRecheckSample { default_control: Some(negative), ..joined }).succeeded() { return false; }
+        }
+    }
+    if (NativeRecheckSample { default_control: Some(capture), ..joined }).succeeded() { return false; }
     let configuration = IdentityConfiguration { attempted: true, parent_setter_entered: true,
         parent_setter_returned: true, parent: Some("nil"), site: Some("complete"), error: Some("none") };
-    let identity = IdentitySample { case: Case::FirstSave, id: 2, start_result: "ok", configuration, binding: Some(proof) };
+    let identity = IdentitySample { case: Case::FirstSave, id: 2, start_result: "ok", configuration,
+        binding: Some(proof), default_control: Some(capture) };
     if !identity.succeeded(2) || identity.succeeded(1) { return false; }
     let dto = identity.value();
-    if dto["mechanism"] != "public-original-sheet-identity-v1"
+    if dto["mechanism"] != "public-original-sheet-default-control-v1"
         || !dto["configuration"].as_object().is_some_and(|o| o.len() == 6 && !o.contains_key("panel"))
         || !dto["binding"].as_object().is_some_and(|o| o.len() == 9)
-        || !dto["binding"]["checks"].as_object().is_some_and(|o| o.len() == 12) { return false; }
+        || !dto["binding"]["checks"].as_object().is_some_and(|o| o.len() == 12)
+        || !dto["defaultControl"].as_object().is_some_and(|o| o.len() == 9)
+        || !dto["defaultControl"]["checks"].as_object().is_some_and(|o| o.len() == 8)
+        || (IdentitySample { default_control: None, ..identity }).succeeded(2)
+        || (IdentitySample { default_control: Some(control), ..identity }).succeeded(2) { return false; }
     let mut changed = proof; changed.panel = Some("different"); changed.checks[10] = Some(false);
     changed.checks[11] = None; changed.site = "stable-identifier"; changed.error = "changed";
     let negative = native_proof_value(changed);
@@ -1944,7 +1977,7 @@ fn native_recheck_data_check() -> bool {
     let input = OpenInputSample { id: 2, prepared: true, entered: true, attempted: Some(true), press_returned: Some(true),
         returned: true, retired: true, identity_matched: Some(true), control_matched: Some(true), cleanup_returned: Some(true),
         diagnostic: Some(AxDiagnostic { site: "press", error: "none" }), native_rechecked: Some(true), phase: Some("control"),
-        calls: Some(36), initial_projection: Some(projection), final_projection: Some(projection), recheck: joined };
+        calls: Some(42), initial_projection: Some(projection), final_projection: Some(projection), recheck: joined };
     if !input.succeeded() || !input.value().as_object().is_some_and(|o| o.len() == 20) { return false; }
     let mutations: [fn(&mut OpenInputSample); 10] = [
         |s| s.native_rechecked = None, |s| s.native_rechecked = Some(false), |s| s.phase = None,
@@ -1956,8 +1989,14 @@ fn native_recheck_data_check() -> bool {
         let mut sample = input; mutation(&mut sample);
         if sample.succeeded() { return false; }
     }
-    for calls in [0, 34, 35, 37, 52, 64, 65, u32::MAX] {
+    for calls in [0, 40, 41, 43, 58, 64, 65, u32::MAX] {
         if (OpenInputSample { calls: Some(calls), ..input }).succeeded() { return false; }
+    }
+    let observed = AxProjection { children: Some(6), ..projection };
+    if !(OpenInputSample { calls: Some(56), ..input }).succeeded()
+        || !(OpenInputSample { calls: Some(64), initial_projection: Some(observed), final_projection: Some(observed), ..input }).succeeded()
+        || (OpenInputSample { calls: Some(66), initial_projection: Some(observed), final_projection: Some(observed), ..input }).succeeded() {
+        return false;
     }
     for invalid in [AxProjection { windows: Some(5), ..projection }, AxProjection { children: Some(17), ..projection },
         AxProjection { sheets: Some(2), ..projection }, AxProjection { matched: false, ..projection }] {
