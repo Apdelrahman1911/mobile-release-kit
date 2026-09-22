@@ -331,6 +331,7 @@ class AquaDataTests(unittest.TestCase):
         prefix = b"MRK_MACOS_AQUA_FAILURE_REASON"
         good = prefix + b"=native-attachment-lost\n"
         for label in M.FAILURE_REASONS:
+            self.assertLessEqual(len(label.encode("ascii")), 48)
             row = prefix + b"=" + label.encode("ascii") + b"\n"
             self.assertEqual(M.failure_reason(row, b""), label)
             self.assertEqual(M.failure_reason(b"", row), label)
@@ -370,7 +371,8 @@ class AquaDataTests(unittest.TestCase):
                                        panelReferencesParent=None, panelVisible=False if panel else None)
             self.assertEqual(M.failure_context(context_row(value), b""), value)
         for pending in ({"kind": "reload", "step": None}, {"kind": "failure-close", "step": None},
-                        {"kind": "dom", "step": "Review(1)"}, {"kind": "close", "step": "CloseCancel"}):
+                        {"kind": "dom", "step": "Review(1)"}, {"kind": "dom", "step": "ChooseCancel"},
+                        {"kind": "close", "step": "CloseCancel"}):
             value = deepcopy(empty); value["pending"] = pending
             self.assertEqual(M.failure_context(context_row(value), b""), value)
         variants = []
@@ -385,6 +387,7 @@ class AquaDataTests(unittest.TestCase):
         item = deepcopy(good); item["lastPanel"]["path"] = "PRIVATE"; variants.append(item)
         item = deepcopy(good); item["nativeHandler"] = None; variants.append(item)
         item = deepcopy(empty); item["nativeHandler"] = {"step": "Quit", "entered": False, "returned": True}; variants.append(item)
+        item = deepcopy(empty); item["pending"] = {"kind": "dom", "step": "ChooseCancel", "sequence": 1}; variants.append(item)
         for item in variants:
             self.assertIsNone(M.failure_context(context_row(item), b""))
         row = context_row(good)
@@ -561,6 +564,70 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn("if (!mrk_observation_attached(s)) return EAGAIN;", native)
         self.assertIn("flags & !0x1ffff == 0", rust)
         self.assertIn("(parent_present && panel_present).then_some", rust)
+
+    def test_dom_callback_custody_wraps_only_the_original_returned_body(self):
+        # Source controls only: the actual Rust DATA entry and native callback
+        # are executed by the reviewed macOS qualification, not these tests.
+        observer = (PATH.parents[1] / "src-tauri" / "src" / "installed_shell_observation_macos.rs").read_text(encoding="utf-8")
+        dispatch = observer.split("if r.evaluations >= 160", 1)[1].split("fn native_step(", 1)[0]
+        self.assertLess(dispatch.index("r.evaluations += 1"), dispatch.index("sequence: r.evaluations"))
+        self.assertIn("r.pending = Some(Pending::Dom(original)); original", dispatch)
+        self.assertIn("if r.pending == Some(Pending::Dom(original)) { r.pending = None; }", dispatch)
+        self.assertIn("q.dom(original,&value)", dispatch)
+        refused = dispatch.split("if window.eval_with_callback", 1)[1]
+        self.assertIn('self.fail_with("dom-dispatch-refused")', refused)
+        self.assertNotIn("r.pending = None", refused)
+        entry = observer.split("fn dom_step_entry(", 1)[1].split("// Only the wrapper", 1)[0]
+        self.assertIn("(1..=160).contains(&original.sequence)", entry)
+        self.assertIn("current == original.step && pending == Some(Pending::Dom(original))", entry)
+        retirement = observer.split("fn retire_returned_dom(", 1)[1].split("#[derive", 1)[0]
+        self.assertIn("*pending != Some(Pending::Dom(original)) { return false; }", retirement)
+        self.assertNotIn("current", retirement)
+        self.assertNotIn("take()", retirement)
+        wrapper = observer.split("    fn dom(", 1)[1].split("    fn dom_body(", 1)[0]
+        self.assertIn("let Some(mut r) = self.record() else { return; };", wrapper)
+        authenticated = 'if !dom_step_entry(r.pending, r.step, original) { self.fail_with("dom-pending-custody"); return; }'
+        self.assertLess(wrapper.index(authenticated), wrapper.index("self.dom_body(&mut r, original.step, raw)"))
+        self.assertLess(wrapper.index("self.dom_body(&mut r, original.step, raw)"), wrapper.index("retire_returned_dom(&mut r.pending, original)"))
+        self.assertEqual(wrapper.count("self.record()"), 1)
+        for forbidden in ("catch_unwind", "drop(r)", "r.pending.take()", "r.step !="):
+            self.assertNotIn(forbidden, wrapper)
+        body = observer.split("    fn dom_body(", 1)[1].split("    pub(super) fn relay_joined", 1)[0]
+        for forbidden in ("self.record()", "r.pending", "catch_unwind", "failed.store", "self.end ="):
+            self.assertNotIn(forbidden, body)
+        self.assertEqual(body.count("if !self.timely() { return; }"), 2)
+        for label in ("dom-callback-size", "dom-callback-json", "dom-callback-object", "dom-callback-state"):
+            self.assertIn(f'self.fail_with("{label}")', body)
+        before_transition = body.split("r.step = match step", 1)[0]
+        self.assertTrue(before_transition.rstrip().endswith("if !self.timely() { return; }"))
+        self.assertNotRegex(before_transition, r"r\.[a-z_]+\s*(?:\+=|=(?!=))")
+        shutdown = observer.split("fn failure_shutdown(", 1)[1].split("    fn dom(", 1)[0]
+        self.assertIn("if r.pending.is_some() || r.failure_quit_attempted { return; }", shutdown)
+        context = observer.split("fn failure_context(", 1)[1].split("pub(super) struct Observation", 1)[0]
+        self.assertIn('Pending::Dom(original) => ("dom", Some(original.step))', context)
+        self.assertNotIn("sequence", context)
+
+    def test_picker_result_routes_errors_without_admitting_early_success(self):
+        observer = (PATH.parents[1] / "src-tauri" / "src" / "installed_shell_observation_macos.rs").read_text(encoding="utf-8")
+        route = observer.split("fn project_return_route(", 1)[1].split("fn native_step_entry(", 1)[0]
+        self.assertLess(route.index("if reload_requested && case == Case::PickerLoss"), route.index("match result"))
+        self.assertIn('if project_returned || result.as_ref().is_ok_and(Option::is_some) { return Err("observer-invariant"); }', route)
+        self.assertIn("case == Case::FirstSave && matches!(step, Step::CancelProject | Step::CancelSettled)", route)
+        self.assertLess(route.index('if cancel && cancel_returned { return Err("cancel-duplicate-result"); }'), route.index("match result"))
+        self.assertIn("Err(error) => Err(crate::asset_commands::AssetError::new(error.reason).code)", route)
+        self.assertIn("Ok(None) if cancel => Ok(ProjectReturn::Cancelled)", route)
+        self.assertIn('Ok(Some(_)) if cancel => Err("cancel-unexpected-project")', route)
+        self.assertIn("Ok(Some(_)) if matches!(step, Step::OpenProject | Step::ProjectSettled) => Ok(ProjectReturn::Selected)", route)
+        self.assertIn('_ => Err("picker-unexpected-result")', route)
+        for forbidden in ("error.code", "error.message", "project_calls", "r.step =", "observe_panel_action"):
+            self.assertNotIn(forbidden, route)
+        handler = observer.split("pub(super) fn project_result(", 1)[1].split("pub(super) fn snapshot_request(", 1)[0]
+        self.assertLess(handler.index("match project_return_route("), handler.index("let Ok(Some(project))"))
+        self.assertIn("Err(reason) => { self.fail_with(reason); return; }", handler)
+        self.assertIn("!matches!(r.step, Step::OpenProject | Step::ProjectSettled) || r.project.is_some()", handler)
+        self.assertIn("Path::new(&project.path) != self.project_path || project.name != self.case.name() || !crate::protocol::valid_id(&project.id)", handler)
+        self.assertNotIn("project_calls", handler)
+        self.assertNotIn("r.step =", handler)
 
     def test_loss_requires_actual_route_but_not_both_events(self):
         for case in ("picker-loss", "save-loss"):

@@ -18,6 +18,8 @@ use super::owned_macos::observation::{observed_panel, observe_panel_action, Obse
 // no Record lock, native call, path, or arbitrary error text enters this latch.
 const FAILURE_REASONS: &[&str] = &[
     "observer-invariant", "observer-deadline", "observer-record-unavailable", "observer-data-check",
+    "dom-dispatch-refused", "dom-pending-custody", "dom-callback-size", "dom-callback-json",
+    "dom-callback-object", "dom-callback-state", "picker-unexpected-result",
     "native-wrong-thread", "native-step", "native-pending-custody", "native-original-id",
     "native-kind", "native-not-started", "native-ineligible", "native-action-attempted",
     "native-action-returned", "native-callback-returned", "native-response-present",
@@ -148,7 +150,42 @@ enum Step {
     PickerPending, Reload, Lost,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Pending { Dom(Step), Native(Step), Close(Step), Reload, FailureClose }
+struct DomDispatch { step: Step, sequence: u16 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pending { Dom(DomDispatch), Native(Step), Close(Step), Reload, FailureClose }
+
+fn dom_step_entry(pending: Option<Pending>, current: Step, original: DomDispatch) -> bool {
+    (1..=160).contains(&original.sequence) && current == original.step && pending == Some(Pending::Dom(original))
+}
+// Only the wrapper's actual synchronous body return authorizes this call. A
+// successful body may already have advanced Step; the original marker remains.
+fn retire_returned_dom(pending: &mut Option<Pending>, original: DomDispatch) -> bool {
+    if !(1..=160).contains(&original.sequence) || *pending != Some(Pending::Dom(original)) { return false; }
+    *pending = None; true
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProjectReturn { Lost, Cancelled, Selected }
+fn project_return_route(case: Case, step: Step, reload_requested: bool, cancel_returned: bool,
+    project_returned: bool, result: &Result<Option<Project>, crate::asset_commands::AssetError>) -> Result<ProjectReturn, &'static str> {
+    // Deliberate document loss has its own original result contract, including
+    // duplicate refusal. It must precede the ordinary error classification.
+    if reload_requested && case == Case::PickerLoss {
+        if project_returned || result.as_ref().is_ok_and(Option::is_some) { return Err("observer-invariant"); }
+        return Ok(ProjectReturn::Lost);
+    }
+    let cancel = case == Case::FirstSave && matches!(step, Step::CancelProject | Step::CancelSettled);
+    if cancel && cancel_returned { return Err("cancel-duplicate-result"); }
+    match result {
+        // The invoke error can precede the DOM acknowledgement of its click.
+        // Reconstruct only the public Reason category, never supplied text/code.
+        Err(error) => Err(crate::asset_commands::AssetError::new(error.reason).code),
+        Ok(None) if cancel => Ok(ProjectReturn::Cancelled),
+        Ok(Some(_)) if cancel => Err("cancel-unexpected-project"),
+        Ok(Some(_)) if matches!(step, Step::OpenProject | Step::ProjectSettled) => Ok(ProjectReturn::Selected),
+        _ => Err("picker-unexpected-result"),
+    }
+}
 
 fn native_step_entry(on_main: bool, timely: bool) -> Result<bool, &'static str> {
     // Wrong-thread uncertainty survives even when the endpoint already failed.
@@ -378,7 +415,7 @@ struct Record {
 fn failure_context(r: &Record) -> Value {
     let pending = r.pending.map(|pending| {
         let (kind, step) = match pending {
-            Pending::Dom(step) => ("dom", Some(step)), Pending::Native(step) => ("native", Some(step)),
+            Pending::Dom(original) => ("dom", Some(original.step)), Pending::Native(step) => ("native", Some(step)),
             Pending::Close(step) => ("close", Some(step)), Pending::Reload => ("reload", None),
             Pending::FailureClose => ("failure-close", None),
         };
@@ -497,20 +534,11 @@ impl Observation {
     }
     pub(super) fn project_result(&self, result: &Result<Option<Project>, crate::asset_commands::AssetError>) {
         let Some(mut r) = self.record() else { return; };
-        if r.reload_requested && self.case == Case::PickerLoss {
-            if r.project_returned || result.as_ref().is_ok_and(Option::is_some) { self.fail(); return; }
-            r.project_returned = true; return;
-        }
-        if self.case == Case::FirstSave && matches!(r.step, Step::CancelProject | Step::CancelSettled) {
-            if r.cancel_returned { self.fail_with("cancel-duplicate-result"); return; }
-            match result {
-                Ok(None) => r.cancel_returned = true,
-                Ok(Some(_)) => self.fail_with("cancel-unexpected-project"),
-                // Reconstruct the public category from Reason, not the supplied
-                // message/code or any project/credential value.
-                Err(error) => self.fail_with(crate::asset_commands::AssetError::new(error.reason).code),
-            }
-            return;
+        match project_return_route(self.case, r.step, r.reload_requested, r.cancel_returned, r.project_returned, result) {
+            Ok(ProjectReturn::Lost) => { r.project_returned = true; return; },
+            Ok(ProjectReturn::Cancelled) => { r.cancel_returned = true; return; },
+            Ok(ProjectReturn::Selected) => {},
+            Err(reason) => { self.fail_with(reason); return; },
         }
         let Ok(Some(project)) = result else { self.fail(); return; };
         if !matches!(r.step, Step::OpenProject | Step::ProjectSettled) || r.project.is_some()
@@ -963,11 +991,13 @@ impl Observation {
                 r.reload_returned = true; r.step = Step::Lost;
             }).is_err() { self.fail(); } return;
         }
-        {
+        let original = {
             let Some(mut r) = self.record() else { return; };
             if r.evaluations >= 160 { self.fail(); return; }
-            r.evaluations += 1; r.pending = Some(Pending::Dom(step));
-        }
+            r.evaluations += 1;
+            let original = DomDispatch { step, sequence: r.evaluations };
+            r.pending = Some(Pending::Dom(original)); original
+        };
         let Some(script) = script(step) else { self.fail(); return; };
         let q = self.clone();
         // Only one unresolved callback. Dispatch Ok is not its completion;
@@ -976,11 +1006,13 @@ impl Observation {
             // The eval has not been called: this is known non-dispatch,
             // not the repair of an uncertain callback or a cleared failure.
             if let Some(mut r) = self.record() {
-                if r.pending == Some(Pending::Dom(step)) { r.pending = None; }
+                if r.pending == Some(Pending::Dom(original)) { r.pending = None; }
             }
             return;
         }
-        if window.eval_with_callback(script,move |value| q.dom(step,&value)).is_err() { self.fail(); }
+        if window.eval_with_callback(script,move |value| q.dom(original,&value)).is_err() {
+            self.fail_with("dom-dispatch-refused");
+        }
     }
     fn native_step(&self, step: Step) {
         let timely = self.timely();
@@ -1119,14 +1151,24 @@ impl Observation {
             if let Some(mut r) = self.record() { r.failure_quit_attempted = true; }
         }
     }
-    fn dom(&self, step: Step, raw: &str) {
-        if !self.timely() || raw.len() > 128 * 1024 { self.fail(); return; }
-        let Ok(v) = crate::protocol::strict_json(raw.as_bytes()) else { self.fail(); return; };
-        let Some(object) = v.as_object() else { self.fail(); return; };
+    fn dom(&self, original: DomDispatch, raw: &str) {
         let Some(mut r) = self.record() else { return; };
-        if r.pending.take() != Some(Pending::Dom(step)) || r.step != step { self.fail(); return; }
+        if !dom_step_entry(r.pending, r.step, original) { self.fail_with("dom-pending-custody"); return; }
+        // Keep this guard and marker throughout the body: no lock reacquisition,
+        // second dispatch or substituted callback can acquire its custody. A
+        // panic unwinds with the marker retained and poisons this Record lock.
+        self.dom_body(&mut r, original.step, raw);
+        // Known returned bookkeeping only, including late/malformed failures.
+        // This does not restore success or establish native/invocation finality.
+        if !retire_returned_dom(&mut r.pending, original) { self.fail_with("dom-pending-custody"); }
+    }
+    fn dom_body(&self, r: &mut Record, step: Step, raw: &str) {
+        if !self.timely() { return; }
+        if raw.len() > 128 * 1024 { self.fail_with("dom-callback-size"); return; }
+        let Ok(v) = crate::protocol::strict_json(raw.as_bytes()) else { self.fail_with("dom-callback-json"); return; };
+        let Some(object) = v.as_object() else { self.fail_with("dom-callback-object"); return; };
         if v["state"] == "wait" && object.len() == 1 { return; }
-        if v["state"] != "ready" { self.fail(); return; }
+        if v["state"] != "ready" { self.fail_with("dom-callback-state"); return; }
         let review_round = match step { Step::Review(i) => Some(i), Step::KeptReview => Some(0), Step::RetainedReview => Some(1), _ => None };
         if let Some(i) = review_round {
             if !r.sessions.get(i).is_some_and(|s| s.live_review() && s.review.as_ref() == v.get("review"))
@@ -1176,6 +1218,9 @@ impl Observation {
             _ => true,
         };
         if !valid { self.fail(); return; }
+        // Parsing and witness/fixture checks spend the same original deadline.
+        // Recheck immediately before any ready flags, counts or Step transition.
+        if !self.timely() { return; }
         r.step = match step {
             Step::Environment => Step::ReadEnvironment, Step::ReadEnvironment => Step::Dashboard,
             Step::Dashboard => if self.case == Case::FirstSave { Step::ChooseCancel } else { Step::ChooseProject },
@@ -1475,7 +1520,8 @@ fn observer_data_checks() -> bool {
         prior[original] = true;
         if same_panel_action_returned(step, &prior) != Ok(true) { return false; }
     }
-    for pending in [None, Some(Pending::Native(Step::Quit)), Some(Pending::Dom(Step::CancelProject)),
+    for pending in [None, Some(Pending::Native(Step::Quit)),
+        Some(Pending::Dom(DomDispatch { step: Step::CancelProject, sequence: 1 })),
         Some(Pending::Close(Step::CancelProject)), Some(Pending::Reload), Some(Pending::FailureClose)] {
         let mut original = pending;
         if retire_returned_native(&mut original, Step::CancelProject, Step::CancelProject) || original != pending { return false; }
@@ -1494,8 +1540,73 @@ fn observer_data_checks() -> bool {
         if result == Ok(false) && !retire_returned_native(&mut pending, Step::CancelProject, Step::CancelProject) { return false; }
         if pending.is_none() != (on_main && !timely) { return false; }
     }
+    let first_dom = DomDispatch { step: Step::ChooseCancel, sequence: 1 };
+    let next_dom = DomDispatch { sequence: 2, ..first_dom };
+    for pending in [None, Some(Pending::Native(first_dom.step)), Some(Pending::Close(first_dom.step)),
+        Some(Pending::Reload), Some(Pending::FailureClose), Some(Pending::Dom(next_dom)),
+        Some(Pending::Dom(DomDispatch { step: Step::ChooseProject, ..first_dom }))] {
+        let mut unchanged = pending;
+        if dom_step_entry(unchanged, first_dom.step, first_dom)
+            || retire_returned_dom(&mut unchanged, first_dom) || unchanged != pending { return false; }
+    }
+    for sequence in [0, 161] {
+        let invalid = DomDispatch { sequence, ..first_dom };
+        let mut pending = Some(Pending::Dom(invalid));
+        if dom_step_entry(pending, invalid.step, invalid) || retire_returned_dom(&mut pending, invalid)
+            || pending != Some(Pending::Dom(invalid)) { return false; }
+    }
+    for returned in [first_dom, next_dom, DomDispatch { sequence: 160, ..first_dom }] {
+        let mut pending = Some(Pending::Dom(returned));
+        let mut current = returned.step;
+        if !dom_step_entry(pending, current, returned) { return false; }
+        current = Step::CancelProject; // A successful body may advance Step.
+        if dom_step_entry(pending, current, returned) || pending != Some(Pending::Dom(returned))
+            || !retire_returned_dom(&mut pending, returned) || pending.is_some() { return false; }
+    }
+    // Repeated polls at the same Step have distinct original custody. A stale
+    // callback cannot enter or retire the next poll, even if its body had failed.
+    let mut pending = Some(Pending::Dom(next_dom));
+    if dom_step_entry(pending, next_dom.step, first_dom) || retire_returned_dom(&mut pending, first_dom)
+        || pending != Some(Pending::Dom(next_dom)) || !dom_step_entry(pending, next_dom.step, next_dom)
+        || !retire_returned_dom(&mut pending, next_dom) { return false; }
+
+    use crate::asset_commands::{AssetError, Reason};
+    let empty = Ok(None);
+    let selected = Ok(Some(Project { id: "synthetic".into(), name: "synthetic".into(), path: "/synthetic".into() }));
+    let error = Err(AssetError { code: "untrusted-supplied-code", message: "untrusted-supplied-message",
+        retryable: true, ..AssetError::new(Reason::SourceRefused) });
+    for step in [Step::ChooseCancel, Step::ChooseProject, Step::SetProject] {
+        if project_return_route(Case::FirstSave, step, false, false, false, &error) != Err("asset_source_refused") { return false; }
+        for result in [&empty, &selected] {
+            if project_return_route(Case::FirstSave, step, false, false, false, result) != Err("picker-unexpected-result") { return false; }
+        }
+    }
+    for step in [Step::CancelProject, Step::CancelSettled] {
+        if project_return_route(Case::FirstSave, step, false, false, false, &empty) != Ok(ProjectReturn::Cancelled)
+            || project_return_route(Case::FirstSave, step, false, false, false, &selected) != Err("cancel-unexpected-project")
+            || project_return_route(Case::FirstSave, step, false, false, false, &error) != Err("asset_source_refused") { return false; }
+        for result in [&empty, &selected, &error] {
+            if project_return_route(Case::FirstSave, step, false, true, false, result) != Err("cancel-duplicate-result") { return false; }
+        }
+    }
+    for step in [Step::OpenProject, Step::ProjectSettled] {
+        if project_return_route(Case::FirstSave, step, false, false, false, &selected) != Ok(ProjectReturn::Selected)
+            || project_return_route(Case::FirstSave, step, false, false, false, &empty) != Err("picker-unexpected-result")
+            || project_return_route(Case::FirstSave, step, false, false, false, &error) != Err("asset_source_refused") { return false; }
+    }
+    for result in [&empty, &error] {
+        if project_return_route(Case::PickerLoss, Step::Lost, true, false, false, result) != Ok(ProjectReturn::Lost) { return false; }
+    }
+    for result in [&empty, &selected, &error] {
+        if project_return_route(Case::PickerLoss, Step::Lost, true, false, true, result) != Err("observer-invariant") { return false; }
+    }
+    if project_return_route(Case::PickerLoss, Step::Lost, true, false, false, &selected) != Err("observer-invariant")
+        || project_return_route(Case::PickerLoss, Step::PickerPending, false, false, false, &error) != Err("asset_source_refused")
+        || project_return_route(Case::SaveLoss, Step::Lost, true, false, false, &error) != Err("asset_source_refused") { return false; }
+
     // Every closed reason survives later generic cleanup/deadline failures.
     for reason in FAILURE_REASONS {
+        if !reason.is_ascii() || reason.len() > 48 { return false; }
         let first = AtomicU8::new(0); let failed = AtomicBool::new(false);
         if first_failure_reason(&first).is_some() { return false; }
         latch_failure(&first, &failed, *reason);
@@ -1503,7 +1614,11 @@ fn observer_data_checks() -> bool {
         latch_failure(&first, &failed, "observer-invariant");
         latch_failure(&first, &failed, "observer-deadline");
         latch_failure(&first, &failed, "native-wrong-thread");
-        if first_failure_reason(&first) != Some(*reason) { return false; }
+        let mut pending = Some(Pending::Dom(first_dom));
+        // DATA for a known returned body after failure/deadline; retirement
+        // changes only this marker, never the first failure or success latch.
+        if !retire_returned_dom(&mut pending, first_dom) || pending.is_some()
+            || !failed.load(Ordering::SeqCst) || first_failure_reason(&first) != Some(*reason) { return false; }
     }
     true
 }

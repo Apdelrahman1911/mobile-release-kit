@@ -43,6 +43,8 @@ FAILURE_STEPS = frozenset((
     "Prepare", "Review", "OpenConfirmation", "Confirmation", "Acknowledge", "Acknowledged", "Apply", "Applied") for number in (0, 1))
 FAILURE_REASONS = frozenset((
     "observer-invariant observer-deadline observer-record-unavailable observer-data-check "
+    "dom-dispatch-refused dom-pending-custody dom-callback-size dom-callback-json "
+    "dom-callback-object dom-callback-state picker-unexpected-result "
     "native-wrong-thread native-step native-pending-custody native-original-id native-kind native-not-started "
     "native-ineligible native-action-attempted native-action-returned native-callback-returned "
     "native-response-present native-selection-present native-close-attempted native-closed "
