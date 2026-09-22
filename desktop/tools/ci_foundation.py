@@ -511,16 +511,22 @@ CONVENTIONAL_SMOKE_INPUTS: dict | None = {
     "protocolSha256": "860d1cee0072730a487ac8e632206c69e3ba676cab849b144a61755c4b84e41e"
 }
 # H's explicit trusted GitHub-hosted platform boundary, not a claimed complete
-# interpreter closure. {trustModel,imageOS,imageVersion,python:{path,size,sha256}}.
+# interpreter closure. Each image selects its own exact {path,size,sha256} body.
 # Startup/stdlib/cached bytecode/loader remain trusted platform TCB; -B prevents
 # writes, not cache reads. No H isolated-root/local Python or image fallback.
 CONVENTIONAL_HOSTED_PYTHON: dict | None = {
     "imageOS": "ubuntu24",
-    "imageVersion": "20260907.300.1",
-    "python": {
-        "path": "/usr/bin/python3.12",
-        "sha256": "a92f0f95e883390c7256b2e441484aac06b1002dbe1d924141a77c8d82f96223",
-        "size": 8025024
+    "images": {
+        "20260907.300.1": {
+            "path": "/usr/bin/python3.12",
+            "sha256": "a92f0f95e883390c7256b2e441484aac06b1002dbe1d924141a77c8d82f96223",
+            "size": 8025024
+        },
+        "20260920.314.1": {
+            "path": "/usr/bin/python3.12",
+            "sha256": "e50d468e8b0adfb05733f5b87b3cff34829c4a8c1aea50c865aa8bdfe4bb150f",
+            "size": 8020928
+        }
     },
     "trustModel": "github-hosted-platform-tcb-v1"
 }
@@ -8056,6 +8062,22 @@ def conventional_module(name: str):
     return module
 
 
+def conventional_hosted_python_profile(data) -> dict:
+    """Validate the complete literal profile, including direct publisher callers."""
+    host = CONVENTIONAL_HOSTED_PYTHON
+    require(type(host) is dict and set(host) == {"trustModel", "imageOS", "images"}
+            and host["trustModel"] == "github-hosted-platform-tcb-v1" and host["imageOS"] == "ubuntu24"
+            and type(host["images"]) is dict and 1 <= len(host["images"]) <= 2,
+            "Conventional trusted platform admission differs")
+    for version, body in host["images"].items():
+        require(type(version) is str and re.fullmatch(r"[0-9]{8}\.[0-9]{1,6}\.[0-9]{1,6}", version) is not None,
+                "Conventional trusted platform image differs")
+        records = data.records([body], absolute=True)
+        require(set(records) == {"/usr/bin/python3.12"} and 0 < body["size"] <= 16 << 20,
+                "Conventional actual hosted Python differs")
+    return host
+
+
 def conventional_admission(scope: str) -> tuple:
     require(scope in CONVENTIONAL_SCOPES, "Unknown conventional route")
     value = CONVENTIONAL_PREPARE_INPUTS if scope == CONVENTIONAL_PREPARE_SCOPE else CONVENTIONAL_SMOKE_INPUTS
@@ -8097,22 +8119,16 @@ def conventional_admission(scope: str) -> tuple:
             require(bool(notices) and rows.keys() == required | notices
                     and all(rows[name]["size"] > 0 for name in required),
                     "Conventional public kit is missing, empty or has foreign members")
-    host = CONVENTIONAL_HOSTED_PYTHON
-    require(set(host) == {"trustModel", "imageOS", "imageVersion", "python"}
-            and host["trustModel"] == "github-hosted-platform-tcb-v1" and host["imageOS"] == "ubuntu24"
-            and type(host["imageVersion"]) is str
-            and re.fullmatch(r"[0-9]{8}\.[0-9]{1,6}\.[0-9]{1,6}", host["imageVersion"]) is not None,
-            "Conventional trusted platform admission differs")
-    body = data.records([host["python"]], absolute=True)
-    require(set(body) == {"/usr/bin/python3.12"} and 0 < host["python"]["size"] <= 16 << 20,
-            "Conventional actual hosted Python differs")
+    host = conventional_hosted_python_profile(data)
     if scope == CONVENTIONAL_PREPARE_SCOPE:
         copier = conventional_module("prepare_cpython_source_payload").P
         review = {row["path"]: row for row in value["reviewFiles"]}
         require((copier.APPROVED_SOURCE_OUTPUT_SHA256, copier.APPROVED_SOURCE_COMPONENTS_SHA256,
-                 copier.APPROVED_SOURCE_NOTICES_SHA256, copier.APPROVED_SOURCE_COPIER_PYTHON_SHA256)
+                 copier.APPROVED_SOURCE_NOTICES_SHA256)
                 == (value["outputInventorySha256"], review["components.json"]["sha256"],
-                    review["notice-inventory.json"]["sha256"], host["python"]["sha256"]),
+                    review["notice-inventory.json"]["sha256"])
+                and data.same(copier.APPROVED_SOURCE_COPIER_PYTHONS,
+                              {"imageOS": host["imageOS"], "images": host["images"]}),
                 "Accepted COPY public pins are closed or differ")
     else:
         probe = conventional_module("probe_cpython_source_runtime")
@@ -8122,21 +8138,24 @@ def conventional_admission(scope: str) -> tuple:
 
 
 def conventional_host(data) -> None:
-    host = CONVENTIONAL_HOSTED_PYTHON
+    host = conventional_hosted_python_profile(data)
+    version = os.environ.get("ImageVersion")
     # Image/body correspondence and drift guards under the declared platform
     # trust assumption; neither these hashes nor provider variables attest a
     # complete startup/import/cache/loader closure.
+    require(os.environ.get("ImageOS") == host["imageOS"] and type(version) is str and version in host["images"],
+            "Conventional route requires the admitted isolated hosted DATA Python")
     require(sys.platform == "linux" and os.geteuid() != 0 and os.uname().machine == "x86_64"
             and os.path.realpath(sys.executable) == "/usr/bin/python3.12" and sys.version_info[:2] == (3, 12)
-            and sys.flags.isolated == sys.flags.no_site == sys.flags.dont_write_bytecode == 1
-            and os.environ.get("ImageOS") == host["imageOS"] and os.environ.get("ImageVersion") == host["imageVersion"],
+            and sys.flags.isolated == sys.flags.no_site == sys.flags.dont_write_bytecode == 1,
             "Conventional route requires the admitted isolated hosted DATA Python")
-    path = Path(host["python"]["path"])
+    body = host["images"][version]
+    path = Path(body["path"])
     before = path.lstat()
     require(stat.S_ISREG(before.st_mode) and stat.S_IMODE(before.st_mode) == 0o755
             and before.st_uid == before.st_gid == 0 and before.st_nlink == 1,
             "Conventional actual hosted Python metadata differs")
-    data.bound(path, host["python"])
+    data.bound(path, body)
     require(data.state(path.lstat()) == data.state(before), "Conventional actual hosted Python changed during binding")
 
 
