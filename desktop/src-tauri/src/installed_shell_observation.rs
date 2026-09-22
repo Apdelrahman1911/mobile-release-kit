@@ -3907,7 +3907,8 @@ fn session_script(step: SessionStep, kind: &str, platform: &str, replacement: Op
         },
         SessionStep::Reload=>r#"if(Object.prototype.hasOwnProperty.call(window,'__mrkInstalledSessionButton'))throw 0;
             const b=button('Request cancel / discard this operation',panel().querySelector('.session-progress'));
-            if(!b||b.disabled)return {state:'wait'};window.__mrkInstalledSessionButton={button:b,label:'loss-discard'};
+            if(!b)return {state:'wait'};if(!b.disabled)throw 0;
+            window.__mrkInstalledSessionButton={button:b,label:'loss-discard'};
             window.location.reload();return {state:'ready'};"#.into(),
         SessionStep::Read(..) | SessionStep::QuitPreserved | SessionStep::Deadline | SessionStep::Loss=>{
             let expected=serde_json::to_string(expected_display?).ok()?;
