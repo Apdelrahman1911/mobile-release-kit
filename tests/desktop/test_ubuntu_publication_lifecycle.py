@@ -3654,6 +3654,12 @@ class FailureLabelSinkContracts(unittest.TestCase):
         good = header + detail
         self.assertEqual(L._shell_label_pair(good), {"step": "SessionReview", "boundary": "settlement", "bootstrapProgress": "advanced",
             "session": {"recipeIndex": 63, "evaluations": 128, "rejection": "evaluation-budget", "lastWait": "rendered-display-mismatch"}})
+        gtk = (b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionActivateFile\n"
+               b"MRK_INSTALLED_SHELL_FAILURE_PHASE=gtk\nMRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n"
+               b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=3;evaluations=16;"
+               b"reject=gtk-observer-endpoint;wait=gtk-action-insensitive\n")
+        self.assertEqual(L._shell_label_pair(gtk), {"step": "SessionActivateFile", "boundary": "gtk", "bootstrapProgress": "advanced",
+            "session": {"recipeIndex": 3, "evaluations": 16, "rejection": "gtk-observer-endpoint", "lastWait": "gtk-action-insensitive"}})
         for rejection in L.SHELL_SESSION_REJECTIONS:
             for wait in L.SHELL_SESSION_WAITS:
                 raw = header + b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=0;evaluations=128;reject=" + rejection + b";wait=" + wait + b"\n"
@@ -3869,6 +3875,74 @@ class FailureLabelSinkContracts(unittest.TestCase):
         self.assertIn("SessionRejection::EvaluationBudget", tick)
         self.assertIn("Ok(Some(wait))=>{self.session_wait(&mut r,wait);return;}", tick)
         self.assertIn("r.evaluations+=1", tick)
+
+    def test_session_gtk_first_rejection_waits_and_callbacks_preserve_original_custody(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        shell = (SOURCE / "desktop/src-tauri/src/shell.rs").read_text()
+        def body(text, name):
+            return text.split("fn " + name + "(", 1)[1].split("\n    }", 1)[0]
+        admitting = source.split("fn session_file_wait_pending(", 1)[1].split("\n}", 1)[0]
+        self.assertIn("if activating { SessionStep::ActivateFile(index) } else { SessionStep::SetFile(index) }", admitting)
+        self.assertIn("actual == expected && pending == Some(Pending::Dom(expected))", admitting)
+        waiting = body(source, "session_file_wait")
+        self.assertIn("self.record()", waiting); self.assertNotIn("record_at", waiting)
+        gate = "if !session_file_wait_pending(r.step,r.pending,index,activating) || self.failed.load(Ordering::SeqCst) { return; }"
+        self.assertLess(waiting.index(gate), waiting.index("r.trace=(r.step,Boundary::Gtk)"))
+        self.assertLess(waiting.index(gate), waiting.index("self.session_wait(&mut r,wait)"))
+        helper = body(shell, "observed_session_file")
+        borrowed = helper.split("let original = DIALOG.with(|book| {", 1)[1].split("        });", 1)[0]
+        self.assertIn("map_err(|_| R::GtkDialogBook)", borrowed)
+        self.assertIn("Err(R::GtkDialogOriginal)", borrowed)
+        self.assertNotIn("q.", borrowed); self.assertNotIn(".facts()", borrowed)
+        self.assertLess(helper.index("        });"), helper.index("Err(reason) => { q.session_file_failed(reason); return Err(()); }"))
+        self.assertIn("q.session_file_wait(index, activating, W::GtkDialogAbsent); return Ok(None);", helper)
+        guards = ["gtk::is_initialized_main_thread()", "DIALOG.with", "context.upgrade()", "call.upgrade()",
+                  "call.owner()", "owner.id != id", "owner.interrupted()", "let original_facts = call.facts()",
+                  "if !original_facts", "q.session_file_dialog(id, index)?", "app.get_webview_window(MAIN_WINDOW)", "dialog.title()"]
+        self.assertEqual([helper.index(guard) for guard in guards], sorted(helper.index(guard) for guard in guards))
+        facts = helper.split("let original_facts =", 1)[1].split("if !original_facts", 1)[0]
+        self.assertTrue(facts.rstrip().endswith("facts.refusal.is_none());"))
+        self.assertNotIn("q.", facts)
+        selecting = body(shell, "select_observed_session_file")
+        activating = body(shell, "activate_observed_session_file")
+        self.assertIn("observed_session_file(app, q, index, false)?", selecting)
+        self.assertIn("observed_session_file(app, q, index, true)?", activating)
+        self.assertEqual(selecting.count("dialog.set_filename(&path)"), 1)
+        self.assertLess(selecting.index("q.session_file_selection(id, index)?"), selecting.index("dialog.set_filename(&path)"))
+        self.assertIn("if !dialog.set_filename(&path) { q.session_file_failed(R::GtkSelectionSetter); return Err(()); }", selecting)
+        insensitive = "if !button.is_sensitive() { q.session_file_wait(index, true, W::GtkActionInsensitive); return Ok(false); }"
+        self.assertLess(activating.index(insensitive), activating.index("q.session_file_activation(id, index)?"))
+        self.assertLess(activating.index("q.session_file_activation(id, index)?"), activating.index("button.emit_clicked()"))
+        self.assertEqual(activating.count("button.emit_clicked()"), 1)
+        self.assertNotIn(".set_filename(", activating)
+        self.assertNotIn(".filename(", selecting + activating)
+        self.assertNotIn(".response(", selecting + activating); self.assertNotIn(".begin_response(", selecting + activating)
+        self.assertEqual(shell.count("dialog.filename()"), 1)
+        response = shell.split("entry.response = Some(dialog.connect_response(move |dialog, response| {", 1)[1].split("}));", 1)[0]
+        self.assertEqual(response.count("let path = native_path(dialog, &call);"), 1)
+        self.assertIn("q.session_file_filename(observed_id,path.as_ref().ok().map(PathBuf::as_path))", response)
+        self.assertLess(response.index("let path = native_path(dialog, &call);"), response.index("q.session_file_filename("))
+        self.assertLess(response.index("q.session_file_filename("), response.index("call.selected_path(path)"))
+        for name in ("session_file_failed", "session_file_dialog", "session_file_selection", "session_file_activation",
+                     "session_file_filename", "session_file_response", "session_file_returned", "native_destroyed", "native_released"):
+            callback = body(source, name)
+            self.assertEqual(callback.count("self.record_at(Boundary::Gtk)"), 1)
+            self.assertIn("self.session_fail(&mut r,", callback)
+            self.assertNotIn("self.session_file_failed(", callback); self.assertNotIn("self.record()", callback)
+        for name in ("session_file_dialog", "session_file_selection", "session_file_activation"):
+            callback = body(source, name)
+            self.assertLess(callback.index("self.failed.load(Ordering::SeqCst)"), callback.index("Instant::now()>=self.end"))
+            self.assertIn("if Instant::now()>=self.end { self.session_fail(&mut r,SessionRejection::GtkObserverEndpoint); return Err(()); }", callback)
+        filename = body(source, "session_file_filename")
+        reasons = ["GtkFilenameState", "GtkFilenameAbsent", "GtkFilenameDifferent", "file.picker.filename=true"]
+        self.assertEqual([filename.index(reason) for reason in reasons], sorted(filename.index(reason) for reason in reasons))
+        returned = body(source, "session_file_returned")
+        self.assertIn("r.pending.take()!=Some(Pending::Dom(Step::Session(step))) || r.step!=Step::Session(step)", returned)
+        self.assertEqual(returned.count(".activation_returned(result)"), 1)
+        self.assertNotIn("self.failed.load", returned)
+        self.assertNotIn(".responded", returned)
+        self.assertLess(returned.index("r.pending.take()"), returned.index(".activation_returned(result)"))
+        # Source ordering and parser contracts are not executed GTK/native finality.
 
     def test_diagnostic_and_close_failures_cannot_replace_an_active_owner_exception(self):
         class ProcessError(RuntimeError):

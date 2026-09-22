@@ -222,8 +222,13 @@ impl SessionStep {
 // Cached observer diagnostics, not native status or authority. Every token is
 // closed and public; no input, identifier, path, DTO or error is retained.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum SessionRejection { NotRecorded, UnknownNativeSnapshot, NativeReadinessInvariant, EvaluationBudget,
-    UnavailableScript, EvaluationDispatch, StepPendingInvariant }
+pub(super) enum SessionRejection { NotRecorded, UnknownNativeSnapshot, NativeReadinessInvariant, EvaluationBudget,
+    UnavailableScript, EvaluationDispatch, StepPendingInvariant,
+    GtkThread, GtkDialogBook, GtkDialogOriginal, GtkOwnerBinding, GtkOwnerInterrupted, GtkOwnerFacts,
+    GtkDialogProperties, GtkSelectionSetter, GtkResponseWidget, GtkActionWidget, GtkDialogRecord,
+    GtkObserverEndpoint, GtkSelectionState, GtkActivationState, GtkFilenameState, GtkFilenameAbsent,
+    GtkFilenameDifferent, GtkResponseState, GtkResponseContract, GtkReturnRole, GtkReturnState,
+    GtkDestroyState, GtkReleaseState }
 impl SessionRejection {
     fn token(self) -> &'static [u8] {
         match self {
@@ -234,11 +239,35 @@ impl SessionRejection {
             Self::UnavailableScript => b"unavailable-projection-script",
             Self::EvaluationDispatch => b"evaluation-dispatch",
             Self::StepPendingInvariant => b"step-pending-invariant",
+            Self::GtkThread => b"gtk-thread",
+            Self::GtkDialogBook => b"gtk-dialog-book",
+            Self::GtkDialogOriginal => b"gtk-dialog-original",
+            Self::GtkOwnerBinding => b"gtk-owner-binding",
+            Self::GtkOwnerInterrupted => b"gtk-owner-interrupted",
+            Self::GtkOwnerFacts => b"gtk-owner-facts",
+            Self::GtkDialogProperties => b"gtk-dialog-properties",
+            Self::GtkSelectionSetter => b"gtk-selection-setter",
+            Self::GtkResponseWidget => b"gtk-response-widget",
+            Self::GtkActionWidget => b"gtk-action-widget",
+            Self::GtkDialogRecord => b"gtk-dialog-record",
+            Self::GtkObserverEndpoint => b"gtk-observer-endpoint",
+            Self::GtkSelectionState => b"gtk-selection-state",
+            Self::GtkActivationState => b"gtk-activation-state",
+            Self::GtkFilenameState => b"gtk-filename-state",
+            Self::GtkFilenameAbsent => b"gtk-filename-absent",
+            Self::GtkFilenameDifferent => b"gtk-filename-different",
+            Self::GtkResponseState => b"gtk-response-state",
+            Self::GtkResponseContract => b"gtk-response-contract",
+            Self::GtkReturnRole => b"gtk-return-role",
+            Self::GtkReturnState => b"gtk-return-state",
+            Self::GtkDestroyState => b"gtk-destroy-state",
+            Self::GtkReleaseState => b"gtk-release-state",
         }
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum SessionWait { NotSampled, RequestNotSeen, ReplyPending, OwnerUnsettled, PhaseNotReady, DisplayMismatch, ControlsMismatch }
+pub(super) enum SessionWait { NotSampled, RequestNotSeen, ReplyPending, OwnerUnsettled, PhaseNotReady, DisplayMismatch, ControlsMismatch,
+    GtkDialogAbsent, GtkActionInsensitive }
 impl SessionWait {
     fn token(self) -> &'static [u8] {
         match self {
@@ -249,6 +278,8 @@ impl SessionWait {
             Self::PhaseNotReady => b"native-phase-not-ready",
             Self::DisplayMismatch => b"rendered-display-mismatch",
             Self::ControlsMismatch => b"rendered-control-mismatch",
+            Self::GtkDialogAbsent => b"gtk-dialog-absent",
+            Self::GtkActionInsensitive => b"gtk-action-insensitive",
         }
     }
 }
@@ -260,6 +291,11 @@ impl SessionDiagnostic {
         Some(Self { step, evaluations, rejection: SessionRejection::NotRecorded,
             wait: previous.filter(|old| old.step == step).map_or(SessionWait::NotSampled, |old| old.wait) })
     }
+}
+
+fn session_file_wait_pending(actual: Step, pending: Option<Pending>, index: u8, activating: bool) -> bool {
+    let expected = Step::Session(if activating { SessionStep::ActivateFile(index) } else { SessionStep::SetFile(index) });
+    actual == expected && pending == Some(Pending::Dom(expected))
 }
 
 use SessionAction as SA;
@@ -685,6 +721,52 @@ fn assert_failure_pair_contract() {
     }
     latch_session_diagnostic(&failed,&mut retained,first);
     assert!(retained == deadline_diagnostic && frozen_trace == (trace.0,Boundary::Deadline));
+
+    let gtk = SessionDiagnostic { step:SessionStep::ActivateFile(3),evaluations:16,
+        rejection:SessionRejection::GtkObserverEndpoint,wait:SessionWait::GtkActionInsensitive };
+    let gtk_trace = (Step::Session(gtk.step),Boundary::Gtk);
+    let expected = [gtk.step.failure_line(),Boundary::Gtk.failure_line(),BootstrapProgress::Advanced.failure_line(),
+        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=3;evaluations=16;reject=gtk-observer-endpoint;wait=gtk-action-insensitive\n"].concat();
+    assert!(failure_pair(gtk_trace,BootstrapProgress::Advanced,Some(gtk)).is_some_and(|(bytes,length)|
+        length <= FAILURE_PAIR_LIMIT && bytes.get(..length) == Some(expected.as_slice())));
+    let same = SessionDiagnostic::sample(gtk_trace.0,16,Some(gtk)).unwrap();
+    assert!(same.wait == SessionWait::GtkActionInsensitive && same.rejection == SessionRejection::NotRecorded);
+    for step in [SessionStep::SetFile(3),SessionStep::ActivateFile(4)] {
+        assert!(SessionDiagnostic::sample(Step::Session(step),16,Some(gtk)).unwrap().wait == SessionWait::NotSampled);
+    }
+    for activating in [false,true] {
+        let actual = Step::Session(if activating { SessionStep::ActivateFile(3) } else { SessionStep::SetFile(3) });
+        let pending = Some(Pending::Dom(actual));
+        assert!(session_file_wait_pending(actual,pending,3,activating));
+        assert!(!session_file_wait_pending(actual,pending,3,!activating));
+        assert!(!session_file_wait_pending(actual,pending,4,activating));
+        for wrong in [None,Some(Pending::Gtk),Some(Pending::Dom(Step::Session(SessionStep::Capture(3)))),
+            Some(Pending::Dom(Step::Session(if activating { SessionStep::SetFile(3) } else { SessionStep::ActivateFile(3) }))),
+            Some(Pending::Dom(Step::Session(if activating { SessionStep::ActivateFile(4) } else { SessionStep::SetFile(4) })))] {
+            assert!(!session_file_wait_pending(actual,wrong,3,activating));
+        }
+        assert!(!session_file_wait_pending(Step::Session(SessionStep::Capture(3)),pending,3,activating));
+    }
+    for deadline_first in [false,true] {
+        let failed = AtomicBool::new(false);
+        let mut trace = gtk_trace;
+        let mut progress = BootstrapProgress::Advanced;
+        let mut retained = Some(same);
+        for deadline in [deadline_first,!deadline_first] {
+            if deadline {
+                if latch_failure(&failed,&mut trace,&mut progress,(gtk_trace.0,Boundary::Deadline),BootstrapProgress::Advanced) {
+                    retained = Some(same);
+                }
+            } else {
+                // record_at(Gtk) may update the trace only before first failure.
+                if !failed.load(Ordering::SeqCst) { trace = gtk_trace; }
+                latch_session_diagnostic(&failed,&mut retained,gtk);
+            }
+        }
+        assert!(failed.load(Ordering::SeqCst) && progress == BootstrapProgress::Advanced);
+        assert!(trace == if deadline_first { (gtk_trace.0,Boundary::Deadline) } else { gtk_trace });
+        assert!(retained == Some(if deadline_first { same } else { gtk }));
+    }
 }
 
 // Original destruction facts only. ProjectPath records an admitted Cancel as
@@ -3167,7 +3249,7 @@ impl Observation {
         if self.case.session().is_some() && id>2 {
             let p=if r.session.quit_cancel_id==Some(id) { Some(&mut r.session.quit_cancel) }
                 else { r.session.files.iter_mut().find(|file| file.id==id).map(|file| &mut file.picker) };
-            if let Some(p)=p { if !seen || !p.responded || p.destroyed { self.fail(); return; } p.destroyed=true; return; }
+            if let Some(p)=p { if !seen || !p.responded || p.destroyed { self.session_fail(&mut r,SessionRejection::GtkDestroyState); return; } p.destroyed=true; return; }
         }
         if self.case != Case::Outstanding && (1..=2).contains(&id) {
             let p = &mut r.pickers[(id - 1) as usize];
@@ -3192,7 +3274,7 @@ impl Observation {
         if self.case.session().is_some() && id>2 {
             let p=if r.session.quit_cancel_id==Some(id) { Some(&mut r.session.quit_cancel) }
                 else { r.session.files.iter_mut().find(|file| file.id==id).map(|file| &mut file.picker) };
-            if let Some(p)=p { if !seen || !p.destroyed || p.released { self.fail(); return; } p.released=true; return; }
+            if let Some(p)=p { if !seen || !p.destroyed || p.released { self.session_fail(&mut r,SessionRejection::GtkReleaseState); return; } p.released=true; return; }
         }
         if self.case != Case::Outstanding && (1..=2).contains(&id) {
             let p = &mut r.pickers[(id - 1) as usize];
@@ -3941,6 +4023,20 @@ impl Observation {
 }
 
 impl Observation {
+    pub(super) fn session_file_failed(&self, rejection: SessionRejection) {
+        // Shell callers have left every DIALOG/GuiFacts borrow before entering.
+        // Record-held callbacks use session_fail on their existing guard instead.
+        let Some(mut r)=self.record_at(Boundary::Gtk) else { return; };
+        self.session_fail(&mut r,rejection);
+    }
+    pub(super) fn session_file_wait(&self, index: u8, activating: bool, wait: SessionWait) {
+        // Authenticate the actual pending role AND index before sampling. A late
+        // SetFile callback cannot attach a wait to ActivateFile at the same index.
+        let Some(mut r)=self.record() else { return; };
+        if !session_file_wait_pending(r.step,r.pending,index,activating) || self.failed.load(Ordering::SeqCst) { return; }
+        r.trace=(r.step,Boundary::Gtk);
+        self.session_wait(&mut r,wait);
+    }
     pub(super) fn session_file_created(&self, id: u32, kind: crate::credential_format::FileKind) {
         let Some(mut r)=self.record_at(Boundary::Gtk) else { return; };
         let Some((index,SA::Choose(file,expected,_)))=self.session_action(r.step) else { self.fail(); return; };
@@ -3949,10 +4045,16 @@ impl Observation {
         r.session.files.push(SessionFile {id,index,kind:expected,select:!file.is_empty(),picker:Picker {created:true,..Picker::default()}});
     }
     pub(super) fn session_file_dialog(&self, id: u32, index: u8) -> Result<(&'static str,bool),()> {
-        let Some(r)=self.record_at(Boundary::Gtk) else { return Err(()); };
-        let file=r.session.files.last().filter(|file| file.id==id && file.index==index).ok_or(())?;
-        if self.failed.load(Ordering::SeqCst) || Instant::now()>=self.end || !file.picker.created || file.picker.responded || file.picker.destroyed
-            || !matches!(r.pending,Some(Pending::Dom(Step::Session(SessionStep::SetFile(i) | SessionStep::ActivateFile(i)))) if i==index) { return Err(()); }
+        let Some(mut r)=self.record_at(Boundary::Gtk) else { return Err(()); };
+        let Some(file)=r.session.files.last().filter(|file| file.id==id && file.index==index) else {
+            self.session_fail(&mut r,SessionRejection::GtkDialogRecord); return Err(());
+        };
+        if self.failed.load(Ordering::SeqCst) { return Err(()); }
+        if Instant::now()>=self.end { self.session_fail(&mut r,SessionRejection::GtkObserverEndpoint); return Err(()); }
+        if !file.picker.created || file.picker.responded || file.picker.destroyed
+            || !matches!(r.pending,Some(Pending::Dom(Step::Session(SessionStep::SetFile(i) | SessionStep::ActivateFile(i)))) if i==index) {
+            self.session_fail(&mut r,SessionRejection::GtkDialogRecord); return Err(());
+        }
         Ok((file.kind,file.select))
     }
     pub(super) fn session_file_target(&self, index: u8) -> Option<PathBuf> {
@@ -3963,48 +4065,73 @@ impl Observation {
     }
     pub(super) fn session_file_selection(&self, id: u32, index: u8) -> Result<(),()> {
         let Some(mut r)=self.record_at(Boundary::Gtk) else { return Err(()); };
-        if self.failed.load(Ordering::SeqCst) || Instant::now()>=self.end
-            || r.pending!=Some(Pending::Dom(Step::Session(SessionStep::SetFile(index)))) { return Err(()); }
-        let file=r.session.files.last_mut().filter(|file| file.id==id && file.index==index).ok_or(())?;
-        if !file.select || file.picker.selected || file.picker.activated { return Err(()); }
+        if self.failed.load(Ordering::SeqCst) { return Err(()); }
+        if Instant::now()>=self.end { self.session_fail(&mut r,SessionRejection::GtkObserverEndpoint); return Err(()); }
+        if r.pending!=Some(Pending::Dom(Step::Session(SessionStep::SetFile(index)))) {
+            self.session_fail(&mut r,SessionRejection::GtkSelectionState); return Err(());
+        }
+        let Some(file)=r.session.files.last_mut().filter(|file| file.id==id && file.index==index) else {
+            self.session_fail(&mut r,SessionRejection::GtkSelectionState); return Err(());
+        };
+        if !file.select || file.picker.selected || file.picker.activated {
+            self.session_fail(&mut r,SessionRejection::GtkSelectionState); return Err(());
+        }
         file.picker.selected=true; Ok(())
     }
     pub(super) fn session_file_activation(&self, id: u32, index: u8) -> Result<(),()> {
         let Some(mut r)=self.record_at(Boundary::Gtk) else { return Err(()); };
-        if self.failed.load(Ordering::SeqCst) || Instant::now()>=self.end
-            || r.pending!=Some(Pending::Dom(Step::Session(SessionStep::ActivateFile(index)))) { return Err(()); }
-        let file=r.session.files.last_mut().filter(|file| file.id==id && file.index==index).ok_or(())?;
-        if file.picker.selected!=file.select || file.picker.activated { return Err(()); }
+        if self.failed.load(Ordering::SeqCst) { return Err(()); }
+        if Instant::now()>=self.end { self.session_fail(&mut r,SessionRejection::GtkObserverEndpoint); return Err(()); }
+        if r.pending!=Some(Pending::Dom(Step::Session(SessionStep::ActivateFile(index)))) {
+            self.session_fail(&mut r,SessionRejection::GtkActivationState); return Err(());
+        }
+        let Some(file)=r.session.files.last_mut().filter(|file| file.id==id && file.index==index) else {
+            self.session_fail(&mut r,SessionRejection::GtkActivationState); return Err(());
+        };
+        if file.picker.selected!=file.select || file.picker.activated {
+            self.session_fail(&mut r,SessionRejection::GtkActivationState); return Err(());
+        }
         file.picker.activated=true; Ok(())
     }
     pub(super) fn session_file_filename(&self, id: u32, path: Option<&Path>) {
         let Some(mut r)=self.record_at(Boundary::Gtk) else { return; };
-        let Some(file)=r.session.files.last_mut().filter(|file| file.id==id) else { self.fail(); return; };
-        if !file.select || !file.picker.activated || file.picker.filename || file.picker.responded
-            || path.is_none() || path!=self.session_file_target(file.index).as_deref() { self.fail(); return; }
+        let Some(file)=r.session.files.last_mut().filter(|file| file.id==id) else {
+            self.session_fail(&mut r,SessionRejection::GtkFilenameState); return;
+        };
+        if !file.select || !file.picker.activated || file.picker.filename || file.picker.responded {
+            self.session_fail(&mut r,SessionRejection::GtkFilenameState); return;
+        }
+        if path.is_none() { self.session_fail(&mut r,SessionRejection::GtkFilenameAbsent); return; }
+        if path!=self.session_file_target(file.index).as_deref() { self.session_fail(&mut r,SessionRejection::GtkFilenameDifferent); return; }
         file.picker.filename=true;
     }
     pub(super) fn session_file_response(&self, id: u32, accepted: bool, cancelled: bool, disposal: bool) {
         let Some(mut r)=self.record_at(Boundary::Gtk) else { return; };
-        let Some(file)=r.session.files.last_mut().filter(|file| file.id==id) else { self.fail(); return; }; let p=&mut file.picker;
-        if !p.activated || p.destroyed || p.released { self.fail(); return; }
+        let Some(file)=r.session.files.last_mut().filter(|file| file.id==id) else {
+            self.session_fail(&mut r,SessionRejection::GtkResponseState); return;
+        }; let p=&mut file.picker;
+        if !p.activated || p.destroyed || p.released { self.session_fail(&mut r,SessionRejection::GtkResponseState); return; }
         if !p.responded && !disposal && accepted==file.select && cancelled!=file.select && p.filename==file.select { p.responded=true; }
         else if p.responded && p.returned && disposal && !accepted && !cancelled && !p.disposal { p.disposal=true; }
-        else { self.fail(); }
+        else { self.session_fail(&mut r,SessionRejection::GtkResponseContract); }
     }
     fn session_file_returned(&self, step: SessionStep, result: Result<bool,()>) {
         let Some(mut r)=self.record_at(Boundary::Gtk) else { return; };
-        if r.pending.take()!=Some(Pending::Dom(Step::Session(step))) || r.step!=Step::Session(step) { self.fail(); return; }
-        let index=match step { SessionStep::SetFile(i) | SessionStep::ActivateFile(i)=>i,_=>{self.fail();return;} };
+        // Always preserve original pending/return bookkeeping, including after a
+        // callback or helper already latched its more precise first rejection.
+        if r.pending.take()!=Some(Pending::Dom(Step::Session(step))) || r.step!=Step::Session(step) {
+            self.session_fail(&mut r,SessionRejection::GtkReturnRole); return;
+        }
+        let index=match step { SessionStep::SetFile(i) | SessionStep::ActivateFile(i)=>i,_=>{self.session_fail(&mut r,SessionRejection::GtkReturnRole);return;} };
         let Some(file)=r.session.files.last_mut().filter(|file| file.index==index) else {
-            if result!=Ok(false) { self.fail(); } return;
+            if result!=Ok(false) { self.session_fail(&mut r,SessionRejection::GtkReturnState); } return;
         };
         match result {
             Ok(false) if !file.picker.activated && (step!=SessionStep::SetFile(index) || !file.picker.selected)=>{},
             Ok(true) if step==SessionStep::SetFile(index) && file.picker.selected && !file.picker.activated=>r.step=Step::Session(SessionStep::ActivateFile(index)),
             Ok(true) if step==SessionStep::ActivateFile(index)=>{
-                if !file.picker.activation_returned(result) { self.fail(); return; } r.step=Step::Session(SessionStep::Capture(index));
-            }, _=>self.fail(),
+                if !file.picker.activation_returned(result) { self.session_fail(&mut r,SessionRejection::GtkReturnState); return; } r.step=Step::Session(SessionStep::Capture(index));
+            }, _=>self.session_fail(&mut r,SessionRejection::GtkReturnState),
         }
     }
     pub(super) fn quit_selects_ok(&self, id: u32) -> Result<bool,()> {

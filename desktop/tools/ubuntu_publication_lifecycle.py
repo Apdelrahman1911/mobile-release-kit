@@ -204,10 +204,16 @@ SHELL_BOOTSTRAP_PROGRESS = (
 SHELL_SESSION_REJECTIONS = (
     b"not-recorded", b"unknown-native-snapshot", b"native-readiness-invariant", b"evaluation-budget",
     b"unavailable-projection-script", b"evaluation-dispatch", b"step-pending-invariant",
+    b"gtk-thread", b"gtk-dialog-book", b"gtk-dialog-original", b"gtk-owner-binding", b"gtk-owner-interrupted", b"gtk-owner-facts",
+    b"gtk-dialog-properties", b"gtk-selection-setter", b"gtk-response-widget", b"gtk-action-widget", b"gtk-dialog-record",
+    b"gtk-observer-endpoint", b"gtk-selection-state", b"gtk-activation-state", b"gtk-filename-state", b"gtk-filename-absent",
+    b"gtk-filename-different", b"gtk-response-state", b"gtk-response-contract", b"gtk-return-role", b"gtk-return-state",
+    b"gtk-destroy-state", b"gtk-release-state",
 )
 SHELL_SESSION_WAITS = (
     b"not-sampled", b"request-not-yet-seen", b"native-reply-pending", b"original-owner-unsettled",
     b"native-phase-not-ready", b"rendered-display-mismatch", b"rendered-control-mismatch",
+    b"gtk-dialog-absent", b"gtk-action-insensitive",
 )
 SHELL_PATH_MARKER = b"MRK_INSTALLED_SHELL_PROJECT_PATHS="
 SHELL_PATH_RECEIPT = {'assetAuthorityCreated': False,

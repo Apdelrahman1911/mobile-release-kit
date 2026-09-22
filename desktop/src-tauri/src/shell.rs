@@ -1413,56 +1413,76 @@ mod owned_gtk {
     }
 
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    fn observed_session_file(app: &tauri::AppHandle, q: &Arc<installed_observation::Observation>, index: u8) -> Result<Option<(u32, gtk::FileChooserDialog, bool)>, ()> {
-        if !gtk::is_initialized_main_thread() { return Err(()); }
+    fn observed_session_file(app: &tauri::AppHandle, q: &Arc<installed_observation::Observation>, index: u8, activating: bool) -> Result<Option<(u32, gtk::FileChooserDialog, bool)>, ()> {
+        use installed_observation::{SessionRejection as R, SessionWait as W};
+        if !gtk::is_initialized_main_thread() { q.session_file_failed(R::GtkThread); return Err(()); }
         let original = DIALOG.with(|book| {
-            let book = book.try_borrow().map_err(|_| ())?;
+            let book = book.try_borrow().map_err(|_| R::GtkDialogBook)?;
             let Some(entry) = book.as_ref() else { return Ok(None); };
-            let Object::File(dialog) = &entry.object else { return Err(()); };
-            let (context, call) = entry.observation.as_ref().ok_or(())?;
+            let Object::File(dialog) = &entry.object else { return Err(R::GtkDialogOriginal); };
+            let (context, call) = entry.observation.as_ref().ok_or(R::GtkDialogOriginal)?;
             Ok(Some((entry.id, dialog.clone(), context.clone(), call.clone())))
-        })?;
-        let Some((id, dialog, context, call)) = original else { return Ok(None); };
-        if !context.upgrade().is_some_and(|actual| Arc::ptr_eq(&actual, q)) { return Err(()); }
-        let call = call.upgrade().ok_or(())?; let owner = call.owner().ok_or(())?;
-        if owner.id != id || !Arc::ptr_eq(&owner.gui, &call) || owner.interrupted()
-            || !call.facts().is_some_and(|facts| facts.created && facts.showing && !facts.constructing
-                && !facts.not_created && !facts.response && !facts.destroyed && !facts.released && facts.refusal.is_none()) { return Err(()); }
+        });
+        // Only closed DATA crosses the DIALOG borrow; record after it is gone.
+        let original = match original {
+            Ok(original) => original,
+            Err(reason) => { q.session_file_failed(reason); return Err(()); },
+        };
+        let Some((id, dialog, context, call)) = original else {
+            q.session_file_wait(index, activating, W::GtkDialogAbsent); return Ok(None);
+        };
+        if !context.upgrade().is_some_and(|actual| Arc::ptr_eq(&actual, q)) { q.session_file_failed(R::GtkDialogOriginal); return Err(()); }
+        let Some(call) = call.upgrade() else { q.session_file_failed(R::GtkDialogOriginal); return Err(()); };
+        let Some(owner) = call.owner() else { q.session_file_failed(R::GtkOwnerBinding); return Err(()); };
+        if owner.id != id || !Arc::ptr_eq(&owner.gui, &call) { q.session_file_failed(R::GtkOwnerBinding); return Err(()); }
+        if owner.interrupted() { q.session_file_failed(R::GtkOwnerInterrupted); return Err(()); }
+        let original_facts = call.facts().is_some_and(|facts| facts.created && facts.showing && !facts.constructing
+            && !facts.not_created && !facts.response && !facts.destroyed && !facts.released && facts.refusal.is_none());
+        if !original_facts { q.session_file_failed(R::GtkOwnerFacts); return Err(()); }
         let (kind, select) = q.session_file_dialog(id, index)?;
         let title = match kind {
             "android-keystore" => "Choose an Android JKS keystore",
             "android-firebase" => "Choose Android Firebase JSON",
-            _ => return Err(()),
+            _ => { q.session_file_failed(R::GtkDialogProperties); return Err(()); },
         };
-        let parent: gtk::Window = app.get_webview_window(MAIN_WINDOW).ok_or(())?.gtk_window().map_err(|_| ())?.upcast();
+        let Some(main) = app.get_webview_window(MAIN_WINDOW) else { q.session_file_failed(R::GtkDialogProperties); return Err(()); };
+        let parent: gtk::Window = match main.gtk_window() {
+            Ok(window) => window.upcast(),
+            Err(_) => { q.session_file_failed(R::GtkDialogProperties); return Err(()); },
+        };
         if dialog.title().as_deref() != Some(title) || !dialog.is_visible() || !dialog.is_modal()
             || dialog.transient_for().as_ref() != Some(&parent) || !dialog.property::<bool>("destroy-with-parent")
             || dialog.property::<gtk::FileChooserAction>("action") != gtk::FileChooserAction::Open
             || !dialog.property::<bool>("local-only") || dialog.property::<bool>("select-multiple") || dialog.property::<bool>("create-folders")
-            || gtk::Settings::default().is_none_or(|settings| settings.is_gtk_recent_files_enabled()) { return Err(()); }
+            || gtk::Settings::default().is_none_or(|settings| settings.is_gtk_recent_files_enabled()) { q.session_file_failed(R::GtkDialogProperties); return Err(()); }
         Ok(Some((id, dialog, select)))
     }
 
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(super) fn select_observed_session_file(app: &tauri::AppHandle, q: &Arc<installed_observation::Observation>, index: u8) -> Result<bool, ()> {
-        let Some((id, dialog, select)) = observed_session_file(app, q, index)? else { return Ok(false); };
-        if !select { return Err(()); }
-        let path = q.session_file_target(index).ok_or(())?;
+        use installed_observation::SessionRejection as R;
+        let Some((id, dialog, select)) = observed_session_file(app, q, index, false)? else { return Ok(false); };
+        if !select { q.session_file_failed(R::GtkSelectionState); return Err(()); }
+        let Some(path) = q.session_file_target(index) else { q.session_file_failed(R::GtkSelectionState); return Err(()); };
         q.session_file_selection(id, index)?;
         // One setter on the real chooser, not a selection receipt. Its actual
         // accepted callback alone performs the original filename() transfer.
-        if !dialog.set_filename(&path) { return Err(()); }
+        if !dialog.set_filename(&path) { q.session_file_failed(R::GtkSelectionSetter); return Err(()); }
         Ok(true)
     }
 
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(super) fn activate_observed_session_file(app: &tauri::AppHandle, q: &Arc<installed_observation::Observation>, index: u8) -> Result<bool, ()> {
-        let Some((id, dialog, select)) = observed_session_file(app, q, index)? else { return Ok(false); };
+        use installed_observation::{SessionRejection as R, SessionWait as W};
+        let Some((id, dialog, select)) = observed_session_file(app, q, index, true)? else { return Ok(false); };
         let response = if select { gtk::ResponseType::Accept } else { gtk::ResponseType::Cancel };
-        let button = dialog.widget_for_response(response).ok_or(())?.downcast::<gtk::Button>().map_err(|_| ())?;
+        let button = match dialog.widget_for_response(response).and_then(|widget| widget.downcast::<gtk::Button>().ok()) {
+            Some(button) => button,
+            None => { q.session_file_failed(R::GtkResponseWidget); return Err(()); },
+        };
         if !button.is_visible() || dialog.response_for_widget(&button) != response
-            || button.label().as_deref() != Some(if select { "Select" } else { "Cancel" }) { return Err(()); }
-        if !button.is_sensitive() { return Ok(false); }
+            || button.label().as_deref() != Some(if select { "Select" } else { "Cancel" }) { q.session_file_failed(R::GtkActionWidget); return Err(()); }
+        if !button.is_sensitive() { q.session_file_wait(index, true, W::GtkActionInsensitive); return Ok(false); }
         q.session_file_activation(id, index)?;
         // The existing GtkDialog handler emits the response. No direct
         // response/begin_response call or second filename read is permitted.

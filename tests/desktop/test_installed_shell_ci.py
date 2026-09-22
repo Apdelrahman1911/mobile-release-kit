@@ -1575,6 +1575,13 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertIn("const FAILURE_PAIR_LIMIT: usize = 512;", source)
         self.assertIn("fn assert_failure_pair_contract()", source)
         self.assertIn("    assert_failure_pair_contract();", source)
+        self.assertLess(source.index("    assert_failure_pair_contract();"), source.index("let returned = super::run_builder("))
+        pure = source.split("fn assert_failure_pair_contract()", 1)[1].split("// Original destruction facts", 1)[0]
+        self.assertIn("SessionStep::ActivateFile(3),evaluations:16", pure)
+        self.assertIn("session_file_wait_pending(actual,pending,3,!activating)", pure)
+        self.assertIn("retained == Some(if deadline_first { same } else { gtk })", pure)
+        # These inert contracts execute before GTK in the reviewed native route;
+        # their source presence here is not executed Rust or native evidence.
         self.assertIn("let end = Instant::now() + Duration::from_secs(45);", source)
         self.assertEqual(lifecycle.SHELL_WORK_FILE_LIMIT, 64 << 20)
         for case in lifecycle.SHELL_CASES[1:]:
