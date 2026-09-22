@@ -309,11 +309,22 @@ int mrk_panel_release(void *opaque) {
 }
 
 #ifdef MRK_INSTALLED_OBSERVATION
-// No separate window lookup: both directions must refer to the parent and
-// exact retained sheet captured by the original production start call.
+// No separate window lookup: sample only the retained originals. Presence
+// bits distinguish an unqueried relationship from a measured false result.
+enum { MRK_PARENT_PRESENT = 1u << 12, MRK_PANEL_PRESENT = 1u << 13,
+    MRK_PARENT_REFERENCES_PANEL = 1u << 14, MRK_PANEL_REFERENCES_PARENT = 1u << 15,
+    MRK_PANEL_VISIBLE = 1u << 16, MRK_ATTACHMENT_ALL = 0x1f000u };
+static uint32_t mrk_observation_attachment(MRKInstalledPanel *s) {
+    uint32_t sample = (s->parent ? MRK_PARENT_PRESENT : 0u) | (s->window ? MRK_PANEL_PRESENT : 0u);
+    if (s->parent && s->window) {
+        if ([s->parent attachedSheet] == s->window) sample |= MRK_PARENT_REFERENCES_PANEL;
+        if ([s->window sheetParent] == s->parent) sample |= MRK_PANEL_REFERENCES_PARENT;
+    }
+    if (s->window && [s->window isVisible]) sample |= MRK_PANEL_VISIBLE;
+    return sample;
+}
 static BOOL mrk_observation_attached(MRKInstalledPanel *s) {
-    return s->parent && s->window && [s->parent attachedSheet] == s->window
-        && [s->window sheetParent] == s->parent && [s->window isVisible];
+    return mrk_observation_attachment(s) == MRK_ATTACHMENT_ALL;
 }
 static BOOL mrk_observation_directory_ready(MRKInstalledPanel *s) {
     if (s->kind != 1 || !s->window || !s->observationDirectoryReturned || !s->observationDirectory[0]) return NO;
@@ -327,10 +338,11 @@ int mrk_panel_observe(void *opaque, int *kind, uint32_t *flags, int *response, u
     MRKInstalledPanel *s = opaque;
     if (s->unknown) return EIO;
     @try {
-        // Closed twelve-bit ABI with the Rust PanelObservation decoder. Reads
+        // Closed seventeen-bit ABI with the Rust PanelObservation decoder. Reads
         // do not set reported, manufacture completion, or authorize retirement.
+        uint32_t attachment = mrk_observation_attachment(s);
         *kind = s->kind; *response = s->response;
-        *flags = (s->started ? 1u : 0u) | (mrk_observation_attached(s) ? 2u : 0u)
+        *flags = attachment | (s->started ? 1u : 0u) | (attachment == MRK_ATTACHMENT_ALL ? 2u : 0u)
             | (s->observationDirectory[0] ? 4u : 0u) | (s->observationDirectoryReturned ? 8u : 0u)
             | (mrk_observation_directory_ready(s) ? 16u : 0u) | (s->observationActionAttempted ? 32u : 0u)
             | (s->observationActionReturned ? 64u : 0u) | (s->responded ? 128u : 0u)

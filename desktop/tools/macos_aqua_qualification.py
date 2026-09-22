@@ -11,6 +11,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
+from importlib.machinery import ModuleSpec
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,7 @@ import re
 import stat
 import subprocess
 import sys
+from types import FunctionType, ModuleType
 
 CASES = ("first-save", "noop-stale", "picker-loss", "save-loss")
 EXECUTABLE = "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/MacOS/mobile-release-kit-desktop"
@@ -27,6 +29,8 @@ WORKFLOW = REPOSITORY + "/.github/workflows/desktop-macos-aqua.yml@" + REF
 MARKER = b"MRK_MACOS_AQUA_RESULT="
 OUTPUT_LIMIT = 2 * 1024 * 1024
 JSON_LIMIT = 16383
+FAILURE_CONTEXT_LIMIT = 1024
+TRACEBACK_LIMIT = 64
 SCOPE = "programmatic genuine controls; no Store, release, distribution or physical-device evidence"
 FAILURE_STEPS = frozenset((
     "Bootstrap Environment ReadEnvironment Dashboard ChooseCancel CancelProject CancelSettled ReadCancelled "
@@ -52,6 +56,7 @@ FAILURE_REASONS = frozenset((
     "asset_exclusion_unconfirmed asset_capacity assessment_context_stale asset_user_cancelled "
     "asset_review_expired asset_deadline asset_document_lost asset_shutdown asset_cleanup_unknown"
 ).split())
+NATIVE_STEPS = frozenset("CancelProject SetProject OpenProject QuitCancel Quit PickerPending".split())
 SOURCE = (b'plugins { id("com.android.application") }\n'
           b'android { defaultConfig { applicationId = "org.example.mrk.observed" } }\n')
 VERSION = b"VERSION_NAME=1.2.3\nBUILD_NUMBER=7\n"
@@ -225,16 +230,32 @@ def parse_result(stdout, stderr, binding, case):
     return value
 
 
-def failure_step(stdout, stderr):
-    # Finite Rust Step labels only; never publish arbitrary child log text.
+def _failure_row(stdout, stderr, marker, limit):
+    """One complete row; count malformed/embedded/partial candidates too."""
     if type(stdout) is not bytes or type(stderr) is not bytes or len(stdout) + len(stderr) > OUTPUT_LIMIT:
         return None
-    prefix = b"MRK_MACOS_AQUA_FAILURE_STEP="
-    rows = [line[len(prefix):] for stream in (stdout, stderr) for line in stream.split(b"\n") if line.startswith(prefix)]
-    if len(rows) != 1 or len(rows[0]) > 40:
+    if sum(stream.count(marker) for stream in (stdout, stderr)) != 1:
+        return None
+    prefix = marker + b"="
+    stream = stdout if marker in stdout else stderr
+    start = stream.index(marker)
+    if (start != 0 and stream[start - 1] != 10) or not stream.startswith(prefix, start):
+        return None
+    start += len(prefix)
+    end = stream.find(b"\n", start)
+    if not 0 < end - start <= limit:
+        return None
+    row = stream[start:end]
+    return None if b"\r" in row else row
+
+
+def failure_step(stdout, stderr):
+    # Finite Rust Step labels only; never publish arbitrary child log text.
+    row = _failure_row(stdout, stderr, b"MRK_MACOS_AQUA_FAILURE_STEP", 40)
+    if row is None:
         return None
     try:
-        label = rows[0].decode("ascii")
+        label = row.decode("ascii")
     except UnicodeError:
         return None
     return label if label in FAILURE_STEPS else None
@@ -242,23 +263,131 @@ def failure_step(stdout, stderr):
 
 def failure_reason(stdout, stderr):
     """Optional closed DATA only; malformed/partial output never grants success."""
-    if type(stdout) is not bytes or type(stderr) is not bytes or len(stdout) + len(stderr) > OUTPUT_LIMIT:
-        return None
-    marker = b"MRK_MACOS_AQUA_FAILURE_REASON"
-    # Count malformed candidates too, including an embedded or incomplete row
-    # accompanying a valid one. Only one exact, newline-terminated row is useful.
-    if sum(stream.count(marker) for stream in (stdout, stderr)) != 1:
-        return None
-    prefix = marker + b"="
-    rows = [line[len(prefix):] for stream in (stdout, stderr)
-            for line in stream.split(b"\n")[:-1] if line.startswith(prefix)]
-    if len(rows) != 1 or not 0 < len(rows[0]) <= 48:
+    row = _failure_row(stdout, stderr, b"MRK_MACOS_AQUA_FAILURE_REASON", 48)
+    if row is None:
         return None
     try:
-        label = rows[0].decode("ascii")
+        label = row.decode("ascii")
     except UnicodeError:
         return None
     return label if label in FAILURE_REASONS else None
+
+
+def failure_context(stdout, stderr):
+    row = _failure_row(stdout, stderr, b"MRK_MACOS_AQUA_FAILURE_CONTEXT", FAILURE_CONTEXT_LIMIT)
+    if row is None:
+        return None
+    try:
+        value = json.loads(row.decode("ascii"), object_pairs_hook=_pairs,
+                           parse_constant=lambda _: (_ for _ in ()).throw(Refused("failure-context")))
+        need(type(value) is dict and set(value) == {"pending", "nativeHandler", "lastPanel"}, "failure-context")
+        pending, native, panel = value["pending"], value["nativeHandler"], value["lastPanel"]
+        if pending is not None:
+            need(type(pending) is dict and set(pending) == {"kind", "step"}
+                 and type(pending["kind"]) is str, "failure-context")
+            kind, step = pending["kind"], pending["step"]
+            allowed = {"dom": FAILURE_STEPS, "native": NATIVE_STEPS, "close": {"Close", "CloseCancel"}}
+            need(kind in ("reload", "failure-close") and step is None
+                 or kind in allowed and type(step) is str and step in allowed[kind], "failure-context")
+        if native is not None:
+            need(type(native) is dict and set(native) == {"step", "entered", "returned"}
+                 and type(native["step"]) is str and native["step"] in NATIVE_STEPS
+                 and type(native["entered"]) is bool and type(native["returned"]) is bool
+                 and (not native["returned"] or native["entered"]), "failure-context")
+        if panel is not None:
+            need(type(panel) is dict and set(panel) == {"step", "id", "kind", "parentPresent", "panelPresent",
+                                                      "parentReferencesPanel", "panelReferencesParent", "panelVisible"}
+                 and native is not None and native["entered"] and panel["step"] == native["step"]
+                 and type(panel["id"]) is int and 1 <= panel["id"] <= 4
+                 and type(panel["kind"]) is str and panel["kind"] in ("project", "quit")
+                 and type(panel["parentPresent"]) is bool and type(panel["panelPresent"]) is bool, "failure-context")
+            both = panel["parentPresent"] and panel["panelPresent"]
+            need(all(type(panel[key]) is bool if both else panel[key] is None
+                     for key in ("parentReferencesPanel", "panelReferencesParent"))
+                 and (type(panel["panelVisible"]) is bool if panel["panelPresent"] else panel["panelVisible"] is None),
+                 "failure-context")
+        return value
+    except (Refused, ValueError, RecursionError, UnicodeError, TypeError):
+        return None
+
+
+def _original_exception_diagnostics(error, run_owned, case, cwd):
+    """Private CI/source-pin seam: reduce only the original call's buffers.
+
+    No import, engine method, cause traversal, outcome/finality query or raw
+    output escape. Missing/changed owner contracts fail closed. The source is
+    pinned by load_owner before this callable can be the original owner.
+    """
+    try:
+        if type(case) is not str or case not in CASES:
+            return None
+        argv = (EXECUTABLE, case)  # Do not trust the mutable list supplied to the call.
+        source = Path(__file__).absolute().parents[2] / "src" / "mobile_release"
+        modules = []
+        for name in ("owned_process", "_command_process"):
+            module = sys.modules.get("mobile_release." + name)
+            if type(module) is not ModuleType:
+                return None
+            namespace = vars(module)
+            expected = str(source / (name + ".py"))
+            spec = namespace.get("__spec__")
+            if (namespace.get("__name__") != "mobile_release." + name
+                    or namespace.get("__file__") != expected or type(spec) is not ModuleSpec or spec.origin != expected):
+                return None
+            modules.append(namespace)
+        owner, command = modules
+        function = command.get("run_command")
+        if (type(run_owned) is not FunctionType or owner.get("run_owned") is not run_owned
+                or run_owned.__globals__ is not owner or run_owned.__code__.co_filename != owner["__file__"]
+                or type(function) is not FunctionType or function.__globals__ is not command
+                or function.__code__.co_filename != command["__file__"]):
+            return None
+        original = None
+        trace = error.__traceback__
+        for _ in range(TRACEBACK_LIMIT):
+            if trace is None:
+                break
+            frame = trace.tb_frame
+            if frame.f_code is function.__code__:
+                if frame.f_globals is not command or original is not None and frame is not original:
+                    return None
+                original = frame  # Re-raising can repeat this identical frame.
+            trace = trace.tb_next
+        if trace is not None or original is None:
+            return None
+        local = original.f_locals  # Python 3.14 can supply FrameLocalsProxy.
+        engine = local.get("engine")
+        if type(engine) is not command.get("_Outer"):
+            return None
+        actual = local.get("argv")
+        if (type(actual) is not list or len(actual) != 2 or any(type(arg) is not str for arg in actual)
+                or tuple(actual) != argv or type(local.get("cwd")) is not type(cwd) or local["cwd"] != cwd
+                or type(local.get("timeout")) is not int or local["timeout"] != 60
+                or local.get("capture") is not True or local.get("text") is not False
+                or type(local.get("output_limit")) is not int or local["output_limit"] != OUTPUT_LIMIT):
+            return None
+        frozen = engine.frozen
+        if type(frozen) is not command.get("FrozenCommand") or type(frozen.manifest) is not command.get("Manifest"):
+            return None
+        if (type(frozen.args) is not tuple or len(frozen.args) != 2
+                or any(type(arg) is not str for arg in frozen.args) or frozen.args != argv
+                or type(frozen.argv) is not tuple or len(frozen.argv) != 2 or any(type(arg) is not bytes for arg in frozen.argv)
+                or frozen.argv != tuple(arg.encode("ascii") for arg in argv)
+                or type(frozen.cwd) is not bytes or frozen.cwd != str(cwd).encode("ascii")
+                or frozen.manifest.capture is not True or type(frozen.manifest.limit) is not int
+                or frozen.manifest.limit != OUTPUT_LIMIT or engine.text is not False):
+            return None
+        outputs = engine.outputs
+        if (type(outputs) is not list or len(outputs) != 2 or any(type(part) is not bytearray for part in outputs)
+                or len(outputs[0]) + len(outputs[1]) > OUTPUT_LIMIT):
+            return None
+        stdout, stderr = bytes(outputs[0]), bytes(outputs[1])
+        # The copies are immediately reduced; none is retained/exported by the
+        # caller. Buffer availability never means EOF or original finality.
+        reduced = (failure_step(stdout, stderr), failure_reason(stdout, stderr), failure_context(stdout, stderr))
+        return reduced if any(part is not None for part in reduced) else None
+    except BaseException:
+        return None  # Extraction must never mask the original invocation error.
 
 
 @dataclass(frozen=True)
@@ -343,6 +472,7 @@ class Fixtures:
         self.inflight = False
         self.last_returned = False
         self.app_returncode = self.inner_failure_step = self.inner_failure_reason = None
+        self.inner_failure_context = self.inner_diagnostic_source = None
         self.case = None
         self.stage = "prepare"
         self.projects, self.states, self.originals = {}, {}, {}
@@ -561,11 +691,24 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit):
         argv = [EXECUTABLE, case]
         fixtures.stage, fixtures.inflight, fixtures.last_returned = "invocation", True, False
         fixtures.app_returncode = fixtures.inner_failure_step = fixtures.inner_failure_reason = None
+        fixtures.inner_failure_context = fixtures.inner_diagnostic_source = None
         # Only the original public return contract clears this flag. An
         # exception/interruption or foreign/malformed result leaves finality
         # unknown, with no readback, close or later invocation.
-        result = run_owned(argv, environ=app_environment(state, uid, username), cwd=state,
-                           timeout=60, capture=True, text=False, output_limit=OUTPUT_LIMIT)
+        try:
+            result = run_owned(argv, environ=app_environment(state, uid, username), cwd=state,
+                               timeout=60, capture=True, text=False, output_limit=OUTPUT_LIMIT)
+        except BaseException as error:
+            # Diagnostics only: preserve identical error, inflight, unknown
+            # finality and the no-readback/no-close/no-next-call boundary.
+            try:
+                reduced = _original_exception_diagnostics(error, run_owned, case, state)
+                if reduced is not None:
+                    fixtures.inner_failure_step, fixtures.inner_failure_reason, fixtures.inner_failure_context = reduced
+                    fixtures.inner_diagnostic_source = "original-exception-buffer"
+            except BaseException:
+                pass  # Even an unexpected diagnostic fault cannot replace this error.
+            raise
         need(type(result) is subprocess.CompletedProcess and type(result.args) is list
              and len(result.args) == 2 and all(type(arg) is str for arg in result.args) and result.args == argv
              and type(result.returncode) is int and type(result.stdout) is bytes and type(result.stderr) is bytes
@@ -574,6 +717,8 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit):
         fixtures.app_returncode = result.returncode
         fixtures.inner_failure_step = failure_step(result.stdout, result.stderr)
         fixtures.inner_failure_reason = failure_reason(result.stdout, result.stderr)
+        fixtures.inner_failure_context = failure_context(result.stdout, result.stderr)
+        fixtures.inner_diagnostic_source = "completed-output"
         need(result.returncode == 0, "app-return")
         report = parse_result(result.stdout, result.stderr, binding, case)
         readback = fixtures.readback(case)
@@ -646,6 +791,9 @@ def diagnostic(error, owner, fixtures):
             "appReturncode": fixtures.app_returncode if fixtures else None,
             "innerFailureStep": fixtures.inner_failure_step if fixtures else None,
             "innerFailureReason": fixtures.inner_failure_reason if fixtures else None,
+            "innerFailureContext": fixtures.inner_failure_context if fixtures else None,
+            "innerDiagnosticSource": fixtures.inner_diagnostic_source if fixtures else None,
+            "innerDiagnosticCompleteness": "complete" if fixtures and fixtures.last_returned else "unknown",
             "invocationFinality": "unknown" if fixtures and fixtures.inflight else "no-pending-invocation",
             "innerOutput": "unavailable" if fixtures and fixtures.inflight else "not-exported",
             "typedLifetimeFacts": facts, "exceptionChainTruncated": bool(pending),
