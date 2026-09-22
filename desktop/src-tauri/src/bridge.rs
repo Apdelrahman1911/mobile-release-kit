@@ -1,6 +1,6 @@
 //! Fixed application services. Project roots enter the registry only through
 //! the Rust-side native picker, never through a renderer-supplied path.
-use std::{collections::BTreeMap, path::PathBuf, sync::{Mutex, atomic::{AtomicU32, Ordering}}};
+use std::{collections::BTreeMap, path::PathBuf, sync::{Arc, Mutex, atomic::{AtomicU32, Ordering}}};
 #[cfg(any(feature = "desktop-shell", all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
 use std::sync::atomic::AtomicU64;
 #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos"))))]
