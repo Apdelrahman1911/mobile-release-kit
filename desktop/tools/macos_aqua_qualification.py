@@ -89,7 +89,7 @@ NATIVE_ACTION_SITES = {
     "button-hidden": ("would-block", 24, True), "project-cancel": ("none", 1, True),
     "project-open": ("none", 4, True), "quit-cancel": ("none", 8, True), "quit-confirm": ("none", 16, True),
 }
-ACCESSIBILITY_SITES = frozenset("binding entry initial-original-proof capture original-proof default-recheck admission press".split())
+ACCESSIBILITY_SITES = frozenset("binding entry initial-original-proof confirm-eligibility original-proof confirm-recheck admission confirm".split())
 ACCESSIBILITY_ERRORS = frozenset((
     "none wrong-thread invalid-input ineligible unsupported ambiguous malformed limit deadline custody "
     "not-triggered changed objc-exception cleanup-unknown"
@@ -109,9 +109,9 @@ ACCESSIBILITY_PROOF_SITES = frozenset((
     "objects attachment directory parent-identifier panel-identifier parent-sheets panel-sheets "
     "panel-attached-sheet native-children native-parent native-role stable-identifier final-eligibility complete"
 ).split())
-ACCESSIBILITY_DEFAULT_CHECKS = ("eligible", "defaultElement", "capability", "buttonRole", "enabled", "pressAllowed", "stableDefault")
-ACCESSIBILITY_DEFAULT_FLAGS = ("attempted", "elementRetained")
-ACCESSIBILITY_DEFAULT_SITES = frozenset("objects default-element capability button-role button-enabled press-allowed stable-default complete".split())
+ACCESSIBILITY_CONFIRM_CHECKS = ("eligible", "openPanel", "capability", "confirmAllowed", "stableOriginal")
+ACCESSIBILITY_CONFIRM_FLAGS = ("attempted",)
+ACCESSIBILITY_CONFIRM_SITES = frozenset("objects open-panel capability confirm-allowed stable-original complete".split())
 SOURCE = (b'plugins { id("com.android.application") }\n'
           b'android { defaultConfig { applicationId = "org.example.mrk.observed" } }\n')
 VERSION = b"VERSION_NAME=1.2.3\nBUILD_NUMBER=7\n"
@@ -205,9 +205,9 @@ def _expected_identity_proof():
             "parent": "match", "panel": "match", "children": 1, "originals": "one", "site": "complete", "error": "none"}
 
 
-def _expected_default_proof():
-    return {"returned": True, "attempted": True, "elementRetained": True,
-            "checks": dict.fromkeys(ACCESSIBILITY_DEFAULT_CHECKS, True), "site": "complete", "error": "none"}
+def _expected_confirm_proof():
+    return {"returned": True, "attempted": True,
+            "checks": dict.fromkeys(ACCESSIBILITY_CONFIRM_CHECKS, True), "site": "complete", "error": "none"}
 
 
 def expected_result(binding, case):
@@ -243,14 +243,14 @@ def expected_result(binding, case):
             "controlReturns": [first, case != "picker-loss", case != "picker-loss", first, True],
             "accessibilityTrustedWithoutPrompt": True,
             "projectOpenInput": None if case == "picker-loss" else {
-                "mechanism": "accessibility-press-original-semantic-element-v1", "step": "OpenProject", "id": 2 if first else 1,
+                "mechanism": "accessibility-confirm-original-open-panel-v1", "step": "OpenProject", "id": 2 if first else 1,
                 "prepared": True, "requested": True, "dispatchAttempted": True, "state": "retired",
                 "bodyEntered": True, "nativeEntered": True, "bodyReturned": True, "receiptJoined": True,
                 "barrierRetired": True, "expired": False, "timely": True, "custodyKnown": True,
-                "attempted": True, "pressReturned": True, "triggered": True,
+                "attempted": True, "confirmReturned": True, "triggered": True,
                 "initialOriginalProof": _expected_identity_proof(), "originalProof": _expected_identity_proof(),
-                "capture": _expected_default_proof(),
-                "defaultRecheck": _expected_default_proof(), "site": "press", "error": "none"},
+                "confirmEligibility": _expected_confirm_proof(),
+                "confirmRecheck": _expected_confirm_proof(), "site": "confirm", "error": "none"},
             "projectOpenBinding": None if case == "picker-loss" else {
                 "mechanism": "public-original-sheet-v1", "case": case, "id": 2 if first else 1, "kind": "project",
                 "start": {"returned": True, "result": "ok"},
@@ -439,33 +439,33 @@ def _accessibility_native_proof(value):
     return value
 
 
-def _accessibility_default_proof(value):
+def _accessibility_confirm_proof(value):
     """Returned scalar facts; neither a lookup identity nor an action permit."""
-    label = "accessibility-default-proof"
-    need(type(value) is dict and set(value) == {"returned", *ACCESSIBILITY_DEFAULT_FLAGS, "checks", "site", "error"}, label)
+    label = "accessibility-confirm-proof"
+    need(type(value) is dict and set(value) == {"returned", *ACCESSIBILITY_CONFIRM_FLAGS, "checks", "site", "error"}, label)
     need(value["returned"] is True and value["attempted"] is True
-         and all(type(value[key]) is bool for key in ACCESSIBILITY_DEFAULT_FLAGS), label)
+         and all(type(value[key]) is bool for key in ACCESSIBILITY_CONFIRM_FLAGS), label)
     checks, site, error = value["checks"], value["site"], value["error"]
-    need(type(checks) is dict and set(checks) == set(ACCESSIBILITY_DEFAULT_CHECKS)
+    need(type(checks) is dict and set(checks) == set(ACCESSIBILITY_CONFIRM_CHECKS)
          and all(v is None or type(v) is bool for v in checks.values()), label)
-    need(type(site) is str and site in ACCESSIBILITY_DEFAULT_SITES
+    need(type(site) is str and site in ACCESSIBILITY_CONFIRM_SITES
          and type(error) is str and error in ACCESSIBILITY_ERRORS, label)
-    need(checks["eligible"] is not None and (checks["defaultElement"] is not True or value["elementRetained"]), label)
-    for index, key in enumerate(ACCESSIBILITY_DEFAULT_CHECKS):
+    need(checks["eligible"] is not None, label)
+    for index, key in enumerate(ACCESSIBILITY_CONFIRM_CHECKS):
         if checks[key] is not None:
-            need(all(checks[earlier] is True for earlier in ACCESSIBILITY_DEFAULT_CHECKS[:index]), label)
+            need(all(checks[earlier] is True for earlier in ACCESSIBILITY_CONFIRM_CHECKS[:index]), label)
     need((site == "complete") == (error == "none"), label)
     if error == "none":
-        need(value["elementRetained"] and all(v is True for v in checks.values()), label)
+        need(all(v is True for v in checks.values()), label)
     return value
 
 
 def _accessibility_succeeded(value):
     return (all(value[key] is True for key in ("prepared", "requested", "dispatchAttempted", "bodyEntered", "nativeEntered",
-             "bodyReturned", "receiptJoined", "barrierRetired", "timely", "custodyKnown", "attempted", "pressReturned", "triggered"))
-            and value["expired"] is False and value["state"] == "retired" and value["site"] == "press" and value["error"] == "none"
+             "bodyReturned", "receiptJoined", "barrierRetired", "timely", "custodyKnown", "attempted", "confirmReturned", "triggered"))
+            and value["expired"] is False and value["state"] == "retired" and value["site"] == "confirm" and value["error"] == "none"
             and all(value[key] is not None and value[key]["error"] == "none"
-                    for key in ("initialOriginalProof", "capture", "originalProof", "defaultRecheck")))
+                    for key in ("initialOriginalProof", "confirmEligibility", "originalProof", "confirmRecheck")))
 
 
 def _accessibility_context(value, native, panel, *, expected_id=None):
@@ -474,10 +474,10 @@ def _accessibility_context(value, native, panel, *, expected_id=None):
     label = "accessibility-data"
     try:
         flags = ("prepared", "requested", "dispatchAttempted", "bodyReturned", "receiptJoined", "barrierRetired", "expired")
-        observed = ("bodyEntered", "nativeEntered", "attempted", "pressReturned", "triggered", "timely", "custodyKnown")
+        observed = ("bodyEntered", "nativeEntered", "attempted", "confirmReturned", "triggered", "timely", "custodyKnown")
         need(type(value) is dict and set(value) == {"mechanism", "step", "id", "state", "site", "error",
-             "initialOriginalProof", "originalProof", "capture", "defaultRecheck", *flags, *observed}, label)
-        need(value["mechanism"] == "accessibility-press-original-semantic-element-v1" and value["step"] == "OpenProject"
+             "initialOriginalProof", "originalProof", "confirmEligibility", "confirmRecheck", *flags, *observed}, label)
+        need(value["mechanism"] == "accessibility-confirm-original-open-panel-v1" and value["step"] == "OpenProject"
              and type(value["id"]) is int and value["id"] in (1, 2), label)
         if expected_id is not None:
             need(value["id"] == expected_id, label)
@@ -522,33 +522,33 @@ def _accessibility_context(value, native, panel, *, expected_id=None):
                 need(value["custodyKnown"] is True, label)
         need(not value["expired"] or value["timely"] is not True, label)
         need(value["attempted"] is not True or value["nativeEntered"] is True and value["bodyReturned"], label)
-        need(value["pressReturned"] is not True or value["attempted"] is True, label)
-        need(value["triggered"] is None or value["pressReturned"] is True, label)
+        need(value["confirmReturned"] is not True or value["attempted"] is True, label)
+        need(value["triggered"] is None or value["confirmReturned"] is True, label)
         need(error not in ("custody", "objc-exception", "cleanup-unknown") or value["custodyKnown"] is not True, label)
         need(error != "not-triggered" or value["triggered"] is False, label)
         need(value["triggered"] is not False or error in ("not-triggered", "custody"), label)
-        proofs = (value["initialOriginalProof"], value["capture"], value["originalProof"], value["defaultRecheck"])
+        proofs = (value["initialOriginalProof"], value["confirmEligibility"], value["originalProof"], value["confirmRecheck"])
         for index, proof in enumerate(proofs):
             if proof is not None:
                 need(value["bodyReturned"] and value["nativeEntered"] is True, label)
-                (_accessibility_native_proof if index in (0, 2) else _accessibility_default_proof)(proof)
+                (_accessibility_native_proof if index in (0, 2) else _accessibility_confirm_proof)(proof)
                 need(all(p is not None and p["error"] == "none" for p in proofs[:index]), label)
         need(value["attempted"] is not True or all(p is not None and p["error"] == "none" for p in proofs), label)
         if value["nativeEntered"] is False:
-            need(all(p is None for p in proofs) and value["attempted"] is False and value["pressReturned"] is False
+            need(all(p is None for p in proofs) and value["attempted"] is False and value["confirmReturned"] is False
                  and value["triggered"] is None, label)
         elif value["nativeEntered"] is None:
-            need(all(p is None for p in proofs) and value["attempted"] is None and value["pressReturned"] is None
+            need(all(p is None for p in proofs) and value["attempted"] is None and value["confirmReturned"] is None
                  and value["triggered"] is None, label)
         else:
             need(value["bodyReturned"], label)
         if not value["bodyReturned"]:
             need(all(p is None for p in proofs) and value["triggered"] is None, label)
         if error == "none":
-            need(site == "press" and value["attempted"] is True and value["pressReturned"] is True
+            need(site == "confirm" and value["attempted"] is True and value["confirmReturned"] is True
                  and value["triggered"] is True and all(p is not None and p["error"] == "none" for p in proofs), label)
-        for name, proof in (("initial-original-proof", proofs[0]), ("capture", proofs[1]),
-                            ("original-proof", proofs[2]), ("default-recheck", proofs[3])):
+        for name, proof in (("initial-original-proof", proofs[0]), ("confirm-eligibility", proofs[1]),
+                            ("original-proof", proofs[2]), ("confirm-recheck", proofs[3])):
             if site == name:
                 need(proof is not None and proof["error"] == error, label)
         return value
@@ -654,11 +654,11 @@ def failure_context(stdout, stderr, case=None):
                  and native == {"step": "OpenProject", "entered": True, "returned": True}
                  and sample is not None and sample["prepared"] and sample["requested"]
                  and sample["expired"] and sample["timely"] is False
-                 and all(sample[key] is None for key in ("nativeEntered", "attempted", "pressReturned", "triggered",
-                     "initialOriginalProof", "capture", "originalProof", "defaultRecheck", "site", "error")), "failure-context")
+                 and all(sample[key] is None for key in ("nativeEntered", "attempted", "confirmReturned", "triggered",
+                     "initialOriginalProof", "confirmEligibility", "originalProof", "confirmRecheck", "site", "error")), "failure-context")
         if "accessibilityBinding" in value:
             # Early start failure legitimately has no nativeHandler/lastPanel
-            # or Press sample. Bind to the known case, not to invented actions.
+            # or Confirm sample. Bind to the known case, not to invented actions.
             value["accessibilityBinding"] = _accessibility_binding_context(value["accessibilityBinding"], case)
         return value
     except (Refused, ValueError, RecursionError, UnicodeError, TypeError):

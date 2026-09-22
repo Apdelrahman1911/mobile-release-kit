@@ -439,8 +439,8 @@ class AquaDataTests(unittest.TestCase):
                           bodyEntered=state not in ("requested", "queued"), nativeEntered=None,
                           bodyReturned=state in ("returned", "joined", "unknown"), receiptJoined=state == "joined", barrierRetired=False,
                           expired=True, timely=False, custodyKnown=False if state == "unknown" else True if state == "joined" else None,
-                          attempted=None, pressReturned=None, triggered=None, initialOriginalProof=None,
-                          originalProof=None, capture=None, defaultRecheck=None, site=None, error=None)
+                          attempted=None, confirmReturned=None, triggered=None, initialOriginalProof=None,
+                          originalProof=None, confirmEligibility=None, confirmRecheck=None, site=None, error=None)
             self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), value)
             self.assertFalse(M._accessibility_succeeded(sample))
             value["snapshotSource"] = "prearm-open-progress"
@@ -454,11 +454,11 @@ class AquaDataTests(unittest.TestCase):
         late = deepcopy(good); late["accessibility"].update(expired=True, timely=False)
         self.assertEqual(M.failure_context(b"", context_row(late), "first-save"), late)
         self.assertFalse(M._accessibility_succeeded(late["accessibility"]))
-        # The same body really returned, but an exceptional Press retains unknown
+        # The same body really returned, but an exceptional Confirm retains unknown
         # custody. Neither callback-shaped DATA nor a receipt repairs it.
         caught = deepcopy(good); sample = caught["accessibility"]
         sample.update(state="unknown", receiptJoined=False, barrierRetired=False, custodyKnown=False,
-                      pressReturned=False, triggered=None, error="objc-exception")
+                      confirmReturned=False, triggered=None, error="objc-exception")
         self.assertEqual(M.failure_context(b"", context_row(caught), "first-save"), caught)
         self.assertFalse(M._accessibility_succeeded(sample))
         # A later Unknown preserves actual prior join/retirement, while still
@@ -469,10 +469,12 @@ class AquaDataTests(unittest.TestCase):
 
     def test_semantic_closed_parser_rejects_fabricated_old_or_conflicting_facts(self):
         good = accessibility_context_data()
-        for key, bad in (("mechanism", "accessibility-press-original-default-frame-v1"), ("id", True), ("id", 1),
+        for key, bad in (("mechanism", "accessibility-press-original-default-frame-v1"),
+                         ("mechanism", "accessibility-press-original-semantic-element-v1"), ("id", True), ("id", 1),
                          ("bodyReturned", False), ("nativeEntered", False), ("receiptJoined", False),
-                         ("custodyKnown", False), ("pressReturned", False), ("triggered", None), ("prepared", False),
-                         ("expired", True), ("initialOriginalProof", None), ("calls", 0), ("cleanupReturned", True), ("initialProjection", None)):
+                         ("custodyKnown", False), ("confirmReturned", False), ("triggered", None), ("prepared", False),
+                         ("expired", True), ("initialOriginalProof", None), ("calls", 0), ("cleanupReturned", True), ("initialProjection", None),
+                         ("capture", None), ("defaultRecheck", None), ("pressReturned", True)):
             value = deepcopy(good); value["accessibility"][key] = bad
             expected = deepcopy(value); expected["accessibility"] = None
             self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), expected, (key, bad))
@@ -484,7 +486,8 @@ class AquaDataTests(unittest.TestCase):
             # SOURCE01 review conflicts: phase alone cannot hide full positive
             # progress or Unknown with known custody.
             self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), expected, state)
-        for path in (("initialOriginalProof", "checks", "eligible"), ("capture", "elementRetained"), ("defaultRecheck", "checks", "stableDefault"),
+        for path in (("initialOriginalProof", "checks", "eligible"), ("confirmEligibility", "checks", "openPanel"),
+                     ("confirmEligibility", "elementRetained"), ("confirmRecheck", "checks", "stableOriginal"),
                      ("originalProof", "checks", "nativeChild")):
             value = deepcopy(good); target = value["accessibility"]
             for part in path[:-1]: target = target[part]
@@ -499,7 +502,7 @@ class AquaDataTests(unittest.TestCase):
             if case == "picker-loss":
                 continue
             sample = good["native"]["projectOpenInput"]
-            self.assertEqual(sample["mechanism"], "accessibility-press-original-semantic-element-v1")
+            self.assertEqual(sample["mechanism"], "accessibility-confirm-original-open-panel-v1")
             for key, bad in (("expired", True), ("timely", False), ("barrierRetired", False), ("receiptJoined", False),
                              ("custodyKnown", False), ("bodyReturned", False), ("triggered", False), ("attempted", False),
                              ("dispatchAttempted", False), ("state", "unknown"), ("initialOriginalProof", None)):
@@ -516,39 +519,52 @@ class AquaDataTests(unittest.TestCase):
                 value["native"]["projectOpenBinding"]["binding"]["children"] = count
                 self.assertEqual(M.parse_result(captured(value), b"", BINDING, case), value)
 
-    def test_generic_default_refusal_keeps_original_proof_and_never_invents_press(self):
+    def test_original_confirm_refusal_keeps_original_proof_and_never_invents_action(self):
         initial = accessibility_context_data(); sample = initial["accessibility"]
-        sample.update(attempted=False, pressReturned=False, triggered=None, site="initial-original-proof", error="ineligible",
-                      capture=None, originalProof=None, defaultRecheck=None)
+        sample.update(attempted=False, confirmReturned=False, triggered=None, site="initial-original-proof", error="ineligible",
+                      confirmEligibility=None, originalProof=None, confirmRecheck=None)
         sample["initialOriginalProof"].update(parent=None, panel=None, children=None, originals=None,
             checks={key: False if key == "eligible" else None for key in M.ACCESSIBILITY_PROOF_CHECKS}, site="objects", error="ineligible")
         self.assertEqual(M.failure_context(b"", context_row(initial), "first-save"), initial)
         self.assertFalse(M._accessibility_succeeded(sample))
-        invalid = deepcopy(initial); invalid["accessibility"]["capture"] = M._expected_default_proof()
+        invalid = deepcopy(initial); invalid["accessibility"]["confirmEligibility"] = M._expected_confirm_proof()
         expected = deepcopy(invalid); expected["accessibility"] = None
         self.assertEqual(M.failure_context(b"", context_row(invalid), "first-save"), expected)
         value = accessibility_context_data(); sample = value["accessibility"]
-        sample.update(attempted=False, pressReturned=False, triggered=None, site="capture", error="unsupported",
-                      originalProof=None, defaultRecheck=None)
-        sample["capture"] = {"returned": True, "attempted": True, "elementRetained": False,
-                             "checks": {key: True if key == "eligible" else False if key == "defaultElement" else None
-                                        for key in M.ACCESSIBILITY_DEFAULT_CHECKS}, "site": "default-element", "error": "unsupported"}
+        sample.update(attempted=False, confirmReturned=False, triggered=None, site="confirm-eligibility", error="unsupported",
+                      originalProof=None, confirmRecheck=None)
+        sample["confirmEligibility"] = {"returned": True, "attempted": True,
+            "checks": {key: True if key in ("eligible", "openPanel") else False if key == "capability" else None
+                       for key in M.ACCESSIBILITY_CONFIRM_CHECKS}, "site": "capability", "error": "unsupported"}
         value["accessibilityBinding"] = binding_context_data()["accessibilityBinding"]
         self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), value)
         self.assertFalse(M._accessibility_succeeded(sample))
-        for key in ("attempted", "pressReturned", "triggered"):
+        for key in ("attempted", "confirmReturned", "triggered"):
             bad = deepcopy(value); bad["accessibility"][key] = True
             expected = deepcopy(bad); expected["accessibility"] = None
             self.assertEqual(M.failure_context(b"", context_row(bad), "first-save"), expected)
-        # A retained generic element can fail capability without any NSView test.
-        sample["capture"].update(elementRetained=True, site="capability")
-        sample["capture"]["checks"].update(defaultElement=True, capability=False)
-        self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), value)
+        denied = deepcopy(value); sample = denied["accessibility"]
+        sample["error"] = "ineligible"
+        sample["confirmEligibility"].update(site="confirm-allowed", error="ineligible")
+        sample["confirmEligibility"]["checks"].update(capability=True, confirmAllowed=False)
+        self.assertEqual(M.failure_context(b"", context_row(denied), "first-save"), denied)
+        # Initial allowance does not authorize a changed final allowance.
+        final = accessibility_context_data(); sample = final["accessibility"]
+        sample.update(attempted=False, confirmReturned=False, triggered=None, site="confirm-recheck", error="ineligible",
+                      confirmRecheck=deepcopy(denied["accessibility"]["confirmEligibility"]))
+        self.assertEqual(M.failure_context(b"", context_row(final), "first-save"), final)
+        self.assertFalse(M._accessibility_succeeded(sample))
+        # Native original-alias mismatch is Unknown, not a changed receiver.
+        sample.update(state="unknown", custodyKnown=False, receiptJoined=False, barrierRetired=False, error="custody")
+        sample["confirmRecheck"].update(site="stable-original", error="custody")
+        sample["confirmRecheck"]["checks"].update(confirmAllowed=True, stableOriginal=False)
+        self.assertEqual(M.failure_context(b"", context_row(final), "first-save"), final)
+        self.assertFalse(M._accessibility_succeeded(sample))
 
     def test_one_original_late_no_entry_can_settle_failure_but_not_succeed(self):
         value = accessibility_context_data(); sample = value["accessibility"]
-        sample.update(nativeEntered=False, attempted=False, pressReturned=False, triggered=None,
-                      initialOriginalProof=None, originalProof=None, capture=None, defaultRecheck=None, expired=True, timely=False,
+        sample.update(nativeEntered=False, attempted=False, confirmReturned=False, triggered=None,
+                      initialOriginalProof=None, originalProof=None, confirmEligibility=None, confirmRecheck=None, expired=True, timely=False,
                       site="admission", error="deadline")
         self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), value)
         self.assertFalse(M._accessibility_succeeded(sample))
@@ -608,10 +624,10 @@ class AquaDataTests(unittest.TestCase):
                       largest["accessibility"]["originalProof"]):
             proof.update(parent="type-invalid", panel="encoding-invalid", originals="multiple", site="panel-attached-sheet", error="cleanup-unknown", children=17)
             proof["checks"] = dict.fromkeys(M.ACCESSIBILITY_PROOF_CHECKS, False)
-        for proof in (largest["accessibility"]["capture"], largest["accessibility"]["defaultRecheck"]):
-            proof.update(site="stable-default", error="cleanup-unknown", elementRetained=False)
-            proof["checks"] = dict.fromkeys(M.ACCESSIBILITY_DEFAULT_CHECKS, False)
-        largest["accessibility"].update(site="default-recheck", error="cleanup-unknown", state="requested")
+        for proof in (largest["accessibility"]["confirmEligibility"], largest["accessibility"]["confirmRecheck"]):
+            proof.update(site="stable-original", error="cleanup-unknown")
+            proof["checks"] = dict.fromkeys(M.ACCESSIBILITY_CONFIRM_CHECKS, False)
+        largest["accessibility"].update(site="confirm-recheck", error="cleanup-unknown", state="requested")
         largest["accessibilityBinding"]["start"]["result"] = "permission-denied"
         largest["accessibilityBinding"]["configuration"].update(parent="type-invalid", site="parent-get", error="cleanup-unknown")
         self.assertLessEqual(len(context_row(largest).split(b"=", 1)[1].rstrip(b"\n")), M.FAILURE_CONTEXT_LIMIT)
@@ -942,34 +958,43 @@ class AquaDataTests(unittest.TestCase):
                       "window.run_on_main_thread("):
             self.assertLess(dispatch.index("if !self.timely() { return; }"), dispatch.index(reset))
 
-    def test_public_default_action_binds_only_the_exact_generic_original(self):
+    def test_public_confirm_action_binds_only_the_exact_original_panel(self):
         desktop = PATH.parents[1]
         native = (desktop / "native/macos-installed-native/src/native.m").read_text(encoding="utf-8")
         trust = native.split("int mrk_observation_ax_trusted(", 1)[1].split("int mrk_panel_observe_arm_open_identity(", 1)[0]
         for fact in ("kAXTrustedCheckOptionPrompt", "kCFBooleanFalse", "AXIsProcessTrustedWithOptions(options)", "CFRelease(options)"):
             self.assertEqual(trust.count(fact), 1)
         self.assertNotIn("kCFBooleanTrue", trust)
-        default = native.split("static int mrk_default_proof(", 1)[1].split("int mrk_panel_observe_open_identity(", 1)[0]
-        self.assertIn("s->observationDefaultElement = [s->window accessibilityDefaultButton]", default)
-        self.assertLess(default.index("s->observationDefaultElement ="), default.index("[s->observationDefaultElement retain]"))
-        self.assertLess(default.index("[s->observationDefaultElement retain]"), default.index("s->observationDefaultRetained = YES"))
-        for check in ("@selector(accessibilityPerformPress)", "isAccessibilitySelectorAllowed:", "NSAccessibilityButtonRole",
-                      "isAccessibilityEnabled", "[s->window accessibilityDefaultButton] == element"):
-            self.assertIn(check, default)
+        eligibility = native.split("static int mrk_confirm_proof(", 1)[1].split("int mrk_panel_observe_open_identity(", 1)[0]
+        for check in ("[panel isKindOfClass:[NSOpenPanel class]]", "respondsToSelector:@selector(accessibilityPerformConfirm)",
+                      "respondsToSelector:@selector(isAccessibilitySelectorAllowed:)",
+                      "isAccessibilitySelectorAllowed:@selector(accessibilityPerformConfirm)",
+                      "mrk_confirm_originals(s, parent, panel, completion)", "mrk_original_eligible(s)"):
+            self.assertIn(check, eligibility)
+        self.assertLess(eligibility.index("mrk_confirm_originals"), eligibility.index("[panel isKindOfClass:"))
         for forbidden in ("NSButtonCell *", "NSButton *observationDefault", "MRKDefaultPacket", "AXUIElementPerformAction",
-                          "AXUIElementCopyElementAtPosition", "defaultButtonCell]", "setAccessibilityIdentifier:tag]"):
+                          "AXUIElementCopyElementAtPosition", "defaultButtonCell]", "setAccessibilityIdentifier:tag]",
+                          "accessibilityDefaultButton", "accessibilityPerformPress", "observationDefaultElement", " ok:"):
             self.assertNotIn(forbidden, native)
-        press = native.split("static void mrk_default_press_body(", 1)[1].split("void mrk_panel_observe_default_press(", 1)[0]
-        self.assertEqual(press.count("[s->observationDefaultElement accessibilityPerformPress]"), 1)
-        self.assertLess(press.index("s->observationActionAttempted = YES"), press.index("accessibilityPerformPress]"))
-        self.assertLess(press.index("accessibilityPerformPress]"), press.index("s->observationActionReturned = YES"))
-        self.assertLess(press.index("mrk_original_proof(s, &r->initial_proof, NO)"), press.index("mrk_default_proof(s, &r->capture, YES)"))
-        self.assertLess(press.index("mrk_default_proof(s, &r->capture, YES)"), press.index("mrk_original_proof(s, &r->proof, NO)"))
+        confirm = native.split("static void mrk_confirm_body(", 1)[1].split("void mrk_panel_observe_confirm(", 1)[0]
+        self.assertIn("NSWindow *const originalPanel = s->window", confirm)
+        self.assertEqual(confirm.count("[originalPanel accessibilityPerformConfirm]"), 1)
+        self.assertLess(confirm.index("s->observationActionAttempted = YES"), confirm.index("accessibilityPerformConfirm]"))
+        self.assertLess(confirm.index("accessibilityPerformConfirm]"), confirm.index("s->observationActionReturned = YES"))
+        self.assertLess(confirm.index("mrk_original_proof(s, &r->initial_proof, NO)"), confirm.index("mrk_confirm_proof(s, &r->eligibility"))
+        self.assertLess(confirm.index("mrk_confirm_proof(s, &r->eligibility"), confirm.index("mrk_original_proof(s, &r->proof, NO)"))
         self.assertIn("sizeof(MRKOpenResult) == 124", native)
-        final_gate = press.rindex("r->error = admit(context, 0)")
-        self.assertLess(press.index("mrk_default_proof(s, &r->recheck, NO)"), final_gate)
-        self.assertLess(final_gate, press.index("s->observationActionAttempted = YES"))
-        proof = native.split("static int mrk_original_proof(", 1)[1].split("static BOOL mrk_default_check(", 1)[0]
+        final_gate = confirm.rindex("r->error = admit(context, 0)")
+        self.assertLess(confirm.index("mrk_confirm_proof(s, &r->recheck"), final_gate)
+        self.assertLess(final_gate, confirm.index("s->observationActionAttempted = YES"))
+        after = confirm.split("BOOL triggered = [originalPanel accessibilityPerformConfirm]", 1)[1]
+        self.assertIn("mrk_confirm_originals(s, originalParent, originalPanel, originalCompletion)", after)
+        self.assertIn("s->callbackActive", after)
+        self.assertIn("s->unknown = YES; r->error = MRK_OPEN_CUSTODY", after)
+        self.assertIn("admit(context, 1)", after)
+        self.assertNotIn("mrk_original_eligible", after)
+        self.assertNotIn("mrk_original_proof", after)
+        proof = native.split("static int mrk_original_proof(", 1)[1].split("static BOOL mrk_confirm_check(", 1)[0]
         for check in ("mrk_original_topology(s, p)", "mrk_observation_attached(s)", "mrk_observation_directory_ready(s)",
                       "[s->parent accessibilityIdentifier]", "[s->window accessibilityIdentifier]", "mrk_original_eligible(s)"):
             self.assertIn(check, proof)
@@ -1048,11 +1073,13 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn("OpenPhase::Joined, OpenPhase::Retired", shell)
         native = (PATH.parents[1] / "native/macos-installed-native/src/native.m").read_text(encoding="utf-8")
         release = native.split("int mrk_panel_release(", 1)[1].split("// Observation helpers", 1)[0]
-        self.assertLess(release.index("s->observationDefaultElement = nil"), release.index("[element release]"))
+        self.assertIn("s->unknown || s->callbackActive || !s->closed", release)
+        self.assertLess(release.index("Block_release(s->completion)"), release.index("[s->window release]"))
+        self.assertNotIn("observationDefaultElement", release)
         callback = native.split("s->completion = Block_copy", 1)[1].split("beginSheetModalForWindow:", 1)[0]
         self.assertIn("s->callbackActive = YES", callback)
         self.assertIn("s->callbackActive = NO", callback)
-        self.assertNotIn("observationDefault", callback)
+        self.assertNotIn("observationConfirm", callback)
         rust = (PATH.parents[1] / "native/macos-installed-native/src/lib.rs").read_text(encoding="utf-8")
         self.assertNotIn("AxProjection", rust)
         self.assertNotIn("DefaultPacket", rust)

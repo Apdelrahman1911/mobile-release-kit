@@ -192,8 +192,8 @@ int mrk_panel_response(int kind, int64_t code, int programmatic) {
 typedef struct {
     uint32_t flags, checked, matched, parent, panel, children, originals, site, error;
 } MRKIdentityProof;
-typedef struct { uint32_t flags, checked, matched, site, error; } MRKDefaultProof;
-_Static_assert(sizeof(MRKDefaultProof) == 20, "default proof ABI");
+typedef struct { uint32_t flags, checked, matched, site, error; } MRKConfirmProof;
+_Static_assert(sizeof(MRKConfirmProof) == 20, "Confirm proof ABI");
 typedef struct {
     uint32_t flags, parent, site, error;
     MRKIdentityProof binding;
@@ -209,9 +209,9 @@ enum { MRK_PROOF_OBJECTS = 1u, MRK_PROOF_ATTACHMENT, MRK_PROOF_DIRECTORY, MRK_PR
     MRK_PROOF_PANEL_ID, MRK_PROOF_PARENT_SHEETS, MRK_PROOF_PANEL_SHEETS, MRK_PROOF_PANEL_SHEET,
     MRK_PROOF_CHILDREN, MRK_PROOF_PARENT, MRK_PROOF_ROLE, MRK_PROOF_STABLE,
     MRK_PROOF_FINAL, MRK_PROOF_COMPLETE, MRK_PROOF_ALL = 0xfffu };
-enum { MRK_DEFAULT_OBJECTS = 1u, MRK_DEFAULT_ELEMENT, MRK_DEFAULT_CAPABILITY,
-    MRK_DEFAULT_ROLE, MRK_DEFAULT_ENABLED, MRK_DEFAULT_ALLOWED, MRK_DEFAULT_STABLE, MRK_DEFAULT_COMPLETE };
-enum { MRK_DEFAULT_ATTEMPTED = 1u, MRK_DEFAULT_RETAINED = 2u };
+enum { MRK_CONFIRM_OBJECTS = 1u, MRK_CONFIRM_PANEL, MRK_CONFIRM_CAPABILITY,
+    MRK_CONFIRM_ALLOWED, MRK_CONFIRM_STABLE, MRK_CONFIRM_COMPLETE };
+enum { MRK_CONFIRM_ATTEMPTED = 1u };
 #endif
 
 @interface MRKInstalledPanel : NSObject {
@@ -229,11 +229,8 @@ enum { MRK_DEFAULT_ATTEMPTED = 1u, MRK_DEFAULT_RETAINED = 2u };
     char observationDirectory[4097];
     char observationParentTag[64], observationPanelTag[64];
     MRKIdentityWire observationIdentity;
-    // Main-thread originals only. A slot is recorded BEFORE retain; its owned
-    // flag requires the actual retain return. Unknown never retries/releases.
-    id observationDefaultElement;
-    BOOL observationDefaultRetained;
-    BOOL observationDefaultBodyAttempted;
+    // Confirm uses the already-retained original window; no extra element owner.
+    BOOL observationConfirmBodyAttempted;
 #endif
 }
 @end
@@ -349,15 +346,6 @@ int mrk_panel_release(void *opaque) {
         // Only original references, after original close/completion returned.
         // Unknown retains the object; there is no replacement or Drop fallback.
         if (s->completion) { Block_release(s->completion); s->completion = NULL; }
-#ifdef MRK_INSTALLED_OBSERVATION
-        if ((s->observationDefaultElement != nil) != s->observationDefaultRetained) {
-            s->unknown = YES; return EBUSY;
-        }
-        // This exact public semantic element never leaves its original panel.
-        // Actual body-return/receipt retirement precedes this ordinary release.
-        id element = s->observationDefaultElement; s->observationDefaultElement = nil;
-        s->observationDefaultRetained = NO; if (element) [element release];
-#endif
         [s->window release]; s->window = nil; [s->alert release]; s->alert = nil;
         [s->parent release]; s->parent = nil; [s release]; return 0;
     } @catch (NSException *e) { (void)e; return EIO; }
@@ -493,20 +481,20 @@ int mrk_panel_observe_action(void *opaque, int action, const char *directory, ui
 #undef MRK_ACTION_RETURN
 }
 
-// Public default input is one synchronous main-thread operation. None of this
+// Public original-panel Confirm is one synchronous main-thread operation. None of this
 // ABI carries an AppKit object, native BOOL, title, path or private identifier.
 enum { MRK_OPEN_NONE, MRK_OPEN_THREAD, MRK_OPEN_INPUT, MRK_OPEN_INELIGIBLE, MRK_OPEN_UNSUPPORTED,
     MRK_OPEN_AMBIGUOUS, MRK_OPEN_MALFORMED, MRK_OPEN_LIMIT, MRK_OPEN_DEADLINE, MRK_OPEN_CUSTODY,
     MRK_OPEN_NOT_TRIGGERED, MRK_OPEN_CHANGED = 13, MRK_OPEN_EXCEPTION = 14 };
-enum { MRK_OPEN_ENTRY = 1u, MRK_OPEN_CAPTURE, MRK_OPEN_PROOF, MRK_OPEN_RECHECK,
-    MRK_OPEN_ADMISSION, MRK_OPEN_PRESS, MRK_OPEN_INITIAL_PROOF };
+enum { MRK_OPEN_ENTRY = 1u, MRK_OPEN_CONFIRM_ELIGIBILITY, MRK_OPEN_PROOF, MRK_OPEN_CONFIRM_RECHECK,
+    MRK_OPEN_ADMISSION, MRK_OPEN_CONFIRM, MRK_OPEN_INITIAL_PROOF };
 enum { MRK_OPEN_ATTEMPTED = 1u, MRK_OPEN_RETURNED = 2u, MRK_OPEN_TRIGGERED = 4u, MRK_OPEN_KNOWN = 8u };
 typedef struct {
     uint32_t flags, site, error;
     MRKIdentityProof initial_proof, proof;
-    MRKDefaultProof capture, recheck;
+    MRKConfirmProof eligibility, recheck;
 } MRKOpenResult;
-_Static_assert(sizeof(MRKOpenResult) == 124, "fixed original/default scalar result ABI required");
+_Static_assert(sizeof(MRKOpenResult) == 124, "fixed original/Confirm scalar result ABI required");
 typedef int (*MRKOpenAdmission)(void *, int);
 
 int mrk_observation_ax_trusted(void) {
@@ -705,52 +693,39 @@ static int mrk_original_proof(MRKInstalledPanel *s, MRKIdentityProof *p, BOOL fr
         p->site = MRK_PROOF_COMPLETE; p->error = MRK_OPEN_NONE; return MRK_OPEN_NONE;
     } @catch (NSException *e) { (void)e; s->unknown = YES; p->error = MRK_OPEN_EXCEPTION; return MRK_OPEN_EXCEPTION; }
 }
-static BOOL mrk_default_check(MRKDefaultProof *p, unsigned bit, BOOL matched, uint32_t error) {
+static BOOL mrk_confirm_check(MRKConfirmProof *p, unsigned bit, BOOL matched, uint32_t error) {
     p->checked |= 1u << bit;
     if (matched) { p->matched |= 1u << bit; return YES; }
     p->error = error; return NO;
 }
-static int mrk_default_proof(MRKInstalledPanel *s, MRKDefaultProof *p, BOOL capture) {
-    p->flags = MRK_DEFAULT_ATTEMPTED; p->site = MRK_DEFAULT_OBJECTS;
-    if (s->observationDefaultRetained) p->flags |= MRK_DEFAULT_RETAINED;
-    if (!mrk_default_check(p, 0, mrk_original_eligible(s), MRK_OPEN_INELIGIBLE)) return p->error;
+static BOOL mrk_confirm_originals(MRKInstalledPanel *s, NSWindow *parent, NSWindow *panel,
+    void (^completion)(NSModalResponse)) {
+    // Borrowed aliases of existing main-only originals, never extra owners or
+    // lookup results. A changed slot cannot authorize messages to a replacement.
+    return parent && panel && completion && s->parent == parent && s->window == panel && s->completion == completion;
+}
+static int mrk_confirm_proof(MRKInstalledPanel *s, MRKConfirmProof *p,
+    NSWindow *parent, NSWindow *panel, void (^completion)(NSModalResponse)) {
+    p->flags = MRK_CONFIRM_ATTEMPTED; p->site = MRK_CONFIRM_OBJECTS;
+    if (!mrk_confirm_originals(s, parent, panel, completion)) {
+        s->unknown = YES; mrk_confirm_check(p, 0, NO, MRK_OPEN_CUSTODY); return p->error;
+    }
+    if (!mrk_confirm_check(p, 0, mrk_original_eligible(s), MRK_OPEN_INELIGIBLE)) return p->error;
     @try {
-        p->site = MRK_DEFAULT_ELEMENT;
-        if (capture) {
-            if (s->observationDefaultElement || s->observationDefaultRetained) {
-                p->error = MRK_OPEN_CUSTODY; s->unknown = YES; return p->error;
-            }
-            // Public nullable generic default child, never an NSButton/View/Cell.
-            // Preserve the actual slot even when retain raises; unknown cannot retry.
-            s->observationDefaultElement = [s->window accessibilityDefaultButton];
-            if (s->observationDefaultElement) {
-                [s->observationDefaultElement retain];
-                s->observationDefaultRetained = YES; p->flags |= MRK_DEFAULT_RETAINED;
-            }
-        }
-        if (!mrk_default_check(p, 1, s->observationDefaultRetained
-            && (capture || [s->window accessibilityDefaultButton] == s->observationDefaultElement),
-            capture ? MRK_OPEN_UNSUPPORTED : MRK_OPEN_CHANGED)) return p->error;
-        id element = s->observationDefaultElement;
-        p->site = MRK_DEFAULT_CAPABILITY;
-        if (!mrk_default_check(p, 2,
-            [element respondsToSelector:@selector(accessibilityRole)]
-            && [element respondsToSelector:@selector(isAccessibilityEnabled)]
-            && [element respondsToSelector:@selector(isAccessibilitySelectorAllowed:)]
-            && [element respondsToSelector:@selector(accessibilityPerformPress)], MRK_OPEN_UNSUPPORTED)) return p->error;
-        p->site = MRK_DEFAULT_ROLE;
-        id role = [element accessibilityRole];
-        if (!mrk_default_check(p, 3, [role isKindOfClass:[NSString class]]
-            && [role isEqualToString:NSAccessibilityButtonRole], MRK_OPEN_UNSUPPORTED)) return p->error;
-        p->site = MRK_DEFAULT_ENABLED;
-        if (!mrk_default_check(p, 4, [element isAccessibilityEnabled], MRK_OPEN_INELIGIBLE)) return p->error;
-        p->site = MRK_DEFAULT_ALLOWED;
-        if (!mrk_default_check(p, 5, [element isAccessibilitySelectorAllowed:@selector(accessibilityPerformPress)],
+        p->site = MRK_CONFIRM_PANEL;
+        if (!mrk_confirm_check(p, 1, [panel isKindOfClass:[NSOpenPanel class]], MRK_OPEN_UNSUPPORTED)) return p->error;
+        p->site = MRK_CONFIRM_CAPABILITY;
+        if (!mrk_confirm_check(p, 2, [panel respondsToSelector:@selector(isAccessibilitySelectorAllowed:)]
+            && [panel respondsToSelector:@selector(accessibilityPerformConfirm)], MRK_OPEN_UNSUPPORTED)) return p->error;
+        p->site = MRK_CONFIRM_ALLOWED;
+        if (!mrk_confirm_check(p, 3, [panel isAccessibilitySelectorAllowed:@selector(accessibilityPerformConfirm)],
             MRK_OPEN_INELIGIBLE)) return p->error;
-        p->site = MRK_DEFAULT_STABLE;
-        if (!mrk_default_check(p, 6, [s->window accessibilityDefaultButton] == element && mrk_original_eligible(s),
-            MRK_OPEN_CHANGED)) return p->error;
-        p->site = MRK_DEFAULT_COMPLETE; p->error = MRK_OPEN_NONE; return MRK_OPEN_NONE;
+        p->site = MRK_CONFIRM_STABLE;
+        if (!mrk_confirm_originals(s, parent, panel, completion)) {
+            s->unknown = YES; mrk_confirm_check(p, 4, NO, MRK_OPEN_CUSTODY); return p->error;
+        }
+        if (!mrk_confirm_check(p, 4, mrk_original_eligible(s), MRK_OPEN_INELIGIBLE)) return p->error;
+        p->site = MRK_CONFIRM_COMPLETE; p->error = MRK_OPEN_NONE; return MRK_OPEN_NONE;
     } @catch (NSException *e) {
         (void)e; s->unknown = YES; p->error = MRK_OPEN_EXCEPTION; return p->error;
     }
@@ -763,25 +738,28 @@ int mrk_panel_observe_open_identity(void *opaque, uint8_t *parent, uint8_t *pane
     if (p->site) return MRK_OPEN_INELIGIBLE;
     int status = mrk_original_proof(s, p, YES);
     if (!status) { memcpy(parent, s->observationParentTag, capacity); memcpy(panel, s->observationPanelTag, capacity); }
-    return status; // Original-only preparation; semantic capture is timed later.
+    return status; // Original-only preparation; Confirm eligibility is timed later.
 }
-static void mrk_default_press_body(MRKInstalledPanel *s, const uint8_t *parent, const uint8_t *panel,
+static void mrk_confirm_body(MRKInstalledPanel *s, const uint8_t *parent, const uint8_t *panel,
     MRKOpenAdmission admit, void *context, MRKOpenResult *r) {
-    if (s->observationDefaultBodyAttempted || s->unknown
+    if (s->observationConfirmBodyAttempted || s->unknown
         || s->observationIdentity.binding.site != MRK_PROOF_COMPLETE || s->observationIdentity.binding.error
         || memcmp(parent, s->observationParentTag, 64) || memcmp(panel, s->observationPanelTag, 64)) {
         r->error = MRK_OPEN_CUSTODY; s->unknown = YES; return;
     }
-    s->observationDefaultBodyAttempted = YES;
+    s->observationConfirmBodyAttempted = YES;
+    NSWindow *const originalParent = s->parent;
+    NSWindow *const originalPanel = s->window;
+    void (^const originalCompletion)(NSModalResponse) = s->completion;
     r->error = admit(context, 0); if (r->error) return;
-    // Preparation's saved proof does not authorize a later semantic capture.
+    // Preparation's saved proof does not authorize later Confirm eligibility.
     // Preserve this fresh full original proof independently from final proof.
     r->site = MRK_OPEN_INITIAL_PROOF;
     r->error = mrk_original_proof(s, &r->initial_proof, NO); if (r->error) return;
     r->site = MRK_OPEN_ADMISSION;
     r->error = admit(context, 0); if (r->error) return;
-    r->site = MRK_OPEN_CAPTURE;
-    r->error = mrk_default_proof(s, &r->capture, YES); if (r->error) return;
+    r->site = MRK_OPEN_CONFIRM_ELIGIBILITY;
+    r->error = mrk_confirm_proof(s, &r->eligibility, originalParent, originalPanel, originalCompletion); if (r->error) return;
     // A slow getter cannot permit a later action or restart this endpoint.
     r->site = MRK_OPEN_ADMISSION;
     r->error = admit(context, 0); if (r->error) return;
@@ -789,22 +767,26 @@ static void mrk_default_press_body(MRKInstalledPanel *s, const uint8_t *parent, 
     r->error = mrk_original_proof(s, &r->proof, NO); if (r->error) return;
     r->site = MRK_OPEN_ADMISSION;
     r->error = admit(context, 0); if (r->error) return;
-    r->site = MRK_OPEN_RECHECK;
-    r->error = mrk_default_proof(s, &r->recheck, NO); if (r->error) return;
+    r->site = MRK_OPEN_CONFIRM_RECHECK;
+    r->error = mrk_confirm_proof(s, &r->recheck, originalParent, originalPanel, originalCompletion); if (r->error) return;
     // All returned AppKit getters precede this final scoped owner/clock gate.
     // No lock, getter, lookup, replacement or renewed clock follows its permit.
     r->site = MRK_OPEN_ADMISSION;
     r->error = admit(context, 0); if (r->error) return;
-    r->site = MRK_OPEN_PRESS;
+    r->site = MRK_OPEN_CONFIRM;
     s->observationActionAttempted = YES; r->flags |= MRK_OPEN_ATTEMPTED;
-    BOOL triggered = [s->observationDefaultElement accessibilityPerformPress];
+    BOOL triggered = [originalPanel accessibilityPerformConfirm];
     s->observationActionReturned = YES; r->flags |= MRK_OPEN_RETURNED;
     if (triggered) r->flags |= MRK_OPEN_TRIGGERED; else r->error = MRK_OPEN_NOT_TRIGGERED;
     // A real callback may already have happened: custody, not pre-action
     // no-response eligibility, is required after actual selector return.
+    if (!mrk_confirm_originals(s, originalParent, originalPanel, originalCompletion)
+        || s->unknown || s->callbackActive || !s->started || s->kind != 1 || s->closeAttempted || s->closed) {
+        s->unknown = YES; r->error = MRK_OPEN_CUSTODY; return;
+    }
     int after = admit(context, 1); if (!r->error || after == MRK_OPEN_CUSTODY) r->error = after;
 }
-void mrk_panel_observe_default_press(void *opaque, const uint8_t *parent, const uint8_t *panel, size_t capacity,
+void mrk_panel_observe_confirm(void *opaque, const uint8_t *parent, const uint8_t *panel, size_t capacity,
     MRKOpenAdmission admit, void *context, MRKOpenResult *out) {
     if (!out) return;
     MRKOpenResult r = {0}; r.site = MRK_OPEN_ENTRY;
@@ -814,7 +796,7 @@ void mrk_panel_observe_default_press(void *opaque, const uint8_t *parent, const 
         else if (!s || !parent || !panel || capacity != 64 || !admit || !context
             || !mrk_identity_tag((const char *)parent, "mrk-parent-") || !mrk_identity_utf8(panel)
             || !memcmp(parent, panel, capacity)) r.error = MRK_OPEN_INPUT;
-        else mrk_default_press_body(s, parent, panel, admit, context, &r);
+        else mrk_confirm_body(s, parent, panel, admit, context, &r);
     } @catch (NSException *e) { (void)e; if (s) s->unknown = YES; r.error = MRK_OPEN_EXCEPTION; }
     if (pthread_main_np() && s && !s->unknown && r.error != MRK_OPEN_CUSTODY && r.error != MRK_OPEN_EXCEPTION)
         r.flags |= MRK_OPEN_KNOWN;

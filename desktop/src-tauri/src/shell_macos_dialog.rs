@@ -121,10 +121,10 @@ pub(super) mod observation {
             }
         }
     }
-    fn original_admitted(id: u32, call: &Arc<GuiCall>, original: &Arc<OriginalWork>, after_press: bool) -> Option<bool> {
+    fn original_admitted(id: u32, call: &Arc<GuiCall>, original: &Arc<OriginalWork>, after_confirm: bool) -> Option<bool> {
         let owner = call.owner()?;
         if owner.id != id || !Arc::ptr_eq(&owner, original) || !Arc::ptr_eq(&owner.gui, call) { return None; }
-        if after_press { let _facts = call.facts()?; Some(true) }
+        if after_confirm { let _facts = call.facts()?; Some(true) }
         else { allowed(call, &owner).ok() }
     }
     pub(crate) struct PreparedOpenInput {
@@ -141,7 +141,7 @@ pub(super) mod observation {
         pub(crate) fn no_entry(&self, custody: bool) -> bool { self.release.no_entry(custody) }
         pub(crate) fn progress_handle(&self) -> Arc<OpenRelease> { self.release.clone() }
     }
-    /// Owned scalar identity/custody only; the original native element stays TLS.
+    /// Owned scalar identity/custody only; the original native panel stays TLS.
     #[derive(Clone)]
     pub(crate) struct OpenAction {
         pub(crate) id: u32, identity: native::OpenIdentity,
@@ -224,7 +224,7 @@ pub(super) mod observation {
                 let Some(panel) = entry.panel.as_mut() else { return OpenActionBody::no_native(None); };
                 // No Record/GuiFacts/owner lock survives either admission into
                 // this synchronous AppKit call. Relay independently observes E.
-                let returned = panel.installed_default_press(&self.identity, end, |after| {
+                let returned = panel.installed_panel_confirm(&self.identity, end, |after| {
                     let allowed = admit(after);
                     if self.state() != "entered" { return None; }
                     allowed.map(|yes| yes && (after || !self.expired() && !self.stopped() && Instant::now() < end))

@@ -197,7 +197,7 @@ impl Panel {
 // nondefault feature forwarding selects BOTH this Rust seam and the C controls.
 #[cfg(feature = "installed-observation")]
 pub use observation::{PanelAction, PanelActionDiagnostic, PanelObservation, OpenIdentity, OpenDiagnostic, OpenReport,
-    OpenInputReturn, IdentityConfiguration, IdentityStartReturn, IdentityBinding, IdentityBindingReturn, DefaultControlProof,
+    OpenInputReturn, IdentityConfiguration, IdentityStartReturn, IdentityBinding, IdentityBindingReturn, PanelConfirmProof,
     installed_accessibility_trusted, installed_observation_flags_data_check};
 #[cfg(feature = "installed-observation")]
 mod observation {
@@ -313,7 +313,7 @@ mod observation {
         fn mrk_panel_observe_arm_open_identity(panel: *mut c_void) -> c_int;
         fn mrk_panel_observe_identity_data(panel: *mut c_void, data: *mut IdentityWire);
         fn mrk_panel_observe_open_identity(panel: *mut c_void, parent: *mut u8, sheet: *mut u8, capacity: usize) -> c_int;
-        fn mrk_panel_observe_default_press(panel: *mut c_void, parent: *const u8, sheet: *const u8, capacity: usize,
+        fn mrk_panel_observe_confirm(panel: *mut c_void, parent: *const u8, sheet: *const u8, capacity: usize,
             admission: unsafe extern "C" fn(*mut c_void, c_int) -> c_int,
             context: *mut c_void, result: *mut OpenWire);
     }
@@ -343,7 +343,7 @@ mod observation {
     }
     #[repr(C)]
     #[derive(Clone, Copy, Default, PartialEq, Eq)]
-    struct DefaultProofWire { flags: u32, checked: u32, matched: u32, site: u32, error: u32 }
+    struct ConfirmProofWire { flags: u32, checked: u32, matched: u32, site: u32, error: u32 }
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
     struct IdentityWire {
@@ -358,29 +358,28 @@ mod observation {
     const PROOF_SITES: [&str; 14] = ["objects", "attachment", "directory", "parent-identifier", "panel-identifier",
         "parent-sheets", "panel-sheets", "panel-attached-sheet", "native-children", "native-parent", "native-role",
         "stable-identifier", "final-eligibility", "complete"];
-    const DEFAULT_SITES: [&str; 8] = ["objects", "default-element", "capability", "button-role", "button-enabled",
-        "press-allowed", "stable-default", "complete"];
+    const CONFIRM_SITES: [&str; 6] = ["objects", "open-panel", "capability", "confirm-allowed", "stable-original", "complete"];
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub struct DefaultControlProof {
-        pub attempted: bool, pub element_retained: bool,
-        pub checks: [Option<bool>; 7], pub site: &'static str, pub error: &'static str,
+    pub struct PanelConfirmProof {
+        pub attempted: bool,
+        pub checks: [Option<bool>; 5], pub site: &'static str, pub error: &'static str,
     }
-    impl DefaultControlProof {
+    impl PanelConfirmProof {
         pub fn matched(self) -> bool {
-            self.attempted && self.element_retained && self.checks == [Some(true); 7]
+            self.attempted && self.checks == [Some(true); 5]
                 && self.site == "complete" && self.error == "none"
         }
     }
-    fn default_proof(w: DefaultProofWire) -> Option<DefaultControlProof> {
-        if w.flags & !3 != 0 || w.flags & 1 == 0 || w.checked & !127 != 0 || w.matched & !w.checked != 0
+    fn confirm_proof(w: ConfirmProofWire) -> Option<PanelConfirmProof> {
+        if w.flags != 1 || w.checked & !31 != 0 || w.matched & !w.checked != 0
             || w.checked & 1 == 0 || w.checked & (w.checked + 1) != 0 || matches!(w.error, 11 | 12 | 15) { return None; }
-        let d = DefaultControlProof { attempted: true, element_retained: w.flags & 2 != 0,
+        let d = PanelConfirmProof { attempted: true,
             checks: std::array::from_fn(|i| (w.checked & (1 << i) != 0).then_some(w.matched & (1 << i) != 0)),
-            site: *DEFAULT_SITES.get(w.site.checked_sub(1)? as usize)?, error: *OPEN_ERRORS.get(w.error as usize)?,
+            site: *CONFIRM_SITES.get(w.site.checked_sub(1)? as usize)?, error: *OPEN_ERRORS.get(w.error as usize)?,
         };
-        if d.checks[1] == Some(true) && !d.element_retained || (d.site == "complete") != (d.error == "none")
+        if (d.site == "complete") != (d.error == "none")
             || d.error == "none" && !d.matched() { return None; }
-        for bit in 1..7 {
+        for bit in 1..5 {
             if w.checked & (1 << bit) != 0 && w.matched & ((1 << bit) - 1) != (1 << bit) - 1 { return None; }
         }
         Some(d)
@@ -529,49 +528,49 @@ mod observation {
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
     struct OpenWire { flags: u32, site: u32, error: u32, initial_proof: IdentityProofWire, proof: IdentityProofWire,
-        capture: DefaultProofWire, recheck: DefaultProofWire }
+        eligibility: ConfirmProofWire, recheck: ConfirmProofWire }
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct OpenReport {
-        pub diagnostic: OpenDiagnostic, pub attempted: bool, pub press_returned: bool,
+        pub diagnostic: OpenDiagnostic, pub attempted: bool, pub confirm_returned: bool,
         pub triggered: Option<bool>, pub custody_known: bool,
         pub initial_proof: Option<IdentityBinding>, pub proof: Option<IdentityBinding>,
-        pub capture: Option<DefaultControlProof>, pub recheck: Option<DefaultControlProof>,
+        pub eligibility: Option<PanelConfirmProof>, pub recheck: Option<PanelConfirmProof>,
     }
     impl OpenReport {
         pub fn succeeded(self) -> bool {
-            self.attempted && self.press_returned && self.triggered == Some(true) && self.custody_known
+            self.attempted && self.confirm_returned && self.triggered == Some(true) && self.custody_known
                 && self.initial_proof.is_some_and(IdentityBinding::matched) && self.proof.is_some_and(IdentityBinding::matched)
-                && self.capture.is_some_and(DefaultControlProof::matched) && self.recheck.is_some_and(DefaultControlProof::matched)
-                && self.diagnostic == OpenDiagnostic { site: "press", error: "none" }
+                && self.eligibility.is_some_and(PanelConfirmProof::matched) && self.recheck.is_some_and(PanelConfirmProof::matched)
+                && self.diagnostic == OpenDiagnostic { site: "confirm", error: "none" }
         }
     }
     fn open_return(w: OpenWire) -> Option<OpenReport> {
         if w.flags & !15 != 0 || matches!(w.error, 11 | 12 | 15) { return None; }
         let initial_proof = if w.initial_proof == IdentityProofWire::default() { None }
             else { Some(identity_proof(c_int::try_from(w.initial_proof.error).ok()?, w.initial_proof)?) };
-        let capture = if w.capture == DefaultProofWire::default() { None } else { Some(default_proof(w.capture)?) };
+        let eligibility = if w.eligibility == ConfirmProofWire::default() { None } else { Some(confirm_proof(w.eligibility)?) };
         let proof = if w.proof == IdentityProofWire::default() { None }
             else { Some(identity_proof(c_int::try_from(w.proof.error).ok()?, w.proof)?) };
-        let recheck = if w.recheck == DefaultProofWire::default() { None } else { Some(default_proof(w.recheck)?) };
+        let recheck = if w.recheck == ConfirmProofWire::default() { None } else { Some(confirm_proof(w.recheck)?) };
         let r = OpenReport { diagnostic: OpenDiagnostic {
-            site: *["entry", "capture", "original-proof", "default-recheck", "admission", "press", "initial-original-proof"]
+            site: *["entry", "confirm-eligibility", "original-proof", "confirm-recheck", "admission", "confirm", "initial-original-proof"]
                 .get(w.site.checked_sub(1)? as usize)?,
             error: *OPEN_ERRORS.get(w.error as usize)?, },
-            attempted: w.flags & 1 != 0, press_returned: w.flags & 2 != 0,
+            attempted: w.flags & 1 != 0, confirm_returned: w.flags & 2 != 0,
             triggered: (w.flags & 2 != 0).then_some(w.flags & 4 != 0), custody_known: w.flags & 8 != 0,
-            initial_proof, proof, capture, recheck };
-        if w.flags & 4 != 0 && !r.press_returned || r.press_returned && !r.attempted
-            || r.attempted && (!recheck.is_some_and(DefaultControlProof::matched) || r.diagnostic.site != "press")
+            initial_proof, proof, eligibility, recheck };
+        if w.flags & 4 != 0 && !r.confirm_returned || r.confirm_returned && !r.attempted
+            || r.attempted && (!recheck.is_some_and(PanelConfirmProof::matched) || r.diagnostic.site != "confirm")
             || recheck.is_some() && !proof.is_some_and(IdentityBinding::matched)
-            || proof.is_some() && !capture.is_some_and(DefaultControlProof::matched)
-            || capture.is_some() && !initial_proof.is_some_and(IdentityBinding::matched)
+            || proof.is_some() && !eligibility.is_some_and(PanelConfirmProof::matched)
+            || eligibility.is_some() && !initial_proof.is_some_and(IdentityBinding::matched)
             || matches!(w.error, 9 | 14) && r.custody_known
             || w.error == 10 && r.triggered != Some(false)
-            || r.press_returned && r.triggered == Some(false) && !matches!(w.error, 9 | 10)
+            || r.confirm_returned && r.triggered == Some(false) && !matches!(w.error, 9 | 10)
             || w.error == 0 && !r.succeeded() { return None; }
         for (site, error) in [("initial-original-proof", initial_proof.map(|p| p.error)),
-            ("capture", capture.map(|p| p.error)), ("original-proof", proof.map(|p| p.error)),
-            ("default-recheck", recheck.map(|p| p.error))] {
+            ("confirm-eligibility", eligibility.map(|p| p.error)), ("original-proof", proof.map(|p| p.error)),
+            ("confirm-recheck", recheck.map(|p| p.error))] {
             if r.diagnostic.site == site && error != Some(r.diagnostic.error) { return None; }
         }
         Some(r)
@@ -596,31 +595,42 @@ mod observation {
     fn semantic_data_check() -> bool {
         // Inert decoders only: these values never manufacture native evidence.
         if std::mem::size_of::<IdentityWire>() != 52 || std::mem::size_of::<OpenWire>() != 124
-            || std::mem::size_of::<DefaultProofWire>() != 20 { return false; }
-        let d = DefaultProofWire { flags: 3, checked: 127, matched: 127, site: 8, error: 0 };
+            || std::mem::size_of::<ConfirmProofWire>() != 20 { return false; }
+        let d = ConfirmProofWire { flags: 1, checked: 31, matched: 31, site: 6, error: 0 };
         let p = IdentityProofWire { flags: 1, checked: 0xfff, matched: 0xfff, parent: 2, panel: 8,
             children: 2, originals: 2, site: 14, error: 0 };
-        let full = OpenWire { flags: 15, site: 6, error: 0, initial_proof: p, proof: p, capture: d, recheck: d };
+        let full = OpenWire { flags: 15, site: 6, error: 0, initial_proof: p, proof: p, eligibility: d, recheck: d };
         if !open_return(full).is_some_and(OpenReport::succeeded) { return false; }
         for flags in 0..32 {
             if open_return(OpenWire { flags, ..full }).is_some_and(OpenReport::succeeded) != (flags == 15) { return false; }
         }
-        for bit in 0..7 {
-            if default_proof(DefaultProofWire { checked: d.checked & !(1 << bit), matched: d.matched & !(1 << bit), ..d }).is_some()
-                || open_return(OpenWire { recheck: DefaultProofWire { matched: d.matched & !(1 << bit), ..d }, ..full }).is_some() { return false; }
+        for bit in 0..5 {
+            if confirm_proof(ConfirmProofWire { checked: d.checked & !(1 << bit), matched: d.matched & !(1 << bit), ..d }).is_some()
+                || open_return(OpenWire { recheck: ConfirmProofWire { matched: d.matched & !(1 << bit), ..d }, ..full }).is_some() { return false; }
         }
-        let nil = DefaultProofWire { flags: 1, checked: 3, matched: 1, site: 2, error: 4 };
+        let unsupported = ConfirmProofWire { flags: 1, checked: 7, matched: 3, site: 3, error: 4 };
+        let disallowed = ConfirmProofWire { flags: 1, checked: 15, matched: 7, site: 4, error: 3 };
+        let changed = ConfirmProofWire { flags: 1, checked: 31, matched: 15, site: 5, error: 9 };
         let late = OpenWire { error: 8, ..full };
-        open_return(OpenWire { flags: 8, site: 2, error: 4, initial_proof: p, capture: nil, ..OpenWire::default() })
-                .is_some_and(|r| !r.attempted && r.custody_known && r.capture.is_some_and(|d| !d.element_retained))
+        open_return(OpenWire { flags: 8, site: 2, error: 4, initial_proof: p, eligibility: unsupported, ..OpenWire::default() })
+                .is_some_and(|r| !r.attempted && r.custody_known && r.eligibility.is_some_and(|d| d.checks[2] == Some(false)))
+            && open_return(OpenWire { flags: 8, site: 2, error: 3, initial_proof: p, eligibility: disallowed, ..OpenWire::default() })
+                .is_some_and(|r| !r.attempted && r.custody_known)
+            && open_return(OpenWire { flags: 8, site: 4, error: 3, recheck: disallowed, ..full })
+                .is_some_and(|r| !r.attempted && r.custody_known && !r.succeeded())
+            && open_return(OpenWire { flags: 0, site: 4, error: 9, recheck: changed, ..full })
+                .is_some_and(|r| !r.attempted && !r.custody_known)
             && open_return(OpenWire { flags: 11, error: 10, ..full }).is_some_and(|r| r.triggered == Some(false) && !r.succeeded())
-            && open_return(OpenWire { flags: 1, error: 14, ..full }).is_some_and(|r| r.attempted && !r.press_returned && !r.custody_known)
-            && open_return(late).is_some_and(|r| r.press_returned && r.triggered == Some(true) && !r.succeeded())
+            && open_return(OpenWire { flags: 1, error: 14, ..full }).is_some_and(|r| r.attempted && !r.confirm_returned && !r.custody_known)
+            && open_return(late).is_some_and(|r| r.confirm_returned && r.triggered == Some(true) && !r.succeeded())
             && open_return(OpenWire { flags: 15, error: 14, ..full }).is_none()
             && open_return(OpenWire { proof: IdentityProofWire::default(), ..full }).is_none()
             && open_return(OpenWire { initial_proof: IdentityProofWire::default(), ..full }).is_none()
-            && open_return(OpenWire { flags: 8, site: 2, error: 4, capture: nil, ..OpenWire::default() }).is_none()
-            && open_return(OpenWire { capture: nil, ..full }).is_none()
+            && open_return(OpenWire { flags: 7, error: 9, ..full }).is_some_and(|r| r.confirm_returned && !r.custody_known && !r.succeeded())
+            && open_return(OpenWire { flags: 8, site: 2, error: 4, eligibility: unsupported, ..OpenWire::default() }).is_none()
+            && open_return(OpenWire { eligibility: unsupported, ..full }).is_none()
+            && confirm_proof(ConfirmProofWire { flags: 3, ..d }).is_none()
+            && confirm_proof(ConfirmProofWire { checked: 63, matched: 63, ..d }).is_none()
             && open_return(OpenWire { site: 0, ..full }).is_none()
     }
     fn observation_flags_valid(flags: u32) -> bool {
@@ -666,7 +676,7 @@ mod observation {
             Err(OpenDiagnostic { site: "binding", error: usize::try_from(status).ok().filter(|s| *s != 0)
                 .and_then(|s| OPEN_ERRORS.get(s)).copied().unwrap_or("malformed") })
         }
-        pub fn installed_default_press<F: FnMut(bool) -> Option<bool>>(&mut self, identity: &OpenIdentity,
+        pub fn installed_panel_confirm<F: FnMut(bool) -> Option<bool>>(&mut self, identity: &OpenIdentity,
             end: Instant, mut admit: F) -> OpenInputReturn {
             let mut returned = OpenInputReturn { entered: false, report: None, custody_known: false };
             if self.usable().is_err() || !identity_tag(&identity.parent, b"mrk-parent-")
@@ -674,8 +684,8 @@ mod observation {
             let mut context = OpenAdmission { end, admit: &mut admit, custody_known: true };
             let mut wire = OpenWire::default(); returned.entered = true;
             // SAFETY: main-only original Panel; synchronous scoped callback;
-            // all generic element/Objective-C custody stays in that same Panel.
-            unsafe { mrk_panel_observe_default_press(self.original.as_ptr(), identity.parent.as_ptr(), identity.panel.as_ptr(),
+            // all original-panel/Objective-C custody stays in that same Panel.
+            unsafe { mrk_panel_observe_confirm(self.original.as_ptr(), identity.parent.as_ptr(), identity.panel.as_ptr(),
                 identity.parent.len(), open_admission::<F>, (&mut context as *mut OpenAdmission<'_, F>).cast(), &mut wire); }
             returned.report = open_return(wire);
             returned.custody_known = context.custody_known && returned.report.is_some_and(|r| r.custody_known);

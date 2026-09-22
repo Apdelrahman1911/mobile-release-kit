@@ -215,11 +215,11 @@ fn native_proof_value(p: mrk_macos_installed_native::IdentityBinding) -> Value {
             "panelIdentifier":c[4],"parentSingleton":c[5],"noNestedSheet":c[6],"nativeChild":c[7],
             "nativeParent":c[8],"nativeRole":c[9],"stableIdentifier":c[10],"finalEligibility":c[11]}})
 }
-fn default_control_value(p: mrk_macos_installed_native::DefaultControlProof) -> Value {
+fn confirm_proof_value(p: mrk_macos_installed_native::PanelConfirmProof) -> Value {
     let c = p.checks;
-    json!({"returned":true,"attempted":p.attempted,"elementRetained":p.element_retained,
-        "checks":{"eligible":c[0],"defaultElement":c[1],"capability":c[2],"buttonRole":c[3],
-            "enabled":c[4],"pressAllowed":c[5],"stableDefault":c[6]},"site":p.site,"error":p.error})
+    json!({"returned":true,"attempted":p.attempted,
+        "checks":{"eligible":c[0],"openPanel":c[1],"capability":c[2],"confirmAllowed":c[3],
+            "stableOriginal":c[4]},"site":p.site,"error":p.error})
 }
 struct OpenActionReceipt { token: OpenAction, body: OpenActionBody, returned_at: Instant }
 struct OpenFlight {
@@ -232,19 +232,19 @@ struct OpenInputSample {
     id: u32, prepared: bool, requested: bool, dispatch_attempted: bool, state: &'static str,
     entered: Option<bool>, native_entered: Option<bool>, returned: bool, joined: bool, retired: bool,
     expired: bool, timely: Option<bool>, custody_known: Option<bool>,
-    attempted: Option<bool>, press_returned: Option<bool>, triggered: Option<bool>,
+    attempted: Option<bool>, confirm_returned: Option<bool>, triggered: Option<bool>,
     diagnostic: Option<mrk_macos_installed_native::OpenDiagnostic>, report: Option<mrk_macos_installed_native::OpenReport>,
 }
 impl OpenInputSample {
     fn preparing(id: u32) -> Self {
         Self { id, prepared: false, requested: false, dispatch_attempted: false, state: "prepared",
             entered: Some(false), native_entered: Some(false), returned: false, joined: false, retired: false,
-            expired: false, timely: None, custody_known: None, attempted: Some(false), press_returned: Some(false),
+            expired: false, timely: None, custody_known: None, attempted: Some(false), confirm_returned: Some(false),
             triggered: None, diagnostic: None, report: None }
     }
     fn requested(&mut self) {
         self.requested = true; self.state = "requested";
-        self.entered = None; self.native_entered = None; self.attempted = None; self.press_returned = None;
+        self.entered = None; self.native_entered = None; self.attempted = None; self.confirm_returned = None;
     }
     fn reconciled(mut self, progress: OpenProgress) -> Self {
         // One atomic phase/history sample, never an acquisition of action or
@@ -265,10 +265,10 @@ impl OpenInputSample {
         *self = self.reconciled(progress);
         self.report = body.native.and_then(|n| n.report);
         if let Some(r) = self.report {
-            self.attempted = Some(r.attempted); self.press_returned = Some(r.press_returned); self.triggered = r.triggered;
+            self.attempted = Some(r.attempted); self.confirm_returned = Some(r.confirm_returned); self.triggered = r.triggered;
             self.diagnostic = Some(r.diagnostic);
         } else {
-            self.attempted = body.native.is_none().then_some(false); self.press_returned = self.attempted;
+            self.attempted = body.native.is_none().then_some(false); self.confirm_returned = self.attempted;
             self.diagnostic = Some(mrk_macos_installed_native::OpenDiagnostic { site: "admission",
                 error: if !body.custody_known() { "custody" } else if self.expired { "deadline" } else { "ineligible" } });
         }
@@ -277,20 +277,20 @@ impl OpenInputSample {
         self.prepared && self.requested && self.dispatch_attempted && self.state == "retired"
             && self.entered == Some(true) && self.native_entered == Some(true) && self.returned && self.joined && self.retired
             && !self.expired && self.timely == Some(true) && self.custody_known == Some(true)
-            && self.attempted == Some(true) && self.press_returned == Some(true) && self.triggered == Some(true)
+            && self.attempted == Some(true) && self.confirm_returned == Some(true) && self.triggered == Some(true)
             && self.report.is_some_and(|r| r.succeeded() && self.diagnostic == Some(r.diagnostic))
     }
     fn value(self) -> Value {
-        json!({"mechanism":"accessibility-press-original-semantic-element-v1","step":"OpenProject","id":self.id,
+        json!({"mechanism":"accessibility-confirm-original-open-panel-v1","step":"OpenProject","id":self.id,
             "prepared":self.prepared,"requested":self.requested,"dispatchAttempted":self.dispatch_attempted,"state":self.state,
             "bodyEntered":self.entered,"nativeEntered":self.native_entered,"bodyReturned":self.returned,
             "receiptJoined":self.joined,"barrierRetired":self.retired,"expired":self.expired,"timely":self.timely,
-            "custodyKnown":self.custody_known,"attempted":self.attempted,"pressReturned":self.press_returned,"triggered":self.triggered,
+            "custodyKnown":self.custody_known,"attempted":self.attempted,"confirmReturned":self.confirm_returned,"triggered":self.triggered,
             "site":self.diagnostic.map(|d| d.site),"error":self.diagnostic.map(|d| d.error),
             "initialOriginalProof":self.report.and_then(|r| r.initial_proof).map(native_proof_value),
             "originalProof":self.report.and_then(|r| r.proof).map(native_proof_value),
-            "capture":self.report.and_then(|r| r.capture).map(default_control_value),
-            "defaultRecheck":self.report.and_then(|r| r.recheck).map(default_control_value)})
+            "confirmEligibility":self.report.and_then(|r| r.eligibility).map(confirm_proof_value),
+            "confirmRecheck":self.report.and_then(|r| r.recheck).map(confirm_proof_value)})
     }
 }
 #[derive(Clone, Copy)]
@@ -1100,7 +1100,7 @@ impl Observation {
     pub(super) fn tick(self: &Arc<Self>, app: &tauri::AppHandle) {
         if std::thread::current().id() == self.main { self.fail(); return; }
         // Drain the one prepared original even after failure/deadline: known
-        // non-entry may retire its barrier, never dispatch a late Press.
+        // non-entry may retire its barrier, never dispatch a late Confirm.
         if self.accessibility_step(app) {
             if !self.timely() { self.report_failure(); self.failure_shutdown(app); }
             return;
@@ -1357,7 +1357,7 @@ impl Observation {
         let (done, receipt) = std::sync::mpsc::sync_channel(1);
         *custody = Some(OpenFlight { input, token: token.clone(), receipt, returned: None, baseline });
         let flight = custody.as_mut().expect("original stored before arming");
-        // One endpoint includes queue/admission/getters/Press/receipt/publication.
+        // One endpoint includes queue/admission/getters/Confirm/receipt/publication.
         // From here: no blocking Record/PANEL/GuiFacts/owner lock on this relay.
         let end = self.end.min(Instant::now() + Duration::from_secs(2));
         if Instant::now() >= end || !self.timely() || token.stopped() {
@@ -1370,7 +1370,7 @@ impl Observation {
             if !self.action_original(&r, &token) || !flight.input.no_entry(true) { self.open_unknown(&token); return true; }
             if let Some(s) = r.accessibility.as_mut() {
                 s.state = "retired"; s.retired = true; s.expired = token.expired(); s.custody_known = Some(true);
-                s.entered = Some(false); s.native_entered = Some(false); s.attempted = Some(false); s.press_returned = Some(false);
+                s.entered = Some(false); s.native_entered = Some(false); s.attempted = Some(false); s.confirm_returned = Some(false);
                 s.diagnostic = Some(mrk_macos_installed_native::OpenDiagnostic { site: "admission", error: if token.expired() { "deadline" } else { "ineligible" } });
             }
             let current = r.step;
@@ -1953,16 +1953,16 @@ fn route() -> Option<(PathBuf,u32)> {
 // Pure regression checks in the already-required instrumented native entry.
 // These do not call AppKit, acquire files, dispatch actions, or supply receipts.
 fn native_recheck_data_check() -> bool {
-    use mrk_macos_installed_native::{DefaultControlProof, IdentityBinding, OpenDiagnostic, OpenReport};
+    use mrk_macos_installed_native::{PanelConfirmProof, IdentityBinding, OpenDiagnostic, OpenReport};
     let proof = IdentityBinding { attempted: true, parent: Some("match"), panel: Some("match"), checks: [Some(true); 12],
         children: Some(1), originals: Some("one"), site: "complete", error: "none" };
-    let control = DefaultControlProof { attempted: true, element_retained: true, checks: [Some(true); 7], site: "complete", error: "none" };
-    let report = OpenReport { diagnostic: OpenDiagnostic { site: "press", error: "none" }, attempted: true,
-        press_returned: true, triggered: Some(true), custody_known: true, initial_proof: Some(proof), proof: Some(proof),
-        capture: Some(control), recheck: Some(control) };
+    let control = PanelConfirmProof { attempted: true, checks: [Some(true); 5], site: "complete", error: "none" };
+    let report = OpenReport { diagnostic: OpenDiagnostic { site: "confirm", error: "none" }, attempted: true,
+        confirm_returned: true, triggered: Some(true), custody_known: true, initial_proof: Some(proof), proof: Some(proof),
+        eligibility: Some(control), recheck: Some(control) };
     let full = OpenInputSample { id: 2, prepared: true, requested: true, dispatch_attempted: true, state: "retired",
         entered: Some(true), native_entered: Some(true), returned: true, joined: true, retired: true, expired: false,
-        timely: Some(true), custody_known: Some(true), attempted: Some(true), press_returned: Some(true), triggered: Some(true),
+        timely: Some(true), custody_known: Some(true), attempted: Some(true), confirm_returned: Some(true), triggered: Some(true),
         diagnostic: Some(report.diagnostic), report: Some(report) };
     if !full.succeeded() || full.value().get("calls").is_some() || full.value().get("cleanupReturned").is_some() { return false; }
     let mutations: [fn(&mut OpenInputSample); 12] = [|s| s.expired = true, |s| s.timely = Some(false),
@@ -1970,9 +1970,9 @@ fn native_recheck_data_check() -> bool {
         |s| s.retired = false, |s| s.state = "unknown", |s| s.custody_known = Some(false),
         |s| s.requested = false, |s| s.dispatch_attempted = false, |s| s.report = None];
     for mutation in mutations { let mut failed = full; mutation(&mut failed); if failed.succeeded() { return false; } }
-    for report in [OpenReport { triggered: Some(false), ..report }, OpenReport { press_returned: false, ..report },
+    for report in [OpenReport { triggered: Some(false), ..report }, OpenReport { confirm_returned: false, ..report },
         OpenReport { custody_known: false, ..report }, OpenReport { recheck: None, ..report },
-        OpenReport { initial_proof: None, ..report }] {
+        OpenReport { initial_proof: None, ..report }, OpenReport { eligibility: None, ..report }] {
         if (OpenInputSample { report: Some(report), ..full }).succeeded() { return false; }
     }
     let unknown = full.reconciled(OpenProgress { state: "unknown", requested: true, dispatched: true,
@@ -2019,7 +2019,7 @@ fn observer_data_checks() -> bool {
     prepared.prepared = true;
     if prepared.succeeded() || prepared.entered != Some(false) || prepared.attempted != Some(false) || prepared.returned { return false; }
     prepared.requested();
-    if prepared.succeeded() || prepared.entered.is_some() || prepared.attempted.is_some() || prepared.press_returned.is_some()
+    if prepared.succeeded() || prepared.entered.is_some() || prepared.attempted.is_some() || prepared.confirm_returned.is_some()
         || prepared.returned || prepared.retired { return false; }
     for id in [1, 2] {
         let mut pending = Some(Pending::Accessibility(id));
