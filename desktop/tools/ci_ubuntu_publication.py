@@ -44,6 +44,8 @@ SHELL_FEATURES = ["custom-protocol", "desktop-shell"]
 SHELL_FEATURE_ARG = "desktop-shell,custom-protocol"
 SHELL_PERMISSIONS = "desktop/src-tauri/permissions"
 SHELL_GENERATED = ("desktop/node_modules", "desktop/dist", "desktop/src-tauri/gen", SHELL_PERMISSIONS)
+SHELL_CLEANUP_SUCCESS = {"generatedRootsRemoved": list(SHELL_GENERATED), "workRemoved": True,
+                         "sourceClean": True, "originalOwnersReturned": True, "exportsRetained": True}
 SHELL_EXPORTS = {"normal": "mobile-release-kit-desktop", "observer": "installed-shell-observation"}
 SHELL_METADATA_LIMIT = 8 << 20
 SHELL_COMPILE_LIMIT = 8 << 20
@@ -87,48 +89,48 @@ SHELL_MODULE_ROOTS = tuple(SHELL_LIBRARY_ROOT + suffix for suffix in (
     *("/gtk-3.0/" + prefix + leaf for prefix in ("3.0.0/linux/", "3.0.0/", "linux/", "")
       for leaf in ("immodules", "modules"))))
 SHELL_MAX_LIBRARIES = 256  # Historical DATA already requires >214 names; fail closed beyond this fixed cap.
-# Independently accepted U35533243674/1: original lifecycle and finality.
+# Independently accepted U35783044845/1: original lifecycle and finality.
 # Complete producer-bound roster; every downloaded member is checked before use.
 # This evidence qualifies neither the new installed candidate nor the product.
 INSTALLED_U_INPUTS = {
-    "sourceSha": "74803bea3f3099608e92852496f087f13265a1ef",
-    "runId": "35533243674",
+    "sourceSha": "1ec7314cf7dd722eba4ad14257d2009c8dad488e",
+    "runId": "35783044845",
     "attempt": "1",
-    "artifactId": "10611313562",
+    "artifactId": "10718458518",
     "files": [
-        {"path": "F1.deb", "sha256": "442a6b9e2dbb3f57a1b73a7625db212c41664a500e2849307355eeffd6d9aa99", "size": 312412352},
-        {"path": "P0.deb", "sha256": "270c2375f4fa40b930487f07fcdf41785006770eac7a19e0940d2fdd3999a5e6", "size": 312412352},
+        {"path": "F1.deb", "sha256": "e17e6ce20b68922cf3a215094b92a59f3beb9745cb324e1403aa499bd30fd734", "size": 312412352},
+        {"path": "P0.deb", "sha256": "5c670a5edf0f29e69fd38dd97706a52f51e76b875f52bef5195dd14f438583c9", "size": 312412352},
         {"path": "acquired-head.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "acquired-head.stdout", "sha256": "57778430359effe06ab7036285b9521f174d0af8f7b5454545d52eddd06fe05b", "size": 41},
+        {"path": "acquired-head.stdout", "sha256": "e8a0ab067206caccf82916da9b4b320ba192f276fd3d838e166d5fcd1e191851", "size": 41},
         {"path": "acquired-status.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "acquired-status.stdout", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "after-head.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "after-head.stdout", "sha256": "57778430359effe06ab7036285b9521f174d0af8f7b5454545d52eddd06fe05b", "size": 41},
+        {"path": "after-head.stdout", "sha256": "e8a0ab067206caccf82916da9b4b320ba192f276fd3d838e166d5fcd1e191851", "size": 41},
         {"path": "after-status.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "after-status.stdout", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "before-head.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "before-head.stdout", "sha256": "57778430359effe06ab7036285b9521f174d0af8f7b5454545d52eddd06fe05b", "size": 41},
+        {"path": "before-head.stdout", "sha256": "e8a0ab067206caccf82916da9b4b320ba192f276fd3d838e166d5fcd1e191851", "size": 41},
         {"path": "before-root-head.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "before-root-head.stdout", "sha256": "57778430359effe06ab7036285b9521f174d0af8f7b5454545d52eddd06fe05b", "size": 41},
+        {"path": "before-root-head.stdout", "sha256": "e8a0ab067206caccf82916da9b4b320ba192f276fd3d838e166d5fcd1e191851", "size": 41},
         {"path": "before-root-status.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "before-root-status.stdout", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "before-status.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "before-status.stdout", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "cargo-selection.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "cargo-selection.stdout", "sha256": "63344e29cd9bc5c8697ad7197884b6340e5540df44a78b2c6e61ce6b73aff6ff", "size": 132},
+        {"path": "cargo-selection.stdout", "sha256": "8bca4bde57cb4684b1ccce5e00f799ecb6c4f56112c724e1e5a88578db033e76", "size": 132},
         {"path": "compiled-head.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "compiled-head.stdout", "sha256": "57778430359effe06ab7036285b9521f174d0af8f7b5454545d52eddd06fe05b", "size": 41},
+        {"path": "compiled-head.stdout", "sha256": "e8a0ab067206caccf82916da9b4b320ba192f276fd3d838e166d5fcd1e191851", "size": 41},
         {"path": "compiled-status.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "compiled-status.stdout", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "compiler-F1.json", "sha256": "43e5213230979b68ace75bade8cf9d733a018b559f8ea00df3b367f511766045", "size": 635},
-        {"path": "compiler-P0.json", "sha256": "8e243cc22dd5072068fb2d538f805909e9594a2a20ceaa19bdc48256781854a3", "size": 632},
-        {"path": "compiler-fixture.json", "sha256": "406a23373fd569e8522e1fad1320cc9f3151bcc0a5d82958b5391a3226b66b26", "size": 580},
-        {"path": "compiler-libtest.json", "sha256": "c9dd611be4d98fe814cd496b2471c41dddc4596c1877acfb95378781e51e796d", "size": 651},
-        {"path": "compiler.json", "sha256": "be8385d53ee7c5afce42850f78ecffc08846df7ca5a78bdbd8e99198e68d10e2", "size": 94649},
+        {"path": "compiler-F1.json", "sha256": "ac137f6d3b9b1447f5ea2c57043b553b4587371130b1bf04de0106114ac3a588", "size": 635},
+        {"path": "compiler-P0.json", "sha256": "c1ab70720602c655f4dfa45f718aef478a3c251793afc8f8369119ce13f34e70", "size": 632},
+        {"path": "compiler-fixture.json", "sha256": "eae8b890f243bfcd56ad01e62e74494d411ca41f266bf29c260ea67022a8d00f", "size": 580},
+        {"path": "compiler-libtest.json", "sha256": "6e679ef44689c0baf5b04e1fb62f18e456e96d2e63f270ee9d4195526ff05745", "size": 651},
+        {"path": "compiler.json", "sha256": "18aea8d036a83f29b0da00374f716573a46a1fd0c94ecd920d3ced70e10f0591", "size": 94666},
         {"path": "deb-build-F1.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "deb-build-F1.stdout", "sha256": "e0219b661f1eb5bfb258266eb2debe44d028f4d6af351e6a6e2a669d973d31e5", "size": 143},
+        {"path": "deb-build-F1.stdout", "sha256": "650e524496f4ca9698f925c538931d642cde09b6641a29a5b043fa40a78c7fcb", "size": 143},
         {"path": "deb-build-P0.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "deb-build-P0.stdout", "sha256": "87b3733eebc942d2cbf3e5c066ef84f0ccaabb085cdf9cc935ac611e8606be2b", "size": 143},
+        {"path": "deb-build-P0.stdout", "sha256": "9255479e81fd72d9443143f82a33ec30e3d9e938809d7fb68ecaff17c96cbc4d", "size": 143},
         {"path": "fixture-app", "sha256": "1035e72810205075e5dc5a7d4f238015eebcfb92981c16811be26d4b09725375", "size": 4501512},
         {"path": "fixture-compile.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "fixture-compile.stdout", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
@@ -137,19 +139,19 @@ INSTALLED_U_INPUTS = {
         {"path": "kernel-packages.stdout", "sha256": "7eb291cfd444858529d37c0869507eeca8e235b938dad14f9fe7f830e192f09f", "size": 290},
         {"path": "kernel-selector.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "kernel-selector.stdout", "sha256": "82aa69c787d486c971aa0d018928eb8b03145e753fa2013f112c871f6c8448d3", "size": 189},
-        {"path": "libtest", "sha256": "bd58709dce364d13b93f8c8cd5310c18ae508f39a59fcf1abc040588399a3a55", "size": 29018840},
-        {"path": "libtest-compile.stderr", "sha256": "04f220e35442671ffc9efd5e16edd0c6746353b7c629edee32d15f450bb37d10", "size": 1362},
-        {"path": "libtest-compile.stdout", "sha256": "056c276af01b37da715973ae8d2857b4ef94d0dbab5cf171f9cc1a9805908f39", "size": 411642},
-        {"path": "lifecycle-binaries-unpacked.json", "sha256": "5a8af30caa02698a760a28fa3f1fe410ede796e8a0c6b5d750fae00df7a121b2", "size": 472},
-        {"path": "lifecycle-binaries-upgrade.json", "sha256": "da2f87dbc50ae76adc0d2fc2a5ec04c06442495b80e194f655a9b2b7510b0eea", "size": 473},
+        {"path": "libtest", "sha256": "7770abc5bc836bdaa309edc2a1aad729101c78f7833deda1f32241bca9a4738a", "size": 29018840},
+        {"path": "libtest-compile.stderr", "sha256": "18c310dbcf138a0a81b82e5c3fa974397a0df66e5d9d2109a80ed41ed14e441b", "size": 1362},
+        {"path": "libtest-compile.stdout", "sha256": "83019e7d05b8f94e27b4ed81204df0c84d8d238a2ef371122563eba830ea132d", "size": 411642},
+        {"path": "lifecycle-binaries-unpacked.json", "sha256": "dd7945a54dea853e7bb89a6988f2516741a02e08bf2018412dc2f68686a4fb62", "size": 473},
+        {"path": "lifecycle-binaries-upgrade.json", "sha256": "454d1e57ed7171e43691461e80214eaa38a5081b0c7aae4269308007b3385d58", "size": 473},
         {"path": "lifecycle-client.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "lifecycle-client.stdout", "sha256": "668e34f3b738ae5ca8af5d91743e6fe1d236c0c875a0b863df625e917110d5bf", "size": 109},
         {"path": "lifecycle-configure.stderr", "sha256": "cb9277feeaf7900ddc2fd0dbad25556ce5920f65a500038a9afe1616667d9397", "size": 89},
         {"path": "lifecycle-configure.stdout", "sha256": "4c3d415d83a0d67f6cc5de6d323083fb43e90cfa57e65f5f78c1377b724c45b5", "size": 142},
-        {"path": "lifecycle-dpkg-policy.json", "sha256": "0569d0316ac816e6cbd1cf7419ca5b575c56eb56f2af9f7beae747ab8140ca49", "size": 4586},
+        {"path": "lifecycle-dpkg-policy.json", "sha256": "b207246c1738a9fc9b9def6fa3775d985428eb48865ed025ef798ae12719ffc0", "size": 4585},
         {"path": "lifecycle-duplicate.stderr", "sha256": "0ef25c1e2c33385e1b95c5e0c5c2d6e0eac6c53d58787bde8e62ca9869e73a69", "size": 1483},
         {"path": "lifecycle-duplicate.stdout", "sha256": "6a0fae4b065fb455db10455f705bf17cfd87426cf29c21d5ebc0b4f21ee2797c", "size": 276},
-        {"path": "lifecycle-inputs.json", "sha256": "bd8e6cd9c41105a79256b09a308a2be628aed3459f894a9836fc0512db738467", "size": 95790},
+        {"path": "lifecycle-inputs.json", "sha256": "aaa34608146c75569e5652fe6b9dea3f587f680dc0575d7db693531d894f9473", "size": 95808},
         {"path": "lifecycle-mutation-denials.txt", "sha256": "d3900e18332f28f6f2dc07b287818220f6e16f499a4507f192733300d95895f9", "size": 1447},
         {"path": "lifecycle-native-root.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "lifecycle-native-root.stdout", "sha256": "8d9f0492793ae74300439d876019b62077154f1a008428e01a061b0790a83ce7", "size": 197},
@@ -158,34 +160,34 @@ INSTALLED_U_INPUTS = {
         {"path": "lifecycle-nonroot-helper.stderr", "sha256": "a75fe26ceeebd7df5c4d046a02d306f04ea88d4a42ce345555433114675ebb4f", "size": 174},
         {"path": "lifecycle-nonroot-helper.stdout", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "lifecycle-observe-duplicate.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "lifecycle-observe-duplicate.stdout", "sha256": "27711e4f6c96cd762f0dfc5acc9a0640c83d118d6cf84662d168bba6ed73b82c", "size": 276296},
+        {"path": "lifecycle-observe-duplicate.stdout", "sha256": "08d04e0bd63321e49adfdceccc6f22fe3d370557c2c3776af459647837dbd89e", "size": 276296},
         {"path": "lifecycle-observe-p0.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "lifecycle-observe-p0.stdout", "sha256": "f2c8a5144839529b139ea6a9d02f03c24ba2682d482bbedee15d5bb40f57e927", "size": 276136},
+        {"path": "lifecycle-observe-p0.stdout", "sha256": "4afb0884d80528caf3d4a3e81d91fff8a1836c9e080f2348c91a6fcba92b5041", "size": 276136},
         {"path": "lifecycle-observe-purge.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "lifecycle-observe-purge.stdout", "sha256": "32a428eca31962aa3c6b07a6ea824c0249081de7d3f0ada5bb1c53bf529f15ae", "size": 276292},
+        {"path": "lifecycle-observe-purge.stdout", "sha256": "b588f6f3397cace1b83480ac9fa8e0aa848901d55434c28b8cb04804df5635e6", "size": 276292},
         {"path": "lifecycle-observe-remove.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "lifecycle-observe-remove.stdout", "sha256": "3b129de857f63317e556f5643e8f4339a58d741bc4bf2e71d0301025ebfa8e42", "size": 276293},
+        {"path": "lifecycle-observe-remove.stdout", "sha256": "10d7f63536e4321001dc516417d03d0277e91fff4ad5d90532193461a97f3919", "size": 276293},
         {"path": "lifecycle-observe-unpacked.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "lifecycle-observe-unpacked.stdout", "sha256": "175af4c97f93f111a260137789898ef760e1256f0087e8aa133a476be7627087", "size": 137859},
+        {"path": "lifecycle-observe-unpacked.stdout", "sha256": "b0a62353d2637be4e1643856a08b97174b57b2b299ecec7a8a98048a7b68fcf4", "size": 137859},
         {"path": "lifecycle-observe-upgrade.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "lifecycle-observe-upgrade.stdout", "sha256": "cd56a38e9b350a0c96a180415670f01fca307363403bcbe631bdacc1a3955674", "size": 414078},
-        {"path": "lifecycle-published-after-duplicate.txt", "sha256": "9541f7f4e304962f1191101d03bf93611c124d09edb7bd378aee3e970ae6749a", "size": 275570},
-        {"path": "lifecycle-published-after-purge.txt", "sha256": "9541f7f4e304962f1191101d03bf93611c124d09edb7bd378aee3e970ae6749a", "size": 275570},
-        {"path": "lifecycle-published-after-remove.txt", "sha256": "9541f7f4e304962f1191101d03bf93611c124d09edb7bd378aee3e970ae6749a", "size": 275570},
-        {"path": "lifecycle-published-after-upgrade.txt", "sha256": "9541f7f4e304962f1191101d03bf93611c124d09edb7bd378aee3e970ae6749a", "size": 275570},
-        {"path": "lifecycle-published-before-upgrade.txt", "sha256": "d7426e9dfa8d39b56a90ff0657be010a7b2dacfcb0ef5e281f56e7dcbfc89aa1", "size": 137786},
+        {"path": "lifecycle-observe-upgrade.stdout", "sha256": "6e1cf3097ac50c5870b241f723debef8780656bf66be4acc4d3b46f8518c7f56", "size": 414078},
+        {"path": "lifecycle-published-after-duplicate.txt", "sha256": "edf70ab82c8aa6579fd3786aa73e739b650dd1e9334c948fd593cee943267a00", "size": 275570},
+        {"path": "lifecycle-published-after-purge.txt", "sha256": "edf70ab82c8aa6579fd3786aa73e739b650dd1e9334c948fd593cee943267a00", "size": 275570},
+        {"path": "lifecycle-published-after-remove.txt", "sha256": "edf70ab82c8aa6579fd3786aa73e739b650dd1e9334c948fd593cee943267a00", "size": 275570},
+        {"path": "lifecycle-published-after-upgrade.txt", "sha256": "edf70ab82c8aa6579fd3786aa73e739b650dd1e9334c948fd593cee943267a00", "size": 275570},
+        {"path": "lifecycle-published-before-upgrade.txt", "sha256": "ef69a14656b18d9add2ab053dbd36ab371f10e6f0f1b20648130e0ddc336ec25", "size": 137786},
         {"path": "lifecycle-purge.stderr", "sha256": "8b6571b7c06cc6e2c89c1d4125d23aee98ac3ad846a2f2a4704ec0ea7e40d9ed", "size": 82},
         {"path": "lifecycle-purge.stdout", "sha256": "e2734c29e4fb52bd84fd2f26f924f1999dceabf0bb376eca996287efa28bfd49", "size": 160},
         {"path": "lifecycle-remove.stderr", "sha256": "cd97eb555af1f9c7e0db23ed401483d9f3b88b6d8b40db0f1c662ee8e7c124db", "size": 434},
         {"path": "lifecycle-remove.stdout", "sha256": "4973803ea17208a7fe1e9719ad59b32e1f533f5b312cc9a8e43f89191a64ad8b", "size": 137},
-        {"path": "lifecycle-scripts-before-upgrade.json", "sha256": "8fcaee32000849eda4e3452dc94ac07bf8c8a34d3f90f4cf2e98c70f2bba629d", "size": 730},
-        {"path": "lifecycle-scripts-duplicate.json", "sha256": "ba1f71621d602703032b8fdaba155853676d7b63f1bbc9eea273287922e964ce", "size": 730},
+        {"path": "lifecycle-scripts-before-upgrade.json", "sha256": "368949589a4f73a18551cee12e6049214cd5a2fa2b850f231a4667d4dadc48f4", "size": 730},
+        {"path": "lifecycle-scripts-duplicate.json", "sha256": "f058d29afdaf9a0dcb567e60df41dac8ee1dba888c03534d74cd88278c46d66a", "size": 730},
         {"path": "lifecycle-scripts-purge.json", "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356", "size": 3},
-        {"path": "lifecycle-scripts-remove.json", "sha256": "73637ca2f53d860021597ee0a12108ca1ef3732e031e7d663f0dc218a8454292", "size": 244},
-        {"path": "lifecycle-scripts-unpacked.json", "sha256": "8fcaee32000849eda4e3452dc94ac07bf8c8a34d3f90f4cf2e98c70f2bba629d", "size": 730},
-        {"path": "lifecycle-scripts-upgrade.json", "sha256": "1359dee6f0a5d137af73fe653c17792d458ea1d3bdc1b55ee53b8dfcf94a386f", "size": 730},
+        {"path": "lifecycle-scripts-remove.json", "sha256": "f7c6cd3b5c66802a7e0b1842190baba1f33c8fa947c8a5f2062b16b960e1f1b7", "size": 244},
+        {"path": "lifecycle-scripts-unpacked.json", "sha256": "368949589a4f73a18551cee12e6049214cd5a2fa2b850f231a4667d4dadc48f4", "size": 730},
+        {"path": "lifecycle-scripts-upgrade.json", "sha256": "3bb2197988c8bd1f6f84094f8efb3417152a03ffcfd93d84f4f12cde72e215b2", "size": 730},
         {"path": "lifecycle-start-unit-show.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "lifecycle-start-unit-show.stdout", "sha256": "f31834f870955c99fb70bfc7ede992a60d25489d232ed90adbed671d825d1f66", "size": 578},
+        {"path": "lifecycle-start-unit-show.stdout", "sha256": "02579a19b9583d4a06eab456f6eb3fb63ec0a4310c049af9e6204e4c5427730c", "size": 578},
         {"path": "lifecycle-state-duplicate.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "lifecycle-state-duplicate.stdout", "sha256": "278598bf429592cb02fc8b25a9e69fee793c72ea27b364e3226d6252c7523794", "size": 49},
         {"path": "lifecycle-state-initial.stderr", "sha256": "01042c2b38915cf55a07ca91be671bf863ee638cc5974c9350091e541076bf8a", "size": 66},
@@ -201,18 +203,18 @@ INSTALLED_U_INPUTS = {
         {"path": "lifecycle-state-upgrade.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "lifecycle-state-upgrade.stdout", "sha256": "dde135efd3a6186b9d7a27a1a3bdd7d2cdc1bd9abdf11e35af8ec1fee8a3f6c2", "size": 43},
         {"path": "lifecycle-stop-unit-show.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "lifecycle-stop-unit-show.stdout", "sha256": "f31834f870955c99fb70bfc7ede992a60d25489d232ed90adbed671d825d1f66", "size": 578},
-        {"path": "lifecycle-unit-result.json", "sha256": "3afc88b4eed18dd5fa24d9a79df8378e3771ed0a6e6717744327909202b8a51d", "size": 19832},
-        {"path": "lifecycle-unit-start.json", "sha256": "a1857f1f39e2520e98141378cbbad21a658ca7d76ef2808bb5bdcc8b4289e1e9", "size": 1353},
-        {"path": "lifecycle-unit-stop.json", "sha256": "29c1c2f4acd26d441cdb3ec6d28531280681118bd3d7d5d0dbba77aa5405cee6", "size": 2281},
+        {"path": "lifecycle-stop-unit-show.stdout", "sha256": "02579a19b9583d4a06eab456f6eb3fb63ec0a4310c049af9e6204e4c5427730c", "size": 578},
+        {"path": "lifecycle-unit-result.json", "sha256": "52a22f98fbee430787fa1519171a0a385fc7f3246871760da78c93871589fa33", "size": 19893},
+        {"path": "lifecycle-unit-start.json", "sha256": "3d1d751994f4e7caf22cc4eae74a79629ffc8dce942514a0d184ce2bf078f669", "size": 1354},
+        {"path": "lifecycle-unit-stop.json", "sha256": "3cc6bc9e775a4a7d70c17bbd6ca305e1d24898ae11caed0e806bf5d5444cdc58", "size": 2282},
         {"path": "lifecycle-unpack.stderr", "sha256": "deff21ac2546a815780222cfb42f071efb719ed60c037139a28a53e8029714f2", "size": 713},
         {"path": "lifecycle-unpack.stdout", "sha256": "102e930374ddfa07b114422741551fedeceaab467a06edde7cfd6710d8b873de", "size": 249},
         {"path": "lifecycle-upgrade.stderr", "sha256": "5494c7f69d0db3faac28e811c4e6fb1434ce9309733ae0fecc52c7d6b1ee4bd5", "size": 1073},
         {"path": "lifecycle-upgrade.stdout", "sha256": "deb86711f47c8d6473d02bdabb31e3d409110edefae508cbcddf432cf48c738f", "size": 352},
-        {"path": "locked-inputs.stderr", "sha256": "34a798a7f1f65ae2c3ca9d1136651a78a83fcdde434136d0008f999342bc2766", "size": 1085},
-        {"path": "locked-inputs.stdout", "sha256": "be8f870de0982f10126271b1cbd2e6f13f7b9e7e22888029b89bf08810ed2c57", "size": 221847},
-        {"path": "mrk-runtime-publish", "sha256": "4ff598a84721b5516f6a758d584d82624644130e6eb150dd6258b005514a3232", "size": 995160},
-        {"path": "mrk-runtime-publish-F1", "sha256": "919fed49fb52ba3b980e42601c0c5f5e2d45e8124b0c2c693f7d60c7c0aa030a", "size": 995160},
+        {"path": "locked-inputs.stderr", "sha256": "22866d80086feac269ee5209841d8a2f5b219cffc402bf399227ef50e42bd15f", "size": 1085},
+        {"path": "locked-inputs.stdout", "sha256": "0261d66f33b7eaf4fc1346758804173138fe35bc38a7d40251cd6394f7b6b9b1", "size": 221847},
+        {"path": "mrk-runtime-publish", "sha256": "c25eeeb7b6fe774b43d485aeaedeb38a3a1c29b8d003e73a3e128d069c8bde68", "size": 995168},
+        {"path": "mrk-runtime-publish-F1", "sha256": "b118fc4870f7987db8c696c324a36edc80fbe865ae613fa35cb7e8cda6089549", "size": 995168},
         {"path": "native-file-owner-1.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "native-file-owner-1.stdout", "sha256": "406ecb79cc447cf72749ab0591bc1aa03582603d084238183d667848ad135175", "size": 58},
         {"path": "native-file-owner-11.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
@@ -286,13 +288,13 @@ INSTALLED_U_INPUTS = {
         {"path": "native-gcc-version.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "native-gcc-version.stdout", "sha256": "bb6aade8c4ca40cae9cb1be8abe12377f651fccd82954af74ec61703b6608fc5", "size": 7},
         {"path": "native-package-10.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "native-package-10.stdout", "sha256": "ed171deb90b856fe942486030574b2a2072083190b2f987d8af0510c8448efd5", "size": 70},
+        {"path": "native-package-10.stdout", "sha256": "e511fbe8cc3abe9c3a62dd53d6b100ead746a655199a3e4a2d974917d3e4592b", "size": 70},
         {"path": "native-package-14.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "native-package-14.stdout", "sha256": "70a0e64fdcef9cfbf5ca20d68b6c12d2be2bfde4f89e72803fa77403e846f193", "size": 91},
         {"path": "native-package-2.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "native-package-2.stdout", "sha256": "8869b8ba8020db04e229e6baa4f2110da6719d275dc30166778b88da09ff9cf9", "size": 95},
         {"path": "native-package-26.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "native-package-26.stdout", "sha256": "512e69aa8bfe9f2eb09922ebc755453a1045577db66e0bc43141143b69d31b70", "size": 66},
+        {"path": "native-package-26.stdout", "sha256": "96f259bf445f93fd14b50047e46045ab232798bc3770bd56f6eec5ff5327a702", "size": 66},
         {"path": "native-package-27.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "native-package-27.stdout", "sha256": "67f8a4dad70880e873ea3464dbbfc27a6e7dd6bcedbac4527a9d0adbc5e108fc", "size": 87},
         {"path": "native-package-28.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
@@ -336,21 +338,21 @@ INSTALLED_U_INPUTS = {
         {"path": "native-package-recheck-4.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "native-package-recheck-4.stdout", "sha256": "a6862d1e918c0d29ef6f0e641de2b7aee63f95e2ca9c940643b3f072756536f0", "size": 81},
         {"path": "native-package-recheck-5.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "native-package-recheck-5.stdout", "sha256": "ed171deb90b856fe942486030574b2a2072083190b2f987d8af0510c8448efd5", "size": 70},
+        {"path": "native-package-recheck-5.stdout", "sha256": "e511fbe8cc3abe9c3a62dd53d6b100ead746a655199a3e4a2d974917d3e4592b", "size": 70},
         {"path": "native-package-recheck-6.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "native-package-recheck-6.stdout", "sha256": "70a0e64fdcef9cfbf5ca20d68b6c12d2be2bfde4f89e72803fa77403e846f193", "size": 91},
         {"path": "native-package-recheck-7.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "native-package-recheck-7.stdout", "sha256": "512e69aa8bfe9f2eb09922ebc755453a1045577db66e0bc43141143b69d31b70", "size": 66},
+        {"path": "native-package-recheck-7.stdout", "sha256": "96f259bf445f93fd14b50047e46045ab232798bc3770bd56f6eec5ff5327a702", "size": 66},
         {"path": "native-package-recheck-8.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "native-package-recheck-8.stdout", "sha256": "67f8a4dad70880e873ea3464dbbfc27a6e7dd6bcedbac4527a9d0adbc5e108fc", "size": 87},
         {"path": "native-package-recheck-9.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "native-package-recheck-9.stdout", "sha256": "f2d0890fa73109b0bc2d1b661282b0dee93b34bd88928cf0a956a59664207af8", "size": 89},
-        {"path": "package-members.txt", "sha256": "fea7f6cf5c7b17353bde59889ba6c1a38e31859390f33ad6f6a5db0d76592d28", "size": 441502},
-        {"path": "publisher-F1-compile.stderr", "sha256": "3b8f3416fd064468992620e67803aa3618ae462e1bb04d6608370da38fe0cdac", "size": 186},
-        {"path": "publisher-F1-compile.stdout", "sha256": "94b0e67ead5c83c25533613f050f713efdde75d86cd25b11dccd9e1775e3928f", "size": 1518440},
-        {"path": "publisher-compile.stderr", "sha256": "9ff3edd18be6525d1952ccb80e58adfb582bb56479919eba952c9e4fefd4afa9", "size": 1363},
-        {"path": "publisher-compile.stdout", "sha256": "580760e2b1960d32f303da04d202f06f7f23c25f3969d5de82ce07fc7fb67ced", "size": 1518486},
-        {"path": "result.json", "sha256": "7ec58758144188c62852f51f3e757531b2fd2e028cda1488f6144921fdf90084", "size": 36503},
+        {"path": "package-members.txt", "sha256": "a9d84ade35a0afc95f993f04fff17011acb22296296a2b0d7dd5663ea0a4867d", "size": 441502},
+        {"path": "publisher-F1-compile.stderr", "sha256": "82bbc036972f760a08ddf30faeb7df92f675530918b86b933a3e875d0a0b4f4e", "size": 186},
+        {"path": "publisher-F1-compile.stdout", "sha256": "7733080ce54913606d0557a12d2844bed71458d3c1e791f213875374b88680ea", "size": 1518440},
+        {"path": "publisher-compile.stderr", "sha256": "a5d6707f3f1e7f685a5cf14c9f9c7f849c42809d7e5ae6b9937a5777ac734b18", "size": 1363},
+        {"path": "publisher-compile.stdout", "sha256": "72a7e93d82d86602afeb47daae1a7685524b54ef7bbd605544858809d00ea062", "size": 1518486},
+        {"path": "result.json", "sha256": "592921fb21b31988733bd54091153a11ef90046988a292970a14e210a6f28f9f", "size": 36503},
         {"path": "root-lifecycle.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "root-lifecycle.stdout", "sha256": "668e34f3b738ae5ca8af5d91743e6fe1d236c0c875a0b863df625e917110d5bf", "size": 109},
         {"path": "runtime-inputs.json", "sha256": "a1a9561db3def48996e1ff84db413189c2d1f4ec17b143b476ceea5b4506391f", "size": 6822},
@@ -359,10 +361,10 @@ INSTALLED_U_INPUTS = {
         {"path": "rust-version.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "rust-version.stdout", "sha256": "3975d062e234a9f3921955bf6ae5b90f5819df94fa825d057f76b34a35ed0f4d", "size": 196},
         {"path": "rustc-selection.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "rustc-selection.stdout", "sha256": "4d52c6378c3b1370fac9a31693ead0fc93da4259ac55300cedb77ae51a05d1d2", "size": 132},
+        {"path": "rustc-selection.stdout", "sha256": "fcf5016fe6903bffcfb485ee743846bba209964a26af3dfa2757d4afe1ec5a31", "size": 132},
         {"path": "source-tree.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "source-tree.stdout", "sha256": "c5d04c0297707aba9c822be82dc781a4128aec72c1a7cdd4e3fe57ce5b00584b", "size": 41},
-        {"path": "source.json", "sha256": "29939717f82b9b16b73da432f894a6161c18f004dcddd45614b9810e0e8a95b9", "size": 792},
+        {"path": "source-tree.stdout", "sha256": "5184f7a4bbf6465a38c7caa9fa4cabf97b145fb451e4a605deca6eebc19becdf", "size": 41},
+        {"path": "source.json", "sha256": "19fbf952d98c9a0efa8fcdf2deeb48000124a9acf000669d919f3388c9556784", "size": 794},
         {"path": "stage-F1.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "stage-F1.stdout", "sha256": "8d7084fca43e9ef3d3ba261fdf5e868137d7d12ca7090e86d7dd2ad560f4afe0", "size": 167},
         {"path": "stage-P0.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
@@ -389,7 +391,7 @@ MAX_DEB = 512 << 20
 KERNEL_SELECTOR = "installed_runtime::pure_tests::kernel_scope_is_reviewed_ubuntu"
 F1_MANIFEST_SHA256 = "3a075688d6bc7f69dbdaa017b5327d8ca892e12b49b0c2012a6cbea1f79a6061"
 FIXTURE_SOURCE = b"fn main() { std::process::exit(78); }\n"
-NOTICE_INPUTS_SHA256 = "2fbc48569a79952aa40ac99c4ce8dc875723d3369e712c7981456dfd6a304791"
+NOTICE_INPUTS_SHA256 = "3f20baf909689c105c5b09e19ec79e4e8f49fec33e75315ad44ee0ea134c9169"
 SONAME_PACKAGES = {name: "libc6:amd64" for name in (
     "libc.so.6", "ld-linux-x86-64.so.2", "libm.so.6", "libmvec.so.1", "libdl.so.2",
     "libpthread.so.0", "librt.so.1", "libutil.so.1")}
@@ -406,7 +408,8 @@ def route(env):
     installed = env.get("MRK_INSTALLED_CASE")
     shell = env.get("MRK_INSTALLED_SHELL_CASE")
     if shell is not None:
-        fixed = (installed is None and env.get("GITHUB_REF") == SHELL_REF and shell in {"compile", "observe"})
+        fixed = (installed is None and env.get("GITHUB_REF") == SHELL_REF and shell in {"compile", "observe"}
+                 and env.get("GITHUB_JOB") == "compile")
     else:
         fixed = (env.get("GITHUB_REF") == INSTALLED_REF and installed in INSTALLED_CASES | {"compile"}
                  if installed is not None else env.get("GITHUB_REF") == REF)
@@ -941,7 +944,16 @@ def hosted_paths():
         D.need(path.resolve(strict=True) == path, "Noncanonical hosted directory")
     D.need(source == SOURCE, "Publisher checkout source differs")
     root = temporary / ("mrk-desktop-ubuntu-publisher-" + os.environ["GITHUB_RUN_ID"] + "-" + os.environ["GITHUB_RUN_ATTEMPT"])
+    if "MRK_INSTALLED_SHELL_CASE" in os.environ:
+        # Two original tasks on one VM, not renewal/reuse of the compiler root.
+        root = root.with_name(root.name + "-" + os.environ["MRK_INSTALLED_SHELL_CASE"])
     return sha, source, temporary, root
+
+
+def preparation_route():
+    """Bind the fixed same-job role in each shell preparation, not a caller path."""
+    return ({"shellCase": os.environ["MRK_INSTALLED_SHELL_CASE"], "job": os.environ["GITHUB_JOB"]}
+            if "MRK_INSTALLED_SHELL_CASE" in os.environ else {})
 
 
 def prepare():
@@ -963,7 +975,8 @@ def prepare():
         row = {"sourceSha": sha, "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
                "source": str(source), "root": str(root), "deadline": deadline,
                "runnerUid": os.getuid(), "runnerGid": os.getgid(),
-               "rootIdentity": list(directory_identity(root)), "workIdentity": list(directory_identity(root / "work"))}
+               "rootIdentity": list(directory_identity(root)), "workIdentity": list(directory_identity(root / "work")),
+               **preparation_route()}
         pin = D.write(root / "preparation.json", D.canonical(row))
         with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
             output.write("preparation_sha256=" + pin["sha256"] + "\ndeadline=" + deadline + "\n")
@@ -982,7 +995,8 @@ def resumed_preparation():
     expected = {"sourceSha": sha, "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
                 "source": str(source), "root": str(root), "deadline": os.environ.get("MRK_UBUNTU_PUBLICATION_DEADLINE"),
                 "runnerUid": os.getuid(), "runnerGid": os.getgid(),
-                "rootIdentity": list(directory_identity(root)), "workIdentity": list(directory_identity(root / "work"))}
+                "rootIdentity": list(directory_identity(root)), "workIdentity": list(directory_identity(root / "work")),
+                **preparation_route()}
     D.need(D.same(row, expected) and type(row["deadline"]) is str
            and re.fullmatch(r"[0-9]+\.[0-9]+", row["deadline"]) is not None, "Original preparation binding changed")
     deadline = float(row["deadline"])
@@ -1556,7 +1570,8 @@ def installed_shell_candidate(work, sha):
            and type(result["cargoBuilds"]) is int and result["cargoBuilds"] == 1
            and type(result["frontendBuilds"]) is int and result["frontendBuilds"] == 1
            and all(result[key] is False for key in ("shellExecuted", "observerExecuted", "supplierRebuilt",
-                                                    "packageBuilt", "helper11Rerun", "qualified")),
+                                                    "packageBuilt", "helper11Rerun", "qualified"))
+           and D.same(result.get("compilerCleanup"), SHELL_CLEANUP_SUCCESS),
            "Original shell source/anchors/features/compile-only result differs")
     source, target = Path(compiler["source"]), Path(compiler["target"])
     D.need(source.is_absolute() and target.is_absolute() and ".." not in (*source.parts, *target.parts),
@@ -1993,6 +2008,96 @@ def shell_permissions_tree(path):
            and all(row["path"].startswith("autogenerated/") for row in tree["files"]),
            "Generated permission parent contains unrelated inputs")
     return tree
+
+
+def shell_directory_identity(path):
+    """Stable directory binding; timestamps/link counts change during removal."""
+    D.directory(path)
+    value = path.lstat()
+    return value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid
+
+
+def shell_remove_owned_directory(path, expected, parents, deadline):
+    """Retire one known compiler directory through its original no-follow FD.
+
+    Only the four initially absent generated roots and original private work
+    call this function, after their original workers have returned. rmtree is
+    confined below the opened target, never a fresh lookup of the target path.
+    A stalled filesystem call is not made interruptible by endpoint checks;
+    any late/uncertain return blocks the next stage rather than claiming cleanup.
+    """
+    D.need(shutil.rmtree.avoids_symlink_attacks, "FD-relative compiler cleanup is unavailable")
+    D.need(path.parent in parents and len(expected) == 5 and expected[3] == os.geteuid()
+           and stat.S_ISDIR(expected[2]) and not expected[2] & 0o7022,
+           "Unowned compiler cleanup target")
+    original_fds, problem = [], None
+
+    def identity(value):
+        return value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid
+
+    def recheck():
+        D.need(time.monotonic() < deadline, "Original compiler cleanup endpoint expired")
+        D.need(all(shell_directory_identity(parent) == wanted for parent, wanted in parents.items()),
+               "Original compiler cleanup ancestry changed")
+
+    try:
+        recheck()
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        parent_fd = os.open(path.parent, flags)
+        original_fds.append(parent_fd)
+        D.need(identity(os.fstat(parent_fd)) == parents[path.parent], "Compiler cleanup parent binding changed")
+        D.need(identity(os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)) == expected,
+               "Original compiler cleanup directory was replaced")
+        target_fd = os.open(path.name, flags, dir_fd=parent_fd)
+        original_fds.append(target_fd)
+        D.need(identity(os.fstat(target_fd)) == expected, "Compiler cleanup original open differs")
+        entries = sorted(os.listdir(target_fd))
+        D.need(len(entries) <= 32768, "Compiler cleanup direct-entry bound")
+        # Precheck the complete direct roster before deleting any entry. The
+        # generated trees additionally have full byte inventories at the caller.
+        entries = [(name, os.stat(name, dir_fd=target_fd, follow_symlinks=False)) for name in entries]
+        D.need(all(value.st_uid == os.geteuid() and value.st_dev == expected[0]
+                   and (stat.S_ISREG(value.st_mode) or stat.S_ISDIR(value.st_mode) or stat.S_ISLNK(value.st_mode))
+                   for _, value in entries), "Unowned or nonordinary compiler cleanup member")
+        for name, value in entries:
+            recheck()
+            D.need(identity(os.fstat(parent_fd)) == parents[path.parent]
+                   and identity(os.fstat(target_fd)) == expected
+                   and identity(os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)) == expected,
+                   "Compiler cleanup original binding changed")
+            D.need(D.state(os.stat(name, dir_fd=target_fd, follow_symlinks=False)) == D.state(value),
+                   "Compiler cleanup member changed before removal")
+            if stat.S_ISDIR(value.st_mode):
+                shutil.rmtree(name, dir_fd=target_fd)
+            else:
+                os.unlink(name, dir_fd=target_fd)
+        recheck()
+        D.need(os.listdir(target_fd) == [] and identity(os.fstat(target_fd)) == expected
+               and identity(os.fstat(parent_fd)) == parents[path.parent]
+               and identity(os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)) == expected,
+               "Original compiler cleanup directory is not empty/bound")
+        os.rmdir(path.name, dir_fd=parent_fd)
+        try:
+            os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise D.Refused("Compiler cleanup name remains present")
+        D.need(os.fstat(target_fd).st_nlink == 0, "Original compiler cleanup directory remains linked")
+        recheck()
+    except BaseException as error:
+        problem = error
+    # Retire every original once, retaining the first error. Neither Drop nor
+    # a later successful lookup can replace a failed consuming close.
+    for fd in reversed(original_fds):
+        try:
+            os.close(fd)
+        except BaseException as error:
+            if problem is None:
+                problem = error
+    if problem is not None:
+        raise problem
+    D.need(time.monotonic() < deadline, "Original compiler cleanup closed late")
 
 
 def shell_cargo_metadata(raw, source, target):
@@ -2592,6 +2697,9 @@ def verify_installed_shell_compile():
     os.umask(0o077)
     work, public = root / "work", root / "public"
     identities = {str(path): directory_identity(path) for path in (root, work, public, root / "cases")}
+    cleanup_paths = {parent for path in (root, source, source / "desktop", source / "desktop/src-tauri")
+                     for parent in (path, *path.parents)}
+    cleanup_parents = {path: shell_directory_identity(path) for path in sorted(cleanup_paths)}
     sys.path.insert(0, str(source / "src"))
     from mobile_release.owned_process import run_owned
     check = Check(root, run_owned, deadline=deadline)
@@ -2608,6 +2716,8 @@ def verify_installed_shell_compile():
         C.conventional_host(D)
         D.need(all(directory_identity(Path(path)) == identity for path, identity in identities.items()),
                "Original shell task root changed")
+        D.need(all(shell_directory_identity(path) == identity for path, identity in cleanup_parents.items()),
+               "Original shell source/cleanup ancestry changed")
         C.no_cargo_configuration((work, root, *root.parents, temporary, *temporary.parents,
                                   source / "desktop/src-tauri", source / "desktop", source, *source.parents,
                                   work / "cargo", work / "home"))
@@ -2621,7 +2731,7 @@ def verify_installed_shell_compile():
             if relative in generated:
                 value = path.lstat()
                 D.directory(path)
-                D.need((value.st_dev, value.st_ino, value.st_uid) == generated[relative],
+                D.need(shell_directory_identity(path) == generated[relative],
                        "Original generated shell directory changed")
             else:
                 D.need(not path.exists() and not path.is_symlink(), "Preexisting/unowned shell compiler output")
@@ -2643,7 +2753,7 @@ def verify_installed_shell_compile():
         D.directory(path)
         value = path.lstat()
         D.need(value.st_uid == os.getuid() and not value.st_mode & 0o7022, "Generated shell root owner/mode differs")
-        generated[relative] = value.st_dev, value.st_ino, value.st_uid
+        generated[relative] = shell_directory_identity(path)
 
     try:
         D.need(all(value is not None and Path(value).is_absolute() for value in (git, rustup, node)),
@@ -2770,13 +2880,48 @@ def verify_installed_shell_compile():
                     "compilerUnits": units, "generatedRoots": list(SHELL_GENERATED), "generatedPermissions": permissions}
         D.write(public / "compiler.json", D.canonical(compiler))
         source_check("after")
+        check.phase = "shell-generated-cleanup"
+        D.need(not check.failed and check.commands and all(row["ordinaryOwnerReturned"] is True for row in check.commands),
+               "Compiler owners have not all returned before cleanup")
+        inventories = {"desktop/node_modules": npm_tree, "desktop/dist": frontend,
+                       "desktop/src-tauri/gen": shell_generated_tree(source / "desktop/src-tauri/gen"),
+                       SHELL_PERMISSIONS: permissions}
+        # Validate every deletion root before the first deletion, including the
+        # whole permissions parent rather than silently ignoring sibling inputs.
+        for relative, expected_tree in inventories.items():
+            actual = (shell_permissions_tree(source / relative) if relative == SHELL_PERMISSIONS else
+                      shell_generated_tree(source / relative, links=relative == "desktop/node_modules"))
+            D.need(actual == expected_tree and shell_directory_identity(source / relative) == generated[relative],
+                   "Original generated shell inventory changed before cleanup")
+        for relative in SHELL_GENERATED:
+            shell_remove_owned_directory(source / relative, generated[relative], cleanup_parents, deadline)
+            del generated[relative]
+        permissions = None
+        # This live clean check still has its original private Git environment.
+        source_check("clean")
+        clean_tree = check.command("clean-tree", [git, "rev-parse", "HEAD^{tree}"], environment, source, timeout=15)
+        D.need(clean_tree.stdout == tree.encode("ascii") + b"\n" and clean_tree.stderr == b"",
+               "Original shell source tree changed during cleanup")
+        check.phase = "shell-work-cleanup"
+        shell_remove_owned_directory(work, identities[str(work)], cleanup_parents, deadline)
+        del identities[str(work)]
+        D.need(all(directory_identity(Path(path)) == identity for path, identity in identities.items())
+               and all(shell_directory_identity(path) == identity for path, identity in cleanup_parents.items())
+               and shell_source_manifest(source) == source_inputs,
+               "Original surviving shell source/public bindings changed after cleanup")
+        for path in (work, *(source / relative for relative in SHELL_GENERATED)):
+            D.need(not path.exists() and not path.is_symlink(), "Compiler output remains after original cleanup")
         D.write(public / "result.json", D.canonical({"sourceSha": sha, "sourceTree": tree,
             "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
             "features": SHELL_FEATURES, "compilations": ["normal", "observer"], "cargoBuilds": 1,
             "frontendBuilds": 1, "shellExecuted": False, "observerExecuted": False, "supplierRebuilt": False,
             "packageBuilt": False, "helper11Rerun": False, "commands": check.commands, "qualified": False,
+            "compilerCleanup": SHELL_CLEANUP_SUCCESS,
             "scope": "installed-shell-production-compiler-and-separate-harness-free-observer-only"}))
         files = [{**D.file_record(path, MAX_BINARY), "path": path.name} for path in sorted(public.iterdir())]
+        retained = {row["path"]: row for row in files}
+        D.need(all(all(retained[SHELL_EXPORTS[role]][key] == exports[role][key] for key in ("size", "sha256"))
+                   for role in SHELL_EXPORTS), "Original shell exports changed during compiler cleanup")
         D.need(len(files) <= 1536 and sum(row["size"] for row in files) <= 1536 << 20 and time.monotonic() < deadline,
                "Original shell artifact roster/endpoint bound")
         pin = D.write(public / "shell-roster.json", D.canonical({"sourceSha": sha, "sourceTree": tree,

@@ -167,7 +167,7 @@ def transport_data(work, change=None):
                 "nativeInputs": native, "compilerInputs": {"metadataSha256": hashlib.sha256(S.D.canonical(metadata())).hexdigest()}}
     result = {**identity, "compilations": ["normal", "observer"], "cargoBuilds": 1, "frontendBuilds": 1,
               "shellExecuted": False, "observerExecuted": False, "supplierRebuilt": False, "packageBuilt": False,
-              "helper11Rerun": False, "qualified": False,
+              "helper11Rerun": False, "qualified": False, "compilerCleanup": deepcopy(S.SHELL_CLEANUP_SUCCESS),
               "commands": [{"phase": "shell-compile", "ordinaryOwnerReturned": True, "exitCode": 0,
                             "argv": S.shell_compile_argv("/tools/cargo", source, target)}]}
     if change is not None:
@@ -339,6 +339,173 @@ class ShellPackageOwnershipContracts(unittest.TestCase):
 
 
 class InstalledShellCompilerContracts(unittest.TestCase):
+    def test_same_job_shell_routes_have_distinct_original_roots_and_preparations(self):
+        # Inert private directory/clock fixtures only. The actual hosted-platform
+        # admission is mocked; no compiler, native service or process is launched.
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            source, temp, output = directory / "source", directory / "tmp", directory / "output"
+            source.mkdir(); temp.mkdir(); output.write_bytes(b"")
+            env = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Linux",
+                   "RUNNER_ARCH": "X64", "GITHUB_EVENT_NAME": "push", "GITHUB_REF": S.SHELL_REF,
+                   "GITHUB_JOB": "compile", "MRK_UBUNTU_PUBLICATION_VERIFY": "1", "GITHUB_SHA": "a" * 40,
+                   "MRK_PUSH_EVENT_AFTER": "a" * 40, "GITHUB_RUN_ID": "10", "GITHUB_RUN_ATTEMPT": "1",
+                   "GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit", "GITHUB_WORKSPACE": str(source),
+                   "RUNNER_TEMP": str(temp), "GITHUB_OUTPUT": str(output)}
+            roots, endpoints = [], []
+            previous_umask = S.os.umask(0o077)
+            try:
+                for index, case in enumerate(("compile", "observe")):
+                    environment = {**env, "MRK_INSTALLED_SHELL_CASE": case}
+                    with patch.dict(S.os.environ, environment, clear=True), patch.object(S, "SOURCE", source), \
+                         patch.object(S.C, "conventional_host"), patch.object(S.os, "getresuid", return_value=(1001,) * 3), \
+                         patch.object(S.os, "getresgid", return_value=(1001,) * 3), \
+                         patch.object(S.time, "monotonic", return_value=100.0 + index * 25):
+                        self.assertEqual(S.route(S.os.environ), "a" * 40)
+                        S.prepare()
+                        _, _, _, root = S.hosted_paths()
+                        raw = (root / "preparation.json").read_bytes()
+                        record = S.D.decode(raw)
+                        self.assertEqual(root.name, "mrk-desktop-ubuntu-publisher-10-1-" + case)
+                        self.assertEqual((record["shellCase"], record["job"]), (case, "compile"))
+                        self.assertEqual(float(record["deadline"]), 1300.0 + index * 25)
+                        pins = {"MRK_UBUNTU_PUBLICATION_ROOT": str(root),
+                                "MRK_UBUNTU_PUBLICATION_PREPARATION_SHA256": hashlib.sha256(raw).hexdigest(),
+                                "MRK_UBUNTU_PUBLICATION_DEADLINE": record["deadline"]}
+                        with patch.dict(S.os.environ, pins):
+                            self.assertEqual(S.resumed_preparation()[-2:], (root, float(record["deadline"])))
+                            with patch.object(S.time, "monotonic", return_value=float(record["deadline"])), \
+                                 self.assertRaisesRegex(S.D.Refused, "endpoint expired"):
+                                S.resumed_preparation()
+                            with patch.dict(S.os.environ, {"MRK_INSTALLED_SHELL_CASE": "observe" if case == "compile" else "compile"}), \
+                                 self.assertRaisesRegex(S.D.Refused, "Original private root differs"):
+                                S.resumed_preparation()
+                            changed = {**record, "shellCase": "observe" if case == "compile" else "compile"}
+                            changed_raw = S.D.canonical(changed)
+                            (root / "preparation.json").write_bytes(changed_raw)
+                            with patch.dict(S.os.environ, {"MRK_UBUNTU_PUBLICATION_PREPARATION_SHA256": hashlib.sha256(changed_raw).hexdigest()}), \
+                                 self.assertRaisesRegex(S.D.Refused, "binding changed"):
+                                S.resumed_preparation()
+                            (root / "preparation.json").write_bytes(raw)
+                        with self.assertRaises(FileExistsError):
+                            S.prepare()
+                        self.assertEqual((root / "preparation.json").read_bytes(), raw)
+                        roots.append(root); endpoints.append(record["deadline"])
+                self.assertNotEqual(roots[0], roots[1])
+                self.assertNotEqual(endpoints[0], endpoints[1])
+                for change in ({"GITHUB_JOB": "native"}, {"GITHUB_JOB": ""},
+                               {"MRK_INSTALLED_CASE": "positive"}, {"MRK_INSTALLED_SHELL_CASE": "host-metadata-only"}):
+                    with self.subTest(change=change), self.assertRaises(S.D.Refused):
+                        S.route({**env, "MRK_INSTALLED_SHELL_CASE": "compile", **change})
+            finally:
+                S.os.umask(previous_umask)
+
+    def test_cleanup_removes_only_owned_roots_and_never_follows_link_targets(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            root = parent / "owned"
+            (root / "nested").mkdir(parents=True, mode=0o700)
+            sentinel = parent / "retained"
+            sentinel.write_bytes(b"unrelated retained DATA")
+            (root / "nested/readonly").write_bytes(b"disposable DATA")
+            (root / "nested/readonly").chmod(0o400)
+            (root / "alias").symlink_to(sentinel)
+            expected = S.shell_directory_identity(root)
+            parents = {parent: S.shell_directory_identity(parent)}
+            original_close = S.os.close
+            with patch.object(S.time, "monotonic", return_value=1.0), \
+                 patch.object(S.os, "close", wraps=original_close) as close:
+                S.shell_remove_owned_directory(root, expected, parents, 2.0)
+            self.assertEqual(close.call_count, 3)  # Original pair plus rmtree's nested directory.
+            self.assertFalse(root.exists())
+            self.assertEqual(sentinel.read_bytes(), b"unrelated retained DATA")
+
+    def test_cleanup_refuses_replacements_or_expired_endpoint_before_removing_data(self):
+        for refusal in ("target", "parent", "expired", "unavailable"):
+            with self.subTest(refusal=refusal), tempfile.TemporaryDirectory() as temporary:
+                parent = Path(temporary) / "parent"
+                root = parent / "owned"
+                root.mkdir(parents=True, mode=0o700)
+                member = root / "data"
+                member.write_bytes(b"original DATA")
+                expected = S.shell_directory_identity(root)
+                parents = {parent: S.shell_directory_identity(parent)}
+                if refusal == "target":
+                    root.rename(parent / "original")
+                    root.mkdir(mode=0o700); member.write_bytes(b"replacement DATA")
+                elif refusal == "parent":
+                    parent.rename(parent.with_name("original-parent"))
+                    root.mkdir(parents=True, mode=0o700); member.write_bytes(b"replacement DATA")
+                with patch.object(S.time, "monotonic", return_value=2.0 if refusal == "expired" else 1.0), \
+                     patch.object(S.shutil.rmtree, "avoids_symlink_attacks", refusal != "unavailable"), \
+                     self.assertRaises(S.D.Refused):
+                    S.shell_remove_owned_directory(root, expected, parents, 2.0)
+                self.assertEqual(member.read_bytes(), b"replacement DATA" if refusal in {"target", "parent"} else b"original DATA")
+
+    def test_cleanup_preserves_first_failure_and_closes_each_original_once(self):
+        for removal_failure in (False, True):
+            with self.subTest(removal_failure=removal_failure), tempfile.TemporaryDirectory() as temporary:
+                parent = Path(temporary)
+                root = parent / "owned"
+                root.mkdir(mode=0o700)
+                if removal_failure:
+                    (root / "nested").mkdir(mode=0o700)
+                    (root / "nested/data").write_bytes(b"disposable DATA")
+                else:
+                    (root / "data").write_bytes(b"disposable DATA")
+                expected = S.shell_directory_identity(root)
+                parents = {parent: S.shell_directory_identity(parent)}
+                closed, original_close, original_rmtree = [], S.os.close, S.shutil.rmtree
+                def close(fd):
+                    original_close(fd)
+                    closed.append(fd)
+                    if len(closed) == 1:
+                        raise OSError("injected original close failure")
+                def remove(name, *, dir_fd):
+                    if removal_failure:
+                        raise OSError("injected original removal failure")
+                    original_rmtree(name, dir_fd=dir_fd)
+                remove.avoids_symlink_attacks = True
+                with patch.object(S.time, "monotonic", return_value=1.0), \
+                     patch.object(S.shutil, "rmtree", remove), patch.object(S.os, "close", side_effect=close), \
+                     self.assertRaisesRegex(OSError, "original removal failure" if removal_failure else "original close failure"):
+                    S.shell_remove_owned_directory(root, expected, parents, 2.0)
+                # Both original cleanup descriptors are consumed once, even
+                # when the first consuming close fails after a prior refusal.
+                self.assertEqual(len(closed), len(set(closed)))
+                self.assertEqual(len(closed), 2)
+                if removal_failure:
+                    self.assertEqual((root / "nested/data").read_bytes(), b"disposable DATA")
+                else:
+                    self.assertFalse(root.exists())
+
+    def test_same_vm_workflow_requires_original_compile_upload_and_cleanup_handoff(self):
+        workflow = (SOURCE / S.WORKFLOW).read_text()
+        self.assertEqual(workflow.count("uses: actions/checkout@"), 1)
+        self.assertNotIn("\n  native:\n", workflow)
+        self.assertNotIn("needs.compile", workflow)
+        native = workflow.split("      - name: Require the fixed disposable native route", 1)[1]
+        self.assertNotIn("apt-get", native)
+        self.assertNotIn("prepare_hosted_ubuntu_data.py", native)
+        for step in native.split("      - name:"):
+            self.assertIn("if:", step)
+            if "if: always()" not in step:
+                self.assertIn("steps.compile.outcome == 'success' && steps.upload.outcome == 'success'", step)
+        self.assertIn("artifact-ids: ${{ steps.upload.outputs.artifact-id }}", native)
+        self.assertIn("path: ${{ steps.prepare_native.outputs.root }}/work/admitted-shell", native)
+        self.assertIn("MRK_INSTALLED_SHELL_CASE: observe", native)
+        # These ordering checks supplement the actual cleanup/transport controls
+        # above; the real owner/native path still requires hosted verification.
+        source = (SOURCE / "desktop/tools/ci_ubuntu_publication.py").read_text()
+        compile_body = source.split("def verify_installed_shell_compile():", 1)[1].split("\ndef verify(", 1)[0]
+        milestones = [compile_body.index(text) for text in (
+            'check.phase = "shell-generated-cleanup"', 'source_check("clean")',
+            'shell_remove_owned_directory(work,', 'D.write(public / "result.json"',
+            'D.write(public / "shell-roster.json"', 'output.write("shell_roster_sha256=')]
+        self.assertEqual(milestones, sorted(milestones))
+        self.assertIn('all(row["ordinaryOwnerReturned"] is True for row in check.commands)', compile_body)
+        self.assertIn('shell_source_status(status.stdout, generated)', compile_body)
+
     def test_paired_shell_source_manifest_binds_the_changed_session_modules(self):
         # Source-only correspondence: no Cargo, native imports or source run.
         tree = ast.parse((SOURCE / "desktop/tools/ci_ubuntu_publication.py").read_text())
@@ -762,6 +929,11 @@ class InstalledShellCompilerContracts(unittest.TestCase):
             lambda compiler, result, native, rows: result.update(observerExecuted=True),
             lambda compiler, result, native, rows: result.update(packageBuilt=True),
             lambda compiler, result, native, rows: result.update(cargoBuilds=True),
+            lambda compiler, result, native, rows: result.pop("compilerCleanup"),
+            lambda compiler, result, native, rows: result["compilerCleanup"].update(workRemoved=False),
+            lambda compiler, result, native, rows: result["compilerCleanup"].update(sourceClean=1),
+            lambda compiler, result, native, rows: result["compilerCleanup"]["generatedRootsRemoved"].pop(),
+            lambda compiler, result, native, rows: result["compilerCleanup"].update(exportsRetained=False),
             lambda compiler, result, native, rows: result["commands"][0].update(ordinaryOwnerReturned=False),
             lambda compiler, result, native, rows: compiler["exportedArtifacts"]["normal"].update(identity=compiler["originalArtifacts"]["normal"]["identity"]),
             lambda compiler, result, native, rows: compiler["originalArtifacts"]["observer"].update(path="/other/observer"),

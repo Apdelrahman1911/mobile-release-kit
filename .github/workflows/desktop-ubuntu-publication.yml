@@ -21,15 +21,11 @@ jobs:
   compile:
     name: ${{ github.ref == 'refs/heads/verify/desktop-shell-host-metadata' && 'host-metadata-only' || 'compile' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: ${{ github.ref == 'refs/heads/verify/desktop-shell-host-metadata' && 10 || 25 }}
+    timeout-minutes: ${{ github.ref == 'refs/heads/verify/desktop-shell-host-metadata' && 10 || 50 }}
     env:
       MRK_INSTALLED_SHELL_CASE: ${{ github.ref == 'refs/heads/verify/desktop-shell-host-metadata' && 'host-metadata-only' || 'compile' }}
       MRK_PUSH_EVENT_AFTER: ${{ github.event.after }}
       MRK_UBUNTU_PUBLICATION_VERIFY: '1'
-    outputs:
-      shell_roster_sha256: ${{ steps.compile.outputs.shell_roster_sha256 }}
-      shell_producer_attempt: ${{ steps.compile.outputs.shell_producer_attempt }}
-      shell_artifact_id: ${{ steps.upload.outputs.artifact-id }}
     steps:
       - name: Require one exact disposable preparation route
         shell: bash
@@ -64,6 +60,46 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev xvfb xauth xdotool dbus-daemon dbus-bin bubblewrap xdg-dbus-proxy
           dpkg-query -W -f='${Package} ${Version}\n' libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev xvfb xauth xdotool dbus-daemon dbus-bin bubblewrap xdg-dbus-proxy
+      # Fixed pre/simulation/post DATA and returned apt success are required
+      # before any compiler/native entry. Unknown/newer/held/partial inputs fail;
+      # this is forward-only disposable-host preparation, not native qualification.
+      - name: Establish only the reviewed forward glibc tuple set
+        id: glibc
+        if: github.ref == 'refs/heads/verify/desktop-installed-shell'
+        timeout-minutes: 8
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_PUSH_EVENT_AFTER: ${{ github.event.after }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$RUNNER_TEMP" == /* && "$GITHUB_RUN_ID" =~ ^[1-9][0-9]{0,19}$ && "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,19}$ ]]
+          root="$RUNNER_TEMP/mrk-desktop-glibc89-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -m 700 -- "$root"
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+          format='${Package}\t${Architecture}\t${Version}\t${source:Package}\t${source:Version}\t${Status}\n'
+          /usr/bin/dpkg-query -W -f="$format" > "$root/before.tsv"
+          /usr/bin/python3.12 -I -S -B desktop/tools/hosted_glibc_policy.py plan > "$root/arguments.txt"
+          mapfile -t packages < "$root/arguments.txt"
+          [[ "${#packages[@]}" -ge 4 && "${#packages[@]}" -le 12 ]]
+          apt=(sudo /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get)
+          options=(--no-install-recommends --no-remove --only-upgrade -o APT::Get::allow-Downgrades=false -o APT::Get::allow-Change-Held-Packages=false -o APT::Get::allow-Remove-Essential=false -o APT::Get::allow-Unauthenticated=false)
+          "${apt[@]}" update -qq </dev/null
+          "${apt[@]}" "${options[@]}" --simulate install "${packages[@]}" </dev/null > "$root/simulation.txt"
+          /usr/bin/python3.12 -I -S -B desktop/tools/hosted_glibc_policy.py simulation
+          "${apt[@]}" "${options[@]}" -y install "${packages[@]}" </dev/null
+          /usr/bin/dpkg-query -W -f="$format" > "$root/after.tsv"
+          /usr/bin/python3.12 -I -S -B desktop/tools/hosted_glibc_policy.py after
+      - name: Retain original glibc prerequisite DATA including failures
+        if: always() && steps.glibc.outputs.root != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-ubuntu-glibc-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.glibc.outputs.root }}
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 1
       - name: Prepare only fixed disposable Ubuntu DATA modes
         timeout-minutes: 1
         shell: bash
@@ -126,24 +162,15 @@ jobs:
           retention-days: 14
           compression-level: 1
 
-  native:
-    if: github.ref == 'refs/heads/verify/desktop-installed-shell'
-    needs: compile
-    name: installed-shell
-    runs-on: ubuntu-24.04
-    timeout-minutes: 25
-    env:
-      MRK_INSTALLED_SHELL_CASE: observe
-      MRK_PUSH_EVENT_AFTER: ${{ github.event.after }}
-      MRK_UBUNTU_PUBLICATION_VERIFY: '1'
-    steps:
       - name: Require the fixed disposable native route
+        if: github.ref == 'refs/heads/verify/desktop-installed-shell' && steps.compile.outcome == 'success' && steps.upload.outcome == 'success'
         shell: bash
         env:
+          MRK_INSTALLED_SHELL_CASE: observe
           HOSTING: ${{ runner.environment }}
-          MRK_INSTALLED_SHELL_ARTIFACT_ID: ${{ needs.compile.outputs.shell_artifact_id }}
-          MRK_INSTALLED_SHELL_ROSTER_SHA256: ${{ needs.compile.outputs.shell_roster_sha256 }}
-          MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT: ${{ needs.compile.outputs.shell_producer_attempt }}
+          MRK_INSTALLED_SHELL_ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          MRK_INSTALLED_SHELL_ROSTER_SHA256: ${{ steps.compile.outputs.shell_roster_sha256 }}
+          MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT: ${{ steps.compile.outputs.shell_producer_attempt }}
         run: |
           set -euo pipefail
           [[ "$HOSTING" == github-hosted && "$GITHUB_EVENT_NAME" == push ]]
@@ -159,31 +186,12 @@ jobs:
           if int(values[1]) > int(values[2]) or not re.fullmatch(r'[0-9a-f]{64}', os.environ.get('MRK_INSTALLED_SHELL_ROSTER_SHA256', '')):
               raise SystemExit('Original compiler roster/producer attempt differs')
           PY
-      - name: Check out exact reviewed source without credentials
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - name: Prepare shared Ubuntu shell inputs only on this disposable runner
-        timeout-minutes: 8
-        shell: bash
-        env:
-          DEBIAN_FRONTEND: noninteractive
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev xvfb xauth xdotool dbus-daemon dbus-bin bubblewrap xdg-dbus-proxy
-          dpkg-query -W -f='${Package} ${Version}\n' libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev xvfb xauth xdotool dbus-daemon dbus-bin bubblewrap xdg-dbus-proxy
-      - name: Prepare only fixed disposable Ubuntu DATA modes
-        timeout-minutes: 1
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent /usr/bin/python3.12 -I -S -B desktop/tools/prepare_hosted_ubuntu_data.py </dev/null
       - name: Observe only the hosted Python body as public DATA
+        if: github.ref == 'refs/heads/verify/desktop-installed-shell' && steps.compile.outcome == 'success' && steps.upload.outcome == 'success'
         timeout-minutes: 1
         shell: bash
         env:
+          MRK_INSTALLED_SHELL_CASE: observe
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
@@ -197,40 +205,46 @@ jobs:
             MRK_PUSH_EVENT_AFTER="$MRK_PUSH_EVENT_AFTER" MRK_INSTALLED_SHELL_CASE="$MRK_INSTALLED_SHELL_CASE" \
             ImageOS="$ImageOS" ImageVersion="$ImageVersion" /usr/bin/python3.12 -I -S -B desktop/tools/observe_hosted_python.py
       - name: Prepare a fresh bounded native owner
-        id: prepare
+        if: github.ref == 'refs/heads/verify/desktop-installed-shell' && steps.compile.outcome == 'success' && steps.upload.outcome == 'success'
+        id: prepare_native
         shell: bash
         env:
+          MRK_INSTALLED_SHELL_CASE: observe
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py prepare
       - name: Download this run's exact original compiled shell outputs
+        if: github.ref == 'refs/heads/verify/desktop-installed-shell' && steps.compile.outcome == 'success' && steps.upload.outcome == 'success'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           repository: Apdelrahman1911/mobile-release-kit
           run-id: ${{ github.run_id }}
-          artifact-ids: ${{ needs.compile.outputs.shell_artifact_id }}
+          artifact-ids: ${{ steps.upload.outputs.artifact-id }}
           github-token: ${{ github.token }}
-          path: ${{ steps.prepare.outputs.root }}/work/admitted-shell
+          path: ${{ steps.prepare_native.outputs.root }}/work/admitted-shell
           merge-multiple: true
       - name: Download independently accepted U packages and original evidence
+        if: github.ref == 'refs/heads/verify/desktop-installed-shell' && steps.compile.outcome == 'success' && steps.upload.outcome == 'success'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           repository: Apdelrahman1911/mobile-release-kit
           # Independently accepted U originals; full artifact membership is verified.
-          run-id: '35533243674'
-          artifact-ids: '10611313562'
+          run-id: '35783044845'
+          artifact-ids: '10718458518'
           github-token: ${{ github.token }}
-          path: ${{ steps.prepare.outputs.root }}/work/admitted-u
+          path: ${{ steps.prepare_native.outputs.root }}/work/admitted-u
           merge-multiple: true
       - name: Observe only the fixed installed shell route with original finality
+        if: github.ref == 'refs/heads/verify/desktop-installed-shell' && steps.compile.outcome == 'success' && steps.upload.outcome == 'success'
         shell: bash
         env:
+          MRK_INSTALLED_SHELL_CASE: observe
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          MRK_UBUNTU_PUBLICATION_ROOT: ${{ steps.prepare.outputs.root }}
-          MRK_UBUNTU_PUBLICATION_PREPARATION_SHA256: ${{ steps.prepare.outputs.preparation_sha256 }}
-          MRK_UBUNTU_PUBLICATION_DEADLINE: ${{ steps.prepare.outputs.deadline }}
-          MRK_INSTALLED_SHELL_ROSTER_SHA256: ${{ needs.compile.outputs.shell_roster_sha256 }}
-          MRK_INSTALLED_SHELL_ARTIFACT_ID: ${{ needs.compile.outputs.shell_artifact_id }}
-          MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT: ${{ needs.compile.outputs.shell_producer_attempt }}
+          MRK_UBUNTU_PUBLICATION_ROOT: ${{ steps.prepare_native.outputs.root }}
+          MRK_UBUNTU_PUBLICATION_PREPARATION_SHA256: ${{ steps.prepare_native.outputs.preparation_sha256 }}
+          MRK_UBUNTU_PUBLICATION_DEADLINE: ${{ steps.prepare_native.outputs.deadline }}
+          MRK_INSTALLED_SHELL_ROSTER_SHA256: ${{ steps.compile.outputs.shell_roster_sha256 }}
+          MRK_INSTALLED_SHELL_ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT: ${{ steps.compile.outputs.shell_producer_attempt }}
           # Exact independently reviewed shell lifecycle; not product qualification.
           MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'fc7a9a093ce69a4bece2fc8af4bc1b5c9969d7bfb1183f5187b6d3107c269a65'
           MRK_UBUNTU_LIFECYCLE_BOOTSTRAP: |
@@ -276,11 +290,11 @@ jobs:
             os.execv('/usr/bin/python3.12',['/usr/bin/python3.12','-I','-S','-B',str(r/'entry.py'),'unit-start'])
         run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed-shell
       - name: Retain only original public evidence for this shell observation
-        if: always() && github.ref == 'refs/heads/verify/desktop-installed-shell' && steps.prepare.outputs.root != ''
+        if: always() && github.ref == 'refs/heads/verify/desktop-installed-shell' && steps.prepare_native.outputs.root != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-installed-shell-native-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ steps.prepare.outputs.root }}/public
+          path: ${{ steps.prepare_native.outputs.root }}/public
           if-no-files-found: error
           retention-days: 14
           compression-level: 1
