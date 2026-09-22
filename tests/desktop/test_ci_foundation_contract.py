@@ -6855,5 +6855,362 @@ class GitHubTLSWorkflowContractTests(unittest.TestCase):
             self.assertNotIn(dynamic, build)
 
 
+class WindowsReaderGateTests(unittest.TestCase):
+    """Inert DATA/source contracts only; these records are not native receipts."""
+
+    @staticmethod
+    def context():
+        return {"source": "/reviewed-source", "root": "/owned-windows-gate", "sourceSha": "1" * 40,
+                "sourceTree": "2" * 40, "runId": "123456", "attempt": 1,
+                "imageOS": "win25-vs2026", "imageVersion": "20260920.1.0", "git": "/fixed-git"}
+
+    @classmethod
+    def graph_data(cls):
+        context = cls.context()
+        source, root = Path(context["source"]), Path(context["root"])
+        registry = "registry+https://github.com/rust-lang/crates.io-index"
+        versions = {"getrandom": "0.3.4", "serde": "1.0.228", "serde_json": "1.0.145", "sha2": "0.10.9",
+                    "tokio": "1.48.0", "windows-sys": "0.61.2", "windows-link": "0.2.1"}
+        packages, locked, ids = [], [], {}
+        declared = {"mobile-release-kit-desktop": "desktop/src-tauri/Cargo.toml",
+                    "mrk-linux-mount-observation": "desktop/native/linux-mount-observation/Cargo.toml",
+                    "mrk-macos-installed-native": "desktop/native/macos-installed-native/Cargo.toml",
+                    "mrk-windows-installed-native": "desktop/native/windows-installed-native/Cargo.toml"}
+        targets = {
+            "mrk-linux-mount-observation": 'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))',
+            "mrk-macos-installed-native": 'cfg(all(target_os = "macos", target_arch = "aarch64"))',
+            "mrk-windows-installed-native": 'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))',
+        }
+        dependencies = [{"name": name, "source": None, "req": "*", "kind": None, "rename": None,
+            "optional": False, "uses_default_features": True, "features": [], "target": target,
+            "registry": None, "path": str((source / declared[name]).parent)} for name, target in targets.items()]
+        for name, manifest in declared.items():
+            ids[name] = name + "@0.1.0"
+            locked.append({"name": name, "version": "0.1.0"})
+            if name not in {"mobile-release-kit-desktop", "mrk-windows-installed-native"}:
+                continue  # Real filtered metadata keeps declarations, not these packages.
+            path = source / manifest
+            target = {"name": "mobile_release_desktop" if name == "mobile-release-kit-desktop" else name.replace("-", "_"),
+                      "kind": ["lib"], "crate_types": ["lib"], "src_path": str(path.parent / "src/lib.rs")}
+            units = [target]
+            if name == "mobile-release-kit-desktop":
+                units.append({"name": "build-script-build", "kind": ["custom-build"], "crate_types": ["bin"],
+                              "src_path": str(path.parent / "build.rs")})
+            packages.append({"id": ids[name], "name": name, "version": "0.1.0", "source": None,
+                             "manifest_path": str(path), "features": {"allowed": []}, "targets": units,
+                             "dependencies": deepcopy(dependencies) if name == "mobile-release-kit-desktop" else []})
+        for name, version in versions.items():
+            ids[name] = name + "@" + version
+            directory = root / "cargo/registry/src/index.crates.io-fixed" / (name + "-" + version)
+            packages.append({"id": ids[name], "name": name, "version": version, "source": registry,
+                "manifest_path": str(directory / "Cargo.toml"), "features": {"allowed": []},
+                "targets": [{"name": name.replace("-", "_"), "kind": ["lib"], "crate_types": ["lib"],
+                             "src_path": str(directory / "src/lib.rs")}]})
+            locked.append({"name": name, "version": version, "source": registry, "checksum": "3" * 64})
+        direct = ["getrandom", "serde", "serde_json", "sha2", "tokio", "mrk-windows-installed-native"]
+        packages[0]["dependencies"].extend({"name": name, "source": registry, "req": "=" + versions[name],
+            "kind": None, "rename": None, "optional": False, "uses_default_features": True, "features": [],
+            "target": None, "registry": None} for name in direct if name in versions)
+        edges = {"mobile-release-kit-desktop": direct, "mrk-windows-installed-native": ["windows-sys"], "windows-sys": ["windows-link"]}
+        nodes = []
+        for name in ["mobile-release-kit-desktop", "mrk-windows-installed-native", *versions]:
+            dependencies = edges.get(name, [])
+            nodes.append({"id": ids[name], "features": [], "dependencies": [ids[item] for item in dependencies],
+                "deps": [{"name": item.replace("-", "_"), "pkg": ids[item], "dep_kinds": [{"kind": None, "target": None}]}
+                         for item in dependencies]})
+        app = ids["mobile-release-kit-desktop"]
+        value = {"version": 1, "packages": packages, "workspace_root": str(source / "desktop/src-tauri"),
+                 "workspace_members": [app], "workspace_default_members": [app], "target_directory": str(root / "target"),
+                 "resolve": {"root": app, "nodes": nodes}}
+        return value, {"version": 4, "package": locked}, context
+
+    def test_windows_reader_active_graph_binds_declared_locals_and_locked_resolution(self):
+        value, lock, context = self.graph_data()
+        arguments = {"source": Path(context["source"]), "root": Path(context["root"])}
+        graph = helper.windows_installed_app_graph(value, lock, **arguments)
+        self.assertEqual(set(graph["localIds"]), {"mobile-release-kit-desktop", "mrk-windows-installed-native"})
+        self.assertEqual(set(graph["nodes"]) & set(graph["localIds"].values()), set(graph["localIds"].values()))
+        mutations = {
+            "missing-inactive-declaration": lambda row: row["packages"][0]["dependencies"].pop(1),
+            "duplicate-local-declaration": lambda row: row["packages"][0]["dependencies"].append(deepcopy(row["packages"][0]["dependencies"][0])),
+            "reserved-name-registry-alias": lambda row: row["packages"][0]["dependencies"].append(
+                {"name": "mrk-macos-installed-native", "source": "registry+https://github.com/rust-lang/crates.io-index"}),
+            "reserved-name-git-alias": lambda row: row["packages"][0]["dependencies"].append(
+                {"name": "mrk-linux-mount-observation", "source": "git+https://example.invalid/other"}),
+            "unrelated-path-key": lambda row: row["packages"][0]["dependencies"].append(
+                {"name": "other-local", "source": "registry+https://github.com/rust-lang/crates.io-index", "path": None}),
+            "active-inactive-local": lambda row: row["resolve"]["nodes"].append({"id": "mrk-macos-installed-native@0.1.0",
+                "features": [], "deps": [], "dependencies": []}),
+            "inactive-local-package": lambda row: row["packages"].append({**deepcopy(row["packages"][1]),
+                "id": "mrk-macos-installed-native@0.1.0", "name": "mrk-macos-installed-native",
+                "manifest_path": str(Path(context["source"]) / "desktop/native/macos-installed-native/Cargo.toml")}),
+            "missing-edge": lambda row: row["resolve"]["nodes"][0]["deps"][0].update(pkg="absent"),
+            "root-feature": lambda row: row["resolve"]["nodes"][0].update(features=["allowed"]),
+            "unknown-feature": lambda row: row["resolve"]["nodes"][2].update(features=["unknown"]),
+            "registry-path": lambda row: row["packages"][2].update(manifest_path="/other/registry/Cargo.toml"),
+            "local-path": lambda row: row["packages"][0].update(manifest_path="/other/Cargo.toml"),
+            "workspace": lambda row: row.update(workspace_members=[]),
+            "target": lambda row: row.update(target_directory="/other-target"),
+            "duplicate-package": lambda row: row["packages"].append(deepcopy(row["packages"][2])),
+            "typed-version": lambda row: row.update(version=True),
+        }
+        for label, change in mutations.items():
+            with self.subTest(case=label):
+                altered = deepcopy(value); change(altered)
+                with self.assertRaises(helper.CheckFailure): helper.windows_installed_app_graph(altered, lock, **arguments)
+        for field, changed in (("name", "other-local"), ("path", "/other/native"), ("target", 'cfg(unix)'),
+                ("kind", "build"), ("source", "registry+https://github.com/rust-lang/crates.io-index"),
+                ("registry", "other"), ("rename", "alias"), ("req", "^0.1"),
+                ("optional", True), ("uses_default_features", False), ("features", ["other"]),
+                ("optional", 0), ("uses_default_features", 1), ("extra", None)):
+            with self.subTest(declaration=field, value=changed):
+                altered = deepcopy(value); altered["packages"][0]["dependencies"][1][field] = changed
+                with self.assertRaises(helper.CheckFailure): helper.windows_installed_app_graph(altered, lock, **arguments)
+        altered = deepcopy(value); del altered["packages"][0]["dependencies"][1]["path"]
+        with self.assertRaises(helper.CheckFailure): helper.windows_installed_app_graph(altered, lock, **arguments)
+        wrong_lock = deepcopy(lock); wrong_lock["package"][4]["source"] = "git+https://example.invalid/input"
+        with self.assertRaises(helper.CheckFailure): helper.windows_installed_app_graph(value, wrong_lock, **arguments)
+        wrong_lock = deepcopy(lock); wrong_lock["package"].pop(2)  # Inactive Mac still belongs to the complete source lock.
+        with self.assertRaises(helper.CheckFailure): helper.windows_installed_app_graph(value, wrong_lock, **arguments)
+
+    def test_windows_reader_artifact_accepts_active_declared_units_and_exact_libtest(self):
+        value, lock, context = self.graph_data()
+        source, root = Path(context["source"]), Path(context["root"])
+        graph = helper.windows_installed_app_graph(value, lock, source=source, root=root)
+        app = graph["packages"][graph["appId"]]
+        compiled = {"reason": "compiler-artifact", "package_id": graph["appId"], "manifest_path": app["manifest_path"],
+                    "target": app["targets"][1], "features": [], "profile": {"test": False, "debug_assertions": True},
+                    "executable": None, "fresh": False}
+        script = {"reason": "build-script-executed", "package_id": graph["appId"], "out_dir": str(root / "target/debug/build/app/out")}
+        executable = root / "target/x86_64-pc-windows-msvc/debug/deps/mobile_release_desktop-fixed.exe"
+        libtest = {**compiled, "target": app["targets"][0], "profile": {"test": True, "debug_assertions": True}, "executable": str(executable)}
+        rows = [compiled, script, libtest, {"reason": "build-finished", "success": True}]
+        def parse(items):
+            raw = b"\n".join(json.dumps(item, separators=(",", ":")).encode("ascii") for item in items)
+            with patch.object(helper, "ordinary_windows_executable", side_effect=lambda path, **_: Path(path)):
+                return helper.windows_installed_app_test_path(raw, graph, source=source, root=root)
+        self.assertEqual(parse(rows), executable)
+        mutations = {
+            "duplicate-libtest": lambda data: data.insert(3, deepcopy(data[2])),
+            "after-final": lambda data: data.append(deepcopy(data[2])),
+            "failed-build": lambda data: data[-1].update(success=False),
+            "wrong-feature": lambda data: data[2].update(features=["allowed"]),
+            "wrong-manifest": lambda data: data[2].update(manifest_path="/other/Cargo.toml"),
+            "wrong-profile": lambda data: data[2]["profile"].update(test=False),
+            "wrong-target": lambda data: data[2].update(target={**app["targets"][0], "name": "other"}),
+            "inactive-build-script": lambda data: data[1].update(package_id="mrk-macos-installed-native@0.1.0"),
+            "uncompiled-build-script": lambda data: data.pop(0),
+            "script-target-escape": lambda data: data[1].update(out_dir=str(root / "target/../outside")),
+            "unknown-message": lambda data: data[1].update(reason="other"),
+        }
+        for label, change in mutations.items():
+            with self.subTest(case=label):
+                altered = deepcopy(rows); change(altered)
+                with self.assertRaises(helper.CheckFailure): parse(altered)
+
+    def test_windows_reader_selected_eleven_and_compile_argv_are_closed(self):
+        names = (
+            "runtime::windows_version::tests::windows_manifest_and_observed_inventory_are_exact",
+            "runtime::windows_version::tests::windows_manifest_anchors_schema_and_inventory_are_bound_before_use",
+            "runtime::windows_version::tests::windows_manifest_rejects_case_aliases_and_file_directory_conflicts",
+            "runtime::windows_version::tests::windows_manifest_preserves_every_supplier_member_and_hash",
+            "runtime::windows_version::tests::windows_manifest_budgets_include_manifest_not_only_payload",
+            "runtime::windows_version::tests::windows_six_method_data_does_not_enable_any_production_profile",
+            "installed_runtime_windows::tests::stopped_expired_and_lost_channel_inspection_never_enters_native_work",
+            "installed_runtime_windows::tests::unknown_completion_precedes_post_call_stop_and_deadline",
+            "installed_runtime_windows::tests::ordinary_returned_refusal_is_not_unknown_and_pending_is_not_a_join",
+            "installed_runtime_windows::tests::settlement_and_interruption_are_one_shot_not_close_by_drop",
+            "installed_runtime_windows::tests::selected_ancestors_remain_live_but_unrelated_subtrees_do_not",
+        )
+        self.assertEqual(helper.WINDOWS_INSTALLED_APP_INERT, names)
+        raw = ("running 11 tests\n" + "\n".join("test " + name + " ... ok" for name in names)
+               + "\ntest result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 173 filtered out; finished in 0.01s\n").encode("ascii")
+        self.assertEqual(helper.windows_installed_app_libtest(raw)["filteredObserved"], 173)
+        variants = (raw.replace(names[0].encode(), names[1].encode()), raw.replace(b"0 ignored", b"1 ignored"),
+                    raw.replace(b"11 passed", b"10 passed"), raw.replace(b" ... ok", b" ... FAILED", 1),
+                    raw + b"extra\n", b"x" * (64 * 1024 + 1), raw.replace(b"running 11 tests", b"running 0 tests"))
+        for number, altered in enumerate(variants):
+            with self.subTest(case=number), self.assertRaises(helper.CheckFailure): helper.windows_installed_app_libtest(altered)
+        context = self.context()
+        self.assertEqual(helper.windows_installed_app_argv("/fixed-cargo", context), ["/fixed-cargo", "test", "--locked", "--offline", "--jobs", "1",
+            "--no-default-features", "--target", "x86_64-pc-windows-msvc", "--manifest-path", "/reviewed-source/desktop/src-tauri/Cargo.toml",
+            "--target-dir", "/owned-windows-gate/target", "--lib", "--no-run", "--message-format=json"])
+
+    def test_windows_reader_runtime_data_binds_actual_outcome_and_redacts_paths(self):
+        context = self.context()
+        value = {"schemaVersion": 1, **{key: context[key] for key in ("sourceSha", "runId", "attempt", "imageOS", "imageVersion")},
+            "powerShell": {"path": r"C:\Program Files\PowerShell\7\pwsh.exe", "version": "7.5.3", "edition": "Core"},
+            "runtime": {"version": "10.0.0", "framework": ".NET 10.0.0"},
+            "processAssembly": {"path": r"C:\Program Files\PowerShell\7\System.Diagnostics.Process.dll", "name": "System.Diagnostics.Process",
+                "version": "10.0.0.0", "moduleVersionId": "11111111-2222-3333-4444-555555555555",
+                "informationalVersion": "10.0.0+" + "a" * 40, "sourceRevision": None}}
+        public, paths = helper.windows_installed_runtime_identity(value, context)
+        self.assertEqual(set(paths), {"powerShell", "processAssembly"})
+        self.assertNotIn("Program Files", json.dumps(public)); self.assertNotIn('"path"', json.dumps(public))
+        for role in paths: public[role].update(size=123, sha256="4" * 64)
+        record = helper.windows_installed_phase_receipt(context, "windows-installed-runtime-data", identity=public)
+        summary, observed = helper.windows_installed_runtime_retention(record, context, "success")
+        self.assertEqual(summary["status"], "failed"); self.assertEqual(observed, record)  # Validation is not retained publication.
+        self.assertIs(summary["sourceMappingAuthenticated"], False); self.assertIs(summary["ordinaryStartAuthorized"], False)
+        for outcome, status in (("failure", "failed"), ("skipped", "unavailable"), ("cancelled", "unavailable")):
+            summary, observed = helper.windows_installed_runtime_retention(record, context, outcome)
+            self.assertEqual(summary["status"], status); self.assertIsNone(observed)
+        self.assertEqual(helper.windows_installed_runtime_retention(None, context, "success")[0]["status"], "failed")
+        mutations = {
+            "foreign-source": lambda item: item.update(sourceSha="9" * 40),
+            "typed-attempt": lambda item: item.update(attempt=True),
+            "path-alias": lambda item: item["powerShell"].update(path=r"C:\Program Files\..\pwsh.exe"),
+            "wrong-role": lambda item: item["processAssembly"].update(path=r"C:\Program Files\other.dll"),
+            "extra-field": lambda item: item["powerShell"].update(extra="unrelated"),
+            "module-shape": lambda item: item["processAssembly"].update(moduleVersionId="not-an-id"),
+            "framework-path": lambda item: item["runtime"].update(framework=r"C:\private"),
+            "source-revision": lambda item: item["processAssembly"].update(sourceRevision="unknown/revision"),
+        }
+        for label, change in mutations.items():
+            with self.subTest(case=label):
+                altered = deepcopy(value); change(altered)
+                with self.assertRaises(helper.CheckFailure): helper.windows_installed_runtime_identity(altered, context)
+        altered = deepcopy(record); altered["identity"]["powerShell"]["path"] = value["powerShell"]["path"]
+        self.assertEqual(helper.windows_installed_runtime_retention(altered, context, "success")[0]["status"], "failed")
+        with self.assertRaises(helper.CheckFailure): helper.windows_installed_runtime_retention(record, context, "queued")
+
+        for role, fields in {"powerShell": ("version", "edition"), "runtime": ("version", "framework"),
+                             "processAssembly": ("name", "version", "moduleVersionId")}.items():
+            for field in fields:
+                for missing in (False, True):
+                    with self.subTest(role=role, field=field, missing=missing):
+                        altered = deepcopy(record)
+                        if missing: del altered["identity"][role][field]
+                        else: altered["identity"][role][field] = None
+                        summary, accepted = helper.windows_installed_runtime_retention(altered, context, "success")
+                        self.assertEqual(summary["status"], "failed"); self.assertIsNone(accepted)
+        for role, field, wrong in (("powerShell", "edition", "Desktop"), ("powerShell", "version", "unknown"),
+                ("runtime", "framework", "other-runtime"), ("processAssembly", "name", "Other.Assembly"),
+                ("processAssembly", "moduleVersionId", "not-a-module-id"), ("processAssembly", "sourceRevision", "not-hex")):
+            with self.subTest(role=role, field=field):
+                altered = deepcopy(record); altered["identity"][role][field] = wrong
+                self.assertIsNone(helper.windows_installed_runtime_retention(altered, context, "success")[1])
+        altered = deepcopy(record); altered["attempt"] = True
+        self.assertIsNone(helper.windows_installed_runtime_retention(altered, context, "success")[1])
+        altered = deepcopy(record); altered["identity"]["processAssembly"]["informationalVersion"] = None
+        self.assertEqual(helper.windows_installed_runtime_retention(altered, context, "success")[1], altered)
+
+        raw = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n"
+        source = Path(context["root"]) / "runtime-data-checks.json"
+        destination = Path(context["root"]) / "public/runtime-data-checks.json"
+
+        def retain(*, outcome="success", input_error=None, payload=raw, output_error=None,
+                   short_write=False, close_error=False, readback_error=None, readback=raw):
+            reads, written = [], []
+
+            def read(path, limit):
+                reads.append(path)
+                self.assertEqual(limit, 64 << 10)
+                if path == source:
+                    if input_error is not None: raise input_error
+                    return payload
+                self.assertEqual(path, destination)
+                if readback_error is not None: raise readback_error
+                return readback
+
+            class Output:
+                def __enter__(self):
+                    return self
+
+                def write(self, data):
+                    written.append(data)
+                    if output_error is not None: raise output_error
+                    return len(data) - int(short_write)
+
+                def __exit__(self, *_):
+                    if close_error: raise OSError("inert public close failure")
+
+            with patch.object(helper, "windows_installed_bytes", side_effect=read), \
+                 patch.object(helper.Path, "open", autospec=True, return_value=Output()) as opened:
+                result = helper.windows_installed_retain_runtime(context, outcome)
+                if result[1] is None: opened.assert_not_called()
+                else: opened.assert_called_once_with(destination, "xb")
+            return result, reads, written
+
+        (summary, accepted), reads, written = retain()
+        self.assertEqual(summary["status"], "observed")
+        self.assertEqual(reads, [source, destination]); self.assertEqual(written, [raw])
+        self.assertEqual(accepted, {"path": source.name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()})
+        for failure in (FileNotFoundError("inert missing"), PermissionError("inert unreadable"),
+                helper.CheckFailure("inert nonordinary"), helper.CheckFailure("inert over-bound"),
+                helper.CheckFailure("inert changed during stable read")):
+            with self.subTest(input_failure=str(failure)):
+                (summary, accepted), reads, written = retain(input_error=failure)
+                self.assertEqual(summary["status"], "failed"); self.assertIsNone(accepted)
+                self.assertEqual(reads, [source]); self.assertEqual(written, [])
+        for payload in (b"{}", b"not-json", b"x" * (64 * 1024 + 1),
+                        raw.replace(b'"edition":"Core"', b'"edition":null')):
+            with self.subTest(invalid_input=len(payload)):
+                (summary, accepted), reads, written = retain(payload=payload)
+                self.assertEqual(summary["status"], "failed"); self.assertIsNone(accepted)
+                self.assertEqual(reads, [source]); self.assertEqual(written, [])
+        for outcome in ("failure", "skipped", "cancelled", "unavailable"):
+            (summary, accepted), reads, written = retain(outcome=outcome)
+            self.assertEqual(summary["status"], "failed" if outcome == "failure" else "unavailable")
+            self.assertIsNone(accepted); self.assertEqual(reads, []); self.assertEqual(written, [])
+        for options in ({"output_error": OSError("inert public write failure")}, {"short_write": True},
+                        {"close_error": True}, {"readback_error": OSError("inert public readback failure")},
+                        {"readback": raw + b"changed"}):
+            with self.subTest(public_failure=next(iter(options))), self.assertRaises((OSError, helper.CheckFailure)):
+                retain(**options)
+
+    def test_windows_reader_source_custody_and_original_aggregate_deadline(self):
+        context = self.context()
+        rows = [{"path": name, "size": 1, "sha256": "5" * 64} for name in helper.WINDOWS_INSTALLED_SOURCES]
+        raw = "\0".join(row["path"] for row in rows) + "\0"
+        with patch.object(helper, "clean_environment", return_value={}), patch.object(helper, "run", side_effect=["", raw]) as run, \
+             patch.object(helper, "fixed_file_inventory", return_value=rows):
+            self.assertEqual(helper.windows_installed_source_files(Path(context["source"]), Path(context["root"]), context["git"]), rows)
+            self.assertEqual([call.kwargs["check"] for call in run.call_args_list],
+                             ["windows-installed-source-status", "windows-installed-source-inventory"])
+        for outputs in ([" M tracked"], ["", raw[:-1]], ["", "other\0"]):
+            with patch.object(helper, "clean_environment", return_value={}), patch.object(helper, "run", side_effect=outputs), \
+                 patch.object(helper, "fixed_file_inventory", return_value=rows), self.assertRaises(helper.CheckFailure):
+                helper.windows_installed_source_files(Path(context["source"]), Path(context["root"]), context["git"])
+        context["sourceFiles"] = rows
+        with patch.object(helper, "windows_installed_directories"), patch.object(helper, "fixed_file_inventory", return_value=rows), \
+             patch.object(helper, "no_cargo_configuration"), patch.object(helper.Path, "exists", return_value=False), \
+             patch.object(helper.Path, "is_symlink", return_value=False), patch.dict(helper.os.environ, {}, clear=True), \
+             patch.object(helper, "run", side_effect=AssertionError("retention must not launch any tool")):
+            helper.windows_installed_inputs(context, retention_only=True)
+        with patch.object(helper.time, "monotonic", return_value=100.0):
+            self.assertEqual(helper.windows_installed_remaining(200.0, 60), 60)
+            self.assertEqual(helper.windows_installed_remaining(105.9, 60), 5)
+            with self.assertRaises(helper.CheckFailure): helper.windows_installed_remaining(100.9, 60)
+        with patch.object(helper.time, "monotonic", return_value=106.0), self.assertRaises(helper.CheckFailure):
+            helper.windows_installed_remaining(105.9, 60)  # Same deadline, never renewed per command.
+
+    def test_windows_reader_existing_job_and_phase_routes_remain_narrow(self):
+        text = HELPER.read_text(encoding="utf-8")
+        phase = text.split("def windows_installed_phase(", 1)[1].split("def main(", 1)[0]
+        self.assertIn('retention_only=name == "retain"', phase)
+        self.assertLess(phase.index('if name == "windows-installed-runtime-data"'), phase.index('phases = ("acquire", "compile", "windows-installed-native")'))
+        retained = phase.split('if name == "retain":', 1)[1].split('phases = ("acquire", "compile", "windows-installed-native")', 1)[0]
+        for unavailable in ('run(', 'tools(', 'runtime-identity.private.json', 'source_unchanged('): self.assertNotIn(unavailable, retained)
+        self.assertNotIn('files["runtime-data-checks.json"]', retained)
+        self.assertLess(retained.index('for filename, limit in files.items()'),
+                        retained.index('windows_installed_retain_runtime(context, outcome)'))
+        self.assertIn('"runtimeIdentity": runtime', retained)
+        self.assertEqual(phase.count('app_argv = windows_installed_app_argv(cargo, context)'), 1)
+        self.assertIn('[app_artifact["path"], *WINDOWS_INSTALLED_APP_INERT, "--exact", "--test-threads=1"]', phase)
+        self.assertIn('[artifact["path"], "--skip", WINDOWS_INSTALLED_TEST, "--test-threads=1"]', phase)
+        self.assertIn('[artifact["path"], WINDOWS_INSTALLED_TEST, "--exact", "--ignored", "--nocapture", "--test-threads=1"]', phase)
+        self.assertNotIn('native_protected_version_walk_and_original_settlement', phase)
+        workflow = (SOURCE / ".github/workflows/desktop-foundation.yml").read_text(encoding="utf-8").split("  windows-installed-native:\n", 1)[1]
+        self.assertIn("runs-on: windows-2025-vs2026", workflow)
+        self.assertEqual(workflow.count("continue-on-error: true"), 1)
+        self.assertIn("MRK_WINDOWS_RUNTIME_DATA_STEP_OUTCOME: ${{ steps.runtime-data.outcome }}", workflow)
+        self.assertLess(workflow.index('ci_foundation.py windows-installed-native'), workflow.index('id: runtime-data'))
+        self.assertLess(workflow.index('id: runtime-data'), workflow.index('id: retain'))
+        self.assertIn('[System.Diagnostics.Process].Assembly', workflow)
+        for unavailable in ('Process.Start', 'New-LocalUser', 'Set-Acl', 'Add-Type', 'Start-Process', 'Get-Process'):
+            self.assertNotIn(unavailable, workflow)
+
+
 if __name__ == "__main__":
     unittest.main()

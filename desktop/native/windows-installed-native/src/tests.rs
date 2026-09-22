@@ -61,6 +61,31 @@ fn own_inert(book: &mut NativeBook, original: &Original, number: usize) -> Resul
 
 #[test]
 fn original_destinations_are_stable_registered_and_book_bound() -> Result<()> {
+    // Same transition used by both native enumeration methods, with no native
+    // invocation: cursor purpose and owned name may be selected only once.
+    let mut mode = DirectoryMode::Unstarted;
+    assert_eq!(mode.bind(DirectoryMode::Unstarted), Err(Error::State));
+    mode.bind(DirectoryMode::Ancestor("Program Files".to_owned()))?;
+    mode.bind(DirectoryMode::Ancestor("Program Files".to_owned()))?;
+    assert_eq!(mode.bind(DirectoryMode::Ancestor("Other".to_owned())), Err(Error::State));
+    assert_eq!(mode.bind(DirectoryMode::Ancestor("program files".to_owned())), Err(Error::State));
+    assert_eq!(mode.bind(DirectoryMode::Strict), Err(Error::State));
+    let mut strict = DirectoryMode::Unstarted;
+    strict.bind(DirectoryMode::Strict)?; strict.bind(DirectoryMode::Strict)?;
+    assert_eq!(strict.bind(DirectoryMode::Ancestor("Program Files".to_owned())), Err(Error::State));
+    // A terminal cursor refuses before even changing its mode. Keep the slot
+    // Reserved so a broken guard still cannot invoke native code with a fake
+    // handle; the unchanged mode/ended assertions detect that regression.
+    let mut cursor = Inert::new();
+    let directory = cursor.book.reserve(Kind::Directory, None, "cursor", "cursor".to_owned())?;
+    cursor.book.slot_mut(directory.index)?.directory_ended = true;
+    assert!(matches!(cursor.book.next_entries(&directory), Err(Error::State)));
+    assert!(matches!(cursor.book.next_ancestor_entries(&directory, "Program Files"), Err(Error::State)));
+    assert_eq!(cursor.book.slot(directory.index)?.directory_mode, DirectoryMode::Unstarted);
+    assert!(cursor.book.slot(directory.index)?.directory_ended);
+    assert!(!cursor.book.started && cursor.book.active.is_none());
+    cursor.book.mark_interrupted();
+    assert!(matches!(cursor.book.next_ancestor_entries(&directory, ".."), Err(Error::Unknown)));
     let mut fixture = Inert::new(); let book = &mut fixture.book;
     assert!(book.never_started());
     assert!(book.first_unavailable.is_none());
@@ -619,6 +644,46 @@ fn metadata_and_directory_keep_the_full_identity_not_a_low_half() -> Result<()> 
     put32(&mut raw, offset_of!(FS::FILE_ID_EXTD_DIR_INFO, NextEntryOffset), 0);
     put32(&mut raw, offset_of!(FS::FILE_ID_EXTD_DIR_INFO, FileAttributes), 0x80000000);
     assert_eq!(decode::directory(&raw), Err(Error::Unsafe));
+
+    // Ordinary Windows roots contain unrelated junctions. Return their bounded
+    // DATA only in ancestor mode; never authorize opening/following one.
+    let mut sibling = entry("unrelated-link", full);
+    put32(&mut sibling, offset_of!(FS::FILE_ID_EXTD_DIR_INFO, FileAttributes),
+        FS::FILE_ATTRIBUTE_DIRECTORY | FS::FILE_ATTRIBUTE_REPARSE_POINT);
+    let aligned = (sibling.len() + 7) & !7;
+    sibling.resize(aligned, 0);
+    put32(&mut sibling, offset_of!(FS::FILE_ID_EXTD_DIR_INFO, NextEntryOffset), aligned as u32);
+    let mut target_id = full; target_id[0] = 2;
+    let mut target = entry("Program Files", target_id);
+    put32(&mut target, offset_of!(FS::FILE_ID_EXTD_DIR_INFO, FileAttributes), FS::FILE_ATTRIBUTE_DIRECTORY);
+    sibling.extend_from_slice(&target);
+    let ancestors = decode::ancestor_directory(&sibling, "Program Files")?;
+    assert_eq!(ancestors.len(), 2);
+    assert_eq!(ancestors[1].name, "Program Files");
+    assert_eq!(ancestors[1].file_id, target_id);
+    assert_ne!(ancestors[0].attributes & FS::FILE_ATTRIBUTE_REPARSE_POINT, 0);
+    assert_eq!(decode::directory(&sibling), Err(Error::Unsafe));
+    for selected in ["unrelated-link", "UNRELATED-LINK"] {
+        assert_eq!(decode::ancestor_directory(&sibling, selected), Err(Error::Unsafe));
+    }
+    assert_eq!(decode::ancestor_directory(&sibling[..sibling.len()-1], "Program Files"), Err(Error::Unsafe));
+    let mut malformed = sibling.clone();
+    put32(&mut malformed, offset_of!(FS::FILE_ID_EXTD_DIR_INFO, NextEntryOffset), 8);
+    assert_eq!(decode::ancestor_directory(&malformed, "Program Files"), Err(Error::Unsafe));
+    let mut zero_id = sibling.clone();
+    let id_at = offset_of!(FS::FILE_ID_EXTD_DIR_INFO, FileId);
+    zero_id[id_at..id_at+16].fill(0);
+    assert_eq!(decode::ancestor_directory(&zero_id, "Program Files"), Err(Error::Unsafe));
+    assert_eq!(decode::ancestor_directory(&vec![0; BUFFER + 1], "Program Files"), Err(Error::Bounds));
+    assert_eq!(decode::ancestor_directory(&sibling, ".."), Err(Error::Unsafe));
+    // Unknown unrelated attributes remain DATA; strict parsing remains closed.
+    put32(&mut sibling, offset_of!(FS::FILE_ID_EXTD_DIR_INFO, FileAttributes), 0x80000000);
+    assert!(decode::ancestor_directory(&sibling, "Program Files").is_ok());
+    assert_eq!(decode::directory(&sibling), Err(Error::Unsafe));
+    // The selected entry may never use this relaxation, even before open_child.
+    put32(&mut sibling, aligned + offset_of!(FS::FILE_ID_EXTD_DIR_INFO, FileAttributes),
+        FS::FILE_ATTRIBUTE_DIRECTORY | FS::FILE_ATTRIBUTE_REPARSE_POINT);
+    assert_eq!(decode::ancestor_directory(&sibling, "Program Files"), Err(Error::Unsafe));
     Ok(())
 }
 

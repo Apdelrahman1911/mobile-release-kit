@@ -112,6 +112,24 @@ pub(crate) fn metadata(kind: FileKind, basic: &[u8], standard: &[u8], tag: &[u8]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DirectoryEntry { pub name: String, pub file_id: [u8; 16], pub kind: FileKind, pub attributes: u32 }
 pub(crate) fn directory(raw: &[u8]) -> Result<Vec<DirectoryEntry>> {
+    directory_records(raw, DirectoryPolicy::Strict)
+}
+// A separate DATA decoder avoids letting a blanket permissive flag leak into
+// immutable inventory. Framing/names/full IDs stay checked for every sibling.
+pub(crate) fn ancestor_directory(raw: &[u8], selected: &str) -> Result<Vec<DirectoryEntry>> {
+    if !component(selected) { return Err(Error::Unsafe); }
+    directory_records(raw, DirectoryPolicy::Ancestor(selected))
+}
+enum DirectoryPolicy<'a> { Strict, Ancestor(&'a str) }
+impl DirectoryPolicy<'_> {
+    fn ordinary(&self, name: &str) -> bool {
+        match self {
+            Self::Strict => true,
+            Self::Ancestor(selected) => name == "." || name == ".." || name.eq_ignore_ascii_case(selected),
+        }
+    }
+}
+fn directory_records(raw: &[u8], policy: DirectoryPolicy<'_>) -> Result<Vec<DirectoryEntry>> {
     if raw.len() > BUFFER { return Err(Error::Bounds); }
     let header = offset_of!(FS::FILE_ID_EXTD_DIR_INFO, FileName);
     let mut offset = 0usize;
@@ -128,7 +146,7 @@ pub(crate) fn directory(raw: &[u8]) -> Result<Vec<DirectoryEntry>> {
         let name = utf16(span(record, header, length)?)?;
         if name.contains('\0') || (name != "." && name != ".." && !component(&name)) { return Err(Error::Unsafe); }
         let attrs = u32_at(record, offset_of!(FS::FILE_ID_EXTD_DIR_INFO, FileAttributes))?;
-        attributes(attrs)?;
+        if policy.ordinary(&name) { attributes(attrs)?; }
         let kind = if attrs & FS::FILE_ATTRIBUTE_DIRECTORY != 0 { FileKind::Directory } else { FileKind::File };
         if (name == "." || name == "..") && kind != FileKind::Directory { return Err(Error::Unsafe); }
         let file_id = span(record, offset_of!(FS::FILE_ID_EXTD_DIR_INFO, FileId), 16)?.try_into().map_err(|_| Error::Unsafe)?;

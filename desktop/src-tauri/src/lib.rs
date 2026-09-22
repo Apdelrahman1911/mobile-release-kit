@@ -28,6 +28,9 @@ mod installed_runtime;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[path = "installed_runtime_macos.rs"]
 mod installed_runtime;
+// Inspection DATA only; deliberately not the producing installed_runtime alias.
+#[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+mod installed_runtime_windows;
 #[cfg(all(target_os = "macos", not(target_arch = "aarch64"), feature = "desktop-shell"))]
 compile_error!("the installed Mac desktop supports ARM64 macOS 26 only");
 #[cfg(all(feature = "ubuntu-runtime-publisher", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]

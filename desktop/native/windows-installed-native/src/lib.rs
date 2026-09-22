@@ -68,6 +68,17 @@ impl From<FileKind> for Kind {
         match value { FileKind::Directory => Self::Directory, FileKind::File => Self::File }
     }
 }
+// The ORIGINAL directory cursor gets one purpose and one owned selected name.
+// Another mode/name cannot reinterpret earlier batches or restart enumeration.
+#[derive(Debug, Eq, PartialEq)]
+enum DirectoryMode { Unstarted, Strict, Ancestor(String) }
+impl DirectoryMode {
+    fn bind(&mut self, requested: Self) -> Result<()> {
+        if requested == Self::Unstarted { return Err(Error::State); }
+        if *self == Self::Unstarted { *self = requested; Ok(()) }
+        else if *self == requested { Ok(()) } else { Err(Error::State) }
+    }
+}
 struct Slot {
     output: UnsafeCell<F::HANDLE>,
     state: SlotState,
@@ -78,6 +89,7 @@ struct Slot {
     read_bytes: u64,
     read_ended: bool,
     directory_ended: bool,
+    directory_mode: DirectoryMode,
     _pin: PhantomPinned,
 }
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -248,7 +260,7 @@ impl NativeBook {
         let index = self.slots.len();
         self.slots.push(ManuallyDrop::new(Box::pin(Slot { output: UnsafeCell::new(null_mut()),
             state: SlotState::Reserved, kind, parent, name: encoded, canonical,
-            read_bytes: 0, read_ended: false, directory_ended: false, _pin: PhantomPinned })));
+            read_bytes: 0, read_ended: false, directory_ended: false, directory_mode: DirectoryMode::Unstarted, _pin: PhantomPinned })));
         Ok(Original { book: Arc::clone(&self.identity), index })
     }
     fn arena(&self) -> Result<&Arena> {
@@ -641,8 +653,21 @@ impl NativeBook {
     /// One sequential bounded batch on the ORIGINAL directory. Never restart.
     /// None means actual ERROR_NO_MORE_FILES, not an empty/malformed batch.
     pub fn next_entries(&mut self, original: &Original) -> Result<Option<Vec<DirectoryEntry>>> {
+        self.directory_entries(original, DirectoryMode::Strict)
+    }
+    /// Parent-prefix DATA only. Never use for the version's strict inventory.
+    /// Unrelated sibling attributes do not grant any open/follow permission. The
+    /// exact selected name (and ASCII aliases) still needs ordinary attributes;
+    /// the caller owes exact-name EOF matching and original canonical/full-ID checks.
+    pub fn next_ancestor_entries(&mut self, original: &Original, selected_name: &str) -> Result<Option<Vec<DirectoryEntry>>> {
+        self.clear()?; // absorbing native Unknown precedes even argument refusal
+        if !decode::component(selected_name) { return Err(Error::Unsafe); }
+        self.directory_entries(original, DirectoryMode::Ancestor(selected_name.to_owned()))
+    }
+    fn directory_entries(&mut self, original: &Original, mode: DirectoryMode) -> Result<Option<Vec<DirectoryEntry>>> {
         self.clear()?; let index = self.index(original)?;
         if self.slot(index)?.kind != Kind::Directory || self.slot(index)?.directory_ended { return Err(Error::State); }
+        self.slot_mut(index)?.directory_mode.bind(mode)?;
         // At the exact limit allow an EOF observation, but a single over-limit
         // batch exhausts this entire book, not just the current directory.
         if self.entries > MAX_ENTRIES { return Err(Error::Bounds); }
@@ -653,7 +678,11 @@ impl NativeBook {
         if matches!(result.arena.returned()?, Returned::Boolean(0, F::ERROR_NO_MORE_FILES)) {
             self.slot_mut(index)?.directory_ended = true; return Ok(None);
         }
-        let entries = decode::directory(result.bytes(BUFFER)?)?;
+        let entries = match &self.slot(index)?.directory_mode {
+            DirectoryMode::Strict => decode::directory(result.bytes(BUFFER)?)?,
+            DirectoryMode::Ancestor(name) => decode::ancestor_directory(result.bytes(BUFFER)?, name)?,
+            DirectoryMode::Unstarted => return Err(Error::State),
+        };
         self.entries = self.entries.checked_add(entries.len()).ok_or(Error::Bounds)?;
         if self.entries > MAX_ENTRIES { return Err(Error::Bounds); }
         self.slot_mut(index)?.directory_ended = false;
