@@ -109,13 +109,15 @@ def action_context_data(step="OpenProject", *, site=None, domain="objc-exception
     return value
 
 
+def unrequested_recheck():
+    return {"state": "unrequested", **dict.fromkeys(M.ACCESSIBILITY_RECHECK_FLAGS, False),
+            "timely": None, "custodyKnown": None, "proof": None}
+
+
 def accessibility_context_data():
     value = action_context_data()
     value["nativeAction"] = None  # The old selector is historical DATA only.
-    value["accessibility"] = {"mechanism": "accessibility-press", "step": "OpenProject", "id": 2,
-        "prepared": True, "entered": True, "attempted": True, "pressReturned": True, "returned": True,
-        "retired": True, "identityMatched": True, "controlMatched": True, "cleanupReturned": True,
-        "site": "press", "error": "none"}
+    value["accessibility"] = deepcopy(M.expected_result(BINDING, "first-save")["native"]["projectOpenInput"])
     return value
 
 
@@ -443,28 +445,32 @@ class AquaDataTests(unittest.TestCase):
         historical["nativeHandler"] = {"step": "Quit", "entered": False, "returned": False}
         historical["lastPanel"] = None
         historical["pending"] = {"kind": "native", "step": "Quit"}
-        examples.append(historical)  # The completed original Open sample persists.
+        examples.append(historical)
         sample = value["accessibility"]
-        flags = ("attempted", "pressReturned", "identityMatched", "controlMatched", "cleanupReturned")
+        flags = ("attempted", "pressReturned", "identityMatched", "controlMatched", "cleanupReturned", "nativeRechecked")
         sample.update(prepared=False, entered=False, returned=False, retired=False, attempted=False, pressReturned=False,
-                      identityMatched=None, controlMatched=None, cleanupReturned=None, site="binding", error="unsupported")
+                      identityMatched=None, controlMatched=None, cleanupReturned=None, nativeRechecked=None,
+                      phase=None, calls=None, initialProjection=None, finalProjection=None,
+                      nativeRecheck=unrequested_recheck(), site="binding", error="unsupported")
         examples.append(deepcopy(value))
         sample.update(prepared=True, site=None, error=None)
         examples.append(deepcopy(value))
-        sample.update(retired=True, site="entry", error="deadline")  # Positively known no FFI entry.
-        examples.append(deepcopy(value))
-        sample.update(entered=True, retired=False, **{key: None for key in flags}, site=None, error=None)
+        sample.update(retired=True, site="entry", error="deadline")
+        examples.append(deepcopy(value))  # Positive no-FFI-entry is not native return.
+        sample.update(entered=True, retired=False, **dict.fromkeys(flags), site=None, error=None)
         value["pending"] = {"kind": "accessibility", "step": "OpenProject"}
-        examples.append(deepcopy(value))  # An unreturned call does not claim attempted=False.
+        examples.append(deepcopy(value))
         sample.update(returned=True, site="entry", error="custody")
-        examples.append(deepcopy(value))  # Invalid returned ABI still cannot retire.
+        examples.append(deepcopy(value))  # Invalid returned ABI cannot retire.
         for error in ("unsupported", "ambiguous", "malformed", "limit", "deadline", "ineligible", "invalid-element"):
             sample.update(attempted=False, pressReturned=False, identityMatched=False, controlMatched=False,
-                          cleanupReturned=True, retired=True, site="panel-identity", error=error)
+                          nativeRechecked=False, cleanupReturned=True, retired=True, phase="initial", calls=6,
+                          initialProjection={"windows": 1, "children": None, "sheets": None, "matched": False},
+                          site="parent-identity", error=error)
             value["pending"] = None
             examples.append(deepcopy(value))
         value = accessibility_context_data()
-        value["accessibility"]["error"] = "cannot-complete"  # Spent attempt, including possible actual effect.
+        value["accessibility"]["error"] = "cannot-complete"  # Spent, possibly effective attempt; never retried.
         examples.append(deepcopy(value))
         value["accessibility"].update(pressReturned=False, cleanupReturned=False, retired=False, error="objc-exception")
         value["pending"] = {"kind": "accessibility", "step": "OpenProject"}
@@ -478,11 +484,12 @@ class AquaDataTests(unittest.TestCase):
 
     def test_accessibility_malformed_data_never_replaces_existing_failure_context(self):
         good = accessibility_context_data()
-        for field, bad in (("id", True), ("id", 1), ("id", 3), ("step", "Quit"), ("mechanism", "selector"),
+        for field, bad in (("id", True), ("id", 1), ("id", 3), ("step", "Quit"), ("mechanism", "accessibility-press"),
                            ("prepared", False), ("entered", False), ("attempted", False), ("pressReturned", None),
                            ("returned", False), ("retired", 1), ("identityMatched", False), ("controlMatched", False),
                            ("cleanupReturned", False), ("site", "private-selector"), ("error", "PRIVATE"),
-                           ("identifier", "PRIVATE")):
+                           ("nativeRechecked", False), ("nativeRecheck", None), ("phase", "initial"), ("calls", True),
+                           ("initialProjection", None), ("finalProjection", None), ("identifier", "PRIVATE")):
             value = deepcopy(good); value["accessibility"][field] = bad
             expected = deepcopy(good); expected["accessibility"] = None
             self.assertEqual(M.failure_context(context_row(value), b""), expected, (field, bad))
@@ -503,9 +510,10 @@ class AquaDataTests(unittest.TestCase):
 
     def test_success_requires_actual_trust_and_one_retired_public_press(self):
         fields = ("prepared", "entered", "attempted", "pressReturned", "returned", "retired", "identityMatched",
-                  "controlMatched", "cleanupReturned")
+                  "controlMatched", "cleanupReturned", "nativeRechecked")
         for case in M.CASES:
             good = M.expected_result(BINDING, case)
+            self.assertEqual(M.parse_result(captured(good), b"", BINDING, case), good)
             variants = []
             for bad in (False, None, 1):
                 value = deepcopy(good); value["native"]["accessibilityTrustedWithoutPrompt"] = bad; variants.append(value)
@@ -514,40 +522,114 @@ class AquaDataTests(unittest.TestCase):
                 value = deepcopy(good); value["native"]["projectOpenInput"] = accessibility_context_data()["accessibility"]
                 variants.append(value)
             else:
-                self.assertEqual(good["native"]["projectOpenInput"]["mechanism"], "accessibility-press")
+                self.assertEqual(good["native"]["projectOpenInput"]["mechanism"], "accessibility-press-original-sheet-v1")
                 for field in fields:
                     for bad in (False, None, 1):
                         value = deepcopy(good); value["native"]["projectOpenInput"][field] = bad; variants.append(value)
-                for field, bad in (("error", "cannot-complete"), ("site", "default-button"), ("mechanism", "ok-selector"),
-                                   ("id", 3)):
+                for field, bad in (("error", "cannot-complete"), ("site", "default-button"), ("mechanism", "accessibility-press"),
+                                   ("id", 3), ("phase", "final"), ("nativeRecheck", unrequested_recheck())):
                     value = deepcopy(good); value["native"]["projectOpenInput"][field] = bad; variants.append(value)
             for value in variants:
                 with self.assertRaises(M.Refused):
                     M.parse_result(captured(value), b"", BINDING, case)
 
+    def test_original_sheet_native_proof_and_exact_aggregate_call_budget_are_mandatory(self):
+        good = M.expected_result(BINDING, "first-save")
+        for proof_path in (("projectOpenBinding", "binding"), ("projectOpenInput", "nativeRecheck", "proof")):
+            for check in M.ACCESSIBILITY_PROOF_CHECKS:
+                for bad in (False, None, 1):
+                    value = deepcopy(good); proof = value["native"]
+                    for part in proof_path:
+                        proof = proof[part]
+                    proof["checks"][check] = bad
+                    with self.assertRaises(M.Refused):
+                        M.parse_result(captured(value), b"", BINDING, "first-save")
+        # Variable topology is allowed only when the complete two-pass count
+        # leaves exactly1..8 ancestry edges within the unchanged64-call budget.
+        for windows, children, final_windows, final_children, edges in ((1, 1, 1, 1, 1), (2, 3, 1, 4, 2), (4, 4, 3, 3, 5)):
+            value = deepcopy(good); sample = value["native"]["projectOpenInput"]
+            sample["initialProjection"].update(windows=windows, children=children)
+            sample["finalProjection"].update(windows=final_windows, children=final_children)
+            sample["calls"] = 2 * (13 + windows + children + final_windows + final_children + edges)
+            self.assertEqual(M.parse_result(captured(value), b"", BINDING, "first-save"), value)
+            for bad in (True, None, 35, 65, sample["calls"] + 1, 2 * (13 + windows + children + final_windows + final_children)):
+                broken = deepcopy(value); broken["native"]["projectOpenInput"]["calls"] = bad
+                with self.assertRaises(M.Refused):
+                    M.parse_result(captured(broken), b"", BINDING, "first-save")
+        for path in ("initialProjection", "finalProjection"):
+            for field, bad in (("windows", 5), ("children", 17), ("sheets", 0), ("sheets", 2), ("matched", False), ("children", True)):
+                value = deepcopy(good); value["native"]["projectOpenInput"][path][field] = bad
+                with self.assertRaises(M.Refused):
+                    M.parse_result(captured(value), b"", BINDING, "first-save")
+
+    def test_native_recheck_unknown_negative_and_joined_receipts_are_not_interchangeable(self):
+        good = accessibility_context_data()
+        success = good["accessibility"]["nativeRecheck"]
+        for field, bad in (("state", "unknown"), ("state", "queued"), ("timely", False), ("custodyKnown", False),
+                           ("proof", None), *((key, False) for key in M.ACCESSIBILITY_RECHECK_FLAGS)):
+            value = deepcopy(good); value["accessibility"]["nativeRecheck"][field] = bad
+            expected = deepcopy(value); expected["accessibility"] = None
+            self.assertEqual(M.failure_context(context_row(value), b""), expected)
+        # A timely known-negative receipt permits no Press. It may retire only
+        # with the actual original AX return/cleanup/custody, unlike Unknown.
+        value = deepcopy(good); sample = value["accessibility"]
+        sample.update(attempted=False, pressReturned=False, identityMatched=False, controlMatched=False,
+                      nativeRechecked=False, phase="native-recheck", calls=12, finalProjection=None,
+                      site="native-recheck", error="ineligible")
+        sample["nativeRecheck"].update(nativeEntered=False, proof=None)
+        self.assertEqual(M.failure_context(context_row(value), b""), value)
+        value["accessibility"]["nativeRecheck"] = {**unrequested_recheck(), "state": "unknown", "requested": True,
+            "dispatchAttempted": True, "timely": False}
+        sample.update(retired=False, error="deadline")
+        self.assertEqual(M.failure_context(context_row(value), b""), value)
+        sample["retired"] = True
+        expected = deepcopy(value); expected["accessibility"] = None
+        self.assertEqual(M.failure_context(context_row(value), b""), expected)
+        # In-flight DATA does not claim native non-entry simply because the
+        # original main body has not returned any native-entry facts yet.
+        sample.update(returned=False, retired=False, site=None, error=None,
+                      **dict.fromkeys(("attempted", "pressReturned", "identityMatched", "controlMatched", "cleanupReturned",
+                                       "nativeRechecked", "phase", "calls", "initialProjection", "finalProjection")))
+        sample["nativeRecheck"] = {**unrequested_recheck(), "state": "entered", "requested": True,
+                                   "dispatchAttempted": True, "bodyEntered": True}
+        self.assertEqual(M.failure_context(context_row(value), b""), value)
+        self.assertEqual(success["state"], "joined")  # Fixtures do not alias the expected proof.
+
     def test_early_binding_matrix_is_diagnostic_but_late_identity_is_mandatory(self):
-        classes = ("nil", "match", "different", "type-invalid")
         for case in ("first-save", "noop-stale", "save-loss"):
-            for parent in classes:
-                for panel in classes:
-                    good = M.expected_result(BINDING, case)
-                    sample = good["native"]["projectOpenBinding"]
-                    sample["configuration"].update(parent=parent, panel=panel)
-                    self.assertEqual(M.parse_result(captured(good), b"", BINDING, case), good)
-                    context = binding_context_data(case); context["accessibilityBinding"] = deepcopy(sample)
-                    self.assertEqual(M.failure_context(context_row(context), b"", case), context)
-                    if parent == panel == "match":
-                        continue
-                    # Both late getter observations survive even when the
-                    # first is already a mismatch. Neither can authorize input.
-                    sample["binding"].update(parent=parent, panel=panel,
-                        site="parent-get" if parent != "match" else "panel-get", error="unsupported")
-                    context["accessibilityBinding"] = deepcopy(sample)
-                    self.assertEqual(M.failure_context(context_row(context), b"", case), context)
-                    with self.assertRaisesRegex(M.Refused, "^project-open-binding$"):
-                        M.parse_result(captured(good), b"", BINDING, case)
-        missing = M.expected_result(BINDING, "first-save")
-        missing["native"]["projectOpenBinding"] = None
+            for parent in ("nil", "match", "different", "type-invalid"):
+                good = M.expected_result(BINDING, case)
+                sample = good["native"]["projectOpenBinding"]
+                sample["configuration"]["parent"] = parent
+                self.assertEqual(M.parse_result(captured(good), b"", BINDING, case), good)
+                context = binding_context_data(case); context["accessibilityBinding"] = deepcopy(sample)
+                self.assertEqual(M.failure_context(context_row(context), b"", case), context)
+                if parent == "match":
+                    continue
+                sample["binding"].update(parent=parent, site="parent-identifier", error="unsupported")
+                sample["binding"]["checks"]["parentIdentifier"] = False
+                context["accessibilityBinding"] = deepcopy(sample)
+                self.assertEqual(M.failure_context(context_row(context), b"", case), context)
+                with self.assertRaisesRegex(M.Refused, "^project-open-binding$"):
+                    M.parse_result(captured(good), b"", BINDING, case)
+        for panel in ("nil", "type-invalid", "empty", "byte-limit", "nul", "encoding-invalid", "different"):
+            good = M.expected_result(BINDING, "first-save"); proof = good["native"]["projectOpenBinding"]["binding"]
+            proof.update(panel=panel, site="stable-identifier", error="changed")
+            proof["checks"].update(stableIdentifier=False, finalEligibility=None)
+            context = binding_context_data(); context["accessibilityBinding"]["binding"] = proof
+            self.assertEqual(M.failure_context(context_row(context), b"", "first-save"), context)
+            self.assertIs(proof["checks"]["panelIdentifier"], True)
+            for field, bad in (("site", "panel-identifier"), ("error", "unsupported"), ("finalEligibility", True)):
+                broken = deepcopy(context); target = broken["accessibilityBinding"]["binding"]
+                if field == "finalEligibility":
+                    target["checks"][field] = bad
+                else:
+                    target[field] = bad
+                expected = deepcopy(broken); expected["accessibilityBinding"] = None
+                self.assertEqual(M.failure_context(context_row(broken), b"", "first-save"), expected)
+            with self.assertRaises(M.Refused):
+                M.parse_result(captured(good), b"", BINDING, "first-save")
+        missing = M.expected_result(BINDING, "first-save"); missing["native"]["projectOpenBinding"] = None
         with self.assertRaises(M.Refused):
             M.parse_result(captured(missing), b"", BINDING, "first-save")
         picker = M.expected_result(BINDING, "picker-loss")
@@ -556,45 +638,34 @@ class AquaDataTests(unittest.TestCase):
             M.parse_result(captured(picker), b"", BINDING, "picker-loss")
 
     def test_binding_partial_returns_remain_data_without_action_or_finality(self):
-        flags = ("parentSetterEntered", "parentSetterReturned", "panelSetterEntered", "panelSetterReturned")
+        flags = ("parentSetterEntered", "parentSetterReturned")
         examples = []
         for result in ("permission-denied", "io", "invalid-input", "already", "other"):
             context = binding_context_data(); sample = context["accessibilityBinding"]
             sample["start"]["result"] = result; sample["binding"] = None
-            sample["configuration"].update(attempted=False, **dict.fromkeys(flags, False), parent=None, panel=None, site=None, error=None)
+            sample["configuration"].update(attempted=False, **dict.fromkeys(flags, False), parent=None, site=None, error=None)
             examples.append(context)
-        for site, error, bits, parent, panel in (
-            ("objects", "ineligible", (False, False, False, False), None, None),
-            ("tags", "invalid-input", (False, False, False, False), None, None),
-            ("tags", "objc-exception", (False, False, False, False), None, None),
-            ("parent-set", "objc-exception", (True, False, False, False), None, None),
-            ("panel-set", "objc-exception", (True, True, True, False), None, None),
-            ("parent-get", "objc-exception", (True, True, True, True), None, None),
-            ("panel-get", "objc-exception", (True, True, True, True), "nil", None),
-            ("complete", "none", (True, True, True, True), "different", "type-invalid"),
+        for site, error, bits, parent in (
+            ("objects", "ineligible", (False, False), None), ("parent-tag", "invalid-input", (False, False), None),
+            ("parent-tag", "objc-exception", (False, False), None), ("parent-set", "objc-exception", (True, False), None),
+            ("parent-get", "objc-exception", (True, True), None), ("complete", "none", (True, True), "different"),
         ):
             context = binding_context_data(); sample = context["accessibilityBinding"]
             sample["start"]["result"] = "io"; sample["binding"] = None
-            sample["configuration"].update(**dict(zip(flags, bits)), parent=parent, panel=panel, site=site, error=error)
+            sample["configuration"].update(**dict(zip(flags, bits)), parent=parent, site=site, error=error)
             examples.append(context)
-        for attempted, site, error, parent, panel in (
-            (False, "objects", "ineligible", None, None),
-            (True, "objects", "ineligible", None, None),
-            (True, "objects", "objc-exception", "match", "match"),
-            (True, "tags", "invalid-input", None, None),
-            (True, "tags", "objc-exception", None, None),
-            (True, "parent-get", "objc-exception", None, None),
-            (True, "panel-get", "objc-exception", "type-invalid", None),
-        ):
+        for attempted, site, error, eligible in ((False, "objects", "custody", None),
+                                                (True, "objects", "ineligible", False),
+                                                (True, "attachment", "objc-exception", True)):
             context = binding_context_data()
-            context["accessibilityBinding"]["binding"].update(attempted=attempted, parent=parent, panel=panel, site=site, error=error)
+            context["accessibilityBinding"]["binding"] = {"returned": True, "attempted": attempted,
+                "checks": {**dict.fromkeys(M.ACCESSIBILITY_PROOF_CHECKS), "eligible": eligible},
+                "parent": None, "panel": None, "children": None, "originals": None, "site": site, "error": error}
             examples.append(context)
         for context in examples:
             self.assertEqual(M.failure_context(context_row(context), b"", "first-save"), context)
             self.assertIsNone(context["nativeHandler"])
             self.assertIsNone(context["accessibility"])
-        # The production exception seam must pass the actual known case and
-        # preserve the same exception/UNKNOWN boundary, not just decode bytes.
         with inert_exception_owner(stderr=context_row(examples[8])) as call:
             fixtures = InertFixtures()
             with self.assertRaises(RuntimeError) as caught:
@@ -612,14 +683,15 @@ class AquaDataTests(unittest.TestCase):
         good["accessibilityBinding"] = binding_context_data()["accessibilityBinding"]
         variants = []
         for path, bad in (
-            (("mechanism",), "selector"), (("case",), "noop-stale"), (("id",), True), (("id",), 1), (("kind",), "quit"),
-            (("tag",), "PRIVATE"), (("start", "returned"), False), (("start", "returned"), 1),
+            (("mechanism",), "public-accessibility-identifier"), (("case",), "noop-stale"), (("id",), True), (("id",), 1),
+            (("kind",), "quit"), (("tag",), "PRIVATE"), (("start", "returned"), False), (("start", "returned"), 1),
             (("start", "result"), "permission-denied"), (("start", "result"), "unknown-status"),
-            (("configuration", "parentSetterEntered"), False), (("configuration", "panelSetterReturned"), False),
-            (("configuration", "parent"), None), (("configuration", "panel"), True),
+            (("configuration", "parentSetterEntered"), False), (("configuration", "panelSetterReturned"), True),
+            (("configuration", "parent"), None), (("configuration", "panel"), "match"),
             (("configuration", "error"), "unsupported"), (("configuration", "site"), "parent-get"),
             (("binding", "returned"), False), (("binding", "returned"), 1), (("binding", "attempted"), False),
-            (("binding", "parent"), "nil"), (("binding", "panel"), "different"),
+            (("binding", "parent"), "nil"), (("binding", "panel"), "different"), (("binding", "children"), True),
+            (("binding", "children"), 17), (("binding", "originals"), "multiple"),
             (("binding", "site"), "parent-set"), (("binding", "error"), "PRIVATE"),
         ):
             value = deepcopy(good); target = value["accessibilityBinding"]
@@ -634,18 +706,18 @@ class AquaDataTests(unittest.TestCase):
             self.assertEqual(M.failure_context(context_row(good), b"", case), expected)
         duplicate = context_row(good).replace(b'"result":"ok"', b'"result":"ok","result":"io"')
         self.assertIsNone(M.failure_context(duplicate, b"", "first-save"))
-        # Upper bound of the old closed context plus worst-sized scalar values
-        # in the new sibling, not a claim that this synthetic matrix occurred.
-        largest = deepcopy(good["accessibilityBinding"])
-        largest["start"]["result"] = "permission-denied"
-        for phase in (largest["configuration"], largest["binding"]):
-            phase.update(parent="type-invalid", panel="type-invalid", site="parent-set", error="cleanup-unknown")
-            for key, value in phase.items():
-                if type(value) is bool:
-                    phase[key] = False
+        # Conservative closed-scalar upper bound, not actual/native evidence.
+        largest = deepcopy(good)
+        largest["accessibilityBinding"]["start"]["result"] = "permission-denied"
+        largest["accessibilityBinding"]["configuration"].update(parent="type-invalid", site="parent-get", error="cleanup-unknown")
+        for proof in (largest["accessibilityBinding"]["binding"], largest["accessibility"]["nativeRecheck"]["proof"]):
+            proof.update(parent="type-invalid", panel="encoding-invalid", children=17, originals="multiple",
+                         site="panel-attached-sheet", error="cleanup-unknown", returned=False, attempted=False)
+            proof["checks"] = dict.fromkeys(M.ACCESSIBILITY_PROOF_CHECKS, False)
+        largest["accessibility"].update(site="parent-identity", error="cleanup-unknown", phase="native-recheck", calls=64)
+        largest["accessibility"]["nativeRecheck"]["state"] = "not-dispatched"
         self.assertEqual(M.FAILURE_CONTEXT_LIMIT, 4096)
-        self.assertLess(1536 + len(json.dumps({"accessibilityBinding": largest}, separators=(",", ":")).encode("ascii")),
-                        M.FAILURE_CONTEXT_LIMIT)
+        self.assertLess(len(context_row(largest)), M.FAILURE_CONTEXT_LIMIT)
 
     def test_original_exception_buffers_do_not_change_error_or_finality(self):
         for duplicate in (False, True):
@@ -998,37 +1070,50 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn("s->unknown = YES; return EIO;", stopped)
         self.assertNotIn("return EPERM;", stopped)
         configuration = native.split("static BOOL mrk_panel_configure_open_identity(MRKInstalledPanel *s) {", 1)[1].split(
-            "int mrk_panel_observe_open_identity(", 1)[0]
-        self.assertEqual(configuration.count("setAccessibilityIdentifier:"), 2)
+            "static BOOL mrk_original_eligible(", 1)[0]
+        self.assertEqual(configuration.count("setAccessibilityIdentifier:"), 1)
         self.assertEqual(configuration.count("[s->parent accessibilityIdentifier]"), 1)
-        self.assertEqual(configuration.count("[s->window accessibilityIdentifier]"), 1)
+        self.assertNotIn("[s->window accessibilityIdentifier]", configuration)
+        self.assertNotIn("[s->window setAccessibilityIdentifier:", native)
         self.assertLess(configuration.index("MRK_ID_CONFIG_ATTEMPTED"), configuration.index("[NSUUID UUID]"))
-        for target, entered, returned in (("parent", "MRK_ID_PARENT_ENTERED", "MRK_ID_PARENT_RETURNED"),
-                                           ("window", "MRK_ID_PANEL_ENTERED", "MRK_ID_PANEL_RETURNED")):
-            self.assertLess(configuration.index(entered), configuration.index(f"[s->{target} setAccessibilityIdentifier:"))
-            self.assertLess(configuration.index(f"[s->{target} setAccessibilityIdentifier:"), configuration.index(returned))
-        self.assertLess(configuration.index("d->configuration_parent ="), configuration.index("d->configuration_panel ="))
-        self.assertLess(configuration.index("d->configuration_panel ="), configuration.index("MRK_ID_CONFIG_COMPLETE"))
-        self.assertNotIn("MRK_ID_MATCH", configuration)  # Normal early classes cannot veto presentation.
+        self.assertLess(configuration.index("MRK_ID_PARENT_ENTERED"), configuration.index("[s->parent setAccessibilityIdentifier:"))
+        self.assertLess(configuration.index("[s->parent setAccessibilityIdentifier:"), configuration.index("MRK_ID_PARENT_RETURNED"))
+        self.assertLess(configuration.index("d->parent ="), configuration.index("MRK_ID_CONFIG_COMPLETE"))
+        self.assertNotIn("MRK_ID_MATCH", configuration)
         self.assertIn("@throw;", configuration)
         copied = native.split("void mrk_panel_observe_identity_data(", 1)[1].split("static BOOL mrk_identity_tag(", 1)[0]
         self.assertEqual(copied.count("memcpy("), 1)
         for forbidden in ("[s->", "[NS", "release]", "retain]", "mrk_panel_poll", "mrk_main_thread("):
             self.assertNotIn(forbidden, copied)
+        identifier = native.split("static uint32_t mrk_original_identifier(", 1)[1].split(
+            "static BOOL mrk_panel_configure_open_identity(", 1)[0]
+        for required in ("length > 63", "characterAtIndex:i] == 0", "bytes_needed > 63", "getBytes:bytes maxLength:63",
+                         "remainingRange:&remainder", "remainder.length", "used != bytes_needed", "mrk_identity_utf8(bytes)",
+                         "[roundtrip isEqualToString:text]"):
+            self.assertIn(required, identifier)
+        self.assertNotIn("allowLossyConversion", identifier)
+        topology = native.split("static BOOL mrk_original_topology(", 1)[1].split("static int mrk_original_proof(", 1)[0]
+        for required in ("[s->parent sheets]", "count == 1 && [sheets objectAtIndex:0] == s->window",
+                         "[s->window sheets]", "[s->window attachedSheet] == nil", "[s->parent accessibilityChildren]",
+                         "count > 16", "[children objectAtIndex:i] == s->window", "originals == 1",
+                         "[s->window accessibilityParent] == s->parent", "NSAccessibilitySheetRole"):
+            self.assertIn(required, topology)
+        proof = native.split("static int mrk_original_proof(", 1)[1].split("int mrk_panel_observe_open_identity(", 1)[0]
+        for required in ("mrk_original_eligible(s)", "mrk_observation_attached(s)", "mrk_observation_directory_ready(s)",
+                         "[s->parent accessibilityIdentifier]", "[s->window accessibilityIdentifier]",
+                         "if (freeze) memcpy(s->observationPanelTag, current, 64)", "MRK_PROOF_STABLE",
+                         "memcmp(current, s->observationPanelTag, 64)", "MRK_PROOF_FINAL"):
+            self.assertIn(required, proof)
+        self.assertEqual(proof.count("mrk_original_topology(s, p)"), 2)
+        self.assertLess(proof.index("if (freeze) memcpy("), proof.index("mrk_original_topology(s, p)"))
         binding = native.split("int mrk_panel_observe_open_identity(", 1)[1].split("typedef union", 1)[0]
-        self.assertLess(binding.index("s->observationIdentityAttempted = YES"), binding.index("[s->parent accessibilityIdentifier]"))
-        self.assertNotIn("setAccessibilityIdentifier:", binding)
-        self.assertNotIn("NSUUID", binding)
-        self.assertLess(binding.index("d->binding_parent ="), binding.index("d->binding_panel ="))
-        self.assertLess(binding.index("d->binding_panel ="), binding.index("d->binding_parent != MRK_ID_MATCH"))
-        self.assertLess(binding.index("d->phase = MRK_ID_BINDING"), binding.index("if (s->unknown"))
-        self.assertIn("d->error = MRK_AX_UNSUPPORTED; return MRK_AX_UNSUPPORTED;", binding)
-        self.assertIn("capacity != 64", binding)
-        for guard in ("s->responded", "s->callbackActive", "s->closeAttempted", "s->closed", "s->observationIdentityAttempted",
-                      "mrk_observation_attached(s)", "mrk_observation_directory_ready(s)"):
-            self.assertIn(guard, binding)
-        for forbidden in ("observationActionAttempted =", "observationActionReturned =", "s->selected", "s->completion("):
-            self.assertNotIn(forbidden, binding)
+        self.assertEqual(binding.count("capacity != 64"), 2)
+        self.assertIn("if (p->site) return MRK_AX_INELIGIBLE", binding)
+        self.assertIn("mrk_original_proof(s, p, YES)", binding)
+        self.assertIn("mrk_original_proof(s, p, NO)", binding)
+        for forbidden in ("setAccessibilityIdentifier:", "NSUUID", "observationActionAttempted =", "observationActionReturned =",
+                          "s->selected", "s->completion("):
+            self.assertNotIn(forbidden, binding + proof + topology)
         ax = native.split("// Public AX input", 1)[1]
         self.assertEqual(ax.count("AXUIElementCreateApplication(getpid())"), 1)
         for forbidden in ("AXUIElementCreateSystemWide", "kAXTitleAttribute", "kAXPositionAttribute", "CGEvent",
@@ -1058,12 +1143,23 @@ class AquaDataTests(unittest.TestCase):
         self.assertLess(arrays.index("mrk_ax_before(s, element)"), arrays.index("AXUIElementCopyAttributeValues("))
         self.assertIn("attribute, 0, limit + 1, &slot->array", arrays)
         self.assertIn("count < 0 || count >= limit + 1", arrays)
-        identified = native.split("static AXUIElementRef mrk_ax_identified(", 1)[1].split("static void mrk_ax_open(", 1)[0]
+        identified = native.split("static AXUIElementRef mrk_ax_identified(", 1)[1].split("static BOOL mrk_ax_projection(", 1)[0]
         self.assertIn("if (found) { mrk_ax_fail(s, MRK_AX_AMBIGUOUS); return NULL; }", identified)
         self.assertIn("if (!found) mrk_ax_fail(s, MRK_AX_UNSUPPORTED);", identified)
+        projection = native.split("static BOOL mrk_ax_projection(", 1)[1].split("static void mrk_ax_open(", 1)[0]
+        for required in ("kAXWindowsAttribute, 4", "kAXChildrenAttribute, 16", "kAXSheetRole", "if (sheets != 1)",
+                         "CFEqual(expected_parent, parent)", "CFEqual(expected_panel, panel)",
+                         "CFEqual(identifier, panel_text)", "CFEqual(link, parent)"):
+            self.assertIn(required, projection)
         body = native.split("static void mrk_ax_open(", 1)[1].split("void mrk_observation_ax_press(", 1)[0]
-        for required in ("kAXWindowsAttribute, 4", "kAXChildrenAttribute, 16", "kAXSheetRole", "CFEqual(link, parent)",
-                         "kAXButtonRole", "CFBooleanGetValue(enabled)", "edge < 8", "CFEqual(link, chain[i])", "CFEqual(link, panel)",
+        self.assertEqual(body.count("mrk_ax_projection("), 2)
+        self.assertEqual(body.count("s->recheck(s->context)"), 1)
+        self.assertLess(body.index("&s->result.initial"), body.index("s->recheck(s->context)"))
+        self.assertLess(body.index("s->recheck(s->context)"), body.index("parent, panel, &repeated_parent"))
+        self.assertLess(body.index("&s->result.final_projection"), body.index("kAXDefaultButtonAttribute"))
+        self.assertIn("CFStringCreateWithBytes", body)
+        self.assertIn("kCFStringEncodingUTF8, false", body)
+        for required in ("kAXButtonRole", "CFBooleanGetValue(enabled)", "edge < 8", "CFEqual(link, chain[i])", "CFEqual(link, panel)",
                          "CFEqual(repeated, control)"):
             self.assertIn(required, body)
         self.assertEqual(body.count("kAXDefaultButtonAttribute"), 2)
@@ -1093,9 +1189,9 @@ class AquaDataTests(unittest.TestCase):
             self.assertIn(required, packet)
         for forbidden in ("CFTypeRef", "AXUIElementRef", "*mut", "Option<Panel>"):
             self.assertNotIn(forbidden, packet)
-        gate = adapter.split("pub(crate) fn admitted(", 1)[1].split("pub(crate) fn stopped(", 1)[0]
-        self.assertIn("owner.id != self.id", gate)
-        self.assertIn("!Arc::ptr_eq(&owner, &self.owner) || !Arc::ptr_eq(&owner.gui, &self.call)", gate)
+        gate = adapter.split("fn original_admitted(", 1)[1].split("pub(crate) struct PreparedOpenInput", 1)[0]
+        self.assertIn("owner.id != id", gate)
+        self.assertIn("!Arc::ptr_eq(&owner, original) || !Arc::ptr_eq(&owner.gui, call)", gate)
         self.assertIn("if after_press", gate)  # Do not reject a real early callback as a pre-action response.
         release = adapter.split("            let release = {", 1)[1].split("        if released {", 1)[0]
         self.assertLess(release.index("barrier.release_ready()"), release.index("facts.release_queued = true"))
@@ -1103,7 +1199,7 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn("OpenPhase::Unknown", adapter)
         self.assertIn("open_release_data_check()", observer)
         tick = observer.split("pub(super) fn tick(", 1)[1].split("let state = app.state", 1)[0]
-        self.assertLess(tick.index("if self.accessibility_step()"), tick.rindex("if !self.timely()"))
+        self.assertLess(tick.index("if self.accessibility_step(app)"), tick.rindex("if !self.timely()"))
         run = observer.split("fn accessibility_step(", 1)[1].split("fn native_step(", 1)[0]
         self.assertEqual(run.count("r.prepared_open.take()"), 1)
         self.assertEqual(run.count("input.press("), 1)
@@ -1153,6 +1249,43 @@ class AquaDataTests(unittest.TestCase):
         self.assertLess(started.index("observation::identity_start_return("), started.index("let result = result(status)"))
         self.assertIn("error.kind() != io::ErrorKind::PermissionDenied) { self.unknown = true; }", started)
         self.assertIn("identity_data_check()", rust)  # Existing hosted DATA entry, not local native execution.
+
+    def test_native_recheck_uses_one_same_deadline_request_and_original_custody(self):
+        root = PATH.parents[1] / "src-tauri/src"
+        adapter = (root / "shell_macos_dialog.rs").read_text(encoding="utf-8")
+        observer = (root / "installed_shell_observation_macos.rs").read_text(encoding="utf-8")
+        token = adapter.split("pub(crate) struct OpenRecheck", 1)[1].split("pub(crate) struct OpenRecheckBody", 1)[0]
+        for required in ("native::OpenIdentity", "Arc<GuiCall>", "Arc<OriginalWork>", "Arc<OpenRelease>"):
+            self.assertIn(required, token)
+        for forbidden in ("*mut", "AXUIElement", "CFTypeRef", "Option<Panel>"):
+            self.assertNotIn(forbidden, token)
+        state = adapter.split("impl OpenRelease", 1)[1].split("fn original_admitted(", 1)[0]
+        self.assertIn("RecheckPhase::Unrequested, RecheckPhase::NotDispatched, RecheckPhase::Joined", state)
+        self.assertIn("self.recheck_unknown(); return false;", state)
+        identity = adapter.split("impl OpenRecheck {", 1)[1].split("pub(crate) fn state(", 1)[0]
+        for required in ("Arc::ptr_eq(&self.call", "Arc::ptr_eq(&self.owner", "Arc::ptr_eq(&self.release"):
+            self.assertIn(required, identity)
+        request = observer.split("fn final_native_recheck(", 1)[1].split("fn accessibility_step(", 1)[0]
+        self.assertEqual(request.count("std::sync::mpsc::sync_channel(1)"), 1)
+        self.assertEqual(request.count("app.run_on_main_thread("), 1)
+        self.assertEqual(request.count("receipt.recv_timeout(remaining)"), 1)
+        self.assertLess(request.index("s.dispatch_attempted = true"), request.index("app.run_on_main_thread("))
+        self.assertLess(request.index("end.saturating_duration_since(Instant::now())"), request.index("receipt.recv_timeout(remaining)"))
+        self.assertLess(request.index("token.same(&returned.token)"), request.index("token.joined()"))
+        self.assertLess(request.index("token.joined()"), request.index("s.receipt_joined = true"))
+        self.assertIn("Instant::now() >= end", request.split("s.receipt_joined = true", 1)[1])
+        for forbidden in ("std::thread::spawn", "tokio::spawn", "Duration::from_secs", "loop {", "end ="):
+            self.assertNotIn(forbidden, request)
+        main = observer.split("fn recheck_main(", 1)[1].split("fn final_native_recheck(", 1)[0]
+        self.assertLess(main.index('token.state() == "unknown"'), main.index("token.observe(end,"))
+        self.assertLess(main.index("token.observe(end,"), main.index("token.returned()"))
+        self.assertLess(main.index("token.returned()"), main.index("s.body_returned = true"))
+        self.assertLess(main.index("s.body_returned = true"), main.index("done.try_send("))
+        after_send = main.split("done.try_send(", 1)[1]
+        for forbidden in ("token.observe(", "PANEL.with(", "run_on_main_thread(", "token.joined("):
+            self.assertNotIn(forbidden, after_send)
+        unknown = observer.split("fn recheck_unknown(", 1)[1].split("fn recheck_main(", 1)[0]
+        self.assertLess(unknown.index("token.unknown()"), unknown.index("self.recheck_sample("))
 
     def test_dom_callback_custody_wraps_only_the_original_returned_body(self):
         # Source controls only: the actual Rust DATA entry and native callback

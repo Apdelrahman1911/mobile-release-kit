@@ -13,7 +13,7 @@ use crate::{asset_session::{DocumentBinding, InstalledMacProjectWitness, Install
     edit_owner::{EditOwner, InstalledConfigFinality, InstalledMacReviewWitness}, edit_protocol::{self as edit, ConfigEditStatus, EditProjection},
     error::BridgeError, supervisor::Supervisor};
 use super::owned_macos::observation::{observed_panel, observe_panel_action, prepare_open_input,
-    ObservedPanel, PanelAction, PreparedOpenInput};
+    ObservedPanel, OpenRecheck, OpenRecheckBody, PanelAction, PreparedOpenInput};
 
 // Closed public categories only. The first winner is published before failure;
 // no Record lock, native call, path, or arbitrary error text enters this latch.
@@ -207,16 +207,66 @@ fn retire_returned_open(pending: &mut Option<Pending>, current: Step, id: u32) -
     if !open_step_entry(*pending, current, id) { return false; }
     *pending = None; true
 }
+fn native_proof_value(p: mrk_macos_installed_native::IdentityBinding) -> Value {
+    let c = p.checks;
+    json!({"returned":true,"attempted":p.attempted,"parent":p.parent,"panel":p.panel,
+        "children":p.children,"originals":p.originals,"site":p.site,"error":p.error,
+        "checks":{"eligible":c[0],"attached":c[1],"directory":c[2],"parentIdentifier":c[3],
+            "panelIdentifier":c[4],"parentSingleton":c[5],"noNestedSheet":c[6],"nativeChild":c[7],
+            "nativeParent":c[8],"nativeRole":c[9],"stableIdentifier":c[10],"finalEligibility":c[11]}})
+}
+fn projection_value(p: mrk_macos_installed_native::AxProjection) -> Value {
+    json!({"windows":p.windows,"children":p.children,"sheets":p.sheets,"matched":p.matched})
+}
+fn projection_calls_match(a: mrk_macos_installed_native::AxProjection,
+    b: mrk_macos_installed_native::AxProjection, calls: u32) -> bool {
+    let complete = |p: mrk_macos_installed_native::AxProjection| p.matched
+        && p.windows.is_some_and(|n| (1..=4).contains(&n)) && p.children.is_some_and(|n| (1..=16).contains(&n))
+        && p.sheets == Some(1);
+    if !complete(a) || !complete(b) || !(36..=64).contains(&calls) || calls % 2 != 0 { return false; }
+    let base = a.windows.zip(a.children).zip(b.windows.zip(b.children))
+        .map(|((w, c), (w2, c2))| 13 + w + c + w2 + c2);
+    base.and_then(|base| (calls / 2).checked_sub(base)).is_some_and(|depth| (1..=8).contains(&depth))
+}
+#[derive(Clone, Copy)]
+struct NativeRecheckSample {
+    state: &'static str, requested: bool, dispatch_attempted: bool, body_entered: bool, native_entered: bool,
+    body_returned: bool, receipt_joined: bool, timely: Option<bool>, custody_known: Option<bool>,
+    proof: Option<mrk_macos_installed_native::IdentityBinding>,
+}
+impl NativeRecheckSample {
+    fn new() -> Self {
+        Self { state: "unrequested", requested: false, dispatch_attempted: false, body_entered: false,
+            native_entered: false, body_returned: false, receipt_joined: false, timely: None, custody_known: None, proof: None }
+    }
+    fn succeeded(self) -> bool {
+        self.state == "joined" && self.requested && self.dispatch_attempted && self.body_entered && self.native_entered
+            && self.body_returned && self.receipt_joined && self.timely == Some(true) && self.custody_known == Some(true)
+            && self.proof.is_some_and(mrk_macos_installed_native::IdentityBinding::matched)
+    }
+    fn value(self) -> Value {
+        json!({"state":self.state,"requested":self.requested,"dispatchAttempted":self.dispatch_attempted,
+            "bodyEntered":self.body_entered,"nativeEntered":self.native_entered,"bodyReturned":self.body_returned,
+            "receiptJoined":self.receipt_joined,"timely":self.timely,"custodyKnown":self.custody_known,
+            "proof":self.proof.map(native_proof_value)})
+    }
+}
+struct NativeRecheckReceipt { token: OpenRecheck, body: OpenRecheckBody }
 #[derive(Clone, Copy)]
 struct OpenInputSample {
     id: u32, prepared: bool, entered: bool, attempted: Option<bool>, press_returned: Option<bool>,
     returned: bool, retired: bool, identity_matched: Option<bool>, control_matched: Option<bool>,
     cleanup_returned: Option<bool>, diagnostic: Option<mrk_macos_installed_native::AxDiagnostic>,
+    native_rechecked: Option<bool>, phase: Option<&'static str>, calls: Option<u32>,
+    initial_projection: Option<mrk_macos_installed_native::AxProjection>,
+    final_projection: Option<mrk_macos_installed_native::AxProjection>, recheck: NativeRecheckSample,
 }
 impl OpenInputSample {
     fn preparing(id: u32) -> Self {
         Self { id, prepared: false, entered: false, attempted: Some(false), press_returned: Some(false),
-            returned: false, retired: false, identity_matched: None, control_matched: None, cleanup_returned: None, diagnostic: None }
+            returned: false, retired: false, identity_matched: None, control_matched: None, cleanup_returned: None, diagnostic: None,
+            native_rechecked: None, phase: None, calls: None, initial_projection: None, final_projection: None,
+            recheck: NativeRecheckSample::new() }
     }
     fn enter(&mut self) {
         self.entered = true; self.attempted = None; self.press_returned = None;
@@ -227,6 +277,8 @@ impl OpenInputSample {
             self.attempted = Some(report.attempted); self.press_returned = Some(report.press_returned);
             self.identity_matched = Some(report.identity_matched); self.control_matched = Some(report.control_matched);
             self.cleanup_returned = Some(report.cleanup_returned); self.diagnostic = Some(report.diagnostic);
+            self.native_rechecked = Some(report.native_rechecked); self.phase = report.phase; self.calls = Some(report.calls);
+            self.initial_projection = report.initial_projection; self.final_projection = report.final_projection;
             if report.diagnostic.error == "none" && !result.timely() {
                 self.diagnostic = Some(mrk_macos_installed_native::AxDiagnostic { site: "cleanup", error: "deadline" });
             }
@@ -236,14 +288,20 @@ impl OpenInputSample {
         self.prepared && self.entered && self.returned && self.retired && self.attempted == Some(true)
             && self.press_returned == Some(true) && self.identity_matched == Some(true) && self.control_matched == Some(true)
             && self.cleanup_returned == Some(true)
+            && self.native_rechecked == Some(true) && self.recheck.succeeded() && self.phase == Some("control")
+            && self.initial_projection.zip(self.final_projection).zip(self.calls)
+                .is_some_and(|((a, b), calls)| projection_calls_match(a, b, calls))
             && self.diagnostic == Some(mrk_macos_installed_native::AxDiagnostic { site: "press", error: "none" })
     }
     fn value(self) -> Value {
-        json!({"mechanism":"accessibility-press", "step":"OpenProject", "id":self.id,
+        json!({"mechanism":"accessibility-press-original-sheet-v1", "step":"OpenProject", "id":self.id,
             "prepared":self.prepared, "entered":self.entered, "attempted":self.attempted, "pressReturned":self.press_returned,
             "returned":self.returned, "retired":self.retired, "identityMatched":self.identity_matched,
             "controlMatched":self.control_matched, "cleanupReturned":self.cleanup_returned,
-            "site":self.diagnostic.map(|d| d.site), "error":self.diagnostic.map(|d| d.error)})
+            "site":self.diagnostic.map(|d| d.site), "error":self.diagnostic.map(|d| d.error),
+            "nativeRechecked":self.native_rechecked,"phase":self.phase,"calls":self.calls,
+            "initialProjection":self.initial_projection.map(projection_value),
+            "finalProjection":self.final_projection.map(projection_value),"nativeRecheck":self.recheck.value()})
     }
 }
 #[derive(Clone, Copy)]
@@ -261,13 +319,11 @@ impl IdentitySample {
     }
     fn value(self) -> Value {
         let c = self.configuration;
-        json!({"mechanism":"public-accessibility-identifier", "case":self.case.name(), "id":self.id, "kind":"project",
+        json!({"mechanism":"public-original-sheet-identity-v1", "case":self.case.name(), "id":self.id, "kind":"project",
             "start":{"returned":true,"result":self.start_result},
             "configuration":{"attempted":c.attempted,"parentSetterEntered":c.parent_setter_entered,
-                "parentSetterReturned":c.parent_setter_returned,"panelSetterEntered":c.panel_setter_entered,
-                "panelSetterReturned":c.panel_setter_returned,"parent":c.parent,"panel":c.panel,"site":c.site,"error":c.error},
-            "binding":self.binding.map(|b| json!({"returned":true,"attempted":b.attempted,
-                "parent":b.parent,"panel":b.panel,"site":b.site,"error":b.error}))})
+                "parentSetterReturned":c.parent_setter_returned,"parent":c.parent,"site":c.site,"error":c.error},
+            "binding":self.binding.map(native_proof_value)})
     }
 }
 #[derive(Clone, Copy)]
@@ -958,7 +1014,7 @@ impl Observation {
         if std::thread::current().id() == self.main { self.fail(); return; }
         // Drain the one prepared original even after failure/deadline: known
         // non-entry may retire its barrier, never dispatch a late Press.
-        if self.accessibility_step() {
+        if self.accessibility_step(app) {
             if !self.timely() { self.report_failure(); self.failure_shutdown(app); }
             return;
         }
@@ -1145,7 +1201,123 @@ impl Observation {
         }; // ALL Record/GuiFacts/owner-endpoint guards gone before AX IPC.
         Some(admitted && self.timely() && (after_press || !input.stopped()))
     }
-    fn accessibility_step(&self) -> bool {
+    fn recheck_original(&self, r: &Record, token: &OpenRecheck) -> bool {
+        r.ax_trusted && token.id == self.case.selected_id() && open_step_entry(r.pending, r.step, token.id)
+            && r.prepared_open.is_none() && r.accessibility.is_some_and(|s|
+                s.id == token.id && s.prepared && s.entered && !s.returned && !s.retired)
+            && r.native_dispatch.is_some_and(|n| n.step == Step::OpenProject && n.entered && n.returned)
+            && r.identity_binding.is_some_and(|s| s.succeeded(token.id))
+    }
+    fn recheck_admission(&self, token: &OpenRecheck) -> Option<bool> {
+        let allowed = {
+            let r = self.record()?;
+            if !self.recheck_original(&r, token) || !r.accessibility?.recheck.requested { return None; }
+            token.admitted(false)?
+        }; // No Record/GuiFacts/owner mutex survives into AppKit/wait/AX IPC.
+        Some(allowed && self.timely() && !token.stopped())
+    }
+    fn recheck_sample(&self, token: &OpenRecheck, update: impl FnOnce(&mut NativeRecheckSample) -> bool) -> bool {
+        let Some(mut r) = self.record() else { return false; };
+        if !self.recheck_original(&r, token) { return false; }
+        let Some(sample) = r.accessibility.as_mut() else { return false; };
+        update(&mut sample.recheck)
+    }
+    fn recheck_unknown(&self, token: &OpenRecheck, end: Instant) {
+        token.unknown(); // Retention precedes any possibly blocking publication.
+        self.fail_with("native-ax-custody");
+        let _ = self.recheck_sample(token, |sample| {
+            sample.state = "unknown"; sample.custody_known = Some(false);
+            if Instant::now() >= end { sample.timely = Some(false); }
+            true // Never overwrite the first body's actual native proof.
+        });
+    }
+    fn recheck_main(self: &Arc<Self>, token: OpenRecheck, end: Instant,
+        done: std::sync::mpsc::SyncSender<NativeRecheckReceipt>) {
+        // A queued or lost closure is not native entry. Unknown/late callbacks
+        // do no PANEL work and cannot revive the request or grant a permit.
+        if std::thread::current().id() != self.main || token.state() == "unknown" || Instant::now() >= end
+            || !token.enter() { self.recheck_unknown(&token, end); return; }
+        if !self.recheck_sample(&token, |s| {
+            if s.state != "queued" || !s.requested || !s.dispatch_attempted || s.body_entered || s.body_returned { return false; }
+            s.state = "entered"; s.body_entered = true; true
+        }) { self.recheck_unknown(&token, end); return; }
+        let body = token.observe(end, || self.recheck_admission(&token));
+        // Actual body returned and all PANEL/original guards are gone. From
+        // here the wrapper does bounded DATA publication only, never AppKit.
+        if !token.returned() { self.recheck_unknown(&token, end); return; }
+        if !self.recheck_sample(&token, |s| {
+            if s.state != "entered" || !s.body_entered || s.body_returned { return false; }
+            s.state = "returned"; s.body_returned = true; s.native_entered = body.native_entered;
+            s.proof = body.proof; s.timely = Some(Instant::now() < end); s.custody_known = Some(body.admitted.is_some()); true
+        }) { self.recheck_unknown(&token, end); return; }
+        // That publication lock may itself have waited. A late return is not
+        // a usable receipt, even if the underlying getters actually returned.
+        if Instant::now() >= end || body.admitted.is_none() || token.state() != "returned" {
+            self.recheck_unknown(&token, end); return;
+        }
+        if done.try_send(NativeRecheckReceipt { token: token.clone(), body }).is_err() {
+            self.recheck_unknown(&token, end);
+        }
+        // Successful send is the LAST operation: no post-publication native
+        // work, new custody transition, second receipt or retirement.
+    }
+    fn final_native_recheck(self: &Arc<Self>, input: &PreparedOpenInput, app: &tauri::AppHandle, end: Instant) -> Option<bool> {
+        let token = input.recheck_token();
+        if !token.request() || !self.recheck_sample(&token, |s| {
+            if s.state != "unrequested" || s.requested { return false; }
+            s.state = "requested"; s.requested = true; true
+        }) { self.recheck_unknown(&token, end); return None; }
+        let (done, receipt) = std::sync::mpsc::sync_channel(1);
+        let q = self.clone(); let dispatched = token.clone();
+        let mut refused = false;
+        let queued = self.recheck_sample(&token, |s| {
+            if s.state != "requested" || s.dispatch_attempted { return false; }
+            let Some(allowed) = token.admitted(false) else { return false; };
+            // Last potentially blocking owner/Record admissions, before the
+            // one dispatch. Only scalar writes/unlocks follow this Eax check.
+            let stopped = token.stopped();
+            if !allowed || stopped || !self.timely() || Instant::now() >= end { refused = true; return false; }
+            if !token.queue() { return false; }
+            s.state = "queued"; s.dispatch_attempted = true; s.custody_known = Some(true); true
+        });
+        if !queued {
+            if refused && token.not_dispatched() && self.recheck_sample(&token, |s| {
+                s.state = "not-dispatched"; s.timely = Some(Instant::now() < end); s.custody_known = Some(true); true
+            }) { return Some(false); }
+            self.recheck_unknown(&token, end); return None;
+        }
+        // Exactly one closure on the existing main-thread mechanism; no new
+        // worker/task/AX controller. All original guards were dropped above.
+        if app.run_on_main_thread(move || q.recheck_main(dispatched, end, done)).is_err() {
+            self.recheck_unknown(&token, end); return None; // Err is NOT no-entry/cancellation.
+        }
+        let custody = self.recheck_admission(&token);
+        let remaining = end.saturating_duration_since(Instant::now());
+        if custody.is_none() || remaining.is_zero() || token.state() == "unknown" {
+            self.recheck_unknown(&token, end); return None;
+        }
+        // ONE finite receive against the SAME Eax. STOP may make the returned
+        // body negative, but is not permission to skip its actual return/join.
+        let Ok(returned) = receipt.recv_timeout(remaining) else { self.recheck_unknown(&token, end); return None; };
+        if !token.same(&returned.token) || returned.body.admitted.is_none() || Instant::now() >= end
+            || returned.body.admitted == Some(true) && (!returned.body.native_entered
+                || !returned.body.proof.is_some_and(mrk_macos_installed_native::IdentityBinding::matched)) {
+            self.recheck_unknown(&token, end); return None;
+        }
+        let allowed = self.recheck_admission(&token);
+        if allowed.is_none() || Instant::now() >= end || !token.joined() {
+            self.recheck_unknown(&token, end); return None;
+        }
+        if !self.recheck_sample(&token, |s| {
+            if s.state != "returned" || !s.body_returned || s.receipt_joined
+                || s.native_entered != returned.body.native_entered || s.proof != returned.body.proof { return false; }
+            s.state = "joined"; s.receipt_joined = true; s.timely = Some(Instant::now() < end); s.custody_known = Some(true); true
+        }) || Instant::now() >= end { self.recheck_unknown(&token, end); return None; }
+        Some(returned.body.admitted == Some(true) && allowed == Some(true))
+        // The scoped FFI caller AGAIN checks original facts/Eax after this
+        // return and before granting C the native-rechecked flag.
+    }
+    fn accessibility_step(self: &Arc<Self>, app: &tauri::AppHandle) -> bool {
         let input = {
             let Some(mut r) = self.record() else { return true; };
             let Some(Pending::Accessibility(id)) = r.pending else { return false; };
@@ -1174,9 +1346,11 @@ impl Observation {
             if let Some(sample) = r.accessibility.as_mut() { sample.enter(); }
             input
         };
-        // Existing retained/joined relay only: no spawn, task, thread or wait.
-        // The main preparation body returned and its PANEL borrow is gone.
-        let result = input.press(self.end, |after_press| self.open_admission(&input, after_press));
+        // The existing retained/joined relay owns this synchronous AX call.
+        // Main preparation returned; only one final main receipt wait may be
+        // requested by C, at its fixed proof boundary and SAME entry Eax.
+        let result = input.press(self.end, |after_press| self.open_admission(&input, after_press),
+            |end| self.final_native_recheck(&input, app, end));
         if result.report.is_some_and(|r| !r.succeeded()) || !result.timely() { self.fail_with("native-ax-input"); }
         else if !result.custody_known { self.fail_with("native-ax-custody"); }
         let Some(mut r) = self.record() else { input.returned(&result, false); return true; };
@@ -1186,7 +1360,12 @@ impl Observation {
         // same-original facts custody again; poison cannot retire the barrier.
         let retired = input.returned(&result, matching && input.admitted(true).is_some());
         if !matching { self.fail_with("native-ax-custody"); return true; }
-        if let Some(sample) = r.accessibility.as_mut() { sample.complete(&result, retired); }
+        if let Some(sample) = r.accessibility.as_mut() {
+            if input.recheck_token().state() == "unknown" {
+                sample.recheck.state = "unknown"; sample.recheck.custody_known = Some(false);
+            }
+            sample.complete(&result, retired);
+        }
         if !retired { self.fail_with("native-ax-custody"); return true; }
         let current = r.step;
         if !retire_returned_open(&mut r.pending, current, input.id) { self.fail_with("native-ax-custody"); return true; }
@@ -1715,6 +1894,85 @@ fn route() -> Option<(PathBuf,u32)> {
 
 // Pure regression checks in the already-required instrumented native entry.
 // These do not call AppKit, acquire files, dispatch actions, or supply receipts.
+fn native_recheck_data_check() -> bool {
+    use mrk_macos_installed_native::{AxDiagnostic, AxProjection, IdentityBinding, IdentityConfiguration};
+    // Inert DTOs only. These values never enter a live original/AX request.
+    let proof = IdentityBinding { attempted: true, parent: Some("match"), panel: Some("match"),
+        checks: [Some(true); 12], children: Some(1), originals: Some("one"), site: "complete", error: "none" };
+    let fresh = NativeRecheckSample::new();
+    if fresh.succeeded() || fresh.value() != json!({"state":"unrequested","requested":false,"dispatchAttempted":false,
+        "bodyEntered":false,"nativeEntered":false,"bodyReturned":false,"receiptJoined":false,
+        "timely":null,"custodyKnown":null,"proof":null}) { return false; }
+    let joined = NativeRecheckSample { state: "joined", requested: true, dispatch_attempted: true,
+        body_entered: true, native_entered: true, body_returned: true, receipt_joined: true,
+        timely: Some(true), custody_known: Some(true), proof: Some(proof) };
+    if !joined.succeeded() { return false; }
+    for state in ["unrequested", "requested", "queued", "entered", "returned", "not-dispatched", "unknown"] {
+        if (NativeRecheckSample { state, ..joined }).succeeded() { return false; }
+    }
+    let mutations: [fn(&mut NativeRecheckSample); 11] = [
+        |s| s.requested = false, |s| s.dispatch_attempted = false, |s| s.body_entered = false,
+        |s| s.native_entered = false, |s| s.body_returned = false, |s| s.receipt_joined = false,
+        |s| s.timely = None, |s| s.timely = Some(false), |s| s.custody_known = None,
+        |s| s.custody_known = Some(false), |s| s.proof = None,
+    ];
+    for mutation in mutations {
+        let mut sample = joined; mutation(&mut sample);
+        if sample.succeeded() { return false; }
+    }
+    for bit in 0..12 {
+        for value in [None, Some(false)] {
+            let mut negative = proof; negative.checks[bit] = value;
+            if (NativeRecheckSample { proof: Some(negative), ..joined }).succeeded() { return false; }
+        }
+    }
+    let configuration = IdentityConfiguration { attempted: true, parent_setter_entered: true,
+        parent_setter_returned: true, parent: Some("nil"), site: Some("complete"), error: Some("none") };
+    let identity = IdentitySample { case: Case::FirstSave, id: 2, start_result: "ok", configuration, binding: Some(proof) };
+    if !identity.succeeded(2) || identity.succeeded(1) { return false; }
+    let dto = identity.value();
+    if dto["mechanism"] != "public-original-sheet-identity-v1"
+        || !dto["configuration"].as_object().is_some_and(|o| o.len() == 6 && !o.contains_key("panel"))
+        || !dto["binding"].as_object().is_some_and(|o| o.len() == 9)
+        || !dto["binding"]["checks"].as_object().is_some_and(|o| o.len() == 12) { return false; }
+    let mut changed = proof; changed.panel = Some("different"); changed.checks[10] = Some(false);
+    changed.checks[11] = None; changed.site = "stable-identifier"; changed.error = "changed";
+    let negative = native_proof_value(changed);
+    if changed.matched() || negative["checks"]["panelIdentifier"] != true
+        || negative["checks"]["stableIdentifier"] != false || !negative["checks"]["finalEligibility"].is_null() { return false; }
+    let projection = AxProjection { windows: Some(1), children: Some(1), sheets: Some(1), matched: true };
+    let input = OpenInputSample { id: 2, prepared: true, entered: true, attempted: Some(true), press_returned: Some(true),
+        returned: true, retired: true, identity_matched: Some(true), control_matched: Some(true), cleanup_returned: Some(true),
+        diagnostic: Some(AxDiagnostic { site: "press", error: "none" }), native_rechecked: Some(true), phase: Some("control"),
+        calls: Some(36), initial_projection: Some(projection), final_projection: Some(projection), recheck: joined };
+    if !input.succeeded() || !input.value().as_object().is_some_and(|o| o.len() == 20) { return false; }
+    let mutations: [fn(&mut OpenInputSample); 10] = [
+        |s| s.native_rechecked = None, |s| s.native_rechecked = Some(false), |s| s.phase = None,
+        |s| s.phase = Some("final"), |s| s.calls = None, |s| s.initial_projection = None,
+        |s| s.final_projection = None, |s| s.retired = false, |s| s.control_matched = Some(false),
+        |s| s.recheck = NativeRecheckSample::new(),
+    ];
+    for mutation in mutations {
+        let mut sample = input; mutation(&mut sample);
+        if sample.succeeded() { return false; }
+    }
+    for calls in [0, 34, 35, 37, 52, 64, 65, u32::MAX] {
+        if (OpenInputSample { calls: Some(calls), ..input }).succeeded() { return false; }
+    }
+    for invalid in [AxProjection { windows: Some(5), ..projection }, AxProjection { children: Some(17), ..projection },
+        AxProjection { sheets: Some(2), ..projection }, AxProjection { matched: false, ..projection }] {
+        if (OpenInputSample { initial_projection: Some(invalid), ..input }).succeeded()
+            || (OpenInputSample { final_projection: Some(invalid), ..input }).succeeded() { return false; }
+    }
+    // Later request uncertainty cannot erase an earlier actual C flag, but it
+    // still vetoes success. A joined no-native negative is likewise no permit.
+    let unknown = NativeRecheckSample { state: "unknown", custody_known: Some(false), ..joined };
+    let uncertain = OpenInputSample { recheck: unknown, retired: false, ..input };
+    if uncertain.succeeded() || uncertain.value()["nativeRechecked"] != true
+        || uncertain.value()["nativeRecheck"]["state"] != "unknown"
+        || (NativeRecheckSample { native_entered: false, proof: None, ..joined }).succeeded() { return false; }
+    true
+}
 fn observer_data_checks() -> bool {
     use mrk_macos_installed_native::{PanelKind, PanelObservation, PanelResponse};
     crate::asset_session::assert_project_selection_gate_contract();
@@ -1724,7 +1982,7 @@ fn observer_data_checks() -> bool {
     if !profile.project_selection_profile_available() || profile.project_path_selection_profile_available()
         || profile.evidence_selection_profile_available() { return false; }
     if !mrk_macos_installed_native::installed_observation_flags_data_check()
-        || !super::owned_macos::observation::open_release_data_check() { return false; }
+        || !super::owned_macos::observation::open_release_data_check() || !native_recheck_data_check() { return false; }
     let mut prepared = OpenInputSample::preparing(2);
     prepared.prepared = true;
     if prepared.succeeded() || prepared.entered || prepared.attempted != Some(false) || prepared.returned { return false; }

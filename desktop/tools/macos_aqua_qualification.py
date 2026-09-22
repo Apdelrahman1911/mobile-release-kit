@@ -91,7 +91,7 @@ NATIVE_ACTION_SITES = {
 }
 ACCESSIBILITY_SITES = frozenset((
     "binding entry application windows parent-identity children panel-identity panel-role panel-parent "
-    "default-button button-role button-enabled ancestry default-recheck press cleanup"
+    "default-button button-role button-enabled ancestry default-recheck press cleanup native-recheck"
 ).split())
 ACCESSIBILITY_ERRORS = frozenset((
     "none wrong-thread invalid-input ineligible unsupported ambiguous malformed limit deadline custody "
@@ -99,8 +99,22 @@ ACCESSIBILITY_ERRORS = frozenset((
 ).split())
 ACCESSIBILITY_BINDING_CLASSES = frozenset(("nil", "match", "different", "type-invalid"))
 ACCESSIBILITY_BINDING_SITES = frozenset((
-    "objects", "tags", "parent-set", "panel-set", "parent-get", "panel-get", "complete",
+    "objects", "parent-tag", "parent-set", "parent-get", "complete",
 ))
+ACCESSIBILITY_PANEL_CLASSES = frozenset((
+    "nil", "type-invalid", "empty", "byte-limit", "nul", "encoding-invalid", "valid", "match", "different",
+))
+ACCESSIBILITY_PROOF_CHECKS = (
+    "eligible", "attached", "directory", "parentIdentifier", "panelIdentifier", "parentSingleton",
+    "noNestedSheet", "nativeChild", "nativeParent", "nativeRole", "stableIdentifier", "finalEligibility",
+)
+ACCESSIBILITY_PROOF_SITES = frozenset((
+    "objects attachment directory parent-identifier panel-identifier parent-sheets panel-sheets "
+    "panel-attached-sheet native-children native-parent native-role stable-identifier final-eligibility complete"
+).split())
+ACCESSIBILITY_RECHECK_FLAGS = (
+    "requested", "dispatchAttempted", "bodyEntered", "nativeEntered", "bodyReturned", "receiptJoined",
+)
 SOURCE = (b'plugins { id("com.android.application") }\n'
           b'android { defaultConfig { applicationId = "org.example.mrk.observed" } }\n')
 VERSION = b"VERSION_NAME=1.2.3\nBUILD_NUMBER=7\n"
@@ -188,6 +202,12 @@ class Binding:
         return {"sourceCommit": self.source, "runId": self.run, "runAttempt": self.attempt}
 
 
+def _expected_identity_proof():
+    # Literal successful DATA shape, never a substitute for a native receipt.
+    return {"returned": True, "attempted": True, "checks": dict.fromkeys(ACCESSIBILITY_PROOF_CHECKS, True),
+            "parent": "match", "panel": "match", "children": 1, "originals": "one", "site": "complete", "error": "none"}
+
+
 def expected_result(binding, case):
     binding.checked()
     need(case in CASES, "case-binding")
@@ -221,18 +241,21 @@ def expected_result(binding, case):
             "controlReturns": [first, case != "picker-loss", case != "picker-loss", first, True],
             "accessibilityTrustedWithoutPrompt": True,
             "projectOpenInput": None if case == "picker-loss" else {
-                "mechanism": "accessibility-press", "step": "OpenProject", "id": 2 if first else 1,
+                "mechanism": "accessibility-press-original-sheet-v1", "step": "OpenProject", "id": 2 if first else 1,
                 "prepared": True, "entered": True, "attempted": True, "pressReturned": True, "returned": True,
                 "retired": True, "identityMatched": True, "controlMatched": True, "cleanupReturned": True,
+                "nativeRechecked": True, "phase": "control", "calls": 36,
+                "initialProjection": {"windows": 1, "children": 1, "sheets": 1, "matched": True},
+                "finalProjection": {"windows": 1, "children": 1, "sheets": 1, "matched": True},
+                "nativeRecheck": {"state": "joined", **dict.fromkeys(ACCESSIBILITY_RECHECK_FLAGS, True),
+                    "timely": True, "custodyKnown": True, "proof": _expected_identity_proof()},
                 "site": "press", "error": "none"},
             "projectOpenBinding": None if case == "picker-loss" else {
-                "mechanism": "public-accessibility-identifier", "case": case, "id": 2 if first else 1, "kind": "project",
+                "mechanism": "public-original-sheet-identity-v1", "case": case, "id": 2 if first else 1, "kind": "project",
                 "start": {"returned": True, "result": "ok"},
                 "configuration": {"attempted": True, "parentSetterEntered": True, "parentSetterReturned": True,
-                    "panelSetterEntered": True, "panelSetterReturned": True, "parent": "match", "panel": "match",
-                    "site": "complete", "error": "none"},
-                "binding": {"returned": True, "attempted": True, "parent": "match", "panel": "match",
-                    "site": "complete", "error": "none"}},
+                    "parent": "match", "site": "complete", "error": "none"},
+                "binding": _expected_identity_proof()},
             "quitCancelKeptOriginalReview": first, "originalDocumentAndQuitSettled": True},
         "saveSessions": sessions, "freshCoreReadback": first, "syntheticFileReadback": True,
         "staleMarkerWriterReturnedAndClosed": stale,
@@ -284,11 +307,15 @@ def parse_result(stdout, stderr, binding, case):
         need(identity is not None and identity["start"]["result"] == "ok" and identity["binding"] is not None
              and identity["binding"]["attempted"] and identity["binding"]["error"] == "none",
              "project-open-binding")
-        # Normal early nil/different/type-invalid are retained DATA, not a new
-        # presentation veto or evidence of late identity. The strict parser
-        # still requires both actual late matches; all remote/finality fields
-        # are checked independently below against the unchanged exact result.
+        # Early parent-only configuration is diagnostic. Native preparation,
+        # final native receipt and both same-original remote passes are distinct
+        # mandatory proofs; measured counts can vary within the fixed budget.
         expected["native"]["projectOpenBinding"] = identity
+        input_data = _accessibility_context(value["native"].get("projectOpenInput"), None, None,
+                                            expected_id=identity["id"])
+        need(input_data is not None and input_data["error"] == "none" and input_data["retired"],
+             "project-open-input")
+        expected["native"]["projectOpenInput"] = input_data
     if case in ("picker-loss", "save-loss"):
         need(type(value) is dict and type(value.get("reload")) is dict, "reload-object")
         reload = value["reload"]
@@ -371,29 +398,132 @@ def _native_action_context(value, native, panel):
         return None
 
 
-def _accessibility_context(value, native, panel):
-    # Closed same-original input DATA only. In-flight flags are UNKNOWN, not
-    # fabricated false; neither this sample nor a Press return is a receipt.
+def _accessibility_native_proof(value):
+    """Validate the closed DATA copied after one actual native body return."""
+    label = "accessibility-native-proof"
+    need(type(value) is dict and set(value) == {
+        "returned", "attempted", "checks", "parent", "panel", "children", "originals", "site", "error"}, label)
+    need(value["returned"] is True and type(value["attempted"]) is bool, label)
+    checks = value["checks"]
+    need(type(checks) is dict and set(checks) == set(ACCESSIBILITY_PROOF_CHECKS)
+         and all(v is None or type(v) is bool for v in checks.values()), label)
+    for field, allowed in (("parent", ACCESSIBILITY_BINDING_CLASSES), ("panel", ACCESSIBILITY_PANEL_CLASSES),
+                           ("originals", {"zero", "one", "multiple"})):
+        need(value[field] is None or type(value[field]) is str and value[field] in allowed, label)
+    children, site, error = value["children"], value["site"], value["error"]
+    need(children is None or type(children) is int and 0 <= children <= 17, label)
+    need(type(site) is str and site in ACCESSIBILITY_PROOF_SITES
+         and type(error) is str and error in ACCESSIBILITY_ERRORS, label)
+    if not value["attempted"]:
+        need(all(v is None for v in checks.values())
+             and all(value[key] is None for key in ("parent", "panel", "children", "originals"))
+             and (site, error) == ("objects", "custody"), label)
+    else:
+        # Preserve the earlier successful first-value observation separately
+        # from the later failed stability check. Only this exact returned
+        # negative frame permits a final class different from valid/match.
+        stable_failure = (site == "stable-identifier" and error == "changed"
+            and all(checks[key] is True for key in ACCESSIBILITY_PROOF_CHECKS[:10])
+            and checks["stableIdentifier"] is False and checks["finalEligibility"] is None
+            and value["panel"] in ACCESSIBILITY_PANEL_CLASSES - {"valid", "match"})
+        need(checks["eligible"] is not None
+             and (checks["parentIdentifier"] is not True or value["parent"] == "match")
+             and (checks["panelIdentifier"] is not True or value["panel"] in ("valid", "match") or stable_failure)
+             and (checks["nativeChild"] is not True or type(children) is int and 1 <= children <= 16
+                  and value["originals"] == "one")
+             and (checks["stableIdentifier"] is not True or value["panel"] == "match"), label)
+        need((site == "complete") == (error == "none"), label)
+        if error == "none":
+            need(all(v is True for v in checks.values()) and value["parent"] == value["panel"] == "match"
+                 and type(children) is int and 1 <= children <= 16 and value["originals"] == "one", label)
+    return value
+
+
+def _accessibility_projection(value):
+    if value is None:
+        return None
+    label = "accessibility-projection"
+    need(type(value) is dict and set(value) == {"windows", "children", "sheets", "matched"}
+         and type(value["matched"]) is bool, label)
+    for key, upper in (("windows", 5), ("children", 17), ("sheets", 16)):
+        need(value[key] is None or type(value[key]) is int and 0 <= value[key] <= upper, label)
+    windows, children, sheets = (value[key] for key in ("windows", "children", "sheets"))
+    need((children is None or type(windows) is int and 1 <= windows <= 4)
+         and (sheets is None or type(children) is int and sheets <= children <= 16), label)
+    if value["matched"]:
+        need(type(windows) is int and 1 <= windows <= 4
+             and type(children) is int and 1 <= children <= 16 and sheets == 1, label)
+    return value
+
+
+def _accessibility_native_recheck(value):
+    label = "accessibility-native-recheck"
+    need(type(value) is dict and set(value) == {"state", *ACCESSIBILITY_RECHECK_FLAGS,
+         "timely", "custodyKnown", "proof"}, label)
+    state = value["state"]
+    need(type(state) is str and state in {"unrequested", "requested", "queued", "entered", "returned", "joined",
+                                        "not-dispatched", "unknown"}, label)
+    need(all(type(value[key]) is bool for key in ACCESSIBILITY_RECHECK_FLAGS)
+         and all(value[key] is None or type(value[key]) is bool for key in ("timely", "custodyKnown")), label)
+    requested, dispatched, entered, native, returned, joined = (value[key] for key in ACCESSIBILITY_RECHECK_FLAGS)
+    need((not dispatched or requested) and (not entered or dispatched) and (not native or entered)
+         and (not returned or entered) and (not joined or returned), label)
+    if value["proof"] is not None:
+        need(native and returned, label)
+        _accessibility_native_proof(value["proof"])
+    if state == "unrequested":
+        need(not any(value[key] for key in ACCESSIBILITY_RECHECK_FLAGS)
+             and all(value[key] is None for key in ("timely", "custodyKnown", "proof")), label)
+    elif state in ("requested", "not-dispatched"):
+        need(requested and not dispatched and not entered and not joined and value["proof"] is None, label)
+    elif state == "queued":
+        need(requested and dispatched and not entered and not returned and not joined, label)
+    elif state == "entered":
+        need(entered and not returned and not joined, label)
+    elif state == "returned":
+        need(returned and not joined, label)
+    elif state == "joined":
+        need(joined and value["timely"] is True and value["custodyKnown"] is True, label)
+    # Unknown is absorbing. Its retained observations may be partial, but are
+    # never treated as a joined receipt, release permit, or successful recheck.
+    return value
+
+
+def _accessibility_recheck_succeeded(value):
+    return (value["state"] == "joined" and all(value[key] for key in ACCESSIBILITY_RECHECK_FLAGS)
+            and value["timely"] is True and value["custodyKnown"] is True
+            and value["proof"] is not None and value["proof"]["error"] == "none")
+
+
+def _accessibility_context(value, native, panel, *, expected_id=None):
+    # In-flight native values remain UNKNOWN. The success report binds its id
+    # to the separately checked original preparation, rather than inventing a
+    # failure-context nativeHandler to make the diagnostic parser pass.
     if value is None:
         return None
     try:
-        flags = ("attempted", "pressReturned", "identityMatched", "controlMatched", "cleanupReturned")
+        flags = ("attempted", "pressReturned", "identityMatched", "controlMatched", "cleanupReturned", "nativeRechecked")
+        observations = ("phase", "calls", "initialProjection", "finalProjection")
         need(type(value) is dict and set(value) == {"mechanism", "step", "id", "prepared", "entered", "returned",
-             "retired", "site", "error", *flags}, "accessibility-data")
-        need(type(value["mechanism"]) is str and type(value["step"]) is str
-             and value["mechanism"] == "accessibility-press" and value["step"] == "OpenProject"
+             "retired", "site", "error", "nativeRecheck", *observations, *flags}, "accessibility-data")
+        need(value["mechanism"] == "accessibility-press-original-sheet-v1" and value["step"] == "OpenProject"
              and type(value["id"]) is int and value["id"] in (1, 2), "accessibility-data")
-        need(native is not None, "accessibility-data")
-        if native["step"] == "OpenProject":
-            # During this original Open, preparation must actually have returned
-            # on the same project panel. A successful sample may remain as
-            # history after a later native handler replaces these two fields.
-            need(native["entered"] and native["returned"] and panel is not None
-                 and panel["step"] == "OpenProject" and panel["kind"] == "project"
-                 and panel["id"] == value["id"], "accessibility-data")
+        if expected_id is not None:
+            need(value["id"] == expected_id, "accessibility-data")
+        else:
+            need(native is not None, "accessibility-data")
+            if native["step"] == "OpenProject":
+                need(native["entered"] and native["returned"] and panel is not None
+                     and panel["step"] == "OpenProject" and panel["kind"] == "project"
+                     and panel["id"] == value["id"], "accessibility-data")
         need(all(type(value[key]) is bool for key in ("prepared", "entered", "returned", "retired"))
              and all(value[key] is None or type(value[key]) is bool for key in flags), "accessibility-data")
-        site, error = value["site"], value["error"]
+        recheck = _accessibility_native_recheck(value["nativeRecheck"])
+        initial, final = (_accessibility_projection(value[key]) for key in ("initialProjection", "finalProjection"))
+        phase, calls, site, error = (value[key] for key in ("phase", "calls", "site", "error"))
+        need(phase is None or type(phase) is str and phase in ("initial", "native-recheck", "final", "control"),
+             "accessibility-data")
+        need(calls is None or type(calls) is int and 0 <= calls <= 64, "accessibility-data")
         need(site is None and error is None or type(site) is str and site in ACCESSIBILITY_SITES
              and type(error) is str and error in ACCESSIBILITY_ERRORS, "accessibility-data")
         need((not value["entered"] or value["prepared"]) and (not value["returned"] or value["entered"])
@@ -401,28 +531,47 @@ def _accessibility_context(value, native, panel):
         if not value["entered"]:
             need(value["attempted"] is False and value["pressReturned"] is False
                  and all(value[key] is None for key in flags[2:]) and site in (None, "binding", "entry")
-                 and error != "none", "accessibility-data")
+                 and error != "none" and all(value[key] is None for key in observations)
+                 and recheck["state"] == "unrequested", "accessibility-data")
             if value["retired"]:
                 need(site == "entry" and error in ("deadline", "ineligible"), "accessibility-data")
         elif not value["returned"]:
-            need(not value["retired"] and all(value[key] is None for key in flags)
+            need(not value["retired"] and all(value[key] is None for key in flags + observations)
                  and site is None and error is None, "accessibility-data")
         elif all(value[key] is None for key in flags):
-            need(not value["retired"] and (site, error) == ("entry", "custody"), "accessibility-data")
+            need(not value["retired"] and (site, error) == ("entry", "custody")
+                 and all(value[key] is None for key in observations), "accessibility-data")
         else:
-            need(all(type(value[key]) is bool for key in flags) and site not in (None, "binding") and error is not None,
-                 "accessibility-data")
-            need((not value["controlMatched"] or value["identityMatched"])
+            need(all(type(value[key]) is bool for key in flags) and type(calls) is int
+                 and site not in (None, "binding") and error is not None, "accessibility-data")
+            need((not value["nativeRechecked"] or initial is not None and initial["matched"]
+                  and _accessibility_recheck_succeeded(recheck))
+                 and (not value["identityMatched"] or value["nativeRechecked"])
+                 and (not value["controlMatched"] or value["identityMatched"])
                  and (not value["attempted"] or value["controlMatched"])
                  and (not value["pressReturned"] or value["attempted"])
-                 and (not value["attempted"] or value["pressReturned"] or error == "objc-exception")
-                 and (not value["retired"] or value["cleanupReturned"] and error != "custody"), "accessibility-data")
+                 and (not value["attempted"] or value["pressReturned"] or error == "objc-exception"), "accessibility-data")
+            need((initial is None or not initial["matched"] or phase in ("native-recheck", "final", "control"))
+                 and (not value["nativeRechecked"] or phase in ("final", "control"))
+                 and (not value["identityMatched"] or phase == "control")
+                 and (phase not in ("native-recheck", "final", "control") or initial is not None and initial["matched"])
+                 and (phase not in ("final", "control") or value["nativeRechecked"])
+                 and (phase != "control" or value["identityMatched"]), "accessibility-data")
+            need(final is None and not value["identityMatched"] or final is not None
+                 and final["matched"] == value["identityMatched"], "accessibility-data")
+            if value["retired"]:
+                need(value["cleanupReturned"] and error != "custody"
+                     and recheck["state"] in ("unrequested", "not-dispatched", "joined"), "accessibility-data")
             if error in ("objc-exception", "cleanup-unknown"):
                 need(not value["cleanupReturned"], "accessibility-data")
             if error == "none":
-                need(site == "press" and all(value[key] for key in flags), "accessibility-data")
+                need(site == "press" and all(value[key] for key in flags)
+                     and initial is not None and initial["matched"] and final is not None and final["matched"]
+                     and 36 <= calls <= 64 and calls % 2 == 0, "accessibility-data")
+                edges = calls // 2 - 13 - sum(p["windows"] + p["children"] for p in (initial, final))
+                need(1 <= edges <= 8, "accessibility-data")
         return value
-    except (Refused, TypeError, ValueError):
+    except (Refused, KeyError, TypeError, ValueError):
         return None
 
 
@@ -434,68 +583,39 @@ def _accessibility_binding_context(value, case):
         label = "accessibility-binding-data"
         need(type(case) is str and case in CASES and case != "picker-loss", label)
         need(type(value) is dict and set(value) == {"mechanism", "case", "id", "kind", "start", "configuration", "binding"}, label)
-        need(value["mechanism"] == "public-accessibility-identifier" and value["case"] == case
+        need(value["mechanism"] == "public-original-sheet-identity-v1" and value["case"] == case
              and type(value["id"]) is int and value["id"] == (2 if case == "first-save" else 1)
              and value["kind"] == "project", label)
         start, configured, bound = value["start"], value["configuration"], value["binding"]
         need(type(start) is dict and set(start) == {"returned", "result"} and start["returned"] is True
              and type(start["result"]) is str
              and start["result"] in ("ok", "permission-denied", "io", "invalid-input", "already", "other"), label)
-        flags = ("parentSetterEntered", "parentSetterReturned", "panelSetterEntered", "panelSetterReturned")
-        need(type(configured) is dict and set(configured) == {"attempted", *flags, "parent", "panel", "site", "error"}
+        flags = ("parentSetterEntered", "parentSetterReturned")
+        need(type(configured) is dict and set(configured) == {"attempted", *flags, "parent", "site", "error"}
              and all(type(configured[key]) is bool for key in ("attempted", *flags)), label)
-        for phase in (configured,) if bound is None else (configured, bound):
-            need(type(phase) is dict and all(key in phase for key in ("parent", "panel", "site", "error")), label)
-            need(all(phase[key] is None or type(phase[key]) is str and phase[key] in ACCESSIBILITY_BINDING_CLASSES
-                     for key in ("parent", "panel")), label)
-            need(phase["site"] is None or type(phase["site"]) is str and phase["site"] in ACCESSIBILITY_BINDING_SITES, label)
-            need(phase["error"] is None or type(phase["error"]) is str and phase["error"] in ACCESSIBILITY_ERRORS, label)
+        parent, site, error = (configured[key] for key in ("parent", "site", "error"))
+        need(parent is None or type(parent) is str and parent in ACCESSIBILITY_BINDING_CLASSES, label)
+        need(site is None or type(site) is str and site in ACCESSIBILITY_BINDING_SITES, label)
+        need(error is None or type(error) is str and error in ACCESSIBILITY_ERRORS, label)
         bits = tuple(configured[key] for key in flags)
-        parent, panel, site, error = (configured[key] for key in ("parent", "panel", "site", "error"))
         if not configured["attempted"]:
-            need(not any(bits) and parent is panel is site is error is None and start["result"] != "ok", label)
+            need(not any(bits) and parent is site is error is None and start["result"] != "ok", label)
         else:
-            # Configuration is inside the actual start, after allocation. A
-            # failure there must not be reclassified as precreation EPERM.
             need(start["result"] in ("ok", "io") and site is not None and error is not None, label)
-            if site in ("objects", "tags"):
-                need(not any(bits) and parent is panel is None
+            if site in ("objects", "parent-tag"):
+                need(not any(bits) and parent is None
                      and error in (("ineligible",) if site == "objects" else ("invalid-input", "objc-exception")), label)
             elif site == "parent-set":
-                need(bits == (True, False, False, False) and parent is panel is None and error == "objc-exception", label)
-            elif site == "panel-set":
-                need(bits == (True, True, True, False) and parent is panel is None and error == "objc-exception", label)
+                need(bits == (True, False) and parent is None and error == "objc-exception", label)
             elif site == "parent-get":
-                need(all(bits) and parent is panel is None and error == "objc-exception", label)
-            elif site == "panel-get":
-                need(all(bits) and parent is not None and panel is None and error == "objc-exception", label)
+                need(all(bits) and parent is None and error == "objc-exception", label)
             else:
-                need(site == "complete" and all(bits) and parent is not None and panel is not None and error == "none", label)
+                need(site == "complete" and all(bits) and parent is not None and error == "none", label)
             if start["result"] == "ok":
                 need(site == "complete" and error == "none", label)
         if bound is not None:
-            need(start["result"] == "ok" and type(bound) is dict
-                 and set(bound) == {"returned", "attempted", "parent", "panel", "site", "error"}
-                 and bound["returned"] is True and type(bound["attempted"]) is bool, label)
-            parent, panel, site, error = (bound[key] for key in ("parent", "panel", "site", "error"))
-            need(site in ("objects", "tags", "parent-get", "panel-get", "complete") and error is not None, label)
-            if not bound["attempted"]:
-                need(site == "objects" and parent is panel is None and error == "ineligible", label)
-            elif site == "complete":
-                need(parent == panel == "match" and error == "none", label)
-            elif site == "parent-get":
-                need(parent is panel is None and error == "objc-exception"
-                     or parent is not None and parent != "match" and panel is not None and error == "unsupported", label)
-            elif site == "panel-get":
-                need(parent is not None and panel is None and error == "objc-exception"
-                     or parent == "match" and panel is not None and panel != "match" and error == "unsupported", label)
-            elif site == "tags":
-                need(parent is panel is None and error in ("invalid-input", "objc-exception"), label)
-            else:
-                # The original final attachment/directory check can refuse
-                # after both getters. It cannot turn that refusal into input.
-                need((parent is panel is None or parent == panel == "match")
-                     and error in ("ineligible", "objc-exception"), label)
+            need(start["result"] == "ok", label)
+            _accessibility_native_proof(bound)
         return value
     except (Refused, KeyError, TypeError, ValueError):
         return None
