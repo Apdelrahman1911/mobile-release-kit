@@ -43,6 +43,10 @@ NOTICE_NAME = "MRK-EMBEDDED-NOTICES.txt"
 NOTICE_BYTES: int | None = 240822
 NOTICE_SHA256: str | None = "6c814672403bec2064b22e54dbd028b055e0cacdc6837557a66cd5c0a04af360"
 MAX_NOTICE_BYTES = 256 * 1024
+GITHUB_CA_SOURCE = "desktop/cpython-source-inputs/github-ca.pem"
+GITHUB_CA_BYTES = 240216
+GITHUB_CA_SHA256 = "9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f"
+SOURCE_PROJECTION_NAME = "fullwalk-source"
 UNDERPTH = (b"python314.zip\r\n.\r\n\r\n"
             b"# Uncomment to run site.main() automatically\r\n#import site\r\n")
 
@@ -109,6 +113,68 @@ def notice_bytes(source: Path) -> bytes:
     return data
 
 
+def github_ca_bytes(source: Path) -> bytes:
+    """The admitted controls leaf, never an ambient or logical-path fallback."""
+    require(type(GITHUB_CA_BYTES) is int
+            and 0 < GITHUB_CA_BYTES <= runtime_preparation.MAX_GITHUB_CA_BYTES
+            and type(GITHUB_CA_SHA256) is str
+            and re.fullmatch(r"[0-9a-f]{64}", GITHUB_CA_SHA256) is not None,
+            "Windows fixed GitHub CA source is not admitted")
+    path = runtime_preparation._root(source) / GITHUB_CA_SOURCE
+    runtime_preparation._root(path.parent)
+    data = runtime_preparation.read_checked(path, limit=runtime_preparation.MAX_GITHUB_CA_BYTES)
+    require(len(data) == GITHUB_CA_BYTES and hashlib.sha256(data).hexdigest() == GITHUB_CA_SHA256,
+            "Windows fixed GitHub CA bytes differ from the reviewed source pin")
+    return data
+
+
+def _source_payloads(source: Path, github_ca: bytes) -> list[tuple[str, bytes]]:
+    """Snapshot only current core, six bootstraps and the separately pinned CA."""
+    fixed_files = len(runtime_preparation.BOOTSTRAPS) + 1
+    package = runtime_preparation._root(source / "src/mobile_release")
+    # The full projection adds src/, src/mobile_release/, desktop/ and seven
+    # desktop leaves to the core census. Reserve that overhead before output.
+    candidates = runtime_preparation.files(package, reserve_entries=3 + fixed_files)
+    require(candidates and len(candidates) + fixed_files <= runtime_preparation.MAX_FILES
+            and all(path.suffix in {".py", ".json", ".pem"} for path in candidates),
+            "Windows current core inventory differs from the preparation envelope")
+    payloads: dict[str, bytes] = {}
+    total = 0
+    for path in candidates:
+        content = runtime_preparation.read_checked(path, limit=runtime_preparation.MAX_CORE_BYTES - total)
+        total += len(content)
+        payloads["src/mobile_release/" + path.relative_to(package).as_posix()] = content
+    desktop = runtime_preparation._root(source / "desktop")
+    for name in runtime_preparation.BOOTSTRAPS:
+        payloads["desktop/" + name] = runtime_preparation.read_checked(
+            desktop / name, limit=runtime_preparation.MAX_BOOTSTRAP_BYTES)
+    payloads["desktop/" + runtime_preparation.GITHUB_CA_NAME] = github_ca
+    require(all(len(name) <= 512 and len(Path(name).parts) <= runtime_preparation.MAX_PATH_PARTS
+                for name in payloads),
+            "Windows projected source path exceeds the preparation envelope")
+    return sorted(payloads.items())
+
+
+def _write_source_projection(projection: Path, payloads: list[tuple[str, bytes]]) -> None:
+    """Exclusive private data copy; never change or import the original checkout."""
+    directories = {parent for name, _ in payloads for parent in Path(name).parents
+                   if parent != Path(".")}
+    projection.mkdir(mode=0o700)
+    for relative in sorted(directories, key=lambda path: (len(path.parts), path.as_posix())):
+        (projection / relative).mkdir(mode=0o700)
+    for name, content in payloads:
+        with (projection / name).open("xb") as output:
+            require(output.write(content) == len(content), "Windows source projection copy was incomplete")
+    expected = dict(payloads)
+    actual = runtime_preparation.files(projection)
+    require([path.relative_to(projection).as_posix() for path in actual] == list(expected),
+            "Windows source projection gained, lost or aliased a member")
+    for path in actual:
+        content = expected[path.relative_to(projection).as_posix()]
+        require(runtime_preparation.read_checked(path, limit=len(content)) == content,
+                "Windows projected source bytes changed")
+
+
 def archive_bytes(archive: Path) -> bytes:
     require(archive.is_absolute() and ".." not in archive.parts and archive.name == ZIP_NAME,
             "The fixed Windows archive must have its explicit absolute pathname")
@@ -166,16 +232,27 @@ def prepare(source: Path, archive: Path, runtime: Path) -> dict[str, str]:
     # those exact bytes, while the closed roster and each streamed CRC/hash below
     # still check this copy. No generic archive proof/decoder is introduced.
     notices = notice_bytes(source)
+    github_ca = github_ca_bytes(source)
     data = archive_bytes(archive)
     require(runtime.is_absolute() and ".." not in runtime.parts
             and runtime_preparation._safe_name(runtime.name),
             "Windows runtime output must have an explicit absolute ordinary name")
     runtime_preparation._root(runtime.parent)
-    require(not runtime.exists() and not runtime.is_symlink(),
-            "Windows preparation never merges or replaces an existing output")
+    projection = runtime.parent / SOURCE_PROJECTION_NAME
+    require(all(not left.is_relative_to(right) and not right.is_relative_to(left)
+                for left, right in ((source, runtime), (source, projection), (runtime, projection))),
+            "Windows source and preparation outputs must be disjoint")
+    for destination in (runtime, projection):
+        try:
+            destination.lstat()
+        except FileNotFoundError:
+            continue
+        raise PreparationError("Windows preparation never merges or replaces an existing output")
+    payloads = _source_payloads(source, github_ca)
     with io.BytesIO(data) as original, zipfile.ZipFile(original, "r", allowZip64=False) as supplier:
         entries = member_roster(supplier)
         pins = {name: (size, digest) for name, size, digest in MEMBERS}
+        _write_source_projection(projection, payloads)
         runtime.mkdir(mode=0o700)
         python = runtime / "python"
         python.mkdir(mode=0o700)
@@ -196,7 +273,7 @@ def prepare(source: Path, archive: Path, runtime: Path) -> dict[str, str]:
         with (python / NOTICE_NAME).open("xb") as output:
             require(output.write(notices) == len(notices), "Windows notice copy was incomplete")
         check_supplier_copy(python, notices)
-    prepared = runtime_preparation.prepare(source, runtime, TARGET)
+    prepared = runtime_preparation.prepare(projection, runtime, TARGET)
     # These are preparation bindings, not a new execution/provenance grant. The
     # existing CI receipt adds source/run/attempt and original native observations.
     return {**prepared, "inputSha256": ZIP_SHA256,

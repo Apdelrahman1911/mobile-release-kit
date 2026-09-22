@@ -893,9 +893,10 @@ WINDOWS_FULLWALK_URL = "https://www.python.org/ftp/python/3.14.7/" + WINDOWS_FUL
 WINDOWS_FULLWALK_ZIP_BYTES = 12673227
 WINDOWS_FULLWALK_ZIP_SHA256 = "d297e5ff019966817ad8502465176139f2d3d840fa4ed84b13bed399a6ab1f15"
 WINDOWS_FULLWALK_PINS = {
-    "desktop/tools/prepare_windows_embedded_payload.py": (12943, "e49c459629f6453166ffdd504dc33f8d6607e78c62178aa03556a5f763f7f775"),
+    "desktop/tools/prepare_windows_embedded_payload.py": (17398, "79c9933b1bb273226ac4b893cd5a08d5ced752875a090d22385215518056a053"),
     "desktop/tools/prepare_runtime.py": (12355, "4d9f0e52b7cbe1f9d648a96512cf0c0ca5ab01b5b06738282133b57e1830e4f8"),
     "desktop/licenses/windows-embedded-runtime.txt": (240822, "6c814672403bec2064b22e54dbd028b055e0cacdc6837557a66cd5c0a04af360"),
+    "desktop/cpython-source-inputs/github-ca.pem": (240216, "9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f"),
 }
 WINDOWS_FULLWALK_BLOBS = {
     "precheck": ("fullwalk-headless-precheck.private.txt", 16 << 10),
@@ -9224,9 +9225,20 @@ def windows_fullwalk_pins(context: dict) -> list[dict]:
     for name, (size, digest) in WINDOWS_FULLWALK_PINS.items():
         record = {"path": name, "size": size, "sha256": digest}
         require(rows.get(name) == record and windows_installed_record(source / name, size) == {"size": size, "sha256": digest},
-                "Windows exact preparer/notice source pin differs")
+                "Windows exact preparer/notice/CA source pin differs")
         expected.append(record)
     return expected
+
+
+def windows_fullwalk_prepare_outputs_absent(root: Path) -> None:
+    # lstat also sees dangling Windows reparse entries that exists()/is_symlink()
+    # may not identify. Only genuine absence permits creating either output.
+    for name in ("runtime", "fullwalk-source"):
+        try:
+            (root / name).lstat()
+        except FileNotFoundError:
+            continue
+        raise CheckFailure("Windows fullwalk runtime/source output is already occupied")
 
 
 def windows_fullwalk_prepare_inputs(context: dict) -> dict:
@@ -9238,8 +9250,7 @@ def windows_fullwalk_prepare_inputs(context: dict) -> dict:
     require(system_root != "", "Windows fixed supplier tool root is absent")
     curl = Path(system_root) / "System32" / "curl.exe"
     digest = windows_fullwalk_curl_sha256(curl)
-    require(not (root / "runtime").exists() and not (root / "runtime").is_symlink(),
-            "Windows fullwalk runtime output is already occupied")
+    windows_fullwalk_prepare_outputs_absent(root)
     (root / "inputs").mkdir(mode=0o700)
     return {"pins": pins, "curl": {"path": str(curl), "sha256": digest}}
 
@@ -9339,9 +9350,16 @@ def windows_fullwalk_prepared_data(context: dict, receipt_raw: bytes, manifest_r
             and receipt["manifestSha256"] == hashlib.sha256(manifest_raw).hexdigest(),
             "Windows prepared core/protocol/manifest anchors differ")
     for name in ("engine_bootstrap.py", "config_edit_bootstrap.py", "github_connection_bootstrap.py",
-                 "environment_bootstrap.py", "offline_preflight_bootstrap.py", "android_build_bootstrap.py", "github-ca.pem"):
+                 "environment_bootstrap.py", "offline_preflight_bootstrap.py", "android_build_bootstrap.py"):
         original = source["desktop/" + name]
-        require(by_name[name] == {**original, "path": name}, "Windows prepared bootstrap/CA is not current source")
+        require(by_name[name] == {**original, "path": name}, "Windows prepared bootstrap is not current source")
+    # The private source projection supplies the common preparer's logical CA
+    # path; evidence stays bound to the admitted original checkout controls leaf.
+    ca_source = "desktop/cpython-source-inputs/github-ca.pem"
+    size, digest = WINDOWS_FULLWALK_PINS[ca_source]
+    require(source.get(ca_source) == {"path": ca_source, "size": size, "sha256": digest}
+            and by_name["github-ca.pem"] == {"path": "github-ca.pem", "size": size, "sha256": digest},
+            "Windows prepared CA is not the fixed current controls source")
     size, digest = WINDOWS_FULLWALK_PINS["desktop/licenses/windows-embedded-runtime.txt"]
     require(by_name["python/MRK-EMBEDDED-NOTICES.txt"] == {"path": "python/MRK-EMBEDDED-NOTICES.txt", "size": size, "sha256": digest},
             "Windows prepared recipient notice differs")
@@ -9413,9 +9431,9 @@ def windows_fullwalk_acquire(context: dict, environment: dict, deadline: float) 
     require(admission["pins"] == windows_fullwalk_pins(context), "Windows supplier original source admission changed")
     inputs, archive = root / "inputs", root / "inputs" / WINDOWS_FULLWALK_ZIP
     windows_installed_directories(inputs)
-    require(not archive.exists() and not archive.is_symlink()
-            and not (root / "runtime").exists() and not (root / "runtime").is_symlink(),
+    require(not archive.exists() and not archive.is_symlink(),
             "Windows supplier/preparation is one-use and output is occupied")
+    windows_fullwalk_prepare_outputs_absent(root)
     argv = windows_fullwalk_curl_argv(context)
     require(windows_fullwalk_curl_sha256(Path(argv[0])) == admission["curl"]["sha256"],
             "Windows supplier original fixed tool changed immediately before invocation")

@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 import stat
 import subprocess
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -7428,7 +7429,7 @@ class WindowsReaderGateTests(unittest.TestCase):
                        for name, (size, sha) in helper.WINDOWS_FULLWALK_PINS.items()],
                        "curl": {"path": r"C:\Windows\System32\curl.exe", "sha256": "e" * 64}}}
         bootstrap_names = ("engine_bootstrap.py", "config_edit_bootstrap.py", "github_connection_bootstrap.py",
-            "environment_bootstrap.py", "offline_preflight_bootstrap.py", "android_build_bootstrap.py", "github-ca.pem")
+            "environment_bootstrap.py", "offline_preflight_bootstrap.py", "android_build_bootstrap.py")
         names = set(helper.WINDOWS_INSTALLED_SOURCES) | set(helper.WINDOWS_FULLWALK_PINS) | {
             "src/mobile_release/__init__.py", "src/mobile_release/_desktop_engine.py",
             *("desktop/" + name for name in bootstrap_names), *helper.WINDOWS_FULLWALK_HEADLESS_SOURCES.values()}
@@ -7443,6 +7444,7 @@ class WindowsReaderGateTests(unittest.TestCase):
                    for name in helper.WINDOWS_FULLWALK_PAYLOAD_NAMES if name != "manifest.json"}
         for name in bootstrap_names:
             payload[name] = {**source_rows["desktop/" + name], "path": name}
+        payload["github-ca.pem"] = {**source_rows["desktop/cpython-source-inputs/github-ca.pem"], "path": "github-ca.pem"}
         size, digest = helper.WINDOWS_FULLWALK_PINS["desktop/licenses/windows-embedded-runtime.txt"]
         payload["python/MRK-EMBEDDED-NOTICES.txt"] = {"path": "python/MRK-EMBEDDED-NOTICES.txt", "size": size, "sha256": digest}
         rows = [payload[name] for name in sorted(payload)]
@@ -7737,16 +7739,58 @@ class WindowsReaderGateTests(unittest.TestCase):
         context = data["context"]
         pins = [{"path": name, "size": size, "sha256": digest} for name, (size, digest) in helper.WINDOWS_FULLWALK_PINS.items()]
         current = {Path(context["source"]) / row["path"]: {"size": row["size"], "sha256": row["sha256"]} for row in pins}
-        with patch.object(helper, "windows_installed_record", side_effect=lambda path, _: current[path]):
+        ca_source = "desktop/cpython-source-inputs/github-ca.pem"
+        self.assertIn(ca_source, helper.WINDOWS_FULLWALK_PINS)
+        self.assertNotIn(Path(context["source"]) / "desktop/github-ca.pem", current)
+        with patch.object(helper, "windows_installed_record", side_effect=lambda path, _: current.get(path)):
             self.assertEqual(helper.windows_fullwalk_pins(context), pins)
-            for key, wrong in (("size", 1), ("sha256", "0" * 64)):
+            for name in (pins[0]["path"], ca_source):
+                for key, wrong in (("size", 1), ("sha256", "0" * 64)):
+                    changed = deepcopy(context)
+                    next(row for row in changed["sourceFiles"] if row["path"] == name)[key] = wrong
+                    with self.subTest(pin=name, field=key), self.assertRaises(helper.CheckFailure):
+                        helper.windows_fullwalk_pins(changed)
                 changed = deepcopy(context)
-                next(row for row in changed["sourceFiles"] if row["path"] == pins[0]["path"])[key] = wrong
-                with self.subTest(pin=key), self.assertRaises(helper.CheckFailure):
+                changed["sourceFiles"] = [row for row in changed["sourceFiles"] if row["path"] != name]
+                with self.subTest(missing_pin=name), self.assertRaises(helper.CheckFailure):
                     helper.windows_fullwalk_pins(changed)
-            saved = current[Path(context["source"]) / pins[0]["path"]]
-            current[Path(context["source"]) / pins[0]["path"]] = {**saved, "sha256": "0" * 64}
-            with self.assertRaises(helper.CheckFailure): helper.windows_fullwalk_pins(context)
+                path = Path(context["source"]) / name
+                saved = current.pop(path)
+                with self.subTest(missing_physical=name), self.assertRaises(helper.CheckFailure):
+                    helper.windows_fullwalk_pins(context)
+                current[path] = {**saved, "sha256": "0" * 64}
+                with self.subTest(changed_physical=name), self.assertRaises(helper.CheckFailure):
+                    helper.windows_fullwalk_pins(context)
+                current[path] = saved
+        # The one-use source projection is reserved before acquisition just like
+        # runtime. These are only inert paths; neither tool probe nor run executes.
+        for kind in ("file", "directory", "dangling-link"):
+            with self.subTest(occupied_projection=kind), tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                occupied = root / "fullwalk-source"
+                if kind == "file": occupied.write_bytes(b"UNRELATED DATA")
+                elif kind == "directory": occupied.mkdir()
+                else: occupied.symlink_to(root / "absent")
+                chosen = {**context, "root": str(root)}
+                with patch.object(helper, "windows_fullwalk_pins", return_value=pins), \
+                     patch.object(helper, "windows_ordinary_path", return_value=helper.PureWindowsPath(r"C:\Fixture")), \
+                     patch.object(helper, "windows_fullwalk_curl_sha256", return_value="e" * 64), \
+                     patch.object(helper, "windows_installed_directories"), \
+                     patch.dict(helper.os.environ, {"SystemRoot": r"C:\Windows"}), \
+                     patch.object(helper, "run", side_effect=AssertionError("Occupied DATA cannot acquire")) as run:
+                    with self.assertRaises(helper.CheckFailure): helper.windows_fullwalk_prepare_inputs(chosen)
+                    with self.assertRaises(helper.CheckFailure): helper.windows_fullwalk_acquire(chosen, {}, 1.0)
+                    run.assert_not_called()
+                self.assertEqual([path.name for path in root.iterdir()], ["fullwalk-source"])
+                if kind == "file": self.assertEqual(occupied.read_bytes(), b"UNRELATED DATA")
+                elif kind == "directory": self.assertEqual(list(occupied.iterdir()), [])
+                else: self.assertEqual(occupied.readlink(), root / "absent")
+        # Any observed object (including a non-symlink reparse point), and any
+        # inspection error other than absence, refuses without changing it.
+        with patch.object(helper.Path, "lstat", return_value=SimpleNamespace(st_file_attributes=0x400)):
+            with self.assertRaises(helper.CheckFailure): helper.windows_fullwalk_prepare_outputs_absent(Path("/inert"))
+        with patch.object(helper.Path, "lstat", side_effect=PermissionError("inert refusal")):
+            with self.assertRaises(PermissionError): helper.windows_fullwalk_prepare_outputs_absent(Path("/inert"))
         argv = helper.windows_fullwalk_curl_argv(context)
         self.assertEqual(argv[:8], [r"C:\Windows\System32\curl.exe", "--disable", "--proto", "=https", "--tlsv1.2", "--noproxy", "*", "--connect-timeout"])
         self.assertEqual(argv[argv.index("--retry") + 1], "0")
@@ -7817,8 +7861,9 @@ class WindowsReaderGateTests(unittest.TestCase):
         prepare = source.split("def windows_fullwalk_prepare_inputs(", 1)[1].split("\ndef ", 1)[0]
         self.assertLess(prepare.index("windows_fullwalk_pins(context)"), prepare.index('.mkdir(mode=0o700)'))
         self.assertLess(prepare.index("windows_fullwalk_curl_sha256(curl)"), prepare.index('.mkdir(mode=0o700)'))
-        self.assertIn('not (root / "runtime").exists() and not (root / "runtime").is_symlink()', prepare)
+        self.assertLess(prepare.index("windows_fullwalk_prepare_outputs_absent(root)"), prepare.index('.mkdir(mode=0o700)'))
         acquire = source.split("def windows_fullwalk_acquire(", 1)[1].split("\ndef ", 1)[0]
+        self.assertLess(acquire.index("windows_fullwalk_prepare_outputs_absent(root)"), acquire.index("run("))
         self.assertEqual(acquire.count("run("), 2)
         self.assertNotIn("time.monotonic()", acquire)
         self.assertIn("windows_installed_remaining(deadline, 135)", acquire)
@@ -7992,10 +8037,36 @@ class WindowsReaderGateTests(unittest.TestCase):
                 with self.subTest(physical=number, field=key), self.assertRaises(helper.CheckFailure): accept(p=changed)
         for invalid in (physical[:-1], physical + [physical[-1]], list(reversed(physical)), tuple(physical)):
             with self.subTest(physical_type=type(invalid).__name__), self.assertRaises(helper.CheckFailure): accept(p=invalid)
-        for path in ("desktop/engine_bootstrap.py", "desktop/github-ca.pem", "src/mobile_release/_desktop_engine.py"):
+        ca_source = "desktop/cpython-source-inputs/github-ca.pem"
+        self.assertNotIn("desktop/github-ca.pem", {row["path"] for row in context["sourceFiles"]})
+        for path in ("desktop/engine_bootstrap.py", ca_source, "src/mobile_release/_desktop_engine.py"):
             changed = deepcopy(context)
             next(row for row in changed["sourceFiles"] if row["path"] == path)["sha256"] = "0" * 64
             with self.subTest(current_source=path), self.assertRaises(helper.CheckFailure): accept(c=changed)
+        # A correctly hashed logical shadow cannot replace the original controls
+        # row, even though the prepared CA's logical name is github-ca.pem.
+        ca_original = next(row for row in context["sourceFiles"] if row["path"] == ca_source)
+        for shadow in (False, True):
+            changed = deepcopy(context)
+            changed["sourceFiles"] = [row for row in changed["sourceFiles"] if row["path"] != ca_source]
+            if shadow:
+                changed["sourceFiles"].append({**ca_original, "path": "desktop/github-ca.pem"})
+                changed["sourceFiles"].sort(key=lambda row: row["path"])
+            with self.subTest(missing_controls_with_shadow=shadow), self.assertRaisesRegex(helper.CheckFailure, "fixed current controls"):
+                accept(c=changed)
+        # Rehash every dependent record consistently so rejection specifically
+        # proves the fixed CA tuple, not an unrelated stale manifest hash.
+        changed, m, r = deepcopy(context), deepcopy(manifest), deepcopy(receipt)
+        alternative = {"size": ca_original["size"], "sha256": "0" * 64}
+        next(row for row in changed["sourceFiles"] if row["path"] == ca_source).update(alternative)
+        next(row for row in m["files"] if row["path"] == "github-ca.pem").update(alternative)
+        m["inventorySha256"] = hashlib.sha256(helper.canonical_json(m["files"])).hexdigest()
+        raw = helper.canonical_json(m) + b"\n"
+        r["manifestSha256"] = hashlib.sha256(raw).hexdigest()
+        p = sorted([*deepcopy(m["files"]), {"path": "manifest.json", "size": len(raw), "sha256": r["manifestSha256"]}],
+                   key=lambda row: row["path"])
+        with self.assertRaisesRegex(helper.CheckFailure, "fixed current controls"):
+            accept(c=changed, m=m, r=r, p=p)
         # Purpose bound only. Generic source inventories remain at8MiB/member.
         large = deepcopy(physical); large[0]["size"] = 128 << 20
         self.assertEqual(helper.windows_fullwalk_payload_rows(large, physical=True), large)
