@@ -109,11 +109,6 @@ def action_context_data(step="OpenProject", *, site=None, domain="objc-exception
     return value
 
 
-def unrequested_recheck():
-    return {"state": "unrequested", **dict.fromkeys(M.ACCESSIBILITY_RECHECK_FLAGS, False),
-            "timely": None, "custodyKnown": None, "proof": None, "defaultControl": None}
-
-
 def accessibility_context_data():
     value = action_context_data()
     value["nativeAction"] = None  # The old selector is historical DATA only.
@@ -435,371 +430,191 @@ class AquaDataTests(unittest.TestCase):
         with self.assertRaisesRegex(M.Refused, "^inner-failure-marker$"):
             M.parse_result(captured(M.expected_result(BINDING, "first-save")), row, BINDING, "first-save")
 
-    def test_accessibility_samples_distinguish_preparation_unknown_and_actual_return(self):
-        value = accessibility_context_data()
-        examples = [deepcopy(value)]
-        same_first = deepcopy(value)
-        same_first["lastPanel"]["id"] = same_first["accessibility"]["id"] = 1
-        examples.append(same_first)
-        historical = deepcopy(value)
-        historical["nativeHandler"] = {"step": "Quit", "entered": False, "returned": False}
-        historical["lastPanel"] = None
-        historical["pending"] = {"kind": "native", "step": "Quit"}
-        examples.append(historical)
-        sample = value["accessibility"]
-        flags = ("attempted", "pressReturned", "identityMatched", "controlMatched", "cleanupReturned", "nativeRechecked")
-        sample.update(prepared=False, entered=False, returned=False, retired=False, attempted=False, pressReturned=False,
-                      identityMatched=None, controlMatched=None, cleanupReturned=None, nativeRechecked=None,
-                      phase=None, calls=None, initialProjection=None, finalProjection=None,
-                      nativeRecheck=unrequested_recheck(), site="binding", error="unsupported")
-        examples.append(deepcopy(value))
-        sample.update(prepared=True, site=None, error=None)
-        examples.append(deepcopy(value))
-        sample.update(retired=True, site="entry", error="deadline")
-        examples.append(deepcopy(value))  # Positive no-FFI-entry is not native return.
-        sample.update(entered=True, retired=False, **dict.fromkeys(flags), site=None, error=None)
-        value["pending"] = {"kind": "accessibility", "step": "OpenProject"}
-        examples.append(deepcopy(value))
-        sample.update(returned=True, site="entry", error="custody")
-        examples.append(deepcopy(value))  # Invalid returned ABI cannot retire.
-        for error in ("unsupported", "ambiguous", "malformed", "limit", "deadline", "ineligible", "invalid-element"):
-            sample.update(attempted=False, pressReturned=False, identityMatched=False, controlMatched=False,
-                          nativeRechecked=False, cleanupReturned=True, retired=True, phase="initial", calls=6,
-                          initialProjection={"windows": 1, "children": None, "sheets": None, "matched": False},
-                          site="parent-identity", error=error)
-            value["pending"] = None
-            examples.append(deepcopy(value))
-        value = accessibility_context_data()
-        value["accessibility"]["error"] = "cannot-complete"  # Spent, possibly effective attempt; never retried.
-        examples.append(deepcopy(value))
-        value["accessibility"].update(pressReturned=False, cleanupReturned=False, retired=False, error="objc-exception")
-        value["pending"] = {"kind": "accessibility", "step": "OpenProject"}
-        examples.append(deepcopy(value))
-        for value in examples:
-            with self.subTest(sample=value["accessibility"]):
-                self.assertEqual(M.failure_context(context_row(value), b""), value)
-                self.assertLess(len(context_row(value)), M.FAILURE_CONTEXT_LIMIT)
-                with self.assertRaisesRegex(M.Refused, "^inner-failure-marker$"):
-                    M.parse_result(captured(M.expected_result(BINDING, "first-save")), context_row(value), BINDING, "first-save")
-
-    def test_accessibility_malformed_data_never_replaces_existing_failure_context(self):
+    def test_semantic_action_actual_return_and_timeout_are_not_completion(self):
         good = accessibility_context_data()
-        for field, bad in (("id", True), ("id", 1), ("id", 3), ("step", "Quit"), ("mechanism", "accessibility-press"),
-                           ("prepared", False), ("entered", False), ("attempted", False), ("pressReturned", None),
-                           ("returned", False), ("retired", 1), ("identityMatched", False), ("controlMatched", False),
-                           ("cleanupReturned", False), ("site", "private-selector"), ("error", "PRIVATE"),
-                           ("nativeRechecked", False), ("nativeRecheck", None), ("phase", "initial"), ("calls", True),
-                           ("initialProjection", None), ("finalProjection", None), ("identifier", "PRIVATE")):
-            value = deepcopy(good); value["accessibility"][field] = bad
-            expected = deepcopy(good); expected["accessibility"] = None
-            self.assertEqual(M.failure_context(context_row(value), b""), expected, (field, bad))
-        for field, bad in (("id", 1), ("kind", "quit")):
-            value = deepcopy(good); value["lastPanel"][field] = bad
-            expected = deepcopy(value); expected["accessibility"] = None
-            self.assertEqual(M.failure_context(context_row(value), b""), expected)
-        for missing_panel, returned in ((True, True), (False, False)):
-            value = deepcopy(good); value["nativeHandler"]["returned"] = returned
-            if missing_panel:
-                value["lastPanel"] = None
-            expected = deepcopy(value); expected["accessibility"] = None
-            self.assertEqual(M.failure_context(context_row(value), b""), expected)
-        row = context_row(good)
-        self.assertIsNone(M.failure_context(row.replace(b'"attempted":true', b'"attempted":true,"attempted":false'), b""))
-        empty = {"pending": None, "nativeHandler": None, "lastPanel": None, "nativeAction": None, "accessibility": None}
-        self.assertEqual(M.failure_context(context_row(empty), b""), empty)
+        self.assertEqual(M.failure_context(b"", context_row(good), "first-save"), good)
+        for state in ("requested", "queued", "entered", "returned", "joined", "unknown"):
+            value = deepcopy(good); sample = value["accessibility"]
+            sample.update(state=state, dispatchAttempted=state != "requested",
+                          bodyEntered=state not in ("requested", "queued"), nativeEntered=None,
+                          bodyReturned=state in ("returned", "joined", "unknown"), receiptJoined=state == "joined", barrierRetired=False,
+                          expired=True, timely=False, custodyKnown=False if state == "unknown" else True if state == "joined" else None,
+                          attempted=None, pressReturned=None, triggered=None, initialOriginalProof=None,
+                          originalProof=None, capture=None, defaultRecheck=None, site=None, error=None)
+            self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), value)
+            self.assertFalse(M._accessibility_succeeded(sample))
+            value["snapshotSource"] = "prearm-open-progress"
+            value["pending"] = {"kind": "accessibility", "step": "OpenProject"}
+            self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), value)
+            # Original pending/last-panel fields are not presented as current
+            # absence observations or native facts without an actual receipt.
+            for key, bad in (("pending", None), ("snapshotSource", "current")):
+                conflict = deepcopy(value); conflict[key] = bad
+                self.assertIsNone(M.failure_context(b"", context_row(conflict), "first-save"))
+        late = deepcopy(good); late["accessibility"].update(expired=True, timely=False)
+        self.assertEqual(M.failure_context(b"", context_row(late), "first-save"), late)
+        self.assertFalse(M._accessibility_succeeded(late["accessibility"]))
+        # The same body really returned, but an exceptional Press retains unknown
+        # custody. Neither callback-shaped DATA nor a receipt repairs it.
+        caught = deepcopy(good); sample = caught["accessibility"]
+        sample.update(state="unknown", receiptJoined=False, barrierRetired=False, custodyKnown=False,
+                      pressReturned=False, triggered=None, error="objc-exception")
+        self.assertEqual(M.failure_context(b"", context_row(caught), "first-save"), caught)
+        self.assertFalse(M._accessibility_succeeded(sample))
+        # A later Unknown preserves actual prior join/retirement, while still
+        # vetoing success/current release permission.
+        history = deepcopy(good); history["accessibility"].update(state="unknown", custodyKnown=False)
+        self.assertEqual(M.failure_context(b"", context_row(history), "first-save"), history)
+        self.assertFalse(M._accessibility_succeeded(history["accessibility"]))
 
-    def test_success_requires_actual_trust_and_one_retired_public_press(self):
-        fields = ("prepared", "entered", "attempted", "pressReturned", "returned", "retired", "identityMatched",
-                  "controlMatched", "cleanupReturned", "nativeRechecked")
+    def test_semantic_closed_parser_rejects_fabricated_old_or_conflicting_facts(self):
+        good = accessibility_context_data()
+        for key, bad in (("mechanism", "accessibility-press-original-default-frame-v1"), ("id", True), ("id", 1),
+                         ("bodyReturned", False), ("nativeEntered", False), ("receiptJoined", False),
+                         ("custodyKnown", False), ("pressReturned", False), ("triggered", None), ("prepared", False),
+                         ("expired", True), ("initialOriginalProof", None), ("calls", 0), ("cleanupReturned", True), ("initialProjection", None)):
+            value = deepcopy(good); value["accessibility"][key] = bad
+            expected = deepcopy(value); expected["accessibility"] = None
+            self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), expected, (key, bad))
+        for state in ("prepared", "requested", "queued", "entered", "returned", "unknown"):
+            value = deepcopy(good)
+            value["accessibility"].update(state=state, barrierRetired=False, receiptJoined=False)
+            if state == "returned": value["accessibility"]["bodyReturned"] = False
+            expected = deepcopy(value); expected["accessibility"] = None
+            # SOURCE01 review conflicts: phase alone cannot hide full positive
+            # progress or Unknown with known custody.
+            self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), expected, state)
+        for path in (("initialOriginalProof", "checks", "eligible"), ("capture", "elementRetained"), ("defaultRecheck", "checks", "stableDefault"),
+                     ("originalProof", "checks", "nativeChild")):
+            value = deepcopy(good); target = value["accessibility"]
+            for part in path[:-1]: target = target[part]
+            target[path[-1]] = False
+            expected = deepcopy(value); expected["accessibility"] = None
+            self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), expected)
+
+    def test_success_requires_all_semantic_native_and_original_join_obligations(self):
         for case in M.CASES:
             good = M.expected_result(BINDING, case)
             self.assertEqual(M.parse_result(captured(good), b"", BINDING, case), good)
-            variants = []
-            for bad in (False, None, 1):
-                value = deepcopy(good); value["native"]["accessibilityTrustedWithoutPrompt"] = bad; variants.append(value)
             if case == "picker-loss":
-                self.assertIsNone(good["native"]["projectOpenInput"])
-                value = deepcopy(good); value["native"]["projectOpenInput"] = accessibility_context_data()["accessibility"]
-                variants.append(value)
-            else:
-                self.assertEqual(good["native"]["projectOpenInput"]["mechanism"], "accessibility-press-original-default-frame-v1")
-                for field in fields:
-                    for bad in (False, None, 1):
-                        value = deepcopy(good); value["native"]["projectOpenInput"][field] = bad; variants.append(value)
-                for field, bad in (("error", "cannot-complete"), ("site", "default-hit"), ("mechanism", "accessibility-press"),
-                                   ("mechanism", "accessibility-press-original-sheet-v1"),
-                                   ("id", 3), ("phase", "final"), ("nativeRecheck", unrequested_recheck())):
-                    value = deepcopy(good); value["native"]["projectOpenInput"][field] = bad; variants.append(value)
-            for value in variants:
-                with self.assertRaises(M.Refused):
+                continue
+            sample = good["native"]["projectOpenInput"]
+            self.assertEqual(sample["mechanism"], "accessibility-press-original-semantic-element-v1")
+            for key, bad in (("expired", True), ("timely", False), ("barrierRetired", False), ("receiptJoined", False),
+                             ("custodyKnown", False), ("bodyReturned", False), ("triggered", False), ("attempted", False),
+                             ("dispatchAttempted", False), ("state", "unknown"), ("initialOriginalProof", None)):
+                value = deepcopy(good); value["native"]["projectOpenInput"][key] = bad
+                with self.assertRaises(M.Refused, msg=(case, key)):
                     M.parse_result(captured(value), b"", BINDING, case)
+            for key in ("accessibilityTrustedWithoutPrompt", "selectedPathMatched", "originalDocumentAndQuitSettled"):
+                value = deepcopy(good); value["native"][key] = False
+                with self.assertRaises(M.Refused): M.parse_result(captured(value), b"", BINDING, case)
+            # These are original native counts, not obsolete AX lookup budgets.
+            for count in (1, 6, 16):
+                value = deepcopy(good)
+                value["native"]["projectOpenInput"]["originalProof"]["children"] = count
+                value["native"]["projectOpenBinding"]["binding"]["children"] = count
+                self.assertEqual(M.parse_result(captured(value), b"", BINDING, case), value)
 
-    def test_original_sheet_native_proof_and_exact_aggregate_call_budget_are_mandatory(self):
-        good = M.expected_result(BINDING, "first-save")
-        for proof_path in (("projectOpenBinding", "binding"), ("projectOpenInput", "nativeRecheck", "proof")):
-            for check in M.ACCESSIBILITY_PROOF_CHECKS:
-                for bad in (False, None, 1):
-                    value = deepcopy(good); proof = value["native"]
-                    for part in proof_path:
-                        proof = proof[part]
-                    proof["checks"][check] = bad
-                    with self.assertRaises(M.Refused):
-                        M.parse_result(captured(value), b"", BINDING, "first-save")
-        # Variable topology is allowed only when the complete two-pass count
-        # leaves exactly1..8 ancestry edges within the unchanged64-call budget.
-        for windows, children, final_windows, final_children, edges in (
-                (1, 1, 1, 1, 1), (2, 3, 1, 4, 2), (4, 4, 3, 3, 2), (1, 1, 1, 1, 8), (1, 6, 1, 6, 2)):
-            value = deepcopy(good); sample = value["native"]["projectOpenInput"]
-            sample["initialProjection"].update(windows=windows, children=children)
-            sample["finalProjection"].update(windows=final_windows, children=final_children)
-            sample["calls"] = 2 * (16 + windows + children + final_windows + final_children + edges)
-            self.assertEqual(M.parse_result(captured(value), b"", BINDING, "first-save"), value)
-            for bad in (True, None, 41, 65, sample["calls"] + 1, 2 * (16 + windows + children + final_windows + final_children)):
-                broken = deepcopy(value); broken["native"]["projectOpenInput"]["calls"] = bad
-                with self.assertRaises(M.Refused):
-                    M.parse_result(captured(broken), b"", BINDING, "first-save")
-        # The observed projection counts leave two ancestry edges, not three.
-        value = deepcopy(good); sample = value["native"]["projectOpenInput"]
-        for key in ("initialProjection", "finalProjection"):
-            sample[key].update(windows=1, children=6)
-        sample["calls"] = 60 + 2 * 3
-        with self.assertRaises(M.Refused):
-            M.parse_result(captured(value), b"", BINDING, "first-save")
-        for path in ("initialProjection", "finalProjection"):
-            for field, bad in (("windows", 5), ("children", 17), ("sheets", 0), ("sheets", 2), ("matched", False), ("children", True)):
-                value = deepcopy(good); value["native"]["projectOpenInput"][path][field] = bad
-                with self.assertRaises(M.Refused):
-                    M.parse_result(captured(value), b"", BINDING, "first-save")
+    def test_generic_default_refusal_keeps_original_proof_and_never_invents_press(self):
+        initial = accessibility_context_data(); sample = initial["accessibility"]
+        sample.update(attempted=False, pressReturned=False, triggered=None, site="initial-original-proof", error="ineligible",
+                      capture=None, originalProof=None, defaultRecheck=None)
+        sample["initialOriginalProof"].update(parent=None, panel=None, children=None, originals=None,
+            checks={key: False if key == "eligible" else None for key in M.ACCESSIBILITY_PROOF_CHECKS}, site="objects", error="ineligible")
+        self.assertEqual(M.failure_context(b"", context_row(initial), "first-save"), initial)
+        self.assertFalse(M._accessibility_succeeded(sample))
+        invalid = deepcopy(initial); invalid["accessibility"]["capture"] = M._expected_default_proof()
+        expected = deepcopy(invalid); expected["accessibility"] = None
+        self.assertEqual(M.failure_context(b"", context_row(invalid), "first-save"), expected)
+        value = accessibility_context_data(); sample = value["accessibility"]
+        sample.update(attempted=False, pressReturned=False, triggered=None, site="capture", error="unsupported",
+                      originalProof=None, defaultRecheck=None)
+        sample["capture"] = {"returned": True, "attempted": True, "elementRetained": False,
+                             "checks": {key: True if key == "eligible" else False if key == "defaultElement" else None
+                                        for key in M.ACCESSIBILITY_DEFAULT_CHECKS}, "site": "default-element", "error": "unsupported"}
+        value["accessibilityBinding"] = binding_context_data()["accessibilityBinding"]
+        self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), value)
+        self.assertFalse(M._accessibility_succeeded(sample))
+        for key in ("attempted", "pressReturned", "triggered"):
+            bad = deepcopy(value); bad["accessibility"][key] = True
+            expected = deepcopy(bad); expected["accessibility"] = None
+            self.assertEqual(M.failure_context(b"", context_row(bad), "first-save"), expected)
+        # A retained generic element can fail capability without any NSView test.
+        sample["capture"].update(elementRetained=True, site="capability")
+        sample["capture"]["checks"].update(defaultElement=True, capability=False)
+        self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), value)
 
-    def test_default_control_proof_is_required_bound_and_closed(self):
-        good = M.expected_result(BINDING, "first-save")
-        for path in (("projectOpenBinding",), ("projectOpenInput", "nativeRecheck")):
-            parent = good["native"]
-            for part in path:
-                parent = parent[part]
-            proof = parent["defaultControl"]
-            variants = [None]
-            for field in ("returned", *M.ACCESSIBILITY_DEFAULT_FLAGS):
-                for bad in (not proof[field], None, 1):
-                    changed = deepcopy(proof); changed[field] = bad; variants.append(changed)
-            for field in M.ACCESSIBILITY_DEFAULT_CHECKS:
-                for bad in (False, None, 1):
-                    changed = deepcopy(proof); changed["checks"][field] = bad; variants.append(changed)
-            for field, bad in (("tag", "PRIVATE"), ("point", [1, 2]), ("frame", [0, 0, 1, 1]),
-                               ("error", "PRIVATE"), ("site", "default-button")):
-                changed = deepcopy(proof); changed[field] = bad; variants.append(changed)
-            for changed in variants:
-                value = deepcopy(good); target = value["native"]
-                for part in path:
-                    target = target[part]
-                target["defaultControl"] = changed
-                with self.assertRaises(M.Refused):
-                    M.parse_result(captured(value), b"", BINDING, "first-save")
+    def test_one_original_late_no_entry_can_settle_failure_but_not_succeed(self):
+        value = accessibility_context_data(); sample = value["accessibility"]
+        sample.update(nativeEntered=False, attempted=False, pressReturned=False, triggered=None,
+                      initialOriginalProof=None, originalProof=None, capture=None, defaultRecheck=None, expired=True, timely=False,
+                      site="admission", error="deadline")
+        self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), value)
+        self.assertFalse(M._accessibility_succeeded(sample))
+        no_dispatch = deepcopy(value)
+        no_dispatch["accessibility"].update(requested=False, dispatchAttempted=False, bodyEntered=False,
+                                            bodyReturned=False, receiptJoined=False)
+        self.assertEqual(M.failure_context(b"", context_row(no_dispatch), "first-save"), no_dispatch)
+        self.assertFalse(M._accessibility_succeeded(no_dispatch["accessibility"]))
+        for key, bad in (("triggered", True), ("nativeEntered", True), ("timely", True)):
+            changed = deepcopy(value); changed["accessibility"][key] = bad
+            if key == "nativeEntered":
+                # No-entry has no successful native proof regardless of a false claim.
+                self.assertFalse(M._accessibility_succeeded(changed["accessibility"]))
+            else:
+                expected = deepcopy(changed); expected["accessibility"] = None
+                self.assertEqual(M.failure_context(b"", context_row(changed), "first-save"), expected)
+        no = accessibility_context_data(); no["accessibility"].update(triggered=False, error="not-triggered")
+        self.assertEqual(M.failure_context(b"", context_row(no), "first-save"), no)
+        self.assertFalse(M._accessibility_succeeded(no["accessibility"]))
 
-    def test_partial_default_failure_preserves_original_proof_without_press(self):
-        # The original sheet can match even when its semantic default is absent.
-        context = binding_context_data(); binding = context["accessibilityBinding"]
-        failed = {"returned": True, "attempted": True, "cellRetained": False, "viewRetained": False,
-                  "tagSetterEntered": False, "tagSetterReturned": False,
-                  "checks": {**dict.fromkeys(M.ACCESSIBILITY_DEFAULT_CHECKS), "eligible": True, "defaultCell": False},
-                  "site": "default-cell", "error": "unsupported"}
-        binding["defaultControl"] = failed
-        self.assertEqual(M.failure_context(context_row(context), b"", "first-save"), context)
-        self.assertEqual(binding["binding"]["error"], "none")
-        for field, bad in (("eligible", None), ("controlView", False), ("stable", True)):
-            broken = deepcopy(context); broken["accessibilityBinding"]["defaultControl"]["checks"][field] = bad
-            expected = deepcopy(broken); expected["accessibilityBinding"] = None
-            self.assertEqual(M.failure_context(context_row(broken), b"", "first-save"), expected)
-        value = M.expected_result(BINDING, "first-save"); value["native"]["projectOpenBinding"] = binding
-        with self.assertRaisesRegex(M.Refused, "^project-open-binding$"):
-            M.parse_result(captured(value), b"", BINDING, "first-save")
-        # No default proof may be attached to an earlier failed original proof.
-        binding["binding"]["checks"]["finalEligibility"] = False
-        binding["binding"].update(site="final-eligibility", error="changed")
-        expected = deepcopy(context); expected["accessibilityBinding"] = None
-        self.assertEqual(M.failure_context(context_row(context), b"", "first-save"), expected)
-        binding["defaultControl"] = None
-        self.assertEqual(M.failure_context(context_row(context), b"", "first-save"), context)
-        # A joined, genuinely negative recheck is not a matching receipt. Its
-        # already retained originals are distinct from a fresh tag-set attempt.
-        context = accessibility_context_data(); sample = context["accessibility"]
-        failed = deepcopy(failed)
-        failed.update(cellRetained=True, viewRetained=True, site="button-enabled", error="ineligible")
-        failed["checks"].update(defaultCell=True, controlView=True, buttonUsable=False)
-        sample["nativeRecheck"]["defaultControl"] = failed
-        sample.update(attempted=False, pressReturned=False, identityMatched=False, controlMatched=False,
-                      nativeRechecked=False, phase="native-recheck", calls=12, finalProjection=None,
-                      site="native-recheck", error="ineligible")
-        self.assertEqual(M.failure_context(context_row(context), b""), context)
-        self.assertEqual(sample["nativeRecheck"]["proof"]["error"], "none")
-        for field in ("nativeRechecked", "attempted", "controlMatched"):
-            broken = deepcopy(context); broken["accessibility"][field] = True
-            expected = deepcopy(broken); expected["accessibility"] = None
-            self.assertEqual(M.failure_context(context_row(broken), b""), expected)
-
-    def test_native_recheck_unknown_negative_and_joined_receipts_are_not_interchangeable(self):
-        good = accessibility_context_data()
-        success = good["accessibility"]["nativeRecheck"]
-        for field, bad in (("state", "unknown"), ("state", "queued"), ("timely", False), ("custodyKnown", False),
-                           ("proof", None), *((key, False) for key in M.ACCESSIBILITY_RECHECK_FLAGS)):
-            value = deepcopy(good); value["accessibility"]["nativeRecheck"][field] = bad
-            expected = deepcopy(value); expected["accessibility"] = None
-            self.assertEqual(M.failure_context(context_row(value), b""), expected)
-        # A timely known-negative receipt permits no Press. It may retire only
-        # with the actual original AX return/cleanup/custody, unlike Unknown.
-        value = deepcopy(good); sample = value["accessibility"]
-        sample.update(attempted=False, pressReturned=False, identityMatched=False, controlMatched=False,
-                      nativeRechecked=False, phase="native-recheck", calls=12, finalProjection=None,
-                      site="native-recheck", error="ineligible")
-        sample["nativeRecheck"].update(nativeEntered=False, proof=None, defaultControl=None)
-        self.assertEqual(M.failure_context(context_row(value), b""), value)
-        value["accessibility"]["nativeRecheck"] = {**unrequested_recheck(), "state": "unknown", "requested": True,
-            "dispatchAttempted": True, "timely": False}
-        sample.update(retired=False, error="deadline")
-        self.assertEqual(M.failure_context(context_row(value), b""), value)
-        sample["retired"] = True
-        expected = deepcopy(value); expected["accessibility"] = None
-        self.assertEqual(M.failure_context(context_row(value), b""), expected)
-        # In-flight DATA does not claim native non-entry simply because the
-        # original main body has not returned any native-entry facts yet.
-        sample.update(returned=False, retired=False, site=None, error=None,
-                      **dict.fromkeys(("attempted", "pressReturned", "identityMatched", "controlMatched", "cleanupReturned",
-                                       "nativeRechecked", "phase", "calls", "initialProjection", "finalProjection")))
-        sample["nativeRecheck"] = {**unrequested_recheck(), "state": "entered", "requested": True,
-                                   "dispatchAttempted": True, "bodyEntered": True}
-        self.assertEqual(M.failure_context(context_row(value), b""), value)
-        self.assertEqual(success["state"], "joined")  # Fixtures do not alias the expected proof.
-
-    def test_early_binding_matrix_is_diagnostic_but_late_identity_is_mandatory(self):
+    def test_original_identity_edges_and_partial_configuration_are_still_mandatory(self):
         for case in ("first-save", "noop-stale", "save-loss"):
-            for parent in ("nil", "match", "different", "type-invalid"):
-                good = M.expected_result(BINDING, case)
-                sample = good["native"]["projectOpenBinding"]
-                sample["configuration"]["parent"] = parent
-                self.assertEqual(M.parse_result(captured(good), b"", BINDING, case), good)
-                context = binding_context_data(case); context["accessibilityBinding"] = deepcopy(sample)
-                self.assertEqual(M.failure_context(context_row(context), b"", case), context)
-                if parent == "match":
-                    continue
-                sample["binding"].update(parent=parent, site="parent-identifier", error="unsupported")
-                sample["binding"]["checks"]["parentIdentifier"] = False
-                sample["defaultControl"] = None
-                context["accessibilityBinding"] = deepcopy(sample)
-                self.assertEqual(M.failure_context(context_row(context), b"", case), context)
-                with self.assertRaisesRegex(M.Refused, "^project-open-binding$"):
-                    M.parse_result(captured(good), b"", BINDING, case)
+            good = M.expected_result(BINDING, case)
+            for name in M.ACCESSIBILITY_PROOF_CHECKS:
+                for where in ("projectOpenBinding", "projectOpenInput"):
+                    value = deepcopy(good)
+                    proof = value["native"][where]["binding" if where == "projectOpenBinding" else "originalProof"]
+                    proof["checks"][name] = False
+                    with self.assertRaises(M.Refused): M.parse_result(captured(value), b"", BINDING, case)
+            for field, bad in (("children", 0), ("children", 17), ("originals", "multiple"),
+                               ("parent", "different"), ("panel", "valid")):
+                value = deepcopy(good); value["native"]["projectOpenBinding"]["binding"][field] = bad
+                with self.assertRaises(M.Refused): M.parse_result(captured(value), b"", BINDING, case)
+        for site, flags in (("parent-tag", (False, False)), ("parent-set", (True, False)), ("parent-get", (True, True))):
+            value = binding_context_data(); binding = value["accessibilityBinding"]
+            binding["start"]["result"] = "io"; binding["binding"] = None
+            binding["configuration"].update(parentSetterEntered=flags[0], parentSetterReturned=flags[1],
+                                             parent=None, site=site, error="objc-exception")
+            self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), value)
         for panel in ("nil", "type-invalid", "empty", "byte-limit", "nul", "encoding-invalid", "different"):
-            good = M.expected_result(BINDING, "first-save"); proof = good["native"]["projectOpenBinding"]["binding"]
-            proof.update(panel=panel, site="stable-identifier", error="changed")
+            value = binding_context_data(); proof = value["accessibilityBinding"]["binding"]
+            proof.update(site="stable-identifier", error="changed", panel=panel)
             proof["checks"].update(stableIdentifier=False, finalEligibility=None)
-            context = binding_context_data(); context["accessibilityBinding"].update(binding=proof, defaultControl=None)
-            self.assertEqual(M.failure_context(context_row(context), b"", "first-save"), context)
-            self.assertIs(proof["checks"]["panelIdentifier"], True)
-            for field, bad in (("site", "panel-identifier"), ("error", "unsupported"), ("finalEligibility", True)):
-                broken = deepcopy(context); target = broken["accessibilityBinding"]["binding"]
-                if field == "finalEligibility":
-                    target["checks"][field] = bad
-                else:
-                    target[field] = bad
-                expected = deepcopy(broken); expected["accessibilityBinding"] = None
-                self.assertEqual(M.failure_context(context_row(broken), b"", "first-save"), expected)
-            with self.assertRaises(M.Refused):
-                M.parse_result(captured(good), b"", BINDING, "first-save")
-        missing = M.expected_result(BINDING, "first-save"); missing["native"]["projectOpenBinding"] = None
-        with self.assertRaises(M.Refused):
-            M.parse_result(captured(missing), b"", BINDING, "first-save")
-        picker = M.expected_result(BINDING, "picker-loss")
-        picker["native"]["projectOpenBinding"] = binding_context_data()["accessibilityBinding"]
-        with self.assertRaises(M.Refused):
-            M.parse_result(captured(picker), b"", BINDING, "picker-loss")
+            self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), value)
 
-    def test_binding_partial_returns_remain_data_without_action_or_finality(self):
-        flags = ("parentSetterEntered", "parentSetterReturned")
-        examples = []
-        for result in ("permission-denied", "io", "invalid-input", "already", "other"):
-            context = binding_context_data(); sample = context["accessibilityBinding"]
-            sample["start"]["result"] = result; sample["binding"] = sample["defaultControl"] = None
-            sample["configuration"].update(attempted=False, **dict.fromkeys(flags, False), parent=None, site=None, error=None)
-            examples.append(context)
-        for site, error, bits, parent in (
-            ("objects", "ineligible", (False, False), None), ("parent-tag", "invalid-input", (False, False), None),
-            ("parent-tag", "objc-exception", (False, False), None), ("parent-set", "objc-exception", (True, False), None),
-            ("parent-get", "objc-exception", (True, True), None), ("complete", "none", (True, True), "different"),
-        ):
-            context = binding_context_data(); sample = context["accessibilityBinding"]
-            sample["start"]["result"] = "io"; sample["binding"] = sample["defaultControl"] = None
-            sample["configuration"].update(**dict(zip(flags, bits)), parent=parent, site=site, error=error)
-            examples.append(context)
-        for attempted, site, error, eligible in ((False, "objects", "custody", None),
-                                                (True, "objects", "ineligible", False),
-                                                (True, "attachment", "objc-exception", True)):
-            context = binding_context_data()
-            context["accessibilityBinding"]["defaultControl"] = None
-            context["accessibilityBinding"]["binding"] = {"returned": True, "attempted": attempted,
-                "checks": {**dict.fromkeys(M.ACCESSIBILITY_PROOF_CHECKS), "eligible": eligible},
-                "parent": None, "panel": None, "children": None, "originals": None, "site": site, "error": error}
-            examples.append(context)
-        for context in examples:
-            self.assertEqual(M.failure_context(context_row(context), b"", "first-save"), context)
-            self.assertIsNone(context["nativeHandler"])
-            self.assertIsNone(context["accessibility"])
-        with inert_exception_owner(stderr=context_row(examples[8])) as call:
-            fixtures = InertFixtures()
-            with self.assertRaises(RuntimeError) as caught:
-                M.run_cases(BINDING, fixtures, call.owner.run_owned, UID, "runner", self.fail)
-            self.assertIs(caught.exception, call.original)
-            self.assertEqual(fixtures.inner_failure_context, examples[8])
-            self.assertTrue(fixtures.inflight)
-            self.assertFalse(fixtures.last_returned)
-            self.assertIsNone(fixtures.app_returncode)
-            self.assertEqual(fixtures.before, ["first-save"])
-            self.assertEqual(fixtures.reads, [])
-
-    def test_binding_malformed_or_wrong_case_drops_only_new_diagnostic(self):
-        good = accessibility_context_data()
-        good["accessibilityBinding"] = binding_context_data()["accessibilityBinding"]
-        variants = []
-        for path, bad in (
-            (("mechanism",), "public-accessibility-identifier"), (("mechanism",), "public-original-sheet-identity-v1"),
-            (("case",), "noop-stale"), (("id",), True), (("id",), 1),
-            (("kind",), "quit"), (("tag",), "PRIVATE"), (("start", "returned"), False), (("start", "returned"), 1),
-            (("start", "result"), "permission-denied"), (("start", "result"), "unknown-status"),
-            (("configuration", "parentSetterEntered"), False), (("configuration", "panelSetterReturned"), True),
-            (("configuration", "parent"), None), (("configuration", "panel"), "match"),
-            (("configuration", "error"), "unsupported"), (("configuration", "site"), "parent-get"),
-            (("binding", "returned"), False), (("binding", "returned"), 1), (("binding", "attempted"), False),
-            (("binding", "parent"), "nil"), (("binding", "panel"), "different"), (("binding", "children"), True),
-            (("binding", "children"), 17), (("binding", "originals"), "multiple"),
-            (("binding", "site"), "parent-set"), (("binding", "error"), "PRIVATE"),
-        ):
-            value = deepcopy(good); target = value["accessibilityBinding"]
-            for key in path[:-1]:
-                target = target[key]
-            target[path[-1]] = bad; variants.append(value)
-        for value in variants:
+    def test_semantic_binding_wrong_case_and_largest_context_are_bounded(self):
+        good = accessibility_context_data(); good["accessibilityBinding"] = binding_context_data()["accessibilityBinding"]
+        for key, bad in (("mechanism", "public-original-sheet-default-control-v1"), ("case", "save-loss"),
+                         ("id", True), ("kind", "quit"), ("defaultControl", {})):
+            value = deepcopy(good); value["accessibilityBinding"][key] = bad
             expected = deepcopy(value); expected["accessibilityBinding"] = None
-            self.assertEqual(M.failure_context(context_row(value), b"", "first-save"), expected)
-        for case in (None, "noop-stale", "picker-loss", "unknown"):
-            expected = deepcopy(good); expected["accessibilityBinding"] = None
-            self.assertEqual(M.failure_context(context_row(good), b"", case), expected)
-        duplicate = context_row(good).replace(b'"result":"ok"', b'"result":"ok","result":"io"')
-        self.assertIsNone(M.failure_context(duplicate, b"", "first-save"))
-        # Conservative closed-scalar upper bound, not actual/native evidence.
+            self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), expected)
+        # Conservative closed-label size fixture only, not claimed native facts.
         largest = deepcopy(good)
+        largest["snapshotSource"] = "prearm-open-progress"
+        for proof in (largest["accessibilityBinding"]["binding"], largest["accessibility"]["initialOriginalProof"],
+                      largest["accessibility"]["originalProof"]):
+            proof.update(parent="type-invalid", panel="encoding-invalid", originals="multiple", site="panel-attached-sheet", error="cleanup-unknown", children=17)
+            proof["checks"] = dict.fromkeys(M.ACCESSIBILITY_PROOF_CHECKS, False)
+        for proof in (largest["accessibility"]["capture"], largest["accessibility"]["defaultRecheck"]):
+            proof.update(site="stable-default", error="cleanup-unknown", elementRetained=False)
+            proof["checks"] = dict.fromkeys(M.ACCESSIBILITY_DEFAULT_CHECKS, False)
+        largest["accessibility"].update(site="default-recheck", error="cleanup-unknown", state="requested")
         largest["accessibilityBinding"]["start"]["result"] = "permission-denied"
         largest["accessibilityBinding"]["configuration"].update(parent="type-invalid", site="parent-get", error="cleanup-unknown")
-        for proof in (largest["accessibilityBinding"]["binding"], largest["accessibility"]["nativeRecheck"]["proof"]):
-            proof.update(parent="type-invalid", panel="encoding-invalid", children=17, originals="multiple",
-                         site="panel-attached-sheet", error="cleanup-unknown", returned=False, attempted=False)
-            proof["checks"] = dict.fromkeys(M.ACCESSIBILITY_PROOF_CHECKS, False)
-        for proof in (largest["accessibilityBinding"]["defaultControl"], largest["accessibility"]["nativeRecheck"]["defaultControl"]):
-            proof.update(returned=False, site="button-enabled", error="cleanup-unknown",
-                         **dict.fromkeys(M.ACCESSIBILITY_DEFAULT_FLAGS, False))
-            proof["checks"] = dict.fromkeys(M.ACCESSIBILITY_DEFAULT_CHECKS, False)
-        largest["accessibility"].update(site="control-identity-recheck", error="cleanup-unknown", phase="native-recheck", calls=64)
-        largest["accessibility"]["nativeRecheck"]["state"] = "not-dispatched"
-        self.assertEqual(M.FAILURE_CONTEXT_LIMIT, 4096)
-        self.assertLess(len(context_row(largest)), M.FAILURE_CONTEXT_LIMIT)
+        self.assertLessEqual(len(context_row(largest).split(b"=", 1)[1].rstrip(b"\n")), M.FAILURE_CONTEXT_LIMIT)
 
     def test_original_exception_buffers_do_not_change_error_or_finality(self):
         for duplicate in (False, True):
@@ -1107,13 +922,14 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn('first_failure_reason(&self.failure_reason) == Some("adapter-native-action")', observer)
         self.assertIn("r.native_action = action_diagnostic;", observer)
         report = observer.split("    fn report_failure(", 1)[1].split("    pub(super) fn attach(", 1)[0]
-        deferred = ('if matches!(reason, "adapter-native-action" | "native-ax-binding") && r.pending == Some(Pending::Native(r.step))\n'
+        deferred = ('if matches!(reason, "adapter-native-action" | "native-default-binding") && r.pending == Some(Pending::Native(r.step))\n'
                     "            && r.native_dispatch.is_some_and(|native| native.step == r.step && native.entered && !native.returned) {\n"
                     "            return;\n        }")
         self.assertIn(deferred, report)
         self.assertLess(report.index("let Ok(r) = self.record.try_lock()"), report.index(deferred))
-        self.assertLess(report.index(deferred), report.index("self.failure_reported.swap(true"))
-        for forbidden in ("self.timely()", "observe_panel_action(", "observed_panel(", "drop(r)", "self.failed.store(", "self.end ="):
+        self.assertLess(report.index(deferred), report.index("FailureSnapshot::from_record(&r)"))
+        self.assertLess(report.index("drop(r)"), report.index("self.diagnostic.submit(snapshot.frame(reason))"))
+        for forbidden in ("self.timely()", "observe_panel_action(", "observed_panel(", "stderr()", ".write_all(", "self.failed.store(", "self.end ="):
             self.assertNotIn(forbidden, report)
         published = observer.split("        let result = self.native_step_body(", 1)[1].split("    fn native_step_body(", 1)[0]
         self.assertLess(published.index("if let Err(reason) = result { self.fail_with(reason); }"),
@@ -1126,299 +942,122 @@ class AquaDataTests(unittest.TestCase):
                       "window.run_on_main_thread("):
             self.assertLess(dispatch.index("if !self.timely() { return; }"), dispatch.index(reset))
 
-    def test_public_ax_trust_and_exact_original_identity_have_no_fallback(self):
+    def test_public_default_action_binds_only_the_exact_generic_original(self):
         desktop = PATH.parents[1]
         native = (desktop / "native/macos-installed-native/src/native.m").read_text(encoding="utf-8")
-        build = (desktop / "native/macos-installed-native/build.rs").read_text(encoding="utf-8")
-        observer = (desktop / "src-tauri/src/installed_shell_observation_macos.rs").read_text(encoding="utf-8")
-        link = build.split('if std::env::var_os("CARGO_FEATURE_INSTALLED_OBSERVATION")', 1)[1].split("\n    }", 1)[0]
-        self.assertIn("framework=ApplicationServices", link)
-        self.assertEqual(build.count("framework=ApplicationServices"), 1)
-        self.assertIn("#ifdef MRK_INSTALLED_OBSERVATION\n#import <ApplicationServices/ApplicationServices.h>", native)
         trust = native.split("int mrk_observation_ax_trusted(", 1)[1].split("int mrk_panel_observe_arm_open_identity(", 1)[0]
-        for required in ("kAXTrustedCheckOptionPrompt", "kCFBooleanFalse", "AXIsProcessTrustedWithOptions(options)", "CFRelease(options)"):
-            self.assertEqual(trust.count(required), 1)
+        for fact in ("kAXTrustedCheckOptionPrompt", "kCFBooleanFalse", "AXIsProcessTrustedWithOptions(options)", "CFRelease(options)"):
+            self.assertEqual(trust.count(fact), 1)
         self.assertNotIn("kCFBooleanTrue", trust)
-        main = observer.split("pub(crate) fn main()", 1)[1]
-        self.assertLess(main.index("Fixture::capture("), main.index("installed_accessibility_trusted()"))
-        self.assertLess(main.index("installed_accessibility_trusted()"), main.index("super::run_builder("))
-        refused = main.split("if trusted != Ok(true)", 1)[1].split("r.ax_trusted = true", 1)[0]
-        self.assertIn('"native-ax-not-trusted"', refused)
-        self.assertIn("return std::process::ExitCode::FAILURE", refused)
-        start = native.split("int mrk_panel_start(", 1)[1].split("int mrk_panel_poll(", 1)[0]
-        self.assertLess(start.index("setReleasedWhenClosed:NO"), start.index("mrk_panel_configure_open_identity(s)"))
-        self.assertLess(start.index("mrk_panel_configure_open_identity(s)"), start.index("beginSheetModalForWindow:"))
-        stopped = start.split("!mrk_panel_configure_open_identity(s)", 1)[1].split("#endif", 1)[0]
-        self.assertIn("s->unknown = YES; return EIO;", stopped)
-        self.assertNotIn("return EPERM;", stopped)
-        configuration = native.split("static BOOL mrk_panel_configure_open_identity(MRKInstalledPanel *s) {", 1)[1].split(
-            "static BOOL mrk_original_eligible(", 1)[0]
-        self.assertEqual(configuration.count("setAccessibilityIdentifier:"), 1)
-        self.assertEqual(configuration.count("[s->parent accessibilityIdentifier]"), 1)
-        self.assertNotIn("[s->window accessibilityIdentifier]", configuration)
-        self.assertNotIn("[s->window setAccessibilityIdentifier:", native)
-        self.assertLess(configuration.index("MRK_ID_CONFIG_ATTEMPTED"), configuration.index("[NSUUID UUID]"))
-        self.assertLess(configuration.index("MRK_ID_PARENT_ENTERED"), configuration.index("[s->parent setAccessibilityIdentifier:"))
-        self.assertLess(configuration.index("[s->parent setAccessibilityIdentifier:"), configuration.index("MRK_ID_PARENT_RETURNED"))
-        self.assertLess(configuration.index("d->parent ="), configuration.index("MRK_ID_CONFIG_COMPLETE"))
-        self.assertNotIn("MRK_ID_MATCH", configuration)
-        self.assertIn("@throw;", configuration)
-        copied = native.split("void mrk_panel_observe_identity_data(", 1)[1].split("static BOOL mrk_identity_tag(", 1)[0]
-        self.assertEqual(copied.count("memcpy("), 1)
-        for forbidden in ("[s->", "[NS", "release]", "retain]", "mrk_panel_poll", "mrk_main_thread("):
-            self.assertNotIn(forbidden, copied)
-        identifier = native.split("static uint32_t mrk_original_identifier(", 1)[1].split(
-            "static BOOL mrk_panel_configure_open_identity(", 1)[0]
-        for required in ("length > 63", "characterAtIndex:i] == 0", "bytes_needed > 63", "getBytes:bytes maxLength:63",
-                         "remainingRange:&remainder", "remainder.length", "used != bytes_needed", "mrk_identity_utf8(bytes)",
-                         "[roundtrip isEqualToString:text]"):
-            self.assertIn(required, identifier)
-        self.assertNotIn("allowLossyConversion", identifier)
-        topology = native.split("static BOOL mrk_original_topology(", 1)[1].split("static int mrk_original_proof(", 1)[0]
-        for required in ("[s->parent sheets]", "count == 1 && [sheets objectAtIndex:0] == s->window",
-                         "[s->window sheets]", "[s->window attachedSheet] == nil", "[s->parent accessibilityChildren]",
-                         "count > 16", "[children objectAtIndex:i] == s->window", "originals == 1",
-                         "[s->window accessibilityParent] == s->parent", "NSAccessibilitySheetRole"):
-            self.assertIn(required, topology)
-        proof = native.split("static int mrk_original_proof(", 1)[1].split("static double mrk_default_double(", 1)[0]
-        for required in ("mrk_original_eligible(s)", "mrk_observation_attached(s)", "mrk_observation_directory_ready(s)",
-                         "[s->parent accessibilityIdentifier]", "[s->window accessibilityIdentifier]",
-                         "if (freeze) memcpy(s->observationPanelTag, current, 64)", "MRK_PROOF_STABLE",
-                         "memcmp(current, s->observationPanelTag, 64)", "MRK_PROOF_FINAL"):
-            self.assertIn(required, proof)
-        self.assertEqual(proof.count("mrk_original_topology(s, p)"), 2)
-        self.assertLess(proof.index("if (freeze) memcpy("), proof.index("mrk_original_topology(s, p)"))
-        binding = native.split("int mrk_panel_observe_open_identity(", 1)[1].split("typedef union", 1)[0]
-        self.assertEqual(binding.count("capacity != 64"), 2)
-        self.assertIn("if (p->site) return MRK_AX_INELIGIBLE", binding)
-        self.assertIn("mrk_original_proof(s, p, YES)", binding)
-        self.assertIn("mrk_original_proof(s, p, NO)", binding)
-        for forbidden in ("setAccessibilityIdentifier:", "NSUUID", "observationActionAttempted =", "observationActionReturned =",
-                          "s->selected", "s->completion("):
-            self.assertNotIn(forbidden, binding + proof + topology)
-        default = native.split("static double mrk_default_double(", 1)[1].split("int mrk_panel_observe_open_identity(", 1)[0]
-        self.assertEqual(default.count("setAccessibilityIdentifier:"), 1)
-        for required in ("[s->window defaultButtonCell]", "[s->observationDefaultCell controlView]",
-                         "[s->observationDefaultView cell] == s->observationDefaultCell",
-                         "[s->observationDefaultView window] == s->window", "NSAccessibilityButtonRole",
-                         "[screens count] != 1", "[screen backingScaleFactor] != 1", "[s->window screen] != screen",
-                         "[s->observationDefaultView accessibilityFrame]", "NSMaxY(screenFrame) - NSMidY(frame)",
-                         "(double)fx == x && (double)fy == y", "mrk_default_geometry(p)",
-                         "memcmp(&current, observed, sizeof(current))", "mrk_original_eligible(s)",
-                         "mrk_observation_attached(s)", "mrk_observation_directory_ready(s)"):
-            self.assertIn(required, default)
-        capture = default.split("static int mrk_default_proof(", 1)[1]
-        self.assertLess(capture.index("[s->observationDefaultCell retain]"), capture.index("s->observationDefaultCellRetained = YES"))
-        self.assertLess(capture.index("[s->observationDefaultView retain]"), capture.index("s->observationDefaultViewRetained = YES"))
-        self.assertLess(capture.index("MRK_DEFAULT_SET_ENTERED"), capture.index("[s->observationDefaultView setAccessibilityIdentifier:"))
-        self.assertLess(capture.index("[s->observationDefaultView setAccessibilityIdentifier:"), capture.index("MRK_DEFAULT_SET_RETURNED"))
-        release = native.split("int mrk_panel_release(", 1)[1].split("// No separate window lookup", 1)[0]
-        self.assertLess(release.index("s->unknown || s->callbackActive || !s->closed"), release.index("NSButton *button"))
-        self.assertLess(release.index("s->observationDefaultView = nil"), release.index("[button release]"))
-        self.assertLess(release.index("[button release]"), release.index("[cell release]"))
-        for forbidden in ("setDefaultButtonCell:", "setAccessibilityFrame:", "setFrame:", "visibleFrame", "subviews]"):
-            self.assertNotIn(forbidden, default)
-        ax = native.split("// Public AX input", 1)[1]
-        self.assertEqual(ax.count("AXUIElementCreateApplication(getpid())"), 1)
-        for forbidden in ("AXUIElementCreateSystemWide", "kAXTitleAttribute", "kAXPositionAttribute", "CGEvent",
-                          "AXUIElementPostKeyboardEvent", "NSSelectorFromString", "objc_msgSend", "ok:nil]"):
-            self.assertNotIn(forbidden, ax)
+        default = native.split("static int mrk_default_proof(", 1)[1].split("int mrk_panel_observe_open_identity(", 1)[0]
+        self.assertIn("s->observationDefaultElement = [s->window accessibilityDefaultButton]", default)
+        self.assertLess(default.index("s->observationDefaultElement ="), default.index("[s->observationDefaultElement retain]"))
+        self.assertLess(default.index("[s->observationDefaultElement retain]"), default.index("s->observationDefaultRetained = YES"))
+        for check in ("@selector(accessibilityPerformPress)", "isAccessibilitySelectorAllowed:", "NSAccessibilityButtonRole",
+                      "isAccessibilityEnabled", "[s->window accessibilityDefaultButton] == element"):
+            self.assertIn(check, default)
+        for forbidden in ("NSButtonCell *", "NSButton *observationDefault", "MRKDefaultPacket", "AXUIElementPerformAction",
+                          "AXUIElementCopyElementAtPosition", "defaultButtonCell]", "setAccessibilityIdentifier:tag]"):
+            self.assertNotIn(forbidden, native)
+        press = native.split("static void mrk_default_press_body(", 1)[1].split("void mrk_panel_observe_default_press(", 1)[0]
+        self.assertEqual(press.count("[s->observationDefaultElement accessibilityPerformPress]"), 1)
+        self.assertLess(press.index("s->observationActionAttempted = YES"), press.index("accessibilityPerformPress]"))
+        self.assertLess(press.index("accessibilityPerformPress]"), press.index("s->observationActionReturned = YES"))
+        self.assertLess(press.index("mrk_original_proof(s, &r->initial_proof, NO)"), press.index("mrk_default_proof(s, &r->capture, YES)"))
+        self.assertLess(press.index("mrk_default_proof(s, &r->capture, YES)"), press.index("mrk_original_proof(s, &r->proof, NO)"))
+        self.assertIn("sizeof(MRKOpenResult) == 124", native)
+        final_gate = press.rindex("r->error = admit(context, 0)")
+        self.assertLess(press.index("mrk_default_proof(s, &r->recheck, NO)"), final_gate)
+        self.assertLess(final_gate, press.index("s->observationActionAttempted = YES"))
+        proof = native.split("static int mrk_original_proof(", 1)[1].split("static BOOL mrk_default_check(", 1)[0]
+        for check in ("mrk_original_topology(s, p)", "mrk_observation_attached(s)", "mrk_observation_directory_ready(s)",
+                      "[s->parent accessibilityIdentifier]", "[s->window accessibilityIdentifier]", "mrk_original_eligible(s)"):
+            self.assertIn(check, proof)
 
-    def test_public_ax_queries_are_bounded_timed_per_use_and_press_is_single(self):
-        native_root = PATH.parents[1] / "native/macos-installed-native/src"
-        native = (native_root / "native.m").read_text(encoding="utf-8")
-        rust = (native_root / "lib.rs").read_text(encoding="utf-8")
-        before = native.split("static BOOL mrk_ax_before(", 1)[1].split("static CFTypeRef mrk_ax_copy(", 1)[0]
-        self.assertIn("MRK_AX_CALL_LIMIT - 2", before)
-        self.assertLess(before.index("mrk_ax_admit(s, 0, 0, &timeout)"), before.index("AXUIElementSetMessagingTimeout(element, timeout.seconds)"))
-        self.assertLess(before.index("AXUIElementSetMessagingTimeout(element, timeout.seconds)"),
-                        before.index("mrk_ax_admit(s, timeout.required_ns, 0, NULL)"))
-        timeout = rust.split("fn ax_timeout(", 1)[1].split("struct AxAdmission", 1)[0]
-        for required in ("remaining_ns.min(100_000_000)", "seconds.to_bits().checked_sub(1)?", ".ceil() as u64",
-                         "remaining_ns > 0 && remaining_ns >= required_ns"):
-            self.assertIn(required, timeout)
-        callback = rust.split('unsafe extern "C" fn ax_admission', 1)[1].split("pub fn installed_accessibility_trusted", 1)[0]
-        self.assertLess(callback.index("(context.admit)(after_press == 1)"), callback.index("context.end.saturating_duration_since(Instant::now())"))
-        self.assertIn("catch_unwind", callback)
-        self.assertIn("std::mem::forget(payload)", callback)
-        self.assertIn("observer_end.min(Instant::now() + Duration::from_secs(2))", rust)
-        self.assertNotIn("context.end =", rust)
-        arrays = native.split("static CFArrayRef mrk_ax_array(", 1)[1].split("static AXUIElementRef mrk_ax_identified(", 1)[0]
-        self.assertLess(arrays.index("mrk_ax_before(s, element)"), arrays.index("AXUIElementCopyAttributeValues("))
-        self.assertIn("attribute, 0, limit + 1, &slot->array", arrays)
-        self.assertIn("count < 0 || count >= limit + 1", arrays)
-        identified = native.split("static AXUIElementRef mrk_ax_identified(", 1)[1].split("static BOOL mrk_ax_projection(", 1)[0]
-        self.assertIn("if (found) { mrk_ax_fail(s, MRK_AX_AMBIGUOUS); return NULL; }", identified)
-        self.assertIn("if (!found) mrk_ax_fail(s, MRK_AX_UNSUPPORTED);", identified)
-        projection = native.split("static BOOL mrk_ax_projection(", 1)[1].split("static void mrk_ax_open(", 1)[0]
-        for required in ("kAXWindowsAttribute, 4", "kAXChildrenAttribute, 16", "kAXSheetRole", "if (sheets != 1)",
-                         "CFEqual(expected_parent, parent)", "CFEqual(expected_panel, panel)",
-                         "CFEqual(identifier, panel_text)", "CFEqual(link, parent)"):
-            self.assertIn(required, projection)
-        body = native.split("static void mrk_ax_open(", 1)[1].split("void mrk_observation_ax_press(", 1)[0]
-        self.assertEqual(body.count("mrk_ax_projection("), 2)
-        self.assertEqual(body.count("s->recheck(s->context)"), 1)
-        self.assertLess(body.index("&s->result.initial"), body.index("s->recheck(s->context)"))
-        self.assertLess(body.index("s->recheck(s->context)"), body.index("parent, panel, &repeated_parent"))
-        self.assertLess(body.index("&s->result.final_projection"), body.index("mrk_ax_hit("))
-        self.assertIn("CFStringCreateWithBytes", body)
-        self.assertIn("kCFStringEncodingUTF8, false", body)
-        for required in ("kAXButtonRole", "CFBooleanGetValue(enabled)", "edge < 8", "CFEqual(link, chain[i])", "CFEqual(link, panel)",
-                         "CFEqual(repeated, control)"):
-            self.assertIn(required, body)
-        self.assertNotIn("kAXDefaultButtonAttribute", native)
-        self.assertEqual(body.count("mrk_ax_hit("), 2)
-        self.assertEqual(body.count("kAXIdentifierAttribute"), 2)
-        self.assertEqual(body.count("kAXSizeAttribute"), 1)
-        for site in ("MRK_AX_DEFAULT", "MRK_AX_RECHECK"):
-            self.assertIn(f"mrk_ax_hit(s, (AXUIElementRef)application->value, native_control, {site})", body)
-        hit = native.split("static AXUIElementRef mrk_ax_hit(", 1)[1].split("static BOOL mrk_ax_type(", 1)[0]
-        self.assertLess(hit.index("mrk_ax_slot(s)"), hit.index("mrk_ax_before(s, application)"))
-        self.assertLess(hit.index("mrk_ax_before(s, application)"), hit.index("AXUIElementCopyElementAtPosition("))
-        self.assertLess(hit.index("AXUIElementCopyElementAtPosition("), hit.index("mrk_ax_admit(s, 0, 0, NULL)"))
-        self.assertIn("&slot->element", hit)
-        self.assertIn("AXUIElementRef element;", native)
-        for required in ("CFEqual(identifier, control_text->value)", "kAXValueCGSizeType", "AXValueGetValue(",
-                         "size.width <= 0 || size.height <= 0", "native_control->control_rect_bits[2]",
-                         "native_control->control_rect_bits[3]"):
-            self.assertIn(required, body)
-        self.assertLess(body.index("kAXSizeAttribute"), body.index("s->result.flags |= MRK_AX_CONTROL"))
-        self.assertLess(body.index("CFEqual(repeated, control)"), body.index("mrk_ax_before(s, (AXUIElementRef)control)"))
-        press = body.split("if (!mrk_ax_before(s, (AXUIElementRef)control)) return;", 1)[1]
-        self.assertEqual(native.count("AXUIElementPerformAction("), 1)
-        self.assertLess(press.index("s->result.flags |= MRK_AX_ATTEMPTED"), press.index("AXUIElementPerformAction("))
-        self.assertLess(press.index("AXUIElementPerformAction("), press.index("s->result.flags |= MRK_AX_PRESS_RETURNED"))
-        for forbidden in ("mrk_ax_copy(", "mrk_ax_array(", "mrk_ax_hit(", "mrk_ax_before(", "EAGAIN", "while (", "for ("):
-            self.assertNotIn(forbidden, press)
-        cleanup = native.split("void mrk_observation_ax_press(", 1)[1].split("#endif", 1)[0]
-        self.assertIn("MRKAXOwned owned[80]", native)
-        self.assertLess(cleanup.index("s.owned[s.count].value = NULL"), cleanup.index("CFRelease(original)"))
-        self.assertEqual(cleanup.count("CFRelease(original)"), 1)
-        self.assertIn("s.cleanupKnown = NO", cleanup)
-        self.assertLess(cleanup.index("mrk_ax_admit(&s, 0,"), cleanup.index("if (s.cleanupKnown)"))
-        for table, expected in (("AX_SITES", M.ACCESSIBILITY_SITES), ("AX_ERRORS", M.ACCESSIBILITY_ERRORS)):
-            rows = rust.split(f"const {table}:", 1)[1].split("];", 1)[0]
-            self.assertEqual(set(M.re.findall(r'"([a-z-]+)"', rows)), expected)
-
-    def test_public_ax_handoff_keeps_original_barrier_and_does_not_forge_native_flags(self):
-        root = PATH.parents[1] / "src-tauri/src"
-        adapter = (root / "shell_macos_dialog.rs").read_text(encoding="utf-8")
-        observer = (root / "installed_shell_observation_macos.rs").read_text(encoding="utf-8")
-        packet = adapter.split("struct PreparedOpenInput", 1)[1].split("impl PreparedOpenInput", 1)[0]
-        for required in ("native::OpenIdentity", "Arc<GuiCall>", "Arc<OriginalWork>", "Arc<OpenRelease>"):
-            self.assertIn(required, packet)
-        for forbidden in ("CFTypeRef", "AXUIElementRef", "*mut", "Option<Panel>"):
-            self.assertNotIn(forbidden, packet)
-        gate = adapter.split("fn original_admitted(", 1)[1].split("pub(crate) struct PreparedOpenInput", 1)[0]
-        self.assertIn("owner.id != id", gate)
-        self.assertIn("!Arc::ptr_eq(&owner, original) || !Arc::ptr_eq(&owner.gui, call)", gate)
-        self.assertIn("if after_press", gate)  # Do not reject a real early callback as a pre-action response.
-        release = adapter.split("            let release = {", 1)[1].split("        if released {", 1)[0]
-        self.assertLess(release.index("barrier.release_ready()"), release.index("facts.release_queued = true"))
-        self.assertLess(release.index("facts.release_queued = true"), release.index("entry.panel.take()"))
-        self.assertIn("OpenPhase::Unknown", adapter)
-        self.assertIn("open_release_data_check()", observer)
-        tick = observer.split("pub(super) fn tick(", 1)[1].split("let state = app.state", 1)[0]
-        self.assertLess(tick.index("if self.accessibility_step(app)"), tick.rindex("if !self.timely()"))
-        run = observer.split("fn accessibility_step(", 1)[1].split("fn native_step(", 1)[0]
-        self.assertEqual(run.count("r.prepared_open.take()"), 1)
-        self.assertEqual(run.count("input.press("), 1)
-        self.assertLess(run.index("input.no_entry("), run.index("input.enter()"))
-        self.assertLess(run.index("input.enter()"), run.index("input.press("))
-        returned = run.split("let result = input.press(", 1)[1]
-        self.assertLess(returned.index('self.fail_with("native-ax-input")'), returned.index("let Some(mut r) = self.record()"))
-        self.assertLess(returned.index("input.returned(&result, matching && input.admitted(true).is_some())"),
-                        returned.index("retire_returned_open("))
-        self.assertLess(returned.index("if !retired"), returned.index("r.native_actions_returned[2] = true"))
-        for forbidden in ("run_on_main_thread(", "tokio::spawn", "std::thread::spawn", ".await", "observe_panel_action("):
-            self.assertNotIn(forbidden, run)
-        wrapper = observer.split("fn native_step(", 1)[1].split("fn native_step_body(", 1)[0]
-        self.assertLess(wrapper.index("self.native_step_body("), wrapper.index("native.returned = true"))
-        self.assertLess(wrapper.index("native.returned = true"), wrapper.index("r.prepared_open = Some(input)"))
-        self.assertLess(wrapper.index("native.returned = true"), wrapper.index("sample.binding = Some(returned.binding)"))
-        self.assertLess(wrapper.index("sample.binding = Some(returned.binding)"), wrapper.index("r.prepared_open = Some(input)"))
-        self.assertIn("sample.configuration == returned.configuration", wrapper)
-        body = observer.split("fn native_step_body(", 1)[1].split("pub(super) fn close_prevented", 1)[0]
-        self.assertIn("prepare_open_input(id, binding_return)", body)
-        self.assertIn("return Ok(false); // Deliberately NOT a native action return.", body)
-        self.assertNotIn("PanelAction::ProjectOpen", observer)
+    def test_semantic_timeout_uses_independent_relay_and_retains_original_receiver(self):
+        desktop = PATH.parents[1]
+        observer = (desktop / "src-tauri/src/installed_shell_observation_macos.rs").read_text(encoding="utf-8")
+        relay = observer.split("fn accessibility_step(", 1)[1].split("fn native_step(", 1)[0]
+        timed = relay.split("let end = self.end.min(", 1)[1]
+        self.assertNotIn("self.record()", timed)
+        self.assertNotIn(".admitted(", timed)
+        self.assertEqual(timed.count("app.run_on_main_thread("), 1)
+        self.assertEqual(timed.count("flight.receipt.recv_timeout("), 2)
+        timeout = timed.split("Err(RecvTimeoutError::Timeout) =>", 1)[1]
+        self.assertLess(timeout.index('self.fail_with("native-default-deadline")'), timeout.index("self.record.try_lock()"))
+        self.assertLess(timeout.index('self.fail_with("native-default-deadline")'), timeout.index("self.report_expiry("))
+        self.assertLess(timeout.index("self.report_expiry("), timeout.index("flight.receipt.recv_timeout(self.end"))
+        self.assertIn("self.end.saturating_duration_since(Instant::now())", timeout)
+        self.assertIn("returned: Option<OpenActionReceipt>", observer)
+        self.assertIn("receipt: std::sync::mpsc::Receiver<OpenActionReceipt>", observer)
+        self.assertIn("open_custody: Mutex<Option<OpenFlight>>", observer)
+        self.assertIn("*custody = Some(OpenFlight", relay)
+        main = observer.split("fn action_main(", 1)[1].split("fn open_unknown(", 1)[0]
+        self.assertNotIn("self.record()", main)
+        self.assertLess(main.index("token.run("), main.index("token.returned()"))
+        self.assertLess(main.index("token.returned()"), main.index("done.try_send(receipt)"))
+        self.assertIn("Instant::now() >= end", main)
+        self.assertLess(main.index("let entered = token.enter()"), main.index("std::thread::current().id() != self.main"))
+        self.assertNotIn('token.state() == "entered" && !token.returned()', main)
         report = observer.split("fn report_failure(", 1)[1].split("pub(super) fn attach(", 1)[0]
-        self.assertLess(report.index('"native-ax-input" | "native-ax-custody"'), report.index("self.failure_reported.swap(true"))
-        scope = observer.split("pub(super) fn open_identity_scope(", 1)[1].split("pub(super) fn identity_start_returned(", 1)[0]
-        self.assertIn("self.case != Case::PickerLoss && id == self.case.selected_id()", scope)
-        self.assertIn("matches!(kind, mrk_macos_installed_native::PanelKind::Project)", scope)
-        code = M.re.sub(r"//[^\n]*", "", scope)
-        for forbidden in (".record(", "project_calls", "r.step", "Step::"):
-            self.assertNotIn(forbidden, code)
-        construct = adapter.split("fn construct(", 1)[1].split("fn ", 1)[0]
-        self.assertLess(construct.index("*book = Some(OriginalPanel"), construct.index("installed_arm_open_identity()"))
-        self.assertLess(construct.index("!q.timely()"), construct.index("installed_arm_open_identity()"))
-        self.assertLess(construct.index("installed_arm_open_identity()"), construct.index("let returned = panel.start(choice)"))
-        self.assertLess(construct.index("let returned = panel.start(choice)"), construct.index("take_installed_identity_start_return()"))
-        self.assertLess(construct.index("take_installed_identity_start_return()"), construct.index("returned.map_err("))
-        delivered = adapter.split("let result = construct(&creating, kind,", 1)[1].split("}).is_err()", 1)[0]
-        self.assertLess(delivered.index("q.identity_start_returned(id, data)"), delivered.index("done.send(result)"))
-        for forbidden in ("installed_observation(", "PANEL.with(", ".facts(", "run_on_main_thread("):
-            self.assertNotIn(forbidden, delivered)
-        published = observer.split("pub(super) fn identity_start_returned(", 1)[1].split("fn report_failure(", 1)[0]
-        self.assertLess(published.index("r.identity_binding = Some("), published.index("if !returned.succeeded()"))
-        rust = (PATH.parents[1] / "native/macos-installed-native/src/lib.rs").read_text(encoding="utf-8")
-        started = rust.split("pub fn start(", 1)[1].split("pub fn poll(", 1)[0]
-        self.assertLess(started.index("self.observation_start = None"), started.index("self.usable()?"))
-        self.assertLess(started.index("mrk_panel_start("), started.index("observation::identity_start_return("))
-        self.assertLess(started.index("observation::identity_start_return("), started.index("let result = result(status)"))
-        self.assertIn("error.kind() != io::ErrorKind::PermissionDenied) { self.unknown = true; }", started)
-        self.assertIn("identity_data_check()", rust)  # Existing hosted DATA entry, not local native execution.
+        self.assertLess(report.index("drop(r)"), report.index("self.diagnostic.submit(snapshot.frame(reason))"))
+        expiry = report.split("fn report_expiry(", 1)[1]
+        for forbidden in ("stderr()", "stdout()", "self.record", "self.open_custody", ".lock()", "write_all", "writeln!"):
+            self.assertNotIn(forbidden, expiry)
+        self.assertIn("snapshot.at_expiry(progress).frame(reason)", expiry)
+        snapshot = observer.split("struct FailureSnapshot", 1)[1].split("fn failure_context(", 1)[0]
+        self.assertIn('self.source = "prearm-open-progress"', snapshot)
+        self.assertIn("8192", snapshot)
+        self.assertIn("context.is_ascii()", snapshot)
+        writer = observer.split("struct DiagnosticWriter", 1)[1].split("pub(super) struct Observation", 1)[0]
+        self.assertEqual(writer.count(".spawn(move ||"), 1)
+        self.assertEqual(writer.count("stderr().lock()"), 1)
+        self.assertIn("sync_channel::<Option<Vec<u8>>>(1)", writer)
+        self.assertIn("compare_exchange(0, choice", writer)
+        self.assertIn("self.sender.try_send(frame)", writer)
+        self.assertLess(writer.index("is_finished()"), writer.index(".join()"))
+        self.assertIn("owner.returned = Some(returned)", writer)
+        self.assertIn("end.saturating_duration_since(Instant::now())", writer)
+        self.assertNotIn("Duration::from_secs(", writer)
+        self.assertNotIn("OpenAction", writer)
+        observe = observer.split("fn observe(q:", 1)[1].split("pub(crate) fn main()", 1)[0]
+        self.assertIn("q.finish()", observe)
+        self.assertIn("edit::bounded(&report", observe)
+        completion = observer.split("let report = observe(&q);", 1)[1]
+        self.assertLess(completion.index("q.diagnostic.finish(q.end)"), completion.index("!q.timely()"))
+        self.assertLess(completion.index("!q.timely()"), completion.index("stdout().lock()"))
+        self.assertIn("std::mem::forget(q)", completion)
+        self.assertNotIn("super::diagnostic", completion)
+        self.assertNotIn("q.report_failure()", completion.split("q.diagnostic.finish(q.end)", 1)[1])
+        close = observer.split("pub(super) fn close_prevented(", 1)[1].split("fn failure_shutdown(", 1)[0]
+        self.assertNotIn("r.pending.take()", close)
+        self.assertLess(close.index("let Some(Pending::Close(request))"), close.index("r.pending = None"))
 
-    def test_native_recheck_uses_one_same_deadline_request_and_original_custody(self):
-        root = PATH.parents[1] / "src-tauri/src"
-        adapter = (root / "shell_macos_dialog.rs").read_text(encoding="utf-8")
-        observer = (root / "installed_shell_observation_macos.rs").read_text(encoding="utf-8")
-        token = adapter.split("pub(crate) struct OpenRecheck", 1)[1].split("pub(crate) struct OpenRecheckBody", 1)[0]
-        for required in ("native::OpenIdentity", "Arc<GuiCall>", "Arc<OriginalWork>", "Arc<OpenRelease>"):
-            self.assertIn(required, token)
-        for forbidden in ("*mut", "AXUIElement", "CFTypeRef", "Option<Panel>"):
-            self.assertNotIn(forbidden, token)
-        state = adapter.split("impl OpenRelease", 1)[1].split("fn original_admitted(", 1)[0]
-        self.assertIn("RecheckPhase::Unrequested, RecheckPhase::NotDispatched, RecheckPhase::Joined", state)
-        self.assertIn("self.recheck_unknown(); return false;", state)
-        identity = adapter.split("impl OpenRecheck {", 1)[1].split("pub(crate) fn state(", 1)[0]
-        for required in ("Arc::ptr_eq(&self.call", "Arc::ptr_eq(&self.owner", "Arc::ptr_eq(&self.release"):
-            self.assertIn(required, identity)
-        request = observer.split("fn final_native_recheck(", 1)[1].split("fn accessibility_step(", 1)[0]
-        self.assertEqual(request.count("std::sync::mpsc::sync_channel(1)"), 1)
-        self.assertEqual(request.count("app.run_on_main_thread("), 1)
-        self.assertEqual(request.count("receipt.recv_timeout(remaining)"), 1)
-        self.assertLess(request.index("s.dispatch_attempted = true"), request.index("app.run_on_main_thread("))
-        self.assertLess(request.index("end.saturating_duration_since(Instant::now())"), request.index("receipt.recv_timeout(remaining)"))
-        self.assertLess(request.index("token.same(&returned.token)"), request.index("token.joined()"))
-        self.assertLess(request.index("token.joined()"), request.index("s.receipt_joined = true"))
-        self.assertIn("!returned.body.default_control.is_some_and(|d| d.matched(true))", request)
-        self.assertLess(request.index("s.default_control != returned.body.default_control"), request.index("s.receipt_joined = true"))
-        self.assertIn("Instant::now() >= end", request.split("s.receipt_joined = true", 1)[1])
-        for forbidden in ("std::thread::spawn", "tokio::spawn", "Duration::from_secs", "loop {", "end ="):
-            self.assertNotIn(forbidden, request)
-        main = observer.split("fn recheck_main(", 1)[1].split("fn final_native_recheck(", 1)[0]
-        self.assertLess(main.index('token.state() == "unknown"'), main.index("token.observe(end,"))
-        self.assertLess(main.index("token.observe(end,"), main.index("token.returned()"))
-        self.assertLess(main.index("token.returned()"), main.index("s.body_returned = true"))
-        self.assertLess(main.index("s.body_returned = true"), main.index("done.try_send("))
-        after_send = main.split("done.try_send(", 1)[1]
-        for forbidden in ("token.observe(", "PANEL.with(", "run_on_main_thread(", "token.joined("):
-            self.assertNotIn(forbidden, after_send)
-        unknown = observer.split("fn recheck_unknown(", 1)[1].split("fn recheck_main(", 1)[0]
-        self.assertLess(unknown.index("token.unknown()"), unknown.index("self.recheck_sample("))
-        native = (PATH.parents[1] / "native/macos-installed-native/src/lib.rs").read_text(encoding="utf-8")
-        components = native.split("fn identity_components(", 1)[1].split("fn identity_binding_return(", 1)[0]
-        for required in ("identity_proof(original_status, original)", "control == DefaultProofWire::default()",
-                         "default_proof(control, recheck)", "Some(status)"):
-            self.assertIn(required, components)
-        default_dto = observer.split("fn default_control_value(", 1)[1].split("fn projection_value(", 1)[0]
-        for field in ("returned", *M.ACCESSIBILITY_DEFAULT_FLAGS, *M.ACCESSIBILITY_DEFAULT_CHECKS, "site", "error"):
-            self.assertIn(f'"{field}"', default_dto)
-        for forbidden in ("control_tag", "rect_bits", "point_bits", "packet", "UUID"):
-            self.assertNotIn(forbidden, default_dto)
-        self.assertIn("default_data_check()", native)
+    def test_semantic_reentrancy_defers_poll_close_and_release_until_actual_join(self):
+        shell = (PATH.parents[1] / "src-tauri/src/shell_macos_dialog.rs").read_text(encoding="utf-8")
+        tick = shell.split("fn tick(call:", 1)[1].split("pub(crate) async fn run_owned_dialog", 1)[0]
+        self.assertLess(tick.index("observation::body_busy(id)"), tick.index("PANEL.with("))
+        self.assertLess(tick.index("!r.release_ready()"), tick.index("panel.poll()"))
+        self.assertLess(tick.index("panel.poll()"), tick.index("panel.close_once()"))
+        self.assertIn("enum OpenPhase { Prepared, Requested, Queued, Entered, Returned, Joined, Retired, Unknown }", shell)
+        self.assertIn("progress: AtomicU16", shell)
+        self.assertIn("let bits = self.progress.load(Ordering::SeqCst)", shell)
+        self.assertIn("self.progress.fetch_or(OpenPhase::Unknown as u16", shell)
+        self.assertIn("self.progress.fetch_or(OPEN_EXPIRED", shell)
+        self.assertIn("queued.snapshot() != (OpenProgress", shell)
+        self.assertIn("OpenPhase::Joined, OpenPhase::Retired", shell)
+        native = (PATH.parents[1] / "native/macos-installed-native/src/native.m").read_text(encoding="utf-8")
+        release = native.split("int mrk_panel_release(", 1)[1].split("// Observation helpers", 1)[0]
+        self.assertLess(release.index("s->observationDefaultElement = nil"), release.index("[element release]"))
+        callback = native.split("s->completion = Block_copy", 1)[1].split("beginSheetModalForWindow:", 1)[0]
+        self.assertIn("s->callbackActive = YES", callback)
+        self.assertIn("s->callbackActive = NO", callback)
+        self.assertNotIn("observationDefault", callback)
+        rust = (PATH.parents[1] / "native/macos-installed-native/src/lib.rs").read_text(encoding="utf-8")
+        self.assertNotIn("AxProjection", rust)
+        self.assertNotIn("DefaultPacket", rust)
+        self.assertIn("fn semantic_data_check()", rust)
+        self.assertNotIn("Duration::from_secs(2)", rust)
 
     def test_dom_callback_custody_wraps_only_the_original_returned_body(self):
         # Source controls only: the actual Rust DATA entry and native callback

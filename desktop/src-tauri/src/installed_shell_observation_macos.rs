@@ -13,7 +13,7 @@ use crate::{asset_session::{DocumentBinding, InstalledMacProjectWitness, Install
     edit_owner::{EditOwner, InstalledConfigFinality, InstalledMacReviewWitness}, edit_protocol::{self as edit, ConfigEditStatus, EditProjection},
     error::BridgeError, supervisor::Supervisor};
 use super::owned_macos::observation::{observed_panel, observe_panel_action, prepare_open_input,
-    ObservedPanel, OpenRecheck, OpenRecheckBody, PanelAction, PreparedOpenInput};
+    ObservedPanel, OpenAction, OpenActionBody, OpenProgress, OpenRelease, PanelAction, PreparedOpenInput};
 
 // Closed public categories only. The first winner is published before failure;
 // no Record lock, native call, path, or arbitrary error text enters this latch.
@@ -26,7 +26,7 @@ const FAILURE_REASONS: &[&str] = &[
     "native-action-returned", "native-callback-returned", "native-response-present",
     "native-selection-present", "native-close-attempted", "native-closed", "native-attachment-lost",
     "native-preaction-history", "native-dismissed", "native-duplicate-action",
-    "native-ax-not-trusted", "native-ax-trust", "native-ax-binding", "native-ax-input", "native-ax-custody",
+    "native-ax-not-trusted", "native-ax-trust", "native-default-binding", "native-default-input", "native-default-custody", "native-default-deadline",
     "cancel-unexpected-project", "cancel-duplicate-result",
     "adapter-wrong-thread", "adapter-book-borrow", "adapter-original-call", "adapter-original-owner",
     "adapter-original-binding", "adapter-missing-facts", "adapter-missing-panel", "adapter-ineligible",
@@ -217,102 +217,80 @@ fn native_proof_value(p: mrk_macos_installed_native::IdentityBinding) -> Value {
 }
 fn default_control_value(p: mrk_macos_installed_native::DefaultControlProof) -> Value {
     let c = p.checks;
-    json!({"returned":true,"attempted":p.attempted,"cellRetained":p.cell_retained,"viewRetained":p.view_retained,
-        "tagSetterEntered":p.tag_setter_entered,"tagSetterReturned":p.tag_setter_returned,
-        "checks":{"eligible":c[0],"defaultCell":c[1],"controlView":c[2],"buttonUsable":c[3],
-            "singleUnitScreen":c[4],"framePoint":c[5],"identifier":c[6],"stable":c[7]},
-        "site":p.site,"error":p.error})
+    json!({"returned":true,"attempted":p.attempted,"elementRetained":p.element_retained,
+        "checks":{"eligible":c[0],"defaultElement":c[1],"capability":c[2],"buttonRole":c[3],
+            "enabled":c[4],"pressAllowed":c[5],"stableDefault":c[6]},"site":p.site,"error":p.error})
 }
-fn projection_value(p: mrk_macos_installed_native::AxProjection) -> Value {
-    json!({"windows":p.windows,"children":p.children,"sheets":p.sheets,"matched":p.matched})
+struct OpenActionReceipt { token: OpenAction, body: OpenActionBody, returned_at: Instant }
+struct OpenFlight {
+    input: PreparedOpenInput, token: OpenAction,
+    receipt: std::sync::mpsc::Receiver<OpenActionReceipt>, returned: Option<OpenActionReceipt>,
+    baseline: FailureSnapshot,
 }
-fn projection_calls_match(a: mrk_macos_installed_native::AxProjection,
-    b: mrk_macos_installed_native::AxProjection, calls: u32) -> bool {
-    let complete = |p: mrk_macos_installed_native::AxProjection| p.matched
-        && p.windows.is_some_and(|n| (1..=4).contains(&n)) && p.children.is_some_and(|n| (1..=16).contains(&n))
-        && p.sheets == Some(1);
-    if !complete(a) || !complete(b) || !(42..=64).contains(&calls) || calls % 2 != 0 { return false; }
-    let base = a.windows.zip(a.children).zip(b.windows.zip(b.children))
-        .map(|((w, c), (w2, c2))| 16 + w + c + w2 + c2);
-    base.and_then(|base| (calls / 2).checked_sub(base)).is_some_and(|depth| (1..=8).contains(&depth))
-}
-#[derive(Clone, Copy)]
-struct NativeRecheckSample {
-    state: &'static str, requested: bool, dispatch_attempted: bool, body_entered: bool, native_entered: bool,
-    body_returned: bool, receipt_joined: bool, timely: Option<bool>, custody_known: Option<bool>,
-    proof: Option<mrk_macos_installed_native::IdentityBinding>,
-    default_control: Option<mrk_macos_installed_native::DefaultControlProof>,
-}
-impl NativeRecheckSample {
-    fn new() -> Self {
-        Self { state: "unrequested", requested: false, dispatch_attempted: false, body_entered: false,
-            native_entered: false, body_returned: false, receipt_joined: false, timely: None, custody_known: None,
-            proof: None, default_control: None }
-    }
-    fn succeeded(self) -> bool {
-        self.state == "joined" && self.requested && self.dispatch_attempted && self.body_entered && self.native_entered
-            && self.body_returned && self.receipt_joined && self.timely == Some(true) && self.custody_known == Some(true)
-            && self.proof.is_some_and(mrk_macos_installed_native::IdentityBinding::matched)
-            && self.default_control.is_some_and(|d| d.matched(true))
-    }
-    fn value(self) -> Value {
-        json!({"state":self.state,"requested":self.requested,"dispatchAttempted":self.dispatch_attempted,
-            "bodyEntered":self.body_entered,"nativeEntered":self.native_entered,"bodyReturned":self.body_returned,
-            "receiptJoined":self.receipt_joined,"timely":self.timely,"custodyKnown":self.custody_known,
-            "proof":self.proof.map(native_proof_value),"defaultControl":self.default_control.map(default_control_value)})
-    }
-}
-struct NativeRecheckReceipt { token: OpenRecheck, body: OpenRecheckBody }
 #[derive(Clone, Copy)]
 struct OpenInputSample {
-    id: u32, prepared: bool, entered: bool, attempted: Option<bool>, press_returned: Option<bool>,
-    returned: bool, retired: bool, identity_matched: Option<bool>, control_matched: Option<bool>,
-    cleanup_returned: Option<bool>, diagnostic: Option<mrk_macos_installed_native::AxDiagnostic>,
-    native_rechecked: Option<bool>, phase: Option<&'static str>, calls: Option<u32>,
-    initial_projection: Option<mrk_macos_installed_native::AxProjection>,
-    final_projection: Option<mrk_macos_installed_native::AxProjection>, recheck: NativeRecheckSample,
+    id: u32, prepared: bool, requested: bool, dispatch_attempted: bool, state: &'static str,
+    entered: Option<bool>, native_entered: Option<bool>, returned: bool, joined: bool, retired: bool,
+    expired: bool, timely: Option<bool>, custody_known: Option<bool>,
+    attempted: Option<bool>, press_returned: Option<bool>, triggered: Option<bool>,
+    diagnostic: Option<mrk_macos_installed_native::OpenDiagnostic>, report: Option<mrk_macos_installed_native::OpenReport>,
 }
 impl OpenInputSample {
     fn preparing(id: u32) -> Self {
-        Self { id, prepared: false, entered: false, attempted: Some(false), press_returned: Some(false),
-            returned: false, retired: false, identity_matched: None, control_matched: None, cleanup_returned: None, diagnostic: None,
-            native_rechecked: None, phase: None, calls: None, initial_projection: None, final_projection: None,
-            recheck: NativeRecheckSample::new() }
+        Self { id, prepared: false, requested: false, dispatch_attempted: false, state: "prepared",
+            entered: Some(false), native_entered: Some(false), returned: false, joined: false, retired: false,
+            expired: false, timely: None, custody_known: None, attempted: Some(false), press_returned: Some(false),
+            triggered: None, diagnostic: None, report: None }
     }
-    fn enter(&mut self) {
-        self.entered = true; self.attempted = None; self.press_returned = None;
+    fn requested(&mut self) {
+        self.requested = true; self.state = "requested";
+        self.entered = None; self.native_entered = None; self.attempted = None; self.press_returned = None;
     }
-    fn complete(&mut self, result: &mrk_macos_installed_native::AxInputReturn, retired: bool) {
-        self.returned = true; self.retired = retired;
-        if let Some(report) = result.report {
-            self.attempted = Some(report.attempted); self.press_returned = Some(report.press_returned);
-            self.identity_matched = Some(report.identity_matched); self.control_matched = Some(report.control_matched);
-            self.cleanup_returned = Some(report.cleanup_returned); self.diagnostic = Some(report.diagnostic);
-            self.native_rechecked = Some(report.native_rechecked); self.phase = report.phase; self.calls = Some(report.calls);
-            self.initial_projection = report.initial_projection; self.final_projection = report.final_projection;
-            if report.diagnostic.error == "none" && !result.timely() {
-                self.diagnostic = Some(mrk_macos_installed_native::AxDiagnostic { site: "cleanup", error: "deadline" });
-            }
-        } else { self.diagnostic = Some(mrk_macos_installed_native::AxDiagnostic { site: "entry", error: "custody" }); }
+    fn reconciled(mut self, progress: OpenProgress) -> Self {
+        // One atomic phase/history sample, never an acquisition of action or
+        // native custody. Unknown vetoes permission without erasing real events.
+        self.state = progress.state; self.requested |= progress.requested;
+        self.dispatch_attempted |= progress.dispatched; self.entered = Some(self.entered == Some(true) || progress.entered);
+        self.returned |= progress.returned; self.joined |= progress.joined; self.retired |= progress.retired;
+        self.expired |= progress.expired;
+        if self.expired { self.timely = Some(false); }
+        if progress.state == "unknown" { self.custody_known = Some(false); }
+        else if matches!(progress.state, "joined" | "retired") { self.custody_known = Some(true); }
+        self
+    }
+    fn complete(&mut self, body: OpenActionBody, token: &OpenAction, timely: bool) {
+        let progress = token.progress();
+        self.native_entered = Some(body.native.is_some_and(|n| n.entered));
+        self.timely = Some(timely); self.custody_known = Some(body.custody_known() && progress.state != "unknown");
+        *self = self.reconciled(progress);
+        self.report = body.native.and_then(|n| n.report);
+        if let Some(r) = self.report {
+            self.attempted = Some(r.attempted); self.press_returned = Some(r.press_returned); self.triggered = r.triggered;
+            self.diagnostic = Some(r.diagnostic);
+        } else {
+            self.attempted = body.native.is_none().then_some(false); self.press_returned = self.attempted;
+            self.diagnostic = Some(mrk_macos_installed_native::OpenDiagnostic { site: "admission",
+                error: if !body.custody_known() { "custody" } else if self.expired { "deadline" } else { "ineligible" } });
+        }
     }
     fn succeeded(self) -> bool {
-        self.prepared && self.entered && self.returned && self.retired && self.attempted == Some(true)
-            && self.press_returned == Some(true) && self.identity_matched == Some(true) && self.control_matched == Some(true)
-            && self.cleanup_returned == Some(true)
-            && self.native_rechecked == Some(true) && self.recheck.succeeded() && self.phase == Some("control")
-            && self.initial_projection.zip(self.final_projection).zip(self.calls)
-                .is_some_and(|((a, b), calls)| projection_calls_match(a, b, calls))
-            && self.diagnostic == Some(mrk_macos_installed_native::AxDiagnostic { site: "press", error: "none" })
+        self.prepared && self.requested && self.dispatch_attempted && self.state == "retired"
+            && self.entered == Some(true) && self.native_entered == Some(true) && self.returned && self.joined && self.retired
+            && !self.expired && self.timely == Some(true) && self.custody_known == Some(true)
+            && self.attempted == Some(true) && self.press_returned == Some(true) && self.triggered == Some(true)
+            && self.report.is_some_and(|r| r.succeeded() && self.diagnostic == Some(r.diagnostic))
     }
     fn value(self) -> Value {
-        json!({"mechanism":"accessibility-press-original-default-frame-v1", "step":"OpenProject", "id":self.id,
-            "prepared":self.prepared, "entered":self.entered, "attempted":self.attempted, "pressReturned":self.press_returned,
-            "returned":self.returned, "retired":self.retired, "identityMatched":self.identity_matched,
-            "controlMatched":self.control_matched, "cleanupReturned":self.cleanup_returned,
-            "site":self.diagnostic.map(|d| d.site), "error":self.diagnostic.map(|d| d.error),
-            "nativeRechecked":self.native_rechecked,"phase":self.phase,"calls":self.calls,
-            "initialProjection":self.initial_projection.map(projection_value),
-            "finalProjection":self.final_projection.map(projection_value),"nativeRecheck":self.recheck.value()})
+        json!({"mechanism":"accessibility-press-original-semantic-element-v1","step":"OpenProject","id":self.id,
+            "prepared":self.prepared,"requested":self.requested,"dispatchAttempted":self.dispatch_attempted,"state":self.state,
+            "bodyEntered":self.entered,"nativeEntered":self.native_entered,"bodyReturned":self.returned,
+            "receiptJoined":self.joined,"barrierRetired":self.retired,"expired":self.expired,"timely":self.timely,
+            "custodyKnown":self.custody_known,"attempted":self.attempted,"pressReturned":self.press_returned,"triggered":self.triggered,
+            "site":self.diagnostic.map(|d| d.site),"error":self.diagnostic.map(|d| d.error),
+            "initialOriginalProof":self.report.and_then(|r| r.initial_proof).map(native_proof_value),
+            "originalProof":self.report.and_then(|r| r.proof).map(native_proof_value),
+            "capture":self.report.and_then(|r| r.capture).map(default_control_value),
+            "defaultRecheck":self.report.and_then(|r| r.recheck).map(default_control_value)})
     }
 }
 #[derive(Clone, Copy)]
@@ -320,23 +298,17 @@ struct IdentitySample {
     case: Case, id: u32, start_result: &'static str,
     configuration: mrk_macos_installed_native::IdentityConfiguration,
     binding: Option<mrk_macos_installed_native::IdentityBinding>,
-    default_control: Option<mrk_macos_installed_native::DefaultControlProof>,
 }
 impl IdentitySample {
-    fn configured(self, id: u32) -> bool {
-        self.id == id && self.start_result == "ok" && self.configuration.complete()
-    }
-    fn succeeded(self, id: u32) -> bool {
-        self.configured(id) && self.binding.is_some_and(mrk_macos_installed_native::IdentityBinding::matched)
-            && self.default_control.is_some_and(|d| d.matched(false))
-    }
+    fn configured(self, id: u32) -> bool { self.id == id && self.start_result == "ok" && self.configuration.complete() }
+    fn succeeded(self, id: u32) -> bool { self.configured(id) && self.binding.is_some_and(mrk_macos_installed_native::IdentityBinding::matched) }
     fn value(self) -> Value {
         let c = self.configuration;
-        json!({"mechanism":"public-original-sheet-default-control-v1", "case":self.case.name(), "id":self.id, "kind":"project",
+        json!({"mechanism":"public-original-sheet-v1","case":self.case.name(),"id":self.id,"kind":"project",
             "start":{"returned":true,"result":self.start_result},
             "configuration":{"attempted":c.attempted,"parentSetterEntered":c.parent_setter_entered,
                 "parentSetterReturned":c.parent_setter_returned,"parent":c.parent,"site":c.site,"error":c.error},
-            "binding":self.binding.map(native_proof_value),"defaultControl":self.default_control.map(default_control_value)})
+            "binding":self.binding.map(native_proof_value)})
     }
 }
 #[derive(Clone, Copy)]
@@ -542,6 +514,7 @@ struct Record {
     step: Step, pending: Option<Pending>, evaluations: u16, attached: bool, started: bool, loaded: bool,
     native_dispatch: Option<NativeDispatch>, last_panel: Option<PanelSample>, native_action: Option<NativeActionSample>,
     ax_trusted: bool, prepared_open: Option<PreparedOpenInput>, accessibility: Option<OpenInputSample>,
+    open_progress: Option<Arc<OpenRelease>>,
     identity_binding: Option<IdentitySample>,
     initial_navigation: bool, info: bool, catalog: bool, methods: usize, capability: bool,
     project_calls: u8, cancel_returned: bool, project_returned: bool, project: Option<Project>,
@@ -559,7 +532,41 @@ struct Record {
     failure_close_requested: bool, failure_quit_attempted: bool,
     fixture: Fixture,
 }
-fn failure_context(r: &Record) -> Value {
+impl Record {
+    fn open_sample(&self) -> Option<OpenInputSample> {
+        self.accessibility.map(|sample| self.open_progress.as_ref()
+            .map_or(sample, |progress| sample.reconciled(progress.snapshot())))
+    }
+}
+#[derive(Clone, Copy)]
+struct FailureSnapshot {
+    source: &'static str, step: Step, pending: Option<Pending>, native_dispatch: Option<NativeDispatch>,
+    last_panel: Option<PanelSample>, native_action: Option<NativeActionSample>,
+    accessibility: Option<OpenInputSample>, identity_binding: Option<IdentitySample>,
+}
+impl FailureSnapshot {
+    fn from_record(r: &Record) -> Self {
+        Self { source: "record", step: r.step, pending: r.pending, native_dispatch: r.native_dispatch,
+            last_panel: r.last_panel, native_action: r.native_action, accessibility: r.open_sample(), identity_binding: r.identity_binding }
+    }
+    fn at_expiry(mut self, progress: OpenProgress) -> Self {
+        // Non-accessibility fields are the original pre-arm sample, NOT fresh
+        // pending/panel absence observations. The schema labels this explicitly.
+        self.source = "prearm-open-progress";
+        self.accessibility = self.accessibility.map(|sample| sample.reconciled(progress));
+        self
+    }
+    fn frame(self, reason: &'static str) -> Option<Vec<u8>> {
+        let step = format!("{:?}", self.step);
+        if step.len() > 32 || !step.is_ascii() || !FAILURE_REASONS.contains(&reason) { return None; }
+        let context = edit::bounded(&failure_context(&self), 8192).ok()?;
+        if !context.is_ascii() { return None; }
+        let mut frame = format!("MRK_MACOS_AQUA_FAILURE_STEP={step}\nMRK_MACOS_AQUA_FAILURE_REASON={reason}\nMRK_MACOS_AQUA_FAILURE_CONTEXT=").into_bytes();
+        frame.extend_from_slice(&context); frame.extend_from_slice(b"\nMRK_MACOS_AQUA=failed\n");
+        (frame.len() <= 8448).then_some(frame)
+    }
+}
+fn failure_context(r: &FailureSnapshot) -> Value {
     let pending = r.pending.map(|pending| {
         let (kind, step) = match pending {
             Pending::Dom(original) => ("dom", Some(original.step)), Pending::Native(step) => ("native", Some(step)),
@@ -580,24 +587,87 @@ fn failure_context(r: &Record) -> Value {
     let action = r.native_action.map(|action| json!({"step":format!("{:?}", action.step), "id":action.id,
         "action":action.diagnostic.action, "domain":action.diagnostic.domain,
         "site":action.diagnostic.site, "error":action.diagnostic.error}));
-    json!({"pending":pending, "nativeHandler":native, "lastPanel":panel, "nativeAction":action,
+    json!({"snapshotSource":r.source,"pending":pending, "nativeHandler":native, "lastPanel":panel, "nativeAction":action,
         "accessibility":r.accessibility.map(OpenInputSample::value),
         "accessibilityBinding":r.identity_binding.map(IdentitySample::value)})
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiagnosticReturn { Stopped, Written, OutputFailed, ChannelClosed, Panicked }
+struct DiagnosticOwner {
+    handle: Option<std::thread::JoinHandle<DiagnosticReturn>>, returned: Option<DiagnosticReturn>,
+}
+struct DiagnosticWriter {
+    sender: std::sync::mpsc::SyncSender<Option<Vec<u8>>>,
+    // Open=0, frame claimed=1, Stop claimed=2, refused handoff=3. Terminal
+    // choices never reopen; successful try_send is submission, not delivery.
+    claim: AtomicU8, owner: Mutex<DiagnosticOwner>,
+}
+impl DiagnosticWriter {
+    fn new() -> Result<Self, ()> {
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<Option<Vec<u8>>>(1);
+        let handle = std::thread::Builder::new().name("mrk-aqua-report".into()).spawn(move || {
+            // Only immutable bounded DATA and this diagnostic receiver cross
+            // into the writer. Sink locks/I/O never touch relay/action custody.
+            match receiver.recv() {
+                Ok(Some(frame)) => {
+                    let mut out = std::io::stderr().lock();
+                    if out.write_all(&frame).and_then(|_| out.flush()).is_ok() { DiagnosticReturn::Written }
+                    else { DiagnosticReturn::OutputFailed }
+                },
+                Ok(None) => DiagnosticReturn::Stopped,
+                Err(_) => DiagnosticReturn::ChannelClosed,
+            }
+        }).map_err(|_| ())?;
+        // No fallible allocation or user callback after spawn and before the
+        // actual handle is registered in its original owner.
+        Ok(Self { sender, claim: AtomicU8::new(0), owner: Mutex::new(DiagnosticOwner { handle: Some(handle), returned: None }) })
+    }
+    fn available(&self) -> bool { self.claim.load(Ordering::SeqCst) == 0 }
+    fn submit(&self, frame: Option<Vec<u8>>) {
+        let frame = frame.filter(|frame| frame.len() <= 8448 && frame.is_ascii());
+        let choice = if frame.is_some() { 1 } else { 3 };
+        if self.claim.compare_exchange(0, choice, Ordering::SeqCst, Ordering::SeqCst).is_err() { return; }
+        // Refused frame construction makes this sole message Stop, not a
+        // second report/fallback. Output remains truthfully unreported.
+        if self.sender.try_send(frame).is_err() {
+            self.claim.store(3, Ordering::SeqCst);
+        }
+    }
+    fn finish(&self, end: Instant) -> Option<DiagnosticReturn> {
+        if self.claim.compare_exchange(0, 2, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+            && self.sender.try_send(None).is_err() { self.claim.store(3, Ordering::SeqCst); }
+        let Ok(mut owner) = self.owner.try_lock() else { return None; };
+        if owner.returned.is_some() { return owner.returned; }
+        loop {
+            let remaining = end.saturating_duration_since(Instant::now());
+            if remaining.is_zero() { return None; } // Actual handle remains owned.
+            if owner.handle.as_ref()?.is_finished() { break; }
+            std::thread::sleep(remaining.min(Duration::from_millis(1)));
+        }
+        let returned = match owner.handle.take()?.join() {
+            Ok(returned) => returned,
+            Err(payload) => { std::mem::forget(payload); DiagnosticReturn::Panicked },
+        };
+        owner.returned = Some(returned); // Actual result, including error/partial output.
+        Some(returned) // Caller must recheck the SAME endpoint after actual join.
+    }
+}
 pub(super) struct Observation {
+    // Only the original relay owns this lock; main never acquires it. Unknown
+    // retains the exact receiver/token/owners here past the finite wait.
+    open_custody: Mutex<Option<OpenFlight>>,
     case: Case, main: ThreadId, end: Instant, project_path: PathBuf, base: Value,
-    failed: AtomicBool, failure_reason: AtomicU8, failure_reported: AtomicBool, record: Mutex<Record>,
+    failed: AtomicBool, failure_reason: AtomicU8, diagnostic: DiagnosticWriter, record: Mutex<Record>,
 }
 impl Observation {
     fn new(case: Case, fixture: Fixture) -> Result<Self, ()> {
         let base = crate::protocol::strict_json(CONFIG).map_err(|_| ())?;
-        Ok(Self { case, main: std::thread::current().id(), end: Instant::now() + Duration::from_secs(45),
-            project_path: fixture.root.clone(), base, failed: AtomicBool::new(false), failure_reason: AtomicU8::new(0),
-            failure_reported: AtomicBool::new(false),
-            record: Mutex::new(Record {
+        let end = Instant::now() + Duration::from_secs(45);
+        let project_path = fixture.root.clone();
+        let record = Mutex::new(Record {
                 step: Step::Bootstrap, pending: None, evaluations: 0, attached: false, started: false, loaded: false,
                 native_dispatch: None, last_panel: None, native_action: None,
-                ax_trusted: false, prepared_open: None, accessibility: None, identity_binding: None,
+                ax_trusted: false, prepared_open: None, accessibility: None, open_progress: None, identity_binding: None,
                 initial_navigation: false, info: false, catalog: false, methods: 0, capability: false,
                 project_calls: 0, cancel_returned: false, project_returned: false, project: None,
                 project_witness: None, picker_witness: None,
@@ -612,7 +682,10 @@ impl Observation {
                 quit_cancelled: false, close_count: 0, reload_requested: false, reload_returned: false, reload_navigation: false,
                 loss_seen: false, loss_settled: false, relay_joined: false, actual_exit: false, originals_final: false,
                 failure_close_requested: false, failure_quit_attempted: false, fixture,
-            }) })
+            });
+        let diagnostic = DiagnosticWriter::new()?; // All fallible setup precedes spawn/registration.
+        Ok(Self { open_custody: Mutex::new(None), case, main: std::thread::current().id(), end,
+            project_path, base, failed: AtomicBool::new(false), failure_reason: AtomicU8::new(0), diagnostic, record })
     }
     fn fail(&self) { self.fail_with("observer-invariant"); }
     fn fail_with(&self, reason: &'static str) { latch_failure(&self.failure_reason, &self.failed, reason); }
@@ -632,34 +705,34 @@ impl Observation {
     pub(super) fn identity_start_returned(&self, id: u32, returned: mrk_macos_installed_native::IdentityStartReturn) {
         let Some(mut r) = self.record() else { return; };
         if !self.open_identity_scope(id, mrk_macos_installed_native::PanelKind::Project) || r.identity_binding.is_some() {
-            self.fail_with("native-ax-custody"); return;
+            self.fail_with("native-default-custody"); return;
         }
-        let Some(configuration) = returned.configuration else { self.fail_with("native-ax-binding"); return; };
+        let Some(configuration) = returned.configuration else { self.fail_with("native-default-binding"); return; };
         r.identity_binding = Some(IdentitySample { case: self.case, id, start_result: returned.result, configuration,
-            binding: None, default_control: None });
+            binding: None });
         // Saved original-return DATA precedes this latch/one-shot report. A
         // previous failure stays absorbing; none of this grants finality.
-        if !returned.succeeded() { self.fail_with("native-ax-binding"); }
+        if !returned.succeeded() { self.fail_with("native-default-binding"); }
     }
     fn report_failure(&self) {
-        if !self.failed.load(Ordering::SeqCst) || self.failure_reported.load(Ordering::SeqCst) { return; }
+        if !self.failed.load(Ordering::SeqCst) || !self.diagnostic.available() { return; }
         let Some(reason) = first_failure_reason(&self.failure_reason) else { return; };
         let Ok(r) = self.record.try_lock() else { return; };
         // This reason is latched only after the original action body returns.
         // Let its matching Record publication precede the one-shot report;
         // unrelated failures still report truthful unknown/nonreturned DATA.
-        if matches!(reason, "adapter-native-action" | "native-ax-binding") && r.pending == Some(Pending::Native(r.step))
+        if matches!(reason, "adapter-native-action" | "native-default-binding") && r.pending == Some(Pending::Native(r.step))
             && r.native_dispatch.is_some_and(|native| native.step == r.step && native.entered && !native.returned) {
             return;
         }
-        if matches!(reason, "native-ax-input" | "native-ax-custody")
-            && matches!(r.pending, Some(Pending::Accessibility(_)))
-            && r.accessibility.is_some_and(|sample| sample.entered && !sample.returned) { return; }
-        if self.failure_reported.swap(true, Ordering::SeqCst) { return; }
-        // Fixed labels and the already recorded sample only; no new native
-        // observation. Later cleanup cannot replace the first reason/sample.
-        let _ = writeln!(std::io::stderr().lock(), "MRK_MACOS_AQUA_FAILURE_STEP={:?}\nMRK_MACOS_AQUA_FAILURE_REASON={}\nMRK_MACOS_AQUA_FAILURE_CONTEXT={}",
-            r.step, reason, failure_context(&r));
+        let snapshot = FailureSnapshot::from_record(&r); drop(r);
+        self.diagnostic.submit(snapshot.frame(reason));
+    }
+    fn report_expiry(&self, snapshot: FailureSnapshot, progress: OpenProgress) {
+        if !self.failed.load(Ordering::SeqCst) || !self.diagnostic.available() { return; }
+        if let Some(reason) = first_failure_reason(&self.failure_reason) {
+            self.diagnostic.submit(snapshot.at_expiry(progress).frame(reason));
+        }
     }
     pub(super) fn attach(&self, _: &Supervisor) -> Result<(), BridgeError> {
         let Some(mut r) = self.record() else { return Err(BridgeError::cleanup_unknown()); };
@@ -1205,193 +1278,158 @@ impl Observation {
             self.fail_with("dom-dispatch-refused");
         }
     }
-    fn open_admission(&self, input: &PreparedOpenInput, after_press: bool) -> Option<bool> {
-        let admitted = {
-            let r = self.record()?;
-            if !r.ax_trusted || input.id != self.case.selected_id() || !open_step_entry(r.pending, r.step, input.id)
-                || r.prepared_open.is_some() || !r.accessibility.is_some_and(|s|
-                    s.id == input.id && s.prepared && s.entered && !s.returned && !s.retired) { return None; }
-            input.admitted(after_press)?
-        }; // ALL Record/GuiFacts/owner-endpoint guards gone before AX IPC.
-        Some(admitted && self.timely() && (after_press || !input.stopped()))
-    }
-    fn recheck_original(&self, r: &Record, token: &OpenRecheck) -> bool {
+    fn action_original(&self, r: &Record, token: &OpenAction) -> bool {
         r.ax_trusted && token.id == self.case.selected_id() && open_step_entry(r.pending, r.step, token.id)
+            && r.open_progress.as_ref().is_some_and(|progress| token.same_progress(progress))
             && r.prepared_open.is_none() && r.accessibility.is_some_and(|s|
-                s.id == token.id && s.prepared && s.entered && !s.returned && !s.retired)
+                s.id == token.id && s.prepared && s.requested) && !r.native_actions_returned[2]
             && r.native_dispatch.is_some_and(|n| n.step == Step::OpenProject && n.entered && n.returned)
             && r.identity_binding.is_some_and(|s| s.succeeded(token.id))
     }
-    fn recheck_admission(&self, token: &OpenRecheck) -> Option<bool> {
+    fn action_admission(&self, token: &OpenAction, after: bool) -> Option<bool> {
+        if std::thread::current().id() != self.main { return None; }
         let allowed = {
             let r = self.record()?;
-            if !self.recheck_original(&r, token) || !r.accessibility?.recheck.requested { return None; }
-            token.admitted(false)?
-        }; // No Record/GuiFacts/owner mutex survives into AppKit/wait/AX IPC.
-        Some(allowed && self.timely() && !token.stopped())
+            if !self.action_original(&r, token) || token.state() != "entered" { return None; }
+            token.admitted(after)?
+        }; // All guards gone BEFORE the caller resumes any AppKit selector.
+        Some(allowed && self.timely() && (after || !token.stopped() && !token.expired()))
     }
-    fn recheck_sample(&self, token: &OpenRecheck, update: impl FnOnce(&mut NativeRecheckSample) -> bool) -> bool {
-        let Some(mut r) = self.record() else { return false; };
-        if !self.recheck_original(&r, token) { return false; }
-        let Some(sample) = r.accessibility.as_mut() else { return false; };
-        update(&mut sample.recheck)
+    fn action_main(self: &Arc<Self>, token: OpenAction, end: Instant,
+        done: std::sync::mpsc::SyncSender<OpenActionReceipt>) {
+        let entered = token.enter(); // Actual wrapper event also survives prior Unknown.
+        let body = if std::thread::current().id() != self.main || !entered {
+            token.unknown(); self.fail_with("native-default-custody"); OpenActionBody::no_native(None)
+        } else if token.expired() || Instant::now() >= end {
+            token.expire(); self.fail_with("native-default-deadline"); OpenActionBody::no_native(Some(false))
+        } else { token.run(end, |after| self.action_admission(&token, after)) };
+        // The actual body and all native/TLS/owner guards returned. No Record
+        // publication can delay the relay's independent timeout latch/receipt.
+        if !body.custody_known() { token.unknown(); self.fail_with("native-default-custody"); }
+        if !token.returned() { self.fail_with("native-default-custody"); }
+        let receipt = OpenActionReceipt { token: token.clone(), body, returned_at: Instant::now() };
+        if done.try_send(receipt).is_err() { token.unknown(); self.fail_with("native-default-custody"); }
+        // Successful send is last: no post-send native work or custody change.
     }
-    fn recheck_unknown(&self, token: &OpenRecheck, end: Instant) {
-        token.unknown(); // Retention precedes any possibly blocking publication.
-        self.fail_with("native-ax-custody");
-        let _ = self.recheck_sample(token, |sample| {
-            sample.state = "unknown"; sample.custody_known = Some(false);
-            if Instant::now() >= end { sample.timely = Some(false); }
-            true // Never overwrite the first body's actual native proof.
-        });
-    }
-    fn recheck_main(self: &Arc<Self>, token: OpenRecheck, end: Instant,
-        done: std::sync::mpsc::SyncSender<NativeRecheckReceipt>) {
-        // A queued or lost closure is not native entry. Unknown/late callbacks
-        // do no PANEL work and cannot revive the request or grant a permit.
-        if std::thread::current().id() != self.main || token.state() == "unknown" || Instant::now() >= end
-            || !token.enter() { self.recheck_unknown(&token, end); return; }
-        if !self.recheck_sample(&token, |s| {
-            if s.state != "queued" || !s.requested || !s.dispatch_attempted || s.body_entered || s.body_returned { return false; }
-            s.state = "entered"; s.body_entered = true; true
-        }) { self.recheck_unknown(&token, end); return; }
-        let body = token.observe(end, || self.recheck_admission(&token));
-        // Actual body returned and all PANEL/original guards are gone. From
-        // here the wrapper does bounded DATA publication only, never AppKit.
-        if !token.returned() { self.recheck_unknown(&token, end); return; }
-        if !self.recheck_sample(&token, |s| {
-            if s.state != "entered" || !s.body_entered || s.body_returned { return false; }
-            s.state = "returned"; s.body_returned = true; s.native_entered = body.native_entered;
-            s.proof = body.proof; s.default_control = body.default_control;
-            s.timely = Some(Instant::now() < end); s.custody_known = Some(body.admitted.is_some()); true
-        }) { self.recheck_unknown(&token, end); return; }
-        // That publication lock may itself have waited. A late return is not
-        // a usable receipt, even if the underlying getters actually returned.
-        if Instant::now() >= end || body.admitted.is_none() || token.state() != "returned" {
-            self.recheck_unknown(&token, end); return;
+    fn open_unknown(&self, token: &OpenAction) {
+        token.unknown(); self.fail_with("native-default-custody");
+        if let Ok(mut r) = self.record.try_lock() {
+            if open_step_entry(r.pending, r.step, token.id) {
+                if let Some(s) = r.accessibility.as_mut() { *s = s.reconciled(token.progress()); }
+            }
         }
-        if done.try_send(NativeRecheckReceipt { token: token.clone(), body }).is_err() {
-            self.recheck_unknown(&token, end);
-        }
-        // Successful send is the LAST operation: no post-publication native
-        // work, new custody transition, second receipt or retirement.
-    }
-    fn final_native_recheck(self: &Arc<Self>, input: &PreparedOpenInput, app: &tauri::AppHandle, end: Instant) -> Option<bool> {
-        let token = input.recheck_token();
-        if !token.request() || !self.recheck_sample(&token, |s| {
-            if s.state != "unrequested" || s.requested { return false; }
-            s.state = "requested"; s.requested = true; true
-        }) { self.recheck_unknown(&token, end); return None; }
-        let (done, receipt) = std::sync::mpsc::sync_channel(1);
-        let q = self.clone(); let dispatched = token.clone();
-        let mut refused = false;
-        let queued = self.recheck_sample(&token, |s| {
-            if s.state != "requested" || s.dispatch_attempted { return false; }
-            let Some(allowed) = token.admitted(false) else { return false; };
-            // Last potentially blocking owner/Record admissions, before the
-            // one dispatch. Only scalar writes/unlocks follow this Eax check.
-            let stopped = token.stopped();
-            if !allowed || stopped || !self.timely() || Instant::now() >= end { refused = true; return false; }
-            if !token.queue() { return false; }
-            s.state = "queued"; s.dispatch_attempted = true; s.custody_known = Some(true); true
-        });
-        if !queued {
-            if refused && token.not_dispatched() && self.recheck_sample(&token, |s| {
-                s.state = "not-dispatched"; s.timely = Some(Instant::now() < end); s.custody_known = Some(true); true
-            }) { return Some(false); }
-            self.recheck_unknown(&token, end); return None;
-        }
-        // Exactly one closure on the existing main-thread mechanism; no new
-        // worker/task/AX controller. All original guards were dropped above.
-        if app.run_on_main_thread(move || q.recheck_main(dispatched, end, done)).is_err() {
-            self.recheck_unknown(&token, end); return None; // Err is NOT no-entry/cancellation.
-        }
-        let custody = self.recheck_admission(&token);
-        let remaining = end.saturating_duration_since(Instant::now());
-        if custody.is_none() || remaining.is_zero() || token.state() == "unknown" {
-            self.recheck_unknown(&token, end); return None;
-        }
-        // ONE finite receive against the SAME Eax. STOP may make the returned
-        // body negative, but is not permission to skip its actual return/join.
-        let Ok(returned) = receipt.recv_timeout(remaining) else { self.recheck_unknown(&token, end); return None; };
-        if !token.same(&returned.token) || returned.body.admitted.is_none() || Instant::now() >= end
-            || returned.body.admitted == Some(true) && (!returned.body.native_entered
-                || !returned.body.proof.is_some_and(mrk_macos_installed_native::IdentityBinding::matched)
-                || !returned.body.default_control.is_some_and(|d| d.matched(true))) {
-            self.recheck_unknown(&token, end); return None;
-        }
-        let allowed = self.recheck_admission(&token);
-        if allowed.is_none() || Instant::now() >= end || !token.joined() {
-            self.recheck_unknown(&token, end); return None;
-        }
-        if !self.recheck_sample(&token, |s| {
-            if s.state != "returned" || !s.body_returned || s.receipt_joined
-                || s.native_entered != returned.body.native_entered || s.proof != returned.body.proof
-                || s.default_control != returned.body.default_control { return false; }
-            s.state = "joined"; s.receipt_joined = true; s.timely = Some(Instant::now() < end); s.custody_known = Some(true); true
-        }) || Instant::now() >= end { self.recheck_unknown(&token, end); return None; }
-        Some(returned.body.admitted == Some(true) && allowed == Some(true))
-        // The scoped FFI caller AGAIN checks original facts/Eax after this
-        // return and before granting C the native-rechecked flag.
     }
     fn accessibility_step(self: &Arc<Self>, app: &tauri::AppHandle) -> bool {
-        let input = {
+        // Main never takes this private relay-custody lock. It retains the
+        // original packet/receiver on every unknown path, including >45s.
+        let Ok(mut custody) = self.open_custody.try_lock() else { self.fail_with("native-default-custody"); return true; };
+        if custody.is_some() { return true; } // Unresolved original; no retry/replacement.
+        let (input, token, baseline) = {
             let Some(mut r) = self.record() else { return true; };
             let Some(Pending::Accessibility(id)) = r.pending else { return false; };
             if id != self.case.selected_id() || !open_step_entry(r.pending, r.step, id) {
-                self.fail_with("native-ax-custody"); return true;
+                self.fail_with("native-default-custody"); return true;
             }
-            // The synchronous relay owns a taken packet until actual return.
-            // Missing/unknown custody is never permission to prepare again.
-            let Some(input) = r.prepared_open.take() else { return true; };
-            if input.id != id || !r.accessibility.is_some_and(|s| s.id == id && s.prepared && !s.entered && !s.returned)
+            let Some(input) = r.prepared_open.take() else { self.fail_with("native-default-custody"); return true; };
+            let token = input.token();
+            if input.id != id || !r.accessibility.is_some_and(|s| s.id == id && s.prepared && !s.requested && !s.returned)
                 || !r.native_dispatch.is_some_and(|n| n.step == Step::OpenProject && n.entered && n.returned) {
-                self.fail_with("native-ax-custody"); return true;
+                self.open_unknown(&token); r.prepared_open = Some(input); return true;
             }
-            if !self.timely() {
-                let retired = input.no_entry(input.admitted(true).is_some());
-                if let Some(sample) = r.accessibility.as_mut() {
-                    sample.retired = retired;
-                    sample.diagnostic = Some(mrk_macos_installed_native::AxDiagnostic { site: "entry",
-                        error: if Instant::now() >= self.end { "deadline" } else { "ineligible" } });
+            let allowed = input.admitted(false); // Before the one action clock is armed.
+            if !self.timely() || allowed != Some(true) {
+                let retired = input.no_entry(allowed.is_some() && input.admitted(true).is_some());
+                if let Some(s) = r.accessibility.as_mut() {
+                    s.state = token.state(); s.retired = retired; s.custody_known = Some(retired);
+                    s.diagnostic = Some(mrk_macos_installed_native::OpenDiagnostic { site: "admission", error: "ineligible" });
                 }
+                self.fail_with("native-default-input");
                 let current = r.step;
-                if !retired || !retire_returned_open(&mut r.pending, current, id) { self.fail_with("native-ax-custody"); }
-                return true; // Positive no FFI entry; no CF work or action flags.
+                if !retired || !retire_returned_open(&mut r.pending, current, id) {
+                    token.unknown(); r.prepared_open = Some(input); self.fail_with("native-default-custody");
+                }
+                return true;
             }
-            if !input.enter() { self.fail_with("native-ax-custody"); return true; }
-            if let Some(sample) = r.accessibility.as_mut() { sample.enter(); }
-            input
+            if !token.request() { r.prepared_open = Some(input); self.fail_with("native-default-custody"); return true; }
+            if let Some(s) = r.accessibility.as_mut() { s.requested(); }
+            (input, token, FailureSnapshot::from_record(&r))
         };
-        // The existing retained/joined relay owns this synchronous AX call.
-        // Main preparation returned; only one final main receipt wait may be
-        // requested by C, at its fixed proof boundary and SAME entry Eax.
-        let result = input.press(self.end, |after_press| self.open_admission(&input, after_press),
-            |end| self.final_native_recheck(&input, app, end));
-        if result.report.is_some_and(|r| !r.succeeded()) || !result.timely() { self.fail_with("native-ax-input"); }
-        else if !result.custody_known { self.fail_with("native-ax-custody"); }
-        let Some(mut r) = self.record() else { input.returned(&result, false); return true; };
-        let matching = open_step_entry(r.pending, r.step, input.id) && r.prepared_open.is_none()
-            && r.accessibility.is_some_and(|s| s.id == input.id && s.prepared && s.entered && !s.returned && !s.retired);
-        // A publication lock may have waited after the final C callback. Check
-        // same-original facts custody again; poison cannot retire the barrier.
-        let retired = input.returned(&result, matching && input.admitted(true).is_some());
-        if !matching { self.fail_with("native-ax-custody"); return true; }
-        if let Some(sample) = r.accessibility.as_mut() {
-            if input.recheck_token().state() == "unknown" {
-                sample.recheck.state = "unknown"; sample.recheck.custody_known = Some(false);
+        let (done, receipt) = std::sync::mpsc::sync_channel(1);
+        *custody = Some(OpenFlight { input, token: token.clone(), receipt, returned: None, baseline });
+        let flight = custody.as_mut().expect("original stored before arming");
+        // One endpoint includes queue/admission/getters/Press/receipt/publication.
+        // From here: no blocking Record/PANEL/GuiFacts/owner lock on this relay.
+        let end = self.end.min(Instant::now() + Duration::from_secs(2));
+        if Instant::now() >= end || !self.timely() || token.stopped() {
+            if Instant::now() >= end {
+                token.expire(); self.fail_with("native-default-deadline");
+                self.report_expiry(flight.baseline, token.progress());
             }
-            sample.complete(&result, retired);
+            else { self.fail_with("native-default-input"); }
+            let Ok(mut r) = self.record.try_lock() else { self.open_unknown(&token); return true; };
+            if !self.action_original(&r, &token) || !flight.input.no_entry(true) { self.open_unknown(&token); return true; }
+            if let Some(s) = r.accessibility.as_mut() {
+                s.state = "retired"; s.retired = true; s.expired = token.expired(); s.custody_known = Some(true);
+                s.entered = Some(false); s.native_entered = Some(false); s.attempted = Some(false); s.press_returned = Some(false);
+                s.diagnostic = Some(mrk_macos_installed_native::OpenDiagnostic { site: "admission", error: if token.expired() { "deadline" } else { "ineligible" } });
+            }
+            let current = r.step;
+            if !retire_returned_open(&mut r.pending, current, token.id) { self.open_unknown(&token); return true; }
+            drop(r); *custody = None; return true;
         }
-        if !retired { self.fail_with("native-ax-custody"); return true; }
+        if !token.queue() { self.open_unknown(&token); return true; }
+        if let Ok(mut r) = self.record.try_lock() {
+            if let Some(s) = r.accessibility.as_mut().filter(|s| s.id == token.id) { *s = s.reconciled(token.progress()); }
+        }
+        let q = self.clone(); let dispatched = token.clone();
+        if app.run_on_main_thread(move || q.action_main(dispatched, end, done)).is_err() {
+            self.open_unknown(&token); return true; // Err never means cancellation/no entry.
+        }
+        use std::sync::mpsc::RecvTimeoutError;
+        let returned = match flight.receipt.recv_timeout(end.saturating_duration_since(Instant::now())) {
+            Ok(receipt) => Some(receipt),
+            Err(RecvTimeoutError::Disconnected) => { self.open_unknown(&token); None },
+            Err(RecvTimeoutError::Timeout) => {
+                // This atomic latch happens BEFORE any Record/log/cleanup wait.
+                token.expire(); self.fail_with("native-default-deadline");
+                self.report_expiry(flight.baseline, token.progress());
+                if let Ok(mut r) = self.record.try_lock() {
+                    if let Some(s) = r.accessibility.as_mut().filter(|s| s.id == token.id) {
+                        *s = s.reconciled(token.progress());
+                    }
+                }
+                // SAME receiver, original45s endpoint: observe cleanup only.
+                flight.receipt.recv_timeout(self.end.saturating_duration_since(Instant::now())).ok()
+            },
+        };
+        if Instant::now() >= end {
+            token.expire(); self.fail_with("native-default-deadline");
+            self.report_expiry(flight.baseline, token.progress());
+        }
+        flight.returned = returned;
+        let Some(receipt) = flight.returned.as_ref() else { self.open_unknown(&token); return true; };
+        let same = flight.token.same(&token) && token.same(&receipt.token)
+            && receipt.returned_at <= Instant::now() && receipt.returned_at < self.end && Instant::now() < self.end;
+        let known = same && receipt.body.custody_known() && token.state() == "returned";
+        let joined = known && token.joined();
+        if !joined { self.open_unknown(&token); }
+        if !receipt.body.succeeded() { self.fail_with("native-default-input"); }
+        let Ok(mut r) = self.record.try_lock() else { self.open_unknown(&token); return true; };
+        if !self.action_original(&r, &token) { self.open_unknown(&token); return true; }
+        let retired = joined && token.retire();
+        let timely = Instant::now() < end && !token.expired();
+        if let Some(s) = r.accessibility.as_mut() { s.complete(receipt.body, &token, timely); }
+        if !retired { self.open_unknown(&token); return true; }
         let current = r.step;
-        if !retire_returned_open(&mut r.pending, current, input.id) { self.fail_with("native-ax-custody"); return true; }
-        if !result.timely() { self.fail_with("native-ax-input"); return true; }
-        if self.timely() && r.accessibility.is_some_and(OpenInputSample::succeeded) {
+        if !retire_returned_open(&mut r.pending, current, token.id) { self.open_unknown(&token); return true; }
+        // Every successful scalar publication is still inside the SAME allowance.
+        if Instant::now() >= end { token.expire(); self.fail_with("native-default-deadline");
+            if let Some(s) = r.accessibility.as_mut() { s.expired = true; s.timely = Some(false); } }
+        if self.timely() && !token.stopped() && r.accessibility.is_some_and(OpenInputSample::succeeded) {
             if r.native_actions_returned[2] { self.fail_with("native-duplicate-action"); return true; }
             r.native_actions_returned[2] = true; r.selected_native = true; r.step = Step::ProjectSettled;
         }
-        true
+        drop(r); *custody = None; true
     }
     fn native_step(&self, step: Step) {
         let timely = self.timely();
@@ -1413,16 +1451,15 @@ impl Observation {
             r.native_action = action_diagnostic; // This same first error's returned DATA only.
         }
         if let Some(sample) = open_sample {
-            if r.accessibility.is_some() { self.fail_with("native-ax-custody"); return; }
+            if r.accessibility.is_some() { self.fail_with("native-default-custody"); return; }
             r.accessibility = Some(sample);
         }
         if let Some(returned) = binding_return {
             let Some(sample) = r.identity_binding.as_mut().filter(|sample|
-                sample.configured(self.case.selected_id()) && sample.binding.is_none() && sample.default_control.is_none()
-                    && sample.configuration == returned.configuration) else { self.fail_with("native-ax-custody"); return; };
-            if step != Step::OpenProject { self.fail_with("native-ax-custody"); return; }
+                sample.configured(self.case.selected_id()) && sample.binding.is_none()
+                    && sample.configuration == returned.configuration) else { self.fail_with("native-default-custody"); return; };
+            if step != Step::OpenProject { self.fail_with("native-default-custody"); return; }
             sample.binding = Some(returned.binding);
-            sample.default_control = returned.default_control;
         }
         // Keep the historical wrong-thread refusal conservative. Diagnostics
         // never authorize retirement; a different/unknown owner is untouched.
@@ -1433,10 +1470,12 @@ impl Observation {
             if step != Step::OpenProject || result != Ok(false) || r.prepared_open.is_some()
                 || !r.native_dispatch.is_some_and(|n| n.step == step && n.entered && n.returned)
                 || !r.identity_binding.is_some_and(|sample| sample.succeeded(input.id)) {
-                self.fail_with("native-ax-custody"); return;
+                self.fail_with("native-default-custody"); return;
             }
             // Publish only the returned preparation, not an action/dispatch
             // success. Nothing native runs after this handoff from the body.
+            if r.open_progress.is_some() { self.fail_with("native-default-custody"); return; }
+            r.open_progress = Some(input.progress_handle());
             r.pending = Some(Pending::Accessibility(input.id)); r.prepared_open = Some(input); return;
         }
         match result {
@@ -1492,8 +1531,8 @@ impl Observation {
             if !self.timely() { return Err("observer-deadline"); }
             {
                 let r = self.record().ok_or("observer-record-unavailable")?;
-                if !r.identity_binding.is_some_and(|sample| sample.configured(id) && sample.binding.is_none() && sample.default_control.is_none()) {
-                    return Err("native-ax-binding");
+                if !r.identity_binding.is_some_and(|sample| sample.configured(id) && sample.binding.is_none()) {
+                    return Err("native-default-binding");
                 }
             }
             let mut sample = OpenInputSample::preparing(id);
@@ -1519,10 +1558,10 @@ impl Observation {
     pub(super) fn close_prevented(&self) {
         let Some(mut r) = self.record() else { return; };
         if self.failed.load(Ordering::SeqCst) && r.failure_close_requested { return; }
-        let Some(Pending::Close(request)) = r.pending.take() else { self.fail(); return; };
+        let Some(Pending::Close(request)) = r.pending else { self.fail(); return; };
         if !matches!((request,r.step),(Step::CloseCancel,Step::QuitCancel)|(Step::Close,Step::Quit)) {
             self.fail(); return;
-        } r.close_count += 1;
+        } r.pending = None; r.close_count += 1;
     }
     fn failure_shutdown(self: &Arc<Self>, app: &tauri::AppHandle) {
         let state = app.state::<super::ShellState>();
@@ -1699,11 +1738,12 @@ impl Observation {
     fn finish(&self) -> Option<Value> {
         if !self.timely() { return None; }
         let r = self.record()?;
+        let accessibility = r.open_sample();
         let common = r.attached && r.loaded && r.info && r.catalog && r.capability && r.actual_exit && r.originals_final
             && r.relay_joined && r.pending.is_none() && r.step == Step::Exit && r.file_readback
             && r.ax_trusted && r.prepared_open.is_none()
-            && (if self.case == Case::PickerLoss { r.accessibility.is_none() && r.identity_binding.is_none() }
-                else { r.accessibility.is_some_and(|s| s.id == self.case.selected_id() && s.succeeded())
+            && (if self.case == Case::PickerLoss { accessibility.is_none() && r.identity_binding.is_none() }
+                else { accessibility.is_some_and(|s| s.id == self.case.selected_id() && s.succeeded())
                     && r.identity_binding.is_some_and(|sample| sample.succeeded(self.case.selected_id())) })
             && r.sessions.len() == self.case.rounds() && r.sessions.iter().all(|s| s.review_visible && s.finality.is_some())
             && (self.case == Case::FirstSave || r.panel_attached == [true,true,false,false])
@@ -1734,7 +1774,7 @@ impl Observation {
             "shippingBinaryQualified":false,"distributionQualified":false,"methods":"eight-passive","actionsAvailable":false,
             "native":{"projectCancelSettled":r.cancel_settled,"selectedPathMatched":r.selected_native && r.project_settled,
                 "panelAttachments":r.panel_attached,"controlReturns":r.native_actions_returned,
-                "accessibilityTrustedWithoutPrompt":r.ax_trusted,"projectOpenInput":r.accessibility.map(OpenInputSample::value),
+                "accessibilityTrustedWithoutPrompt":r.ax_trusted,"projectOpenInput":accessibility.map(OpenInputSample::value),
                 "projectOpenBinding":r.identity_binding.map(IdentitySample::value),
                 "quitCancelKeptOriginalReview":r.quit_cancelled,"originalDocumentAndQuitSettled":r.originals_final},
             "saveSessions":sessions,"freshCoreReadback":self.case == Case::FirstSave && r.snapshots == 2,
@@ -1913,103 +1953,56 @@ fn route() -> Option<(PathBuf,u32)> {
 // Pure regression checks in the already-required instrumented native entry.
 // These do not call AppKit, acquire files, dispatch actions, or supply receipts.
 fn native_recheck_data_check() -> bool {
-    use mrk_macos_installed_native::{AxDiagnostic, AxProjection, IdentityBinding, IdentityConfiguration, DefaultControlProof};
-    // Inert DTOs only. These values never enter a live original/AX request.
-    let proof = IdentityBinding { attempted: true, parent: Some("match"), panel: Some("match"),
-        checks: [Some(true); 12], children: Some(1), originals: Some("one"), site: "complete", error: "none" };
-    let control = DefaultControlProof { attempted: true, cell_retained: true, view_retained: true,
-        tag_setter_entered: false, tag_setter_returned: false, checks: [Some(true); 8], site: "complete", error: "none" };
-    let capture = DefaultControlProof { tag_setter_entered: true, tag_setter_returned: true, ..control };
-    let fresh = NativeRecheckSample::new();
-    if fresh.succeeded() || fresh.value() != json!({"state":"unrequested","requested":false,"dispatchAttempted":false,
-        "bodyEntered":false,"nativeEntered":false,"bodyReturned":false,"receiptJoined":false,
-        "timely":null,"custodyKnown":null,"proof":null,"defaultControl":null}) { return false; }
-    let joined = NativeRecheckSample { state: "joined", requested: true, dispatch_attempted: true,
-        body_entered: true, native_entered: true, body_returned: true, receipt_joined: true,
-        timely: Some(true), custody_known: Some(true), proof: Some(proof), default_control: Some(control) };
-    if !joined.succeeded() { return false; }
-    for state in ["unrequested", "requested", "queued", "entered", "returned", "not-dispatched", "unknown"] {
-        if (NativeRecheckSample { state, ..joined }).succeeded() { return false; }
+    use mrk_macos_installed_native::{DefaultControlProof, IdentityBinding, OpenDiagnostic, OpenReport};
+    let proof = IdentityBinding { attempted: true, parent: Some("match"), panel: Some("match"), checks: [Some(true); 12],
+        children: Some(1), originals: Some("one"), site: "complete", error: "none" };
+    let control = DefaultControlProof { attempted: true, element_retained: true, checks: [Some(true); 7], site: "complete", error: "none" };
+    let report = OpenReport { diagnostic: OpenDiagnostic { site: "press", error: "none" }, attempted: true,
+        press_returned: true, triggered: Some(true), custody_known: true, initial_proof: Some(proof), proof: Some(proof),
+        capture: Some(control), recheck: Some(control) };
+    let full = OpenInputSample { id: 2, prepared: true, requested: true, dispatch_attempted: true, state: "retired",
+        entered: Some(true), native_entered: Some(true), returned: true, joined: true, retired: true, expired: false,
+        timely: Some(true), custody_known: Some(true), attempted: Some(true), press_returned: Some(true), triggered: Some(true),
+        diagnostic: Some(report.diagnostic), report: Some(report) };
+    if !full.succeeded() || full.value().get("calls").is_some() || full.value().get("cleanupReturned").is_some() { return false; }
+    let mutations: [fn(&mut OpenInputSample); 12] = [|s| s.expired = true, |s| s.timely = Some(false),
+        |s| s.joined = false, |s| s.returned = false, |s| s.entered = None, |s| s.native_entered = Some(false),
+        |s| s.retired = false, |s| s.state = "unknown", |s| s.custody_known = Some(false),
+        |s| s.requested = false, |s| s.dispatch_attempted = false, |s| s.report = None];
+    for mutation in mutations { let mut failed = full; mutation(&mut failed); if failed.succeeded() { return false; } }
+    for report in [OpenReport { triggered: Some(false), ..report }, OpenReport { press_returned: false, ..report },
+        OpenReport { custody_known: false, ..report }, OpenReport { recheck: None, ..report },
+        OpenReport { initial_proof: None, ..report }] {
+        if (OpenInputSample { report: Some(report), ..full }).succeeded() { return false; }
     }
-    let mutations: [fn(&mut NativeRecheckSample); 12] = [
-        |s| s.requested = false, |s| s.dispatch_attempted = false, |s| s.body_entered = false,
-        |s| s.native_entered = false, |s| s.body_returned = false, |s| s.receipt_joined = false,
-        |s| s.timely = None, |s| s.timely = Some(false), |s| s.custody_known = None,
-        |s| s.custody_known = Some(false), |s| s.proof = None, |s| s.default_control = None,
-    ];
-    for mutation in mutations {
-        let mut sample = joined; mutation(&mut sample);
-        if sample.succeeded() { return false; }
+    let unknown = full.reconciled(OpenProgress { state: "unknown", requested: true, dispatched: true,
+        entered: true, returned: true, joined: true, retired: true, expired: true });
+    if unknown.succeeded() || !unknown.joined || !unknown.retired || unknown.custody_known != Some(false)
+        || unknown.timely != Some(false) || unknown.report != full.report { return false; }
+    let mut baseline = OpenInputSample::preparing(2); baseline.prepared = true; baseline.requested();
+    let progress = OpenProgress { state: "unknown", requested: true, dispatched: true, entered: true,
+        returned: true, joined: false, retired: false, expired: true };
+    let sample = baseline.reconciled(progress);
+    if !sample.dispatch_attempted || sample.entered != Some(true) || !sample.returned
+        || sample.custody_known != Some(false) || sample.native_entered.is_some() || sample.report.is_some() { return false; }
+    // Channel DATA only: exercise the real one-shot handoff without a worker,
+    // sink, sleep or a fake completion/JoinHandle. Native runs own the actual one.
+    let writer = || {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        (DiagnosticWriter { sender, claim: AtomicU8::new(0), owner: Mutex::new(DiagnosticOwner { handle: None, returned: None }) }, receiver)
+    };
+    let (sink, receiver) = writer();
+    sink.submit(Some(b"first".to_vec())); sink.submit(Some(b"second".to_vec()));
+    if receiver.try_recv() != Ok(Some(b"first".to_vec())) || receiver.try_recv().is_ok()
+        || sink.available() || sink.finish(Instant::now()).is_some() { return false; }
+    for refused in [None, Some(vec![b'x'; 8449]), Some(vec![0xff])] {
+        let (sink, receiver) = writer(); sink.submit(refused); sink.submit(Some(b"later".to_vec()));
+        if receiver.try_recv() != Ok(None) || receiver.try_recv().is_ok() || sink.claim.load(Ordering::SeqCst) != 3 { return false; }
     }
-    for bit in 0..12 {
-        for value in [None, Some(false)] {
-            let mut negative = proof; negative.checks[bit] = value;
-            if (NativeRecheckSample { proof: Some(negative), ..joined }).succeeded() { return false; }
-        }
-    }
-    for bit in 0..8 {
-        for value in [None, Some(false)] {
-            let mut negative = control; negative.checks[bit] = value;
-            if (NativeRecheckSample { default_control: Some(negative), ..joined }).succeeded() { return false; }
-        }
-    }
-    if (NativeRecheckSample { default_control: Some(capture), ..joined }).succeeded() { return false; }
-    let configuration = IdentityConfiguration { attempted: true, parent_setter_entered: true,
-        parent_setter_returned: true, parent: Some("nil"), site: Some("complete"), error: Some("none") };
-    let identity = IdentitySample { case: Case::FirstSave, id: 2, start_result: "ok", configuration,
-        binding: Some(proof), default_control: Some(capture) };
-    if !identity.succeeded(2) || identity.succeeded(1) { return false; }
-    let dto = identity.value();
-    if dto["mechanism"] != "public-original-sheet-default-control-v1"
-        || !dto["configuration"].as_object().is_some_and(|o| o.len() == 6 && !o.contains_key("panel"))
-        || !dto["binding"].as_object().is_some_and(|o| o.len() == 9)
-        || !dto["binding"]["checks"].as_object().is_some_and(|o| o.len() == 12)
-        || !dto["defaultControl"].as_object().is_some_and(|o| o.len() == 9)
-        || !dto["defaultControl"]["checks"].as_object().is_some_and(|o| o.len() == 8)
-        || (IdentitySample { default_control: None, ..identity }).succeeded(2)
-        || (IdentitySample { default_control: Some(control), ..identity }).succeeded(2) { return false; }
-    let mut changed = proof; changed.panel = Some("different"); changed.checks[10] = Some(false);
-    changed.checks[11] = None; changed.site = "stable-identifier"; changed.error = "changed";
-    let negative = native_proof_value(changed);
-    if changed.matched() || negative["checks"]["panelIdentifier"] != true
-        || negative["checks"]["stableIdentifier"] != false || !negative["checks"]["finalEligibility"].is_null() { return false; }
-    let projection = AxProjection { windows: Some(1), children: Some(1), sheets: Some(1), matched: true };
-    let input = OpenInputSample { id: 2, prepared: true, entered: true, attempted: Some(true), press_returned: Some(true),
-        returned: true, retired: true, identity_matched: Some(true), control_matched: Some(true), cleanup_returned: Some(true),
-        diagnostic: Some(AxDiagnostic { site: "press", error: "none" }), native_rechecked: Some(true), phase: Some("control"),
-        calls: Some(42), initial_projection: Some(projection), final_projection: Some(projection), recheck: joined };
-    if !input.succeeded() || !input.value().as_object().is_some_and(|o| o.len() == 20) { return false; }
-    let mutations: [fn(&mut OpenInputSample); 10] = [
-        |s| s.native_rechecked = None, |s| s.native_rechecked = Some(false), |s| s.phase = None,
-        |s| s.phase = Some("final"), |s| s.calls = None, |s| s.initial_projection = None,
-        |s| s.final_projection = None, |s| s.retired = false, |s| s.control_matched = Some(false),
-        |s| s.recheck = NativeRecheckSample::new(),
-    ];
-    for mutation in mutations {
-        let mut sample = input; mutation(&mut sample);
-        if sample.succeeded() { return false; }
-    }
-    for calls in [0, 40, 41, 43, 58, 64, 65, u32::MAX] {
-        if (OpenInputSample { calls: Some(calls), ..input }).succeeded() { return false; }
-    }
-    let observed = AxProjection { children: Some(6), ..projection };
-    if !(OpenInputSample { calls: Some(56), ..input }).succeeded()
-        || !(OpenInputSample { calls: Some(64), initial_projection: Some(observed), final_projection: Some(observed), ..input }).succeeded()
-        || (OpenInputSample { calls: Some(66), initial_projection: Some(observed), final_projection: Some(observed), ..input }).succeeded() {
-        return false;
-    }
-    for invalid in [AxProjection { windows: Some(5), ..projection }, AxProjection { children: Some(17), ..projection },
-        AxProjection { sheets: Some(2), ..projection }, AxProjection { matched: false, ..projection }] {
-        if (OpenInputSample { initial_projection: Some(invalid), ..input }).succeeded()
-            || (OpenInputSample { final_projection: Some(invalid), ..input }).succeeded() { return false; }
-    }
-    // Later request uncertainty cannot erase an earlier actual C flag, but it
-    // still vetoes success. A joined no-native negative is likewise no permit.
-    let unknown = NativeRecheckSample { state: "unknown", custody_known: Some(false), ..joined };
-    let uncertain = OpenInputSample { recheck: unknown, retired: false, ..input };
-    if uncertain.succeeded() || uncertain.value()["nativeRechecked"] != true
-        || uncertain.value()["nativeRecheck"]["state"] != "unknown"
-        || (NativeRecheckSample { native_entered: false, proof: None, ..joined }).succeeded() { return false; }
+    let (sink, receiver) = writer();
+    if sink.finish(Instant::now()).is_some() { return false; }
+    sink.submit(Some(b"post-stop".to_vec()));
+    if receiver.try_recv() != Ok(None) || receiver.try_recv().is_ok() || sink.claim.load(Ordering::SeqCst) != 2 { return false; }
     true
 }
 fn observer_data_checks() -> bool {
@@ -2024,9 +2017,9 @@ fn observer_data_checks() -> bool {
         || !super::owned_macos::observation::open_release_data_check() || !native_recheck_data_check() { return false; }
     let mut prepared = OpenInputSample::preparing(2);
     prepared.prepared = true;
-    if prepared.succeeded() || prepared.entered || prepared.attempted != Some(false) || prepared.returned { return false; }
-    prepared.enter();
-    if prepared.succeeded() || !prepared.entered || prepared.attempted.is_some() || prepared.press_returned.is_some()
+    if prepared.succeeded() || prepared.entered != Some(false) || prepared.attempted != Some(false) || prepared.returned { return false; }
+    prepared.requested();
+    if prepared.succeeded() || prepared.entered.is_some() || prepared.attempted.is_some() || prepared.press_returned.is_some()
         || prepared.returned || prepared.retired { return false; }
     for id in [1, 2] {
         let mut pending = Some(Pending::Accessibility(id));
@@ -2182,6 +2175,21 @@ fn observer_data_checks() -> bool {
     }
     true
 }
+fn observe(q: &Arc<Observation>) -> Option<Vec<u8>> {
+    let trusted = mrk_macos_installed_native::installed_accessibility_trusted();
+    if trusted != Ok(true) {
+        q.fail_with(if trusted == Ok(false) { "native-ax-not-trusted" } else { "native-ax-trust" });
+        return None;
+    }
+    if let Some(mut r) = q.record() { r.ax_trusted = true; } else { return None; }
+    if !q.timely() { return None; }
+    // All original success/fixture validation and serialization finish BEFORE
+    // the idle diagnostic writer may be stopped at the common main exit.
+    let returned = super::run_builder(super::builder().manage(q.clone()));
+    let report = matches!(returned, Ok(0)).then(|| q.finish()).flatten()?;
+    let report = edit::bounded(&report, 16 * 1024 - 1).ok()?;
+    q.timely().then_some(report)
+}
 pub(crate) fn main() -> std::process::ExitCode {
     if !observer_data_checks() {
         super::diagnostic(b"MRK_MACOS_AQUA_FAILURE_REASON=observer-data-check\nMRK_MACOS_AQUA=failed\n");
@@ -2196,21 +2204,22 @@ pub(crate) fn main() -> std::process::ExitCode {
     let input = route().filter(|_| args.next().is_none()).and_then(|(root,uid)| Fixture::capture(root.join(case.name()),uid,case).ok())
         .and_then(|fixture| Observation::new(case,fixture).ok());
     let Some(q) = input.map(Arc::new) else { super::diagnostic(b"MRK_MACOS_AQUA=fixture-refused\n"); return std::process::ExitCode::FAILURE; };
-    let trusted = mrk_macos_installed_native::installed_accessibility_trusted();
-    if trusted != Ok(true) {
-        q.fail_with(if trusted == Ok(false) { "native-ax-not-trusted" } else { "native-ax-trust" });
-        q.report_failure(); super::diagnostic(b"MRK_MACOS_AQUA=failed\n"); return std::process::ExitCode::FAILURE;
-    }
-    if let Some(mut r) = q.record() { r.ax_trusted = true; } else { return std::process::ExitCode::FAILURE; }
-    if !q.timely() { q.report_failure(); return std::process::ExitCode::FAILURE; }
-    // Routing is DATA only. The ordinary builder/core/installed selector still
-    // establish every runtime, native project, document and edit boundary.
-    let returned = super::run_builder(super::builder().manage(q.clone()));
-    let report = matches!(returned,Ok(0)).then(|| q.finish()).flatten();
-    let Some(report) = report.and_then(|v| edit::bounded(&v,16 * 1024 - 1).ok()) else {
-        q.fail(); q.report_failure(); super::diagnostic(b"MRK_MACOS_AQUA=failed\n"); return std::process::ExitCode::FAILURE;
+    let report = observe(&q);
+    if report.is_none() { q.fail(); q.report_failure(); }
+    // One cleanup path for every post-construction return. Receipt submission
+    // never counts as writer return/join, nor does process containment.
+    let returned = q.diagnostic.finish(q.end);
+    let Some(returned) = returned else {
+        // Preserve this original Arc, including its real JoinHandle and any
+        // unresolved action receiver/owners, through process lifetime. A default
+        // Drop/detach must not turn an unfinished reporter into finality.
+        std::mem::forget(q);
+        return std::process::ExitCode::FAILURE;
     };
-    if !q.timely() { q.report_failure(); return std::process::ExitCode::FAILURE; }
+    if returned != DiagnosticReturn::Stopped || !q.timely() { return std::process::ExitCode::FAILURE; }
+    let Some(report) = report else { return std::process::ExitCode::FAILURE; };
+    // A post-Stop deadline/output failure is truthfully unreported. No new
+    // writer, stderr fallback, receipt retry or success allowance is created.
     let mut out = std::io::stdout().lock();
     if out.write_all(b"MRK_MACOS_AQUA_RESULT=").and_then(|_| out.write_all(&report)).and_then(|_| out.write_all(b"\n"))
         .and_then(|_| out.flush()).is_ok() && q.timely() { std::process::ExitCode::SUCCESS } else { std::process::ExitCode::FAILURE }

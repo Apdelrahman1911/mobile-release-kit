@@ -22,7 +22,7 @@ thread_local! { static PANEL: RefCell<Option<OriginalPanel>> = const { RefCell::
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
 pub(super) mod observation {
     use super::*;
-    use std::{sync::atomic::{AtomicU8, Ordering}, time::Instant};
+    use std::{cell::Cell, sync::atomic::{AtomicU16, Ordering}, time::Instant};
     pub(crate) use native::PanelAction;
 
     #[derive(Clone, Copy)]
@@ -30,7 +30,7 @@ pub(super) mod observation {
         WrongThread, BookBorrow, OriginalCall, OriginalOwner, OriginalBinding,
         MissingFacts, MissingPanel, Ineligible, NativeObservation,
         NativeAction(Option<native::PanelActionDiagnostic>),
-        OpenBinding(native::AxDiagnostic), OpenCustody,
+        OpenBinding(native::OpenDiagnostic), OpenCustody,
     }
     impl ObservationError {
         pub(crate) fn reason(self) -> &'static str { match self {
@@ -39,12 +39,12 @@ pub(super) mod observation {
             Self::OriginalBinding => "adapter-original-binding", Self::MissingFacts => "adapter-missing-facts",
             Self::MissingPanel => "adapter-missing-panel", Self::Ineligible => "adapter-ineligible",
             Self::NativeObservation => "adapter-native-observation", Self::NativeAction(_) => "adapter-native-action",
-            Self::OpenBinding(_) => "native-ax-binding", Self::OpenCustody => "native-ax-custody",
+            Self::OpenBinding(_) => "native-default-binding", Self::OpenCustody => "native-default-custody",
         }}
         pub(crate) fn action_diagnostic(self) -> Option<native::PanelActionDiagnostic> {
             match self { Self::NativeAction(diagnostic) => diagnostic, _ => None }
         }
-        pub(crate) fn binding_diagnostic(self) -> Option<native::AxDiagnostic> {
+        pub(crate) fn binding_diagnostic(self) -> Option<native::OpenDiagnostic> {
             match self { Self::OpenBinding(diagnostic) => Some(diagnostic), _ => None }
         }
     }
@@ -68,152 +68,170 @@ pub(super) mod observation {
     }
     #[repr(u8)]
     #[derive(Clone, Copy)]
-    enum OpenPhase { Prepared, Entered, Returned, Retired, Unknown }
-    #[repr(u8)]
-    #[derive(Clone, Copy)]
-    enum RecheckPhase { Unrequested, Requested, Queued, Entered, Returned, Joined, NotDispatched, Unknown }
-    pub(crate) struct OpenRelease { phase: AtomicU8, recheck: AtomicU8 }
+    enum OpenPhase { Prepared, Requested, Queued, Entered, Returned, Joined, Retired, Unknown }
+    const OPEN_PHASE: u16 = 7;
+    const OPEN_EXPIRED: u16 = 1 << 9;
+    impl OpenPhase {
+        fn event(self) -> u16 { match self {
+            Self::Prepared | Self::Unknown => 0, _ => 1 << (self as u16 + 2),
+        }}
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) struct OpenProgress {
+        pub(crate) state: &'static str, pub(crate) requested: bool, pub(crate) dispatched: bool,
+        pub(crate) entered: bool, pub(crate) returned: bool, pub(crate) joined: bool,
+        pub(crate) retired: bool, pub(crate) expired: bool,
+    }
+    pub(crate) struct OpenRelease { progress: AtomicU16 }
     impl OpenRelease {
-        fn new() -> Self { Self { phase: AtomicU8::new(OpenPhase::Prepared as u8),
-            recheck: AtomicU8::new(RecheckPhase::Unrequested as u8) } }
+        fn new() -> Self { Self { progress: AtomicU16::new(OpenPhase::Prepared as u16) } }
+        fn transition(&self, from: OpenPhase, to: OpenPhase, actual_body_event: bool) -> bool {
+            let previous = self.progress.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |bits| {
+                let admitted = bits & OPEN_PHASE == from as u16;
+                let phase = if admitted { to } else { OpenPhase::Unknown };
+                // Real wrapper entry/return is history even after custody became
+                // Unknown. Failed requests/joins never invent those events.
+                Some((bits & !OPEN_PHASE) | phase as u16
+                    | if admitted || actual_body_event { to.event() } else { 0 })
+            }).unwrap_or_else(|bits| bits);
+            previous & OPEN_PHASE == from as u16
+        }
         fn advance(&self, from: OpenPhase, to: OpenPhase) -> bool {
-            self.phase.compare_exchange(from as u8, to as u8, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+            self.transition(from, to, false)
         }
-        pub(super) fn release_ready(&self) -> bool { self.phase.load(Ordering::SeqCst) == OpenPhase::Retired as u8 }
-        fn enter(&self) -> bool { self.advance(OpenPhase::Prepared, OpenPhase::Entered) }
+        pub(crate) fn snapshot(&self) -> OpenProgress {
+            let bits = self.progress.load(Ordering::SeqCst);
+            let event = |phase: OpenPhase| bits & phase.event() != 0;
+            OpenProgress { state: ["prepared", "requested", "queued", "entered", "returned", "joined", "retired", "unknown"]
+                [(bits & OPEN_PHASE) as usize], requested: event(OpenPhase::Requested), dispatched: event(OpenPhase::Queued),
+                entered: event(OpenPhase::Entered), returned: event(OpenPhase::Returned), joined: event(OpenPhase::Joined),
+                retired: event(OpenPhase::Retired), expired: bits & OPEN_EXPIRED != 0 }
+        }
+        pub(super) fn release_ready(&self) -> bool { self.snapshot().state == "retired" }
+        fn state(&self) -> &'static str { self.snapshot().state }
+        fn unknown(&self) { self.progress.fetch_or(OpenPhase::Unknown as u16, Ordering::SeqCst); }
+        fn expire(&self) { self.progress.fetch_or(OPEN_EXPIRED, Ordering::SeqCst); }
+        fn expired(&self) -> bool { self.snapshot().expired }
         fn no_entry(&self, custody: bool) -> bool {
-            let custody = custody && self.recheck.load(Ordering::SeqCst) == RecheckPhase::Unrequested as u8;
-            self.advance(OpenPhase::Prepared, if custody { OpenPhase::Retired } else { OpenPhase::Unknown }) && custody
-        }
-        fn returned(&self, cleanup: bool, custody: bool) -> bool {
-            if !self.advance(OpenPhase::Entered, OpenPhase::Returned) { return false; }
-            let phase = self.recheck.load(Ordering::SeqCst);
-            let known = [RecheckPhase::Unrequested, RecheckPhase::NotDispatched, RecheckPhase::Joined]
-                .into_iter().any(|p| p as u8 == phase);
-            if !known { self.recheck_unknown(); return false; }
-            self.advance(OpenPhase::Returned, if cleanup && custody && known { OpenPhase::Retired } else { OpenPhase::Unknown })
-                && cleanup && custody && known
-        }
-        fn recheck_advance(&self, from: RecheckPhase, to: RecheckPhase) -> bool {
-            if self.phase.load(Ordering::SeqCst) == OpenPhase::Entered as u8
-                && self.recheck.compare_exchange(from as u8, to as u8, Ordering::SeqCst, Ordering::SeqCst).is_ok() { true }
-            else { self.recheck_unknown(); false }
-        }
-        fn recheck_unknown(&self) {
-            self.recheck.store(RecheckPhase::Unknown as u8, Ordering::SeqCst);
-            self.phase.store(OpenPhase::Unknown as u8, Ordering::SeqCst);
-        }
-        fn recheck_state(&self) -> &'static str {
-            ["unrequested", "requested", "queued", "entered", "returned", "joined", "not-dispatched", "unknown"]
-                .get(self.recheck.load(Ordering::SeqCst) as usize).copied().unwrap_or("unknown")
+            if !custody { self.unknown(); return false; }
+            match self.state() {
+                "prepared" => self.advance(OpenPhase::Prepared, OpenPhase::Retired),
+                "requested" => self.advance(OpenPhase::Requested, OpenPhase::Retired),
+                _ => { self.unknown(); false },
+            }
         }
     }
     fn original_admitted(id: u32, call: &Arc<GuiCall>, original: &Arc<OriginalWork>, after_press: bool) -> Option<bool> {
         let owner = call.owner()?;
         if owner.id != id || !Arc::ptr_eq(&owner, original) || !Arc::ptr_eq(&owner.gui, call) { return None; }
-        if after_press {
-            // A REAL callback/close may precede AX return; custody, not a
-            // pre-action eligibility gate, is required for known retirement.
-            let _facts = call.facts()?; Some(true)
-        } else { allowed(call, &owner).ok() }
+        if after_press { let _facts = call.facts()?; Some(true) }
+        else { allowed(call, &owner).ok() }
     }
     pub(crate) struct PreparedOpenInput {
         pub(crate) id: u32, identity: native::OpenIdentity,
         call: Arc<GuiCall>, owner: Arc<OriginalWork>, release: Arc<OpenRelease>,
     }
     impl PreparedOpenInput {
-        /// Called only inside the scoped AX admission; never touches PANEL or
-        /// AppKit. The Record caller releases its guard before any AX IPC.
-        pub(crate) fn admitted(&self, after_press: bool) -> Option<bool> {
-            original_admitted(self.id, &self.call, &self.owner, after_press)
+        pub(crate) fn admitted(&self, after: bool) -> Option<bool> {
+            original_admitted(self.id, &self.call, &self.owner, after)
         }
-        pub(crate) fn stopped(&self) -> bool { self.owner.stopped() }
-        pub(crate) fn enter(&self) -> bool { self.release.enter() }
-        pub(crate) fn press(&self, end: Instant, admit: impl FnMut(bool) -> Option<bool>,
-            recheck: impl FnOnce(Instant) -> Option<bool>) -> native::AxInputReturn {
-            native::installed_accessibility_press(&self.identity, end, admit, recheck)
-        }
-        pub(crate) fn recheck_token(&self) -> OpenRecheck {
-            OpenRecheck { id: self.id, identity: self.identity, call: self.call.clone(),
-                owner: self.owner.clone(), release: self.release.clone() }
+        pub(crate) fn token(&self) -> OpenAction {
+            OpenAction { id: self.id, identity: self.identity, call: self.call.clone(), owner: self.owner.clone(), release: self.release.clone() }
         }
         pub(crate) fn no_entry(&self, custody: bool) -> bool { self.release.no_entry(custody) }
-        pub(crate) fn returned(&self, result: &native::AxInputReturn, matching: bool) -> bool {
-            self.release.returned(result.report.is_some_and(|r| r.cleanup_returned),
-                matching && result.custody_known && result.report.is_some_and(|r| r.diagnostic.error != "custody"))
-        }
+        pub(crate) fn progress_handle(&self) -> Arc<OpenRelease> { self.release.clone() }
     }
-    /// OWNED DATA/custody token only. No Panel, AppKit/CF pointer or borrowed C
-    /// callback can cross into the one main-thread recheck request.
+    /// Owned scalar identity/custody only; the original native element stays TLS.
     #[derive(Clone)]
-    pub(crate) struct OpenRecheck {
+    pub(crate) struct OpenAction {
         pub(crate) id: u32, identity: native::OpenIdentity,
         call: Arc<GuiCall>, owner: Arc<OriginalWork>, release: Arc<OpenRelease>,
     }
-    #[derive(Clone, Copy)]
-    pub(crate) struct OpenRecheckBody {
-        pub(crate) native_entered: bool, pub(crate) proof: Option<native::IdentityBinding>,
-        pub(crate) default_control: Option<native::DefaultControlProof>,
-        pub(crate) admitted: Option<bool>,
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) struct OpenActionBody { pub(crate) native: Option<native::OpenInputReturn>, pub(crate) admitted: Option<bool> }
+    impl OpenActionBody {
+        pub(crate) fn no_native(admitted: Option<bool>) -> Self { Self { native: None, admitted } }
+        pub(crate) fn custody_known(self) -> bool {
+            self.admitted.is_some() && self.native.is_none_or(|n| n.custody_known)
+        }
+        pub(crate) fn succeeded(self) -> bool {
+            self.admitted == Some(true) && self.native.is_some_and(|n|
+                n.entered && n.custody_known && n.report.is_some_and(native::OpenReport::succeeded))
+        }
     }
-    impl OpenRecheckBody {
-        fn no_native(admitted: Option<bool>) -> Self { Self { native_entered: false, proof: None, default_control: None, admitted } }
+    thread_local! { static OPEN_BODY: Cell<Option<u32>> = const { Cell::new(None) }; }
+    struct OpenBodyGuard { id: u32, release: Arc<OpenRelease> }
+    impl OpenBodyGuard {
+        fn enter(token: &OpenAction) -> Option<Self> {
+            OPEN_BODY.with(|cell| {
+                if cell.get().is_some() { token.unknown(); return None; }
+                cell.set(Some(token.id)); Some(Self { id: token.id, release: token.release.clone() })
+            })
+        }
     }
-    impl OpenRecheck {
+    impl Drop for OpenBodyGuard {
+        fn drop(&mut self) {
+            OPEN_BODY.with(|cell| {
+                if cell.get() != Some(self.id) { self.release.unknown(); }
+                else { cell.set(None); }
+            });
+        }
+    }
+    pub(super) fn body_busy(id: u32) -> Result<bool, ()> {
+        OPEN_BODY.with(|cell| match cell.get() { None => Ok(false), Some(original) if original == id => Ok(true), _ => Err(()) })
+    }
+    impl OpenAction {
         pub(crate) fn same(&self, other: &Self) -> bool {
             self.id == other.id && self.identity == other.identity && Arc::ptr_eq(&self.call, &other.call)
                 && Arc::ptr_eq(&self.owner, &other.owner) && Arc::ptr_eq(&self.release, &other.release)
         }
-        pub(crate) fn state(&self) -> &'static str { self.release.recheck_state() }
-        pub(crate) fn request(&self) -> bool { self.release.recheck_advance(RecheckPhase::Unrequested, RecheckPhase::Requested) }
-        pub(crate) fn not_dispatched(&self) -> bool { self.release.recheck_advance(RecheckPhase::Requested, RecheckPhase::NotDispatched) }
-        pub(crate) fn queue(&self) -> bool { self.release.recheck_advance(RecheckPhase::Requested, RecheckPhase::Queued) }
-        pub(crate) fn enter(&self) -> bool { self.release.recheck_advance(RecheckPhase::Queued, RecheckPhase::Entered) }
-        pub(crate) fn returned(&self) -> bool { self.release.recheck_advance(RecheckPhase::Entered, RecheckPhase::Returned) }
-        pub(crate) fn joined(&self) -> bool { self.release.recheck_advance(RecheckPhase::Returned, RecheckPhase::Joined) }
-        pub(crate) fn unknown(&self) { self.release.recheck_unknown(); }
-        pub(crate) fn admitted(&self, after_press: bool) -> Option<bool> {
-            original_admitted(self.id, &self.call, &self.owner, after_press)
-        }
+        pub(crate) fn state(&self) -> &'static str { self.release.state() }
+        pub(crate) fn progress(&self) -> OpenProgress { self.release.snapshot() }
+        pub(crate) fn same_progress(&self, progress: &Arc<OpenRelease>) -> bool { Arc::ptr_eq(&self.release, progress) }
+        pub(crate) fn request(&self) -> bool { self.release.advance(OpenPhase::Prepared, OpenPhase::Requested) }
+        pub(crate) fn queue(&self) -> bool { self.release.advance(OpenPhase::Requested, OpenPhase::Queued) }
+        pub(crate) fn enter(&self) -> bool { self.release.transition(OpenPhase::Queued, OpenPhase::Entered, true) }
+        pub(crate) fn returned(&self) -> bool { self.release.transition(OpenPhase::Entered, OpenPhase::Returned, true) }
+        pub(crate) fn joined(&self) -> bool { self.release.advance(OpenPhase::Returned, OpenPhase::Joined) }
+        pub(crate) fn retire(&self) -> bool { self.release.advance(OpenPhase::Joined, OpenPhase::Retired) }
+        pub(crate) fn unknown(&self) { self.release.unknown(); }
+        pub(crate) fn expire(&self) { self.release.expire(); }
+        pub(crate) fn expired(&self) -> bool { self.release.expired() }
         pub(crate) fn stopped(&self) -> bool { self.owner.stopped() }
-        pub(crate) fn observe(&self, end: Instant, mut admit: impl FnMut() -> Option<bool>) -> OpenRecheckBody {
-            if !native::main_thread() || self.state() != "entered" { return OpenRecheckBody::no_native(None); }
-            let before = admit();
-            if before != Some(true) || Instant::now() >= end { return OpenRecheckBody::no_native(before.map(|_| false)); }
-            let mut result = PANEL.with(|book| {
-                let Ok(mut book) = book.try_borrow_mut() else { return OpenRecheckBody::no_native(None); };
-                let Some(entry) = book.as_mut().filter(|e| e.id == self.id) else { return OpenRecheckBody::no_native(None); };
-                let Ok((call, owner)) = original(entry) else { return OpenRecheckBody::no_native(None); };
+        pub(crate) fn admitted(&self, after: bool) -> Option<bool> {
+            original_admitted(self.id, &self.call, &self.owner, after)
+        }
+        pub(crate) fn run(&self, end: Instant, mut admit: impl FnMut(bool) -> Option<bool>) -> OpenActionBody {
+            if !native::main_thread() || self.state() != "entered" { return OpenActionBody::no_native(None); }
+            if self.expired() || Instant::now() >= end { return OpenActionBody::no_native(Some(false)); }
+            let before = admit(false);
+            if before != Some(true) || self.stopped() || self.expired() || Instant::now() >= end {
+                return OpenActionBody::no_native(before.map(|_| false));
+            }
+            let Some(_body) = OpenBodyGuard::enter(self) else { return OpenActionBody::no_native(None); };
+            PANEL.with(|book| {
+                let Ok(mut book) = book.try_borrow_mut() else { return OpenActionBody::no_native(None); };
+                let Some(entry) = book.as_mut().filter(|e| e.id == self.id) else { return OpenActionBody::no_native(None); };
+                let Ok((call, owner)) = original(entry) else { return OpenActionBody::no_native(None); };
                 if !Arc::ptr_eq(&call, &self.call) || !Arc::ptr_eq(&owner, &self.owner)
                     || !entry.open_release.as_ref().is_some_and(|r| Arc::ptr_eq(r, &self.release)) {
-                    return OpenRecheckBody::no_native(None);
+                    return OpenActionBody::no_native(None);
                 }
-                let Some(allowed) = self.admitted(false) else { return OpenRecheckBody::no_native(None); };
-                if !allowed || self.stopped() || self.state() != "entered" || Instant::now() >= end {
-                    return OpenRecheckBody::no_native(Some(false));
+                let before = admit(false);
+                if before != Some(true) || self.state() != "entered" || self.stopped() || self.expired() || Instant::now() >= end {
+                    return OpenActionBody::no_native(before.map(|_| false));
                 }
-                let Some(panel) = entry.panel.as_mut() else { return OpenRecheckBody::no_native(None); };
-                // No Record/GuiFacts guard across AppKit. Check Eax AFTER all
-                // owner locks and immediately before this sole native entry.
-                // Repeat observer failure/pending admission as well: the
-                // preceding owner lookup may itself have blocked.
-                let before = admit();
-                if before != Some(true) || self.state() != "entered" || self.stopped() || Instant::now() >= end {
-                    return OpenRecheckBody::no_native(before.map(|_| false));
-                }
-                let native = panel.installed_recheck_open_identity(&self.identity);
-                let after = self.admitted(false);
-                let admitted = if !native.custody_known { None } else {
-                    after.map(|allowed| allowed && !self.stopped() && Instant::now() < end
-                        && native.proof.is_some_and(native::IdentityBinding::matched)
-                        && native.default_control.is_some_and(|d| d.matched(true)))
-                };
-                OpenRecheckBody { native_entered: native.entered, proof: native.proof, default_control: native.default_control, admitted }
-            }); // This body's original PANEL borrow is gone before publication.
-            let after = admit();
-            result.admitted = result.admitted.zip(after).map(|(matched, allowed)|
-                matched && allowed && self.state() == "entered" && Instant::now() < end);
-            result
+                let Some(panel) = entry.panel.as_mut() else { return OpenActionBody::no_native(None); };
+                // No Record/GuiFacts/owner lock survives either admission into
+                // this synchronous AppKit call. Relay independently observes E.
+                let returned = panel.installed_default_press(&self.identity, end, |after| {
+                    let allowed = admit(after);
+                    if self.state() != "entered" { return None; }
+                    allowed.map(|yes| yes && (after || !self.expired() && !self.stopped() && Instant::now() < end))
+                });
+                let after = admit(true);
+                OpenActionBody { native: Some(returned), admitted: if returned.custody_known { after } else { None } }
+            }) // PANEL and main-only body guard drop before wrapper publication.
         }
     }
     pub(crate) fn prepare_open_input(id: u32, returned: &mut Option<native::IdentityBindingReturn>) -> Result<PreparedOpenInput, ObservationError> {
@@ -233,55 +251,40 @@ pub(super) mod observation {
         })
     }
     pub(crate) fn open_release_data_check() -> bool {
-        // Inert state-machine DATA: no original owner, panel or callback exists.
+        // Same state transitions as the real lifecycle, inert original-free DATA.
         for custody in [false, true] {
-            let no_entry = OpenRelease::new();
-            if no_entry.release_ready() || no_entry.no_entry(custody) != custody
-                || no_entry.release_ready() != custody || no_entry.enter() || no_entry.no_entry(true) { return false; }
-            for cleanup in [false, true] {
-                let entered = OpenRelease::new();
-                if !entered.enter() || entered.enter() || entered.release_ready() { return false; }
-                if entered.returned(cleanup, custody) != (cleanup && custody)
-                    || entered.release_ready() != (cleanup && custody) || entered.returned(true, true)
-                    || entered.no_entry(true) { return false; }
-            }
+            let p = OpenRelease::new();
+            if p.release_ready() || p.no_entry(custody) != custody || p.release_ready() != custody { return false; }
+            let s = p.snapshot();
+            if s.requested || s.dispatched || s.entered || s.returned || s.joined || s.retired != custody { return false; }
         }
-        for stage in 0..8 {
-            for cleanup in [false, true] {
-                for custody in [false, true] {
-                    let barrier = OpenRelease::new();
-                    if !barrier.enter() { return false; }
-                    if stage != 0 && !barrier.recheck_advance(RecheckPhase::Unrequested, RecheckPhase::Requested) { return false; }
-                    if stage == 6 {
-                        if !barrier.recheck_advance(RecheckPhase::Requested, RecheckPhase::NotDispatched) { return false; }
-                    } else if stage != 0 {
-                        for (at, from, to) in [(2, RecheckPhase::Requested, RecheckPhase::Queued),
-                            (3, RecheckPhase::Queued, RecheckPhase::Entered), (4, RecheckPhase::Entered, RecheckPhase::Returned),
-                            (5, RecheckPhase::Returned, RecheckPhase::Joined)] {
-                            if stage >= at && !barrier.recheck_advance(from, to) { return false; }
-                        }
-                        if stage == 7 { barrier.recheck_unknown(); }
-                    }
-                    let known = matches!(stage, 0 | 5 | 6) && cleanup && custody;
-                    if barrier.returned(cleanup, custody) != known || barrier.release_ready() != known { return false; }
-                }
+        for expire_at in 0..=6 {
+            let p = OpenRelease::new();
+            let stages = [OpenPhase::Prepared, OpenPhase::Requested, OpenPhase::Queued, OpenPhase::Entered,
+                OpenPhase::Returned, OpenPhase::Joined, OpenPhase::Retired];
+            for i in 0..6 {
+                if i == expire_at { p.expire(); }
+                if p.release_ready() || !p.advance(stages[i], stages[i+1]) { return false; }
             }
+            if !p.release_ready() || p.expired() != (expire_at < 6) { return false; }
+            let mut saved = p.snapshot(); saved.state = "unknown";
+            p.unknown();
+            if p.snapshot() != saved { return false; } // Unknown preserves actual retirement history.
+            if p.release_ready() || p.advance(OpenPhase::Joined, OpenPhase::Retired) || p.no_entry(true) { return false; }
         }
-        // A lost/late/duplicate request can never be repaired by a later body
-        // return, a copied receipt or complete CF cleanup.
-        let lost = OpenRelease::new();
-        if !lost.enter() || !lost.recheck_advance(RecheckPhase::Unrequested, RecheckPhase::Requested)
-            || !lost.recheck_advance(RecheckPhase::Requested, RecheckPhase::Queued) { return false; }
-        lost.recheck_unknown();
-        if lost.recheck_advance(RecheckPhase::Queued, RecheckPhase::Entered)
-            || lost.recheck_advance(RecheckPhase::Entered, RecheckPhase::Returned)
-            || lost.recheck_advance(RecheckPhase::Returned, RecheckPhase::Joined)
-            || lost.returned(true, true) || lost.release_ready() { return false; }
-        let duplicate = OpenRelease::new();
-        if !duplicate.enter() || !duplicate.recheck_advance(RecheckPhase::Unrequested, RecheckPhase::Requested)
-            || duplicate.recheck_advance(RecheckPhase::Unrequested, RecheckPhase::Requested)
-            || duplicate.returned(true, true) || duplicate.release_ready() { return false; }
-        true
+        let queued = OpenRelease::new();
+        if !queued.advance(OpenPhase::Prepared, OpenPhase::Requested)
+            || !queued.advance(OpenPhase::Requested, OpenPhase::Queued) { return false; }
+        queued.unknown(); queued.expire();
+        // The real wrapper may enter/return after a dispatch error made custody
+        // Unknown. These facts persist; native admission and join stay refused.
+        if queued.transition(OpenPhase::Queued, OpenPhase::Entered, true)
+            || queued.transition(OpenPhase::Entered, OpenPhase::Returned, true)
+            || queued.advance(OpenPhase::Returned, OpenPhase::Joined) || queued.release_ready() { return false; }
+        if queued.snapshot() != (OpenProgress { state: "unknown", requested: true, dispatched: true,
+            entered: true, returned: true, joined: false, retired: false, expired: true }) { return false; }
+        let p = OpenRelease::new(); p.unknown();
+        !p.advance(OpenPhase::Prepared, OpenPhase::Requested) && !p.release_ready()
     }
     pub(crate) fn observed_panel() -> Result<Option<ObservedPanel>, ObservationError> {
         if !native::main_thread() { return Err(ObservationError::WrongThread); }
@@ -289,6 +292,7 @@ pub(super) mod observation {
             let mut book = book.try_borrow_mut().map_err(|_| ObservationError::BookBorrow)?;
             let Some(entry) = book.as_mut() else { return Ok(None); };
             let (call, owner) = original(entry)?;
+            if entry.open_release.as_ref().is_some_and(|r| !r.release_ready()) { return Err(ObservationError::Ineligible); }
             let action_allowed = allowed(&call, &owner)?;
             let native = entry.panel.as_mut().ok_or(ObservationError::MissingPanel)?
                 .installed_observation().map_err(|_| ObservationError::NativeObservation)?;
@@ -301,7 +305,8 @@ pub(super) mod observation {
             let mut book = book.try_borrow_mut().map_err(|_| ObservationError::BookBorrow)?;
             let entry = book.as_mut().filter(|entry| entry.id == id).ok_or(ObservationError::OriginalBinding)?;
             let (call, owner) = original(entry)?;
-            if !allowed(&call, &owner)? || owner.interrupted() { return Err(ObservationError::Ineligible); }
+            if entry.open_release.as_ref().is_some_and(|r| !r.release_ready())
+                || !allowed(&call, &owner)? || owner.interrupted() { return Err(ObservationError::Ineligible); }
             // No GuiFacts lock across AppKit. The same native completion and
             // production tick retain response admission/close/release custody.
             let mut diagnostic = None;
@@ -415,10 +420,16 @@ fn construct(call: &Arc<GuiCall>, choice: PanelKind,
 
 fn tick(call: &Arc<GuiCall>, id: u32, quit: bool) -> NativeResult {
     if !native::main_thread() { return uncertain(call); }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
+    match observation::body_busy(id) { Ok(true) => return Ok(()), Ok(false) => {}, Err(()) => return uncertain(call) }
     let result = PANEL.with(|book| -> NativeResult {
         let mut book = book.try_borrow_mut().map_err(|_| ())?;
         let released = {
             let entry = book.as_mut().filter(|entry| entry.id == id).ok_or(())?;
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
+            if entry.open_release.as_ref().is_some_and(|r| !r.release_ready()) { return Ok(()); }
             let panel = entry.panel.as_mut().ok_or(())?;
             match panel.poll() {
                 Ok(PanelState::Responded { response, path }) => {
@@ -453,8 +464,8 @@ fn tick(call: &Arc<GuiCall>, id: u32, quit: bool) -> NativeResult {
             let release = {
                 let mut facts = call.facts().ok_or(())?;
                 let ready = facts.destroyed && facts.close_ack && !facts.release_queued;
-                // The original may poll/respond/close during AX IPC, but must
-                // retain its exact panel/parent until actual AX retirement.
+                // The whole original poll/close path is gated above; release
+                // independently requires actual body/receipt retirement too.
                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
                     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
                 let ready = ready && entry.open_release.as_ref().is_none_or(|barrier| barrier.release_ready());
