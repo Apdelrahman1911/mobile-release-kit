@@ -611,6 +611,11 @@ fn common_document_gate(state: &DocumentState, session: bool, owner_gate: impl F
     if session && state.slot.as_ref().is_some_and(|slot| (slot.operation.evidence() || slot.operation.project_path())
         && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) { return Err(AssetError::new(Reason::Busy)); }
     if state.quit_pending || state.retiring || state.lock_pending { return Err(AssetError::new(Reason::Busy)); }
+    Ok(())
+}
+fn ordinary_asset_platform_gate() -> Result<(), AssetError> {
+    // Private asset custody is separate from the installed project-only
+    // profile. Sharing document checks must not qualify either native route.
     if !cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")) { return Err(AssetError::new(Reason::UnsupportedPlatform)); }
     Ok(())
 }
@@ -1097,6 +1102,7 @@ impl DocumentBinding {
     }
     fn gate(&self, state: &DocumentState, session: bool) -> Result<(), AssetError> {
         self.common_gate(state, session)?;
+        ordinary_asset_platform_gate()?;
         if !self.native_qualified() { return Err(AssetError::new(Reason::Unqualified)); }
         if session && !state.session { return Err(AssetError::new(Reason::Closed)); } Ok(())
     }
@@ -3208,8 +3214,7 @@ pub(crate) fn assert_project_path_document_contracts() {
     for reason in [Reason::Busy, Reason::Shutdown, Reason::CleanupUnknown] {
         assert_eq!(common_document_gate(&ready, false, || Err(AssetError::new(reason))).err().map(|e| e.reason), Some(reason));
     }
-    let platform = if cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")) { None } else { Some(Reason::UnsupportedPlatform) };
-    assert_eq!(common_document_gate(&ready, false, || Ok(())).err().map(|e| e.reason), platform);
+    assert!(common_document_gate(&ready, false, || Ok(())).is_ok());
     assert!(Operation::ChooseProjectPath.blocks_context() && !Operation::ChooseProjectPath.evidence());
     for operation in [Operation::ChooseProject, Operation::ChooseEvidenceFolder, Operation::InspectEvidence] { assert!(operation.blocks_context()); }
     for operation in [Operation::ChooseFile, Operation::Prepare, Operation::PrepareDelete, Operation::Commit, Operation::Bind] { assert!(!operation.blocks_context()); }
@@ -3335,8 +3340,9 @@ pub(crate) fn assert_project_selection_gate_contract() {
     for refusal in [Reason::CleanupUnknown, Reason::Shutdown, Reason::Busy] {
         assert_eq!(common_document_gate(&ready, false, || Err(AssetError::new(refusal))).err().map(|error| error.reason), Some(refusal));
     }
+    assert_eq!(reason(&ready), None);
     let platform = if cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")) { None } else { Some(Reason::UnsupportedPlatform) };
-    assert_eq!(reason(&ready), platform);
+    assert_eq!(ordinary_asset_platform_gate().err().map(|error| error.reason), platform);
     assert!(!ready.session && ready.context.is_none() && ready.records.is_empty() && ready.assignments.is_empty());
     assert!(idle(&ready).is_ok());
     // Model original join/retirement facts only, not actual native settlement.

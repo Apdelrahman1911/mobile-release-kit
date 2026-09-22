@@ -525,6 +525,29 @@ class AquaDataTests(unittest.TestCase):
         observer = (source_root / "installed_shell_observation_macos.rs").read_text(encoding="utf-8")
         adapter = (source_root / "shell_macos_dialog.rs").read_text(encoding="utf-8")
         errors = (source_root / "asset_commands.rs").read_text(encoding="utf-8")
+        document = (source_root / "asset_session.rs").read_text(encoding="utf-8")
+        shared = document.split("fn common_document_gate(", 1)[1].split("fn ordinary_asset_platform_gate(", 1)[0]
+        self.assertNotIn("cfg!", shared)
+        self.assertNotIn("UnsupportedPlatform", shared)
+        ordinary = document.split("fn gate(&self,", 1)[1].split("fn project_path_gate(", 1)[0]
+        self.assertLess(ordinary.index("self.common_gate(state, session)?"), ordinary.index("ordinary_asset_platform_gate()?"))
+        self.assertLess(ordinary.index("ordinary_asset_platform_gate()?"), ordinary.index("self.native_qualified()"))
+        predicate = document.split("fn ordinary_asset_platform_gate()", 1)[1].split("fn preflight_document_gate(", 1)[0]
+        self.assertIn('cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))', predicate)
+        self.assertIn("Reason::UnsupportedPlatform", predicate)
+        contract = document.split("pub(crate) fn assert_project_selection_gate_contract()", 1)[1].split("pub(crate) fn assert_installed_evidence_gate_contract()", 1)[0]
+        self.assertIn("assert_eq!(reason(&ready), None)", contract)
+        self.assertIn("ordinary_asset_platform_gate().err().map(|error| error.reason), platform", contract)
+        self.assertIn("assert!(common_document_gate(&ready, false, || Ok(())).is_ok())", document)
+        checks = observer.split("fn observer_data_checks()", 1)[1].split("pub(crate) fn main()", 1)[0]
+        self.assertIn("crate::asset_session::assert_project_selection_gate_contract();", checks)
+        self.assertIn("crate::runtime::RuntimeConfig::packaged(", checks)
+        self.assertIn("!profile.project_selection_profile_available() || profile.project_path_selection_profile_available()", checks)
+        self.assertIn("|| profile.evidence_selection_profile_available() { return false; }", checks)
+        self.assertNotIn(".resolve(", checks)
+        main = observer.split("pub(crate) fn main()", 1)[1]
+        for native_entry in ("Fixture::capture(", "Observation::new(", "super::run_builder("):
+            self.assertLess(main.index("if !observer_data_checks()"), main.index(native_entry))
         reasons = observer.split("const FAILURE_REASONS: &[&str] = &[", 1)[1].split("];", 1)[0]
         labels = M.re.findall(r'"([a-z_-]+)"', reasons)
         self.assertEqual(len(labels), len(set(labels)))

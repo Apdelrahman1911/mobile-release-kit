@@ -1481,6 +1481,12 @@ fn route() -> Option<(PathBuf,u32)> {
 // These do not call AppKit, acquire files, dispatch actions, or supply receipts.
 fn observer_data_checks() -> bool {
     use mrk_macos_installed_native::{PanelKind, PanelObservation, PanelResponse};
+    crate::asset_session::assert_project_selection_gate_contract();
+    // Compiled profile DATA only: this inert path is never resolved or opened.
+    // The real builder must still establish every installed/native original.
+    let profile = crate::runtime::RuntimeConfig::packaged(PathBuf::from("/inert-mrk-profile-not-opened"));
+    if !profile.project_selection_profile_available() || profile.project_path_selection_profile_available()
+        || profile.evidence_selection_profile_available() { return false; }
     if !mrk_macos_installed_native::installed_observation_flags_data_check() { return false; }
     let fresh = || ObservedPanel { id: 1, action_allowed: true, native: PanelObservation {
         kind: PanelKind::Project, started: true, attached: false, directory_bound: false,

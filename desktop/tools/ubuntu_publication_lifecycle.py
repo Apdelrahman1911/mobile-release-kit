@@ -166,6 +166,16 @@ SHELL_FAILURE_BOUNDARIES = (
     b"MRK_INSTALLED_SHELL_FAILURE_PHASE=deadline\n",
     b"MRK_INSTALLED_SHELL_FAILURE_PHASE=exit\n",
 )
+SHELL_BOOTSTRAP_PROGRESS = (
+    b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=not-sampled\n",
+    b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=attachment\n",
+    b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=page-load\n",
+    b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=original-registry-sample\n",
+    b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=app-info-catalog\n",
+    b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=held-app-info\n",
+    b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n",
+    b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=app-info-returned-before-hold\n",
+)
 SHELL_PATH_MARKER = b"MRK_INSTALLED_SHELL_PROJECT_PATHS="
 SHELL_PATH_RECEIPT = {'assetAuthorityCreated': False,
  'cancel': [{'field': 'version.source', 'operation': 3}, {'field': 'metadata.root', 'operation': 7}],
@@ -3267,10 +3277,14 @@ def _shell_label_pair(raw):
     if type(raw) is not bytes or not 0 < len(raw) <= SHELL_FAILURE_LABEL_LIMIT:
         return None
     lines = raw.splitlines(keepends=True)
-    if len(lines) != 2 or lines[0] not in SHELL_FAILURE_STEPS or lines[1] not in SHELL_FAILURE_BOUNDARIES:
+    # Current executions require the whole closed diagnostic. Historical
+    # two-line evidence is retained as historical, not completed by inference.
+    if (len(lines) != 3 or lines[0] not in SHELL_FAILURE_STEPS or lines[1] not in SHELL_FAILURE_BOUNDARIES
+            or lines[2] not in SHELL_BOOTSTRAP_PROGRESS):
         return None
     return {"step": lines[0][len(b"MRK_INSTALLED_SHELL_FAILURE_STEP="):-1].decode("ascii"),
-            "boundary": lines[1][len(b"MRK_INSTALLED_SHELL_FAILURE_PHASE="):-1].decode("ascii")}
+            "boundary": lines[1][len(b"MRK_INSTALLED_SHELL_FAILURE_PHASE="):-1].decode("ascii"),
+            "bootstrapProgress": lines[2][len(b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS="):-1].decode("ascii")}
 
 
 def _shell_labels_read(original):

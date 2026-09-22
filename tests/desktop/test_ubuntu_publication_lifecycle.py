@@ -3406,14 +3406,20 @@ class FailureLabelSinkContracts(unittest.TestCase):
     def test_finite_pair_refuses_partial_reordered_duplicate_or_injected_data(self):
         step = b"MRK_INSTALLED_SHELL_FAILURE_STEP=PrepareSave\n"
         boundary = b"MRK_INSTALLED_SHELL_FAILURE_PHASE=request\n"
-        good = step + boundary
-        self.assertEqual(L._shell_label_pair(good), {"step": "PrepareSave", "boundary": "request"})
+        progress = b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n"
+        good = step + boundary + progress
+        self.assertEqual(L._shell_label_pair(good), {"step": "PrepareSave", "boundary": "request", "bootstrapProgress": "advanced"})
         self.assertEqual(L._shell_label_pair(b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathSettlement\n"
-                                           b"MRK_INSTALLED_SHELL_FAILURE_PHASE=settlement\n"),
-                         {"step": "PathSettlement", "boundary": "settlement"})
-        for raw in (b"", good[:-1], step, boundary + step, step + step, good + boundary,
+                                           b"MRK_INSTALLED_SHELL_FAILURE_PHASE=settlement\n" + progress),
+                         {"step": "PathSettlement", "boundary": "settlement", "bootstrapProgress": "advanced"})
+        for line in L.SHELL_BOOTSTRAP_PROGRESS:
+            parsed = L._shell_label_pair(step + boundary + line)
+            self.assertEqual(parsed["bootstrapProgress"], line.split(b"=", 1)[1][:-1].decode("ascii"))
+        for raw in (b"", good[:-1], step, step + boundary, boundary + step + progress, step + step + progress,
+                    step + progress + boundary, good + progress, good + boundary,
                     b"prefix" + good, good.replace(b"PrepareSave", b"NotAnAllowedStep"),
                     good.replace(b"request", b"unknown"), good.replace(b"\n", b"\r\n"),
+                    good.replace(b"advanced", b"unknown"), good.replace(b"advanced", b"\xff"),
                     good + b"/private/injected\n", good + b"x" * 512, good.decode(), bytearray(good)):
             with self.subTest(kind=type(raw).__name__, length=len(raw)):
                 self.assertIsNone(L._shell_label_pair(raw))
@@ -3453,7 +3459,8 @@ class FailureLabelSinkContracts(unittest.TestCase):
                 unlinking.assert_not_called()
 
     def test_original_fd_read_is_single_bounded_and_rejects_binding_or_metadata_loss(self):
-        raw = b"MRK_INSTALLED_SHELL_FAILURE_STEP=Bootstrap\nMRK_INSTALLED_SHELL_FAILURE_PHASE=bootstrap\n"
+        raw = (b"MRK_INSTALLED_SHELL_FAILURE_STEP=Bootstrap\nMRK_INSTALLED_SHELL_FAILURE_PHASE=bootstrap\n"
+               b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=not-sampled\n")
         node = needrestart_stat(stat.S_IFREG | 0o620, size=len(raw)); node.st_gid = 1001
         original = (41, L.identity(node)[:6])
         for fault in (None, "inode", "link", "mode", "group", "oversized", "acl", "drift", "partial", "empty", "read-error"):
@@ -3472,7 +3479,7 @@ class FailureLabelSinkContracts(unittest.TestCase):
                 if fault == "read-error": reading.side_effect = InterruptedError("inert read interruption")
                 if fault in (None, "empty"):
                     self.assertEqual(L._shell_labels_read(original), None if fault == "empty" else
-                                     {"step": "Bootstrap", "boundary": "bootstrap"})
+                                     {"step": "Bootstrap", "boundary": "bootstrap", "bootstrapProgress": "not-sampled"})
                 else:
                     with self.assertRaises((ValueError, OSError)): L._shell_labels_read(original)
                 if fault in ("inode", "link", "mode", "group", "oversized", "acl"):
@@ -3508,7 +3515,7 @@ class FailureLabelSinkContracts(unittest.TestCase):
                     _FAILED=False, _COMMANDS=[], _OWNER=owner), patch.object(L, "_root_ids"), \
                  patch.object(L.time, "monotonic", return_value=100.0), \
                  patch.object(L, "_shell_labels_prepare", return_value=(41, "original")), \
-                 patch.object(L, "_shell_labels_read", return_value={"step": "PrepareSave", "boundary": "request"}) as reading, \
+                 patch.object(L, "_shell_labels_read", return_value={"step": "PrepareSave", "boundary": "request", "bootstrapProgress": "advanced"}) as reading, \
                  patch.object(L, "_shell_log_capture") as raw_log, patch.object(L, "_command_capture") as capture, \
                  patch.object(L.os, "close") as closing, patch.object(L.sys, "stderr", new_callable=io.StringIO) as stream:
                 with self.assertRaises(BaseException) as raised:
@@ -3527,8 +3534,35 @@ class FailureLabelSinkContracts(unittest.TestCase):
                 self.assertIsNone(data["capture"])
                 self.assertFalse(data["qualified"]); self.assertFalse(data["cleanupEstablished"])
                 self.assertEqual(data["labelsReason"], None if index == 0 else "owner-finality-unavailable")
-                self.assertEqual(data["labels"], {"step": "PrepareSave", "boundary": "request"} if index == 0 else None)
+                self.assertEqual(data["labels"], {"step": "PrepareSave", "boundary": "request", "bootstrapProgress": "advanced"} if index == 0 else None)
                 self.assertFalse(data["ownerCall"]["ownerReturned"])
+
+    def test_bootstrap_catalog_and_first_failure_wiring_match_the_original_observer(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        block = source.split("impl BootstrapProgress {", 1)[1].split("enum OutstandingInfo", 1)[0]
+        actual = [ast.literal_eval(line.split("=>", 1)[1].strip().rstrip(","))
+                  for line in block.splitlines() if "=> b" in line]
+        self.assertEqual(tuple(actual), L.SHELL_BOOTSTRAP_PROGRESS)
+        self.assertEqual(len(set(actual)), 8)
+        callback = source.split("pub(super) fn app_info(&self", 1)[1].split("pub(super) fn unexpected", 1)[0]
+        outstanding = callback.split("let Some(methods)", 1)[0]
+        self.assertIn("self.record()", outstanding)
+        self.assertNotIn("record_at", outstanding)
+        self.assertIn("outstanding_info(r.step", outstanding)
+        self.assertIn("result != OutstandingInfo::ShutdownUnavailable", outstanding)
+        self.assertIn("latch_failure(&self.failed", outstanding)
+        self.assertNotIn("runtime.reason", outstanding)
+        self.assertNotIn("r.held", outstanding)
+        report = source.split("fn report_failure(&self)", 1)[1].split("pub(super) fn attach", 1)[0]
+        self.assertIn("Ok(r) => (r.trace, r.bootstrap)", report)
+        self.assertIn("failure_pair(trace, progress)", report)
+        self.assertEqual(report.count("rustix::io::write"), 1)
+        self.assertNotIn("retain_held_app_info", report)
+        tick = source.split("pub(super) fn tick(", 1)[1].split("pub(super) fn", 1)[0]
+        self.assertEqual(tick.count("retain_held_app_info()"), 1)
+        self.assertIn("(*step, Boundary::Deadline), progress", tick)
+        self.assertIn("Duration::from_secs(45)", source)
+        self.assertIn("assert_failure_pair_contract();", source)
 
     def test_diagnostic_and_close_failures_cannot_replace_an_active_owner_exception(self):
         class ProcessError(RuntimeError):

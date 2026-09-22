@@ -1,10 +1,12 @@
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type { ProjectSession } from '../drafts.ts';
 import type { CredentialGuide, CredentialKind, HelpContent } from '../types.ts';
 import type { AssetDisplayState, AssetKind, AssetScope, CredentialAssessment, CredentialIssue } from '../assetSessionTypes.ts';
 import { AssetSessionController, assetCancellationReason, assetContextReason, assetIntentPending, assetSessionReason } from '../assetSessionController.ts';
 import { ASSET_KINDS, ASSET_PLATFORMS, ASSET_PURPOSES, ASSET_REASON_HELP, ASSET_STAGES, SESSION_FIELDS } from '../assetSessionProtocol.ts';
 import { sessionControlHelp, sessionKindHelp, sessionTargetLabel } from '../assetSessionHelp.ts';
+import { RELEASE_INPUT_STAGES, preparationScopeChanged, preparationSessionReason, sessionPreparationKind } from '../releaseInputGuidance.ts';
+import type { ReleaseInputPreparationLocal, ReleaseInputPreparationTarget } from '../releaseInputGuidance.ts';
 import { Badge, ErrorNotice, HelpButton, SectionHeading } from './Common.tsx';
 import { Icon } from './Icon.tsx';
 
@@ -65,18 +67,40 @@ function WriteOnlyFields({ kind, disabled, prepareHelp, onPrepare, onHelp }: { k
   </form>;
 }
 
-export function CredentialSession({ state, controller, project, guide, onHelp, nativeBusyReason = null }: { state: AssetDisplayState; controller: AssetSessionController; project: ProjectSession | null; guide: CredentialGuide | null; onHelp: (help: HelpContent) => void; nativeBusyReason?: string | null }) {
+export function CredentialSession({ state, controller, project, guide, onHelp, nativeBusyReason = null,
+  preparation, isPreparationCurrent, takePreparation, dismissPreparation }: {
+  state: AssetDisplayState; controller: AssetSessionController; project: ProjectSession | null; guide: CredentialGuide | null;
+  onHelp: (help: HelpContent) => void; nativeBusyReason?: string | null; preparation: ReleaseInputPreparationTarget | null;
+  isPreparationCurrent: (target: ReleaseInputPreparationTarget) => boolean; takePreparation: (target: ReleaseInputPreparationTarget) => boolean;
+  dismissPreparation: (target: ReleaseInputPreparationTarget) => void;
+}) {
   const id = useId();
-  const [kindId, setKind] = useState<AssetKind>('android-keystore');
-  const [replacementId, setReplacement] = useState<string | null>(null);
-  const [confirmLock, setConfirmLock] = useState(false);
+  type LocalChoices = Omit<ReleaseInputPreparationLocal, 'writeOnlyFormMounted'>;
+  const [local, setLocal] = useState<LocalChoices>({ kindId: 'android-keystore', replacementId: null, confirmLock: false });
+  const localRef = useRef(local);
+  const { kindId, replacementId, confirmLock } = local;
+  const changeLocal = (patch: Partial<LocalChoices>) => {
+    const next = { ...localRef.current, ...patch };
+    if (next.kindId === localRef.current.kindId && next.replacementId === localRef.current.replacementId && next.confirmLock === localRef.current.confirmLock) return;
+    // Retained callbacks must see an already queued local choice, not wait for
+    // React to render it. This reference never contains private form values.
+    localRef.current = next; setLocal(next);
+  };
+  const mounted = useRef(true), sessionRef = useRef<HTMLElement>(null);
+  const render = {}, renderRef = useRef<object | null>(null);
+  // Bind only a committed view: an abandoned concurrent render must not disable
+  // the still-visible handler. Local changes above retire callbacks immediately.
+  useLayoutEffect(() => {
+    mounted.current = true; renderRef.current = render;
+    return () => { mounted.current = false; renderRef.current = null; };
+  }, [render]);
   const [, expireView] = useState(0);
   useEffect(() => {
     if (state.previewDeadline === null) return;
     const timer = setTimeout(() => expireView((value) => value + 1), Math.max(0, state.previewDeadline - performance.now()) + 1);
     return () => clearTimeout(timer);
   }, [state.previewDeadline]);
-  useEffect(() => { setReplacement(null); setConfirmLock(false); }, [project?.project.id, state.scope.platform, state.scope.stage, state.scope.purpose]);
+  useEffect(() => { changeLocal({ replacementId: null, confirmLock: false }); }, [project?.project.id, state.scope.platform, state.scope.stage, state.scope.purpose]);
   const status = state.status;
   const operation = status?.operation;
   const projectPathOperation = operation?.operation === 'choose-project-path';
@@ -93,6 +117,11 @@ export function CredentialSession({ state, controller, project, guide, onHelp, n
   const kind = originalKind ? sessionKindHelp(originalKind) : null;
   const originalSelectedKind = guide?.kinds.find((item) => item.id === effectiveKindId);
   const selectedKind = originalSelectedKind ? sessionKindHelp(originalSelectedKind) : null;
+  const selectionVisible = !!(nativeAvailable && inSession && guide && !projectPathActive);
+  // The complete existing outer + inner render condition protects even an
+  // unsubmitted private form. Navigation never inspects or resets its values.
+  const writeOnlyFormMounted = selectionVisible && !!kind && (!!(operation?.selectionToken && state.selectionKind) ||
+    (idle && !intentPending && (kindId === 'google-wif' || kindId === 'project-read-token')));
   const replacement = controller.replacement(kindId, replacementId);
   const preview = operation?.preview;
   const expired = state.previewDeadline === null || performance.now() >= state.previewDeadline;
@@ -112,18 +141,56 @@ export function CredentialSession({ state, controller, project, guide, onHelp, n
     if (kindId === 'project-read-token') return controller.prepareScalar('project-read-token', { token: fields.token ?? null }, replacement);
     return false;
   };
-  return <section className="card credential-session" aria-labelledby={`${id}-title`}>
+  const preparationCurrent = preparation !== null && isPreparationCurrent(preparation);
+  const originalPreparationKind = preparationCurrent ? preparation.source.help.guide?.kinds.find((entry) => entry.id === preparation.guideId) : null;
+  const preparationKind = originalPreparationKind ? sessionKindHelp(originalPreparationKind) : null;
+  const preparationReason = !preparationCurrent ? 'This preparation guide is no longer current. Open the relevant current-draft requirement again.' :
+    !guide?.kinds.some((entry) => entry.id === preparation.guideId) ? 'The session field guide is unavailable. No private input should be provided.' :
+      preparationSessionReason(preparation, state, { ...local, writeOnlyFormMounted }, nativeBusyReason);
+  const preparationHelp = (content: HelpContent) => { if (preparation && isPreparationCurrent(preparation)) onHelp(content); };
+  const continuePreparation = () => {
+    if (!mounted.current || renderRef.current !== render || localRef.current !== local || !preparation ||
+        controller.getSnapshot() !== state || !isPreparationCurrent(preparation)) return;
+    const nextKind = sessionPreparationKind(preparation.guideId);
+    if (!nextKind || !guide?.kinds.some((entry) => entry.id === nextKind) ||
+        preparationSessionReason(preparation, controller.getSnapshot(), { ...localRef.current, writeOnlyFormMounted }, nativeBusyReason) !== null) return;
+    if (!takePreparation(preparation)) return;
+    if (preparationScopeChanged(preparation, state.scope)) controller.setScope({ ...preparation.scope });
+    if (nextKind !== local.kindId) changeLocal({ kindId: nextKind });
+    sessionRef.current?.focus();
+  };
+  return <section ref={sessionRef} tabIndex={-1} className="card credential-session" aria-labelledby={`${id}-title`}>
     <SectionHeading title="Private inputs, one guided step at a time" description="Select → assess → keep for this session → assign to this release context. Each is a separate step." />
     <h3 id={`${id}-title`} className="inline-heading">Session-only storage {controlHelp('mode')}<Badge tone={inSession ? 'info' : 'neutral'}>{inSession ? 'Session open · no persistence' : 'Session closed'}</Badge></h3>
     <p>Nothing is uploaded, written into your repository, or stored in a persistent vault. Native file selection preserves the original. Quitting discards session copies only after their original owners settle.</p>
+    {preparation && <div className="session-context" aria-label="Current requirement preparation guide">
+      <div className="inline-heading"><h3>Prepare this input</h3><Badge>Guidance only · no input checked</Badge></div>
+      {preparationCurrent && preparationKind && <>
+        <p><strong>{preparationKind.label}</strong> · {project?.project.name ?? 'Selected project'} · draft revision {preparation.source.project?.draftRevision}</p>
+        <p>{preparation.scope.platform === 'project' ? 'Project dependency access' : preparation.scope.platform === 'ios' ? 'iOS' : 'Android'} · {RELEASE_INPUT_STAGES.find((stage) => stage.id === preparation.scope.stage)?.label} · All selected input roles (full)</p>
+        <p><strong>Current-draft requirement:</strong> {preparation.requirement.name}<br />{preparation.requirement.reason}</p>
+        <p>Current in-memory draft only: saved files, credential presence, signing and account access have not been checked. Release readiness is unknown.</p>
+        <details><summary>What this input is, where to find it, and supported formats</summary>
+          <p>These fields belong to one input. Companion field help is not an additional requirement or presence result; the core decides what your draft requires.</p>
+          {preparationKind.fields.map((field) => <div key={field.id} className="session-field-help">
+            <div className="inline-heading"><h4>{field.label}</h4><HelpButton content={field} onHelp={preparationHelp} /></div>
+            <p>{field.what}</p><p><strong>Find it:</strong> {field.where}</p><p><strong>Format:</strong> {field.format}</p><p><strong>If incorrect:</strong> {field.failure}</p>
+          </div>)}
+        </details>
+        <p>Continue sets the choices in the existing session controls. If a session is open, changing its release context submits that context and makes earlier assignment displays stale. It does not choose a file, read a credential, keep an input, assign it or start a release.</p>
+        <p><strong>Next explicit step:</strong> {!nativeAvailable ? 'Read the availability reason below; this guide cannot enable collection.' : !inSession ? 'Start a session when you are ready.' : !state.contextCurrent || preparationScopeChanged(preparation, state.scope) ? 'Wait for the changed context, or use Submit current context if it is not current.' : preparation.guideId === 'android-keystore' || preparation.guideId === 'android-firebase' ? 'Use Select file, then prepare and review separately.' : 'Use the private fields, then Prepare private review.'}</p>
+      </>}
+      {preparationReason && <p className="review-caution" role="status">{preparationReason}</p>}
+      <div className="button-row"><button type="button" className="button secondary" disabled={preparationReason !== null} onClick={continuePreparation}>Continue with this context</button><button type="button" className="button secondary" onClick={() => dismissPreparation(preparation)}>Close guidance</button></div>
+    </div>}
     {!nativeAvailable && <div className="notice notice-warning"><Icon name="lock" size={18} /><div><strong>Private input is unavailable in this build</strong><p>{baseReason ?? 'Native qualification is required before collection.'}</p><p>Guides remain available. Do not paste credentials into project configuration to work around this gate.</p></div></div>}
     {state.error && <ErrorNotice error={state.error} title="The session action was not confirmed" />}
     <div className="button-row">
       {!inSession && <button className="button" disabled={!!baseReason || !guide} onClick={() => controller.open()}><Icon name="key" size={16} />Start session — keep inputs in memory</button>}
       <button className="button secondary" disabled={state.mode !== 'native' || state.observing} onClick={() => void controller.checkStatus()}><Icon name="refresh" size={16} />{state.observing ? 'Checking original status…' : 'Check session status'}</button>
-      {inSession && <button className="button secondary" disabled={!!state.busy || projectPathActive} onClick={() => setConfirmLock(true)}>Discard session…</button>}
+      {inSession && <button className="button secondary" disabled={!!state.busy || projectPathActive} onClick={() => changeLocal({ confirmLock: true })}>Discard session…</button>}
     </div>
-    {confirmLock && <div className="session-review" role="group" aria-label="Confirm session discard"><div className="inline-heading"><h3>Discard all session copies and assignments?</h3>{controlHelp('lock')}</div><p>Original files stay untouched. This cannot force cleanup of an unsettled operation. No record is kept for your next launch.</p><div className="button-row"><button className="button secondary" onClick={() => setConfirmLock(false)}>Keep this session</button><button className="button danger" disabled={!!state.busy || projectPathActive} onClick={() => { if (controller.lock()) setConfirmLock(false); }}>Discard session copies</button></div></div>}
+    {confirmLock && <div className="session-review" role="group" aria-label="Confirm session discard"><div className="inline-heading"><h3>Discard all session copies and assignments?</h3>{controlHelp('lock')}</div><p>Original files stay untouched. This cannot force cleanup of an unsettled operation. No record is kept for your next launch.</p><div className="button-row"><button className="button secondary" onClick={() => changeLocal({ confirmLock: false })}>Keep this session</button><button className="button danger" disabled={!!state.busy || projectPathActive} onClick={() => { if (controller.lock()) changeLocal({ confirmLock: false }); }}>Discard session copies</button></div></div>}
     <div className="session-context">
       <div className="inline-heading"><h3>Release context</h3>{controlHelp('project')}<Badge tone={state.contextCurrent ? 'info' : 'warning'}>{state.contextCurrent ? 'Context submitted · not yet policy-validated' : 'Context not current'}</Badge></div>
       <p><strong>Project:</strong> {project?.project.name ?? 'Choose a project first'} · {project?.draft ? 'Current in-memory draft' : 'Prepare a draft in Project settings'}</p>
@@ -133,11 +200,11 @@ export function CredentialSession({ state, controller, project, guide, onHelp, n
       <p>Changing the project, draft, platform, stage or purpose makes prior assignment displays stale immediately. The core—not these selectors—decides which inputs are required.</p>
       <button className="button secondary small" disabled={!nativeAvailable || !inSession || !project || state.updatingContext || nativeBusyReason !== null} onClick={() => controller.submitContext()}>{state.updatingContext ? 'Submitting current context…' : 'Submit current context'}</button>
     </div>
-    {nativeAvailable && inSession && guide && !projectPathActive && <>
+    {selectionVisible && guide && <>
       <div className="session-selection">
         {idle && !intentPending ? <>
-          <div className="field"><div className="field-label"><label htmlFor={`${id}-kind`}>What would you like to provide?</label>{controlHelp('choose')}</div><select id={`${id}-kind`} value={kindId} disabled={!!state.busy} onChange={(event) => { setKind(event.target.value as AssetKind); setReplacement(null); }}>{ASSET_KINDS.map((kind) => <option key={kind} value={kind}>{guide.kinds.find((entry) => entry.id === kind)?.label ?? 'Supported session input'}</option>)}</select></div>
-          <div className="field"><div className="field-label"><label htmlFor={`${id}-replace`}>New or replacement copy?</label>{controlHelp('replace')}</div><select id={`${id}-replace`} value={replacementId ?? ''} disabled={!!state.busy} onChange={(event) => setReplacement(event.target.value || null)}><option value="">Keep a new session record</option>{status?.records.map((record, index) => record.kind === kindId && <option key={record.recordId} value={record.recordId}>Replace session item {index + 1} · revision {record.revision}</option>)}</select><p>Starting a replacement makes old assignments unavailable, even if you cancel. The old record is not silently reassigned.</p></div>
+          <div className="field"><div className="field-label"><label htmlFor={`${id}-kind`}>What would you like to provide?</label>{controlHelp('choose')}</div><select id={`${id}-kind`} value={kindId} disabled={!!state.busy} onChange={(event) => changeLocal({ kindId: event.target.value as AssetKind, replacementId: null })}>{ASSET_KINDS.map((kind) => <option key={kind} value={kind}>{guide.kinds.find((entry) => entry.id === kind)?.label ?? 'Supported session input'}</option>)}</select></div>
+          <div className="field"><div className="field-label"><label htmlFor={`${id}-replace`}>New or replacement copy?</label>{controlHelp('replace')}</div><select id={`${id}-replace`} value={replacementId ?? ''} disabled={!!state.busy} onChange={(event) => changeLocal({ replacementId: event.target.value || null })}><option value="">Keep a new session record</option>{status?.records.map((record, index) => record.kind === kindId && <option key={record.recordId} value={record.recordId}>Replace session item {index + 1} · revision {record.revision}</option>)}</select><p>Starting a replacement makes old assignments unavailable, even if you cancel. The old record is not silently reassigned.</p></div>
         </> : <div className="session-intent" role="status"><strong>Original requested action:</strong> {state.intent?.change === 'replace' ? 'Replace' : state.intent?.change === 'assign' ? 'Assess for assignment' : state.intent?.change === 'delete' ? 'Review removal of' : 'Prepare'} {intentTarget ?? 'an unconfirmed target'}<p>Page navigation cannot change this target. Cancel the original operation before choosing a different action.</p></div>}
         {(effectiveKindId === 'android-keystore' || effectiveKindId === 'android-firebase') && <>
           <p>{effectiveKindId === 'android-keystore' ? 'Select a private .jks or .keystore original outside project folders. Only its JKS header is recognized; PKCS#12 is not supported here.' : 'Select the Android google-services.json downloaded from Firebase project settings. Every supported client is checked against your draft by the core.'}</p>
@@ -146,7 +213,7 @@ export function CredentialSession({ state, controller, project, guide, onHelp, n
           <p>No path entry, manual registration, renaming or copy into an internal folder. Native selection never sends the original filename or bytes to this view.</p>
         </>}
         {contextReason && <p className="review-caution">{contextReason}</p>}
-        {kind && ((operation?.selectionToken && state.selectionKind) || (idle && !intentPending && (kindId === 'google-wif' || kindId === 'project-read-token'))) &&
+        {writeOnlyFormMounted && kind &&
           <WriteOnlyFields key={`${state.entryGeneration}-${kind.id}-${replacementId ?? 'new'}`} kind={kind} disabled={!!contextReason || (idle && replacement === undefined)} prepareHelp={sessionControlHelp(guide, 'prepare')} onPrepare={prepare} onHelp={onHelp} />}
       </div>
     </>}

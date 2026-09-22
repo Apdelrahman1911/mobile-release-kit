@@ -1463,14 +1463,20 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
             r'b"(MRK_INSTALLED_SHELL_FAILURE_STEP=[A-Za-z]+)\\n"', source)}
         boundaries = {line.encode("ascii") + b"\n" for line in re.findall(
             r'b"(MRK_INSTALLED_SHELL_FAILURE_PHASE=[a-z]+)\\n"', source)}
+        progress = {line.encode("ascii") + b"\n" for line in re.findall(
+            r'b"(MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=[a-z-]+)\\n"', source)}
         self.assertEqual(set(lifecycle.SHELL_FAILURE_STEPS), steps)
         self.assertEqual(set(lifecycle.SHELL_FAILURE_BOUNDARIES), boundaries)
         self.assertEqual(len(lifecycle.SHELL_FAILURE_STEPS), len(steps))
         self.assertEqual(len(lifecycle.SHELL_FAILURE_BOUNDARIES), 8)
+        self.assertEqual(set(lifecycle.SHELL_BOOTSTRAP_PROGRESS), progress)
+        self.assertEqual(len(lifecycle.SHELL_BOOTSTRAP_PROGRESS), len(progress))
         for boundary in boundaries:
-            self.assertEqual(lifecycle._shell_label_pair(b"MRK_INSTALLED_SHELL_FAILURE_STEP=SelectProject\n" + boundary),
-                             {"step": "SelectProject", "boundary": boundary.decode("ascii").strip().split("=", 1)[1]})
-        self.assertLessEqual(max(map(len, steps)) + max(map(len, boundaries)), 512)
+            for context in progress:
+                self.assertEqual(lifecycle._shell_label_pair(b"MRK_INSTALLED_SHELL_FAILURE_STEP=SelectProject\n" + boundary + context),
+                                 {"step": "SelectProject", "boundary": boundary.decode("ascii").strip().split("=", 1)[1],
+                                  "bootstrapProgress": context.decode("ascii").strip().split("=", 1)[1]})
+        self.assertLessEqual(max(map(len, steps)) + max(map(len, boundaries)) + max(map(len, progress)), 512)
         self.assertIn("const FAILURE_PAIR_LIMIT: usize = 512;", source)
         self.assertIn("fn assert_failure_pair_contract()", source)
         self.assertIn("    assert_failure_pair_contract();", source)

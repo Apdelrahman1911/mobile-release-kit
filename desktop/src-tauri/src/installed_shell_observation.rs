@@ -150,7 +150,7 @@ impl WorkflowStep {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Pending { Dom(Step), Project(Step), Evidence(Step), Path(PathStep), Close, Gtk }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Boundary { Bootstrap, Request, Result, Dom, Gtk, Settlement, Deadline, Exit }
 impl Boundary {
     fn failure_line(self) -> &'static [u8] {
@@ -165,6 +165,42 @@ impl Boundary {
             Self::Exit => b"MRK_INSTALLED_SHELL_FAILURE_PHASE=exit\n",
         }
     }
+}
+
+// Last observation made by an already-admitted Bootstrap tick. This is cached
+// diagnostic history, never a current owner/finality receipt. The one result
+// category records an original callback instead of a wait predicate.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BootstrapProgress {
+    NotSampled, Attachment, PageLoad, OriginalRegistrySample, AppInfoCatalog,
+    HeldAppInfo, Advanced, AppInfoReturnedBeforeHold,
+}
+impl BootstrapProgress {
+    fn failure_line(self) -> &'static [u8] {
+        match self {
+            Self::NotSampled => b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=not-sampled\n",
+            Self::Attachment => b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=attachment\n",
+            Self::PageLoad => b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=page-load\n",
+            Self::OriginalRegistrySample => b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=original-registry-sample\n",
+            Self::AppInfoCatalog => b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=app-info-catalog\n",
+            Self::HeldAppInfo => b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=held-app-info\n",
+            Self::Advanced => b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n",
+            Self::AppInfoReturnedBeforeHold => b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=app-info-returned-before-hold\n",
+        }
+    }
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OutstandingInfo { ShutdownUnavailable, ReturnedBeforeHold, Unexpected }
+fn outstanding_info(step: Step, available: bool, capabilities: bool) -> OutstandingInfo {
+    if available || capabilities { OutstandingInfo::Unexpected }
+    else if matches!(step, Step::Close | Step::Quit | Step::Exit) { OutstandingInfo::ShutdownUnavailable }
+    else { OutstandingInfo::ReturnedBeforeHold }
+}
+fn latch_failure(failed: &AtomicBool, trace: &mut (Step, Boundary), progress: &mut BootstrapProgress,
+    next_trace: (Step, Boundary), next_progress: BootstrapProgress) {
+    // The caller holds the existing Record mutex. Reporting reads these facts
+    // together under that mutex; only the first failure may replace them.
+    if !failed.swap(true, Ordering::SeqCst) { *trace = next_trace; *progress = next_progress; }
 }
 
 const PROJECT_SOURCE: &str = "plugins { id(\"com.android.application\") }\nandroid { defaultConfig { applicationId = \"org.example.mrk.observed\" } }\n";
@@ -279,13 +315,16 @@ fn failure_sink(case: Case) -> Option<rustix::fd::OwnedFd> {
 }
 
 const FAILURE_PAIR_LIMIT: usize = 512;
-fn failure_pair(trace: (Step, Boundary)) -> Option<([u8; FAILURE_PAIR_LIMIT], usize)> {
+fn failure_pair(trace: (Step, Boundary), progress: BootstrapProgress) -> Option<([u8; FAILURE_PAIR_LIMIT], usize)> {
     let step = trace.0.failure_line();
     let boundary = trace.1.failure_line();
-    let length = step.len().checked_add(boundary.len())?;
+    let context = progress.failure_line();
+    let pair_end = step.len().checked_add(boundary.len())?;
+    let length = pair_end.checked_add(context.len())?;
     let mut bytes = [0_u8; FAILURE_PAIR_LIMIT];
     bytes.get_mut(..step.len())?.copy_from_slice(step);
-    bytes.get_mut(step.len()..length)?.copy_from_slice(boundary);
+    bytes.get_mut(step.len()..pair_end)?.copy_from_slice(boundary);
+    bytes.get_mut(pair_end..length)?.copy_from_slice(context);
     Some((bytes, length))
 }
 
@@ -294,9 +333,32 @@ fn assert_failure_pair_contract() {
     for trace in [(Step::Bootstrap, Boundary::Bootstrap), (Step::PrepareSave, Boundary::Request),
         (Step::Paths(PathStep::Settled(10)), Boundary::Settlement), (Step::SelectProject, Boundary::Deadline),
         (Step::Exit, Boundary::Exit)] {
-        let expected = [trace.0.failure_line(), trace.1.failure_line()].concat();
-        assert!(failure_pair(trace).is_some_and(|(bytes, length)|
-            length <= FAILURE_PAIR_LIMIT && bytes.get(..length) == Some(expected.as_slice())));
+        for progress in [BootstrapProgress::NotSampled, BootstrapProgress::Attachment, BootstrapProgress::PageLoad,
+            BootstrapProgress::OriginalRegistrySample, BootstrapProgress::AppInfoCatalog, BootstrapProgress::HeldAppInfo,
+            BootstrapProgress::Advanced, BootstrapProgress::AppInfoReturnedBeforeHold] {
+            let expected = [trace.0.failure_line(), trace.1.failure_line(), progress.failure_line()].concat();
+            assert!(failure_pair(trace, progress).is_some_and(|(bytes, length)|
+                length <= FAILURE_PAIR_LIMIT && bytes.get(..length) == Some(expected.as_slice())));
+        }
+    }
+    for step in [Step::Bootstrap, Step::Environment, Step::Close, Step::Quit, Step::Exit] {
+        for (available, capabilities) in [(false, false), (true, false), (false, true), (true, true)] {
+            let result = outstanding_info(step, available, capabilities);
+            assert!(result == if available || capabilities { OutstandingInfo::Unexpected }
+                else if matches!(step, Step::Close | Step::Quit | Step::Exit) { OutstandingInfo::ShutdownUnavailable }
+                else { OutstandingInfo::ReturnedBeforeHold });
+        }
+    }
+    for deadline_first in [false, true] {
+        let failed = AtomicBool::new(false);
+        let mut trace = (Step::Bootstrap, Boundary::Bootstrap);
+        let mut progress = BootstrapProgress::NotSampled;
+        let deadline = ((Step::Bootstrap, Boundary::Deadline), BootstrapProgress::NotSampled);
+        let early = ((Step::Bootstrap, Boundary::Result), BootstrapProgress::AppInfoReturnedBeforeHold);
+        let (first, second) = if deadline_first { (deadline, early) } else { (early, deadline) };
+        latch_failure(&failed, &mut trace, &mut progress, first.0, first.1);
+        latch_failure(&failed, &mut trace, &mut progress, second.0, second.1);
+        assert!(failed.load(Ordering::SeqCst) && trace == first.0 && progress == first.1);
     }
 }
 
@@ -1132,7 +1194,7 @@ struct Record {
     open_pending: bool, prepare_pending: Option<usize>, apply_returned: bool,
     confirmation_opened: u8, kept_reviewing: bool, acknowledged: bool, saved_visible: bool,
     readback: bool, readback_visible: bool, saved_reads: SavedReads, saved_draft_retained: bool, noop_outstanding: bool, originals_final: bool,
-    step: Step, pending: Option<Pending>, evaluations: u16, trace: (Step, Boundary),
+    step: Step, pending: Option<Pending>, evaluations: u16, trace: (Step, Boundary), bootstrap: BootstrapProgress,
     close_prevented: bool, native_id: Option<u32>, activated: bool,
     responded: bool, disposal_response: bool, destroyed: bool, released: bool, gtk_returned: bool,
     relay_joined: bool, exit: bool, held: Option<HeldAppInfo>,
@@ -1163,6 +1225,7 @@ impl Observation {
             failure_reported: AtomicBool::new(false), failure_sink, record: Mutex::new(Record {
                 attached: false, started: false, loaded: false, info: false, methods: 0, catalog: false, environment: false,
                 step: Step::Bootstrap, pending: None, evaluations: 0, trace: (Step::Bootstrap, Boundary::Bootstrap),
+                bootstrap: BootstrapProgress::NotSampled,
                 pickers: std::array::from_fn(|_| Picker::default()), cancel_returned: false, cancelled: false, project: None, selected: false,
                 project_witness: None, candidate: Candidate::default(), paths, workflow: WorkflowRecord::default(),
                 snapshot_requests: 0, snapshot: false, snapshot_visible: false, suggest_called: false, suggested: None, provenance: None,
@@ -1186,16 +1249,17 @@ impl Observation {
     }
     fn report_failure(&self) {
         if !self.failed.load(Ordering::SeqCst) || self.failure_reported.load(Ordering::SeqCst) { return; }
-        let trace = match self.record.try_lock() { Ok(r) => r.trace, Err(_) => return };
+        let (trace, progress) = match self.record.try_lock() { Ok(r) => (r.trace, r.bootstrap), Err(_) => return };
         if self.failure_reported.swap(true, Ordering::SeqCst) { return; }
-        // Two fixed enum labels, outside every record/GTK lock. No paths,
+        // Three fixed enum labels, outside every record/GTK lock. No paths,
         // opaque identifiers, DTOs, exception bodies or terminal transcript.
         // One unbuffered attempt before stderr: partial/EINTR/error is not
         // retried, formatted or allowed to affect the original failure latch.
-        if let Some((bytes, length)) = failure_pair(trace) {
+        if let Some((bytes, length)) = failure_pair(trace, progress) {
             if let Some(pair) = bytes.get(..length) { let _ = rustix::io::write(&self.failure_sink, pair); }
         }
         super::diagnostic(trace.0.failure_line()); super::diagnostic(trace.1.failure_line());
+        super::diagnostic(progress.failure_line());
     }
     pub(super) fn attach(&self, supervisor: &Supervisor) -> Result<(), BridgeError> {
         if std::thread::current().id() != self.main { self.fail(); return Err(BridgeError::invalid()); }
@@ -1214,7 +1278,16 @@ impl Observation {
     }
     pub(super) fn app_info(&self, info: &AppInfo) {
         if self.case == Case::Outstanding {
-            if info.runtime.state == "available" || info.capabilities.is_some() { self.fail(); }
+            // The original result may arrive during genuine Quit, including
+            // after finish took the held token. Do not require later GUI flags.
+            let Some(mut r) = self.record() else { return; };
+            let result = outstanding_info(r.step, info.runtime.state == "available", info.capabilities.is_some());
+            if result != OutstandingInfo::ShutdownUnavailable {
+                let next = if result == OutstandingInfo::ReturnedBeforeHold { BootstrapProgress::AppInfoReturnedBeforeHold }
+                    else { r.bootstrap };
+                let Record { step, trace, bootstrap, .. } = &mut *r;
+                latch_failure(&self.failed, trace, bootstrap, (*step, Boundary::Result), next);
+            }
             return;
         }
         let Some(methods) = info.capabilities.as_ref().and_then(|c| c.get("methods")).and_then(Value::as_array) else { self.fail(); return; };
@@ -2145,14 +2218,25 @@ impl Observation {
             // Preserve the first failure even if another callback failed while
             // this relay was acquiring the record. Report only after unlock.
             if let Some(mut r) = self.record() {
-                if !self.failed.swap(true, Ordering::SeqCst) { r.trace = (r.step, Boundary::Deadline); }
+                let Record { step, trace, bootstrap, .. } = &mut *r;
+                let progress = *bootstrap;
+                latch_failure(&self.failed, trace, bootstrap, (*step, Boundary::Deadline), progress);
             }
             self.report_failure(); return;
         }
         if std::thread::current().id() == self.main { self.fail(); self.report_failure(); return; }
         let step = {
             let Some(mut r) = self.record_at(Boundary::Settlement) else { return; };
-            if !r.attached || !r.loaded || r.pending.is_some() { return; }
+            if self.failed.load(Ordering::SeqCst) { return; }
+            if !r.attached {
+                if r.step == Step::Bootstrap { r.bootstrap = BootstrapProgress::Attachment; }
+                return;
+            }
+            if !r.loaded {
+                if r.step == Step::Bootstrap { r.bootstrap = BootstrapProgress::PageLoad; }
+                return;
+            }
+            if r.pending.is_some() { return; }
             if r.step == Step::Bootstrap {
                 // Observe the same owners after start_relay returned and its
                 // barrier opened. Teardown may legitimately report document loss.
@@ -2161,13 +2245,15 @@ impl Observation {
                        state.bridge.android_build.original_for_test().observed_document_lost_for_test()) {
                     (Some(false), Some(false)) => {},
                     (Some(true), _) | (_, Some(true)) => { self.fail(); return; },
-                    _ => return, // No absent/busy/unknown observation becomes false.
+                    _ => { r.bootstrap = BootstrapProgress::OriginalRegistrySample; return; },
+                    // No absent/busy/unknown observation becomes false.
                 }
             }
             if r.step == Step::Bootstrap && self.case != Case::Outstanding {
-                if !r.info || !r.catalog { return; }
-                r.step = Step::Environment;
+                if !r.info || !r.catalog { r.bootstrap = BootstrapProgress::AppInfoCatalog; return; }
+                r.step = Step::Environment; r.bootstrap = BootstrapProgress::Advanced;
             }
+            if r.step == Step::Bootstrap { r.bootstrap = BootstrapProgress::HeldAppInfo; }
             // Wait for already-requested native replies without spending DOM
             // evaluations on work that has not returned. No new task/deadline.
             let native_pending = match r.step {
@@ -2205,6 +2291,7 @@ impl Observation {
                     let Some(mut r) = self.record_at(Boundary::Settlement) else { return; };
                     if r.held.is_some() { self.fail(); return; }
                     r.held = Some(held); r.step = Step::Close;
+                    if !self.failed.load(Ordering::SeqCst) { r.bootstrap = BootstrapProgress::Advanced; }
                 },
                 Ok(None) => {}, Err(_) => self.fail(),
             }

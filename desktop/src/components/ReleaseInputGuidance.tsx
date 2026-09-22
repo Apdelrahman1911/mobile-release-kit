@@ -1,13 +1,13 @@
 import { useId } from 'react';
-import { RELEASE_INPUT_STAGES, releaseInputGroups } from '../releaseInputGuidance.ts';
-import type { ReleaseInputGuidanceController, ReleaseInputGuidanceState } from '../releaseInputGuidance.ts';
-import type { CredentialKindId, HelpContent } from '../types.ts';
+import { RELEASE_INPUT_STAGES, releaseInputGroups, sessionPreparationKind } from '../releaseInputGuidance.ts';
+import type { ReleaseInputGuidanceController, ReleaseInputGuidanceState, ReleaseInputPreparationTarget } from '../releaseInputGuidance.ts';
+import type { HelpContent } from '../types.ts';
 import { Badge, EmptyState, HelpButton, SectionHeading } from './Common.tsx';
 import { Icon } from './Icon.tsx';
 
 export function ReleaseInputGuidance({ state, controller, onGuide, onSettings, onHelp }: {
   state: ReleaseInputGuidanceState; controller: ReleaseInputGuidanceController;
-  onGuide: (kind: CredentialKindId) => void; onSettings: () => void; onHelp: (help: HelpContent) => void;
+  onGuide: (target: ReleaseInputPreparationTarget) => void; onSettings: () => void; onHelp: (help: HelpContent) => void;
 }) {
   const stageId = useId(), reason = controller.startReason(), groups = releaseInputGroups(state);
   // A handler retained by an older render cannot reopen retired catalogue help.
@@ -35,9 +35,12 @@ export function ReleaseInputGuidance({ state, controller, onGuide, onSettings, o
         {row.file && <p className="release-input-file">Core guide limits: {row.file.maxBytes} bytes maximum{row.file.suffixes.length > 0 ? `; suffixes ${row.file.suffixes.join(', ')}` : ''}. These are format instructions, not a check of your file.</p>}
         {row.requirement.alternatives.length > 0 && <p className="release-input-alternatives">Core-listed alternatives: {row.requirement.alternatives.join(' · ')}. These are alternatives, not extra mandatory inputs.</p>}
         {!row.help && <p className="review-caution">Detailed core guidance is unavailable for this requirement. The returned requirement remains listed; review Project settings or reconnect for compatible help.</p>}
-        {row.guideId && <button type="button" className="button small secondary" onClick={() => { if (controller.getSnapshot() === state && row.guideId) onGuide(row.guideId); }}>Open guide</button>}
+        {row.guideId && <button type="button" className="button small secondary" onClick={() => {
+          const target = controller.preparationTarget(state, row.requirement);
+          if (target) onGuide(target);
+        }}>{sessionPreparationKind(row.guideId) ? 'Open preparation guide' : 'Open reference guide'}</button>}
       </article>)}</div>
     </div>)}
-    <p className="release-input-scope">Guidance never selects, imports, validates, registers, stores or assigns private inputs. The independently gated session controls below retain their own availability and original status; persistent vault storage and unsupported file pickers remain unavailable.</p>
+    <p className="release-input-scope">Opening guidance never changes session context or selects, imports, validates, registers, stores or assigns private inputs. Supported guides offer a separate explicit continuation to the existing session controls. Those controls retain their own availability and original status; persistent vault storage and unsupported file pickers remain unavailable.</p>
   </section>;
 }
