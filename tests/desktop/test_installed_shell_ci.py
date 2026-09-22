@@ -1557,12 +1557,21 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertEqual(len(lifecycle.SHELL_FAILURE_BOUNDARIES), 8)
         self.assertEqual(set(lifecycle.SHELL_BOOTSTRAP_PROGRESS), progress)
         self.assertEqual(len(lifecycle.SHELL_BOOTSTRAP_PROGRESS), len(progress))
+        rejections = source.split("impl SessionRejection {", 1)[1].split("enum SessionWait", 1)[0]
+        waits = source.split("impl SessionWait {", 1)[1].split("struct SessionDiagnostic", 1)[0]
+        for block, expected in ((rejections, lifecycle.SHELL_SESSION_REJECTIONS), (waits, lifecycle.SHELL_SESSION_WAITS)):
+            tokens = tuple(value.encode("ascii") for value in re.findall(r'=> b"([a-z-]+)"', block))
+            self.assertEqual(tokens, expected)
+            self.assertEqual(len(tokens), len(set(tokens)))
         for boundary in boundaries:
             for context in progress:
                 self.assertEqual(lifecycle._shell_label_pair(b"MRK_INSTALLED_SHELL_FAILURE_STEP=SelectProject\n" + boundary + context),
                                  {"step": "SelectProject", "boundary": boundary.decode("ascii").strip().split("=", 1)[1],
                                   "bootstrapProgress": context.decode("ascii").strip().split("=", 1)[1]})
         self.assertLessEqual(max(map(len, steps)) + max(map(len, boundaries)) + max(map(len, progress)), 512)
+        longest_session = (len(b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=none;evaluations=128;reject=;wait=\n")
+                           + max(map(len, lifecycle.SHELL_SESSION_REJECTIONS)) + max(map(len, lifecycle.SHELL_SESSION_WAITS)))
+        self.assertLessEqual(max(map(len, steps)) + max(map(len, boundaries)) + max(map(len, progress)) + longest_session, 512)
         self.assertIn("const FAILURE_PAIR_LIMIT: usize = 512;", source)
         self.assertIn("fn assert_failure_pair_contract()", source)
         self.assertIn("    assert_failure_pair_contract();", source)

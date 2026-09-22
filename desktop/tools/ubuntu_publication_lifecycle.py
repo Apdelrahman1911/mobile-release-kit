@@ -200,6 +200,15 @@ SHELL_BOOTSTRAP_PROGRESS = (
     b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n",
     b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=app-info-returned-before-hold\n",
 )
+# Only public observer categories; these do not establish native state/finality.
+SHELL_SESSION_REJECTIONS = (
+    b"not-recorded", b"unknown-native-snapshot", b"native-readiness-invariant", b"evaluation-budget",
+    b"unavailable-projection-script", b"evaluation-dispatch", b"step-pending-invariant",
+)
+SHELL_SESSION_WAITS = (
+    b"not-sampled", b"request-not-yet-seen", b"native-reply-pending", b"original-owner-unsettled",
+    b"native-phase-not-ready", b"rendered-display-mismatch", b"rendered-control-mismatch",
+)
 SHELL_PATH_MARKER = b"MRK_INSTALLED_SHELL_PROJECT_PATHS="
 SHELL_PATH_RECEIPT = {'assetAuthorityCreated': False,
  'cancel': [{'field': 'version.source', 'operation': 3}, {'field': 'metadata.root', 'operation': 7}],
@@ -3362,14 +3371,35 @@ def _shell_label_pair(raw):
     if type(raw) is not bytes or not 0 < len(raw) <= SHELL_FAILURE_LABEL_LIMIT:
         return None
     lines = raw.splitlines(keepends=True)
-    # Current executions require the whole closed diagnostic. Historical
-    # two-line evidence is retained as historical, not completed by inference.
-    if (len(lines) != 3 or lines[0] not in SHELL_FAILURE_STEPS or lines[1] not in SHELL_FAILURE_BOUNDARIES
+    # Current Session traces require their complete fourth record. Historical
+    # incomplete records are retained as historical, not filled by inference.
+    if (len(lines) not in (3, 4) or lines[0] not in SHELL_FAILURE_STEPS or lines[1] not in SHELL_FAILURE_BOUNDARIES
             or lines[2] not in SHELL_BOOTSTRAP_PROGRESS):
         return None
-    return {"step": lines[0][len(b"MRK_INSTALLED_SHELL_FAILURE_STEP="):-1].decode("ascii"),
-            "boundary": lines[1][len(b"MRK_INSTALLED_SHELL_FAILURE_PHASE="):-1].decode("ascii"),
-            "bootstrapProgress": lines[2][len(b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS="):-1].decode("ascii")}
+    result = {"step": lines[0][len(b"MRK_INSTALLED_SHELL_FAILURE_STEP="):-1].decode("ascii"),
+              "boundary": lines[1][len(b"MRK_INSTALLED_SHELL_FAILURE_PHASE="):-1].decode("ascii"),
+              "bootstrapProgress": lines[2][len(b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS="):-1].decode("ascii")}
+    session = result["step"].startswith("Session")  # Membership was checked above, not prefix admission.
+    if len(lines) != (4 if session else 3):
+        return None
+    if session:
+        match = re.fullmatch(rb"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=(none|0|[1-9][0-9]?);"
+                             rb"evaluations=(0|[1-9][0-9]{0,2});reject=([a-z-]{1,32});wait=([a-z-]{1,32})\n", lines[3])
+        if match is None:
+            return None
+        index_raw, evaluations_raw, rejection, wait = match.groups()
+        index = None if index_raw == b"none" else int(index_raw)
+        evaluations = int(evaluations_raw)
+        unindexed = {"SessionNavigate", "SessionReload", "SessionLoss", "SessionDeadline", "SessionQuitPreserved"}
+        mixed = {"SessionQuitCancel", "SessionFinality"}
+        if (index is not None and index >= 64 or evaluations > 128 or rejection not in SHELL_SESSION_REJECTIONS
+                or wait not in SHELL_SESSION_WAITS or rejection == b"evaluation-budget" and evaluations != 128
+                or result["step"] in unindexed and index is not None
+                or result["step"] not in unindexed | mixed and index is None):
+            return None
+        result["session"] = {"recipeIndex": index, "evaluations": evaluations,
+                             "rejection": rejection.decode("ascii"), "lastWait": wait.decode("ascii")}
+    return result
 
 
 def _shell_labels_read(original):

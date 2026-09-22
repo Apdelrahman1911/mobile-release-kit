@@ -3645,6 +3645,44 @@ class SessionFixtureContracts(unittest.TestCase):
 
 
 class FailureLabelSinkContracts(unittest.TestCase):
+    def test_session_record_requires_exact_index_bounds_categories_and_complete_frame(self):
+        header = (b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionReview\n"
+                  b"MRK_INSTALLED_SHELL_FAILURE_PHASE=settlement\n"
+                  b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n")
+        detail = (b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=63;evaluations=128;"
+                  b"reject=evaluation-budget;wait=rendered-display-mismatch\n")
+        good = header + detail
+        self.assertEqual(L._shell_label_pair(good), {"step": "SessionReview", "boundary": "settlement", "bootstrapProgress": "advanced",
+            "session": {"recipeIndex": 63, "evaluations": 128, "rejection": "evaluation-budget", "lastWait": "rendered-display-mismatch"}})
+        for rejection in L.SHELL_SESSION_REJECTIONS:
+            for wait in L.SHELL_SESSION_WAITS:
+                raw = header + b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=0;evaluations=128;reject=" + rejection + b";wait=" + wait + b"\n"
+                value = L._shell_label_pair(raw)
+                self.assertEqual(value["session"], {"recipeIndex": 0, "evaluations": 128,
+                    "rejection": rejection.decode("ascii"), "lastWait": wait.decode("ascii")})
+                self.assertLessEqual(len(raw), 512)
+        for number in (b"0", b"9", b"10", b"99", b"100", b"128"):
+            raw = good.replace(b"evaluations=128", b"evaluations=" + number).replace(b"evaluation-budget", b"not-recorded")
+            self.assertEqual(L._shell_label_pair(raw)["session"]["evaluations"], int(number))
+        for name in (b"SessionNavigate", b"SessionReload", b"SessionLoss", b"SessionDeadline", b"SessionQuitPreserved"):
+            raw = good.replace(b"SessionReview", name).replace(b"index=63", b"index=none")
+            self.assertIsNone(L._shell_label_pair(good.replace(b"SessionReview", name)))
+            self.assertIsNone(L._shell_label_pair(raw)["session"]["recipeIndex"])
+        for name in (b"SessionQuitCancel", b"SessionFinality"):
+            self.assertIsNotNone(L._shell_label_pair(good.replace(b"SessionReview", name)))
+            self.assertIsNotNone(L._shell_label_pair(good.replace(b"SessionReview", name).replace(b"index=63", b"index=none")))
+        bad = [header, header + detail[:-1], header + detail + detail, detail + header,
+            good.replace(b"SessionReview", b"PrepareSave"), good.replace(b"index=63", b"index=none"),
+            good.replace(b"index=63", b"index=64"), good.replace(b"index=63", b"index=063"),
+            good.replace(b"index=63", b"index=-1"), good.replace(b"evaluations=128", b"evaluations=129"),
+            good.replace(b"evaluations=128", b"evaluations=0128"), good.replace(b"evaluations=128", b"evaluations=127"),
+            good.replace(b"evaluation-budget", b"not-an-allowed-condition"), good.replace(b"rendered-display-mismatch", b"unknown"),
+            good.replace(b"v1;", b"v2;"), good.replace(b";wait=", b";extra=1;wait="),
+            good.replace(b";reject=", b";index=63;reject="), good.replace(b"\n", b"\r\n"),
+            good + b"/private/inert\n", good + b"x" * 512]
+        for raw in bad:
+            with self.subTest(raw=raw[:80]): self.assertIsNone(L._shell_label_pair(raw))
+
     def test_finite_pair_refuses_partial_reordered_duplicate_or_injected_data(self):
         step = b"MRK_INSTALLED_SHELL_FAILURE_STEP=PrepareSave\n"
         boundary = b"MRK_INSTALLED_SHELL_FAILURE_PHASE=request\n"
@@ -3796,8 +3834,8 @@ class FailureLabelSinkContracts(unittest.TestCase):
         self.assertNotIn("runtime.reason", outstanding)
         self.assertNotIn("r.held", outstanding)
         report = source.split("fn report_failure(&self)", 1)[1].split("pub(super) fn attach", 1)[0]
-        self.assertIn("Ok(r) => (r.trace, r.bootstrap)", report)
-        self.assertIn("failure_pair(trace, progress)", report)
+        self.assertIn("Ok(r) => (r.trace, r.bootstrap, r.session.diagnostic)", report)
+        self.assertIn("failure_pair(trace, progress, session)", report)
         self.assertEqual(report.count("rustix::io::write"), 1)
         self.assertNotIn("retain_held_app_info", report)
         tick = source.split("pub(super) fn tick(", 1)[1].split("pub(super) fn", 1)[0]
@@ -3805,6 +3843,32 @@ class FailureLabelSinkContracts(unittest.TestCase):
         self.assertIn("(*step, Boundary::Deadline), progress", tick)
         self.assertIn("Duration::from_secs(45)", source)
         self.assertIn("assert_failure_pair_contract();", source)
+
+    def test_session_diagnostics_are_cached_same_step_and_first_failure_only(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        sample = source.split("impl SessionDiagnostic {", 1)[1].split("use SessionAction", 1)[0]
+        self.assertIn("old.step == step", sample)
+        self.assertIn("SessionWait::NotSampled", sample)
+        cache = source.split("fn record_at(&self", 1)[1].split("fn report_failure(&self)", 1)[0]
+        self.assertIn("if !self.failed.load(Ordering::SeqCst)", cache)
+        self.assertIn("SessionDiagnostic::sample(r.step,r.evaluations,r.session.diagnostic)", cache)
+        latch = source.split("fn latch_session_diagnostic(", 1)[1].split("const PROJECT_SOURCE", 1)[0]
+        self.assertIn("if !failed.swap(true, Ordering::SeqCst)", latch)
+        report = source.split("fn report_failure(&self)", 1)[1].split("pub(super) fn attach", 1)[0]
+        self.assertNotIn("installed_session_snapshot", report)
+        self.assertNotIn("session_wait", report)
+        self.assertNotIn("session_fail", report)
+        encoder = source.split("fn failure_pair(", 1)[1].split("fn assert_failure_pair_contract", 1)[0]
+        self.assertIn("diagnostic.step == step", encoder)
+        self.assertIn("diagnostic.evaluations > 128", encoder)
+        self.assertIn("index >= 64", encoder)
+        self.assertIn("bytes.get_mut(*length..end)?", encoder)
+        self.assertNotIn("format!", encoder)
+        tick = source.split("fn session_tick(", 1)[1].split("fn session_dom(", 1)[0]
+        self.assertIn("if r.evaluations>=128", tick)
+        self.assertIn("SessionRejection::EvaluationBudget", tick)
+        self.assertIn("Ok(Some(wait))=>{self.session_wait(&mut r,wait);return;}", tick)
+        self.assertIn("r.evaluations+=1", tick)
 
     def test_diagnostic_and_close_failures_cannot_replace_an_active_owner_exception(self):
         class ProcessError(RuntimeError):
