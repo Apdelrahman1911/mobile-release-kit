@@ -247,6 +247,30 @@ impl OpenInputSample {
     }
 }
 #[derive(Clone, Copy)]
+struct IdentitySample {
+    case: Case, id: u32, start_result: &'static str,
+    configuration: mrk_macos_installed_native::IdentityConfiguration,
+    binding: Option<mrk_macos_installed_native::IdentityBinding>,
+}
+impl IdentitySample {
+    fn configured(self, id: u32) -> bool {
+        self.id == id && self.start_result == "ok" && self.configuration.complete()
+    }
+    fn succeeded(self, id: u32) -> bool {
+        self.configured(id) && self.binding.is_some_and(mrk_macos_installed_native::IdentityBinding::matched)
+    }
+    fn value(self) -> Value {
+        let c = self.configuration;
+        json!({"mechanism":"public-accessibility-identifier", "case":self.case.name(), "id":self.id, "kind":"project",
+            "start":{"returned":true,"result":self.start_result},
+            "configuration":{"attempted":c.attempted,"parentSetterEntered":c.parent_setter_entered,
+                "parentSetterReturned":c.parent_setter_returned,"panelSetterEntered":c.panel_setter_entered,
+                "panelSetterReturned":c.panel_setter_returned,"parent":c.parent,"panel":c.panel,"site":c.site,"error":c.error},
+            "binding":self.binding.map(|b| json!({"returned":true,"attempted":b.attempted,
+                "parent":b.parent,"panel":b.panel,"site":b.site,"error":b.error}))})
+    }
+}
+#[derive(Clone, Copy)]
 struct NativeDispatch { step: Step, entered: bool, returned: bool }
 #[derive(Clone, Copy)]
 struct NativeActionSample {
@@ -449,6 +473,7 @@ struct Record {
     step: Step, pending: Option<Pending>, evaluations: u16, attached: bool, started: bool, loaded: bool,
     native_dispatch: Option<NativeDispatch>, last_panel: Option<PanelSample>, native_action: Option<NativeActionSample>,
     ax_trusted: bool, prepared_open: Option<PreparedOpenInput>, accessibility: Option<OpenInputSample>,
+    identity_binding: Option<IdentitySample>,
     initial_navigation: bool, info: bool, catalog: bool, methods: usize, capability: bool,
     project_calls: u8, cancel_returned: bool, project_returned: bool, project: Option<Project>,
     project_witness: Option<InstalledMacProjectWitness>, picker_witness: Option<InstalledMacPickerWitness>,
@@ -487,7 +512,8 @@ fn failure_context(r: &Record) -> Value {
         "action":action.diagnostic.action, "domain":action.diagnostic.domain,
         "site":action.diagnostic.site, "error":action.diagnostic.error}));
     json!({"pending":pending, "nativeHandler":native, "lastPanel":panel, "nativeAction":action,
-        "accessibility":r.accessibility.map(OpenInputSample::value)})
+        "accessibility":r.accessibility.map(OpenInputSample::value),
+        "accessibilityBinding":r.identity_binding.map(IdentitySample::value)})
 }
 pub(super) struct Observation {
     case: Case, main: ThreadId, end: Instant, project_path: PathBuf, base: Value,
@@ -502,7 +528,7 @@ impl Observation {
             record: Mutex::new(Record {
                 step: Step::Bootstrap, pending: None, evaluations: 0, attached: false, started: false, loaded: false,
                 native_dispatch: None, last_panel: None, native_action: None,
-                ax_trusted: false, prepared_open: None, accessibility: None,
+                ax_trusted: false, prepared_open: None, accessibility: None, identity_binding: None,
                 initial_navigation: false, info: false, catalog: false, methods: 0, capability: false,
                 project_calls: 0, cancel_returned: false, project_returned: false, project: None,
                 project_witness: None, picker_witness: None,
@@ -524,9 +550,26 @@ impl Observation {
     fn record(&self) -> Option<MutexGuard<'_, Record>> {
         match self.record.lock() { Ok(r) => Some(r), Err(_) => { self.fail_with("observer-record-unavailable"); None } }
     }
-    fn timely(&self) -> bool {
+    pub(super) fn timely(&self) -> bool {
         if self.failed.load(Ordering::SeqCst) { return false; }
         if Instant::now() >= self.end { self.fail_with("observer-deadline"); false } else { true }
+    }
+    pub(super) fn open_identity_scope(&self, id: u32, kind: mrk_macos_installed_native::PanelKind) -> bool {
+        // The real command can construct before the ChooseProject DOM return.
+        // Immutable case/id only: no step/project_calls/acknowledgement race.
+        self.case != Case::PickerLoss && id == self.case.selected_id()
+            && matches!(kind, mrk_macos_installed_native::PanelKind::Project)
+    }
+    pub(super) fn identity_start_returned(&self, id: u32, returned: mrk_macos_installed_native::IdentityStartReturn) {
+        let Some(mut r) = self.record() else { return; };
+        if !self.open_identity_scope(id, mrk_macos_installed_native::PanelKind::Project) || r.identity_binding.is_some() {
+            self.fail_with("native-ax-custody"); return;
+        }
+        let Some(configuration) = returned.configuration else { self.fail_with("native-ax-binding"); return; };
+        r.identity_binding = Some(IdentitySample { case: self.case, id, start_result: returned.result, configuration, binding: None });
+        // Saved original-return DATA precedes this latch/one-shot report. A
+        // previous failure stays absorbing; none of this grants finality.
+        if !returned.succeeded() { self.fail_with("native-ax-binding"); }
     }
     fn report_failure(&self) {
         if !self.failed.load(Ordering::SeqCst) || self.failure_reported.load(Ordering::SeqCst) { return; }
@@ -1163,8 +1206,8 @@ impl Observation {
             }
         }
         let mut action_diagnostic = None;
-        let mut prepared_open = None; let mut open_sample = None;
-        let result = self.native_step_body(step, timely, &mut action_diagnostic, &mut prepared_open, &mut open_sample);
+        let mut prepared_open = None; let mut open_sample = None; let mut binding_return = None;
+        let result = self.native_step_body(step, timely, &mut action_diagnostic, &mut prepared_open, &mut open_sample, &mut binding_return);
         // Preserve the exact first refusal before any Record/cleanup failure.
         if let Err(reason) = result { self.fail_with(reason); }
         let Some(mut r) = self.record() else { return; };
@@ -1177,6 +1220,13 @@ impl Observation {
             if r.accessibility.is_some() { self.fail_with("native-ax-custody"); return; }
             r.accessibility = Some(sample);
         }
+        if let Some(returned) = binding_return {
+            let Some(sample) = r.identity_binding.as_mut().filter(|sample|
+                sample.configured(self.case.selected_id()) && sample.binding.is_none()
+                    && sample.configuration == returned.configuration) else { self.fail_with("native-ax-custody"); return; };
+            if step != Step::OpenProject { self.fail_with("native-ax-custody"); return; }
+            sample.binding = Some(returned.binding);
+        }
         // Keep the historical wrong-thread refusal conservative. Diagnostics
         // never authorize retirement; a different/unknown owner is untouched.
         if matches!(result, Err("native-wrong-thread" | "native-pending-custody")) { return; }
@@ -1184,7 +1234,8 @@ impl Observation {
         if !retire_returned_native(&mut r.pending, current, step) { self.fail_with("native-pending-custody"); return; }
         if let Some(input) = prepared_open {
             if step != Step::OpenProject || result != Ok(false) || r.prepared_open.is_some()
-                || !r.native_dispatch.is_some_and(|n| n.step == step && n.entered && n.returned) {
+                || !r.native_dispatch.is_some_and(|n| n.step == step && n.entered && n.returned)
+                || !r.identity_binding.is_some_and(|sample| sample.succeeded(input.id)) {
                 self.fail_with("native-ax-custody"); return;
             }
             // Publish only the returned preparation, not an action/dispatch
@@ -1209,7 +1260,7 @@ impl Observation {
     }
     fn native_step_body(&self, step: Step, timely: bool,
         action_diagnostic: &mut Option<NativeActionSample>, prepared_open: &mut Option<PreparedOpenInput>,
-        open_sample: &mut Option<OpenInputSample>) -> Result<bool, &'static str> {
+        open_sample: &mut Option<OpenInputSample>, binding_return: &mut Option<mrk_macos_installed_native::IdentityBindingReturn>) -> Result<bool, &'static str> {
         // This returned body has made no native query/action. Keep failed,
         // first reason, Step and original endpoint; only its matching slot may
         // retire in the caller, permitting ordinary failure shutdown to check.
@@ -1242,8 +1293,14 @@ impl Observation {
         }
         if step == Step::OpenProject {
             if !self.timely() { return Err("observer-deadline"); }
+            {
+                let r = self.record().ok_or("observer-record-unavailable")?;
+                if !r.identity_binding.is_some_and(|sample| sample.configured(id) && sample.binding.is_none()) {
+                    return Err("native-ax-binding");
+                }
+            }
             let mut sample = OpenInputSample::preparing(id);
-            let prepared = prepare_open_input(id).map_err(|error| {
+            let prepared = prepare_open_input(id, binding_return).map_err(|error| {
                 sample.diagnostic = error.binding_diagnostic(); error.reason()
             });
             sample.prepared = prepared.is_ok(); *open_sample = Some(sample);
@@ -1448,8 +1505,9 @@ impl Observation {
         let common = r.attached && r.loaded && r.info && r.catalog && r.capability && r.actual_exit && r.originals_final
             && r.relay_joined && r.pending.is_none() && r.step == Step::Exit && r.file_readback
             && r.ax_trusted && r.prepared_open.is_none()
-            && (if self.case == Case::PickerLoss { r.accessibility.is_none() }
-                else { r.accessibility.is_some_and(|s| s.id == self.case.selected_id() && s.succeeded()) })
+            && (if self.case == Case::PickerLoss { r.accessibility.is_none() && r.identity_binding.is_none() }
+                else { r.accessibility.is_some_and(|s| s.id == self.case.selected_id() && s.succeeded())
+                    && r.identity_binding.is_some_and(|sample| sample.succeeded(self.case.selected_id())) })
             && r.sessions.len() == self.case.rounds() && r.sessions.iter().all(|s| s.review_visible && s.finality.is_some())
             && (self.case == Case::FirstSave || r.panel_attached == [true,true,false,false])
             && r.project_calls == (if self.case == Case::FirstSave { 2 } else { 1 });
@@ -1480,6 +1538,7 @@ impl Observation {
             "native":{"projectCancelSettled":r.cancel_settled,"selectedPathMatched":r.selected_native && r.project_settled,
                 "panelAttachments":r.panel_attached,"controlReturns":r.native_actions_returned,
                 "accessibilityTrustedWithoutPrompt":r.ax_trusted,"projectOpenInput":r.accessibility.map(OpenInputSample::value),
+                "projectOpenBinding":r.identity_binding.map(IdentitySample::value),
                 "quitCancelKeptOriginalReview":r.quit_cancelled,"originalDocumentAndQuitSettled":r.originals_final},
             "saveSessions":sessions,"freshCoreReadback":self.case == Case::FirstSave && r.snapshots == 2,
             "syntheticFileReadback":r.file_readback,"staleMarkerWriterReturnedAndClosed":r.fixture.mutated,

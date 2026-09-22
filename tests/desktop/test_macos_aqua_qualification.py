@@ -119,6 +119,13 @@ def accessibility_context_data():
     return value
 
 
+def binding_context_data(case="first-save"):
+    # A start can fail before any native handler or Press exists. This DATA
+    # fixture deliberately supplies neither, rather than inventing an action.
+    return {"pending": None, "nativeHandler": None, "lastPanel": None, "nativeAction": None, "accessibility": None,
+            "accessibilityBinding": deepcopy(M.expected_result(BINDING, case)["native"]["projectOpenBinding"])}
+
+
 def _inert_command(argv, *, environ, cwd, timeout, capture, text, output_limit):
     """Literal DATA-only body rebound below; no owner import or command call."""
     global recursion
@@ -518,6 +525,128 @@ class AquaDataTests(unittest.TestCase):
                 with self.assertRaises(M.Refused):
                     M.parse_result(captured(value), b"", BINDING, case)
 
+    def test_early_binding_matrix_is_diagnostic_but_late_identity_is_mandatory(self):
+        classes = ("nil", "match", "different", "type-invalid")
+        for case in ("first-save", "noop-stale", "save-loss"):
+            for parent in classes:
+                for panel in classes:
+                    good = M.expected_result(BINDING, case)
+                    sample = good["native"]["projectOpenBinding"]
+                    sample["configuration"].update(parent=parent, panel=panel)
+                    self.assertEqual(M.parse_result(captured(good), b"", BINDING, case), good)
+                    context = binding_context_data(case); context["accessibilityBinding"] = deepcopy(sample)
+                    self.assertEqual(M.failure_context(context_row(context), b"", case), context)
+                    if parent == panel == "match":
+                        continue
+                    # Both late getter observations survive even when the
+                    # first is already a mismatch. Neither can authorize input.
+                    sample["binding"].update(parent=parent, panel=panel,
+                        site="parent-get" if parent != "match" else "panel-get", error="unsupported")
+                    context["accessibilityBinding"] = deepcopy(sample)
+                    self.assertEqual(M.failure_context(context_row(context), b"", case), context)
+                    with self.assertRaisesRegex(M.Refused, "^project-open-binding$"):
+                        M.parse_result(captured(good), b"", BINDING, case)
+        missing = M.expected_result(BINDING, "first-save")
+        missing["native"]["projectOpenBinding"] = None
+        with self.assertRaises(M.Refused):
+            M.parse_result(captured(missing), b"", BINDING, "first-save")
+        picker = M.expected_result(BINDING, "picker-loss")
+        picker["native"]["projectOpenBinding"] = binding_context_data()["accessibilityBinding"]
+        with self.assertRaises(M.Refused):
+            M.parse_result(captured(picker), b"", BINDING, "picker-loss")
+
+    def test_binding_partial_returns_remain_data_without_action_or_finality(self):
+        flags = ("parentSetterEntered", "parentSetterReturned", "panelSetterEntered", "panelSetterReturned")
+        examples = []
+        for result in ("permission-denied", "io", "invalid-input", "already", "other"):
+            context = binding_context_data(); sample = context["accessibilityBinding"]
+            sample["start"]["result"] = result; sample["binding"] = None
+            sample["configuration"].update(attempted=False, **dict.fromkeys(flags, False), parent=None, panel=None, site=None, error=None)
+            examples.append(context)
+        for site, error, bits, parent, panel in (
+            ("objects", "ineligible", (False, False, False, False), None, None),
+            ("tags", "invalid-input", (False, False, False, False), None, None),
+            ("tags", "objc-exception", (False, False, False, False), None, None),
+            ("parent-set", "objc-exception", (True, False, False, False), None, None),
+            ("panel-set", "objc-exception", (True, True, True, False), None, None),
+            ("parent-get", "objc-exception", (True, True, True, True), None, None),
+            ("panel-get", "objc-exception", (True, True, True, True), "nil", None),
+            ("complete", "none", (True, True, True, True), "different", "type-invalid"),
+        ):
+            context = binding_context_data(); sample = context["accessibilityBinding"]
+            sample["start"]["result"] = "io"; sample["binding"] = None
+            sample["configuration"].update(**dict(zip(flags, bits)), parent=parent, panel=panel, site=site, error=error)
+            examples.append(context)
+        for attempted, site, error, parent, panel in (
+            (False, "objects", "ineligible", None, None),
+            (True, "objects", "ineligible", None, None),
+            (True, "objects", "objc-exception", "match", "match"),
+            (True, "tags", "invalid-input", None, None),
+            (True, "tags", "objc-exception", None, None),
+            (True, "parent-get", "objc-exception", None, None),
+            (True, "panel-get", "objc-exception", "type-invalid", None),
+        ):
+            context = binding_context_data()
+            context["accessibilityBinding"]["binding"].update(attempted=attempted, parent=parent, panel=panel, site=site, error=error)
+            examples.append(context)
+        for context in examples:
+            self.assertEqual(M.failure_context(context_row(context), b"", "first-save"), context)
+            self.assertIsNone(context["nativeHandler"])
+            self.assertIsNone(context["accessibility"])
+        # The production exception seam must pass the actual known case and
+        # preserve the same exception/UNKNOWN boundary, not just decode bytes.
+        with inert_exception_owner(stderr=context_row(examples[8])) as call:
+            fixtures = InertFixtures()
+            with self.assertRaises(RuntimeError) as caught:
+                M.run_cases(BINDING, fixtures, call.owner.run_owned, UID, "runner", self.fail)
+            self.assertIs(caught.exception, call.original)
+            self.assertEqual(fixtures.inner_failure_context, examples[8])
+            self.assertTrue(fixtures.inflight)
+            self.assertFalse(fixtures.last_returned)
+            self.assertIsNone(fixtures.app_returncode)
+            self.assertEqual(fixtures.before, ["first-save"])
+            self.assertEqual(fixtures.reads, [])
+
+    def test_binding_malformed_or_wrong_case_drops_only_new_diagnostic(self):
+        good = accessibility_context_data()
+        good["accessibilityBinding"] = binding_context_data()["accessibilityBinding"]
+        variants = []
+        for path, bad in (
+            (("mechanism",), "selector"), (("case",), "noop-stale"), (("id",), True), (("id",), 1), (("kind",), "quit"),
+            (("tag",), "PRIVATE"), (("start", "returned"), False), (("start", "returned"), 1),
+            (("start", "result"), "permission-denied"), (("start", "result"), "unknown-status"),
+            (("configuration", "parentSetterEntered"), False), (("configuration", "panelSetterReturned"), False),
+            (("configuration", "parent"), None), (("configuration", "panel"), True),
+            (("configuration", "error"), "unsupported"), (("configuration", "site"), "parent-get"),
+            (("binding", "returned"), False), (("binding", "returned"), 1), (("binding", "attempted"), False),
+            (("binding", "parent"), "nil"), (("binding", "panel"), "different"),
+            (("binding", "site"), "parent-set"), (("binding", "error"), "PRIVATE"),
+        ):
+            value = deepcopy(good); target = value["accessibilityBinding"]
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = bad; variants.append(value)
+        for value in variants:
+            expected = deepcopy(value); expected["accessibilityBinding"] = None
+            self.assertEqual(M.failure_context(context_row(value), b"", "first-save"), expected)
+        for case in (None, "noop-stale", "picker-loss", "unknown"):
+            expected = deepcopy(good); expected["accessibilityBinding"] = None
+            self.assertEqual(M.failure_context(context_row(good), b"", case), expected)
+        duplicate = context_row(good).replace(b'"result":"ok"', b'"result":"ok","result":"io"')
+        self.assertIsNone(M.failure_context(duplicate, b"", "first-save"))
+        # Upper bound of the old closed context plus worst-sized scalar values
+        # in the new sibling, not a claim that this synthetic matrix occurred.
+        largest = deepcopy(good["accessibilityBinding"])
+        largest["start"]["result"] = "permission-denied"
+        for phase in (largest["configuration"], largest["binding"]):
+            phase.update(parent="type-invalid", panel="type-invalid", site="parent-set", error="cleanup-unknown")
+            for key, value in phase.items():
+                if type(value) is bool:
+                    phase[key] = False
+        self.assertEqual(M.FAILURE_CONTEXT_LIMIT, 4096)
+        self.assertLess(1536 + len(json.dumps({"accessibilityBinding": largest}, separators=(",", ":")).encode("ascii")),
+                        M.FAILURE_CONTEXT_LIMIT)
+
     def test_original_exception_buffers_do_not_change_error_or_finality(self):
         for duplicate in (False, True):
             with self.subTest(repeated_identical_frame=duplicate), inert_exception_owner(duplicate=duplicate) as call:
@@ -852,7 +981,7 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn("framework=ApplicationServices", link)
         self.assertEqual(build.count("framework=ApplicationServices"), 1)
         self.assertIn("#ifdef MRK_INSTALLED_OBSERVATION\n#import <ApplicationServices/ApplicationServices.h>", native)
-        trust = native.split("int mrk_observation_ax_trusted(", 1)[1].split("int mrk_panel_observe_open_identity(", 1)[0]
+        trust = native.split("int mrk_observation_ax_trusted(", 1)[1].split("int mrk_panel_observe_arm_open_identity(", 1)[0]
         for required in ("kAXTrustedCheckOptionPrompt", "kCFBooleanFalse", "AXIsProcessTrustedWithOptions(options)", "CFRelease(options)"):
             self.assertEqual(trust.count(required), 1)
         self.assertNotIn("kCFBooleanTrue", trust)
@@ -862,10 +991,38 @@ class AquaDataTests(unittest.TestCase):
         refused = main.split("if trusted != Ok(true)", 1)[1].split("r.ax_trusted = true", 1)[0]
         self.assertIn('"native-ax-not-trusted"', refused)
         self.assertIn("return std::process::ExitCode::FAILURE", refused)
+        start = native.split("int mrk_panel_start(", 1)[1].split("int mrk_panel_poll(", 1)[0]
+        self.assertLess(start.index("setReleasedWhenClosed:NO"), start.index("mrk_panel_configure_open_identity(s)"))
+        self.assertLess(start.index("mrk_panel_configure_open_identity(s)"), start.index("beginSheetModalForWindow:"))
+        stopped = start.split("!mrk_panel_configure_open_identity(s)", 1)[1].split("#endif", 1)[0]
+        self.assertIn("s->unknown = YES; return EIO;", stopped)
+        self.assertNotIn("return EPERM;", stopped)
+        configuration = native.split("static BOOL mrk_panel_configure_open_identity(MRKInstalledPanel *s) {", 1)[1].split(
+            "int mrk_panel_observe_open_identity(", 1)[0]
+        self.assertEqual(configuration.count("setAccessibilityIdentifier:"), 2)
+        self.assertEqual(configuration.count("[s->parent accessibilityIdentifier]"), 1)
+        self.assertEqual(configuration.count("[s->window accessibilityIdentifier]"), 1)
+        self.assertLess(configuration.index("MRK_ID_CONFIG_ATTEMPTED"), configuration.index("[NSUUID UUID]"))
+        for target, entered, returned in (("parent", "MRK_ID_PARENT_ENTERED", "MRK_ID_PARENT_RETURNED"),
+                                           ("window", "MRK_ID_PANEL_ENTERED", "MRK_ID_PANEL_RETURNED")):
+            self.assertLess(configuration.index(entered), configuration.index(f"[s->{target} setAccessibilityIdentifier:"))
+            self.assertLess(configuration.index(f"[s->{target} setAccessibilityIdentifier:"), configuration.index(returned))
+        self.assertLess(configuration.index("d->configuration_parent ="), configuration.index("d->configuration_panel ="))
+        self.assertLess(configuration.index("d->configuration_panel ="), configuration.index("MRK_ID_CONFIG_COMPLETE"))
+        self.assertNotIn("MRK_ID_MATCH", configuration)  # Normal early classes cannot veto presentation.
+        self.assertIn("@throw;", configuration)
+        copied = native.split("void mrk_panel_observe_identity_data(", 1)[1].split("static BOOL mrk_identity_tag(", 1)[0]
+        self.assertEqual(copied.count("memcpy("), 1)
+        for forbidden in ("[s->", "[NS", "release]", "retain]", "mrk_panel_poll", "mrk_main_thread("):
+            self.assertNotIn(forbidden, copied)
         binding = native.split("int mrk_panel_observe_open_identity(", 1)[1].split("typedef union", 1)[0]
-        self.assertLess(binding.index("s->observationIdentityAttempted = YES"), binding.index("setAccessibilityIdentifier:"))
-        self.assertEqual(binding.count("setAccessibilityIdentifier:"), 2)
-        self.assertEqual(binding.count("accessibilityIdentifier] isEqualToString:"), 2)
+        self.assertLess(binding.index("s->observationIdentityAttempted = YES"), binding.index("[s->parent accessibilityIdentifier]"))
+        self.assertNotIn("setAccessibilityIdentifier:", binding)
+        self.assertNotIn("NSUUID", binding)
+        self.assertLess(binding.index("d->binding_parent ="), binding.index("d->binding_panel ="))
+        self.assertLess(binding.index("d->binding_panel ="), binding.index("d->binding_parent != MRK_ID_MATCH"))
+        self.assertLess(binding.index("d->phase = MRK_ID_BINDING"), binding.index("if (s->unknown"))
+        self.assertIn("d->error = MRK_AX_UNSUPPORTED; return MRK_AX_UNSUPPORTED;", binding)
         self.assertIn("capacity != 64", binding)
         for guard in ("s->responded", "s->callbackActive", "s->closeAttempted", "s->closed", "s->observationIdentityAttempted",
                       "mrk_observation_attached(s)", "mrk_observation_directory_ready(s)"):
@@ -962,12 +1119,40 @@ class AquaDataTests(unittest.TestCase):
         wrapper = observer.split("fn native_step(", 1)[1].split("fn native_step_body(", 1)[0]
         self.assertLess(wrapper.index("self.native_step_body("), wrapper.index("native.returned = true"))
         self.assertLess(wrapper.index("native.returned = true"), wrapper.index("r.prepared_open = Some(input)"))
+        self.assertLess(wrapper.index("native.returned = true"), wrapper.index("sample.binding = Some(returned.binding)"))
+        self.assertLess(wrapper.index("sample.binding = Some(returned.binding)"), wrapper.index("r.prepared_open = Some(input)"))
+        self.assertIn("sample.configuration == returned.configuration", wrapper)
         body = observer.split("fn native_step_body(", 1)[1].split("pub(super) fn close_prevented", 1)[0]
-        self.assertIn("prepare_open_input(id)", body)
+        self.assertIn("prepare_open_input(id, binding_return)", body)
         self.assertIn("return Ok(false); // Deliberately NOT a native action return.", body)
         self.assertNotIn("PanelAction::ProjectOpen", observer)
         report = observer.split("fn report_failure(", 1)[1].split("pub(super) fn attach(", 1)[0]
         self.assertLess(report.index('"native-ax-input" | "native-ax-custody"'), report.index("self.failure_reported.swap(true"))
+        scope = observer.split("pub(super) fn open_identity_scope(", 1)[1].split("pub(super) fn identity_start_returned(", 1)[0]
+        self.assertIn("self.case != Case::PickerLoss && id == self.case.selected_id()", scope)
+        self.assertIn("matches!(kind, mrk_macos_installed_native::PanelKind::Project)", scope)
+        code = M.re.sub(r"//[^\n]*", "", scope)
+        for forbidden in (".record(", "project_calls", "r.step", "Step::"):
+            self.assertNotIn(forbidden, code)
+        construct = adapter.split("fn construct(", 1)[1].split("fn ", 1)[0]
+        self.assertLess(construct.index("*book = Some(OriginalPanel"), construct.index("installed_arm_open_identity()"))
+        self.assertLess(construct.index("!q.timely()"), construct.index("installed_arm_open_identity()"))
+        self.assertLess(construct.index("installed_arm_open_identity()"), construct.index("let returned = panel.start(choice)"))
+        self.assertLess(construct.index("let returned = panel.start(choice)"), construct.index("take_installed_identity_start_return()"))
+        self.assertLess(construct.index("take_installed_identity_start_return()"), construct.index("returned.map_err("))
+        delivered = adapter.split("let result = construct(&creating, kind,", 1)[1].split("}).is_err()", 1)[0]
+        self.assertLess(delivered.index("q.identity_start_returned(id, data)"), delivered.index("done.send(result)"))
+        for forbidden in ("installed_observation(", "PANEL.with(", ".facts(", "run_on_main_thread("):
+            self.assertNotIn(forbidden, delivered)
+        published = observer.split("pub(super) fn identity_start_returned(", 1)[1].split("fn report_failure(", 1)[0]
+        self.assertLess(published.index("r.identity_binding = Some("), published.index("if !returned.succeeded()"))
+        rust = (PATH.parents[1] / "native/macos-installed-native/src/lib.rs").read_text(encoding="utf-8")
+        started = rust.split("pub fn start(", 1)[1].split("pub fn poll(", 1)[0]
+        self.assertLess(started.index("self.observation_start = None"), started.index("self.usable()?"))
+        self.assertLess(started.index("mrk_panel_start("), started.index("observation::identity_start_return("))
+        self.assertLess(started.index("observation::identity_start_return("), started.index("let result = result(status)"))
+        self.assertIn("error.kind() != io::ErrorKind::PermissionDenied) { self.unknown = true; }", started)
+        self.assertIn("identity_data_check()", rust)  # Existing hosted DATA entry, not local native execution.
 
     def test_dom_callback_custody_wraps_only_the_original_returned_body(self):
         # Source controls only: the actual Rust DATA entry and native callback

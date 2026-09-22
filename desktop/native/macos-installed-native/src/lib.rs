@@ -114,22 +114,42 @@ fn panel_response(code: c_int) -> io::Result<PanelResponse> {
 pub enum PanelState { Showing, Responded { response: PanelResponse, path: Option<PathBuf> }, Closed }
 /// Main-thread-only original. Drop deliberately does not stand in for native
 /// close/release finality: an unresolved object is retained, never retried.
-pub struct Panel { original: NonNull<c_void>, unknown: bool, _main: PhantomData<Rc<()>> }
+pub struct Panel {
+    original: NonNull<c_void>, unknown: bool, _main: PhantomData<Rc<()>>,
+    #[cfg(feature = "installed-observation")]
+    observation_identity_armed: bool,
+    #[cfg(feature = "installed-observation")]
+    observation_start: Option<observation::IdentityStartReturn>,
+}
 pub fn main_thread() -> bool { unsafe { mrk_main_thread() == 1 } }
 impl Panel {
     pub fn reserve() -> io::Result<Self> {
         // SAFETY: native code enforces the main thread before allocating.
         let original = NonNull::new(unsafe { mrk_panel_reserve() }).ok_or(io::ErrorKind::Other)?;
-        Ok(Self { original, unknown: false, _main: PhantomData })
+        Ok(Self { original, unknown: false, _main: PhantomData,
+            #[cfg(feature = "installed-observation")]
+            observation_identity_armed: false,
+            #[cfg(feature = "installed-observation")]
+            observation_start: None,
+        })
     }
     fn usable(&self) -> io::Result<()> {
         if self.unknown || !main_thread() { Err(io::ErrorKind::Other.into()) } else { Ok(()) }
     }
     pub fn start(&mut self, kind: PanelKind) -> io::Result<()> {
+        #[cfg(feature = "installed-observation")]
+        { self.observation_start = None; }
         self.usable()?;
         // SAFETY: retained opaque original, main-thread-only type. EPERM means
         // the native function observed no available parent before construction.
-        let result = result(unsafe { mrk_panel_start(self.original.as_ptr(), match kind { PanelKind::Project => 1, PanelKind::Quit => 2 }) });
+        let status = unsafe { mrk_panel_start(self.original.as_ptr(), match kind { PanelKind::Project => 1, PanelKind::Quit => 2 }) };
+        #[cfg(feature = "installed-observation")]
+        if self.observation_identity_armed {
+            // This C call ACTUALLY returned. Copy saved scalars now, before the
+            // unchanged unknown rule; never query AppKit to explain an error.
+            self.observation_start = Some(observation::identity_start_return(self.original, status));
+        }
+        let result = result(status);
         if result.as_ref().is_err_and(|error| error.kind() != io::ErrorKind::PermissionDenied) { self.unknown = true; }
         result
     }
@@ -177,7 +197,8 @@ impl Panel {
 // nondefault feature forwarding selects BOTH this Rust seam and the C controls.
 #[cfg(feature = "installed-observation")]
 pub use observation::{PanelAction, PanelActionDiagnostic, PanelObservation, OpenIdentity, AxDiagnostic, AxReport,
-    AxInputReturn, installed_accessibility_trusted, installed_accessibility_press, installed_observation_flags_data_check};
+    AxInputReturn, IdentityConfiguration, IdentityStartReturn, IdentityBinding, IdentityBindingReturn,
+    installed_accessibility_trusted, installed_accessibility_press, installed_observation_flags_data_check};
 #[cfg(feature = "installed-observation")]
 mod observation {
     use super::*;
@@ -289,6 +310,8 @@ mod observation {
         fn mrk_panel_observe_action(panel: *mut c_void, action: c_int, directory: *const c_char,
             diagnostic: *mut u32) -> c_int;
         fn mrk_observation_ax_trusted() -> c_int;
+        fn mrk_panel_observe_arm_open_identity(panel: *mut c_void) -> c_int;
+        fn mrk_panel_observe_identity_data(panel: *mut c_void, data: *mut IdentityWire);
         fn mrk_panel_observe_open_identity(panel: *mut c_void, parent: *mut u8, sheet: *mut u8, capacity: usize) -> c_int;
         fn mrk_observation_ax_press(parent: *const u8, sheet: *const u8, capacity: usize,
             admission: unsafe extern "C" fn(*mut c_void, u64, c_int, *mut AxTimeout) -> c_int,
@@ -310,6 +333,162 @@ mod observation {
     const AX_ERRORS: [&str; 16] = ["none", "wrong-thread", "invalid-input", "ineligible", "unsupported", "ambiguous",
         "malformed", "limit", "deadline", "custody", "invalid-element", "cannot-complete", "ax-other", "changed",
         "objc-exception", "cleanup-unknown"];
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct IdentityWire {
+        flags: u32, configuration_parent: u32, configuration_panel: u32, binding_parent: u32, binding_panel: u32,
+        phase: u32, site: u32, error: u32,
+    }
+    const IDENTITY_CLASSES: [Option<&str>; 5] = [None, Some("nil"), Some("match"), Some("different"), Some("type-invalid")];
+    const IDENTITY_SITES: [Option<&str>; 8] = [None, Some("objects"), Some("tags"), Some("parent-set"), Some("panel-set"),
+        Some("parent-get"), Some("panel-get"), Some("complete")];
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct IdentityConfiguration {
+        pub attempted: bool, pub parent_setter_entered: bool, pub parent_setter_returned: bool,
+        pub panel_setter_entered: bool, pub panel_setter_returned: bool,
+        pub parent: Option<&'static str>, pub panel: Option<&'static str>,
+        pub site: Option<&'static str>, pub error: Option<&'static str>,
+    }
+    impl IdentityConfiguration {
+        pub fn complete(self) -> bool {
+            self.attempted && self.parent_setter_entered && self.parent_setter_returned
+                && self.panel_setter_entered && self.panel_setter_returned && self.parent.is_some() && self.panel.is_some()
+                && self.site == Some("complete") && self.error == Some("none")
+        }
+    }
+    /// Exists only after the original C start returns; an invalid scalar frame
+    /// is missing DATA, never permission to change that original return.
+    #[derive(Clone, Copy)]
+    pub struct IdentityStartReturn { pub result: &'static str, pub configuration: Option<IdentityConfiguration> }
+    impl IdentityStartReturn {
+        pub fn succeeded(self) -> bool { self.result == "ok" && self.configuration.is_some_and(IdentityConfiguration::complete) }
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct IdentityBinding {
+        pub attempted: bool, pub parent: Option<&'static str>, pub panel: Option<&'static str>,
+        pub site: &'static str, pub error: &'static str,
+    }
+    impl IdentityBinding {
+        pub fn matched(self) -> bool {
+            self.attempted && self.parent == Some("match") && self.panel == Some("match")
+                && self.site == "complete" && self.error == "none"
+        }
+    }
+    #[derive(Clone, Copy)]
+    pub struct IdentityBindingReturn { pub configuration: IdentityConfiguration, pub binding: IdentityBinding }
+    fn identity_configuration(w: IdentityWire) -> Option<IdentityConfiguration> {
+        if w.flags & !255 != 0 || w.flags & 1 == 0 { return None; }
+        let parent = *IDENTITY_CLASSES.get(w.configuration_parent as usize)?;
+        let panel = *IDENTITY_CLASSES.get(w.configuration_panel as usize)?;
+        let mut c = IdentityConfiguration {
+            attempted: w.flags & 2 != 0, parent_setter_entered: w.flags & 4 != 0, parent_setter_returned: w.flags & 8 != 0,
+            panel_setter_entered: w.flags & 16 != 0, panel_setter_returned: w.flags & 32 != 0,
+            parent, panel, site: None, error: None,
+        };
+        if c.parent_setter_returned && !c.parent_setter_entered || c.panel_setter_entered && !c.parent_setter_returned
+            || c.panel_setter_returned && !c.panel_setter_entered || c.parent.is_some() && !c.panel_setter_returned
+            || c.panel.is_some() && c.parent.is_none() { return None; }
+        if !c.attempted {
+            return (w.flags == 1 && w.phase == 0 && w.site == 0 && w.error == 0 && parent.is_none() && panel.is_none()
+                && w.binding_parent == 0 && w.binding_panel == 0).then_some(c);
+        }
+        if w.phase == 2 {
+            // The original start froze these configuration fields before the
+            // binding phase changed its own site/error. Early equality is NOT required.
+            c.site = Some("complete"); c.error = Some("none");
+            return (w.flags & 128 != 0 && c.complete()).then_some(c);
+        }
+        if w.phase != 1 || w.flags & 64 != 0 || w.binding_parent != 0 || w.binding_panel != 0 { return None; }
+        c.site = *IDENTITY_SITES.get(w.site as usize)?;
+        c.error = Some(*AX_ERRORS.get(w.error as usize)?);
+        let setters = w.flags & 60;
+        let no_classes = parent.is_none() && panel.is_none();
+        let valid = match (w.site, w.error) {
+            (1, 3) | (2, 2 | 14) => setters == 0 && no_classes && w.flags & 128 == 0,
+            (3, 14) => setters == 4 && no_classes && w.flags & 128 == 0,
+            (4, 14) => setters == 28 && no_classes && w.flags & 128 == 0,
+            (5, 14) => setters == 60 && no_classes && w.flags & 128 == 0,
+            (6, 14) => setters == 60 && parent.is_some() && panel.is_none() && w.flags & 128 == 0,
+            (7, 0) => w.flags & 128 != 0 && c.complete(),
+            _ => false,
+        };
+        valid.then_some(c)
+    }
+    pub(super) fn identity_start_return(original: NonNull<c_void>, status: c_int) -> IdentityStartReturn {
+        let mut wire = IdentityWire::default();
+        // SAFETY: immediate original-return copy; this opaque cell is retained
+        // on EVERY start return. No Objective-C query or ownership operation.
+        unsafe { mrk_panel_observe_identity_data(original.as_ptr(), &mut wire); }
+        let result = match status { 0 => "ok", 1 => "permission-denied", 5 => "io", 22 => "invalid-input", 37 => "already", _ => "other" };
+        let configuration = identity_configuration(wire).filter(|c| wire.phase != 2 && (status != 0 || c.complete()));
+        IdentityStartReturn { result, configuration }
+    }
+    fn identity_binding_return(status: c_int, w: IdentityWire) -> Option<IdentityBindingReturn> {
+        if w.phase != 2 || c_int::try_from(w.error).ok() != Some(status) { return None; }
+        let configuration = identity_configuration(w)?;
+        let b = IdentityBinding {
+            attempted: w.flags & 64 != 0,
+            parent: *IDENTITY_CLASSES.get(w.binding_parent as usize)?, panel: *IDENTITY_CLASSES.get(w.binding_panel as usize)?,
+            site: (*IDENTITY_SITES.get(w.site as usize)?)?, error: *AX_ERRORS.get(w.error as usize)?,
+        };
+        let no_classes = b.parent.is_none() && b.panel.is_none();
+        if !b.attempted {
+            return (no_classes && b.site == "objects" && b.error == "ineligible")
+                .then_some(IdentityBindingReturn { configuration, binding: b });
+        }
+        let both_match = b.parent == Some("match") && b.panel == Some("match");
+        let valid = match (w.site, w.error) {
+            (1, 3 | 14) => no_classes || both_match,
+            (2, 2 | 14) | (5, 14) => no_classes,
+            (6, 14) => b.parent.is_some() && b.panel.is_none(),
+            (5, 4) => b.parent.is_some() && b.parent != Some("match") && b.panel.is_some(),
+            (6, 4) => b.parent == Some("match") && b.panel.is_some() && b.panel != Some("match"),
+            (7, 0) => both_match,
+            _ => false,
+        };
+        valid.then_some(IdentityBindingReturn { configuration, binding: b })
+    }
+    fn identity_data_check() -> bool {
+        // Inert scalar DATA only: no panel/owner/native call or return is made.
+        let empty = IdentityWire { flags: 1, ..IdentityWire::default() };
+        if !identity_configuration(empty).is_some_and(|c| !c.attempted && !c.complete() && c.parent.is_none() && c.panel.is_none())
+            || identity_configuration(IdentityWire::default()).is_some() { return false; }
+        for parent in 1..=4 {
+            for panel in 1..=4 {
+                let configured = IdentityWire { flags: 191, configuration_parent: parent, configuration_panel: panel,
+                    phase: 1, site: 7, ..IdentityWire::default() };
+                let Some(configuration) = identity_configuration(configured) else { return false; };
+                if !configuration.complete() { return false; } // ANY early normal class, not only match.
+                let refused = IdentityWire { phase: 2, site: 1, error: 3, ..configured };
+                if !identity_binding_return(3, refused).is_some_and(|r|
+                    r.configuration == configuration && !r.binding.attempted && r.binding.parent.is_none() && r.binding.panel.is_none())
+                    || identity_binding_return(3, configured).is_some() { return false; }
+                for late_parent in 1..=4 {
+                    for late_panel in 1..=4 {
+                        let matches = late_parent == 2 && late_panel == 2;
+                        let site = if late_parent != 2 { 5 } else if late_panel != 2 { 6 } else { 7 };
+                        let error = if matches { 0 } else { 4 };
+                        let late = IdentityWire { flags: 255, binding_parent: late_parent, binding_panel: late_panel,
+                            phase: 2, site, error, ..configured };
+                        if !identity_binding_return(error as c_int, late).is_some_and(|r|
+                            r.configuration == configuration && r.binding.matched() == matches
+                                && r.binding.parent.is_some() && r.binding.panel.is_some())
+                            || identity_binding_return(14, late).is_some() { return false; }
+                    }
+                }
+            }
+        }
+        for (flags, site, parent) in [(3, 2, 0), (7, 3, 0), (31, 4, 0), (63, 5, 0), (63, 6, 1)] {
+            let partial = IdentityWire { flags, phase: 1, site, error: 14, configuration_parent: parent, ..IdentityWire::default() };
+            if !identity_configuration(partial).is_some_and(|c| !c.complete() && c.panel.is_none())
+                || identity_configuration(IdentityWire { configuration_panel: 2, ..partial }).is_some() { return false; }
+        }
+        let complete = IdentityWire { flags: 191, phase: 1, site: 7, configuration_parent: 1, configuration_panel: 4,
+            ..IdentityWire::default() };
+        [IdentityWire { flags: 447, ..complete }, IdentityWire { configuration_parent: 5, ..complete },
+            IdentityWire { configuration_panel: 0, ..complete }, IdentityWire { error: 4, ..complete }]
+            .into_iter().all(|wire| identity_configuration(wire).is_none())
+    }
     #[repr(C)]
     #[derive(Default)]
     struct AxWire { site: u32, error: u32, flags: u32 }
@@ -426,19 +605,37 @@ mod observation {
     /// Pure checks called by the existing instrumented observer entry, not a
     /// native query or a separate test executable/qualification route.
     pub fn installed_observation_flags_data_check() -> bool {
-        action_diagnostics_data_check() && ax_data_check() && [0, 0x1000, 0x2000, 0x12000, 0x3000, 0xf000, 0x1f002, 0x1ffff]
+        action_diagnostics_data_check() && ax_data_check() && identity_data_check() && [0, 0x1000, 0x2000, 0x12000, 0x3000, 0xf000, 0x1f002, 0x1ffff]
             .into_iter().all(observation_flags_valid)
             && [2, 0x4000, 0x8000, 0x10000, 0x14000, 0x1f000, 0x20000, u32::MAX]
                 .into_iter().all(|flags| !observation_flags_valid(flags))
     }
     impl Panel {
-        pub fn installed_open_identity(&mut self) -> Result<OpenIdentity, AxDiagnostic> {
+        pub fn installed_arm_open_identity(&mut self) -> io::Result<()> {
+            self.usable()?;
+            if self.observation_identity_armed { return Err(io::ErrorKind::Other.into()); }
+            // SAFETY: fresh retained original. The C arm writes a scalar only.
+            let returned = result(unsafe { mrk_panel_observe_arm_open_identity(self.original.as_ptr()) });
+            if returned.is_ok() { self.observation_identity_armed = true; } else { self.unknown = true; }
+            returned
+        }
+        pub fn take_installed_identity_start_return(&mut self) -> Option<IdentityStartReturn> {
+            self.observation_start.take() // Rust DATA only, including an original failed start.
+        }
+        pub fn installed_open_identity(&mut self, returned: &mut Option<IdentityBindingReturn>) -> Result<OpenIdentity, AxDiagnostic> {
+            *returned = None;
             self.usable().map_err(|_| AxDiagnostic { site: "binding", error: "ineligible" })?;
             let mut identity = OpenIdentity { parent: [0; 64], panel: [0; 64] };
             // SAFETY: same retained main-thread original; only tag bytes return.
             let status = unsafe { mrk_panel_observe_open_identity(self.original.as_ptr(), identity.parent.as_mut_ptr(),
                 identity.panel.as_mut_ptr(), identity.parent.len()) };
-            if status == 0 && identity_tag(&identity.parent, b"mrk-parent-") && identity_tag(&identity.panel, b"mrk-panel-") {
+            let mut wire = IdentityWire::default();
+            // SAFETY: same immediate returned-original scalar copy, even if C
+            // caught an exception. Never a subsequent AppKit observation.
+            unsafe { mrk_panel_observe_identity_data(self.original.as_ptr(), &mut wire); }
+            *returned = identity_binding_return(status, wire);
+            if status == 0 && returned.is_some_and(|data| data.binding.matched())
+                && identity_tag(&identity.parent, b"mrk-parent-") && identity_tag(&identity.panel, b"mrk-panel-") {
                 return Ok(identity);
             }
             if status == 0 || status == 14 || !(1..16).contains(&status) { self.unknown = true; }

@@ -29,7 +29,7 @@ WORKFLOW = REPOSITORY + "/.github/workflows/desktop-macos-aqua.yml@" + REF
 MARKER = b"MRK_MACOS_AQUA_RESULT="
 OUTPUT_LIMIT = 2 * 1024 * 1024
 JSON_LIMIT = 16383
-FAILURE_CONTEXT_LIMIT = 1536
+FAILURE_CONTEXT_LIMIT = 4096
 TRACEBACK_LIMIT = 64
 SCOPE = "programmatic genuine controls; no Store, release, distribution or physical-device evidence"
 FAILURE_STEPS = frozenset((
@@ -97,6 +97,10 @@ ACCESSIBILITY_ERRORS = frozenset((
     "none wrong-thread invalid-input ineligible unsupported ambiguous malformed limit deadline custody "
     "invalid-element cannot-complete ax-other changed objc-exception cleanup-unknown"
 ).split())
+ACCESSIBILITY_BINDING_CLASSES = frozenset(("nil", "match", "different", "type-invalid"))
+ACCESSIBILITY_BINDING_SITES = frozenset((
+    "objects", "tags", "parent-set", "panel-set", "parent-get", "panel-get", "complete",
+))
 SOURCE = (b'plugins { id("com.android.application") }\n'
           b'android { defaultConfig { applicationId = "org.example.mrk.observed" } }\n')
 VERSION = b"VERSION_NAME=1.2.3\nBUILD_NUMBER=7\n"
@@ -221,6 +225,14 @@ def expected_result(binding, case):
                 "prepared": True, "entered": True, "attempted": True, "pressReturned": True, "returned": True,
                 "retired": True, "identityMatched": True, "controlMatched": True, "cleanupReturned": True,
                 "site": "press", "error": "none"},
+            "projectOpenBinding": None if case == "picker-loss" else {
+                "mechanism": "public-accessibility-identifier", "case": case, "id": 2 if first else 1, "kind": "project",
+                "start": {"returned": True, "result": "ok"},
+                "configuration": {"attempted": True, "parentSetterEntered": True, "parentSetterReturned": True,
+                    "panelSetterEntered": True, "panelSetterReturned": True, "parent": "match", "panel": "match",
+                    "site": "complete", "error": "none"},
+                "binding": {"returned": True, "attempted": True, "parent": "match", "panel": "match",
+                    "site": "complete", "error": "none"}},
             "quitCancelKeptOriginalReview": first, "originalDocumentAndQuitSettled": True},
         "saveSessions": sessions, "freshCoreReadback": first, "syntheticFileReadback": True,
         "staleMarkerWriterReturnedAndClosed": stale,
@@ -266,6 +278,17 @@ def parse_result(stdout, stderr, binding, case):
     except (ValueError, RecursionError, UnicodeError) as error:
         raise Refused("result-json") from error
     expected = expected_result(binding, case)
+    if case != "picker-loss":
+        need(type(value) is dict and type(value.get("native")) is dict, "native-object")
+        identity = _accessibility_binding_context(value["native"].get("projectOpenBinding"), case)
+        need(identity is not None and identity["start"]["result"] == "ok" and identity["binding"] is not None
+             and identity["binding"]["attempted"] and identity["binding"]["error"] == "none",
+             "project-open-binding")
+        # Normal early nil/different/type-invalid are retained DATA, not a new
+        # presentation veto or evidence of late identity. The strict parser
+        # still requires both actual late matches; all remote/finality fields
+        # are checked independently below against the unchanged exact result.
+        expected["native"]["projectOpenBinding"] = identity
     if case in ("picker-loss", "save-loss"):
         need(type(value) is dict and type(value.get("reload")) is dict, "reload-object")
         reload = value["reload"]
@@ -403,16 +426,92 @@ def _accessibility_context(value, native, panel):
         return None
 
 
-def failure_context(stdout, stderr):
+def _accessibility_binding_context(value, case):
+    """Closed original-return DATA; never a permission, action or finality fact."""
+    if value is None:
+        return None
+    try:
+        label = "accessibility-binding-data"
+        need(type(case) is str and case in CASES and case != "picker-loss", label)
+        need(type(value) is dict and set(value) == {"mechanism", "case", "id", "kind", "start", "configuration", "binding"}, label)
+        need(value["mechanism"] == "public-accessibility-identifier" and value["case"] == case
+             and type(value["id"]) is int and value["id"] == (2 if case == "first-save" else 1)
+             and value["kind"] == "project", label)
+        start, configured, bound = value["start"], value["configuration"], value["binding"]
+        need(type(start) is dict and set(start) == {"returned", "result"} and start["returned"] is True
+             and type(start["result"]) is str
+             and start["result"] in ("ok", "permission-denied", "io", "invalid-input", "already", "other"), label)
+        flags = ("parentSetterEntered", "parentSetterReturned", "panelSetterEntered", "panelSetterReturned")
+        need(type(configured) is dict and set(configured) == {"attempted", *flags, "parent", "panel", "site", "error"}
+             and all(type(configured[key]) is bool for key in ("attempted", *flags)), label)
+        for phase in (configured,) if bound is None else (configured, bound):
+            need(type(phase) is dict and all(key in phase for key in ("parent", "panel", "site", "error")), label)
+            need(all(phase[key] is None or type(phase[key]) is str and phase[key] in ACCESSIBILITY_BINDING_CLASSES
+                     for key in ("parent", "panel")), label)
+            need(phase["site"] is None or type(phase["site"]) is str and phase["site"] in ACCESSIBILITY_BINDING_SITES, label)
+            need(phase["error"] is None or type(phase["error"]) is str and phase["error"] in ACCESSIBILITY_ERRORS, label)
+        bits = tuple(configured[key] for key in flags)
+        parent, panel, site, error = (configured[key] for key in ("parent", "panel", "site", "error"))
+        if not configured["attempted"]:
+            need(not any(bits) and parent is panel is site is error is None and start["result"] != "ok", label)
+        else:
+            # Configuration is inside the actual start, after allocation. A
+            # failure there must not be reclassified as precreation EPERM.
+            need(start["result"] in ("ok", "io") and site is not None and error is not None, label)
+            if site in ("objects", "tags"):
+                need(not any(bits) and parent is panel is None
+                     and error in (("ineligible",) if site == "objects" else ("invalid-input", "objc-exception")), label)
+            elif site == "parent-set":
+                need(bits == (True, False, False, False) and parent is panel is None and error == "objc-exception", label)
+            elif site == "panel-set":
+                need(bits == (True, True, True, False) and parent is panel is None and error == "objc-exception", label)
+            elif site == "parent-get":
+                need(all(bits) and parent is panel is None and error == "objc-exception", label)
+            elif site == "panel-get":
+                need(all(bits) and parent is not None and panel is None and error == "objc-exception", label)
+            else:
+                need(site == "complete" and all(bits) and parent is not None and panel is not None and error == "none", label)
+            if start["result"] == "ok":
+                need(site == "complete" and error == "none", label)
+        if bound is not None:
+            need(start["result"] == "ok" and type(bound) is dict
+                 and set(bound) == {"returned", "attempted", "parent", "panel", "site", "error"}
+                 and bound["returned"] is True and type(bound["attempted"]) is bool, label)
+            parent, panel, site, error = (bound[key] for key in ("parent", "panel", "site", "error"))
+            need(site in ("objects", "tags", "parent-get", "panel-get", "complete") and error is not None, label)
+            if not bound["attempted"]:
+                need(site == "objects" and parent is panel is None and error == "ineligible", label)
+            elif site == "complete":
+                need(parent == panel == "match" and error == "none", label)
+            elif site == "parent-get":
+                need(parent is panel is None and error == "objc-exception"
+                     or parent is not None and parent != "match" and panel is not None and error == "unsupported", label)
+            elif site == "panel-get":
+                need(parent is not None and panel is None and error == "objc-exception"
+                     or parent == "match" and panel is not None and panel != "match" and error == "unsupported", label)
+            elif site == "tags":
+                need(parent is panel is None and error in ("invalid-input", "objc-exception"), label)
+            else:
+                # The original final attachment/directory check can refuse
+                # after both getters. It cannot turn that refusal into input.
+                need((parent is panel is None or parent == panel == "match")
+                     and error in ("ineligible", "objc-exception"), label)
+        return value
+    except (Refused, KeyError, TypeError, ValueError):
+        return None
+
+
+def failure_context(stdout, stderr, case=None):
     row = _failure_row(stdout, stderr, b"MRK_MACOS_AQUA_FAILURE_CONTEXT", FAILURE_CONTEXT_LIMIT)
     if row is None:
         return None
     try:
         value = json.loads(row.decode("ascii"), object_pairs_hook=_pairs,
                            parse_constant=lambda _: (_ for _ in ()).throw(Refused("failure-context")))
-        need(type(value) is dict and set(value) in ({"pending", "nativeHandler", "lastPanel"},
-                                                  {"pending", "nativeHandler", "lastPanel", "nativeAction"},
-                                                  {"pending", "nativeHandler", "lastPanel", "nativeAction", "accessibility"}), "failure-context")
+        need(type(value) is dict and set(value) - {"accessibilityBinding"} in (
+            {"pending", "nativeHandler", "lastPanel"},
+            {"pending", "nativeHandler", "lastPanel", "nativeAction"},
+            {"pending", "nativeHandler", "lastPanel", "nativeAction", "accessibility"}), "failure-context")
         pending, native, panel = value["pending"], value["nativeHandler"], value["lastPanel"]
         if pending is not None:
             need(type(pending) is dict and set(pending) == {"kind", "step"}
@@ -443,6 +542,10 @@ def failure_context(stdout, stderr):
             value["nativeAction"] = _native_action_context(value["nativeAction"], native, panel)
         if "accessibility" in value:
             value["accessibility"] = _accessibility_context(value["accessibility"], native, panel)
+        if "accessibilityBinding" in value:
+            # Early start failure legitimately has no nativeHandler/lastPanel
+            # or Press sample. Bind to the known case, not to invented actions.
+            value["accessibilityBinding"] = _accessibility_binding_context(value["accessibilityBinding"], case)
         return value
     except (Refused, ValueError, RecursionError, UnicodeError, TypeError):
         return None
@@ -521,7 +624,7 @@ def _original_exception_diagnostics(error, run_owned, case, cwd):
         stdout, stderr = bytes(outputs[0]), bytes(outputs[1])
         # The copies are immediately reduced; none is retained/exported by the
         # caller. Buffer availability never means EOF or original finality.
-        reduced = (failure_step(stdout, stderr), failure_reason(stdout, stderr), failure_context(stdout, stderr))
+        reduced = (failure_step(stdout, stderr), failure_reason(stdout, stderr), failure_context(stdout, stderr, case))
         return reduced if any(part is not None for part in reduced) else None
     except BaseException:
         return None  # Extraction must never mask the original invocation error.
@@ -854,7 +957,7 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit):
         fixtures.app_returncode = result.returncode
         fixtures.inner_failure_step = failure_step(result.stdout, result.stderr)
         fixtures.inner_failure_reason = failure_reason(result.stdout, result.stderr)
-        fixtures.inner_failure_context = failure_context(result.stdout, result.stderr)
+        fixtures.inner_failure_context = failure_context(result.stdout, result.stderr, case)
         fixtures.inner_diagnostic_source = "completed-output"
         need(result.returncode == 0, "app-return")
         report = parse_result(result.stdout, result.stderr, binding, case)

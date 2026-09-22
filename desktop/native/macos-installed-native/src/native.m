@@ -188,6 +188,20 @@ int mrk_panel_response(int kind, int64_t code, int programmatic) {
     return 0; // Stop/Abort/unknown are never evidence of genuine user Cancel.
 }
 
+#ifdef MRK_INSTALLED_OBSERVATION
+// Saved scalar DATA only. Zero means unobserved, not a nil getter result.
+typedef struct {
+    uint32_t flags, configuration_parent, configuration_panel, binding_parent, binding_panel, phase, site, error;
+} MRKIdentityWire;
+enum { MRK_ID_ARMED = 1u, MRK_ID_CONFIG_ATTEMPTED = 2u, MRK_ID_PARENT_ENTERED = 4u,
+    MRK_ID_PARENT_RETURNED = 8u, MRK_ID_PANEL_ENTERED = 16u, MRK_ID_PANEL_RETURNED = 32u,
+    MRK_ID_BINDING_ATTEMPTED = 64u, MRK_ID_CONFIG_COMPLETE = 128u };
+enum { MRK_ID_CONFIGURATION = 1u, MRK_ID_BINDING = 2u };
+enum { MRK_ID_OBJECTS = 1u, MRK_ID_TAGS, MRK_ID_PARENT_SET, MRK_ID_PANEL_SET,
+    MRK_ID_PARENT_GET, MRK_ID_PANEL_GET, MRK_ID_COMPLETE };
+enum { MRK_ID_UNOBSERVED, MRK_ID_NIL, MRK_ID_MATCH, MRK_ID_DIFFERENT, MRK_ID_TYPE_INVALID };
+#endif
+
 @interface MRKInstalledPanel : NSObject {
 @public
     NSWindow *parent;
@@ -202,11 +216,16 @@ int mrk_panel_response(int kind, int64_t code, int programmatic) {
     BOOL observationDirectoryReturned, observationActionAttempted, observationActionReturned;
     BOOL observationIdentityAttempted;
     char observationDirectory[4097];
+    char observationParentTag[64], observationPanelTag[64];
+    MRKIdentityWire observationIdentity;
 #endif
 }
 @end
 @implementation MRKInstalledPanel
 @end
+#ifdef MRK_INSTALLED_OBSERVATION
+static BOOL mrk_panel_configure_open_identity(MRKInstalledPanel *s);
+#endif
 
 void *mrk_panel_reserve(void) {
     if (!pthread_main_np()) return NULL;
@@ -240,6 +259,12 @@ int mrk_panel_start(void *opaque, int kind) {
             s->window = [[s->alert window] retain];
         }
         [s->window setReleasedWhenClosed:NO];
+#ifdef MRK_INSTALLED_OBSERVATION
+        if ((s->observationIdentity.flags & MRK_ID_ARMED) && !mrk_panel_configure_open_identity(s)) {
+            // Objects already exist. This is never the pre-construction EPERM.
+            s->unknown = YES; return EIO;
+        }
+#endif
         // The original state is retained by the copied native completion. No
         // raw Rust callback or path publication can outlive the real document.
         s->completion = Block_copy(^(NSModalResponse code) {
@@ -371,7 +396,7 @@ enum {
     MRK_ACTION_BUTTON_WINDOW, MRK_ACTION_BUTTON_ENABLED, MRK_ACTION_BUTTON_HIDDEN,
     MRK_ACTION_PROJECT_CANCEL, MRK_ACTION_PROJECT_OPEN, MRK_ACTION_QUIT_CANCEL, MRK_ACTION_QUIT_CONFIRM
 };
-_Static_assert(EPERM == 1 && EIO == 5 && EINVAL == 22 && EAGAIN == 35, "Darwin action diagnostic errno ABI");
+_Static_assert(EPERM == 1 && EIO == 5 && EINVAL == 22 && EAGAIN == 35 && EALREADY == 37, "Darwin action diagnostic errno ABI");
 static int mrk_observation_action_return(uint32_t *diagnostic, uint32_t domain, uint32_t site, int status) {
     if (diagnostic) *diagnostic = (domain << 16) | site;
     return status; // The original status, not a diagnostic classification.
@@ -473,30 +498,106 @@ int mrk_observation_ax_trusted(void) {
     return trusted; // A false result never prompts, waits, or opens a panel.
 }
 
+int mrk_panel_observe_arm_open_identity(void *opaque) {
+    if (!pthread_main_np() || !opaque) return EINVAL;
+    MRKInstalledPanel *s = opaque;
+    if (s->attempted || s->unknown || s->observationIdentity.flags) return EALREADY;
+    s->observationIdentity.flags = MRK_ID_ARMED; // Passive: no AppKit message or tag generation.
+    return 0;
+}
+void mrk_panel_observe_identity_data(void *opaque, MRKIdentityWire *data) {
+    // Used immediately after an original FFI return, while its retained Panel
+    // is still borrowed. No usable()/AppKit query, release or ownership change.
+    if (opaque && data) memcpy(data, &((MRKInstalledPanel *)opaque)->observationIdentity, sizeof(*data));
+}
+static BOOL mrk_identity_tag(const char tag[64], const char *prefix) {
+    size_t offset = strlen(prefix), length = offset + 36;
+    if (length >= 64 || strnlen(tag, 64) != length || memcmp(tag, prefix, offset)) return NO;
+    for (size_t i = 0; i < 36; i++) {
+        char c = tag[offset + i];
+        if (i == 8 || i == 13 || i == 18 || i == 23) { if (c != '-') return NO; }
+        else if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f'))) return NO;
+    }
+    for (size_t i = length; i < 64; i++) if (tag[i]) return NO;
+    return YES;
+}
+static uint32_t mrk_identity_class(id value, NSString *tag) {
+    if (!value) return MRK_ID_NIL;
+    if (![value isKindOfClass:[NSString class]]) return MRK_ID_TYPE_INVALID;
+    return [(NSString *)value isEqualToString:tag] ? MRK_ID_MATCH : MRK_ID_DIFFERENT;
+}
+static BOOL mrk_panel_configure_open_identity(MRKInstalledPanel *s) {
+    MRKIdentityWire *d = &s->observationIdentity;
+    d->flags |= MRK_ID_CONFIG_ATTEMPTED; d->phase = MRK_ID_CONFIGURATION; d->site = MRK_ID_OBJECTS;
+    d->error = MRK_AX_INELIGIBLE;
+    if (!s->parent || !s->window || s->kind != 1 || s->unknown || s->responded
+        || s->callbackActive || s->closeAttempted || s->closed) return NO;
+    @try {
+        d->site = MRK_ID_TAGS; d->error = MRK_AX_INPUT;
+        NSString *parentTag = [@"mrk-parent-" stringByAppendingString:[[NSUUID UUID] UUIDString]];
+        NSString *panelTag = [@"mrk-panel-" stringByAppendingString:[[NSUUID UUID] UUIDString]];
+        if (![parentTag getCString:s->observationParentTag maxLength:64 encoding:NSASCIIStringEncoding]
+            || ![panelTag getCString:s->observationPanelTag maxLength:64 encoding:NSASCIIStringEncoding]
+            || !mrk_identity_tag(s->observationParentTag, "mrk-parent-")
+            || !mrk_identity_tag(s->observationPanelTag, "mrk-panel-")) return NO;
+        d->site = MRK_ID_PARENT_SET; d->flags |= MRK_ID_PARENT_ENTERED;
+        [s->parent setAccessibilityIdentifier:parentTag];
+        d->flags |= MRK_ID_PARENT_RETURNED;
+        d->site = MRK_ID_PANEL_SET; d->flags |= MRK_ID_PANEL_ENTERED;
+        [s->window setAccessibilityIdentifier:panelTag];
+        d->flags |= MRK_ID_PANEL_RETURNED;
+        d->site = MRK_ID_PARENT_GET;
+        d->configuration_parent = mrk_identity_class([s->parent accessibilityIdentifier], parentTag);
+        d->site = MRK_ID_PANEL_GET;
+        d->configuration_panel = mrk_identity_class([s->window accessibilityIdentifier], panelTag);
+        // Early publication timing is not an identity proof or equality veto.
+        // Both normal classes are DATA; late exact local AND remote matches
+        // remain mandatory before the sole input attempt.
+        d->flags |= MRK_ID_CONFIG_COMPLETE; d->site = MRK_ID_COMPLETE; d->error = MRK_AX_NONE;
+        return YES;
+    } @catch (NSException *e) {
+        (void)e; d->error = MRK_AX_EXCEPTION;
+        @throw; // The SAME original start catch records unknown/EIO.
+    }
+}
 int mrk_panel_observe_open_identity(void *opaque, uint8_t *parent, uint8_t *panel, size_t capacity) {
     if (!pthread_main_np()) return MRK_AX_THREAD;
     if (!opaque || !parent || !panel || capacity != 64) return MRK_AX_INPUT;
     memset(parent, 0, capacity); memset(panel, 0, capacity);
     MRKInstalledPanel *s = opaque;
+    MRKIdentityWire *d = &s->observationIdentity;
+    if (d->phase == MRK_ID_BINDING) return MRK_AX_INELIGIBLE; // Never replace the first binding DATA.
+    d->phase = MRK_ID_BINDING; d->site = MRK_ID_OBJECTS; d->error = MRK_AX_INELIGIBLE;
+    d->binding_parent = d->binding_panel = MRK_ID_UNOBSERVED;
     if (s->unknown || !s->started || s->kind != 1 || !s->parent || !s->window || !s->completion
         || s->responded || s->callbackActive || s->closeAttempted || s->closed
-        || s->observationActionAttempted || s->observationActionReturned || s->observationIdentityAttempted)
+        || s->observationActionAttempted || s->observationActionReturned || s->observationIdentityAttempted
+        || (d->flags & (MRK_ID_ARMED | MRK_ID_CONFIG_COMPLETE)) != (MRK_ID_ARMED | MRK_ID_CONFIG_COMPLETE))
         return MRK_AX_INELIGIBLE;
-    s->observationIdentityAttempted = YES; // One binding, including refused/partial binding; never retag.
+    s->observationIdentityAttempted = YES; d->flags |= MRK_ID_BINDING_ATTEMPTED;
     @try {
         if (!mrk_observation_attached(s) || !mrk_observation_directory_ready(s)) return MRK_AX_INELIGIBLE;
-        NSString *parentTag = [@"mrk-parent-" stringByAppendingString:[[NSUUID UUID] UUIDString]];
-        NSString *panelTag = [@"mrk-panel-" stringByAppendingString:[[NSUUID UUID] UUIDString]];
-        if (![parentTag getCString:(char *)parent maxLength:capacity encoding:NSASCIIStringEncoding]
-            || ![panelTag getCString:(char *)panel maxLength:capacity encoding:NSASCIIStringEncoding]) return MRK_AX_INPUT;
-        [s->parent setAccessibilityIdentifier:parentTag];
-        [s->window setAccessibilityIdentifier:panelTag];
-        if (![[s->parent accessibilityIdentifier] isEqualToString:parentTag]
-            || ![[s->window accessibilityIdentifier] isEqualToString:panelTag]) return MRK_AX_UNSUPPORTED;
+        d->site = MRK_ID_TAGS; d->error = MRK_AX_INPUT;
+        if (!mrk_identity_tag(s->observationParentTag, "mrk-parent-")
+            || !mrk_identity_tag(s->observationPanelTag, "mrk-panel-")) return MRK_AX_INPUT;
+        NSString *parentTag = [NSString stringWithCString:s->observationParentTag encoding:NSASCIIStringEncoding];
+        NSString *panelTag = [NSString stringWithCString:s->observationPanelTag encoding:NSASCIIStringEncoding];
+        if (!parentTag || !panelTag) return MRK_AX_INPUT;
+        d->site = MRK_ID_PARENT_GET;
+        d->binding_parent = mrk_identity_class([s->parent accessibilityIdentifier], parentTag);
+        d->site = MRK_ID_PANEL_GET;
+        d->binding_panel = mrk_identity_class([s->window accessibilityIdentifier], panelTag);
+        if (d->binding_parent != MRK_ID_MATCH || d->binding_panel != MRK_ID_MATCH) {
+            d->site = d->binding_parent != MRK_ID_MATCH ? MRK_ID_PARENT_GET : MRK_ID_PANEL_GET;
+            d->error = MRK_AX_UNSUPPORTED; return MRK_AX_UNSUPPORTED;
+        }
+        d->site = MRK_ID_OBJECTS; d->error = MRK_AX_INELIGIBLE;
         if (s->responded || s->callbackActive || s->closeAttempted || s->closed
             || !mrk_observation_attached(s) || !mrk_observation_directory_ready(s)) return MRK_AX_INELIGIBLE;
+        memcpy(parent, s->observationParentTag, capacity); memcpy(panel, s->observationPanelTag, capacity);
+        d->site = MRK_ID_COMPLETE; d->error = MRK_AX_NONE;
         return MRK_AX_NONE; // Preparation is NOT an action attempt or return.
-    } @catch (NSException *e) { (void)e; s->unknown = YES; return MRK_AX_EXCEPTION; }
+    } @catch (NSException *e) { (void)e; s->unknown = YES; d->error = MRK_AX_EXCEPTION; return MRK_AX_EXCEPTION; }
 }
 
 typedef union { CFTypeRef value; CFArrayRef array; } MRKAXOwned;

@@ -54,7 +54,7 @@ pub(super) mod observation {
         /// Read-only sample, not an action permit or a settlement receipt.
         pub(crate) action_allowed: bool,
     }
-    fn original(entry: &OriginalPanel) -> Result<(Arc<GuiCall>, Arc<OriginalWork>), ObservationError> {
+    pub(super) fn original(entry: &OriginalPanel) -> Result<(Arc<GuiCall>, Arc<OriginalWork>), ObservationError> {
         let call = entry.observed_call.upgrade().ok_or(ObservationError::OriginalCall)?;
         let owner = call.owner().ok_or(ObservationError::OriginalOwner)?;
         if owner.id != entry.id || !Arc::ptr_eq(&owner.gui, &call) { return Err(ObservationError::OriginalBinding); }
@@ -113,7 +113,8 @@ pub(super) mod observation {
                 matching && result.custody_known && result.report.is_some_and(|r| r.diagnostic.error != "custody"))
         }
     }
-    pub(crate) fn prepare_open_input(id: u32) -> Result<PreparedOpenInput, ObservationError> {
+    pub(crate) fn prepare_open_input(id: u32, returned: &mut Option<native::IdentityBindingReturn>) -> Result<PreparedOpenInput, ObservationError> {
+        *returned = None;
         if !native::main_thread() { return Err(ObservationError::WrongThread); }
         PANEL.with(|book| {
             let mut book = book.try_borrow_mut().map_err(|_| ObservationError::BookBorrow)?;
@@ -122,7 +123,7 @@ pub(super) mod observation {
             let (call, owner) = original(entry)?;
             if !allowed(&call, &owner)? || owner.interrupted() { return Err(ObservationError::Ineligible); }
             let identity = entry.panel.as_mut().ok_or(ObservationError::MissingPanel)?
-                .installed_open_identity().map_err(ObservationError::OpenBinding)?;
+                .installed_open_identity(returned).map_err(ObservationError::OpenBinding)?;
             let release = Arc::new(OpenRelease::new());
             entry.open_release = Some(release.clone());
             Ok(PreparedOpenInput { id, identity, call, owner, release })
@@ -201,7 +202,14 @@ fn response_kind(response: PanelResponse) -> NativeResponse {
 }
 fn uncertain(call: &Arc<GuiCall>) -> NativeResult { call.failed(Reason::CleanupUnknown); Err(()) }
 
-fn construct(call: &Arc<GuiCall>, choice: PanelKind) -> NativeResult {
+fn construct(call: &Arc<GuiCall>, choice: PanelKind,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
+    observer: Option<&super::installed_observation::Observation>,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
+    identity_return: &mut Option<(u32, native::IdentityStartReturn)>,
+) -> NativeResult {
     let Some(owner) = call.owner() else { call.not_created(Reason::DocumentLost); return Ok(()); };
     if !native::main_thread() || owner.interrupted() { call.not_created(Reason::UserCancelled); return Ok(()); }
     if let Some(mut facts) = call.facts() { facts.constructing = true; } else { return uncertain(call); }
@@ -230,8 +238,28 @@ fn construct(call: &Arc<GuiCall>, choice: PanelKind) -> NativeResult {
     }
     let started = PANEL.with(|book| {
         let mut book = book.try_borrow_mut().map_err(|_| Reason::CleanupUnknown)?;
-        let panel = book.as_mut().filter(|entry| entry.id == owner.id).and_then(|entry| entry.panel.as_mut()).ok_or(Reason::CleanupUnknown)?;
-        panel.start(choice).map_err(|error| if error.kind() == std::io::ErrorKind::PermissionDenied {
+        let entry = book.as_mut().filter(|entry| entry.id == owner.id).ok_or(Reason::CleanupUnknown)?;
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
+        let arm = observer.filter(|q| q.open_identity_scope(owner.id, choice));
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
+        if let Some(q) = arm {
+            let (bound_call, bound_owner) = observation::original(entry).map_err(|_| Reason::CleanupUnknown)?;
+            if !Arc::ptr_eq(&bound_call, call) || !Arc::ptr_eq(&bound_owner, &owner)
+                || bound_owner.interrupted() || !q.timely() { return Err(Reason::CleanupUnknown); }
+        }
+        let panel = entry.panel.as_mut().ok_or(Reason::CleanupUnknown)?;
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
+        if arm.is_some() { panel.installed_arm_open_identity().map_err(|_| Reason::CleanupUnknown)?; }
+        // Keep the original PANEL borrow, but no Record/GuiFacts guard, across
+        // this SAME start. There is no per-getter observer callback in AppKit.
+        let returned = panel.start(choice);
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
+        if arm.is_some() { *identity_return = panel.take_installed_identity_start_return().map(|data| (owner.id, data)); }
+        returned.map_err(|error| if error.kind() == std::io::ErrorKind::PermissionDenied {
             // Native start observed an unavailable/occupied parent before any
             // NSWindow/NSAlert construction. The reserved cell still closes.
             Reason::SourceRefused
@@ -332,7 +360,30 @@ pub(crate) async fn run_owned_dialog(app: &tauri::AppHandle, owner: &Arc<Origina
     // The original coordinator retains each completion receiver and its native
     // outcome. A failed dispatch/join keeps that original without another tick.
     let (done, joined) = oneshot::channel(); let creating = call.clone();
-    if app.run_on_main_thread(move || { let result = construct(&creating, kind); let _ = done.send(result); }).is_err() {
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
+    let observer = app.try_state::<Arc<super::installed_observation::Observation>>().map(|q| q.inner().clone());
+    if app.run_on_main_thread(move || {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
+        let mut identity_return = None;
+        let result = construct(&creating, kind,
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
+            observer.as_deref(),
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
+            &mut identity_return,
+        );
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
+        if let (Some(q), Some((id, data))) = (observer.as_ref(), identity_return) {
+            // Original construct has returned and PANEL/GuiFacts guards are
+            // gone. Publish only its saved scalar DATA, before the same send.
+            q.identity_start_returned(id, data);
+        }
+        let _ = done.send(result);
+    }).is_err() {
         dispatch.observe(uncertain(&call)); std::future::pending::<()>().await;
     }
     dispatch.observe(match joined.await { Ok(result) => result, Err(_) => uncertain(&call) });
