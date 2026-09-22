@@ -194,7 +194,10 @@ static BOOL prepare(void) {
         backing:NSBackingStoreBuffered defer:NO];
     if (!p.parent) { reason(&p, "parent-create"); return NO; }
     [p.parent setReleasedWhenClosed:NO]; [p.parent setTitle:@"MRK read-only panel probe"];
+    [NSApp activate];
     [p.parent makeKeyAndOrderFront:nil]; [p.parent makeMainWindow];
+    // Activation is a request: observe our original parent under the same endpoint.
+    while ([NSApp mainWindow] != p.parent && now() < p.end) pump();
     if ([NSApp mainWindow] != p.parent) { reason(&p, "parent-main-window"); return NO; }
     if (now() >= p.end) { reason(&p, "preparation-deadline"); return NO; }
     p.state = mrk_panel_reserve();
