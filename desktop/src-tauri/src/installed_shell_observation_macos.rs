@@ -201,6 +201,10 @@ fn retire_returned_native(pending: &mut Option<Pending>, current: Step, returned
 #[derive(Clone, Copy)]
 struct NativeDispatch { step: Step, entered: bool, returned: bool }
 #[derive(Clone, Copy)]
+struct NativeActionSample {
+    step: Step, id: u32, diagnostic: mrk_macos_installed_native::PanelActionDiagnostic,
+}
+#[derive(Clone, Copy)]
 struct PanelSample {
     step: Step, id: u32, kind: &'static str, parent_present: bool, panel_present: bool,
     parent_references_panel: Option<bool>, panel_references_parent: Option<bool>, panel_visible: Option<bool>,
@@ -395,7 +399,7 @@ impl Session {
 }
 struct Record {
     step: Step, pending: Option<Pending>, evaluations: u16, attached: bool, started: bool, loaded: bool,
-    native_dispatch: Option<NativeDispatch>, last_panel: Option<PanelSample>,
+    native_dispatch: Option<NativeDispatch>, last_panel: Option<PanelSample>, native_action: Option<NativeActionSample>,
     initial_navigation: bool, info: bool, catalog: bool, methods: usize, capability: bool,
     project_calls: u8, cancel_returned: bool, project_returned: bool, project: Option<Project>,
     project_witness: Option<InstalledMacProjectWitness>, picker_witness: Option<InstalledMacPickerWitness>,
@@ -429,7 +433,10 @@ fn failure_context(r: &Record) -> Value {
         "id":panel.id, "kind":panel.kind, "parentPresent":panel.parent_present, "panelPresent":panel.panel_present,
         "parentReferencesPanel":panel.parent_references_panel, "panelReferencesParent":panel.panel_references_parent,
         "panelVisible":panel.panel_visible}));
-    json!({"pending":pending, "nativeHandler":native, "lastPanel":panel})
+    let action = r.native_action.map(|action| json!({"step":format!("{:?}", action.step), "id":action.id,
+        "action":action.diagnostic.action, "domain":action.diagnostic.domain,
+        "site":action.diagnostic.site, "error":action.diagnostic.error}));
+    json!({"pending":pending, "nativeHandler":native, "lastPanel":panel, "nativeAction":action})
 }
 pub(super) struct Observation {
     case: Case, main: ThreadId, end: Instant, project_path: PathBuf, base: Value,
@@ -443,7 +450,7 @@ impl Observation {
             failure_reported: AtomicBool::new(false),
             record: Mutex::new(Record {
                 step: Step::Bootstrap, pending: None, evaluations: 0, attached: false, started: false, loaded: false,
-                native_dispatch: None, last_panel: None,
+                native_dispatch: None, last_panel: None, native_action: None,
                 initial_navigation: false, info: false, catalog: false, methods: 0, capability: false,
                 project_calls: 0, cancel_returned: false, project_returned: false, project: None,
                 project_witness: None, picker_witness: None,
@@ -473,6 +480,13 @@ impl Observation {
         if !self.failed.load(Ordering::SeqCst) || self.failure_reported.load(Ordering::SeqCst) { return; }
         let Some(reason) = first_failure_reason(&self.failure_reason) else { return; };
         let Ok(r) = self.record.try_lock() else { return; };
+        // This reason is latched only after the original action body returns.
+        // Let its matching Record publication precede the one-shot report;
+        // unrelated failures still report truthful unknown/nonreturned DATA.
+        if reason == "adapter-native-action" && r.pending == Some(Pending::Native(r.step))
+            && r.native_dispatch.is_some_and(|native| native.step == r.step && native.entered && !native.returned) {
+            return;
+        }
         if self.failure_reported.swap(true, Ordering::SeqCst) { return; }
         // Fixed labels and the already recorded sample only; no new native
         // observation. Later cleanup cannot replace the first reason/sample.
@@ -957,9 +971,12 @@ impl Observation {
         if matches!(step,Step::CancelProject|Step::SetProject|Step::OpenProject|Step::QuitCancel|Step::Quit|Step::PickerPending) {
             {
                 let Some(mut r) = self.record() else { return; };
+                // The entry check preceded this lock. A late tick must not
+                // overwrite the first failure's returned sample or dispatch.
+                if !self.timely() { return; }
                 r.pending = Some(Pending::Native(step));
                 r.native_dispatch = Some(NativeDispatch { step, entered: false, returned: false });
-                r.last_panel = None;
+                r.last_panel = None; r.native_action = None;
             }
             let q = self.clone();
             if window.run_on_main_thread(move || q.native_step(step)).is_err() { self.fail(); } return;
@@ -1022,12 +1039,16 @@ impl Observation {
                 if let Some(native) = r.native_dispatch.as_mut().filter(|native| native.step == step) { native.entered = true; }
             }
         }
-        let result = self.native_step_body(step, timely);
+        let mut action_diagnostic = None;
+        let result = self.native_step_body(step, timely, &mut action_diagnostic);
         // Preserve the exact first refusal before any Record/cleanup failure.
         if let Err(reason) = result { self.fail_with(reason); }
         let Some(mut r) = self.record() else { return; };
         if r.pending != Some(Pending::Native(step)) || r.step != step { self.fail_with("native-pending-custody"); return; }
         if let Some(native) = r.native_dispatch.as_mut().filter(|native| native.step == step) { native.returned = true; }
+        if result == Err("adapter-native-action") && first_failure_reason(&self.failure_reason) == Some("adapter-native-action") {
+            r.native_action = action_diagnostic; // This same first error's returned DATA only.
+        }
         // Keep the historical wrong-thread refusal conservative. Diagnostics
         // never authorize retirement; a different/unknown owner is untouched.
         if matches!(result, Err("native-wrong-thread" | "native-pending-custody")) { return; }
@@ -1049,7 +1070,8 @@ impl Observation {
             },
         }
     }
-    fn native_step_body(&self, step: Step, timely: bool) -> Result<bool, &'static str> {
+    fn native_step_body(&self, step: Step, timely: bool,
+        action_diagnostic: &mut Option<NativeActionSample>) -> Result<bool, &'static str> {
         // This returned body has made no native query/action. Keep failed,
         // first reason, Step and original endpoint; only its matching slot may
         // retire in the caller, permitting ordinary failure shutdown to check.
@@ -1087,7 +1109,10 @@ impl Observation {
         };
         if !self.timely() { return Err("observer-deadline"); }
         // The original native API rechecks exact attachment before action.
-        observe_panel_action(id,action).map_err(|error| error.reason())
+        observe_panel_action(id,action).map_err(|error| {
+            *action_diagnostic = error.action_diagnostic().map(|diagnostic| NativeActionSample { step, id, diagnostic });
+            error.reason()
+        })
     }
     pub(super) fn close_prevented(&self) {
         let Some(mut r) = self.record() else { return; };

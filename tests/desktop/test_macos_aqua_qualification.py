@@ -91,6 +91,24 @@ def context_row(value):
     return b"MRK_MACOS_AQUA_FAILURE_CONTEXT=" + json.dumps(value, separators=(",", ":")).encode("ascii") + b"\n"
 
 
+def action_context_data(step="OpenProject", *, site=None, domain="objc-exception", error="io"):
+    action, kind, panel_id, call_site = {
+        "CancelProject": ("project-cancel", "project", 1, "project-cancel"),
+        "SetProject": ("project-directory", "project", 2, "directory-set"),
+        "OpenProject": ("project-open", "project", 2, "project-open"),
+        "QuitCancel": ("quit-cancel", "quit", 3, "quit-cancel"),
+        "Quit": ("quit-confirm", "quit", 4, "quit-confirm"),
+    }[step]
+    value = context_data()
+    value["pending"] = None
+    value["nativeHandler"].update(step=step, returned=True)
+    value["lastPanel"].update(step=step, id=panel_id, kind=kind, parentReferencesPanel=True,
+                              panelReferencesParent=True, panelVisible=True)
+    value["nativeAction"] = {"step": step, "id": panel_id, "action": action, "domain": domain,
+                             "site": call_site if site is None else site, "error": error}
+    return value
+
+
 def _inert_command(argv, *, environ, cwd, timeout, capture, text, output_limit):
     """Literal DATA-only body rebound below; no owner import or command call."""
     global recursion
@@ -419,6 +437,77 @@ class AquaDataTests(unittest.TestCase):
                 self.assertNotIn("PRIVATE", output.getvalue())
                 self.assertNotIn(M.EXECUTABLE, output.getvalue())
 
+    def test_native_action_closed_sites_cover_all_five_original_actions(self):
+        self.assertEqual(set(M.NATIVE_ACTION_STEPS), {"CancelProject", "SetProject", "OpenProject", "QuitCancel", "Quit"})
+        self.assertEqual(len(M.NATIVE_ACTION_SITES), 35)
+        for step, (_, _, _, mask) in M.NATIVE_ACTION_STEPS.items():
+            for site, (native_error, actions, exception) in M.NATIVE_ACTION_SITES.items():
+                for domain, error, admitted in (
+                    ("native-return", native_error or "io", bool(actions & mask) and native_error not in (None, "none", "would-block")),
+                    ("objc-exception", "io", bool(actions & mask) and exception),
+                    ("native-return", "none", False), ("native-return", "would-block", False),
+                ):
+                    value = action_context_data(step, site=site, domain=domain, error=error)
+                    original = deepcopy(value)
+                    row = context_row(value)
+                    self.assertLess(len(row) - len(b"MRK_MACOS_AQUA_FAILURE_CONTEXT=\n"), M.FAILURE_CONTEXT_LIMIT)
+                    result = M.failure_context(b"", row)
+                    expected = deepcopy(value)
+                    if not admitted:
+                        expected["nativeAction"] = None
+                    self.assertEqual(result, expected, (step, site, domain, error))
+                    self.assertEqual(value, original)
+            value = action_context_data(step, site="original-usability", domain="rust-precondition", error="other")
+            self.assertEqual(M.failure_context(context_row(value), b""), value)
+        for site in ("directory-utf8", "directory-path", "directory-cstring"):
+            value = action_context_data("SetProject", site=site, domain="rust-precondition", error="invalid-input")
+            self.assertEqual(M.failure_context(context_row(value), b""), value)
+        for step, panel_id in (("SetProject", 1), ("OpenProject", 1), ("Quit", 2)):
+            value = action_context_data(step)
+            value["lastPanel"]["id"] = value["nativeAction"]["id"] = panel_id
+            self.assertEqual(M.failure_context(context_row(value), b""), value)
+
+    def test_native_action_missing_invalid_or_stale_data_does_not_replace_context(self):
+        good = action_context_data()
+        variants = []
+        for field, value in (("id", True), ("id", 0), ("id", 5), ("id", 1), ("step", "SetProject"),
+                             ("action", "quit-confirm"), ("domain", "PRIVATE EXCEPTION"), ("site", "PRIVATE PATH"),
+                             ("error", "PRIVATE ERROR"), ("site", "directory-set"), ("domain", "native-return")):
+            item = deepcopy(good); item["nativeAction"][field] = value; variants.append(item)
+        for value in (None, [], "PRIVATE", {}, {**good["nativeAction"], "path": "PRIVATE"}):
+            item = deepcopy(good); item["nativeAction"] = value; variants.append(item)
+        item = deepcopy(good); del item["nativeAction"]["error"]; variants.append(item)
+        item = deepcopy(good); item["nativeHandler"]["returned"] = False; variants.append(item)
+        item = deepcopy(good); item["lastPanel"] = None; variants.append(item)
+        for item in variants:
+            expected = deepcopy(item); expected["nativeAction"] = None
+            self.assertEqual(M.failure_context(context_row(item), b""), expected)
+        self.assertEqual(M.failure_context(context_row(context_data()), b""), context_data())
+        row = context_row(good)
+        for malformed in (row[:-1], row + row, b"log " + row, row + b"MRK_MACOS_AQUA_FAILURE_CONTEXT?"):
+            self.assertIsNone(M.failure_context(malformed, b""))
+
+    def test_native_action_original_exception_stays_unknown_and_stops_later_cases(self):
+        good = action_context_data()
+        invalid = deepcopy(good); invalid["nativeAction"]["private"] = "PRIVATE"
+        reduced = deepcopy(good); reduced["nativeAction"] = None
+        prefix = b"MRK_MACOS_AQUA_FAILURE_STEP=OpenProject\nMRK_MACOS_AQUA_FAILURE_REASON=adapter-native-action\n"
+        for row, expected in ((context_row(good), good), (context_row(invalid), reduced), (context_row(good)[:-1], None)):
+            with inert_exception_owner(stderr=prefix + row) as call:
+                fixtures = InertFixtures()
+                with self.assertRaises(RuntimeError) as caught:
+                    M.run_cases(BINDING, fixtures, call.owner.run_owned, UID, "runner", self.fail)
+                self.assertIs(caught.exception, call.original)
+                self.assertEqual((fixtures.before, fixtures.reads), (["first-save"], []))
+                self.assertTrue(fixtures.inflight); self.assertFalse(fixtures.last_returned)
+                report = M.diagnostic(caught.exception, None, fixtures)
+                self.assertEqual(report["innerFailureContext"], expected)
+                self.assertEqual((report["innerFailureStep"], report["innerFailureReason"]), ("OpenProject", "adapter-native-action"))
+                self.assertEqual((report["invocationFinality"], report["innerDiagnosticCompleteness"]), ("unknown", "unknown"))
+                self.assertIsNone(report["appReturncode"]); self.assertFalse(report["originalCallReturned"])
+                output = io.StringIO(); M.emit_record(report, output)
+                self.assertNotIn("PRIVATE", output.getvalue())
+
     def test_exception_snapshot_refuses_foreign_ambiguous_changed_or_unbounded_inputs(self):
         def change_shared_case(call):
             call.command.mutate_argv = True
@@ -567,7 +656,7 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn('if let Err(reason) = result { self.fail_with(reason); }', action)
         self.assertNotIn("r.pending.take()", action)
         self.assertLess(action.index("let timely = self.timely()"), action.index("let result = self.native_step_body("))
-        self.assertLess(action.index("let result = self.native_step_body(step, timely)"), action.index("native.returned = true"))
+        self.assertLess(action.index("let result = self.native_step_body(step, timely, &mut action_diagnostic)"), action.index("native.returned = true"))
         body = action.split("fn native_step_body(", 1)[1]
         entry = "if !native_step_entry(std::thread::current().id() == self.main, timely)? { return Ok(false); }"
         self.assertLess(body.index(entry), body.index("observed_panel()"))
@@ -584,9 +673,69 @@ class AquaDataTests(unittest.TestCase):
         rust = (native_root / "lib.rs").read_text(encoding="utf-8")
         self.assertIn("uint32_t attachment = mrk_observation_attachment(s);", native)
         self.assertIn("attachment == MRK_ATTACHMENT_ALL ? 2u : 0u", native)
-        self.assertIn("if (!mrk_observation_attached(s)) return EAGAIN;", native)
+        self.assertIn("if (!mrk_observation_attached(s)) MRK_ACTION_RETURN(EAGAIN);", native)
         self.assertIn("flags & !0x1ffff == 0", rust)
         self.assertIn("(parent_present && panel_present).then_some", rust)
+
+    def test_native_action_source_keeps_original_calls_status_and_closed_decoder(self):
+        native_root = PATH.parents[1] / "native" / "macos-installed-native" / "src"
+        native = (native_root / "native.m").read_text(encoding="utf-8")
+        rust = (native_root / "lib.rs").read_text(encoding="utf-8")
+        table = rust.split("const ACTION_SITES:", 1)[1].split("];", 1)[0]
+        rows = M.re.findall(r'\("([a-z-]+)", (-?[0-9]+), ([0-9]+), (true|false)\)', table)
+        errors = {-1: None, 0: "none", 1: "permission-denied", 5: "io", 22: "invalid-input", 35: "would-block"}
+        self.assertEqual(len(rows), 35)
+        self.assertEqual({site: (errors[int(status)], int(actions), exception == "true")
+                          for site, status, actions, exception in rows}, M.NATIVE_ACTION_SITES)
+        action = native.split("int mrk_panel_observe_action(", 1)[1].split("#endif", 1)[0]
+        calls = ("pthread_main_np()", "mrk_observation_attached(s)", "mrk_observation_directory_ready(s)",
+                 "[NSString stringWithUTF8String:directory]", "[NSURL fileURLWithPath:text isDirectory:YES]",
+                 "setDirectoryURL:url]", "[s->alert buttons]", "[buttons count]", "[buttons objectAtIndex:",
+                 "[button window]", "[button isEnabled]", "[button isHidden]", "cancel:nil]", "ok:nil]", "[button performClick:nil]")
+        for call in calls:
+            self.assertEqual(action.count(call), 1, call)
+        self.assertLess(action.index("[s->alert buttons]"), action.index("if (!s->alert)"))
+        self.assertLess(action.index("[button isEnabled]"), action.index("[button isHidden]"))
+        self.assertLess(action.index("s->observationActionAttempted = YES"), action.index("ok:nil]"))
+        self.assertLess(action.index("ok:nil]"), action.index("s->observationActionReturned = YES"))
+        self.assertIn("(void)e; s->unknown = YES;", action)
+        self.assertIn("mrk_observation_action_return(diagnostic, 2u, site, EIO)", action)
+        controls = M.re.sub(r"//[^\n]*", "", action)
+        for forbidden in ("[e ", "respondsToSelector", "NSLog", "endSheet:", "close_once(", "s->selected"):
+            self.assertNotIn(forbidden, controls)
+        returned = rust.split("pub fn installed_action(", 1)[1].split("#[cfg(test)]", 1)[0]
+        self.assertLess(returned.index("*diagnostic = None"), returned.index("self.usable()"))
+        self.assertEqual(returned.count("mrk_panel_observe_action("), 1)
+        self.assertIn("*diagnostic = action_return_diagnostic(code, status, wire);", returned)
+        self.assertIn("Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false)", returned)
+        self.assertIn("io::ErrorKind::InvalidInput | io::ErrorKind::PermissionDenied", returned)
+        self.assertIn("Err(error) => { self.unknown = true; Err(error) }", returned)
+        source_root = PATH.parents[1] / "src-tauri" / "src"
+        adapter = (source_root / "shell_macos_dialog.rs").read_text(encoding="utf-8")
+        self.assertIn("returned.map_err(|_| ObservationError::NativeAction(diagnostic))", adapter)
+        observer = (source_root / "installed_shell_observation_macos.rs").read_text(encoding="utf-8")
+        self.assertIn("r.last_panel = None; r.native_action = None;", observer)
+        self.assertIn('first_failure_reason(&self.failure_reason) == Some("adapter-native-action")', observer)
+        self.assertIn("r.native_action = action_diagnostic;", observer)
+        report = observer.split("    fn report_failure(", 1)[1].split("    pub(super) fn attach(", 1)[0]
+        deferred = ('if reason == "adapter-native-action" && r.pending == Some(Pending::Native(r.step))\n'
+                    "            && r.native_dispatch.is_some_and(|native| native.step == r.step && native.entered && !native.returned) {\n"
+                    "            return;\n        }")
+        self.assertIn(deferred, report)
+        self.assertLess(report.index("let Ok(r) = self.record.try_lock()"), report.index(deferred))
+        self.assertLess(report.index(deferred), report.index("self.failure_reported.swap(true"))
+        for forbidden in ("self.timely()", "observe_panel_action(", "observed_panel(", "drop(r)", "self.failed.store(", "self.end ="):
+            self.assertNotIn(forbidden, report)
+        published = observer.split("        let result = self.native_step_body(", 1)[1].split("    fn native_step_body(", 1)[0]
+        self.assertLess(published.index("if let Err(reason) = result { self.fail_with(reason); }"),
+                        published.index("let Some(mut r) = self.record()"))
+        self.assertLess(published.index("native.returned = true"), published.index("r.native_action = action_diagnostic;"))
+        self.assertLess(published.index("r.native_action = action_diagnostic;"), published.index("retire_returned_native("))
+        dispatch = observer.split("if matches!(step,Step::CancelProject|", 1)[1].split("if step == Step::Reload", 1)[0]
+        self.assertLess(dispatch.index("let Some(mut r) = self.record()"), dispatch.index("if !self.timely() { return; }"))
+        for reset in ("r.pending = Some(Pending::Native(step))", "r.native_dispatch =", "r.last_panel =", "r.native_action =",
+                      "window.run_on_main_thread("):
+            self.assertLess(dispatch.index("if !self.timely() { return; }"), dispatch.index(reset))
 
     def test_dom_callback_custody_wraps_only_the_original_returned_body(self):
         # Source controls only: the actual Rust DATA entry and native callback

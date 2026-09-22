@@ -352,48 +352,95 @@ int mrk_panel_observe(void *opaque, int *kind, uint32_t *flags, int *response, u
         memcpy(path, s->selected, sizeof(s->selected)); return 0;
     } @catch (NSException *e) { (void)e; s->unknown = YES; return EIO; }
 }
-int mrk_panel_observe_action(void *opaque, int action, const char *directory) {
-    if (!pthread_main_np() || !opaque || action < 1 || action > 5 || ((action == 2) != (directory != NULL))) return EINVAL;
+// Closed DATA from this one original return. No exception object, subsequent
+// query, native status replacement, or permission is carried by these sites.
+enum {
+    MRK_ACTION_THREAD = 1, MRK_ACTION_POINTER, MRK_ACTION_CODE, MRK_ACTION_ARGUMENT,
+    MRK_ACTION_UNKNOWN, MRK_ACTION_STARTED, MRK_ACTION_WINDOW, MRK_ACTION_PARENT,
+    MRK_ACTION_COMPLETION, MRK_ACTION_RESPONDED, MRK_ACTION_CALLBACK,
+    MRK_ACTION_CLOSE_ATTEMPTED, MRK_ACTION_CLOSED, MRK_ACTION_ATTEMPTED, MRK_ACTION_KIND,
+    MRK_ACTION_ATTACHMENT, MRK_ACTION_DIRECTORY_BOUND, MRK_ACTION_DIRECTORY_PATH,
+    MRK_ACTION_DIRECTORY_TEXT, MRK_ACTION_DIRECTORY_URL, MRK_ACTION_DIRECTORY_SET,
+    MRK_ACTION_DIRECTORY_UNBOUND, MRK_ACTION_DIRECTORY_RETURNED, MRK_ACTION_DIRECTORY_READY,
+    MRK_ACTION_ALERT_BUTTONS, MRK_ACTION_ALERT, MRK_ACTION_BUTTON_COUNT, MRK_ACTION_BUTTON_INDEX,
+    MRK_ACTION_BUTTON_WINDOW, MRK_ACTION_BUTTON_ENABLED, MRK_ACTION_BUTTON_HIDDEN,
+    MRK_ACTION_PROJECT_CANCEL, MRK_ACTION_PROJECT_OPEN, MRK_ACTION_QUIT_CANCEL, MRK_ACTION_QUIT_CONFIRM
+};
+_Static_assert(EPERM == 1 && EIO == 5 && EINVAL == 22 && EAGAIN == 35, "Darwin action diagnostic errno ABI");
+static int mrk_observation_action_return(uint32_t *diagnostic, uint32_t domain, uint32_t site, int status) {
+    if (diagnostic) *diagnostic = (domain << 16) | site;
+    return status; // The original status, not a diagnostic classification.
+}
+int mrk_panel_observe_action(void *opaque, int action, const char *directory, uint32_t *diagnostic) {
+    if (diagnostic) *diagnostic = 0;
+    volatile uint32_t site = MRK_ACTION_THREAD;
+#define MRK_ACTION_RETURN(status) return mrk_observation_action_return(diagnostic, 1u, site, (status))
+    // Split only the existing short-circuit predicates, in their original order.
+    if (!pthread_main_np()) MRK_ACTION_RETURN(EINVAL);
+    site = MRK_ACTION_POINTER; if (!opaque) MRK_ACTION_RETURN(EINVAL);
+    site = MRK_ACTION_CODE; if (action < 1 || action > 5) MRK_ACTION_RETURN(EINVAL);
+    site = MRK_ACTION_ARGUMENT; if ((action == 2) != (directory != NULL)) MRK_ACTION_RETURN(EINVAL);
     MRKInstalledPanel *s = opaque;
-    if (s->unknown) return EIO;
-    if (!s->started || !s->window || !s->parent || !s->completion || s->responded || s->callbackActive
-        || s->closeAttempted || s->closed || s->observationActionAttempted) return EPERM;
-    if ((action <= 3 && s->kind != 1) || (action >= 4 && s->kind != 2)) return EPERM;
+    site = MRK_ACTION_UNKNOWN; if (s->unknown) MRK_ACTION_RETURN(EIO);
+    site = MRK_ACTION_STARTED; if (!s->started) MRK_ACTION_RETURN(EPERM);
+    site = MRK_ACTION_WINDOW; if (!s->window) MRK_ACTION_RETURN(EPERM);
+    site = MRK_ACTION_PARENT; if (!s->parent) MRK_ACTION_RETURN(EPERM);
+    site = MRK_ACTION_COMPLETION; if (!s->completion) MRK_ACTION_RETURN(EPERM);
+    site = MRK_ACTION_RESPONDED; if (s->responded) MRK_ACTION_RETURN(EPERM);
+    site = MRK_ACTION_CALLBACK; if (s->callbackActive) MRK_ACTION_RETURN(EPERM);
+    site = MRK_ACTION_CLOSE_ATTEMPTED; if (s->closeAttempted) MRK_ACTION_RETURN(EPERM);
+    site = MRK_ACTION_CLOSED; if (s->closed) MRK_ACTION_RETURN(EPERM);
+    site = MRK_ACTION_ATTEMPTED; if (s->observationActionAttempted) MRK_ACTION_RETURN(EPERM);
+    site = MRK_ACTION_KIND;
+    if ((action <= 3 && s->kind != 1) || (action >= 4 && s->kind != 2)) MRK_ACTION_RETURN(EPERM);
     @try {
         // EAGAIN is only pre-action readiness, never permission to repeat an
         // attempted action. The caller's original endpoint is not renewed.
-        if (!mrk_observation_attached(s)) return EAGAIN;
+        site = MRK_ACTION_ATTACHMENT; if (!mrk_observation_attached(s)) MRK_ACTION_RETURN(EAGAIN);
         if (action == 2) {
-            if (s->observationDirectory[0]) return EPERM;
+            site = MRK_ACTION_DIRECTORY_BOUND; if (s->observationDirectory[0]) MRK_ACTION_RETURN(EPERM);
+            site = MRK_ACTION_DIRECTORY_PATH;
             size_t length = strnlen(directory, sizeof(s->observationDirectory));
-            if (length == 0 || length >= sizeof(s->observationDirectory) || directory[0] != '/') return EINVAL;
+            if (length == 0 || length >= sizeof(s->observationDirectory) || directory[0] != '/') MRK_ACTION_RETURN(EINVAL);
+            site = MRK_ACTION_DIRECTORY_TEXT;
             NSString *text = [NSString stringWithUTF8String:directory];
-            NSURL *url = text ? [NSURL fileURLWithPath:text isDirectory:YES] : nil;
-            if (!url) return EINVAL;
+            NSURL *url = nil;
+            if (text) { site = MRK_ACTION_DIRECTORY_URL; url = [NSURL fileURLWithPath:text isDirectory:YES]; }
+            if (!url) MRK_ACTION_RETURN(EINVAL);
             memcpy(s->observationDirectory, directory, length + 1);
+            site = MRK_ACTION_DIRECTORY_SET;
             [(NSOpenPanel *)s->window setDirectoryURL:url];
-            s->observationDirectoryReturned = YES; return 0;
+            s->observationDirectoryReturned = YES; MRK_ACTION_RETURN(0);
         }
         if (action == 3) {
-            if (!s->observationDirectory[0] || !s->observationDirectoryReturned) return EPERM;
-            if (!mrk_observation_directory_ready(s)) return EAGAIN;
+            site = MRK_ACTION_DIRECTORY_UNBOUND; if (!s->observationDirectory[0]) MRK_ACTION_RETURN(EPERM);
+            site = MRK_ACTION_DIRECTORY_RETURNED; if (!s->observationDirectoryReturned) MRK_ACTION_RETURN(EPERM);
+            site = MRK_ACTION_DIRECTORY_READY; if (!mrk_observation_directory_ready(s)) MRK_ACTION_RETURN(EAGAIN);
         }
         NSButton *button = nil;
         if (action >= 4) {
+            site = MRK_ACTION_ALERT_BUTTONS;
             NSArray<NSButton *> *buttons = [s->alert buttons];
-            if (!s->alert || [buttons count] != 2) return EPERM;
+            site = MRK_ACTION_ALERT; if (!s->alert) MRK_ACTION_RETURN(EPERM);
+            site = MRK_ACTION_BUTTON_COUNT; if ([buttons count] != 2) MRK_ACTION_RETURN(EPERM);
+            site = MRK_ACTION_BUTTON_INDEX;
             button = [buttons objectAtIndex:action == 4 ? 0 : 1];
-            if ([button window] != s->window) return EPERM;
-            if (![button isEnabled] || [button isHidden]) return EAGAIN;
+            site = MRK_ACTION_BUTTON_WINDOW; if ([button window] != s->window) MRK_ACTION_RETURN(EPERM);
+            site = MRK_ACTION_BUTTON_ENABLED; if (![button isEnabled]) MRK_ACTION_RETURN(EAGAIN);
+            site = MRK_ACTION_BUTTON_HIDDEN; if ([button isHidden]) MRK_ACTION_RETURN(EAGAIN);
         }
         s->observationActionAttempted = YES;
-        if (action == 1) [(NSOpenPanel *)s->window cancel:nil];
-        else if (action == 3) [(NSOpenPanel *)s->window ok:nil];
-        else [button performClick:nil];
+        if (action == 1) { site = MRK_ACTION_PROJECT_CANCEL; [(NSOpenPanel *)s->window cancel:nil]; }
+        else if (action == 3) { site = MRK_ACTION_PROJECT_OPEN; [(NSOpenPanel *)s->window ok:nil]; }
+        else { site = action == 4 ? MRK_ACTION_QUIT_CANCEL : MRK_ACTION_QUIT_CONFIRM; [button performClick:nil]; }
         s->observationActionReturned = YES;
         // No call of s->completion, endSheet:, close_once or selected-path
         // mutation. Only AppKit's original completion supplies the outcome.
-        return 0;
-    } @catch (NSException *e) { (void)e; s->unknown = YES; return EIO; }
+        MRK_ACTION_RETURN(0);
+    } @catch (NSException *e) {
+        (void)e; s->unknown = YES;
+        return mrk_observation_action_return(diagnostic, 2u, site, EIO);
+    }
+#undef MRK_ACTION_RETURN
 }
 #endif

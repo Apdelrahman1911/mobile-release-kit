@@ -59,6 +59,35 @@ FAILURE_REASONS = frozenset((
     "asset_review_expired asset_deadline asset_document_lost asset_shutdown asset_cleanup_unknown"
 ).split())
 NATIVE_STEPS = frozenset("CancelProject SetProject OpenProject QuitCancel Quit PickerPending".split())
+# Closed same-origin action DATA, not a panel query or an action/finality permit.
+NATIVE_ACTION_STEPS = {
+    "CancelProject": ("project-cancel", "project", (1,), 1),
+    "SetProject": ("project-directory", "project", (1, 2), 2),
+    "OpenProject": ("project-open", "project", (1, 2), 4),
+    "QuitCancel": ("quit-cancel", "quit", (3,), 8),
+    "Quit": ("quit-confirm", "quit", (2, 4), 16),
+}
+# site: (original native-return error, permitted action mask, can catch ObjC).
+# None denotes an exception-only site. Keep aligned with the native decoder.
+NATIVE_ACTION_SITES = {
+    "main-thread": ("invalid-input", 31, False), "state-pointer": ("invalid-input", 31, False),
+    "action-code": ("invalid-input", 31, False), "directory-argument": ("invalid-input", 31, False),
+    "original-unknown": ("io", 31, False), "not-started": ("permission-denied", 31, False),
+    "window-absent": ("permission-denied", 31, False), "parent-absent": ("permission-denied", 31, False),
+    "completion-absent": ("permission-denied", 31, False), "responded": ("permission-denied", 31, False),
+    "callback-active": ("permission-denied", 31, False), "close-attempted": ("permission-denied", 31, False),
+    "closed": ("permission-denied", 31, False), "action-attempted": ("permission-denied", 31, False),
+    "panel-kind": ("permission-denied", 31, False), "attachment": ("would-block", 31, True),
+    "directory-already-bound": ("permission-denied", 2, False), "directory-path": ("invalid-input", 2, False),
+    "directory-text": ("invalid-input", 2, True), "directory-url": ("invalid-input", 2, True),
+    "directory-set": ("none", 2, True), "directory-unbound": ("permission-denied", 4, False),
+    "directory-not-returned": ("permission-denied", 4, False), "directory-ready": ("would-block", 4, True),
+    "alert-buttons": (None, 24, True), "alert-absent": ("permission-denied", 24, False),
+    "button-count": ("permission-denied", 24, True), "button-index": (None, 24, True),
+    "button-window": ("permission-denied", 24, True), "button-enabled": ("would-block", 24, True),
+    "button-hidden": ("would-block", 24, True), "project-cancel": ("none", 1, True),
+    "project-open": ("none", 4, True), "quit-cancel": ("none", 8, True), "quit-confirm": ("none", 16, True),
+}
 SOURCE = (b'plugins { id("com.android.application") }\n'
           b'android { defaultConfig { applicationId = "org.example.mrk.observed" } }\n')
 VERSION = b"VERSION_NAME=1.2.3\nBUILD_NUMBER=7\n"
@@ -275,6 +304,35 @@ def failure_reason(stdout, stderr):
     return label if label in FAILURE_REASONS else None
 
 
+def _native_action_context(value, native, panel):
+    # Missing/malformed new DATA loses only this diagnostic. Never replace the
+    # existing context, first error, original return or unknown-finality facts.
+    if value is None:
+        return None
+    try:
+        need(type(value) is dict and set(value) == {"step", "id", "action", "domain", "site", "error"}, "native-action-data")
+        need(all(type(value[key]) is str for key in ("step", "action", "domain", "site", "error"))
+             and type(value["id"]) is int, "native-action-data")
+        spec = NATIVE_ACTION_STEPS.get(value["step"])
+        need(spec is not None and value["action"] == spec[0] and value["id"] in spec[2], "native-action-data")
+        need(native is not None and native["entered"] and native["returned"] and native["step"] == value["step"]
+             and panel is not None and panel["step"] == value["step"] and panel["id"] == value["id"]
+             and panel["kind"] == spec[1], "native-action-data")
+        domain, site, error = value["domain"], value["site"], value["error"]
+        if domain == "rust-precondition":
+            need(site == "original-usability" and error == "other"
+                 or value["action"] == "project-directory" and site in ("directory-utf8", "directory-path", "directory-cstring")
+                 and error == "invalid-input", "native-action-data")
+        else:
+            rule = NATIVE_ACTION_SITES.get(site)
+            need(rule is not None and rule[1] & spec[3], "native-action-data")
+            need(domain == "native-return" and error == rule[0] and error not in (None, "none", "would-block")
+                 or domain == "objc-exception" and rule[2] and error == "io", "native-action-data")
+        return value
+    except (Refused, TypeError, ValueError):
+        return None
+
+
 def failure_context(stdout, stderr):
     row = _failure_row(stdout, stderr, b"MRK_MACOS_AQUA_FAILURE_CONTEXT", FAILURE_CONTEXT_LIMIT)
     if row is None:
@@ -282,7 +340,8 @@ def failure_context(stdout, stderr):
     try:
         value = json.loads(row.decode("ascii"), object_pairs_hook=_pairs,
                            parse_constant=lambda _: (_ for _ in ()).throw(Refused("failure-context")))
-        need(type(value) is dict and set(value) == {"pending", "nativeHandler", "lastPanel"}, "failure-context")
+        need(type(value) is dict and set(value) in ({"pending", "nativeHandler", "lastPanel"},
+                                                  {"pending", "nativeHandler", "lastPanel", "nativeAction"}), "failure-context")
         pending, native, panel = value["pending"], value["nativeHandler"], value["lastPanel"]
         if pending is not None:
             need(type(pending) is dict and set(pending) == {"kind", "step"}
@@ -308,6 +367,8 @@ def failure_context(stdout, stderr):
                      for key in ("parentReferencesPanel", "panelReferencesParent"))
                  and (type(panel["panelVisible"]) is bool if panel["panelPresent"] else panel["panelVisible"] is None),
                  "failure-context")
+        if "nativeAction" in value:
+            value["nativeAction"] = _native_action_context(value["nativeAction"], native, panel)
         return value
     except (Refused, ValueError, RecursionError, UnicodeError, TypeError):
         return None

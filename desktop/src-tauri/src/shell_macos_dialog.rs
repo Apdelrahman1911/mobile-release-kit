@@ -24,7 +24,8 @@ pub(super) mod observation {
     #[derive(Clone, Copy)]
     pub(crate) enum ObservationError {
         WrongThread, BookBorrow, OriginalCall, OriginalOwner, OriginalBinding,
-        MissingFacts, MissingPanel, Ineligible, NativeObservation, NativeAction,
+        MissingFacts, MissingPanel, Ineligible, NativeObservation,
+        NativeAction(Option<native::PanelActionDiagnostic>),
     }
     impl ObservationError {
         pub(crate) fn reason(self) -> &'static str { match self {
@@ -32,8 +33,11 @@ pub(super) mod observation {
             Self::OriginalCall => "adapter-original-call", Self::OriginalOwner => "adapter-original-owner",
             Self::OriginalBinding => "adapter-original-binding", Self::MissingFacts => "adapter-missing-facts",
             Self::MissingPanel => "adapter-missing-panel", Self::Ineligible => "adapter-ineligible",
-            Self::NativeObservation => "adapter-native-observation", Self::NativeAction => "adapter-native-action",
+            Self::NativeObservation => "adapter-native-observation", Self::NativeAction(_) => "adapter-native-action",
         }}
+        pub(crate) fn action_diagnostic(self) -> Option<native::PanelActionDiagnostic> {
+            match self { Self::NativeAction(diagnostic) => diagnostic, _ => None }
+        }
     }
     pub(crate) struct ObservedPanel {
         pub(crate) id: u32,
@@ -74,8 +78,12 @@ pub(super) mod observation {
             if !allowed(&call, &owner)? || owner.interrupted() { return Err(ObservationError::Ineligible); }
             // No GuiFacts lock across AppKit. The same native completion and
             // production tick retain response admission/close/release custody.
-            entry.panel.as_mut().ok_or(ObservationError::MissingPanel)?
-                .installed_action(action).map_err(|_| ObservationError::NativeAction)
+            let mut diagnostic = None;
+            let returned = entry.panel.as_mut().ok_or(ObservationError::MissingPanel)?
+                .installed_action(action, &mut diagnostic);
+            // Only this original error carries its DATA; no later panel query,
+            // successful/not-ready action, or old slot can supply diagnostics.
+            returned.map_err(|_| ObservationError::NativeAction(diagnostic))
         })
     }
 }

@@ -176,7 +176,7 @@ impl Panel {
 // The integration target's cfg(test) does not reach this dependency. Explicit
 // nondefault feature forwarding selects BOTH this Rust seam and the C controls.
 #[cfg(feature = "installed-observation")]
-pub use observation::{PanelAction, PanelObservation, installed_observation_flags_data_check};
+pub use observation::{PanelAction, PanelActionDiagnostic, PanelObservation, installed_observation_flags_data_check};
 #[cfg(feature = "installed-observation")]
 mod observation {
     use super::*;
@@ -190,6 +190,75 @@ mod observation {
         ProjectOpen,
         QuitCancel,
         QuitConfirm,
+    }
+    /// Closed labels copied from one original return, never a native query or
+    /// action/finality permit. Missing/invalid DATA does not change that return.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct PanelActionDiagnostic {
+        pub action: &'static str, pub domain: &'static str,
+        pub site: &'static str, pub error: &'static str,
+    }
+    fn action_name(action: c_int) -> Option<&'static str> {
+        match action { 1 => Some("project-cancel"), 2 => Some("project-directory"), 3 => Some("project-open"),
+            4 => Some("quit-cancel"), 5 => Some("quit-confirm"), _ => None }
+    }
+    // Same numbered sites and Darwin errno values as the feature-gated shim.
+    // label, original native-return status (-1 = exception-only), action mask,
+    // whether an EXISTING Objective-C query/action at this site can throw.
+    const ACTION_SITES: [(&str, c_int, u8, bool); 35] = [
+        ("main-thread", 22, 31, false), ("state-pointer", 22, 31, false),
+        ("action-code", 22, 31, false), ("directory-argument", 22, 31, false),
+        ("original-unknown", 5, 31, false), ("not-started", 1, 31, false),
+        ("window-absent", 1, 31, false), ("parent-absent", 1, 31, false),
+        ("completion-absent", 1, 31, false), ("responded", 1, 31, false),
+        ("callback-active", 1, 31, false), ("close-attempted", 1, 31, false),
+        ("closed", 1, 31, false), ("action-attempted", 1, 31, false),
+        ("panel-kind", 1, 31, false), ("attachment", 35, 31, true),
+        ("directory-already-bound", 1, 2, false), ("directory-path", 22, 2, false),
+        ("directory-text", 22, 2, true), ("directory-url", 22, 2, true),
+        ("directory-set", 0, 2, true), ("directory-unbound", 1, 4, false),
+        ("directory-not-returned", 1, 4, false), ("directory-ready", 35, 4, true),
+        ("alert-buttons", -1, 24, true), ("alert-absent", 1, 24, false),
+        ("button-count", 1, 24, true), ("button-index", -1, 24, true),
+        ("button-window", 1, 24, true), ("button-enabled", 35, 24, true),
+        ("button-hidden", 35, 24, true), ("project-cancel", 0, 1, true),
+        ("project-open", 0, 4, true), ("quit-cancel", 0, 8, true), ("quit-confirm", 0, 16, true),
+    ];
+    fn action_return_diagnostic(action: c_int, status: c_int, wire: u32) -> Option<PanelActionDiagnostic> {
+        let action_label = action_name(action)?;
+        let (site, expected, actions, exception) = *ACTION_SITES.get((wire & 0xffff).checked_sub(1)? as usize)?;
+        if actions & (1u8 << (action - 1)) == 0 { return None; }
+        let domain = match wire >> 16 {
+            1 if expected >= 0 && status == expected => "native-return",
+            2 if exception && status == 5 => "objc-exception",
+            _ => return None,
+        };
+        let error = match status { 0 => "none", 1 => "permission-denied", 5 => "io",
+            22 => "invalid-input", 35 => "would-block", _ => return None };
+        Some(PanelActionDiagnostic { action: action_label, domain, site, error })
+    }
+    fn action_diagnostics_data_check() -> bool {
+        // Inert decoder checks only. No Panel, exception, or native call exists.
+        for action in 1..=5 {
+            for (index, &(site, status, actions, exception)) in ACTION_SITES.iter().enumerate() {
+                let applies = actions & (1u8 << (action - 1)) != 0;
+                let wire = (index + 1) as u32;
+                let native = action_return_diagnostic(action, status, 0x10000 | wire);
+                let caught = action_return_diagnostic(action, 5, 0x20000 | wire);
+                if native.is_some() != (applies && status >= 0) || caught.is_some() != (applies && exception)
+                    || native.is_some_and(|d| d.site != site || d.action != action_name(action).unwrap() || d.domain != "native-return")
+                    || caught.is_some_and(|d| d.error != "io" || d.domain != "objc-exception") { return false; }
+                for bad in [wire, 0x30000 | wire, 0x80010000 | wire] {
+                    if action_return_diagnostic(action, status, bad).is_some() { return false; }
+                }
+                if action_return_diagnostic(action, 999, 0x10000 | wire).is_some() { return false; }
+            }
+        }
+        action_return_diagnostic(3, 5, 0x20021).is_some_and(|d| d.site == "project-open" && d.error == "io")
+            && action_return_diagnostic(3, 0, 0x10021).is_some_and(|d| d.error == "none")
+            && action_return_diagnostic(3, 35, 0x10018).is_some_and(|d| d.error == "would-block")
+            && [0, 6, -1].into_iter().all(|action| action_return_diagnostic(action, 5, 0x20021).is_none())
+            && [0, 0x10000, 0x10024, u32::MAX].into_iter().all(|wire| action_return_diagnostic(3, 5, wire).is_none())
     }
     pub struct PanelObservation {
         pub kind: PanelKind,
@@ -216,7 +285,8 @@ mod observation {
     unsafe extern "C" {
         fn mrk_panel_observe(panel: *mut c_void, kind: *mut c_int, flags: *mut u32,
             response: *mut c_int, path: *mut u8, capacity: usize) -> c_int;
-        fn mrk_panel_observe_action(panel: *mut c_void, action: c_int, directory: *const c_char) -> c_int;
+        fn mrk_panel_observe_action(panel: *mut c_void, action: c_int, directory: *const c_char,
+            diagnostic: *mut u32) -> c_int;
     }
     fn observation_flags_valid(flags: u32) -> bool {
         let both_present = flags & 0x3000 == 0x3000;
@@ -227,7 +297,7 @@ mod observation {
     /// Pure checks called by the existing instrumented observer entry, not a
     /// native query or a separate test executable/qualification route.
     pub fn installed_observation_flags_data_check() -> bool {
-        [0, 0x1000, 0x2000, 0x12000, 0x3000, 0xf000, 0x1f002, 0x1ffff]
+        action_diagnostics_data_check() && [0, 0x1000, 0x2000, 0x12000, 0x3000, 0xf000, 0x1f002, 0x1ffff]
             .into_iter().all(observation_flags_valid)
             && [2, 0x4000, 0x8000, 0x10000, 0x14000, 0x1f000, 0x20000, u32::MAX]
                 .into_iter().all(|flags| !observation_flags_valid(flags))
@@ -265,17 +335,33 @@ mod observation {
         /// false means a not-yet-ready sheet/directory/button was observed
         /// BEFORE any action. true means only the actual action call returned;
         /// the real callback and original coordinator still own all outcomes.
-        pub fn installed_action(&mut self, action: PanelAction<'_>) -> io::Result<bool> {
-            self.usable()?;
+        pub fn installed_action(&mut self, action: PanelAction<'_>, diagnostic: &mut Option<PanelActionDiagnostic>) -> io::Result<bool> {
+            *diagnostic = None; // Never expose a previous action's diagnostic.
+            let name = match &action { PanelAction::ProjectCancel => "project-cancel",
+                PanelAction::ProjectDirectory(_) => "project-directory", PanelAction::ProjectOpen => "project-open",
+                PanelAction::QuitCancel => "quit-cancel", PanelAction::QuitConfirm => "quit-confirm" };
+            if let Err(error) = self.usable() {
+                *diagnostic = Some(PanelActionDiagnostic { action: name, domain: "rust-precondition",
+                    site: "original-usability", error: "other" });
+                return Err(error);
+            }
             let (code, directory) = match action {
                 PanelAction::ProjectCancel => (1, None),
                 PanelAction::ProjectDirectory(path) => {
-                    let text = path.to_str().ok_or(io::ErrorKind::InvalidInput)?;
+                    let text = path.to_str().ok_or(io::ErrorKind::InvalidInput).map_err(|error| {
+                        *diagnostic = Some(PanelActionDiagnostic { action: name, domain: "rust-precondition",
+                            site: "directory-utf8", error: "invalid-input" }); error
+                    })?;
                     if !path.is_absolute() || text.len() > 4096 || text.split('/').skip(1)
                         .any(|part| part.is_empty() || part == "." || part == "..") {
+                        *diagnostic = Some(PanelActionDiagnostic { action: name, domain: "rust-precondition",
+                            site: "directory-path", error: "invalid-input" });
                         return Err(io::ErrorKind::InvalidInput.into());
                     }
-                    (2, Some(CString::new(text).map_err(|_| io::ErrorKind::InvalidInput)?))
+                    (2, Some(CString::new(text).map_err(|_| {
+                        *diagnostic = Some(PanelActionDiagnostic { action: name, domain: "rust-precondition",
+                            site: "directory-cstring", error: "invalid-input" }); io::ErrorKind::InvalidInput
+                    })?))
                 }
                 PanelAction::ProjectOpen => (3, None),
                 PanelAction::QuitCancel => (4, None),
@@ -283,8 +369,11 @@ mod observation {
             };
             // SAFETY: same retained main-thread original; optional bounded
             // CString lives through the call and is copied once by the shim.
+            // The initialized writable diagnostic belongs to THIS call only.
+            let mut wire = 0u32;
             let status = unsafe { mrk_panel_observe_action(self.original.as_ptr(), code,
-                directory.as_ref().map_or(std::ptr::null(), |path| path.as_ptr())) };
+                directory.as_ref().map_or(std::ptr::null(), |path| path.as_ptr()), &mut wire) };
+            *diagnostic = action_return_diagnostic(code, status, wire);
             match result(status) {
                 Ok(()) => Ok(true),
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false),
