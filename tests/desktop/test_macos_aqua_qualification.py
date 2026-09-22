@@ -1163,6 +1163,9 @@ class AquaDataTests(unittest.TestCase):
                          "CFEqual(repeated, control)"):
             self.assertIn(required, body)
         self.assertEqual(body.count("kAXDefaultButtonAttribute"), 2)
+        for site in ("MRK_AX_DEFAULT", "MRK_AX_RECHECK"):
+            self.assertIn(f"mrk_ax_copy(s, parent, kAXDefaultButtonAttribute, {site})", body)
+        self.assertNotIn("mrk_ax_copy(s, panel, kAXDefaultButtonAttribute", body)
         self.assertLess(body.index("CFEqual(repeated, control)"), body.index("mrk_ax_before(s, (AXUIElementRef)control)"))
         press = body.split("if (!mrk_ax_before(s, (AXUIElementRef)control)) return;", 1)[1]
         self.assertEqual(native.count("AXUIElementPerformAction("), 1)

@@ -870,7 +870,9 @@ static void mrk_ax_open(MRKAX *s, const uint8_t *parent_tag, const uint8_t *pane
         parent, panel, &repeated_parent, &repeated_panel, &s->result.final_projection)) return;
     s->result.flags |= MRK_AX_IDENTITY;
     s->result.phase = 4;
-    CFTypeRef control = mrk_ax_copy(s, panel, kAXDefaultButtonAttribute, MRK_AX_DEFAULT);
+    // Read the default from the verified window; its control must still have
+    // the exact original sheet in its ancestry before the sole Press.
+    CFTypeRef control = mrk_ax_copy(s, parent, kAXDefaultButtonAttribute, MRK_AX_DEFAULT);
     if (!control || !mrk_ax_type(s, control, AXUIElementGetTypeID())) return;
     CFTypeRef role = mrk_ax_copy(s, (AXUIElementRef)control, kAXRoleAttribute, MRK_AX_BUTTON_ROLE);
     if (!role || !mrk_ax_type(s, role, CFStringGetTypeID())) return;
@@ -889,7 +891,7 @@ static void mrk_ax_open(MRKAX *s, const uint8_t *parent_tag, const uint8_t *pane
         if (CFEqual(link, panel)) { reached = YES; break; }
     }
     if (!reached) { mrk_ax_fail(s, MRK_AX_LIMIT); return; }
-    CFTypeRef repeated = mrk_ax_copy(s, panel, kAXDefaultButtonAttribute, MRK_AX_RECHECK);
+    CFTypeRef repeated = mrk_ax_copy(s, parent, kAXDefaultButtonAttribute, MRK_AX_RECHECK);
     if (!repeated || !mrk_ax_type(s, repeated, AXUIElementGetTypeID())) return;
     if (!CFEqual(repeated, control)) { mrk_ax_fail(s, MRK_AX_CHANGED); return; }
     s->result.flags |= MRK_AX_CONTROL;
