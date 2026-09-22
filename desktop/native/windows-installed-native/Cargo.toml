@@ -10,10 +10,17 @@ description = "Private original-handle Windows installed-runtime facts; no execu
 [lib]
 path = "src/lib.rs"
 
+# Fixed privileged package producer only; never a consumer/runtime capability.
+[features]
+runtime-publication = []
+# Qualification DATA writer only; never a normal helper capability.
+qualification-result = []
+
 [target.'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'.dependencies]
 windows-sys = { version = "=0.61.2", features = [
   "Wdk_Foundation", "Wdk_Storage_FileSystem", "Wdk_System_SystemServices",
   "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Security",
+  "Win32_NetworkManagement_NetManagement", "Win32_Security_Cryptography",
   "Win32_System_IO", "Win32_System_Threading", "Win32_System_SystemInformation",
   "Win32_System_SystemServices", "Win32_System_WindowsProgramming", "Win32_UI_Shell",
 ] }

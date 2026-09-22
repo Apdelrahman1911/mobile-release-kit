@@ -35,6 +35,14 @@ mod installed_runtime_windows;
 compile_error!("the installed Mac desktop supports ARM64 macOS 26 only");
 #[cfg(all(feature = "ubuntu-runtime-publisher", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 pub mod runtime_publication;
+#[cfg(all(feature = "windows-runtime-publisher", any(
+    not(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")),
+    feature = "desktop-shell", feature = "development-runtime",
+    feature = "ubuntu-runtime-publisher", feature = "macos-installed-installer",
+    feature = "macos-installed-observation")))]
+compile_error!("windows-runtime-publisher requires the isolated Windows x64 MSVC headless producer profile");
+#[cfg(all(feature = "windows-runtime-publisher", target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+pub mod runtime_publication_windows;
 pub mod supervisor;
 pub mod bridge;
 mod document_lifetime;
