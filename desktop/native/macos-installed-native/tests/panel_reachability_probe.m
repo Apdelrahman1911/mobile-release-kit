@@ -185,17 +185,21 @@ static void pump(void) { (void)CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, t
 static BOOL prepare(void) {
     p.stringClass = [NSString class]; p.arrayClass = [NSArray class]; p.urlClass = [NSURL class];
     [NSApplication sharedApplication];
-    if (![NSApp setActivationPolicy:NSApplicationActivationPolicyRegular]) return NO;
+    if (![NSApp setActivationPolicy:NSApplicationActivationPolicyRegular]) {
+        reason(&p, "activation-policy"); return NO;
+    }
     [NSApp finishLaunching];
     p.parent = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 640, 480)
         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
         backing:NSBackingStoreBuffered defer:NO];
-    if (!p.parent) return NO;
+    if (!p.parent) { reason(&p, "parent-create"); return NO; }
     [p.parent setReleasedWhenClosed:NO]; [p.parent setTitle:@"MRK read-only panel probe"];
     [p.parent makeKeyAndOrderFront:nil]; [p.parent makeMainWindow];
-    if ([NSApp mainWindow] != p.parent || now() >= p.end) return NO;
+    if ([NSApp mainWindow] != p.parent) { reason(&p, "parent-main-window"); return NO; }
+    if (now() >= p.end) { reason(&p, "preparation-deadline"); return NO; }
     p.state = mrk_panel_reserve();
-    if (!p.state || mrk_panel_observe_arm_open_identity(p.state)) return NO;
+    if (!p.state) { reason(&p, "panel-reserve"); return NO; }
+    if (mrk_panel_observe_arm_open_identity(p.state)) { reason(&p, "panel-arm"); return NO; }
     p.startStatus = mrk_panel_start(p.state, 1);
     p.panel = p.state->window; p.completion = p.state->completion;
     if (p.startStatus || !originals(&p)) return NO;

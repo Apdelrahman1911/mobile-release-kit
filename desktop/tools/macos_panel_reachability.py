@@ -36,7 +36,7 @@ PINS = {
     "src/mobile_release/owned_process.py": "430a596c5069b7acf248334d1f60fdd12ad8212cf9c2e9dfef717c9ba2179c02",
 }
 LIMIT = 65536
-REASONS = frozenset("none input preparation original-custody read-deadline query-limit original-changed holder-limit retain-return parent-attachment panel-attachment panel-not-visible configuration directory-unavailable directory-type directory-changed nil-element repeated-element element-limit role-type children-unsupported children-nil children-type children-limit depth-limit children-changed ordinary-close ordinary-completion ordinary-release exception ordinary-cleanup".split())
+REASONS = frozenset("none input preparation activation-policy parent-create parent-main-window preparation-deadline panel-reserve panel-arm original-custody read-deadline query-limit original-changed holder-limit retain-return parent-attachment panel-attachment panel-not-visible configuration directory-unavailable directory-type directory-changed nil-element repeated-element element-limit role-type children-unsupported children-nil children-type children-limit depth-limit children-changed ordinary-close ordinary-completion ordinary-release exception ordinary-cleanup".split())
 
 
 class Refused(Exception):
