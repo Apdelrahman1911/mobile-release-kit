@@ -103,7 +103,15 @@ def native_data(content):
     value = json.loads(content[len(prefix):], object_pairs_hook=pairs,
                        parse_constant=lambda _: (_ for _ in ()).throw(Refused("nonfinite-data")))
     booleans = "readOnly semanticOpenIdentity acceptingActionSent prepared bodyEntered bodyReturned preProof postProof custodyKnown timely complete closeReturned completionReturned panelReleased parentReleased poolReturned".split()
-    integers = "selectorQueries selectorReturns holders holdersReleased startStatus directoryStatus closeStatus releaseStatus".split()
+    # Three fixed parent-readiness observations, frozen when that phase ends.
+    # Reads are sequential, last-in-budget, not an atomic snapshot at refusal.
+    # None of these values grants preparation, native success or cleanup.
+    readiness = {
+        "parentReadinessInBudgetEventProgress": (0, 1, 3, 7),
+        "parentReadinessLastInBudgetMainWindow": (0, 1, 2, 3),
+        "parentReadinessLastInBudgetActiveEligible": (0, 1, 3, 5, 7, 13, 15),
+    }
+    integers = [*"selectorQueries selectorReturns holders holdersReleased startStatus directoryStatus closeStatus releaseStatus".split(), *readiness]
     need(type(value) is dict and set(value) == {*booleans, *integers, "schemaVersion", "scope", "reason", "rows"}, "native-fields")
     need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
          and value["scope"] == "fresh-normal-parent-not-installed-tauri"
@@ -111,6 +119,7 @@ def native_data(content):
          and value["readOnly"] and not value["semanticOpenIdentity"] and not value["acceptingActionSent"]
          and all(type(value[k]) is int for k in integers)
          and value["reason"] in REASONS, "native-types")
+    need(all(value[key] in domain for key, domain in readiness.items()), "native-readiness-domain")
     need(0 <= value["selectorReturns"] <= value["selectorQueries"] <= 256
          and 0 <= value["holdersReleased"] <= value["holders"] <= 192
          and all(-1 <= value[k] <= 255 for k in integers if k.endswith("Status")), "native-bounds")

@@ -19,6 +19,10 @@ typedef struct {
     double end, readEnd; BOOL known, bodyEntered, bodyReturned, pre, post, timely;
     BOOL complete, cleanupPhase, closeReturned, completionReturned, panelReleased, parentReleased;
     BOOL poolReturned, prepared, releaseEntered; int startStatus, directoryStatus, closeStatus, releaseStatus;
+    // Diagnostic-only: freeze when parent readiness ends. These are sequential
+    // last-in-budget observations, never an atomic refusal snapshot or authority.
+    BOOL parentReadinessPhase;
+    unsigned readinessEvents, readinessMain, readinessPair;
 } Probe;
 static Probe p; // Original holders remain rooted even on exception/Unknown.
 static NSAutoreleasePool *pool;
@@ -181,7 +185,44 @@ static BOOL walk(Probe *s) {
     return YES;
 }
 #undef READ
-static void pump(void) { (void)CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, true); }
+static void pump(void) {
+    double remaining = p.end - now();
+    if (!(remaining > 0)) return;
+    (void)CFRunLoopRunInMode(kCFRunLoopDefaultMode, fmin(0.01, remaining), true);
+    if (now() >= p.end) return;
+    NSDate *until = [NSDate distantPast];
+    if (now() >= p.end) return;
+    // Service only our application's AppKit lifecycle events. Never dispatch
+    // keyboard, mouse, synthetic or accepting input, or drain an unbounded queue.
+    NSEvent *event = [NSApp nextEventMatchingMask:NSEventMaskAppKitDefined
+        untilDate:until inMode:NSDefaultRunLoopMode dequeue:YES];
+    if (now() >= p.end) return;
+    if (event) {
+        BOOL activated = NO;
+        if (p.parentReadinessPhase) {
+            p.readinessEvents |= 1;
+            activated = [event subtype] == NSEventSubtypeApplicationActivated;
+            if (now() >= p.end) return;
+        }
+        [NSApp sendEvent:event];
+        if (now() >= p.end) return;
+        if (p.parentReadinessPhase) p.readinessEvents |= activated ? 7 : 3;
+    }
+    if (now() >= p.end) return;
+    [NSApp updateWindows];
+}
+static void sample_parent_readiness(void) {
+    if (now() >= p.end) return;
+    BOOL active = [NSApp isActive];
+    if (now() >= p.end) return;
+    // A new first return replaces the prior pair with an explicitly partial
+    // sample. No first return preserves the older sample; no late fill occurs.
+    p.readinessPair = active ? 3 : 1;
+    if (now() >= p.end) return;
+    BOOL eligible = [p.parent canBecomeMainWindow];
+    if (now() >= p.end) return;
+    p.readinessPair |= eligible ? 12 : 4;
+}
 static BOOL prepare(void) {
     p.stringClass = [NSString class]; p.arrayClass = [NSArray class]; p.urlClass = [NSURL class];
     [NSApplication sharedApplication];
@@ -196,9 +237,20 @@ static BOOL prepare(void) {
     [p.parent setReleasedWhenClosed:NO]; [p.parent setTitle:@"MRK read-only panel probe"];
     [NSApp activate];
     [p.parent makeKeyAndOrderFront:nil]; [p.parent makeMainWindow];
-    // Activation is a request: observe our original parent under the same endpoint.
-    while ([NSApp mainWindow] != p.parent && now() < p.end) pump();
-    if ([NSApp mainWindow] != p.parent) { reason(&p, "parent-main-window"); return NO; }
+    // Activation is a request. Only this original getter's in-budget return,
+    // not diagnostic classifications, may satisfy the unchanged parent guard.
+    BOOL originalMain = NO;
+    p.parentReadinessPhase = YES;
+    while (now() < p.end) {
+        NSWindow *main = [NSApp mainWindow];
+        if (now() >= p.end) break;
+        p.readinessMain = !main ? 1 : main == p.parent ? 2 : 3;
+        if (main == p.parent) { originalMain = YES; break; }
+        sample_parent_readiness();
+        pump();
+    }
+    p.parentReadinessPhase = NO;
+    if (!originalMain) { reason(&p, "parent-main-window"); return NO; }
     if (now() >= p.end) { reason(&p, "preparation-deadline"); return NO; }
     p.state = mrk_panel_reserve();
     if (!p.state) { reason(&p, "panel-reserve"); return NO; }
@@ -267,11 +319,14 @@ static BOOL emit(void) {
         "\"custodyKnown\":%s,\"timely\":%s,\"complete\":%s,\"reason\":\"%s\","
         "\"selectorQueries\":%u,\"selectorReturns\":%u,\"holders\":%u,\"holdersReleased\":%u,"
         "\"startStatus\":%d,\"directoryStatus\":%d,\"closeStatus\":%d,\"releaseStatus\":%d,"
-        "\"closeReturned\":%s,\"completionReturned\":%s,\"panelReleased\":%s,\"parentReleased\":%s,\"poolReturned\":%s,\"rows\":[",
+        "\"closeReturned\":%s,\"completionReturned\":%s,\"panelReleased\":%s,\"parentReleased\":%s,\"poolReturned\":%s,"
+        "\"parentReadinessInBudgetEventProgress\":%u,\"parentReadinessLastInBudgetMainWindow\":%u,"
+        "\"parentReadinessLastInBudgetActiveEligible\":%u,\"rows\":[",
         boolean(p.prepared), boolean(p.bodyEntered), boolean(p.bodyReturned), boolean(p.pre), boolean(p.post),
         boolean(p.known), boolean(p.timely), boolean(p.complete), p.reason, p.queries, p.returns, p.held, p.released,
         p.startStatus, p.directoryStatus, p.closeStatus, p.releaseStatus, boolean(p.closeReturned),
-        boolean(p.completionReturned), boolean(p.panelReleased), boolean(p.parentReleased), boolean(p.poolReturned));
+        boolean(p.completionReturned), boolean(p.panelReleased), boolean(p.parentReleased), boolean(p.poolReturned),
+        p.readinessEvents, p.readinessMain, p.readinessPair);
     for (unsigned n = 0; n < p.count; ++n) {
         Row *r = &p.rows[n];
         printf("%s{\"ordinal\":%u,\"depth\":%u,\"viaOrdinal\":%u,\"role\":\"%s\",\"parent\":%d,\"window\":%d,"
