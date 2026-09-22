@@ -3241,7 +3241,9 @@ mod installed_session_observation {
             })
         }
         pub(crate) fn installed_session_capture_checkpoint(&self) -> Option<Arc<asset_source::InstalledCaptureCheckpoint>> {
-            let state = self.lock(); state.slot.as_ref()?.owner.installed_capture.lock().ok()?.clone()
+            let state = self.lock();
+            let checkpoint = state.slot.as_ref()?.owner.installed_capture.lock().ok()?.clone();
+            checkpoint
         }
         pub(crate) fn take_installed_session_queries(&self) -> Result<crate::supervisor::InstalledSessionQueries, BridgeError> {
             // Forward only the original document's original Supervisor; no

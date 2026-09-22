@@ -8,7 +8,7 @@ fn empty_state() -> DocumentState {
     DocumentState { lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0,
         exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false,
         quit_pending: false, retiring: false, lock_pending: false, compatibility_picker_pending: false,
-        context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None,
+        session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None,
         quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new() }
 }
 fn section<'a>(text: &'a str, start: &str, end: &str) -> &'a str {
