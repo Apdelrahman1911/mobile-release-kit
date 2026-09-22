@@ -17,6 +17,7 @@ else:
     _OFFLINE_CLI11_STARTED_NS = None
 
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -9240,7 +9241,7 @@ def windows_fullwalk_precheck_data(context: dict, raw: bytes) -> dict:
         require(row[key] == windows_fullwalk_command_sha(row[role], test), "Windows fullwalk headless command binding differs")
     if production:
         require(windows_ordinary_path(row["helperArtifact"])
-                == root / "target/x86_64-pc-windows-msvc/debug" / (WINDOWS_RUNTIME_PUBLICATION_HELPER + ".exe")
+                == root / (WINDOWS_RUNTIME_PUBLICATION_HELPER + ".exe")
                 and row["helperNativeFeatures"] == "runtime-publication"
                 and row["helperCommandSha256"] == windows_runtime_publication_helper_command_sha(row["helperArtifact"]),
                 "Windows normal helper path/features/command differs")
@@ -11076,10 +11077,15 @@ def windows_installed_app_test_path(raw: bytes, graph: dict, *, source: Path, ro
                     and profile.get("test") is (not helper) and profile.get("debug_assertions") is True
                     and row.get("features") == unit_features[graph["appId"]] and row.get("fresh") is False,
                     "Windows app original executable has the wrong fixed role, features or profile")
-            found = ordinary_windows_executable(row["executable"], target_root=root / "target")
             if helper:
+                # Cargo uplifts this normal binary using a hardlink or copy.
+                # Only derive its lexical DATA role here; no filesystem effect
+                # until the ENTIRE successful original stream is validated.
+                found = windows_executable_path(row["executable"], target_root=root / "target")
                 require(found == root / "target" / TARGETS["windows"] / "debug" / (WINDOWS_RUNTIME_PUBLICATION_HELPER + ".exe"),
                         "Windows normal helper is not the fixed non-libtest artifact")
+            else:
+                found = ordinary_windows_executable(row["executable"], target_root=root / "target")
     require(finished and found is not None and (not helper or normal_native_units == 1),
             "Windows app compilation did not identify its original executable and normal native unit")
     return found
@@ -11112,18 +11118,230 @@ def windows_installed_helper_argv(cargo: str, context: dict) -> list[str]:
         "--bin", WINDOWS_RUNTIME_PUBLICATION_HELPER, "--message-format=json"]
 
 
-def windows_installed_helper_artifact(context: dict) -> dict:
+def windows_installed_helper_paths(context: dict) -> tuple[Path, Path, Path]:
     require(windows_runtime_publication_profile(context), "The helper artifact requires its production profile")
+    root = Path(context["root"])
+    leaf = WINDOWS_RUNTIME_PUBLICATION_HELPER + ".exe"
+    raw = root / "target" / TARGETS["windows"] / "debug" / leaf
+    copy = root / leaf
+    require(root.is_absolute() and len(str(raw)) <= 1024, "Windows helper fixed root exceeds its bound")
+    windows_executable_path(str(raw), target_root=root / "target")
+    windows_executable_path(str(copy), target_root=root)
+    return raw, copy, root / "helper-compiled-artifact.json"
+
+
+def windows_installed_helper_outputs_absent(context: dict) -> None:
+    """Before the ONE original helper compile; never adopt a stale raw/copy/receipt."""
+    for role, path in zip(("compiler-source", "singleton-copy", "compiled-receipt"), windows_installed_helper_paths(context), strict=True):
+        try:
+            details = path.lstat()
+        except FileNotFoundError:
+            continue
+        except BaseException:
+            windows_installed_helper_refused(role, "outputs-absent")
+            raise
+        windows_installed_helper_refused(role, "outputs-absent", details)
+        raise CheckFailure("Windows helper original output already exists")
+
+
+def windows_installed_helper_messages(context: dict) -> tuple[Path, dict]:
+    raw_path, _, _ = windows_installed_helper_paths(context)
     root, source = Path(context["root"]), Path(context["source"])
-    messages = root / "helper-compile-messages.jsonl"
-    path = windows_installed_app_test_path(windows_installed_bytes(messages, 16 << 20),
-        windows_installed_app_metadata(context), source=source, root=root, helper=True)
-    before = path.lstat()
-    record = windows_installed_record(path, 128 << 20)
-    require(windows_installed_state(before) == windows_installed_state(path.lstat()), "Windows helper original artifact changed")
-    return {"path": str(path), **record,
-        "identity": [before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns],
-        "messages": windows_installed_record(messages, 16 << 20)}
+    stage = "compiler-messages"
+    try:
+        raw = windows_installed_bytes(root / "helper-compile-messages.jsonl", 16 << 20)
+        stage = "compiler-graph"; graph = windows_installed_app_metadata(context)
+        stage = "compiler-role"
+        path = windows_installed_app_test_path(raw, graph, source=source, root=root, helper=True)
+        require(path == raw_path, "Windows helper compiler DATA role differs")
+    except BaseException:
+        windows_installed_helper_refused("compiler-source", stage)
+        raise
+    return path, {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def windows_installed_helper_refused(role: str, stage: str, details=None) -> None:
+    """Fixed diagnostic projection of the failing observation, never authority."""
+    try:
+        row = {"role": role, "stage": stage, "diagnosticOnly": True}
+        if details is not None:
+            links = getattr(details, "st_nlink", None)
+            attributes = getattr(details, "st_file_attributes", 0 if os.name != "nt" else None)
+            tag = getattr(details, "st_reparse_tag", 0 if os.name != "nt" else None)
+            row.update(regular=stat.S_ISREG(details.st_mode),
+                linkClass=({0: "zero", 1: "one", 2: "two"}.get(links, "other")
+                    if type(links) is int else "unavailable"),
+                reparse=(bool(attributes & 0x400 or tag) if type(attributes) is int and type(tag) is int else None))
+        print("MRK_WINDOWS_HELPER_HANDOFF_REFUSED=" + canonical_json(row).decode("ascii"), flush=True)
+    except BaseException:
+        pass  # Even interrupted diagnostics cannot replace the original failure.
+
+
+def windows_installed_helper_shape(details, *, compiler_source: bool, empty: bool = False) -> bool:
+    # Actual Windows fields are mandatory on Windows. The POSIX branch supports
+    # inert DATA file-copy contracts, never Windows/native qualification.
+    attributes = getattr(details, "st_file_attributes", 0 if os.name != "nt" else None)
+    tag = getattr(details, "st_reparse_tag", 0 if os.name != "nt" else None)
+    return (stat.S_ISREG(details.st_mode) and type(attributes) is int and not attributes & 0x400
+        and type(tag) is int and tag == 0 and type(details.st_nlink) is int
+        and details.st_nlink in ((1, 2) if compiler_source else (1,))
+        and integer_between(details.st_size, 0 if empty else 1, 128 << 20))
+
+
+def windows_installed_helper_open_matches(named, opened) -> bool:
+    if os.name == "nt":
+        # Both fixed leaves are .exe. Normalize ONLY this cross-API comparison;
+        # raw same-API snapshots retain original mode, link count and ChangeTime.
+        return (windows_installed_identity(named, named.st_mode & ~0o111)
+                == windows_installed_identity(opened, opened.st_mode))
+    return windows_installed_state(named) == windows_installed_state(opened)
+
+
+@contextmanager
+def windows_installed_helper_observation(path: Path, *, compiler_source: bool, deadline: float | None = None):
+    """Keep the single original DATA reader through its consumer and actual close."""
+    role = "compiler-source" if compiler_source else "singleton-copy"
+    stream, failure, close_entered = None, None, False
+    stage, details = "deadline", None
+    gate = lambda: windows_installed_remaining(deadline, 1) if deadline is not None else None
+    try:
+        gate(); stage = "ancestry"; windows_installed_directories(path.parent)
+        stage = "shape"; before = path.lstat(); details = before
+        require(windows_installed_helper_shape(before, compiler_source=compiler_source), "Windows helper DATA file shape differs")
+        details = None; stage = "deadline"; gate(); stage = "open"; stream = path.open("rb")
+        stage = "opened-shape"; opened = os.fstat(stream.fileno()); details = opened
+        require(windows_installed_helper_shape(opened, compiler_source=compiler_source), "Windows helper opened DATA shape differs")
+        details = None; stage = "open-identity"
+        require(windows_installed_helper_open_matches(before, opened), "Windows helper DATA changed at open")
+        stage = "deadline"; gate(); stage = "read"; raw = stream.read(before.st_size + 1)
+        require(type(raw) is bytes and len(raw) == before.st_size, "Windows helper DATA length or EOF differs")
+        stage = "descriptor-stable"
+        require(windows_installed_state(os.fstat(stream.fileno())) == windows_installed_state(opened),
+                "Windows helper original DATA descriptor changed")
+        stage = "named-stable"
+        require(windows_installed_state(path.lstat()) == windows_installed_state(before), "Windows helper DATA pathname changed")
+        record = {"path": str(path), "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+            "named": list(windows_installed_state(before)), "descriptor": list(windows_installed_state(opened))}
+        stage = "deadline"; gate(); stage = "consumer"
+        yield raw, record
+        stage = "deadline"; gate(); stage = "descriptor-stable"
+        require(windows_installed_state(os.fstat(stream.fileno())) == windows_installed_state(opened),
+                "Windows helper original DATA descriptor changed after use")
+        stage = "named-stable"
+        require(windows_installed_state(path.lstat()) == windows_installed_state(before), "Windows helper DATA pathname changed after use")
+        stage = "ancestry"; windows_installed_directories(path.parent)
+        stage = "close"; close_entered = True; stream.close()
+        require(stream.closed, "Windows helper original DATA reader is not closed")
+        stage = "deadline"; gate(); stage = "closed-named"
+        require(windows_installed_state(path.lstat()) == windows_installed_state(before), "Windows helper closed DATA pathname changed")
+    except BaseException as error:
+        failure = error
+        if stage != "consumer":
+            windows_installed_helper_refused(role, stage, details)
+        raise
+    finally:
+        if stream is not None and not close_entered:
+            # An entered close is never retried. On an earlier failure, this is
+            # only the normal once-only close of the known original reader.
+            close_entered = True
+            try:
+                stream.close()
+                require(stream.closed, "Windows helper original DATA reader is not closed")
+            except BaseException:
+                windows_installed_helper_refused(role, "close")
+                if failure is None:
+                    raise
+
+
+def windows_installed_helper_copy(path: Path, raw: bytes, source: dict, deadline: float) -> tuple[int, int]:
+    """Exclusive byte writer only; its immutable copy epoch starts AFTER close."""
+    output, failure, close_entered = None, None, False
+    stage, details = "deadline", None
+    try:
+        windows_installed_remaining(deadline, 1)
+        stage = "ancestry"; windows_installed_directories(path.parent)
+        stage = "deadline"; windows_installed_remaining(deadline, 1)
+        stage = "create"; output = path.open("xb")  # Collision retains every existing object.
+        stage = "writer-shape"; created = os.fstat(output.fileno()); details = created
+        require(windows_installed_helper_shape(created, compiler_source=False, empty=True) and created.st_size == 0,
+                "Windows helper exclusive writer shape differs")
+        original = (created.st_dev, created.st_ino)
+        details = None; stage = "writer-identity"
+        require(original != tuple(source["descriptor"][:2])
+                and windows_installed_helper_open_matches(path.lstat(), created), "Windows helper writer is not its distinct original")
+        stage = "deadline"; windows_installed_remaining(deadline, 1); stage = "write"
+        written = output.write(raw)
+        require(type(written) is int and written == len(raw), "Windows helper original byte write was incomplete")
+        stage = "deadline"; windows_installed_remaining(deadline, 1)
+        stage = "flush"; output.flush(); stage = "deadline"; windows_installed_remaining(deadline, 1)
+        stage = "writer-shape"; after = os.fstat(output.fileno()); details = after
+        require(windows_installed_helper_shape(after, compiler_source=False) and after.st_size == len(raw),
+                "Windows helper writer shape changed")
+        details = None; stage = "writer-identity"
+        require((after.st_dev, after.st_ino) == original and windows_installed_helper_open_matches(path.lstat(), after),
+                "Windows helper writer pathname changed")
+        stage = "close"; close_entered = True; output.close()
+        require(output.closed, "Windows helper original copy writer is not closed")
+        stage = "deadline"; windows_installed_remaining(deadline, 1)
+        return original
+    except BaseException as error:
+        failure = error
+        windows_installed_helper_refused("singleton-copy", stage, details)
+        raise
+    finally:
+        if output is not None and not close_entered:
+            close_entered = True
+            try:
+                output.close()
+                require(output.closed, "Windows helper original copy writer is not closed")
+            except BaseException:
+                windows_installed_helper_refused("singleton-copy", "close")
+                if failure is None:
+                    raise
+
+
+def windows_installed_helper_record(source: dict, copy: dict, messages: dict) -> dict:
+    require(source["size"] == copy["size"] and source["sha256"] == copy["sha256"]
+            and source["descriptor"][:2] != copy["descriptor"][:2], "Windows helper source/copy provenance differs")
+    named = copy["named"]
+    return {"path": copy["path"], "size": copy["size"], "sha256": copy["sha256"],
+        # Compatibility only. Full named AND descriptor epochs below remain
+        # authoritative, including Windows ChangeTime absent from this format.
+        "identity": [named[0], named[1], named[4], named[5], named[-1]],
+        "messages": messages, "compilerSource": source,
+        "copySnapshot": {"named": named, "descriptor": copy["descriptor"]}}
+
+
+def windows_installed_helper_handoff(context: dict, deadline: float) -> dict:
+    """Sole creator, called only after original compiler0 and BOTH writers close."""
+    _, destination, _ = windows_installed_helper_paths(context)
+    windows_installed_remaining(deadline, 1)
+    path, messages = windows_installed_helper_messages(context)
+    with windows_installed_helper_observation(path, compiler_source=True, deadline=deadline) as (raw, source):
+        original = windows_installed_helper_copy(destination, raw, source, deadline)
+        with windows_installed_helper_observation(destination, compiler_source=False, deadline=deadline) as (copied, copy):
+            if tuple(copy["descriptor"][:2]) != original or copied != raw:
+                windows_installed_helper_refused("singleton-copy", "readback")
+                raise CheckFailure("Windows helper closed original copy differs")
+            result = windows_installed_helper_record(source, copy, messages)
+    windows_installed_remaining(deadline, 1)
+    return result
+
+
+def windows_installed_helper_artifact(context: dict) -> dict:
+    """Read-only revalidation of the SEALED original; never copy/repair/rebase."""
+    _, destination, receipt = windows_installed_helper_paths(context)
+    saved = closed_object(bounded_json(windows_installed_bytes(receipt, 64 << 10), 64 << 10),
+        {"path", "size", "sha256", "identity", "messages", "compilerSource", "copySnapshot"},
+        "Windows helper original provenance fields differ")
+    path, messages = windows_installed_helper_messages(context)
+    with windows_installed_helper_observation(path, compiler_source=True) as (_, source):
+        with windows_installed_helper_observation(destination, compiler_source=False) as (_, copy):
+            observed = windows_installed_helper_record(source, copy, messages)
+            if not same_compile_json(saved, observed):
+                windows_installed_helper_refused("handoff", "sealed-provenance")
+                raise CheckFailure("Windows helper sealed original source/copy epoch changed")
+    return observed
 
 
 def windows_installed_native_inert(context: dict) -> tuple[str, ...]:
@@ -11976,6 +12194,7 @@ def windows_installed_phase(name: str, scope: str) -> None:
                  "appCompiledTest": app_artifact, "appOriginalExitCode": 0,
                  "appInvocationSha256": hashlib.sha256(canonical_json(app_argv)).hexdigest()}
         if production:
+            windows_installed_helper_outputs_absent(context)
             helper_argv = windows_installed_helper_argv(cargo, context)
             compile_failure = None
             try:
@@ -11994,7 +12213,8 @@ def windows_installed_phase(name: str, scope: str) -> None:
                 except BaseException:
                     pass  # Diagnostics cannot replace the original compiler/close failure.
                 raise
-            helper_artifact = windows_installed_helper_artifact(context)
+            require(output.closed and diagnostics.closed, "Windows helper original compiler writers are not closed")
+            helper_artifact = windows_installed_helper_handoff(context, deadline)
             write_json(root / "helper-compiled-artifact.json", helper_artifact)
             facts.update(helperCompiledArtifact=helper_artifact, helperOriginalExitCode=0,
                 helperInvocationSha256=hashlib.sha256(canonical_json(helper_argv)).hexdigest())

@@ -755,7 +755,7 @@ jobs:
                 $env:MRK_WINDOWS_HELPER_ARTIFACT_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
                 $env:MRK_WINDOWS_PRECHECK_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
                 $env:MRK_WINDOWS_ORDINARY_PREFLIGHT_STEP_OUTCOME -cne 'success') { throw 'binding' }
-            $expectedHelper = [System.IO.Path]::Combine($expectedRoot, 'target', 'x86_64-pc-windows-msvc', 'debug', 'mrk-windows-runtime-publish.exe')
+            $expectedHelper = [System.IO.Path]::Combine($expectedRoot, 'mrk-windows-runtime-publish.exe')
             if ($env:MRK_WINDOWS_HELPER_ARTIFACT -cne $expectedHelper) { throw 'artifact' }
             if ($env:MRK_WINDOWS_PRODUCER_STAGE_STEP_OUTCOME -cne 'success' -or
                 $env:MRK_WINDOWS_PRODUCER_STAGE_FINALIZE_STEP_OUTCOME -cne 'success') { throw 'prior-original-finality' }
@@ -926,7 +926,7 @@ jobs:
                 $env:MRK_WINDOWS_HELPER_ARTIFACT_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
                 $env:MRK_WINDOWS_PRECHECK_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
                 $env:MRK_WINDOWS_ORDINARY_PREFLIGHT_STEP_OUTCOME -cne 'success') { throw 'binding' }
-            $expectedHelper = [System.IO.Path]::Combine($expectedRoot, 'target', 'x86_64-pc-windows-msvc', 'debug', 'mrk-windows-runtime-publish.exe')
+            $expectedHelper = [System.IO.Path]::Combine($expectedRoot, 'mrk-windows-runtime-publish.exe')
             if ($env:MRK_WINDOWS_HELPER_ARTIFACT -cne $expectedHelper) { throw 'artifact' }
             if ($env:MRK_WINDOWS_PRODUCER_STAGE_STEP_OUTCOME -cne 'success' -or
                 $env:MRK_WINDOWS_PRODUCER_STAGE_FINALIZE_STEP_OUTCOME -cne 'success') { throw 'prior-original-finality' }

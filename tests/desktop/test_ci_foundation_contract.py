@@ -6856,6 +6856,274 @@ class GitHubTLSWorkflowContractTests(unittest.TestCase):
             self.assertNotIn(dynamic, build)
 
 
+class WindowsHelperHandoffTests(unittest.TestCase):
+    """DATA-only compiler handoff contracts; selected bytes are never executed."""
+
+    @staticmethod
+    def fixture(root):
+        context = {"root": str(root), "source": "/unused-source",
+                   "qualificationProfile": helper.WINDOWS_RUNTIME_PUBLICATION_PROFILE}
+        raw, copy, receipt = helper.windows_installed_helper_paths(context)
+        messages = {"size": 17, "sha256": "9" * 64}
+        return context, raw, copy, receipt, messages
+
+    def test_one_and_two_link_compiler_data_make_one_distinct_singleton_without_changing_originals(self):
+        for links in (1, 2):
+            with self.subTest(links=links), tempfile.TemporaryDirectory() as directory:
+                context, raw, copy, receipt, messages = self.fixture(Path(directory))
+                helper.windows_installed_helper_outputs_absent(context)
+                raw.parent.mkdir(parents=True)
+                payload = b"inert helper bytes; never a runnable fixture"
+                raw.write_bytes(payload)
+                alias = raw.parent / "compiler-alias.data"
+                if links == 2:
+                    helper.os.link(raw, alias)
+                before = helper.windows_installed_state(raw.lstat())
+                with patch.object(helper, "windows_installed_helper_messages", return_value=(raw, messages)):
+                    artifact = helper.windows_installed_helper_handoff(context, helper.time.monotonic() + 30)
+                    self.assertEqual(copy.read_bytes(), payload)
+                    self.assertEqual(copy.lstat().st_nlink, 1)
+                    self.assertNotEqual((copy.lstat().st_dev, copy.lstat().st_ino), before[:2])
+                    self.assertEqual(helper.windows_installed_state(raw.lstat()), before)
+                    self.assertEqual(artifact["compilerSource"]["named"], list(before))
+                    self.assertEqual(artifact["copySnapshot"]["named"], list(helper.windows_installed_state(copy.lstat())))
+                    self.assertEqual(artifact["messages"], messages)
+                    helper.write_json(receipt, artifact)
+                    with patch.object(helper, "windows_installed_helper_copy", side_effect=AssertionError("no recopy")), \
+                         patch.object(helper, "windows_installed_helper_handoff", side_effect=AssertionError("no creator")), \
+                         redirect_stdout(io.StringIO()):
+                        self.assertEqual(helper.windows_installed_helper_artifact(context), artifact)
+                        if links == 1:
+                            helper.os.link(raw, alias)
+                            self.assertEqual(raw.lstat().st_nlink, 2)  # Both shapes are admissible only at FIRST admission.
+                            with self.assertRaises(helper.CheckFailure): helper.windows_installed_helper_artifact(context)
+                    if links == 2:
+                        self.assertEqual(alias.read_bytes(), payload)
+                        self.assertEqual(helper.windows_installed_state(alias.lstat()), before)
+                        with self.assertRaises(helper.CheckFailure): helper.ordinary(raw)
+                        with self.assertRaises(helper.CheckFailure): helper.windows_installed_bytes(raw, 1024)
+
+    def test_windows_raw_observation_preserves_both_api_epochs_and_original_failure(self):
+        raw = b"inert"
+        named = SimpleNamespace(st_dev=77, st_ino=2**100 + 7, st_mode=stat.S_IFREG | 0o755, st_nlink=2,
+            st_size=len(raw), st_mtime_ns=200, st_birthtime_ns=100, st_ctime_ns=100, st_file_attributes=128, st_reparse_tag=0)
+        opened = SimpleNamespace(**{**vars(named), "st_mode": stat.S_IFREG | 0o644, "st_ctime_ns": 700})
+        original = OSError("PRIVATE-ORIGINAL-READ-FAILURE")
+
+        def observe(*, first=named, descriptor=opened, named_change=None, descriptor_change=None,
+                    read_error=False, close_error=False, diagnostic_error=False, as_copy=False, data=raw):
+            counts = {"named": 0, "descriptor": 0, "close": 0}
+            class Input(io.BytesIO):
+                def fileno(self): return 91
+                def read(self, size=-1):
+                    if read_error: raise original
+                    return super().read(size)
+                def close(self):
+                    counts["close"] += 1
+                    super().close()
+                    if close_error: raise OSError("PRIVATE-CLOSE-FAILURE")
+            stream = Input(data)
+            class Named:
+                parent = Path("/inert-parent")
+                def __str__(self): return "C:\\private\\mrk-windows-runtime-publish.exe"
+                def lstat(self):
+                    counts["named"] += 1
+                    return named_change if named_change is not None and counts["named"] == 2 else first
+                def open(self, mode):
+                    self_outer.assertEqual(mode, "rb")
+                    return stream
+            def fstat(_):
+                counts["descriptor"] += 1
+                return descriptor_change if descriptor_change is not None and counts["descriptor"] == 2 else descriptor
+            self_outer, capture = self, io.StringIO()
+            try:
+                with patch.object(helper, "os", SimpleNamespace(name="nt", fstat=fstat)), \
+                     patch.object(helper, "windows_installed_directories"), redirect_stdout(capture), \
+                     (patch("builtins.print", side_effect=KeyboardInterrupt()) if diagnostic_error else ExitStack()):
+                    with helper.windows_installed_helper_observation(Named(), compiler_source=not as_copy) as value:
+                        result = value
+                self.assertEqual(counts["close"], 1)
+                return result
+            except BaseException:
+                self.assertLessEqual(counts["close"], 1)
+                if read_error:
+                    self.assertEqual(counts["close"], 1)
+                if counts["descriptor"] == 0:
+                    self.assertEqual(counts["named"], 1)  # Diagnostic must not re-stat.
+                    if not diagnostic_error:
+                        row = json.loads(capture.getvalue().split("=", 1)[1])
+                        self.assertEqual(set(row), {"role", "stage", "diagnosticOnly", "regular", "linkClass", "reparse"})
+                        self.assertEqual(row["stage"], "shape")
+                        self.assertNotIn("private", capture.getvalue().lower())
+                raise
+            finally:
+                if not stream.closed:
+                    io.BytesIO.close(stream)
+
+        _, record = observe()
+        self.assertEqual(record["named"], [77, named.st_ino, named.st_mode, 2, 5, 200, 100, 128, 0, 100])
+        self.assertEqual(record["descriptor"], [77, named.st_ino, opened.st_mode, 2, 5, 200, 100, 128, 0, 700])
+        for field, value in (("st_nlink", 0), ("st_nlink", 3), ("st_nlink", True), ("st_size", 0),
+                ("st_size", (128 << 20) + 1), ("st_mode", stat.S_IFDIR | 0o700),
+                ("st_file_attributes", 0x400), ("st_reparse_tag", 1), ("st_file_attributes", None)):
+            with self.subTest(shape=field, value=value), self.assertRaises(helper.CheckFailure):
+                observe(first=SimpleNamespace(**{**vars(named), field: value}))
+        with self.assertRaises(helper.CheckFailure): observe(as_copy=True)
+        with self.assertRaises(helper.CheckFailure): observe(descriptor=SimpleNamespace(**{**vars(opened), "st_ino": 9}))
+        for data in (b"in", b"inert+"):
+            with self.subTest(read_length=len(data)), self.assertRaises(helper.CheckFailure): observe(data=data)
+        for api, state in (("named_change", named), ("descriptor_change", opened)):
+            for field in ("st_nlink", "st_mode", "st_ino", "st_size", "st_mtime_ns", "st_birthtime_ns", "st_ctime_ns", "st_file_attributes", "st_reparse_tag"):
+                changed = SimpleNamespace(**{**vars(state), field: getattr(state, field) + 1})
+                with self.subTest(api=api, field=field), self.assertRaises(helper.CheckFailure): observe(**{api: changed})
+        with self.assertRaises(OSError): observe(close_error=True)
+        with self.assertRaises(OSError) as caught:
+            observe(read_error=True, close_error=True, diagnostic_error=True)
+        self.assertIs(caught.exception, original)
+
+    def test_revalidation_rejects_full_saved_epochs_including_changes_hidden_by_legacy_identity(self):
+        context, raw, copy, receipt, messages = self.fixture(Path("/inert-ci-root"))
+        source = {"path": str(raw), "size": 5, "sha256": "a" * 64,
+            "named": [77, 8, 33261, 2, 5, 200, 100, 128, 0, 100],
+            "descriptor": [77, 8, 33188, 2, 5, 200, 100, 128, 0, 700]}
+        singleton = {**deepcopy(source), "path": str(copy),
+            "named": [77, 9, 33261, 1, 5, 400, 300, 128, 0, 300],
+            "descriptor": [77, 9, 33188, 1, 5, 400, 300, 128, 0, 800]}
+        saved = helper.windows_installed_helper_record(source, singleton, messages)
+        def revalidate(actual_source=source, actual_copy=singleton, claimed=saved, message_record=messages):
+            class Observation:
+                def __init__(self, row): self.row = row
+                def __enter__(self): return b"inert", self.row
+                def __exit__(self, *_): return False
+            def read(path, limit):
+                self.assertEqual((path, limit), (receipt, 64 << 10))
+                return helper.canonical_json(claimed)
+            def observe(path, *, compiler_source):
+                self.assertEqual(path, raw if compiler_source else copy)
+                return Observation(actual_source if compiler_source else actual_copy)
+            with patch.object(helper, "windows_installed_bytes", side_effect=read), \
+                 patch.object(helper, "windows_installed_helper_messages", return_value=(raw, message_record)), \
+                 patch.object(helper, "windows_installed_helper_observation", side_effect=observe), \
+                 patch.object(helper, "windows_installed_helper_copy", side_effect=AssertionError("no repair")) as writer, \
+                 patch.object(helper, "windows_installed_helper_handoff", side_effect=AssertionError("no creator")) as creator, \
+                 patch.object(helper.Path, "open", side_effect=AssertionError("no filesystem effect")), redirect_stdout(io.StringIO()):
+                try:
+                    return helper.windows_installed_helper_artifact(context)
+                finally:
+                    writer.assert_not_called(); creator.assert_not_called()
+        self.assertEqual(revalidate(), saved)
+        for role, key in (("actual_source", source), ("actual_copy", singleton)):
+            for api, index in (("descriptor", 9), ("descriptor", 6), ("named", 3), ("descriptor", 3), ("named", 7), ("named", 8)):
+                changed = deepcopy(key)
+                changed[api][index] += 1 if index != 3 else -1
+                with self.subTest(role=role, api=api, index=index), self.assertRaises(helper.CheckFailure):
+                    revalidate(**{role: changed})
+        for key in ("compilerSource", "copySnapshot"):
+            changed = deepcopy(saved); del changed[key]
+            with self.subTest(missing=key), self.assertRaises(helper.CheckFailure): revalidate(claimed=changed)
+        for changed in ({**saved, "extra": True}, {**saved, "path": str(raw)}, {**saved, "size": True}):
+            with self.subTest(record=changed), self.assertRaises(helper.CheckFailure): revalidate(claimed=changed)
+        with self.assertRaises(helper.CheckFailure): revalidate(message_record={**messages, "sha256": "0" * 64})
+
+    def test_conflicts_and_write_flush_close_readback_source_change_or_expiry_never_publish(self):
+        for edge in ("collision", "writer-hardlink", "short-write", "write-error", "flush", "close", "unclosed",
+                     "readback", "copy-replaced", "copy-hardlink", "source-change", "precreate-expiry", "expiry"):
+            with self.subTest(edge=edge), tempfile.TemporaryDirectory() as directory:
+                context, raw, copy, receipt, messages = self.fixture(Path(directory))
+                raw.parent.mkdir(parents=True); payload = b"inert"; raw.write_bytes(payload)
+                before = helper.windows_installed_state(raw.lstat())
+                if edge == "collision": copy.write_bytes(b"occupied")
+                open_original, writers, calls, walked = Path.open, [], [], []
+                directories_original = helper.windows_installed_directories
+                original = OSError("PRIVATE-WRITER-FAILURE")
+                class Writer:
+                    def __init__(self, actual): self.actual = actual; self.closes = 0
+                    @property
+                    def closed(self): return self.actual.closed
+                    def fileno(self): return self.actual.fileno()
+                    def write(self, value):
+                        calls.append("write")
+                        if edge == "write-error": raise original
+                        if edge == "source-change":
+                            with open_original(raw, "wb") as changed: changed.write(b"other")
+                            helper.os.utime(raw, ns=(before[5], before[5] + 1_000_000))
+                        return self.actual.write(value[:-1] if edge == "short-write" else value)
+                    def flush(self):
+                        if edge == "flush": raise original
+                        self.actual.flush()
+                    def close(self):
+                        self.closes += 1
+                        if edge == "unclosed": return
+                        self.actual.close()
+                        if edge == "close": raise original
+                        if edge == "readback":
+                            with open_original(copy, "wb") as changed: changed.write(b"other")
+                        if edge == "copy-replaced":
+                            helper.os.rename(copy, copy.with_suffix(".retained"))
+                            with open_original(copy, "wb") as changed: changed.write(payload)
+                        if edge == "copy-hardlink": helper.os.link(copy, copy.with_suffix(".alias"))
+                def open_file(path, mode="r", *args, **kwargs):
+                    actual = open_original(path, mode, *args, **kwargs)
+                    if path == copy and mode == "xb":
+                        wrapper = Writer(actual); writers.append(wrapper)
+                        if edge == "writer-hardlink": helper.os.link(copy, copy.with_suffix(".alias"))
+                        return wrapper
+                    return actual
+                def directories(path):
+                    directories_original(path); walked.append(path)
+                def remaining(*_):
+                    if edge == "expiry" and calls or edge == "precreate-expiry" and copy.parent in walked:
+                        raise helper.CheckFailure("original deadline expired")
+                    return 1
+                try:
+                    with patch.object(helper, "windows_installed_helper_messages", return_value=(raw, messages)), \
+                         patch.object(helper.Path, "open", autospec=True, side_effect=open_file), \
+                         patch.object(helper, "windows_installed_directories", side_effect=directories), \
+                         patch.object(helper, "windows_installed_remaining", side_effect=remaining), redirect_stdout(io.StringIO()):
+                        with self.assertRaises((helper.CheckFailure, OSError)) as caught:
+                            helper.windows_installed_helper_handoff(context, 1000.0)
+                    if edge in ("write-error", "flush", "close"): self.assertIs(caught.exception, original)
+                    self.assertFalse(receipt.exists())
+                    self.assertEqual(copy.exists(), edge != "precreate-expiry")  # Never delete/reset/retry a partial copy.
+                    self.assertLessEqual(len(writers), 1)
+                    self.assertTrue(all(writer.closes == 1 for writer in writers))
+                    if edge == "collision": self.assertEqual(copy.read_bytes(), b"occupied")
+                    if edge != "source-change":
+                        self.assertEqual(raw.read_bytes(), payload)
+                        self.assertEqual(helper.windows_installed_state(raw.lstat()), before)
+                finally:
+                    # Only this synthetic test's still-open underlying stream;
+                    # no retry of the application's entered Writer.close.
+                    for writer in writers:
+                        if not writer.actual.closed: writer.actual.close()
+
+    def test_precompile_absence_is_nonfollowing_and_creator_stays_out_of_readonly_or_retention_paths(self):
+        for index in range(3):
+            with self.subTest(role=index), tempfile.TemporaryDirectory() as directory:
+                context, raw, copy, receipt, _ = self.fixture(Path(directory))
+                helper.windows_installed_helper_outputs_absent(context)
+                occupied = (raw, copy, receipt)[index]; occupied.parent.mkdir(parents=True, exist_ok=True)
+                occupied.symlink_to(Path(directory) / "absent-target")
+                with redirect_stdout(io.StringIO()), self.assertRaises(helper.CheckFailure):
+                    helper.windows_installed_helper_outputs_absent(context)
+                self.assertTrue(occupied.is_symlink())
+        source = HELPER.read_text()
+        phase = source.split("def windows_installed_phase(", 1)[1].split("\ndef main(", 1)[0]
+        self.assertEqual(phase.count("windows_installed_helper_handoff(context, deadline)"), 1)
+        self.assertLess(phase.index("windows_installed_helper_outputs_absent(context)"),
+                        phase.index('check="windows-installed-helper-compile-only"'))
+        self.assertLess(phase.index("require(output.closed and diagnostics.closed"),
+                        phase.index("windows_installed_helper_handoff(context, deadline)"))
+        for begin, end in (("def windows_installed_helper_artifact(", "def windows_installed_native_inert("),
+                           ("def windows_fullwalk_retain(", "def windows_installed_identity(")):
+            body = source.split(begin, 1)[1].split(end, 1)[0]
+            self.assertNotIn("windows_installed_helper_handoff(", body)
+            self.assertNotIn("windows_installed_helper_copy(", body)
+        native = (SOURCE / "desktop/native/windows-installed-native/src/qualification_fixture.rs").read_text()
+        self.assertIn('need(helper == root.join("mrk-windows-runtime-publish.exe"))?', native)
+        self.assertIn("self.recheck(index)?;self.close(index)?;self.pop_closed(index)?;", native)
+
+
 class WindowsReaderGateTests(unittest.TestCase):
     """Inert DATA/source contracts only; these records are not native receipts."""
 
@@ -7248,7 +7516,12 @@ class WindowsReaderGateTests(unittest.TestCase):
         rows = [unit, library, binary, {"reason": "build-finished", "success": True}]
         def parse(items, helper_role=True):
             raw = b"\n".join(helper.canonical_json(row) for row in items)
-            with patch.object(helper, "ordinary_windows_executable", side_effect=lambda path, **_: Path(path)):
+            def ordinary(path, **_):
+                self.assertFalse(helper_role, "The whole helper JSON stream must remain lexical DATA")
+                return Path(path)
+            with patch.object(helper, "ordinary_windows_executable", side_effect=ordinary), \
+                 patch.object(helper.Path, "lstat", side_effect=AssertionError("no filesystem admission while parsing")), \
+                 patch.object(helper.Path, "open", side_effect=AssertionError("no filesystem effect while parsing")):
                 return helper.windows_installed_app_test_path(raw, graph, source=source, root=root, helper=helper_role)
         self.assertEqual(parse(rows), executable)
         libtest = {**library, "profile": {"test": True, "debug_assertions": True},
@@ -7268,6 +7541,9 @@ class WindowsReaderGateTests(unittest.TestCase):
             "release-helper": lambda data: data[2].update(executable=str(executable.parent.parent / "release/mrk-windows-runtime-publish.exe")),
             "duplicate-helper": lambda data: data.insert(3, deepcopy(data[2])),
             "typed-test-profile": lambda data: data[2]["profile"].update(test=0),
+            "missing-final": lambda data: data.pop(),
+            "failed-final": lambda data: data[-1].update(success=False),
+            "after-final": lambda data: data.append(deepcopy(data[2])),
         }
         for label, change in cases.items():
             altered = deepcopy(rows); change(altered)
@@ -7831,7 +8107,7 @@ class WindowsReaderGateTests(unittest.TestCase):
         # observation, producer execution, prepared payload or helper return.
         legacy = cls.fullwalk_data()
         context = {**legacy["context"], "qualificationProfile": helper.WINDOWS_RUNTIME_PUBLICATION_PROFILE}
-        helper_path = str(helper.PureWindowsPath(context["root"]) / "target/x86_64-pc-windows-msvc/debug/mrk-windows-runtime-publish.exe")
+        helper_path = str(helper.PureWindowsPath(context["root"]) / "mrk-windows-runtime-publish.exe")
         helper_identity = helper.windows_ordinary_wire({**legacy["ordinary"][4]["aclTransitions"][5]["before"],
                                                        "fileId": "99" * 16, "size": 97})
         pre = {**legacy["pre"], "profile": helper.WINDOWS_RUNTIME_PUBLICATION_PROFILE,
@@ -8110,6 +8386,9 @@ class WindowsReaderGateTests(unittest.TestCase):
             stack.enter_context(patch.object(helper, name, return_value=value))
         if "helper" in data:
             stack.enter_context(patch.object(helper, "windows_installed_helper_artifact", return_value=data["helper"]))
+            stack.enter_context(patch.object(helper, "windows_installed_helper_outputs_absent"))
+            stack.enter_context(patch.object(helper, "windows_installed_helper_handoff",
+                side_effect=AssertionError("Read-only DATA chain cannot recreate the helper")))
         stack.enter_context(patch.object(helper, "windows_ordinary_original",
             side_effect=lambda artifact, **kw: (data["pre"]["helperArtifactIdentity"] if artifact == data.get("helper") else
                 data["after"] if kw.get("app_role") else data["ordinary"][3])))
@@ -9162,20 +9441,27 @@ class WindowsReaderGateTests(unittest.TestCase):
         data = self.publication_fullwalk_data()
         files, packages, graph = self.fullwalk_originals(data)
         context = {**data["context"], "sdk": {"version": helper.WINDOWS_SDK_VERSION, "headers": []}}
-        root, opened = Path(context["root"]), []
+        root, opened, streams = Path(context["root"]), [], {}
         class Output:
+            closed = False
             def __enter__(self): return self
-            def __exit__(self, *_): pass
+            def __exit__(self, *_): self.closed = True
         def open_output(path, mode, **_):
             self.assertEqual((mode, path.parent), ("x", root))
             self.assertIn(path.name, ("compile-messages.jsonl", "compile.stderr", "app-compile-messages.jsonl", "app-compile.stderr",
                                      "helper-compile-messages.jsonl", "helper-compile.stderr"))
             self.assertNotIn(path, opened); opened.append(path)
-            return Output()
+            streams[path.name] = Output()
+            return streams[path.name]
         def remaining(deadline, maximum):
             self.assertEqual(deadline, 760.0)  # Original phase origin100 +660; never a per-role replacement.
             self.assertIn(maximum, (1, 600))
             return maximum
+        def finish_handoff(received, deadline):
+            self.assertIs(received, context); self.assertEqual(deadline, 760.0)
+            self.assertEqual(len(streams), 6)
+            self.assertTrue(all(stream.closed for stream in streams.values()))
+            return data["helper"]
         with self.fullwalk_edges(data, files, packages, graph), \
              patch.object(helper, "windows_installed_context", return_value=context), \
              patch.object(helper, "source_unchanged"), patch.object(helper, "windows_installed_inputs"), \
@@ -9186,10 +9472,12 @@ class WindowsReaderGateTests(unittest.TestCase):
              patch.object(helper.Path, "open", autospec=True, side_effect=open_output), \
              patch.object(helper.time, "monotonic", return_value=100.0), \
              patch.object(helper, "windows_installed_remaining", side_effect=remaining) as clock, \
+             patch.object(helper, "windows_installed_helper_handoff", side_effect=finish_handoff) as handoff, \
              patch.object(helper, "windows_installed_compile_failure") as diagnostic, \
              patch.object(helper, "write_json") as written, patch.object(helper, "run", return_value=None) as run:
             helper.windows_installed_phase("compile", helper.WINDOWS_INSTALLED_SCOPE)
         diagnostic.assert_not_called()
+        handoff.assert_called_once_with(context, 760.0)
         expected = [helper.windows_fullwalk_native_argv("/inert-compiler/cargo.exe", context),
                     helper.windows_installed_app_argv("/inert-compiler/cargo.exe", context),
                     helper.windows_installed_helper_argv("/inert-compiler/cargo.exe", context)]
@@ -9222,7 +9510,8 @@ class WindowsReaderGateTests(unittest.TestCase):
             files, packages, graph = self.fullwalk_originals(data)
             context = {**data["context"], "sdk": {"version": helper.WINDOWS_SDK_VERSION, "headers": []}}
             root = Path(context["root"])
-            for edge in ("compile", "diagnostic-error", "diagnostic-interrupt", "compile-interrupt", "open", "deadline", "close", "unclosed"):
+            for edge in ("compile", "diagnostic-error", "diagnostic-interrupt", "compile-interrupt", "open", "deadline", "close", "unclosed",
+                         *(("success-unclosed",) if stage == "helper" else ())):
                 original = helper.CheckFailure("Fixed original compile failure")
                 boundary = KeyboardInterrupt() if edge == "compile-interrupt" else helper.CheckFailure("Fixed stream/deadline failure")
                 expected = boundary if edge in {"compile-interrupt", "open", "deadline", "close"} else original
@@ -9231,7 +9520,7 @@ class WindowsReaderGateTests(unittest.TestCase):
                     def __init__(self, name): self.name, self.closed = name, False
                     def __enter__(self): return self
                     def __exit__(self, *_):
-                        self.closed = not (edge == "unclosed" and self.name == prefix + "compile.stderr")
+                        self.closed = not (edge in {"unclosed", "success-unclosed"} and self.name == prefix + "compile.stderr")
                         if edge == "close" and self.name == prefix + "compile.stderr": raise boundary
                 def open_output(path, mode, **_):
                     self.assertEqual((path.parent, mode), (root, "x"))
@@ -9243,7 +9532,7 @@ class WindowsReaderGateTests(unittest.TestCase):
                     return streams[path.name]
                 def run_compile(_, **kw):
                     self.assertFalse(kw["output"].closed or kw["diagnostics"].closed)
-                    if kw["check"] == check: raise expected if edge == "compile-interrupt" else original
+                    if kw["check"] == check and edge != "success-unclosed": raise expected if edge == "compile-interrupt" else original
                 def remaining(*_):
                     if edge == "deadline" and prefix + "compile.stderr" in streams: raise boundary
                     return 600
@@ -9265,7 +9554,8 @@ class WindowsReaderGateTests(unittest.TestCase):
                      patch.object(helper, "windows_installed_compile_failure", side_effect=emit) as diagnostic, \
                      patch.object(helper, "write_json") as written, patch.object(helper, "run", side_effect=run_compile) as run:
                     with self.assertRaises(type(expected)) as caught: helper.windows_installed_phase("compile", helper.WINDOWS_INSTALLED_SCOPE)
-                    self.assertIs(caught.exception, expected)
+                    if edge == "success-unclosed": self.assertIn("writers are not closed", str(caught.exception))
+                    else: self.assertIs(caught.exception, expected)
                     if edge in {"compile", "diagnostic-error", "diagnostic-interrupt"}:
                         diagnostic.assert_called_once_with(context, stage)
                         self.assertIsNone(original.__context__)  # Private diagnostic errors do not replace or chain onto it.
@@ -9274,7 +9564,7 @@ class WindowsReaderGateTests(unittest.TestCase):
                     outputs = {call.args[0].name for call in written.call_args_list}
                     self.assertEqual(outputs, {"compile-started.json"} | ({"compiled-test.json"} if stage != "standalone" else set())
                         | ({"app-compiled-test.json"} if stage == "helper" else set()))
-                if edge != "unclosed": self.assertTrue(all(stream.closed for stream in streams.values()))
+                if edge not in {"unclosed", "success-unclosed"}: self.assertTrue(all(stream.closed for stream in streams.values()))
 
     def test_windows_fullwalk_app_original_role_keeps_512mib_and_raw_same_api_state_narrow(self):
         raw = b"exe"
@@ -9660,7 +9950,7 @@ class WindowsReaderGateTests(unittest.TestCase):
             self.assertEqual(step.count("exit 0"), 1)
             if test is None:
                 self.assertIn("$command = '\"' + $env:MRK_WINDOWS_HELPER_ARTIFACT + '\"'", step)
-                self.assertIn("'debug', 'mrk-windows-runtime-publish.exe'", step)
+                self.assertIn("::Combine($expectedRoot, 'mrk-windows-runtime-publish.exe')", step)
                 self.assertNotIn("--ignored", step); self.assertNotIn("--test-threads", step)
             for forbidden in ("MRK_PYTHON", "always()", "continue-on-error", "Start-Process", "Process.Start", "Copy-Item", "Remove-Item",
                               "Set-Acl", "icacls", "Wait-Process", "Stop-Process", "ConvertTo-Json"):

@@ -429,7 +429,7 @@ pub(super) fn precheck(raw: &[u8], root: &Path) -> Result<Wire> {
     ] { value.equal(key, &command_sha(value.get(role)?, test)?)?; }
     if production {
         let helper = fixed_path(value.get("helperArtifact")?)?;
-        need(helper == fixed_directories(root)[2].1.join("mrk-windows-runtime-publish.exe"))?;
+        need(helper == root.join("mrk-windows-runtime-publish.exe"))?;
         original_epoch(value.get("helperArtifactIdentity")?,value.get("helperArtifactIdentity")?)?;
         need(value.number("helperArtifactBytes",PAYLOAD_LIMIT as u64)?>0
             && value.number("helperCompileMessagesBytes",16<<20)?>0)?;
