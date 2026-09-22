@@ -505,7 +505,7 @@ jobs:
 
 
   windows-installed-native:
-    name: Windows MSVC standalone native facts / no runtime enablement
+    name: Windows MSVC headless reader and native facts / no runtime enablement
     if: >-
       github.ref == 'refs/heads/verify/desktop-windows-installed-native' &&
       (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.scope == 'windows-installed-native'))
@@ -562,14 +562,14 @@ jobs:
         with:
           python-version: '3.14.7'
           architecture: x64
-      - name: Bind standalone source and one original task root
+      - name: Bind complete source and one original task root
         id: prepare
         shell: bash
         env:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py prepare'
-      - name: Acquire only the locked three-package MSVC graph
+      - name: Acquire only the locked headless app and native MSVC graphs
         timeout-minutes: 15
         shell: bash
         env:
@@ -577,7 +577,7 @@ jobs:
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py acquire'
-      - name: Compile only the original standalone native libtest
+      - name: Compile the original no-feature app and standalone native libtests
         timeout-minutes: 12
         shell: bash
         env:
@@ -585,7 +585,7 @@ jobs:
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py compile'
-      - name: Run nine inert controls and the fixed native facts contract
+      - name: Run fixed app eleven and native nine plus the native facts contract
         timeout-minutes: 4
         shell: bash
         env:
@@ -593,6 +593,63 @@ jobs:
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-installed-native'
+      - name: Observe actual PowerShell and loaded Process identity as DATA only
+        id: runtime-data
+        if: always() && steps.prepare.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          try {
+            $expectedRoot = [System.IO.Path]::Combine($env:RUNNER_TEMP, "mrk-windows-installed-native-$($env:GITHUB_RUN_ID)-1")
+            if ($env:GITHUB_RUN_ATTEMPT -ne '1' -or $env:MRK_DESKTOP_CI_ROOT -cne $expectedRoot) { throw 'binding' }
+            $assembly = [System.Diagnostics.Process].Assembly
+            $name = $assembly.GetName()
+            $attributes = $assembly.GetCustomAttributesData()
+            if ($attributes.Count -gt 128) { throw 'metadata-bound' }
+            $informational = $null
+            $revision = $null
+            foreach ($attribute in $attributes) {
+              if ($attribute.AttributeType.FullName -eq 'System.Reflection.AssemblyInformationalVersionAttribute') {
+                if ($null -ne $informational -or $attribute.ConstructorArguments.Count -ne 1) { throw 'metadata-shape' }
+                $informational = [string]$attribute.ConstructorArguments[0].Value
+              } elseif ($attribute.AttributeType.FullName -eq 'System.Reflection.AssemblyMetadataAttribute' -and
+                        $attribute.ConstructorArguments.Count -eq 2 -and
+                        [string]$attribute.ConstructorArguments[0].Value -in @('SourceRevisionId', 'RepositoryCommit', 'CommitHash')) {
+                $value = [string]$attribute.ConstructorArguments[1].Value
+                if ($null -ne $revision -and $revision -cne $value) { throw 'metadata-conflict' }
+                $revision = $value
+              }
+            }
+            $identity = [ordered]@{
+              schemaVersion = 1; sourceSha = $env:GITHUB_SHA; runId = $env:GITHUB_RUN_ID; attempt = 1
+              imageOS = $env:ImageOS; imageVersion = $env:ImageVersion
+              powerShell = [ordered]@{ path = [Environment]::ProcessPath; version = $PSVersionTable.PSVersion.ToString(); edition = $PSVersionTable.PSEdition }
+              runtime = [ordered]@{ version = [Environment]::Version.ToString(); framework = [System.Runtime.InteropServices.RuntimeInformation]::FrameworkDescription }
+              processAssembly = [ordered]@{
+                path = $assembly.Location; name = $name.Name; version = $name.Version.ToString()
+                moduleVersionId = $assembly.ManifestModule.ModuleVersionId.ToString('D')
+                informationalVersion = $informational; sourceRevision = $revision
+              }
+            }
+            $raw = [System.Text.UTF8Encoding]::new($false, $true).GetBytes(($identity | ConvertTo-Json -Depth 6 -Compress))
+            if ($raw.Length -eq 0 -or $raw.Length -gt 65536) { throw 'data-bound' }
+            $path = [System.IO.Path]::Combine($expectedRoot, 'runtime-identity.private.json')
+            $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            try { $stream.Write($raw, 0, $raw.Length); $stream.Flush() } finally { $stream.Dispose() }
+            # The actual observer remains alive during this fixed stable-file DATA handoff.
+            & $env:MRK_PYTHON -I -S -B desktop/tools/ci_foundation.py windows-installed-runtime-data
+            if ($LASTEXITCODE -ne 0) { throw 'data-validator' }
+          } catch {
+            [Console]::Error.WriteLine('MRK_WINDOWS_RUNTIME_DATA_REFUSED=observation')
+            exit 1
+          }
       - name: Retain only bounded original DATA without retry or cleanup
         id: retain
         if: always() && steps.prepare.outcome == 'success'
@@ -601,6 +658,7 @@ jobs:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_WINDOWS_RUNTIME_DATA_STEP_OUTCOME: ${{ steps.runtime-data.outcome }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py retain'
       - name: Upload bounded original verification evidence
         if: always() && steps.retain.outcome == 'success'

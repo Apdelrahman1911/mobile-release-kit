@@ -20,7 +20,7 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 import shlex
 import shutil
@@ -29,6 +29,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 from typing import TextIO
 import zipfile
 
@@ -860,11 +861,31 @@ WINDOWS_SNAPSHOT_TEST = "supervisor::hosted_tests::windows_static_snapshot_hoste
 FOUNDATION_SCOPE = "passive-v1"
 WINDOWS_SNAPSHOT_SCOPE = "windows-snapshot-v1"
 
-# Standalone native-facts verification only; no app/core ZIP/runtime preparation.
+# Fixed headless reader/native facts only; no shell/core ZIP/runtime preparation.
 WINDOWS_INSTALLED_SCOPE = "windows-installed-native-v1"
 WINDOWS_INSTALLED_CRATE = "desktop/native/windows-installed-native"
 WINDOWS_INSTALLED_TEST = "hosted_tests::hosted_native_read_only_contract"
-WINDOWS_INSTALLED_PHASES = ("prepare", "acquire", "compile", "windows-installed-native", "retain")
+WINDOWS_INSTALLED_PHASES = ("prepare", "acquire", "compile", "windows-installed-native", "windows-installed-runtime-data", "retain")
+WINDOWS_INSTALLED_APP = "desktop/src-tauri"
+WINDOWS_INSTALLED_APP_LOCALS = {
+    "mobile-release-kit-desktop": "desktop/src-tauri/Cargo.toml",
+    "mrk-linux-mount-observation": "desktop/native/linux-mount-observation/Cargo.toml",
+    "mrk-macos-installed-native": "desktop/native/macos-installed-native/Cargo.toml",
+    "mrk-windows-installed-native": "desktop/native/windows-installed-native/Cargo.toml",
+}
+WINDOWS_INSTALLED_APP_INERT = (
+    "runtime::windows_version::tests::windows_manifest_and_observed_inventory_are_exact",
+    "runtime::windows_version::tests::windows_manifest_anchors_schema_and_inventory_are_bound_before_use",
+    "runtime::windows_version::tests::windows_manifest_rejects_case_aliases_and_file_directory_conflicts",
+    "runtime::windows_version::tests::windows_manifest_preserves_every_supplier_member_and_hash",
+    "runtime::windows_version::tests::windows_manifest_budgets_include_manifest_not_only_payload",
+    "runtime::windows_version::tests::windows_six_method_data_does_not_enable_any_production_profile",
+    "installed_runtime_windows::tests::stopped_expired_and_lost_channel_inspection_never_enters_native_work",
+    "installed_runtime_windows::tests::unknown_completion_precedes_post_call_stop_and_deadline",
+    "installed_runtime_windows::tests::ordinary_returned_refusal_is_not_unknown_and_pending_is_not_a_join",
+    "installed_runtime_windows::tests::settlement_and_interruption_are_one_shot_not_close_by_drop",
+    "installed_runtime_windows::tests::selected_ancestors_remain_live_but_unrelated_subtrees_do_not",
+)
 WINDOWS_INSTALLED_INERT = tuple("tests::" + name for name in (
     "original_destinations_are_stable_registered_and_book_bound",
     "pending_and_lost_completion_keep_the_exact_arena_and_slots",
@@ -878,7 +899,9 @@ WINDOWS_INSTALLED_INERT = tuple("tests::" + name for name in (
 ))
 WINDOWS_INSTALLED_SOURCES = tuple(sorted((
     ".github/workflows/desktop-foundation.yml", "desktop/tools/ci_foundation.py",
-    "desktop/src-tauri/Cargo.toml", "desktop/src-tauri/Cargo.lock",
+    "desktop/src-tauri/Cargo.toml", "desktop/src-tauri/Cargo.lock", "desktop/src-tauri/build.rs",
+    "desktop/src-tauri/src/lib.rs", "desktop/src-tauri/src/runtime.rs",
+    "desktop/src-tauri/src/installed_runtime_windows.rs", "tests/desktop/test_ci_foundation_contract.py",
     *(WINDOWS_INSTALLED_CRATE + "/" + name for name in (
         "Cargo.toml", "Cargo.lock", "README.md", "src/lib.rs", "src/decode.rs",
         "src/security.rs", "src/tests.rs", "src/hosted_tests.rs")),
@@ -888,6 +911,10 @@ WINDOWS_INSTALLED_NOT_VERIFIED = (
     "runtime-public-snapshot-save-or-launch-enablement", "native-pending-failure-injection",
     "real-readfile-directory-eof-transitions", "protected-version-publication-and-full-manifest-walk",
     "loaded-image-import-custody", "com-msi-ui-or-installed-app",
+)
+WINDOWS_INSTALLED_COMBINED_NOT_VERIFIED = (
+    "application-shell-featured-build-and-packaging",
+    *(name for name in WINDOWS_INSTALLED_NOT_VERIFIED if name != "parent-application-cargo-graph-or-build"),
 )
 WINDOWS_SNAPSHOT_PUBLIC_SCOPE = "windows-static-snapshot-native-only-not-desktop-enablement"
 WINDOWS_SNAPSHOT_PHASES = frozenset({"prepare", "acquire", "compile", "windows-snapshot", "clean"})
@@ -1481,6 +1508,8 @@ TOOL_CHECKS = frozenset({
     "windows-snapshot-native-contract",
     "windows-installed-locked-metadata", "windows-installed-test-compile-only",
     "windows-installed-inert-contracts", "windows-installed-native-contract",
+    "windows-installed-source-status", "windows-installed-source-inventory",
+    "windows-installed-app-locked-metadata", "windows-installed-app-test-compile-only", "windows-installed-app-inert-contracts",
     "github-locked-headless-metadata", "github-headless-test-compile-only", "github-owner-native-contract",
     "github-tls-locked-headless-metadata", "github-tls-headless-test-compile-only",
     "environment-source-status", "environment-source-inventory",
@@ -1724,7 +1753,8 @@ def run(argv: list[str], *, check: str, cwd: Path, env: dict[str, str], timeout:
         "github-tls-locked-headless-metadata", "github-tls-headless-test-compile-only",
         "environment-locked-headless-metadata", "environment-headless-test-compile-only",
         "windows-installed-locked-metadata", "windows-installed-test-compile-only",
-        "windows-installed-inert-contracts", "windows-installed-native-contract"}),
+        "windows-installed-inert-contracts", "windows-installed-native-contract",
+        "windows-installed-app-locked-metadata", "windows-installed-app-test-compile-only", "windows-installed-app-inert-contracts"}),
         "Unexpected private diagnostic destination")
     print(f"Fixed check: {check}", flush=True)
     try:
@@ -8671,14 +8701,29 @@ def windows_installed_binding() -> dict:
             "event": event, "imageOS": e["ImageOS"], "imageVersion": e["ImageVersion"]}
 
 
-def windows_installed_inputs(context: dict) -> None:
+def windows_installed_source_files(source: Path, root: Path, git: str) -> list[dict]:
+    environment = clean_environment(root)
+    require(run([git, "status", "--porcelain=v1", "--untracked-files=all"], check="windows-installed-source-status",
+                cwd=source, env=environment, timeout=15, capture=True) == "", "Windows headless source is not clean")
+    raw = run([git, "ls-files", "-z"], check="windows-installed-source-inventory",
+              cwd=source, env=environment, timeout=15, capture=True)
+    require(raw.endswith("\0"), "Windows headless source inventory is incomplete")
+    names = tuple(sorted(raw[:-1].split("\0")))
+    require(set(WINDOWS_INSTALLED_SOURCES) <= set(names), "Windows headless required source is absent")
+    return validate_environment_inventory(fixed_file_inventory(source, names), maximum=64 << 20)
+
+
+def windows_installed_inputs(context: dict, *, retention_only: bool = False) -> None:
     root, source = Path(context["root"]), Path(context["source"])
-    for path in (root, source, root / "cargo", root / "target", root / "public",
-                 *( (source / name).parent for name in WINDOWS_INSTALLED_SOURCES )):
+    rows = validate_environment_inventory(context["sourceFiles"], maximum=64 << 20)
+    for path in sorted({root, source, root / "cargo", root / "target", root / "public",
+                        *((source / row["path"]).parent for row in rows)}, key=str):
         windows_installed_directories(path)
-    require(fixed_file_inventory(source, WINDOWS_INSTALLED_SOURCES) == context["sourceFiles"], "Windows native source inputs changed")
-    no_cargo_configuration((source / WINDOWS_INSTALLED_CRATE, source / "desktop/native", source / "desktop",
-        source, *source.parents, root, *root.parents, root / "home"))
+    observed = (fixed_file_inventory(source, tuple(row["path"] for row in rows)) if retention_only
+                else windows_installed_source_files(source, root, context["git"]))
+    require(observed == rows, "Windows headless source inputs changed")
+    no_cargo_configuration((source / WINDOWS_INSTALLED_APP, source / WINDOWS_INSTALLED_CRATE,
+        source / "desktop/native", source / "desktop", source, *source.parents, root, *root.parents, root / "home"))
     for name in ("config", "config.toml"):
         require(not (root / "cargo" / name).exists() and not (root / "cargo" / name).is_symlink(), "Windows native Cargo home is configured")
     require(not any(name in os.environ for name in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "RUSTC_WRAPPER",
@@ -8707,7 +8752,7 @@ def windows_installed_tool(path: Path, role: str) -> None:
             if role == "git" else "Expected an ordinary, single-link file")
 
 
-def windows_installed_context(*, create: bool) -> dict:
+def windows_installed_context(*, create: bool, retention_only: bool = False) -> dict:
     binding = windows_installed_binding()
     source, temp = Path(os.environ["GITHUB_WORKSPACE"]), Path(os.environ["RUNNER_TEMP"])
     windows_installed_directories(source)
@@ -8732,7 +8777,7 @@ def windows_installed_context(*, create: bool) -> dict:
         require(re.fullmatch(r"[0-9a-f]{40}", tree) is not None and tree != "0" * 40, "Windows native source tree differs")
         context = {**binding, "root": str(root), "source": str(source), "sourceTree": tree, "platform": "windows",
             "python": str(selected), "git": git, "rustup": rustup,
-            "sourceFiles": fixed_file_inventory(source, WINDOWS_INSTALLED_SOURCES),
+            "sourceFiles": windows_installed_source_files(source, root, git),
             "pythonIdentity": windows_installed_record(selected, 32 << 20),
             "sdk": {"version": WINDOWS_SDK_VERSION, "headers": fixed_file_inventory(windows_sdk_root(), WINDOWS_SDK_HEADERS)},
             "windowsVersion": list(sys.getwindowsversion()[:3])}
@@ -8750,7 +8795,7 @@ def windows_installed_context(*, create: bool) -> dict:
         require(context.get("root") == str(root) and context.get("source") == str(source)
                 and context.get("python") == str(selected) and all(context.get(k) == v for k, v in binding.items()),
                 "Windows native original context changed")
-        windows_installed_inputs(context)
+        windows_installed_inputs(context, retention_only=retention_only)
         require(windows_installed_record(selected, 32 << 20) == context["pythonIdentity"], "Windows native Python changed")
     return context
 
@@ -8778,6 +8823,352 @@ def windows_installed_metadata(context: dict) -> dict:
             and nodes[packages["windows-sys"]["id"]].get("dependencies") == [packages["windows-link"]["id"]]
             and nodes[packages["windows-link"]["id"]].get("dependencies") == [], "Windows native resolved edges differ")
     return packages
+
+
+def windows_installed_app_graph(value: object, lock: object, *, source: Path, root: Path) -> dict:
+    require(type(value) is dict and type(value.get("version")) is int and value["version"] == 1 and type(value.get("packages")) is list
+            and 4 <= len(value["packages"]) <= 512, "Windows app package inventory differs")
+    require(type(lock) is dict and type(lock.get("version")) is int and lock["version"] == 4 and type(lock.get("package")) is list
+            and 4 <= len(lock["package"]) <= 2048, "Windows app source-bound lock differs")
+    locked = {}
+    for row in lock["package"]:
+        require(type(row) is dict and type(row.get("name")) is str and type(row.get("version")) is str
+                and (row.get("source") is None or type(row["source"]) is str), "Windows app lock identity differs")
+        key = (row["name"], row["version"], row.get("source"))
+        require(key not in locked and (key[2] is None or key[2] == "registry+https://github.com/rust-lang/crates.io-index"
+                and sha256_value(row.get("checksum"))), "Windows app lock source/checksum differs")
+        locked[key] = row
+    require({key[:2] for key in locked if key[2] is None}
+            == {(name, "0.1.0") for name in WINDOWS_INSTALLED_APP_LOCALS}, "Windows app declared lock locals differ")
+    active_locals = {"mobile-release-kit-desktop", "mrk-windows-installed-native"}
+    packages, local, identities = {}, {}, set()
+    for package in value["packages"]:
+        require(type(package) is dict and type(package.get("id")) is str and 0 < len(package["id"]) <= 4096
+                and package["id"] not in packages and type(package.get("name")) is str
+                and type(package.get("version")) is str and type(package.get("manifest_path")) is str
+                and type(package.get("features")) is dict and (package.get("source") is None or type(package["source"]) is str),
+                "Windows app package identity differs")
+        # Cargo inventories unselected integration tests too (locked tokio has
+        # 158 declarations). This finite DATA bound is not compiler permission:
+        # windows_installed_app_test_path separately admits actual selected units.
+        require(type(package.get("targets")) is list and 0 < len(package["targets"]) <= 512,
+                "Windows app declared target inventory differs")
+        key = (package["name"], package["version"], package.get("source"))
+        require(key in locked and key not in identities, "Windows app package is duplicated/outside the original lock")
+        identities.add(key)
+        if key[2] is None:
+            require(key[0] in active_locals and key[0] not in local and key[1] == "0.1.0"
+                    and package["manifest_path"] == str(source / WINDOWS_INSTALLED_APP_LOCALS[key[0]]),
+                    "Windows app declared local path differs")
+            local[key[0]] = package["id"]
+        else:
+            manifest = Path(package["manifest_path"])
+            registry = root / "cargo" / "registry" / "src"
+            require(manifest.is_absolute() and manifest.is_relative_to(registry)
+                    and len(manifest.relative_to(registry).parts) == 3
+                    and manifest.parent.name == key[0] + "-" + key[1] and manifest.name == "Cargo.toml",
+                    "Windows app registry manifest left the private acquisition")
+        packages[package["id"]] = package
+    require(set(local) == active_locals, "Windows app target must contain exactly two local packages")
+    app = local["mobile-release-kit-desktop"]
+    require(value.get("workspace_root") == str(source / WINDOWS_INSTALLED_APP)
+            and value.get("workspace_members") == [app] and value.get("workspace_default_members") == [app]
+            and value.get("target_directory") == str(root / "target"), "Windows app original workspace/target differs")
+    # Cargo filters package/resolve rows, not the selected app's declarations.
+    # Keep the source lock's four locals separate from these exact three edges.
+    declarations = packages[app].get("dependencies")
+    require(type(declarations) is list and 3 <= len(declarations) <= 256
+            and all(type(dep) is dict and type(dep.get("name")) is str for dep in declarations),
+            "Windows app dependency declarations differ")
+    targets = {
+        "mrk-linux-mount-observation": 'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))',
+        "mrk-macos-installed-native": 'cfg(all(target_os = "macos", target_arch = "aarch64"))',
+        "mrk-windows-installed-native": 'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))',
+    }
+    expected = {name: {"name": name, "source": None, "req": "*", "kind": None, "rename": None,
+        "optional": False, "uses_default_features": True, "features": [], "target": target,
+        "registry": None, "path": str((source / WINDOWS_INSTALLED_APP_LOCALS[name]).parent)}
+        for name, target in targets.items()}
+    declared_locals = [dep for dep in declarations
+                       if dep.get("source") is None or "path" in dep or dep["name"] in targets]
+    require(len(declared_locals) == 3 and same_compile_json({dep["name"]: dep for dep in declared_locals}, expected),
+            "Windows app exact three local declarations differ")
+    resolve = value.get("resolve")
+    require(type(resolve) is dict and resolve.get("root") == app and type(resolve.get("nodes")) is list
+            and 2 <= len(resolve["nodes"]) <= 256, "Windows app active resolution differs")
+    nodes = {}
+    for node in resolve["nodes"]:
+        require(type(node) is dict and type(node.get("id")) is str and node["id"] in packages and node["id"] not in nodes
+                and type(node.get("dependencies")) is list and type(node.get("deps")) is list
+                and type(node.get("features")) is list, "Windows app active node differs")
+        features = node["features"]
+        require(all(type(feature) is str for feature in features) and features == sorted(set(features))
+                and set(features) <= set(packages[node["id"]]["features"]), "Windows app resolved features differ")
+        nodes[node["id"]] = node
+    require(set(nodes) & set(local.values()) == {app, local["mrk-windows-installed-native"]}
+            and nodes[app]["features"] == [] and nodes[local["mrk-windows-installed-native"]]["features"] == [],
+            "Windows app active locals/features differ")
+    for node in nodes.values():
+        edges = []
+        for dep in node["deps"]:
+            require(type(dep) is dict and type(dep.get("name")) is str and type(dep.get("pkg")) is str
+                    and dep["pkg"] in nodes and type(dep.get("dep_kinds")) is list and 0 < len(dep["dep_kinds"]) <= 3,
+                    "Windows app active dependency is missing/inactive")
+            for kind in dep["dep_kinds"]:
+                require(type(kind) is dict and set(kind) == {"kind", "target"}
+                        and (kind["kind"] is None or type(kind["kind"]) is str and kind["kind"] in {"dev", "build"})
+                        and (kind["target"] is None or type(kind["target"]) is str), "Windows app dependency kind differs")
+            edges.append(dep["pkg"])
+        require(all(type(item) is str for item in node["dependencies"])
+                and len(set(node["dependencies"])) == len(node["dependencies"])
+                and set(node["dependencies"]) == set(edges), "Windows app original edge tables differ")
+    seen, pending = set(), [app]
+    while pending:
+        current = pending.pop()
+        if current not in seen:
+            seen.add(current)
+            pending.extend(nodes[current]["dependencies"])
+    require(seen == set(nodes), "Windows app has a disconnected active compiler node")
+    root_dependencies = {(packages[key]["name"], packages[key]["version"]) for key in nodes[app]["dependencies"]}
+    require(root_dependencies == {("getrandom", "0.3.4"), ("serde", "1.0.228"), ("serde_json", "1.0.145"),
+            ("sha2", "0.10.9"), ("tokio", "1.48.0"), ("mrk-windows-installed-native", "0.1.0")},
+            "Windows app selected direct dependencies differ")
+    require({(packages[key]["name"], packages[key]["version"]) for key in nodes[local["mrk-windows-installed-native"]]["dependencies"]}
+            == {("windows-sys", "0.61.2")}, "Windows app native dependency differs")
+    return {"packages": packages, "nodes": nodes, "appId": app, "localIds": local}
+
+
+def windows_installed_app_metadata(context: dict) -> dict:
+    root, source = Path(context["root"]), Path(context["source"])
+    value = bounded_json(windows_installed_bytes(root / "app-metadata.json", 8 << 20), 8 << 20, max_nodes=200000)
+    try:
+        lock = tomllib.loads(windows_installed_bytes(source / WINDOWS_INSTALLED_APP / "Cargo.lock", 8 << 20).decode("utf-8"))
+    except (ValueError, UnicodeError):
+        raise CheckFailure("Windows app source-bound lock is malformed") from None
+    return windows_installed_app_graph(value, lock, source=source, root=root)
+
+
+def windows_installed_app_unit_features(graph: dict) -> dict:
+    """One source-locked platform unit, not a general Cargo feature resolver.
+
+    Filtered metadata can retain features unified through inactive platforms.
+    Derive windows-sys' exact normal-unit closure from its active incoming
+    declarations; keep ordinary metadata equality for every other package.
+    """
+    packages, nodes = graph["packages"], graph["nodes"]
+    expected = {key: node["features"] for key, node in nodes.items()}
+    selected = [key for key in nodes if (packages[key]["name"], packages[key]["version"], packages[key].get("source"))
+                == ("windows-sys", "0.61.2", "registry+https://github.com/rust-lang/crates.io-index")]
+    require(len(selected) == 1, "Windows app platform feature package is missing/ambiguous")
+    key = selected[0]
+    package, feature_map = packages[key], packages[key]["features"]
+    require(type(feature_map) is dict and 0 < len(feature_map) <= 512
+            and all(type(name) is str and re.fullmatch(r"[A-Za-z0-9_+\-]{1,128}", name) for name in feature_map),
+            "Windows app platform feature map differs")
+    for refs in feature_map.values():
+        require(type(refs) is list and len(refs) <= 128
+                and all(type(ref) is str and ref in feature_map for ref in refs),
+                "Windows app platform feature map has an unknown/nonlocal expression")
+    seeds, seen_edges = set(), set()
+    for parent_key, node in nodes.items():
+        incoming = [dep for dep in node["deps"] if dep["pkg"] == key]
+        if not incoming:
+            continue
+        parent = packages[parent_key]
+        declarations = parent.get("dependencies")
+        require(type(declarations) is list and 0 < len(declarations) <= 512
+                and all(type(dep) is dict for dep in declarations),
+                "Windows app incoming feature declarations differ")
+        for edge in incoming:
+            for kind in edge["dep_kinds"]:
+                # The fixed headless graph has normal windows-sys users only.
+                # A new host/build/dev split needs review, not union guessing.
+                require(kind["kind"] is None, "Windows app platform feature unit has an unreviewed dependency kind")
+                identity = (parent_key, edge["name"], kind["kind"], kind["target"])
+                require(identity not in seen_edges and len(seen_edges) < 256,
+                        "Windows app incoming feature edge is duplicated/overbound")
+                seen_edges.add(identity)
+                matched = []
+                for dep in declarations:
+                    alias = dep.get("rename") if dep.get("rename") is not None else dep.get("name")
+                    if (dep.get("name") == package["name"] and dep.get("source") == package["source"]
+                            and type(alias) is str and alias.replace("-", "_") == edge["name"]
+                            and dep.get("kind") == kind["kind"] and dep.get("target") == kind["target"]):
+                        matched.append((dep, alias))
+                require(len(matched) == 1, "Windows app incoming feature declaration is missing/ambiguous")
+                dep, alias = matched[0]
+                require({"name", "source", "req", "kind", "rename", "optional", "uses_default_features",
+                         "features", "target", "registry"} <= set(dep),
+                        "Windows app incoming feature declaration is incomplete")
+                require(0 < len(alias) <= 128 and type(dep.get("optional")) is bool
+                        and type(dep.get("uses_default_features")) is bool
+                        and type(dep.get("features")) is list and len(dep["features"]) <= 512
+                        and all(type(name) is str and name in feature_map for name in dep["features"]),
+                        "Windows app incoming feature declaration values differ")
+                seeds.update(dep["features"])
+                if dep["uses_default_features"] and "default" in feature_map:
+                    seeds.add("default")
+                for feature in node["features"]:
+                    refs = parent["features"][feature]
+                    require(type(refs) is list and len(refs) <= 512
+                            and all(type(ref) is str and 0 < len(ref) <= 256 for ref in refs),
+                            "Windows app incoming selected feature expressions differ")
+                    for ref in refs:
+                        if "/" not in ref:
+                            continue  # Local/dep: activation is already represented by active resolve edges.
+                        dependency, name = ref.split("/", 1)
+                        dependency = dependency.removesuffix("?")
+                        if dependency.replace("-", "_") != edge["name"]:
+                            continue
+                        require(dependency == alias and name in feature_map,
+                                "Windows app incoming feature forwarding differs")
+                        seeds.add(name)  # Weak forwarding is valid only on this already active edge.
+    require(seen_edges, "Windows app platform feature unit has no active incoming edge")
+    closed, pending = set(), list(seeds)
+    while pending:
+        feature = pending.pop()
+        if feature not in closed:
+            closed.add(feature)
+            pending.extend(feature_map[feature])  # Visited set handles real Win32/Foundation cycles.
+    require(closed <= set(nodes[key]["features"]), "Windows app active unit features are missing from metadata")
+    expected[key] = sorted(closed)
+    return expected
+
+
+def windows_installed_app_test_path(raw: bytes, graph: dict, *, source: Path, root: Path) -> Path:
+    require(type(raw) is bytes and 0 < len(raw) <= 16 << 20, "Windows app compiler output exceeds its bound")
+    found, finished, script_units = None, False, set()
+    packages, nodes = graph["packages"], graph["nodes"]
+    unit_features = windows_installed_app_unit_features(graph)
+    for line in raw.splitlines():
+        require(not finished, "Windows app compiler output followed its final result")
+        row = bounded_json(line, 2 << 20)
+        require(type(row) is dict and row.get("reason") in {"compiler-artifact", "compiler-message", "build-script-executed", "build-finished"},
+                "Windows app compiler message differs")
+        reason = row["reason"]
+        if reason == "build-finished":
+            require(row.get("success") is True, "Windows app original compiler failed")
+            finished = True
+            continue
+        key = row.get("package_id")
+        require(type(key) is str and key in nodes, "Windows app compiler unit is not in the active graph")
+        package = packages[key]
+        if reason == "build-script-executed":
+            scripts = [target for target in package["targets"] if type(target) is dict and target.get("kind") == ["custom-build"]]
+            require(len(scripts) == 1 and key in script_units and type(row.get("out_dir")) is str
+                    and not any(part in {".", ".."} for part in re.split(r"[\\/]", row["out_dir"]))
+                    and Path(row["out_dir"]) != root / "target" and Path(row["out_dir"]).is_relative_to(root / "target"),
+                    "Windows app build script is not an active compiled unit")
+            continue
+        target = row.get("target")
+        require(type(target) is dict and any(same_compile_json(target, declared) for declared in package["targets"])
+                and target.get("kind") in (["lib"], ["proc-macro"], ["custom-build"])
+                and (row.get("manifest_path") is None or row["manifest_path"] == package["manifest_path"]),
+                "Windows app compiler target differs from its active declaration")
+        if reason == "compiler-message":
+            continue
+        profile = row.get("profile")
+        require(row.get("features") == unit_features[key] and row.get("manifest_path") == package["manifest_path"]
+                and type(profile) is dict and type(profile.get("test")) is bool,
+                "Windows app compiler unit features/source differ")
+        if target["kind"] == ["custom-build"]:
+            require(profile["test"] is False, "Windows app build script became a test unit")
+            script_units.add(key)
+        elif key != graph["appId"]:
+            require(profile["test"] is False, "Windows app dependency became an unrelated test unit")
+        if row.get("executable") is not None:
+            require(found is None and key == graph["appId"] and target.get("name") == "mobile_release_desktop"
+                    and target.get("kind") == ["lib"] and target.get("crate_types") == ["lib"]
+                    and target.get("src_path") == str(source / WINDOWS_INSTALLED_APP / "src/lib.rs")
+                    and type(profile) is dict and profile.get("test") is True and profile.get("debug_assertions") is True
+                    and row.get("features") == [] and row.get("fresh") is False,
+                    "Windows app original executable is not the one fresh no-feature libtest")
+            found = ordinary_windows_executable(row["executable"], target_root=root / "target")
+    require(finished and found is not None, "Windows app compilation did not identify one original libtest")
+    return found
+
+
+def windows_installed_app_artifact(context: dict) -> dict:
+    root, source = Path(context["root"]), Path(context["source"])
+    messages = root / "app-compile-messages.jsonl"
+    graph = windows_installed_app_metadata(context)
+    path = windows_installed_app_test_path(windows_installed_bytes(messages, 16 << 20), graph, source=source, root=root)
+    before = path.lstat()
+    record = windows_installed_record(path, 512 << 20)
+    require(windows_installed_state(before) == windows_installed_state(path.lstat()), "Windows app original artifact changed")
+    return {"path": str(path), **record, "identity": list(windows_installed_state(before)),
+            "messages": windows_installed_record(messages, 16 << 20)}
+
+
+def windows_installed_app_argv(cargo: str, context: dict) -> list[str]:
+    return [cargo, "test", "--locked", "--offline", "--jobs", "1", "--no-default-features", "--target", TARGETS["windows"],
+            "--manifest-path", str(Path(context["source"]) / WINDOWS_INSTALLED_APP / "Cargo.toml"),
+            "--target-dir", str(Path(context["root"]) / "target"), "--lib", "--no-run", "--message-format=json"]
+
+
+def windows_installed_app_libtest(raw: bytes) -> dict:
+    require(type(raw) is bytes and 0 < len(raw) <= 64 << 10, "Windows app inert output exceeds its bound")
+    try:
+        lines = [line.strip() for line in raw.decode("ascii").splitlines() if line.strip()]
+    except UnicodeError:
+        raise CheckFailure("Windows app inert output is not ASCII") from None
+    require(len(lines) == 13 and lines[0] == "running 11 tests", "Windows app inert selection count differs")
+    match = re.fullmatch(r"test result: ok\. 11 passed; 0 failed; 0 ignored; 0 measured; ([0-9]{1,6}) filtered out; finished in [0-9]+\.[0-9]+s", lines[-1])
+    require(match is not None, "Windows app inert result differs")
+    windows_installed_libtest(raw, WINDOWS_INSTALLED_APP_INERT, int(match.group(1)))
+    return {"names": list(WINDOWS_INSTALLED_APP_INERT), "passed": 11, "failed": 0, "ignored": 0, "measured": 0,
+            "filteredObserved": int(match.group(1))}
+
+
+def windows_installed_remaining(deadline: float, maximum: int) -> int:
+    remaining = int(deadline - time.monotonic())
+    require(remaining > 0, "Windows headless original aggregate deadline expired")
+    return min(maximum, remaining)
+
+
+def windows_installed_runtime_values(ps: dict, runtime: dict, assembly: dict) -> None:
+    """The same mandatory value predicate for private and path-redacted DATA."""
+    version = lambda value: type(value) is str and re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,3}(?:[-+][A-Za-z0-9.+-]+)?", value) is not None and len(value) <= 128
+    require(version(ps["version"]) and ps["edition"] == "Core" and version(runtime["version"])
+            and type(runtime["framework"]) is str and re.fullmatch(r"\.NET [A-Za-z0-9 .+-]{1,128}", runtime["framework"]) is not None
+            and assembly["name"] == "System.Diagnostics.Process" and version(assembly["version"])
+            and type(assembly["moduleVersionId"]) is str
+            and re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", assembly["moduleVersionId"]) is not None,
+            "Windows runtime observed version/module identity differs")
+    require(assembly["informationalVersion"] is None or type(assembly["informationalVersion"]) is str
+            and re.fullmatch(r"[A-Za-z0-9.+_-]{1,256}", assembly["informationalVersion"]) is not None,
+            "Windows runtime informational identity differs")
+    require(assembly["sourceRevision"] is None or type(assembly["sourceRevision"]) is str
+            and re.fullmatch(r"[0-9a-fA-F]{7,64}", assembly["sourceRevision"]) is not None,
+            "Windows runtime source-revision DATA differs")
+
+
+def windows_installed_runtime_identity(value: object, context: dict) -> tuple[dict, dict]:
+    keys = {"schemaVersion", "sourceSha", "runId", "attempt", "imageOS", "imageVersion", "powerShell", "runtime", "processAssembly"}
+    row = closed_object(value, keys, "Windows runtime identity fields differ")
+    require(type(row["schemaVersion"]) is int and row["schemaVersion"] == 1 and type(row["attempt"]) is int
+            and all(row[key] == context[key] for key in ("sourceSha", "runId", "attempt", "imageOS", "imageVersion")),
+            "Windows runtime identity belongs to another original observation")
+    ps = closed_object(row["powerShell"], {"path", "version", "edition"}, "Windows runtime PowerShell fields differ")
+    runtime = closed_object(row["runtime"], {"version", "framework"}, "Windows runtime framework fields differ")
+    assembly = closed_object(row["processAssembly"], {"path", "name", "version", "moduleVersionId", "informationalVersion", "sourceRevision"},
+                             "Windows runtime assembly fields differ")
+    windows_installed_runtime_values(ps, runtime, assembly)
+    paths = {}
+    for role, item, basename in (("powerShell", ps, "pwsh.exe"), ("processAssembly", assembly, "System.Diagnostics.Process.dll")):
+        text = item["path"]
+        require(type(text) is str and 0 < len(text) <= 32768 and not any(ord(char) < 32 for char in text)
+                and not any(part in {".", ".."} for part in re.split(r"[\\/]", text)), "Windows runtime physical path differs")
+        path = PureWindowsPath(text)
+        require(path.is_absolute() and re.fullmatch(r"[A-Za-z]:", path.drive) is not None
+                and path.name.lower() == basename.lower() and not any(part in {".", ".."} or ":" in part for part in path.parts[1:]),
+                "Windows runtime physical file role differs")
+        paths[role] = text
+    public = {key: row[key] for key in ("schemaVersion", "sourceSha", "runId", "attempt", "imageOS", "imageVersion")}
+    public.update(powerShell={key: ps[key] for key in ("version", "edition")}, runtime=dict(runtime),
+                  processAssembly={key: assembly[key] for key in ("name", "version", "moduleVersionId", "informationalVersion", "sourceRevision")},
+                  sourceMappingAuthenticated=False, ordinaryStartAuthorized=False)
+    return public, paths
 
 
 def windows_installed_artifact(context: dict) -> dict:
@@ -8839,18 +9230,100 @@ def windows_installed_libtest(raw: bytes, names: tuple[str, ...], filtered: int,
     return receipt
 
 
+def windows_installed_runtime_public(value: object, context: dict) -> dict:
+    base = windows_installed_phase_receipt(context, "windows-installed-runtime-data")
+    row = closed_object(value, {*base, "identity"}, "Windows runtime public receipt fields differ")
+    require(same_compile_json({key: row[key] for key in base}, base), "Windows runtime public binding differs")
+    identity = closed_object(row["identity"], {"schemaVersion", "sourceSha", "runId", "attempt", "imageOS", "imageVersion",
+        "powerShell", "runtime", "processAssembly", "sourceMappingAuthenticated", "ordinaryStartAuthorized"},
+        "Windows runtime public identity fields differ")
+    require(type(identity["schemaVersion"]) is int and identity["schemaVersion"] == 1 and type(identity["attempt"]) is int
+            and identity["sourceMappingAuthenticated"] is False
+            and identity["ordinaryStartAuthorized"] is False
+            and all(identity[key] == context[key] for key in ("sourceSha", "runId", "attempt", "imageOS", "imageVersion")),
+            "Windows runtime public identity binding differs")
+    roles = {"powerShell": {"version", "edition"},
+             "processAssembly": {"name", "version", "moduleVersionId", "informationalVersion", "sourceRevision"}}
+    for role, keys in roles.items():
+        item = closed_object(identity[role], {*keys, "size", "sha256"}, "Windows runtime public role exposes unexpected fields")
+        require(integer_between(item["size"], 1, 128 << 20) and sha256_value(item["sha256"]),
+                "Windows runtime public byte/hash identity differs")
+    runtime = closed_object(identity["runtime"], {"version", "framework"}, "Windows runtime public framework fields differ")
+    windows_installed_runtime_values(identity["powerShell"], runtime, identity["processAssembly"])
+    return row
+
+
+def windows_installed_runtime_retention(value: object, context: dict, outcome: str) -> tuple[dict, dict | None]:
+    require(outcome in {"success", "failure", "skipped", "cancelled", "unavailable"}, "Windows runtime DATA step outcome differs")
+    summary = {"stepOutcome": outcome, "status": "failed" if outcome in {"success", "failure"} else "unavailable",
+               "sourceMappingAuthenticated": False, "ordinaryStartAuthorized": False}
+    if outcome == "success":
+        try:
+            record = windows_installed_runtime_public(value, context)
+        except (ValueError, TypeError, KeyError):
+            summary["status"] = "failed"
+        else:
+            # Validation is not public retention. Only the successful copy below
+            # may turn this fail-closed summary into an observed record.
+            return summary, record
+    return summary, None
+
+
+def windows_installed_retain_runtime(context: dict, outcome: str) -> tuple[dict, dict | None]:
+    summary, _ = windows_installed_runtime_retention(None, context, outcome)
+    if outcome != "success":
+        return summary, None
+    root, filename, limit = Path(context["root"]), "runtime-data-checks.json", 64 << 10
+    try:
+        # One stable input observation; preserve these exact redacted bytes.
+        raw = windows_installed_bytes(root / filename, limit)
+        summary, record = windows_installed_runtime_retention(bounded_json(raw, limit), context, outcome)
+    except (OSError, ValueError, TypeError, KeyError):
+        return summary, None
+    if record is None:
+        return summary, None
+    destination = root / "public" / filename
+    # Public-area publication/close/readback uncertainty is NOT optional input
+    # failure. Leave it fail-closed; never accept, retry or clean partial output.
+    with destination.open("xb") as output:
+        require(output.write(raw) == len(raw), "Windows runtime retained DATA write is incomplete")
+    require(windows_installed_bytes(destination, limit) == raw, "Windows runtime retained DATA changed")
+    summary["status"] = "observed"
+    return summary, {"path": filename, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+
+
 def windows_installed_phase(name: str, scope: str) -> None:
-    require(scope == WINDOWS_INSTALLED_SCOPE and name in WINDOWS_INSTALLED_PHASES, "Unexpected standalone Windows native phase")
-    context = windows_installed_context(create=name == "prepare")
+    require(scope == WINDOWS_INSTALLED_SCOPE and name in WINDOWS_INSTALLED_PHASES, "Unexpected fixed Windows headless phase")
+    deadline = time.monotonic() + {"acquire": 840, "compile": 660, "windows-installed-native": 210,
+                                   "windows-installed-runtime-data": 40}.get(name, 60)
+    context = windows_installed_context(create=name == "prepare", retention_only=name == "retain")
     root, source = Path(context["root"]), Path(context["source"])
     if name == "prepare":
+        return
+    if name == "windows-installed-runtime-data":
+        # One live observer's DATA only; no acquire/compiler/test/account route.
+        write_json(root / "runtime-data-started.json", windows_installed_phase_receipt(context, name, claimOnly=True))
+        raw = windows_installed_bytes(root / "runtime-identity.private.json", 64 << 10)
+        public, paths = windows_installed_runtime_identity(bounded_json(raw, 64 << 10), context)
+        for role, value in paths.items():
+            path = Path(value)
+            windows_installed_directories(path.parent)
+            public[role].update(windows_installed_record(path, 128 << 20))
+        windows_installed_remaining(deadline, 1)
+        record = windows_installed_phase_receipt(context, name, identity=public)
+        windows_installed_runtime_public(record, context)
+        write_json(root / "runtime-data-checks.json", record)
         return
     if name == "retain":
         # DATA-only after success/failure: no launch, retry, reset or cleanup.
         files = {"public-bindings.json": 256 << 10, "acquire-checks.json": 64 << 10, "compile-checks.json": 64 << 10,
             "windows-installed-native-checks.json": 64 << 10, "metadata.json": 2 << 20, "acquire.stderr": 1 << 20,
             "compile-messages.jsonl": 16 << 20, "compile.stderr": 1 << 20,
-            "inert.stdout": 64 << 10, "inert.stderr": 64 << 10, "native.stdout": 64 << 10, "native.stderr": 64 << 10}
+            "inert.stdout": 64 << 10, "inert.stderr": 64 << 10, "native.stdout": 64 << 10, "native.stderr": 64 << 10,
+            "app-metadata.json": 8 << 20, "app-acquire.stderr": 1 << 20,
+            "app-compile-messages.jsonl": 16 << 20, "app-compile.stderr": 1 << 20,
+            "app-inert.stdout": 64 << 10, "app-inert.stderr": 64 << 10}
+        outcome = os.environ.get("MRK_WINDOWS_RUNTIME_DATA_STEP_OUTCOME", "unavailable")
         retained, omitted = [], []
         for filename, limit in files.items():
             path = root / filename
@@ -8864,8 +9337,11 @@ def windows_installed_phase(name: str, scope: str) -> None:
             with (root / "public" / filename).open("xb") as output: output.write(raw)
             require(windows_installed_bytes(root / "public" / filename, limit) == raw, "Windows native retained DATA changed")
             retained.append({"path": filename, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()})
+        runtime, runtime_record = windows_installed_retain_runtime(context, outcome)
+        if runtime_record is not None:
+            retained.append(runtime_record)
         write_json(root / "public" / "retention.json", {"scope": WINDOWS_INSTALLED_SCOPE, "sourceSha": context["sourceSha"],
-            "runId": context["runId"], "attempt": 1, "files": retained, "omittedOverBound": omitted,
+            "runId": context["runId"], "attempt": 1, "files": retained, "omittedOverBound": omitted, "runtimeIdentity": runtime,
             "retentionOnlyNotNativeSuccess": True, "notVerified": list(WINDOWS_INSTALLED_NOT_VERIFIED)})
         return
     phases = ("acquire", "compile", "windows-installed-native")
@@ -8878,8 +9354,9 @@ def windows_installed_phase(name: str, scope: str) -> None:
     if name != "acquire":
         acquired = read_bounded_json(root / "acquire-checks.json", 64 << 10)
         require(acquired["metadata"] == windows_installed_record(root / "metadata.json", 2 << 20)
+                and acquired["appMetadata"] == windows_installed_record(root / "app-metadata.json", 8 << 20)
                 and acquired["compilerTools"] == windows_installed_record(root / "compiler-tools.json", 64 << 10),
-                "Windows native original acquisition changed")
+                "Windows headless original acquisition changed")
     write_json(root / (name + "-started.json"), windows_installed_phase_receipt(context, name, claimOnly=True))
     source_unchanged(context)
     require(context["sdk"] == {"version": WINDOWS_SDK_VERSION, "headers": fixed_file_inventory(windows_sdk_root(), WINDOWS_SDK_HEADERS)},
@@ -8889,19 +9366,26 @@ def windows_installed_phase(name: str, scope: str) -> None:
     manifest = source / WINDOWS_INSTALLED_CRATE / "Cargo.toml"
     if name == "acquire":
         run([context["rustup"], "toolchain", "install", RUST, "--profile", "minimal", "--no-self-update"],
-            check="rust-toolchain-install", cwd=root, env=environment, timeout=600)
+            check="rust-toolchain-install", cwd=root, env=environment, timeout=windows_installed_remaining(deadline, 600))
         cargo, rustc = tools(context, environment)
         with (root / "metadata.json").open("x", encoding="utf-8", newline="\n") as output, (root / "acquire.stderr").open("x", encoding="utf-8") as diagnostics:
             run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features", "--filter-platform", TARGETS["windows"],
-                "--manifest-path", str(manifest)], check="windows-installed-locked-metadata", cwd=root, env=environment, timeout=600,
-                output=output, diagnostics=diagnostics)
+                "--manifest-path", str(manifest)], check="windows-installed-locked-metadata", cwd=root, env=environment,
+                timeout=windows_installed_remaining(deadline, 600), output=output, diagnostics=diagnostics)
         packages = windows_installed_metadata(context)
+        app_environment = {**environment, "CARGO_TARGET_DIR": str(root / "target")}
+        with (root / "app-metadata.json").open("x", encoding="utf-8", newline="\n") as output, (root / "app-acquire.stderr").open("x", encoding="utf-8") as diagnostics:
+            run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features", "--filter-platform", TARGETS["windows"],
+                "--manifest-path", str(source / WINDOWS_INSTALLED_APP / "Cargo.toml")], check="windows-installed-app-locked-metadata", cwd=root,
+                env=app_environment, timeout=windows_installed_remaining(deadline, 600), output=output, diagnostics=diagnostics)
+        graph = windows_installed_app_metadata(context)
         compiler = {"cargo": {"path": cargo, **windows_installed_record(Path(cargo), 128 << 20)},
                     "rustc": {"path": rustc, **windows_installed_record(Path(rustc), 128 << 20)}}
         write_json(root / "compiler-tools.json", compiler)
         facts = {"rust": RUST, "target": TARGETS["windows"], "packages": {n: p["version"] for n, p in packages.items()},
                  "metadata": windows_installed_record(root / "metadata.json", 2 << 20), "originalExitCode": 0,
-                 "compilerTools": windows_installed_record(root / "compiler-tools.json", 64 << 10)}
+                 "appMetadata": windows_installed_record(root / "app-metadata.json", 8 << 20), "appOriginalExitCode": 0,
+                 "appActivePackageIds": sorted(graph["nodes"]), "compilerTools": windows_installed_record(root / "compiler-tools.json", 64 << 10)}
     elif name == "compile":
         cargo, rustc = tools(context, environment)
         compiler = read_bounded_json(root / "compiler-tools.json", 64 << 10)
@@ -8910,26 +9394,50 @@ def windows_installed_phase(name: str, scope: str) -> None:
         argv = [cargo, "test", "--locked", "--offline", "--jobs", "1", "--no-default-features", "--target", TARGETS["windows"],
                 "--manifest-path", str(manifest), "--target-dir", str(root / "target"), "--lib", "--no-run", "--message-format=json"]
         with (root / "compile-messages.jsonl").open("x", encoding="utf-8", newline="\n") as output, (root / "compile.stderr").open("x", encoding="utf-8") as diagnostics:
-            run(argv, check="windows-installed-test-compile-only", cwd=root, env=environment, timeout=600, output=output, diagnostics=diagnostics)
+            run(argv, check="windows-installed-test-compile-only", cwd=root, env=environment,
+                timeout=windows_installed_remaining(deadline, 600), output=output, diagnostics=diagnostics)
         artifact = windows_installed_artifact(context)
         write_json(root / "compiled-test.json", artifact)
+        app_argv = windows_installed_app_argv(cargo, context)
+        with (root / "app-compile-messages.jsonl").open("x", encoding="utf-8", newline="\n") as output, (root / "app-compile.stderr").open("x", encoding="utf-8") as diagnostics:
+            run(app_argv, check="windows-installed-app-test-compile-only", cwd=root, env=environment,
+                timeout=windows_installed_remaining(deadline, 600), output=output, diagnostics=diagnostics)
+        app_artifact = windows_installed_app_artifact(context)
+        write_json(root / "app-compiled-test.json", app_artifact)
         facts = {"rust": RUST, "target": TARGETS["windows"], "compiledTest": artifact, "originalExitCode": 0,
-                 "invocationSha256": hashlib.sha256(canonical_json(argv)).hexdigest(), "standaloneOnly": True}
+                 "invocationSha256": hashlib.sha256(canonical_json(argv)).hexdigest(), "standaloneOnly": False,
+                 "appCompiledTest": app_artifact, "appOriginalExitCode": 0,
+                 "appInvocationSha256": hashlib.sha256(canonical_json(app_argv)).hexdigest()}
     else:
         artifact = read_bounded_json(root / "compiled-test.json", 64 << 10)
         require(artifact == windows_installed_artifact(context), "Windows native original executable changed")
+        app_artifact = read_bounded_json(root / "app-compiled-test.json", 64 << 10)
+        compiled = read_bounded_json(root / "compile-checks.json", 64 << 10)
+        compiler = read_bounded_json(root / "compiler-tools.json", 64 << 10)
+        require(type(compiled.get("appOriginalExitCode")) is int and compiled["appOriginalExitCode"] == 0
+                and compiled.get("appCompiledTest") == app_artifact
+                and compiled.get("appInvocationSha256") == hashlib.sha256(canonical_json(
+                    windows_installed_app_argv(compiler["cargo"]["path"], context))).hexdigest()
+                and app_artifact == windows_installed_app_artifact(context), "Windows app original executable/compilation changed")
+        with (root / "app-inert.stdout").open("x", encoding="utf-8") as output, (root / "app-inert.stderr").open("x", encoding="utf-8") as diagnostics:
+            run([app_artifact["path"], *WINDOWS_INSTALLED_APP_INERT, "--exact", "--test-threads=1"], check="windows-installed-app-inert-contracts",
+                cwd=root, env=environment, timeout=windows_installed_remaining(deadline, 60), output=output, diagnostics=diagnostics)
+        require(windows_installed_bytes(root / "app-inert.stderr", 64 << 10) == b"", "Windows app inert stderr is not empty")
+        app_inert = windows_installed_app_libtest(windows_installed_bytes(root / "app-inert.stdout", 64 << 10))
+        require(app_artifact == windows_installed_app_artifact(context), "Windows app original executable changed after inert controls")
         environment.update(MRK_DESKTOP_HOSTED_CHECKS=WINDOWS_INSTALLED_SCOPE, GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted",
             RUNNER_OS="Windows", RUNNER_ARCH="X64", ImageOS=context["imageOS"], GITHUB_RUN_ATTEMPT="1")
         with (root / "inert.stdout").open("x", encoding="utf-8") as output, (root / "inert.stderr").open("x", encoding="utf-8") as diagnostics:
             run([artifact["path"], "--skip", WINDOWS_INSTALLED_TEST, "--test-threads=1"], check="windows-installed-inert-contracts",
-                cwd=root, env=environment, timeout=60, output=output, diagnostics=diagnostics)
+                cwd=root, env=environment, timeout=windows_installed_remaining(deadline, 60), output=output, diagnostics=diagnostics)
         require(windows_installed_bytes(root / "inert.stderr", 64 << 10) == b"", "Windows native inert stderr is not empty")
         windows_installed_libtest(windows_installed_bytes(root / "inert.stdout", 64 << 10), WINDOWS_INSTALLED_INERT, 1)
         source_unchanged(context)
         require(artifact == windows_installed_artifact(context), "Windows native original executable changed after inert controls")
         with (root / "native.stdout").open("x", encoding="utf-8") as output, (root / "native.stderr").open("x", encoding="utf-8") as diagnostics:
             run([artifact["path"], WINDOWS_INSTALLED_TEST, "--exact", "--ignored", "--nocapture", "--test-threads=1"],
-                check="windows-installed-native-contract", cwd=root, env=environment, timeout=90, output=output, diagnostics=diagnostics)
+                check="windows-installed-native-contract", cwd=root, env=environment,
+                timeout=windows_installed_remaining(deadline, 90), output=output, diagnostics=diagnostics)
         require(windows_installed_bytes(root / "native.stderr", 64 << 10) == b"", "Windows native stderr is not empty")
         native = windows_installed_libtest(windows_installed_bytes(root / "native.stdout", 64 << 10), (WINDOWS_INSTALLED_TEST,), 9, native=True)
         require(type(native) is dict and native.get("context") in {"ordinary-admitted", "elevated-primary-refused"}, "Windows native context outcome differs")
@@ -8941,11 +9449,14 @@ def windows_installed_phase(name: str, scope: str) -> None:
         require(canonical_json(native) == canonical_json(expected), "Windows native fact/refusal/settlement counts differ")
         require(artifact == windows_installed_artifact(context), "Windows native original executable changed after native controls")
         facts = {"compiledTest": artifact, "inertContracts": {"passed": 9, "failed": 0, "ignored": 0}, "native": native,
-            "originalOutputs": {n: windows_installed_record(root / n, 64 << 10) for n in ("inert.stdout", "inert.stderr", "native.stdout", "native.stderr")},
+            "appCompiledTest": app_artifact, "appInertContracts": app_inert, "appOriginalExitCode": 0,
+            "originalOutputs": {n: windows_installed_record(root / n, 64 << 10) for n in
+                ("app-inert.stdout", "app-inert.stderr", "inert.stdout", "inert.stderr", "native.stdout", "native.stderr")},
             "inertOriginalExitCode": 0, "nativeOriginalExitCode": 0, "originalProcessWaitReturned": True,
-            "notVerified": list(WINDOWS_INSTALLED_NOT_VERIFIED)}
+            "notVerified": list(WINDOWS_INSTALLED_COMBINED_NOT_VERIFIED)}
     windows_installed_inputs(context)
     source_unchanged(context)
+    windows_installed_remaining(deadline, 1)
     write_json(root / (name + "-checks.json"), windows_installed_phase_receipt(context, name, **facts))
 
 
@@ -8953,13 +9464,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("phase", choices=(*BOUNDARY_PHASES, "workflow-owner", "workflow-transaction-eof", "workflow-core",
                         "metadata-owner", "metadata-transaction-eof", "metadata-core", "windows-snapshot", "github-owner", "github-tls", "github-tls-deadline",
-                         "environment-native", "offline-cli11", "retain", "windows-installed-native", *CONVENTIONAL_PHASES))
+                         "environment-native", "offline-cli11", "retain", "windows-installed-native", "windows-installed-runtime-data", *CONVENTIONAL_PHASES))
     args = parser.parse_args()
     os.umask(0o077)
     print(f"Starting fixed desktop phase: {args.phase}", flush=True)
     try:
         scope = os.environ.get("MRK_DESKTOP_HOSTED_CHECKS", "")
-        if scope == WINDOWS_INSTALLED_SCOPE or args.phase == "windows-installed-native":
+        if scope == WINDOWS_INSTALLED_SCOPE or args.phase in {"windows-installed-native", "windows-installed-runtime-data"}:
             windows_installed_phase(args.phase, scope)
             return 0
         if scope in CONVENTIONAL_SCOPES or args.phase in CONVENTIONAL_PHASES:

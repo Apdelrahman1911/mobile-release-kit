@@ -7,13 +7,14 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
 import importlib.util
+from importlib.machinery import ModuleSpec
 import io
 import json
 from pathlib import Path
 import stat
 from subprocess import CompletedProcess
 import sys
-from types import SimpleNamespace
+from types import FunctionType, ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -63,7 +64,8 @@ class InertFixtures:
         self.inflight = self.last_returned = False
         self.close_errors = 0
         self.case = self.stage = None
-        self.app_returncode = self.inner_failure_step = None
+        self.app_returncode = self.inner_failure_step = self.inner_failure_reason = None
+        self.inner_failure_context = self.inner_diagnostic_source = None
         self.before, self.reads = [], []
 
     def before_call(self, case):
@@ -75,6 +77,80 @@ class InertFixtures:
             raise AssertionError("readback lacks positive original return")
         self.reads.append(case)
         return {"inertTestOnly": True}
+
+
+def context_data():
+    return {"pending": {"kind": "native", "step": "CancelProject"},
+            "nativeHandler": {"step": "CancelProject", "entered": True, "returned": False},
+            "lastPanel": {"step": "CancelProject", "id": 1, "kind": "project",
+                          "parentPresent": True, "panelPresent": True, "parentReferencesPanel": False,
+                          "panelReferencesParent": True, "panelVisible": False}}
+
+
+def context_row(value):
+    return b"MRK_MACOS_AQUA_FAILURE_CONTEXT=" + json.dumps(value, separators=(",", ":")).encode("ascii") + b"\n"
+
+
+def _inert_command(argv, *, environ, cwd, timeout, capture, text, output_limit):
+    """Literal DATA-only body rebound below; no owner import or command call."""
+    global recursion
+    engine = original_engine
+    if mutate_argv:
+        argv[1] = "noop-stale"
+    argv, cwd, timeout = overrides.get("argv", argv), overrides.get("cwd", cwd), overrides.get("timeout", timeout)
+    capture, text = overrides.get("capture", capture), overrides.get("text", text)
+    output_limit = overrides.get("output_limit", output_limit)
+    if recursion:
+        recursion -= 1
+        return run_command(argv, environ=environ, cwd=cwd, timeout=timeout, capture=capture,
+                           text=text, output_limit=output_limit)
+    try:
+        raise original_error
+    except BaseException as error:
+        if duplicate_frame:
+            raise error
+        raise
+
+
+def _inert_owned(argv, **options):
+    return run_command(argv, **options)
+
+
+@contextmanager
+def inert_exception_owner(*, stderr=None, duplicate=False, recursion=0):
+    """Synthetic function/frame DATA fixtures, NEVER evidence of a real owner.
+
+    No source loader/import is used. Expected filenames here exercise the
+    origin guard; the actual engine, Store, process and filesystem are absent.
+    """
+    source = PATH.parents[2] / "src" / "mobile_release"
+    owner, command = ModuleType("mobile_release.owned_process"), ModuleType("mobile_release._command_process")
+    for module, name in ((owner, "owned_process"), (command, "_command_process")):
+        module.__file__ = str(source / (name + ".py"))
+        module.__spec__ = ModuleSpec(module.__name__, loader=None, origin=module.__file__)
+    for name in ("_Outer", "FrozenCommand", "Manifest"):
+        setattr(command, name, type(name, (), {"__module__": command.__name__}))
+    manifest = command.Manifest(); manifest.capture, manifest.limit = True, M.OUTPUT_LIMIT
+    frozen = command.FrozenCommand()
+    frozen.args = (M.EXECUTABLE, "first-save")
+    frozen.argv = tuple(arg.encode("ascii") for arg in frozen.args)
+    frozen.cwd = str(BINDING.root() / "state" / "first-save").encode("ascii")
+    frozen.manifest = manifest
+    engine = command._Outer(); engine.frozen, engine.text = frozen, False
+    if stderr is None:
+        stderr = (b"PRIVATE CHILD LOG\nMRK_MACOS_AQUA_FAILURE_STEP=CancelProject\n"
+                  b"MRK_MACOS_AQUA_FAILURE_REASON=observer-deadline\n" + context_row(context_data()))
+    engine.outputs = [bytearray(), bytearray(stderr)]
+    original = RuntimeError("PRIVATE ORIGINAL ERROR")
+    command.original_engine, command.original_error = engine, original
+    command.duplicate_frame, command.recursion = duplicate, recursion
+    command.overrides = {}
+    command.mutate_argv = False
+    command.run_command = FunctionType(_inert_command.__code__.replace(co_filename=command.__file__), vars(command), "run_command")
+    owner.run_command = command.run_command
+    owner.run_owned = FunctionType(_inert_owned.__code__.replace(co_filename=owner.__file__), vars(owner), "run_owned")
+    with patch.dict(sys.modules, {owner.__name__: owner, command.__name__: command}):
+        yield SimpleNamespace(owner=owner, command=command, engine=engine, frozen=frozen, manifest=manifest, original=original)
 
 
 @contextmanager
@@ -250,6 +326,241 @@ class AquaDataTests(unittest.TestCase):
                 M.parse_result(good, stderr, BINDING, "first-save")
         self.assertEqual(M.failure_step(b"", b"MRK_MACOS_AQUA_FAILURE_STEP=Review(1)\n"), "Review(1)")
         self.assertIsNone(M.failure_step(b"", b"MRK_MACOS_AQUA_FAILURE_STEP=PRIVATE_UNKNOWN_DATA\n"))
+
+    def test_failure_reason_records_are_closed_complete_and_unique(self):
+        prefix = b"MRK_MACOS_AQUA_FAILURE_REASON"
+        good = prefix + b"=native-attachment-lost\n"
+        for label in M.FAILURE_REASONS:
+            row = prefix + b"=" + label.encode("ascii") + b"\n"
+            self.assertEqual(M.failure_reason(row, b""), label)
+            self.assertEqual(M.failure_reason(b"", row), label)
+        invalid = (b"", good[:-1], b"log " + good, good.replace(b"\n", b"\r\n"),
+                   prefix + b"=PRIVATE_UNKNOWN_DATA\n", prefix + b"=\xff\n", prefix + b"=\n",
+                   prefix + b"=" + b"a" * 49 + b"\n", good + good,
+                   good + prefix + b"?malformed\n", good + b"log " + prefix,
+                   good + b"x" * M.OUTPUT_LIMIT)
+        for row in invalid:
+            with self.subTest(row=row[:80]):
+                self.assertIsNone(M.failure_reason(row, b""))
+        self.assertIsNone(M.failure_reason(good, prefix + b"=unknown\n"))
+        self.assertIsNone(M.failure_reason(good, prefix))
+        self.assertIsNone(M.failure_reason(good, "not-bytes"))
+        with self.assertRaisesRegex(M.Refused, "^inner-failure-marker$"):
+            M.parse_result(captured(M.expected_result(BINDING, "first-save")), good, BINDING, "first-save")
+
+    def test_failure_step_rejects_partial_and_ambiguous_exception_buffers(self):
+        prefix = b"MRK_MACOS_AQUA_FAILURE_STEP"
+        good = prefix + b"=CancelProject\n"
+        for step in M.FAILURE_STEPS:
+            self.assertEqual(M.failure_step(b"", prefix + b"=" + step.encode("ascii") + b"\n"), step)
+        for bad in (good[:-1], b"log " + good, good + good, good + prefix, good + b"log " + prefix,
+                    good.replace(b"\n", b"\r\n"), prefix + b"=Prepare(2)\n", prefix + b"=\xff\n"):
+            self.assertIsNone(M.failure_step(bad, b""))
+        self.assertIsNone(M.failure_step(good, prefix + b"?malformed\n"))
+        self.assertIsNone(M.failure_step(good, bytearray()))
+
+    def test_failure_context_is_closed_nullable_and_not_a_receipt(self):
+        good = context_data()
+        self.assertEqual(M.failure_context(b"", context_row(good)), good)
+        empty = {"pending": None, "nativeHandler": None, "lastPanel": None}
+        self.assertEqual(M.failure_context(context_row(empty), b""), empty)
+        for parent, panel in ((False, False), (True, False), (False, True)):
+            value = deepcopy(good)
+            value["lastPanel"].update(parentPresent=parent, panelPresent=panel, parentReferencesPanel=None,
+                                       panelReferencesParent=None, panelVisible=False if panel else None)
+            self.assertEqual(M.failure_context(context_row(value), b""), value)
+        for pending in ({"kind": "reload", "step": None}, {"kind": "failure-close", "step": None},
+                        {"kind": "dom", "step": "Review(1)"}, {"kind": "close", "step": "CloseCancel"}):
+            value = deepcopy(empty); value["pending"] = pending
+            self.assertEqual(M.failure_context(context_row(value), b""), value)
+        variants = []
+        for target, field, value in (("lastPanel", "id", True), ("lastPanel", "id", 5),
+                                     ("lastPanel", "kind", "private-class"), ("lastPanel", "step", "Quit"),
+                                     ("lastPanel", "parentPresent", 1), ("lastPanel", "parentReferencesPanel", None),
+                                     ("lastPanel", "panelVisible", "false"), ("nativeHandler", "entered", False),
+                                     ("nativeHandler", "returned", 1), ("pending", "kind", "foreign"),
+                                     ("pending", "step", "Prepare(0)")):
+            item = deepcopy(good); item[target][field] = value; variants.append(item)
+        item = deepcopy(good); item["lastPanel"].update(panelPresent=False, panelVisible=None); variants.append(item)
+        item = deepcopy(good); item["lastPanel"]["path"] = "PRIVATE"; variants.append(item)
+        item = deepcopy(good); item["nativeHandler"] = None; variants.append(item)
+        item = deepcopy(empty); item["nativeHandler"] = {"step": "Quit", "entered": False, "returned": True}; variants.append(item)
+        for item in variants:
+            self.assertIsNone(M.failure_context(context_row(item), b""))
+        row = context_row(good)
+        for bad in (row[:-1], row + row, b"log " + row, row + b"MRK_MACOS_AQUA_FAILURE_CONTEXT?\n",
+                    row.replace(b'"id":1', b'"id":1,"id":1'), row.replace(b'"id":1', b'"id":NaN'),
+                    b"MRK_MACOS_AQUA_FAILURE_CONTEXT=" + b" " * (M.FAILURE_CONTEXT_LIMIT + 1) + b"\n"):
+            self.assertIsNone(M.failure_context(bad, b""))
+        with self.assertRaisesRegex(M.Refused, "^inner-failure-marker$"):
+            M.parse_result(captured(M.expected_result(BINDING, "first-save")), row, BINDING, "first-save")
+
+    def test_original_exception_buffers_do_not_change_error_or_finality(self):
+        for duplicate in (False, True):
+            with self.subTest(repeated_identical_frame=duplicate), inert_exception_owner(duplicate=duplicate) as call:
+                fixtures = InertFixtures()
+                with patch.object(M, "parse_result", side_effect=AssertionError("must not parse success")), \
+                        self.assertRaises(RuntimeError) as caught:
+                    M.run_cases(BINDING, fixtures, call.owner.run_owned, UID, "runner", self.fail)
+                self.assertIs(caught.exception, call.original)
+                self.assertEqual((fixtures.before, fixtures.reads), (["first-save"], []))
+                self.assertTrue(fixtures.inflight); self.assertFalse(fixtures.last_returned)
+                report = M.diagnostic(caught.exception, None, fixtures)
+                self.assertEqual((report["innerFailureStep"], report["innerFailureReason"], report["innerFailureContext"]),
+                                 ("CancelProject", "observer-deadline", context_data()))
+                self.assertEqual(report["innerDiagnosticSource"], "original-exception-buffer")
+                self.assertEqual((report["innerDiagnosticCompleteness"], report["invocationFinality"]), ("unknown", "unknown"))
+                self.assertIsNone(report["appReturncode"])
+                self.assertFalse(report["originalCallReturned"])
+                output = io.StringIO(); M.emit_record(report, output)
+                self.assertNotIn("PRIVATE", output.getvalue())
+                self.assertNotIn(M.EXECUTABLE, output.getvalue())
+
+    def test_exception_snapshot_refuses_foreign_ambiguous_changed_or_unbounded_inputs(self):
+        def change_shared_case(call):
+            call.command.mutate_argv = True
+            call.frozen.args = (M.EXECUTABLE, "noop-stale")
+            call.frozen.argv = tuple(arg.encode("ascii") for arg in call.frozen.args)
+        mutations = (
+            lambda f: setattr(f.command.__spec__, "origin", "/foreign"),
+            lambda f: setattr(f.command, "__file__", "/foreign"),
+            lambda f: setattr(f.owner, "run_command", FunctionType(f.command.run_command.__code__, dict(vars(f.command)))),
+            lambda f: setattr(f.owner, "run_command", FunctionType(f.command.run_command.__code__.replace(co_firstlineno=1), vars(f.command))),
+            lambda f: setattr(f.command, "recursion", 1),
+            change_shared_case,
+            lambda f: f.command.overrides.update(argv=[M.EXECUTABLE, "noop-stale"]),
+            lambda f: f.command.overrides.update(cwd=Path("/foreign")),
+            lambda f: f.command.overrides.update(timeout=61),
+            lambda f: f.command.overrides.update(capture=1),
+            lambda f: f.command.overrides.update(text=True),
+            lambda f: f.command.overrides.update(output_limit=M.OUTPUT_LIMIT + 1),
+            lambda f: setattr(f.command, "original_engine", SimpleNamespace(frozen=f.frozen, text=False, outputs=f.engine.outputs)),
+            lambda f: setattr(f.frozen, "args", (M.EXECUTABLE, "noop-stale")),
+            lambda f: setattr(f.frozen, "argv", (b"/foreign", b"first-save")),
+            lambda f: setattr(f.frozen, "cwd", b"/foreign"),
+            lambda f: setattr(f.frozen, "manifest", SimpleNamespace(capture=True, limit=M.OUTPUT_LIMIT)),
+            lambda f: setattr(f.manifest, "capture", 1),
+            lambda f: setattr(f.manifest, "limit", M.OUTPUT_LIMIT + 1),
+            lambda f: setattr(f.engine, "text", True),
+            lambda f: setattr(f.engine, "outputs", tuple(f.engine.outputs)),
+            lambda f: setattr(f.engine, "outputs", [bytearray()]),
+            lambda f: setattr(f.engine, "outputs", [b"", f.engine.outputs[1]]),
+            lambda f: setattr(f.engine, "outputs", [bytearray(M.OUTPUT_LIMIT), f.engine.outputs[1]]),
+        )
+        for index, mutation in enumerate(mutations):
+            with self.subTest(index=index), inert_exception_owner() as call:
+                mutation(call)
+                fixtures = InertFixtures()
+                with self.assertRaises(RuntimeError) as caught:
+                    M.run_cases(BINDING, fixtures, call.owner.run_owned, UID, "runner", self.fail)
+                self.assertIs(caught.exception, call.original)
+                self.assertIsNone(fixtures.inner_diagnostic_source)
+                self.assertIsNone(fixtures.inner_failure_step)
+                self.assertEqual((fixtures.before, fixtures.reads, fixtures.inflight, fixtures.last_returned),
+                                 (["first-save"], [], True, False))
+        with inert_exception_owner() as call, patch.object(M, "TRACEBACK_LIMIT", 1):
+            fixtures = InertFixtures()
+            with self.assertRaises(RuntimeError):
+                M.run_cases(BINDING, fixtures, call.owner.run_owned, UID, "runner", self.fail)
+            self.assertIsNone(fixtures.inner_diagnostic_source)
+
+    def test_exception_partial_absent_or_parser_failure_stays_unavailable(self):
+        for stderr in (b"", b"PRIVATE ONLY", b"MRK_MACOS_AQUA_FAILURE_STEP=CancelProject",
+                       b"MRK_MACOS_AQUA_FAILURE_REASON=observer-deadline\nMRK_MACOS_AQUA_FAILURE_REASON"):
+            with inert_exception_owner(stderr=stderr) as call:
+                fixtures = InertFixtures()
+                with self.assertRaises(RuntimeError) as caught:
+                    M.run_cases(BINDING, fixtures, call.owner.run_owned, UID, "runner", self.fail)
+                self.assertIs(caught.exception, call.original)
+                self.assertIsNone(fixtures.inner_diagnostic_source)
+        # A complete closed field remains diagnostic even if a separate field
+        # is absent/partial. The partial field and capture completeness do not.
+        with inert_exception_owner(stderr=(b"MRK_MACOS_AQUA_FAILURE_STEP=CancelProject\n"
+                                           b"MRK_MACOS_AQUA_FAILURE_REASON=observer-deadline")) as call:
+            fixtures = InertFixtures()
+            with self.assertRaises(RuntimeError):
+                M.run_cases(BINDING, fixtures, call.owner.run_owned, UID, "runner", self.fail)
+            self.assertEqual(fixtures.inner_failure_step, "CancelProject")
+            self.assertIsNone(fixtures.inner_failure_reason)
+            self.assertIsNone(fixtures.inner_failure_context)
+            self.assertEqual(fixtures.inner_diagnostic_source, "original-exception-buffer")
+        with inert_exception_owner() as call, patch.object(M, "failure_step", side_effect=ValueError("PRIVATE PARSER ERROR")):
+            fixtures = InertFixtures()
+            with self.assertRaises(RuntimeError) as caught:
+                M.run_cases(BINDING, fixtures, call.owner.run_owned, UID, "runner", self.fail)
+            self.assertIs(caught.exception, call.original)
+            self.assertIsNone(fixtures.inner_diagnostic_source)
+            self.assertTrue(fixtures.inflight)
+        with inert_exception_owner() as call, patch.object(M, "_original_exception_diagnostics", side_effect=ValueError("PRIVATE SNAPSHOT ERROR")):
+            fixtures = InertFixtures()
+            with self.assertRaises(RuntimeError) as caught:
+                M.run_cases(BINDING, fixtures, call.owner.run_owned, UID, "runner", self.fail)
+            self.assertIs(caught.exception, call.original)
+            self.assertIsNone(fixtures.inner_diagnostic_source)
+
+    def test_failure_reason_diagnostic_does_not_promote_nonzero(self):
+        fixtures, emitted = InertFixtures(), []
+        marker = (b"MRK_MACOS_AQUA_FAILURE_STEP=CancelProject\n"
+                  b"MRK_MACOS_AQUA_FAILURE_REASON=asset_source_refused\n")
+        def runner(argv, **_):
+            return CompletedProcess(args=argv, returncode=1, stdout=b"", stderr=marker)
+        with self.assertRaisesRegex(M.Refused, "^app-return$") as caught:
+            M.run_cases(BINDING, fixtures, runner, UID, "runner", emitted.append)
+        report = M.diagnostic(caught.exception, None, fixtures)
+        self.assertEqual((report["status"], report["innerFailureStep"], report["innerFailureReason"]),
+                         ("failed", "CancelProject", "asset_source_refused"))
+        self.assertEqual(report["appReturncode"], 1)
+        self.assertEqual(report["innerDiagnosticSource"], "completed-output")
+        self.assertEqual(report["innerDiagnosticCompleteness"], "complete")
+        self.assertEqual(report["typedLifetimeFacts"], [])
+        self.assertEqual(fixtures.before, ["first-save"])
+        self.assertEqual((fixtures.reads, emitted), ([], []))
+        self.assertIsNone(M.diagnostic(M.Refused("fixture-refused"), None, None)["innerFailureReason"])
+
+    def test_observer_reason_catalog_and_readiness_call_contract(self):
+        source_root = PATH.parents[1] / "src-tauri" / "src"
+        observer = (source_root / "installed_shell_observation_macos.rs").read_text(encoding="utf-8")
+        adapter = (source_root / "shell_macos_dialog.rs").read_text(encoding="utf-8")
+        errors = (source_root / "asset_commands.rs").read_text(encoding="utf-8")
+        reasons = observer.split("const FAILURE_REASONS: &[&str] = &[", 1)[1].split("];", 1)[0]
+        labels = M.re.findall(r'"([a-z_-]+)"', reasons)
+        self.assertEqual(len(labels), len(set(labels)))
+        self.assertEqual(set(labels), M.FAILURE_REASONS)
+        closed_codes = set(M.re.findall(r'=> "((?:asset_|assessment_)[a-z_]+)"', errors))
+        self.assertTrue(closed_codes <= M.FAILURE_REASONS)
+        self.assertTrue(set(M.re.findall(r'=> "(adapter-[a-z-]+)"', adapter)) <= M.FAILURE_REASONS)
+        self.assertIn("if !observer_data_checks()", observer)
+        readiness = observer.split("fn panel_readiness(", 1)[1].split("const METHODS", 1)[0]
+        self.assertNotIn("observe_panel_action(", readiness)
+        self.assertNotIn("Instant::now()", readiness)
+        self.assertIn('if ever_attached { return Err("native-attachment-lost"); }', readiness)
+        self.assertIn("native.directory_bound || native.directory_returned || native.directory_ready || same_action_returned", readiness)
+        action = observer.split("fn native_step(", 1)[1].split("pub(super) fn close_prevented", 1)[0]
+        self.assertLess(action.index("if !panel_readiness("), action.index("r.panel_attached[(id - 1) as usize] = true"))
+        self.assertLess(action.index("r.panel_attached[(id - 1) as usize] = true"), action.index("observe_panel_action(id,action)"))
+        self.assertIn('if let Err(reason) = result { self.fail_with(reason); }', action)
+        self.assertNotIn("r.pending.take()", action)
+        self.assertLess(action.index("let timely = self.timely()"), action.index("let result = self.native_step_body("))
+        self.assertLess(action.index("let result = self.native_step_body(step, timely)"), action.index("native.returned = true"))
+        body = action.split("fn native_step_body(", 1)[1]
+        entry = "if !native_step_entry(std::thread::current().id() == self.main, timely)? { return Ok(false); }"
+        self.assertLess(body.index(entry), body.index("observed_panel()"))
+        admission = observer.split("fn native_step_entry(", 1)[1].split("fn retire_returned_native(", 1)[0]
+        self.assertLess(admission.index('if !on_main { return Err("native-wrong-thread"); }'), admission.index("Ok(timely)"))
+        self.assertIn('if matches!(result, Err("native-wrong-thread" | "native-pending-custody")) { return; }', action)
+        self.assertIn('(false, false, Err("native-wrong-thread"))', observer)
+        self.assertIn('(false, true, Err("native-wrong-thread"))', observer)
+        self.assertIn('(true, false, Ok(false))', observer)
+        self.assertIn("retire_returned_native(&mut original", observer)
+        self.assertIn("installed_observation_flags_data_check()", observer)
+        native_root = PATH.parents[1] / "native" / "macos-installed-native" / "src"
+        native = (native_root / "native.m").read_text(encoding="utf-8")
+        rust = (native_root / "lib.rs").read_text(encoding="utf-8")
+        self.assertIn("uint32_t attachment = mrk_observation_attachment(s);", native)
+        self.assertIn("attachment == MRK_ATTACHMENT_ALL ? 2u : 0u", native)
+        self.assertIn("if (!mrk_observation_attached(s)) return EAGAIN;", native)
+        self.assertIn("flags & !0x1ffff == 0", rust)
+        self.assertIn("(parent_present && panel_present).then_some", rust)
 
     def test_loss_requires_actual_route_but_not_both_events(self):
         for case in ("picker-loss", "save-loss"):

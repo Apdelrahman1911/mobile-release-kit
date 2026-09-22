@@ -1,6 +1,7 @@
 //! One retained finite native owner, separate from disposable passive queries.
 //!
-//! Installed configuration Save has its own fixed original-custody profile.
+//! Installed Configuration Save and Linux workflow Apply have separate fixed
+//! profiles inside this SAME original owner and custody/settlement route.
 //! General edit qualification stays closed; no Windows edit backend is admitted.
 use std::{collections::BTreeSet, future::{Future, pending}, path::PathBuf, pin::Pin, process::ExitStatus,
     sync::{Arc, Mutex, MutexGuard, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
@@ -13,6 +14,8 @@ use tokio::{io::{AsyncRead, AsyncReadExt, AsyncWriteExt}, process::{Child, Child
 use {std::process::Stdio, tokio::process::Command};
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 use crate::installed_runtime::{CloseOutcome, ConfigurationRuntimeSlots};
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+use crate::installed_runtime::GitHubWorkflowRuntimeSlots;
 use crate::{edit_protocol::{self as wire, Capability, Checkout, ChildFrame, ConfigEditStatus, CoreReason,
     EditAvailability, EditDomain, EditProjection, Effect, Journal, NativeEditReason as Reason, NativeFinality, Phase,
     PrepareConfigEdit, Prepared, ResourceState}, github_workflow_edit_protocol::{self as workflow_wire, PrepareWorkflowEdit, WorkflowEditStatus},
@@ -36,6 +39,114 @@ fn qualified(domain: EditDomain, configuration_fixture: bool) -> bool {
 }
 fn configuration_installed_selected(domain: EditDomain, profile_available: bool) -> bool {
     domain == EditDomain::Configuration && profile_available
+}
+fn workflow_installed_selected(domain: EditDomain, profile_available: bool) -> bool {
+    domain == EditDomain::GitHubWorkflows && profile_available
+}
+fn installed_edit_selected(domain: EditDomain, runtime: &RuntimeConfig) -> bool {
+    match domain {
+        EditDomain::Configuration => configuration_installed_selected(domain, runtime.configuration_edit_profile_available()),
+        EditDomain::GitHubWorkflows => workflow_installed_selected(domain, runtime.github_workflow_edit_profile_available()),
+        EditDomain::MetadataText => false,
+    }
+}
+fn installed_domains_match(session: EditDomain, projection: EditDomain, slots: EditDomain) -> bool {
+    matches!(session, EditDomain::Configuration | EditDomain::GitHubWorkflows) && session == projection && session == slots
+}
+
+// One closed adapter in Resources, not another owner/ledger/closer. The Mac
+// facade has only its existing Configuration arm. Every borrow checks exact
+// session/slot equality; being some installed edit domain is not sufficient.
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+enum InstalledEditSlots {
+    Configuration(ConfigurationRuntimeSlots),
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    GitHubWorkflows(GitHubWorkflowRuntimeSlots),
+}
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+enum InstalledPrepareFailure { CapabilityUnknown, Unavailable }
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+impl InstalledEditSlots {
+    fn new(domain: EditDomain, runtime: &RuntimeConfig) -> Option<Self> {
+        if !installed_edit_selected(domain, runtime) { return None; }
+        match domain {
+            EditDomain::Configuration => Some(Self::Configuration(ConfigurationRuntimeSlots::new())),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            EditDomain::GitHubWorkflows => Some(Self::GitHubWorkflows(GitHubWorkflowRuntimeSlots::new())),
+            _ => None,
+        }
+    }
+    fn domain(&self) -> EditDomain { match self {
+        Self::Configuration(_) => EditDomain::Configuration,
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        Self::GitHubWorkflows(_) => EditDomain::GitHubWorkflows,
+    } }
+    fn require_domain(&self, domain: EditDomain) -> Result<(), BridgeError> {
+        if self.domain() == domain { Ok(()) } else { Err(edit_unknown()) }
+    }
+    fn inspect_once(&mut self, domain: EditDomain, runtime: &RuntimeConfig,
+        end: Instant, stop: &watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        self.require_domain(domain)?;
+        match self {
+            Self::Configuration(slots) => runtime.resolve_configuration_installed(slots, end, stop),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::GitHubWorkflows(slots) => runtime.resolve_github_workflow_installed(slots, end, stop),
+        }
+    }
+    fn transfer_once(&mut self, domain: EditDomain) -> Result<(), BridgeError> {
+        self.require_domain(domain)?;
+        match self {
+            Self::Configuration(slots) => slots.transfer_once().map_err(|_| edit_unknown()),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::GitHubWorkflows(slots) => slots.transfer_once().map_err(|_| edit_unknown()),
+        }
+    }
+    fn prepare_once(&mut self, domain: EditDomain, end: Instant, stop: &watch::Receiver<bool>)
+        -> Result<&VerifiedRuntime, InstalledPrepareFailure> {
+        self.require_domain(domain).map_err(|_| InstalledPrepareFailure::CapabilityUnknown)?;
+        match self {
+            Self::Configuration(slots) => slots.capability().map_err(|_| InstalledPrepareFailure::CapabilityUnknown)?
+                .prepare_once(end, stop).map_err(|_| InstalledPrepareFailure::Unavailable),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::GitHubWorkflows(slots) => slots.capability().map_err(|_| InstalledPrepareFailure::CapabilityUnknown)?
+                .prepare_once(end, stop).map_err(|_| InstalledPrepareFailure::Unavailable),
+        }
+    }
+    fn claim_once(&mut self, domain: EditDomain) -> Result<(), BridgeError> {
+        self.require_domain(domain)?;
+        match self {
+            Self::Configuration(slots) => slots.capability().map_err(|_| edit_unknown())?.claim_once().map_err(|_| edit_unknown()),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::GitHubWorkflows(slots) => slots.capability().map_err(|_| edit_unknown())?.claim_once().map_err(|_| edit_unknown()),
+        }
+    }
+    fn no_child_effect(&self, domain: EditDomain) -> bool {
+        self.domain() == domain && match self {
+            Self::Configuration(slots) => slots.no_child_effect(),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::GitHubWorkflows(slots) => slots.no_child_effect(),
+        }
+    }
+    fn mark_interrupted(&mut self) { match self {
+        Self::Configuration(slots) => slots.mark_interrupted(),
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        Self::GitHubWorkflows(slots) => slots.mark_interrupted(),
+    } }
+    fn settle_originals(&mut self, domain: EditDomain) -> CloseOutcome {
+        if self.domain() != domain { self.mark_interrupted(); return CloseOutcome::Unknown; }
+        match self {
+            Self::Configuration(slots) => slots.settle_originals(),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::GitHubWorkflows(slots) => slots.settle_originals(),
+        }
+    }
+    fn settled(&self, domain: EditDomain) -> bool {
+        self.domain() == domain && match self {
+            Self::Configuration(slots) => slots.settled(),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::GitHubWorkflows(slots) => slots.settled(),
+        }
+    }
 }
 fn capability_reason(domain: EditDomain, active: Option<EditDomain>, stopping: bool, disabled: bool,
     domain_qualified: bool, document_live: bool) -> EditAvailability {
@@ -199,7 +310,7 @@ struct Registry {
         not(feature = "ubuntu-runtime-publisher"),
         any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
             all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
-    installed_final: Option<InstalledConfigFinality>,
+    installed_final: Option<InstalledEditFinality>,
 }
 struct ActiveOwner {
     session: Arc<Session>, projection: EditProjection, review_end: Instant, phase_end: Option<Instant>,
@@ -252,17 +363,17 @@ struct Resources {
     inspection_started: bool, acquisition_started: bool,
     inspection_join_failed: bool, acquisition_join_failed: bool,
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-    configuration: Option<Arc<Mutex<ConfigurationRuntimeSlots>>>,
+    installed: Option<Arc<Mutex<InstalledEditSlots>>>,
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-    configuration_settlement: Option<JoinHandle<CloseOutcome>>,
+    installed_settlement: Option<JoinHandle<CloseOutcome>>,
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-    configuration_settlement_started: bool,
+    installed_settlement_started: bool,
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-    configuration_settlement_joined: bool,
+    installed_settlement_joined: bool,
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-    configuration_settlement_failed: bool,
+    installed_settlement_failed: bool,
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-    configuration_settlement_outcome: Option<CloseOutcome>,
+    installed_settlement_outcome: Option<CloseOutcome>,
     writer: Option<JoinHandle<WriteEnd>>, stdout: Option<JoinHandle<ReadEnd>>, stderr: Option<JoinHandle<ReadEnd>>,
     write_end: Option<WriteEnd>, out_end: Option<ReadEnd>, err_end: Option<ReadEnd>,
     write_join_failed: bool, out_join_failed: bool, err_join_failed: bool,
@@ -289,6 +400,48 @@ pub(crate) struct InstalledConfigFinality {
     pub(crate) stdin_closed: bool, pub(crate) stdout_eof_closed: bool, pub(crate) stderr_eof_closed: bool,
     pub(crate) io_joined: bool, pub(crate) driver_joined: bool, pub(crate) watchdog_joined: bool, pub(crate) manager_joined: bool,
     pub(crate) runtime_ledger_settled: bool, pub(crate) runtime_settlement_joined: bool,
+}
+
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+    not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[derive(Clone)]
+pub(crate) struct InstalledWorkflowFinality {
+    pub(crate) session_id: String, pub(crate) project_id: String, pub(crate) owner_generation: String,
+    pub(crate) writer_frames: usize, pub(crate) stdout_frames: usize,
+    pub(crate) inspection_joined: bool, pub(crate) acquisition_joined: bool, pub(crate) child_waited_success: bool,
+    pub(crate) stdin_closed: bool, pub(crate) stdout_eof_closed: bool, pub(crate) stderr_eof_closed: bool,
+    pub(crate) io_joined: bool, pub(crate) driver_joined: bool, pub(crate) watchdog_joined: bool, pub(crate) manager_joined: bool,
+    pub(crate) runtime_ledger_settled: bool, pub(crate) runtime_settlement_joined: bool,
+}
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+    not(feature = "ubuntu-runtime-publisher"),
+    any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+enum InstalledEditFinality {
+    Configuration(InstalledConfigFinality),
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    GitHubWorkflows(InstalledWorkflowFinality),
+}
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+    not(feature = "ubuntu-runtime-publisher"),
+    any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+impl InstalledEditFinality {
+    fn bind_original(mut self, projection: &EditProjection) -> Option<Self> {
+        if projection.phase != Phase::Final || projection.native_finality != NativeFinality::Settled || projection.late_settled { return None; }
+        match &mut self {
+            Self::Configuration(facts) => {
+                if projection.domain != EditDomain::Configuration || projection.session_id != facts.session_id { return None; }
+                facts.project_id = projection.project_id.clone(); facts.owner_generation = projection.owner_generation.clone();
+            },
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::GitHubWorkflows(facts) => {
+                if projection.domain != EditDomain::GitHubWorkflows || projection.session_id != facts.session_id { return None; }
+                facts.project_id = projection.project_id.clone(); facts.owner_generation = projection.owner_generation.clone();
+            },
+        }
+        Some(self)
+    }
 }
 
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
@@ -326,11 +479,12 @@ mod installed_macos_observation {
                 io_outstanding: book.writer.is_some() && book.stdout.is_some() && book.stderr.is_some() && book.frames.is_some()
                     && book.write_end.is_none() && book.out_end.is_none() && book.err_end.is_none()
                     && !book.write_join_failed && !book.out_join_failed && !book.err_join_failed,
-                configuration_outstanding: book.configuration.as_ref().is_some_and(|native|
-                    native.try_lock().is_ok_and(|slots| !slots.settled() && !slots.no_child_effect()))
-                    && !book.configuration_settlement_started && book.configuration_settlement.is_none()
-                    && !book.configuration_settlement_joined && !book.configuration_settlement_failed
-                    && book.configuration_settlement_outcome.is_none(),
+                configuration_outstanding: book.installed.as_ref().is_some_and(|native|
+                    native.try_lock().is_ok_and(|slots| slots.domain() == EditDomain::Configuration
+                        && !slots.settled(EditDomain::Configuration) && !slots.no_child_effect(EditDomain::Configuration)))
+                    && !book.installed_settlement_started && book.installed_settlement.is_none()
+                    && !book.installed_settlement_joined && !book.installed_settlement_failed
+                    && book.installed_settlement_outcome.is_none(),
                 tasks_outstanding: !book.driver_joined && !book.watchdog_joined && !book.manager_joined,
             };
             (facts.startup_returned && facts.setup_joined && facts.child_outstanding
@@ -452,7 +606,7 @@ mod installed_macos_observation {
         }
         pub(crate) fn installed_macos_lost(&self, witness: &ReviewWitness) -> bool {
             let r = self.inner.lock();
-            let (Some(last), Some(facts)) = (&r.last, &r.installed_final) else { return false; };
+            let (Some(last), Some(InstalledEditFinality::Configuration(facts))) = (&r.last, &r.installed_final) else { return false; };
             same_document(&self.inner, &witness.document) && healthy(&self.inner, &r)
                 && r.document_lost && r.generation == witness.document.tombstone && r.loss_generation == witness.document.generation
                 && r.active.is_none() && facts.original.upgrade().is_some_and(|original| Arc::ptr_eq(&original, &witness.session))
@@ -498,21 +652,21 @@ fn consumer_returned(handle: bool, result: bool, failed: bool) -> bool {
 fn no_child_before_claim(startup: &Startup, child_present: bool, unclaimed: bool) -> bool {
     unclaimed && !startup.attempted && !startup.returned && !startup.failed && startup.child.is_none() && !child_present
 }
-fn configuration_completion_clear(settlement: OriginalWorker, closed: bool, same_ledger_settled: bool) -> bool {
+fn installed_completion_clear(settlement: OriginalWorker, closed: bool, same_ledger_settled: bool) -> bool {
     settlement.started && settlement.positive() && closed && same_ledger_settled
 }
-fn configuration_settlement_pending(settlement: OriginalWorker) -> bool {
+fn installed_settlement_pending(settlement: OriginalWorker) -> bool {
     settlement.started && !settlement.joined && !settlement.failed
 }
 
 #[derive(Clone, Copy)]
-struct ConfigurationClaim {
-    selected: bool, same_original: bool, same_identity: bool, document_live: bool,
+struct InstalledEditClaim {
+    selected: bool, same_original: bool, same_identity: bool, same_domain: bool, document_live: bool,
     opening: bool, stopping: bool, disabled: bool, stopped: bool, end: Option<Instant>,
 }
-impl ConfigurationClaim {
+impl InstalledEditClaim {
     fn clear(self, now: Instant) -> bool {
-        self.selected && self.same_original && self.same_identity && self.document_live && self.opening
+        self.selected && self.same_original && self.same_identity && self.same_domain && self.document_live && self.opening
             && !self.stopping && !self.disabled && !self.stopped && self.end.is_some_and(|end| now < end)
     }
 }
@@ -530,9 +684,9 @@ fn invalid_owner() -> BridgeError { BridgeError::new("invalid_edit_owner", "This
 
 impl Inner {
     fn hosted_qualified(&self, domain: EditDomain) -> bool {
-        // Same sealed selector for configuration availability and admission.
+        // Same domain-specific sealed selectors for availability and admission.
         // Neither a global flag nor a passive candidate authorizes this branch.
-        if configuration_installed_selected(domain, self.runtime.configuration_edit_profile_available()) { return true; }
+        if installed_edit_selected(domain, &self.runtime) { return true; }
         // Separately gated, existing per-owner development-fixture permissions.
         #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         if domain == EditDomain::GitHubWorkflows
@@ -656,13 +810,14 @@ impl Inner {
         phase_deadline(a.review_end, a.phase_end, a.projection.apply_submitted)
     }
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-    fn configuration_claim_clear(&self, r: &Registry, owner: &Arc<Session>, now: Instant) -> bool {
+    fn installed_claim_clear(&self, r: &Registry, owner: &Arc<Session>, slots: &InstalledEditSlots, now: Instant) -> bool {
         let Some(a) = r.active.as_ref() else { return false; };
-        ConfigurationClaim {
-            selected: configuration_installed_selected(owner.domain, self.runtime.configuration_edit_profile_available()),
+        InstalledEditClaim {
+            selected: installed_edit_selected(owner.domain, &self.runtime),
             same_original: Arc::ptr_eq(&a.session, owner),
-            same_identity: a.projection.domain == EditDomain::Configuration && a.projection.session_id == owner.id
-                && a.projection.owner_generation == r.generation,
+            same_domain: installed_domains_match(owner.domain, a.projection.domain, slots.domain()),
+            same_identity: a.projection.session_id == owner.id && a.projection.owner_generation == r.generation
+                && (owner.domain != EditDomain::GitHubWorkflows || owner.registration.is_some()),
             document_live: r.window.is_some() && r.document_bound && !r.document_lost,
             opening: a.projection.phase == Phase::Opening && !a.opened && !a.prepared && !a.terminal && !a.unknown
                 && a.claimed_seq == 0 && !a.projection.apply_submitted && a.cleanup_start.is_none(),
@@ -737,8 +892,23 @@ impl EditOwner {
     pub(crate) fn installed_observation_final(&self, session_id: &str) -> Option<InstalledConfigFinality> {
         let r = self.inner.lock();
         let last = r.last.as_ref()?;
-        let facts = r.installed_final.as_ref()?;
+        let facts = match r.installed_final.as_ref()? {
+            InstalledEditFinality::Configuration(facts) => facts,
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            InstalledEditFinality::GitHubWorkflows(_) => return None,
+        };
         (last.domain == EditDomain::Configuration && last.session_id == session_id && facts.session_id == session_id
+            && facts.project_id == last.project_id && facts.owner_generation == last.owner_generation
+            && last.phase == Phase::Final && last.native_finality == NativeFinality::Settled && !last.late_settled)
+            .then(|| facts.clone())
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+        not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn installed_workflow_observation_final(&self, session_id: &str) -> Option<InstalledWorkflowFinality> {
+        let r = self.inner.lock();
+        let last = r.last.as_ref()?;
+        let InstalledEditFinality::GitHubWorkflows(facts) = r.installed_final.as_ref()? else { return None; };
+        (last.domain == EditDomain::GitHubWorkflows && last.session_id == session_id && facts.session_id == session_id
             && facts.project_id == last.project_id && facts.owner_generation == last.owner_generation
             && last.phase == Phase::Final && last.native_finality == NativeFinality::Settled && !last.late_settled)
             .then(|| facts.clone())
@@ -901,8 +1071,7 @@ impl EditOwner {
                 // Pure allocation BEFORE this Session is admitted or any
                 // original worker is registered/released. No passive custody.
                 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-                configuration: configuration_installed_selected(domain, self.inner.runtime.configuration_edit_profile_available())
-                    .then(|| Arc::new(Mutex::new(ConfigurationRuntimeSlots::new()))),
+                installed: InstalledEditSlots::new(domain, &self.inner.runtime).map(|slots| Arc::new(Mutex::new(slots))),
                 ..Resources::default() }),
             input: Arc::new(AsyncMutex::new(Pipe::default())), output: Arc::new(AsyncMutex::new(Pipe::default())),
             error: Arc::new(AsyncMutex::new(Pipe::default())), driver: AsyncMutex::new(None), watchdog: AsyncMutex::new(None),
@@ -1550,10 +1719,10 @@ async fn watchdog(inner: Arc<Inner>, owner: Arc<Session>) {
 }
 
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-fn configuration_worker_lost(book: &Resources) {
+fn installed_worker_lost(book: &Resources) {
     // ONLY after this original worker returned JoinError. A watchdog endpoint
     // never borrows/closes the ledger out from under inspection/acquisition.
-    if let Some(native) = &book.configuration {
+    if let Some(native) = &book.installed {
         match native.lock() {
             Ok(mut slots) => slots.mark_interrupted(),
             Err(error) => error.into_inner().mark_interrupted(),
@@ -1562,25 +1731,25 @@ fn configuration_worker_lost(book: &Resources) {
 }
 
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-fn transfer_configuration(book: &Resources, inner: &Inner, owner: &Arc<Session>) -> Result<(), BridgeError> {
+fn transfer_installed_edit(book: &Resources, inner: &Inner, owner: &Arc<Session>) -> Result<(), BridgeError> {
     let (inspection, acquisition) = startup_workers(book);
     if !inspection.started || !inspection.positive() || acquisition.started || !acquisition.positive() {
         return Err(edit_unknown());
     }
-    let native = book.configuration.as_ref().ok_or_else(edit_unknown)?;
+    let native = book.installed.as_ref().ok_or_else(edit_unknown)?;
     let mut slots = native.try_lock().map_err(|_| edit_unknown())?;
     let mut r = inner.lock();
     let now = Instant::now();
     inner.expire_locked(&mut r, &owner.id, now);
-    if !inner.configuration_claim_clear(&r, owner, now) { return Err(invalid_owner()); }
+    if !inner.installed_claim_clear(&r, owner, &slots, now) { return Err(invalid_owner()); }
     // Exact active Arc, document generation and STOP/deadline share the SAME
     // registry race as this whole-ledger move. No native work or allocation.
-    slots.transfer_once().map_err(|_| edit_unknown())
+    slots.transfer_once(owner.domain)
 }
 
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-fn acquire_configuration_installed(inner: &Inner, owner: &Arc<Session>, native: &Arc<Mutex<ConfigurationRuntimeSlots>>, end: Instant) {
-    if !configuration_installed_selected(owner.domain, inner.runtime.configuration_edit_profile_available()) {
+fn acquire_installed_edit(inner: &Inner, owner: &Arc<Session>, native: &Arc<Mutex<InstalledEditSlots>>, end: Instant) {
+    if !installed_edit_selected(owner.domain, &inner.runtime) {
         inner.trigger(&owner.id, Reason::RuntimeUnavailable, Instant::now());
         return;
     }
@@ -1596,21 +1765,22 @@ fn acquire_configuration_installed(inner: &Inner, owner: &Arc<Session>, native: 
             Ok(slots) => slots,
             Err(_) => { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return; },
         };
-        let runtime = match slots.capability() {
-            Ok(runtime) => runtime,
-            Err(_) => { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return; },
-        };
+        let workflow_domain = slots.domain() == EditDomain::GitHubWorkflows;
         let stop = owner.stop.subscribe();
-        let selected = match runtime.prepare_once(end, &stop) {
+        let selected = match slots.prepare_once(owner.domain, end, &stop) {
             Ok(selected) => selected,
-            Err(_) => { inner.trigger(&owner.id, Reason::RuntimeUnavailable, Instant::now()); return; },
+            Err(InstalledPrepareFailure::CapabilityUnknown) => { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return; },
+            Err(InstalledPrepareFailure::Unavailable) => { inner.trigger(&owner.id, Reason::RuntimeUnavailable, Instant::now()); return; },
         };
-        // Fixed config bootstrap/default domain only; no caller arguments,
+        // Fixed bootstrap and a literal workflow domain from the checked slot,
+        // never a caller-supplied domain. Configuration retains its default ABI.
+        // No caller arguments,
         // environment or cwd. Complete ALL native work and allocations first.
         let mut command = Command::new(&selected.python);
         command.args(["-I", "-S", "-B"]).arg(&selected.bootstrap).arg(&selected.core)
             .current_dir(&selected.cwd).env_clear().env("LC_ALL", "C").env("LANG", "C")
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
+        if workflow_domain { command.arg("github_workflows"); } // Allocate BEFORE the final serialized claim.
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         if crate::runtime::macos_installed_environment(&mut command).is_err() {
             inner.trigger(&owner.id, Reason::RuntimeUnavailable, Instant::now()); return;
@@ -1625,12 +1795,12 @@ fn acquire_configuration_installed(inner: &Inner, owner: &Arc<Session>, native: 
         let mut r = inner.lock();
         let now = Instant::now();
         inner.expire_locked(&mut r, &owner.id, now);
-        if !inner.configuration_claim_clear(&r, owner, now) {
+        if !inner.installed_claim_clear(&r, owner, &slots, now) {
             drop(r);
             inner.trigger(&owner.id, Reason::Cancelled, Instant::now());
             return;
         }
-        if runtime.claim_once().is_err() {
+        if slots.claim_once(owner.domain).is_err() {
             drop(r);
             owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return;
         }
@@ -1773,14 +1943,15 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     let endpoint = match endpoint { Some(end) => end, None => return };
     let runtime = inner.runtime.clone();
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-    let configuration = {
-        let selected = configuration_installed_selected(owner.domain, runtime.configuration_edit_profile_available());
-        if selected != book.configuration.is_some() {
+    let installed = {
+        let selected = installed_edit_selected(owner.domain, &runtime);
+        if selected != book.installed.is_some() {
             owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return;
         }
-        book.configuration.clone()
+        book.installed.clone()
     };
     let stop = owner.stop.subscribe();
+    let domain = owner.domain;
     #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
     let schedule = owner.fixture_schedule.clone();
     let (release, enter) = oneshot::channel();
@@ -1788,9 +1959,9 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     book.inspection = Some(tokio::task::spawn_blocking(move || {
         if enter.blocking_recv().is_err() { return Err(edit_unknown()); }
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-        let result = if let Some(native) = configuration {
+        let result = if let Some(native) = installed {
             match native.lock() {
-                Ok(mut originals) => runtime.resolve_configuration_installed(&mut originals, endpoint, &stop),
+                Ok(mut originals) => originals.inspect_once(domain, &runtime, endpoint, &stop),
                 Err(_) => Err(edit_unknown()),
             }
         } else { runtime.resolve_edit(endpoint) };
@@ -1812,7 +1983,7 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
         Err(_) => {
             book.inspection_join_failed = true;
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-            configuration_worker_lost(&book);
+            installed_worker_lost(&book);
             owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return;
         }
     };
@@ -1830,9 +2001,9 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     // acquisition site. Survivors never call start_original or resolve/spawn.
     let startup_inner = inner.clone();
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-    let configuration = book.configuration.clone();
+    let installed = book.installed.clone();
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-    if configuration.is_some() && transfer_configuration(&book, inner, owner).is_err() {
+    if installed.is_some() && transfer_installed_edit(&book, inner, owner).is_err() {
         inner.trigger(&owner.id, Reason::RuntimeUnavailable, Instant::now());
         return;
     }
@@ -1841,11 +2012,11 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     book.acquisition = Some(tokio::task::spawn_blocking(move || {
         if enter.blocking_recv().is_err() { return; }
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-        if let Some(native) = configuration {
+        if let Some(native) = installed {
             // The worker's inspection return is DATA only. The original slots,
             // not these paths, supply the separately prepared one-use claim.
             drop(runtime);
-            acquire_configuration_installed(&startup_inner, &startup_owner, &native, endpoint);
+            acquire_installed_edit(&startup_inner, &startup_owner, &native, endpoint);
             return;
         }
         spawn_original(runtime, &startup_inner, &startup_owner)
@@ -1862,35 +2033,35 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Session>) {
     continue_original(inner, owner, true).await;
 }
 
-fn configuration_settled(book: &Resources, inner: &Inner, owner: &Session) -> bool {
-    let selected = configuration_installed_selected(owner.domain, inner.runtime.configuration_edit_profile_available());
+fn installed_edit_settled(book: &Resources, inner: &Inner, owner: &Session) -> bool {
+    let selected = installed_edit_selected(owner.domain, &inner.runtime);
     #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
     { let _ = book; !selected }
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     {
         if !selected {
-            return book.configuration.is_none() && !book.configuration_settlement_started
-                && book.configuration_settlement.is_none();
+            return book.installed.is_none() && !book.installed_settlement_started
+                && book.installed_settlement.is_none();
         }
-        configuration_completion_clear(OriginalWorker {
-            started: book.configuration_settlement_started, joined: book.configuration_settlement_joined,
-            failed: book.configuration_settlement_failed, handle: book.configuration_settlement.is_some(),
-        }, book.configuration_settlement_outcome == Some(CloseOutcome::Settled),
-            book.configuration.as_ref().is_some_and(|native| native.try_lock().is_ok_and(|slots| slots.settled())))
+        installed_completion_clear(OriginalWorker {
+            started: book.installed_settlement_started, joined: book.installed_settlement_joined,
+            failed: book.installed_settlement_failed, handle: book.installed_settlement.is_some(),
+        }, book.installed_settlement_outcome == Some(CloseOutcome::Settled),
+            book.installed.as_ref().is_some_and(|native| native.try_lock().is_ok_and(|slots| slots.settled(owner.domain))))
     }
 }
 
-async fn settle_configuration_originals(book: &mut Resources, inner: &Inner, owner: &Arc<Session>) {
+async fn settle_installed_edit_originals(book: &mut Resources, inner: &Inner, owner: &Arc<Session>) {
     #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
     { let _ = (book, inner, owner); }
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     {
-        let selected = configuration_installed_selected(owner.domain, inner.runtime.configuration_edit_profile_available());
-        let Some(native) = book.configuration.clone() else {
+        let selected = installed_edit_selected(owner.domain, &inner.runtime);
+        let Some(native) = book.installed.clone() else {
             if selected { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); }
             return;
         };
-        if !book.configuration_settlement_started {
+        if !book.installed_settlement_started {
             let (inspection, acquisition) = startup_workers(book);
             let consumers_returned = || {
                 let slots = match native.try_lock() {
@@ -1906,10 +2077,10 @@ async fn settle_configuration_originals(book: &mut Resources, inner: &Inner, own
                 let io_returned = consumer_returned(book.writer.is_some(), book.write_end.is_some(), book.write_join_failed)
                     && consumer_returned(book.stdout.is_some(), book.out_end.is_some(), book.out_join_failed)
                     && consumer_returned(book.stderr.is_some(), book.err_end.is_some(), book.err_join_failed);
-                io_returned && startup.child.is_none() && if book.child.is_some() {
+                slots.domain() == owner.domain && io_returned && startup.child.is_none() && if book.child.is_some() {
                     book.waited.is_some() && !book.wait_failed
                 } else {
-                    no_child_before_claim(&startup, false, slots.no_child_effect())
+                    no_child_before_claim(&startup, false, slots.no_child_effect(owner.domain))
                 }
             };
             if !selected || !inspection.returned() || !acquisition.returned() || !consumers_returned() {
@@ -1919,13 +2090,14 @@ async fn settle_configuration_originals(book: &mut Resources, inner: &Inner, own
                 owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return;
             }
             let closing = native.clone();
+            let domain = owner.domain;
             let (release, enter) = oneshot::channel();
-            book.configuration_settlement_started = true;
-            book.configuration_settlement = Some(tokio::task::spawn_blocking(move || {
+            book.installed_settlement_started = true;
+            book.installed_settlement = Some(tokio::task::spawn_blocking(move || {
                 if enter.blocking_recv().is_err() { return CloseOutcome::Unknown; }
                 match closing.lock() {
-                    Ok(mut slots) => slots.settle_originals(),
-                    Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals() },
+                    Ok(mut slots) => slots.settle_originals(domain),
+                    Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals(domain) },
                 }
             }));
             let _ = release.send(()); // Original consuming close worker registered before ANY close.
@@ -1933,27 +2105,27 @@ async fn settle_configuration_originals(book: &mut Resources, inner: &Inner, own
         // A surviving original continuation may arrive while this SAME closer
         // still holds the native mutex. Never reinspect its borrowed ledger or
         // demand try_lock success: join its registered handle directly.
-        if configuration_settlement_pending(OriginalWorker {
-            started: book.configuration_settlement_started, joined: book.configuration_settlement_joined,
-            failed: book.configuration_settlement_failed, handle: book.configuration_settlement.is_some(),
+        if installed_settlement_pending(OriginalWorker {
+            started: book.installed_settlement_started, joined: book.installed_settlement_joined,
+            failed: book.installed_settlement_failed, handle: book.installed_settlement.is_some(),
         }) {
-            if book.configuration_settlement.is_none() {
+            if book.installed_settlement.is_none() {
                 owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return;
             }
-            match join_with_clock(&mut book.configuration_settlement, inner, owner).await {
+            match join_with_clock(&mut book.installed_settlement, inner, owner).await {
                 Ok(outcome) => {
-                    book.configuration_settlement_joined = true;
-                    book.configuration_settlement_outcome = Some(outcome);
-                    book.configuration_settlement.take();
+                    book.installed_settlement_joined = true;
+                    book.installed_settlement_outcome = Some(outcome);
+                    book.installed_settlement.take();
                 },
                 Err(_) => {
-                    book.configuration_settlement_failed = true; // Retain the failed handle; never repoll/retry.
-                    configuration_worker_lost(book);
+                    book.installed_settlement_failed = true; // Retain the failed handle; never repoll/retry.
+                    installed_worker_lost(book);
                     owner.resource_unknown.store(true, Ordering::SeqCst);
                 },
             }
         }
-        if !configuration_settled(book, inner, owner) { inner.unknown(&owner.id); }
+        if !installed_edit_settled(book, inner, owner) { inner.unknown(&owner.id); }
     }
 }
 
@@ -1972,7 +2144,7 @@ async fn continue_original(inner: Arc<Inner>, owner: Arc<Session>, _original_dri
             Err(_) => {
                 book.inspection_join_failed = true;
                 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-                configuration_worker_lost(&book);
+                installed_worker_lost(&book);
                 owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id);
             },
         }
@@ -1984,7 +2156,7 @@ async fn continue_original(inner: Arc<Inner>, owner: Arc<Session>, _original_dri
             Err(_) => {
                 book.acquisition_join_failed = true;
                 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-                configuration_worker_lost(&book);
+                installed_worker_lost(&book);
                 owner.resource_unknown.store(true, Ordering::SeqCst);
                 inner.unknown(&owner.id);
             },
@@ -2134,7 +2306,7 @@ async fn continue_original(inner: Arc<Inner>, owner: Arc<Session>, _original_dri
     // Retain installed originals throughout Open/Prepare/Review/Apply and all
     // actual child wait/IO consumers. The existing driver/continuation joins the
     // one registered settlement; elapsed time never starts independent closes.
-    settle_configuration_originals(&mut book, &inner, &owner).await;
+    settle_installed_edit_originals(&mut book, &inner, &owner).await;
 }
 
 struct ManagerGuard { inner: Arc<Inner>, owner: Arc<Session>, completed: bool }
@@ -2291,7 +2463,7 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
                 && book.out_end.as_ref().is_some_and(|end| end.eof && end.closed)
                 && book.err_end.as_ref().is_some_and(|end| end.eof && end.closed)
         } else { book.child.is_none() && startup.child.is_none() };
-        let runtime_settled = configuration_settled(&book, &inner, &owner);
+        let runtime_settled = installed_edit_settled(&book, &inner, &owner);
         let settled = startup_settled && io_joined && child_settled && runtime_settled && book.driver_joined && book.watchdog_joined
             && !owner.driver_join_failed.load(Ordering::SeqCst) && !owner.watchdog_join_failed.load(Ordering::SeqCst)
             && !owner.resource_unknown.load(Ordering::SeqCst);
@@ -2299,10 +2471,11 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
             not(feature = "ubuntu-runtime-publisher"),
         any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
             all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
-        if settled && configuration_installed_selected(owner.domain, inner.runtime.configuration_edit_profile_available()) && startup.returned {
+        if settled && installed_edit_selected(owner.domain, &inner.runtime) && startup.returned {
             if let (Some(write), Some(out), Some(err)) = (&book.write_end, &book.out_end, &book.err_end) {
                 if !write.failed && !out.failed && !err.failed && err.bytes == 0 {
-                    installed_observed = Some(InstalledConfigFinality {
+                    installed_observed = match owner.domain {
+                    EditDomain::Configuration => Some(InstalledEditFinality::Configuration(InstalledConfigFinality {
                         #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation"))]
                         original: Arc::downgrade(&owner),
                         session_id: owner.id.clone(), project_id: String::new(), owner_generation: String::new(),
@@ -2311,8 +2484,20 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
                         child_waited_success: book.waited.as_ref().is_some_and(ExitStatus::success) && !book.wait_failed,
                         stdin_closed: write.closed, stdout_eof_closed: out.eof && out.closed, stderr_eof_closed: err.eof && err.closed,
                         io_joined, driver_joined: book.driver_joined, watchdog_joined: book.watchdog_joined, manager_joined: book.manager_joined,
-                        runtime_ledger_settled: runtime_settled, runtime_settlement_joined: book.configuration_settlement_joined,
-                    });
+                        runtime_ledger_settled: runtime_settled, runtime_settlement_joined: book.installed_settlement_joined,
+                    })),
+                    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    EditDomain::GitHubWorkflows => Some(InstalledEditFinality::GitHubWorkflows(InstalledWorkflowFinality {
+                        session_id: owner.id.clone(), project_id: String::new(), owner_generation: String::new(),
+                        writer_frames: write.frames, stdout_frames: out.frames,
+                        inspection_joined: book.inspection_joined, acquisition_joined: book.acquisition_joined,
+                        child_waited_success: book.waited.as_ref().is_some_and(ExitStatus::success) && !book.wait_failed,
+                        stdin_closed: write.closed, stdout_eof_closed: out.eof && out.closed, stderr_eof_closed: err.eof && err.closed,
+                        io_joined, driver_joined: book.driver_joined, watchdog_joined: book.watchdog_joined, manager_joined: book.manager_joined,
+                        runtime_ledger_settled: runtime_settled, runtime_settlement_joined: book.installed_settlement_joined,
+                    })),
+                    _ => None,
+                    };
                 }
             }
         }
@@ -2353,11 +2538,7 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
             // retirement as the correlated projection; never derive them from
             // a renderer DTO or infer ledger joins from child/process absence.
             r.installed_final = if !a.unknown {
-                installed_observed.map(|mut facts| {
-                    facts.project_id = a.projection.project_id.clone();
-                    facts.owner_generation = a.projection.owner_generation.clone();
-                    facts
-                })
+                installed_observed.and_then(|facts| facts.bind_original(&a.projection))
             } else { None };
         }
         r.last = Some(a.projection); // Atomic active -> one terminal projection.
@@ -2378,6 +2559,11 @@ pub(crate) fn assert_installed_configuration_owner_contract() {
 }
 
 #[cfg(test)]
+pub(crate) fn assert_installed_workflow_owner_contract() {
+    installed_configuration_data_tests::workflow_contract();
+}
+
+#[cfg(test)]
 mod installed_configuration_data_tests {
     use super::*;
 
@@ -2388,8 +2574,56 @@ mod installed_configuration_data_tests {
         no_child_after_an_attempt_or_consumed_claim_is_never_inferred_from_an_empty_slot();
         installed_finality_requires_the_original_settlement_join_and_same_ledger_close();
     }
+    pub(super) fn workflow_contract() {
+        workflow_selection_and_exact_domain_equality_are_closed();
+        installed_configuration_claim_refuses_stop_late_inspection_loss_quit_and_wrong_original();
+        only_actual_returned_original_borrowers_permit_settlement_and_loss_never_qualifies();
+        no_child_after_an_attempt_or_consumed_claim_is_never_inferred_from_an_empty_slot();
+        installed_finality_requires_the_original_settlement_join_and_same_ledger_close();
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        workflow_adapter_cannot_borrow_or_close_another_domain();
+    }
     #[test]
     fn installed_configuration_owner_contract_is_inert() { assert_installed_configuration_owner_contract(); }
+    #[test]
+    fn installed_workflow_owner_contract_is_inert() { assert_installed_workflow_owner_contract(); }
+
+    fn workflow_selection_and_exact_domain_equality_are_closed() {
+        assert!(!NATIVE_EDIT_QUALIFIED && !NATIVE_WORKFLOW_EDIT_QUALIFIED && !NATIVE_METADATA_TEXT_EDIT_QUALIFIED);
+        let domains = [EditDomain::Configuration, EditDomain::GitHubWorkflows, EditDomain::MetadataText];
+        for domain in domains {
+            for available in [false, true] {
+                assert_eq!(workflow_installed_selected(domain, available), domain == EditDomain::GitHubWorkflows && available);
+                assert_eq!(configuration_installed_selected(domain, available), domain == EditDomain::Configuration && available);
+            }
+            for projection in domains { for slots in domains {
+                assert_eq!(installed_domains_match(domain, projection, slots),
+                    domain != EditDomain::MetadataText && domain == projection && domain == slots);
+            } }
+            assert!(!qualified(domain, false));
+        }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn workflow_adapter_cannot_borrow_or_close_another_domain() {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-wrong-domain-must-not-be-opened"));
+        let (_sender, stop) = watch::channel(false);
+        for wrong in [EditDomain::Configuration, EditDomain::MetadataText] {
+            let mut slots = InstalledEditSlots::GitHubWorkflows(GitHubWorkflowRuntimeSlots::new());
+            assert_eq!(slots.domain(), EditDomain::GitHubWorkflows);
+            assert!(slots.inspect_once(wrong, &runtime, Instant::now(), &stop).is_err());
+            assert!(slots.transfer_once(wrong).is_err() && slots.claim_once(wrong).is_err());
+            assert!(slots.prepare_once(wrong, Instant::now(), &stop).is_err());
+            assert!(!slots.no_child_effect(wrong) && !slots.settled(wrong));
+            assert!(slots.no_child_effect(EditDomain::GitHubWorkflows)); // Only the original EMPTY slots.
+            assert_eq!(slots.settle_originals(wrong), CloseOutcome::Unknown);
+            assert!(!slots.settled(wrong) && !slots.settled(EditDomain::GitHubWorkflows));
+        }
+        let mut config = InstalledEditSlots::Configuration(ConfigurationRuntimeSlots::new());
+        assert!(config.inspect_once(EditDomain::GitHubWorkflows, &runtime, Instant::now(), &stop).is_err());
+        assert!(config.transfer_once(EditDomain::GitHubWorkflows).is_err() && config.claim_once(EditDomain::GitHubWorkflows).is_err());
+        assert_eq!(config.settle_originals(EditDomain::GitHubWorkflows), CloseOutcome::Unknown);
+        assert!(!config.settled(EditDomain::Configuration));
+    }
 
     fn installed_configuration_selection_never_opens_other_edit_domains_or_global_flags() {
         assert!(!NATIVE_EDIT_QUALIFIED && !NATIVE_WORKFLOW_EDIT_QUALIFIED && !NATIVE_METADATA_TEXT_EDIT_QUALIFIED);
@@ -2410,14 +2644,14 @@ mod installed_configuration_data_tests {
         // Pure facts fed to the production predicate. No registry/session,
         // native task, selector or executable capability is fabricated.
         let now = Instant::now();
-        let ready = ConfigurationClaim { selected: true, same_original: true, same_identity: true, document_live: true,
+        let ready = InstalledEditClaim { selected: true, same_original: true, same_identity: true, same_domain: true, document_live: true,
             opening: true, stopping: false, disabled: false, stopped: false, end: Some(now + ACTIVE) };
         assert!(ready.clear(now));
-        for closed in [ConfigurationClaim { selected: false, ..ready }, ConfigurationClaim { same_original: false, ..ready },
-            ConfigurationClaim { same_identity: false, ..ready }, ConfigurationClaim { document_live: false, ..ready },
-            ConfigurationClaim { opening: false, ..ready }, ConfigurationClaim { stopping: true, ..ready },
-            ConfigurationClaim { disabled: true, ..ready }, ConfigurationClaim { stopped: true, ..ready },
-            ConfigurationClaim { end: None, ..ready }, ConfigurationClaim { end: Some(now), ..ready }] {
+        for closed in [InstalledEditClaim { selected: false, ..ready }, InstalledEditClaim { same_original: false, ..ready },
+            InstalledEditClaim { same_identity: false, ..ready }, InstalledEditClaim { same_domain: false, ..ready }, InstalledEditClaim { document_live: false, ..ready },
+            InstalledEditClaim { opening: false, ..ready }, InstalledEditClaim { stopping: true, ..ready },
+            InstalledEditClaim { disabled: true, ..ready }, InstalledEditClaim { stopped: true, ..ready },
+            InstalledEditClaim { end: None, ..ready }, InstalledEditClaim { end: Some(now), ..ready }] {
             assert!(!closed.clear(now));
             assert!(!closed.clear(now + ACTIVE)); // Late DATA cannot renew or reverse admission.
         }
@@ -2453,9 +2687,9 @@ mod installed_configuration_data_tests {
     fn installed_finality_requires_the_original_settlement_join_and_same_ledger_close() {
         for started in [false, true] { for joined in [false, true] { for failed in [false, true] { for handle in [false, true] {
             let worker = OriginalWorker { started, joined, failed, handle };
-            assert_eq!(configuration_settlement_pending(worker), started && !joined && !failed);
+            assert_eq!(installed_settlement_pending(worker), started && !joined && !failed);
             for closed in [false, true] { for ledger in [false, true] {
-                assert_eq!(configuration_completion_clear(worker, closed, ledger),
+                assert_eq!(installed_completion_clear(worker, closed, ledger),
                     started && joined && !failed && !handle && closed && ledger);
             } }
         } } } }
@@ -2463,9 +2697,9 @@ mod installed_configuration_data_tests {
         // Even with the ledger borrowed by its closer, continuation chooses the
         // retained handle, not a new native borrow/close or positive finality.
         let pending = OriginalWorker { started: true, joined: false, failed: false, handle: true };
-        assert!(configuration_settlement_pending(pending));
-        assert!(!configuration_completion_clear(pending, true, true));
-        assert!(!configuration_settlement_pending(OriginalWorker { failed: true, ..pending }));
+        assert!(installed_settlement_pending(pending));
+        assert!(!installed_completion_clear(pending, true, true));
+        assert!(!installed_settlement_pending(OriginalWorker { failed: true, ..pending }));
     }
 }
 

@@ -1048,8 +1048,10 @@ class LifecycleData(unittest.TestCase):
             baseline = (sum(row["size"] for row in candidate["packages"].values()) + candidate["library"]["size"]
                         + (12 if profile == "installed" else 68 if profile == "shell" else 0)
                         + 2 * 1024 + 1 + 2 * 2048 + (32 << 20) + (1 << 20))
-            required = baseline + ((448 << 20) + 1 if profile == "shell" else 0)
-            inodes = 2 * 16 + 2 * 8192 + 128 + (4 if profile == "shell" else 0)
+            # Five original logs plus four failure leaves retain the 64 MiB
+            # ceiling; the fixed workflow bytes and 13 nodes are additional.
+            required = baseline + ((576 << 20) + 7235 + 13 if profile == "shell" else 0)
+            inodes = 2 * 16 + 2 * 8192 + 128 + (17 if profile == "shell" else 0)
             for available in (required - 1, required):
                 with self.subTest(profile=profile, available=available), \
                      patch.object(Path, "stat", return_value=SimpleNamespace(st_dev=1)), \
@@ -2190,8 +2192,8 @@ def positive_capture(receipt=None, candidate=None):
 def fixture_namespace_data(value):
     suffix = value["runId"] + "-" + value["attempt"]
     return {"root": "/var/lib/mrk-ubuntu-shell-fixtures-" + suffix,
-            "identity": [1, 5, stat.S_IFDIR | 0o755, 0, 0, 6, 4096, 11, 11],
-            "children": ["candidate-evidence", "path-outside", "path-project", "positive-project"],
+            "identity": [1, 5, stat.S_IFDIR | 0o755, 0, 0, 7, 4096, 11, 11],
+            "children": ["candidate-evidence", "path-outside", "path-project", "positive-project", "workflow-project"],
             "control": {"path": "/var/lib/mrk-ubuntu-native-" + suffix, "identity": [1, 4, stat.S_IFDIR | 0o711, 0, 0]},
             "ancestors": [{"path": path, "identity": [1, i + 1, stat.S_IFDIR | 0o755, 0, 0]}
                           for i, path in enumerate(("/", "/var", "/var/lib"))]}
@@ -2289,6 +2291,45 @@ def path_fixture_data(value, *, changed=False):
             "entries": rows, "absent": absent, "namespace": namespace}
 
 
+def workflow_capture():
+    return (b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n"
+            + b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
+            + L.SHELL_WORKFLOW_MARKER + L.canonical(L.SHELL_WORKFLOW_RECEIPT)
+            + b"MRK_INSTALLED_SHELL_OBSERVATION=workflow-apply-verified\n", b"")
+
+
+def workflow_fixture_data(value, *, installed=False):
+    """Finite synthetic before/after DATA; no fixture construction or renderer."""
+    owner = (value["runnerUid"], value["runnerGid"])
+    callers = (".github/workflows/mobile-preflight.yml", ".github/workflows/mobile-candidate.yml",
+               ".github/workflows/mobile-external-testing.yml", ".github/workflows/mobile-production-submit.yml")
+    selected = callers if installed else callers[:1]
+    directories = ((".", 0o700, owner, 4, [".github", ".gitignore", "app", "version.properties"]),
+                   ("app", 0o555, (0, 0), 2, ["build.gradle.kts"]),
+                   (".github", 0o700, owner, 3, ["workflows"]),
+                   (".github/workflows", 0o700, owner, 2, sorted([Path(name).name for name in selected] + ["unrelated.yml"])))
+    rows = []
+    for index, (name, mode, owners, links, children) in enumerate(directories):
+        stamp = 22 if installed and name in (".", ".github/workflows") else 11
+        rows.append({"path": name, "kind": "directory", "children": children,
+                     "identity": [1, 400 + index, stat.S_IFDIR | mode, *owners, links, 4096, stamp, stamp]})
+    files = [("app/build.gradle.kts", L.SHELL_PROJECT_SOURCE, 0o444, (0, 0)),
+             ("version.properties", L.SHELL_PROJECT_VERSION, 0o600, owner),
+             (".gitignore", L.SHELL_WORKFLOW_IGNORE, 0o640, owner),
+             (".github/workflows/unrelated.yml", L.SHELL_WORKFLOW_SIBLING, 0o600, owner),
+             *((name, L.SHELL_WORKFLOW_CALLERS[name], 0o640 if index == 0 else 0o600, owner)
+               for index, name in enumerate(selected))]
+    for index, (name, raw, mode, owners) in enumerate(files):
+        stamp = 22 if index >= 5 else 11
+        rows.append({"path": name, "kind": "file", "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+                     "identity": [1, 404 + index, stat.S_IFREG | mode, *owners, 1, len(raw), stamp, stamp]})
+    absent = ["release", ".mobile-release", ".mobile-release-init-prepare", ".mobile-release-init", ".mobile-release-init-cleanup",
+              ".mobile-release-metadata-text-prepare", ".mobile-release-metadata-text", ".mobile-release-metadata-text-cleanup"]
+    namespace = fixture_namespace_data(value)
+    return {"schemaVersion": 1, "fixture": "android-workflow-apply-v1", "root": namespace["root"] + "/workflow-project",
+            "installed": installed, "entries": rows, "absent": absent + ([] if installed else list(callers[1:])), "namespace": namespace}
+
+
 def closed_shell_data():
     value, expected = installed_handoff(), map_data()
     value.pop("installed")
@@ -2300,7 +2341,7 @@ def closed_shell_data():
                 "positive": positive_capture(),
                 "quit-outstanding": (b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
                     + L.CHILD_MARKER.encode() + L.canonical(maps) + b"MRK_INSTALLED_SHELL_OBSERVATION=quit-outstanding-verified\n", b""),
-                "project-paths": path_capture()}
+                "project-paths": path_capture(), "workflow-apply": workflow_capture()}
     cases, files, commands = {}, {}, []
     for case, (stdout, stderr) in captures.items():
         cases[case] = L.shell_result(stdout, stderr, case, 0, expected)
@@ -2313,6 +2354,7 @@ def closed_shell_data():
     for phase in ("before", "after"):
         files["shell-positive-candidate-" + phase + ".json"] = L.canonical(candidate_fixture_data(value))
         files["shell-project-paths-" + phase + ".json"] = L.canonical(path_fixture_data(value, changed=phase == "after"))
+        files["shell-workflow-apply-" + phase + ".json"] = L.canonical(workflow_fixture_data(value, installed=phase == "after"))
     keys = [{"phase": "key", "exitCode": 0, "stdout": "", "stderr": "",
              "argv": L._drop(value, ["/usr/bin/xdotool", "key", "--clearmodifiers", key])} for key in ("ctrl+q", "alt+o")]
     files["shell-normal-control.json"] = L.canonical({"joined": True, "inputs": 2, "workerGuardState": "RESTORED",
@@ -2383,7 +2425,9 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
                 if fault == "published-identity" and stat.S_IMODE(node.st_mode) == 0o755: current.st_ino += 100
                 return current
             def chmod(path, mode):
-                self.assertIn((path, mode), ((root / "positive-project/app", 0o555), (root, 0o755)))
+                self.assertIn((path, mode), ((root / "positive-project/app", 0o555),
+                    (root / "workflow-project/.github/workflows", 0o700), (root / "workflow-project/.github", 0o700),
+                    (root / "workflow-project/app", 0o555), (root / "workflow-project", 0o700), (root, 0o755)))
                 if path == root: node.st_mode = stat.S_IFDIR | mode
             def attrs(path, directory):
                 if fault == "acl" and path == root or fault == "leaf-acl" and path == root / "path-outside/VERSION":
@@ -2411,18 +2455,32 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
                     self.assertIs(type(binding), bytes); self.assertEqual(L.decode(binding), namespace)
                     self.assertEqual(created, [root, root / "positive-project", root / "positive-project/app",
                         root / "candidate-evidence", root / "candidate-evidence/operation",
-                        *(root / name for name, directory in PATH_FIXTURE_NODES if directory)])
+                        *(root / name for name, directory in PATH_FIXTURE_NODES if directory),
+                        root / "workflow-project", root / "workflow-project/app", root / "workflow-project/.github",
+                        root / "workflow-project/.github/workflows"])
                     self.assertEqual([call.args for call in writer.call_args_list], [
                         (root / "positive-project/app/build.gradle.kts", L.SHELL_PROJECT_SOURCE, 0o444),
                         (root / "positive-project/version.properties", L.SHELL_PROJECT_VERSION, 0o600),
                         *((root / "candidate-evidence" / name, raw, 0o600) for name, raw in L.SHELL_CANDIDATE_DOCUMENTS.items()),
-                        *((root / name, b"inert path-picker fixture\n", 0o600) for name, directory in PATH_FIXTURE_NODES if not directory)])
+                        *((root / name, b"inert path-picker fixture\n", 0o600) for name, directory in PATH_FIXTURE_NODES if not directory),
+                        (root / "workflow-project/app/build.gradle.kts", L.SHELL_PROJECT_SOURCE, 0o444),
+                        (root / "workflow-project/version.properties", L.SHELL_PROJECT_VERSION, 0o600),
+                        (root / "workflow-project/.gitignore", L.SHELL_WORKFLOW_IGNORE, 0o640),
+                        (root / "workflow-project/.github/workflows/unrelated.yml", L.SHELL_WORKFLOW_SIBLING, 0o600),
+                        (root / "workflow-project/.github/workflows/mobile-preflight.yml", L.SHELL_WORKFLOW_CALLERS[".github/workflows/mobile-preflight.yml"], 0o640)])
                     self.assertEqual([call.args for call in ownership.call_args_list], [
                         (path, value["runnerUid"], value["runnerGid"]) for path in
                         (root / "positive-project/version.properties", root / "positive-project",
                          *(root / "candidate-evidence" / name for name in L.SHELL_CANDIDATE_DOCUMENTS),
-                         root / "candidate-evidence/operation", root / "candidate-evidence", *(root / name for name, _ in PATH_FIXTURE_NODES))])
-                    self.assertEqual([call.args for call in modes.call_args_list], [(root / "positive-project/app", 0o555), (root, 0o755)])
+                         root / "candidate-evidence/operation", root / "candidate-evidence", *(root / name for name, _ in PATH_FIXTURE_NODES))] + [
+                        (root / "workflow-project/app/build.gradle.kts", 0, 0),
+                        *((root / "workflow-project" / name, value["runnerUid"], value["runnerGid"]) for name in
+                          ("version.properties", ".gitignore", ".github/workflows/unrelated.yml", ".github/workflows/mobile-preflight.yml",
+                           ".github/workflows", ".github")),
+                        (root / "workflow-project/app", 0, 0), (root / "workflow-project", value["runnerUid"], value["runnerGid"])])
+                    self.assertEqual([call.args for call in modes.call_args_list], [(root / "positive-project/app", 0o555),
+                        (root / "workflow-project/.github/workflows", 0o700), (root / "workflow-project/.github", 0o700),
+                        (root / "workflow-project/app", 0o555), (root / "workflow-project", 0o700), (root, 0o755)])
                 else:
                     with self.assertRaises((ValueError, OSError)): L._shell_fixtures_prepare(value)
                     publications = [call.args for call in modes.call_args_list if call.args[0] == root]
@@ -2477,7 +2535,7 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
             altered = deepcopy(original); mutate(altered)
             with self.subTest(mutate=mutate), self.assertRaises(ValueError): L._shell_namespace_data(value, altered)
         families = ((L.shell_project_fixture, "shell-positive-project"), (L.shell_candidate_fixture, "shell-positive-candidate"),
-                    (L.shell_paths_fixture, "shell-project-paths"))
+                    (L.shell_paths_fixture, "shell-project-paths"), (L.shell_workflow_fixture, "shell-workflow-apply"))
         for validate, prefix in families:
             for change in ("missing", "old-schema", "old-root", "binding-drift"):
                 before, after = (L.decode(files[prefix + "-" + phase + ".json"]) for phase in ("before", "after"))
@@ -2487,15 +2545,16 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
                 else: after["namespace"]["identity"][1] = 50
                 with self.subTest(family=prefix, change=change), self.assertRaises(ValueError):
                     validate(value, L.canonical(before), L.canonical(after))
-        altered = dict(files)
-        for phase in ("before", "after"):
-            name = "shell-positive-candidate-" + phase + ".json"; document = L.decode(altered[name])
-            document["namespace"]["identity"][1] = 50; altered[name] = L.canonical(document)
-        L.shell_candidate_fixture(value, altered["shell-positive-candidate-before.json"], altered["shell-positive-candidate-after.json"])
-        with patch.object(L, "shell_closed_loader", return_value=expected), \
-             patch.object(L, "_shell_namespace_check", side_effect=AssertionError("Closed DATA is not live authority")), \
-             self.assertRaisesRegex(ValueError, "different original namespaces"):
-            L.shell_closed_result(value, outcome, altered)
+        for validate, prefix in ((L.shell_candidate_fixture, "shell-positive-candidate"), (L.shell_workflow_fixture, "shell-workflow-apply")):
+            altered = dict(files)
+            for phase in ("before", "after"):
+                name = prefix + "-" + phase + ".json"; document = L.decode(altered[name])
+                document["namespace"]["identity"][1] = 50; altered[name] = L.canonical(document)
+            validate(value, altered[prefix + "-before.json"], altered[prefix + "-after.json"])
+            with self.subTest(family=prefix), patch.object(L, "shell_closed_loader", return_value=expected), \
+                 patch.object(L, "_shell_namespace_check", side_effect=AssertionError("Closed DATA is not live authority")), \
+                 self.assertRaisesRegex(ValueError, "different original namespaces"):
+                L.shell_closed_result(value, outcome, altered)
 
     def test_twenty_digit_roots_keep_existing_inventory_byte_caps(self):
         value = installed_handoff(); value.update(runId="9" * 20, attempt="9" * 20)
@@ -2503,7 +2562,8 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
         self.assertEqual(str(L.shell_fixture_root(value)), namespace["root"])
         self.assertLess(len(L.canonical(namespace)), 1024)
         for document in (project_fixture_data(value), project_fixture_data(value, saved=True), candidate_fixture_data(value),
-                         path_fixture_data(value), path_fixture_data(value, changed=True)):
+                         path_fixture_data(value), path_fixture_data(value, changed=True),
+                         workflow_fixture_data(value), workflow_fixture_data(value, installed=True)):
             self.assertLessEqual(len(L.canonical(document)), 8192)
         for field in ("runId", "attempt"):
             for bad in ("", "0", "01", "1-2", "9" * 21, 10, True):
@@ -2574,13 +2634,16 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                          {"shell-" + case + "-xvfb.stderr" for case in L.SHELL_CASES})
         self.assertEqual({name for name in roster if name.startswith("shell-positive-candidate-")},
                          {"shell-positive-candidate-before.json", "shell-positive-candidate-after.json"})
-        self.assertEqual(len(roster), 84)
-        self.assertEqual(len(roster) + 2, 86)
-        self.assertEqual(len(L.root_phases(value)), 18)
+        self.assertEqual({name for name in roster if name.startswith("shell-workflow-apply-") and name.endswith(".json")},
+                         {"shell-workflow-apply-before.json", "shell-workflow-apply-after.json"})
+        self.assertEqual(len(roster), 89)
+        self.assertEqual(len(roster) + 2, 91)
+        self.assertEqual(len(L.root_phases(value)), 19)
         self.assertLessEqual(len(roster), 128)
         for case in ("positive", "refuse-writable", "refuse-pth"):
             self.assertFalse(any(name.startswith("shell-positive-project-") for name in L.public_files(installed_handoff(case))))
             self.assertFalse(any(name.startswith("shell-positive-candidate-") for name in L.public_files(installed_handoff(case))))
+            self.assertFalse(any(name.startswith("shell-workflow-apply-") for name in L.public_files(installed_handoff(case))))
 
     def test_positive_typed_schema_rejects_each_missing_or_changed_leaf(self):
         expected = project_draft_receipt()
@@ -2821,7 +2884,8 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                  patch.object(L, "_absent"), patch.object(L, "_retain") as retain, \
                  patch.object(L, "_shell_project_inventory", return_value=project_fixture_data(value)) as inventory, \
                  patch.object(L, "_shell_candidate_inventory", return_value=candidate_fixture_data(value)) as candidate_inventory, \
-                 patch.object(L, "_shell_paths_inventory", return_value=path_fixture_data(value)) as path_inventory:
+                 patch.object(L, "_shell_paths_inventory", return_value=path_fixture_data(value)) as path_inventory, \
+                 patch.object(L, "_shell_workflow_inventory", return_value=workflow_fixture_data(value)) as workflow_inventory:
                 self.assertEqual(L._shell_prepare(value, case, binding), (L.shell_environment(value, case), "original-log-binding"))
                 namespace_check.assert_called_once_with(value, binding)
                 prepare.assert_not_called(); chmod.assert_not_called()
@@ -2834,16 +2898,22 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                 if case == "positive":
                     inventory.assert_called_once_with(value, binding)
                     candidate_inventory.assert_called_once_with(value, binding)
-                    path_inventory.assert_not_called()
+                    path_inventory.assert_not_called(); workflow_inventory.assert_not_called()
                     self.assertEqual([call.args for call in retain.call_args_list], [
                         ("shell-positive-project-before.json", L.canonical(project_fixture_data(value))),
                         ("shell-positive-candidate-before.json", L.canonical(candidate_fixture_data(value)))])
                 elif case == "project-paths":
                     inventory.assert_not_called(); candidate_inventory.assert_not_called()
                     path_inventory.assert_called_once_with(value, binding)
+                    workflow_inventory.assert_not_called()
                     retain.assert_called_once_with("shell-project-paths-before.json", L.canonical(path_fixture_data(value)))
+                elif case == "workflow-apply":
+                    inventory.assert_not_called(); candidate_inventory.assert_not_called(); path_inventory.assert_not_called()
+                    workflow_inventory.assert_called_once_with(value, binding)
+                    retain.assert_called_once_with("shell-workflow-apply-before.json", L.canonical(workflow_fixture_data(value)))
                 else:
-                    inventory.assert_not_called(); candidate_inventory.assert_not_called(); path_inventory.assert_not_called(); retain.assert_not_called(); chmod.assert_not_called()
+                    inventory.assert_not_called(); candidate_inventory.assert_not_called(); path_inventory.assert_not_called()
+                    workflow_inventory.assert_not_called(); retain.assert_not_called(); chmod.assert_not_called()
         with patch.object(L, "_shell_namespace_check", side_effect=L.Refused("original namespace changed")), \
              patch.object(L, "_shell_log_prepare") as logs, patch.object(Path, "mkdir") as mkdir:
             with self.assertRaises(ValueError): L._shell_prepare(value, "normal", binding)
@@ -3146,8 +3216,8 @@ class CandidateDocumentsLifecycleContracts(unittest.TestCase):
         body = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "unit_start")
         calls = [(node.func.id, node.lineno) for node in ast.walk(body) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)]
         gated = [line for name, line in calls if name == "shell_result"]
-        inventories = [line for name, line in calls if name == "_shell_candidate_inventory"]
-        self.assertEqual((len(gated), len(inventories)), (1, 1))
+        inventories = sorted(line for name, line in calls if name == "_shell_candidate_inventory")
+        self.assertEqual((len(gated), len(inventories)), (1, 2))
         self.assertLess(gated[0], inventories[0])
         loop = next(node for node in ast.walk(body) if isinstance(node, ast.For)
                     and isinstance(node.iter, ast.Name) and node.iter.id == "SHELL_CASES")
@@ -3157,9 +3227,20 @@ class CandidateDocumentsLifecycleContracts(unittest.TestCase):
         positive = branch.orelse[gate + 1]
         self.assertIsInstance(positive, ast.If)
         self.assertEqual(ast.unparse(positive.test), "case == 'positive'")
-        # The sole post-exit inventory is a direct, subsequent positive-branch
-        # assignment, not an exception/finally path after a failed gate.
+        # The original post-exit capture remains a direct positive-branch
+        # assignment. The only additional call is the fifth-case recheck below.
         self.assertTrue(any(isinstance(node, ast.Assign) and node.lineno <= inventories[0] <= node.end_lineno for node in positive.body))
+        workflow = next(node for node in branch.orelse[gate + 1:]
+                        if isinstance(node, ast.If) and ast.unparse(node.test) == "case == 'workflow-apply'")
+        rechecks = [node for node in workflow.body if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                    and isinstance(node.value.func, ast.Name) and node.value.func.id == "need"]
+        self.assertEqual(len(rechecks), 1)
+        self.assertLess(gated[0], inventories[1])
+        self.assertTrue(rechecks[0].lineno <= inventories[1] <= rechecks[0].end_lineno)
+        self.assertEqual([node.func.id for node in ast.walk(rechecks[0]) if isinstance(node, ast.Call)
+                          and isinstance(node.func, ast.Name) and node.func.id in
+                          {"_shell_project_inventory", "_shell_candidate_inventory", "_shell_paths_inventory"}],
+                         ["_shell_project_inventory", "_shell_candidate_inventory", "_shell_paths_inventory"])
 
 
 
@@ -3313,7 +3394,12 @@ class ProjectPathLifecycleContracts(unittest.TestCase):
         calls = [n for n in ast.walk(path_branch) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_shell_paths_inventory"]
         self.assertEqual(len(calls), 1)
         self.assertEqual([(arg.arg, ast.literal_eval(arg.value)) for arg in calls[0].keywords], [("changed", True)])
-        self.assertEqual(set(L.SHELL_CASES), {"normal", "positive", "quit-outstanding", "project-paths"})
+        workflow_branch = next(n for n in branch.orelse[gate+1:] if isinstance(n, ast.If) and ast.unparse(n.test) == "case == 'workflow-apply'")
+        workflow_calls = [n for n in ast.walk(workflow_branch) if isinstance(n, ast.Call)
+                          and isinstance(n.func, ast.Name) and n.func.id == "_shell_workflow_inventory"]
+        self.assertEqual(len(workflow_calls), 1)
+        self.assertEqual([(arg.arg, ast.literal_eval(arg.value)) for arg in workflow_calls[0].keywords], [("installed", True)])
+        self.assertEqual(set(L.SHELL_CASES), {"normal", "positive", "quit-outstanding", "project-paths", "workflow-apply"})
 
 
 class FailureLabelSinkContracts(unittest.TestCase):

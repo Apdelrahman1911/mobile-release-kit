@@ -121,6 +121,29 @@ impl PassiveInstalledProfile {
     }
 }
 
+// The same authenticated A contains the existing workflow bootstrap/core, but
+// Configuration or passive selection is NOT authority for this edit domain.
+// Only the normal installed workflow selector below can mint this profile.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) struct GitHubWorkflowInstalledProfile { _private: () }
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl GitHubWorkflowInstalledProfile {
+    fn bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
+        PassiveInstalledProfile::bindings_match(target, manifest, protocol) // Fixed DATA only.
+    }
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !Self::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) { return Err(unavailable()); }
+        let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions")
+            .join(PassiveInstalledProfile::TARGET).join(PassiveInstalledProfile::MANIFEST);
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("config_edit_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+    pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
+        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+    }
+}
+
 // Separate configuration-only selection DATA. A passive candidate/profile is
 // not edit authority, and the feature-off native passive fixture cannot mint
 // this value. The original EditOwner still owes custody and a one-use claim.
@@ -486,6 +509,29 @@ impl RuntimeConfig {
         let profile = self.configuration_installed_profile()?; // Refuse other builds before inspection.
         originals.inspect_once(profile, end, stop)
     }
+    /// SAME sealed workflow selector for capability and original-owner admission.
+    /// Neither another edit profile nor a feature-off native test can select it.
+    pub(crate) fn github_workflow_edit_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        { self.github_workflow_installed_profile().is_ok() }
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        { false }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn github_workflow_installed_profile(&self) -> Result<GitHubWorkflowInstalledProfile, BridgeError> {
+        #[cfg(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        if GitHubWorkflowInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
+            return Ok(GitHubWorkflowInstalledProfile { _private: () });
+        }
+        Err(BridgeError::unavailable("The GitHub workflow installed-runtime release and custody profile are not qualified."))
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn resolve_github_workflow_installed(&self, originals: &mut crate::installed_runtime::GitHubWorkflowRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        // The registered original worker borrows its domain-bound slots. The
+        // returned paths are DATA; they cannot carry the ledger or spawn.
+        originals.inspect_once(self.github_workflow_installed_profile()?, end, stop)
+    }
     /// Separate fixed entry point for the finite configuration owner. Never
     /// dispatch stateful work through the passive engine or its supervisor.
     pub fn resolve_edit(&self, end: Instant) -> Result<VerifiedRuntime, BridgeError> {
@@ -796,6 +842,7 @@ pub(crate) fn assert_packaged_shell_allowlist_contract() {
     let bindings = PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR);
     assert_eq!(runtime.project_selection_profile_available(), bindings);
     assert_eq!(runtime.configuration_edit_profile_available(), bindings);
+    assert_eq!(runtime.github_workflow_edit_profile_available(), bindings);
     for name in ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview",
         "environment.requirements", "github.setup.propose", "release.version.observe", "metadata.text.observe", "metadata.text.validate", "artifacts.candidate.observe"] {
         assert_eq!(runtime.passive_method_available(name), bindings);
@@ -817,6 +864,13 @@ pub(crate) fn assert_packaged_shell_allowlist_contract() {
 pub(crate) fn assert_installed_configuration_profile_contract() {
     tests::configuration_candidate_bindings_are_exactly_a_not_an_arbitrary_anchor();
     tests::installed_configuration_data_is_fixed_and_stopped_inspection_owes_original_settlement();
+}
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+pub(crate) fn assert_installed_workflow_profile_contract() {
+    tests::workflow_candidate_bindings_are_exactly_a_not_an_arbitrary_anchor();
+    tests::installed_workflow_data_is_fixed_and_stopped_inspection_owes_original_settlement();
 }
 
 #[cfg(test)]
@@ -908,6 +962,69 @@ mod tests {
             assert!(slots.never_started() && !slots.settled()); // Selector refusal before ANY inspection.
             assert!(slots.capability().is_err());
         }
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"))))]
+    #[test]
+    fn installed_workflow_selector_is_closed_outside_the_normal_linux_shell() {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-workflow-path-must-not-be-opened"));
+        assert!(!runtime.github_workflow_edit_profile_available());
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        {
+            let mut slots = crate::installed_runtime::GitHubWorkflowRuntimeSlots::new();
+            let (_sender, stop) = tokio::sync::watch::channel(false);
+            assert!(runtime.resolve_github_workflow_installed(&mut slots, Instant::now(), &stop).is_err());
+            assert!(slots.never_started() && !slots.settled() && slots.capability().is_err());
+        }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn workflow_candidate_bindings_data_contract() { workflow_candidate_bindings_are_exactly_a_not_an_arbitrary_anchor(); }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(super) fn workflow_candidate_bindings_are_exactly_a_not_an_arbitrary_anchor() {
+        let (target, manifest, protocol) = (PassiveInstalledProfile::TARGET, PassiveInstalledProfile::MANIFEST, PassiveInstalledProfile::PROTOCOL);
+        assert!(GitHubWorkflowInstalledProfile::bindings_match(target, Some(manifest), Some(protocol)));
+        let wrong = "0".repeat(64);
+        for (target, manifest, protocol) in [
+            ("aarch64-unknown-linux-gnu", Some(manifest), Some(protocol)), (target, None, Some(protocol)),
+            (target, Some(manifest), None), (target, Some(wrong.as_str()), Some(protocol)), (target, Some(manifest), Some(wrong.as_str())),
+        ] { assert!(!GitHubWorkflowInstalledProfile::bindings_match(target, manifest, protocol)); }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    #[test]
+    fn installed_workflow_profile_contract_is_inert() { assert_installed_workflow_profile_contract(); }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    pub(super) fn installed_workflow_data_is_fixed_and_stopped_inspection_owes_original_settlement() {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-workflow-data-only"));
+        let profile = runtime.github_workflow_installed_profile();
+        assert_eq!(runtime.github_workflow_edit_profile_available(), profile.is_ok());
+        assert_eq!(profile.is_ok(), GitHubWorkflowInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR));
+        if let Ok(profile) = profile {
+            let data = profile.selection().unwrap();
+            let root = PathBuf::from("/var/lib/mobile-release-kit/versions").join(PassiveInstalledProfile::TARGET).join(PassiveInstalledProfile::MANIFEST);
+            assert_eq!(data.python, root.join("python/bin/python3"));
+            assert_eq!(data.bootstrap, root.join("config_edit_bootstrap.py"));
+            assert_eq!(data.core, root.join("core.zip")); assert_eq!(data.cwd, root);
+            assert!(profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure"));
+            for release in [b"6.8.0-91-generic".as_slice(), b"6.17.0-1021-azure", b"6.17.0-1022-azure-custom"] {
+                assert!(!profile.accepts_platform(b"Linux", b"x86_64", release));
+            }
+            assert!(!profile.accepts_platform(b"Linux", b"aarch64", b"6.17.0-1022-azure"));
+            assert!(!profile.accepts_platform(b"FreeBSD", b"x86_64", b"6.17.0-1022-azure"));
+            let mut slots = crate::installed_runtime::GitHubWorkflowRuntimeSlots::new();
+            let (_sender, stop) = tokio::sync::watch::channel(true);
+            // Sticky STOP precedes uname/open: this is empty DATA bookkeeping,
+            // never an executed runtime, transferred ledger or native witness.
+            assert!(runtime.resolve_github_workflow_installed(&mut slots, Instant::now() + std::time::Duration::from_secs(1), &stop).is_err());
+            assert!(!slots.never_started() && !slots.settled() && slots.no_child_effect());
+            assert!(slots.transfer_once().is_err() && slots.capability().is_err());
+            assert_eq!(slots.settle_originals(), crate::installed_runtime::CloseOutcome::Settled);
+            assert!(slots.settled() && slots.capability().is_err());
+        }
+        assert!(runtime.resolve(Instant::now()).is_err());
+        assert!(runtime.resolve_edit(Instant::now()).is_err());
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     #[test]

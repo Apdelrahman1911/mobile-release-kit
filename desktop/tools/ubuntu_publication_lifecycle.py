@@ -44,7 +44,7 @@ INSTALLED_TESTS = {key: "supervisor::tests::installed_candidate_a_" + suffix for
     ("overlap", "child_spans_f1_publication"))}
 CHILD_MARKER = "MRK_INSTALLED_NATIVE_CHILD="
 EMFILE_MARKER = "MRK_INSTALLED_NATIVE_EMFILE_RETAINED_UNKNOWN"
-SHELL_CASES = ("normal", "positive", "quit-outstanding", "project-paths")
+SHELL_CASES = ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply")
 SHELL_FAILURE_LABEL_LIMIT = 512
 # Literal observer labels only; never a prefix parser or raw-output escape.
 SHELL_FAILURE_STEPS = (
@@ -137,6 +137,24 @@ SHELL_FAILURE_STEPS = (
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathSettlement\n",
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathField\n",
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathNavigation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowGitHub\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowPin\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadPin\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowStart\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowOpenText\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadReview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowConfirm\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadConfirmation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowKeep\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadKept\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReconfirm\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadReconfirmation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowAcknowledge\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadAcknowledged\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowApply\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadResult\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowSettings\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadDraft\n",
 )
 SHELL_FAILURE_BOUNDARIES = (
     b"MRK_INSTALLED_SHELL_FAILURE_PHASE=bootstrap\n",
@@ -202,6 +220,246 @@ SHELL_PATH_MOVES = {
 SHELL_PATH_ABSENT = ("path-project/.gitignore", "path-project/release", "path-project/.mobile-release",
     "path-project/.mobile-release-init-prepare", "path-project/.mobile-release-init", "path-project/.mobile-release-init-cleanup",
     "path-project/.mobile-release-metadata-text-prepare", "path-project/.mobile-release-metadata-text", "path-project/.mobile-release-metadata-text-cleanup")
+
+SHELL_WORKFLOW_MARKER = b"MRK_INSTALLED_SHELL_WORKFLOW_APPLY="
+SHELL_WORKFLOW_RECEIPT = {
+    "schemaVersion": 1, "fixture": "android-workflow-apply-v1", "gate": "installed-workflow-profile",
+    "project": {"cancelSettled": True, "registered": True, "snapshot": True, "adopted": True},
+    "requests": {"open": 4, "prepare": 4, "apply": 2, "close": 0, "configuration": [0, 0, 0, 0]},
+    "draft": {"wholeMatched": True, "revision": 1, "baselineGeneration": 1, "unsavedReads": 4, "neverSaved": True},
+    "pins": {"explicit": True, "changed": True, "restored": True, "browserEdit": "insertText"},
+    "reviews": {"fullText": True, "conflictNoToken": True, "conflictReason": "existing_workflow_differs", "configBlocked": 4},
+    "confirmation": {"opened": [2, 0, 1, 0], "keepReviewing": True, "acknowledged": 2},
+    "outcomes": [["committed", "clean", "settled", "none"], ["not_started", "not_created", "settled", "none"],
+                 ["unchanged", "not_created", "settled", "none"], ["not_started", "not_created", "settled", "cancelled"]],
+    "nativeReasons": ["none", "none", "none", "shutdown"],
+    "originals": {"sessions": 4, "writerFrames": [3, 2, 3, 2], "stdoutFrames": [3, 2, 3, 3],
+                  "startupJoined": 4, "childWaited": 4, "ioSettled": 4, "ownersJoined": 4,
+                  "runtimeLedgerSettled": 4, "runtimeSettlementJoined": 4},
+    "quit": {"operation": 3, "pendingReview": True, "gtkSettled": True, "originalsSettled": True, "relayJoined": True, "exit": True},
+}
+# Reviewed literal caller DATA, never a second runtime generator. The existing
+# focused fixture contract compares every byte with the shared core proposal and
+# shipped template resource before this source may be qualified.
+SHELL_WORKFLOW_CALLERS = {
+    '.github/workflows/mobile-preflight.yml': b'''name: Mobile release preflight
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform to validate
+        required: true
+        default: both
+        type: choice
+        options:
+          - android
+          - ios
+          - both
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    uses: example/toolkit/.github/workflows/reusable-preflight.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    with:
+      tooling_sha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      source_sha: ${{ github.sha }}
+      platform: ${{ inputs.platform }}
+''',
+    '.github/workflows/mobile-candidate.yml': b'''name: Mobile internal candidate
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform to build once and upload to internal testing
+        required: true
+        type: choice
+        options:
+        - android
+        - ios
+        - both
+      confirmation:
+        description: candidate:<platform>:<version>:<build>
+        required: true
+        type: string
+      recovery_run_id:
+        description: Run holding the original intent or selected complete final; never replaces authorization.
+        required: false
+        default: ''
+        type: string
+      recovery_confirmation:
+        description: Exact additional iOS recovery confirmation, only when requested by reconciliation.
+        required: false
+        default: ''
+        type: string
+permissions: {}
+jobs:
+  candidate:
+    permissions:
+      actions: read
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    uses: example/toolkit/.github/workflows/reusable-candidate.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    with:
+      tooling_sha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      source_sha: ${{ github.sha }}
+      platform: ${{ inputs.platform }}
+      confirmation: ${{ inputs.confirmation }}
+      recovery_run_id: ${{ inputs.recovery_run_id }}
+      recovery_confirmation: ${{ inputs.recovery_confirmation }}
+''',
+    '.github/workflows/mobile-external-testing.yml': b'''name: Mobile external testing
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform whose exact internal build should be promoted
+        required: true
+        type: choice
+        options:
+        - android
+        - ios
+        - both
+      candidate_run_id:
+        description: Common candidate evidence run; leave blank for per-platform or preserved recovery inputs.
+        required: false
+        default: ''
+        type: string
+      confirmation:
+        description: external-testing:<platform>:<version>:<build>
+        required: true
+        type: string
+      recovery_run_id:
+        description: Run holding the original intent or selected complete final; never replaces authorization.
+        required: false
+        default: ''
+        type: string
+      recovery_confirmation:
+        description: Exact additional iOS recovery confirmation, only when requested by reconciliation.
+        required: false
+        default: ''
+        type: string
+      candidate_android_run_id:
+        description: android candidate evidence run; cannot conflict with a common run.
+        required: false
+        default: ''
+        type: string
+      candidate_ios_run_id:
+        description: ios candidate evidence run; cannot conflict with a common run.
+        required: false
+        default: ''
+        type: string
+permissions: {}
+jobs:
+  external-testing:
+    permissions:
+      actions: read
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    uses: example/toolkit/.github/workflows/reusable-external-testing.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    with:
+      tooling_sha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      source_sha: ${{ github.sha }}
+      platform: ${{ inputs.platform }}
+      candidate_run_id: ${{ inputs.candidate_run_id }}
+      confirmation: ${{ inputs.confirmation }}
+      recovery_run_id: ${{ inputs.recovery_run_id }}
+      recovery_confirmation: ${{ inputs.recovery_confirmation }}
+      candidate_android_run_id: ${{ inputs.candidate_android_run_id }}
+      candidate_ios_run_id: ${{ inputs.candidate_ios_run_id }}
+''',
+    '.github/workflows/mobile-production-submit.yml': b'''name: Mobile production submission
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Exactly one platform to prepare for production review
+        required: true
+        type: choice
+        options:
+        - android
+        - ios
+      candidate_run_id:
+        description: Common candidate evidence run; leave blank for per-platform or preserved recovery inputs.
+        required: false
+        default: ''
+        type: string
+      external_run_id:
+        description: Common external evidence run; leave blank for per-platform or preserved recovery inputs.
+        required: false
+        default: ''
+        type: string
+      confirmation:
+        description: production-submit:<platform>:<version>:<build>
+        required: true
+        type: string
+      recovery_run_id:
+        description: Run holding the original intent or selected complete final; never replaces authorization.
+        required: false
+        default: ''
+        type: string
+      recovery_confirmation:
+        description: Exact additional iOS recovery confirmation, only when requested by reconciliation.
+        required: false
+        default: ''
+        type: string
+      candidate_android_run_id:
+        description: android candidate evidence run; cannot conflict with a common run.
+        required: false
+        default: ''
+        type: string
+      candidate_ios_run_id:
+        description: ios candidate evidence run; cannot conflict with a common run.
+        required: false
+        default: ''
+        type: string
+      external_android_run_id:
+        description: android external evidence run; cannot conflict with a common run.
+        required: false
+        default: ''
+        type: string
+      external_ios_run_id:
+        description: ios external evidence run; cannot conflict with a common run.
+        required: false
+        default: ''
+        type: string
+permissions: {}
+jobs:
+  production-submit:
+    permissions:
+      actions: read
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    uses: example/toolkit/.github/workflows/reusable-production-submit.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    with:
+      tooling_sha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      source_sha: ${{ github.sha }}
+      platform: ${{ inputs.platform }}
+      candidate_run_id: ${{ inputs.candidate_run_id }}
+      external_run_id: ${{ inputs.external_run_id }}
+      confirmation: ${{ inputs.confirmation }}
+      recovery_run_id: ${{ inputs.recovery_run_id }}
+      recovery_confirmation: ${{ inputs.recovery_confirmation }}
+      candidate_android_run_id: ${{ inputs.candidate_android_run_id }}
+      candidate_ios_run_id: ${{ inputs.candidate_ios_run_id }}
+      external_android_run_id: ${{ inputs.external_android_run_id }}
+      external_ios_run_id: ${{ inputs.external_ios_run_id }}
+''',
+}
+
+SHELL_WORKFLOW_IGNORE = b"# workflow fixture sentinel; not a configuration save\n"
+SHELL_WORKFLOW_SIBLING = b"# unrelated caller sentinel; never part of this bundle\n"
+SHELL_WORKFLOW_ABSENT = ("release", ".mobile-release", ".mobile-release-init-prepare", ".mobile-release-init",
+    ".mobile-release-init-cleanup", ".mobile-release-metadata-text-prepare", ".mobile-release-metadata-text",
+    ".mobile-release-metadata-text-cleanup")
 
 SHELL_FEATURES = ["custom-protocol", "desktop-shell"]
 SHELL_PROJECT_SOURCE = (b'plugins { id("com.android.application") }\n'
@@ -1174,21 +1432,23 @@ def _capacity(value):
                 + (value["installed"]["candidate"]["size"] if "installed" in value else 0)
                 + (sum(row["size"] for row in value["shell"]["binaries"].values()) if "shell" in value else 0)
                 + 2 * capacity["runtimeBytes"] + 1 + 2 * max(capacity["installedBytes"].values()) + TOTAL_LIMIT + JSON_LIMIT)
-    # The four original Xvfb logs share the GUI per-file ceiling. Account for
+    # The five original Xvfb logs share the GUI per-file ceiling. Account for
     # those private files in addition to retained output. This free-space check
     # is not a reservation, aggregate quota or a bound on every GUI cache/memfd.
     if "shell" in value:
-        # Three additional write-only failure leaves. The512-byte emitter/read
+        # Four additional write-only failure leaves. The512-byte emitter/read
         # bound is not a filesystem quota; retain the unchanged64MiB ceiling.
         required += (len(SHELL_CASES) + len(SHELL_CASES[1:])) * SHELL_WORK_FILE_LIMIT
+        required += sum(map(len, SHELL_WORKFLOW_CALLERS.values())) + len(SHELL_WORKFLOW_IGNORE) + len(SHELL_WORKFLOW_SIBLING) \
+            + len(SHELL_PROJECT_SOURCE) + len(SHELL_PROJECT_VERSION)
     inodes = 2 * max(capacity["installedEntries"].values()) + 2 * 8192 + 128
     if "shell" in value:
-        inodes += len(SHELL_CASES[1:]) + 1  # One separate readable fixture namespace.
+        inodes += len(SHELL_CASES[1:]) + 1 + 12  # Namespace plus complete workflow fixture.
     need(len({Path(name).stat().st_dev for name in ("/", "/var", "/var/lib", "/usr")}) == 1,
          "Capacity DATA does not cover the same root package/publication filesystem")
     space = os.statvfs("/var/lib")
     if "shell" in value:
-        required += space.f_frsize  # One new directory allocation block, not a quota.
+        required += 13 * space.f_frsize  # Namespace and twelve workflow nodes, not a quota.
     need(space.f_bavail * space.f_frsize >= required and space.f_favail >= inodes, "Insufficient original host capacity; do not clear caches")
 
 
@@ -1842,6 +2102,7 @@ def public_files(value):
                         "shell-normal-control.json", "shell-positive-project-before.json", "shell-positive-project-after.json",
                         "shell-positive-candidate-before.json", "shell-positive-candidate-after.json",
                         "shell-project-paths-before.json", "shell-project-paths-after.json",
+                        "shell-workflow-apply-before.json", "shell-workflow-apply-after.json",
                         "published-before-upgrade.txt", "mutation-denials.txt"} \
             | {"shell-" + case + "-xvfb.stderr" for case in SHELL_CASES} \
             | {"shell-root-data-" + str(index) + ".json" for index in range(len(SHELL_DATA_ROOTS))}
@@ -3071,7 +3332,7 @@ def _shell_log_capture(value, case, original, result):
     return raw
 
 
-SHELL_FIXTURE_CHILDREN = ("candidate-evidence", "path-outside", "path-project", "positive-project")
+SHELL_FIXTURE_CHILDREN = ("candidate-evidence", "path-outside", "path-project", "positive-project", "workflow-project")
 
 
 def _shell_fixture_ancestry(value):
@@ -3130,7 +3391,7 @@ def _shell_namespace_roster(root):
     found = []
     with os.scandir(root) as entries:
         for entry in entries:
-            need(len(found) < 4 and entry.name in SHELL_FIXTURE_CHILDREN, "Unexpected shell fixture namespace entry")
+            need(len(found) < len(SHELL_FIXTURE_CHILDREN) and entry.name in SHELL_FIXTURE_CHILDREN, "Unexpected shell fixture namespace entry")
             found.append(entry.name)
     need(sorted(found) == list(SHELL_FIXTURE_CHILDREN), "Shell fixture namespace roster differs")
 
@@ -3151,7 +3412,7 @@ def _shell_namespace_check(value, binding):
 
 
 def _shell_fixtures_prepare(value):
-    """Create the four fixed DATA trees once, retained on every failure.
+    """Create the five fixed DATA trees once, retained on every failure.
 
     The sibling follows the existing disposable-runner retention policy; there
     is no deletion, cleanup scan, retry or permission repair of an old object.
@@ -3190,6 +3451,20 @@ def _shell_fixtures_prepare(value):
         else:
             _D.write(path, SHELL_PATH_BYTES, 0o600)
         os.chown(path, value["runnerUid"], value["runnerGid"])
+    workflow_root = root / "workflow-project"
+    workflow_nodes = [(workflow_root if name == "." else workflow_root / name, mode, owners, expected)
+                      for name, mode, owners, expected in _shell_workflow_roster(value, False)]
+    for path, mode, owners, expected in workflow_nodes:
+        if stat.S_ISDIR(mode):
+            path.mkdir(mode=0o700)
+        else:
+            _D.write(path, expected, stat.S_IMODE(mode))
+            os.chown(path, *owners)
+    for path, mode, owners, _ in reversed(workflow_nodes):
+        if stat.S_ISDIR(mode):
+            os.chmod(path, stat.S_IMODE(mode))
+            os.chown(path, *owners)
+        _xattrs(path, stat.S_ISDIR(mode))
     _shell_namespace_roster(root)
     for name, kind in (("positive-project", True), ("positive-project/app", True),
                        ("positive-project/app/build.gradle.kts", False), ("positive-project/version.properties", False),
@@ -3325,6 +3600,123 @@ def shell_project_fixture(value, before_raw, after_raw):
             "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
 
 
+def _shell_workflow_roster(value, installed):
+    """Closed fixture DATA; never a caller renderer or a generic write plan."""
+    need(type(installed) is bool, "Workflow fixture phase is not a boolean")
+    owner = (value["runnerUid"], value["runnerGid"])
+    callers = list(SHELL_WORKFLOW_CALLERS.items())
+    leaves = callers if installed else callers[:1]
+    return [
+        (".", stat.S_IFDIR | 0o700, owner, [".github", ".gitignore", "app", "version.properties"]),
+        ("app", stat.S_IFDIR | 0o555, (0, 0), ["build.gradle.kts"]),
+        (".github", stat.S_IFDIR | 0o700, owner, ["workflows"]),
+        (".github/workflows", stat.S_IFDIR | 0o700, owner, sorted([Path(name).name for name, _ in leaves] + ["unrelated.yml"])),
+        ("app/build.gradle.kts", stat.S_IFREG | 0o444, (0, 0), SHELL_PROJECT_SOURCE),
+        ("version.properties", stat.S_IFREG | 0o600, owner, SHELL_PROJECT_VERSION),
+        (".gitignore", stat.S_IFREG | 0o640, owner, SHELL_WORKFLOW_IGNORE),
+        (".github/workflows/unrelated.yml", stat.S_IFREG | 0o600, owner, SHELL_WORKFLOW_SIBLING),
+        *((name, stat.S_IFREG | (0o640 if index == 0 else 0o600), owner, raw) for index, (name, raw) in enumerate(leaves)),
+    ]
+
+
+def _shell_workflow_absent(installed):
+    return list(SHELL_WORKFLOW_ABSENT) + ([] if installed else list(SHELL_WORKFLOW_CALLERS)[1:])
+
+
+def _shell_workflow_inventory(value, namespace, *, installed=False):
+    """Only before launch or AFTER original successful exit/finality.
+
+    Unexpected names refuse before descendant reads. Nothing repairs, removes,
+    reopens a live operation, follows a link or inspects an unknown journal.
+    """
+    need(_ROOT == root_path(value) and type(installed) is bool, "Different workflow fixture route or phase")
+    binding = namespace
+    namespace = _shell_namespace_check(value, binding)
+    root = shell_fixture_root(value) / "workflow-project"
+    roster = _shell_workflow_roster(value, installed)
+    rows, originals = [], []
+    for relative, mode, owners, expected in roster:
+        path = root if relative == "." else root / relative
+        before = path.lstat()
+        need(before.st_mode == mode and (before.st_uid, before.st_gid) == owners, "Workflow fixture mode or ownership differs")
+        if stat.S_ISDIR(mode):
+            directory(path)
+            children = []
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    need(len(children) < len(expected) and entry.name in expected, "Unexpected workflow fixture entry")
+                    children.append(entry.name)
+            need(sorted(children) == expected and identity(path.lstat()) == identity(before), "Workflow fixture parent changed")
+            rows.append({"path": relative, "kind": "directory", "identity": list(identity(before)), "children": expected})
+            originals.append((path, identity(before)))
+        else:
+            observed = record(path, len(expected))
+            need(observed["size"] == len(expected) and observed["sha256"] == hashlib.sha256(expected).hexdigest()
+                 and identity(path.lstat()) == identity(before), "Workflow fixture caller or sentinel differs")
+            rows.append({**observed, "path": relative, "kind": "file", "identity": list(identity(before))})
+    absent = _shell_workflow_absent(installed)
+    for relative in absent:
+        _absent(root / relative)
+    need(all(identity(path.lstat()) == original for path, original in originals), "Workflow fixture changed during its inventory")
+    _shell_namespace_check(value, binding)
+    return {"schemaVersion": 1, "fixture": "android-workflow-apply-v1", "root": str(root), "installed": installed,
+            "entries": rows, "absent": absent, "namespace": namespace}
+
+
+def shell_workflow_fixture(value, before_raw, after_raw):
+    """Type-sensitive, exact fixture correspondence; no possible-live I/O."""
+    inventories, namespaces = [], []
+    for raw, installed in ((before_raw, False), (after_raw, True)):
+        document = decode(raw, 8192)
+        need(type(document) is dict and set(document) == {"schemaVersion", "fixture", "root", "installed", "entries", "absent", "namespace"}
+             and canonical(document) == raw and type(document["schemaVersion"]) is int and document["schemaVersion"] == 1
+             and document["fixture"] == "android-workflow-apply-v1" and document["installed"] is installed
+             and document["root"] == str(shell_fixture_root(value) / "workflow-project")
+             and document["absent"] == _shell_workflow_absent(installed), "Workflow fixture inventory is incomplete or out of phase")
+        namespace = _shell_namespace_data(value, document["namespace"])
+        namespaces.append(namespace)
+        roster, rows = _shell_workflow_roster(value, installed), document["entries"]
+        need(type(rows) is list and len(rows) == len(roster), "Workflow fixture node roster differs")
+        observed = {}
+        for row, (relative, mode, owners, expected) in zip(rows, roster):
+            is_directory = stat.S_ISDIR(mode)
+            wanted = {"path", "kind", "identity", "children"} if is_directory else {"path", "kind", "identity", "size", "sha256"}
+            need(type(row) is dict and set(row) == wanted and row["path"] == relative
+                 and row["kind"] == ("directory" if is_directory else "file"), "Workflow fixture node kind/path differs")
+            original = row["identity"]
+            need(type(original) is list and len(original) == 9 and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+                 and original[0] > 0 and original[1] > 0 and original[2] == mode and tuple(original[3:5]) == owners
+                 and 0 < original[5] <= 16 and original[6] <= 1 << 20, "Workflow fixture original identity differs")
+            if is_directory:
+                need(row["children"] == expected, "Workflow fixture has an unexpected child or pending state")
+            else:
+                need(original[5] == 1 and original[6] == len(expected) and type(row["size"]) is int
+                     and row["size"] == len(expected) and row["sha256"] == hashlib.sha256(expected).hexdigest(),
+                     "Workflow fixture bytes differ from the fixed reviewed caller/sentinel DATA")
+            observed[relative] = row
+        reserved = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
+        need(all(row["identity"][0] == namespace["identity"][0] and tuple(row["identity"][:2]) not in reserved for row in rows)
+             and len({tuple(row["identity"][:2]) for row in rows}) == len(rows), "Workflow fixture nodes alias or cross devices")
+        inventories.append(observed)
+    first, last = inventories
+    need(namespaces[0] == namespaces[1] and len(first) == 9 and len(last) == 12
+         and set(last) - set(first) == set(list(SHELL_WORKFLOW_CALLERS)[1:]), "Workflow fixture does not contain exactly three new callers")
+    for name, old in first.items():
+        new = last[name]
+        if name in (".", ".github/workflows"):
+            # Only these original parents gained/removed entries. Identity,
+            # mode, owners and link counts remain original; timestamps may move.
+            need(old["identity"][:6] == new["identity"][:6], "Workflow fixture original parent was replaced or chmodded")
+        else:
+            need(old == new, "Workflow installation changed an exact-preserved original")
+    return {"fixture": "android-workflow-apply-v1", "rootRetained": True, "originalsRetained": True, "createdCount": 3,
+            "beforeCount": len(first), "afterCount": len(last), "configurationAbsent": True, "noUnexpectedEntries": True,
+            "noPendingState": True, "callers": [{"path": name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+                "mode": stat.S_IMODE(last[name]["identity"][2])} for name, raw in SHELL_WORKFLOW_CALLERS.items()],
+            "before": {"size": len(before_raw), "sha256": hashlib.sha256(before_raw).hexdigest()},
+            "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
+
+
 def _shell_candidate_inventory(value, namespace):
     """Only the five fixed nodes, before launch or after successful finality.
 
@@ -3436,6 +3828,13 @@ def shell_candidate_receipt(raw):
 def shell_path_receipt(raw):
     receipt = decode(raw, 2048)
     need(raw == canonical(receipt) == canonical(SHELL_PATH_RECEIPT), "Project-path receipt is missing, malformed or premature")
+    return receipt
+
+
+def shell_workflow_receipt(raw):
+    receipt = decode(raw, 2048)
+    need(raw == canonical(receipt) == canonical(SHELL_WORKFLOW_RECEIPT),
+         "Workflow Apply receipt is missing, malformed or premature")
     return receipt
 
 
@@ -3594,6 +3993,8 @@ def _shell_prepare(value, case, namespace):
         _retain("shell-positive-candidate-before.json", canonical(_shell_candidate_inventory(value, namespace)))
     if case == "project-paths":
         _retain("shell-project-paths-before.json", canonical(_shell_paths_inventory(value, namespace)))
+    if case == "workflow-apply":
+        _retain("shell-workflow-apply-before.json", canonical(_shell_workflow_inventory(value, namespace)))
     return environment, log_binding
 
 
@@ -3621,16 +4022,18 @@ def shell_result(stdout, stderr, case, code, expected):
         candidate = shell_candidate_receipt(output[4][len(SHELL_CANDIDATE_MARKER):])
         return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
                 "maps": [], "projectDraft": receipt, "candidateDocuments": candidate}
-    if case == "project-paths":
+    if case in ("project-paths", "workflow-apply"):
+        receipt_marker = SHELL_PATH_MARKER if case == "project-paths" else SHELL_WORKFLOW_MARKER
         output = [line for line in stdout.splitlines(keepends=True) if line.startswith(b"MRK_")]
         diagnostics = [line for line in stderr.splitlines() if line.startswith(b"MRK_")]
         need(len(output) == 5 and output[:3] == [b"MRK_DESKTOP_CAPABILITIES=available\n",
              b"MRK_DESKTOP_CATALOGUE=returned\n", contracts + b"\n"]
-             and output[3].startswith(SHELL_PATH_MARKER) and output[3].endswith(b"\n")
+             and output[3].startswith(receipt_marker) and output[3].endswith(b"\n")
              and output[4] == marker + b"\n" and diagnostics == [],
-             "Project-path original bootstrap/contract/receipt/completion order differs")
-        receipt = shell_path_receipt(output[3][len(SHELL_PATH_MARKER):])
-        return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True, "maps": [], "projectPaths": receipt}
+             "Original path/workflow bootstrap/contract/receipt/completion order differs")
+        receipt = (shell_path_receipt if case == "project-paths" else shell_workflow_receipt)(output[3][len(receipt_marker):])
+        return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True, "maps": [],
+                ("projectPaths" if case == "project-paths" else "workflowApply"): receipt}
     if case == "normal":
         wanted = [b"MRK_DESKTOP_CAPABILITIES=available", b"MRK_DESKTOP_CATALOGUE=returned"]
         need(sorted(lines) == sorted(wanted), "Actual normal capabilities/catalogue or observer completion missing")
@@ -4363,6 +4766,19 @@ def unit_start():
                     paths_after = canonical(_shell_paths_inventory(value, namespace, changed=True))
                     _retain("shell-project-paths-after.json", paths_after)
                     shell_paths_fixture(value, read(_ROOT / "public/shell-project-paths-before.json", 8192), paths_after)
+                if case == "workflow-apply":
+                    workflow_after = canonical(_shell_workflow_inventory(value, namespace, installed=True))
+                    _retain("shell-workflow-apply-after.json", workflow_after)
+                    shell_workflow_fixture(value, read(_ROOT / "public/shell-workflow-apply-before.json", 8192), workflow_after)
+                    # Same fixed earlier fixture originals, after this actual
+                    # workflow exit; never inspect a failed/possibly-live case.
+                    need(canonical(_shell_project_inventory(value, namespace, saved=True))
+                         == read(_ROOT / "public/shell-positive-project-after.json", 8192)
+                         and canonical(_shell_candidate_inventory(value, namespace))
+                         == read(_ROOT / "public/shell-positive-candidate-after.json", 8192)
+                         and canonical(_shell_paths_inventory(value, namespace, changed=True))
+                         == read(_ROOT / "public/shell-project-paths-after.json", 8192),
+                         "Workflow case changed another original fixture family")
             _shell_namespace_check(value, namespace)
         need(_tree(PREFIX / M, M, published=True) == original, "Published A changed during shell observations")
         state("shell-finished", "install ok installed", "P0")
@@ -4628,14 +5044,15 @@ def shell_closed_result(value, outcome, raw_files):
         need(all(type(raw) is bytes for raw in streams) and sum(map(len, streams)) <= LIMIT,
              "Closed original shell combined output differs")
         result = shell_result(raw_files[phase + ".stdout"], raw_files[phase + ".stderr"], case, commands[phase]["exitCode"], expected)
-        need(canonical(result) == canonical(cases[case]) if case in ("positive", "project-paths") else result == cases[case],
+        need(canonical(result) == canonical(cases[case]) if case in ("positive", "project-paths", "workflow-apply") else result == cases[case],
              "Closed original shell capture differs")
     fixture = shell_project_fixture(value, raw_files["shell-positive-project-before.json"], raw_files["shell-positive-project-after.json"])
     candidate = shell_candidate_fixture(value, raw_files["shell-positive-candidate-before.json"], raw_files["shell-positive-candidate-after.json"])
     paths = shell_paths_fixture(value, raw_files["shell-project-paths-before.json"], raw_files["shell-project-paths-after.json"])
+    workflow = shell_workflow_fixture(value, raw_files["shell-workflow-apply-before.json"], raw_files["shell-workflow-apply-after.json"])
     namespaces = [decode(raw_files[name], 8192)["namespace"] for name in
-                  ("shell-positive-project-before.json", "shell-positive-candidate-before.json", "shell-project-paths-before.json")]
-    need(namespaces[0] == namespaces[1] == namespaces[2], "Closed shell fixture families have different original namespaces")
+                  ("shell-positive-project-before.json", "shell-positive-candidate-before.json", "shell-project-paths-before.json", "shell-workflow-apply-before.json")]
+    need(namespaces[0] == namespaces[1] == namespaces[2] == namespaces[3], "Closed shell fixture families have different original namespaces")
     control = decode(raw_files["shell-normal-control.json"])
     need(control.get("joined") is True and control.get("inputs") == 2 and control.get("workerGuardState") == "RESTORED"
          and control.get("workerErrorCount") == 0 and control.get("errorType") is None
@@ -4654,6 +5071,7 @@ def shell_closed_result(value, outcome, raw_files):
             "cases": cases, "projectDraft": {"native": cases["positive"]["projectDraft"], "fixture": fixture},
             "candidateDocuments": {"native": cases["positive"]["candidateDocuments"], "fixture": candidate},
             "projectPaths": {"native": cases["project-paths"]["projectPaths"], "fixture": paths},
+            "workflowApply": {"native": cases["workflow-apply"]["workflowApply"], "fixture": workflow},
             "packageLifecycleQualified": False, "shellPackageBuilt": False}
 
 

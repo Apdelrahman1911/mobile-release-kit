@@ -30,6 +30,11 @@ project/draft/guidance native checks are still pending; this is not general Linu
 or production qualification. A separate configuration-only installed Save route
 now uses the existing edit owner, full two-file review, explicit confirmation and
 original runtime settlement. Its installed native check is also pending.
+A separately sealed workflow profile now connects the existing GitHub review
+and confirmation UI to that same installed edit owner. It can create absent
+callers or preserve exact originals, never save the configuration draft. This
+is **prepared source, not installed workflow qualification**; the five-case
+installed check and independent original-finality review are still required.
 Credentials, tools, network and Store actions remain unavailable on that path. Trusted development builds
 remain a separate explicit mode, never a fallback. Android still needs a compatible JDK/Android SDK and
 project Gradle wrapper. iOS native work requires macOS/Xcode locally or on a
@@ -40,7 +45,7 @@ disappear. No complete installer or clean-machine qualification is claimed here.
 
 This table describes implemented surfaces, not a grant to execute them. The
 installed path above admits its twelve passive core methods, separate
-project/evidence-folder pickers and configuration-only edit profile; the UI shows an explicit
+project/evidence-folder pickers and separately sealed configuration/workflow edit profiles; the UI shows an explicit
 reason for unavailable actions.
 Choosing a project does not enable the credential/asset session. Draft changes
 stay in memory until a separately reviewed and confirmed native Save.
@@ -53,6 +58,7 @@ stay in memory until a separately reviewed and confirmed native Save.
 | Configuration | Guided in-memory drafts with core-owned schema/policy validation and contextual help | Saving a file, checking path existence, approving an app identity or release readiness |
 | Configuration save implementation (installed verification pending) | Existing separate native owner, fixed Linux installed profile, exact two-file preview/apply contract, guided confirmation and original-outcome handling | General packaged/native qualification, project initialization, workflow or metadata Save, or Windows file transactions |
 | GitHub setup proposal | Guided toolkit pin inputs, core-generated read-only workflow previews, contextual help and environment/credential-name checklist | GitHub login/contact, repository observation, compatibility verification, file writes, secret provisioning or workflow dispatch |
+| Local workflow Apply implementation (installed verification pending) | Existing four-caller review, complete text, separate confirmation and one-use Apply through the original shared edit owner; create absent or preserve exact bytes | Configuration Save, overwrite/pin upgrades, remote setup, Mac/Windows workflow writes, or completed installed qualification |
 | Public locale text | Saved-config-derived named observations, in-memory drafts, shared core validation and contextual help | Private review/TestFlight access, whole-metadata validation, translation, Store acceptance or writes |
 | Public locale text save implementation (disabled) | Separate metadata domain, complete one-locale file review and original one-use typed Save | Enabled saving, native transaction/process qualification, screenshot editing, locale deletion or packaged-runtime readiness |
 | Pure credential assessment (internal only) | Core policy over explicitly supplied scalars and finite file observations, with a private result-sanitizing adapter | Renderer secret entry, file acquisition/parser qualification, password verification, native custody, storage or assignment |
@@ -593,6 +599,17 @@ preview is an explicit `VITE_MRK_BROWSER_PREVIEW=1` development build, prominent
 labelled with inert example data. A bridge error must never activate preview.
 
 ## Verification and resource rules
+
+The prepared installed workflow route is limited to the normal
+`desktop-shell` profile on Linux x86_64 GNU, with the existing A runtime and
+exact Ubuntu/platform/custody checks, including kernel `6.17.0-1022-azure`.
+It does not enable a global edit flag or a development/publisher fallback.
+The existing installed-shell observer has a separate fifth `workflow-apply`
+case: mixed preserve/create, a changed-pin conflict without a token, explicit
+unchanged confirmation, and native Quit with a pending review. Its original
+45-second, 128-evaluation and 2048-byte receipt limits remain unchanged.
+Source, compilation or prior headless checks do not establish that this path
+works in an installed window. The full Desktop remains incomplete.
 
 Read [repository verification](verification.md) first. The historical native/
 process suites and CI controller must not run on a shared VPS. Desktop filenames

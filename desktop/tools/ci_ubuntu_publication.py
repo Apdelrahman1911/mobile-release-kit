@@ -3095,7 +3095,7 @@ def shell_project_draft_observation(observed, lifecycle):
     cases, combined, files = observed.get("cases"), observed.get("projectDraft"), observed.get("files")
     # The unchanged root cap is 128; its exporter adds the original client's
     # stdout/stderr, not two more root evidence slots or another capture.
-    D.need(type(cases) is dict and set(cases) == {"normal", "positive", "quit-outstanding", "project-paths"}
+    D.need(type(cases) is dict and set(cases) == {"normal", "positive", "quit-outstanding", "project-paths", "workflow-apply"}
            and type(combined) is dict and set(combined) == {"native", "fixture"}
            and type(files) is list and len(files) <= 130, "Closed project/draft receipt or exported original roster is missing")
     positive = cases["positive"]
@@ -3143,6 +3143,7 @@ def shell_project_draft_observation(observed, lifecycle):
     D.need(fixture["before"]["sha256"] != fixture["after"]["sha256"], "Save fixture incorrectly claims an unchanged inventory")
     _shell_candidate_documents_observation(positive, observed.get("candidateDocuments"), files, lifecycle)
     _shell_project_paths_observation(cases["project-paths"], observed.get("projectPaths"), files, lifecycle)
+    _shell_workflow_apply_observation(cases["workflow-apply"], observed.get("workflowApply"), files, lifecycle)
     return {"native": receipt, "fixture": fixture}
 
 
@@ -3219,6 +3220,35 @@ def _shell_project_paths_observation(case, combined, files, lifecycle):
     D.need(fixture["before"]["sha256"] != fixture["after"]["sha256"], "Project-path inventory incorrectly claims unchanged fixture state")
 
 
+def _shell_workflow_apply_observation(case, combined, files, lifecycle):
+    """Require the fifth original plus its exact post-exit three-create inventory."""
+    D.need(type(case) is dict and set(case) == {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps", "workflowApply"}
+           and case["case"] == "workflow-apply" and type(case["exitCode"]) is int and case["exitCode"] == 0
+           and case["bootstrapReturned"] is True and case["domAndGtkObserved"] is True and case["maps"] == [],
+           "Closed workflow original result is incomplete")
+    D.need(type(combined) is dict and set(combined) == {"native", "fixture"}, "Closed workflow Apply observation is missing")
+    receipt = lifecycle.shell_workflow_receipt(D.canonical(case["workflowApply"]))
+    D.need(D.canonical(combined["native"]) == D.canonical(receipt), "Closed workflow native receipt correspondence differs")
+    fixture = combined["fixture"]
+    expected = {"fixture": "android-workflow-apply-v1", "rootRetained": True, "originalsRetained": True, "createdCount": 3,
+                "beforeCount": 9, "afterCount": 12, "configurationAbsent": True, "noUnexpectedEntries": True, "noPendingState": True,
+                "callers": [{"path": name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(), "mode": 0o640 if index == 0 else 0o600}
+                            for index, (name, raw) in enumerate(lifecycle.SHELL_WORKFLOW_CALLERS.items())]}
+    D.need(type(fixture) is dict and set(fixture) == set(expected) | {"before", "after"}
+           and D.canonical({key: fixture[key] for key in expected}) == D.canonical(expected),
+           "Closed workflow fixture originals or exact caller bytes differ")
+    for phase in ("before", "after"):
+        pin = fixture[phase]
+        D.need(type(pin) is dict and set(pin) == {"size", "sha256"} and type(pin["size"]) is int and 0 < pin["size"] <= 8192
+               and type(pin["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", pin["sha256"]) is not None,
+               "Closed workflow original inventory pin differs")
+        matches = [row for row in files if type(row) is dict and row.get("path") == "lifecycle-shell-workflow-apply-" + phase + ".json"]
+        D.need(len(matches) == 1 and set(matches[0]) == {"path", "size", "sha256"}
+               and type(matches[0]["size"]) is int and matches[0]["size"] == pin["size"] and matches[0]["sha256"] == pin["sha256"],
+               "Original workflow before/after export pin differs")
+    D.need(fixture["before"]["sha256"] != fixture["after"]["sha256"], "Workflow inventory incorrectly claims no created callers")
+
+
 def verify_installed_shell():
     """One installed connection gate; reuse U, not its entire lifecycle again."""
     D.need(os.environ.get("MRK_INSTALLED_SHELL_CASE") == "observe", "Only the fixed shell observation job is accepted")
@@ -3283,11 +3313,12 @@ def verify_installed_shell():
         D.need(time.monotonic() < deadline, "Original shell result endpoint expired")
         D.write(public / "result.json", D.canonical({**source_record, "lifecycle": observed,
             "projectDraft": project_draft, "candidateDocuments": observed["candidateDocuments"], "projectPaths": observed["projectPaths"],
-            "commands": check.commands, "cases": ["normal", "positive", "quit-outstanding", "project-paths"], "compilerRerun": False,
+            "workflowApply": observed["workflowApply"],
+            "commands": check.commands, "cases": ["normal", "positive", "quit-outstanding", "project-paths", "workflow-apply"], "compilerRerun": False,
             "supplierRebuilt": False, "packageBuilt": False, "upgradeOrRefusalRerun": False,
             "scope": "normal-shell-to-accepted-installed-runtime-connection-only"}))
         D.need(time.monotonic() < deadline, "Original shell result close/readback was late")
-        print("Normal window and three original observer cases retained with service finality; no product/package qualification.", flush=True)
+        print("Normal window and four original observer cases retained with service finality; no product/package qualification.", flush=True)
     except BaseException as error:
         retain_failure(root, phase if check is None else check.phase, [] if check is None else check.commands, error)
         raise

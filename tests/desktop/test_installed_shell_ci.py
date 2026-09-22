@@ -887,6 +887,12 @@ def closed_project_draft_data(lifecycle):
         "noPendingState": True, "inertBytesUnchanged": True, "beforeCount": 14, "afterCount": 15, "fileCount": 5, "fileBytes": 130,
         "mutations": ["symlink", "directory-for-file", "file-for-directory", "root-mode"], "rootModes": [0o700, 0o500],
         "before": {"size": 4000, "sha256": "d" * 64}, "after": {"size": 4200, "sha256": "e" * 64}}
+    workflows = deepcopy(lifecycle.SHELL_WORKFLOW_RECEIPT)
+    workflow_fixture = {"fixture": "android-workflow-apply-v1", "rootRetained": True, "originalsRetained": True, "createdCount": 3,
+        "beforeCount": 9, "afterCount": 12, "configurationAbsent": True, "noUnexpectedEntries": True, "noPendingState": True,
+        "callers": [{"path": name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(), "mode": 0o640 if index == 0 else 0o600}
+                    for index, (name, raw) in enumerate(lifecycle.SHELL_WORKFLOW_CALLERS.items())],
+        "before": {"size": 3500, "sha256": "f" * 64}, "after": {"size": 4500, "sha256": "9" * 64}}
     return {"state": "normal-shell-installed-runtime-connection-observed", "productQualified": False,
             "packageLifecycleQualified": False, "shellPackageBuilt": False,
             "cases": {
@@ -897,15 +903,20 @@ def closed_project_draft_data(lifecycle):
                                      "domAndGtkObserved": True, "maps": [[{"DATA": True}]]},
                 "project-paths": {"case": "project-paths", "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
                                   "maps": [], "projectPaths": paths},
+                "workflow-apply": {"case": "workflow-apply", "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
+                                   "maps": [], "workflowApply": workflows},
             }, "projectDraft": {"native": deepcopy(receipt), "fixture": fixture},
             "candidateDocuments": {"native": deepcopy(candidate), "fixture": candidate_fixture},
             "projectPaths": {"native": deepcopy(paths), "fixture": path_fixture},
+            "workflowApply": {"native": deepcopy(workflows), "fixture": workflow_fixture},
             "files": [{"path": "lifecycle-shell-positive-project-" + phase + ".json", **fixture[phase]}
                       for phase in ("before", "after")]
                      + [{"path": "lifecycle-shell-positive-candidate-" + phase + ".json", **candidate_fixture[phase]}
                         for phase in ("before", "after")]
-                     + [{"path": "lifecycle-shell-project-paths-" + phase + ".json", **path_fixture[phase]}
-                        for phase in ("before", "after")]}
+                      + [{"path": "lifecycle-shell-project-paths-" + phase + ".json", **path_fixture[phase]}
+                         for phase in ("before", "after")]
+                      + [{"path": "lifecycle-shell-workflow-apply-" + phase + ".json", **workflow_fixture[phase]}
+                         for phase in ("before", "after")]}
 
 
 class InstalledProjectDraftReceiptContracts(unittest.TestCase):
@@ -954,7 +965,7 @@ class InstalledProjectDraftReceiptContracts(unittest.TestCase):
         self.assertEqual(result["fixture"]["entryCount"], 7)
         self.assertEqual(result["fixture"]["sourceBytes"], 149)
         self.assertNotEqual(result["fixture"]["before"], result["fixture"]["after"])
-        self.assertEqual(set(observed["cases"]), {"normal", "positive", "quit-outstanding", "project-paths"})
+        self.assertEqual(set(observed["cases"]), {"normal", "positive", "quit-outstanding", "project-paths", "workflow-apply"})
 
     def test_rejects_legacy_partial_mistyped_or_relabelled_positive_receipts(self):
         lifecycle = S.local("ubuntu_publication_lifecycle")
@@ -1085,10 +1096,10 @@ class InstalledCandidateDocumentsReceiptContracts(unittest.TestCase):
         fixture = candidate["fixture"]
         self.assertEqual((fixture["entryCount"], fixture["documentBytes"], fixture["directoryMode"], fixture["fileMode"]), (5, 11366, 0o700, 0o600))
         self.assertEqual(fixture["before"], fixture["after"])
-        self.assertEqual(len(observed["files"]), 6)
+        self.assertEqual(len(observed["files"]), 8)
         # The original exporter allows at most 128 root files plus the same
         # original client's two captures; adding fixtures cannot raise it.
-        observed["files"].extend({"path": "inert-" + str(index), "size": 0, "sha256": "0" * 64} for index in range(124))
+        observed["files"].extend({"path": "inert-" + str(index), "size": 0, "sha256": "0" * 64} for index in range(122))
         S.shell_project_draft_observation(observed, lifecycle)
         observed["files"].append({"path": "over-cap", "size": 0, "sha256": "0" * 64})
         with self.assertRaises(S.D.Refused):
@@ -1206,7 +1217,7 @@ class HostBindingDiagnosticContracts(unittest.TestCase):
 
 
 class InstalledProjectPathReceiptContracts(unittest.TestCase):
-    def test_requires_all_four_cases_and_both_typed_inventory_export_pins(self):
+    def test_requires_all_five_cases_and_both_typed_inventory_export_pins(self):
         lifecycle = S.local("ubuntu_publication_lifecycle")
         observed = closed_project_draft_data(lifecycle)
         self.assertEqual(S.shell_project_draft_observation(observed, lifecycle), observed["projectDraft"])
@@ -1227,9 +1238,9 @@ class InstalledProjectPathReceiptContracts(unittest.TestCase):
             lambda v: v["projectPaths"]["fixture"]["mutations"].reverse(), lambda v: v["projectPaths"]["fixture"].update(extra=True),
             lambda v: v["projectPaths"]["fixture"].pop("inertBytesUnchanged"),
             lambda v: v["projectPaths"]["fixture"].update(after=deepcopy(v["projectPaths"]["fixture"]["before"])),
-            lambda v: v["files"].pop(), lambda v: v["files"].append(deepcopy(v["files"][-1])),
-            lambda v: v["files"][-2].update(sha256="0" * 64), lambda v: v["files"][-1].update(size=True),
-            lambda v: v["files"][-1].update(path="lifecycle-shell-positive-project-after.json"),
+            lambda v: v["files"].pop(5), lambda v: v["files"].append(deepcopy(v["files"][5])),
+            lambda v: v["files"][4].update(sha256="0" * 64), lambda v: v["files"][5].update(size=True),
+            lambda v: v["files"][5].update(path="lifecycle-shell-positive-project-after.json"),
             lambda v: v["projectPaths"]["fixture"]["before"].update(size=8193), lambda v: v["projectPaths"]["fixture"]["after"].update(sha256="invalid"),
         )
         for mutate in mutations:
@@ -1254,6 +1265,141 @@ class InstalledProjectPathReceiptContracts(unittest.TestCase):
                 parent[path[-1]] = int(old) if type(old) is bool else True if type(old) is int else None
                 with self.subTest(path=path, target=target), self.assertRaises((S.D.Refused, ValueError)):
                     S.shell_project_draft_observation(changed, lifecycle)
+
+
+class InstalledWorkflowApplyReceiptContracts(unittest.TestCase):
+    def test_literal_fixture_callers_match_the_existing_shared_proposal_and_resource(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        with patch.object(S.sys, "path", [str(SOURCE / "src"), *S.sys.path]):
+            from mobile_release.api import execute
+            from mobile_release.workflow_payloads import render_workflow_caller
+        suggestion = execute("config.suggest", {"hints": {"platforms": ["android"],
+            "androidApplicationId": "org.example.mrk.observed", "versionSource": "version.properties",
+            "versionNameKey": "VERSION_NAME", "versionBuildKey": "BUILD_NUMBER"}})
+        self.assertEqual(suggestion["draft"], json.loads(lifecycle.SHELL_PROJECT_CONFIG))
+        proposal = execute("github.setup.propose", {"draft": suggestion["draft"], "toolingRepository": "example/toolkit",
+            "toolingSha": "a" * 40, "suppliedSnapshot": None})
+        resource = (SOURCE / "src/mobile_release/api/data/github-setup-v1.json").read_bytes()
+        self.assertEqual(hashlib.sha256(resource).hexdigest(), "4d486fc24ebf24271dbb5227174df7c8f28a530a97011e004da643fdad7fe17c")
+        self.assertEqual(proposal["templateSet"]["resourceSha256"], hashlib.sha256(resource).hexdigest())
+        self.assertFalse(proposal["facts"]["applyAvailable"])
+        self.assertFalse(proposal["facts"]["repositoryObserved"])
+        names = ["preflight", "candidate", "external-testing", "production-submit"]
+        self.assertEqual(list(lifecycle.SHELL_WORKFLOW_CALLERS), [".github/workflows/mobile-" + name + ".yml" for name in names])
+        self.assertEqual([len(raw) for raw in lifecycle.SHELL_WORKFLOW_CALLERS.values()], [567, 1379, 2150, 2881])
+        for item, (path, raw), name in zip(proposal["workflows"], lifecycle.SHELL_WORKFLOW_CALLERS.items(), names):
+            self.assertEqual((item["path"], item["content"].encode(), item["byteLength"], item["sha256"]),
+                             (path, raw, len(raw), hashlib.sha256(raw).hexdigest()))
+            template = (SOURCE / "templates/workflows" / ("mobile-" + name + ".yml")).read_bytes()
+            self.assertEqual(json.loads(resource)["workflows"][name].encode(), template)
+            self.assertEqual(render_workflow_caller(template, "example/toolkit", "a" * 40), raw)
+
+    def test_fifth_receipt_is_bounded_ordered_and_separate_from_configuration(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        raw = lifecycle.canonical(lifecycle.SHELL_WORKFLOW_RECEIPT)
+        self.assertLessEqual(len(raw), 2048)
+        self.assertEqual(lifecycle.shell_workflow_receipt(raw), lifecycle.SHELL_WORKFLOW_RECEIPT)
+        lines = [b"MRK_DESKTOP_CAPABILITIES=available\n", b"MRK_DESKTOP_CATALOGUE=returned\n",
+                 b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n",
+                 lifecycle.SHELL_WORKFLOW_MARKER + raw, b"MRK_INSTALLED_SHELL_OBSERVATION=workflow-apply-verified\n"]
+        result = lifecycle.shell_result(b"".join(lines), b"", "workflow-apply", 0, {})
+        self.assertEqual(result["workflowApply"], lifecycle.SHELL_WORKFLOW_RECEIPT)
+        self.assertNotIn("projectDraft", result)
+        for output in (b"".join(lines[:3] + lines[4:]), b"".join(lines + [lines[3]]),
+                       b"".join(lines[:3] + [lines[4], lines[3]]), b"".join(lines).replace(lifecycle.SHELL_WORKFLOW_MARKER, lifecycle.SHELL_PATH_MARKER)):
+            with self.subTest(output=hashlib.sha256(output).hexdigest()), self.assertRaises(ValueError):
+                lifecycle.shell_result(output, b"", "workflow-apply", 0, {})
+        for malformed in (raw[:-1], raw + b"\n", b" " + raw, raw + b" " * 2048):
+            with self.assertRaises(ValueError):
+                lifecycle.shell_workflow_receipt(malformed)
+
+    def test_each_workflow_receipt_leaf_requires_exact_types_on_both_projections(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        expected = closed_project_draft_data(lifecycle)
+        self.assertEqual(S.shell_project_draft_observation(expected, lifecycle), expected["projectDraft"])
+        def leaves(value, prefix=()):
+            if type(value) is dict:
+                for key, child in value.items(): yield from leaves(child, (*prefix, key))
+            elif type(value) is list:
+                for key, child in enumerate(value): yield from leaves(child, (*prefix, key))
+            else: yield prefix, value
+        for path, old in leaves(expected["workflowApply"]["native"]):
+            for target in ("case", "combined", "both"):
+                changed = deepcopy(expected)
+                copies = []
+                if target in ("case", "both"): copies.append(changed["cases"]["workflow-apply"]["workflowApply"])
+                if target in ("combined", "both"): copies.append(changed["workflowApply"]["native"])
+                for parent in copies:
+                    for key in path[:-1]: parent = parent[key]
+                    parent[path[-1]] = int(old) if type(old) is bool else True if type(old) is int else None
+                with self.subTest(path=path, target=target), self.assertRaises((S.D.Refused, ValueError)):
+                    S.shell_project_draft_observation(changed, lifecycle)
+
+    def test_workflow_case_fixture_and_exports_cannot_be_missing_relabelled_or_partial(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        mutations = (
+            lambda v: v.pop("workflowApply"), lambda v: v["cases"].pop("workflow-apply"),
+            lambda v: v["cases"]["workflow-apply"].pop("workflowApply"), lambda v: v["workflowApply"].pop("fixture"),
+            lambda v: v["workflowApply"]["native"].pop("originals"),
+            lambda v: v["cases"]["workflow-apply"].update(exitCode=True),
+            lambda v: v["cases"]["workflow-apply"].update(domAndGtkObserved=1),
+            lambda v: v["cases"]["normal"].update(workflowApply=v["workflowApply"]["native"]),
+            lambda v: v["workflowApply"]["fixture"].update(createdCount=True),
+            lambda v: v["workflowApply"]["fixture"].update(configurationAbsent=False),
+            lambda v: v["workflowApply"]["fixture"].update(noPendingState=1),
+            lambda v: v["workflowApply"]["fixture"].update(extra=True),
+            lambda v: v["workflowApply"]["fixture"]["callers"].pop(),
+            lambda v: v["workflowApply"]["fixture"]["callers"].reverse(),
+            lambda v: v["workflowApply"]["fixture"]["callers"][0].update(mode=0o600),
+            lambda v: v["workflowApply"]["fixture"]["callers"][1].update(sha256="0" * 64),
+            lambda v: v["workflowApply"]["fixture"].update(after=deepcopy(v["workflowApply"]["fixture"]["before"])),
+            lambda v: v["workflowApply"]["fixture"]["before"].update(size=8193),
+            lambda v: v["files"].pop(6), lambda v: v["files"].pop(7),
+            lambda v: v["files"].append(deepcopy(v["files"][6])),
+            lambda v: v["files"][6].update(size=True), lambda v: v["files"][7].update(sha256="0" * 64),
+            lambda v: v["files"][7].update(path="lifecycle-shell-project-paths-after.json"),
+        )
+        for mutate in mutations:
+            observed = closed_project_draft_data(lifecycle); mutate(observed)
+            with self.subTest(mutate=mutate), self.assertRaises((S.D.Refused, ValueError, KeyError)):
+                S.shell_project_draft_observation(observed, lifecycle)
+
+    def test_outer_workflow_inventory_preserves_original_identities_and_refuses_unexpected_state(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        value = {"runId": "10", "attempt": "2", "runnerUid": 1001, "runnerGid": 1002}
+        namespace = {"root": str(lifecycle.shell_fixture_root(value)), "identity": [1, 5, 0o40755, 0, 0, 7, 4096, 9, 9],
+            "children": list(lifecycle.SHELL_FIXTURE_CHILDREN), "control": {"path": str(lifecycle.root_path(value)), "identity": [1, 4, 0o40711, 0, 0]},
+            "ancestors": [{"path": name, "identity": [1, index, 0o40755, 0, 0]} for index, name in enumerate(("/", "/var", "/var/lib"), 1)]}
+        documents = []
+        for installed in (False, True):
+            entries = []
+            for index, (name, mode, owners, data) in enumerate(lifecycle._shell_workflow_roster(value, installed)):
+                directory = lifecycle.stat.S_ISDIR(mode)
+                original = [1, 100 + index, mode, *owners, 2 if directory else 1, 4096 if directory else len(data),
+                            1800000000000000001, 1800000000000000001]
+                row = {"path": name, "kind": "directory" if directory else "file", "identity": original}
+                row.update({"children": data} if directory else {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+                entries.append(row)
+            documents.append({"schemaVersion": 1, "fixture": "android-workflow-apply-v1", "root": str(lifecycle.shell_fixture_root(value) / "workflow-project"),
+                "installed": installed, "entries": entries, "absent": lifecycle._shell_workflow_absent(installed), "namespace": deepcopy(namespace)})
+        before, after = map(lifecycle.canonical, documents)
+        result = lifecycle.shell_workflow_fixture(value, before, after)
+        self.assertEqual((result["createdCount"], result["beforeCount"], result["afterCount"]), (3, 9, 12))
+        for mutate in (
+            lambda d: d["entries"].pop(), lambda d: d["entries"].append(deepcopy(d["entries"][-1])),
+            lambda d: d["entries"][0]["children"].append(".mobile-release-init"),
+            lambda d: d["entries"][8]["identity"].__setitem__(1, 999),
+            lambda d: d["entries"][8]["identity"].__setitem__(7, 1800000000000000000),
+            lambda d: d["entries"][9]["identity"].__setitem__(2, 0o100644),
+            lambda d: d["entries"][9].update(size=True),
+            lambda d: d["entries"][9].update(sha256="0" * 64),
+            lambda d: d["entries"][9]["identity"].__setitem__(1, d["entries"][8]["identity"][1]),
+            lambda d: d["namespace"]["children"].pop(), lambda d: d["absent"].remove("release"),
+            lambda d: d.update(installed=1),
+        ):
+            changed = deepcopy(documents[1]); mutate(changed)
+            with self.subTest(mutate=mutate), self.assertRaises(ValueError):
+                lifecycle.shell_workflow_fixture(value, before, lifecycle.canonical(changed))
 
 
 class InstalledFailureLabelSourceContracts(unittest.TestCase):

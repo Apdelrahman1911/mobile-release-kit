@@ -1,4 +1,4 @@
-//! Three bounded observations of the NORMAL builder/bridge/packaged selector.
+//! Bounded observations of the NORMAL builder/bridge/packaged selector.
 //! No alternate runtime, document, IPC command, timer, task or shutdown owner.
 //! Only the existing relay drives these steps; failures cannot authorize exit.
 use std::{ffi::OsStr, io::Write, path::{Path, PathBuf}, sync::{Arc, Mutex, MutexGuard, atomic::{AtomicBool, Ordering}},
@@ -7,11 +7,12 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tauri::Manager;
 use crate::{asset_session::{InstalledEvidenceWitness, InstalledProjectWitness}, bridge::{AppInfo, Project},
-    candidate_evidence_protocol as evidence, edit_owner::{EditOwner, InstalledConfigFinality},
+    candidate_evidence_protocol as evidence, edit_owner::{EditOwner, InstalledConfigFinality, InstalledWorkflowFinality},
+    github_workflow_edit_protocol as workflow,
     edit_protocol::{self as edit, ConfigEditStatus, EditProjection}, error::BridgeError, supervisor::{HeldAppInfo, Supervisor}};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Case { Positive, Outstanding, ProjectPaths }
+enum Case { Positive, Outstanding, ProjectPaths, WorkflowApply }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Step {
     Bootstrap, Environment, ReadEnvironment, Dashboard, ChooseCancel, Cancel, Cancelled, ReadCancelled,
@@ -24,7 +25,7 @@ enum Step {
     EnterTitle, EnterShortDescription, EnterFullDescription, ReadMetadataInputs, ValidateMetadata, ReadMetadataValidation,
     SavedSettings, ReadSavedDraft, Artifacts, ReadEvidenceEmpty, ChooseEvidenceCancel, CancelEvidence, EvidenceCancelled, ReadEvidenceCancelled,
     ChooseEvidenceSelect, SetEvidence, SelectEvidence, EvidenceSelected, ReadEvidenceSelected, InspectEvidence, EvidenceObserved, ReadEvidenceObserved,
-    CandidateSettings, ReadCandidateDraft, PrepareNoop, ReadNoopReview, Close, Quit, Exit, Paths(PathStep),
+    CandidateSettings, ReadCandidateDraft, PrepareNoop, ReadNoopReview, Close, Quit, Exit, Paths(PathStep), Workflow(WorkflowStep),
 }
 impl Step {
     fn failure_line(self) -> &'static [u8] {
@@ -111,6 +112,38 @@ impl Step {
             Self::Quit => b"MRK_INSTALLED_SHELL_FAILURE_STEP=Quit\n",
             Self::Exit => b"MRK_INSTALLED_SHELL_FAILURE_STEP=Exit\n",
             Self::Paths(step) => step.failure_line(),
+            Self::Workflow(step) => step.failure_line(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WorkflowStep {
+    GitHub(u8), Pin(u8), ReadPin(u8), Start(u8), OpenText(u8), ReadReview(u8),
+    Confirm(u8), ReadConfirmation(u8), Keep, ReadKept, Reconfirm, ReadReconfirmation,
+    Acknowledge(u8), ReadAcknowledged(u8), Apply(u8), ReadResult(u8), Settings(u8), ReadDraft(u8),
+}
+impl WorkflowStep {
+    fn failure_line(self) -> &'static [u8] {
+        match self {
+            Self::GitHub(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowGitHub\n",
+            Self::Pin(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowPin\n",
+            Self::ReadPin(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadPin\n",
+            Self::Start(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowStart\n",
+            Self::OpenText(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowOpenText\n",
+            Self::ReadReview(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadReview\n",
+            Self::Confirm(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowConfirm\n",
+            Self::ReadConfirmation(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadConfirmation\n",
+            Self::Keep => b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowKeep\n",
+            Self::ReadKept => b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadKept\n",
+            Self::Reconfirm => b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReconfirm\n",
+            Self::ReadReconfirmation => b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadReconfirmation\n",
+            Self::Acknowledge(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowAcknowledge\n",
+            Self::ReadAcknowledged(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadAcknowledged\n",
+            Self::Apply(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowApply\n",
+            Self::ReadResult(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadResult\n",
+            Self::Settings(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowSettings\n",
+            Self::ReadDraft(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadDraft\n",
         }
     }
 }
@@ -141,6 +174,7 @@ const METHODS: [&str; 12] = ["capabilities", "catalog", "project.snapshot", "con
     "github.setup.propose", "metadata.text.observe", "metadata.text.validate", "environment.requirements", "release.version.observe", "artifacts.candidate.observe"];
 const TOOLKIT_REPOSITORY: &str = "example/toolkit";
 const TOOLKIT_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const CONFLICT_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const GITHUB_RESOURCE: &str = "4d486fc24ebf24271dbb5227174df7c8f28a530a97011e004da643fdad7fe17c";
 const WORKFLOWS: [(&str, &str, usize); 4] = [
     ("preflight", ".github/workflows/mobile-preflight.yml", 567),
@@ -229,6 +263,7 @@ fn failure_sink(case: Case) -> Option<rustix::fd::OwnedFd> {
         Case::Positive => "shell-positive-failure.labels",
         Case::Outstanding => "shell-quit-outstanding-failure.labels",
         Case::ProjectPaths => "shell-project-paths-failure.labels",
+        Case::WorkflowApply => "shell-workflow-apply-failure.labels",
     };
     let fd = fs::openat(&parent, leaf, OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
         Mode::empty()).ok()?;
@@ -672,7 +707,7 @@ impl ProposalSample {
                 "No comparison summary was supplied; existing workflow presence is unknown. A match is not a verified no-op or an unchanged repository."],
             "workflowHeading":"Four read-only workflow previews", "workflowDescription":"Selectable text only. Paths and hashes identify proposed content, not existing repository files or permission to overwrite them.",
             "settingsHeading":"Environment checklist · not configured", "settingsDescription":"Desired policy and unresolved administrator work, not remote API requests. Existing environments, approvals, permissions and values remain unknown.",
-            "localReviewAvailable":false, "remoteAvailable":false
+            "localReviewAvailable":true, "remoteAvailable":false
         }) })
     }
 }
@@ -972,10 +1007,125 @@ impl SaveSession {
             && self.prepared.is_some() && self.review.is_some() && self.finality.is_none()
     }
 }
+// Bounded read-only witnesses from four distinct originals. A final witness is
+// frozen before another Open can replace the native owner's sole last slot.
+struct WorkflowSession {
+    projection: workflow::Projection, prepared: Option<Value>, review: Option<Value>, conflict: Option<Value>,
+    prepare_requested: bool, prepare_returned: bool, binding: Option<(u32, u32)>,
+    review_visible: bool, result_visible: bool, config_blocked: bool,
+    confirmation_opened: u8, kept_reviewing: bool, acknowledged: bool, apply_requested: bool, apply_returned: bool,
+    finality: Option<InstalledWorkflowFinality>,
+}
+impl WorkflowSession {
+    fn live_review(&self) -> bool {
+        self.projection.phase == edit::Phase::Reviewing && self.projection.review_remaining_ms > 0
+            && !self.projection.apply_submitted && self.projection.native_reason == edit::NativeEditReason::None
+            && self.projection.native_finality == edit::NativeFinality::Pending && self.projection.core_outcome.is_none()
+            && self.projection.conflict.is_none() && self.prepared.is_some() && self.review.is_some() && self.finality.is_none()
+    }
+}
+#[derive(Default)]
+struct WorkflowRecord {
+    capability: bool, native_revision: Option<u32>, sessions: Vec<WorkflowSession>, requests: [u8; 4],
+    open_pending: bool, prepare_pending: Option<usize>, pin_changed: bool, pin_restored: bool,
+    draft_reads: u8, outstanding: bool,
+}
+impl WorkflowRecord {
+    fn complete(&self) -> bool {
+        self.capability && self.requests == [4, 4, 2, 0] && !self.open_pending && self.prepare_pending.is_none()
+            && self.pin_changed && self.pin_restored && self.draft_reads == 4 && self.outstanding && self.sessions.len() == 4
+            && self.sessions.iter().enumerate().all(|(index, session)| session.prepare_requested && session.prepare_returned
+                && session.binding == Some((1, 1)) && session.config_blocked && session.finality.is_some()
+                && session.review_visible == (index != 1) && session.result_visible == (index != 3)
+                && session.apply_requested == matches!(index, 0 | 2)
+                && session.apply_returned == matches!(index, 0 | 2)
+                && session.confirmation_opened == (if index == 0 { 2 } else if index == 2 { 1 } else { 0 })
+                && session.kept_reviewing == (index == 0) && session.acknowledged == matches!(index, 0 | 2))
+    }
+}
+fn workflow_observed(proposal: &ProposalSample, index: usize) -> Option<Value> {
+    let mut rows = Vec::new();
+    for (offset, (id, _, size)) in WORKFLOWS.iter().enumerate() {
+        let content = proposal.workflows.get(offset)?.get("content")?.as_str()?;
+        let digest = format!("{:x}", Sha256::digest(content.as_bytes()));
+        rows.push(if index == 0 && offset != 0 { serde_json::json!({"id":id,"state":"absent"}) }
+            else { serde_json::json!({"id":id,"state":"present","byteLength":size,"sha256":digest}) });
+    }
+    Some(Value::Array(rows))
+}
+fn workflow_review_sample(view: &workflow::PreparedView, proposal: &ProposalSample, index: usize) -> Option<Value> {
+    if index == 1 || index > 3 || edit::bounded(view, workflow::RESPONSE_LIMIT).is_err()
+        || view.schema_version != 1 || view.files.len() != 4 || !view.create_directories.is_empty()
+        || serde_json::to_value(&view.template_set).ok()? != serde_json::json!({"coreVersion":crate::runtime::CORE_VERSION,
+            "resourceVersion":1,"resourceSha256":GITHUB_RESOURCE})
+        || serde_json::to_value(&view.tooling).ok()? != serde_json::json!({"repository":TOOLKIT_REPOSITORY,"sha":TOOLKIT_SHA,
+            "schemaReference":format!("https://raw.githubusercontent.com/{TOOLKIT_REPOSITORY}/{TOOLKIT_SHA}/schemas/project.schema.json"),"state":"format-only"}) { return None; }
+    let mut files = Vec::new(); let mut texts = Vec::new();
+    let observations = workflow_observed(proposal, index)?;
+    for (offset, (file, (id, path, size))) in view.files.iter().zip(WORKFLOWS).enumerate() {
+        let preserve = index != 0 || offset == 0;
+        let generated = &file.generated;
+        let content = proposal.workflows.get(offset)?.get("content")?.as_str()?;
+        let digest = format!("{:x}", Sha256::digest(content.as_bytes()));
+        let mut observed = observations.get(offset)?.clone(); observed.as_object_mut()?.remove("id");
+        if serde_json::to_value(file.id).ok()?.as_str() != Some(id) || file.path != path
+            || file.action != (if preserve { workflow::Action::Preserve } else { workflow::Action::Create })
+            || serde_json::to_value(&file.observed).ok()? != observed
+            || generated.content != content || generated.content.len() != size
+            || generated.byte_length as usize != size || generated.sha256 != digest { return None; }
+        files.push(serde_json::json!({"path":path,"action":file.action,"observed":file.observed,
+            "generated":{"byteLength":generated.byte_length,"sha256":generated.sha256}}));
+        // Display-only line prefixes, not a caller generator or disk oracle.
+        let newline = content.ends_with('\n');
+        let lines: Vec<_> = content.strip_suffix('\n').unwrap_or(content).split('\n').collect();
+        let before = if preserve { path } else { "/dev/null" };
+        let range = if preserve { format!("-1,{}", lines.len()) } else { "-0,0".into() };
+        let prefix = if preserve { ' ' } else { '+' };
+        let diff = format!("--- {before}\n+++ {path}\n@@ {range} +1,{} @@\n{}\n{}", lines.len(),
+            lines.iter().map(|line| format!("{prefix}{line}")).collect::<Vec<_>>().join("\n"),
+            if newline { "" } else { "\\ No newline at end of file\n" });
+        texts.push(serde_json::json!({"path":path,"badge":if preserve { "Full unchanged context" } else { "Full added text" },
+            "label":format!("Complete {} for {path}", if preserve { "unchanged generated context" } else { "added diff" }),"content":diff}));
+    }
+    Some(serde_json::json!({"files":files,"texts":texts,
+        "basis":if index == 0 { "Only absent callers will be created" } else { "No file writes are planned" },
+        "facts":[["Toolkit repository",TOOLKIT_REPOSITORY],["Toolkit commit · format-only",TOOLKIT_SHA],
+            ["Core / resource version",format!("{} / 1",crate::runtime::CORE_VERSION)],["Resource identity SHA256",GITHUB_RESOURCE],
+            ["Schema reference · informational, not fetched or saved",view.tooling.schema_reference]],
+        "note":"Existing ancestors are preserved. New directories use 0755; new files request 0644 subject to inherited umask. Exact-preserved originals are not rewritten or chmodded.",
+        "caution":"Draft validation was required for this plan, but no configuration save is required or performed. The toolkit ref and template compatibility are not remotely verified. GitHub, credentials, unknown workflow siblings, .gitignore, Git/index state and release operations are outside this plan."}))
+}
+fn workflow_conflict_sample(view: &workflow::ConflictView, proposal: &ProposalSample) -> Option<Value> {
+    if view.schema_version != 1 || view.reason != "existing_workflow_differs" || view.conflicts.len() != 4
+        || edit::bounded(view, 4096).is_err() { return None; }
+    let observed = workflow_observed(proposal, 1)?;
+    let mut rows = Vec::new();
+    for (offset, (file, (id, _, size))) in view.conflicts.iter().zip(WORKFLOWS).enumerate() {
+        let mut expected = observed.get(offset)?.clone(); expected.as_object_mut()?.remove("id");
+        if serde_json::to_value(file.id).ok()?.as_str() != Some(id) || serde_json::to_value(&file.observed).ok()? != expected { return None; }
+        rows.push(serde_json::json!({"id":id,"bytes":size,"sha256":expected["sha256"]}));
+    }
+    Some(serde_json::json!({"heading":"Observed differing callers · no Apply token","rows":rows,
+        "caution":"Only summaries actually obtained by the original capture are shown. Existing YAML is not exposed; no subset, force or overwrite option is available."}))
+}
+fn workflow_original_final(facts: &InstalledWorkflowFinality, projection: &workflow::Projection, index: usize) -> bool {
+    projection.domain == workflow::DOMAIN && facts.session_id == projection.session_id
+        && facts.project_id == projection.project_id && facts.owner_generation == projection.owner_generation
+        && facts.writer_frames == (if matches!(index, 0 | 2) { 3 } else { 2 })
+        && facts.stdout_frames == (if index == 1 { 2 } else { 3 })
+        && facts.inspection_joined && facts.acquisition_joined && facts.child_waited_success
+        && facts.stdin_closed && facts.stdout_eof_closed && facts.stderr_eof_closed && facts.io_joined
+        && facts.driver_joined && facts.watchdog_joined && facts.manager_joined
+        && facts.runtime_ledger_settled && facts.runtime_settlement_joined
+}
+fn workflow_start_step(step: Step, index: usize) -> bool {
+    matches!(step, Step::Workflow(WorkflowStep::Start(i) | WorkflowStep::OpenText(i) | WorkflowStep::ReadResult(i)) if usize::from(i) == index)
+}
+
 struct Record {
     attached: bool, started: bool, loaded: bool, info: bool, methods: usize, catalog: bool, environment: bool,
     pickers: [Picker; 2], cancel_returned: bool, cancelled: bool, project: Option<Project>, selected: bool,
-    project_witness: Option<InstalledProjectWitness>, candidate: Candidate, paths: Paths,
+    project_witness: Option<InstalledProjectWitness>, candidate: Candidate, paths: Paths, workflow: WorkflowRecord,
     snapshot_requests: u8, snapshot: bool, snapshot_visible: bool, suggest_called: bool, suggested: Option<Value>, provenance: Option<Value>,
     provenance_visible: bool, adopted: bool, draft_visible: bool, guidance: Guidance,
     capability: bool, generation: Option<String>, native_revision: Option<u32>, sessions: Vec<SaveSession>, requests: [u8; 4],
@@ -1003,7 +1153,8 @@ impl Observation {
     fn new(case: Case, failure_sink: rustix::fd::OwnedFd) -> Self {
         let end = Instant::now() + Duration::from_secs(45);
         let project_path = (case != Case::Outstanding).then(project_path).flatten().map(|path|
-            if case == Case::ProjectPaths { path.with_file_name("path-project") } else { path });
+            match case { Case::ProjectPaths => path.with_file_name("path-project"),
+                Case::WorkflowApply => path.with_file_name("workflow-project"), _ => path });
         let paths = Paths::new((case == Case::ProjectPaths).then_some(project_path.as_deref()).flatten());
         let evidence_path = project_path.as_ref().and_then(|path| path.parent()).map(|root| root.join("candidate-evidence"));
         Self { case, main: std::thread::current().id(), end,
@@ -1013,7 +1164,7 @@ impl Observation {
                 attached: false, started: false, loaded: false, info: false, methods: 0, catalog: false, environment: false,
                 step: Step::Bootstrap, pending: None, evaluations: 0, trace: (Step::Bootstrap, Boundary::Bootstrap),
                 pickers: std::array::from_fn(|_| Picker::default()), cancel_returned: false, cancelled: false, project: None, selected: false,
-                project_witness: None, candidate: Candidate::default(), paths,
+                project_witness: None, candidate: Candidate::default(), paths, workflow: WorkflowRecord::default(),
                 snapshot_requests: 0, snapshot: false, snapshot_visible: false, suggest_called: false, suggested: None, provenance: None,
                 provenance_visible: false, adopted: false, draft_visible: false, guidance: Guidance::default(),
                 capability: false, generation: None, native_revision: None, sessions: Vec::new(), requests: [0; 4],
@@ -1110,7 +1261,8 @@ impl Observation {
             Ok(None) if r.step == Step::Cancelled && !r.cancel_returned && r.pickers[0].responded && r.pickers[0].returned => r.cancel_returned = true,
             Ok(Some(project)) if r.step == Step::Selected && r.cancelled && r.project.is_none() && r.pickers[1].responded && r.pickers[1].returned
                 && self.project_path().is_some_and(|path| Path::new(&project.path) == path)
-                && project.name == (if self.case == Case::ProjectPaths { "path-project" } else { "positive-project" }) && crate::protocol::valid_id(&project.id) => r.project = Some(project.clone()),
+                && project.name == (match self.case { Case::ProjectPaths => "path-project", Case::WorkflowApply => "workflow-project", _ => "positive-project" })
+                && crate::protocol::valid_id(&project.id) => r.project = Some(project.clone()),
             _ => self.fail(),
         }
     }
@@ -1162,8 +1314,8 @@ impl Observation {
                 && discovery["hints"]["versionBuildKey"].as_str() == Some("BUILD_NUMBER")
                 && scan["sourceFiles"].as_u64() == Some(if saved { 3 } else { 2 })
                 && scan["sourceBytes"].as_u64() == Some(PROJECT_SOURCE.len() as u64 + u64::from(VERSION_BYTES) + if saved { u64::from(CONFIG_BYTES) } else { 0 })
-                && scan["entries"].as_u64() == Some(if saved { 6 } else { 3 })
-                && scan["excludedEntries"].as_u64() == Some(u64::from(saved)) })
+                && scan["entries"].as_u64() == Some(if self.case == Case::WorkflowApply { 5 } else if saved { 6 } else { 3 })
+                && scan["excludedEntries"].as_u64() == Some(if self.case == Case::WorkflowApply { 2 } else { u64::from(saved) }) })
                 && value["issues"].as_array().is_some_and(Vec::is_empty) && assurance(value, "static-text")
         });
         let stage = if saved { matches!(r.step, Step::Refresh | Step::ReadReadback) && r.saved_visible && !r.readback }
@@ -1173,7 +1325,7 @@ impl Observation {
     }
     pub(super) fn suggest_request(&self, hints: &Value) {
         let Some(mut r) = self.record_at(Boundary::Request) else { return; };
-        if self.case != Case::Positive || !r.snapshot_visible || !matches!(r.step, Step::Suggest | Step::ReadSuggestion)
+        if !matches!(self.case, Case::Positive | Case::WorkflowApply) || !r.snapshot_visible || !matches!(r.step, Step::Suggest | Step::ReadSuggestion)
             || r.suggest_called || *hints != serde_json::json!({"platforms":["android"],"androidApplicationId":APP_ID,
                 "versionSource":VERSION_SOURCE,"versionNameKey":"VERSION_NAME","versionBuildKey":"BUILD_NUMBER"}) { self.fail(); return; }
         r.suggest_called = true;
@@ -1197,7 +1349,7 @@ impl Observation {
             if path.is_empty() || path.len() > 128 || !matches!(source, "hint" | "default" | "example") { self.fail(); return; }
             projected.push(serde_json::json!({"path":path,"source":source}));
         }
-        if self.case != Case::Positive || !r.suggest_called || r.suggested.is_some() || !matches!(r.step, Step::Suggest | Step::ReadSuggestion)
+        if !matches!(self.case, Case::Positive | Case::WorkflowApply) || !r.suggest_called || r.suggested.is_some() || !matches!(r.step, Step::Suggest | Step::ReadSuggestion)
             || !["android.enabled", "android.applicationId"].iter().all(|path| provenance.iter().any(|row| row["path"].as_str() == Some(*path) && row["source"].as_str() == Some("hint")))
             || !["version.source", "version.nameKey", "version.buildKey"].iter().all(|path| provenance.iter().any(|row|
                 row["path"].as_str() == Some(*path) && row["source"].as_str() == Some("hint"))) { self.fail(); return; }
@@ -1207,7 +1359,7 @@ impl Observation {
     }
     pub(super) fn requirements_request(&self, body: &Value) {
         let Some(mut r) = self.record_at(Boundary::Request) else { return; };
-        if self.case != Case::Positive || !r.adopted || !r.draft_visible || r.requests != [0; 4] || !r.sessions.is_empty() || r.open_pending
+        if !matches!(self.case, Case::Positive | Case::WorkflowApply) || !r.adopted || !r.draft_visible || r.requests != [0; 4] || !r.sessions.is_empty() || r.open_pending
             || r.guidance.requirements_called
             || !matches!(r.step, Step::LoadRequirements | Step::ReadRequirements)
             || !keys(body, &["draft", "platform", "operation"]) || body["platform"].as_str() != Some("android")
@@ -1218,14 +1370,14 @@ impl Observation {
     pub(super) fn requirements(&self, result: &Result<crate::environment::Requirements, BridgeError>) {
         let sample = result.as_ref().ok().and_then(requirements_display);
         let Some(mut r) = self.record_at(Boundary::Result) else { return; };
-        if self.case != Case::Positive || !r.adopted || !r.draft_visible || r.requests != [0; 4] || !r.sessions.is_empty() || r.open_pending
+        if !matches!(self.case, Case::Positive | Case::WorkflowApply) || !r.adopted || !r.draft_visible || r.requests != [0; 4] || !r.sessions.is_empty() || r.open_pending
             || !r.guidance.requirements_called || r.guidance.requirements.is_some() || sample.is_none()
             || !matches!(r.step, Step::LoadRequirements | Step::ReadRequirements) { self.fail(); return; }
         r.guidance.requirements = sample;
     }
     pub(super) fn github_request(&self, body: &Value) {
         let Some(mut r) = self.record_at(Boundary::Request) else { return; };
-        if self.case != Case::Positive || !r.adopted || !r.draft_visible || r.requests != [0; 4] || !r.sessions.is_empty() || r.open_pending
+        if !matches!(self.case, Case::Positive | Case::WorkflowApply) || !r.adopted || !r.draft_visible || r.requests != [0; 4] || !r.sessions.is_empty() || r.open_pending
             || !r.guidance.requirements_visible || !r.guidance.github_empty
             || !r.guidance.repository_entered || !r.guidance.sha_entered || !r.guidance.inputs_visible || r.guidance.github_called
             || !matches!(r.step, Step::ProposeGitHub | Step::ReadProposal)
@@ -1238,7 +1390,7 @@ impl Observation {
     pub(super) fn github_proposal(&self, result: &Result<Value, BridgeError>) {
         let Some(mut r) = self.record_at(Boundary::Result) else { return; };
         let sample = result.as_ref().ok().and_then(|value| r.suggested.as_ref().and_then(|draft| ProposalSample::read(value, draft)));
-        if self.case != Case::Positive || !r.adopted || !r.draft_visible || r.requests != [0; 4] || !r.sessions.is_empty() || r.open_pending
+        if !matches!(self.case, Case::Positive | Case::WorkflowApply) || !r.adopted || !r.draft_visible || r.requests != [0; 4] || !r.sessions.is_empty() || r.open_pending
             || !r.guidance.github_called || r.guidance.proposal.is_some() || sample.is_none()
             || !matches!(r.step, Step::ProposeGitHub | Step::ReadProposal) { self.fail(); return; }
         r.guidance.proposal = sample;
@@ -1433,6 +1585,24 @@ impl Observation {
         self.fail(); // Keep reviewing is not Close; native Quit owns the sole EOF.
     }
     pub(super) fn edit_status(&self, status: &ConfigEditStatus, edits: &EditOwner) {
+        if self.case == Case::WorkflowApply {
+            let Some(mut r) = self.record_at(Boundary::Result) else { return; };
+            if status.schema_version != 1 || !edit::token(&status.window_generation)
+                || r.generation.as_ref().is_some_and(|generation| generation != &status.window_generation)
+                || status.active.is_some() || status.last_terminal.is_some() { self.fail(); return; }
+            if r.generation.is_none() { r.generation = Some(status.window_generation.clone()); }
+            if r.native_revision.is_some_and(|revision| status.status_revision < revision)
+                || r.workflow.native_revision.is_some_and(|revision| status.status_revision < revision) { return; }
+            match (status.capability.available, status.capability.reason) {
+                (true, edit::EditAvailability::Available) => r.capability = true,
+                (false, edit::EditAvailability::OtherEditActive) if r.workflow.open_pending
+                    || r.workflow.sessions.last().is_some_and(|s| s.finality.is_none()) => {},
+                (false, edit::EditAvailability::Shutdown) if r.close_prevented => {},
+                (false, edit::EditAvailability::RuntimeUnqualified) if !r.capability => {},
+                _ => { self.fail(); return; },
+            }
+            r.native_revision = Some(status.status_revision); return;
+        }
         if self.case != Case::Positive { return; }
         let Some(mut r) = self.record_at(Boundary::Result) else { return; };
         if status.schema_version != 1 || !edit::token(&status.window_generation)
@@ -1498,6 +1668,271 @@ impl Observation {
             r.sessions[index].projection = projection.clone();
         }
         r.native_revision = Some(status.status_revision);
+    }
+
+    pub(super) fn workflow_open_request(&self, project_id: &str) {
+        let Some(mut r) = self.record_at(Boundary::Request) else { return; };
+        let w = &r.workflow; let index = w.sessions.len();
+        if self.case != Case::WorkflowApply || index >= 4 || !workflow_start_step(r.step, index)
+            || !r.guidance.complete() || !r.capability || !w.capability || w.open_pending
+            || usize::from(w.requests[0]) != index || r.requests != [0; 4] || !r.sessions.is_empty()
+            || w.sessions.iter().any(|s| s.finality.is_none() || !s.result_visible)
+            || index > 0 && usize::from(w.draft_reads) != index
+            || index == 1 && !w.pin_changed || index >= 2 && !w.pin_restored
+            || !r.project.as_ref().is_some_and(|project| project.id == project_id) { self.fail(); return; }
+        r.workflow.open_pending = true; r.workflow.requests[0] += 1;
+    }
+    pub(super) fn workflow_open_result(&self, result: &Result<workflow::WorkflowEditStatus, BridgeError>, edits: &EditOwner) {
+        // This is an actual opposite-domain capability snapshot of the SAME
+        // admitted owner, before returning Open to its controller.
+        let Ok(config) = edits.status() else { self.fail(); return; };
+        {
+            let Some(mut r) = self.record_at(Boundary::Result) else { return; };
+            let Some(status) = result.as_ref().ok() else { self.fail(); return; };
+            let Some(owner) = status.active.as_ref() else { self.fail(); return; };
+            let w = &r.workflow;
+            if self.case != Case::WorkflowApply || !w.open_pending || w.sessions.len() >= 4
+                || usize::from(w.requests[0]) != w.sessions.len() + 1 || owner.domain != workflow::DOMAIN
+                || owner.phase != edit::Phase::Opening || owner.checkout.is_some() || owner.prepared.is_some()
+                || owner.conflict.is_some() || owner.core_outcome.is_some() || owner.apply_submitted
+                || w.sessions.iter().any(|s| s.projection.session_id == owner.session_id)
+                || !r.project.as_ref().is_some_and(|project| project.id == owner.project_id)
+                || config.window_generation != status.window_generation || config.status_revision < status.status_revision
+                || config.capability.available || config.capability.reason != edit::EditAvailability::OtherEditActive
+                || config.active.is_some() || config.last_terminal.is_some() { self.fail(); return; }
+            r.workflow.open_pending = false;
+            r.workflow.sessions.push(WorkflowSession { projection: owner.clone(), prepared: None, review: None, conflict: None,
+                prepare_requested: false, prepare_returned: false, binding: None, review_visible: false, result_visible: false,
+                config_blocked: true, confirmation_opened: 0, kept_reviewing: false, acknowledged: false,
+                apply_requested: false, apply_returned: false, finality: None });
+        }
+        self.edit_status(&config, edits);
+        if let Ok(status) = result { self.workflow_status(status, edits); }
+    }
+    pub(super) fn workflow_prepare_request(&self, args: &workflow::PrepareWorkflowEdit) {
+        let Some(mut r) = self.record_at(Boundary::Request) else { return; };
+        let index = usize::from(r.workflow.requests[1]);
+        let Some(session) = r.workflow.sessions.get(index) else { self.fail(); return; };
+        if self.case != Case::WorkflowApply || !workflow_start_step(r.step, index)
+            || r.workflow.prepare_pending.is_some() || session.prepare_requested || session.binding.is_some()
+            || session.projection.phase != edit::Phase::Editing || session.projection.session_id != args.session_id
+            || !session.projection.checkout.as_ref().is_some_and(|checkout| checkout.revision == args.revision)
+            || r.suggested.as_ref() != Some(&args.draft) || args.draft_revision != 1 || args.baseline_generation != 1
+            || args.tooling_repository != TOOLKIT_REPOSITORY || args.tooling_sha != (if index == 1 { CONFLICT_SHA } else { TOOLKIT_SHA })
+            || !session.config_blocked { self.fail(); return; }
+        let session = &mut r.workflow.sessions[index];
+        session.prepare_requested = true; session.binding = Some((args.draft_revision, args.baseline_generation));
+        r.workflow.prepare_pending = Some(index); r.workflow.requests[1] += 1;
+    }
+    pub(super) fn workflow_prepare_result(&self, result: &Result<workflow::WorkflowEditStatus, BridgeError>, edits: &EditOwner) {
+        {
+            let Some(mut r) = self.record_at(Boundary::Result) else { return; };
+            let Some(index) = r.workflow.prepare_pending.take() else { self.fail(); return; };
+            let Some(owner) = result.as_ref().ok().and_then(|status| status.active.as_ref()) else { self.fail(); return; };
+            let session = &mut r.workflow.sessions[index];
+            if session.prepare_returned || owner.session_id != session.projection.session_id || owner.phase != edit::Phase::Preparing
+                || owner.prepared.is_some() || owner.conflict.is_some() || owner.apply_submitted
+                || owner.checkout.as_ref().map(|c| &c.revision) != session.projection.checkout.as_ref().map(|c| &c.revision) { self.fail(); return; }
+            session.prepare_returned = true;
+        }
+        if let Ok(status) = result { self.workflow_status(status, edits); }
+    }
+    pub(super) fn workflow_apply_request(&self, session_id: &str, plan_token: &str) {
+        let Some(mut r) = self.record_at(Boundary::Request) else { return; };
+        let index = match r.step {
+            Step::Workflow(WorkflowStep::Apply(i) | WorkflowStep::ReadResult(i)) if matches!(i, 0 | 2) => usize::from(i),
+            _ => { self.fail(); return; },
+        };
+        let expected = if index == 0 { [1, 1, 0, 0] } else { [3, 3, 1, 0] };
+        if self.case != Case::WorkflowApply || r.workflow.requests != expected
+            || !r.workflow.sessions.get(index).is_some_and(|s| s.prepare_returned && s.review_visible && s.live_review()
+                && s.confirmation_opened == (if index == 0 { 2 } else { 1 }) && s.kept_reviewing == (index == 0)
+                && s.acknowledged && !s.apply_requested && s.projection.session_id == session_id
+                && s.projection.prepared.as_ref().is_some_and(|p| p.plan_token == plan_token)) { self.fail(); return; }
+        r.workflow.sessions[index].apply_requested = true; r.workflow.requests[2] += 1;
+    }
+    pub(super) fn workflow_apply_result(&self, result: &Result<workflow::WorkflowEditStatus, BridgeError>, edits: &EditOwner) {
+        {
+            let Some(mut r) = self.record_at(Boundary::Result) else { return; };
+            let Some(owner) = result.as_ref().ok().and_then(|status| status.active.as_ref()) else { self.fail(); return; };
+            let Some(session) = r.workflow.sessions.iter_mut().find(|s| s.projection.session_id == owner.session_id) else { self.fail(); return; };
+            if !session.apply_requested || session.apply_returned || owner.phase != edit::Phase::Applying || !owner.apply_submitted
+                || session.projection.prepared.as_ref().map(|p| &p.plan_token) != owner.prepared.as_ref().map(|p| &p.plan_token) { self.fail(); return; }
+            session.apply_returned = true;
+        }
+        if let Ok(status) = result { self.workflow_status(status, edits); }
+    }
+    pub(super) fn workflow_close_request(&self) {
+        if let Some(mut r) = self.record_at(Boundary::Request) { r.workflow.requests[3] = r.workflow.requests[3].saturating_add(1); }
+        self.fail(); // Keep reviewing is local; native Quit must own original4.
+    }
+    pub(super) fn workflow_status(&self, status: &workflow::WorkflowEditStatus, edits: &EditOwner) {
+        if self.case != Case::WorkflowApply { return; }
+        let Some(mut r) = self.record_at(Boundary::Result) else { return; };
+        if status.schema_version != 1 || status.domain != workflow::DOMAIN || !edit::token(&status.window_generation)
+            || r.generation.as_ref().is_some_and(|generation| generation != &status.window_generation) { self.fail(); return; }
+        if r.generation.is_none() { r.generation = Some(status.window_generation.clone()); }
+        if r.workflow.native_revision.is_some_and(|revision| status.status_revision < revision)
+            || r.native_revision.is_some_and(|revision| status.status_revision < revision) { return; }
+        if let Some(active) = &status.active {
+            if !r.workflow.sessions.iter().any(|s| s.projection.session_id == active.session_id) {
+                if r.workflow.open_pending && usize::from(r.workflow.requests[0]) == r.workflow.sessions.len() + 1 { return; }
+                self.fail(); return;
+            }
+        }
+        if status.capability.available && status.capability.reason == edit::EditAvailability::Available { r.workflow.capability = true; }
+        else if r.workflow.capability && !(r.close_prevented && !status.capability.available
+            && status.capability.reason == edit::EditAvailability::Shutdown) { self.fail(); return; }
+        for projection in status.last_terminal.iter().chain(status.active.iter()) {
+            let Some(index) = r.workflow.sessions.iter().position(|s| s.projection.session_id == projection.session_id) else { self.fail(); return; };
+            let old = r.workflow.sessions[index].projection.clone();
+            if projection.domain != workflow::DOMAIN || projection.project_id != old.project_id || projection.owner_generation != status.window_generation
+                || !edit::token(&projection.session_id) || projection.late_settled || projection.phase == edit::Phase::Unknown
+                || phase_order(projection.phase) < phase_order(old.phase) || projection.native_finality == edit::NativeFinality::Unknown
+                || projection.apply_submitted != (r.workflow.sessions[index].apply_requested && phase_order(projection.phase) >= phase_order(edit::Phase::Applying))
+                || projection.native_reason != (if index == 3 && r.close_prevented && phase_order(projection.phase) >= phase_order(edit::Phase::Finalizing) {
+                    edit::NativeEditReason::Shutdown
+                } else { edit::NativeEditReason::None }) { self.fail(); return; }
+            let Some(proposal) = r.guidance.proposal.as_ref() else { self.fail(); return; };
+            if let Some(checkout) = &projection.checkout {
+                if !edit::token(&checkout.revision) || serde_json::to_value(&checkout.observed).ok() != workflow_observed(proposal, index)
+                    || old.checkout.as_ref().is_some_and(|before| before.revision != checkout.revision
+                        || serde_json::to_value(before).ok() != serde_json::to_value(checkout).ok())
+                    || r.workflow.sessions.iter().enumerate().any(|(i, s)| i != index
+                        && s.projection.checkout.as_ref().is_some_and(|c| c.revision == checkout.revision)) { self.fail(); return; }
+            } else if old.checkout.is_some() { self.fail(); return; }
+            let review = if let Some(prepared) = &projection.prepared {
+                let Some(review) = workflow_review_sample(&prepared.view, proposal, index) else { self.fail(); return; };
+                let Ok(value) = serde_json::to_value(prepared) else { self.fail(); return; };
+                if !r.workflow.sessions[index].prepare_requested || !edit::token(&prepared.plan_token)
+                    || !projection.checkout.as_ref().is_some_and(|c| c.revision == prepared.revision)
+                    || prepared.draft_revision != 1 || prepared.baseline_generation != 1
+                    || r.workflow.sessions[index].prepared.as_ref().is_some_and(|before| before != &value)
+                    || r.workflow.sessions.iter().enumerate().any(|(i, s)| i != index
+                        && s.projection.prepared.as_ref().is_some_and(|p| p.plan_token == prepared.plan_token)) { self.fail(); return; }
+                Some((value, review))
+            } else {
+                if r.workflow.sessions[index].prepared.is_some() { self.fail(); return; } None
+            };
+            let conflict = if let Some(conflict) = &projection.conflict {
+                let Some(sample) = workflow_conflict_sample(conflict, proposal) else { self.fail(); return; };
+                if index != 1 || !r.workflow.sessions[index].prepare_requested || projection.prepared.is_some() || projection.apply_submitted
+                    || r.workflow.sessions[index].conflict.as_ref().is_some_and(|before| before != &sample) { self.fail(); return; }
+                Some(sample)
+            } else {
+                if r.workflow.sessions[index].conflict.is_some() { self.fail(); return; } None
+            };
+            if let Some(core) = &projection.core_outcome {
+                if core.effect != (match index { 0 => edit::Effect::Committed, 2 => edit::Effect::Unchanged, _ => edit::Effect::NotStarted })
+                    || core.journal != (if index == 0 { edit::Journal::Clean } else { edit::Journal::NotCreated })
+                    || core.resources != edit::ResourceState::Settled
+                    || core.reason != (if index == 3 { edit::CoreReason::Cancelled } else { edit::CoreReason::None })
+                    || phase_order(projection.phase) < phase_order(edit::Phase::Finalizing) { self.fail(); return; }
+            }
+            if projection.phase == edit::Phase::Final {
+                if projection.native_finality != edit::NativeFinality::Settled || projection.core_outcome.is_none()
+                    || projection.prepared.is_some() != (index != 1) || projection.conflict.is_some() != (index == 1)
+                    || index == 3 && !r.workflow.outstanding { self.fail(); return; }
+                if r.workflow.sessions[index].finality.is_none() {
+                    let Some(facts) = edits.installed_workflow_observation_final(&projection.session_id) else { self.fail(); return; };
+                    if !workflow_original_final(&facts, projection, index) { self.fail(); return; }
+                    r.workflow.sessions[index].finality = Some(facts);
+                }
+            } else if projection.native_finality != edit::NativeFinality::Pending { self.fail(); return; }
+            let session = &mut r.workflow.sessions[index];
+            if let Some((prepared, review)) = review { session.prepared = Some(prepared); session.review = Some(review); }
+            if let Some(conflict) = conflict { session.conflict = Some(conflict); }
+            session.projection = projection.clone();
+        }
+        r.workflow.native_revision = Some(status.status_revision);
+    }
+
+    fn workflow_dom(&self, step: WorkflowStep, value: &Value) {
+        let Some(object) = value.as_object() else { self.fail(); return; };
+        let Some(mut r) = self.record_at(Boundary::Dom) else { return; };
+        if self.case != Case::WorkflowApply || r.pending.take() != Some(Pending::Dom(Step::Workflow(step)))
+            || r.step != Step::Workflow(step) { self.fail(); return; }
+        match value.get("state").and_then(Value::as_str) {
+            Some("wait") if object.len() == 1 => return,
+            Some("ready") => {}, _ => { self.fail(); return; },
+        }
+        let review = |index: usize| r.workflow.sessions.get(index).is_some_and(|s| s.prepare_returned && s.live_review()
+            && s.review.as_ref() == value.get("review"));
+        let valid = match step {
+            WorkflowStep::ReadPin(index) => object.len() == 2 && matches!(index, 1 | 2)
+                && value["inputs"] == serde_json::json!({"repository":TOOLKIT_REPOSITORY,
+                    "sha":if index == 1 { CONFLICT_SHA } else { TOOLKIT_SHA },"comparison":false}),
+            WorkflowStep::ReadReview(index) => object.len() == 2 && review(usize::from(index)),
+            WorkflowStep::ReadKept => object.len() == 2 && review(0) && r.workflow.requests == [1, 1, 0, 0]
+                && r.workflow.sessions[0].confirmation_opened == 1,
+            WorkflowStep::ReadConfirmation(index) | WorkflowStep::ReadAcknowledged(index) => {
+                let acknowledged = matches!(step, WorkflowStep::ReadAcknowledged(_));
+                object.len() == 2 && matches!(index, 0 | 2)
+                    && r.workflow.sessions.get(usize::from(index)).is_some_and(|s| s.live_review() && s.review_visible
+                        && s.confirmation_opened == (if index == 0 && acknowledged { 2 } else { 1 })
+                        && (!acknowledged || index != 0 || s.kept_reviewing)
+                        && s.review.as_ref().is_some_and(|review| value["confirmation"] == serde_json::json!({
+                            "title":if index == 0 { "Apply this four-caller bundle?" } else { "Confirm four unchanged callers?" },
+                            "draftRevision":1,"pin":format!("{TOOLKIT_REPOSITORY}@{TOOLKIT_SHA}"),"files":review["files"],
+                            "checked":acknowledged,"applyAvailable":acknowledged})))
+            },
+            WorkflowStep::ReadReconfirmation => object.len() == 2 && r.workflow.requests == [1, 1, 0, 0]
+                && r.workflow.sessions.first().is_some_and(|s| s.live_review() && s.confirmation_opened == 2 && s.kept_reviewing
+                    && s.review.as_ref().is_some_and(|review| value["confirmation"] == serde_json::json!({
+                        "title":"Apply this four-caller bundle?","draftRevision":1,"pin":format!("{TOOLKIT_REPOSITORY}@{TOOLKIT_SHA}"),
+                        "files":review["files"],"checked":false,"applyAvailable":false}))),
+            WorkflowStep::ReadResult(index) => object.len() == 8 && index < 3
+                && r.workflow.sessions.get(usize::from(index)).is_some_and(|s| s.finality.is_some() && s.prepare_returned
+                    && s.apply_returned == (index != 1)
+                    && value["conflict"] == s.conflict.clone().unwrap_or(Value::Null))
+                && value["title"].as_str() == Some(match index { 0 => "Reviewed local workflow bundle installed",
+                    1 => "Local workflow bundle refused", _ => "Four callers verified unchanged" })
+                && value["facts"] == serde_json::json!([["Transaction effect",match index { 0 => "committed", 1 => "not_started", _ => "unchanged" }],
+                    ["Journal",if index == 0 { "clean" } else { "not_created" }],["Core resources","settled"],["Native finality","settled"]])
+                && value["startAvailable"].as_bool() == Some(true) && value["applyAvailable"].as_bool() == Some(false)
+                && value["closeAvailable"].as_bool() == Some(false) && value["hasReview"].as_bool() == Some(index != 1),
+            WorkflowStep::ReadDraft(index) => object.len() == 5 && index < 4 && r.workflow.draft_reads == index
+                && value["unsaved"].as_bool() == Some(true) && value["saved"].as_bool() == Some(false)
+                && value["saveAvailable"].as_bool() == Some(index != 3)
+                && r.suggested.as_ref().is_some_and(|draft| value["source"].as_str() == draft["version"]["source"].as_str())
+                && r.workflow.sessions.get(usize::from(index)).is_some_and(|s| if index == 3 { s.live_review() && s.review_visible }
+                    else { s.finality.is_some() && s.result_visible }),
+            _ => object.len() == 1,
+        };
+        if !valid { self.fail(); return; }
+        let next = match step {
+            WorkflowStep::GitHub(index) => if matches!(index, 1 | 2) { WorkflowStep::Pin(index) } else { WorkflowStep::Start(index) },
+            WorkflowStep::Pin(index) => WorkflowStep::ReadPin(index),
+            WorkflowStep::ReadPin(index) => {
+                if index == 1 { r.workflow.pin_changed = true; } else { r.workflow.pin_restored = true; }
+                WorkflowStep::Start(index)
+            },
+            WorkflowStep::Start(index) => if index == 1 { WorkflowStep::ReadResult(index) } else { WorkflowStep::OpenText(index) },
+            WorkflowStep::OpenText(index) => WorkflowStep::ReadReview(index),
+            WorkflowStep::ReadReview(index) => {
+                r.workflow.sessions[usize::from(index)].review_visible = true;
+                if index == 3 { WorkflowStep::Settings(index) } else { WorkflowStep::Confirm(index) }
+            },
+            WorkflowStep::Confirm(index) => {
+                r.workflow.sessions[usize::from(index)].confirmation_opened += 1; WorkflowStep::ReadConfirmation(index)
+            },
+            WorkflowStep::ReadConfirmation(index) => if index == 0 { WorkflowStep::Keep } else { WorkflowStep::Acknowledge(index) },
+            WorkflowStep::Keep => WorkflowStep::ReadKept,
+            WorkflowStep::ReadKept => { r.workflow.sessions[0].kept_reviewing = true; WorkflowStep::Reconfirm },
+            WorkflowStep::Reconfirm => { r.workflow.sessions[0].confirmation_opened += 1; WorkflowStep::ReadReconfirmation },
+            WorkflowStep::ReadReconfirmation => WorkflowStep::Acknowledge(0),
+            WorkflowStep::Acknowledge(index) => WorkflowStep::ReadAcknowledged(index),
+            WorkflowStep::ReadAcknowledged(index) => { r.workflow.sessions[usize::from(index)].acknowledged = true; WorkflowStep::Apply(index) },
+            WorkflowStep::Apply(index) => WorkflowStep::ReadResult(index),
+            WorkflowStep::ReadResult(index) => { r.workflow.sessions[usize::from(index)].result_visible = true; WorkflowStep::Settings(index) },
+            WorkflowStep::Settings(index) => WorkflowStep::ReadDraft(index),
+            WorkflowStep::ReadDraft(index) => {
+                r.workflow.draft_reads += 1;
+                if index == 3 { r.step = Step::Close; return; }
+                WorkflowStep::GitHub(index + 1)
+            },
+        };
+        r.step = Step::Workflow(next);
     }
 
     pub(super) fn path_request(&self, args: &crate::asset_commands::ChooseProjectPath<'_>) {
@@ -1736,6 +2171,11 @@ impl Observation {
             // Wait for already-requested native replies without spending DOM
             // evaluations on work that has not returned. No new task/deadline.
             let native_pending = match r.step {
+                Step::Workflow(WorkflowStep::OpenText(index) | WorkflowStep::ReadReview(index)) =>
+                    !r.workflow.sessions.get(usize::from(index)).is_some_and(|s| s.prepare_returned && s.live_review()),
+                Step::Workflow(WorkflowStep::ReadResult(index)) =>
+                    !r.workflow.sessions.get(usize::from(index)).is_some_and(|s| s.prepare_returned && s.finality.is_some()
+                        && (index == 1 || s.apply_returned)),
                 Step::Paths(PathStep::ReadPreview(index)) => r.paths.previews.get(index as usize).is_none_or(Option::is_none),
                 Step::ReadSnapshot => !r.snapshot,
                 Step::ReadSuggestion => r.suggested.is_none(),
@@ -1848,6 +2288,13 @@ impl Observation {
                         r.noop_outstanding = true;
                     }
                     if self.case == Case::ProjectPaths && (!r.paths.complete() || r.requests != [0;4] || !r.sessions.is_empty()) { self.fail(); return; }
+                    if self.case == Case::WorkflowApply {
+                        if r.requests != [0; 4] || !r.sessions.is_empty() || r.workflow.requests != [4, 4, 2, 0]
+                            || r.workflow.draft_reads != 4 || r.workflow.sessions.len() != 4
+                            || !r.workflow.sessions[..3].iter().all(|s| s.finality.is_some() && s.result_visible)
+                            || !r.workflow.sessions[3].live_review() || !r.workflow.sessions[3].review_visible { self.fail(); return; }
+                        r.workflow.outstanding = true;
+                    }
                     r.step = Step::Quit; Pending::Close
                 },
                 Step::Quit => { if !r.close_prevented { self.fail(); return; } Pending::Gtk },
@@ -1895,7 +2342,7 @@ impl Observation {
                 }).is_err() { self.fail(); }
             },
             _ => {
-                let Some(script) = script(step) else { self.fail(); return; };
+                let Some(script) = script(step, self.case) else { self.fail(); return; };
                 let q = self.clone();
                 // Outer Ok is dispatch, never an evaluation or DOM receipt.
                 // An absent callback remains pending; it is never retried.
@@ -1907,6 +2354,7 @@ impl Observation {
         if raw.len() > 262144 || Instant::now() >= self.end { self.fail(); return; }
         let Ok(value) = crate::protocol::strict_json(raw.as_bytes()) else { self.fail(); return; };
         if let Step::Paths(path) = step { self.path_dom(path,&value); return; }
+        if let Step::Workflow(workflow) = step { self.workflow_dom(workflow, &value); return; }
         let Some(object) = value.as_object() else { self.fail(); return; };
         let Some(mut r) = self.record_at(Boundary::Dom) else { return; };
         if r.pending.take() != Some(Pending::Dom(step)) || r.step != step { self.fail(); return; }
@@ -1940,7 +2388,8 @@ impl Observation {
             Step::ReadSnapshot => object.len() == 4 && r.selected && r.snapshot
                 && value["configuration"].as_str() == Some("Not configured")
                 && value["sourceFiles"].as_str() == Some(if self.case == Case::ProjectPaths { "0 recognized files" } else { "2 recognized files" })
-                && value["name"].as_str() == Some(if self.case == Case::ProjectPaths { "path-project" } else { "positive-project" }),
+                && value["name"].as_str() == Some(match self.case { Case::ProjectPaths => "path-project",
+                    Case::WorkflowApply => "workflow-project", _ => "positive-project" }),
             Step::ReadSuggestion => object.len() == 2 && r.suggested.is_some() && r.provenance.as_ref() == value.get("provenance"),
             Step::ReadDraft | Step::ReadRetainedDraft => object.len() == 5 && r.adopted && r.capability && source() && draft(false, true)
                 && (step != Step::ReadRetainedDraft || r.guidance.workflows_visible),
@@ -2040,7 +2489,8 @@ impl Observation {
             Step::OpenWorkflows => Step::ReadWorkflows,
             Step::ReadWorkflows => { r.guidance.workflows_visible = true; Step::GuidanceSettings },
             Step::GuidanceSettings => Step::ReadRetainedDraft,
-            Step::ReadRetainedDraft => { r.guidance.draft_retained = true; Step::PrepareSave },
+            Step::ReadRetainedDraft => { r.guidance.draft_retained = true;
+                if self.case == Case::WorkflowApply { Step::Workflow(WorkflowStep::GitHub(0)) } else { Step::PrepareSave } },
             Step::PrepareSave => Step::ReadSaveReview,
             Step::ReadSaveReview => { r.sessions[0].review_visible = true; Step::OpenConfirmation },
             Step::OpenConfirmation => { r.confirmation_opened += 1; Step::ReadConfirmation },
@@ -2208,6 +2658,7 @@ impl Observation {
     pub(super) fn native_created(&self, id: u32, quit: bool) {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return; };
         if !quit || id == 0 || self.case == Case::Positive && id != 6 || self.case == Case::ProjectPaths && id != 14
+            || self.case == Case::WorkflowApply && id != 3
             || !r.close_prevented || r.step != Step::Quit || r.native_id.is_some() { self.fail(); return; }
         r.native_id = Some(id);
     }
@@ -2287,20 +2738,26 @@ impl Observation {
         if self.case == Case::Positive {
             match edits.status() { Ok(status) => self.edit_status(&status, edits), Err(_) => self.fail() }
         }
+        if self.case == Case::WorkflowApply {
+            match edits.status() { Ok(status) => self.edit_status(&status, edits), Err(_) => self.fail() }
+            match edits.workflow_status() { Ok(status) => self.workflow_status(&status, edits), Err(_) => self.fail() }
+        }
         let originals_final = if self.case == Case::Outstanding { true } else {
             let Some(r) = self.record_at(Boundary::Exit) else { return; };
             if self.case == Case::ProjectPaths { r.paths.complete() && r.project_witness.as_ref().is_some_and(|project| document.installed_observation_paths_final(project)) }
+            else if self.case == Case::WorkflowApply { r.project_witness.is_some() && document.installed_observation_final() }
             else { r.candidate.complete() && r.project_witness.as_ref().is_some_and(|project| document.installed_observation_candidate_final(project)) }
         };
         let Some(mut r) = self.record_at(Boundary::Exit) else { return; };
         if !ready || !originals_final || !r.relay_joined || !r.released || r.exit
-            || self.case == Case::Positive && (r.sessions.len() != 2 || !r.sessions.iter().all(|session| session.finality.is_some())) { self.fail(); return; }
+            || self.case == Case::Positive && (r.sessions.len() != 2 || !r.sessions.iter().all(|session| session.finality.is_some()))
+            || self.case == Case::WorkflowApply && !r.workflow.complete() { self.fail(); return; }
         r.originals_final = originals_final; r.exit = true;
     }
     fn finish(&self) -> bool {
         let held = match self.record() { Some(mut r) => r.held.take(), None => return false };
         let retired = match (self.case, held) {
-            (Case::Positive | Case::ProjectPaths, None) => true,
+            (Case::Positive | Case::ProjectPaths | Case::WorkflowApply, None) => true,
             (Case::Outstanding, Some(mut held)) => {
                 // Borrow/join the same original after the NORMAL event loop
                 // exits. No additional task, shutdown call, or replacement
@@ -2323,7 +2780,47 @@ impl Observation {
                 && r.confirmation_opened == 2 && r.kept_reviewing && r.acknowledged && r.saved_visible
                 && r.snapshot_requests == 2 && r.readback && r.readback_visible && r.saved_reads.complete() && r.saved_draft_retained && r.noop_outstanding
                 && r.sessions.len() == 2 && r.sessions.iter().all(|session| session.prepare_returned && session.review_visible && session.finality.is_some())
-                && r.project_witness.is_some() && r.candidate.complete() && r.originals_final)
+                && r.project_witness.is_some() && r.candidate.complete() && r.originals_final
+                || self.case == Case::WorkflowApply && r.info && r.catalog && r.environment
+                && r.cancelled && r.pickers[0].settled(false) && r.selected && r.pickers[1].settled(true)
+                && r.snapshot && r.snapshot_visible && r.snapshot_requests == 1 && r.suggested.is_some()
+                && r.provenance_visible && r.adopted && r.draft_visible && r.guidance.complete()
+                && r.capability && r.requests == [0; 4] && r.sessions.is_empty() && !r.open_pending && r.prepare_pending.is_none()
+                && r.workflow.complete() && r.project_witness.is_some() && r.originals_final)
+    }
+    fn workflow_report(&self) -> Option<Vec<u8>> {
+        let r = self.record()?;
+        if self.case != Case::WorkflowApply || !r.exit || !r.originals_final || !r.workflow.complete() { return None; }
+        let w = &r.workflow;
+        let finals: Vec<_> = w.sessions.iter().filter_map(|s| s.finality.as_ref()).collect();
+        if finals.len() != 4 { return None; }
+        let count = |test: fn(&InstalledWorkflowFinality) -> bool| finals.iter().filter(|facts| test(facts)).count();
+        let outcomes: Option<Vec<_>> = w.sessions.iter().map(|s| s.projection.core_outcome.as_ref()
+            .map(|core| serde_json::json!([core.effect,core.journal,core.resources,core.reason]))).collect();
+        serde_json::to_vec(&serde_json::json!({
+            "schemaVersion":1,"fixture":"android-workflow-apply-v1","gate":"installed-workflow-profile",
+            "project":{"cancelSettled":r.cancelled && r.pickers[0].settled(false),"registered":r.selected && r.pickers[1].settled(true) && r.project_witness.is_some(),
+                "snapshot":r.snapshot && r.snapshot_visible,"adopted":r.adopted && r.provenance_visible},
+            "requests":{"open":w.requests[0],"prepare":w.requests[1],"apply":w.requests[2],"close":w.requests[3],"configuration":r.requests},
+            "draft":{"wholeMatched":w.sessions.iter().all(|s| s.binding == Some((1,1))),"revision":1,"baselineGeneration":1,
+                "unsavedReads":w.draft_reads,"neverSaved":r.sessions.is_empty() && r.requests == [0;4]},
+            "pins":{"explicit":r.guidance.inputs_visible,"changed":w.pin_changed,"restored":w.pin_restored,"browserEdit":"insertText"},
+            "reviews":{"fullText":w.sessions.iter().enumerate().all(|(i,s)| s.review_visible == (i!=1)),
+                "conflictNoToken":w.sessions[1].result_visible && w.sessions[1].projection.prepared.is_none() && w.sessions[1].conflict.is_some(),
+                "conflictReason":w.sessions[1].projection.conflict.as_ref()?.reason,
+                "configBlocked":w.sessions.iter().filter(|s| s.config_blocked).count()},
+            "confirmation":{"opened":w.sessions.iter().map(|s|s.confirmation_opened).collect::<Vec<_>>(),
+                "keepReviewing":w.sessions[0].kept_reviewing,"acknowledged":w.sessions.iter().filter(|s|s.acknowledged).count()},
+            "outcomes":outcomes?,"nativeReasons":w.sessions.iter().map(|s|s.projection.native_reason).collect::<Vec<_>>(),
+            "originals":{"sessions":finals.len(),"writerFrames":finals.iter().map(|f|f.writer_frames).collect::<Vec<_>>(),
+                "stdoutFrames":finals.iter().map(|f|f.stdout_frames).collect::<Vec<_>>(),
+                "startupJoined":count(|f|f.inspection_joined && f.acquisition_joined),"childWaited":count(|f|f.child_waited_success),
+                "ioSettled":count(|f|f.stdin_closed && f.stdout_eof_closed && f.stderr_eof_closed && f.io_joined),
+                "ownersJoined":count(|f|f.driver_joined && f.watchdog_joined && f.manager_joined),
+                "runtimeLedgerSettled":count(|f|f.runtime_ledger_settled),"runtimeSettlementJoined":count(|f|f.runtime_settlement_joined)},
+            "quit":{"operation":3,"pendingReview":w.outstanding,"gtkSettled":r.native_id == Some(3) && r.gtk_returned && r.destroyed && r.released,
+                "originalsSettled":r.originals_final,"relayJoined":r.relay_joined,"exit":r.exit}
+        })).ok().filter(|raw| raw.len() + 1 <= 2048)
     }
     fn positive_report(&self) -> Option<Vec<u8>> {
         let r = self.record()?;
@@ -2481,8 +2978,144 @@ fn path_script(step: PathStep) -> Option<String> {
     }} catch {{ return {{state:'error'}} }} }})()"#))
 }
 
-fn script(step: Step) -> Option<String> {
+fn workflow_script(step: WorkflowStep) -> Option<String> {
+    let body = match step {
+        WorkflowStep::GitHub(_) => r#"const b=document.querySelector('nav[aria-label="Workspace navigation"] button[aria-label="GitHub"]');
+            if (!b || b.disabled) throw 0; b.click(); return {state:'ready'};"#.to_owned(),
+        WorkflowStep::Pin(index) => {
+            let (before, after) = match index { 1 => (TOOLKIT_SHA, CONFLICT_SHA), 2 => (CONFLICT_SHA, TOOLKIT_SHA), _ => return None };
+            format!(r#"if (!selected('GitHub')) return {{state:'wait'}};
+                const g=inputs(); if (g.repository.value!=='example/toolkit' || g.sha.value!=='{before}' || g.comparison.checked) throw 0;
+                const input=g.sha; show(input); input.focus(); input.select();
+                if (document.activeElement!==input || input.selectionStart!==0 || input.selectionEnd!==40
+                    || !document.execCommand('insertText',false,'{after}')) throw 0; return {{state:'ready'}};"#)
+        },
+        WorkflowStep::ReadPin(_) => r#"const g=inputs(); return {state:'ready',
+            inputs:{repository:g.repository.value,sha:g.sha.value,comparison:g.comparison.checked}};"#.to_owned(),
+        WorkflowStep::Start(index) => {
+            if index > 3 { return None; }
+            let pin = if index == 1 { CONFLICT_SHA } else { TOOLKIT_SHA };
+            format!(r#"if (!selected('GitHub')) return {{state:'wait'}};
+                const g=inputs(), p=panel(), b=start(p);
+                if (g.repository.value!=='example/toolkit' || g.sha.value!=='{pin}' || g.comparison.checked) throw 0;
+                if (b.disabled) return {{state:'wait'}}; remoteClosed(); show(b); b.click(); return {{state:'ready'}};"#)
+        },
+        WorkflowStep::OpenText(_) => r#"if (!selected('GitHub')) return {state:'wait'};
+            const p=panel(), review=p.querySelector(':scope > .workflow-review');
+            if (!review || text(p.querySelector('h2'))!=='Review the fresh native workflow plan') return {state:'wait'};
+            const rows=[...review.querySelectorAll('details.github-workflow')]; if (rows.length!==4) throw 0;
+            for (const row of rows) { const summary=row.querySelector(':scope > summary'); show(summary); if (!row.open) summary.click(); }
+            return {state:'ready'};"#.to_owned(),
+        WorkflowStep::ReadReview(_) | WorkflowStep::ReadKept => r#"if (document.querySelector('dialog')) return {state:'wait'};
+            const p=panel(), review=p.querySelector(':scope > .workflow-review'), b=p.querySelector('.save-actions button.primary');
+            if (!review || !b || b.disabled || text(p.querySelector('h2'))!=='Review the fresh native workflow plan') return {state:'wait'};
+            return {state:'ready',review:reviewDisplay(review)};"#.to_owned(),
+        WorkflowStep::Confirm(index) => {
+            let label = match index { 0 => "Confirm reviewed local files", 2 => "Review unchanged confirmation", _ => return None };
+            format!(r#"const p=panel(), b=p.querySelector('.save-actions button.primary');
+                if (!b || b.disabled || text(b)!=='{label}' || document.querySelector('dialog')) throw 0;
+                show(b); b.click(); return {{state:'ready'}};"#)
+        },
+        WorkflowStep::Reconfirm => r#"const p=panel(), b=p.querySelector('.save-actions button.primary');
+            if (!b || b.disabled || text(b)!=='Confirm reviewed local files' || document.querySelector('dialog')) throw 0;
+            show(b); b.click(); return {state:'ready'};"#.to_owned(),
+        WorkflowStep::ReadConfirmation(_) | WorkflowStep::ReadReconfirmation | WorkflowStep::ReadAcknowledged(_) =>
+            r#"if (!document.querySelector('dialog.workflow-confirm-dialog[open]')) return {state:'wait'};
+                return {state:'ready',confirmation:confirmationDisplay()};"#.to_owned(),
+        WorkflowStep::Keep => r#"const c=confirmation(); if (c.check.checked || !c.apply.disabled) throw 0;
+            show(c.keep); c.keep.click(); return {state:'ready'};"#.to_owned(),
+        WorkflowStep::Acknowledge(_) => r#"const c=confirmation(); if (c.check.checked || !c.apply.disabled) throw 0;
+            show(c.check); c.check.click(); return {state:'ready'};"#.to_owned(),
+        WorkflowStep::Apply(_) => r#"const c=confirmation(); if (!c.check.checked || c.apply.disabled) throw 0;
+            show(c.apply); c.apply.click(); return {state:'ready'};"#.to_owned(),
+        WorkflowStep::ReadResult(index) => {
+            let title = match index { 0 => "Reviewed local workflow bundle installed", 1 => "Local workflow bundle refused",
+                2 => "Four callers verified unchanged", _ => return None };
+            format!(r#"if (document.querySelector('dialog')) return {{state:'wait'}};
+                const p=panel(), b=start(p), title=text(p.querySelector('h2'));
+                if (title!=='{title}' || b.disabled || !p.querySelector('.save-outcome-facts')) return {{state:'wait'}};
+                remoteClosed(); const conflict=p.querySelector('.workflow-conflict');
+                const rows=conflict?[...conflict.querySelectorAll('ul > li')]:[];
+                if (conflict && rows.length!==4) throw 0;
+                const facts=[...p.querySelectorAll(':scope > .save-outcome-facts > div')].map(row=>{{show(row);return [text(row.querySelector('dt')),text(row.querySelector('dd'))];}});
+                const close=[...p.querySelectorAll('.save-actions button')].filter(b=>['Close workflow review / keep draft','Request cancellation'].includes(text(b)));
+                return {{state:'ready',title,facts,startAvailable:!b.disabled,
+                    applyAvailable:!!p.querySelector('.save-actions button.primary:not(:disabled)'),closeAvailable:close.some(b=>!b.disabled),
+                    hasReview:!!p.querySelector(':scope > .workflow-review'),
+                    conflict:conflict?{{heading:text(conflict.querySelector('h3')),rows:rows.map(row=>{{show(row);
+                        return {{id:text(row.querySelector('strong')),bytes:count(text(row.querySelector('span')),' observed bytes'),sha256:text(row.querySelector('code'))}};}}),
+                        caution:text(conflict.querySelector(':scope > p'))}}:null}};"#)
+        },
+        WorkflowStep::Settings(_) => r#"const b=document.querySelector('nav[aria-label="Workspace navigation"] button[aria-label="Project settings"]');
+            if (!b || b.disabled || document.querySelector('dialog')) throw 0; b.click(); return {state:'ready'};"#.to_owned(),
+        WorkflowStep::ReadDraft(index) => {
+            if index > 3 { return None; }
+            let available = if index == 3 { "false" } else { "true" };
+            format!(r#"if (!selected('Project settings') || document.querySelector('dialog')) return {{state:'wait'}};
+                const banner=document.querySelector('.draft-banner'), save=document.querySelector('.draft-toolbar button[aria-describedby="draft-save-reason"]');
+                const field=[...document.querySelectorAll('.form-field')].find(f=>f.querySelector('.help-button')?.getAttribute('aria-label')==='Help: Committed version file');
+                if (!banner || !save || !field || (!save.disabled)!=={available}) return {{state:'wait'}};
+                const input=field.querySelector('input'); if (!input || input.value.length>512 || text(field.querySelector('.field-presence'))!=='Set'
+                    || document.querySelector('.suggestion-card')) throw 0; show(field);
+                return {{state:'ready',source:input.value,unsaved:text(banner.querySelector('.badge'))==='Unsaved changes',
+                    saved:text(banner.querySelector('.badge'))==='Settled submitted revision',saveAvailable:!save.disabled}};"#)
+        },
+    };
+    Some(format!(r#"(() => {{ try {{
+        if (document.querySelector('.preview-banner, .fatal-error, #main-content > .notice-danger, .native-workflow-panel .notice-danger')) throw 0;
+        const text=e=>{{if (!e || typeof e.textContent!=='string' || e.textContent.length>4096) throw 0; return e.textContent;}};
+        const visible=e=>{{const r=e.getBoundingClientRect(),s=getComputedStyle(e);return e.isConnected && r.width>0 && r.height>0 && s.display!=='none' && s.visibility==='visible';}};
+        const show=e=>{{if (!e) throw 0;e.scrollIntoView({{block:'center'}});if (!visible(e)) throw 0;}};
+        const selected=label=>[...document.querySelectorAll('nav[aria-label="Workspace navigation"] button[aria-current="page"]')].some(b=>b.getAttribute('aria-label')===label);
+        const panel=()=>{{const rows=document.querySelectorAll('section.native-workflow-panel');if (!selected('GitHub') || rows.length!==1) throw 0;return rows[0];}};
+        const start=p=>{{const rows=p.querySelectorAll('button[aria-describedby="github-workflow-start-reason"]');
+            if (rows.length!==1 || text(rows[0])!=='Review local workflow files') throw 0;return rows[0];}};
+        const remoteClosed=()=>{{const rows=[...document.querySelectorAll('.github-disabled-actions button')];if (rows.length!==3 || rows.some(b=>!b.disabled)) throw 0;}};
+        const inputs=()=>{{if (!selected('GitHub') || document.querySelector('dialog, .github-assertions')) throw 0;
+            const forms=document.querySelectorAll('form.github-form');if (forms.length!==1) throw 0;const form=forms[0];
+            const repository=form.querySelector('#github-toolkit-repository'),sha=form.querySelector('#github-toolkit-sha'),comparison=form.querySelector('.github-comparison-toggle input');
+            if (!repository || !sha || !comparison || [repository,sha].some(i=>i.type!=='text' || i.disabled || i.readOnly)
+                || repository.value.length>140 || sha.value.length>40 || text(form.querySelector('.github-draft > strong'))!=='workflow-project · current draft') throw 0;
+            return {{repository,sha,comparison}};}};
+        const count=(raw,suffix)=>{{if (!raw.endsWith(suffix)) throw 0;const n=raw.slice(0,-suffix.length);
+            if (!/^(?:[0-9]{{1,5}}|[0-9]{{1,2}},[0-9]{{3}})$/.test(n)) throw 0;return Number(n.replace(',',''));}};
+        const cellText=cell=>[...cell.childNodes].filter(n=>n.nodeType===Node.TEXT_NODE).map(n=>n.textContent).join('');
+        const inventory=root=>{{const tables=root.querySelectorAll('.workflow-files table');if (tables.length!==1) throw 0;
+            const table=tables[0];if (text(table.querySelector('caption'))!=='Complete native workflow inventory — all four or refuse') throw 0;
+            const rows=[...table.querySelectorAll('tbody > tr')];if (rows.length!==4) throw 0;
+            return rows.map(row=>{{show(row);const cells=[...row.querySelectorAll(':scope > td')];if (cells.length!==3) throw 0;
+                const label=text(cells[0]),action=label==='Create absent file'?'create':label==='Preserve exact original'?'preserve':null;
+                if (!action) throw 0;const absent=text(cells[1])==='Observed absent';
+                return {{path:text(row.querySelector(':scope > th code')),action,
+                    observed:absent?{{state:'absent'}}:{{state:'present',byteLength:count(cellText(cells[1]),' bytes'),sha256:text(cells[1].querySelector('code'))}},
+                    generated:{{byteLength:count(cellText(cells[2]),' bytes'),sha256:text(cells[2].querySelector('code'))}}}};}});
+        }};
+        const reviewDisplay=review=>{{const rows=[...review.querySelectorAll('details.github-workflow')];if (rows.length!==4 || rows.some(row=>!row.open)) throw 0;
+            const texts=rows.map(row=>{{const pre=row.querySelector('pre');show(pre);return {{path:text(row.querySelector('summary > code')),
+                badge:text(row.querySelector('summary > .badge')),label:pre.getAttribute('aria-label'),content:text(pre.querySelector('code'))}};}});
+            const facts=[...review.querySelectorAll(':scope > .github-facts > div')].map(row=>{{show(row);return [text(row.querySelector('dt')),text(row.querySelector('dd'))];}});
+            return {{files:inventory(review),texts,basis:text(review.querySelector('.review-basis strong')),facts,
+                note:text(review.querySelector(':scope > .save-note')),caution:text(review.querySelector(':scope > .review-caution'))}};
+        }};
+        const confirmation=()=>{{const dialogs=document.querySelectorAll('dialog');if (!selected('GitHub') || dialogs.length!==1) throw 0;
+            const dialog=dialogs[0];if (!dialog.classList.contains('workflow-confirm-dialog') || !dialog.open || dialog.querySelector('[role="alert"]')) throw 0;
+            const checks=dialog.querySelectorAll('.save-confirm-choice input[type="checkbox"]'),buttons=[...dialog.querySelectorAll('.button-row > button')];
+            if (checks.length!==1 || checks[0].disabled || buttons.length!==2 || buttons[0].disabled || text(buttons[0])!=='Keep reviewing'
+                || !['Apply reviewed local files','Confirm unchanged plan'].includes(text(buttons[1]))
+                || text(dialog.querySelector('.save-confirm-choice'))!=='I reviewed all four paths and complete text. This only installs or preserves local callers; it does not save configuration, contact GitHub or execute a release.') throw 0;
+            return {{dialog,check:checks[0],keep:buttons[0],apply:buttons[1]}};}};
+        const confirmationDisplay=()=>{{const c=confirmation(),p=c.dialog.querySelector('.dialog-content > p');
+            const revision=/^This confirms the native plan made from draft revision ([0-9]{{1,10}}) and toolkit pin /.exec(text(p));if (!revision) throw 0;
+            return {{title:text(c.dialog.querySelector('h2')),draftRevision:Number(revision[1]),pin:text(p.querySelector('code')),
+                files:inventory(c.dialog),checked:c.check.checked,applyAvailable:!c.apply.disabled}};}};
+        {body}
+    }} catch {{ return {{state:'error'}}; }} }})()"#))
+}
+
+fn script(step: Step, case: Case) -> Option<String> {
     if let Step::Paths(path) = step { return path_script(path); }
+    if let Step::Workflow(workflow) = step { return workflow_script(workflow); }
+    let project_name = if case == Case::WorkflowApply { "workflow-project" } else { "positive-project" };
     let body = match step {
         Step::Environment | Step::GuidanceEnvironment => r#"
             const b = document.querySelector('nav[aria-label="Workspace navigation"] button[aria-label="Environment"]');
@@ -2584,7 +3217,7 @@ fn script(step: Step) -> Option<String> {
         Step::ReadGitHubEmpty => r#"
             if (!selected('GitHub') || !document.querySelector('form.github-form')) return {state:'wait'};
             const g = githubInputs();
-            if (document.querySelector('.github-proposal') || text(g.form.querySelector('.github-draft > strong')) !== 'positive-project · current draft'
+            if (document.querySelector('.github-proposal') || text(g.form.querySelector('.github-draft > strong')) !== projectName + ' · current draft'
                 || text(g.button) !== 'Preview GitHub setup') return {state:'error'};
             g.form.scrollIntoView({block:'start'}); if (!visible(g.repository) || !visible(g.sha)) return {state:'error'};
             return {state:'ready', inputs:inputValues(g), branches:[...g.form.querySelectorAll('.github-draft .github-facts dd code')].map(text)};"#,
@@ -2807,6 +3440,7 @@ fn script(step: Step) -> Option<String> {
     };
     Some(format!(r#"(() => {{ try {{
         if (document.querySelector('.preview-banner, .fatal-error, #main-content > .notice-danger, .native-save-panel .notice-danger')) return {{state:'error'}};
+        const projectName = '{project_name}';
         const text = e => {{ if (!e) throw 0; const t=e.textContent; if (typeof t!=='string' || t.length>4096) throw 0; return t; }};
         const visible = e => {{ const r=e.getBoundingClientRect(), s=getComputedStyle(e); return e.isConnected && r.width>0 && r.height>0 && s.display!=='none' && s.visibility==='visible'; }};
         const selected = label => [...document.querySelectorAll('nav[aria-label="Workspace navigation"] button[aria-current="page"]')].some(b => b.getAttribute('aria-label')===label);
@@ -3017,6 +3651,7 @@ pub(crate) fn main() -> std::process::ExitCode {
         Some(value) if value == OsStr::new("positive") => Some(Case::Positive),
         Some(value) if value == OsStr::new("quit-outstanding") => Some(Case::Outstanding),
         Some(value) if value == OsStr::new("project-paths") => Some(Case::ProjectPaths),
+        Some(value) if value == OsStr::new("workflow-apply") => Some(Case::WorkflowApply),
         _ => None,
     };
     let Some(case) = case.filter(|_| args.next().is_none() && route()) else {
@@ -3053,6 +3688,12 @@ pub(crate) fn main() -> std::process::ExitCode {
         crate::asset_session::assert_project_path_document_contracts();
         crate::bridge::assert_project_path_availability_contract();
     }
+    if case == Case::WorkflowApply {
+        crate::asset_session::assert_project_selection_gate_contract();
+        crate::runtime::assert_installed_workflow_profile_contract();
+        crate::installed_runtime::assert_installed_workflow_slots_contract();
+        crate::edit_owner::assert_installed_workflow_owner_contract();
+    }
     // Routing DATA is not native admission. The ordinary builder constructs
     // DesktopBridge::new / RuntimeConfig::packaged and owes every real check.
     let returned = super::run_builder(super::builder().manage(q.clone()));
@@ -3065,10 +3706,16 @@ pub(crate) fn main() -> std::process::ExitCode {
         Case::Positive => b"MRK_INSTALLED_SHELL_OBSERVATION=positive-verified\n",
         Case::Outstanding => b"MRK_INSTALLED_SHELL_OBSERVATION=quit-outstanding-verified\n",
         Case::ProjectPaths => b"MRK_INSTALLED_SHELL_OBSERVATION=project-paths-verified\n",
+        Case::WorkflowApply => b"MRK_INSTALLED_SHELL_OBSERVATION=workflow-apply-verified\n",
     };
     let mut stdout = std::io::stdout().lock();
     if stdout.write_all(b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n")
         .and_then(|_| {
+            if case == Case::WorkflowApply {
+                let report = q.workflow_report().ok_or_else(|| std::io::Error::other("workflow receipt unavailable"))?;
+                stdout.write_all(b"MRK_INSTALLED_SHELL_WORKFLOW_APPLY=")?;
+                stdout.write_all(&report)?; return stdout.write_all(b"\n");
+            }
             if case == Case::ProjectPaths {
                 let report = q.paths_report().ok_or_else(|| std::io::Error::other("project paths receipt unavailable"))?;
                 stdout.write_all(b"MRK_INSTALLED_SHELL_PROJECT_PATHS=")?;

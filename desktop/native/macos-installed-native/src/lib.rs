@@ -176,7 +176,7 @@ impl Panel {
 // The integration target's cfg(test) does not reach this dependency. Explicit
 // nondefault feature forwarding selects BOTH this Rust seam and the C controls.
 #[cfg(feature = "installed-observation")]
-pub use observation::{PanelAction, PanelObservation};
+pub use observation::{PanelAction, PanelObservation, installed_observation_flags_data_check};
 #[cfg(feature = "installed-observation")]
 mod observation {
     use super::*;
@@ -195,6 +195,11 @@ mod observation {
         pub kind: PanelKind,
         pub started: bool,
         pub attached: bool,
+        pub parent_present: bool,
+        pub panel_present: bool,
+        pub parent_references_panel: Option<bool>,
+        pub panel_references_parent: Option<bool>,
+        pub panel_visible: Option<bool>,
         pub directory_bound: bool,
         pub directory_returned: bool,
         pub directory_ready: bool,
@@ -213,6 +218,20 @@ mod observation {
             response: *mut c_int, path: *mut u8, capacity: usize) -> c_int;
         fn mrk_panel_observe_action(panel: *mut c_void, action: c_int, directory: *const c_char) -> c_int;
     }
+    fn observation_flags_valid(flags: u32) -> bool {
+        let both_present = flags & 0x3000 == 0x3000;
+        flags & !0x1ffff == 0 && (flags & 2 != 0) == (flags & 0x1f000 == 0x1f000)
+            && (both_present || flags & 0xc000 == 0)
+            && (flags & 0x2000 != 0 || flags & 0x10000 == 0)
+    }
+    /// Pure checks called by the existing instrumented observer entry, not a
+    /// native query or a separate test executable/qualification route.
+    pub fn installed_observation_flags_data_check() -> bool {
+        [0, 0x1000, 0x2000, 0x12000, 0x3000, 0xf000, 0x1f002, 0x1ffff]
+            .into_iter().all(observation_flags_valid)
+            && [2, 0x4000, 0x8000, 0x10000, 0x14000, 0x1f000, 0x20000, u32::MAX]
+                .into_iter().all(|flags| !observation_flags_valid(flags))
+    }
     impl Panel {
         pub fn installed_observation(&mut self) -> io::Result<PanelObservation> {
             self.usable()?;
@@ -225,11 +244,16 @@ mod observation {
             let parsed = (|| {
                 let kind = match kind { 1 => PanelKind::Project, 2 => PanelKind::Quit,
                     _ => return Err(io::Error::from(io::ErrorKind::InvalidData)) };
-                if flags & !0xfff != 0 { return Err(io::ErrorKind::InvalidData.into()); }
+                if !observation_flags_valid(flags) { return Err(io::ErrorKind::InvalidData.into()); }
+                let parent_present = flags & 0x1000 != 0; let panel_present = flags & 0x2000 != 0;
                 let end = path.iter().position(|byte| *byte == 0).ok_or(io::ErrorKind::InvalidData)?;
                 let selected = if end == 0 { None } else { std::str::from_utf8(&path[..end]).ok().map(PathBuf::from) };
                 let response = if flags & 128 != 0 { Some(panel_response(response)?) } else { None };
                 Ok(PanelObservation { kind, started: flags & 1 != 0, attached: flags & 2 != 0,
+                    parent_present, panel_present,
+                    parent_references_panel: (parent_present && panel_present).then_some(flags & 0x4000 != 0),
+                    panel_references_parent: (parent_present && panel_present).then_some(flags & 0x8000 != 0),
+                    panel_visible: panel_present.then_some(flags & 0x10000 != 0),
                     directory_bound: flags & 4 != 0, directory_returned: flags & 8 != 0,
                     directory_ready: flags & 16 != 0, action_attempted: flags & 32 != 0,
                     action_returned: flags & 64 != 0, callback_returned: flags & 256 != 0,
