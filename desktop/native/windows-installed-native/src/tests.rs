@@ -1362,7 +1362,7 @@ fn stream(name: &str) -> Vec<u8> {
 fn stream_and_component_refusals_cannot_be_treated_as_absence() -> Result<()> {
     {
         use qualification_result::complete_fixture_write;
-        use qualification_fixture::{roster,number,Wire,PAYLOAD_NAMES,INVOCATION_HEADER,INVOCATION_FIELDS};
+        use qualification_fixture::{payload_path,roster,number,Wire,PAYLOAD_NAMES,INVOCATION_HEADER,INVOCATION_FIELDS};
         for bytes in [65536usize,65537,128<<20] {
             assert!(complete_fixture_write(true,bytes as u32,bytes,true));
             assert!(!complete_fixture_write(true,(bytes-1) as u32,bytes,true));
@@ -1374,6 +1374,17 @@ fn stream_and_component_refusals_cannot_be_treated_as_absence() -> Result<()> {
             .map(|name|format!("file={name}|37|{}\n","1".repeat(64))).collect::<String>();
         let rows=roster(raw.as_bytes())?;assert_eq!(rows.len(),47);
         assert_eq!(rows.iter().map(|p|p.path.as_str()).collect::<Vec<_>>(),PAYLOAD_NAMES.to_vec());
+        let base=qualification_result::fixed_path(r"C:\fixture\runtime")?;
+        for name in PAYLOAD_NAMES {
+            let path=payload_path(&base,name)?;
+            let expected=format!(r"C:\fixture\runtime\{}",name.replace('/',"\\"));
+            assert_eq!(path.to_str(),Some(expected.as_str()));
+            assert_eq!(qualification_result::fixed_path(&expected)?,path);
+        }
+        for wrong in ["", "core.zip/", "extra.py", "../core.zip", "python/../core.zip",
+            "python/Python.exe", "python//python.exe", r"python\python.exe", r"C:\python.exe"] {
+            assert_eq!(payload_path(&base,wrong),Err(Error::Unsafe));
+        }
         for wrong in [raw.replacen("android_build_bootstrap.py","../android_build_bootstrap.py",1),
             raw.replacen("python/python.exe","python/Python.exe",1),
             raw.replacen("|37|","|037|",1),raw.replacen("|37|","|0|",1),

@@ -352,7 +352,7 @@ pub(super) fn precheck(raw: &[u8], root: &Path) -> Result<Wire> {
     for (role, name, ceiling) in [("app", "mobile_release_desktop-", APP_ARTIFACT_LIMIT),
                                 ("owner", "mrk_windows_installed_native-", PAYLOAD_LIMIT)] {
         let path = fixed_path(value.get(&format!("{role}Artifact"))?)?;
-        need(path.parent() == Some(root.join("target/x86_64-pc-windows-msvc/debug/deps").as_path()))?;
+        need(path.parent() == Some(fixed_directories(root)[3].1.as_path()))?;
         let leaf = path.file_name().and_then(|s| s.to_str()).ok_or(Error::Unsafe)?;
         need(leaf.strip_prefix(name).and_then(|s| s.strip_suffix(".exe")).is_some_and(|s| is_hex(s,16)))?;
         original_epoch(value.get(&format!("{role}ArtifactIdentity"))?,value.get(&format!("{role}ArtifactIdentity"))?)?;
@@ -390,6 +390,14 @@ pub(super) fn roster(raw: &[u8]) -> Result<Vec<Payload>> {
         result.push(Payload { path: expected.to_owned(), bytes: bytes as usize, sha: columns[2].to_owned() });
     }
     Ok(result)
+}
+// Wire roster names use '/', but exact DOS-name checks require native spelling.
+// Only the closed roster can contribute components to an already-admitted base.
+pub(super) fn payload_path(base: &Path, name: &str) -> Result<PathBuf> {
+    need(PAYLOAD_NAMES.contains(&name))?;
+    let mut path = base.to_path_buf();
+    for component in name.split('/') { path.push(component); }
+    Ok(path)
 }
 pub(super) fn stamp_text(value: &Stamp) -> String {
     format!("{}:{}:{}:{}:{}:{}:{}:{}:{}", value.volume, hex(&value.id), value.creation,
@@ -1118,7 +1126,7 @@ impl Fixture {
             && digest(&raw)?==pre.get("ownerArtifactSha256")?
             && self.snapshots.get(&artifact).ok_or(Error::State)?.wire()==pre.get("ownerArtifactIdentity")?)?;
         self.directory(&self.root.join("runtime"),0,None,None)?;
-        self.directory(&self.root.join("runtime/python"),0,None,None)?;
+        self.directory(&self.root.join("runtime").join("python"),0,None,None)?;
         Ok((pre,items,pre_raw,roster_raw))
     }
     fn publish(&mut self) -> Result<Wire> {
@@ -1144,11 +1152,11 @@ impl Fixture {
             self.directories.push(index);
         }
         for item in &items {
-            let source_path=self.root.join("runtime").join(&item.path);
+            let source_path=payload_path(&self.root.join("runtime"),&item.path)?;
             let (source,raw)=self.input(&source_path,PAYLOAD_LIMIT)?;
             self.source_readers+=1;
             need(raw.len()==item.bytes && digest(&raw)?==item.sha)?;
-            let destination=paths[3].join(&item.path);
+            let destination=payload_path(&paths[3],&item.path)?;
             let parent=if item.path.starts_with("python/") {self.directories[4]}else{self.directories[3]};
             self.recheck(parent)?;
             let writer=self.create_file(&destination)?;
@@ -1186,7 +1194,7 @@ impl Fixture {
         need(pair==(0,F::ERROR_ALREADY_EXISTS))?;
         for index in self.directories.clone() {self.recheck(index)?;}
         for (item,object) in items.iter().zip(self.objects[5..].to_vec()) {
-            let (reader,raw)=self.input(&paths[3].join(&item.path),PAYLOAD_LIMIT)?;self.postcheck_readers+=1;
+            let (reader,raw)=self.input(&payload_path(&paths[3],&item.path)?,PAYLOAD_LIMIT)?;self.postcheck_readers+=1;
             let (stamp,security)=self.checked(reader,Some(AuthorityScope::ImmutableVersion),Some(true))?;
             need(stamp==object.sealed && digest(&security)?==object.sealed_security
                 && raw.len()==item.bytes && digest(&raw)?==item.sha)?;
@@ -1305,7 +1313,7 @@ impl Fixture {
         // Verify all47 files and all five exact directories BEFORE the first
         // disposition. A second post-run original is acquired for each deletion.
         for (item,object) in items.iter().zip(self.objects[5..].to_vec()) {
-            let (index,raw)=self.input(&paths[3].join(&item.path),PAYLOAD_LIMIT)?;
+            let (index,raw)=self.input(&payload_path(&paths[3],&item.path)?,PAYLOAD_LIMIT)?;
             let (stamp,security)=self.checked(index,Some(AuthorityScope::ImmutableVersion),Some(true))?;
             need(stamp==object.sealed && digest(&security)?==object.sealed_security
                 && raw.len()==item.bytes && digest(&raw)?==item.sha)?;
@@ -1313,7 +1321,7 @@ impl Fixture {
         }
         self.verify_all_directories()?;
         for (item,object) in items.iter().zip(self.objects[5..].to_vec()) {
-            let path=paths[3].join(&item.path);
+            let path=payload_path(&paths[3],&item.path)?;
             let index=self.open(&path,false,FS::FILE_GENERIC_READ|FS::DELETE)?;
             let (stamp,security)=self.checked(index,Some(AuthorityScope::ImmutableVersion),Some(true))?;
             need(stamp==object.sealed && digest(&security)?==object.sealed_security)?;
