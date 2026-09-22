@@ -895,7 +895,8 @@ fn token_context_pointer_bounds_and_enableable_authority_are_checked() -> Result
     {
         // The fixture's private elevated route never manufactures ordinary
         // TokenFacts, clears refusal, or enables either public discovery route.
-        assert!(!ordinary_owner::FULLWALK_PREREQUISITES_REVIEWED);
+        // Review admits synthetic qualification attempts, not ordinary/product authority.
+        assert!(ordinary_owner::FULLWALK_PREREQUISITES_REVIEWED);
         let mut elevated=Inert::new();
         let token=elevated.book.reserve(Kind::ProcessToken,None,"token","token".to_owned())?;
         enter_inert(&mut elevated.book,Call::ProcessToken(token.index),null_mut())?;
@@ -1194,7 +1195,8 @@ fn metadata_and_directory_keep_the_full_identity_not_a_low_half() -> Result<()> 
     // Fixed fullwalk request/result DATA reuses this existing inert control;
     // no writer, OriginalFile, account, token query or process is entered.
     use qualification_result::FullwalkRequest;
-    assert!(!ordinary_owner::FULLWALK_PREREQUISITES_REVIEWED);
+    // Reviewed prerequisites admit this synthetic attempt, not runtime enablement.
+    assert!(ordinary_owner::FULLWALK_PREREQUISITES_REVIEWED);
     let fullwalk_raw = fullwalk_request();
     let fullwalk = FullwalkRequest::parse(fullwalk_raw.as_bytes())?;
     fullwalk.at_root(std::path::Path::new(r"C:\owned"))?;

@@ -6865,6 +6865,124 @@ class WindowsReaderGateTests(unittest.TestCase):
                 "sourceTree": "2" * 40, "runId": "123456", "attempt": 1,
                 "imageOS": "win25-vs2026", "imageVersion": "20260920.1.0", "git": "/fixed-git"}
 
+    @staticmethod
+    def compile_failure_data():
+        native = helper.WINDOWS_INSTALLED_CRATE + "/src/qualification_fixture.rs"
+        names = sorted((native, helper.WINDOWS_INSTALLED_CRATE + "/src/lib.rs", helper.WINDOWS_INSTALLED_APP + "/src/lib.rs"))
+        context = {"source": r"C:\private-checkout", "root": "/private-run",
+            "sourceFiles": [{"path": name, "size": 1, "sha256": "a" * 64} for name in names]}
+        private = "PRIVATE-COMPILER-TEXT"
+        row = {"reason": "compiler-message", "package_id": private,
+            "target": {"src_path": context["source"] + "/" + helper.WINDOWS_INSTALLED_CRATE + "/src/lib.rs"},
+            "message": {"level": "error", "message": private, "rendered": private,
+                "code": {"code": "E0499", "explanation": private}, "children": [{"message": private}],
+                "spans": [{"is_primary": True, "file_name": native, "line_start": 607,
+                           "text": [{"text": private}], "label": private}]}}
+        return context, row
+
+    def test_windows_compile_diagnostic_projects_only_inventory_names_codes_and_primary_lines(self):
+        context, original = self.compile_failure_data()
+        for stage, name, crate in (("standalone", helper.WINDOWS_INSTALLED_CRATE + "/src/qualification_fixture.rs", helper.WINDOWS_INSTALLED_CRATE),
+                                   ("app", helper.WINDOWS_INSTALLED_APP + "/src/lib.rs", helper.WINDOWS_INSTALLED_APP)):
+            absolute = context["source"].replace("\\", "/") + "/" + name
+            spellings = (name, name.replace("/", "\\"), absolute, absolute.replace("/", "\\"), name[len(crate) + 1:])
+            for spelling in spellings:
+                row = deepcopy(original)
+                row["target"]["src_path"] = context["source"] + "/" + crate + "/src/lib.rs"
+                row["message"]["spans"][0]["file_name"] = spelling
+                row["message"]["spans"][:0] = [
+                    {"is_primary": False, "file_name": name, "line_start": 1},
+                    {"is_primary": True, "file_name": "/private/unadmitted.rs", "line_start": 2}]
+                warning = deepcopy(row); warning["message"]["level"] = "warning"
+                raw = b"\n".join(helper.canonical_json(value) for value in (warning, row, {"reason": "build-finished", "success": False})) + b"\n"
+                with self.subTest(stage=stage, spelling=spelling):
+                    result = helper.windows_installed_compile_failure_data(raw, context, stage)
+                    self.assertEqual(result, {"stage": stage, "category": "admitted-errors", "diagnosticOnly": True,
+                        "errors": [{"code": "E0499", "path": name, "line": 607}]})
+                    public = helper.canonical_json(result)
+                    for private in (b"PRIVATE-COMPILER-TEXT", b"private-checkout", b"private-run", b"unadmitted", b"rendered", b"package_id"):
+                        self.assertNotIn(private, public)
+
+    def test_windows_compile_diagnostic_rejects_unknown_traversal_ambiguity_and_invalid_coordinates(self):
+        context, original = self.compile_failure_data()
+        native = original["message"]["spans"][0]["file_name"]
+        for spelling in ("qualification_fixture.rs", "./" + native, native + "/../lib.rs", native.replace("/src/", "//src/"),
+                         native.upper(), "C:/foreign/" + native, "../src/lib.rs", "/PRIVATE-COMPILER-TEXT.rs", "Cargo.toml"):
+            row = deepcopy(original); row["message"]["spans"][0]["file_name"] = spelling
+            result = helper.windows_installed_compile_failure_data(helper.canonical_json(row), context, "standalone")
+            self.assertEqual(result["errors"], [{"code": "E0499", "path": None, "line": None}])
+        ambiguous = deepcopy(context)
+        ambiguous["sourceFiles"].append({"path": "src/lib.rs", "size": 1, "sha256": "b" * 64})
+        ambiguous["sourceFiles"].sort(key=lambda row: row["path"])
+        row = deepcopy(original); row["message"]["spans"][0]["file_name"] = "src/lib.rs"
+        self.assertEqual(helper.windows_installed_compile_failure_data(helper.canonical_json(row), ambiguous, "standalone")["errors"],
+                         [{"code": "E0499", "path": None, "line": None}])
+        for target in ("src/lib.rs", "/foreign/src/lib.rs", context["source"] + "/" + helper.WINDOWS_INSTALLED_APP + "/src/lib.rs"):
+            row = deepcopy(original); row["message"]["spans"][0]["file_name"] = "src/lib.rs"
+            row["target"]["src_path"] = target
+            self.assertEqual(helper.windows_installed_compile_failure_data(helper.canonical_json(row), context, "standalone")["errors"],
+                             [{"code": "E0499", "path": None, "line": None}])
+        for coordinate in (True, 0, -1, 1000001, "607", None):
+            row = deepcopy(original); row["message"]["spans"][0]["line_start"] = coordinate
+            result = helper.windows_installed_compile_failure_data(helper.canonical_json(row), context, "standalone")
+            self.assertEqual(result["errors"], [{"code": "E0499", "path": native, "line": None}])
+        for code in (None, True, 499, "E499", "e0499", "E04990", "E0499\nPRIVATE-COMPILER-TEXT", {"nested": "E0499"}):
+            row = deepcopy(original); row["message"]["code"] = {"code": code}
+            result = helper.windows_installed_compile_failure_data(helper.canonical_json(row), context, "standalone")
+            self.assertEqual(result["errors"], [{"code": None, "path": native, "line": 607}])
+        row["message"]["spans"][0]["is_primary"] = 1  # Truthy is not a primary-span Boolean.
+        result = helper.windows_installed_compile_failure_data(helper.canonical_json(row), context, "standalone")
+        self.assertEqual((result["category"], result["errors"]), ("no-admitted-error", []))
+        context["sourceFiles"].append(context["sourceFiles"][0])
+        self.assertEqual(helper.windows_installed_compile_failure_data(helper.canonical_json(original), context, "standalone")["category"], "unavailable")
+
+    def test_windows_compile_diagnostic_bounds_and_malformed_input_never_publish_partial_data(self):
+        context, row = self.compile_failure_data()
+        raw = helper.canonical_json(row) + b"\n"
+        result = helper.windows_installed_compile_failure_data(raw * 9, context, "standalone")
+        self.assertEqual(len(result["errors"]), 8)
+        longest = "a" * 509 + ".rs"
+        long_context = {**context, "sourceFiles": [{"path": longest, "size": 1, "sha256": "a" * 64}]}
+        long_row = deepcopy(row); long_row["message"]["spans"][0]["file_name"] = longest
+        result = helper.windows_installed_compile_failure_data((helper.canonical_json(long_row) + b"\n") * 9, long_context, "app")
+        self.assertEqual([item["path"] for item in result["errors"]], [longest] * 8)
+        self.assertLessEqual(len(helper.canonical_json(result)) + len(b"MRK_WINDOWS_COMPILE_FAILURE_DATA=\n"), 8192)
+        long_context["sourceFiles"][0]["path"] += "x.rs"
+        long_row["message"]["spans"][0]["file_name"] = long_context["sourceFiles"][0]["path"]
+        self.assertIsNone(helper.windows_installed_compile_failure_data(helper.canonical_json(long_row), long_context, "app")["errors"][0]["path"])
+        too_many_spans = deepcopy(row); too_many_spans["message"]["spans"] *= 129
+        malformed = (None, b"", b"\xff", b"{", b"{}", b'{"reason":"compiler-message","reason":"compiler-message"}',
+                     b'{"reason":"compiler-message","message":null}', b" " * ((16 << 20) + 1),
+                     b" " * ((2 << 20) + 1), b'{"reason":"compiler-artifact"}\n' * 4097,
+                     helper.canonical_json(too_many_spans), raw * 8 + b"PRIVATE-COMPILER-TEXT")
+        for value in malformed:
+            result = helper.windows_installed_compile_failure_data(value, context, "standalone")
+            self.assertEqual(result, {"stage": "standalone", "category": "unavailable", "diagnosticOnly": True, "errors": []})
+        row["message"]["level"] = "warning"
+        self.assertEqual(helper.windows_installed_compile_failure_data(helper.canonical_json(row), context, "app")["category"], "no-admitted-error")
+        with self.assertRaises(helper.CheckFailure): helper.windows_installed_compile_failure_data(raw, context, "PRIVATE-COMPILER-TEXT")
+
+    def test_windows_compile_diagnostic_emitter_reads_only_fixed_stream_and_never_stderr(self):
+        context, row = self.compile_failure_data()
+        for stage, filename in (("standalone", "compile-messages.jsonl"), ("app", "app-compile-messages.jsonl")):
+            for missing in (False, True):
+                output = io.StringIO()
+                with patch.object(helper, "windows_installed_bytes",
+                        side_effect=OSError("PRIVATE-COMPILER-TEXT") if missing else None,
+                        return_value=helper.canonical_json(row)) as read, \
+                     patch.object(helper, "run") as command, redirect_stdout(output):
+                    helper.windows_installed_compile_failure(context, stage)
+                read.assert_called_once_with(Path(context["root"]) / filename, 16 << 20)
+                command.assert_not_called()
+                marker = output.getvalue()
+                self.assertLessEqual(len(marker.encode("ascii")), 8192)
+                self.assertEqual(marker.count("\n"), 1)
+                self.assertTrue(marker.startswith("MRK_WINDOWS_COMPILE_FAILURE_DATA="))
+                self.assertNotIn("PRIVATE-COMPILER-TEXT", marker)
+                result = json.loads(marker.split("=", 1)[1])
+                self.assertEqual((result["stage"], result["diagnosticOnly"], result["category"]),
+                                 (stage, True, "unavailable" if missing else "admitted-errors"))
+
     @classmethod
     def graph_data(cls):
         context = cls.context()
@@ -8340,8 +8458,10 @@ class WindowsReaderGateTests(unittest.TestCase):
              patch.object(helper, "tools", return_value=("/inert-compiler/cargo.exe", "/inert-compiler/rustc.exe")), \
              patch.object(helper.Path, "open", autospec=True, side_effect=open_output), \
              patch.object(helper.time, "monotonic", return_value=100.0), \
+             patch.object(helper, "windows_installed_compile_failure") as diagnostic, \
              patch.object(helper, "write_json") as written, patch.object(helper, "run", return_value=None) as run:
             helper.windows_installed_phase("compile", helper.WINDOWS_INSTALLED_SCOPE)
+        diagnostic.assert_not_called()
         self.assertEqual(len(run.call_args_list), 2)
         self.assertEqual([call.args[0] for call in run.call_args_list], [
             helper.windows_fullwalk_native_argv("/inert-compiler/cargo.exe", context),
@@ -8366,6 +8486,65 @@ class WindowsReaderGateTests(unittest.TestCase):
         self.assertLess(phase.index("environment.update(MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"), phase.index('check="windows-installed-test-compile-only"'))
         self.assertLess(phase.index('check="windows-installed-test-compile-only"'), phase.index('check="windows-installed-app-test-compile-only"'))
         self.assertLess(phase.index('windows_fullwalk_acquire(context, environment, deadline)'), phase.index('check="windows-installed-locked-metadata"'))
+
+    def test_windows_compile_failure_diagnostic_preserves_original_errors_and_closed_stream_boundary(self):
+        data = self.fullwalk_data()
+        files, packages, graph = self.fullwalk_originals(data)
+        context = {**data["context"], "sdk": {"version": helper.WINDOWS_SDK_VERSION, "headers": []}}
+        root = Path(context["root"])
+        for stage, prefix, check in (("standalone", "", "windows-installed-test-compile-only"),
+                                     ("app", "app-", "windows-installed-app-test-compile-only")):
+            for edge in ("compile", "diagnostic-error", "diagnostic-interrupt", "compile-interrupt", "open", "deadline", "close", "unclosed"):
+                original = helper.CheckFailure("Fixed original compile failure")
+                boundary = KeyboardInterrupt() if edge == "compile-interrupt" else helper.CheckFailure("Fixed stream/deadline failure")
+                expected = boundary if edge in {"compile-interrupt", "open", "deadline", "close"} else original
+                streams = {}
+                class Output:
+                    def __init__(self, name): self.name, self.closed = name, False
+                    def __enter__(self): return self
+                    def __exit__(self, *_):
+                        self.closed = not (edge == "unclosed" and self.name == prefix + "compile.stderr")
+                        if edge == "close" and self.name == prefix + "compile.stderr": raise boundary
+                def open_output(path, mode, **_):
+                    self.assertEqual((path.parent, mode), (root, "x"))
+                    self.assertIn(path.name, ("compile-messages.jsonl", "compile.stderr", "app-compile-messages.jsonl", "app-compile.stderr"))
+                    if edge == "open" and path.name == prefix + "compile.stderr": raise boundary
+                    self.assertNotIn(path.name, streams)
+                    streams[path.name] = Output(path.name)
+                    return streams[path.name]
+                def run_compile(_, **kw):
+                    self.assertFalse(kw["output"].closed or kw["diagnostics"].closed)
+                    if kw["check"] == check: raise expected if edge == "compile-interrupt" else original
+                def remaining(*_):
+                    if edge == "deadline" and prefix + "compile.stderr" in streams: raise boundary
+                    return 600
+                def emit(received, selected):
+                    self.assertIs(received, context); self.assertEqual(selected, stage)
+                    self.assertTrue(all(stream.closed for stream in streams.values()))
+                    if edge == "diagnostic-error": raise OSError("PRIVATE-COMPILER-TEXT")
+                    if edge == "diagnostic-interrupt": raise KeyboardInterrupt()
+                with self.subTest(stage=stage, edge=edge), self.fullwalk_edges(data, files, packages, graph), \
+                     patch.object(helper, "windows_installed_context", return_value=context), \
+                     patch.object(helper, "source_unchanged"), patch.object(helper, "windows_installed_inputs"), \
+                     patch.object(helper, "clean_environment", return_value={}), \
+                     patch.object(helper, "windows_sdk_root", return_value=Path("/inert-sdk")), \
+                     patch.object(helper, "fixed_file_inventory", return_value=[]), \
+                     patch.object(helper, "tools", return_value=("/inert-compiler/cargo.exe", "/inert-compiler/rustc.exe")), \
+                     patch.object(helper.Path, "open", autospec=True, side_effect=open_output), \
+                     patch.object(helper.time, "monotonic", return_value=100.0), \
+                     patch.object(helper, "windows_installed_remaining", side_effect=remaining), \
+                     patch.object(helper, "windows_installed_compile_failure", side_effect=emit) as diagnostic, \
+                     patch.object(helper, "write_json") as written, patch.object(helper, "run", side_effect=run_compile) as run:
+                    with self.assertRaises(type(expected)) as caught: helper.windows_installed_phase("compile", helper.WINDOWS_INSTALLED_SCOPE)
+                    self.assertIs(caught.exception, expected)
+                    if edge in {"compile", "diagnostic-error", "diagnostic-interrupt"}:
+                        diagnostic.assert_called_once_with(context, stage)
+                        self.assertIsNone(original.__context__)  # Private diagnostic errors do not replace or chain onto it.
+                    else: diagnostic.assert_not_called()
+                    self.assertEqual(len(run.call_args_list), (1 if stage == "standalone" else 2) - (edge in {"open", "deadline"}))
+                    outputs = {call.args[0].name for call in written.call_args_list}
+                    self.assertEqual(outputs, {"compile-started.json"} | ({"compiled-test.json"} if stage == "app" else set()))
+                if edge != "unclosed": self.assertTrue(all(stream.closed for stream in streams.values()))
 
     def test_windows_fullwalk_app_original_role_keeps_512mib_and_raw_same_api_state_narrow(self):
         raw = b"exe"

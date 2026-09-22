@@ -604,7 +604,8 @@ pub(super) fn admit(
         let owned = owned_file_traced(files,&root.join(name),false,FS::FILE_GENERIC_READ,trace)?;
         let before = files[owned].stamp_traced(trace)?;
         raw.push(files[owned].read_traced(limit,trace)?);
-        trace.need(files[owned].stamp_traced(trace)? == before,InputCheck::ArtifactStable)?;
+        let after = files[owned].stamp_traced(trace)?;
+        trace.need(after == before,InputCheck::ArtifactStable)?;
         originals.push((owned,before));
     }
     let envelope = Wire::parse(&raw[0],PREREQUISITE_HEADER,&PREREQUISITE_FIELDS,TEXT_LIMIT)?;

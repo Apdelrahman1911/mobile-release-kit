@@ -10084,6 +10084,103 @@ def windows_installed_record(path: Path, limit: int) -> dict:
     return {"size": len(value), "sha256": hashlib.sha256(value).hexdigest()}
 
 
+def windows_installed_compile_failure_data(raw: bytes | None, context: dict, stage: str) -> dict:
+    """Closed diagnostic DATA, never compiler success, finality or retention authority."""
+    require(type(stage) is str and stage in {"standalone", "app"}, "Unknown Windows compile diagnostic stage")
+    unavailable = {"stage": stage, "category": "unavailable", "diagnosticOnly": True, "errors": []}
+    try:
+        require(type(raw) is bytes and 0 < len(raw) <= 16 << 20, "Windows compile diagnostic exceeds its bound")
+        inventory = validate_environment_inventory(context["sourceFiles"], maximum=64 << 20)
+        source = context["source"]
+        require(type(source) is str and 0 < len(source) <= 16384, "Windows compile source spelling exceeds its bound")
+        source = source.replace("\\", "/")
+        require(re.fullmatch(r"(?:[A-Za-z]:)?/[^\x00-\x1f\x7f]+", source) is not None
+                and not any(part in {"", ".", ".."} for part in source.split("/")[1:]),
+                "Windows compile source spelling differs")
+        crate = WINDOWS_INSTALLED_CRATE if stage == "standalone" else WINDOWS_INSTALLED_APP
+        spellings: dict[str, str | None] = {}
+        crate_spellings, crate_targets = set(), set()
+        for row in inventory:
+            name = row["path"]
+            if not name.endswith(".rs") or len(name) > 512:
+                continue
+            names = [name, source + "/" + name]
+            if name.startswith(crate + "/"):
+                names.append(name[len(crate) + 1:])
+                crate_spellings.add(names[-1])
+                crate_targets.add(source + "/" + name)
+            for spelling in names:
+                # Ambiguous repository/crate-relative spellings admit neither
+                # source. Only separators vary; no resolve, case/suffix guessing
+                # or traversal normalization is permitted.
+                spellings[spelling] = name if spelling not in spellings or spellings[spelling] == name else None
+        lines = raw.split(b"\n", 4096)
+        if lines[-1] == b"":
+            lines.pop()
+        require(0 < len(lines) <= 4096, "Windows compile diagnostic message count exceeds its bound")
+        errors = []
+        for line in lines:
+            row = bounded_json(line, 2 << 20)
+            require(type(row) is dict and row.get("reason") in {
+                "compiler-artifact", "compiler-message", "build-script-executed", "build-finished"},
+                "Windows compile diagnostic framing differs")
+            if row["reason"] != "compiler-message":
+                continue
+            message = row.get("message")
+            require(type(message) is dict, "Windows compile diagnostic message differs")
+            if message.get("level") != "error":
+                continue
+            code = message.get("code")
+            code = code.get("code") if type(code) is dict else None
+            if type(code) is not str or re.fullmatch(r"E[0-9]{4}", code) is None:
+                code = None
+            spans = message.get("spans", [])
+            require(type(spans) is list and len(spans) <= 128, "Windows compile diagnostic span count exceeds its bound")
+            target = row.get("target")
+            target_source = target.get("src_path") if type(target) is dict else None
+            from_crate = (type(target_source) is str and len(target_source) <= 16384 + 513
+                          and target_source.replace("\\", "/") in crate_targets)
+            path, number = None, None
+            for span in spans:
+                if type(span) is not dict or span.get("is_primary") is not True:
+                    continue
+                name = span.get("file_name")
+                if type(name) is not str or len(name) > 16384 + 513:
+                    continue
+                spelling = name.replace("\\", "/")
+                # Dependency errors can also say src/lib.rs. Admit crate-relative
+                # names only for an exact admitted absolute target in this crate;
+                # do not recursively establish that origin from relative aliases.
+                if spelling in crate_spellings and not from_crate:
+                    continue
+                admitted = spellings.get(spelling)
+                if admitted is not None:
+                    path = admitted  # Inventory text, never compiler text.
+                    candidate = span.get("line_start")
+                    number = candidate if integer_between(candidate, 1, 1000000) else None
+                    break
+            if len(errors) < 8 and (code is not None or path is not None):
+                errors.append({"code": code, "path": path, "line": number})
+        return {**unavailable, "category": "admitted-errors" if errors else "no-admitted-error", "errors": errors}
+    except (CheckFailure, KeyError, TypeError, OverflowError):
+        # Malformed/over-bound DATA never exports a partial projection or raw
+        # exception. In particular, rendered/text/children/package IDs stay private.
+        return unavailable
+
+
+def windows_installed_compile_failure(context: dict, stage: str) -> None:
+    require(type(stage) is str and stage in {"standalone", "app"}, "Unknown Windows compile diagnostic stage")
+    filename = "compile-messages.jsonl" if stage == "standalone" else "app-compile-messages.jsonl"
+    try:
+        raw = windows_installed_bytes(Path(context["root"]) / filename, 16 << 20)
+    except Exception:
+        raw = None
+    value = windows_installed_compile_failure_data(raw, context, stage)
+    marker = b"MRK_WINDOWS_COMPILE_FAILURE_DATA=" + canonical_json(value) + b"\n"
+    require(len(marker) <= 8192, "Windows compile diagnostic marker exceeds its bound")
+    print(marker.decode("ascii"), end="", flush=True)
+
+
 def windows_installed_directories(path: Path) -> None:
     require(path.is_absolute() and not any(part in {".", ".."} for part in path.parts), "Windows native root is not absolute")
     for directory in (path, *path.parents):
@@ -11311,15 +11408,45 @@ def windows_installed_phase(name: str, scope: str) -> None:
             "rustc": {"path": rustc, **windows_installed_record(Path(rustc), 128 << 20)}}, "Windows native pinned compiler changed")
         argv = [cargo, "test", "--locked", "--offline", "--jobs", "1", "--no-default-features", "--target", TARGETS["windows"],
                 "--manifest-path", str(manifest), "--target-dir", str(root / "target"), "--lib", "--no-run", "--message-format=json"]
-        with (root / "compile-messages.jsonl").open("x", encoding="utf-8", newline="\n") as output, (root / "compile.stderr").open("x", encoding="utf-8") as diagnostics:
-            run(argv, check="windows-installed-test-compile-only", cwd=root, env=environment,
-                timeout=windows_installed_remaining(deadline, 600), output=output, diagnostics=diagnostics)
+        compile_failure = None
+        try:
+            with (root / "compile-messages.jsonl").open("x", encoding="utf-8", newline="\n") as output, (root / "compile.stderr").open("x", encoding="utf-8") as diagnostics:
+                timeout = windows_installed_remaining(deadline, 600)
+                try:
+                    run(argv, check="windows-installed-test-compile-only", cwd=root, env=environment,
+                        timeout=timeout, output=output, diagnostics=diagnostics)
+                except CheckFailure as error:
+                    compile_failure = error
+                    raise
+        except CheckFailure as error:
+            try:
+                if error is compile_failure and output.closed and diagnostics.closed:
+                    windows_installed_compile_failure(context, "standalone")
+            except BaseException:
+                # A diagnostic cannot replace the ORIGINAL compile/close error,
+                # even if its own reader or stdout emission is interrupted.
+                pass
+            raise
         artifact = windows_installed_artifact(context)
         write_json(root / "compiled-test.json", artifact)
         app_argv = windows_installed_app_argv(cargo, context)
-        with (root / "app-compile-messages.jsonl").open("x", encoding="utf-8", newline="\n") as output, (root / "app-compile.stderr").open("x", encoding="utf-8") as diagnostics:
-            run(app_argv, check="windows-installed-app-test-compile-only", cwd=root, env=environment,
-                timeout=windows_installed_remaining(deadline, 600), output=output, diagnostics=diagnostics)
+        compile_failure = None
+        try:
+            with (root / "app-compile-messages.jsonl").open("x", encoding="utf-8", newline="\n") as output, (root / "app-compile.stderr").open("x", encoding="utf-8") as diagnostics:
+                timeout = windows_installed_remaining(deadline, 600)
+                try:
+                    run(app_argv, check="windows-installed-app-test-compile-only", cwd=root, env=environment,
+                        timeout=timeout, output=output, diagnostics=diagnostics)
+                except CheckFailure as error:
+                    compile_failure = error
+                    raise
+        except CheckFailure as error:
+            try:
+                if error is compile_failure and output.closed and diagnostics.closed:
+                    windows_installed_compile_failure(context, "app")
+            except BaseException:
+                pass  # Same failure-only, original-exception rule as above.
+            raise
         app_artifact = windows_installed_app_artifact(context)
         write_json(root / "app-compiled-test.json", app_artifact)
         facts = {"rust": RUST, "target": TARGETS["windows"], "compiledTest": artifact, "originalExitCode": 0,
