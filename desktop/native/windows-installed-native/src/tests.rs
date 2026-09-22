@@ -61,6 +61,14 @@ fn own_inert(book: &mut NativeBook, original: &Original, number: usize) -> Resul
 
 #[test]
 fn original_destinations_are_stable_registered_and_book_bound() -> Result<()> {
+    let mut owner = ordinary_owner::ProcessFacts::new();
+    assert!(!owner.passed() && !owner.returned);
+    assert_eq!(owner.begin_close(false), Err(Error::State));
+    assert_eq!(owner.begin_terminate(), Err(Error::State));
+    owner.begin()?;
+    assert_eq!((owner.process, owner.thread), (SlotState::Acquiring, SlotState::Acquiring));
+    assert_eq!(owner.begin(), Err(Error::State));
+    assert!(!owner.returned && !owner.passed()); // An unreturned create is not absence.
     // Same transition used by both native enumeration methods, with no native
     // invocation: cursor purpose and owned name may be selected only once.
     let mut mode = DirectoryMode::Unstarted;
@@ -112,6 +120,26 @@ fn original_destinations_are_stable_registered_and_book_bound() -> Result<()> {
 
 #[test]
 fn pending_and_lost_completion_keep_the_exact_arena_and_slots() -> Result<()> {
+    // Same absorbing native owner decisions; no clock/worker/API is called.
+    for timeout in [false, true] {
+        let mut owner = ordinary_owner::ProcessFacts::new(); owner.begin()?;
+        if timeout {
+            owner.creation(true, 0, (101, 102, 201, 202), false)?;
+            assert_eq!(owner.wait(F::WAIT_TIMEOUT, false), Err(Error::Unsafe));
+        } else {
+            assert_eq!(owner.creation(true, 0, (101, 102, 201, 202), true), Err(Error::Unsafe));
+        }
+        owner.begin_terminate()?;
+        assert_eq!(owner.begin_terminate(), Err(Error::State)); // At most one terminate.
+        owner.wait(F::WAIT_OBJECT_0, true)?; owner.exited(true, 0)?;
+        owner.begin_close(true)?; owner.closed(true, true)?;
+        owner.begin_close(false)?; owner.closed(false, true)?;
+        assert!(!owner.passed()); // Late success cannot clear a deadline/failure.
+    }
+    let mut pending = ordinary_owner::ProcessFacts::new(); pending.begin()?;
+    assert_eq!(pending.creation(false, F::ERROR_IO_PENDING, (0, 0, 0, 0), false), Err(Error::Unknown));
+    assert!(pending.unknown && !pending.passed());
+    assert_eq!(pending.begin_close(false), Err(Error::State));
     for (call, returned) in [
         (Call::Open(0), Returned::Nt(F::STATUS_PENDING)),
         (Call::ProcessToken(0), Returned::Boolean(0, F::ERROR_IO_PENDING)),
@@ -150,6 +178,38 @@ fn pending_and_lost_completion_keep_the_exact_arena_and_slots() -> Result<()> {
 
 #[test]
 fn acquisition_needs_a_definite_consistent_receipt() -> Result<()> {
+    use std::time::Duration;
+    // The actual next-effect gate is rechecked after an absence query returns,
+    // not only before that query or after account creation has already occurred.
+    for query_returned_seconds in [89, 90, 91] {
+        let mut deadline_latched = false; let mut account_additions = 0;
+        ordinary_owner::next_effect(Duration::from_secs(1), &mut deadline_latched)?;
+        if ordinary_owner::next_effect(Duration::from_secs(query_returned_seconds), &mut deadline_latched).is_ok() {
+            account_additions += 1;
+        }
+        assert_eq!(account_additions, if query_returned_seconds < 90 { 1 } else { 0 });
+        assert_eq!(deadline_latched, query_returned_seconds >= 90);
+        if deadline_latched {
+            assert_eq!(ordinary_owner::next_effect(Duration::ZERO, &mut deadline_latched), Err(Error::Unsafe));
+        }
+    }
+    for (ok, error, outputs, unknown) in [
+        (false, F::ERROR_ACCESS_DENIED, (0, 0, 0, 0), false),
+        (false, 0, (0, 0, 0, 0), true),
+        (false, F::ERROR_ACCESS_DENIED, (101, 0, 0, 0), true),
+        (true, 0, (0, 0, 0, 0), true),
+        (true, 0, (101, 0, 201, 202), true),
+        (true, 0, (101, 101, 201, 202), true),
+        (true, 0, (101, 102, 0, 202), true),
+        (true, 0, (101, 102, 201, 201), true),
+    ] {
+        let mut owner = ordinary_owner::ProcessFacts::new(); owner.begin()?;
+        assert_eq!(owner.creation(ok, error, outputs, false),
+            Err(if unknown { Error::Unknown } else { Error::Unavailable }));
+        assert_eq!(owner.unknown, unknown);
+        assert_eq!(owner.creation(true, 0, (101, 102, 201, 202), false), Err(Error::State));
+        assert!(!owner.passed());
+    }
     for (status, handle, io, information, no_handle) in [
         (F::STATUS_ACCESS_DENIED, null_mut(), F::STATUS_PENDING, usize::MAX, true),
         (F::STATUS_ACCESS_DENIED, 31usize as F::HANDLE, F::STATUS_PENDING, usize::MAX, false),
@@ -372,6 +432,40 @@ fn acquisition_needs_a_definite_consistent_receipt() -> Result<()> {
 
 #[test]
 fn close_retires_before_entry_and_failure_is_never_retried() -> Result<()> {
+    use std::time::Duration;
+    for closed in [false, true] {
+        let mut owner = ordinary_owner::ProcessFacts::new(); owner.begin()?;
+        owner.creation(true, 0, (101, 102, 201, 202), false)?;
+        assert_eq!(owner.exited(true, 0), Err(Error::State));
+        assert_eq!(owner.begin_close(false), Err(Error::State));
+        owner.wait(F::WAIT_OBJECT_0, false)?; owner.exited(true, 0)?;
+        let mut deadline_latched = false;
+        assert_eq!(ordinary_owner::next_effect(Duration::from_secs(90), &mut deadline_latched), Err(Error::Unsafe));
+        // Expiry refuses new effects, not the same original's once-only close.
+        owner.begin_close(true)?;
+        assert_eq!(owner.thread, SlotState::Closing);
+        assert_eq!(owner.closed(true, closed), if closed { Ok(()) } else { Err(Error::Unknown) });
+        assert_eq!(owner.begin_close(true), Err(Error::State));
+        assert_eq!(owner.closed(true, true), Err(Error::State));
+        owner.begin_close(false)?; owner.closed(false, true)?;
+        assert_eq!(owner.passed(), closed);
+        assert_eq!(owner.begin_close(false), Err(Error::State));
+        assert_eq!(ordinary_owner::next_effect(Duration::ZERO, &mut deadline_latched), Err(Error::Unsafe));
+        assert!(!(owner.passed() && !deadline_latched)); // Closed alone is not the owner's success gate.
+    }
+    // Already-settled originals do not authorize a late account deletion:
+    // retirement's same-SID/Users observations must return within the same clock.
+    for query_returned_seconds in [89, 90, 91] {
+        let mut deadline_latched = false; let mut deletions = 0;
+        ordinary_owner::next_effect(Duration::from_secs(1), &mut deadline_latched)?;
+        if ordinary_owner::next_effect(Duration::from_secs(query_returned_seconds), &mut deadline_latched).is_ok() {
+            deletions += 1;
+        }
+        assert_eq!(deletions, if query_returned_seconds < 90 { 1 } else { 0 });
+        if deadline_latched {
+            assert_eq!(ordinary_owner::next_effect(Duration::ZERO, &mut deadline_latched), Err(Error::Unsafe));
+        }
+    }
     let mut fixture = Inert::new(); let book = &mut fixture.book;
     let first = book.reserve(Kind::File, None, "close-one", "close-one".to_owned())?;
     own_inert(book, &first, 41)?;
@@ -429,6 +523,26 @@ fn descriptor(owner: &[u8], aces: &[(u8, u8, u32, Vec<u8>)]) -> Vec<u8> {
 
 #[test]
 fn acl_distinguishes_sibling_creation_from_replacement_and_mutation() -> Result<()> {
+    use std::time::Duration;
+    let mut deadline_latched = false; let mut grants = 0;
+    // First mutation is timely; its original observation returns at the budget
+    // boundary. Neither the next grant nor an invented fresh clock is admitted.
+    for elapsed in [Duration::from_secs(89), Duration::from_secs(90), Duration::ZERO] {
+        if ordinary_owner::next_effect(elapsed, &mut deadline_latched).is_ok() { grants += 1; }
+    }
+    assert_eq!(grants, 1); assert!(deadline_latched);
+    let account = sid(5, &[21, 11, 22, 33, 1001]);
+    let users = vec![sid(5, &[32, 545])];
+    let absent = windows_sys::Win32::NetworkManagement::NetManagement::NERR_UserNotFound;
+    assert!(ordinary_owner::fresh_account(absent, true, 0, &account, &users));
+    for (status, null, added) in [(0, true, 0), (absent, false, 0), (absent, true, 2224)] {
+        assert!(!ordinary_owner::fresh_account(status, null, added, &account, &users));
+    }
+    for groups in [Vec::new(), vec![sid(5, &[32, 544])],
+        vec![sid(5, &[32, 545]), sid(5, &[32, 544])]] {
+        assert!(!ordinary_owner::fresh_account(absent, true, 0, &account, &groups));
+    }
+    assert!(!ordinary_owner::fresh_account(absent, true, 0, &sid(5, &[18]), &users));
     let owner = sid(5, &[18]); let everyone = sid(1, &[0]);
     let allow = SS::ACCESS_ALLOWED_ACE_TYPE as u8; let deny = SS::ACCESS_DENIED_ACE_TYPE as u8;
     let raw = descriptor(&owner, &[(allow, 0, F::GENERIC_READ, everyone.clone())]);
@@ -458,6 +572,21 @@ fn acl_distinguishes_sibling_creation_from_replacement_and_mutation() -> Result<
 
 #[test]
 fn acl_bounds_and_actual_trusted_sid_are_required() -> Result<()> {
+    let before = ordinary_stamp();
+    let mut after = before.clone(); after.change += 1;
+    assert!(ordinary_owner::acl_stamp(&before, &after));
+    after.change = before.change - 1;
+    assert!(!ordinary_owner::acl_stamp(&before, &after));
+    for field in 0..8 {
+        let mut changed = before.clone(); changed.change += 1;
+        match field {
+            0 => changed.volume += 1, 1 => changed.id[15] ^= 0x80,
+            2 => changed.creation += 1, 3 => changed.write += 1,
+            4 => changed.size += 1, 5 => changed.allocation += 1,
+            6 => changed.links += 1, _ => changed.attributes ^= FS::FILE_ATTRIBUTE_HIDDEN,
+        }
+        assert!(!ordinary_owner::acl_stamp(&before, &changed));
+    }
     let owner = sid(5, &[80, 956008885, 3418522649, 1831038044, 1853292631, 2271478464]);
     let mut raw = descriptor(&owner, &[]);
     assert!(security::descriptor(&raw, FileKind::Directory, AuthorityScope::ImmutableVersion).is_ok());
@@ -487,6 +616,21 @@ fn token_sid(header: usize, field: usize, attributes: usize, flags: u32, princip
 }
 #[test]
 fn token_context_pointer_bounds_and_enableable_authority_are_checked() -> Result<()> {
+    let mut wait = ordinary_owner::ProcessFacts::new(); wait.begin()?;
+    wait.creation(true, 0, (101, 102, 201, 202), false)?;
+    // 259 (STILL_ACTIVE) is not a wait finality receipt or a successful exit.
+    assert_eq!(wait.wait(259, false), Err(Error::Unknown));
+    assert_eq!(wait.exited(true, 0), Err(Error::State));
+    assert_eq!(wait.begin_close(false), Err(Error::State));
+    for (ok, code) in [(true, 259), (true, 1), (false, 0)] {
+        let mut owner = ordinary_owner::ProcessFacts::new(); owner.begin()?;
+        owner.creation(true, 0, (101, 102, 201, 202), false)?;
+        owner.wait(F::WAIT_OBJECT_0, false)?;
+        assert_eq!(owner.exited(ok, code), if ok { Ok(()) } else { Err(Error::Unknown) });
+        owner.begin_close(true)?; owner.closed(true, true)?;
+        owner.begin_close(false)?; owner.closed(false, true)?;
+        assert!(!owner.passed());
+    }
     // Literal target expectations are independent of the production selector.
     // DWORD is the fixed output for both UIAccess and VirtualizationEnabled.
     for (actual, expected) in [
@@ -613,6 +757,22 @@ fn entry(name: &str, id: [u8; 16]) -> Vec<u8> {
 }
 #[test]
 fn metadata_and_directory_keep_the_full_identity_not_a_low_half() -> Result<()> {
+    let stamp = ordinary_stamp();
+    let raw = ordinary_request(&stamp);
+    let binding = ordinary_owner::Binding::parse(raw.as_bytes())?;
+    assert!(binding.matches(&stamp));
+    let mut changed = stamp.clone(); changed.id[15] ^= 0x80;
+    assert!(!binding.matches(&changed));
+    changed = stamp.clone(); changed.change += 1;
+    assert!(ordinary_owner::acl_stamp(&stamp, &changed));
+    assert!(!binding.matches(&changed)); // Requires the separate exact ACL transition.
+    for altered in [raw.replace("attempt=1", "attempt=2"), raw.replace("runId=123456", "runId=0"),
+        raw.replace("artifactBytes=37", "artifactBytes=0"), raw.replace("sourceSha=", "other="),
+        raw.replace('\n', "\r\n"), raw.clone() + "extra=1\n",
+        raw.replace("C:\\owned\\native.exe", "\\\\host\\share\\native.exe"),
+        raw.replace("artifactIdentity=", "commandSha256=")] {
+        assert!(ordinary_owner::Binding::parse(altered.as_bytes()).is_err());
+    }
     let mut basic = vec![0; size_of::<FS::FILE_BASIC_INFO>()];
     let mut standard = vec![0; size_of::<FS::FILE_STANDARD_INFO>()];
     let mut tag = vec![0; size_of::<FS::FILE_ATTRIBUTE_TAG_INFO>()];
@@ -695,6 +855,13 @@ fn stream(name: &str) -> Vec<u8> {
 }
 #[test]
 fn stream_and_component_refusals_cannot_be_treated_as_absence() -> Result<()> {
+    assert!(ordinary_owner::complete_write(true, 37, 37, true));
+    for (returned, count, bytes, closed) in [
+        (false, 37, 37, true), (true, 36, 37, true), (true, 38, 37, true),
+        (true, 37, 37, false), (true, 0, 0, true), (true, 65537, 65537, true),
+    ] {
+        assert!(!ordinary_owner::complete_write(returned, count, bytes, closed));
+    }
     let unnamed = stream("::$DATA");
     assert_eq!(decode::streams(&unnamed, FileKind::File), Ok(()));
     assert_eq!(decode::streams(&[], FileKind::Directory), Ok(()));
@@ -716,4 +883,15 @@ fn stream_and_component_refusals_cannot_be_treated_as_absence() -> Result<()> {
     let subst: Vec<u8> = "\\??\\C:\\elsewhere\0\0".encode_utf16().flat_map(u16::to_le_bytes).collect();
     assert_eq!(decode::mapping(&subst), Err(Error::Unsafe));
     Ok(())
+}
+
+// Fixed in-memory ordinary-owner fixtures. Never create an Account, Launch or
+// OriginalFile: even the positive cases call only the live driver's pure gates.
+fn ordinary_stamp() -> ordinary_owner::Stamp {
+    ordinary_owner::Stamp { volume: 77, id: [0x11; 16], creation: 100, write: 200,
+        change: 300, size: 37, allocation: 4096, links: 1, attributes: FS::FILE_ATTRIBUTE_NORMAL }
+}
+fn ordinary_request(stamp: &ordinary_owner::Stamp) -> String {
+    format!("MRK_WINDOWS_ORDINARY_REQUEST_V1\nsourceSha={}\nsourceTree={}\nrunId=123456\nattempt=1\nartifact=C:\\owned\\native.exe\nartifactBytes=37\nartifactSha256={}\ncommandSha256={}\nartifactIdentity={}\n",
+        "1".repeat(40), "2".repeat(40), "3".repeat(64), "4".repeat(64), stamp.wire())
 }

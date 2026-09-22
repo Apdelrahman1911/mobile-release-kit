@@ -865,7 +865,14 @@ WINDOWS_SNAPSHOT_SCOPE = "windows-snapshot-v1"
 WINDOWS_INSTALLED_SCOPE = "windows-installed-native-v1"
 WINDOWS_INSTALLED_CRATE = "desktop/native/windows-installed-native"
 WINDOWS_INSTALLED_TEST = "hosted_tests::hosted_native_read_only_contract"
-WINDOWS_INSTALLED_PHASES = ("prepare", "acquire", "compile", "windows-installed-native", "windows-installed-runtime-data", "retain")
+WINDOWS_ORDINARY_OWNER = "ordinary_owner::hosted_ordinary_original_handle_contract"
+WINDOWS_ORDINARY_ACLS = (
+    ("root", 0x20), ("target", 0x20), ("target/x86_64-pc-windows-msvc", 0x20),
+    ("target/x86_64-pc-windows-msvc/debug", 0x20), ("target/x86_64-pc-windows-msvc/debug/deps", 0x20),
+    ("artifact", 0x1200a9), ("ordinary-output", 0x1000a2),
+)
+WINDOWS_INSTALLED_PHASES = ("prepare", "acquire", "compile", "windows-installed-native",
+                          "windows-installed-native-finalize", "windows-installed-runtime-data", "retain")
 WINDOWS_INSTALLED_APP = "desktop/src-tauri"
 WINDOWS_INSTALLED_APP_LOCALS = {
     "mobile-release-kit-desktop": "desktop/src-tauri/Cargo.toml",
@@ -904,7 +911,7 @@ WINDOWS_INSTALLED_SOURCES = tuple(sorted((
     "desktop/src-tauri/src/installed_runtime_windows.rs", "tests/desktop/test_ci_foundation_contract.py",
     *(WINDOWS_INSTALLED_CRATE + "/" + name for name in (
         "Cargo.toml", "Cargo.lock", "README.md", "src/lib.rs", "src/decode.rs",
-        "src/security.rs", "src/tests.rs", "src/hosted_tests.rs")),
+        "src/security.rs", "src/tests.rs", "src/hosted_tests.rs", "src/ordinary_owner.rs")),
 )))
 WINDOWS_INSTALLED_NOT_VERIFIED = (
     "rust-1.88-minimum", "parent-application-cargo-graph-or-build", "production-resources-worker-joins",
@@ -9292,13 +9299,245 @@ def windows_installed_retain_runtime(context: dict, outcome: str) -> tuple[dict,
     return summary, {"path": filename, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
 
 
+
+def windows_ordinary_path(value: object) -> PureWindowsPath:
+    require(type(value) is str and 0 < len(value) <= 1024 and value.isascii()
+            and not any(ord(char) < 32 or char in '"/%=' for char in value),
+            "Windows ordinary fixed path differs")
+    path = PureWindowsPath(value)
+    require(path.is_absolute() and re.fullmatch(r"[A-Za-z]:", path.drive) is not None
+            and str(path) == value and all(part not in {".", ".."} and ":" not in part
+            and not part.endswith((" ", ".")) for part in path.parts[1:]),
+            "Windows ordinary path is not an exact local spelling")
+    return path
+
+
+def windows_ordinary_wire(stamp: dict) -> str:
+    return ":".join(str(stamp[key]) for key in ("volume", "fileId", "creation", "write", "change", "attributes"))
+
+
+def windows_ordinary_identity(value: object) -> str:
+    require(type(value) is str and len(value) <= 160, "Windows ordinary native identity exceeds its bound")
+    fields = value.split(":")
+    require(len(fields) == 6 and re.fullmatch(r"[0-9a-f]{32}", fields[1]) is not None and fields[1] != "0" * 32
+            and all(re.fullmatch(r"[1-9][0-9]{0,19}", fields[index]) is not None for index in (0, 2, 3, 4, 5))
+            and int(fields[0]) < 2**64 and all(int(fields[index]) < 2**63 for index in (2, 3, 4))
+            and int(fields[5]) < 2**32, "Windows ordinary native identity differs")
+    return value
+
+
+def windows_ordinary_request(context: dict, artifact: dict, identity: str) -> bytes:
+    """Closed DATA binding, not launch authority or an account-operation adapter."""
+    path = windows_ordinary_path(artifact["path"])
+    require(path.parent == windows_ordinary_path(context["root"]) / "target/x86_64-pc-windows-msvc/debug/deps"
+            and re.fullmatch(r"mrk_windows_installed_native-[0-9a-f]{16}\.exe", path.name) is not None
+            and integer_between(artifact["size"], 1, 128 << 20) and sha256_value(artifact["sha256"])
+            and all(type(context[key]) is str and re.fullmatch(r"[0-9a-f]{40}", context[key]) is not None
+                    and context[key] != "0" * 40 for key in ("sourceSha", "sourceTree"))
+            and type(context["runId"]) is str and re.fullmatch(r"[1-9][0-9]{0,19}", context["runId"]) is not None
+            and type(context["attempt"]) is int and context["attempt"] == 1,
+            "Windows ordinary fixed artifact/source/run binding differs")
+    command = '"' + str(path) + '" ' + WINDOWS_INSTALLED_TEST + " --exact --ignored --nocapture --test-threads=1"
+    require(len(command.encode("utf-16-le")) // 2 <= 1023, "Windows original logon command exceeds its native bound")
+    command_sha = hashlib.sha256(command.encode("utf-16-le")).hexdigest()
+    text = ("MRK_WINDOWS_ORDINARY_REQUEST_V1\nsourceSha=" + context["sourceSha"]
+            + "\nsourceTree=" + context["sourceTree"] + "\nrunId=" + context["runId"]
+            + "\nattempt=1\nartifact=" + str(path) + "\nartifactBytes=" + str(artifact["size"])
+            + "\nartifactSha256=" + artifact["sha256"] + "\ncommandSha256=" + command_sha
+            + "\nartifactIdentity=" + windows_ordinary_identity(identity) + "\n")
+    raw = text.encode("ascii")
+    require(0 < len(raw) <= 4096, "Windows ordinary request exceeds its bound")
+    return raw
+
+
+def windows_ordinary_original(artifact: dict) -> str:
+    """Bind descriptor ChangeTime separately; never rewrite the compile receipt."""
+    require(os.name == "nt", "Windows ordinary descriptor observation requires Windows")
+    path = Path(artifact["path"])
+    before = path.lstat()
+    require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and not before.st_file_attributes & 0x400
+            and [before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns] == artifact["identity"]
+            and 0 < before.st_size == artifact["size"] <= 128 << 20, "Windows ordinary original changed before open")
+    with path.open("rb") as stream:
+        original = os.fstat(stream.fileno())
+        # Exactly the existing named-executable/raw-descriptor cross-API rule.
+        # Named ctime is birthtime in this fixed CPython; descriptor ctime is the
+        # native ChangeTime. Both raw observations remain individually intact.
+        require(windows_installed_identity(before, before.st_mode & ~0o111)
+                == windows_installed_identity(original, original.st_mode), "Windows ordinary original changed at open")
+        raw = stream.read(before.st_size + 1)
+        require(windows_installed_state(original) == windows_installed_state(os.fstat(stream.fileno())),
+                "Windows ordinary original changed during read")
+    require(windows_installed_state(before) == windows_installed_state(path.lstat())
+            and len(raw) == artifact["size"] and hashlib.sha256(raw).hexdigest() == artifact["sha256"],
+            "Windows ordinary original byte or named identity changed")
+    ticks = lambda ns: ns // 100 + 116444736000000000
+    identity = windows_ordinary_wire({"volume": original.st_dev, "fileId": original.st_ino.to_bytes(16, "little").hex(),
+        "creation": ticks(original.st_birthtime_ns), "write": ticks(original.st_mtime_ns),
+        "change": ticks(original.st_ctime_ns), "attributes": original.st_file_attributes})
+    return windows_ordinary_identity(identity)
+
+
+def windows_ordinary_stamp(value: object) -> dict:
+    stamp = closed_object(value, {"volume", "fileId", "creation", "write", "change", "size", "allocation", "links", "attributes"},
+                          "Windows ordinary original stamp fields differ")
+    require(integer_between(stamp["volume"], 1, 2**64 - 1)
+            and type(stamp["fileId"]) is str and re.fullmatch(r"[0-9a-f]{32}", stamp["fileId"]) is not None
+            and stamp["fileId"] != "0" * 32
+            and all(integer_between(stamp[key], 1, 2**63 - 1) for key in ("creation", "write", "change"))
+            and all(integer_between(stamp[key], 0, 2**63 - 1) for key in ("size", "allocation"))
+            and type(stamp["links"]) is int and stamp["links"] == 1
+            and integer_between(stamp["attributes"], 1, 2**32 - 1) and not stamp["attributes"] & 0x400,
+            "Windows ordinary original stamp differs")
+    return stamp
+
+
+def windows_ordinary_transitions(value: object, artifact: dict, before_identity: str, after_identity: str) -> list[dict]:
+    require(type(value) is list and len(value) == len(WINDOWS_ORDINARY_ACLS), "Windows ordinary ACL transition roster differs")
+    identities, public = set(), []
+    for row, (role, mask) in zip(value, WINDOWS_ORDINARY_ACLS, strict=True):
+        row = closed_object(row, {"role", "mask", "before", "after", "securityBefore", "securityAfter", "singleExplicitNoninheritingAce"},
+                            "Windows ordinary ACL transition fields differ")
+        before, after = windows_ordinary_stamp(row["before"]), windows_ordinary_stamp(row["after"])
+        require(row["role"] == role and type(row["mask"]) is int and row["mask"] == mask
+                and row["singleExplicitNoninheritingAce"] is True
+                and sha256_value(row["securityBefore"]) and sha256_value(row["securityAfter"])
+                and row["securityBefore"] != row["securityAfter"]
+                and same_compile_json({**before, "change": after["change"]}, after) and after["change"] >= before["change"]
+                and bool(before["attributes"] & 0x10) == (role != "artifact"),
+                "Windows ordinary ACL changed more than its explicit original transition")
+        key = (before["volume"], before["fileId"])
+        require(key not in identities, "Windows ordinary ACL roles aliased the same original")
+        identities.add(key)
+        if role == "artifact":
+            require(before["size"] == artifact["size"] and windows_ordinary_wire(before) == before_identity
+                    and windows_ordinary_wire(after) == after_identity,
+                    "Windows ordinary artifact ChangeTime is not the original authorized ACL transition")
+        public.append({"role": role, "mask": mask, "singleExplicitNoninheritingAce": True, "originalIdentityTransitionChecked": True})
+    return public
+
+
+def windows_ordinary_records(context: dict, artifact: dict, before_identity: str, after_identity: str,
+                             owner_raw: bytes, child_raw: bytes, exit_raw: bytes, outcome: str) -> dict:
+    """Only DATA. Original child/owner exits and the separate step close gate are mandatory."""
+    require(outcome == "success" and all(type(raw) is bytes for raw in (owner_raw, child_raw, exit_raw)),
+            "Windows ordinary original owner step or closed DATA differs")
+    request = windows_ordinary_request(context, artifact, before_identity)
+    command_sha = request.decode("ascii").split("\ncommandSha256=", 1)[1].split("\n", 1)[0]
+    binding = {"schemaVersion": 1, "sourceSha": context["sourceSha"], "sourceTree": context["sourceTree"],
+               "runId": context["runId"], "attempt": 1, "artifactBytes": artifact["size"],
+               "artifactSha256": artifact["sha256"], "commandSha256": command_sha}
+    native = {"context": "ordinary-admitted", "contextContracts": 1, "admitted": 1, "refused": 0,
+              "rootContracts": 1, "rootNotExecuted": 0, "primaryOriginals": 1, "absentThreadReceipts": 6,
+              "closedOriginals": 2, "unknown": 0, "bookSettled": True}
+    child = bounded_json(child_raw, 4096)
+    owner = bounded_json(owner_raw, 64 << 10)
+    original_exit = bounded_json(exit_raw, 4096)
+    require(type(owner) is dict and sha256_value(owner.get("accountSidSha256")), "Windows ordinary account binding is missing")
+    child_expected = {**binding, "accountSidSha256": owner["accountSidSha256"], "test": WINDOWS_INSTALLED_TEST,
+        "native": native, "resultFile": {"createNew": True, "writeCalls": 1, "closeGate": "original-child-exit-zero-required"}}
+    require(same_compile_json(child, child_expected), "Windows ordinary child result, counts or source binding differs")
+    exit_expected = {key: binding[key] for key in ("schemaVersion", "sourceSha", "sourceTree", "runId", "attempt", "artifactSha256")}
+    exit_expected.update(ownerTest=WINDOWS_ORDINARY_OWNER, originalWaitReturned=True, exitCode=0,
+                         writerCloseGate="original-owner-step-success-required")
+    require(same_compile_json(original_exit, exit_expected), "Windows ordinary original owner exit/step-close receipt differs")
+    count = len(windows_ordinary_path(context["root"]).parents) + 1 + 8
+    fixed = {**binding, "accountSidSha256": owner["accountSidSha256"], "ownerTest": WINDOWS_ORDINARY_OWNER,
+        "childTest": WINDOWS_INSTALLED_TEST, "createCalls": 1, "createError": None, "firstWait": 0,
+        "originalExitCode": 0, "terminateCalls": 0, "deadlineLatched": False, "unknown": False,
+        "parentBookSettled": True, "inputOriginals": count, "inputOriginalsClosed": count, "freshAccountVerified": True,
+        "onlyUsersMembership": True, "accountRemovedAfterSettlement": True,
+        "nativeResultSha256": hashlib.sha256(child_raw).hexdigest(),
+        "ownerResult": {"createNew": True, "writeCalls": 1, "closeGate": "original-owner-exit-zero-required"},
+        "managedSourceMappingAuthenticated": False, "managedOrdinaryStartAuthorized": False,
+        "protectedFullwalk": False, "productionEnabled": False}
+    scalar_keys = {"createReturn", "exitReturn", "processCloseReturn", "threadCloseReturn"}
+    closed_object(owner, {*fixed, *scalar_keys, "aclTransitions"}, "Windows ordinary owner fields differ")
+    require(same_compile_json({key: owner[key] for key in fixed}, fixed)
+            and all(integer_between(owner[key], 1, 2**31 - 1) for key in scalar_keys),
+            "Windows ordinary original create/wait/exit/close/cleanup did not settle successfully")
+    transitions = windows_ordinary_transitions(owner["aclTransitions"], artifact, before_identity, after_identity)
+    # Never publish private account names/SIDs, request/intent, raw handle IDs,
+    # complete native file IDs or ACL images. No captured-child stdout/EOF claim.
+    return {"native": {"sourceSha": context["sourceSha"], **native},
+        "ordinaryOwner": {"test": WINDOWS_ORDINARY_OWNER, "directCreateProcessWithLogonW": True,
+            "originalOwnerExitCode": 0, "originalChildExitCode": 0, "processAndThreadOriginalsClosed": True,
+            "parentBookSettled": True, "inputOriginalsClosed": count, "freshOrdinaryAccount": True,
+            "accountRemovedAfterSettlement": True, "resultFilesClosedBySeparateExitGates": True,
+            "nativeResultSha256": hashlib.sha256(child_raw).hexdigest(), "ownerResultSha256": hashlib.sha256(owner_raw).hexdigest(),
+            "nullDesktopInheritedNoGrant": True, "aclTransitions": transitions},
+        "managedSourceMappingAuthenticated": False, "managedOrdinaryStartAuthorized": False,
+        "protectedFullwalk": False, "productionEnabled": False}
+
+
+def windows_ordinary_finalize(context: dict) -> None:
+    # No tools(), source_unchanged(), run(), compiler, account operation or
+    # native worker here. Same-original ownership belongs solely to the ignored
+    # owner test, not to Python's subprocess.run(timeout=...).
+    root = Path(context["root"])
+    preflight = read_bounded_json(root / "windows-installed-native-preflight-checks.json", 64 << 10)
+    base = windows_installed_phase_receipt(context, "windows-installed-native-preflight")
+    closed_object(preflight, {*base, "compiledTest", "inertContracts", "appCompiledTest", "appInertContracts",
+        "appOriginalExitCode", "originalOutputs", "inertOriginalExitCode", "artifactNativeIdentity", "request",
+        "nativeNotStarted", "notVerified"}, "Windows ordinary preflight fields differ")
+    require(same_compile_json({key: preflight[key] for key in base}, base)
+            and preflight["nativeNotStarted"] is True
+            and same_compile_json(preflight["inertContracts"], {"passed": 9, "failed": 0, "ignored": 0})
+            and type(preflight["appOriginalExitCode"]) is int and preflight["appOriginalExitCode"] == 0
+            and type(preflight["inertOriginalExitCode"]) is int and preflight["inertOriginalExitCode"] == 0
+            and same_compile_json(preflight["notVerified"], list(WINDOWS_INSTALLED_COMBINED_NOT_VERIFIED)),
+            "Windows ordinary original preflight did not pass")
+    require(read_bounded_json(root / "windows-installed-native-started.json", 64 << 10)
+            == windows_installed_phase_receipt(context, "windows-installed-native", claimOnly=True),
+            "Windows ordinary original preflight claim differs")
+    artifact = read_bounded_json(root / "compiled-test.json", 64 << 10)
+    compiled = read_bounded_json(root / "compile-checks.json", 64 << 10)
+    app_artifact = read_bounded_json(root / "app-compiled-test.json", 64 << 10)
+    require(same_compile_json(artifact, preflight["compiledTest"]) and same_compile_json(artifact, compiled["compiledTest"])
+            and type(compiled["originalExitCode"]) is int and compiled["originalExitCode"] == 0
+            and same_compile_json(app_artifact, preflight["appCompiledTest"])
+            and same_compile_json(app_artifact, compiled["appCompiledTest"])
+            and artifact == windows_installed_artifact(context) and app_artifact == windows_installed_app_artifact(context),
+            "Windows ordinary original compile receipts or compiled originals changed")
+    request = windows_ordinary_request(context, artifact, preflight["artifactNativeIdentity"])
+    require(windows_installed_bytes(root / "ordinary-request.txt", 4096) == request
+            and preflight["request"] == {"size": len(request), "sha256": hashlib.sha256(request).hexdigest()},
+            "Windows ordinary original request changed")
+    for filename, record in preflight["originalOutputs"].items():
+        require(filename in ("app-inert.stdout", "app-inert.stderr", "inert.stdout", "inert.stderr")
+                and record == windows_installed_record(root / filename, 64 << 10), "Windows ordinary original inert output changed")
+    require(set(preflight["originalOutputs"]) == {"app-inert.stdout", "app-inert.stderr", "inert.stdout", "inert.stderr"}
+            and windows_installed_bytes(root / "inert.stderr", 64 << 10) == b""
+            and windows_installed_bytes(root / "app-inert.stderr", 64 << 10) == b"", "Windows ordinary inert outputs differ")
+    windows_installed_libtest(windows_installed_bytes(root / "inert.stdout", 64 << 10), WINDOWS_INSTALLED_INERT, 2)
+    app_inert = windows_installed_app_libtest(windows_installed_bytes(root / "app-inert.stdout", 64 << 10))
+    require(same_compile_json(app_inert, preflight["appInertContracts"]), "Windows ordinary original app inert counts changed")
+    after_identity = windows_ordinary_original(artifact)
+    facts = windows_ordinary_records(context, artifact, preflight["artifactNativeIdentity"], after_identity,
+        windows_installed_bytes(root / "ordinary-owner-result.private.json", 64 << 10),
+        windows_installed_bytes(root / "ordinary-output" / "native-result.json", 4096),
+        windows_installed_bytes(root / "ordinary-owner-exit.private.json", 4096),
+        os.environ.get("MRK_WINDOWS_ORDINARY_OWNER_STEP_OUTCOME", "unavailable"))
+    windows_installed_inputs(context, retention_only=True)
+    require(context["sdk"] == {"version": WINDOWS_SDK_VERSION, "headers": fixed_file_inventory(windows_sdk_root(), WINDOWS_SDK_HEADERS)},
+            "Windows ordinary selected SDK DATA changed")
+    write_json(root / "windows-installed-native-checks.json", windows_installed_phase_receipt(context, "windows-installed-native",
+        compiledTest=artifact, appCompiledTest=app_artifact, inertContracts={"passed": 9, "failed": 0, "ignored": 0},
+        appInertContracts=app_inert, appOriginalExitCode=0, inertOriginalExitCode=0,
+        nativeOriginalExitCode=0, originalProcessWaitReturned=True,
+        **facts, notVerified=list(WINDOWS_INSTALLED_COMBINED_NOT_VERIFIED)))
+
+
 def windows_installed_phase(name: str, scope: str) -> None:
     require(scope == WINDOWS_INSTALLED_SCOPE and name in WINDOWS_INSTALLED_PHASES, "Unexpected fixed Windows headless phase")
     deadline = time.monotonic() + {"acquire": 840, "compile": 660, "windows-installed-native": 210,
                                    "windows-installed-runtime-data": 40}.get(name, 60)
-    context = windows_installed_context(create=name == "prepare", retention_only=name == "retain")
+    context = windows_installed_context(create=name == "prepare", retention_only=name in {"retain", "windows-installed-native-finalize"})
     root, source = Path(context["root"]), Path(context["source"])
     if name == "prepare":
+        return
+    if name == "windows-installed-native-finalize":
+        windows_ordinary_finalize(context)
         return
     if name == "windows-installed-runtime-data":
         # One live observer's DATA only; no acquire/compiler/test/account route.
@@ -9316,10 +9555,13 @@ def windows_installed_phase(name: str, scope: str) -> None:
         return
     if name == "retain":
         # DATA-only after success/failure: no launch, retry, reset or cleanup.
+        # Original preflight contains full descriptor IDs and stays private for
+        # finalization. Only the redacted final result belongs in this whitelist.
         files = {"public-bindings.json": 256 << 10, "acquire-checks.json": 64 << 10, "compile-checks.json": 64 << 10,
-            "windows-installed-native-checks.json": 64 << 10, "metadata.json": 2 << 20, "acquire.stderr": 1 << 20,
+            "windows-installed-native-checks.json": 64 << 10,
+            "metadata.json": 2 << 20, "acquire.stderr": 1 << 20,
             "compile-messages.jsonl": 16 << 20, "compile.stderr": 1 << 20,
-            "inert.stdout": 64 << 10, "inert.stderr": 64 << 10, "native.stdout": 64 << 10, "native.stderr": 64 << 10,
+            "inert.stdout": 64 << 10, "inert.stderr": 64 << 10,
             "app-metadata.json": 8 << 20, "app-acquire.stderr": 1 << 20,
             "app-compile-messages.jsonl": 16 << 20, "app-compile.stderr": 1 << 20,
             "app-inert.stdout": 64 << 10, "app-inert.stderr": 64 << 10}
@@ -9362,7 +9604,8 @@ def windows_installed_phase(name: str, scope: str) -> None:
     require(context["sdk"] == {"version": WINDOWS_SDK_VERSION, "headers": fixed_file_inventory(windows_sdk_root(), WINDOWS_SDK_HEADERS)},
             "Windows native selected SDK context changed")
     environment = clean_environment(root)
-    environment["GITHUB_SHA"] = context["sourceSha"]
+    environment.update(GITHUB_SHA=context["sourceSha"], GITHUB_RUN_ID=context["runId"],
+                       MRK_WINDOWS_SOURCE_TREE=context["sourceTree"])
     manifest = source / WINDOWS_INSTALLED_CRATE / "Cargo.toml"
     if name == "acquire":
         run([context["rustup"], "toolchain", "install", RUST, "--profile", "minimal", "--no-self-update"],
@@ -9414,7 +9657,9 @@ def windows_installed_phase(name: str, scope: str) -> None:
         app_artifact = read_bounded_json(root / "app-compiled-test.json", 64 << 10)
         compiled = read_bounded_json(root / "compile-checks.json", 64 << 10)
         compiler = read_bounded_json(root / "compiler-tools.json", 64 << 10)
-        require(type(compiled.get("appOriginalExitCode")) is int and compiled["appOriginalExitCode"] == 0
+        require(type(compiled.get("originalExitCode")) is int and compiled["originalExitCode"] == 0
+                and same_compile_json(compiled.get("compiledTest"), artifact)
+                and type(compiled.get("appOriginalExitCode")) is int and compiled["appOriginalExitCode"] == 0
                 and compiled.get("appCompiledTest") == app_artifact
                 and compiled.get("appInvocationSha256") == hashlib.sha256(canonical_json(
                     windows_installed_app_argv(compiler["cargo"]["path"], context))).hexdigest()
@@ -9428,49 +9673,53 @@ def windows_installed_phase(name: str, scope: str) -> None:
         environment.update(MRK_DESKTOP_HOSTED_CHECKS=WINDOWS_INSTALLED_SCOPE, GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted",
             RUNNER_OS="Windows", RUNNER_ARCH="X64", ImageOS=context["imageOS"], GITHUB_RUN_ATTEMPT="1")
         with (root / "inert.stdout").open("x", encoding="utf-8") as output, (root / "inert.stderr").open("x", encoding="utf-8") as diagnostics:
-            run([artifact["path"], "--skip", WINDOWS_INSTALLED_TEST, "--test-threads=1"], check="windows-installed-inert-contracts",
+            run([artifact["path"], *WINDOWS_INSTALLED_INERT, "--exact", "--test-threads=1"], check="windows-installed-inert-contracts",
                 cwd=root, env=environment, timeout=windows_installed_remaining(deadline, 60), output=output, diagnostics=diagnostics)
         require(windows_installed_bytes(root / "inert.stderr", 64 << 10) == b"", "Windows native inert stderr is not empty")
-        windows_installed_libtest(windows_installed_bytes(root / "inert.stdout", 64 << 10), WINDOWS_INSTALLED_INERT, 1)
+        windows_installed_libtest(windows_installed_bytes(root / "inert.stdout", 64 << 10), WINDOWS_INSTALLED_INERT, 2)
         source_unchanged(context)
         require(artifact == windows_installed_artifact(context), "Windows native original executable changed after inert controls")
-        with (root / "native.stdout").open("x", encoding="utf-8") as output, (root / "native.stderr").open("x", encoding="utf-8") as diagnostics:
-            run([artifact["path"], WINDOWS_INSTALLED_TEST, "--exact", "--ignored", "--nocapture", "--test-threads=1"],
-                check="windows-installed-native-contract", cwd=root, env=environment,
-                timeout=windows_installed_remaining(deadline, 90), output=output, diagnostics=diagnostics)
-        require(windows_installed_bytes(root / "native.stderr", 64 << 10) == b"", "Windows native stderr is not empty")
-        native = windows_installed_libtest(windows_installed_bytes(root / "native.stdout", 64 << 10), (WINDOWS_INSTALLED_TEST,), 9, native=True)
-        require(type(native) is dict and native.get("context") in {"ordinary-admitted", "elevated-primary-refused"}, "Windows native context outcome differs")
-        admitted = native["context"] == "ordinary-admitted"
-        expected = {"sourceSha": context["sourceSha"], "context": native["context"], "contextContracts": 1,
-            "admitted": int(admitted), "refused": int(not admitted), "rootContracts": int(admitted), "rootNotExecuted": int(not admitted),
-            "primaryOriginals": 1, "absentThreadReceipts": 6 if admitted else 4, "closedOriginals": 2 if admitted else 1,
-            "unknown": 0, "bookSettled": True}
-        require(canonical_json(native) == canonical_json(expected), "Windows native fact/refusal/settlement counts differ")
-        require(artifact == windows_installed_artifact(context), "Windows native original executable changed after native controls")
-        facts = {"compiledTest": artifact, "inertContracts": {"passed": 9, "failed": 0, "ignored": 0}, "native": native,
+        # Preflight only. The real logon owner is a separate direct workflow
+        # invocation, never a child of Python's timeout/kill subprocess wrapper.
+        for filename in ("ordinary-request.txt", "ordinary-owner-intent.private.json", "ordinary-output",
+                         "ordinary-owner-result.private.json", "ordinary-owner-exit.private.json",
+                         "windows-installed-native-preflight-checks.json", "windows-installed-native-checks.json"):
+            path = root / filename
+            require(not path.exists() and not path.is_symlink(), "Windows ordinary one-use output already exists")
+        identity = windows_ordinary_original(artifact)
+        request = windows_ordinary_request(context, artifact, identity)
+        with (root / "ordinary-request.txt").open("xb") as output:
+            require(output.write(request) == len(request), "Windows ordinary original request write is incomplete")
+        require(windows_installed_bytes(root / "ordinary-request.txt", 4096) == request, "Windows ordinary original request changed")
+        facts = {"compiledTest": artifact, "inertContracts": {"passed": 9, "failed": 0, "ignored": 0},
             "appCompiledTest": app_artifact, "appInertContracts": app_inert, "appOriginalExitCode": 0,
             "originalOutputs": {n: windows_installed_record(root / n, 64 << 10) for n in
-                ("app-inert.stdout", "app-inert.stderr", "inert.stdout", "inert.stderr", "native.stdout", "native.stderr")},
-            "inertOriginalExitCode": 0, "nativeOriginalExitCode": 0, "originalProcessWaitReturned": True,
-            "notVerified": list(WINDOWS_INSTALLED_COMBINED_NOT_VERIFIED)}
+                ("app-inert.stdout", "app-inert.stderr", "inert.stdout", "inert.stderr")},
+            "inertOriginalExitCode": 0, "artifactNativeIdentity": identity,
+            "request": {"size": len(request), "sha256": hashlib.sha256(request).hexdigest()},
+            "nativeNotStarted": True, "notVerified": list(WINDOWS_INSTALLED_COMBINED_NOT_VERIFIED)}
     windows_installed_inputs(context)
     source_unchanged(context)
     windows_installed_remaining(deadline, 1)
-    write_json(root / (name + "-checks.json"), windows_installed_phase_receipt(context, name, **facts))
+    phase = "windows-installed-native-preflight" if name == "windows-installed-native" else name
+    write_json(root / (phase + "-checks.json"), windows_installed_phase_receipt(context, phase, **facts))
+    if name == "windows-installed-native":
+        outputs = "artifact=" + artifact["path"] + "\nsourceTree=" + context["sourceTree"] + "\nartifactSha256=" + artifact["sha256"] + "\n"
+        with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8", newline="\n") as output:
+            require(output.write(outputs) == len(outputs), "Windows ordinary preflight handoff write is incomplete")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("phase", choices=(*BOUNDARY_PHASES, "workflow-owner", "workflow-transaction-eof", "workflow-core",
                         "metadata-owner", "metadata-transaction-eof", "metadata-core", "windows-snapshot", "github-owner", "github-tls", "github-tls-deadline",
-                         "environment-native", "offline-cli11", "retain", "windows-installed-native", "windows-installed-runtime-data", *CONVENTIONAL_PHASES))
+                         "environment-native", "offline-cli11", "retain", "windows-installed-native", "windows-installed-native-finalize", "windows-installed-runtime-data", *CONVENTIONAL_PHASES))
     args = parser.parse_args()
     os.umask(0o077)
     print(f"Starting fixed desktop phase: {args.phase}", flush=True)
     try:
         scope = os.environ.get("MRK_DESKTOP_HOSTED_CHECKS", "")
-        if scope == WINDOWS_INSTALLED_SCOPE or args.phase in {"windows-installed-native", "windows-installed-runtime-data"}:
+        if scope == WINDOWS_INSTALLED_SCOPE or args.phase in {"windows-installed-native", "windows-installed-native-finalize", "windows-installed-runtime-data"}:
             windows_installed_phase(args.phase, scope)
             return 0
         if scope in CONVENTIONAL_SCOPES or args.phase in CONVENTIONAL_PHASES:

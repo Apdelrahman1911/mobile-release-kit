@@ -3,7 +3,7 @@
 //! The caller must register this book inside its ORIGINAL retained Resources before
 //! releasing blocking work. Serialize it under that owner's Mutex; keep it and the
 //! actual workers reachable through STOP, document loss, timeout and settlement.
-//! This crate creates no worker, clock, broker, capability or process. It must not
+//! The production API creates no worker, clock, broker, capability or process. It must not
 //! run on the UI/deadline thread. The production Windows profile remains closed.
 //!
 //! Native output destinations already belong to the pinned book before entry.
@@ -795,3 +795,6 @@ impl NativeBook {
 mod tests;
 #[cfg(test)]
 mod hosted_tests;
+
+#[cfg(test)]
+mod ordinary_owner;

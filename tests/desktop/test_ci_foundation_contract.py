@@ -7301,7 +7301,8 @@ class WindowsReaderGateTests(unittest.TestCase):
     def test_windows_reader_existing_job_and_phase_routes_remain_narrow(self):
         text = HELPER.read_text(encoding="utf-8")
         phase = text.split("def windows_installed_phase(", 1)[1].split("def main(", 1)[0]
-        self.assertIn('retention_only=name == "retain"', phase)
+        self.assertIn('retention_only=name in {"retain", "windows-installed-native-finalize"}', phase)
+        self.assertLess(phase.index('if name == "windows-installed-native-finalize"'), phase.index('phases = ("acquire", "compile", "windows-installed-native")'))
         self.assertLess(phase.index('if name == "windows-installed-runtime-data"'), phase.index('phases = ("acquire", "compile", "windows-installed-native")'))
         retained = phase.split('if name == "retain":', 1)[1].split('phases = ("acquire", "compile", "windows-installed-native")', 1)[0]
         for unavailable in ('run(', 'tools(', 'runtime-identity.private.json', 'source_unchanged('): self.assertNotIn(unavailable, retained)
@@ -7311,18 +7312,331 @@ class WindowsReaderGateTests(unittest.TestCase):
         self.assertIn('"runtimeIdentity": runtime', retained)
         self.assertEqual(phase.count('app_argv = windows_installed_app_argv(cargo, context)'), 1)
         self.assertIn('[app_artifact["path"], *WINDOWS_INSTALLED_APP_INERT, "--exact", "--test-threads=1"]', phase)
-        self.assertIn('[artifact["path"], "--skip", WINDOWS_INSTALLED_TEST, "--test-threads=1"]', phase)
-        self.assertIn('[artifact["path"], WINDOWS_INSTALLED_TEST, "--exact", "--ignored", "--nocapture", "--test-threads=1"]', phase)
+        self.assertIn('[artifact["path"], *WINDOWS_INSTALLED_INERT, "--exact", "--test-threads=1"]', phase)
+        self.assertNotIn('[artifact["path"], WINDOWS_INSTALLED_TEST,', phase)
+        self.assertNotIn('"native.stdout"', phase)
+        self.assertNotIn('"native.stderr"', phase)
+        self.assertIn('WINDOWS_INSTALLED_INERT, 2)', phase)
         self.assertNotIn('native_protected_version_walk_and_original_settlement', phase)
         workflow = (SOURCE / ".github/workflows/desktop-foundation.yml").read_text(encoding="utf-8").split("  windows-installed-native:\n", 1)[1]
         self.assertIn("runs-on: windows-2025-vs2026", workflow)
         self.assertEqual(workflow.count("continue-on-error: true"), 1)
         self.assertIn("MRK_WINDOWS_RUNTIME_DATA_STEP_OUTCOME: ${{ steps.runtime-data.outcome }}", workflow)
-        self.assertLess(workflow.index('ci_foundation.py windows-installed-native'), workflow.index('id: runtime-data'))
+        self.assertLess(workflow.index('id: ordinary-preflight'), workflow.index('id: ordinary-owner'))
+        self.assertLess(workflow.index('id: ordinary-owner'), workflow.index('ci_foundation.py windows-installed-native-finalize'))
+        self.assertLess(workflow.index('ci_foundation.py windows-installed-native-finalize'), workflow.index('id: runtime-data'))
+        self.assertIn('MRK_WINDOWS_ORDINARY_OWNER_STEP_OUTCOME: ${{ steps.ordinary-owner.outcome }}', workflow)
+        self.assertIn('& $env:MRK_WINDOWS_NATIVE_ARTIFACT ordinary_owner::hosted_ordinary_original_handle_contract --exact --ignored --nocapture --test-threads=1', workflow)
+        direct = workflow.split('id: ordinary-owner', 1)[1].split('      - name: Validate separately', 1)[0]
+        self.assertIn('timeout-minutes: 4', direct)
+        self.assertIn('$originalExitCode = $LASTEXITCODE', direct)
+        self.assertNotIn('MRK_PYTHON', direct)
+        self.assertIn('[System.IO.FileMode]::CreateNew', direct)
+        self.assertNotIn('ordinary-owner-intent.private.json', retained)
+        self.assertNotIn('ordinary-request.txt', retained)
+        self.assertNotIn('ordinary-owner-result.private.json', retained)
+        self.assertNotIn('ordinary-owner-exit.private.json', retained)
+        self.assertNotIn('windows-installed-native-preflight-checks.json', retained)
+        self.assertNotIn('ordinary-output', retained)
         self.assertLess(workflow.index('id: runtime-data'), workflow.index('id: retain'))
         self.assertIn('[System.Diagnostics.Process].Assembly', workflow)
         for unavailable in ('Process.Start', 'New-LocalUser', 'Set-Acl', 'Add-Type', 'Start-Process', 'Get-Process'):
             self.assertNotIn(unavailable, workflow)
+
+
+    @classmethod
+    def ordinary_data(cls):
+        context = {**cls.context(), "root": r"C:\runner\_temp\mrk-windows-installed-native-123456-1"}
+        artifact = {"path": context["root"] + r"\target\x86_64-pc-windows-msvc\debug\deps\mrk_windows_installed_native-aaaaaaaaaaaaaaaa.exe",
+                    "size": 37, "sha256": "3" * 64}
+        stamp = {"volume": 77, "fileId": "11" * 16, "creation": 100, "write": 200, "change": 300,
+                 "size": 37, "allocation": 4096, "links": 1, "attributes": 128}
+        transitions = []
+        for number, (role, mask) in enumerate(helper.WINDOWS_ORDINARY_ACLS, 1):
+            before = (dict(stamp) if role == "artifact" else
+                      {**stamp, "fileId": f"{number:032x}", "size": 0, "allocation": 0, "attributes": 16})
+            transitions.append({"role": role, "mask": mask, "before": before, "after": {**before, "change": before["change"] + 1},
+                "securityBefore": "4" * 64, "securityAfter": "5" * 64, "singleExplicitNoninheritingAce": True})
+        before, after = (helper.windows_ordinary_wire(transitions[5][key]) for key in ("before", "after"))
+        request = helper.windows_ordinary_request(context, artifact, before)
+        command_sha = request.decode("ascii").split("\ncommandSha256=", 1)[1].split("\n", 1)[0]
+        binding = {"schemaVersion": 1, "sourceSha": context["sourceSha"], "sourceTree": context["sourceTree"],
+                   "runId": context["runId"], "attempt": 1, "artifactBytes": artifact["size"],
+                   "artifactSha256": artifact["sha256"], "commandSha256": command_sha}
+        native = {"context": "ordinary-admitted", "contextContracts": 1, "admitted": 1, "refused": 0,
+                  "rootContracts": 1, "rootNotExecuted": 0, "primaryOriginals": 1, "absentThreadReceipts": 6,
+                  "closedOriginals": 2, "unknown": 0, "bookSettled": True}
+        child = {**binding, "accountSidSha256": "6" * 64, "test": helper.WINDOWS_INSTALLED_TEST, "native": native,
+                 "resultFile": {"createNew": True, "writeCalls": 1, "closeGate": "original-child-exit-zero-required"}}
+        count = len(helper.PureWindowsPath(context["root"]).parents) + 1 + 8
+        owner = {**binding, "accountSidSha256": "6" * 64, "ownerTest": helper.WINDOWS_ORDINARY_OWNER,
+            "childTest": helper.WINDOWS_INSTALLED_TEST, "createCalls": 1, "createReturn": 1, "createError": None, "firstWait": 0,
+            "exitReturn": 1, "originalExitCode": 0, "terminateCalls": 0, "processCloseReturn": 1, "threadCloseReturn": 1,
+            "deadlineLatched": False, "unknown": False, "parentBookSettled": True, "inputOriginals": count,
+            "inputOriginalsClosed": count, "freshAccountVerified": True, "onlyUsersMembership": True,
+            "accountRemovedAfterSettlement": True, "nativeResultSha256": hashlib.sha256(helper.canonical_json(child)).hexdigest(),
+            "aclTransitions": transitions, "ownerResult": {"createNew": True, "writeCalls": 1,
+            "closeGate": "original-owner-exit-zero-required"}, "managedSourceMappingAuthenticated": False,
+            "managedOrdinaryStartAuthorized": False, "protectedFullwalk": False, "productionEnabled": False}
+        original_exit = {key: binding[key] for key in ("schemaVersion", "sourceSha", "sourceTree", "runId", "attempt", "artifactSha256")}
+        original_exit.update(ownerTest=helper.WINDOWS_ORDINARY_OWNER, originalWaitReturned=True, exitCode=0,
+                             writerCloseGate="original-owner-step-success-required")
+        return context, artifact, before, after, owner, child, original_exit
+
+    @staticmethod
+    def ordinary_accept(data, outcome="success"):
+        context, artifact, before, after, owner, child, original_exit = data
+        return helper.windows_ordinary_records(context, artifact, before, after,
+            helper.canonical_json(owner), helper.canonical_json(child), helper.canonical_json(original_exit), outcome)
+
+    def test_windows_reader_ordinary_request_is_fixed_bounded_data(self):
+        context, artifact, before, *_ = self.ordinary_data()
+        raw = helper.windows_ordinary_request(context, artifact, before)
+        self.assertEqual(len(raw.splitlines()), 10)
+        self.assertTrue(raw.startswith(b"MRK_WINDOWS_ORDINARY_REQUEST_V1\n") and raw.endswith(b"\n"))
+        command = '"' + artifact["path"] + '" ' + helper.WINDOWS_INSTALLED_TEST + " --exact --ignored --nocapture --test-threads=1"
+        self.assertIn(b"\ncommandSha256=" + hashlib.sha256(command.encode("utf-16-le")).hexdigest().encode("ascii") + b"\n", raw)
+        for key, value in (("size", 0), ("size", True), ("size", 128 * 1024 * 1024 + 1), ("sha256", "X" * 64),
+                           ("path", artifact["path"].replace("aaaaaaaaaaaaaaaa", "bbbb")),
+                           ("path", artifact["path"].replace("debug\\deps", "release\\deps")),
+                           ("path", artifact["path"] + "\ncommand=other"), ("path", r"\\host\share\fake.exe")):
+            with self.subTest(artifact=key, value=value), self.assertRaises(helper.CheckFailure):
+                helper.windows_ordinary_request(context, {**artifact, key: value}, before)
+        for key, value in (("attempt", True), ("attempt", 2), ("runId", "0"), ("sourceSha", "0" * 40), ("sourceTree", "z" * 40)):
+            with self.subTest(binding=key), self.assertRaises(helper.CheckFailure):
+                helper.windows_ordinary_request({**context, key: value}, artifact, before)
+        for identity in ("", before + ":extra", before.replace(":300:", ":-1:"), before.replace("77:", "0:", 1),
+                         before.replace("11" * 16, "0" * 32), before.replace(":128", ":" + str(2**32))):
+            with self.subTest(identity=identity), self.assertRaises(helper.CheckFailure):
+                helper.windows_ordinary_request(context, artifact, identity)
+        long_root = r"C:\runner" + r"\abcdefghij" * 80
+        long_context = {**context, "root": long_root}
+        long_artifact = {**artifact, "path": long_root + artifact["path"][len(context["root"]):]}
+        with self.assertRaises(helper.CheckFailure): helper.windows_ordinary_request(long_context, long_artifact, before)
+
+    def test_windows_reader_ordinary_acl_transition_is_exact_not_ctime_exemption(self):
+        context, artifact, before, after, owner, *_ = self.ordinary_data()
+        rows = owner["aclTransitions"]
+        public = helper.windows_ordinary_transitions(rows, artifact, before, after)
+        self.assertEqual([row["role"] for row in public], [role for role, _ in helper.WINDOWS_ORDINARY_ACLS])
+        for key in ("volume", "creation", "write", "size", "allocation", "links", "attributes"):
+            altered = deepcopy(rows); altered[5]["after"][key] += 1
+            with self.subTest(drift=key), self.assertRaises(helper.CheckFailure):
+                helper.windows_ordinary_transitions(altered, artifact, before, after)
+        changes = [
+            (5, "role", "other"), (5, "mask", 0x1f01ff), (5, "mask", True),
+            (5, "singleExplicitNoninheritingAce", False), (5, "securityAfter", "4" * 64),
+        ]
+        for index, key, value in changes:
+            altered = deepcopy(rows); altered[index][key] = value
+            with self.subTest(transition=key), self.assertRaises(helper.CheckFailure):
+                helper.windows_ordinary_transitions(altered, artifact, before, after)
+        for altered in (rows[:-1], rows + [rows[0]], list(reversed(rows))):
+            with self.assertRaises(helper.CheckFailure): helper.windows_ordinary_transitions(altered, artifact, before, after)
+        for identity in (before, after.replace("11" * 16, "12" * 16), after.replace(":301:", ":302:")):
+            with self.assertRaises(helper.CheckFailure): helper.windows_ordinary_transitions(rows, artifact, before, identity)
+        altered = deepcopy(rows); altered[1]["before"]["fileId"] = altered[0]["before"]["fileId"]
+        altered[1]["after"]["fileId"] = altered[0]["after"]["fileId"]
+        with self.assertRaises(helper.CheckFailure): helper.windows_ordinary_transitions(altered, artifact, before, after)
+
+    def test_windows_reader_ordinary_records_require_closed_exact_source_bound_schema(self):
+        data = self.ordinary_data()
+        public = self.ordinary_accept(data)
+        self.assertEqual(public["native"]["admitted"], 1)
+        self.assertEqual(public["native"]["rootContracts"], 1)
+        self.assertTrue(public["ordinaryOwner"]["resultFilesClosedBySeparateExitGates"])
+        self.assertIs(public["managedOrdinaryStartAuthorized"], False)
+        self.assertIs(public["managedSourceMappingAuthenticated"], False)
+        self.assertIs(public["protectedFullwalk"], False)
+        text = helper.canonical_json(public).decode()
+        for absent in ("accountName", "accountSidSha256", "fileId", "securityBefore", "stdout", "EOF"):
+            self.assertNotIn(absent, text)
+        for number in (4, 5, 6):
+            for key, value in (("sourceSha", "f" * 40), ("sourceTree", "e" * 40),
+                               ("runId", "123457"), ("attempt", True), ("extra", "not-admitted")):
+                altered = deepcopy(data); altered[number][key] = value
+                with self.subTest(record=number, field=key), self.assertRaises(helper.CheckFailure):
+                    self.ordinary_accept(altered)
+        context, artifact, before, after, owner, child, original_exit = data
+        good = [helper.canonical_json(row) for row in (owner, child, original_exit)]
+        for number, limit in ((0, 64 << 10), (1, 4096), (2, 4096)):
+            for bad in (b"{}", b"not-json", b"x" * (limit + 1), good[number][:-1],
+                        b'{"schemaVersion":1,' + good[number][1:]):
+                values = list(good); values[number] = bad
+                with self.subTest(record=number, bytes=len(bad)), self.assertRaises(helper.CheckFailure):
+                    helper.windows_ordinary_records(context, artifact, before, after, *values, "success")
+
+        # Exercise the actual retain selection/copy loop, not just the redacted
+        # record return above. All filesystem/context/runtime edges are inert.
+        root = Path(context["root"])
+        private_names = ("windows-installed-native-preflight-checks.json", "ordinary-request.txt",
+            "ordinary-owner-intent.private.json", "ordinary-owner-result.private.json",
+            "ordinary-owner-exit.private.json", "ordinary-output/native-result.json")
+        private_raw = helper.canonical_json({"artifactNativeIdentity": before,
+            "accountName": "inert-private-account", "privateMarker": "never-publish-this-original"})
+        originals = {root / name: private_raw for name in private_names}
+        public_name = "windows-installed-native-checks.json"
+        originals[root / public_name] = helper.canonical_json(public)
+        original_bytes = dict(originals)
+        written, closed = {}, set()
+
+        def info(path):
+            if path not in originals: raise FileNotFoundError("inert absent retained input")
+            return SimpleNamespace(st_size=len(originals[path]))
+
+        def read(path, limit):
+            if path in originals:
+                raw = originals[path]
+            else:
+                self.assertIn(path, closed)
+                raw = written[path]
+            self.assertLessEqual(len(raw), limit)
+            return raw
+
+        class Output:
+            def __init__(self, path): self.path = path
+            def __enter__(self): return self
+            def write(self, raw):
+                written[self.path] = raw
+                return len(raw)
+            def __exit__(self, *_): closed.add(self.path)
+
+        def open_public(path, mode):
+            self.assertEqual((path.parent, mode), (root / "public", "xb"))
+            self.assertNotIn(path, written)
+            return Output(path)
+
+        with patch.object(helper, "windows_installed_context", return_value=context) as selected_context, \
+             patch.object(helper.Path, "lstat", autospec=True, side_effect=info), \
+             patch.object(helper.Path, "open", autospec=True, side_effect=open_public), \
+             patch.object(helper, "ordinary", side_effect=lambda path: self.assertIn(path, originals)), \
+             patch.object(helper, "windows_installed_bytes", side_effect=read), \
+             patch.object(helper, "windows_installed_retain_runtime", return_value=({"status": "unavailable"}, None)), \
+             patch.object(helper, "write_json") as retention, \
+             patch.object(helper, "run", side_effect=AssertionError("retention must not launch a tool")):
+            helper.windows_installed_phase("retain", helper.WINDOWS_INSTALLED_SCOPE)
+        selected_context.assert_called_once_with(create=False, retention_only=True)
+        retention.assert_called_once()
+        destination, summary = retention.call_args.args
+        self.assertEqual(destination, root / "public/retention.json")
+        self.assertEqual(set(written), {root / "public" / public_name})
+        self.assertEqual(closed, set(written))
+        self.assertEqual(written[root / "public" / public_name], originals[root / public_name])
+        self.assertEqual([row["path"] for row in summary["files"]], [public_name])
+        self.assertEqual(originals, original_bytes)  # Authoritative private bytes are never rewritten.
+        exported = b"\n".join(written.values()) + helper.canonical_json(summary)
+        for forbidden in (before.encode("ascii"), b"artifactNativeIdentity", b"inert-private-account",
+                          b"never-publish-this-original", *(name.encode("ascii") for name in private_names)):
+            self.assertNotIn(forbidden, exported)
+
+    def test_windows_reader_ordinary_failures_and_late_success_are_not_receipts(self):
+        for outcome in ("failure", "cancelled", "skipped", "unavailable", "queued"):
+            with self.subTest(outcome=outcome), self.assertRaises(helper.CheckFailure):
+                self.ordinary_accept(self.ordinary_data(), outcome)
+        failures = {"createCalls": 0, "createReturn": 0, "createError": 5, "firstWait": 258, "exitReturn": 0,
+            "originalExitCode": 259, "terminateCalls": 1, "processCloseReturn": 0, "threadCloseReturn": 0,
+            "deadlineLatched": True, "unknown": True, "parentBookSettled": False, "inputOriginalsClosed": 0,
+            "freshAccountVerified": False, "onlyUsersMembership": False, "accountRemovedAfterSettlement": False,
+            "managedSourceMappingAuthenticated": True, "managedOrdinaryStartAuthorized": True,
+            "protectedFullwalk": True, "productionEnabled": True}
+        for key, value in failures.items():
+            data = self.ordinary_data(); data[4][key] = value
+            with self.subTest(owner=key), self.assertRaises(helper.CheckFailure): self.ordinary_accept(data)
+        for key in ("createCalls", "createReturn", "exitReturn", "processCloseReturn", "threadCloseReturn"):
+            data = self.ordinary_data(); data[4][key] = True
+            with self.subTest(boolean=key), self.assertRaises(helper.CheckFailure): self.ordinary_accept(data)
+        for key, value in (("context", "elevated-primary-refused"), ("admitted", 0), ("refused", 1),
+                           ("rootContracts", 0), ("rootNotExecuted", 1), ("absentThreadReceipts", 4),
+                           ("closedOriginals", 1), ("unknown", 1), ("bookSettled", False)):
+            data = self.ordinary_data(); data[5]["native"][key] = value
+            data[4]["nativeResultSha256"] = hashlib.sha256(helper.canonical_json(data[5])).hexdigest()
+            with self.subTest(child=key), self.assertRaises(helper.CheckFailure): self.ordinary_accept(data)
+        for record, key, value in ((4, "ownerResult", {"createNew": True, "writeCalls": 1, "closed": True}),
+            (5, "resultFile", {"createNew": True, "writeCalls": 1, "closed": True}),
+            (6, "exitCode", 1), (6, "originalWaitReturned", False), (6, "writerCloseGate", "self-certified")):
+            data = self.ordinary_data(); data[record][key] = value
+            with self.subTest(record=record, field=key), self.assertRaises(helper.CheckFailure): self.ordinary_accept(data)
+
+    def test_windows_reader_ordinary_original_keeps_raw_descriptor_change_time(self):
+        raw = b"exe"
+        before = SimpleNamespace(st_dev=77, st_ino=1, st_mode=stat.S_IFREG | 0o755, st_nlink=1, st_size=len(raw),
+            st_mtime_ns=200, st_birthtime_ns=100, st_ctime_ns=100, st_file_attributes=128, st_reparse_tag=0)
+        opened = SimpleNamespace(**{**vars(before), "st_mode": stat.S_IFREG | 0o644, "st_ctime_ns": 700})
+        artifact = {"path": r"C:\owned\native.exe", "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+                    "identity": [77, 1, len(raw), 200, 100]}
+        class Input:
+            closed = False
+            def __enter__(self): return self
+            def __exit__(self, *_): self.closed = True
+            def fileno(self): return 91
+            def read(self, limit):
+                if limit != len(raw) + 1: raise AssertionError("unbounded original read")
+                return raw
+        stream = Input()
+        path = SimpleNamespace(lstat=lambda: before, open=lambda *_: stream)
+        with patch.object(helper, "Path", return_value=path), patch.object(helper.os, "name", "nt"), \
+             patch.object(helper.os, "fstat", side_effect=[opened, opened]):
+            identity = helper.windows_ordinary_original(artifact)
+        self.assertTrue(stream.closed)
+        self.assertEqual(identity, "77:" + (1).to_bytes(16, "little").hex() + ":116444736000000001:116444736000000002:116444736000000007:128")
+        self.assertEqual(artifact["identity"], [77, 1, len(raw), 200, 100])  # Compile receipt not rewritten.
+        for key in ("st_ctime_ns", "st_birthtime_ns", "st_ino", "st_file_attributes", "st_mtime_ns"):
+            changed = SimpleNamespace(**{**vars(opened), key: getattr(opened, key) + 1})
+            with self.subTest(raw_descriptor_drift=key), patch.object(helper, "Path", return_value=path), \
+                 patch.object(helper.os, "name", "nt"), patch.object(helper.os, "fstat", side_effect=[opened, changed]), \
+                 self.assertRaises(helper.CheckFailure):
+                helper.windows_ordinary_original(artifact)
+
+    def test_windows_reader_ordinary_native_source_has_one_retained_original_owner(self):
+        native = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/ordinary_owner.rs").read_text(encoding="utf-8")
+        self.assertIn(helper.WINDOWS_INSTALLED_CRATE + "/src/ordinary_owner.rs", helper.WINDOWS_INSTALLED_SOURCES)
+        for api in ("T::CreateProcessWithLogonW(", "T::TerminateProcess(",
+                    "F::CloseHandle(this.outputs.hProcess)", "F::CloseHandle(this.outputs.hThread)"):
+            self.assertEqual(native.count(api), 1)
+        enter = native.split("    fn enter(self:", 1)[1].split("    fn finish(self:", 1)[0]
+        self.assertLess(enter.index("this.facts.begin()?"), enter.index("T::CreateProcessWithLogonW("))
+        self.assertLess(enter.index("this.error ="), enter.index("account.zero()"))
+        self.assertIn("this.domain.as_ptr()", enter)
+        self.assertIn("domain: [u16; 2]", native)
+        self.assertIn("startup: T::STARTUPINFOW, outputs: T::PROCESS_INFORMATION", native)
+        self.assertIn("Pin<Box<Self>>", native)
+        self.assertIn("std::thread::park()", native)
+        self.assertIn("if file.close().is_err() { return false; }", native)
+        self.assertIn("const NATIVE_SECONDS: u64 = 90;", native)
+        self.assertIn("const SETTLE_MS: u32 = 10_000;", native)
+        deadline = native.split("pub(super) fn next_effect(", 1)[1].split("fn hex(", 1)[0]
+        self.assertIn("*deadline_latched |= elapsed >= Duration::from_secs(NATIVE_SECONDS)", deadline)
+        self.assertIn("need(!*deadline_latched)", deadline)
+        self.assertNotIn("Instant::now()", deadline)
+        guard = "next_effect(start.elapsed(), deadline_latched)?;"
+        self.assertLess(enter.index(guard), enter.index("this.facts.begin()?"))
+        # Bind the guard after the last prerequisite observation, not merely at
+        # helper entry or at the later successful-result check.
+        for start, end, observation, mutation in (
+            ("    fn create(", "    fn retire(", "self.query()?.is_none()", "NM::NetUserAdd("),
+            ("    fn create(", "    fn retire(", "if self.groups()?.is_empty()", "NM::NetLocalGroupAddMembers("),
+            ("    fn retire(", "impl Drop for Account", "self.query()?.as_deref()", "NM::NetUserDel("),
+            ("fn grant(", "// NetAPI allocation", "file.descriptor()?", "S::SetKernelObjectSecurity("),
+        ):
+            body = native.split(start, 1)[1].split(end, 1)[0]
+            before_mutation = body.split(mutation, 1)[0]
+            self.assertGreater(before_mutation.rindex(guard), before_mutation.index(observation))
+        driver = native.split("fn hosted_ordinary_original_handle_contract()", 1)[1]
+        before_output = driver.split("FS::CreateDirectoryW(", 1)[0]
+        self.assertGreater(before_output.rindex("next_effect(start.elapsed(), &mut deadline_latched)?;"),
+                           before_output.index("let output_name ="))
+        self.assertIn("current.create(&parent, start, &mut deadline_latched)?", driver)
+        self.assertIn("current.retire(start, &mut deadline_latched)", driver)
+        self.assertIn("start, &mut deadline_latched)?", driver.split("for (index, role) in directories", 1)[1])
+        self.assertEqual(native.count("let start = Instant::now();"), 1)
+        for unavailable in ("std::thread::spawn", "std::process::Command", "LogonUserW(", "ImpersonateLoggedOnUser(",
+                            "AdjustTokenPrivileges(", "CreateProcessAsUserW(", "AuthzAccessCheck(", "SetNamedSecurityInfoW("):
+            self.assertNotIn(unavailable, native)
+        child = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/hosted_tests.rs").read_text(encoding="utf-8")
+        self.assertLess(child.index("let settlement = book.settle_once()"), child.index("ordinary_owner::write_native_result"))
+        self.assertLess(child.index("&& absent == if admitted { 6 } else { 4 }"), child.index("ordinary_owner::write_native_result"))
+        self.assertIn("require_fact(admitted)?;", child)
+
 
 
 if __name__ == "__main__":

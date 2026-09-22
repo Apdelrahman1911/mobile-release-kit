@@ -585,7 +585,8 @@ jobs:
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py compile'
-      - name: Run fixed app eleven and native nine plus the native facts contract
+      - name: Preflight the original app eleven and native nine; do not launch ordinary work
+        id: ordinary-preflight
         timeout-minutes: 4
         shell: bash
         env:
@@ -593,6 +594,62 @@ jobs:
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-installed-native'
+      - name: Own one fixed ordinary native child by its original logon handles
+        id: ordinary-owner
+        timeout-minutes: 4
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          MRK_WINDOWS_NATIVE_ARTIFACT: ${{ steps.ordinary-preflight.outputs.artifact }}
+          MRK_WINDOWS_NATIVE_ARTIFACT_SHA256: ${{ steps.ordinary-preflight.outputs.artifactSha256 }}
+          MRK_WINDOWS_SOURCE_TREE: ${{ steps.ordinary-preflight.outputs.sourceTree }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          try {
+            $expectedRoot = [System.IO.Path]::Combine($env:RUNNER_TEMP, "mrk-windows-installed-native-$($env:GITHUB_RUN_ID)-1")
+            $expectedDeps = [System.IO.Path]::Combine($expectedRoot, 'target', 'x86_64-pc-windows-msvc', 'debug', 'deps')
+            if ($env:GITHUB_RUN_ATTEMPT -cne '1' -or $env:MRK_DESKTOP_CI_ROOT -cne $expectedRoot -or
+                [System.IO.Path]::GetDirectoryName($env:MRK_WINDOWS_NATIVE_ARTIFACT) -cne $expectedDeps -or
+                [System.IO.Path]::GetFileName($env:MRK_WINDOWS_NATIVE_ARTIFACT) -cnotmatch '^mrk_windows_installed_native-[0-9a-f]{16}\.exe$' -or
+                $env:MRK_WINDOWS_NATIVE_ARTIFACT_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+                $env:MRK_WINDOWS_SOURCE_TREE -cnotmatch '^[0-9a-f]{40}$') { throw 'binding' }
+            Set-Location -LiteralPath $expectedRoot
+            # Direct foreground invocation. No Python timeout, managed Process
+            # object, credential launcher, redirected pipe or detached borrower.
+            & $env:MRK_WINDOWS_NATIVE_ARTIFACT ordinary_owner::hosted_ordinary_original_handle_contract --exact --ignored --nocapture --test-threads=1
+            $originalExitCode = $LASTEXITCODE
+            if ($originalExitCode -isnot [int]) { throw 'original-exit' }
+            $receipt = [ordered]@{
+              schemaVersion = 1; sourceSha = $env:GITHUB_SHA; sourceTree = $env:MRK_WINDOWS_SOURCE_TREE
+              runId = $env:GITHUB_RUN_ID; attempt = 1; artifactSha256 = $env:MRK_WINDOWS_NATIVE_ARTIFACT_SHA256
+              ownerTest = 'ordinary_owner::hosted_ordinary_original_handle_contract'
+              originalWaitReturned = $true; exitCode = $originalExitCode
+              writerCloseGate = 'original-owner-step-success-required'
+            }
+            $raw = [System.Text.UTF8Encoding]::new($false, $true).GetBytes(($receipt | ConvertTo-Json -Depth 4 -Compress))
+            if ($raw.Length -eq 0 -or $raw.Length -gt 4096) { throw 'exit-bound' }
+            $path = [System.IO.Path]::Combine($expectedRoot, 'ordinary-owner-exit.private.json')
+            $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            try { $stream.Write($raw, 0, $raw.Length); $stream.Flush() } finally { $stream.Dispose() }
+            # The private writer cannot attest its own close from preceding
+            # bytes. Finalize additionally requires THIS original step success.
+            if ($originalExitCode -ne 0) { exit $originalExitCode }
+          } catch {
+            [Console]::Error.WriteLine('MRK_WINDOWS_ORDINARY_OWNER_REFUSED=original-owner-or-exit-record')
+            exit 1
+          }
+      - name: Validate separately closed ordinary native and parent evidence as DATA
+        if: success() && steps.ordinary-owner.outcome == 'success'
+        timeout-minutes: 2
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          MRK_WINDOWS_ORDINARY_OWNER_STEP_OUTCOME: ${{ steps.ordinary-owner.outcome }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-installed-native-finalize'
       - name: Observe actual PowerShell and loaded Process identity as DATA only
         id: runtime-data
         if: always() && steps.prepare.outcome == 'success'
