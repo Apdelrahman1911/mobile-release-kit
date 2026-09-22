@@ -8846,9 +8846,13 @@ def windows_installed_app_graph(value: object, lock: object, *, source: Path, ro
         require(type(package) is dict and type(package.get("id")) is str and 0 < len(package["id"]) <= 4096
                 and package["id"] not in packages and type(package.get("name")) is str
                 and type(package.get("version")) is str and type(package.get("manifest_path")) is str
-                and type(package.get("targets")) is list and 0 < len(package["targets"]) <= 32
                 and type(package.get("features")) is dict and (package.get("source") is None or type(package["source"]) is str),
-                "Windows app package identity/targets differ")
+                "Windows app package identity differs")
+        # Cargo inventories unselected integration tests too (locked tokio has
+        # 158 declarations). This finite DATA bound is not compiler permission:
+        # windows_installed_app_test_path separately admits actual selected units.
+        require(type(package.get("targets")) is list and 0 < len(package["targets"]) <= 512,
+                "Windows app declared target inventory differs")
         key = (package["name"], package["version"], package.get("source"))
         require(key in locked and key not in identities, "Windows app package is duplicated/outside the original lock")
         identities.add(key)

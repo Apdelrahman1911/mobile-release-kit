@@ -6902,10 +6902,17 @@ class WindowsReaderGateTests(unittest.TestCase):
         for name, version in versions.items():
             ids[name] = name + "@" + version
             directory = root / "cargo/registry/src/index.crates.io-fixed" / (name + "-" + version)
+            units = [{"name": name.replace("-", "_"), "kind": ["lib"], "crate_types": ["lib"],
+                      "src_path": str(directory / "src/lib.rs")}]
+            if name == "tokio":
+                # Match the genuine locked dependency's declaration count, not
+                # a claim that Cargo compiles/runs these integration tests.
+                units.extend({"name": "case_" + str(index), "kind": ["test"], "crate_types": ["bin"],
+                              "src_path": str(directory / "tests" / ("case_" + str(index) + ".rs"))}
+                             for index in range(157))
             packages.append({"id": ids[name], "name": name, "version": version, "source": registry,
                 "manifest_path": str(directory / "Cargo.toml"), "features": {"allowed": []},
-                "targets": [{"name": name.replace("-", "_"), "kind": ["lib"], "crate_types": ["lib"],
-                             "src_path": str(directory / "src/lib.rs")}]})
+                "targets": units})
             locked.append({"name": name, "version": version, "source": registry, "checksum": "3" * 64})
         direct = ["getrandom", "serde", "serde_json", "sha2", "tokio", "mrk-windows-installed-native"]
         packages[0]["dependencies"].extend({"name": name, "source": registry, "req": "=" + versions[name],
@@ -6973,6 +6980,25 @@ class WindowsReaderGateTests(unittest.TestCase):
         wrong_lock = deepcopy(lock); wrong_lock["package"].pop(2)  # Inactive Mac still belongs to the complete source lock.
         with self.assertRaises(helper.CheckFailure): helper.windows_installed_app_graph(value, wrong_lock, **arguments)
 
+    def test_windows_reader_declared_target_inventory_is_bounded_not_compiler_permission(self):
+        value, lock, context = self.graph_data()
+        arguments = {"source": Path(context["source"]), "root": Path(context["root"])}
+        dependency = next(package for package in value["packages"] if package["name"] == "tokio")
+        self.assertEqual(len(dependency["targets"]), 158)
+        graph = helper.windows_installed_app_graph(value, lock, **arguments)
+        self.assertEqual(len(graph["packages"][dependency["id"]]["targets"]), 158)
+        targets = dependency["targets"]
+        dependency["targets"] = targets + [
+            {**targets[1], "name": "extra_" + str(index), "src_path": "/inert/extra_" + str(index) + ".rs"}
+            for index in range(512 - len(targets))]
+        self.assertEqual(len(dependency["targets"]), 512)
+        helper.windows_installed_app_graph(value, lock, **arguments)
+        for invalid in (dependency["targets"] + [deepcopy(targets[1])], [], (), None, True):
+            with self.subTest(target_type=type(invalid).__name__, count=len(invalid) if type(invalid) is list else None):
+                dependency["targets"] = invalid
+                with self.assertRaisesRegex(helper.CheckFailure, "declared target inventory"):
+                    helper.windows_installed_app_graph(value, lock, **arguments)
+
     def test_windows_reader_artifact_accepts_active_declared_units_and_exact_libtest(self):
         value, lock, context = self.graph_data()
         source, root = Path(context["source"]), Path(context["root"])
@@ -6990,7 +7016,12 @@ class WindowsReaderGateTests(unittest.TestCase):
             with patch.object(helper, "ordinary_windows_executable", side_effect=lambda path, **_: Path(path)):
                 return helper.windows_installed_app_test_path(raw, graph, source=source, root=root)
         self.assertEqual(parse(rows), executable)
+        dependency = next(package for package in graph["packages"].values() if package["name"] == "tokio")
+        dependency_unit = {**compiled, "package_id": dependency["id"], "manifest_path": dependency["manifest_path"],
+                           "target": dependency["targets"][1], "profile": {"test": True, "debug_assertions": True}}
         mutations = {
+            "declared-but-unselected-dependency-test": lambda data: data.insert(0, deepcopy(dependency_unit)),
+            "dependency-library-test-profile": lambda data: data.insert(0, {**deepcopy(dependency_unit), "target": dependency["targets"][0]}),
             "duplicate-libtest": lambda data: data.insert(3, deepcopy(data[2])),
             "after-final": lambda data: data.append(deepcopy(data[2])),
             "failed-build": lambda data: data[-1].update(success=False),
