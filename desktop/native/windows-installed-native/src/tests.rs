@@ -681,6 +681,18 @@ fn acl_bounds_and_actual_trusted_sid_are_required() -> Result<()> {
     let raw = ordinary_descriptor(&parent, &admins, &aces);
     let fresh = || { let mut trace = InputTrace::default(); trace.at(InputRole::AclRoot, Some(3)); trace };
     let image = AclImage::parse_traced(&raw, &mut fresh())?;
+    // These are the actual live initializer's pure operands, not an object
+    // SECURITY_INFORMATION mask or a copied self-relative control word.
+    for (control, value) in [
+        (0x8004_u16, 0_u16), (0x9004, 0x1000),
+        (0x8104, 0), (0x9104, 0x1000), // unrelated AUTO_INHERIT_REQ
+        (0x8404, 0), (0x9404, 0x1000), // unrelated AUTO_INHERITED
+        (0x8504, 0), (0x9504, 0x1000), // both unrelated control bits
+    ] {
+        let mut original = raw.clone(); put16(&mut original, 2, control);
+        let selected = AclImage::parse_traced(&original, &mut fresh())?;
+        assert_eq!(selected.dacl_control(), (0x1000, value));
+    }
     let (expected, acl) = image.add(&account, FS::FILE_TRAVERSE, &mut fresh())?;
     let mut added = aces.clone(); added.push((allow, 0, FS::FILE_TRAVERSE, account.clone()));
     let raw_after = ordinary_descriptor(&parent, &admins, &added);
@@ -691,6 +703,23 @@ fn acl_bounds_and_actual_trusted_sid_are_required() -> Result<()> {
     for stamp in [&before, &after] {
         let mut trace = fresh(); expected.readback(&before, stamp, &raw, &raw_after, &mut trace)?;
         assert!(trace.first.is_none()); // Exact equality remains admitted.
+    }
+    // Reproduce the observed 0x9004 -> 0x8004 loss, and reject the reverse
+    // unrequested protection change. Exact equality still passes in both cases.
+    for (original_control, wrong_control) in [(0x9004, 0x8004), (0x8004, 0x9004)] {
+        let mut original = raw.clone(); put16(&mut original, 2, original_control);
+        let selected = AclImage::parse_traced(&original, &mut fresh())?;
+        let (expected_control, _) = selected.add(&account, FS::FILE_TRAVERSE, &mut fresh())?;
+        let mut matching = raw_after.clone(); put16(&mut matching, 2, original_control);
+        let mut matching_trace = fresh();
+        expected_control.readback(&before, &after, &original, &matching, &mut matching_trace)?;
+        assert!(matching_trace.first.is_none());
+        let mut wrong = matching.clone(); put16(&mut wrong, 2, wrong_control);
+        let mut trace = fresh();
+        assert_eq!(expected_control.readback(&before, &after, &original, &wrong, &mut trace), Err(Error::Unsafe));
+        let mut wanted = fresh();
+        assert_eq!(wanted.control(original_control, wrong_control), Err(Error::Unsafe));
+        assert_eq!(trace.first, wanted.first);
     }
     // A pre-existing inherited sequence stays byte-identical and in order;
     // the one explicit noninheriting account ACE precedes it, never propagates.
@@ -964,7 +993,7 @@ fn metadata_and_directory_keep_the_full_identity_not_a_low_half() -> Result<()> 
     assert!(text.contains("\"role\":\"AclArtifact\",\"slot\":null,\"check\":\"AclControl\",\"status\":null"));
     assert!(text.contains("\"control\":{\"expected\":65535,\"observed\":65534}"));
     assert!(output.len() + 32 <= 768);
-    for check in [InputCheck::AclInitialize, InputCheck::AclDacl, InputCheck::AclDeadline,
+    for check in [InputCheck::AclInitialize, InputCheck::AclDacl, InputCheck::AclControlInput, InputCheck::AclDeadline,
         InputCheck::AclTransitions, InputCheck::ParentPrimary, InputCheck::ParentUser,
         InputCheck::ParentIdentity, InputCheck::ParentSettlement] {
         let mut trace = InputTrace::default(); trace.at(InputRole::AclOutput, Some(40));

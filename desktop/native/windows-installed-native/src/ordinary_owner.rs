@@ -43,7 +43,7 @@ pub(super) enum InputCheck {
     ArtifactIdentity, ArtifactBytes, ArtifactDigest, ArtifactStable,
     OutputCreate, DescriptorState, DescriptorReturned, DescriptorLength,
     AclLayout, AclOwner, AclGroup, AclAccount, AclMask, AclMutation, AclCapacity,
-    AclInitialize, AclDacl, AclSetState, AclSetReturned, AclStamp, AclControl,
+    AclInitialize, AclDacl, AclControlInput, AclSetState, AclSetReturned, AclStamp, AclControl,
     AclOwnerEqual, AclGroupEqual, AclRevision, AclAces, AclChanged, AclDeadline,
     AclTransitions, ParentPrimary, ParentUser, ParentIdentity, ParentSettlement,
 }
@@ -518,6 +518,11 @@ impl AclImage {
         }
         Ok(())
     }
+    pub(super) fn dacl_control(&self) -> (u16, u16) {
+        // Only the original protection bit belongs in this absolute input.
+        // Descriptor control bits are not SECURITY_INFORMATION operation flags.
+        (S::SE_DACL_PROTECTED, self.control & S::SE_DACL_PROTECTED)
+    }
     pub(super) fn add(&self, sid: &[u8], mask: u32, trace: &mut InputTrace) -> Result<(Self, Box<Aligned>)> {
         let size = 8 + self.aces.iter().map(Vec::len).sum::<usize>() + 8 + sid.len();
         trace.need(size <= BUFFER && size <= u16::MAX as usize && self.aces.len() < 1024, InputCheck::AclCapacity)?;
@@ -558,6 +563,10 @@ fn grant(file: &mut OriginalFile, role: &str, parent: &[u8], account: &[u8], mas
     trace.need(unsafe { S::InitializeSecurityDescriptor((&mut *descriptor as *mut S::SECURITY_DESCRIPTOR).cast(), 1) } != 0, InputCheck::AclInitialize)?;
     trace.need(unsafe { S::SetSecurityDescriptorDacl((&mut *descriptor as *mut S::SECURITY_DESCRIPTOR).cast(),
         1, acl.0.as_ptr().cast(), 0) } != 0, InputCheck::AclDacl)?;
+    // Mutate only owned descriptor DATA; the original object setter stays below.
+    let (control_interest, control_value) = image.dacl_control();
+    trace.need(unsafe { S::SetSecurityDescriptorControl(
+        (&mut *descriptor as *mut S::SECURITY_DESCRIPTOR).cast(), control_interest, control_value) } != 0, InputCheck::AclControlInput)?;
     let b = file.body();
     if b.state != SlotState::Owned || b.active { return trace.observed(Err(Error::State), InputCheck::AclSetState); }
     trace.observed(next_effect(start.elapsed(), deadline_latched), InputCheck::AclDeadline)?;
