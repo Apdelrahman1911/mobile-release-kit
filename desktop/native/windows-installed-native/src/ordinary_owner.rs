@@ -952,7 +952,8 @@ fn hosted_ordinary_original_handle_contract() -> Result<()> {
         stage = "original-inputs";
         // Pin all actual ancestors against reparse/rename, but change ACLs ONLY
         // at/below this freshly owned root, never RUNNER_TEMP or an OS directory.
-        let ancestors: Vec<_> = root.ancestors().map(Path::to_path_buf).rev().collect();
+        let mut ancestors: Vec<_> = root.ancestors().map(Path::to_path_buf).collect();
+        ancestors.reverse();
         need(ancestors.len() <= 24)?;
         let mut root_index = 0;
         for path in &ancestors {
