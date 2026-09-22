@@ -9,13 +9,13 @@ import os
 from pathlib import Path
 import re
 import stat
-import textwrap
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 
 WORKFLOW = Path(__file__).resolve().parents[2] / ".github/workflows/desktop-ubuntu-publication.yml"
+PROVISIONER = WORKFLOW.parents[2] / "desktop/tools/prepare_hosted_ubuntu_data.py"
 BYOBU_ICON = "/usr/share/byobu/pixmaps/byobu.svg"
 PREPARE = (
     "/usr/share", "/etc/gtk-3.0", "/etc/fonts", "/etc/fonts/conf.d",
@@ -72,7 +72,7 @@ def access_acl(mode=0o755, *, users=((0x11223344, 7),), groups=(), group_permiss
 
 
 PREPARER_MARKER = ("          sudo /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent "
-                   "/usr/bin/python3.12 -I -S -B - <<'PY'\n")
+                   "/usr/bin/python3.12 -I -S -B desktop/tools/prepare_hosted_ubuntu_data.py </dev/null\n")
 
 
 class DirectoryMetadataOS:
@@ -305,10 +305,12 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
         raw = WORKFLOW.read_bytes()
         if len(raw) > 128 << 10:
             raise AssertionError("Workflow source exceeds this DATA read bound")
-        blocks = [textwrap.dedent(part.split("          PY\n", 1)[0]) for part in raw.decode("utf-8").split(PREPARER_MARKER)[1:]]
-        if len(blocks) != 2 or blocks[0] != blocks[1]:
-            raise AssertionError("Compiler/native directory-preparation bodies must be identical")
-        cls.inline = blocks[0]
+        if raw.decode("utf-8").count(PREPARER_MARKER) != 2:
+            raise AssertionError("Compiler/native jobs must invoke the same fixed DATA script")
+        shared = PROVISIONER.read_bytes()
+        if not 0 < len(shared) <= 64 << 10:
+            raise AssertionError("Shared preparation source exceeds this DATA read bound")
+        cls.inline = shared.decode("utf-8")
 
     def run_inline(self, filesystem):
         def forbidden(*_args, **_kwargs):
@@ -321,9 +323,9 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
         replacements.update(getresuid=lambda: filesystem.uids, getresgid=lambda: filesystem.gids)
         with patch.multiple(os, **replacements), patch.object(builtins, "open", filesystem.open_mounts), redirect_stdout(output):
             try:
-                # Execute the actual inline imports and top-level entry, not
+                # Execute the actual shared imports and top-level entry, not
                 # selected AST functions with a fabricated dependency namespace.
-                exec(compile(self.inline, str(WORKFLOW) + ":directory-preparation", "exec"), namespace)
+                exec(compile(self.inline, str(PROVISIONER), "exec"), namespace)
             except BaseException as caught:
                 error = caught
         self.assertEqual(filesystem.live, {})
@@ -1566,13 +1568,15 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
         steps = re.split(r"^      - name: ", compile_job, flags=re.MULTILINE)[1:]
         expected = {"Require one exact disposable preparation route", "Check out exact reviewed source without credentials",
                     "Select the fixed frontend compiler", "Prepare shared Ubuntu shell inputs only on this disposable runner",
-                    "Prepare only fixed disposable Ubuntu DATA modes", "Prepare a fresh bounded compiler owner",
+                    "Prepare only fixed disposable Ubuntu DATA modes", "Observe only the hosted Python body as public DATA",
+                    "Prepare a fresh bounded compiler owner",
                     "Download the exact accepted A runtime as DATA", "Compile the normal shell and separate observer once without executing either",
                     "Retain original compiler evidence and shell outputs"}
         self.assertEqual({step.splitlines()[0] for step in steps}, expected)
         self.assertEqual(len(steps), len(expected))
         unguarded = {"Require one exact disposable preparation route", "Check out exact reviewed source without credentials",
-                     "Prepare shared Ubuntu shell inputs only on this disposable runner", "Prepare only fixed disposable Ubuntu DATA modes"}
+                     "Prepare shared Ubuntu shell inputs only on this disposable runner", "Prepare only fixed disposable Ubuntu DATA modes",
+                     "Observe only the hosted Python body as public DATA"}
         for step in steps:
             name = step.splitlines()[0]
             if name in unguarded:
@@ -1584,7 +1588,7 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
         self.assertIn("    if: github.ref == '" + full + "'\n    needs: compile\n", native_job)
         self.assertIn("    timeout-minutes: 25\n", native_job)
         self.assertEqual(source.count("        timeout-minutes: 8\n"), 2)
-        self.assertEqual(source.count("        timeout-minutes: 1\n"), 2)
+        self.assertEqual(source.count("        timeout-minutes: 1\n"), 4)
         self.assertEqual(source.count(PREPARER_MARKER), 2)
         self.assertIn("          persist-credentials: false\n", compile_job)
 

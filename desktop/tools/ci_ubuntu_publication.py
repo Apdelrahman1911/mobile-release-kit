@@ -1927,7 +1927,8 @@ def shell_source_manifest(source):
              "desktop/src-tauri/src/supervisor.rs", "desktop/src-tauri/src/installed_shell_shutdown_observation.rs",
              "desktop/src-tauri/tauri.conf.json", "desktop/package.json", "desktop/package-lock.json",
              "desktop/vite.config.mjs", "desktop/tsconfig.json", "desktop/src/App.tsx",
-             "desktop/tools/ci_ubuntu_publication.py", "desktop/tools/ubuntu_publication_lifecycle.py")
+             "desktop/tools/ci_ubuntu_publication.py", "desktop/tools/ubuntu_publication_lifecycle.py",
+             "desktop/tools/prepare_hosted_ubuntu_data.py")
     return [{**D.file_record(source / path, 2 << 20), "path": path} for path in sorted(paths)]
 
 
