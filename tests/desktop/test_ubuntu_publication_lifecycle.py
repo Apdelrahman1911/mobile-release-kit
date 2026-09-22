@@ -717,12 +717,15 @@ class LifecycleData(unittest.TestCase):
         # A finite original failure in an omitted middle is counted from the
         # SAME validated capture, not recovered by opening another log.
         failed_capability = b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-query_timeout\n"
-        middle = subprocess.CompletedProcess(argv, 0, b"h" * 1024 + b"\n" + failed_capability + b"t" * 2048, b"")
+        failed_cause = b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-namespace\n"
+        middle = subprocess.CompletedProcess(argv, 0, b"h" * 1024 + b"\n" + failed_capability + failed_cause + b"t" * 2048, b"")
         counted_middle = observe(dict(holder, result=middle), display_log=b"")
         self.assertEqual(counted_middle["bootstrap"]["stdout"]["stages"]["capabilities-query-wait-query_timeout"], 1)
+        self.assertEqual(counted_middle["bootstrap"]["stdout"]["stages"]["capabilities-cause-inspection-namespace"], 1)
         summary = counted_middle["capture"]["stdout"]
         self.assertTrue(summary["truncated"])
         self.assertNotIn("capabilities-query-wait-query_timeout", summary["head"] + summary["tail"])
+        self.assertNotIn("capabilities-cause-inspection-namespace", summary["head"] + summary["tail"])
         self.assertEqual(observed["resources"], resource_observation())
         self.assertLess(len(L.canonical(observed["resources"])), 1024)
         unavailable = observe(resources=resource_observation(unavailable=True))
@@ -757,6 +760,18 @@ class LifecycleData(unittest.TestCase):
         for name in ("stdout", "stderr"):
             self.assertEqual(observed["controller"]["lastCompleted"]["capture"][name]["sha256"],
                              hashlib.sha256(getattr(query, name)).hexdigest())
+        # Expanded cause counts survive the SAME <=32768-byte fallback;
+        # neither another capture nor a larger report limit is permitted.
+        tagged = subprocess.CompletedProcess(argv, 127, original.stdout + b"\n" + failed_cause,
+                                             original.stderr + b"\n" + failed_cause)
+        trimmed = observe(dict(holder, result=tagged), controller=controller)
+        for name in ("stdout", "stderr"):
+            self.assertEqual(trimmed["bootstrap"][name]["stages"]["capabilities-cause-inspection-namespace"], 1)
+            self.assertNotIn("head", trimmed["capture"][name])
+            self.assertNotIn("tail", trimmed["capture"][name])
+            self.assertEqual(trimmed["capture"][name]["sha256"], hashlib.sha256(getattr(tagged, name)).hexdigest())
+        self.assertFalse(trimmed["qualified"])
+        self.assertFalse(trimmed["cleanupEstablished"])
         # A returned object is not a valid capture, and mistyped scalar facts
         # must not be presented as known observations.
         altered = deepcopy(controller)
@@ -859,7 +874,54 @@ class LifecycleData(unittest.TestCase):
                             "protocol_error", "engine_failed", "io_error", "output_limit", "other")
         capability_stages = tuple("capabilities-" + origin + "-" + code
                                   for origin in ("admission", "query-wait") for code in capability_codes)
-        stages += capability_stages
+        native_failures = (
+            'unsupported-platform',
+            'missing-compile-anchor',
+            'stopped',
+            'deadline',
+            'native-unavailable',
+            'native-denied',
+            'namespace',
+            'mount',
+            'ownership',
+            'extended-attributes',
+            'identity-changed',
+            'manifest',
+            'inventory',
+            'bounds',
+            'already-used',
+            'interrupted',
+            'close-uncertain',
+            'ledger-invariant',
+            'transfer-unavailable',
+            'destination-occupied',
+        )
+        local_causes = (
+            'selection-profile-closed',
+            'selection-compile-binding',
+            'selection-method-outside-profile',
+            'inspection-unavailable',
+            'acquisition-entry-not-released',
+            'acquisition-custody-missing',
+            'acquisition-lock',
+            'final-claim-owner-gate',
+            'returned-spawn-process-fd-limit',
+            'returned-spawn-system-fd-limit',
+            'returned-spawn-memory',
+            'returned-spawn-resource-unavailable',
+            'returned-spawn-permission-denied',
+            'returned-spawn-not-found',
+            'returned-spawn-exec-format',
+            'returned-spawn-other',
+            'engine-response',
+            'unavailable',
+        )
+        cause_stages = tuple("capabilities-cause-" + origin + "-" + reason
+                             for origin in ("inspection", "capability", "preparation", "final-claim") for reason in native_failures)
+        cause_stages += tuple("capabilities-cause-" + label for label in local_causes)
+        self.assertEqual(len(cause_stages), 98)
+        self.assertEqual(len(set(cause_stages)), 98)
+        stages += capability_stages + cause_stages
         prefix = b"MRKDBG_DESKTOP_BOOTSTRAP="
         stdout = (b"ordinary wrapper text\n" + b"".join(markers) + markers[0]
                   + b"".join(prefix + stage.encode("ascii") + b"\n" for stage in stages)
@@ -877,7 +939,7 @@ class LifecycleData(unittest.TestCase):
             "unexpectedMrk": 1, "stages": {stage: int(stage == "catalog-enter") for stage in stages}, "unexpectedBootstrap": 0})
         self.assertNotIn(b"private", L.canonical(counted))
         for reason in ("content-reason-crashed", "content-reason-exceeded-memory-limit",
-                       "content-reason-terminated-by-api", "content-reason-unknown", *capability_stages):
+                       "content-reason-terminated-by-api", "content-reason-unknown", *capability_stages, *cause_stages):
             line = prefix + reason.encode("ascii")
             for malformed in (line, line + b"\r\n", line + b" extra\n"):
                 row = L._shell_normal_markers(malformed, b"")["stdout"]
@@ -885,19 +947,28 @@ class LifecycleData(unittest.TestCase):
                 self.assertEqual(row["unexpectedBootstrap"], 1)
         for line in (prefix + b"capabilities-admission-PRIVATE_CODE\n",
                      prefix + b"capabilities-PRIVATE_ORIGIN-query_timeout\n",
-                     prefix + b"capabilities-query-wait-protocol_error\x1b[31mPRIVATE\n"):
+                     prefix + b"capabilities-query-wait-protocol_error\x1b[31mPRIVATE\n",
+                     prefix + b"capabilities-cause-inspection-PRIVATE_REASON\n",
+                     prefix + b"capabilities-cause-PRIVATE_ORIGIN-namespace\n",
+                     prefix + b"capabilities-cause-returned-spawn-13\n",
+                     prefix + b"capabilities-cause-engine-response\x1b[31mPRIVATE\n"):
             row = L._shell_normal_markers(line, b"")["stdout"]
-            self.assertTrue(all(row["stages"][stage] == 0 for stage in capability_stages))
+            self.assertTrue(all(row["stages"][stage] == 0 for stage in capability_stages + cause_stages))
             self.assertEqual(row["unexpectedBootstrap"], 1)
             self.assertNotIn(b"PRIVATE", L.canonical(row))
         duplicate = prefix + b"capabilities-admission-busy\n"
         row = L._shell_normal_markers(duplicate * 2, b"")["stdout"]
         self.assertEqual(row["stages"]["capabilities-admission-busy"], 2)
         self.assertEqual(row["unexpectedBootstrap"], 0)
-        # Counts are diagnostic-only; a completed or empty stage sequence
-        # cannot manufacture normal bootstrap success.
-        with self.assertRaises(ValueError):
-            L.shell_result(prefix + b"setup-enter\n", b"", "normal", 0, map_data())
+        cause = prefix + b"capabilities-cause-inspection-namespace\n"
+        row = L._shell_normal_markers(cause * 2, b"")["stdout"]
+        self.assertEqual(row["stages"]["capabilities-cause-inspection-namespace"], 2)
+        self.assertEqual(row["unexpectedBootstrap"], 0)
+        # Counts are diagnostic-only; neither all causes nor a stage can
+        # manufacture normal capabilities/catalogue or observer success.
+        for raw in (prefix + b"setup-enter\n", b"".join(prefix + stage.encode("ascii") + b"\n" for stage in cause_stages)):
+            with self.assertRaises(ValueError):
+                L.shell_result(raw, b"", "normal", 0, map_data())
 
 
     def test_normal_resource_diagnostic_is_original_bounded_and_failure_only(self):

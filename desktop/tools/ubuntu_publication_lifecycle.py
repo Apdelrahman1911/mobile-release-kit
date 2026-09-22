@@ -4508,6 +4508,52 @@ def _shell_normal_markers(stdout, stderr):
                      "protocol_error", "engine_failed", "io_error", "output_limit", "other")
     stages += tuple("capabilities-" + origin + "-" + code
                     for origin in ("admission", "query-wait") for code in failure_codes)
+    # Linux-only first-error cause DATA, counted only as complete fixed records.
+    native_failures = (
+        'unsupported-platform',
+        'missing-compile-anchor',
+        'stopped',
+        'deadline',
+        'native-unavailable',
+        'native-denied',
+        'namespace',
+        'mount',
+        'ownership',
+        'extended-attributes',
+        'identity-changed',
+        'manifest',
+        'inventory',
+        'bounds',
+        'already-used',
+        'interrupted',
+        'close-uncertain',
+        'ledger-invariant',
+        'transfer-unavailable',
+        'destination-occupied',
+    )
+    local_causes = (
+        'selection-profile-closed',
+        'selection-compile-binding',
+        'selection-method-outside-profile',
+        'inspection-unavailable',
+        'acquisition-entry-not-released',
+        'acquisition-custody-missing',
+        'acquisition-lock',
+        'final-claim-owner-gate',
+        'returned-spawn-process-fd-limit',
+        'returned-spawn-system-fd-limit',
+        'returned-spawn-memory',
+        'returned-spawn-resource-unavailable',
+        'returned-spawn-permission-denied',
+        'returned-spawn-not-found',
+        'returned-spawn-exec-format',
+        'returned-spawn-other',
+        'engine-response',
+        'unavailable',
+    )
+    stages += tuple("capabilities-cause-" + origin + "-" + reason
+                    for origin in ("inspection", "capability", "preparation", "final-claim") for reason in native_failures)
+    stages += tuple("capabilities-cause-" + label for label in local_causes)
     prefix = b"MRKDBG_DESKTOP_BOOTSTRAP="
     stage_lines = {prefix + stage.encode("ascii") + b"\n": stage for stage in stages}
     result = {}

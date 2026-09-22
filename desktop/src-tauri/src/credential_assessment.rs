@@ -1287,7 +1287,8 @@ mod tests {
             assert_eq!(error.code, "assessment_unavailable");
             assert_eq!(error.message, "Credential assessment is unavailable; no credential was verified.");
         }
-        let error = sanitized_error(BridgeError { code: "assessment_limit".into(), message: "fictional-private-message".into(), retryable: true });
+        let mut input = BridgeError::new("assessment_limit", "fictional-private-message"); input.retryable = true;
+        let error = sanitized_error(input);
         assert_eq!(error.code, "assessment_unavailable");
     }
 

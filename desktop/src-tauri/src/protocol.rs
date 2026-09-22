@@ -164,7 +164,10 @@ pub fn decode_response(bytes: &[u8], id: &str) -> Result<Value, BridgeError> {
         || error.message.chars().any(|c| c <= '\u{1f}' || c == '\u{7f}') {
         return Err(BridgeError::protocol());
     }
-    Err(BridgeError::new(&error.code, &error.message))
+    let error = BridgeError::new(&error.code, &error.message);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let error = error.with_linux_passive_cause(Some(crate::error::LinuxPassiveCause::EngineResponse));
+    Err(error)
 }
 
 #[cfg(test)]
@@ -174,6 +177,28 @@ mod tests {
     use serde_json::json;
     fn response(value: Value) -> Vec<u8> {
         let mut bytes = serde_json::to_vec(&value).unwrap_or_default(); bytes.push(b'\n'); bytes
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn only_a_valid_engine_error_can_supply_the_engine_response_cause() {
+        let valid = json!({"protocol":1,"id":"query-1","ok":false,
+            "error":{"code":"runtime_unavailable","message":"inert engine message","retryable":false}});
+        let error = decode_response(&response(valid.clone()), "query-1").unwrap_err();
+        assert_eq!(error, BridgeError::new("runtime_unavailable", "inert engine message"));
+        assert_eq!(error.linux_passive_cause(), Some(crate::error::LinuxPassiveCause::EngineResponse));
+        let mut invalid = Vec::new();
+        let mut row = valid.clone(); row["id"] = json!("other"); invalid.push(response(row));
+        let mut row = valid.clone(); row["error"]["retryable"] = json!(true); invalid.push(response(row));
+        let mut row = valid.clone(); row["error"]["message"] = json!("PRIVATE\nmessage"); invalid.push(response(row));
+        let mut row = valid.clone(); row["error"]["code"] = json!("PRIVATE\ncode"); invalid.push(response(row));
+        let mut row = valid.clone(); row["error"]["linux_passive_cause"] = json!("engine-response"); invalid.push(response(row));
+        let mut row = valid.clone(); row["linux_passive_cause"] = json!("engine-response"); invalid.push(response(row));
+        let mut frame = response(valid); frame.pop(); invalid.push(frame);
+        for bytes in invalid {
+            let error = decode_response(&bytes, "query-1").unwrap_err();
+            assert_eq!(error.code, "protocol_error");
+            assert_eq!(error.linux_passive_cause(), None);
+        }
     }
     #[test]
     fn request_is_closed_correlated_and_newline_terminated() {

@@ -193,7 +193,9 @@ impl PassiveInstalledProfile {
         target == Self::TARGET && manifest == Some(Self::MANIFEST) && protocol == Some(Self::PROTOCOL)
     }
     pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
-        if !Self::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) { return Err(unavailable()); }
+        if !Self::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
+            return Err(unavailable().with_linux_passive_cause(Some(crate::error::LinuxPassiveCause::SelectionCompileBinding)));
+        }
         let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions").join(Self::TARGET).join(Self::MANIFEST);
         Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("engine_bootstrap.py"),
             core: cwd.join("core.zip"), cwd })
@@ -563,17 +565,21 @@ impl RuntimeConfig {
         end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
         let profile = self.passive_installed_profile()?;
         if !self.installed_method_available(method.name()) {
-            return Err(BridgeError::unavailable("This installed desktop method is outside the selected passive/session profile."));
+            return Err(BridgeError::unavailable("This installed desktop method is outside the selected passive/session profile.")
+                .with_linux_passive_cause(Some(crate::error::LinuxPassiveCause::SelectionMethodOutsideProfile)));
         }
         originals.inspect_once(profile, end, stop)
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fn passive_installed_profile(&self) -> Result<PassiveInstalledProfile, BridgeError> {
         match self.passive_installed {
-            PassiveInstalledSelection::Closed => Err(BridgeError::unavailable("The passive installed-runtime release and custody profile are not qualified.")),
+            PassiveInstalledSelection::Closed => Err(BridgeError::unavailable("The passive installed-runtime release and custody profile are not qualified.")
+                .with_linux_passive_cause(Some(crate::error::LinuxPassiveCause::SelectionProfileClosed))),
             #[cfg(all(not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell")))]
             PassiveInstalledSelection::CandidateA => {
-                if !PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) { return Err(unavailable()); }
+                if !PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
+                    return Err(unavailable().with_linux_passive_cause(Some(crate::error::LinuxPassiveCause::SelectionCompileBinding)));
+                }
                 Ok(PassiveInstalledProfile { _private: () })
             }
         }

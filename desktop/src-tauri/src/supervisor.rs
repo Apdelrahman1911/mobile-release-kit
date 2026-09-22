@@ -205,10 +205,96 @@ impl OwnerState {
         if now >= self.endpoint { self.fail_at(BridgeError::timeout(), now); }
         if self.cleanup_endpoint.is_some_and(|endpoint| now >= endpoint) { self.unknown = true; }
         let Some(DriverEnd::Ready(result)) = self.driver_end.take() else { return None; };
-        Some(if self.unknown { Err(BridgeError::cleanup_unknown()) }
+        Some(if self.unknown {
+            let error = BridgeError::cleanup_unknown();
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            let error = error.with_linux_passive_cause(self.error.as_ref().and_then(BridgeError::linux_passive_cause));
+            Err(error)
+        }
             else { match &self.error { Some(error) => Err(error.clone()), None => result } })
     }
 }
+
+// The SAME acquisition's error return, not another owner or receipt. The raw
+// io::Error remains private; only closed returned facts reach BridgeError.
+#[derive(Debug)]
+struct AcquisitionError {
+    original: std::io::Error,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    cause: Option<crate::error::LinuxPassiveCause>,
+}
+impl From<std::io::Error> for AcquisitionError {
+    fn from(original: std::io::Error) -> Self {
+        Self { original,
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            cause: None,
+        }
+    }
+}
+impl AcquisitionError {
+    fn unsupported(message: &'static str) -> Self {
+        std::io::Error::new(std::io::ErrorKind::Unsupported, message).into()
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn with_cause(mut self, cause: crate::error::LinuxPassiveCause) -> Self {
+        self.cause = Some(cause); self
+    }
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    fn capability(failure: crate::installed_runtime::AdmissionFailure) -> Self {
+        let error = Self::unsupported("passive installed custody is unavailable");
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let error = error.with_cause(crate::error::LinuxPassiveCause::Capability(failure));
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        let _ = failure;
+        error
+    }
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    fn preparation(failure: crate::installed_runtime::AdmissionFailure) -> Self {
+        let error = Self::unsupported("passive installed preparation refused");
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let error = error.with_cause(crate::error::LinuxPassiveCause::Preparation(failure));
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        let _ = failure;
+        error
+    }
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    fn final_claim(failure: crate::installed_runtime::AdmissionFailure) -> Self {
+        let error = Self::unsupported("passive installed custody is unavailable");
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let error = error.with_cause(crate::error::LinuxPassiveCause::FinalClaim(failure));
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        let _ = failure;
+        error
+    }
+    fn returned_spawn(original: std::io::Error) -> Self {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let cause = {
+            use crate::error::LinuxSpawnFailure as F;
+            use rustix::io::Errno;
+            match original.raw_os_error() {
+                Some(code) if code == Errno::MFILE.raw_os_error() => F::ProcessFdLimit,
+                Some(code) if code == Errno::NFILE.raw_os_error() => F::SystemFdLimit,
+                Some(code) if code == Errno::NOMEM.raw_os_error() => F::Memory,
+                Some(code) if code == Errno::AGAIN.raw_os_error() => F::ResourceUnavailable,
+                Some(code) if code == Errno::ACCESS.raw_os_error() || code == Errno::PERM.raw_os_error() => F::PermissionDenied,
+                Some(code) if code == Errno::NOENT.raw_os_error() => F::NotFound,
+                Some(code) if code == Errno::NOEXEC.raw_os_error() => F::ExecFormat,
+                _ => F::Other,
+            }
+        };
+        Self { original,
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            cause: Some(crate::error::LinuxPassiveCause::ReturnedSpawn(cause)),
+        }
+    }
+    fn into_bridge_error(self) -> BridgeError {
+        let error = BridgeError::unavailable("The selected isolated core could not start.");
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let error = error.with_linux_passive_cause(self.cause);
+        error
+    }
+}
+
 #[derive(Default)]
 struct Resources {
     inspection: Option<JoinHandle<Result<VerifiedRuntime, BridgeError>>>,
@@ -224,7 +310,7 @@ struct Resources {
     #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
     native_snapshots: Vec<installed_native_fixture::ChildObservation>,
-    acquisition: Option<JoinHandle<std::io::Result<Child>>>, child: Option<Child>,
+    acquisition: Option<JoinHandle<Result<Child, AcquisitionError>>>, child: Option<Child>,
     acquisition_return: Option<ManagementJoin>, acquisition_error: Option<tokio::task::JoinError>,
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     passive: Option<Arc<Mutex<PassiveRuntimeSlots>>>,
@@ -261,6 +347,8 @@ impl Owner {
         state.unknown = true;
         state.fail_at(BridgeError::cleanup_unknown(), Instant::now());
         let reply = state.reply.take();
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let cause = state.error.as_ref().and_then(BridgeError::linux_passive_cause);
         drop(state);
         // No supervisor bookkeeping lock is held while publishing safe data.
         // A racing actual retirement may already have sealed the final receipt;
@@ -269,7 +357,12 @@ impl Owner {
             let mut receipt = lock(receipt);
             if matches!(&*receipt, GitHubReadReceipt::Pending) { *receipt = GitHubReadReceipt::RetainedUnknown; }
         }
-        if let Some(reply) = reply { let _ = reply.send(Err(BridgeError::cleanup_unknown())); }
+        if let Some(reply) = reply {
+            let error = BridgeError::cleanup_unknown();
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            let error = error.with_linux_passive_cause(cause);
+            let _ = reply.send(Err(error));
+        }
         self.stop.send_replace(true);
         inner.changed.notify_waiters();
         self.changed.notify_waiters();
@@ -777,9 +870,9 @@ struct PreparedPassiveSpawn<'a> {
 
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 impl<'a> PreparedPassiveSpawn<'a> {
-    fn prepare(runtime: &'a mut PassiveInstalledRuntime, end: Instant, stop: &watch::Receiver<bool>) -> std::io::Result<Self> {
+    fn prepare(runtime: &'a mut PassiveInstalledRuntime, end: Instant, stop: &watch::Receiver<bool>) -> Result<Self, AcquisitionError> {
         let selected = runtime.prepare_once(end, stop)
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::Unsupported, "passive installed preparation refused"))?;
+            .map_err(AcquisitionError::preparation)?;
         // All native checks and fixed argument/environment allocations precede
         // the serialized final owner claim. No pathname/Command-taking adapter.
         #[cfg(all(not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell")))]
@@ -803,26 +896,31 @@ impl<'a> PreparedPassiveSpawn<'a> {
 
 #[cfg(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")),
     not(all(not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell")))))]
-fn spawn_passive_original(prepared: PreparedPassiveSpawn<'_>) -> std::io::Result<Child> {
+fn spawn_passive_original(prepared: PreparedPassiveSpawn<'_>) -> Result<Child, AcquisitionError> {
     // Unsupported profiles remain unconditional. Only this no-effect stub has
     // a receipt; it is absent from the fixed installed-shell/native profile.
     prepared.runtime.record_closed_spawn_gate();
-    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "packaged runtime execution is not qualified"))
+    Err(AcquisitionError::unsupported("packaged runtime execution is not qualified"))
 }
 
 #[cfg(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")),
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell")))]
-fn spawn_passive_original(mut prepared: PreparedPassiveSpawn<'_>) -> std::io::Result<Child> {
+fn spawn_passive_original(mut prepared: PreparedPassiveSpawn<'_>) -> Result<Child, AcquisitionError> {
     // Opaque creation errors provide NO no-child/pipe-close proof. The claimed
     // original stays registered; the existing owner therefore retains Unknown.
-    prepared.command.spawn()
+    prepared.command.spawn().map_err(AcquisitionError::returned_spawn)
 }
 
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-fn acquire_passive_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mutex<PassiveRuntimeSlots>>) -> std::io::Result<Child> {
-    let refused = || std::io::Error::new(std::io::ErrorKind::Unsupported, "passive installed custody is unavailable");
-    let mut slots = native.lock().map_err(|_| refused())?;
-    let runtime = slots.capability().map_err(|_| refused())?;
+fn acquire_passive_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mutex<PassiveRuntimeSlots>>) -> Result<Child, AcquisitionError> {
+    let refused = || AcquisitionError::unsupported("passive installed custody is unavailable");
+    let mut slots = native.lock().map_err(|_| {
+        let error = refused();
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let error = error.with_cause(crate::error::LinuxPassiveCause::AcquisitionLock);
+        error
+    })?;
+    let runtime = slots.capability().map_err(AcquisitionError::capability)?;
     let stop = owner.stop.subscribe();
     let prepared = PreparedPassiveSpawn::prepare(runtime, owner.endpoint(), &stop)?;
     #[cfg(all(target_os = "linux", test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
@@ -834,13 +932,16 @@ fn acquire_passive_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mute
         let owners = lock(&inner.owners); let state = lock(&owner.state);
         if !passive_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
             &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
-            return Err(refused());
+            let error = refused();
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            let error = error.with_cause(crate::error::LinuxPassiveCause::FinalClaimOwnerGate);
+            return Err(error);
         }
-        prepared.runtime.claim_once().map_err(|_| refused())?;
+        prepared.runtime.claim_once().map_err(AcquisitionError::final_claim)?;
         drop(state); drop(owners);
         let result = spawn_passive_original(prepared); // No await/callback/IO between final claim and creation.
         #[cfg(all(target_os = "linux", test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
-        { *lock(&inner.native_test.creation) = Some((result.is_ok(), result.as_ref().err().and_then(std::io::Error::raw_os_error))); }
+        { *lock(&inner.native_test.creation) = Some((result.is_ok(), result.as_ref().err().and_then(|error| error.original.raw_os_error()))); }
         result
     })();
     #[cfg(all(target_os = "linux", test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
@@ -1021,7 +1122,10 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     resources.acquisition_return = Some(ManagementJoin::Pending);
     resources.acquisition = Some(tokio::task::spawn_blocking(move || {
         if acquire_enter.blocking_recv().is_err() {
-            return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "original acquisition entry was not released"));
+            let error = AcquisitionError::from(std::io::Error::new(std::io::ErrorKind::Interrupted, "original acquisition entry was not released"));
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            let error = error.with_cause(crate::error::LinuxPassiveCause::AcquisitionEntryNotReleased);
+            return Err(error);
         }
         // Scheduling instrumentation inside THIS retained original task,
         // before spawn_original's two final creation checks. No new deadline.
@@ -1031,11 +1135,14 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         if passive_selected(acquiring_owner.profile) {
             let Some(native) = acquisition_native else {
                 acquiring_owner.unknown(&acquiring_inner);
-                return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "original passive custody is missing"));
+                let error = AcquisitionError::unsupported("original passive custody is missing");
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                let error = error.with_cause(crate::error::LinuxPassiveCause::AcquisitionCustodyMissing);
+                return Err(error);
             };
             return acquire_passive_original(&acquiring_inner, &acquiring_owner, &native);
         }
-        spawn_original(runtime, acquiring_owner)
+        spawn_original(runtime, acquiring_owner).map_err(AcquisitionError::from)
     }));
     let _ = acquire_start.send(());
     let acquired = join_slot(&mut resources.acquisition).await;
@@ -1044,9 +1151,9 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     if acquired.is_ok() { lock(&owner.observation).acquisition_joined = true; }
     let child = match acquired {
         Ok(Ok(child)) => { resources.acquisition.take(); Some(child) },
-        Ok(Err(_)) => {
+        Ok(Err(failure)) => {
             resources.acquisition.take();
-            let error = BridgeError::unavailable("The selected isolated core could not start.");
+            let error = failure.into_bridge_error(); // Only after this original acquisition joined.
             owner.fail(error.clone());
             return ready_after_custody(&mut resources, &inner, &owner, Err(error)).await;
         }
@@ -1546,6 +1653,81 @@ mod tests {
             observation: Arc::new(Mutex::new(hosted_tests::Observation::default())),
         }
     }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn acquisition_native_causes_survive_the_original_error_carrier() {
+        use crate::error::LinuxPassiveCause as Cause;
+        use crate::installed_runtime::AdmissionFailure as Failure;
+        let failures = [
+            Failure::UnsupportedPlatform,
+            Failure::MissingCompileAnchor,
+            Failure::Stopped,
+            Failure::Deadline,
+            Failure::NativeUnavailable,
+            Failure::NativeDenied,
+            Failure::Namespace,
+            Failure::Mount,
+            Failure::Ownership,
+            Failure::ExtendedAttributes,
+            Failure::IdentityChanged,
+            Failure::Manifest,
+            Failure::Inventory,
+            Failure::Bounds,
+            Failure::AlreadyUsed,
+            Failure::Interrupted,
+            Failure::CloseUncertain,
+            Failure::LedgerInvariant,
+            Failure::TransferUnavailable,
+            Failure::DestinationOccupied,
+        ];
+        let origins: [(fn(Failure) -> AcquisitionError, fn(Failure) -> Cause); 3] = [
+            (AcquisitionError::capability, Cause::Capability),
+            (AcquisitionError::preparation, Cause::Preparation),
+            (AcquisitionError::final_claim, Cause::FinalClaim),
+        ];
+        for (map, cause) in origins {
+            for failure in failures {
+                let original = map(failure);
+                assert_eq!(original.original.kind(), std::io::ErrorKind::Unsupported);
+                let error = original.into_bridge_error();
+                assert_eq!(error, BridgeError::unavailable("The selected isolated core could not start."));
+                assert_eq!(error.linux_passive_cause(), Some(cause(failure)));
+            }
+        }
+        let stub = AcquisitionError::unsupported("PRIVATE no-effect refusal").into_bridge_error();
+        assert_eq!(stub.linux_passive_cause(), None); // Never a returned-spawn fact.
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn returned_spawn_errors_have_closed_classes_without_formatting() {
+        use crate::error::{LinuxPassiveCause as Cause, LinuxSpawnFailure as Failure};
+        use rustix::io::Errno;
+        for (errno, expected) in [(Errno::MFILE, Failure::ProcessFdLimit), (Errno::NFILE, Failure::SystemFdLimit),
+            (Errno::NOMEM, Failure::Memory), (Errno::AGAIN, Failure::ResourceUnavailable),
+            (Errno::ACCESS, Failure::PermissionDenied), (Errno::PERM, Failure::PermissionDenied),
+            (Errno::NOENT, Failure::NotFound), (Errno::NOEXEC, Failure::ExecFormat), (Errno::IO, Failure::Other)] {
+            let original = AcquisitionError::returned_spawn(std::io::Error::from_raw_os_error(errno.raw_os_error()));
+            assert_eq!(original.original.raw_os_error(), Some(errno.raw_os_error()));
+            let error = original.into_bridge_error();
+            assert_eq!(error.linux_passive_cause(), Some(Cause::ReturnedSpawn(expected)));
+            assert_eq!(error, BridgeError::unavailable("The selected isolated core could not start."));
+        }
+        struct PrivateError;
+        impl std::fmt::Debug for PrivateError {
+            fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { panic!("private Debug must not run") }
+        }
+        impl std::fmt::Display for PrivateError {
+            fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { panic!("private Display must not run") }
+        }
+        impl std::error::Error for PrivateError {}
+        let original = AcquisitionError::returned_spawn(std::io::Error::new(std::io::ErrorKind::Other, PrivateError));
+        assert_eq!(original.original.raw_os_error(), None);
+        assert_eq!(original.into_bridge_error().linux_passive_cause(), Some(Cause::ReturnedSpawn(Failure::Other)));
+        let original = AcquisitionError::from(std::io::Error::new(std::io::ErrorKind::Interrupted, PrivateError));
+        assert_eq!(original.into_bridge_error().linux_passive_cause(), None);
+    }
+
     #[test]
     fn stop_is_latched_before_any_io_receiver_exists() {
         let owner = inert_owner();

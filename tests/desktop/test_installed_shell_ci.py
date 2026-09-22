@@ -516,7 +516,8 @@ class InstalledShellCompilerContracts(unittest.TestCase):
         self.assertEqual(len(names), len(set(names)))
         self.assertTrue({"desktop/src-tauri/src/" + name + ".rs" for name in (
             "runtime", "bridge", "asset_session", "asset_source", "shell", "installed_shell_observation",
-            "supervisor", "installed_shell_shutdown_observation")} <= set(names))
+            "supervisor", "installed_shell_shutdown_observation", "error", "protocol", "installed_runtime",
+            "passive_management_tests", "credential_assessment")} <= set(names))
         self.assertTrue({"desktop/src-tauri/src/main.rs", "desktop/src-tauri/tests/installed_shell_observation.rs"} <= set(names))
 
     def test_one_build_exact_production_features_and_two_selected_targets(self):
@@ -1691,17 +1692,26 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         lifecycle = S.local("ubuntu_publication_lifecycle")
         source = (SOURCE / "desktop/src-tauri/src/bridge.rs").read_text()
         shell = (SOURCE / "desktop/src-tauri/src/shell.rs").read_text()
-        classifier = source.split("fn capabilities_failure_line(", 1)[1].split("\nstruct RegisteredProject", 1)[0]
+        classifier = source.split("fn capabilities_failure_line(", 1)[1].split("fn capabilities_cause_line(", 1)[0]
+        cause_classifier = source.split("fn capabilities_cause_line(", 1)[1].split("\nstruct RegisteredProject", 1)[0]
         literal_rows = re.findall(r'b"(MRKDBG_DESKTOP_BOOTSTRAP=capabilities-[a-z_-]+)\\n"', classifier)
+        cause_rows = re.findall(r'b"(MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-[a-z-]+)\\n"', cause_classifier)
         self.assertEqual(len(literal_rows), 30)
         self.assertEqual(len(set(literal_rows)), 30)
+        self.assertEqual(len(cause_rows), 98)
+        self.assertEqual(len(set(cause_rows)), 98)
         prefix = "MRKDBG_DESKTOP_BOOTSTRAP="
         consumer = lifecycle._shell_normal_markers(b"", b"")["stdout"]["stages"]
         self.assertEqual({line[len(prefix):] for line in literal_rows},
-                         {stage for stage in consumer if stage.startswith("capabilities-")})
+                         {stage for stage in consumer if stage.startswith("capabilities-") and not stage.startswith("capabilities-cause-")})
+        self.assertEqual({line[len(prefix):] for line in cause_rows},
+                         {stage for stage in consumer if stage.startswith("capabilities-cause-")})
         self.assertLessEqual(max(len(line.encode("ascii")) + 1 for line in literal_rows), 78)
-        self.assertNotIn("error.message", classifier); self.assertNotIn("format!", classifier)
-        self.assertNotIn(".to_string()", classifier); self.assertNotIn("std::io", classifier)
+        self.assertLessEqual(max(len(line.encode("ascii")) + 1 for line in cause_rows), 96)
+        for block in (classifier, cause_classifier):
+            self.assertNotIn("error.message", block); self.assertNotIn("format!", block)
+            self.assertNotIn(".to_string()", block); self.assertNotIn("std::io", block)
+        self.assertNotIn("error.code", cause_classifier)
         app_info = source.split("    pub(crate) async fn app_info(", 1)[1].split("    pub(crate) async fn catalog(", 1)[0]
         self.assertEqual(app_info.count("document.passive_query(self, Method::Capabilities, json!({}))"), 1)
         self.assertEqual(app_info.count("query.wait().await"), 1)
@@ -1709,10 +1719,67 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertIn("if let Err(error) = &result", app_info)
         self.assertIn("capabilities_failure_line(CapabilitiesFailureOrigin::QueryWait, error)", app_info)
         self.assertIn("capabilities_failure_line(CapabilitiesFailureOrigin::Admission, &error)", app_info)
+        cause_emit = "crate::shell::diagnostic(capabilities_cause_line(error));"
+        self.assertEqual(app_info.count(cause_emit), 1)
+        self.assertLess(app_info.index("query.wait().await"), app_info.index(cause_emit))
+        self.assertLess(app_info.index("if let Err(error) = &result"), app_info.index(cause_emit))
+        self.assertIn('#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]', app_info)
         self.assertIn("pub(crate) fn diagnostic(line: &'static [u8])", shell)
         self.assertIn("let _ = std::io::stderr().write_all(line);", shell)
         # Source correspondence does not execute the Rust classifier, a query,
         # or a window and cannot count as native capabilities acceptance.
+
+    def test_closed_causes_preserve_first_error_and_actual_return_boundaries(self):
+        supervisor = (SOURCE / "desktop/src-tauri/src/supervisor.rs").read_text()
+        installed = (SOURCE / "desktop/src-tauri/src/installed_runtime.rs").read_text()
+        runtime = (SOURCE / "desktop/src-tauri/src/runtime.rs").read_text()
+        protocol = (SOURCE / "desktop/src-tauri/src/protocol.rs").read_text()
+        error = (SOURCE / "desktop/src-tauri/src/error.rs").read_text()
+        fail_at = supervisor.split("    fn fail_at(", 1)[1].split("    fn management_ready(", 1)[0]
+        self.assertEqual(fail_at, '''&mut self, error: BridgeError, now: Instant) {
+        if self.terminal { return; }
+        if self.error.is_none() { self.error = Some(error); }
+        if self.cleanup_endpoint.is_none() { self.cleanup_endpoint = Some(now.min(self.endpoint) + CLEANUP_TIME); }
+    }
+''')
+        state = supervisor.split("struct OwnerState {", 1)[1].split("\n}", 1)[0]
+        self.assertNotIn("cause", state)  # No additional latch/fill/freeze storage.
+        unknown = supervisor.split("    fn unknown(&self", 1)[1].split("    fn advance_clock(", 1)[0]
+        self.assertEqual(unknown.count("state.error.as_ref().and_then(BridgeError::linux_passive_cause)"), 1)
+        self.assertIn("error.with_linux_passive_cause(cause)", unknown)
+        retirement = supervisor.split("    fn retirement_result(", 1)[1].split("// The SAME acquisition", 1)[0]
+        self.assertIn("self.error.as_ref().and_then(BridgeError::linux_passive_cause)", retirement)
+        self.assertNotIn("with_linux_passive_cause", fail_at)
+        equality = error.split("impl PartialEq for BridgeError {", 1)[1].split("impl Eq for BridgeError", 1)[0]
+        self.assertIn("self.code == other.code && self.message == other.message && self.retryable == other.retryable", equality)
+        self.assertNotIn("linux_passive_cause", equality)
+        self.assertIn("#[serde(skip)]\n    linux_passive_cause: Option<LinuxPassiveCause>", error)
+        self.assertIn("InspectionOutcome::Refused(failure) => Err(passive_inspection_refusal(failure))", installed)
+        self.assertIn("InspectionOutcome::Unknown => Err(passive_inspection_unknown(original.observation().failure()))", installed)
+        for label in ("SelectionProfileClosed", "SelectionCompileBinding", "SelectionMethodOutsideProfile"):
+            self.assertIn("LinuxPassiveCause::" + label, runtime)
+        acquisition = supervisor.split("fn acquire_passive_original(", 1)[1].split("async fn settle_passive(", 1)[0]
+        self.assertIn("slots.capability().map_err(AcquisitionError::capability)?", acquisition)
+        self.assertIn("LinuxPassiveCause::FinalClaimOwnerGate", acquisition)
+        after_claim = acquisition.split("prepared.runtime.claim_once().map_err(AcquisitionError::final_claim)?;", 1)[1]
+        self.assertEqual(after_claim.split("let result = spawn_passive_original(prepared);", 1)[0],
+                         "\n        drop(state); drop(owners);\n        ")
+        spawn = supervisor.split("fn spawn_passive_original(")
+        self.assertEqual(len(spawn), 3)
+        stub, actual = (body.split("\n}", 1)[0] for body in spawn[1:])
+        self.assertIn("record_closed_spawn_gate()", stub)
+        self.assertNotIn("returned_spawn", stub)
+        self.assertIn("prepared.command.spawn().map_err(AcquisitionError::returned_spawn)", actual)
+        driver = supervisor.split("async fn drive(", 1)[1].split("// Finite hosted fixtures", 1)[0]
+        self.assertLess(driver.index("let acquired = join_slot(&mut resources.acquisition).await"),
+                        driver.index("failure.into_bridge_error()"))
+        self.assertIn(".map_err(AcquisitionError::preparation)?", supervisor)
+        decoder = protocol.split("pub fn decode_response(", 1)[1].split("#[cfg(test)]", 1)[0]
+        self.assertLess(decoder.rindex("return Err(BridgeError::protocol())"), decoder.index("LinuxPassiveCause::EngineResponse"))
+        for block in (fail_at, unknown, retirement, acquisition, stub, actual, decoder):
+            self.assertNotIn("shell::diagnostic", block)
+        # Text correspondence only; no native operation, returned spawn or
+        # management/custody finality is established by these source assertions.
 
     def test_literal_allowlists_correspond_to_bounded_rust_step_boundary_encoder(self):
         lifecycle = S.local("ubuntu_publication_lifecycle")

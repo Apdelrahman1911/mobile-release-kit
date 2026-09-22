@@ -722,8 +722,8 @@ impl PassiveRuntimeSlots {
                 Ok(crate::runtime::VerifiedRuntime { python: data.python.clone(), bootstrap: data.bootstrap.clone(),
                     core: data.core.clone(), cwd: data.cwd.clone() }) // DATA only; originals never leave these slots.
             }
-            InspectionOutcome::Refused(_) => Err(BridgeError::unavailable("The passive installed runtime failed original-custody inspection.")),
-            InspectionOutcome::Unknown => Err(BridgeError::cleanup_unknown()),
+            InspectionOutcome::Refused(failure) => Err(passive_inspection_refusal(failure)),
+            InspectionOutcome::Unknown => Err(passive_inspection_unknown(original.observation().failure())),
         }
     }
     pub(crate) fn transfer_once(&mut self) -> AdmissionResult<()> {
@@ -794,6 +794,18 @@ impl PassiveRuntimeSlots {
             _ => None,
         }
     }
+}
+
+fn passive_inspection_refusal(failure: AdmissionFailure) -> crate::error::BridgeError {
+    crate::error::BridgeError::unavailable("The passive installed runtime failed original-custody inspection.")
+        .with_linux_passive_cause(Some(crate::error::LinuxPassiveCause::Inspection(Some(failure))))
+}
+
+fn passive_inspection_unknown(failure: Option<AdmissionFailure>) -> crate::error::BridgeError {
+    // Only the same original's already-recorded DATA after its inspect return.
+    // A known refusal reason is not a positive settlement/close receipt.
+    crate::error::BridgeError::cleanup_unknown()
+        .with_linux_passive_cause(Some(crate::error::LinuxPassiveCause::Inspection(failure)))
 }
 
 // Shared mechanics are private and closed to exactly two sealed edit profiles.
@@ -2133,6 +2145,45 @@ mod pure_tests {
     // native descriptor, proc read, runtime, process, fixture installer or
     // executable capability is used or fabricated. Empty/pending books below
     // cannot make a syscall even when testing original-settlement refusal.
+    #[test]
+    fn passive_inspection_maps_every_returned_reason_without_promoting_unknown() {
+        let failures = [
+            AdmissionFailure::UnsupportedPlatform,
+            AdmissionFailure::MissingCompileAnchor,
+            AdmissionFailure::Stopped,
+            AdmissionFailure::Deadline,
+            AdmissionFailure::NativeUnavailable,
+            AdmissionFailure::NativeDenied,
+            AdmissionFailure::Namespace,
+            AdmissionFailure::Mount,
+            AdmissionFailure::Ownership,
+            AdmissionFailure::ExtendedAttributes,
+            AdmissionFailure::IdentityChanged,
+            AdmissionFailure::Manifest,
+            AdmissionFailure::Inventory,
+            AdmissionFailure::Bounds,
+            AdmissionFailure::AlreadyUsed,
+            AdmissionFailure::Interrupted,
+            AdmissionFailure::CloseUncertain,
+            AdmissionFailure::LedgerInvariant,
+            AdmissionFailure::TransferUnavailable,
+            AdmissionFailure::DestinationOccupied,
+        ];
+        for failure in failures {
+            let refused = passive_inspection_refusal(failure);
+            let unknown = passive_inspection_unknown(Some(failure));
+            assert_eq!(refused.code, "runtime_unavailable");
+            assert_eq!(unknown.code, "cleanup_unknown");
+            let cause = Some(crate::error::LinuxPassiveCause::Inspection(Some(failure)));
+            assert_eq!(refused.linux_passive_cause(), cause);
+            assert_eq!(unknown.linux_passive_cause(), cause);
+            assert!(!refused.retryable && !unknown.retryable);
+        }
+        let unknown = passive_inspection_unknown(None);
+        assert_eq!(unknown.code, "cleanup_unknown");
+        assert_eq!(unknown.linux_passive_cause(), Some(crate::error::LinuxPassiveCause::Inspection(None)));
+    }
+
     #[test]
     fn digest_and_component_policy_are_exact() {
         assert!(sha(&"a".repeat(64)));
