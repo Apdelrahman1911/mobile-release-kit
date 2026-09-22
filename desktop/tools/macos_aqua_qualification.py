@@ -37,6 +37,21 @@ FAILURE_STEPS = frozenset((
     "QuitCancel QuitCancelled RetainedReview Close Quit Exit PickerPending Reload Lost"
 ).split()) | frozenset(f"{name}({number})" for name in (
     "Prepare", "Review", "OpenConfirmation", "Confirmation", "Acknowledge", "Acknowledged", "Apply", "Applied") for number in (0, 1))
+FAILURE_REASONS = frozenset((
+    "observer-invariant observer-deadline observer-record-unavailable observer-data-check "
+    "native-wrong-thread native-step native-pending-custody native-original-id native-kind native-not-started "
+    "native-ineligible native-action-attempted native-action-returned native-callback-returned "
+    "native-response-present native-selection-present native-close-attempted native-closed "
+    "native-attachment-lost native-preaction-history native-dismissed native-duplicate-action "
+    "cancel-unexpected-project cancel-duplicate-result adapter-wrong-thread adapter-book-borrow "
+    "adapter-original-call adapter-original-owner adapter-original-binding adapter-missing-facts "
+    "adapter-missing-panel adapter-ineligible adapter-native-observation adapter-native-action "
+    "asset_invalid_request asset_closed asset_unqualified asset_unsupported_platform "
+    "asset_unsupported_filesystem asset_unsupported_format asset_busy asset_source_refused "
+    "asset_source_changed asset_material_limit asset_parser_limit asset_project_overlap "
+    "asset_exclusion_unconfirmed asset_capacity assessment_context_stale asset_user_cancelled "
+    "asset_review_expired asset_deadline asset_document_lost asset_shutdown asset_cleanup_unknown"
+).split())
 SOURCE = (b'plugins { id("com.android.application") }\n'
           b'android { defaultConfig { applicationId = "org.example.mrk.observed" } }\n')
 VERSION = b"VERSION_NAME=1.2.3\nBUILD_NUMBER=7\n"
@@ -225,6 +240,27 @@ def failure_step(stdout, stderr):
     return label if label in FAILURE_STEPS else None
 
 
+def failure_reason(stdout, stderr):
+    """Optional closed DATA only; malformed/partial output never grants success."""
+    if type(stdout) is not bytes or type(stderr) is not bytes or len(stdout) + len(stderr) > OUTPUT_LIMIT:
+        return None
+    marker = b"MRK_MACOS_AQUA_FAILURE_REASON"
+    # Count malformed candidates too, including an embedded or incomplete row
+    # accompanying a valid one. Only one exact, newline-terminated row is useful.
+    if sum(stream.count(marker) for stream in (stdout, stderr)) != 1:
+        return None
+    prefix = marker + b"="
+    rows = [line[len(prefix):] for stream in (stdout, stderr)
+            for line in stream.split(b"\n")[:-1] if line.startswith(prefix)]
+    if len(rows) != 1 or not 0 < len(rows[0]) <= 48:
+        return None
+    try:
+        label = rows[0].decode("ascii")
+    except UnicodeError:
+        return None
+    return label if label in FAILURE_REASONS else None
+
+
 @dataclass(frozen=True)
 class Node:
     # dev, inode, complete mode, uid, gid, nlink, size, mtime_ns, ctime_ns.
@@ -306,7 +342,7 @@ class Fixtures:
         self.first_close_error = None
         self.inflight = False
         self.last_returned = False
-        self.app_returncode = self.inner_failure_step = None
+        self.app_returncode = self.inner_failure_step = self.inner_failure_reason = None
         self.case = None
         self.stage = "prepare"
         self.projects, self.states, self.originals = {}, {}, {}
@@ -524,7 +560,7 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit):
         state = binding.root() / "state" / case
         argv = [EXECUTABLE, case]
         fixtures.stage, fixtures.inflight, fixtures.last_returned = "invocation", True, False
-        fixtures.app_returncode = fixtures.inner_failure_step = None
+        fixtures.app_returncode = fixtures.inner_failure_step = fixtures.inner_failure_reason = None
         # Only the original public return contract clears this flag. An
         # exception/interruption or foreign/malformed result leaves finality
         # unknown, with no readback, close or later invocation.
@@ -537,6 +573,7 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit):
         fixtures.inflight, fixtures.last_returned, fixtures.stage = False, True, "result-validation"
         fixtures.app_returncode = result.returncode
         fixtures.inner_failure_step = failure_step(result.stdout, result.stderr)
+        fixtures.inner_failure_reason = failure_reason(result.stdout, result.stderr)
         need(result.returncode == 0, "app-return")
         report = parse_result(result.stdout, result.stderr, binding, case)
         readback = fixtures.readback(case)
@@ -608,6 +645,7 @@ def diagnostic(error, owner, fixtures):
             "originalCallReturned": fixtures.last_returned if fixtures else False,
             "appReturncode": fixtures.app_returncode if fixtures else None,
             "innerFailureStep": fixtures.inner_failure_step if fixtures else None,
+            "innerFailureReason": fixtures.inner_failure_reason if fixtures else None,
             "invocationFinality": "unknown" if fixtures and fixtures.inflight else "no-pending-invocation",
             "innerOutput": "unavailable" if fixtures and fixtures.inflight else "not-exported",
             "typedLifetimeFacts": facts, "exceptionChainTruncated": bool(pending),

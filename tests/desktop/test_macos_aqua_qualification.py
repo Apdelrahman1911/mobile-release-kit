@@ -63,7 +63,7 @@ class InertFixtures:
         self.inflight = self.last_returned = False
         self.close_errors = 0
         self.case = self.stage = None
-        self.app_returncode = self.inner_failure_step = None
+        self.app_returncode = self.inner_failure_step = self.inner_failure_reason = None
         self.before, self.reads = [], []
 
     def before_call(self, case):
@@ -250,6 +250,67 @@ class AquaDataTests(unittest.TestCase):
                 M.parse_result(good, stderr, BINDING, "first-save")
         self.assertEqual(M.failure_step(b"", b"MRK_MACOS_AQUA_FAILURE_STEP=Review(1)\n"), "Review(1)")
         self.assertIsNone(M.failure_step(b"", b"MRK_MACOS_AQUA_FAILURE_STEP=PRIVATE_UNKNOWN_DATA\n"))
+
+    def test_failure_reason_records_are_closed_complete_and_unique(self):
+        prefix = b"MRK_MACOS_AQUA_FAILURE_REASON"
+        good = prefix + b"=native-attachment-lost\n"
+        for label in M.FAILURE_REASONS:
+            row = prefix + b"=" + label.encode("ascii") + b"\n"
+            self.assertEqual(M.failure_reason(row, b""), label)
+            self.assertEqual(M.failure_reason(b"", row), label)
+        invalid = (b"", good[:-1], b"log " + good, good.replace(b"\n", b"\r\n"),
+                   prefix + b"=PRIVATE_UNKNOWN_DATA\n", prefix + b"=\xff\n", prefix + b"=\n",
+                   prefix + b"=" + b"a" * 49 + b"\n", good + good,
+                   good + prefix + b"?malformed\n", good + b"log " + prefix,
+                   good + b"x" * M.OUTPUT_LIMIT)
+        for row in invalid:
+            with self.subTest(row=row[:80]):
+                self.assertIsNone(M.failure_reason(row, b""))
+        self.assertIsNone(M.failure_reason(good, prefix + b"=unknown\n"))
+        self.assertIsNone(M.failure_reason(good, prefix))
+        self.assertIsNone(M.failure_reason(good, "not-bytes"))
+        with self.assertRaisesRegex(M.Refused, "^inner-failure-marker$"):
+            M.parse_result(captured(M.expected_result(BINDING, "first-save")), good, BINDING, "first-save")
+
+    def test_failure_reason_diagnostic_does_not_promote_nonzero(self):
+        fixtures, emitted = InertFixtures(), []
+        marker = (b"MRK_MACOS_AQUA_FAILURE_STEP=CancelProject\n"
+                  b"MRK_MACOS_AQUA_FAILURE_REASON=asset_source_refused\n")
+        def runner(argv, **_):
+            return CompletedProcess(args=argv, returncode=1, stdout=b"", stderr=marker)
+        with self.assertRaisesRegex(M.Refused, "^app-return$") as caught:
+            M.run_cases(BINDING, fixtures, runner, UID, "runner", emitted.append)
+        report = M.diagnostic(caught.exception, None, fixtures)
+        self.assertEqual((report["status"], report["innerFailureStep"], report["innerFailureReason"]),
+                         ("failed", "CancelProject", "asset_source_refused"))
+        self.assertEqual(report["appReturncode"], 1)
+        self.assertEqual(report["typedLifetimeFacts"], [])
+        self.assertEqual(fixtures.before, ["first-save"])
+        self.assertEqual((fixtures.reads, emitted), ([], []))
+        self.assertIsNone(M.diagnostic(M.Refused("fixture-refused"), None, None)["innerFailureReason"])
+
+    def test_observer_reason_catalog_and_readiness_call_contract(self):
+        source_root = PATH.parents[1] / "src-tauri" / "src"
+        observer = (source_root / "installed_shell_observation_macos.rs").read_text(encoding="utf-8")
+        adapter = (source_root / "shell_macos_dialog.rs").read_text(encoding="utf-8")
+        errors = (source_root / "asset_commands.rs").read_text(encoding="utf-8")
+        reasons = observer.split("const FAILURE_REASONS: &[&str] = &[", 1)[1].split("];", 1)[0]
+        labels = M.re.findall(r'"([a-z_-]+)"', reasons)
+        self.assertEqual(len(labels), len(set(labels)))
+        self.assertEqual(set(labels), M.FAILURE_REASONS)
+        closed_codes = set(M.re.findall(r'=> "((?:asset_|assessment_)[a-z_]+)"', errors))
+        self.assertTrue(closed_codes <= M.FAILURE_REASONS)
+        self.assertTrue(set(M.re.findall(r'=> "(adapter-[a-z-]+)"', adapter)) <= M.FAILURE_REASONS)
+        self.assertIn("if !observer_data_checks()", observer)
+        readiness = observer.split("fn panel_readiness(", 1)[1].split("const METHODS", 1)[0]
+        self.assertNotIn("observe_panel_action(", readiness)
+        self.assertNotIn("Instant::now()", readiness)
+        self.assertIn('if ever_attached { return Err("native-attachment-lost"); }', readiness)
+        self.assertIn("native.directory_bound || native.directory_returned || native.directory_ready || same_action_returned", readiness)
+        action = observer.split("fn native_step(", 1)[1].split("pub(super) fn close_prevented", 1)[0]
+        self.assertLess(action.index("if !panel_readiness("), action.index("r.panel_attached[(id - 1) as usize] = true"))
+        self.assertLess(action.index("r.panel_attached[(id - 1) as usize] = true"), action.index("observe_panel_action(id,action)"))
+        self.assertIn('if let Err(reason) = result { self.fail_with(reason); }', action)
 
     def test_loss_requires_actual_route_but_not_both_events(self):
         for case in ("picker-loss", "save-loss"):

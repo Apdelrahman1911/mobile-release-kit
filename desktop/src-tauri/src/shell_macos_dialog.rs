@@ -21,45 +21,61 @@ pub(super) mod observation {
     use super::*;
     pub(crate) use native::PanelAction;
 
+    #[derive(Clone, Copy)]
+    pub(crate) enum ObservationError {
+        WrongThread, BookBorrow, OriginalCall, OriginalOwner, OriginalBinding,
+        MissingFacts, MissingPanel, Ineligible, NativeObservation, NativeAction,
+    }
+    impl ObservationError {
+        pub(crate) fn reason(self) -> &'static str { match self {
+            Self::WrongThread => "adapter-wrong-thread", Self::BookBorrow => "adapter-book-borrow",
+            Self::OriginalCall => "adapter-original-call", Self::OriginalOwner => "adapter-original-owner",
+            Self::OriginalBinding => "adapter-original-binding", Self::MissingFacts => "adapter-missing-facts",
+            Self::MissingPanel => "adapter-missing-panel", Self::Ineligible => "adapter-ineligible",
+            Self::NativeObservation => "adapter-native-observation", Self::NativeAction => "adapter-native-action",
+        }}
+    }
     pub(crate) struct ObservedPanel {
         pub(crate) id: u32,
         pub(crate) native: native::PanelObservation,
         /// Read-only sample, not an action permit or a settlement receipt.
         pub(crate) action_allowed: bool,
     }
-    fn original(entry: &OriginalPanel) -> Result<(Arc<GuiCall>, Arc<OriginalWork>), ()> {
-        let call = entry.observed_call.upgrade().ok_or(())?;
-        let owner = call.owner().ok_or(())?;
-        if owner.id != entry.id || !Arc::ptr_eq(&owner.gui, &call) { return Err(()); }
+    fn original(entry: &OriginalPanel) -> Result<(Arc<GuiCall>, Arc<OriginalWork>), ObservationError> {
+        let call = entry.observed_call.upgrade().ok_or(ObservationError::OriginalCall)?;
+        let owner = call.owner().ok_or(ObservationError::OriginalOwner)?;
+        if owner.id != entry.id || !Arc::ptr_eq(&owner.gui, &call) { return Err(ObservationError::OriginalBinding); }
         Ok((call, owner))
     }
-    fn allowed(call: &GuiCall, owner: &OriginalWork) -> Result<bool, ()> {
-        let facts = call.facts().ok_or(())?;
+    fn allowed(call: &GuiCall, owner: &OriginalWork) -> Result<bool, ObservationError> {
+        let facts = call.facts().ok_or(ObservationError::MissingFacts)?;
         Ok(!owner.interrupted() && facts.dispatched && facts.created && facts.showing && !facts.constructing
             && !facts.not_created && facts.refusal.is_none() && !facts.response && !facts.close_queued
             && !facts.destroyed && !facts.close_ack && !facts.release_queued && !facts.released)
     }
-    pub(crate) fn observed_panel() -> Result<Option<ObservedPanel>, ()> {
-        if !native::main_thread() { return Err(()); }
+    pub(crate) fn observed_panel() -> Result<Option<ObservedPanel>, ObservationError> {
+        if !native::main_thread() { return Err(ObservationError::WrongThread); }
         PANEL.with(|book| {
-            let mut book = book.try_borrow_mut().map_err(|_| ())?;
+            let mut book = book.try_borrow_mut().map_err(|_| ObservationError::BookBorrow)?;
             let Some(entry) = book.as_mut() else { return Ok(None); };
             let (call, owner) = original(entry)?;
             let action_allowed = allowed(&call, &owner)?;
-            let native = entry.panel.as_mut().ok_or(())?.installed_observation().map_err(|_| ())?;
+            let native = entry.panel.as_mut().ok_or(ObservationError::MissingPanel)?
+                .installed_observation().map_err(|_| ObservationError::NativeObservation)?;
             Ok(Some(ObservedPanel { id: entry.id, native, action_allowed }))
         })
     }
-    pub(crate) fn observe_panel_action(id: u32, action: PanelAction<'_>) -> Result<bool, ()> {
-        if !native::main_thread() { return Err(()); }
+    pub(crate) fn observe_panel_action(id: u32, action: PanelAction<'_>) -> Result<bool, ObservationError> {
+        if !native::main_thread() { return Err(ObservationError::WrongThread); }
         PANEL.with(|book| {
-            let mut book = book.try_borrow_mut().map_err(|_| ())?;
-            let entry = book.as_mut().filter(|entry| entry.id == id).ok_or(())?;
+            let mut book = book.try_borrow_mut().map_err(|_| ObservationError::BookBorrow)?;
+            let entry = book.as_mut().filter(|entry| entry.id == id).ok_or(ObservationError::OriginalBinding)?;
             let (call, owner) = original(entry)?;
-            if !allowed(&call, &owner)? || owner.interrupted() { return Err(()); }
+            if !allowed(&call, &owner)? || owner.interrupted() { return Err(ObservationError::Ineligible); }
             // No GuiFacts lock across AppKit. The same native completion and
             // production tick retain response admission/close/release custody.
-            entry.panel.as_mut().ok_or(())?.installed_action(action).map_err(|_| ())
+            entry.panel.as_mut().ok_or(ObservationError::MissingPanel)?
+                .installed_action(action).map_err(|_| ObservationError::NativeAction)
         })
     }
 }

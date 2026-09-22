@@ -4,7 +4,7 @@
 //! return/EOF. No replacement document, reply, cleanup owner or runtime exists.
 use std::{ffi::OsStr, fs::OpenOptions, io::{Read, Write},
     os::{fd::AsFd, unix::fs::{MetadataExt, OpenOptionsExt}}, path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard, atomic::{AtomicBool, Ordering}},
+    sync::{Arc, Mutex, MutexGuard, atomic::{AtomicBool, AtomicU8, Ordering}},
     thread::ThreadId, time::{Duration, Instant}};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -12,7 +12,65 @@ use tauri::Manager;
 use crate::{asset_session::{DocumentBinding, InstalledMacProjectWitness, InstalledMacPickerWitness, NativeResponse}, bridge::{AppInfo, Project},
     edit_owner::{EditOwner, InstalledConfigFinality, InstalledMacReviewWitness}, edit_protocol::{self as edit, ConfigEditStatus, EditProjection},
     error::BridgeError, supervisor::Supervisor};
-use super::owned_macos::observation::{observed_panel, observe_panel_action, PanelAction};
+use super::owned_macos::observation::{observed_panel, observe_panel_action, ObservedPanel, PanelAction};
+
+// Closed public categories only. The first winner is published before failure;
+// no Record lock, native call, path, or arbitrary error text enters this latch.
+const FAILURE_REASONS: &[&str] = &[
+    "observer-invariant", "observer-deadline", "observer-record-unavailable", "observer-data-check",
+    "native-wrong-thread", "native-step", "native-pending-custody", "native-original-id",
+    "native-kind", "native-not-started", "native-ineligible", "native-action-attempted",
+    "native-action-returned", "native-callback-returned", "native-response-present",
+    "native-selection-present", "native-close-attempted", "native-closed", "native-attachment-lost",
+    "native-preaction-history", "native-dismissed", "native-duplicate-action",
+    "cancel-unexpected-project", "cancel-duplicate-result",
+    "adapter-wrong-thread", "adapter-book-borrow", "adapter-original-call", "adapter-original-owner",
+    "adapter-original-binding", "adapter-missing-facts", "adapter-missing-panel", "adapter-ineligible",
+    "adapter-native-observation", "adapter-native-action",
+    "asset_invalid_request", "asset_closed", "asset_unqualified", "asset_unsupported_platform",
+    "asset_unsupported_filesystem", "asset_unsupported_format", "asset_busy", "asset_source_refused",
+    "asset_source_changed", "asset_material_limit", "asset_parser_limit", "asset_project_overlap",
+    "asset_exclusion_unconfirmed", "asset_capacity", "assessment_context_stale", "asset_user_cancelled",
+    "asset_review_expired", "asset_deadline", "asset_document_lost", "asset_shutdown", "asset_cleanup_unknown",
+];
+const _: () = assert!(FAILURE_REASONS.len() < u8::MAX as usize);
+fn latch_failure(first: &AtomicU8, failed: &AtomicBool, reason: &'static str) {
+    // Unknown internal labels degrade only to generic failure, never raw text.
+    let code = FAILURE_REASONS.iter().position(|label| *label == reason).map_or(1, |index| index as u8 + 1);
+    let _ = first.compare_exchange(0, code, Ordering::SeqCst, Ordering::SeqCst);
+    failed.store(true, Ordering::SeqCst);
+}
+fn first_failure_reason(first: &AtomicU8) -> Option<&'static str> {
+    FAILURE_REASONS.get(usize::from(first.load(Ordering::SeqCst).checked_sub(1)?)).copied()
+}
+
+/// A read-only readiness predicate, never an action/close/finality permit.
+fn panel_readiness(panel: &ObservedPanel, id: u32, quit: bool, ever_attached: bool,
+    same_action_returned: bool) -> Result<bool, &'static str> {
+    let native = &panel.native;
+    if panel.id != id { return Err("native-original-id"); }
+    if matches!(native.kind, mrk_macos_installed_native::PanelKind::Quit) != quit { return Err("native-kind"); }
+    if !native.started { return Err("native-not-started"); }
+    if !panel.action_allowed { return Err("native-ineligible"); }
+    if native.action_attempted { return Err("native-action-attempted"); }
+    if native.action_returned { return Err("native-action-returned"); }
+    if native.callback_returned { return Err("native-callback-returned"); }
+    if native.response.is_some() { return Err("native-response-present"); }
+    if native.selected.is_some() { return Err("native-selection-present"); }
+    if native.close_attempted { return Err("native-close-attempted"); }
+    if native.closed { return Err("native-closed"); }
+    if !native.attached {
+        if ever_attached { return Err("native-attachment-lost"); }
+        if native.directory_bound || native.directory_returned || native.directory_ready || same_action_returned {
+            return Err("native-preaction-history");
+        }
+        // dismissed is an instantaneous not-visible/not-parented sample. Before
+        // first attachment and with NO history, either value can mean not ready.
+        return Ok(false);
+    }
+    if native.dismissed { return Err("native-dismissed"); }
+    Ok(true)
+}
 
 const METHODS: [&str; 8] = ["capabilities", "catalog", "project.snapshot", "config.validate",
     "config.suggest", "config.preview", "environment.requirements", "github.setup.propose"];
@@ -91,6 +149,15 @@ enum Step {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Pending { Dom(Step), Native(Step), Close(Step), Reload, FailureClose }
+
+fn same_panel_action_returned(step: Step, actions: &[bool; 5]) -> Result<bool, &'static str> {
+    match step {
+        Step::CancelProject => Ok(actions[0]),
+        Step::SetProject | Step::OpenProject | Step::PickerPending => Ok(actions[1] || actions[2]),
+        Step::QuitCancel => Ok(actions[3]), Step::Quit => Ok(actions[4]),
+        _ => Err("native-step"),
+    }
+}
 
 #[derive(Clone, PartialEq, Eq)]
 struct FileFact { identity: [u64; 9], sha256: String }
@@ -279,13 +346,14 @@ struct Record {
 }
 pub(super) struct Observation {
     case: Case, main: ThreadId, end: Instant, project_path: PathBuf, base: Value,
-    failed: AtomicBool, failure_reported: AtomicBool, record: Mutex<Record>,
+    failed: AtomicBool, failure_reason: AtomicU8, failure_reported: AtomicBool, record: Mutex<Record>,
 }
 impl Observation {
     fn new(case: Case, fixture: Fixture) -> Result<Self, ()> {
         let base = crate::protocol::strict_json(CONFIG).map_err(|_| ())?;
         Ok(Self { case, main: std::thread::current().id(), end: Instant::now() + Duration::from_secs(45),
-            project_path: fixture.root.clone(), base, failed: AtomicBool::new(false), failure_reported: AtomicBool::new(false),
+            project_path: fixture.root.clone(), base, failed: AtomicBool::new(false), failure_reason: AtomicU8::new(0),
+            failure_reported: AtomicBool::new(false),
             record: Mutex::new(Record {
                 step: Step::Bootstrap, pending: None, evaluations: 0, attached: false, started: false, loaded: false,
                 initial_navigation: false, info: false, catalog: false, methods: 0, capability: false,
@@ -304,19 +372,22 @@ impl Observation {
                 failure_close_requested: false, failure_quit_attempted: false, fixture,
             }) })
     }
-    fn fail(&self) { self.failed.store(true, Ordering::SeqCst); }
+    fn fail(&self) { self.fail_with("observer-invariant"); }
+    fn fail_with(&self, reason: &'static str) { latch_failure(&self.failure_reason, &self.failed, reason); }
     fn record(&self) -> Option<MutexGuard<'_, Record>> {
-        match self.record.lock() { Ok(r) => Some(r), Err(_) => { self.fail(); None } }
+        match self.record.lock() { Ok(r) => Some(r), Err(_) => { self.fail_with("observer-record-unavailable"); None } }
     }
     fn timely(&self) -> bool {
-        if self.failed.load(Ordering::SeqCst) || Instant::now() >= self.end { self.fail(); false } else { true }
+        if self.failed.load(Ordering::SeqCst) { return false; }
+        if Instant::now() >= self.end { self.fail_with("observer-deadline"); false } else { true }
     }
     fn report_failure(&self) {
         if !self.failed.load(Ordering::SeqCst) || self.failure_reported.load(Ordering::SeqCst) { return; }
+        let Some(reason) = first_failure_reason(&self.failure_reason) else { return; };
         let Ok(r) = self.record.try_lock() else { return; };
         if self.failure_reported.swap(true, Ordering::SeqCst) { return; }
-        // Fixed enum-only diagnostics; no paths, secrets, tokens, DTOs or errors.
-        let _ = writeln!(std::io::stderr(), "MRK_MACOS_AQUA_FAILURE_STEP={:?}", r.step);
+        // Fixed labels only; later cleanup cannot replace the first reason.
+        let _ = writeln!(std::io::stderr().lock(), "MRK_MACOS_AQUA_FAILURE_STEP={:?}\nMRK_MACOS_AQUA_FAILURE_REASON={}", r.step, reason);
     }
     pub(super) fn attach(&self, _: &Supervisor) -> Result<(), BridgeError> {
         let Some(mut r) = self.record() else { return Err(BridgeError::cleanup_unknown()); };
@@ -378,7 +449,15 @@ impl Observation {
             r.project_returned = true; return;
         }
         if self.case == Case::FirstSave && matches!(r.step, Step::CancelProject | Step::CancelSettled) {
-            if !matches!(result, Ok(None)) || r.cancel_returned { self.fail(); return; } r.cancel_returned = true; return;
+            if r.cancel_returned { self.fail_with("cancel-duplicate-result"); return; }
+            match result {
+                Ok(None) => r.cancel_returned = true,
+                Ok(Some(_)) => self.fail_with("cancel-unexpected-project"),
+                // Reconstruct the public category from Reason, not the supplied
+                // message/code or any project/credential value.
+                Err(error) => self.fail_with(crate::asset_commands::AssetError::new(error.reason).code),
+            }
+            return;
         }
         let Ok(Some(project)) = result else { self.fail(); return; };
         if !matches!(r.step, Step::OpenProject | Step::ProjectSettled) || r.project.is_some()
@@ -846,21 +925,28 @@ impl Observation {
         if window.eval_with_callback(script,move |value| q.dom(step,&value)).is_err() { self.fail(); }
     }
     fn native_step(&self, step: Step) {
-        if !self.timely() || std::thread::current().id() != self.main { self.fail(); return; }
-        let result = (|| -> Result<bool, ()> {
-            let Some(panel) = observed_panel()? else { return Ok(false); };
+        if !self.timely() { return; }
+        if std::thread::current().id() != self.main { self.fail_with("native-wrong-thread"); return; }
+        let result = (|| -> Result<bool, &'static str> {
             let (id,quit) = match step {
                 Step::CancelProject | Step::PickerPending => (1,false),
                 Step::SetProject | Step::OpenProject => (self.case.selected_id(),false),
-                Step::QuitCancel => (3,true), Step::Quit => (self.case.quit_id(),true), _ => return Err(()),
+                Step::QuitCancel => (3,true), Step::Quit => (self.case.quit_id(),true), _ => return Err("native-step"),
             };
-            if panel.id != id || matches!(panel.native.kind,mrk_macos_installed_native::PanelKind::Quit) != quit
-                || !panel.native.started || !panel.native.attached || !panel.action_allowed || panel.native.action_attempted
-                || panel.native.callback_returned || panel.native.response.is_some() || panel.native.selected.is_some()
-                || panel.native.close_attempted || panel.native.dismissed || panel.native.closed { return Err(()); }
             {
-                let mut r = self.record().ok_or(())?;
-                if r.pending != Some(Pending::Native(step)) || r.step != step { return Err(()); }
+                let r = self.record().ok_or("observer-record-unavailable")?;
+                if r.pending != Some(Pending::Native(step)) || r.step != step { return Err("native-pending-custody"); }
+            }
+            let Some(panel) = observed_panel().map_err(|error| error.reason())? else { return Ok(false); };
+            {
+                let mut r = self.record().ok_or("observer-record-unavailable")?;
+                if r.pending != Some(Pending::Native(step)) || r.step != step { return Err("native-pending-custody"); }
+                if !panel_readiness(&panel, id, quit, r.panel_attached[(id - 1) as usize],
+                    same_panel_action_returned(step, &r.native_actions_returned)?)? {
+                    // Only this known never-attached/no-history phase may wait.
+                    // No action, progress fact, or renewed endpoint is produced.
+                    return Ok(false);
+                }
                 r.panel_attached[(id - 1) as usize] = true;
             }
             if step == Step::PickerPending { return Ok(true); } // Observation only; never dismiss-as-Cancel.
@@ -870,24 +956,27 @@ impl Observation {
             let action = match step {
                 Step::CancelProject => PanelAction::ProjectCancel,
                 Step::SetProject => PanelAction::ProjectDirectory(&self.project_path), Step::OpenProject => PanelAction::ProjectOpen,
-                Step::QuitCancel => PanelAction::QuitCancel, Step::Quit => PanelAction::QuitConfirm, _ => return Err(()),
+                Step::QuitCancel => PanelAction::QuitCancel, Step::Quit => PanelAction::QuitConfirm, _ => return Err("native-step"),
             };
-            if !self.timely() { return Err(()); }
-            observe_panel_action(id,action)
+            if !self.timely() { return Err("observer-deadline"); }
+            // The original native API rechecks exact attachment before action.
+            observe_panel_action(id,action).map_err(|error| error.reason())
         })();
+        // Preserve the exact first refusal before any Record/cleanup failure.
+        if let Err(reason) = result { self.fail_with(reason); }
         let Some(mut r) = self.record() else { return; };
-        if r.pending.take() != Some(Pending::Native(step)) || r.step != step { self.fail(); return; }
+        if r.pending.take() != Some(Pending::Native(step)) || r.step != step { self.fail_with("native-pending-custody"); return; }
         match result {
             Ok(false) => {},
-            Err(()) => self.fail(),
+            Err(_) => {},
             Ok(true) => {
                 let (index,next) = match step {
                     Step::CancelProject => (0,Step::CancelSettled), Step::SetProject => (1,Step::OpenProject),
                     Step::OpenProject => (2,Step::ProjectSettled), Step::QuitCancel => (3,Step::QuitCancelled),
                     Step::Quit => (4,Step::Exit), Step::PickerPending => { r.step = Step::Reload; return; },
-                    _ => { self.fail(); return; },
+                    _ => { self.fail_with("native-step"); return; },
                 };
-                if r.native_actions_returned[index] { self.fail(); return; }
+                if r.native_actions_returned[index] { self.fail_with("native-duplicate-action"); return; }
                 r.native_actions_returned[index] = true;
                 if step == Step::OpenProject { r.selected_native = true; } r.step = next;
             },
@@ -934,7 +1023,7 @@ impl Observation {
         let q = self.clone();
         if window.run_on_main_thread(move || {
             let result = (|| -> Result<Option<u32>, ()> {
-                let Some(p) = observed_panel()? else { return Ok(None); };
+                let Some(p) = observed_panel().map_err(|_| ())? else { return Ok(None); };
                 if !matches!(p.native.kind,mrk_macos_installed_native::PanelKind::Quit) || !p.action_allowed
                     || !p.native.started || !p.native.attached || p.native.action_attempted || p.native.close_attempted
                     || p.native.callback_returned || p.native.response.is_some() { return Err(()); }
@@ -1267,7 +1356,62 @@ fn route() -> Option<(PathBuf,u32)> {
     directory(&root,uid,0o700,&["first-save","noop-stale","picker-loss","save-loss","state"]).ok()?;
     Some((root,uid))
 }
+
+// Pure regression checks in the already-required instrumented native entry.
+// These do not call AppKit, acquire files, dispatch actions, or supply receipts.
+fn observer_data_checks() -> bool {
+    use mrk_macos_installed_native::{PanelKind, PanelObservation, PanelResponse};
+    let fresh = || ObservedPanel { id: 1, action_allowed: true, native: PanelObservation {
+        kind: PanelKind::Project, started: true, attached: false, directory_bound: false,
+        directory_returned: false, directory_ready: false, action_attempted: false, action_returned: false,
+        callback_returned: false, response: None, selected: None, close_attempted: false, dismissed: false, closed: false,
+    }};
+    for dismissed in [false, true] {
+        let mut panel = fresh(); panel.native.dismissed = dismissed;
+        if panel_readiness(&panel, 1, false, false, false) != Ok(false) { return false; }
+        if panel_readiness(&panel, 1, false, true, false) != Err("native-attachment-lost") { return false; }
+        if panel_readiness(&panel, 1, false, false, true) != Err("native-preaction-history") { return false; }
+        panel.native.attached = true;
+        let expected = if dismissed { Err("native-dismissed") } else { Ok(true) };
+        if panel_readiness(&panel, 1, false, false, false) != expected { return false; }
+    }
+    let mutations: [fn(&mut ObservedPanel); 14] = [
+        |p| p.id = 2, |p| p.native.kind = PanelKind::Quit, |p| p.native.started = false,
+        |p| p.action_allowed = false, |p| p.native.action_attempted = true, |p| p.native.action_returned = true,
+        |p| p.native.callback_returned = true, |p| p.native.response = Some(PanelResponse::Decline),
+        |p| p.native.selected = Some(PathBuf::from("/synthetic")), |p| p.native.close_attempted = true,
+        |p| p.native.closed = true, |p| p.native.directory_bound = true,
+        |p| p.native.directory_returned = true, |p| p.native.directory_ready = true,
+    ];
+    for mutation in mutations {
+        let mut panel = fresh(); mutation(&mut panel);
+        if panel_readiness(&panel, 1, false, false, false).is_ok() { return false; }
+    }
+    for (step, original) in [(Step::CancelProject, 0), (Step::SetProject, 1), (Step::OpenProject, 2),
+        (Step::PickerPending, 1), (Step::QuitCancel, 3), (Step::Quit, 4)] {
+        let mut prior = [true; 5]; prior[original] = false;
+        if matches!(step, Step::SetProject | Step::OpenProject | Step::PickerPending) { prior[1] = false; prior[2] = false; }
+        if same_panel_action_returned(step, &prior) != Ok(false) { return false; }
+        prior[original] = true;
+        if same_panel_action_returned(step, &prior) != Ok(true) { return false; }
+    }
+    // Every closed reason survives later generic cleanup/deadline failures.
+    for reason in FAILURE_REASONS {
+        let first = AtomicU8::new(0); let failed = AtomicBool::new(false);
+        if first_failure_reason(&first).is_some() { return false; }
+        latch_failure(&first, &failed, *reason);
+        if !failed.load(Ordering::SeqCst) || first_failure_reason(&first) != Some(*reason) { return false; }
+        latch_failure(&first, &failed, "observer-invariant");
+        latch_failure(&first, &failed, "observer-deadline");
+        if first_failure_reason(&first) != Some(*reason) { return false; }
+    }
+    true
+}
 pub(crate) fn main() -> std::process::ExitCode {
+    if !observer_data_checks() {
+        super::diagnostic(b"MRK_MACOS_AQUA_FAILURE_REASON=observer-data-check\nMRK_MACOS_AQUA=failed\n");
+        return std::process::ExitCode::FAILURE;
+    }
     let mut args = std::env::args_os().skip(1);
     let case = match args.next().as_deref() {
         Some(v) if v == OsStr::new("first-save") => Case::FirstSave, Some(v) if v == OsStr::new("noop-stale") => Case::NoopStale,
