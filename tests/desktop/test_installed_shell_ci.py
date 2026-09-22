@@ -4,6 +4,7 @@ import ast
 import hashlib
 import importlib.util
 import json
+import re
 from pathlib import Path
 import struct
 import tempfile
@@ -63,6 +64,12 @@ def metadata():
             row["features"] = ["compression", "custom-protocol", "wry"]
         elif row["id"] == "sha2":
             row["features"] = ["std"]
+    # Cargo keeps inactive target-specific declarations in packages, not in
+    # the target-filtered resolve graph. Keep original registry/node positions.
+    for platform in ("macos", "windows"):
+        packages.append({"id": platform, "name": "mrk-" + platform + "-installed-native",
+                         "version": "0.1.0", "source": None,
+                         "manifest_path": "/source/desktop/native/" + platform + "-installed-native/Cargo.toml"})
     return {"workspace_root": "/source/desktop/src-tauri", "target_directory": "/target",
             "packages": packages, "resolve": {"root": "root", "nodes": nodes}}
 
@@ -380,7 +387,7 @@ class InstalledShellCompilerContracts(unittest.TestCase):
     def test_full_metadata_rejects_incomplete_or_development_graph(self):
         value = metadata()
         parsed, packages, nodes = S.shell_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/target"))
-        self.assertEqual(len(packages), 36)
+        self.assertEqual(len(packages), 38)
         self.assertEqual(nodes["root"]["features"], S.SHELL_FEATURES)
         changes = (
             lambda row: row["resolve"]["nodes"][0].update(features=[*S.SHELL_FEATURES, "development-runtime"]),
@@ -395,6 +402,37 @@ class InstalledShellCompilerContracts(unittest.TestCase):
             change(value)
             with self.subTest(change=change), self.assertRaises((S.D.Refused, S.C.CheckFailure)):
                 S.shell_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/target"))
+
+    def test_declared_platforms_cannot_enter_linux_graph_or_compiler(self):
+        _, packages, nodes = S.shell_cargo_metadata(S.D.canonical(metadata()), Path("/source"), Path("/target"))
+        self.assertEqual({row["id"] for row in packages.values() if row["source"] is None},
+                         {"root", "mount", "macos", "windows"})
+        self.assertEqual(set(nodes) & {"root", "mount", "macos", "windows"}, {"root", "mount"})
+        changes = (
+            lambda row: row["packages"].pop(),
+            lambda row: row["packages"][-1].update(name="unreviewed-local"),
+            lambda row: row["packages"][-1].update(version="0.2.0"),
+            lambda row: row["packages"][-1].update(manifest_path="/elsewhere/Cargo.toml"),
+            lambda row: row["resolve"]["nodes"].pop(1),  # Required Linux helper absent.
+        )
+        for change in changes:
+            value = metadata()
+            change(value)
+            with self.subTest(change=change), self.assertRaises(S.D.Refused):
+                S.shell_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/target"))
+        for platform in ("macos", "windows"):
+            for extra_node, extra_edge in ((True, False), (False, True), (True, True)):
+                value = metadata()
+                if extra_node:
+                    value["resolve"]["nodes"].append({"id": platform, "features": [], "deps": []})
+                if extra_edge:
+                    value["resolve"]["nodes"][0]["deps"].append({"pkg": platform})
+                with self.subTest(platform=platform, node=extra_node, edge=extra_edge), self.assertRaises(S.D.Refused):
+                    S.shell_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/target"))
+            _, units = S.shell_compiled_artifacts(messages(compiler_rows()), Path("/source"), Path("/target"))
+            extra = deepcopy(units[0]); extra.update(package_id=platform, features=[])
+            with self.subTest(compiler=platform), self.assertRaises(S.D.Refused):
+                S.shell_compiler_units([*units, extra], packages, nodes)
 
     def test_actual_sha2_optimized_profile_is_required_not_inferred(self):
         _, packages, nodes = S.shell_cargo_metadata(S.D.canonical(metadata()), Path("/source"), Path("/target"))
@@ -415,7 +453,7 @@ class InstalledShellCompilerContracts(unittest.TestCase):
         with self.assertRaises(S.C.CheckFailure):
             S.C.bounded_json(raw, S.SHELL_METADATA_LIMIT)
         _, packages, _ = S.shell_cargo_metadata(raw, Path("/source"), Path("/target"))
-        self.assertEqual(len(packages), 36)
+        self.assertEqual(len(packages), 38)
         value["metadata"] = [None] * 200000
         with self.assertRaises(S.C.CheckFailure):
             S.shell_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/target"))
@@ -1109,6 +1147,200 @@ class InstalledProjectPathReceiptContracts(unittest.TestCase):
                 parent[path[-1]] = int(old) if type(old) is bool else True if type(old) is int else None
                 with self.subTest(path=path, target=target), self.assertRaises((S.D.Refused, ValueError)):
                     S.shell_project_draft_observation(changed, lifecycle)
+
+
+class InstalledFailureLabelSourceContracts(unittest.TestCase):
+    def test_fixture_parent_is_readable_but_diagnostic_parent_stays_control_bound(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        parser = source.split("fn control_root_from_executable(", 1)[1].split("fn control_root()", 1)[0]
+        self.assertIn('executable.file_name()? != OsStr::new("shell-observer")', parser)
+        self.assertIn('root.parent()? != Path::new("/var/lib")', parser)
+        self.assertIn('strip_prefix("mrk-ubuntu-native-")?', parser)
+        self.assertIn("parts.len() != 2", parser); self.assertIn("part.len() <= 20", parser)
+        self.assertIn("!part.starts_with('0')", parser); self.assertIn("byte.is_ascii_digit()", parser)
+        self.assertIn('executable.as_os_str() != expected.join("shell-observer").as_os_str()', parser)
+        derivation = source.split("fn project_path_from_executable(", 1)[1].split("fn assert_shell_fixture_path_contract()", 1)[0]
+        self.assertIn("control_root_from_executable(executable)?", derivation)
+        self.assertIn('join(format!("mrk-ubuntu-shell-fixtures-{suffix}"))', derivation)
+        self.assertIn('join("positive-project")', derivation)
+        self.assertNotIn("std::env::var", parser + derivation)
+        capture = source.split("impl PathFixture {", 1)[1].split("    fn verify(", 1)[0]
+        self.assertIn("path == root.as_path() { id[2] != 0o040755 }", capture)
+        self.assertIn("id[2] & 0o005 != 0o005", capture)
+        self.assertLess(source.index("    assert_shell_fixture_path_contract();"), source.index("let returned = super::run_builder("))
+        # Source correspondence and pure assertion placement are not GTK/native evidence.
+
+    def test_both_lifecycle_workflow_entry_pins_follow_actual_source(self):
+        workflow = (SOURCE / ".github/workflows/desktop-ubuntu-publication.yml").read_text()
+        lifecycle = (SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_bytes()
+        pins = re.findall(r"MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '([0-9a-f]{64})'", workflow)
+        self.assertEqual(pins, [hashlib.sha256(lifecycle).hexdigest()] * 2)
+
+    def test_normal_capability_error_literals_match_the_existing_joined_classifier(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        source = (SOURCE / "desktop/src-tauri/src/bridge.rs").read_text()
+        shell = (SOURCE / "desktop/src-tauri/src/shell.rs").read_text()
+        classifier = source.split("fn capabilities_failure_line(", 1)[1].split("\nstruct RegisteredProject", 1)[0]
+        literal_rows = re.findall(r'b"(MRKDBG_DESKTOP_BOOTSTRAP=capabilities-[a-z_-]+)\\n"', classifier)
+        self.assertEqual(len(literal_rows), 30)
+        self.assertEqual(len(set(literal_rows)), 30)
+        prefix = "MRKDBG_DESKTOP_BOOTSTRAP="
+        consumer = lifecycle._shell_normal_markers(b"", b"")["stdout"]["stages"]
+        self.assertEqual({line[len(prefix):] for line in literal_rows},
+                         {stage for stage in consumer if stage.startswith("capabilities-")})
+        self.assertLessEqual(max(len(line.encode("ascii")) + 1 for line in literal_rows), 78)
+        self.assertNotIn("error.message", classifier); self.assertNotIn("format!", classifier)
+        self.assertNotIn(".to_string()", classifier); self.assertNotIn("std::io", classifier)
+        app_info = source.split("    pub(crate) async fn app_info(", 1)[1].split("    pub(crate) async fn catalog(", 1)[0]
+        self.assertEqual(app_info.count("document.passive_query(self, Method::Capabilities, json!({}))"), 1)
+        self.assertEqual(app_info.count("query.wait().await"), 1)
+        self.assertEqual(app_info.count('#[cfg(feature = "desktop-shell")]'), 2)
+        self.assertIn("if let Err(error) = &result", app_info)
+        self.assertIn("capabilities_failure_line(CapabilitiesFailureOrigin::QueryWait, error)", app_info)
+        self.assertIn("capabilities_failure_line(CapabilitiesFailureOrigin::Admission, &error)", app_info)
+        self.assertIn("pub(crate) fn diagnostic(line: &'static [u8])", shell)
+        self.assertIn("let _ = std::io::stderr().write_all(line);", shell)
+        # Source correspondence does not execute the Rust classifier, a query,
+        # or a window and cannot count as native capabilities acceptance.
+
+    def test_literal_allowlists_correspond_to_bounded_rust_step_boundary_encoder(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        steps = {line.encode("ascii") + b"\n" for line in re.findall(
+            r'b"(MRK_INSTALLED_SHELL_FAILURE_STEP=[A-Za-z]+)\\n"', source)}
+        boundaries = {line.encode("ascii") + b"\n" for line in re.findall(
+            r'b"(MRK_INSTALLED_SHELL_FAILURE_PHASE=[a-z]+)\\n"', source)}
+        self.assertEqual(set(lifecycle.SHELL_FAILURE_STEPS), steps)
+        self.assertEqual(set(lifecycle.SHELL_FAILURE_BOUNDARIES), boundaries)
+        self.assertEqual(len(lifecycle.SHELL_FAILURE_STEPS), len(steps))
+        self.assertEqual(len(lifecycle.SHELL_FAILURE_BOUNDARIES), 8)
+        for boundary in boundaries:
+            self.assertEqual(lifecycle._shell_label_pair(b"MRK_INSTALLED_SHELL_FAILURE_STEP=SelectProject\n" + boundary),
+                             {"step": "SelectProject", "boundary": boundary.decode("ascii").strip().split("=", 1)[1]})
+        self.assertLessEqual(max(map(len, steps)) + max(map(len, boundaries)), 512)
+        self.assertIn("const FAILURE_PAIR_LIMIT: usize = 512;", source)
+        self.assertIn("fn assert_failure_pair_contract()", source)
+        self.assertIn("    assert_failure_pair_contract();", source)
+        self.assertIn("let end = Instant::now() + Duration::from_secs(45);", source)
+        self.assertEqual(lifecycle.SHELL_WORK_FILE_LIMIT, 64 << 20)
+        for case in lifecycle.SHELL_CASES[1:]:
+            self.assertIn('"shell-' + case + '-failure.labels"', source)
+        self.assertNotIn("shell-normal-failure.labels", source)
+        self.assertFalse(any(name.endswith("failure.labels") for name in lifecycle.public_files({"shell": {}})))
+
+    def test_folder_selection_waits_for_the_exact_current_folder_before_one_activation(self):
+        source = (SOURCE / "desktop/src-tauri/src/shell.rs").read_text()
+        selecting = source.split("    pub(super) fn select_observed_folder(", 1)[1].split("    #[cfg(", 1)[0]
+        activating = source.split("    pub(super) fn activate_observed_folder(", 1)[1].split("    #[cfg(", 1)[0]
+        self.assertEqual(selecting.count("dialog.set_current_folder(path)"), 1)
+        self.assertEqual(selecting.count("q.project_selection(id)?"), 1)
+        self.assertEqual(selecting.count("q.evidence_selection(id)?"), 1)
+        self.assertNotIn(".set_filename(", selecting); self.assertNotIn(".filename(", selecting + activating)
+        self.assertNotIn("set_current_folder", activating)
+        readiness = "if dialog.current_folder().as_deref() != Some(path) { return Ok(false); }"
+        self.assertEqual(activating.count("dialog.current_folder()"), 1)
+        self.assertIn("if select {", activating)
+        self.assertIn("if evidence { q.evidence_path() } else { q.project_path() }", activating)
+        self.assertIn(readiness, activating)
+        self.assertLess(activating.index(readiness), activating.index("dialog.widget_for_response(response)"))
+        self.assertLess(activating.index(readiness), activating.index("q.project_activation(id, select)?"))
+        self.assertLess(activating.index(readiness), activating.index("q.evidence_activation(id, select)?"))
+        self.assertEqual(activating.count("button.emit_clicked()"), 1)
+        # This source correspondence cannot prove GTK readiness or acceptance.
+
+    def test_picker_return_latch_keeps_response_and_original_finality_independent(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        latch = source.split("    fn activation_returned(", 1)[1].split("    fn settled(", 1)[0]
+        self.assertIn("result != Ok(true) || !self.created || !self.activated || self.returned", latch)
+        self.assertEqual(latch.count("self.returned = true"), 1)
+        self.assertNotIn("self.responded", latch)
+        self.assertIn("self.created && self.activated && self.responded && self.destroyed && self.released && self.returned", source)
+        self.assertIn("&& self.selected == select && self.filename == select", source)
+        for name, next_name, pending, waiting in (
+            ("project_gtk_returned", "evidence_created", "Project(step)", ("Step::Cancelled", "Step::Selected")),
+            ("evidence_gtk_returned", "native_created", "Evidence(step)", ("Step::EvidenceCancelled", "Step::EvidenceSelected")),
+            ("path_gtk_returned", "preview_request", "Path(path)", ("Step::Paths(PathStep::Settled(index))",)),
+        ):
+            caller = source.split("    fn " + name + "(", 1)[1].split("    pub(super) fn " + next_name, 1)[0]
+            self.assertIn("r.pending.take() != Some(Pending::" + pending + ")", caller)
+            self.assertEqual(caller.count(".activation_returned(result)"), 1)
+            self.assertNotIn(".responded", caller)
+            for step in waiting: self.assertIn(step, caller)
+        self.assertIn("Ok(true) if matches!(step, Step::Cancel | Step::SelectProject)", source)
+        self.assertIn("Ok(true) if matches!(step, Step::CancelEvidence | Step::SelectEvidence)", source)
+        self.assertIn("PathStep::Set(i) => (i,true), PathStep::Activate(i) => (i,false)", source)
+        self.assertIn("Ok(true) if !selecting =>", source)
+        self.assertIn("fn assert_picker_activation_return_contract()", source)
+        self.assertLess(source.index("    assert_picker_activation_return_contract();"),
+                        source.index("let returned = super::run_builder("))
+        # The actual helper's inert assertions run in the reviewed observer
+        # before GTK. Original response, owner and finality evidence is separate.
+
+    def test_project_path_cancel_destruction_uses_choice_specific_original_facts(self):
+        shell = (SOURCE / "desktop/src-tauri/src/shell.rs").read_text()
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        callback = shell.split("entry.destroy = Some(dialog.connect_destroy(move |_| {", 1)[1].split("}));", 1)[0]
+        self.assertIn("destroy_call.upgrade().is_some_and(|call| call.facts().is_some_and(|facts|", callback)
+        predicate = "installed_observation::file_destroyed(&facts, matches!(choice, DialogChoice::ProjectPath(_)))"
+        self.assertEqual(callback.count(predicate), 1)
+        self.assertLess(callback.index("destroyed(&destroy_call)"), callback.index(predicate))
+        self.assertLess(callback.index(predicate), callback.index("q.native_destroyed(observed_id, seen)"))
+        self.assertNotIn("!facts.declined", callback)
+        helper = source.split("pub(super) fn file_destroyed(", 1)[1].split("fn assert_file_destroyed_contract()", 1)[0]
+        self.assertIn("facts.destroyed && facts.response && facts.refusal.is_none()", helper)
+        self.assertIn("if path_choice { facts.accepted != facts.declined } else { !facts.declined }", helper)
+        self.assertNotIn("facts.close_ack", helper); self.assertNotIn("facts.released", helper)
+        self.assertIn("(true, false, true, true)", source)  # Path Cancel is declined.
+        self.assertIn("(false, false, false, true)", source)  # Ordinary Cancel is not.
+        self.assertLess(source.index("    assert_file_destroyed_contract();"),
+                        source.index("let returned = super::run_builder("))
+        self.assertIn("if !seen || !p.responded || p.destroyed", source)
+        self.assertIn("if !seen || !p.destroyed || p.released", source)
+        self.assertIn(
+            "original.response = None;\n        original.destroy = None;\n"
+            "        gtk_fixture!(call, HandlersDetached, 1);",
+            shell.split("    fn release_after_destroy(", 1)[1].split("\n    #[cfg(", 1)[0],
+        )
+        # Original GTK signals, destruction, release and joins require native evidence.
+
+    def test_deadline_label_latches_once_before_report_outside_the_record_lock(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        tick = source.split("    pub(super) fn tick(", 1)[1].split("        let step = {", 1)[0]
+        deadline = tick.split("        if Instant::now() >= self.end {", 1)[1].split(
+            "        if std::thread::current().id() == self.main", 1)[0]
+        self.assertIn("if let Some(mut r) = self.record() {", deadline)
+        self.assertIn("if !self.failed.swap(true, Ordering::SeqCst) { r.trace = (r.step, Boundary::Deadline); }", deadline)
+        self.assertEqual(deadline.count("Boundary::Deadline"), 1)
+        self.assertIn("\n            }\n            self.report_failure(); return;\n        }", deadline)
+        self.assertIn("if self.failed.load(Ordering::SeqCst) { self.report_failure(); return; }", tick)
+        self.assertIn("if std::thread::current().id() == self.main { self.fail(); self.report_failure(); return; }", tick)
+        self.assertNotIn("self.end ||", tick)
+        self.assertIn("if !self.failed.load(Ordering::SeqCst) { r.trace = (r.step, boundary); }", source)
+
+    def test_test_only_original_fd_sink_has_one_attempt_before_existing_stderr(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        entry = (SOURCE / "desktop/src-tauri/tests/installed_shell_observation.rs").read_text()
+        opener = source.split("fn failure_sink(case: Case)", 1)[1].split("const FAILURE_PAIR_LIMIT", 1)[0]
+        self.assertIn("let root = control_root()?;", opener)
+        self.assertNotIn("project_path()", opener)
+        self.assertIn("OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC", opener)
+        self.assertIn("OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK", opener)
+        self.assertNotIn("OFlags::CREATE", opener); self.assertNotIn("OFlags::TRUNC", opener)
+        self.assertEqual(opener.count("fs::openat("), 1)
+        self.assertIn("item.st_mode != 0o100620", opener)
+        self.assertIn("item.st_nlink != 1 || item.st_size != 0", opener)
+        self.assertIn("before.st_mode != 0o040711", opener)
+        reporter = source.split("    fn report_failure(&self)", 1)[1].split("    pub(super) fn attach", 1)[0]
+        self.assertEqual(reporter.count("rustix::io::write("), 1)
+        self.assertLess(reporter.index("self.failure_reported.swap(true"), reporter.index("rustix::io::write("))
+        self.assertLess(reporter.index("rustix::io::write("), reporter.index("super::diagnostic(trace.0.failure_line())"))
+        self.assertNotIn("write_all", reporter); self.assertNotIn("loop {", reporter)
+        self.assertIn("failure_sink: rustix::fd::OwnedFd", source)
+        self.assertIn("#![forbid(unsafe_code)]", entry)
+        self.assertIn("not(feature = \"development-runtime\")", entry)
+        self.assertIn('target_os = "linux"', entry)
+        # The source contract is not a substitute for the next actual shared
+        # normal/observer compiler gate or runtime FD behavior on the host.
 
 
 if __name__ == "__main__":

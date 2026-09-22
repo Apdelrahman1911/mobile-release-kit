@@ -118,7 +118,7 @@ impl Step {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Pending { Dom(Step), Project(Step), Evidence(Step), Path(PathStep), Close, Gtk }
 #[derive(Clone, Copy)]
-enum Boundary { Bootstrap, Request, Result, Dom, Gtk, Settlement, Exit }
+enum Boundary { Bootstrap, Request, Result, Dom, Gtk, Settlement, Deadline, Exit }
 impl Boundary {
     fn failure_line(self) -> &'static [u8] {
         match self {
@@ -128,6 +128,7 @@ impl Boundary {
             Self::Dom => b"MRK_INSTALLED_SHELL_FAILURE_PHASE=dom\n",
             Self::Gtk => b"MRK_INSTALLED_SHELL_FAILURE_PHASE=gtk\n",
             Self::Settlement => b"MRK_INSTALLED_SHELL_FAILURE_PHASE=settlement\n",
+            Self::Deadline => b"MRK_INSTALLED_SHELL_FAILURE_PHASE=deadline\n",
             Self::Exit => b"MRK_INSTALLED_SHELL_FAILURE_PHASE=exit\n",
         }
     }
@@ -164,17 +165,140 @@ const IGNORE_BYTES: u32 = 208;
 const IGNORE_LINES: [&str; 7] = [".mobile-release/", ".mobile-release-init-prepare/", ".mobile-release-init/", ".mobile-release-init-cleanup/",
     ".mobile-release-metadata-text-prepare/", ".mobile-release-metadata-text/", ".mobile-release-metadata-text-cleanup/"];
 
-// This is the fixed original service's protected sibling, not an environment
-// path or a renderer-selected fixture. It is only passed to GtkFileChooser.
-fn project_path() -> Option<PathBuf> {
-    let executable = std::env::current_exe().ok()?;
+// Control and synthetic DATA have distinct protected parents. No environment,
+// renderer input or CLI option chooses either root.
+fn control_root_from_executable(executable: &Path) -> Option<PathBuf> {
     if executable.file_name()? != OsStr::new("shell-observer") { return None; }
     let root = executable.parent()?;
     if root.parent()? != Path::new("/var/lib") { return None; }
     let parts: Vec<_> = root.file_name()?.to_str()?.strip_prefix("mrk-ubuntu-native-")?.split('-').collect();
     if parts.len() != 2 || !parts.iter().all(|part| !part.is_empty() && part.len() <= 20
         && !part.starts_with('0') && part.bytes().all(|byte| byte.is_ascii_digit())) { return None; }
-    Some(root.join("positive-project"))
+    let expected = Path::new("/var/lib").join(format!("mrk-ubuntu-native-{}-{}", parts[0], parts[1]));
+    if executable.as_os_str() != expected.join("shell-observer").as_os_str() { return None; }
+    Some(expected)
+}
+fn control_root() -> Option<PathBuf> {
+    control_root_from_executable(&std::env::current_exe().ok()?)
+}
+fn project_path_from_executable(executable: &Path) -> Option<PathBuf> {
+    let control = control_root_from_executable(executable)?;
+    let suffix = control.file_name()?.to_str()?.strip_prefix("mrk-ubuntu-native-")?;
+    Some(Path::new("/var/lib").join(format!("mrk-ubuntu-shell-fixtures-{suffix}")).join("positive-project"))
+}
+fn project_path() -> Option<PathBuf> {
+    project_path_from_executable(&std::env::current_exe().ok()?)
+}
+fn assert_shell_fixture_path_contract() {
+    // Pure path DATA: no filesystem access, GTK or native operation.
+    for ids in ["10-2", "99999999999999999999-99999999999999999999"] {
+        let control = Path::new("/var/lib").join(format!("mrk-ubuntu-native-{ids}"));
+        let executable = control.join("shell-observer");
+        assert_eq!(control_root_from_executable(&executable), Some(control));
+        assert_eq!(project_path_from_executable(&executable),
+            Some(Path::new("/var/lib").join(format!("mrk-ubuntu-shell-fixtures-{ids}")).join("positive-project")));
+    }
+    for path in ["/var/lib/mrk-ubuntu-native-10-2/shell-normal", "/tmp/mrk-ubuntu-native-10-2/shell-observer",
+        "/var/lib/mrk-ubuntu-shell-fixtures-10-2/shell-observer", "/var/lib/mrk-ubuntu-native-0-2/shell-observer",
+        "/var/lib/mrk-ubuntu-native-10-02/shell-observer", "/var/lib/mrk-ubuntu-native-100000000000000000000-2/shell-observer",
+        "/var/lib/mrk-ubuntu-native-10-2-3/shell-observer", "/var/lib/mrk-ubuntu-native-10-x/shell-observer",
+        "/var/lib/mrk-ubuntu-native-10-/shell-observer", "/var/lib/mrk-ubuntu-native-10-2/./shell-observer",
+        "/var//lib/mrk-ubuntu-native-10-2/shell-observer", "var/lib/mrk-ubuntu-native-10-2/shell-observer"] {
+        assert!(control_root_from_executable(Path::new(path)).is_none());
+        assert!(project_path_from_executable(Path::new(path)).is_none());
+    }
+}
+
+// One fixed root-prepared diagnostic leaf. O_PATH permits binding the0711
+// parent without granting directory read permission to the dropped runner.
+// OwnedFd closes once on every Rust return/drop path; no raw FD is exported.
+fn failure_sink(case: Case) -> Option<rustix::fd::OwnedFd> {
+    use std::os::unix::fs::MetadataExt;
+    use rustix::fs::{self, Mode, OFlags};
+    let root = control_root()?;
+    for ancestor in root.ancestors() {
+        let metadata = std::fs::symlink_metadata(ancestor).ok()?;
+        if !metadata.is_dir() || metadata.uid() != 0 || metadata.gid() != 0
+            || metadata.mode() & 0o022 != 0 { return None; }
+    }
+    let parent = fs::open(&root, OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty()).ok()?;
+    let before = fs::fstat(&parent).ok()?;
+    if before.st_mode != 0o040711 || before.st_uid != 0 || before.st_gid != 0 { return None; }
+    let leaf = match case {
+        Case::Positive => "shell-positive-failure.labels",
+        Case::Outstanding => "shell-quit-outstanding-failure.labels",
+        Case::ProjectPaths => "shell-project-paths-failure.labels",
+    };
+    let fd = fs::openat(&parent, leaf, OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty()).ok()?;
+    let item = fs::fstat(&fd).ok()?;
+    let group = rustix::process::getegid();
+    let after = fs::fstat(&parent).ok()?;
+    if group.as_raw() == 0 || group != rustix::process::getgid()
+        || item.st_mode != 0o100620 || item.st_uid != 0 || item.st_gid != group.as_raw()
+        || item.st_nlink != 1 || item.st_size != 0 || item.st_dev != before.st_dev
+        || (before.st_dev, before.st_ino, before.st_mode, before.st_uid, before.st_gid)
+            != (after.st_dev, after.st_ino, after.st_mode, after.st_uid, after.st_gid) { return None; }
+    Some(fd)
+}
+
+const FAILURE_PAIR_LIMIT: usize = 512;
+fn failure_pair(trace: (Step, Boundary)) -> Option<([u8; FAILURE_PAIR_LIMIT], usize)> {
+    let step = trace.0.failure_line();
+    let boundary = trace.1.failure_line();
+    let length = step.len().checked_add(boundary.len())?;
+    let mut bytes = [0_u8; FAILURE_PAIR_LIMIT];
+    bytes.get_mut(..step.len())?.copy_from_slice(step);
+    bytes.get_mut(step.len()..length)?.copy_from_slice(boundary);
+    Some((bytes, length))
+}
+
+fn assert_failure_pair_contract() {
+    // Pure byte contracts only; no open, write, GTK or process work.
+    for trace in [(Step::Bootstrap, Boundary::Bootstrap), (Step::PrepareSave, Boundary::Request),
+        (Step::Paths(PathStep::Settled(10)), Boundary::Settlement), (Step::SelectProject, Boundary::Deadline),
+        (Step::Exit, Boundary::Exit)] {
+        let expected = [trace.0.failure_line(), trace.1.failure_line()].concat();
+        assert!(failure_pair(trace).is_some_and(|(bytes, length)|
+            length <= FAILURE_PAIR_LIMIT && bytes.get(..length) == Some(expected.as_slice())));
+    }
+}
+
+// Original destruction facts only. ProjectPath records an admitted Cancel as
+// declined; ordinary project/evidence pickers deliberately do not. Later close,
+// release and document-owner settlement are separate observations.
+pub(super) fn file_destroyed(facts: &crate::asset_session::GuiFacts, path_choice: bool) -> bool {
+    facts.destroyed && facts.response && facts.refusal.is_none()
+        && if path_choice { facts.accepted != facts.declined } else { !facts.declined }
+}
+
+fn assert_file_destroyed_contract() {
+    use crate::asset_session::GuiFacts;
+    let facts = |accepted, declined| GuiFacts {
+        dispatched: true, constructing: false, created: true, showing: false,
+        response: true, accepted, declined, accepted_at: None,
+        destroyed: true, released: false, not_created: false,
+        close_queued: true, close_ack: false, release_queued: false,
+        selected: None, refusal: None,
+    };
+    // These synthetic values prove only the predicate, never native finality.
+    for (path_choice, accepted, declined, expected) in [
+        (true, true, false, true), (true, false, true, true),
+        (true, false, false, false), (true, true, true, false),
+        (false, true, false, true), (false, false, false, true),
+        (false, false, true, false), (false, true, true, false),
+    ] {
+        assert_eq!(file_destroyed(&facts(accepted, declined), path_choice), expected);
+        if expected {
+            let mut missing = facts(accepted, declined); missing.destroyed = false;
+            assert!(!file_destroyed(&missing, path_choice));
+            let mut missing = facts(accepted, declined); missing.response = false;
+            assert!(!file_destroyed(&missing, path_choice));
+            let mut refused = facts(accepted, declined); refused.refusal = Some(PR::SourceRefused);
+            assert!(!file_destroyed(&refused, path_choice));
+        }
+    }
 }
 
 #[derive(Default)]
@@ -183,9 +307,49 @@ struct Picker {
     disposal: bool, destroyed: bool, released: bool, returned: bool,
 }
 impl Picker {
+    fn activation_returned(&mut self, result: Result<bool, ()>) -> bool {
+        // Only the actual completed activation callback latches return. GTK
+        // may defer its genuine response until after emit_clicked unwinds.
+        if result != Ok(true) || !self.created || !self.activated || self.returned { return false; }
+        self.returned = true; true
+    }
     fn settled(&self, select: bool) -> bool {
         self.created && self.activated && self.responded && self.destroyed && self.released && self.returned
             && self.selected == select && self.filename == select
+    }
+}
+
+fn assert_picker_activation_return_contract() {
+    // Inert state assertions only, never native response or settlement receipts.
+    for select in [false, true] {
+        for response_first in [false, true] {
+            let mut p = Picker { created: true, selected: select, activated: true, ..Picker::default() };
+            if response_first { p.responded = true; p.filename = select; }
+            assert!(p.activation_returned(Ok(true)));
+            assert!(!p.settled(select));
+            assert!(!p.activation_returned(Ok(true))); // No second activation return.
+            if !response_first { p.responded = true; p.filename = select; }
+            assert!(!p.settled(select));
+            p.destroyed = true; assert!(!p.settled(select));
+            p.released = true; assert!(p.settled(select));
+            assert!(!p.settled(!select));
+        }
+        let complete = || Picker { created: true, selected: select, activated: true, responded: true,
+            filename: select, destroyed: true, released: true, returned: true, ..Picker::default() };
+        for incomplete in [Picker { created: false, ..complete() }, Picker { activated: false, ..complete() },
+            Picker { responded: false, ..complete() }, Picker { destroyed: false, ..complete() },
+            Picker { released: false, ..complete() }, Picker { returned: false, ..complete() },
+            Picker { selected: !select, ..complete() }, Picker { filename: !select, ..complete() }] {
+            assert!(!incomplete.settled(select));
+        }
+        for result in [Ok(false), Err(())] {
+            let mut p = Picker { created: true, selected: select, activated: true, ..Picker::default() };
+            assert!(!p.activation_returned(result)); assert!(!p.returned);
+        }
+    }
+    for (created, activated) in [(false, true), (true, false)] {
+        let mut p = Picker { created, activated, ..Picker::default() };
+        assert!(!p.activation_returned(Ok(true))); assert!(!p.returned);
     }
 }
 
@@ -281,7 +445,8 @@ impl PathFixture {
         let mut ancestors = Vec::new();
         for path in root.ancestors() {
             let id = fixture_identity(path)?;
-            if id[2] & 0o170000 != 0o040000 || id[2] & 0o022 != 0 || id[3] != 0 || id[4] != 0 { return Err(()); }
+            if id[2] & 0o170000 != 0o040000 || id[2] & 0o022 != 0 || id[3] != 0 || id[4] != 0
+                || (if path == root.as_path() { id[2] != 0o040755 } else { id[2] & 0o005 != 0o005 }) { return Err(()); }
             ancestors.push((path.to_path_buf(),id));
         }
         let mut originals = Vec::new();
@@ -832,10 +997,10 @@ fn saved_read_context(r: &Record) -> bool {
 }
 pub(super) struct Observation {
     case: Case, main: ThreadId, end: Instant, project_path: Option<PathBuf>, evidence_path: Option<PathBuf>, failed: AtomicBool,
-    failure_reported: AtomicBool, record: Mutex<Record>,
+    failure_reported: AtomicBool, failure_sink: rustix::fd::OwnedFd, record: Mutex<Record>,
 }
 impl Observation {
-    fn new(case: Case) -> Self {
+    fn new(case: Case, failure_sink: rustix::fd::OwnedFd) -> Self {
         let end = Instant::now() + Duration::from_secs(45);
         let project_path = (case != Case::Outstanding).then(project_path).flatten().map(|path|
             if case == Case::ProjectPaths { path.with_file_name("path-project") } else { path });
@@ -844,7 +1009,7 @@ impl Observation {
         Self { case, main: std::thread::current().id(), end,
             failed: AtomicBool::new(case != Case::Outstanding && (project_path.is_none() || evidence_path.is_none())
                 || case == Case::ProjectPaths && paths.fixture.is_none()), project_path, evidence_path,
-            failure_reported: AtomicBool::new(false), record: Mutex::new(Record {
+            failure_reported: AtomicBool::new(false), failure_sink, record: Mutex::new(Record {
                 attached: false, started: false, loaded: false, info: false, methods: 0, catalog: false, environment: false,
                 step: Step::Bootstrap, pending: None, evaluations: 0, trace: (Step::Bootstrap, Boundary::Bootstrap),
                 pickers: std::array::from_fn(|_| Picker::default()), cancel_returned: false, cancelled: false, project: None, selected: false,
@@ -874,6 +1039,11 @@ impl Observation {
         if self.failure_reported.swap(true, Ordering::SeqCst) { return; }
         // Two fixed enum labels, outside every record/GTK lock. No paths,
         // opaque identifiers, DTOs, exception bodies or terminal transcript.
+        // One unbuffered attempt before stderr: partial/EINTR/error is not
+        // retried, formatted or allowed to affect the original failure latch.
+        if let Some((bytes, length)) = failure_pair(trace) {
+            if let Some(pair) = bytes.get(..length) { let _ = rustix::io::write(&self.failure_sink, pair); }
+        }
         super::diagnostic(trace.0.failure_line()); super::diagnostic(trace.1.failure_line());
     }
     pub(super) fn attach(&self, supervisor: &Supervisor) -> Result<(), BridgeError> {
@@ -1426,8 +1596,9 @@ impl Observation {
         match result {
             Ok(false) if !op.picker.activated && (!selecting || !op.picker.selected) => {},
             Ok(true) if selecting && op.picker.selected && !op.picker.activated => r.step = Step::Paths(PathStep::Activate(index)),
-            Ok(true) if !selecting && op.picker.activated && op.picker.responded && !op.picker.returned => {
-                op.picker.returned = true; r.step = Step::Paths(PathStep::Settled(index));
+            Ok(true) if !selecting => {
+                if !op.picker.activation_returned(result) { self.fail(); return; }
+                r.step = Step::Paths(PathStep::Settled(index));
             }, _ => self.fail(),
         }
     }
@@ -1535,7 +1706,15 @@ impl Observation {
     }
     pub(super) fn tick(self: &Arc<Self>, app: &tauri::AppHandle) {
         if self.failed.load(Ordering::SeqCst) { self.report_failure(); return; }
-        if Instant::now() >= self.end || std::thread::current().id() == self.main { self.fail(); self.report_failure(); return; }
+        if Instant::now() >= self.end {
+            // Preserve the first failure even if another callback failed while
+            // this relay was acquiring the record. Report only after unlock.
+            if let Some(mut r) = self.record() {
+                if !self.failed.swap(true, Ordering::SeqCst) { r.trace = (r.step, Boundary::Deadline); }
+            }
+            self.report_failure(); return;
+        }
+        if std::thread::current().id() == self.main { self.fail(); self.report_failure(); return; }
         let step = {
             let Some(mut r) = self.record_at(Boundary::Settlement) else { return; };
             if !r.attached || !r.loaded || r.pending.is_some() { return; }
@@ -1963,8 +2142,8 @@ impl Observation {
         match result {
             Ok(false) if !r.pickers[index].activated && (step != Step::SetProject || !r.pickers[index].selected) => {},
             Ok(true) if step == Step::SetProject && r.pickers[1].selected && !r.pickers[1].activated => r.step = Step::SelectProject,
-            Ok(true) if r.pickers[index].activated && r.pickers[index].responded && !r.pickers[index].returned => {
-                r.pickers[index].returned = true;
+            Ok(true) if matches!(step, Step::Cancel | Step::SelectProject) => {
+                if !r.pickers[index].activation_returned(result) { self.fail(); return; }
                 r.step = if index == 0 { Step::Cancelled } else { Step::Selected };
             },
             _ => self.fail(),
@@ -2019,8 +2198,8 @@ impl Observation {
         match result {
             Ok(false) if !r.candidate.pickers[index].activated && (step != Step::SetEvidence || !r.candidate.pickers[index].selected) => {},
             Ok(true) if step == Step::SetEvidence && r.candidate.pickers[1].selected && !r.candidate.pickers[1].activated => r.step = Step::SelectEvidence,
-            Ok(true) if r.candidate.pickers[index].activated && r.candidate.pickers[index].responded && !r.candidate.pickers[index].returned => {
-                r.candidate.pickers[index].returned = true;
+            Ok(true) if matches!(step, Step::CancelEvidence | Step::SelectEvidence) => {
+                if !r.candidate.pickers[index].activation_returned(result) { self.fail(); return; }
                 r.step = if index == 0 { Step::EvidenceCancelled } else { Step::EvidenceSelected };
             },
             _ => self.fail(),
@@ -2844,13 +3023,21 @@ pub(crate) fn main() -> std::process::ExitCode {
         super::diagnostic(b"MRK_INSTALLED_SHELL_OBSERVATION=route-refused\n");
         return std::process::ExitCode::FAILURE;
     };
-    let q = Arc::new(Observation::new(case));
+    let Some(failure_sink) = failure_sink(case) else {
+        super::diagnostic(b"MRK_INSTALLED_SHELL_OBSERVATION=route-refused\n");
+        return std::process::ExitCode::FAILURE;
+    };
+    let q = Arc::new(Observation::new(case, failure_sink));
     // This target has no libtest harness. Execute the existing pure contracts
     // and positive configuration-domain contracts before GTK; a failed
     // assertion cannot reach the success report.
     crate::bridge::assert_native_capability_intersection_contract();
     crate::runtime::assert_packaged_shell_allowlist_contract();
     assert_recent_files_suppression_contract();
+    assert_failure_pair_contract();
+    assert_file_destroyed_contract();
+    assert_picker_activation_return_contract();
+    assert_shell_fixture_path_contract();
     if case == Case::Positive {
         crate::asset_session::assert_project_selection_gate_contract();
         crate::asset_session::assert_installed_evidence_gate_contract();

@@ -2011,11 +2011,19 @@ def shell_cargo_metadata(raw, source, target):
                and type(row.get("deps")) is list and all(dep.get("pkg") in nodes for dep in row["deps"]),
                "Shell resolved Cargo edge/features differ")
     local_paths = {"mobile-release-kit-desktop": source / "desktop/src-tauri/Cargo.toml",
-                   "mrk-linux-mount-observation": source / "desktop/native/linux-mount-observation/Cargo.toml"}
+                   "mrk-linux-mount-observation": source / "desktop/native/linux-mount-observation/Cargo.toml",
+                   "mrk-macos-installed-native": source / "desktop/native/macos-installed-native/Cargo.toml",
+                   "mrk-windows-installed-native": source / "desktop/native/windows-installed-native/Cargo.toml"}
     local = [row for row in packages if row.get("source") is None]
-    D.need(len(local) == 2 and {row["name"] for row in local} == set(local_paths)
+    D.need(len(local) == len(local_paths) and {row["name"] for row in local} == set(local_paths)
            and all(row["version"] == "0.1.0" and row["manifest_path"] == str(local_paths[row["name"]]) for row in local),
            "Shell Cargo local source roster differs")
+    # --filter-platform selects resolve, not packages: other-platform local
+    # declarations must be accounted for without authorizing their compilation.
+    active_local = {row["id"] for row in local if row["id"] in nodes}
+    linux_local = {row["id"] for row in local
+                   if row["name"] in ("mobile-release-kit-desktop", "mrk-linux-mount-observation")}
+    D.need(active_local == linux_local, "Shell Cargo active local graph differs")
     registry = [row for row in packages if row.get("source") is not None]
     keys = {(row["name"], row["version"]) for row in registry}
     D.need(len(keys) == len(registry) and all(row["source"] == "registry+https://github.com/rust-lang/crates.io-index"

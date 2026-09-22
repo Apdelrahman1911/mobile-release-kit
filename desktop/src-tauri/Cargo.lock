@@ -1902,6 +1902,7 @@ dependencies = [
  "gtk",
  "mrk-linux-mount-observation",
  "mrk-macos-installed-native",
+ "mrk-windows-installed-native",
  "nix",
  "rfd",
  "rustix",
@@ -1928,6 +1929,13 @@ name = "mrk-macos-installed-native"
 version = "0.1.0"
 dependencies = [
  "cc",
+]
+
+[[package]]
+name = "mrk-windows-installed-native"
+version = "0.1.0"
+dependencies = [
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

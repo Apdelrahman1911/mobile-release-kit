@@ -349,9 +349,21 @@ class Fixtures:
     def _mkdir(self, parent, name, mode=0o700):
         os.mkdir(name, 0o700, dir_fd=parent)  # Refuse occupied paths; never adopt.
         fd = self._open(name, parent, directory=True)
+        original = signature(os.fstat(fd))
+        need(signature(os.stat(name, dir_fd=parent, follow_symlinks=False)) == original
+             and original[2] == stat.S_IFDIR | 0o700 and original[3] == self.uid,
+             "fixture-created-directory-custody")
+        # Darwin can inherit the parent's group even without setgid. Normalize
+        # only this fresh, private, caller-owned original, before widening it.
+        if original[4] != self.gid:
+            os.fchown(fd, -1, self.gid)
+        current = signature(os.fstat(fd))
+        need(current[:4] == original[:4] and current[4] == self.gid,
+             "fixture-created-directory-group")
+        self._named(parent, name, fd, 0o700)
         if mode != 0o700:
             os.fchmod(fd, mode)  # Only this newly and exclusively created dir.
-        self._named(parent, name, fd, mode)
+            self._named(parent, name, fd, mode)
         return fd
 
     def _named(self, parent, name, fd, mode):

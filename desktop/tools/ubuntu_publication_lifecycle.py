@@ -45,6 +45,109 @@ INSTALLED_TESTS = {key: "supervisor::tests::installed_candidate_a_" + suffix for
 CHILD_MARKER = "MRK_INSTALLED_NATIVE_CHILD="
 EMFILE_MARKER = "MRK_INSTALLED_NATIVE_EMFILE_RETAINED_UNKNOWN"
 SHELL_CASES = ("normal", "positive", "quit-outstanding", "project-paths")
+SHELL_FAILURE_LABEL_LIMIT = 512
+# Literal observer labels only; never a prefix parser or raw-output escape.
+SHELL_FAILURE_STEPS = (
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Bootstrap\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Environment\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadEnvironment\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Dashboard\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ChooseCancel\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Cancel\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Cancelled\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadCancelled\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ChooseSelect\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SetProject\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SelectProject\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Selected\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadSnapshot\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Settings\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Suggest\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadSuggestion\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Adopt\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadDraft\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=GuidanceEnvironment\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=LoadRequirements\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadRequirements\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=GitHub\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadGitHubEmpty\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EnterRepository\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EnterSha\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadGitHubInputs\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ProposeGitHub\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadProposal\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=OpenWorkflows\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadWorkflows\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=GuidanceSettings\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadRetainedDraft\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PrepareSave\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadSaveReview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=OpenConfirmation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadConfirmation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=KeepReviewing\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadKeptReview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReopenConfirmation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadReopenedConfirmation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Acknowledge\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadAcknowledged\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Apply\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadSaved\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SavedDashboard\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Refresh\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadReadback\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadVersion\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadVersionCard\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Metadata\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=LoadMetadata\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadMetadata\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EnterTitle\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EnterShortDescription\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EnterFullDescription\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadMetadataInputs\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ValidateMetadata\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadMetadataValidation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SavedSettings\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadSavedDraft\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Artifacts\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadEvidenceEmpty\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ChooseEvidenceCancel\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=CancelEvidence\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EvidenceCancelled\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadEvidenceCancelled\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ChooseEvidenceSelect\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SetEvidence\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SelectEvidence\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EvidenceSelected\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadEvidenceSelected\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=InspectEvidence\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EvidenceObserved\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadEvidenceObserved\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=CandidateSettings\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadCandidateDraft\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PrepareNoop\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadNoopReview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Close\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Quit\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Exit\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathDraft\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathPreview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathBrowse\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathSet\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathActivate\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathSettlement\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathField\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathNavigation\n",
+)
+SHELL_FAILURE_BOUNDARIES = (
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=bootstrap\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=request\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=result\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=dom\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=gtk\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=settlement\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=deadline\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=exit\n",
+)
 SHELL_PATH_MARKER = b"MRK_INSTALLED_SHELL_PROJECT_PATHS="
 SHELL_PATH_RECEIPT = {'assetAuthorityCreated': False,
  'cancel': [{'field': 'version.source', 'operation': 3}, {'field': 'metadata.root', 'operation': 7}],
@@ -880,6 +983,12 @@ def root_path(value):
     return Path("/var/lib/mrk-ubuntu-native-" + value["runId"] + "-" + value["attempt"])
 
 
+def shell_fixture_root(value):
+    need(all(type(value.get(key)) is str and re.fullmatch(r"[1-9][0-9]{0,19}", value[key]) is not None
+             for key in ("runId", "attempt")), "Original shell fixture run identity differs")
+    return Path("/var/lib/mrk-ubuntu-shell-fixtures-" + value["runId"] + "-" + value["attempt"])
+
+
 def service_task_limit(value):
     # The validated shell handoff includes GTK/WebKit threads, Xvfb, private
     # D-Bus and the original command controllers in this same bounded domain.
@@ -1069,11 +1178,17 @@ def _capacity(value):
     # those private files in addition to retained output. This free-space check
     # is not a reservation, aggregate quota or a bound on every GUI cache/memfd.
     if "shell" in value:
-        required += len(SHELL_CASES) * SHELL_WORK_FILE_LIMIT
+        # Three additional write-only failure leaves. The512-byte emitter/read
+        # bound is not a filesystem quota; retain the unchanged64MiB ceiling.
+        required += (len(SHELL_CASES) + len(SHELL_CASES[1:])) * SHELL_WORK_FILE_LIMIT
     inodes = 2 * max(capacity["installedEntries"].values()) + 2 * 8192 + 128
+    if "shell" in value:
+        inodes += len(SHELL_CASES[1:]) + 1  # One separate readable fixture namespace.
     need(len({Path(name).stat().st_dev for name in ("/", "/var", "/var/lib", "/usr")}) == 1,
          "Capacity DATA does not cover the same root package/publication filesystem")
     space = os.statvfs("/var/lib")
+    if "shell" in value:
+        required += space.f_frsize  # One new directory allocation block, not a quota.
     need(space.f_bavail * space.f_frsize >= required and space.f_favail >= inodes, "Insufficient original host capacity; do not clear caches")
 
 
@@ -1111,42 +1226,63 @@ def command(label, argv, *, maximum=120, codes=(0,), env=None, endpoint=None, sh
     # The fixed overlap configure may only SHORTEN this original endpoint.
     need(endpoint is None or type(endpoint) in {int, float} and math.isfinite(endpoint), "Fixed finite command cap required")
     bound = _END if endpoint is None else min(_END, endpoint)
-    started = time.monotonic()
-    seconds = min(maximum, math.floor(bound - started))
-    need(seconds > 0, "Original root command endpoint exhausted")
     _FAILED = True
-    result = _OWNER.run_owned(argv, environ=_environment() if env is None else env, cwd=Path("/"), timeout=seconds,
-        capture=True, text=False, output_limit=LIMIT, execution_scope=None, journal_binding=None, cleanup=False)
-    _command_capture(label, argv, result, seconds)
-    if endpoint is not None:
-        _COMMANDS[-1].update(originalEndpoint=bound, startMonotonic=started)
-    accepted = result.returncode in codes and time.monotonic() < bound
-    display_log, log_error = None, None
-    if shell_log is not None:
+    failure_sink = None
+    try:
+        if shell_log is not None:
+            failure_sink = _shell_labels_prepare(shell_log[0], shell_log[1])
+        started = time.monotonic()
+        seconds = min(maximum, math.floor(bound - started))
+        need(seconds > 0, "Original root command endpoint exhausted")
+        call = _shell_call_started(seconds) if shell_log is not None else None
         try:
-            display_log = _shell_log_capture(*shell_log, result)
+            result = _OWNER.run_owned(argv, environ=_environment() if env is None else env, cwd=Path("/"), timeout=seconds,
+                capture=True, text=False, output_limit=LIMIT, execution_scope=None, journal_binding=None, cleanup=False)
         except BaseException as error:
-            log_error = error
-        if not accepted or log_error is not None:
-            _shell_command_failure(argv, result, shell_log[1], display_log, log_error)
-        if not accepted:
-            # The settled original command's failure remains primary. Preserve
-            # a later read/retention/interruption error as its explicit cause;
-            # neither branch can resume or claim cleanup/success.
-            raise Refused("Original root command failed or completed late") from log_error
-        if log_error is not None:
-            raise log_error
-        need(time.monotonic() < bound, "Original shell log captured after endpoint")
-    if not accepted and label in {"native-root", "native-user", "observe-unpacked", "observe-p0",
-                                 "observe-upgrade", "observe-duplicate", "observe-remove", "observe-purge"}:
-        # Only these fixed credential-free fixtures may expose bounded DATA
-        # from the SAME returned capture. This is not another read or receipt.
-        diagnostic = {"phase": label, "exitCode": result.returncode, "timeoutSeconds": seconds,
-            "stdoutBytes": len(result.stdout), "stderrBytes": len(result.stderr),
-            "stdoutPrefix": result.stdout[:1024].decode("utf-8", errors="backslashreplace"),
-            "stderrPrefix": result.stderr[:1024].decode("utf-8", errors="backslashreplace")}
-        sys.stderr.write("Fixture command failure DATA: " + canonical(diagnostic).decode("ascii"))
-    need(accepted, "Original root command failed or completed late")
+            if shell_log is not None:
+                try:
+                    _shell_owner_failure(shell_log[1], error, failure_sink, call)
+                except BaseException:
+                    pass
+            raise  # Same original object; diagnosis supplies no continuation authority.
+        _command_capture(label, argv, result, seconds)
+        if endpoint is not None:
+            _COMMANDS[-1].update(originalEndpoint=bound, startMonotonic=started)
+        accepted = result.returncode in codes and time.monotonic() < bound
+        display_log, log_error = None, None
+        if shell_log is not None:
+            try:
+                display_log = _shell_log_capture(*shell_log, result)
+            except BaseException as error:
+                log_error = error
+            if not accepted or log_error is not None:
+                _shell_command_failure(argv, result, shell_log[1], display_log, log_error)
+            if not accepted:
+                # The settled original command's failure remains primary. Preserve
+                # a later read/retention/interruption error as its explicit cause;
+                # neither branch can resume or claim cleanup/success.
+                raise Refused("Original root command failed or completed late") from log_error
+            if log_error is not None:
+                raise log_error
+            need(time.monotonic() < bound, "Original shell log captured after endpoint")
+        if not accepted and label in {"native-root", "native-user", "observe-unpacked", "observe-p0",
+                                     "observe-upgrade", "observe-duplicate", "observe-remove", "observe-purge"}:
+            # Only these fixed credential-free fixtures may expose bounded DATA
+            # from the SAME returned capture. This is not another read or receipt.
+            diagnostic = {"phase": label, "exitCode": result.returncode, "timeoutSeconds": seconds,
+                "stdoutBytes": len(result.stdout), "stderrBytes": len(result.stderr),
+                "stdoutPrefix": result.stdout[:1024].decode("utf-8", errors="backslashreplace"),
+                "stderrPrefix": result.stderr[:1024].decode("utf-8", errors="backslashreplace")}
+            sys.stderr.write("Fixture command failure DATA: " + canonical(diagnostic).decode("ascii"))
+        need(accepted, "Original root command failed or completed late")
+    finally:
+        if failure_sink is not None:
+            active_failure = sys.exc_info()[0] is not None
+            try:
+                os.close(failure_sink[0])  # This exact retained original, once; no reopen/unlink.
+            except BaseException:
+                if not active_failure:
+                    raise  # _FAILED remains True; a lost close cannot qualify.
     _FAILED = False
     return result
 
@@ -2839,6 +2975,56 @@ def shell_argv(value, case):
         "--server-args=-screen 0 1280x1024x24 -noreset", *command])
 
 
+def _shell_labels_prepare(value, case):
+    """One root-owned leaf and its original read FD; never an app-writable namespace."""
+    need(case in SHELL_CASES[1:] and _ROOT == root_path(value), "Different fixed shell label route")
+    directory(_ROOT, protected=True)
+    root = identity(_ROOT.lstat())
+    need(root[2:5] == (stat.S_IFDIR | 0o711, 0, 0), "Different protected shell label parent")
+    _xattrs(_ROOT, True)
+    path = _ROOT / ("shell-" + case + "-failure.labels")
+    fd = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, 0o600)
+    try:
+        os.fchown(fd, 0, value["runnerGid"])
+        os.fchmod(fd, 0o620)
+        original = identity(os.fstat(fd))
+        need(original[0] == root[0] and original[2:7] == (stat.S_IFREG | 0o620, 0, value["runnerGid"], 1, 0)
+             and identity(path.lstat()) == original and identity(_ROOT.lstat())[:6] == root[:6],
+             "Fresh shell label binding differs")
+        need(os.listxattr(fd) == [], "Shell label attributes are not empty")
+        need(identity(os.fstat(fd)) == original, "Fresh shell label changed before launch")
+        return fd, original[:6]
+    except BaseException:
+        try:
+            os.close(fd)
+        except BaseException:
+            pass  # No retry of an ambiguous close; the original refusal stays primary.
+        raise
+
+
+def _shell_label_pair(raw):
+    if type(raw) is not bytes or not 0 < len(raw) <= SHELL_FAILURE_LABEL_LIMIT:
+        return None
+    lines = raw.splitlines(keepends=True)
+    if len(lines) != 2 or lines[0] not in SHELL_FAILURE_STEPS or lines[1] not in SHELL_FAILURE_BOUNDARIES:
+        return None
+    return {"step": lines[0][len(b"MRK_INSTALLED_SHELL_FAILURE_STEP="):-1].decode("ascii"),
+            "boundary": lines[1][len(b"MRK_INSTALLED_SHELL_FAILURE_PHASE="):-1].decode("ascii")}
+
+
+def _shell_labels_read(original):
+    """Only the exact original read FD, after this call's strict typed settlement gate."""
+    fd, binding = original
+    before = identity(os.fstat(fd))
+    need(before[:6] == binding and 0 <= before[6] <= SHELL_FAILURE_LABEL_LIMIT,
+         "Original shell label identity or bound differs")
+    need(os.listxattr(fd) == [], "Original shell label attributes differ")
+    raw = os.read(fd, SHELL_FAILURE_LABEL_LIMIT + 1)  # One attempt; no seek, reopen or suffix retry.
+    need(type(raw) is bytes and len(raw) == before[6] and identity(os.fstat(fd)) == before,
+         "Original shell label read was incomplete or changed")
+    return _shell_label_pair(raw)
+
+
 def _shell_log_prepare(value, case):
     """One original write-only-for-test-group log, never a writable namespace."""
     need(case in SHELL_CASES and _ROOT == root_path(value), "Different original shell log root/case")
@@ -2885,7 +3071,145 @@ def _shell_log_capture(value, case, original, result):
     return raw
 
 
-def _shell_project_inventory(value, *, saved=False):
+SHELL_FIXTURE_CHILDREN = ("candidate-evidence", "path-outside", "path-project", "positive-project")
+
+
+def _shell_fixture_ancestry(value):
+    """Metadata only; the search-only control root and private contents stay put."""
+    need("shell" in value and "installed" not in value and _ROOT == root_path(value), "Different original shell fixture route")
+    rows = []
+    for path in (Path("/"), Path("/var"), Path("/var/lib"), _ROOT):
+        before = identity(path.lstat())[:5]
+        need(stat.S_ISDIR(before[2]) and before[3:5] == (0, 0) and before[2] & 0o022 == 0
+             and (before[2] == stat.S_IFDIR | 0o711 if path == _ROOT else before[2] & 0o005 == 0o005),
+             "Shell fixture ancestor is not protected/readable as required")
+        _xattrs(path, True)
+        need(identity(path.lstat())[:5] == before, "Shell fixture ancestor changed")
+        rows.append({"path": str(path), "identity": list(before)})
+    need(len({row["identity"][0] for row in rows}) == 1
+         and len({tuple(row["identity"][:2]) for row in rows}) == 4, "Shell fixture ancestors cross devices or alias")
+    private = _ROOT / "private"
+    before = identity(private.lstat())[:5]
+    need(before[0] == rows[0]["identity"][0] and before[2:] == (stat.S_IFDIR | 0o700, 0, 0), "Shell private control protection changed")
+    _xattrs(private, True)
+    need(identity(private.lstat())[:5] == before, "Shell private control identity changed")
+    return {"control": rows[-1], "ancestors": rows[:-1]}
+
+
+def _shell_namespace_data(value, namespace):
+    """Closed inert DATA; it is not permission to inspect a live/failed tree."""
+    need(type(namespace) is dict and set(namespace) == {"root", "identity", "children", "control", "ancestors"}
+         and namespace["root"] == str(shell_fixture_root(value)) and namespace["children"] == list(SHELL_FIXTURE_CHILDREN),
+         "Shell fixture namespace shape/root differs")
+    need(type(namespace["control"]) is dict and set(namespace["control"]) == {"path", "identity"}
+         and namespace["control"]["path"] == str(root_path(value)) and type(namespace["ancestors"]) is list
+         and len(namespace["ancestors"]) == 3, "Shell fixture control/ancestor binding differs")
+    identities = []
+    for row, path in zip(namespace["ancestors"], ("/", "/var", "/var/lib")):
+        need(type(row) is dict and set(row) == {"path", "identity"} and row["path"] == path,
+             "Shell fixture ancestor path differs")
+    rows = [(namespace["identity"], 9, stat.S_IFDIR | 0o755),
+            (namespace["control"]["identity"], 5, stat.S_IFDIR | 0o711)]
+    rows.extend((row["identity"], 5, None) for row in namespace["ancestors"])
+    for original, length, mode in rows:
+        need(type(original) is list and len(original) == length
+             and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+             and original[0] > 0 and original[1] > 0 and original[3:5] == [0, 0]
+             and original[2] <= 0o177777 and stat.S_ISDIR(original[2]) and original[2] & 0o022 == 0
+             and (original[2] == mode if mode is not None else original[2] & 0o005 == 0o005),
+             "Shell fixture namespace identity/mode differs")
+        if length == 9:
+            need(0 < original[5] <= 16 and original[6] <= 1 << 20, "Shell fixture namespace directory bound differs")
+        identities.append(tuple(original[:2]))
+    need(len(set(identities)) == 5 and len({pair[0] for pair in identities}) == 1 and len(canonical(namespace)) < 1024,
+         "Shell fixture namespace aliases, device or DATA bound differs")
+    return namespace
+
+
+def _shell_namespace_roster(root):
+    found = []
+    with os.scandir(root) as entries:
+        for entry in entries:
+            need(len(found) < 4 and entry.name in SHELL_FIXTURE_CHILDREN, "Unexpected shell fixture namespace entry")
+            found.append(entry.name)
+    need(sorted(found) == list(SHELL_FIXTURE_CHILDREN), "Shell fixture namespace roster differs")
+
+
+def _shell_namespace_check(value, binding):
+    # Immutable original bytes, never a new snapshot substituted as authority.
+    namespace = _shell_namespace_data(value, decode(binding, 1024))
+    need(canonical(namespace) == binding, "Original shell namespace binding is not canonical")
+    ancestry = {key: namespace[key] for key in ("control", "ancestors")}
+    need(_shell_fixture_ancestry(value) == ancestry, "Original shell fixture ancestry changed")
+    root = shell_fixture_root(value)
+    need(list(identity(root.lstat())) == namespace["identity"], "Original shell fixture namespace changed")
+    _xattrs(root, True)
+    _shell_namespace_roster(root)  # Admit names before any fixture descendant read.
+    need(list(identity(root.lstat())) == namespace["identity"] and _shell_fixture_ancestry(value) == ancestry,
+         "Original shell fixture namespace changed during observation")
+    return namespace
+
+
+def _shell_fixtures_prepare(value):
+    """Create the four fixed DATA trees once, retained on every failure.
+
+    The sibling follows the existing disposable-runner retention policy; there
+    is no deletion, cleanup scan, retry or permission repair of an old object.
+    """
+    ancestry = _shell_fixture_ancestry(value)
+    root = shell_fixture_root(value)
+    root.mkdir(mode=0o700)  # Exclusive. Do not inspect/adopt an occupied name.
+    original = identity(root.lstat())
+    need(original[2:5] == (stat.S_IFDIR | 0o700, 0, 0)
+         and original[0] == ancestry["control"]["identity"][0]
+         and all(original[:2] != tuple(row["identity"][:2]) for row in [ancestry["control"], *ancestry["ancestors"]]),
+         "Fresh shell fixture namespace protection/device differs")
+    _xattrs(root, True)
+    need(identity(root.lstat()) == original, "Fresh shell fixture namespace changed")
+    project = root / "positive-project"
+    project.mkdir(mode=0o700)
+    (project / "app").mkdir(mode=0o700)
+    _D.write(project / "app/build.gradle.kts", SHELL_PROJECT_SOURCE, 0o444)
+    _D.write(project / "version.properties", SHELL_PROJECT_VERSION, 0o600)
+    # release/.gitignore are created only by real Save; app stays read-only.
+    os.chmod(project / "app", 0o555)
+    os.chown(project / "version.properties", value["runnerUid"], value["runnerGid"])
+    os.chown(project, value["runnerUid"], value["runnerGid"])
+    evidence = root / "candidate-evidence"
+    evidence.mkdir(mode=0o700)
+    (evidence / "operation").mkdir(mode=0o700)
+    for relative, raw in SHELL_CANDIDATE_DOCUMENTS.items():
+        _D.write(evidence / relative, raw, 0o600)
+        os.chown(evidence / relative, value["runnerUid"], value["runnerGid"])
+    for path in (evidence / "operation", evidence):
+        os.chown(path, value["runnerUid"], value["runnerGid"])
+    for name, kind in SHELL_PATH_NODES:
+        path = root / name
+        if kind == "directory":
+            path.mkdir(mode=0o700)
+        else:
+            _D.write(path, SHELL_PATH_BYTES, 0o600)
+        os.chown(path, value["runnerUid"], value["runnerGid"])
+    _shell_namespace_roster(root)
+    for name, kind in (("positive-project", True), ("positive-project/app", True),
+                       ("positive-project/app/build.gradle.kts", False), ("positive-project/version.properties", False),
+                       ("candidate-evidence", True), ("candidate-evidence/operation", True),
+                       *(("candidate-evidence/" + name, False) for name in SHELL_CANDIDATE_DOCUMENTS),
+                       *((name, kind == "directory") for name, kind in SHELL_PATH_NODES)):
+        _xattrs(root / name, kind)
+    need(identity(root.lstat())[:5] == original[:5] and _shell_fixture_ancestry(value) == ancestry,
+         "Fresh shell namespace or ancestry changed before publication")
+    _xattrs(root, True)
+    os.chmod(root, 0o755)  # Only this verified fresh original becomes readable.
+    published = identity(root.lstat())
+    need(published[:2] == original[:2] and published[2:5] == (stat.S_IFDIR | 0o755, 0, 0),
+         "Original shell fixture namespace publication differs")
+    binding = canonical({"root": str(root), "identity": list(published), "children": list(SHELL_FIXTURE_CHILDREN), **ancestry})
+    _shell_namespace_check(value, binding)
+    return binding
+
+
+def _shell_project_inventory(value, namespace, *, saved=False):
     """Fixed fixture only, before launch or AFTER original exit and finality.
 
     This never repairs/removes a pending transaction or scans an unexpected
@@ -2893,8 +3217,9 @@ def _shell_project_inventory(value, *, saved=False):
     cannot reach the saved observation through the original shell-result gate.
     """
     need(_ROOT == root_path(value) and type(saved) is bool, "Positive fixture differs from the original service root or phase")
-    root = _ROOT / "positive-project"
-    directory(root.parent, protected=True)
+    binding = namespace
+    namespace = _shell_namespace_check(value, binding)
+    root = shell_fixture_root(value) / "positive-project"
     owner = (value["runnerUid"], value["runnerGid"])
     directories = [(".", [".gitignore", "app", "release", "version.properties"] if saved else ["app", "version.properties"], 0o700, owner),
                    ("app", ["build.gradle.kts"], 0o555, (0, 0))]
@@ -2934,8 +3259,9 @@ def _shell_project_inventory(value, *, saved=False):
         _absent(root / relative)
     need(all(identity(path.lstat()) == original for path, original in original_directories),
          "Positive fixture parent changed during its bounded inventory")
-    return {"schemaVersion": 2, "fixture": "android-saved-readonly-v1", "root": str(root), "saved": saved,
-            "entries": rows, "absent": absent}
+    _shell_namespace_check(value, binding)
+    return {"schemaVersion": 3, "fixture": "android-saved-readonly-v1", "root": str(root), "saved": saved,
+            "entries": rows, "absent": absent, "namespace": namespace}
 
 
 def shell_project_fixture(value, before_raw, after_raw):
@@ -2944,12 +3270,13 @@ def shell_project_fixture(value, before_raw, after_raw):
     owner = (value["runnerUid"], value["runnerGid"])
     inventories = []
     for document, raw, saved in ((before, before_raw, False), (after, after_raw, True)):
-        need(type(document) is dict and set(document) == {"schemaVersion", "fixture", "root", "saved", "entries", "absent"}
-             and canonical(document) == raw and type(document["schemaVersion"]) is int and document["schemaVersion"] == 2
+        need(type(document) is dict and set(document) == {"schemaVersion", "fixture", "root", "saved", "entries", "absent", "namespace"}
+             and canonical(document) == raw and type(document["schemaVersion"]) is int and document["schemaVersion"] == 3
              and document["fixture"] == "android-saved-readonly-v1" and document["saved"] is saved
-             and document["root"] == str(root_path(value) / "positive-project")
+             and document["root"] == str(shell_fixture_root(value) / "positive-project")
              and document["absent"] == (["release/store"] if saved else [".gitignore", "release"]),
              "Positive fixture inventory is incomplete or out of phase")
+        namespace = _shell_namespace_data(value, document["namespace"])
         roster = [(".", stat.S_IFDIR | 0o700, owner, [".gitignore", "app", "release", "version.properties"] if saved else ["app", "version.properties"]),
                   ("app", stat.S_IFDIR | 0o555, (0, 0), ["build.gradle.kts"])]
         if saved:
@@ -2978,13 +3305,14 @@ def shell_project_fixture(value, before_raw, after_raw):
                      and row["size"] == len(expected) and row["sha256"] == hashlib.sha256(expected).hexdigest(),
                      "Positive fixture source or saved output does not match exact expected DATA")
             observed[relative] = row
-        need(all(row["identity"][0] == observed["."]["identity"][0] for row in rows)
+        reserved = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
+        need(all(row["identity"][0] == namespace["identity"][0] and tuple(row["identity"][:2]) not in reserved for row in rows)
              and len({tuple(row["identity"][:2]) for row in rows}) == len(rows), "Positive fixture node aliases or cross-device entries differ")
         inventories.append(observed)
     first, last = inventories
     # Save creates release and may change root timestamps/size/link count,
     # never its dev/inode/type/mode/ownership. Both original hints stay exact.
-    need(first["."]["identity"][:5] == last["."]["identity"][:5]
+    need(before["namespace"] == after["namespace"] and first["."]["identity"][:5] == last["."]["identity"][:5]
          and all(first[name] == last[name] for name in ("app", "app/build.gradle.kts", "version.properties")),
          "Positive fixture root was replaced or an original hint changed")
     return {"fixture": "android-saved-readonly-v1", "rootRetained": True, "hintUnchanged": True,
@@ -2997,15 +3325,16 @@ def shell_project_fixture(value, before_raw, after_raw):
             "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
 
 
-def _shell_candidate_inventory(value):
+def _shell_candidate_inventory(value, namespace):
     """Only the five fixed nodes, before launch or after successful finality.
 
     Unexpected children refuse before any leaf read or subtree inspection.
     Artifact names are checked for absence, never opened, measured or hashed.
     """
     need(_ROOT == root_path(value), "Candidate fixture differs from the original service root")
-    root = _ROOT / "candidate-evidence"
-    directory(root.parent, protected=True)
+    binding = namespace
+    namespace = _shell_namespace_check(value, binding)
+    root = shell_fixture_root(value) / "candidate-evidence"
     owner = (value["runnerUid"], value["runnerGid"])
     rows, originals = [], []
     for relative, expected in ((".", ["candidate-manifest.json", "candidate-receipt.json", "operation"]),
@@ -3040,8 +3369,9 @@ def _shell_candidate_inventory(value):
          and len({tuple(row["identity"][:2]) for row in rows}) == 5
          and all(identity(path.lstat()) == original for path, original in originals),
          "Candidate fixture node aliases, cross-device entry or inventory drift")
-    return {"schemaVersion": 1, "fixture": "android-candidate-documents-v1", "root": str(root),
-            "entries": rows, "absent": list(SHELL_CANDIDATE_ARTIFACT_TARGETS)}
+    _shell_namespace_check(value, binding)
+    return {"schemaVersion": 2, "fixture": "android-candidate-documents-v1", "root": str(root),
+            "entries": rows, "absent": list(SHELL_CANDIDATE_ARTIFACT_TARGETS), "namespace": namespace}
 
 
 def shell_candidate_fixture(value, before_raw, after_raw):
@@ -3052,11 +3382,12 @@ def shell_candidate_fixture(value, before_raw, after_raw):
               ("operation", stat.S_IFDIR | 0o700, ["candidate-operation-intent.json"]),
               *((relative, stat.S_IFREG | 0o600, raw) for relative, raw in SHELL_CANDIDATE_DOCUMENTS.items())]
     for document, raw in ((before, before_raw), (after, after_raw)):
-        need(type(document) is dict and set(document) == {"schemaVersion", "fixture", "root", "entries", "absent"}
-             and canonical(document) == raw and type(document["schemaVersion"]) is int and document["schemaVersion"] == 1
+        need(type(document) is dict and set(document) == {"schemaVersion", "fixture", "root", "entries", "absent", "namespace"}
+             and canonical(document) == raw and type(document["schemaVersion"]) is int and document["schemaVersion"] == 2
              and document["fixture"] == "android-candidate-documents-v1"
-             and document["root"] == str(root_path(value) / "candidate-evidence")
+             and document["root"] == str(shell_fixture_root(value) / "candidate-evidence")
              and document["absent"] == list(SHELL_CANDIDATE_ARTIFACT_TARGETS), "Candidate inventory shape or root differs")
+        namespace = _shell_namespace_data(value, document["namespace"])
         rows = document["entries"]
         need(type(rows) is list and len(rows) == 5, "Candidate fixture must contain exactly five nodes")
         for row, (relative, mode, expected) in zip(rows, roster):
@@ -3074,7 +3405,8 @@ def shell_candidate_fixture(value, before_raw, after_raw):
                 need(original[5] == 1 and original[6] == len(expected) and type(row["size"]) is int
                      and row["size"] == len(expected) and row["sha256"] == hashlib.sha256(expected).hexdigest(),
                      "Candidate document differs from the fixed literal DATA")
-        need(all(row["identity"][0] == rows[0]["identity"][0] for row in rows)
+        reserved = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
+        need(all(row["identity"][0] == namespace["identity"][0] and tuple(row["identity"][:2]) not in reserved for row in rows)
              and len({tuple(row["identity"][:2]) for row in rows}) == 5, "Candidate nodes alias or cross devices")
     need(before_raw == after_raw, "Candidate original nodes, bytes or absent artifact targets changed")
     return {"fixture": "android-candidate-documents-v1", "rootRetained": True, "documentsUnchanged": True,
@@ -3117,21 +3449,23 @@ def _shell_path_absent(changed):
         ["path-project/inputs/link-original", "path-project/inputs/kind-original", "path-project/ios/Kind.original"])
 
 
-def _shell_paths_inventory(value, *, changed=False):
+def _shell_paths_inventory(value, namespace, *, changed=False):
     """Fixed before/after fixture; after is reachable only after actual success.
 
     No failed-work scan, repair, restoration or target-file follow is admitted.
     A directory's exact children are admitted before any descendant is opened.
     """
     need(_ROOT == root_path(value) and type(changed) is bool, "Different original path fixture or phase")
-    directory(_ROOT, protected=True)
+    binding = namespace
+    namespace = _shell_namespace_check(value, binding)
+    root = shell_fixture_root(value)
     roster = _shell_path_roster(changed)
     rows, originals = {}, []
     # Parent roster admission is first, including both fixed sibling roots.
     for name, kind in roster:
         if kind != "directory":
             continue
-        path = _ROOT / name
+        path = root / name
         before = path.lstat()
         mode = 0o500 if changed and name == "path-project" else 0o700
         need(stat.S_ISDIR(before.st_mode) and stat.S_IMODE(before.st_mode) == mode
@@ -3149,7 +3483,7 @@ def _shell_paths_inventory(value, *, changed=False):
     for name, kind in roster:
         if kind == "directory":
             continue
-        path = _ROOT / name
+        path = root / name
         before = path.lstat()
         need((before.st_uid, before.st_gid) == (value["runnerUid"], value["runnerGid"])
              and before.st_nlink == 1, "Path fixture leaf ownership differs")
@@ -3167,24 +3501,27 @@ def _shell_paths_inventory(value, *, changed=False):
         rows[name] = row
         originals.append((path, identity(before)))
     for name in _shell_path_absent(changed):
-        _absent(_ROOT / name)
+        _absent(root / name)
     need(len({(row["identity"][0], row["identity"][1]) for row in rows.values()}) == len(roster)
-         and all(row["identity"][0] == _ROOT.lstat().st_dev for row in rows.values())
+         and all(row["identity"][0] == namespace["identity"][0] for row in rows.values())
          and all(identity(path.lstat()) == original for path, original in originals), "Path fixture aliases or original identity drift")
-    return {"schemaVersion": 1, "fixture": "project-paths-v1", "root": str(_ROOT), "changed": changed,
-            "entries": [rows[name] for name, _ in roster], "absent": _shell_path_absent(changed)}
+    _shell_namespace_check(value, binding)
+    return {"schemaVersion": 2, "fixture": "project-paths-v1", "root": str(root), "changed": changed,
+            "entries": [rows[name] for name, _ in roster], "absent": _shell_path_absent(changed), "namespace": namespace}
 
 
 def shell_paths_fixture(value, before_raw, after_raw):
     """Typed correspondence only; not authority to observe a live/failed case."""
-    documents = []
+    documents, namespaces = [], []
     for raw, changed in ((before_raw, False), (after_raw, True)):
         doc = decode(raw, 8192)
         roster = _shell_path_roster(changed)
-        need(type(doc) is dict and set(doc) == {"schemaVersion", "fixture", "root", "changed", "entries", "absent"}
-             and canonical(doc) == raw and type(doc["schemaVersion"]) is int and doc["schemaVersion"] == 1
-             and doc["fixture"] == "project-paths-v1" and doc["root"] == str(root_path(value)) and doc["changed"] is changed
+        need(type(doc) is dict and set(doc) == {"schemaVersion", "fixture", "root", "changed", "entries", "absent", "namespace"}
+             and canonical(doc) == raw and type(doc["schemaVersion"]) is int and doc["schemaVersion"] == 2
+             and doc["fixture"] == "project-paths-v1" and doc["root"] == str(shell_fixture_root(value)) and doc["changed"] is changed
              and doc["absent"] == _shell_path_absent(changed), "Project-path inventory shape, root or phase differs")
+        namespace = _shell_namespace_data(value, doc["namespace"])
+        namespaces.append(namespace)
         rows = doc["entries"]
         need(type(rows) is list and len(rows) == len(roster), "Project-path fixture must have exactly fourteen/fifteen nodes")
         for row, (name, kind) in zip(rows, roster):
@@ -3204,8 +3541,10 @@ def shell_paths_fixture(value, before_raw, after_raw):
             else:
                 need(original[5] == 1 and original[6] == len(SHELL_PATH_BYTES) and type(row["size"]) is int
                      and row["size"] == len(SHELL_PATH_BYTES) and row["sha256"] == hashlib.sha256(SHELL_PATH_BYTES).hexdigest(), "Project-path fixed inert bytes differ")
+        reserved = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
         need(len({tuple(row["identity"][:2]) for row in rows}) == len(roster)
-             and all(row["identity"][0] == rows[0]["identity"][0] for row in rows), "Project-path nodes alias or cross devices")
+             and all(row["identity"][0] == namespace["identity"][0] and tuple(row["identity"][:2]) not in reserved for row in rows),
+             "Project-path nodes alias or cross devices")
         documents.append({row["path"]: row for row in rows})
     before, after = documents
     for name, kind in SHELL_PATH_NODES:
@@ -3221,7 +3560,7 @@ def shell_paths_fixture(value, before_raw, after_raw):
             need(old == new, "Unchanged project-path node identity changed")
         if kind == "file":
             need(before[name]["sha256"] == after[new_name]["sha256"], "Moved original file bytes changed")
-    need(before_raw != after_raw, "Project-path mutations were not observed")
+    need(namespaces[0] == namespaces[1] and before_raw != after_raw, "Project-path mutations or original namespace differ")
     return {"fixture": "project-paths-v1", "rootRetained": True, "originalsRetained": True, "noUnexpectedEntries": True,
             "noPendingState": True, "inertBytesUnchanged": True, "beforeCount": 14, "afterCount": 15, "fileCount": 5,
             "fileBytes": len(SHELL_PATH_BYTES) * 5, "mutations": ["symlink", "directory-for-file", "file-for-directory", "root-mode"],
@@ -3229,7 +3568,8 @@ def shell_paths_fixture(value, before_raw, after_raw):
             "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
 
 
-def _shell_prepare(value, case):
+def _shell_prepare(value, case, namespace):
+    _shell_namespace_check(value, namespace)
     base, environment = _ROOT / ("gui-" + case), shell_environment(value, case)
     log_binding = _shell_log_prepare(value, case)
     for path in (base, *(base / name for name in ("home", "tmp", "runtime", "config", "cache", "data", "empty-config"))):
@@ -3250,35 +3590,10 @@ def _shell_prepare(value, case):
     for path in (Path("/tmp/.X99-lock"), Path("/tmp/.X11-unix/X99"), bus, base / "runtime/absent-system-bus"):
         _absent(path)  # Conflict is failure, never permission to repair/remove.
     if case == "positive":
-        project = _ROOT / "positive-project"
-        project.mkdir(mode=0o700)
-        (project / "app").mkdir(mode=0o700)
-        _D.write(project / "app/build.gradle.kts", SHELL_PROJECT_SOURCE, 0o444)
-        _D.write(project / "version.properties", SHELL_PROJECT_VERSION, 0o600)
-        # Keep release absent: the actual reviewed Save must create it. The
-        # named version input has project-owner ancestry; app stays read-only.
-        os.chmod(project / "app", 0o555)
-        os.chown(project / "version.properties", value["runnerUid"], value["runnerGid"])
-        os.chown(project, value["runnerUid"], value["runnerGid"])
-        _retain("shell-positive-project-before.json", canonical(_shell_project_inventory(value)))
-        evidence = _ROOT / "candidate-evidence"
-        evidence.mkdir(mode=0o700)
-        (evidence / "operation").mkdir(mode=0o700)
-        for relative, raw in SHELL_CANDIDATE_DOCUMENTS.items():
-            _D.write(evidence / relative, raw, 0o600)
-            os.chown(evidence / relative, value["runnerUid"], value["runnerGid"])
-        for path in (evidence / "operation", evidence):
-            os.chown(path, value["runnerUid"], value["runnerGid"])
-        _retain("shell-positive-candidate-before.json", canonical(_shell_candidate_inventory(value)))
+        _retain("shell-positive-project-before.json", canonical(_shell_project_inventory(value, namespace)))
+        _retain("shell-positive-candidate-before.json", canonical(_shell_candidate_inventory(value, namespace)))
     if case == "project-paths":
-        for name, kind in SHELL_PATH_NODES:
-            path = _ROOT / name
-            if kind == "directory":
-                path.mkdir(mode=0o700)
-            else:
-                _D.write(path, SHELL_PATH_BYTES, 0o600)
-            os.chown(path, value["runnerUid"], value["runnerGid"])
-        _retain("shell-project-paths-before.json", canonical(_shell_paths_inventory(value)))
+        _retain("shell-project-paths-before.json", canonical(_shell_paths_inventory(value, namespace)))
     return environment, log_binding
 
 
@@ -3438,6 +3753,13 @@ def _shell_normal_markers(stdout, stderr):
               "app-info-enter", "catalog-enter", "content-terminated",
               "content-reason-crashed", "content-reason-exceeded-memory-limit",
               "content-reason-terminated-by-api", "content-reason-unknown")
+    # Exact static Rust records from the SAME capability admission/original wait.
+    # Unknown original codes map to literal other; unknown emitted bytes do not.
+    failure_codes = ("runtime_unavailable", "cleanup_unknown", "invalid_request", "shutting_down", "busy", "unavailable",
+                     "offline_preflight_busy", "android_build_busy", "environment_diagnostics_busy", "query_timeout",
+                     "protocol_error", "engine_failed", "io_error", "output_limit", "other")
+    stages += tuple("capabilities-" + origin + "-" + code
+                    for origin in ("admission", "query-wait") for code in failure_codes)
     prefix = b"MRKDBG_DESKTOP_BOOTSTRAP="
     stage_lines = {prefix + stage.encode("ascii") + b"\n": stage for stage in stages}
     result = {}
@@ -3572,6 +3894,74 @@ def _shell_command_failure(argv, result, case, display_log, log_error):
         pass  # Never replace an original failure, including a log read failure.
 
 
+def _shell_error_data(original, origin):
+    safe_messages = {
+        "Normal window controller endpoint expired",
+        "Normal original returned before controller command",
+        "Normal window controller command bound exhausted",
+        "No original controller command budget remains",
+        "Original normal shell returned before Quit",
+        "Original private shell window did not become visible in the finite observation",
+        "Original normal shell/controller did not settle",
+        "Original shell capture failed/incomplete",
+        "Actual normal capabilities/catalogue or observer completion missing",
+        "owned command failed, timed out, or produced incomplete output",
+        "owned command cleanup could not be confirmed",
+        "owned command executable could not be started",
+        "owned command produced incomplete output",
+        "owned command output exceeds its bound",
+        "owned command exceeded its original deadline",
+        "owned command protocol or original ownership is incomplete",
+        "Original shell error log was replaced or changed",
+        "Original shell error log changed during capture",
+        "Combined shell output exceeds its bound",
+    }
+
+    known_errors = tuple(value for name in ("ProcessError", "ProcessCleanupError", "ProcessOutcomeUnknown")
+                         if isinstance(value := getattr(_OWNER, name, None), type))
+
+    name = type(original).__name__
+    row = {"type": name if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name) else "other",
+           "origin": origin, "originalProcessFacts": None}
+    # Never call exception formatting: it may contain argv, environment
+    # or other context, or itself raise. Only fixed public messages pass.
+    args = BaseException.args.__get__(original)
+    if type(args) is tuple and len(args) == 1 and type(args[0]) is str and args[0] in safe_messages:
+        row["message"] = args[0]
+    if type(original) in known_errors:
+        # Exact trusted family only; read stored fields, not properties.
+        fields = vars(original)
+        row["originalProcessFacts"] = {key: fields.get(key) if type(fields.get(key)) is bool else None
+                                       for key in ("dispatched", "contained", "cleanup_complete")}
+    return row
+
+
+def _shell_owner_failure(case, error, original, call):
+    """Finite sidecar DATA only; neither exception text nor a new lifetime authority."""
+    try:
+        _shell_call_finished(call, False)
+        labels, reason = None, "owner-finality-unavailable"
+        if type(error) is getattr(_OWNER, "ProcessError", None):
+            fields = vars(error)  # Exact trusted type: stored built-in flags, not properties/causes.
+            if fields.get("contained") is True and fields.get("cleanup_complete") is True:
+                reason = "unavailable"
+                try:
+                    labels = _shell_labels_read(original)
+                except BaseException:
+                    pass
+                if labels is not None:
+                    reason = None
+        facts = _shell_error_data(error, "owner")
+        facts.pop("message", None)  # No exception text in this diagnostic lane.
+        data = {"schemaVersion": 1, "scope": "original-shell-owner-failure-diagnostic-only",
+                "case": case, "phase": "owner-call", "qualified": False, "cleanupEstablished": False,
+                "capture": None, "labels": labels, "labelsReason": reason, "error": facts,
+                "ownerCall": _shell_call_summary(call)}
+        _shell_failure_output(b"MRK_INSTALLED_SHELL_COMMAND_FAILURE=", data)
+    except BaseException:
+        pass  # Diagnosis/clock/format/output failures never replace the active original.
+
+
 def _shell_normal_failure(holder, argv, *, joined, stage, inputs, commands, error,
                           join_error=None, capture_error=None, display_log=None,
                           controller=None, error_origin="main", resources=None):
@@ -3583,47 +3973,6 @@ def _shell_normal_failure(holder, argv, *, joined, stage, inputs, commands, erro
     operation's original failure.
     """
     try:
-        safe_messages = {
-            "Normal window controller endpoint expired",
-            "Normal original returned before controller command",
-            "Normal window controller command bound exhausted",
-            "No original controller command budget remains",
-            "Original normal shell returned before Quit",
-            "Original private shell window did not become visible in the finite observation",
-            "Original normal shell/controller did not settle",
-            "Original shell capture failed/incomplete",
-            "Actual normal capabilities/catalogue or observer completion missing",
-            "owned command failed, timed out, or produced incomplete output",
-            "owned command cleanup could not be confirmed",
-            "owned command executable could not be started",
-            "owned command produced incomplete output",
-            "owned command output exceeds its bound",
-            "owned command exceeded its original deadline",
-            "owned command protocol or original ownership is incomplete",
-            "Original shell error log was replaced or changed",
-            "Original shell error log changed during capture",
-            "Combined shell output exceeds its bound",
-        }
-
-        known_errors = tuple(value for name in ("ProcessError", "ProcessCleanupError", "ProcessOutcomeUnknown")
-                             if isinstance(value := getattr(_OWNER, name, None), type))
-
-        def error_data(original, origin):
-            name = type(original).__name__
-            row = {"type": name if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name) else "other",
-                   "origin": origin, "originalProcessFacts": None}
-            # Never call exception formatting: it may contain argv, environment
-            # or other context, or itself raise. Only fixed public messages pass.
-            args = BaseException.args.__get__(original)
-            if type(args) is tuple and len(args) == 1 and type(args[0]) is str and args[0] in safe_messages:
-                row["message"] = args[0]
-            if type(original) in known_errors:
-                # Exact trusted family only; read stored fields, not properties.
-                fields = vars(original)
-                row["originalProcessFacts"] = {key: fields.get(key) if type(fields.get(key)) is bool else None
-                                               for key in ("dispatched", "contained", "cleanup_complete")}
-            return row
-
         errors = [(item, origin) for item, origin in
                   ((error, error_origin), (join_error, "join"), (capture_error, "capture")) if item is not None]
         result = None
@@ -3680,7 +4029,7 @@ def _shell_normal_failure(holder, argv, *, joined, stage, inputs, commands, erro
                             "guard-restore", "guard-check", "guard-state"} else "worker"
                     errors.append((item, label))
             result = holder.get("result")
-        data["errors"] = [error_data(item, origin) for item, origin in errors[:4]]
+        data["errors"] = [_shell_error_data(item, origin) for item, origin in errors[:4]]
         data["errorsTruncated"] = len(errors) > 4
         data["capture"] = _shell_capture_summary(result, argv, display_log if joined else None, normal=True)
         if data["capture"] is not None:
@@ -3994,8 +4343,9 @@ def unit_start():
     if "shell" in value:
         original = observations["p0"]["published"]["P0"]
         expected = _installed_payload(value, loader, original)
+        namespace = _shell_fixtures_prepare(value)
         for case in SHELL_CASES:
-            environment, log_binding = _shell_prepare(value, case)
+            environment, log_binding = _shell_prepare(value, case, namespace)
             if case == "normal":
                 cases[case] = _shell_normal(value, environment, expected, log_binding)
             else:
@@ -4003,16 +4353,17 @@ def unit_start():
                                  shell_log=(value, case, log_binding))
                 cases[case] = shell_result(result.stdout, result.stderr, case, result.returncode, expected)
                 if case == "positive":
-                    after = canonical(_shell_project_inventory(value, saved=True))
+                    after = canonical(_shell_project_inventory(value, namespace, saved=True))
                     _retain("shell-positive-project-after.json", after)
                     shell_project_fixture(value, read(_ROOT / "public/shell-positive-project-before.json", 8192), after)
-                    candidate_after = canonical(_shell_candidate_inventory(value))
+                    candidate_after = canonical(_shell_candidate_inventory(value, namespace))
                     _retain("shell-positive-candidate-after.json", candidate_after)
                     shell_candidate_fixture(value, read(_ROOT / "public/shell-positive-candidate-before.json", 8192), candidate_after)
                 if case == "project-paths":
-                    paths_after = canonical(_shell_paths_inventory(value, changed=True))
+                    paths_after = canonical(_shell_paths_inventory(value, namespace, changed=True))
                     _retain("shell-project-paths-after.json", paths_after)
                     shell_paths_fixture(value, read(_ROOT / "public/shell-project-paths-before.json", 8192), paths_after)
+            _shell_namespace_check(value, namespace)
         need(_tree(PREFIX / M, M, published=True) == original, "Published A changed during shell observations")
         state("shell-finished", "install ok installed", "P0")
         _finish_body(value, request_sha, start, states, observations, traces, cases, loader)
@@ -4282,6 +4633,9 @@ def shell_closed_result(value, outcome, raw_files):
     fixture = shell_project_fixture(value, raw_files["shell-positive-project-before.json"], raw_files["shell-positive-project-after.json"])
     candidate = shell_candidate_fixture(value, raw_files["shell-positive-candidate-before.json"], raw_files["shell-positive-candidate-after.json"])
     paths = shell_paths_fixture(value, raw_files["shell-project-paths-before.json"], raw_files["shell-project-paths-after.json"])
+    namespaces = [decode(raw_files[name], 8192)["namespace"] for name in
+                  ("shell-positive-project-before.json", "shell-positive-candidate-before.json", "shell-project-paths-before.json")]
+    need(namespaces[0] == namespaces[1] == namespaces[2], "Closed shell fixture families have different original namespaces")
     control = decode(raw_files["shell-normal-control.json"])
     need(control.get("joined") is True and control.get("inputs") == 2 and control.get("workerGuardState") == "RESTORED"
          and control.get("workerErrorCount") == 0 and control.get("errorType") is None

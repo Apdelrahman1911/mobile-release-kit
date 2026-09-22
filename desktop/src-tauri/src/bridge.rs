@@ -48,6 +48,49 @@ fn native_capabilities(mut value: Value, available: impl Fn(&str) -> bool) -> Va
     value
 }
 
+#[cfg(any(feature = "desktop-shell", test))]
+#[derive(Clone, Copy)]
+enum CapabilitiesFailureOrigin { Admission, QueryWait }
+
+#[cfg(any(feature = "desktop-shell", test))]
+fn capabilities_failure_line(origin: CapabilitiesFailureOrigin, error: &BridgeError) -> &'static [u8] {
+    // Only complete source literals leave this classifier. QueryWait means the
+    // SAME original wait returned an error, not that dispatch/finality succeeded.
+    use CapabilitiesFailureOrigin::{Admission, QueryWait};
+    match (origin, error.code.as_str()) {
+        (Admission, "runtime_unavailable") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-runtime_unavailable\n",
+        (Admission, "cleanup_unknown") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-cleanup_unknown\n",
+        (Admission, "invalid_request") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-invalid_request\n",
+        (Admission, "shutting_down") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-shutting_down\n",
+        (Admission, "busy") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-busy\n",
+        (Admission, "unavailable") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-unavailable\n",
+        (Admission, "offline_preflight_busy") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-offline_preflight_busy\n",
+        (Admission, "android_build_busy") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-android_build_busy\n",
+        (Admission, "environment_diagnostics_busy") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-environment_diagnostics_busy\n",
+        (Admission, "query_timeout") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-query_timeout\n",
+        (Admission, "protocol_error") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-protocol_error\n",
+        (Admission, "engine_failed") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-engine_failed\n",
+        (Admission, "io_error") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-io_error\n",
+        (Admission, "output_limit") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-output_limit\n",
+        (Admission, _) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-other\n",
+        (QueryWait, "runtime_unavailable") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-runtime_unavailable\n",
+        (QueryWait, "cleanup_unknown") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-cleanup_unknown\n",
+        (QueryWait, "invalid_request") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-invalid_request\n",
+        (QueryWait, "shutting_down") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-shutting_down\n",
+        (QueryWait, "busy") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-busy\n",
+        (QueryWait, "unavailable") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-unavailable\n",
+        (QueryWait, "offline_preflight_busy") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-offline_preflight_busy\n",
+        (QueryWait, "android_build_busy") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-android_build_busy\n",
+        (QueryWait, "environment_diagnostics_busy") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-environment_diagnostics_busy\n",
+        (QueryWait, "query_timeout") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-query_timeout\n",
+        (QueryWait, "protocol_error") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-protocol_error\n",
+        (QueryWait, "engine_failed") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-engine_failed\n",
+        (QueryWait, "io_error") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-io_error\n",
+        (QueryWait, "output_limit") => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-output_limit\n",
+        (QueryWait, _) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-other\n",
+    }
+}
+
 struct RegisteredProject { view: Project, root: PathBuf, identity: Option<crate::asset_source::DirectoryIdentity> }
 pub(crate) struct ProjectRoster { pub(crate) generation: u32, pub(crate) roots: Vec<crate::asset_source::RegisteredRoot> }
 
@@ -91,7 +134,19 @@ impl DesktopBridge {
     pub(crate) fn installed_evidence_selection_available(&self) -> bool { self.installed_evidence_selection_available }
     pub(crate) async fn app_info(&self, document: &crate::asset_session::DocumentBinding) -> AppInfo {
         let result = match document.passive_query(self, Method::Capabilities, json!({})) {
-            Ok(query) => query.wait().await, Err(error) => Err(error),
+            Ok(query) => {
+                let result = query.wait().await;
+                #[cfg(feature = "desktop-shell")]
+                if let Err(error) = &result {
+                    crate::shell::diagnostic(capabilities_failure_line(CapabilitiesFailureOrigin::QueryWait, error));
+                }
+                result
+            },
+            Err(error) => {
+                #[cfg(feature = "desktop-shell")]
+                crate::shell::diagnostic(capabilities_failure_line(CapabilitiesFailureOrigin::Admission, &error));
+                Err(error)
+            },
         };
         let (runtime, capabilities) = match result {
             Ok(value) => (RuntimeStatus { state: "available", reason: None, mode: self.supervisor.runtime_mode() },
@@ -397,6 +452,32 @@ pub(crate) fn assert_project_path_availability_contract() {
 #[cfg(test)]
 mod capability_tests {
     use super::*;
+    #[test]
+    fn capability_failure_diagnostic_is_closed_data_with_original_origins() {
+        let codes = ["runtime_unavailable", "cleanup_unknown", "invalid_request", "shutting_down", "busy", "unavailable",
+            "offline_preflight_busy", "android_build_busy", "environment_diagnostics_busy", "query_timeout",
+            "protocol_error", "engine_failed", "io_error", "output_limit"];
+        let mut records = std::collections::BTreeSet::new();
+        for (origin, name) in [(CapabilitiesFailureOrigin::Admission, "admission"), (CapabilitiesFailureOrigin::QueryWait, "query-wait")] {
+            for code in codes {
+                let error = BridgeError::new(code, "PRIVATE_MESSAGE must not enter diagnostic DATA");
+                let original = error.clone();
+                let line = capabilities_failure_line(origin, &error);
+                assert_eq!(line, format!("MRKDBG_DESKTOP_BOOTSTRAP=capabilities-{name}-{code}\n").as_bytes());
+                assert!(line.len() <= 78 && records.insert(line));
+                assert_eq!(error, original);
+            }
+            let long_code = "PRIVATE_CODE".repeat(1024);
+            for code in ["", "PRIVATE_CODE", "runtime_unavailable\nPRIVATE_CODE", "runtime_unavailable\r", "\u{1b}[31mPRIVATE_CODE", long_code.as_str()] {
+                let error = BridgeError::new(code, "PRIVATE_MESSAGE");
+                let line = capabilities_failure_line(origin, &error);
+                assert_eq!(line, format!("MRKDBG_DESKTOP_BOOTSTRAP=capabilities-{name}-other\n").as_bytes());
+                assert!(line.len() <= 78);
+                records.insert(line);
+            }
+        }
+        assert_eq!(records.len(), 30);
+    }
     #[test]
     fn project_path_availability_is_separate_bounded_display_data() { assert_project_path_availability_contract(); }
     #[test]

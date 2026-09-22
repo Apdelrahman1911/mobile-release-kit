@@ -64,7 +64,7 @@ struct ShellState {
 }
 struct RelayBook { handle: Option<tauri::async_runtime::JoinHandle<()>>, settled: bool }
 
-fn diagnostic(line: &'static [u8]) {
+pub(crate) fn diagnostic(line: &'static [u8]) {
     use std::io::Write;
     // Fixed status only. A closed diagnostic channel must not panic, change
     // admission, or substitute for the original query/cleanup result.
@@ -939,9 +939,6 @@ mod owned_gtk {
     impl Object {
         fn close(&self) { match self { Self::File(dialog) => dialog.close(), Self::Message(dialog) => dialog.close() } }
         fn show(&self) { match self { Self::File(dialog) => dialog.show(), Self::Message(dialog) => dialog.show() } }
-        fn disconnect(&self, handler: gtk::glib::SignalHandlerId) {
-            match self { Self::File(dialog) => dialog.disconnect(handler), Self::Message(dialog) => dialog.disconnect(handler) }
-        }
     }
 
     fn destroyed(weak: &Weak<GuiCall>) {
@@ -1109,7 +1106,7 @@ mod owned_gtk {
                         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
                         if let Some(q) = destroy_observation.as_ref().and_then(Weak::upgrade) {
                             let seen = destroy_call.upgrade().is_some_and(|call| call.facts().is_some_and(|facts|
-                                facts.destroyed && facts.response && !facts.declined && facts.refusal.is_none()));
+                                installed_observation::file_destroyed(&facts, matches!(choice, DialogChoice::ProjectPath(_)))));
                             q.native_destroyed(observed_id, seen);
                         }
                     }));
@@ -1193,12 +1190,15 @@ mod owned_gtk {
         let Some(mut original) = original else { call.failed(Reason::CleanupUnknown); return; };
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         let observation = original.observation.as_ref().and_then(|(q, _)| q.upgrade());
-        if let Some(handler) = original.response.take() { original.object.disconnect(handler); }
-        if let Some(handler) = original.destroy.take() { original.object.disconnect(handler); }
+        // This queued entry is the full genuine GTK destruction-unwind barrier.
+        // gtk_widget_destroy runs GObject disposal, which disconnects all handlers.
+        // Retire only the saved IDs; do not disconnect or query the inert widget.
+        original.response = None;
+        original.destroy = None;
         gtk_fixture!(call, HandlersDetached, 1);
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         let had_topology = original.topology.is_some();
-        drop(original); // Original dialog/filter/handler refs, on their thread.
+        drop(original); // Original dialog/filter refs, on their thread.
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         topology::retire(&call, id, had_topology);
         if let Some(mut facts) = call.facts() { facts.released = true; }
@@ -1247,16 +1247,22 @@ mod owned_gtk {
         let Some((id, dialog)) = observed_folder_dialog(app, q, evidence)? else { return Ok(false); };
         let path = (if evidence { q.evidence_path() } else { q.project_path() }).ok_or(())?;
         if evidence { q.evidence_selection(id)?; } else { q.project_selection(id)?; }
-        // Exactly one actual chooser selection. The next original relay tick
-        // permits GTK to render/load it before its real Select widget is used.
+        // Navigate once into the exact accessible target. Selecting a row in
+        // its protected, nonenumerable parent is not a selection receipt.
         // Never read filename here: the admitted response owns that sole read.
-        if !dialog.set_filename(path) { return Err(()); }
+        if !dialog.set_current_folder(path) { return Err(()); }
         Ok(true)
     }
 
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(super) fn activate_observed_folder(app: &tauri::AppHandle, q: &Arc<installed_observation::Observation>, select: bool, evidence: bool) -> Result<bool, ()> {
         let Some((id, dialog)) = observed_folder_dialog(app, q, evidence)? else { return Ok(false); };
+        if select {
+            let path = (if evidence { q.evidence_path() } else { q.project_path() }).ok_or(())?;
+            // A setter return or one relay tick is not asynchronous readiness.
+            // Wait within the original clock, without another setter or click.
+            if dialog.current_folder().as_deref() != Some(path) { return Ok(false); }
+        }
         let response = if select { gtk::ResponseType::Accept } else { gtk::ResponseType::Cancel };
         let button = dialog.widget_for_response(response).ok_or(())?.downcast::<gtk::Button>().map_err(|_| ())?;
         if !button.is_visible() || dialog.response_for_widget(&button) != response

@@ -714,6 +714,15 @@ class LifecycleData(unittest.TestCase):
             self.assertTrue(all(count == 0 for count in row["markers"].values()))
             self.assertTrue(all(count == 0 for count in row["stages"].values()))
             self.assertEqual((row["unexpectedMrk"], row["unexpectedBootstrap"]), (0, 0))
+        # A finite original failure in an omitted middle is counted from the
+        # SAME validated capture, not recovered by opening another log.
+        failed_capability = b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-query_timeout\n"
+        middle = subprocess.CompletedProcess(argv, 0, b"h" * 1024 + b"\n" + failed_capability + b"t" * 2048, b"")
+        counted_middle = observe(dict(holder, result=middle), display_log=b"")
+        self.assertEqual(counted_middle["bootstrap"]["stdout"]["stages"]["capabilities-query-wait-query_timeout"], 1)
+        summary = counted_middle["capture"]["stdout"]
+        self.assertTrue(summary["truncated"])
+        self.assertNotIn("capabilities-query-wait-query_timeout", summary["head"] + summary["tail"])
         self.assertEqual(observed["resources"], resource_observation())
         self.assertLess(len(L.canonical(observed["resources"])), 1024)
         unavailable = observe(resources=resource_observation(unavailable=True))
@@ -845,6 +854,12 @@ class LifecycleData(unittest.TestCase):
                   "page-finish-untrusted", "hook-installed", "app-info-enter", "catalog-enter", "content-terminated",
                   "content-reason-crashed", "content-reason-exceeded-memory-limit",
                   "content-reason-terminated-by-api", "content-reason-unknown")
+        capability_codes = ("runtime_unavailable", "cleanup_unknown", "invalid_request", "shutting_down", "busy", "unavailable",
+                            "offline_preflight_busy", "android_build_busy", "environment_diagnostics_busy", "query_timeout",
+                            "protocol_error", "engine_failed", "io_error", "output_limit", "other")
+        capability_stages = tuple("capabilities-" + origin + "-" + code
+                                  for origin in ("admission", "query-wait") for code in capability_codes)
+        stages += capability_stages
         prefix = b"MRKDBG_DESKTOP_BOOTSTRAP="
         stdout = (b"ordinary wrapper text\n" + b"".join(markers) + markers[0]
                   + b"".join(prefix + stage.encode("ascii") + b"\n" for stage in stages)
@@ -861,12 +876,24 @@ class LifecycleData(unittest.TestCase):
             "markers": {"capabilitiesAvailable": 0, "capabilitiesUnavailable": 1, "catalogueReturned": 0, "catalogueRefused": 0},
             "unexpectedMrk": 1, "stages": {stage: int(stage == "catalog-enter") for stage in stages}, "unexpectedBootstrap": 0})
         self.assertNotIn(b"private", L.canonical(counted))
-        for reason in stages[-4:]:
+        for reason in ("content-reason-crashed", "content-reason-exceeded-memory-limit",
+                       "content-reason-terminated-by-api", "content-reason-unknown", *capability_stages):
             line = prefix + reason.encode("ascii")
             for malformed in (line, line + b"\r\n", line + b" extra\n"):
                 row = L._shell_normal_markers(malformed, b"")["stdout"]
                 self.assertEqual(row["stages"][reason], 0)
                 self.assertEqual(row["unexpectedBootstrap"], 1)
+        for line in (prefix + b"capabilities-admission-PRIVATE_CODE\n",
+                     prefix + b"capabilities-PRIVATE_ORIGIN-query_timeout\n",
+                     prefix + b"capabilities-query-wait-protocol_error\x1b[31mPRIVATE\n"):
+            row = L._shell_normal_markers(line, b"")["stdout"]
+            self.assertTrue(all(row["stages"][stage] == 0 for stage in capability_stages))
+            self.assertEqual(row["unexpectedBootstrap"], 1)
+            self.assertNotIn(b"PRIVATE", L.canonical(row))
+        duplicate = prefix + b"capabilities-admission-busy\n"
+        row = L._shell_normal_markers(duplicate * 2, b"")["stdout"]
+        self.assertEqual(row["stages"]["capabilities-admission-busy"], 2)
+        self.assertEqual(row["unexpectedBootstrap"], 0)
         # Counts are diagnostic-only; a completed or empty stage sequence
         # cannot manufacture normal bootstrap success.
         with self.assertRaises(ValueError):
@@ -1007,7 +1034,7 @@ class LifecycleData(unittest.TestCase):
             with self.assertRaises(FileExistsError): L._shell_log_prepare(value, "normal")
             self.assertEqual(opening.call_count, 1); closing.assert_not_called(); removing.assert_not_called()
 
-    def test_shell_capacity_adds_fixed_private_logs_without_changing_other_profiles(self):
+    def test_shell_capacity_adds_fixed_private_logs_and_label_leaves_without_changing_other_profiles(self):
         value = installed_handoff()
         value["compilerRecords"]["capacity"] = {"runtimeBytes": 1024,
             "installedBytes": {key: 2048 for key in L.VERSIONS},
@@ -1021,17 +1048,22 @@ class LifecycleData(unittest.TestCase):
             baseline = (sum(row["size"] for row in candidate["packages"].values()) + candidate["library"]["size"]
                         + (12 if profile == "installed" else 68 if profile == "shell" else 0)
                         + 2 * 1024 + 1 + 2 * 2048 + (32 << 20) + (1 << 20))
-            required = baseline + ((256 << 20) if profile == "shell" else 0)
+            required = baseline + ((448 << 20) + 1 if profile == "shell" else 0)
+            inodes = 2 * 16 + 2 * 8192 + 128 + (4 if profile == "shell" else 0)
             for available in (required - 1, required):
                 with self.subTest(profile=profile, available=available), \
                      patch.object(Path, "stat", return_value=SimpleNamespace(st_dev=1)), \
                      patch.object(L.os, "statvfs", return_value=SimpleNamespace(
-                         f_bavail=available, f_frsize=1, f_favail=2 * 16 + 2 * 8192 + 128)):
+                         f_bavail=available, f_frsize=1, f_favail=inodes)):
                     if available < required:
                         with self.assertRaisesRegex(ValueError, "Insufficient original host capacity"):
                             L._capacity(candidate)
                     else:
                         self.assertIsNone(L._capacity(candidate))
+            with patch.object(Path, "stat", return_value=SimpleNamespace(st_dev=1)), \
+                 patch.object(L.os, "statvfs", return_value=SimpleNamespace(f_bavail=required, f_frsize=1, f_favail=inodes - 1)):
+                with self.assertRaisesRegex(ValueError, "Insufficient original host capacity"):
+                    L._capacity(candidate)
 
     def test_shell_display_capture_requires_bound_original_and_complete_combined_bytes(self):
         value = installed_handoff(); value.pop("installed"); value["shell"] = {}
@@ -1086,6 +1118,8 @@ class LifecycleData(unittest.TestCase):
                  patch.object(L.time, "monotonic", return_value=100.0), \
                  patch.object(L, "_retain", side_effect=lambda name, raw: events.append(name.rsplit(".", 1)[1])), \
                  patch.object(L, "_shell_log_capture", side_effect=capture) as log, \
+                 patch.object(L, "_shell_labels_prepare", return_value=(41, "original-label-binding")) as labels, \
+                 patch.object(L, "_shell_labels_read") as label_read, patch.object(L.os, "close") as closing, \
                  patch.object(L.sys, "stderr", new_callable=io.StringIO) as stream:
                 if case == "diagnostic-error": stream.write = Mock(side_effect=OSError("inert diagnostic error"))
                 arguments = dict(maximum=60, shell_log=(value, "normal" if case == "wrong-route" else "positive", "original-log-binding"))
@@ -1100,6 +1134,9 @@ class LifecycleData(unittest.TestCase):
                         self.assertIs(raised.exception.__cause__, primary)
                     if case != "wrong-route": self.assertTrue(L._FAILED)
                 self.assertEqual(log.call_count, int(case not in ("owner-error", "bad-result", "wrong-route")))
+                self.assertEqual(labels.call_count, int(case != "wrong-route"))
+                self.assertEqual(closing.call_args_list, [] if case == "wrong-route" else [unittest.mock.call(41)])
+                label_read.assert_not_called()  # Generic owner error grants neither sidecar nor raw-log read.
                 if case == "nonzero":
                     raw = stream.getvalue().encode("ascii")
                     self.assertLessEqual(len(raw), 32768)
@@ -2150,6 +2187,16 @@ def positive_capture(receipt=None, candidate=None):
             + b"MRK_INSTALLED_SHELL_OBSERVATION=positive-verified\n", b"")
 
 
+def fixture_namespace_data(value):
+    suffix = value["runId"] + "-" + value["attempt"]
+    return {"root": "/var/lib/mrk-ubuntu-shell-fixtures-" + suffix,
+            "identity": [1, 5, stat.S_IFDIR | 0o755, 0, 0, 6, 4096, 11, 11],
+            "children": ["candidate-evidence", "path-outside", "path-project", "positive-project"],
+            "control": {"path": "/var/lib/mrk-ubuntu-native-" + suffix, "identity": [1, 4, stat.S_IFDIR | 0o711, 0, 0]},
+            "ancestors": [{"path": path, "identity": [1, i + 1, stat.S_IFDIR | 0o755, 0, 0]}
+                          for i, path in enumerate(("/", "/var", "/var/lib"))]}
+
+
 def project_fixture_data(value, *, saved=False):
     source = (b'plugins { id("com.android.application") }\n'
               b'android { defaultConfig { applicationId = "org.example.mrk.observed" } }\n')
@@ -2170,8 +2217,9 @@ def project_fixture_data(value, *, saved=False):
         for index, (relative, data) in enumerate((("release/mobile-release.json", L.SHELL_PROJECT_CONFIG), (".gitignore", L.SHELL_PROJECT_IGNORE))):
             rows.append({"path": relative, "kind": "file", "identity": [1, 105 + index, stat.S_IFREG | 0o600, uid, gid, 1, len(data), 22, 22],
                          "size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
-    return {"schemaVersion": 2, "fixture": "android-saved-readonly-v1", "root": str(L.root_path(value) / "positive-project"),
-            "saved": saved, "entries": rows,
+    namespace = fixture_namespace_data(value)
+    return {"schemaVersion": 3, "fixture": "android-saved-readonly-v1", "root": namespace["root"] + "/positive-project",
+            "saved": saved, "entries": rows, "namespace": namespace,
             "absent": ["release/store"] if saved else [".gitignore", "release"]}
 
 
@@ -2184,8 +2232,10 @@ def candidate_fixture_data(value):
     for index, (relative, _, size, digest) in enumerate(CANDIDATE_FIXTURE_PINS):
         rows.append({"path": relative, "kind": "file", "identity": [1, 202 + index, stat.S_IFREG | 0o600, uid, gid, 1, size, 11, 11],
                      "size": size, "sha256": digest})
-    return {"schemaVersion": 1, "fixture": "android-candidate-documents-v1", "root": str(L.root_path(value) / "candidate-evidence"),
-            "entries": rows, "absent": ["reader-1.2.3-42.aab", "store-metadata-1.2.3-42.zip", "validation-report-1.2.3-42.json"]}
+    namespace = fixture_namespace_data(value)
+    return {"schemaVersion": 2, "fixture": "android-candidate-documents-v1", "root": namespace["root"] + "/candidate-evidence",
+            "entries": rows, "namespace": namespace,
+            "absent": ["reader-1.2.3-42.aab", "store-metadata-1.2.3-42.zip", "validation-report-1.2.3-42.json"]}
 
 
 def project_path_receipt():
@@ -2234,7 +2284,9 @@ def path_fixture_data(value, *, changed=False):
               "path-project/.mobile-release-metadata-text-prepare", "path-project/.mobile-release-metadata-text", "path-project/.mobile-release-metadata-text-cleanup"]
     absent += ["path-project/inputs/kind-directory", "path-project/ios/Kind.file"] if changed else [
         "path-project/inputs/link-original", "path-project/inputs/kind-original", "path-project/ios/Kind.original"]
-    return {"schemaVersion": 1, "fixture": "project-paths-v1", "root": str(L.root_path(value)), "changed": changed, "entries": rows, "absent": absent}
+    namespace = fixture_namespace_data(value)
+    return {"schemaVersion": 2, "fixture": "project-paths-v1", "root": namespace["root"], "changed": changed,
+            "entries": rows, "absent": absent, "namespace": namespace}
 
 
 def closed_shell_data():
@@ -2271,6 +2323,211 @@ def closed_shell_data():
                "acceptedU": value["shell"]["acceptedU"], "consumerAttempt": value["attempt"],
                "packageLifecycleQualified": False, "shellPackageBuilt": False, "commands": commands}
     return value, outcome, files, expected
+
+
+class ShellFixtureNamespaceContracts(unittest.TestCase):
+    def test_readable_ancestry_preserves_control_private_and_only_stable_identity(self):
+        value = installed_handoff(); value.pop("installed"); value["shell"] = {}
+        namespace = fixture_namespace_data(value); root = L.root_path(value)
+        expected = {key: namespace[key] for key in ("control", "ancestors")}
+        for fault in (None, "unreadable", "writable", "control-mode", "private-mode", "owner", "device", "alias", "symlink", "drift", "acl"):
+            nodes = {Path(row["path"]): inert_stat(row["identity"][1], row["identity"][2])
+                     for row in [namespace["control"], *namespace["ancestors"]]}
+            nodes[root / "private"] = inert_stat(6, stat.S_IFDIR | 0o700)
+            if fault == "unreadable": nodes[Path("/var/lib")].st_mode = stat.S_IFDIR | 0o711
+            if fault == "writable": nodes[Path("/var")].st_mode = stat.S_IFDIR | 0o777
+            if fault == "control-mode": nodes[root].st_mode = stat.S_IFDIR | 0o755
+            if fault == "private-mode": nodes[root / "private"].st_mode = stat.S_IFDIR | 0o711
+            if fault == "owner": nodes[Path("/var/lib")].st_uid = value["runnerUid"]
+            if fault == "device": nodes[root].st_dev = 2
+            if fault == "alias": nodes[root].st_ino = 3
+            if fault == "symlink": nodes[Path("/var")].st_mode = stat.S_IFLNK | 0o755
+            observed = []
+            def metadata(path):
+                observed.append(path); node = deepcopy(nodes[path])
+                # Legitimate sibling/control activity is not stable authority.
+                node.st_nlink += len(observed); node.st_size += len(observed)
+                node.st_mtime_ns += len(observed); node.st_ctime_ns += len(observed)
+                if fault == "drift" and path == root and observed.count(root) == 2: node.st_ino += 100
+                return node
+            with self.subTest(fault=fault), patch.object(L, "_ROOT", root), patch.object(Path, "lstat", metadata), \
+                 patch.object(L, "_xattrs", side_effect=L.Refused("inert ACL") if fault == "acl" else None) as attrs, \
+                 patch.object(L.os, "scandir", side_effect=AssertionError("No private/fixture scan")):
+                if fault is None:
+                    self.assertEqual(L._shell_fixture_ancestry(value), expected)
+                    self.assertEqual([call.args for call in attrs.call_args_list],
+                                     [(path, True) for path in (Path("/"), Path("/var"), Path("/var/lib"), root, root / "private")])
+                else:
+                    with self.assertRaises(ValueError): L._shell_fixture_ancestry(value)
+
+    def test_constructor_exact_fixed_bytes_then_original_publication_or_refusal(self):
+        value = installed_handoff(); value.pop("installed"); value["shell"] = {}
+        namespace = fixture_namespace_data(value); root = Path(namespace["root"])
+        ancestry = {key: namespace[key] for key in ("control", "ancestors")}
+        for fault in (None, "occupied", "mode", "owner", "device", "alias", "acl", "leaf-acl", "write", "unknown-child", "identity", "ancestry", "published-identity"):
+            node = inert_stat(5, stat.S_IFDIR | 0o700, size=4096, stamp=11)
+            if fault == "mode": node.st_mode = stat.S_IFDIR | 0o755
+            if fault == "owner": node.st_uid = value["runnerUid"]
+            if fault == "device": node.st_dev = 2
+            if fault == "alias": node.st_ino = 4
+            created = []
+            def mkdir(path, *, mode):
+                self.assertEqual(mode, 0o700)
+                if fault == "occupied" and path == root: raise FileExistsError("inert occupied sibling")
+                created.append(path)
+                if path.parent == root: node.st_nlink += 1
+            def metadata(path):
+                self.assertEqual(path, root)
+                current = deepcopy(node)
+                if fault == "identity" and len(created) > 1: current.st_ino += 100
+                if fault == "published-identity" and stat.S_IMODE(node.st_mode) == 0o755: current.st_ino += 100
+                return current
+            def chmod(path, mode):
+                self.assertIn((path, mode), ((root / "positive-project/app", 0o555), (root, 0o755)))
+                if path == root: node.st_mode = stat.S_IFDIR | mode
+            def attrs(path, directory):
+                if fault == "acl" and path == root or fault == "leaf-acl" and path == root / "path-outside/VERSION":
+                    raise L.Refused("inert ACL")
+            def scan(path):
+                self.assertEqual(path, root)
+                names = [p.name for p in created if p.parent == root]
+                if fault == "unknown-child": names.insert(0, "unexpected")
+                context = Mock(); context.__enter__ = Mock(return_value=iter(SimpleNamespace(name=n) for n in names))
+                context.__exit__ = Mock(return_value=False); return context
+            def ancestors(_):
+                current = deepcopy(ancestry)
+                if fault == "ancestry" and len(created) > 1: current["control"]["identity"][1] += 100
+                return current
+            writer = Mock(side_effect=OSError("inert write failure") if fault == "write" else None)
+            with self.subTest(fault=fault), patch.object(L, "_ROOT", L.root_path(value)), \
+                 patch.object(L, "_shell_fixture_ancestry", side_effect=ancestors), \
+                 patch.object(Path, "mkdir", autospec=True, side_effect=mkdir) as making, \
+                 patch.object(Path, "lstat", autospec=True, side_effect=metadata) as reading, \
+                 patch.object(L, "_D", SimpleNamespace(write=writer)), patch.object(L.os, "chown") as ownership, \
+                 patch.object(L.os, "chmod", side_effect=chmod) as modes, patch.object(L, "_xattrs", side_effect=attrs), \
+                 patch.object(L.os, "scandir", side_effect=scan) as scans:
+                if fault is None:
+                    binding = L._shell_fixtures_prepare(value)
+                    self.assertIs(type(binding), bytes); self.assertEqual(L.decode(binding), namespace)
+                    self.assertEqual(created, [root, root / "positive-project", root / "positive-project/app",
+                        root / "candidate-evidence", root / "candidate-evidence/operation",
+                        *(root / name for name, directory in PATH_FIXTURE_NODES if directory)])
+                    self.assertEqual([call.args for call in writer.call_args_list], [
+                        (root / "positive-project/app/build.gradle.kts", L.SHELL_PROJECT_SOURCE, 0o444),
+                        (root / "positive-project/version.properties", L.SHELL_PROJECT_VERSION, 0o600),
+                        *((root / "candidate-evidence" / name, raw, 0o600) for name, raw in L.SHELL_CANDIDATE_DOCUMENTS.items()),
+                        *((root / name, b"inert path-picker fixture\n", 0o600) for name, directory in PATH_FIXTURE_NODES if not directory)])
+                    self.assertEqual([call.args for call in ownership.call_args_list], [
+                        (path, value["runnerUid"], value["runnerGid"]) for path in
+                        (root / "positive-project/version.properties", root / "positive-project",
+                         *(root / "candidate-evidence" / name for name in L.SHELL_CANDIDATE_DOCUMENTS),
+                         root / "candidate-evidence/operation", root / "candidate-evidence", *(root / name for name, _ in PATH_FIXTURE_NODES))])
+                    self.assertEqual([call.args for call in modes.call_args_list], [(root / "positive-project/app", 0o555), (root, 0o755)])
+                else:
+                    with self.assertRaises((ValueError, OSError)): L._shell_fixtures_prepare(value)
+                    publications = [call.args for call in modes.call_args_list if call.args[0] == root]
+                    self.assertEqual(publications, [(root, 0o755)] if fault == "published-identity" else [])
+                    if fault == "occupied":
+                        making.assert_called_once_with(root, mode=0o700)
+                        reading.assert_not_called(); scans.assert_not_called(); ownership.assert_not_called(); writer.assert_not_called()
+
+    def test_original_namespace_drift_and_unexpected_names_refuse_without_descendant_reads(self):
+        value = installed_handoff(); namespace = fixture_namespace_data(value); root = Path(namespace["root"])
+        binding = L.canonical(namespace); ancestry = {key: namespace[key] for key in ("control", "ancestors")}
+        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        for fault in (None, *range(9), "unknown-child", "after-scan", "ancestry"):
+            values = list(namespace["identity"])
+            if type(fault) is int: values[fault] += 1
+            node = SimpleNamespace(**dict(zip(fields, values))); scans_seen = []
+            def metadata(path):
+                self.assertEqual(path, root)
+                current = deepcopy(node)
+                if fault == "after-scan" and scans_seen: current.st_ctime_ns += 1
+                return current
+            def scan(path):
+                self.assertEqual(path, root); scans_seen.append(path)
+                names = ["unrelated"] if fault == "unknown-child" else namespace["children"]
+                context = Mock(); context.__enter__ = Mock(return_value=iter(SimpleNamespace(name=n) for n in names))
+                context.__exit__ = Mock(return_value=False); return context
+            current_ancestry = deepcopy(ancestry)
+            if fault == "ancestry": current_ancestry["control"]["identity"][1] += 1
+            with self.subTest(fault=fault), patch.object(L, "_shell_fixture_ancestry", return_value=current_ancestry), \
+                 patch.object(Path, "lstat", metadata), patch.object(L, "_xattrs"), patch.object(L.os, "scandir", side_effect=scan), \
+                 patch.object(L, "record", side_effect=AssertionError("Namespace check cannot read a fixture leaf")):
+                if fault is None: self.assertEqual(L._shell_namespace_check(value, binding), namespace)
+                else:
+                    with self.assertRaises(ValueError): L._shell_namespace_check(value, binding)
+                if type(fault) is int or fault == "ancestry": self.assertEqual(scans_seen, [])
+        with patch.object(L, "_shell_fixture_ancestry", side_effect=AssertionError("Malformed DATA cannot authorize filesystem observation")):
+            for raw in (bytearray(binding), binding.decode(), binding + b" ", b"{}", b"x" * 1025):
+                with self.subTest(kind=type(raw)), self.assertRaises(ValueError): L._shell_namespace_check(value, raw)
+
+    def test_closed_namespaces_reject_old_shapes_wrong_authority_and_cross_family_mismatch(self):
+        value, outcome, files, expected = closed_shell_data(); original = fixture_namespace_data(value)
+        self.assertEqual(L._shell_namespace_data(value, original), original)
+        for mutate in (lambda d: d.pop("control"), lambda d: d.update(root=str(L.root_path(value))),
+                       lambda d: d.update(children=d["children"][:-1]), lambda d: d["identity"].__setitem__(2, stat.S_IFDIR | 0o711),
+                       lambda d: d["identity"].__setitem__(0, 2), lambda d: d["identity"].__setitem__(1, 4),
+                       lambda d: d["identity"].__setitem__(3, 1001), lambda d: d["identity"].__setitem__(5, True),
+                       lambda d: d["identity"].__setitem__(8, -1), lambda d: d["identity"].append(0),
+                       lambda d: d["control"].update(path="/other"), lambda d: d["control"]["identity"].append(0),
+                       lambda d: d["control"]["identity"].__setitem__(2, stat.S_IFDIR | 0o755),
+                       lambda d: d["ancestors"][0].update(path="/var"),
+                       lambda d: d["ancestors"][1]["identity"].__setitem__(2, stat.S_IFDIR | 0o711)):
+            altered = deepcopy(original); mutate(altered)
+            with self.subTest(mutate=mutate), self.assertRaises(ValueError): L._shell_namespace_data(value, altered)
+        families = ((L.shell_project_fixture, "shell-positive-project"), (L.shell_candidate_fixture, "shell-positive-candidate"),
+                    (L.shell_paths_fixture, "shell-project-paths"))
+        for validate, prefix in families:
+            for change in ("missing", "old-schema", "old-root", "binding-drift"):
+                before, after = (L.decode(files[prefix + "-" + phase + ".json"]) for phase in ("before", "after"))
+                if change == "missing": after.pop("namespace")
+                elif change == "old-schema": after["schemaVersion"] -= 1
+                elif change == "old-root": after["root"] = after["root"].replace("mrk-ubuntu-shell-fixtures-", "mrk-ubuntu-native-")
+                else: after["namespace"]["identity"][1] = 50
+                with self.subTest(family=prefix, change=change), self.assertRaises(ValueError):
+                    validate(value, L.canonical(before), L.canonical(after))
+        altered = dict(files)
+        for phase in ("before", "after"):
+            name = "shell-positive-candidate-" + phase + ".json"; document = L.decode(altered[name])
+            document["namespace"]["identity"][1] = 50; altered[name] = L.canonical(document)
+        L.shell_candidate_fixture(value, altered["shell-positive-candidate-before.json"], altered["shell-positive-candidate-after.json"])
+        with patch.object(L, "shell_closed_loader", return_value=expected), \
+             patch.object(L, "_shell_namespace_check", side_effect=AssertionError("Closed DATA is not live authority")), \
+             self.assertRaisesRegex(ValueError, "different original namespaces"):
+            L.shell_closed_result(value, outcome, altered)
+
+    def test_twenty_digit_roots_keep_existing_inventory_byte_caps(self):
+        value = installed_handoff(); value.update(runId="9" * 20, attempt="9" * 20)
+        namespace = fixture_namespace_data(value)
+        self.assertEqual(str(L.shell_fixture_root(value)), namespace["root"])
+        self.assertLess(len(L.canonical(namespace)), 1024)
+        for document in (project_fixture_data(value), project_fixture_data(value, saved=True), candidate_fixture_data(value),
+                         path_fixture_data(value), path_fixture_data(value, changed=True)):
+            self.assertLessEqual(len(L.canonical(document)), 8192)
+        for field in ("runId", "attempt"):
+            for bad in ("", "0", "01", "1-2", "9" * 21, 10, True):
+                altered = dict(value); altered[field] = bad
+                with self.subTest(field=field, bad=bad), self.assertRaises(ValueError): L.shell_fixture_root(altered)
+
+    def test_source_has_one_constructor_after_admission_and_postchecks_after_success(self):
+        tree = ast.parse((SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_text())
+        unit = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "unit_start")
+        branch = next(n for n in unit.body if isinstance(n, ast.If) and ast.unparse(n.test) == "'shell' in value")
+        loop = next(n for n in branch.body if isinstance(n, ast.For))
+        self.assertEqual(ast.unparse(loop.iter), "SHELL_CASES")
+        self.assertEqual(ast.unparse(branch.body[1]), "expected = _installed_payload(value, loader, original)")
+        self.assertEqual(ast.unparse(branch.body[2]), "namespace = _shell_fixtures_prepare(value)")
+        self.assertIs(branch.body[3], loop)
+        self.assertEqual(ast.unparse(loop.body[0]), "environment, log_binding = _shell_prepare(value, case, namespace)")
+        self.assertIsInstance(loop.body[1], ast.If)
+        self.assertEqual(ast.unparse(loop.body[1].body[0]), "cases[case] = _shell_normal(value, environment, expected, log_binding)")
+        self.assertEqual(ast.unparse(loop.body[-1]), "_shell_namespace_check(value, namespace)")
+        self.assertFalse(any(isinstance(n, ast.Try) for n in ast.walk(branch)))
+        calls = [n.func.id for n in ast.walk(unit) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+        self.assertEqual(calls.count("_shell_fixtures_prepare"), 1)
+        prepare = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_shell_prepare")
+        self.assertEqual(ast.unparse(prepare.body[0]), "_shell_namespace_check(value, namespace)")
 
 
 class ProjectDraftLifecycleContracts(unittest.TestCase):
@@ -2517,7 +2774,8 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                 L.shell_project_fixture(value, before, after)
 
     def test_actual_inventory_observes_only_fixed_nodes_and_refuses_changed_or_pending_data(self):
-        value = installed_handoff(); root = L.root_path(value); project = root / "positive-project"
+        value = installed_handoff(); root = L.root_path(value); namespace = fixture_namespace_data(value)
+        binding = L.canonical(namespace); project = Path(namespace["root"]) / "positive-project"
         for saved in (False, True):
             fixture = project_fixture_data(value, saved=saved)
             by_path = {project if row["path"] == "." else project / row["path"]: row for row in fixture["entries"]}
@@ -2533,9 +2791,11 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                 row = by_path[path]
                 return {"path": str(path), "size": row["size"], "sha256": row["sha256"]}
             with self.subTest(saved=saved), patch.object(L, "_ROOT", root), patch.object(L, "directory"), \
+                 patch.object(L, "_shell_namespace_check", return_value=namespace) as namespace_check, \
                  patch.object(Path, "lstat", file_stat), patch.object(L.os, "scandir", side_effect=scan), \
                  patch.object(L, "record", side_effect=read_data) as reads, patch.object(L, "_absent") as absent:
-                self.assertEqual(L._shell_project_inventory(value, saved=saved), fixture)
+                self.assertEqual(L._shell_project_inventory(value, binding, saved=saved), fixture)
+                self.assertEqual([call.args for call in namespace_check.call_args_list], [(value, binding)] * 2)
                 self.assertEqual([call.args for call in reads.call_args_list],
                                  [(project / row["path"], row["size"]) for row in fixture["entries"] if row["kind"] == "file"])
                 self.assertEqual(reads.call_count, 4 if saved else 2)
@@ -2544,53 +2804,50 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                     reads.reset_mock()
                     by_path[parent]["children"].append(extra)
                     with self.assertRaises(ValueError):
-                        L._shell_project_inventory(value, saved=saved)
+                        L._shell_project_inventory(value, binding, saved=saved)
                     reads.assert_not_called()  # Never inspect an unadmitted journal/metadata subtree.
                     by_path[parent]["children"].pop()
 
-    def test_prepare_creates_only_fixed_positive_siblings_without_running_anything(self):
-        value = installed_handoff(); root = L.root_path(value); project = root / "positive-project"
-        evidence = root / "candidate-evidence"
+    def test_prepare_keeps_per_case_before_captures_without_recreating_fixtures(self):
+        value = installed_handoff(); root = L.root_path(value); namespace = fixture_namespace_data(value)
+        binding = L.canonical(namespace)
         for case in L.SHELL_CASES:
             writer = Mock()
             with self.subTest(case=case), patch.object(L, "_ROOT", root), patch.object(L, "_D", SimpleNamespace(write=writer)), \
                  patch.object(Path, "mkdir", autospec=True) as mkdir, patch.object(L.os, "chown") as chown, patch.object(L.os, "chmod") as chmod, \
+                 patch.object(L, "_shell_namespace_check", return_value=namespace) as namespace_check, \
+                 patch.object(L, "_shell_fixtures_prepare") as prepare, \
                  patch.object(L, "_shell_log_prepare", return_value="original-log-binding") as log, \
                  patch.object(L, "_absent"), patch.object(L, "_retain") as retain, \
                  patch.object(L, "_shell_project_inventory", return_value=project_fixture_data(value)) as inventory, \
                  patch.object(L, "_shell_candidate_inventory", return_value=candidate_fixture_data(value)) as candidate_inventory, \
                  patch.object(L, "_shell_paths_inventory", return_value=path_fixture_data(value)) as path_inventory:
-                self.assertEqual(L._shell_prepare(value, case), (L.shell_environment(value, case), "original-log-binding"))
+                self.assertEqual(L._shell_prepare(value, case, binding), (L.shell_environment(value, case), "original-log-binding"))
+                namespace_check.assert_called_once_with(value, binding)
+                prepare.assert_not_called(); chmod.assert_not_called()
                 log.assert_called_once_with(value, case)
-                fixture_writes = [call.args for call in writer.call_args_list if project in call.args[0].parents]
-                self.assertEqual(fixture_writes, [(project / "app/build.gradle.kts", L.SHELL_PROJECT_SOURCE, 0o444),
-                                                (project / "version.properties", L.SHELL_PROJECT_VERSION, 0o600)] if case == "positive" else [])
-                candidate_writes = [call.args for call in writer.call_args_list if evidence in call.args[0].parents]
-                self.assertEqual(candidate_writes, [(evidence / relative, raw, 0o600) for relative, raw in L.SHELL_CANDIDATE_DOCUMENTS.items()]
-                                 if case == "positive" else [])
-                self.assertEqual(mkdir.call_count, 12 if case == "positive" else 17 if case == "project-paths" else 8)
+                self.assertEqual(mkdir.call_count, 8)
+                self.assertEqual(chown.call_count, 9)
+                self.assertEqual(writer.call_count, 2)
+                self.assertTrue(all(root in call.args[0].parents for call in
+                                    [*mkdir.call_args_list, *chown.call_args_list, *writer.call_args_list]))
                 if case == "positive":
-                    self.assertNotIn(project / "release", [call.args[0] for call in mkdir.call_args_list])
-                    self.assertEqual([call.args for call in chmod.call_args_list], [(project / "app", 0o555)])
-                    self.assertEqual([call.args for call in chown.call_args_list if call.args[0] == project or project in call.args[0].parents],
-                                     [(path, value["runnerUid"], value["runnerGid"]) for path in
-                                      (project / "version.properties", project)])
-                    inventory.assert_called_once_with(value)
-                    candidate_inventory.assert_called_once_with(value)
-                    self.assertEqual([call.args for call in chown.call_args_list if call.args[0] == evidence or evidence in call.args[0].parents],
-                                     [(path, value["runnerUid"], value["runnerGid"]) for path in
-                                      (*(evidence / relative for relative in L.SHELL_CANDIDATE_DOCUMENTS), evidence / "operation", evidence)])
+                    inventory.assert_called_once_with(value, binding)
+                    candidate_inventory.assert_called_once_with(value, binding)
+                    path_inventory.assert_not_called()
                     self.assertEqual([call.args for call in retain.call_args_list], [
                         ("shell-positive-project-before.json", L.canonical(project_fixture_data(value))),
                         ("shell-positive-candidate-before.json", L.canonical(candidate_fixture_data(value)))])
                 elif case == "project-paths":
-                    inventory.assert_not_called(); candidate_inventory.assert_not_called(); chmod.assert_not_called()
-                    path_inventory.assert_called_once_with(value)
+                    inventory.assert_not_called(); candidate_inventory.assert_not_called()
+                    path_inventory.assert_called_once_with(value, binding)
                     retain.assert_called_once_with("shell-project-paths-before.json", L.canonical(path_fixture_data(value)))
-                    self.assertEqual([call.args for call in writer.call_args_list if call.args[0].name not in {"authority", "shell-project-paths-bus.conf"}][-5:],
-                                     [(root / name, b"inert path-picker fixture\n", 0o600) for name, directory in PATH_FIXTURE_NODES if not directory])
                 else:
                     inventory.assert_not_called(); candidate_inventory.assert_not_called(); path_inventory.assert_not_called(); retain.assert_not_called(); chmod.assert_not_called()
+        with patch.object(L, "_shell_namespace_check", side_effect=L.Refused("original namespace changed")), \
+             patch.object(L, "_shell_log_prepare") as logs, patch.object(Path, "mkdir") as mkdir:
+            with self.assertRaises(ValueError): L._shell_prepare(value, "normal", binding)
+            logs.assert_not_called(); mkdir.assert_not_called()
 
     def test_closed_case_requires_native_receipt_and_same_before_after_originals(self):
         value, outcome, files, expected = closed_shell_data()
@@ -2808,7 +3065,8 @@ class CandidateDocumentsLifecycleContracts(unittest.TestCase):
                 L.shell_candidate_fixture(value, malformed, raw)
 
     def test_actual_candidate_inventory_never_reads_artifacts_or_unexpected_subtrees(self):
-        value = installed_handoff(); root = L.root_path(value); evidence = root / "candidate-evidence"
+        value = installed_handoff(); root = L.root_path(value); namespace = fixture_namespace_data(value)
+        binding = L.canonical(namespace); evidence = Path(namespace["root"]) / "candidate-evidence"
         for case in ("complete", "artifact", "private-subtree", "mode", "owner", "links", "special", "bytes", "alias", "device", "drift"):
             fixture = candidate_fixture_data(value)
             by_path = {evidence if row["path"] == "." else evidence / row["path"]: row for row in fixture["entries"]}
@@ -2837,15 +3095,17 @@ class CandidateDocumentsLifecycleContracts(unittest.TestCase):
                     first["identity"][8] += 1
                 return {"path": str(path), "size": row["size"], "sha256": row["sha256"]}
             with self.subTest(case=case), patch.object(L, "_ROOT", root), patch.object(L, "directory"), \
+                 patch.object(L, "_shell_namespace_check", return_value=namespace) as namespace_check, \
                  patch.object(Path, "lstat", file_stat), patch.object(L.os, "scandir", side_effect=scan) as scans, \
                  patch.object(L, "record", side_effect=read_data) as reads, patch.object(L, "_absent") as absent:
                 if case == "complete":
-                    self.assertEqual(L._shell_candidate_inventory(value), fixture)
+                    self.assertEqual(L._shell_candidate_inventory(value, binding), fixture)
+                    self.assertEqual([call.args for call in namespace_check.call_args_list], [(value, binding)] * 2)
                     self.assertEqual([call.args for call in reads.call_args_list], [(evidence / name, size) for name, _, size, _ in CANDIDATE_FIXTURE_PINS])
                     self.assertEqual([call.args[0] for call in absent.call_args_list], [evidence / relative for relative in fixture["absent"]])
                 else:
                     with self.assertRaises(ValueError):
-                        L._shell_candidate_inventory(value)
+                        L._shell_candidate_inventory(value, binding)
                     if case in {"artifact", "private-subtree", "mode", "owner", "links", "special"}:
                         reads.assert_not_called()
                 self.assertTrue(all(call.args[0] in {evidence, evidence / "operation"} for call in scans.call_args_list))
@@ -3014,13 +3274,12 @@ class ProjectPathLifecycleContracts(unittest.TestCase):
                 L.shell_paths_fixture(value, L.canonical(left), L.canonical(right))
 
     def test_inventory_admits_all_parents_before_only_fixed_inert_reads_and_no_link_follow(self):
-        value, _, _, _ = closed_shell_data(); root = L.root_path(value)
+        value, _, _, _ = closed_shell_data(); namespace = fixture_namespace_data(value)
+        root = Path(namespace["root"]); binding = L.canonical(namespace)
         for changed in (False, True):
             expected = path_fixture_data(value, changed=changed)
             by_path = {root / row["path"]: row for row in expected["entries"]}
             def metadata(path):
-                if path == root:
-                    return SimpleNamespace(st_dev=1)
                 row = by_path[path]; n = row["identity"]
                 return SimpleNamespace(**dict(zip(("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns"), n)))
             class Entries:
@@ -3030,15 +3289,17 @@ class ProjectPathLifecycleContracts(unittest.TestCase):
             def read_file(path, limit):
                 self.assertEqual(limit, 26); row = by_path[path]; self.assertEqual(row["kind"], "file")
                 return {"path": str(path), "size": row["size"], "sha256": row["sha256"]}
-            with patch.object(L, "_ROOT", root), patch.object(L, "directory"), patch.object(L, "_absent"), \
+            with patch.object(L, "_ROOT", L.root_path(value)), patch.object(L, "_absent"), \
+                 patch.object(L, "_shell_namespace_check", return_value=namespace) as namespace_check, \
                  patch.object(Path, "lstat", metadata), patch.object(L.os, "scandir", side_effect=Entries), \
                  patch.object(L.os, "readlink", return_value="link-original") as link, patch.object(L, "record", side_effect=read_file) as reads:
-                self.assertEqual(L._shell_paths_inventory(value, changed=changed), expected)
+                self.assertEqual(L._shell_paths_inventory(value, binding, changed=changed), expected)
+                self.assertEqual([call.args for call in namespace_check.call_args_list], [(value, binding)] * 2)
                 self.assertEqual(reads.call_count, 5)
                 self.assertEqual(link.call_count, int(changed))
                 reads.reset_mock(); by_path[root / "path-project"]["children"].append("unexpected")
                 with self.assertRaises(ValueError):
-                    L._shell_paths_inventory(value, changed=changed)
+                    L._shell_paths_inventory(value, binding, changed=changed)
                 reads.assert_not_called()
 
     def test_after_inventory_is_only_after_success_in_the_existing_original_case_branch(self):
@@ -3053,6 +3314,194 @@ class ProjectPathLifecycleContracts(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual([(arg.arg, ast.literal_eval(arg.value)) for arg in calls[0].keywords], [("changed", True)])
         self.assertEqual(set(L.SHELL_CASES), {"normal", "positive", "quit-outstanding", "project-paths"})
+
+
+class FailureLabelSinkContracts(unittest.TestCase):
+    def test_finite_pair_refuses_partial_reordered_duplicate_or_injected_data(self):
+        step = b"MRK_INSTALLED_SHELL_FAILURE_STEP=PrepareSave\n"
+        boundary = b"MRK_INSTALLED_SHELL_FAILURE_PHASE=request\n"
+        good = step + boundary
+        self.assertEqual(L._shell_label_pair(good), {"step": "PrepareSave", "boundary": "request"})
+        self.assertEqual(L._shell_label_pair(b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathSettlement\n"
+                                           b"MRK_INSTALLED_SHELL_FAILURE_PHASE=settlement\n"),
+                         {"step": "PathSettlement", "boundary": "settlement"})
+        for raw in (b"", good[:-1], step, boundary + step, step + step, good + boundary,
+                    b"prefix" + good, good.replace(b"PrepareSave", b"NotAnAllowedStep"),
+                    good.replace(b"request", b"unknown"), good.replace(b"\n", b"\r\n"),
+                    good + b"/private/injected\n", good + b"x" * 512, good.decode(), bytearray(good)):
+            with self.subTest(kind=type(raw).__name__, length=len(raw)):
+                self.assertIsNone(L._shell_label_pair(raw))
+
+    def test_preparation_exclusively_binds_original_fd_and_preserves_preparation_failure(self):
+        value = installed_handoff(); value.pop("installed"); value["shell"] = {}
+        root = L.root_path(value)
+        for fault in (None, "occupied", "owner", "acl", "hardlink", "parent"):
+            parent = needrestart_stat(stat.S_IFDIR | 0o711)
+            leaf = needrestart_stat(stat.S_IFREG | 0o620, ino=42); leaf.st_gid = value["runnerGid"]
+            if fault == "hardlink": leaf.st_nlink = 2
+            if fault == "parent": parent.st_mode = stat.S_IFDIR | 0o777
+            primary = OSError("inert preparation failure; must not be formatted")
+            with self.subTest(fault=fault), patch.object(L, "_ROOT", root), patch.object(L, "directory"), \
+                 patch.object(L, "_xattrs"), patch.object(Path, "lstat", lambda path: parent if path == root else leaf), \
+                 patch.object(L.os, "open", return_value=41) as opening, patch.object(L.os, "fchown") as chown, \
+                 patch.object(L.os, "fchmod") as chmod, patch.object(L.os, "fstat", return_value=leaf), \
+                 patch.object(L.os, "listxattr", return_value=["system.posix_acl_access"] if fault == "acl" else []), \
+                 patch.object(L.os, "close") as closing, patch.object(L.os, "unlink") as unlinking:
+                if fault == "occupied": opening.side_effect = primary
+                if fault == "owner":
+                    chown.side_effect = primary
+                    closing.side_effect = OSError("inert ambiguous close")
+                if fault is None:
+                    self.assertEqual(L._shell_labels_prepare(value, "positive"), (41, L.identity(leaf)[:6]))
+                    opening.assert_called_once_with(root / "shell-positive-failure.labels",
+                        os.O_RDONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, 0o600)
+                    chown.assert_called_once_with(41, 0, value["runnerGid"])
+                    chmod.assert_called_once_with(41, 0o620)
+                    closing.assert_not_called()  # The command, not preparation, now owns this original.
+                else:
+                    with self.assertRaises((OSError, ValueError)) as raised:
+                        L._shell_labels_prepare(value, "positive")
+                    if fault in ("occupied", "owner"): self.assertIs(raised.exception, primary)
+                    self.assertEqual(closing.call_count, int(fault not in ("occupied", "parent")))
+                    self.assertEqual(opening.call_count, int(fault != "parent"))
+                unlinking.assert_not_called()
+
+    def test_original_fd_read_is_single_bounded_and_rejects_binding_or_metadata_loss(self):
+        raw = b"MRK_INSTALLED_SHELL_FAILURE_STEP=Bootstrap\nMRK_INSTALLED_SHELL_FAILURE_PHASE=bootstrap\n"
+        node = needrestart_stat(stat.S_IFREG | 0o620, size=len(raw)); node.st_gid = 1001
+        original = (41, L.identity(node)[:6])
+        for fault in (None, "inode", "link", "mode", "group", "oversized", "acl", "drift", "partial", "empty", "read-error"):
+            before, after = deepcopy(node), deepcopy(node)
+            for name, field, value in (("inode", "st_ino", 99), ("link", "st_nlink", 2),
+                    ("mode", "st_mode", stat.S_IFIFO | 0o620), ("group", "st_gid", 99),
+                    ("oversized", "st_size", 513)):
+                if fault == name: setattr(before, field, value)
+            if fault == "drift": after.st_ctime_ns += 1
+            if fault == "empty": before.st_size = after.st_size = 0
+            with self.subTest(fault=fault), patch.object(L.os, "fstat", side_effect=[before, after]), \
+                 patch.object(L.os, "listxattr", return_value=["user.inert"] if fault == "acl" else []), \
+                 patch.object(L.os, "read", return_value=b"" if fault == "empty" else raw[:-1] if fault == "partial" else raw) as reading, \
+                 patch.object(L.os, "open") as opening, patch.object(L, "read") as raw_read, \
+                 patch.object(L.os, "lseek") as seeking:
+                if fault == "read-error": reading.side_effect = InterruptedError("inert read interruption")
+                if fault in (None, "empty"):
+                    self.assertEqual(L._shell_labels_read(original), None if fault == "empty" else
+                                     {"step": "Bootstrap", "boundary": "bootstrap"})
+                else:
+                    with self.assertRaises((ValueError, OSError)): L._shell_labels_read(original)
+                if fault in ("inode", "link", "mode", "group", "oversized", "acl"):
+                    reading.assert_not_called()
+                else:
+                    reading.assert_called_once_with(41, 513)
+                opening.assert_not_called(); raw_read.assert_not_called(); seeking.assert_not_called()
+
+    def test_owner_exception_requires_exact_stored_true_facts_and_same_original_is_reraised(self):
+        class ProcessError(RuntimeError):
+            def __init__(self, contained=True, cleanup=True):
+                super().__init__("/private/inert-secret must not be exposed")
+                self.__dict__.update(dispatched=True, contained=contained, cleanup_complete=cleanup)
+            def __str__(self):
+                raise AssertionError("error formatting is forbidden")
+        class ProcessCleanupError(ProcessError): pass
+        class ProcessOutcomeUnknown(ProcessError): pass
+        class Unknown(ProcessError):
+            @property
+            def contained(self): raise AssertionError("subclass properties are not evidence")
+        value = installed_handoff(); value.pop("installed"); value["shell"] = {}
+        argv = L.shell_argv(value, "positive")
+        errors = [ProcessError(), ProcessError(False), ProcessError(True, False), ProcessError(1),
+                  ProcessError(True, "true"), ProcessCleanupError(), ProcessOutcomeUnknown(), Unknown(),
+                  KeyboardInterrupt(), SystemExit(), OSError("private generic error")]
+        missing = ProcessError(); del missing.__dict__["cleanup_complete"]; errors.append(missing)
+        for index, primary in enumerate(errors):
+            if index:
+                primary.__cause__ = ProcessError()  # Cause-chain facts grant no read authority.
+            owner = SimpleNamespace(run_owned=Mock(side_effect=primary), ProcessError=ProcessError,
+                                    ProcessCleanupError=ProcessCleanupError, ProcessOutcomeUnknown=ProcessOutcomeUnknown)
+            with self.subTest(index=index), patch.multiple(L, _ROOT=L.root_path(value), _END=1000.0,
+                    _FAILED=False, _COMMANDS=[], _OWNER=owner), patch.object(L, "_root_ids"), \
+                 patch.object(L.time, "monotonic", return_value=100.0), \
+                 patch.object(L, "_shell_labels_prepare", return_value=(41, "original")), \
+                 patch.object(L, "_shell_labels_read", return_value={"step": "PrepareSave", "boundary": "request"}) as reading, \
+                 patch.object(L, "_shell_log_capture") as raw_log, patch.object(L, "_command_capture") as capture, \
+                 patch.object(L.os, "close") as closing, patch.object(L.sys, "stderr", new_callable=io.StringIO) as stream:
+                with self.assertRaises(BaseException) as raised:
+                    L.command("shell-positive", argv, maximum=60, shell_log=(value, "positive", "original-log"))
+                self.assertIs(raised.exception, primary)
+                self.assertTrue(L._FAILED)
+                self.assertEqual(reading.call_count, int(index == 0))
+                raw_log.assert_not_called(); capture.assert_not_called(); closing.assert_called_once_with(41)
+                owner.run_owned.assert_called_once()
+                self.assertEqual(owner.run_owned.call_args.kwargs["timeout"], 60)
+                text = stream.getvalue()
+                self.assertLessEqual(len(text.encode("ascii")), 32768)
+                self.assertNotIn("inert-secret", text); self.assertNotIn("private generic", text)
+                data = json.loads(text.split("=", 1)[1])
+                self.assertEqual((data["case"], data["phase"]), ("positive", "owner-call"))
+                self.assertIsNone(data["capture"])
+                self.assertFalse(data["qualified"]); self.assertFalse(data["cleanupEstablished"])
+                self.assertEqual(data["labelsReason"], None if index == 0 else "owner-finality-unavailable")
+                self.assertEqual(data["labels"], {"step": "PrepareSave", "boundary": "request"} if index == 0 else None)
+                self.assertFalse(data["ownerCall"]["ownerReturned"])
+
+    def test_diagnostic_and_close_failures_cannot_replace_an_active_owner_exception(self):
+        class ProcessError(RuntimeError):
+            def __init__(self):
+                super().__init__("inert original")
+                self.__dict__.update(dispatched=True, contained=True, cleanup_complete=True)
+        value = installed_handoff(); value.pop("installed"); value["shell"] = {}
+        argv = L.shell_argv(value, "project-paths")
+        for fault in ("read", "clock", "format", "write", "close", "diagnostic-dispatch"):
+            primary = ProcessError()
+            with self.subTest(fault=fault), patch.multiple(L, _ROOT=L.root_path(value), _END=1000.0, _FAILED=False,
+                    _COMMANDS=[], _OWNER=SimpleNamespace(ProcessError=ProcessError, run_owned=Mock(side_effect=primary))), \
+                 patch.object(L, "_root_ids"), patch.object(L.time, "monotonic", return_value=100.0), \
+                 patch.object(L, "_shell_labels_prepare", return_value=(41, "original")), \
+                 patch.object(L, "_shell_labels_read", return_value=None) as reading, \
+                 patch.object(L, "_shell_diagnostic_time", return_value=None) as clock, \
+                 patch.object(L, "canonical", wraps=L.canonical) as formatting, \
+                 patch.object(L, "_shell_owner_failure", wraps=L._shell_owner_failure) as diagnostic, \
+                 patch.object(L, "_shell_log_capture") as raw_log, patch.object(L.os, "close") as closing, \
+                 patch.object(L.sys, "stderr", new_callable=io.StringIO) as stream:
+                failing = {"read": reading, "clock": clock, "format": formatting,
+                           "close": closing, "diagnostic-dispatch": diagnostic}
+                if fault == "write": stream.write = Mock(side_effect=OSError("inert diagnostic write"))
+                else: failing[fault].side_effect = OSError("inert diagnosis failure")
+                with self.assertRaises(ProcessError) as raised:
+                    L.command("shell-project-paths", argv, maximum=60, shell_log=(value, "project-paths", "log"))
+                self.assertIs(raised.exception, primary); self.assertTrue(L._FAILED)
+                closing.assert_called_once_with(41); raw_log.assert_not_called()
+                self.assertLessEqual(reading.call_count, 1)
+                if fault == "read":
+                    data = json.loads(stream.getvalue().split("=", 1)[1])
+                    self.assertIsNone(data["labels"]); self.assertEqual(data["labelsReason"], "unavailable")
+
+    def test_good_return_closes_once_and_close_loss_refuses_without_altering_capture(self):
+        value = installed_handoff(); value.pop("installed"); value["shell"] = {}
+        for synthetic, close_error in ((True, False), (True, True), (False, False)):
+            argv = L.shell_argv(value, "positive") if synthetic else ["/inert-fixed-command"]
+            result = subprocess.CompletedProcess(argv, 0, b"unchanged stdout", b"unchanged stderr")
+            with self.subTest(synthetic=synthetic, close_error=close_error), \
+                 patch.multiple(L, _ROOT=L.root_path(value), _END=1000.0, _FAILED=False,
+                    _COMMANDS=[], _OWNER=SimpleNamespace(run_owned=Mock(return_value=result))), \
+                 patch.object(L, "_root_ids"), patch.object(L, "_retain") as retained, \
+                 patch.object(L.time, "monotonic", return_value=100.0), \
+                 patch.object(L, "_shell_labels_prepare", return_value=(41, "original")) as preparation, \
+                 patch.object(L, "_shell_labels_read") as reading, patch.object(L, "_shell_log_capture", return_value=b""), \
+                 patch.object(L.os, "close") as closing, patch.object(L.sys, "stderr", new_callable=io.StringIO) as stream:
+                if close_error: closing.side_effect = OSError("inert close loss")
+                options = {"shell_log": (value, "positive", "log")} if synthetic else {}
+                if close_error:
+                    with self.assertRaises(OSError): L.command("shell-positive", argv, maximum=60, **options)
+                    self.assertTrue(L._FAILED)
+                else:
+                    label = "shell-positive" if synthetic else "inert-command"
+                    self.assertIs(L.command(label, argv, maximum=60, **options), result)
+                    self.assertFalse(L._FAILED)
+                self.assertEqual(preparation.call_count, int(synthetic))
+                self.assertEqual(closing.call_count, int(synthetic)); reading.assert_not_called()
+                self.assertEqual([call.args[1] for call in retained.call_args_list], [b"unchanged stdout", b"unchanged stderr"])
+                self.assertEqual(stream.getvalue(), "")
 
 
 if __name__ == "__main__":
