@@ -50,6 +50,21 @@ def metadata():
         {"id": "mount", "name": "mrk-linux-mount-observation", "version": "0.1.0", "source": None,
          "manifest_path": "/source/desktop/native/linux-mount-observation/Cargo.toml"},
     ]
+    # Original Cargo 1.98.0 Linux DATA has two local packages/nodes, while the
+    # root dependencies retain these three complete target-specific declarations.
+    packages[0]["dependencies"] = [
+        {"name": name, "path": "/source/desktop/native/" + directory, "target": cfg,
+         "source": None, "req": "*", "kind": None, "rename": None, "optional": False,
+         "uses_default_features": True, "features": [], "registry": None}
+        for name, directory, cfg in (
+            ("mrk-linux-mount-observation", "linux-mount-observation",
+             'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))'),
+            ("mrk-macos-installed-native", "macos-installed-native",
+             'cfg(all(target_os = "macos", target_arch = "aarch64"))'),
+            ("mrk-windows-installed-native", "windows-installed-native",
+             'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'),
+        )
+    ]
     fixed = [("tauri", "2.11.5"), ("tauri-build", "2.6.3"), ("gtk", "0.18.2"),
              ("webkit2gtk", "2.0.2"), ("wry", "0.55.1"), ("rfd", "0.15.4"), ("sha2", "0.10.9")]
     for name, version in fixed + [("inert-" + str(index), "1.0.0") for index in range(27)]:
@@ -60,16 +75,11 @@ def metadata():
     for row in nodes:
         if row["id"] == "root":
             row["features"] = S.SHELL_FEATURES
+            row["deps"] = [{"pkg": "mount"}]
         elif row["id"] == "tauri":
             row["features"] = ["compression", "custom-protocol", "wry"]
         elif row["id"] == "sha2":
             row["features"] = ["std"]
-    # Cargo keeps inactive target-specific declarations in packages, not in
-    # the target-filtered resolve graph. Keep original registry/node positions.
-    for platform in ("macos", "windows"):
-        packages.append({"id": platform, "name": "mrk-" + platform + "-installed-native",
-                         "version": "0.1.0", "source": None,
-                         "manifest_path": "/source/desktop/native/" + platform + "-installed-native/Cargo.toml"})
     return {"workspace_root": "/source/desktop/src-tauri", "target_directory": "/target",
             "packages": packages, "resolve": {"root": "root", "nodes": nodes}}
 
@@ -387,7 +397,7 @@ class InstalledShellCompilerContracts(unittest.TestCase):
     def test_full_metadata_rejects_incomplete_or_development_graph(self):
         value = metadata()
         parsed, packages, nodes = S.shell_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/target"))
-        self.assertEqual(len(packages), 38)
+        self.assertEqual(len(packages), 36)
         self.assertEqual(nodes["root"]["features"], S.SHELL_FEATURES)
         changes = (
             lambda row: row["resolve"]["nodes"][0].update(features=[*S.SHELL_FEATURES, "development-runtime"]),
@@ -405,34 +415,127 @@ class InstalledShellCompilerContracts(unittest.TestCase):
 
     def test_declared_platforms_cannot_enter_linux_graph_or_compiler(self):
         _, packages, nodes = S.shell_cargo_metadata(S.D.canonical(metadata()), Path("/source"), Path("/target"))
-        self.assertEqual({row["id"] for row in packages.values() if row["source"] is None},
-                         {"root", "mount", "macos", "windows"})
+        self.assertEqual({row["id"] for row in packages.values() if row["source"] is None}, {"root", "mount"})
         self.assertEqual(set(nodes) & {"root", "mount", "macos", "windows"}, {"root", "mount"})
+        declared = packages["root"]["dependencies"]
+        self.assertEqual(len(declared), 3)
+        self.assertEqual({row["name"] for row in declared},
+                         {"mrk-linux-mount-observation", "mrk-macos-installed-native", "mrk-windows-installed-native"})
+        # Declaration order and unrelated registry declarations do not change
+        # the exact local contract.
+        value = metadata()
+        value["packages"][0]["dependencies"].append(
+            {"name": "sha2", "source": "registry+https://github.com/rust-lang/crates.io-index"})
+        value["packages"][0]["dependencies"].reverse()
+        S.shell_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/target"))
+        for index in (0, 1):
+            for field, replacement in (("name", "unreviewed-local"), ("version", "0.2.0"),
+                                       ("manifest_path", "/elsewhere/Cargo.toml"),
+                                       ("source", "registry+https://github.com/rust-lang/crates.io-index")):
+                value = metadata()
+                value["packages"][index][field] = replacement
+                with self.subTest(package=index, field=field), self.assertRaises(S.D.Refused):
+                    S.shell_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/target"))
+            value = metadata()
+            value["packages"].pop(index)
+            with self.subTest(missing_package=index), self.assertRaises(S.D.Refused):
+                S.shell_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/target"))
         changes = (
-            lambda row: row["packages"].pop(),
-            lambda row: row["packages"][-1].update(name="unreviewed-local"),
-            lambda row: row["packages"][-1].update(version="0.2.0"),
-            lambda row: row["packages"][-1].update(manifest_path="/elsewhere/Cargo.toml"),
             lambda row: row["resolve"]["nodes"].pop(1),  # Required Linux helper absent.
+            lambda row: row["packages"][0].pop("dependencies"),
+            lambda row: row["packages"][0].update(dependencies=None),
+            lambda row: row["packages"][0].update(dependencies={}),
+            lambda row: row["packages"][0].update(dependencies="not-a-list"),
+            lambda row: row["packages"][0]["dependencies"].append(None),
         )
         for change in changes:
             value = metadata()
             change(value)
             with self.subTest(change=change), self.assertRaises(S.D.Refused):
                 S.shell_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/target"))
-        for platform in ("macos", "windows"):
-            for extra_node, extra_edge in ((True, False), (False, True), (True, True)):
+        for extra in (
+            {"name": "foreign-local", "source": None},
+            {"name": "foreign-local"},
+            {"name": "foreign-path", "source": "registry+https://github.com/rust-lang/crates.io-index", "path": None},
+            {"name": "foreign-path", "source": "git+https://unreviewed.invalid/repo", "path": "/elsewhere"},
+            {"name": "mrk-macos-installed-native", "source": "registry+https://github.com/rust-lang/crates.io-index"},
+            {"name": "mrk-windows-installed-native", "source": "git+https://unreviewed.invalid/repo"},
+        ):
+            value = metadata()
+            value["packages"][0]["dependencies"].append(extra)
+            with self.subTest(extra_declaration=extra), self.assertRaises(S.D.Refused):
+                S.shell_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/target"))
+        field_changes = (
+            ("name", "unreviewed-local"), ("name", 0), ("name", []),
+            ("path", "/elsewhere"), ("path", False),
+            ("target", None), ("target", 'cfg(target_os = "linux")'), ("target", False),
+            ("source", "registry+https://github.com/rust-lang/crates.io-index"),
+            ("source", "git+https://unreviewed.invalid/repo"), ("source", False),
+            ("kind", "dev"), ("kind", "build"), ("kind", 0),
+            ("req", "^0.1.0"), ("req", True),
+            ("rename", "unreviewed_alias"), ("rename", 0),
+            ("registry", "https://unreviewed.invalid/index"), ("registry", False),
+            ("features", ["installed-observation"]), ("features", {}), ("features", False),
+            ("optional", True), ("optional", 0), ("optional", None),
+            ("uses_default_features", False), ("uses_default_features", 1), ("uses_default_features", None),
+            ("unreviewed-field", None),
+        )
+        for index in range(3):
+            for mutation in ("missing", "duplicate", "duplicate-replacement"):
                 value = metadata()
+                dependencies = value["packages"][0]["dependencies"]
+                if mutation == "missing":
+                    dependencies.pop(index)
+                elif mutation == "duplicate":
+                    dependencies.append(deepcopy(dependencies[index]))
+                else:
+                    dependencies[(index + 1) % 3] = deepcopy(dependencies[index])
+                with self.subTest(declaration=index, mutation=mutation), self.assertRaises(S.D.Refused):
+                    S.shell_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/target"))
+            for field in declared[index]:
+                value = metadata()
+                del value["packages"][0]["dependencies"][index][field]
+                with self.subTest(declaration=index, missing_field=field), self.assertRaises(S.D.Refused):
+                    S.shell_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/target"))
+            swaps = tuple((field, declared[(index + 1) % 3][field]) for field in ("name", "path", "target"))
+            for field, replacement in (*field_changes, *swaps, ("path", declared[index]["path"] + "/Cargo.toml")):
+                value = metadata()
+                value["packages"][0]["dependencies"][index][field] = replacement
+                with self.subTest(declaration=index, field=field, value=replacement), self.assertRaises(S.D.Refused):
+                    S.shell_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/target"))
+        _, units = S.shell_compiled_artifacts(messages(compiler_rows()), Path("/source"), Path("/target"))
+        for platform in ("macos", "windows", "unreviewed"):
+            for extra_package, extra_node, extra_edge in (
+                (True, False, False), (False, True, False), (False, False, True),
+                (True, True, False), (True, False, True), (False, True, True), (True, True, True),
+            ):
+                value = metadata()
+                if extra_package:
+                    value["packages"].append(
+                        {"id": platform, "name": "mrk-" + platform + "-installed-native", "version": "0.1.0",
+                         "source": None,
+                         "manifest_path": "/source/desktop/native/" + platform + "-installed-native/Cargo.toml"})
                 if extra_node:
                     value["resolve"]["nodes"].append({"id": platform, "features": [], "deps": []})
                 if extra_edge:
                     value["resolve"]["nodes"][0]["deps"].append({"pkg": platform})
-                with self.subTest(platform=platform, node=extra_node, edge=extra_edge), self.assertRaises(S.D.Refused):
-                    S.shell_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/target"))
-            _, units = S.shell_compiled_artifacts(messages(compiler_rows()), Path("/source"), Path("/target"))
+                with self.subTest(platform=platform, package=extra_package, node=extra_node, edge=extra_edge):
+                    with self.assertRaises(S.D.Refused):
+                        S.shell_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/target"))
             extra = deepcopy(units[0]); extra.update(package_id=platform, features=[])
             with self.subTest(compiler=platform), self.assertRaises(S.D.Refused):
                 S.shell_compiler_units([*units, extra], packages, nodes)
+        # A registry package may remain accounted without a selected node, but
+        # a compiler unit must still belong to BOTH original metadata sets.
+        value = metadata()
+        inactive_id = value["resolve"]["nodes"].pop()["id"]
+        _, inactive_packages, inactive_nodes = S.shell_cargo_metadata(
+            S.D.canonical(value), Path("/source"), Path("/target"))
+        self.assertIn(inactive_id, inactive_packages)
+        self.assertNotIn(inactive_id, inactive_nodes)
+        extra = deepcopy(units[0]); extra.update(package_id=inactive_id, features=[])
+        with self.assertRaises(S.D.Refused):
+            S.shell_compiler_units([*units, extra], inactive_packages, inactive_nodes)
 
     def test_actual_sha2_optimized_profile_is_required_not_inferred(self):
         _, packages, nodes = S.shell_cargo_metadata(S.D.canonical(metadata()), Path("/source"), Path("/target"))
@@ -445,6 +548,10 @@ class InstalledShellCompilerContracts(unittest.TestCase):
                 S.shell_compiler_units(changed, packages, nodes)
         with self.assertRaises(S.D.Refused):
             S.shell_compiler_units(units[1:], packages, nodes)
+        changed = deepcopy(units)
+        changed[0]["features"] = ["unreviewed-feature"]
+        with self.assertRaises(S.D.Refused):
+            S.shell_compiler_units(changed, packages, nodes)
 
     def test_full_metadata_budget_does_not_widen_other_json_profiles(self):
         value = metadata()
@@ -453,7 +560,7 @@ class InstalledShellCompilerContracts(unittest.TestCase):
         with self.assertRaises(S.C.CheckFailure):
             S.C.bounded_json(raw, S.SHELL_METADATA_LIMIT)
         _, packages, _ = S.shell_cargo_metadata(raw, Path("/source"), Path("/target"))
-        self.assertEqual(len(packages), 38)
+        self.assertEqual(len(packages), 36)
         value["metadata"] = [None] * 200000
         with self.assertRaises(S.C.CheckFailure):
             S.shell_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/target"))

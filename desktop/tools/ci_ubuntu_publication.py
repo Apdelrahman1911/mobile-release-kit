@@ -2010,20 +2010,39 @@ def shell_cargo_metadata(raw, source, target):
         D.need(type(row.get("features")) is list and all(type(name) is str for name in row["features"])
                and type(row.get("deps")) is list and all(dep.get("pkg") in nodes for dep in row["deps"]),
                "Shell resolved Cargo edge/features differ")
+    # The Linux-filtered package/resolve roster contains only app + Linux.
     local_paths = {"mobile-release-kit-desktop": source / "desktop/src-tauri/Cargo.toml",
-                   "mrk-linux-mount-observation": source / "desktop/native/linux-mount-observation/Cargo.toml",
-                   "mrk-macos-installed-native": source / "desktop/native/macos-installed-native/Cargo.toml",
-                   "mrk-windows-installed-native": source / "desktop/native/windows-installed-native/Cargo.toml"}
+                   "mrk-linux-mount-observation": source / "desktop/native/linux-mount-observation/Cargo.toml"}
     local = [row for row in packages if row.get("source") is None]
     D.need(len(local) == len(local_paths) and {row["name"] for row in local} == set(local_paths)
            and all(row["version"] == "0.1.0" and row["manifest_path"] == str(local_paths[row["name"]]) for row in local),
            "Shell Cargo local source roster differs")
-    # --filter-platform selects resolve, not packages: other-platform local
-    # declarations must be accounted for without authorizing their compilation.
-    active_local = {row["id"] for row in local if row["id"] in nodes}
-    linux_local = {row["id"] for row in local
-                   if row["name"] in ("mobile-release-kit-desktop", "mrk-linux-mount-observation")}
-    D.need(active_local == linux_local, "Shell Cargo active local graph differs")
+    D.need(all(row["id"] in nodes for row in local), "Shell Cargo active local graph differs")
+    # Other-target helpers remain root dependency declarations, not packages.
+    declarations = roots[0].get("dependencies")
+    D.need(type(declarations) is list
+           and all(type(row) is dict and type(row.get("name")) is str for row in declarations),
+           "Shell Cargo root dependency declarations differ")
+    expected_declarations = [
+        {"name": name, "path": str(source / ("desktop/native/" + directory)), "target": cfg,
+         "source": None, "req": "*", "kind": None, "rename": None, "optional": False,
+         "uses_default_features": True, "features": [], "registry": None}
+        for name, directory, cfg in (
+            ("mrk-linux-mount-observation", "linux-mount-observation",
+             'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))'),
+            ("mrk-macos-installed-native", "macos-installed-native",
+             'cfg(all(target_os = "macos", target_arch = "aarch64"))'),
+            ("mrk-windows-installed-native", "windows-installed-native",
+             'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'),
+        )
+    ]
+    local_names = {row["name"] for row in expected_declarations}
+    local_declarations = [row for row in declarations
+                          if row.get("source") is None or "path" in row or row["name"] in local_names]
+    D.need(len(local_declarations) == len(expected_declarations)
+           and D.canonical(sorted(local_declarations, key=lambda row: row["name"]))
+           == D.canonical(sorted(expected_declarations, key=lambda row: row["name"])),
+           "Shell Cargo local dependency declarations differ")
     registry = [row for row in packages if row.get("source") is not None]
     keys = {(row["name"], row["version"]) for row in registry}
     D.need(len(keys) == len(registry) and all(row["source"] == "registry+https://github.com/rust-lang/crates.io-index"
