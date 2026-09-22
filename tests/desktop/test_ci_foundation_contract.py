@@ -7752,12 +7752,63 @@ class WindowsReaderGateTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--retry") + 1], "0")
         self.assertEqual(argv[argv.index("--max-redirs") + 1], "0")
         self.assertEqual(argv[-1], "https://www.python.org/ftp/python/3.14.7/python-3.14.7-embed-amd64.zip")
-        status = ("200\n" + helper.WINDOWS_FULLWALK_URL + "\n0\n" + str(helper.WINDOWS_FULLWALK_ZIP_BYTES) + "\n").encode("ascii")
-        helper.windows_fullwalk_supplier_status(status)
-        for bad in (status[:-1], status.replace(b"200\n", b"302\n"), status.replace(b"\n0\n", b"\n1\n"),
-                    status.replace(b"https:", b"http:"), status + b"\n", status.replace(b"12673227", b"12673228")):
-            with self.subTest(status=bad[:30]), self.assertRaises(helper.CheckFailure):
-                helper.windows_fullwalk_supplier_status(bad)
+        self.assertEqual(helper.WINDOWS_FULLWALK_ZIP_BYTES, 12673227)
+        self.assertEqual(helper.WINDOWS_FULLWALK_ZIP_SHA256, "d297e5ff019966817ad8502465176139f2d3d840fa4ed84b13bed399a6ab1f15")
+        self.assertEqual(argv[argv.index("--write-out") + 1],
+                         "%{http_code}\n%{url_effective}\n%{num_redirects}\n%{size_download}\n")
+        fields = (b"200", helper.WINDOWS_FULLWALK_URL.encode("ascii"), b"0", b"12673227")
+        labels = ("http", "effective-url", "redirect", "byte-count")
+        cases = []
+        for framing, ending in (("lf", b"\n"), ("crlf", b"\r\n")):
+            status = ending.join(fields) + ending
+            with self.subTest(framing=framing, case="exact-frame"):
+                self.assertIsNone(helper.windows_fullwalk_supplier_status(status))
+            changes = [
+                (0, "wrong-http", b"302"),
+                (1, "wrong-scheme", fields[1].replace(b"https:", b"http:")),
+                (1, "wrong-url-case", fields[1].replace(b"www.python.org", b"WWW.PYTHON.ORG")),
+                (1, "wrong-url-suffix", fields[1] + b"?unexpected=1"),
+                (2, "wrong-redirect", b"1"), (3, "wrong-byte-count", b"12673228"),
+            ]
+            for index, value in enumerate(fields):
+                changes.extend((index, case, wrong) for case, wrong in (
+                    ("leading-space", b" " + value), ("trailing-space", value + b" "),
+                    ("leading-tab", b"\t" + value), ("trailing-tab", value + b"\t"),
+                    ("non-ascii", value + b"\x80"), ("nul", value + b"\x00"), ("empty", b"")))
+                if index != 1:
+                    changes.extend((index, case, wrong) for case, wrong in (
+                        ("leading-zero", b"0" + value), ("plus", b"+" + value),
+                        ("decimal", value + b".0"), ("exponent", value + b"e0")))
+            for index, case, wrong in changes:
+                bad = ending.join(fields[:index] + (wrong,) + fields[index + 1:]) + ending
+                cases.append((framing + "-" + labels[index] + "-" + case, bad, labels[index]))
+            for first in range(3):
+                bad_fields = fields[:first] + (b"different",) * (4 - first)
+                cases.append((framing + "-first-field-" + str(first), ending.join(bad_fields) + ending, labels[first]))
+            malformed = [
+                ("missing-final", status[:-len(ending)]),
+                ("extra-final", status + ending),
+                ("missing-record", ending.join(fields[:-1]) + ending),
+                ("extra-record", status + b"extra" + ending),
+                ("extra-blank-record", ending.join(fields[:1] + (b"",) + fields[1:]) + ending),
+                ("trailing-space", status + b" "), ("trailing-tab", status + b"\t"),
+                ("trailing-nul", status + b"\x00"), ("trailing-data", status + b"extra"),
+                ("embedded-cr", ending.join((fields[0] + b"\rX",) + fields[1:]) + ending),
+                ("embedded-lf", ending.join((fields[0] + b"\nX",) + fields[1:]) + ending),
+                ("doubled-cr", fields[0] + b"\r\r\n" + ending.join(fields[1:]) + ending),
+                ("framing-before-http", ending.join((b"302",) + fields[1:]) + ending + b"\x00"),
+            ]
+            cases.extend((framing + "-" + case, bad, "framing") for case, bad in malformed)
+        cases.append(("bare-cr", b"\r".join(fields) + b"\r", "framing"))
+        for mask in range(1, 15):
+            mixed = b"".join(value + (b"\r\n" if mask & (1 << index) else b"\n")
+                             for index, value in enumerate(fields))
+            cases.append(("mixed-terminators-" + str(mask), mixed, "framing"))
+        for case, bad, label in cases:
+            with self.subTest(case=case):
+                with self.assertRaises(helper.CheckFailure) as caught:
+                    helper.windows_fullwalk_supplier_status(bad)
+                self.assertEqual(str(caught.exception), "Windows supplier " + label + " differs")
         self.assertEqual(helper.windows_fullwalk_preparer_argv(context), [context["python"], "-I", "-S", "-B",
             str(Path(context["source"]) / "desktop/tools/prepare_windows_embedded_payload.py"), "--source", context["source"],
             "--archive", str(Path(context["root"]) / "inputs" / helper.WINDOWS_FULLWALK_ZIP),

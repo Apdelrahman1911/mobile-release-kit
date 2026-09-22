@@ -9256,8 +9256,25 @@ def windows_fullwalk_curl_argv(context: dict) -> list[str]:
 
 
 def windows_fullwalk_supplier_status(raw: bytes) -> None:
-    require(raw == ("200\n" + WINDOWS_FULLWALK_URL + "\n0\n" + str(WINDOWS_FULLWALK_ZIP_BYTES) + "\n").encode("ascii"),
-            "Windows supplier status/effective URL/redirect/byte-count differs")
+    expected = (b"200", WINDOWS_FULLWALK_URL.encode("ascii"), b"0",
+                str(WINDOWS_FULLWALK_ZIP_BYTES).encode("ascii"))
+    endings = (b"\n", b"\r\n")
+    if raw in tuple(ending.join(expected) + ending for ending in endings):
+        return
+    # Parsed fields select rejection diagnostics only; this path never admits bytes.
+    label = "framing"
+    for ending in endings:
+        if not raw.endswith(ending):
+            continue
+        fields = raw[:-len(ending)].split(ending)
+        if len(fields) != 4 or any(b"\r" in field or b"\n" in field for field in fields):
+            continue
+        for value, wanted, field_label in zip(fields, expected, ("http", "effective-url", "redirect", "byte-count")):
+            if value != wanted:
+                label = field_label
+                break
+        break
+    raise CheckFailure(f"Windows supplier {label} differs")
 
 
 def windows_fullwalk_preparer_argv(context: dict) -> list[str]:
