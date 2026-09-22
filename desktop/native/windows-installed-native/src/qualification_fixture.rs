@@ -929,7 +929,7 @@ impl Fixture {
         frame.returned=unsafe {match frame.kind {
             MutationKind::Directory=>FS::CreateDirectoryW(frame.path.as_ptr(),&frame.attributes),
             MutationKind::Seal=>S::SetKernelObjectSecurity(frame.handle,S::DACL_SECURITY_INFORMATION,
-                frame.descriptor.0.as_ptr().cast()),
+                frame.descriptor.0.as_mut_ptr().cast()),
             MutationKind::Disposition=>FS::SetFileInformationByHandle(frame.handle,FS::FileDispositionInfo,
                 (&frame.disposition as *const FS::FILE_DISPOSITION_INFO).cast(),size_of::<FS::FILE_DISPOSITION_INFO>() as u32),
             MutationKind::FileCreate=>unreachable!("shared OriginalFile body only"),
