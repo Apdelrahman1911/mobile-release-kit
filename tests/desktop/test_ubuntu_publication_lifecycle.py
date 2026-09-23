@@ -3807,6 +3807,13 @@ class FailureLabelSinkContracts(unittest.TestCase):
         for worker in L.SHELL_SESSION_WORKERS:
             value = b"unregistered" if worker == b"na" else b"unavailable"
             self.assertEqual(L._shell_label_pair(frame(b"registry", b"none", b"bound", value, worker))["session"]["firstOrigin"]["worker"], worker.decode("ascii"))
+        for worker in (b"maps-check", b"map-p-nl", b"map-p-order", b"map-x-file", b"map-m-owner-cr", b"map-dup-py"):
+            raw = frame(b"supervisor-disabled", b"none", b"bound", b"cleanup.none.pp", worker)
+            self.assertEqual(L._shell_label_pair(raw)["session"]["firstOrigin"], {
+                "origin": "supervisor-disabled", "detail": "none", "association": "bound", "query": "cleanup.none.pp", "worker": worker.decode("ascii")})
+            self.assertLessEqual(len(raw), 412)
+            self.assertIsNone(L._shell_label_pair(raw.replace(b";a=bound", b";a=unassociated")))
+            self.assertIsNone(L._shell_label_pair(raw.replace(b";q=cleanup.none.pp", b";q=unregistered")))
         for stage in L.SHELL_SESSION_WORKER_STAGES:
             self.assertIsNotNone(L._shell_label_pair(frame(b"registry", b"none", b"bound", b"cleanup.none.pp", stage + b"-c")))
         for suffix in L.SHELL_SESSION_WORKER_JOINS:
@@ -3827,7 +3834,8 @@ class FailureLabelSinkContracts(unittest.TestCase):
                 b"none.spawn-other.pp", b"future.none.pp", b"cleanup.future.pp", b"cleanup.none.p", b"cleanup.none.ppp",
                 b"cleanup.none.pz", b"cleanup.none.pr.extra", b"cleanup..pr", b"cleanup_none_pr", b"cleanup.none.PR")),
             *(frame(b"registry", b"none", b"bound", b"cleanup.none.pp", worker) for worker in (
-                b"inspect-r", b"inspect-c-extra", b"future-c", b"maps-future", b"settle-unknownx", b"\xff"))]
+                b"inspect-r", b"inspect-c-extra", b"future-c", b"maps-future", b"settle-unknownx", b"\xff",
+                b"map-p-future", b"map-m-time-py", b"map-m-owner-zz", b"map-m-owner-pyx", b"map-x-file\n/private/inert"))]
         for raw in bad_v2:
             with self.subTest(version="v2", raw=raw[:80]): self.assertIsNone(L._shell_label_pair(raw))
 

@@ -385,9 +385,12 @@ mod session {
             assert!(WorkerJoin::returned(receipt).is_some() == matches!(token, b'c' | b'x' | b'f'));
         }
         use installed_native_fixture::ObservationFailure as F;
+        use installed_native_fixture::{MapRefusal as R, MapMetadataRefusal as M, MapRole};
+        installed_native_fixture::assert_mappings_diagnostic_contract();
         let mut resources = Resources::default();
         for (failure, token) in [(F::ChildId,b"child-id".as_slice()), (F::Entry,b"observe-entry"), (F::MapsRead,b"maps-read"),
-            (F::MapsCheck,b"maps-check"), (F::EnvironmentRead,b"env-read"), (F::EnvironmentCheck,b"env-check"), (F::HoldRefused,b"hold-refused")] {
+            (F::MapsCheck(R::Newline),b"map-p-nl"), (F::MapsCheck(R::Metadata(MapRole::Crypto, M::Owner)),b"map-m-owner-cr"),
+            (F::EnvironmentRead,b"env-read"), (F::EnvironmentCheck,b"env-check"), (F::HoldRefused,b"hold-refused")] {
             resources.native_observation_failure = Some(failure);
             assert!(WorkerProjection::stored(&resources).token() == token && token.len() <= 14);
         }

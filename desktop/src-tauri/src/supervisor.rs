@@ -1452,13 +1452,59 @@ mod installed_native_fixture {
     pub(super) struct Mapping { role: String, path: String, device_major: u64, device_minor: u64, inode: u64 }
     #[derive(Debug, Eq, PartialEq)]
     pub(super) struct ChildObservation { maps: Vec<Mapping>, environment_clear: bool }
+    // Diagnostic roles do not replace the original strings used to order maps.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) enum MapRole { Python, Ssl, Crypto, Loader, Libc, Libm }
+    impl MapRole {
+        const ALL: [Self; 6] = [Self::Python, Self::Ssl, Self::Crypto, Self::Loader, Self::Libc, Self::Libm];
+        fn name(self) -> &'static str {
+            match self { Self::Python => "python", Self::Ssl => "libssl.so.3", Self::Crypto => "libcrypto.so.3",
+                Self::Loader => "ld-linux-x86-64.so.2", Self::Libc => "libc.so.6", Self::Libm => "libm.so.6" }
+        }
+        fn diagnostic_tokens(self) -> [&'static [u8]; 8] {
+            // Fixed literals only; no observed pathname or metadata is emitted.
+            match self {
+                Self::Python => [b"map-m-stat-py", b"map-m-type-py", b"map-m-owner-py", b"map-m-links-py", b"map-m-mode-py", b"map-m-inode-py", b"map-m-dev-py", b"map-dup-py"],
+                Self::Ssl => [b"map-m-stat-ss", b"map-m-type-ss", b"map-m-owner-ss", b"map-m-links-ss", b"map-m-mode-ss", b"map-m-inode-ss", b"map-m-dev-ss", b"map-dup-ss"],
+                Self::Crypto => [b"map-m-stat-cr", b"map-m-type-cr", b"map-m-owner-cr", b"map-m-links-cr", b"map-m-mode-cr", b"map-m-inode-cr", b"map-m-dev-cr", b"map-dup-cr"],
+                Self::Loader => [b"map-m-stat-ld", b"map-m-type-ld", b"map-m-owner-ld", b"map-m-links-ld", b"map-m-mode-ld", b"map-m-inode-ld", b"map-m-dev-ld", b"map-dup-ld"],
+                Self::Libc => [b"map-m-stat-lc", b"map-m-type-lc", b"map-m-owner-lc", b"map-m-links-lc", b"map-m-mode-lc", b"map-m-inode-lc", b"map-m-dev-lc", b"map-dup-lc"],
+                Self::Libm => [b"map-m-stat-lm", b"map-m-type-lm", b"map-m-owner-lm", b"map-m-links-lm", b"map-m-mode-lm", b"map-m-inode-lm", b"map-m-dev-lm", b"map-dup-lm"],
+            }
+        }
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) enum MapMetadataRefusal { Stat, Type, Owner, Links, Mode, Inode, Device }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) enum MapRefusal {
+        Utf8, Newline, Row, Columns, Address, Order, Permissions, Offset, Device, Inode,
+        ExecutableAnonymous, ExecutablePseudo, ExecutableFile,
+        Metadata(MapRole, MapMetadataRefusal), Duplicate(MapRole),
+    }
+    impl MapRefusal {
+        fn token(self) -> &'static [u8] {
+            match self {
+                Self::Utf8 => b"map-p-utf", Self::Newline => b"map-p-nl", Self::Row => b"map-p-row",
+                Self::Columns => b"map-p-cols", Self::Address => b"map-p-addr", Self::Order => b"map-p-order",
+                Self::Permissions => b"map-p-perm", Self::Offset => b"map-p-offset", Self::Device => b"map-p-dev",
+                Self::Inode => b"map-p-inode", Self::ExecutableAnonymous => b"map-x-anon",
+                Self::ExecutablePseudo => b"map-x-pseudo", Self::ExecutableFile => b"map-x-file",
+                Self::Metadata(role, reason) => role.diagnostic_tokens()[match reason {
+                    MapMetadataRefusal::Stat => 0, MapMetadataRefusal::Type => 1, MapMetadataRefusal::Owner => 2,
+                    MapMetadataRefusal::Links => 3, MapMetadataRefusal::Mode => 4, MapMetadataRefusal::Inode => 5,
+                    MapMetadataRefusal::Device => 6,
+                }],
+                Self::Duplicate(role) => role.diagnostic_tokens()[7],
+            }
+        }
+    }
     #[derive(Clone, Copy, PartialEq, Eq)]
-    pub(super) enum ObservationFailure { ChildId, Entry, MapsRead, MapsCheck, EnvironmentRead, EnvironmentCheck, HoldRefused }
+    pub(super) enum ObservationFailure { ChildId, Entry, MapsRead, MapsCheck(MapRefusal), EnvironmentRead, EnvironmentCheck, HoldRefused }
     impl ObservationFailure {
         pub(super) fn token(self) -> &'static [u8] {
             match self {
                 Self::ChildId => b"child-id", Self::Entry => b"observe-entry", Self::MapsRead => b"maps-read",
-                Self::MapsCheck => b"maps-check", Self::EnvironmentRead => b"env-read", Self::EnvironmentCheck => b"env-check",
+                Self::MapsCheck(reason) => reason.token(), Self::EnvironmentRead => b"env-read", Self::EnvironmentCheck => b"env-check",
                 Self::HoldRefused => b"hold-refused",
             }
         }
@@ -1492,62 +1538,161 @@ mod installed_native_fixture {
         need(!value.is_empty() && value.len() <= 16 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))?;
         u64::from_str_radix(value, 16).map_err(|_| ())
     }
-    fn role(path: &str) -> Option<&'static str> {
-        for (name, suffix) in [("python", "/python/bin/python3"), ("libssl.so.3", "/python/lib/libssl.so.3"),
-            ("libcrypto.so.3", "/python/lib/libcrypto.so.3")] {
-            if path.strip_prefix(VERSION) == Some(suffix) { return Some(name); }
+    fn role(path: &str) -> Option<MapRole> {
+        for (role, suffix) in [(MapRole::Python, "/python/bin/python3"), (MapRole::Ssl, "/python/lib/libssl.so.3"),
+            (MapRole::Crypto, "/python/lib/libcrypto.so.3")] {
+            if path.strip_prefix(VERSION) == Some(suffix) { return Some(role); }
         }
-        for name in ["ld-linux-x86-64.so.2", "libc.so.6", "libm.so.6"] {
+        for role in [MapRole::Loader, MapRole::Libc, MapRole::Libm] {
+            let name = role.name();
             if path.strip_prefix("/usr/lib/x86_64-linux-gnu/") == Some(name)
                 || path.strip_prefix("/lib/x86_64-linux-gnu/") == Some(name)
-                || name == "ld-linux-x86-64.so.2" && path == "/lib64/ld-linux-x86-64.so.2" { return Some(name); }
+                || name == "ld-linux-x86-64.so.2" && path == "/lib64/ld-linux-x86-64.so.2" { return Some(role); }
         }
         None
     }
-    fn mappings(raw: &[u8]) -> Result<Option<Vec<Mapping>>, ()> {
-        let text = std::str::from_utf8(raw).map_err(|_| ())?;
-        need(text.is_empty() || text.ends_with('\n'))?;
-        let mut found: BTreeMap<&str, (Mapping, bool)> = BTreeMap::new();
+    #[derive(Clone, Copy)]
+    struct MapMetadata { regular: bool, uid: u32, gid: u32, links: u64, mode: u32, inode: u64, major: u64, minor: u64 }
+    fn check_map_metadata(st: MapMetadata, inode: u64, major: u64, minor: u64) -> Result<(), MapMetadataRefusal> {
+        // Pure facts from the SAME original stat; comparisons keep their old order.
+        if !st.regular { return Err(MapMetadataRefusal::Type); }
+        if st.uid != 0 || st.gid != 0 { return Err(MapMetadataRefusal::Owner); }
+        if st.links != 1 { return Err(MapMetadataRefusal::Links); }
+        if st.mode & 0o7022 != 0 { return Err(MapMetadataRefusal::Mode); }
+        if inode == 0 || inode != st.inode { return Err(MapMetadataRefusal::Inode); }
+        if major != st.major || minor != st.minor { return Err(MapMetadataRefusal::Device); }
+        Ok(())
+    }
+    fn insert_mapping(found: &mut BTreeMap<&'static str, (Mapping, bool)>, role: MapRole, row: Mapping, executable: bool) -> Result<(), MapRefusal> {
+        if let Some((previous, code)) = found.get_mut(role.name()) {
+            if *previous != row { return Err(MapRefusal::Duplicate(role)); }
+            *code |= executable;
+        } else { found.insert(role.name(), (row, executable)); }
+        Ok(())
+    }
+    fn complete_mappings(found: BTreeMap<&'static str, (Mapping, bool)>) -> Option<Vec<Mapping>> {
+        if found.len() == 6 && found.values().all(|(_, code)| *code) { Some(found.into_values().map(|(row, _)| row).collect()) } else { None }
+    }
+    fn mappings(raw: &[u8]) -> Result<Option<Vec<Mapping>>, MapRefusal> {
+        let text = std::str::from_utf8(raw).map_err(|_| MapRefusal::Utf8)?;
+        need(text.is_empty() || text.ends_with('\n')).map_err(|_| MapRefusal::Newline)?;
+        let mut found = BTreeMap::new();
         for (index, line) in text.split_terminator('\n').enumerate() {
-            need(index < 4096 && !line.is_empty())?;
+            need(index < 4096 && !line.is_empty()).map_err(|_| MapRefusal::Row)?;
             let mut rest = line;
             let mut columns = [""; 5];
             for column in &mut columns {
                 rest = rest.trim_start_matches([' ', '\t']);
                 let end = rest.find([' ', '\t']).unwrap_or(rest.len());
-                need(end > 0)?; *column = &rest[..end]; rest = &rest[end..];
+                need(end > 0).map_err(|_| MapRefusal::Columns)?; *column = &rest[..end]; rest = &rest[end..];
             }
-            let (start, end) = columns[0].split_once('-').ok_or(())?;
-            need(hex(start)? < hex(end)?)?;
+            let (start, end) = columns[0].split_once('-').ok_or(MapRefusal::Address)?;
+            need(hex(start).map_err(|_| MapRefusal::Address)? < hex(end).map_err(|_| MapRefusal::Address)?).map_err(|_| MapRefusal::Order)?;
             let permissions = columns[1].as_bytes();
             need(permissions.len() == 4 && matches!(permissions[0], b'r' | b'-') && matches!(permissions[1], b'w' | b'-')
-                && matches!(permissions[2], b'x' | b'-') && matches!(permissions[3], b'p' | b's'))?;
-            let _ = hex(columns[2])?;
-            let (major, minor) = columns[3].split_once(':').ok_or(())?;
-            let (major, minor) = (hex(major)?, hex(minor)?);
-            need(!columns[4].is_empty() && columns[4].len() <= 20 && columns[4].bytes().all(|byte| byte.is_ascii_digit()))?;
-            let inode = columns[4].parse::<u64>().map_err(|_| ())?;
+                && matches!(permissions[2], b'x' | b'-') && matches!(permissions[3], b'p' | b's')).map_err(|_| MapRefusal::Permissions)?;
+            let _ = hex(columns[2]).map_err(|_| MapRefusal::Offset)?;
+            let (major, minor) = columns[3].split_once(':').ok_or(MapRefusal::Device)?;
+            let (major, minor) = (hex(major).map_err(|_| MapRefusal::Device)?, hex(minor).map_err(|_| MapRefusal::Device)?);
+            need(!columns[4].is_empty() && columns[4].len() <= 20 && columns[4].bytes().all(|byte| byte.is_ascii_digit())).map_err(|_| MapRefusal::Inode)?;
+            let inode = columns[4].parse::<u64>().map_err(|_| MapRefusal::Inode)?;
             let path = rest.trim_start_matches([' ', '\t']); // Opaque pathname, not a sixth whitespace token.
             let executable = permissions[2] == b'x';
             if !path.starts_with('/') {
-                need(!executable || matches!(path, "[vdso]" | "[vsyscall]"))?;
+                need(!executable || matches!(path, "[vdso]" | "[vsyscall]")).map_err(|_|
+                    if path.is_empty() { MapRefusal::ExecutableAnonymous } else { MapRefusal::ExecutablePseudo })?;
                 continue;
             }
-            let Some(role) = role(path) else { need(!executable)?; continue; };
-            let st = fs::metadata(path).map_err(|_| ())?;
-            need(st.is_file() && st.uid() == 0 && st.gid() == 0 && st.nlink() == 1 && st.mode() & 0o7022 == 0
-                && inode > 0 && inode == st.ino() && major == nix::sys::stat::major(st.dev()) && minor == nix::sys::stat::minor(st.dev()))?;
-            let row = Mapping { role: role.into(), path: path.into(), device_major: major, device_minor: minor, inode };
-            if let Some((previous, code)) = found.get_mut(role) { need(*previous == row)?; *code |= executable; }
-            else { found.insert(role, (row, executable)); }
+            let Some(role) = role(path) else { need(!executable).map_err(|_| MapRefusal::ExecutableFile)?; continue; };
+            let st = fs::metadata(path).map_err(|_| MapRefusal::Metadata(role, MapMetadataRefusal::Stat))?;
+            check_map_metadata(MapMetadata { regular: st.is_file(), uid: st.uid(), gid: st.gid(), links: st.nlink(), mode: st.mode(),
+                inode: st.ino(), major: nix::sys::stat::major(st.dev()), minor: nix::sys::stat::minor(st.dev()) }, inode, major, minor)
+                .map_err(|reason| MapRefusal::Metadata(role, reason))?;
+            let row = Mapping { role: role.name().into(), path: path.into(), device_major: major, device_minor: minor, inode };
+            insert_mapping(&mut found, role, row, executable)?;
         }
-        Ok(if found.len() == 6 && found.values().all(|(_, code)| *code) { Some(found.into_values().map(|(row, _)| row).collect()) } else { None })
+        Ok(complete_mappings(found))
+    }
+    #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
+    pub(super) fn assert_mappings_diagnostic_contract() {
+        // Explicit-call DATA only. These parser inputs have no recognized file
+        // paths, so no filesystem, /proc reader or native worker is invoked.
+        use MapRefusal as R;
+        let failures: &[(&[u8], R)] = &[
+            (b"\xff", R::Utf8), (b"x", R::Newline), (b"\n", R::Row),
+            (b"1-2 r--p 0 00:00\n", R::Columns), (b"x r--p 0 00:00 0\n", R::Address),
+            (b"1-z r--p 0 00:00 0\n", R::Address), (b"2-1 invalid 0 00:00 0\n", R::Order),
+            (b"1-2 invalid x 00:00 0\n", R::Permissions), (b"1-2 r--p x invalid 0\n", R::Offset),
+            (b"1-2 r--p 0 invalid invalid\n", R::Device), (b"1-2 r--p 0 00:00 invalid\n", R::Inode),
+            (b"1-2 r--p 0 00:00 18446744073709551616\n", R::Inode),
+            (b"1-2 r-xp 0 00:00 0\n", R::ExecutableAnonymous),
+            (b"1-2 r-xp 0 00:00 0 [heap]\n", R::ExecutablePseudo),
+            (b"1-2 r-xp 0 00:00 0 /unrecognized\n", R::ExecutableFile),
+        ];
+        for &(bytes, expected) in failures { assert_eq!(mappings(bytes), Err(expected)); }
+        for bytes in [b"".as_slice(), b"1-2 r--p 0 00:00 0\n", b"1-2 r--p 0 00:00 0 /unrecognized\n",
+            b"1-2 r-xp 0 00:00 0 [vdso]\n1-2 r-xp 0 00:00 0 [vsyscall]\n"] {
+            assert_eq!(mappings(bytes), Ok(None));
+        }
+        use MapMetadataRefusal as M;
+        let good = MapMetadata { regular: true, uid: 0, gid: 0, links: 1, mode: 0o100755, inode: 1, major: 8, minor: 1 };
+        for mode in [0o100400, 0o100644, 0o100755] { assert_eq!(check_map_metadata(MapMetadata { mode, ..good }, 1, 8, 1), Ok(())); }
+        let mut bad = MapMetadata { regular: false, uid: 1, links: 2, mode: 0o102777, inode: 2, major: 9, minor: 2, ..good };
+        assert_eq!(check_map_metadata(bad, 1, 8, 1), Err(M::Type)); bad.regular = true;
+        assert_eq!(check_map_metadata(bad, 1, 8, 1), Err(M::Owner)); bad.uid = 0; bad.gid = 1;
+        assert_eq!(check_map_metadata(bad, 1, 8, 1), Err(M::Owner)); bad.gid = 0;
+        assert_eq!(check_map_metadata(bad, 1, 8, 1), Err(M::Links)); bad.links = 1;
+        assert_eq!(check_map_metadata(bad, 1, 8, 1), Err(M::Mode)); bad.mode = good.mode;
+        assert_eq!(check_map_metadata(bad, 1, 8, 1), Err(M::Inode)); bad.inode = good.inode;
+        assert_eq!(check_map_metadata(bad, 0, 8, 1), Err(M::Inode));
+        assert_eq!(check_map_metadata(bad, 1, 8, 1), Err(M::Device)); bad.major = good.major;
+        assert_eq!(check_map_metadata(bad, 1, 8, 1), Err(M::Device)); bad.minor = good.minor;
+        assert_eq!(check_map_metadata(bad, 1, 8, 1), Ok(()));
+
+        let row = Mapping { role: MapRole::Python.name().into(), path: "inert-original".into(), device_major: 8, device_minor: 1, inode: 1 };
+        let mut found = BTreeMap::new();
+        assert_eq!(complete_mappings(found.clone()), None);
+        assert_eq!(insert_mapping(&mut found, MapRole::Python, row.clone(), false), Ok(()));
+        assert_eq!(complete_mappings(found.clone()), None); // Recognized-but-incomplete is not refusal.
+        assert_eq!(insert_mapping(&mut found, MapRole::Python, row.clone(), true), Ok(()));
+        assert_eq!(insert_mapping(&mut found, MapRole::Python, row.clone(), false), Ok(()));
+        assert_eq!(found.get("python"), Some(&(row.clone(), true)));
+        let unchanged = found.clone();
+        let conflict = Mapping { inode: 2, ..row };
+        assert_eq!(insert_mapping(&mut found, MapRole::Python, conflict, false), Err(R::Duplicate(MapRole::Python)));
+        assert_eq!(found, unchanged);
+        for role in MapRole::ALL.into_iter().filter(|role| *role != MapRole::Python) {
+            let row = Mapping { role: role.name().into(), path: "inert-original".into(), device_major: 8, device_minor: 1, inode: 1 };
+            assert_eq!(insert_mapping(&mut found, role, row, role != MapRole::Ssl), Ok(()));
+        }
+        assert_eq!(complete_mappings(found.clone()), None); // Every one of the six roles must have code.
+        found.get_mut(MapRole::Ssl.name()).unwrap().1 = true;
+        let complete = complete_mappings(found).unwrap();
+        assert_eq!(complete.iter().map(|row| row.role.as_str()).collect::<Vec<_>>(),
+            ["ld-linux-x86-64.so.2", "libc.so.6", "libcrypto.so.3", "libm.so.6", "libssl.so.3", "python"]);
+        for (path, expected) in [("/lib/x86_64-linux-gnu/libc.so.6", Some(MapRole::Libc)),
+            ("/usr/lib/x86_64-linux-gnu/libc.so.6", Some(MapRole::Libc)), ("/lib64/ld-linux-x86-64.so.2", Some(MapRole::Loader)),
+            ("/lib64/libc.so.6", None), ("/lib/x86_64-linux-gnu/libc.so.6 (deleted)", None)] {
+            assert_eq!(role(path), expected);
+        }
+        assert_eq!(role(&format!("{VERSION}/python/bin/python3")), Some(MapRole::Python));
+        let mut tokens = vec![R::Utf8.token(), R::Newline.token(), R::Row.token(), R::Columns.token(), R::Address.token(),
+            R::Order.token(), R::Permissions.token(), R::Offset.token(), R::Device.token(), R::Inode.token(),
+            R::ExecutableAnonymous.token(), R::ExecutablePseudo.token(), R::ExecutableFile.token()];
+        for role in MapRole::ALL {
+            for reason in [M::Stat, M::Type, M::Owner, M::Links, M::Mode, M::Inode, M::Device] { tokens.push(R::Metadata(role, reason).token()); }
+            tokens.push(R::Duplicate(role).token());
+        }
+        assert_eq!(tokens.len(), 61);
+        assert!(tokens.iter().all(|token| !token.is_empty() && token.len() <= 14
+            && token.iter().all(|byte| byte.is_ascii_lowercase() || *byte == b'-')));
+        tokens.sort(); tokens.dedup(); assert_eq!(tokens.len(), 61);
     }
     fn child_snapshot(id: u32, end: Instant, stop: &watch::Receiver<bool>) -> Result<Option<ChildObservation>, ObservationFailure> {
         need(id > 0).map_err(|_| ObservationFailure::ChildId)?;
         while live(end, stop) {
             let raw = original_bytes(Path::new(&format!("/proc/{id}/maps")), 1 << 20, false).map_err(|_| ObservationFailure::MapsRead)?;
-            if let Some(maps) = mappings(&raw).map_err(|_| ObservationFailure::MapsCheck)? {
+            if let Some(maps) = mappings(&raw).map_err(ObservationFailure::MapsCheck)? {
                 let mut environment = original_bytes(Path::new(&format!("/proc/{id}/environ")), 8192, false)
                     .map_err(|_| ObservationFailure::EnvironmentRead)?;
                 let clear = environment.last() == Some(&0) && {

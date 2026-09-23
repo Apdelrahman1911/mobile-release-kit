@@ -1855,7 +1855,13 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         workers = query_source.split("impl WorkerProjection {", 1)[1].split("pub(crate) struct InstalledSessionQueryDiagnostic", 1)[0]
         native = supervisor.split("impl ObservationFailure {", 1)[1].split("impl ChildObservation", 1)[0]
         literals = {value.encode("ascii") for value in re.findall(r'=> b"([a-z-]+)"', workers + native)}
-        self.assertEqual(literals, set(lifecycle.SHELL_SESSION_WORKERS))
+        maps = supervisor.split("impl MapRole {", 1)[1].split("impl ObservationFailure {", 1)[0]
+        map_tokens = tuple(value.encode("ascii") for value in re.findall(r'b"(map-[a-z-]+)"', maps))
+        self.assertEqual((len(map_tokens), len(set(map_tokens))), (61, 61))
+        self.assertTrue(all(re.fullmatch(rb"[a-z-]{1,14}", token) for token in map_tokens))
+        self.assertEqual(literals | set(map_tokens) | {b"maps-check"}, set(lifecycle.SHELL_SESSION_WORKERS))
+        self.assertEqual(len(lifecycle.SHELL_SESSION_WORKERS), len(set(lifecycle.SHELL_SESSION_WORKERS)))
+        self.assertIn("installed_native_fixture::assert_mappings_diagnostic_contract();", query_source)
         stages = re.findall(r'WorkerStage::[A-Za-z]+ => join.token\(b"([a-z]+)-c", b"\1-x", b"\1-f"\)', workers)
         self.assertEqual(tuple(stage.encode("ascii") for stage in stages), lifecycle.SHELL_SESSION_WORKER_STAGES)
         self.assertEqual(lifecycle.SHELL_SESSION_WORKER_JOINS, b"cxf")

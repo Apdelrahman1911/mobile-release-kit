@@ -280,6 +280,16 @@ SHELL_SESSION_MANAGEMENT_JOINS = b"prmcxfi"
 SHELL_SESSION_WORKERS = (
     b"na", b"unavailable", b"none-recorded", b"child-id", b"observe-entry", b"maps-read", b"maps-check", b"env-read", b"env-check",
     b"hold-refused", b"settle-unknown",
+    # Same-read refusal categories, not raw values or an inferred root cause.
+    # Historical maps-check above remains generic and distinguishable.
+    b"map-p-utf", b"map-p-nl", b"map-p-row", b"map-p-cols", b"map-p-addr", b"map-p-order", b"map-p-perm", b"map-p-offset", b"map-p-dev", b"map-p-inode",
+    b"map-x-anon", b"map-x-pseudo", b"map-x-file",
+    b"map-m-stat-py", b"map-m-type-py", b"map-m-owner-py", b"map-m-links-py", b"map-m-mode-py", b"map-m-inode-py", b"map-m-dev-py", b"map-dup-py",
+    b"map-m-stat-ss", b"map-m-type-ss", b"map-m-owner-ss", b"map-m-links-ss", b"map-m-mode-ss", b"map-m-inode-ss", b"map-m-dev-ss", b"map-dup-ss",
+    b"map-m-stat-cr", b"map-m-type-cr", b"map-m-owner-cr", b"map-m-links-cr", b"map-m-mode-cr", b"map-m-inode-cr", b"map-m-dev-cr", b"map-dup-cr",
+    b"map-m-stat-ld", b"map-m-type-ld", b"map-m-owner-ld", b"map-m-links-ld", b"map-m-mode-ld", b"map-m-inode-ld", b"map-m-dev-ld", b"map-dup-ld",
+    b"map-m-stat-lc", b"map-m-type-lc", b"map-m-owner-lc", b"map-m-links-lc", b"map-m-mode-lc", b"map-m-inode-lc", b"map-m-dev-lc", b"map-dup-lc",
+    b"map-m-stat-lm", b"map-m-type-lm", b"map-m-owner-lm", b"map-m-links-lm", b"map-m-mode-lm", b"map-m-inode-lm", b"map-m-dev-lm", b"map-dup-lm",
 )
 SHELL_SESSION_WORKER_STAGES = (b"inspect", b"acquire", b"observe", b"write", b"stdout", b"stderr", b"settle")
 SHELL_SESSION_WORKER_JOINS = b"cxf"
