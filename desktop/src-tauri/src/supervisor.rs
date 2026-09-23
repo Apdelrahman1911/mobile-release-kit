@@ -1242,6 +1242,8 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     // Original child wait and IO/EOF evidence are still in Resources here.
     // Keep custody through them, then join its one explicit native settlement.
     if !settle_passive(&mut resources, &inner, &owner).await { return DriverEnd::RetainedUnknown; }
+    #[cfg(all(test, target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+    windows_passive_tests::observe_settled_io(&inner, &resources);
     let output = resources.out_end.take();
     let diagnostics = resources.err_end.take();
     if output.as_ref().is_some_and(|end| end.overflow) || diagnostics.as_ref().is_some_and(|end| end.overflow) {

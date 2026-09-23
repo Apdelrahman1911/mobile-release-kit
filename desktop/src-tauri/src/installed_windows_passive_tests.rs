@@ -15,15 +15,94 @@ pub(super) struct Hooks {
     case: Mutex<Case>,
     ready: watch::Sender<bool>,
     live: AtomicBool,
+    consumed_io: Mutex<ConsumedIo>,
 }
 impl Default for Hooks {
     fn default() -> Self {
         let (ready, _) = watch::channel(false);
-        Self { case: Mutex::new(Case::Engine), ready, live: AtomicBool::new(false) }
+        Self { case: Mutex::new(Case::Engine), ready, live: AtomicBool::new(false),
+            consumed_io: Mutex::new(ConsumedIo::Absent) }
     }
 }
 impl Hooks {
     pub(super) fn hold_writer(&self) -> bool { *lock(&self.case) == Case::StopChild }
+}
+
+// DATA only, captured on the original driver immediately before it consumes
+// the real read results. No bytes, handles, authority or substitute join receipt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConsumedIo {
+    Absent,
+    Once { stdout: Option<(bool, bool)>, stderr: Option<(bool, bool)> },
+    Repeated,
+}
+impl ConsumedIo {
+    fn record(&mut self, stdout: Option<(bool, bool)>, stderr: Option<(bool, bool)>) {
+        *self = match *self { Self::Absent => Self::Once { stdout, stderr }, _ => Self::Repeated };
+    }
+    fn complete(self) -> bool {
+        matches!(self, Self::Once { stdout: Some((true, false)), stderr: Some((true, false)) })
+    }
+}
+pub(super) fn observe_settled_io(inner: &Inner, resources: &Resources) {
+    lock(&inner.windows_test.consumed_io).record(
+        resources.out_end.as_ref().map(|end| (end.eof, end.overflow)),
+        resources.err_end.as_ref().map(|end| (end.eof, end.overflow)));
+}
+
+#[derive(Clone, Copy)]
+struct ConsumerReturn {
+    waited: bool,
+    acquisition: Option<ManagementJoin>,
+    child_retained: bool,
+    write_returned: bool,
+    stdout_retained: bool,
+    stderr_retained: bool,
+    no_child_effect: bool,
+    kill_attempted: bool,
+    io: ConsumedIo,
+}
+impl ConsumerReturn {
+    fn consistent(self) -> bool {
+        if self.child_retained || self.stdout_retained || self.stderr_retained { return false; }
+        if self.waited {
+            self.acquisition == Some(ManagementJoin::Returned) && self.write_returned
+                && !self.no_child_effect && self.io.complete()
+        } else {
+            matches!(self.acquisition, None | Some(ManagementJoin::Returned))
+                && self.no_child_effect && !self.write_returned && !self.kill_attempted
+                && self.io == ConsumedIo::Absent
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PhaseMarker { Start, Settled, QueryUnknown, ObserverMissing, ObserverFailed,
+    ResourceBorrow, SlotsMissing, NativeBorrow, FinalityMissing }
+fn diagnostic(case: Case, method: Method, phase: PhaseMarker) {
+    use std::io::Write;
+    let case = match (case, method) {
+        (Case::Engine, Method::Capabilities) => "capabilities",
+        (Case::Engine, Method::Catalog) => "catalog",
+        (Case::Engine, Method::ValidateConfig) => "config-validate",
+        (Case::Engine, Method::SuggestConfig) => "config-suggest",
+        (Case::Engine, Method::PreviewConfig) => "config-preview",
+        (Case::Closure, Method::Catalog) => "closure",
+        (Case::StopBeforeClaim, Method::Capabilities) => "stop-before-claim",
+        (Case::StopChild, Method::Catalog) => "stop-owned-child",
+        (Case::Engine, Method::ProjectSnapshot) => "closed-method",
+        _ => "unexpected-fixed-case",
+    };
+    let phase = match phase {
+        PhaseMarker::Start => "start", PhaseMarker::Settled => "settled",
+        PhaseMarker::QueryUnknown => "query-finality-unknown", PhaseMarker::ObserverMissing => "observer-missing",
+        PhaseMarker::ObserverFailed => "observer-failed", PhaseMarker::ResourceBorrow => "resource-borrow-outstanding",
+        PhaseMarker::SlotsMissing => "native-slots-missing", PhaseMarker::NativeBorrow => "native-borrow-outstanding",
+        PhaseMarker::FinalityMissing => "finality-postcondition-missing",
+    };
+    // Best effort on the existing stream only. Failure cannot unwind originals;
+    // stream inheritance/marker visibility is not assumed or used as authority.
+    let _ = writeln!(std::io::stderr().lock(), "MRK_WINDOWS_PASSIVE_CASE=case={case};phase={phase}");
 }
 fn probe_command_units(python: &str, core: &str) -> Option<usize> {
     // Conservative std Command quoting bound: include every quote/backslash,
@@ -81,12 +160,14 @@ struct Observation {
     write_complete: bool,
     live: bool,
 }
-async fn retain_originals(supervisor: &Supervisor, owner: &Arc<Owner>, note: &'static str) -> Observation {
+async fn retain_originals(supervisor: &Supervisor, owner: &Arc<Owner>, case: Case,
+    method: Method, phase: PhaseMarker) -> Observation {
     owner.unknown(&supervisor.inner);
-    eprintln!("Windows installed passive retained: {note}");
+    diagnostic(case, method, phase);
     pending::<Observation>().await // Borrow THIS owner/supervisor; no replacement controller.
 }
 async fn case(case: Case, method: Method, params: Value) -> Observation {
+    diagnostic(case, method, PhaseMarker::Start);
     let supervisor = Supervisor::new(RuntimeConfig::installed_windows_passive_candidate());
     *lock(&supervisor.inner.windows_test.case) = case;
     let mut created = supervisor.inner.windows_test.ready.subscribe();
@@ -107,15 +188,15 @@ async fn case(case: Case, method: Method, params: Value) -> Observation {
     }
     let result = match early { Some(result) => result, None => response.await };
     if result.as_ref().err().is_some_and(|error| error.code == "cleanup_unknown") {
-        return retain_originals(&supervisor, &owner, "original query finality unknown").await;
+        return retain_originals(&supervisor, &owner, case, method, PhaseMarker::QueryUnknown).await;
     }
     let observer = { owner.observer.lock().await.take() };
     let Some(mut observer) = observer else {
-        return retain_originals(&supervisor, &owner, "original observer missing").await;
+        return retain_originals(&supervisor, &owner, case, method, PhaseMarker::ObserverMissing).await;
     };
     if (&mut observer).await.is_err() {
         *owner.observer.lock().await = Some(observer);
-        return retain_originals(&supervisor, &owner, "original observer failed").await;
+        return retain_originals(&supervisor, &owner, case, method, PhaseMarker::ObserverFailed).await;
     }
     drop(observer);
     let management = {
@@ -124,42 +205,96 @@ async fn case(case: Case, method: Method, params: Value) -> Observation {
             && state.driver_join == ManagementJoin::Returned && state.watchdog_join == ManagementJoin::Returned
     } && owner.driver.try_lock().is_ok_and(|slot| slot.is_none())
         && owner.watchdog.try_lock().is_ok_and(|slot| slot.is_none())
-        && lock(&owner.permit).is_none() && supervisor.can_exit() && !supervisor.disabled()
+        && lock(&owner.permit).is_none() && supervisor.can_exit() && !supervisor.disabled() && !supervisor.stopping()
         && supervisor.inner.permits.available_permits() == ACTIVE_LIMIT;
     let resources = match owner.resources.try_lock() {
         Ok(resources) => resources,
-        Err(_) => return retain_originals(&supervisor, &owner, "original resource borrow did not return").await,
+        Err(_) => return retain_originals(&supervisor, &owner, case, method, PhaseMarker::ResourceBorrow).await,
     };
     let Some(originals) = resources.passive.as_ref() else {
         drop(resources);
-        return retain_originals(&supervisor, &owner, "registered Windows slots missing").await;
+        return retain_originals(&supervisor, &owner, case, method, PhaseMarker::SlotsMissing).await;
     };
     let slots = match originals.try_lock() {
         Ok(slots) => slots,
-        Err(_) => return retain_originals(&supervisor, &owner, "original native borrow did not return").await,
+        Err(_) => return retain_originals(&supervisor, &owner, case, method, PhaseMarker::NativeBorrow).await,
     };
-    let child = resources.child.is_some();
+    // The driver deliberately consumes Child and both read DTOs before Ready.
+    // The retained actual wait, not a live Child slot, proves that it existed.
+    let child = resources.waited.is_some();
     let joined = resources.inspection_return == Some(ManagementJoin::Returned)
         && resources.inspection.is_none() && resources.inspection_error.is_none()
         && resources.acquisition.is_none() && resources.acquisition_error.is_none()
         && resources.writer.is_none() && resources.stdout.is_none() && resources.stderr.is_none()
         && resources.failed_writer.is_none() && resources.failed_stdout.is_none() && resources.failed_stderr.is_none();
-    let consumers = if child {
-        resources.acquisition_return == Some(ManagementJoin::Returned) && resources.waited.is_some()
-            && resources.out_end.as_ref().is_some_and(|r| r.eof && !r.overflow)
-            && resources.err_end.as_ref().is_some_and(|r| r.eof && !r.overflow)
-    } else { slots.no_child_effect() && resources.waited.is_none() };
-    if !management || !joined || !consumers || !(slots.never_started() || slots.settled()) {
+    let consumers = ConsumerReturn {
+        waited: child, acquisition: resources.acquisition_return, child_retained: resources.child.is_some(),
+        write_returned: resources.write_end.is_some(), stdout_retained: resources.out_end.is_some(),
+        stderr_retained: resources.err_end.is_some(), no_child_effect: slots.no_child_effect(),
+        kill_attempted: resources.kill_attempted, io: *lock(&supervisor.inner.windows_test.consumed_io),
+    }.consistent();
+    let (inspection, acquisition) = passive_borrows(&resources);
+    let native = if slots.never_started() {
+        !resources.native_started && resources.native_return.is_none() && resources.native_settlement.is_none()
+            && passive_never_started_clear(inspection, acquisition, true)
+    } else {
+        passive_completion_clear(inspection, acquisition, resources.native_started,
+            resources.native_return.as_ref().is_some_and(Result::is_ok), resources.native_settlement.is_some(),
+            matches!(resources.native_return.as_ref(), Some(Ok(CloseOutcome::Settled))), slots.settled())
+    };
+    if !management || !joined || !consumers || !native {
         drop(slots); drop(resources);
-        return retain_originals(&supervisor, &owner, "original finality postcondition missing").await;
+        return retain_originals(&supervisor, &owner, case, method, PhaseMarker::FinalityMissing).await;
     }
-    Observation { result, native: slots.settled_observation(), child, kill: resources.kill_attempted,
+    let observation = Observation { result, native: slots.settled_observation(), child, kill: resources.kill_attempted,
         write_complete: resources.write_end.as_ref().is_some_and(|w| w.complete),
-        live: supervisor.inner.windows_test.live.load(Ordering::SeqCst) }
+        live: supervisor.inner.windows_test.live.load(Ordering::SeqCst) };
+    drop(slots); drop(resources);
+    diagnostic(case, method, PhaseMarker::Settled);
+    observation
 }
 
 #[test]
 fn fixed_probe_and_candidate_are_bounded_and_nonshipping() {
+    // Same DATA predicate as the native fixture, not invented native receipts.
+    let mut io = ConsumedIo::Absent;
+    io.record(Some((true, false)), Some((true, false)));
+    let child = ConsumerReturn { waited: true, acquisition: Some(ManagementJoin::Returned),
+        child_retained: false, write_returned: true, stdout_retained: false, stderr_retained: false,
+        no_child_effect: false, kill_attempted: false, io };
+    assert!(child.consistent());
+    assert!(ConsumerReturn { kill_attempted: true, ..child }.consistent()); // Settled STOP; outcome/write completeness are separate.
+    for wrong in [
+        ConsumerReturn { waited: false, ..child }, ConsumerReturn { acquisition: None, ..child },
+        ConsumerReturn { acquisition: Some(ManagementJoin::Pending), ..child },
+        ConsumerReturn { acquisition: Some(ManagementJoin::Panicked), ..child },
+        ConsumerReturn { child_retained: true, ..child }, ConsumerReturn { write_returned: false, ..child },
+        ConsumerReturn { stdout_retained: true, ..child }, ConsumerReturn { stderr_retained: true, ..child },
+        ConsumerReturn { no_child_effect: true, ..child }, ConsumerReturn { io: ConsumedIo::Absent, ..child },
+    ] { assert!(!wrong.consistent()); }
+    for wrong in [
+        ConsumedIo::Once { stdout: None, stderr: Some((true, false)) },
+        ConsumedIo::Once { stdout: Some((true, false)), stderr: None },
+        ConsumedIo::Once { stdout: Some((false, false)), stderr: Some((true, false)) },
+        ConsumedIo::Once { stdout: Some((true, false)), stderr: Some((false, false)) },
+        ConsumedIo::Once { stdout: Some((true, true)), stderr: Some((true, false)) },
+        ConsumedIo::Once { stdout: Some((true, false)), stderr: Some((true, true)) },
+    ] { assert!(!ConsumerReturn { io: wrong, ..child }.consistent()); }
+    io.record(Some((true, false)), Some((true, false)));
+    assert_eq!(io, ConsumedIo::Repeated);
+    assert!(!ConsumerReturn { io, ..child }.consistent());
+    io.record(Some((true, false)), Some((true, false)));
+    assert_eq!(io, ConsumedIo::Repeated);
+    let no_child = ConsumerReturn { waited: false, acquisition: None, write_returned: false,
+        no_child_effect: true, io: ConsumedIo::Absent, ..child };
+    assert!(no_child.consistent()); // Closed method; native never-started shape checked separately.
+    assert!(ConsumerReturn { acquisition: Some(ManagementJoin::Returned), ..no_child }.consistent()); // Preclaim STOP.
+    for wrong in [
+        ConsumerReturn { waited: true, ..no_child }, ConsumerReturn { no_child_effect: false, ..no_child },
+        ConsumerReturn { write_returned: true, ..no_child }, ConsumerReturn { kill_attempted: true, ..no_child },
+        ConsumerReturn { acquisition: Some(ManagementJoin::Pending), ..no_child },
+        ConsumerReturn { io: child.io, ..no_child }, ConsumerReturn { io: ConsumedIo::Repeated, ..no_child },
+    ] { assert!(!wrong.consistent()); }
     assert_eq!(PROBE.len(), 27173);
     assert!(probe_command_units(&"a".repeat(507), &"a".repeat(507)).is_some());
     assert!(probe_command_units(&"a".repeat(32767), "C:\\core.zip").is_none());
