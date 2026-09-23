@@ -215,10 +215,12 @@ fn native_proof_value(p: mrk_macos_installed_native::IdentityBinding) -> Value {
             "panelIdentifier":c[4],"parentSingleton":c[5],"noNestedSheet":c[6],"nativeChild":c[7],
             "nativeParent":c[8],"nativeRole":c[9],"stableIdentifier":c[10],"finalEligibility":c[11]}})
 }
-fn prompt_button_value(p: mrk_macos_installed_native::DirectSheetButtonProof) -> Value {
+fn prompt_button_value(p: mrk_macos_installed_native::ControlContainerButtonProof) -> Value {
     let c = p.checks;
-    json!({"checks":{"parentBound":c[0],"sheetBound":c[1],"completeDirectSheetChildren":c[2],"uniqueDirectPromptButton":c[3],
-        "enabled":c[4],"pressAdvertised":c[5],"sameDirectButtonRechecked":c[6]},"calls":p.calls,"directChildrenExamined":p.direct_children_examined,
+    json!({"checks":{"parentBound":c[0],"sheetBound":c[1],"completeControlProjection":c[2],"uniquePromptButton":c[3],
+        "enabled":c[4],"pressAdvertised":c[5],"sameOriginalControlPathRechecked":c[6]},"calls":p.calls,
+        "initialNodesExamined":p.initial_nodes_examined,"recheckNodesExamined":p.recheck_nodes_examined,
+        "lastRole":p.last_role,"lastDepth":p.last_depth,
         "cfSlots":p.cf_slots,"cfSlotsRetired":p.cf_slots_retired,"cleanupReturned":p.cleanup_returned,"axError":p.ax_error})
 }
 struct OpenActionReceipt { token: OpenAction, body: OpenActionBody, returned_at: Instant }
@@ -308,7 +310,7 @@ impl OpenInputSample {
             && self.report.is_some_and(|r| r.succeeded() && self.diagnostic == Some(r.diagnostic))
     }
     fn value(self) -> Value {
-        json!({"mechanism":"accessibility-press-original-direct-sheet-button-v2","step":"OpenProject","id":self.id,
+        json!({"mechanism":"accessibility-press-original-control-container-button-v3","step":"OpenProject","id":self.id,
             "prepared":self.prepared,"requested":self.requested,"dispatchAttempted":self.dispatch_attempted,"state":self.state,
             "bodyEntered":self.entered,"nativeEntered":self.native_entered,"bodyReturned":self.returned,
             "receiptJoined":self.joined,"workerRegistered":self.worker_registered,"workerJoined":self.worker_joined,
@@ -2236,10 +2238,11 @@ fn route() -> Option<(PathBuf,u32)> {
 // Pure regression checks in the already-required instrumented native entry.
 // These do not call AppKit, acquire files, dispatch actions, or supply receipts.
 fn native_recheck_data_check() -> bool {
-    use mrk_macos_installed_native::{DirectSheetButtonProof, IdentityBinding, OpenDiagnostic, OpenReport};
+    use mrk_macos_installed_native::{ControlContainerButtonProof, IdentityBinding, OpenDiagnostic, OpenReport};
     let proof = IdentityBinding { attempted: true, parent: Some("match"), panel: Some("match"), checks: [Some(true); 12],
         children: Some(1), originals: Some("one"), site: "complete", error: "none" };
-    let button = DirectSheetButtonProof { checks: [true; 7], calls: 101, direct_children_examined: 8,
+    let button = ControlContainerButtonProof { checks: [true; 7], calls: 101, initial_nodes_examined: 4, recheck_nodes_examined: 4,
+        last_role: "Button", last_depth: 2,
         cf_slots: 60, cf_slots_retired: 60, cleanup_returned: true, ax_error: 0 };
     let report = OpenReport { diagnostic: OpenDiagnostic { site: "press", error: "none" }, attempted: true,
         press_returned: true, triggered: Some(true), custody_known: true, initial_proof: Some(proof), proof: Some(proof),
@@ -2251,13 +2254,15 @@ fn native_recheck_data_check() -> bool {
         diagnostic: Some(report.diagnostic), report: Some(report) };
     let value = full.value();
     if !full.succeeded() || value.get("confirmReturned").is_some()
-        || value["mechanism"] != "accessibility-press-original-direct-sheet-button-v2"
-        || value["promptButton"]["directChildrenExamined"] != 8
+        || value["mechanism"] != "accessibility-press-original-control-container-button-v3"
+        || value["promptButton"]["initialNodesExamined"] != 4 || value["promptButton"]["recheckNodesExamined"] != 4
+        || value["promptButton"]["lastRole"] != "Button" || value["promptButton"]["lastDepth"] != 2
+        || value["promptButton"].get("directChildrenExamined").is_some()
         || value["promptButton"].get("nodes").is_some()
         || value["promptButton"]["checks"].get("completeSearch").is_some()
-        || value["promptButton"]["checks"]["completeDirectSheetChildren"] != true
-        || value["promptButton"]["checks"]["uniqueDirectPromptButton"] != true
-        || value["promptButton"]["checks"]["sameDirectButtonRechecked"] != true { return false; }
+        || value["promptButton"]["checks"]["completeControlProjection"] != true
+        || value["promptButton"]["checks"]["uniquePromptButton"] != true
+        || value["promptButton"]["checks"]["sameOriginalControlPathRechecked"] != true { return false; }
     let mutations: [fn(&mut OpenInputSample); 15] = [|s| s.expired = true, |s| s.timely = Some(false),
         |s| s.joined = false, |s| s.returned = false, |s| s.entered = None, |s| s.native_entered = Some(false),
         |s| s.retired = false, |s| s.state = "unknown", |s| s.custody_known = Some(false),
@@ -2267,11 +2272,13 @@ fn native_recheck_data_check() -> bool {
     for report in [OpenReport { triggered: Some(false), ..report }, OpenReport { press_returned: false, ..report },
         OpenReport { custody_known: false, ..report }, OpenReport { proof: None, ..report },
         OpenReport { initial_proof: None, ..report }, OpenReport { prompt: [Some(true), Some(false)], ..report },
-        OpenReport { button: DirectSheetButtonProof { cleanup_returned: false, ..button }, ..report },
-        OpenReport { button: DirectSheetButtonProof { direct_children_examined: 1, ..button }, ..report },
-        OpenReport { button: DirectSheetButtonProof { direct_children_examined: 33, ..button }, ..report },
-        OpenReport { button: DirectSheetButtonProof { checks: [true, true, true, true, true, true, false], ..button }, ..report },
-        OpenReport { button: DirectSheetButtonProof { checks: [true, true, true, false, false, false, false], ..button }, ..report }] {
+        OpenReport { button: ControlContainerButtonProof { cleanup_returned: false, ..button }, ..report },
+        OpenReport { button: ControlContainerButtonProof { initial_nodes_examined: 0, ..button }, ..report },
+        OpenReport { button: ControlContainerButtonProof { recheck_nodes_examined: 17, ..button }, ..report },
+        OpenReport { button: ControlContainerButtonProof { last_role: "Group", ..button }, ..report },
+        OpenReport { button: ControlContainerButtonProof { last_depth: 9, ..button }, ..report },
+        OpenReport { button: ControlContainerButtonProof { checks: [true, true, true, true, true, true, false], ..button }, ..report },
+        OpenReport { button: ControlContainerButtonProof { checks: [true, true, true, false, false, false, false], ..button }, ..report }] {
         if (OpenInputSample { report: Some(report), ..full }).succeeded() { return false; }
     }
     // The exact live retirement predicate: an actual matching body receipt

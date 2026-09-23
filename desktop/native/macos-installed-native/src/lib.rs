@@ -197,7 +197,7 @@ impl Panel {
 // nondefault feature forwarding selects BOTH this Rust seam and the C controls.
 #[cfg(feature = "installed-observation")]
 pub use observation::{PanelAction, PanelActionDiagnostic, PanelObservation, OpenIdentity, OpenDiagnostic, OpenReport,
-    OpenInputReturn, OpenRecheckReturn, DirectSheetButtonProof, installed_prompt_button,
+    OpenInputReturn, OpenRecheckReturn, ControlContainerButtonProof, installed_prompt_button,
     IdentityConfiguration, IdentityStartReturn, IdentityBinding, IdentityBindingReturn,
     OriginalWindowState, OriginalWindowReturn, installed_original_window,
     installed_accessibility_trusted, installed_observation_flags_data_check};
@@ -521,8 +521,9 @@ mod observation {
     }
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
-    struct OpenWire { flags: u32, site: u32, error: u32, checks: u32, calls: u32, direct_children_examined: u32,
-        owned: u32, released: u32, ax_error: i32 }
+    struct OpenWire { flags: u32, site: u32, error: u32, checks: u32, calls: u32,
+        initial_nodes_examined: u32, recheck_nodes_examined: u32, owned: u32, released: u32, ax_error: i32,
+        last_role: u32, last_depth: u32 }
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
     struct RecheckWire { known: u32, error: u32, prompt: u32, proof: IdentityProofWire }
@@ -555,13 +556,17 @@ mod observation {
     /// either a definite empty out-slot or its CFRelease actually returned;
     /// these counters deliberately do not claim that many non-null objects.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub struct DirectSheetButtonProof {
-        pub checks: [bool; 7], pub calls: u32, pub direct_children_examined: u32,
+    pub struct ControlContainerButtonProof {
+        pub checks: [bool; 7], pub calls: u32, pub initial_nodes_examined: u32, pub recheck_nodes_examined: u32,
+        pub last_role: &'static str, pub last_depth: u32,
         pub cf_slots: u32, pub cf_slots_retired: u32, pub cleanup_returned: bool, pub ax_error: i32,
     }
-    impl DirectSheetButtonProof {
+    impl ControlContainerButtonProof {
         pub fn matched(self) -> bool {
-            self.checks == [true; 7] && (1..=512).contains(&self.calls) && (2..=32).contains(&self.direct_children_examined)
+            self.checks == [true; 7] && (1..=512).contains(&self.calls)
+                && (1..=16).contains(&self.initial_nodes_examined) && (1..=16).contains(&self.recheck_nodes_examined)
+                && self.last_role == "Button" && (1..=8).contains(&self.last_depth)
+                && self.last_depth <= self.initial_nodes_examined.min(self.recheck_nodes_examined)
                 && (1..=256).contains(&self.cf_slots) && self.cf_slots_retired == self.cf_slots
                 && self.cleanup_returned && self.ax_error == 0
         }
@@ -571,7 +576,7 @@ mod observation {
         pub diagnostic: OpenDiagnostic, pub attempted: bool, pub press_returned: bool,
         pub triggered: Option<bool>, pub custody_known: bool,
         pub initial_proof: Option<IdentityBinding>, pub proof: Option<IdentityBinding>,
-        pub prompt: [Option<bool>; 2], pub button: DirectSheetButtonProof,
+        pub prompt: [Option<bool>; 2], pub button: ControlContainerButtonProof,
     }
     impl OpenReport {
         pub fn succeeded(self) -> bool {
@@ -582,19 +587,21 @@ mod observation {
         }
     }
     fn open_return(w: OpenWire, rechecks: [Option<OpenRecheckReturn>; 2], known: bool) -> Option<OpenReport> {
-        // V2 completion bits form a prefix: a full first direct roster and
-        // unique prompt button, then eligibility and a complete same-button
-        // second census. No descendant-search or partial-roster claim is made.
+        // V3 completion bits form a prefix over the eligible control projection,
+        // not all AX descendants. Second-pass progress cannot erase the first.
         if w.flags & !15 != 0 || w.checks > 127 || w.checks & (w.checks + 1) != 0
-            || w.calls > 512 || w.direct_children_examined > 32 || w.owned > 256 || w.released > w.owned
+            || w.calls > 512 || w.initial_nodes_examined > 16 || w.recheck_nodes_examined > 16
+            || w.last_depth > 8 || w.owned > 256 || w.released > w.owned
             || !(w.ax_error == 0 || (-25214..=-25200).contains(&w.ax_error)) { return None; }
-        let button = DirectSheetButtonProof { checks: std::array::from_fn(|i| w.checks & (1 << i) != 0), calls: w.calls,
-            direct_children_examined: w.direct_children_examined, cf_slots: w.owned, cf_slots_retired: w.released,
+        let button = ControlContainerButtonProof { checks: std::array::from_fn(|i| w.checks & (1 << i) != 0), calls: w.calls,
+            initial_nodes_examined: w.initial_nodes_examined, recheck_nodes_examined: w.recheck_nodes_examined,
+            last_role: *["not-read", "Sheet", "Group", "SplitGroup", "Button", "Browser", "Table", "Outline", "ScrollArea", "opaque"]
+                .get(w.last_role as usize)?, last_depth: w.last_depth, cf_slots: w.owned, cf_slots_retired: w.released,
             cleanup_returned: w.flags & 8 != 0, ax_error: w.ax_error };
         let r = OpenReport { diagnostic: OpenDiagnostic {
-            site: *["entry", "application", "windows", "parent-identifier", "sheet", "topology", "direct-sheet-children", "button",
-                "direct-sheet-recheck", "initial-original-proof", "original-proof", "admission", "press", "cleanup",
-                "direct-sheet-title-limit", "direct-sheet-child-count-limit", "direct-sheet-child-copy-limit"]
+            site: *["entry", "application", "windows", "parent-identifier", "sheet", "topology", "control-projection", "button",
+                "control-recheck", "initial-original-proof", "original-proof", "admission", "press", "cleanup",
+                "control-title-limit", "control-child-count-limit", "control-child-copy-limit", "control-node-limit", "control-depth-limit"]
                 .get(w.site.checked_sub(1)? as usize)?, error: *OPEN_ERRORS.get(w.error as usize)?, },
             attempted: w.flags & 1 != 0, press_returned: w.flags & 2 != 0,
             triggered: (w.flags & 2 != 0).then_some(w.flags & 4 != 0),
@@ -607,27 +614,40 @@ mod observation {
             || button.cleanup_returned && w.released != w.owned
             || matches!(w.error, 9 | 14 | 15) && r.custody_known
             || w.calls != 0 && !rechecks[0].is_some_and(OpenRecheckReturn::matched)
-            || w.direct_children_examined != 0 && w.checks & 3 != 3
-            || w.checks & 4 != 0 && w.direct_children_examined == 0
-            || w.direct_children_examined > 16 && w.checks < 63
-            || w.checks == 127 && w.direct_children_examined < 2
+            || (w.checks != 0 || w.last_role != 0) && (w.calls == 0 || w.owned == 0)
+            || w.initial_nodes_examined != 0 && w.checks & 3 != 3
+            || w.checks & 4 != 0 && w.initial_nodes_examined == 0
+            || w.checks < 63 && w.recheck_nodes_examined != 0
+            || w.last_depth > w.initial_nodes_examined.max(w.recheck_nodes_examined)
+            || w.checks == 127 && (w.recheck_nodes_examined == 0 || w.last_role != 4 || w.last_depth == 0
+                || w.last_depth > w.initial_nodes_examined.min(w.recheck_nodes_examined))
             || rechecks[1].is_some() && w.checks != 127
             || r.triggered == Some(false) && w.ax_error == 0
             || r.triggered == Some(true) && w.ax_error != 0
             || w.ax_error != 0 && w.error == 0
             || w.error == 0 && !r.succeeded() { return None; }
-        // Count/Copy precedes child validation in each pass. Title is checked
-        // only after that child's counter increment. Unknown cleanup preserves
-        // the exact first-failure phase/counter; it cannot relax this grammar.
-        if matches!(w.site, 15..=17) {
-            let phase_count = match (w.checks, w.site == 15) {
-                (3, false) => w.direct_children_examined == 0,
-                (3, true) => (1..=16).contains(&w.direct_children_examined),
-                (63, false) => (1..=16).contains(&w.direct_children_examined),
-                (63, true) => (2..=32).contains(&w.direct_children_examined),
+        if w.site == 7 && (!matches!(w.checks, 3 | 7) || w.recheck_nodes_examined != 0)
+            || w.site == 8 && (!matches!(w.checks, 15 | 31 | 63) || w.recheck_nodes_examined != 0)
+            || w.site == 9 && (w.checks != 63 || w.last_depth > w.recheck_nodes_examined) { return None; }
+        // Count/Copy may fail on the root OR a deeper admitted container. A
+        // deeper failure preserves its already-begun node count, including
+        // late/Unknown outcomes; not-read can never stand in for an actual role.
+        if matches!(w.site, 15..=19) {
+            let examined = match w.checks {
+                3 if w.recheck_nodes_examined == 0 => w.initial_nodes_examined,
+                63 if w.initial_nodes_examined >= 1 => w.recheck_nodes_examined,
+                _ => return None,
+            };
+            let node = (1..=8).contains(&w.last_depth) && examined >= w.last_depth;
+            let container = matches!(w.last_role, 2 | 3) && node;
+            let local_site = match w.site {
+                15 => w.last_role == 4 && node,
+                16 | 17 => container || w.last_role == 1 && w.last_depth == 0 && examined == 0,
+                18 => container && w.last_depth < 8,
+                19 => container && w.last_depth == 8,
                 _ => false,
             };
-            if w.error != 7 || !phase_count || w.calls == 0 || w.owned == 0 || w.ax_error != 0 || w.flags & 7 != 0
+            if w.error != 7 || !local_site || w.calls == 0 || w.owned == 0 || w.ax_error != 0 || w.flags & 7 != 0
                 || !rechecks[0].is_some_and(OpenRecheckReturn::matched) || rechecks[1].is_some() { return None; }
         }
         Some(r)
@@ -779,23 +799,26 @@ mod observation {
     }
     fn semantic_data_check() -> bool {
         // Inert decoder/timeout DATA only: never manufacture a native return.
-        if std::mem::size_of::<IdentityWire>() != 56 || std::mem::size_of::<OpenWire>() != 36
+        if std::mem::size_of::<IdentityWire>() != 56 || std::mem::size_of::<OpenWire>() != 48
             || std::mem::size_of::<RecheckWire>() != 48 || std::mem::size_of::<OpenTimeout>() != 16 { return false; }
         let p = IdentityProofWire { flags: 1, checked: 0xfff, matched: 0xfff, parent: 2, panel: 8,
             children: 2, originals: 2, site: 14, error: 0 };
         let rw = RecheckWire { known: 1, error: 0, prompt: 1, proof: p };
         let Some(recheck) = recheck_return(rw) else { return false; };
         let rechecks = [Some(recheck); 2];
-        let full = OpenWire { flags: 15, site: 13, error: 0, checks: 127, calls: 101, direct_children_examined: 8,
-            owned: 60, released: 60, ax_error: 0 };
+        let full = OpenWire { flags: 15, site: 13, error: 0, checks: 127, calls: 101,
+            initial_nodes_examined: 4, recheck_nodes_examined: 4, owned: 60, released: 60, ax_error: 0,
+            last_role: 4, last_depth: 2 };
         if !open_return(full, rechecks, true).is_some_and(OpenReport::succeeded) { return false; }
-        // Neither incomplete census, a missing unique direct button, nor an
-        // unperformed same-original recheck may pass through the v2 proof.
+        // Neither incomplete eligible projection, missing unique button, nor
+        // unperformed same-original control-path recheck may pass the v3 proof.
         for bit in 0..7 {
             if open_return(OpenWire { checks: full.checks & !(1 << bit), ..full }, rechecks, true).is_some() { return false; }
         }
-        for bad in [OpenWire { calls: 513, ..full }, OpenWire { direct_children_examined: 33, ..full },
-            OpenWire { direct_children_examined: 1, ..full },
+        for bad in [OpenWire { calls: 513, ..full }, OpenWire { initial_nodes_examined: 17, ..full },
+            OpenWire { initial_nodes_examined: 0, ..full }, OpenWire { recheck_nodes_examined: 0, ..full },
+            OpenWire { recheck_nodes_examined: 17, ..full }, OpenWire { last_role: 10, ..full },
+            OpenWire { last_role: 2, ..full }, OpenWire { last_depth: 0, ..full }, OpenWire { last_depth: 9, ..full },
             OpenWire { owned: 257, released: 257, ..full }, OpenWire { released: 59, ..full },
             OpenWire { ax_error: 1, ..full }, OpenWire { checks: 255, ..full }, OpenWire { flags: 31, ..full }] {
             if open_return(bad, rechecks, true).is_some() { return false; }
@@ -804,43 +827,65 @@ mod observation {
             RecheckWire { known: 0, ..rw }, RecheckWire { proof: IdentityProofWire::default(), ..rw }] {
             if recheck_return(bad).is_some() { return false; }
         }
-        for examined in [2, 32] {
-            if !open_return(OpenWire { direct_children_examined: examined, ..full }, rechecks, true)
+        for (initial, recheck, depth) in [(1, 1, 1), (4, 6, 3), (16, 16, 8)] {
+            if !open_return(OpenWire { initial_nodes_examined: initial, recheck_nodes_examined: recheck, last_depth: depth, ..full }, rechecks, true)
                 .is_some_and(OpenReport::succeeded) { return false; }
         }
-        // Full first roster: zero/two prompt matches. Full recheck: absent,
-        // duplicate, foreign or replaced candidate. None can authorize Press.
+        // Complete first projection: zero/two matches, including a disabled
+        // duplicate in another admitted branch. Recheck ambiguity, replacement,
+        // changed role/title or reparenting never authorizes Press.
         for (checks, error) in [(7, 4), (7, 5), (3, 7), (63, 4), (63, 5), (63, 13)] {
-            let failed = OpenWire { flags: 8, site: if checks == 63 { 9 } else { 7 }, error, checks, ..full };
+            let failed = OpenWire { flags: 8, site: if checks == 63 { 9 } else { 7 }, error, checks,
+                recheck_nodes_examined: if checks == 63 { 4 } else { 0 }, ..full };
             if !open_return(failed, [Some(recheck), None], true).is_some_and(|r| !r.attempted && !r.succeeded()) { return false; }
         }
-        for (checks, examined) in [(3, 17), (7, 0), (7, 17), (15, 17), (31, 17)] {
-            let failed = OpenWire { flags: 8, site: 7, error: 7, checks, direct_children_examined: examined, ..full };
+        // A node can fail its type/parent/role before a role was read. Keeping
+        // not-read + this positive depth is essential to honest diagnostics.
+        for checks in [3, 63] {
+            let failed = OpenWire { flags: 8, site: if checks == 3 { 7 } else { 9 }, error: 6, checks,
+                initial_nodes_examined: 4, recheck_nodes_examined: if checks == 3 { 0 } else { 2 },
+                last_role: 0, last_depth: 2, ..full };
+            if !open_return(failed, [Some(recheck), None], true).is_some_and(|r|
+                r.button.last_role == "not-read" && r.button.last_depth == 2 && !r.succeeded()) { return false; }
+        }
+        for (checks, initial, again) in [(1, 1, 0), (3, 17, 0), (7, 0, 0), (15, 4, 1), (31, 4, 1), (127, 4, 0)] {
+            let failed = OpenWire { flags: 8, site: 7, error: 7, checks,
+                initial_nodes_examined: initial, recheck_nodes_examined: again, ..full };
             if open_return(failed, [Some(recheck), None], true).is_some() { return false; }
         }
-        for (site, label) in (15..=17).zip(["direct-sheet-title-limit", "direct-sheet-child-count-limit",
-            "direct-sheet-child-copy-limit"]) {
+        if open_return(OpenWire { flags: 8, site: 9, error: 6, checks: 63, initial_nodes_examined: 8,
+            recheck_nodes_examined: 1, last_role: 0, last_depth: 2, ..full }, [Some(recheck), None], true).is_some() { return false; }
+        for (site, label, role, depth, minimum) in [
+            (15, "control-title-limit", 4, 1, 1),
+            (16, "control-child-count-limit", 1, 0, 0), (16, "control-child-count-limit", 2, 2, 2),
+            (17, "control-child-copy-limit", 1, 0, 0), (17, "control-child-copy-limit", 3, 2, 2),
+            (18, "control-node-limit", 2, 1, 1), (19, "control-depth-limit", 3, 8, 8)] {
             for checks in [3, 63] {
-                let bounds = match (checks, site == 15) { (3, false) => (0, 0), (3, true) => (1, 16),
-                    (63, false) => (1, 16), _ => (2, 32) };
-                for examined in [0, 1, 2, 16, 17, 32, 33] {
-                    let failed = OpenWire { flags: 8, site, error: 7, checks, direct_children_examined: examined, ..full };
-                    let valid = (bounds.0..=bounds.1).contains(&examined);
+                let limits = if depth == 0 { (0, 0) } else { (minimum, 16) };
+                let frame = |examined| OpenWire { flags: 8, site, error: 7, checks,
+                    initial_nodes_examined: if checks == 3 { examined } else { 16 },
+                    recheck_nodes_examined: if checks == 63 { examined } else { 0 }, last_role: role, last_depth: depth, ..full };
+                for examined in [0, 1, 2, 8, 16, 17] {
+                    let failed = frame(examined);
+                    let valid = (limits.0..=limits.1).contains(&examined);
                     for (flags, released, known) in [(8, full.owned, true), (8, full.owned, false), (0, 16, false)] {
                         let returned = open_return(OpenWire { flags, released, ..failed }, [Some(recheck), None], known);
                         if returned.is_some() != valid { return false; }
                         if valid && !returned.is_some_and(|r| r.diagnostic == OpenDiagnostic { site: label, error: "limit" }
                             && !r.attempted && !r.press_returned && r.triggered.is_none() && !r.succeeded()
                             && r.custody_known == known && r.button.cleanup_returned == (flags & 8 != 0)
-                            && r.button.cf_slots_retired == released && r.button.direct_children_examined == examined)
+                            && r.button.cf_slots_retired == released && r.button.last_depth == depth
+                            && r.button.initial_nodes_examined == failed.initial_nodes_examined
+                            && r.button.recheck_nodes_examined == failed.recheck_nodes_examined)
                             { return false; }
                     }
                 }
-                let failed = OpenWire { flags: 8, site, error: 7, checks, direct_children_examined: bounds.0, ..full };
+                let failed = frame(limits.0);
                 for bad in [OpenWire { error: 0, ..failed }, OpenWire { error: 5, ..failed },
                     OpenWire { calls: 0, ..failed }, OpenWire { owned: 0, released: 0, ..failed },
                     OpenWire { checks: 7, ..failed }, OpenWire { ax_error: -25204, ..failed },
-                    OpenWire { flags: 9, ..failed }, OpenWire { site: 18, ..failed }, OpenWire { site: 19, ..failed }] {
+                    OpenWire { flags: 9, ..failed }, OpenWire { site: 20, ..failed }, OpenWire { last_role: 0, ..failed },
+                    OpenWire { last_role: 9, ..failed }, OpenWire { last_depth: 9, ..failed }] {
                     if open_return(bad, [Some(recheck), None], true).is_some() { return false; }
                 }
                 if open_return(failed, [None; 2], true).is_some() || open_return(failed, rechecks, true).is_some()

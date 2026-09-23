@@ -514,13 +514,17 @@ enum { MRK_OPEN_NONE, MRK_OPEN_THREAD, MRK_OPEN_INPUT, MRK_OPEN_INELIGIBLE, MRK_
     MRK_OPEN_INVALID_ELEMENT, MRK_OPEN_CANNOT_COMPLETE, MRK_OPEN_OTHER,
     MRK_OPEN_CHANGED, MRK_OPEN_EXCEPTION, MRK_OPEN_CLEANUP_UNKNOWN };
 enum { MRK_OPEN_ENTRY = 1u, MRK_OPEN_APPLICATION, MRK_OPEN_WINDOWS, MRK_OPEN_PARENT_ID,
-    MRK_OPEN_SHEET, MRK_OPEN_TOPOLOGY, MRK_OPEN_DIRECT_CHILDREN, MRK_OPEN_BUTTON, MRK_OPEN_DIRECT_RECHECK,
+    MRK_OPEN_SHEET, MRK_OPEN_TOPOLOGY, MRK_OPEN_CONTROL_PROJECTION, MRK_OPEN_BUTTON, MRK_OPEN_CONTROL_RECHECK,
     MRK_OPEN_INITIAL_PROOF, MRK_OPEN_FINAL_PROOF, MRK_OPEN_ADMISSION, MRK_OPEN_PRESS, MRK_OPEN_CLEANUP,
-    MRK_OPEN_DIRECT_TITLE_LIMIT, MRK_OPEN_DIRECT_CHILD_COUNT_LIMIT, MRK_OPEN_DIRECT_CHILD_COPY_LIMIT };
+    MRK_OPEN_CONTROL_TITLE_LIMIT, MRK_OPEN_CONTROL_CHILD_COUNT_LIMIT, MRK_OPEN_CONTROL_CHILD_COPY_LIMIT,
+    MRK_OPEN_CONTROL_NODE_LIMIT, MRK_OPEN_CONTROL_DEPTH_LIMIT };
 enum { MRK_OPEN_ATTEMPTED = 1u, MRK_OPEN_RETURNED = 2u, MRK_OPEN_TRIGGERED = 4u, MRK_OPEN_KNOWN = 8u };
-typedef struct { uint32_t flags, site, error, checks, calls, direct_children_examined, owned, released; int32_t ax_error; } MRKOpenResult;
+enum { MRK_ROLE_NOT_READ, MRK_ROLE_SHEET, MRK_ROLE_GROUP, MRK_ROLE_SPLIT_GROUP, MRK_ROLE_BUTTON,
+    MRK_ROLE_BROWSER, MRK_ROLE_TABLE, MRK_ROLE_OUTLINE, MRK_ROLE_SCROLL_AREA, MRK_ROLE_OPAQUE };
+typedef struct { uint32_t flags, site, error, checks, calls, initial_nodes_examined, recheck_nodes_examined, owned, released;
+    int32_t ax_error; uint32_t last_role, last_depth; } MRKOpenResult;
 typedef struct { uint32_t known, error, prompt; MRKIdentityProof proof; } MRKOpenRecheck;
-_Static_assert(sizeof(MRKOpenResult) == 36 && sizeof(MRKOpenRecheck) == 48, "fixed prompt input scalar ABI");
+_Static_assert(sizeof(MRKOpenResult) == 48 && sizeof(MRKOpenRecheck) == 48, "fixed prompt input scalar ABI");
 typedef struct { float seconds; uint64_t required_ns; } MRKOpenTimeout;
 typedef int (*MRKOpenAdmission)(void *, uint64_t, int, MRKOpenTimeout *);
 typedef int (*MRKOpenRecheckCall)(void *, int);
@@ -781,13 +785,18 @@ done:
     *out = r; // The actual main/TLS guard is released by Rust before its receipt.
 }
 
-enum { MRK_PROMPT_CALLS = 512, MRK_PROMPT_CF = 256 };
+enum { MRK_PROMPT_CALLS = 512, MRK_PROMPT_CF = 256, MRK_CONTROL_NODES = 17, MRK_CONTROL_DEPTH = 8 };
 typedef union { CFTypeRef value; CFArrayRef array; } MRKPromptOwned;
+typedef struct {
+    AXUIElementRef nodes[MRK_CONTROL_NODES];
+    unsigned parents[MRK_CONTROL_NODES], depths[MRK_CONTROL_NODES], roles[MRK_CONTROL_NODES];
+    unsigned chain[MRK_CONTROL_DEPTH + 1], chain_count, candidate;
+} MRKControlPass;
 typedef struct {
     MRKOpenAdmission admit; MRKOpenRecheckCall recheck; void *context; MRKOpenResult result;
     CFTypeID elementType;
     MRKPromptOwned owned[MRK_PROMPT_CF]; unsigned count;
-    AXUIElementRef button; // Borrowed only from the first retained direct-child CFArray.
+    AXUIElementRef button; // Borrowed only from the first pass's retained original CFArray.
     BOOL cleanupKnown;
 } MRKPrompt;
 // One registered worker per original process. On exception/uncertain CF cleanup
@@ -798,12 +807,23 @@ static BOOL mrk_ax_fail(MRKPrompt *s, uint32_t error) {
     if (!s->result.error) s->result.error = error;
     return NO;
 }
-static BOOL mrk_ax_direct_limit(MRKPrompt *s, uint32_t site) {
-    // Shared array callers outside either direct census and an earlier failure
-    // keep their site. Cleanup must preserve the original phase and counter.
-    if ((s->result.site == MRK_OPEN_DIRECT_CHILDREN || s->result.site == MRK_OPEN_DIRECT_RECHECK)
+static BOOL mrk_ax_control_limit(MRKPrompt *s, uint32_t site) {
+    // Shared array callers outside either control pass and an earlier failure
+    // keep their site. Cleanup preserves the first phase and both counters.
+    if ((s->result.site == MRK_OPEN_CONTROL_PROJECTION || s->result.site == MRK_OPEN_CONTROL_RECHECK)
         && !s->result.error) s->result.site = site;
     return mrk_ax_fail(s, MRK_OPEN_LIMIT);
+}
+static uint32_t mrk_ax_role(CFStringRef role) {
+    if (CFEqual(role, kAXSheetRole)) return MRK_ROLE_SHEET;
+    if (CFEqual(role, kAXGroupRole)) return MRK_ROLE_GROUP;
+    if (CFEqual(role, kAXSplitGroupRole)) return MRK_ROLE_SPLIT_GROUP;
+    if (CFEqual(role, kAXButtonRole)) return MRK_ROLE_BUTTON;
+    if (CFEqual(role, kAXBrowserRole)) return MRK_ROLE_BROWSER;
+    if (CFEqual(role, kAXTableRole)) return MRK_ROLE_TABLE;
+    if (CFEqual(role, kAXOutlineRole)) return MRK_ROLE_OUTLINE;
+    if (CFEqual(role, kAXScrollAreaRole)) return MRK_ROLE_SCROLL_AREA;
+    return MRK_ROLE_OPAQUE;
 }
 static BOOL mrk_ax_status(MRKPrompt *s, AXError error) {
     if (error == kAXErrorSuccess) return YES;
@@ -860,29 +880,29 @@ static CFTypeRef mrk_ax_copy(MRKPrompt *s, AXUIElementRef element, CFStringRef a
     if (!slot->value) { mrk_ax_fail(s, MRK_OPEN_MALFORMED); return NULL; }
     return slot->value;
 }
-static CFArrayRef mrk_ax_array(MRKPrompt *s, AXUIElementRef element, CFStringRef attribute, CFIndex limit, BOOL optional) {
+static CFArrayRef mrk_ax_array(MRKPrompt *s, AXUIElementRef element, CFStringRef attribute, CFIndex limit, BOOL allow_empty) {
     // A returned zero count is an ordinary empty array, not an illegal index0
     // Copy converted to absence. Count and bounded Copy both spend the common
     // timeout/call budget; a changed or truncated array cannot prove a search.
     if (!mrk_ax_before(s, element)) return NULL;
     CFIndex expected = -1; s->result.calls++;
     AXError count_status = AXUIElementGetAttributeValueCount(element, attribute, &expected);
-    BOOL absent = optional && (count_status == kAXErrorNoValue || count_status == kAXErrorAttributeUnsupported);
-    BOOL counted = absent || mrk_ax_status(s, count_status), admitted = mrk_ax_admit(s, 0, 0, NULL);
-    if (!counted || !admitted || absent) return NULL;
+    BOOL counted = mrk_ax_status(s, count_status), admitted = mrk_ax_admit(s, 0, 0, NULL);
+    if (!counted || !admitted) return NULL;
     if (expected < 0) { mrk_ax_fail(s, MRK_OPEN_MALFORMED); return NULL; }
-    if (expected > limit) { mrk_ax_direct_limit(s, MRK_OPEN_DIRECT_CHILD_COUNT_LIMIT); return NULL; }
-    if (!expected) { if (!optional) mrk_ax_fail(s, MRK_OPEN_UNSUPPORTED); return NULL; }
+    if (expected > limit) { mrk_ax_control_limit(s, MRK_OPEN_CONTROL_CHILD_COUNT_LIMIT); return NULL; }
+    if (!expected) { if (!allow_empty) mrk_ax_fail(s, MRK_OPEN_UNSUPPORTED); return NULL; }
     MRKPromptOwned *slot = mrk_ax_slot(s); if (!slot || !mrk_ax_before(s, element)) return NULL;
     s->result.calls++;
     AXError status = AXUIElementCopyAttributeValues(element, attribute, 0, limit + 1, &slot->array);
     BOOL copied = mrk_ax_status(s, status); admitted = mrk_ax_admit(s, 0, 0, NULL);
     if (!copied || !admitted || !mrk_ax_type(s, slot->value, CFArrayGetTypeID())) return NULL;
     CFIndex count = CFArrayGetCount(slot->array);
-    if (count < 0 || count > limit) { mrk_ax_direct_limit(s, MRK_OPEN_DIRECT_CHILD_COPY_LIMIT); return NULL; }
+    if (count < 0 || count > limit) { mrk_ax_control_limit(s, MRK_OPEN_CONTROL_CHILD_COPY_LIMIT); return NULL; }
     if (count != expected) { mrk_ax_fail(s, MRK_OPEN_CHANGED); return NULL; }
-    for (CFIndex i = 0; i < count; ++i)
-        if (!mrk_ax_type(s, CFArrayGetValueAtIndex(slot->array, i), s->elementType)) return NULL;
+    // Each caller validates an element when that node begins. In the control
+    // pass this keeps a failed type/parent/role read paired with its own counter,
+    // depth and cleared role, never a previous sibling's diagnostic state.
     return slot->array;
 }
 static BOOL mrk_ax_equal_attribute(MRKPrompt *s, AXUIElementRef element, CFStringRef attribute, CFTypeRef expected) {
@@ -892,12 +912,15 @@ static BOOL mrk_ax_equal_attribute(MRKPrompt *s, AXUIElementRef element, CFStrin
 }
 static BOOL mrk_ax_projection(MRKPrompt *s, AXUIElementRef app, CFStringRef parent_text, CFStringRef panel_text,
     AXUIElementRef *parent, AXUIElementRef *sheet) {
+    s->result.last_depth = 0; s->result.last_role = MRK_ROLE_NOT_READ;
     s->result.site = MRK_OPEN_WINDOWS;
     CFArrayRef windows = mrk_ax_array(s, app, kAXWindowsAttribute, 4, NO); if (!windows) return NO;
     AXUIElementRef found_parent = NULL, found_sheet = NULL;
     s->result.site = MRK_OPEN_PARENT_ID;
     for (CFIndex i = 0; i < CFArrayGetCount(windows); ++i) {
         AXUIElementRef candidate = (AXUIElementRef)CFArrayGetValueAtIndex(windows, i);
+        s->result.last_depth = 0; s->result.last_role = MRK_ROLE_NOT_READ;
+        if (!mrk_ax_type(s, candidate, s->elementType)) return NO;
         CFTypeRef name = mrk_ax_copy(s, candidate, kAXIdentifierAttribute, NO);
         if (!name || !mrk_ax_type(s, name, CFStringGetTypeID())) return NO;
         if (CFStringGetLength(name) >= 64) return mrk_ax_fail(s, MRK_OPEN_LIMIT);
@@ -912,8 +935,11 @@ static BOOL mrk_ax_projection(MRKPrompt *s, AXUIElementRef app, CFStringRef pare
     CFArrayRef children = mrk_ax_array(s, found_parent, kAXChildrenAttribute, 16, NO); if (!children) return NO;
     for (CFIndex i = 0; i < CFArrayGetCount(children); ++i) {
         AXUIElementRef candidate = (AXUIElementRef)CFArrayGetValueAtIndex(children, i);
+        s->result.last_depth = 0; s->result.last_role = MRK_ROLE_NOT_READ;
+        if (!mrk_ax_type(s, candidate, s->elementType)) return NO;
         CFTypeRef role = mrk_ax_copy(s, candidate, kAXRoleAttribute, NO);
         if (!role || !mrk_ax_type(s, role, CFStringGetTypeID())) return NO;
+        s->result.last_role = mrk_ax_role(role);
         if (CFEqual(role, kAXSheetRole)) {
             if (found_sheet) return mrk_ax_fail(s, MRK_OPEN_AMBIGUOUS);
             found_sheet = candidate;
@@ -922,43 +948,79 @@ static BOOL mrk_ax_projection(MRKPrompt *s, AXUIElementRef app, CFStringRef pare
     if (!found_sheet) return mrk_ax_fail(s, MRK_OPEN_UNSUPPORTED);
     if (*sheet && !CFEqual(*sheet, found_sheet)) return mrk_ax_fail(s, MRK_OPEN_CHANGED);
     s->result.site = MRK_OPEN_TOPOLOGY;
+    s->result.last_depth = 0; s->result.last_role = MRK_ROLE_NOT_READ;
     if (!mrk_ax_equal_attribute(s, found_sheet, kAXIdentifierAttribute, panel_text)
         || !mrk_ax_equal_attribute(s, found_sheet, kAXParentAttribute, found_parent)) return NO;
     s->result.checks |= 2u; *parent = found_parent; *sheet = found_sheet; return YES;
 }
-static BOOL mrk_ax_direct_roster(MRKPrompt *s, AXUIElementRef sheet, CFStringRef prompt, AXUIElementRef *found) {
-    // V2 supports only immediate prompt buttons on the exact original Sheet.
-    // File/browser/group descendants are not eligible; absence never falls back.
-    CFArrayRef children = mrk_ax_array(s, sheet, kAXChildrenAttribute, 16, NO);
-    if (!children) return NO;
-    CFIndex count = CFArrayGetCount(children); unsigned matches = 0;
-    AXUIElementRef candidate = NULL;
-    for (CFIndex at = 0; at < count; ++at) {
-        s->result.direct_children_examined++; // Once per begun child, across both complete censuses.
-        AXUIElementRef child = (AXUIElementRef)CFArrayGetValueAtIndex(children, at);
-        for (CFIndex previous = 0; previous < at; ++previous)
-            if (CFEqual(child, CFArrayGetValueAtIndex(children, previous))) return mrk_ax_fail(s, MRK_OPEN_MALFORMED);
-        if (!mrk_ax_equal_attribute(s, child, kAXParentAttribute, sheet)) return NO;
-        CFTypeRef role = mrk_ax_copy(s, child, kAXRoleAttribute, NO);
+static BOOL mrk_ax_control_roster(MRKPrompt *s, AXUIElementRef sheet, CFStringRef prompt, BOOL rechecking, MRKControlPass *pass) {
+    // Only Sheet -> (Group|SplitGroup)* -> Button is eligible. Other roles are
+    // outside this projection, never observed-empty or expandable subtrees.
+    pass->nodes[0] = sheet;
+    unsigned queued = 1, matches = 0;
+    uint32_t *examined = rechecking ? &s->result.recheck_nodes_examined : &s->result.initial_nodes_examined;
+    for (unsigned at = 0; at < queued; ++at) {
+        AXUIElementRef node = pass->nodes[at];
+        s->result.last_depth = pass->depths[at]; s->result.last_role = MRK_ROLE_NOT_READ;
+        if (at) (*examined)++; // Once per begun nonroot node of this pass only.
+        if (!mrk_ax_type(s, node, s->elementType)) return NO;
+        for (unsigned previous = 0; previous < queued; ++previous)
+            if (previous != at && pass->nodes[previous] && CFEqual(node, pass->nodes[previous]))
+                return mrk_ax_fail(s, MRK_OPEN_MALFORMED);
+        if (at && !mrk_ax_equal_attribute(s, node, kAXParentAttribute, pass->nodes[pass->parents[at]])) return NO;
+        CFTypeRef role = mrk_ax_copy(s, node, kAXRoleAttribute, NO);
         if (!role || !mrk_ax_type(s, role, CFStringGetTypeID())) return NO;
+        pass->roles[at] = s->result.last_role = mrk_ax_role(role);
+        if (!at && pass->roles[at] != MRK_ROLE_SHEET) return mrk_ax_fail(s, MRK_OPEN_CHANGED);
         if (CFEqual(role, kAXButtonRole)) {
-            CFTypeRef title = mrk_ax_copy(s, child, kAXTitleAttribute, YES);
+            CFTypeRef title = mrk_ax_copy(s, node, kAXTitleAttribute, YES);
             if (s->result.error) return NO;
             if (title) {
                 if (!mrk_ax_type(s, title, CFStringGetTypeID())) return NO;
-                if (CFStringGetLength(title) > 512) return mrk_ax_direct_limit(s, MRK_OPEN_DIRECT_TITLE_LIMIT);
-                if (CFEqual(title, prompt)) { matches++; candidate = child; }
+                if (CFStringGetLength(title) > 512) return mrk_ax_control_limit(s, MRK_OPEN_CONTROL_TITLE_LIMIT);
+                if (CFEqual(title, prompt)) { matches++; pass->candidate = at; }
             }
         }
+        if (at && !CFEqual(role, kAXGroupRole) && !CFEqual(role, kAXSplitGroupRole)) continue;
+        CFArrayRef children = mrk_ax_array(s, node, kAXChildrenAttribute, 16, at != 0);
+        if (!children) { if (s->result.error) return NO; continue; } // Only actual Count0 may be empty.
+        CFIndex count = CFArrayGetCount(children);
+        if (pass->depths[at] == MRK_CONTROL_DEPTH) return mrk_ax_control_limit(s, MRK_OPEN_CONTROL_DEPTH_LIMIT);
+        if ((unsigned)count > MRK_CONTROL_NODES - queued) return mrk_ax_control_limit(s, MRK_OPEN_CONTROL_NODE_LIMIT);
+        for (CFIndex child = 0; child < count; ++child) {
+            pass->nodes[queued] = (AXUIElementRef)CFArrayGetValueAtIndex(children, child);
+            pass->parents[queued] = at; pass->depths[queued] = pass->depths[at] + 1; queued++;
+        }
     }
-    s->result.checks |= 4u; // Entire immediate roster, never a descendant-search claim or early match.
+    s->result.checks |= 4u; // Entire eligible control projection, never a first-match exit.
     if (matches != 1) return mrk_ax_fail(s, matches ? MRK_OPEN_AMBIGUOUS : MRK_OPEN_UNSUPPORTED);
-    s->result.checks |= 8u; *found = candidate; return YES;
+    for (unsigned node = pass->candidate; ; node = pass->parents[node]) {
+        if (pass->chain_count == MRK_CONTROL_DEPTH + 1) return mrk_ax_fail(s, MRK_OPEN_MALFORMED);
+        pass->chain[pass->chain_count++] = node;
+        if (!node) break;
+    }
+    s->result.checks |= 8u; return YES;
 }
-static BOOL mrk_ax_button(MRKPrompt *s, AXUIElementRef sheet, CFStringRef prompt) {
+static BOOL mrk_ax_control_path(MRKPrompt *s, AXUIElementRef parent, const MRKControlPass *original) {
+    for (unsigned left = original->chain_count; left; --left) {
+        unsigned at = original->chain[left - 1]; AXUIElementRef node = original->nodes[at];
+        s->result.last_depth = original->depths[at]; s->result.last_role = MRK_ROLE_NOT_READ;
+        if (!mrk_ax_type(s, node, s->elementType)) return NO;
+        if (!mrk_ax_equal_attribute(s, node, kAXParentAttribute, at ? original->nodes[original->parents[at]] : parent)) return NO;
+        CFTypeRef role = mrk_ax_copy(s, node, kAXRoleAttribute, NO);
+        if (!role || !mrk_ax_type(s, role, CFStringGetTypeID())) return NO;
+        s->result.last_role = mrk_ax_role(role);
+        if (s->result.last_role != original->roles[at]
+            || (!at ? s->result.last_role != MRK_ROLE_SHEET : at == original->candidate ? s->result.last_role != MRK_ROLE_BUTTON
+                : s->result.last_role != MRK_ROLE_GROUP && s->result.last_role != MRK_ROLE_SPLIT_GROUP))
+            return mrk_ax_fail(s, MRK_OPEN_CHANGED);
+    }
+    return YES;
+}
+static BOOL mrk_ax_button(MRKPrompt *s, AXUIElementRef parent, const MRKControlPass *original, CFStringRef prompt) {
     AXUIElementRef button = s->button;
-    if (!mrk_ax_equal_attribute(s, button, kAXRoleAttribute, kAXButtonRole)
-        || !mrk_ax_equal_attribute(s, button, kAXTitleAttribute, prompt)) return NO;
+    if (!CFEqual(button, original->nodes[original->candidate])) return mrk_ax_fail(s, MRK_OPEN_CHANGED);
+    if (!mrk_ax_control_path(s, parent, original) || !mrk_ax_equal_attribute(s, button, kAXTitleAttribute, prompt)) return NO;
     CFTypeRef enabled = mrk_ax_copy(s, button, kAXEnabledAttribute, NO);
     if (!enabled || !mrk_ax_type(s, enabled, CFBooleanGetTypeID())) return NO;
     if (!CFBooleanGetValue(enabled)) return mrk_ax_fail(s, MRK_OPEN_INELIGIBLE);
@@ -980,7 +1042,7 @@ static BOOL mrk_ax_button(MRKPrompt *s, AXUIElementRef sheet, CFStringRef prompt
     }
     if (presses != 1) return mrk_ax_fail(s, presses ? MRK_OPEN_AMBIGUOUS : MRK_OPEN_UNSUPPORTED);
     s->result.checks |= 32u;
-    return mrk_ax_equal_attribute(s, button, kAXParentAttribute, sheet);
+    return YES;
 }
 static BOOL mrk_ax_original(MRKPrompt *s, int stage) {
     s->result.site = stage == 1 ? MRK_OPEN_INITIAL_PROOF : MRK_OPEN_FINAL_PROOF;
@@ -1002,19 +1064,23 @@ static void mrk_ax_open(MRKPrompt *s, const uint8_t *parent_tag, const uint8_t *
         || !mrk_ax_type(s, prompt_text->value, CFStringGetTypeID()) || !mrk_ax_type(s, application->value, s->elementType)) return;
     AXUIElementRef parent = NULL, sheet = NULL;
     if (!mrk_ax_projection(s, (AXUIElementRef)application->value, parent_text->value, panel_text->value, &parent, &sheet)) return;
-    s->result.site = MRK_OPEN_DIRECT_CHILDREN;
-    AXUIElementRef candidate = NULL;
-    if (!mrk_ax_direct_roster(s, sheet, prompt_text->value, &candidate)) return;
-    s->button = candidate; // Assigned once; the first CFArray keeps this original alive through Press/cleanup.
+    s->result.site = MRK_OPEN_CONTROL_PROJECTION;
+    MRKControlPass initial = {0}, rechecked = {0}; // Separate immutable first-chain backing; no scratch reuse.
+    if (!mrk_ax_control_roster(s, sheet, prompt_text->value, NO, &initial)) return;
+    s->button = initial.nodes[initial.candidate]; // Assigned once; original CFArray ledger owns all ancestors too.
     s->result.site = MRK_OPEN_BUTTON;
-    if (!mrk_ax_button(s, sheet, prompt_text->value)) return;
+    if (!mrk_ax_button(s, parent, &initial, prompt_text->value)) return;
     if (!mrk_ax_projection(s, (AXUIElementRef)application->value, parent_text->value, panel_text->value, &parent, &sheet)) return;
-    s->result.site = MRK_OPEN_DIRECT_RECHECK;
-    AXUIElementRef rechecked = NULL;
-    if (!mrk_ax_direct_roster(s, sheet, prompt_text->value, &rechecked)) return;
-    if (!CFEqual(s->button, rechecked)) { mrk_ax_fail(s, MRK_OPEN_CHANGED); return; }
-    if (!mrk_ax_button(s, sheet, prompt_text->value)) return;
-    s->result.checks |= 64u; // Complete second roster, same retained candidate and revalidated eligibility.
+    s->result.site = MRK_OPEN_CONTROL_RECHECK;
+    if (!mrk_ax_control_roster(s, sheet, prompt_text->value, YES, &rechecked)) return;
+    if (initial.chain_count != rechecked.chain_count) { mrk_ax_fail(s, MRK_OPEN_CHANGED); return; }
+    for (unsigned i = 0; i < initial.chain_count; ++i)
+        if (!CFEqual(initial.nodes[initial.chain[i]], rechecked.nodes[rechecked.chain[i]])
+            || initial.roles[initial.chain[i]] != rechecked.roles[rechecked.chain[i]]) {
+            mrk_ax_fail(s, MRK_OPEN_CHANGED); return;
+        }
+    if (!mrk_ax_button(s, parent, &initial, prompt_text->value)) return;
+    s->result.checks |= 64u; // Complete second projection, same original chain and revalidated eligibility.
     if (!mrk_ax_original(s, 2)) return;
     s->result.site = MRK_OPEN_ADMISSION;
     AXUIElementRef button = s->button;
