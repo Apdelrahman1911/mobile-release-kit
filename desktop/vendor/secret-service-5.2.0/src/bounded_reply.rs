@@ -477,7 +477,16 @@ pub(crate) fn decode_owner_changed<'a>(body: &'a Body) -> Result<(Option<&'a str
 
 pub(crate) fn check_empty_bus_reply(body: &Body) -> Result<(), Error> {
     let bus = UniqueName::try_from(BUS).map_err(|_| Error::InvalidReply)?;
-    checked_envelope(body, &bus, MessageType::MethodReturn)?;
+    check_empty_reply(body, &bus)
+}
+
+pub(crate) fn check_empty_owner_reply(body: &Body, sender: &UniqueName<'_>) -> Result<(), Error> {
+    provider_name(sender.as_str())?;
+    check_empty_reply(body, sender)
+}
+
+fn check_empty_reply(body: &Body, sender: &UniqueName<'_>) -> Result<(), Error> {
+    checked_envelope(body, sender, MessageType::MethodReturn)?;
     // raw_wire_signature also checks the actual/primary body lengths and the
     // complete aligned header. Both legal empty-signature forms remain valid.
     if !matches!(raw_wire_signature(body)?, None | Some(""))
@@ -588,8 +597,9 @@ pub(crate) fn decode_get_secret<'a>(
     Ok(EncryptedSecret { session, iv, ciphertext, content_type })
 }
 
-/// Wire-bounded only: the peer bytes are not DH/domain-validated and no Session
-/// has been established by this view. It performs neither crypto nor another call.
+/// Wire-bounded only: even empty peer bytes retain a valid returned session path
+/// for cleanup. DH/domain validity belongs to the separate checked crypto step;
+/// this view establishes neither a Session nor permission for a successor call.
 pub(crate) struct WireBoundedOpenSession<'a> {
     pub(crate) peer_bytes: &'a [u8],
     pub(crate) session: BoundedPath<'a>,
@@ -600,13 +610,15 @@ pub(crate) fn decode_open_session<'a>(
     sender: &UniqueName<'_>,
 ) -> Result<WireBoundedOpenSession<'a>, Error> {
     let (output, session): OpenSessionWire<'a> = checked_body(body, sender)?;
-    if output.0.0.is_empty() {
-        return Err(Error::InvalidReply);
-    }
     Ok(WireBoundedOpenSession { peer_bytes: output.0.0, session })
 }
 
-#[cfg(test)]
+#[cfg(feature = "mrk-retrieval-test-support")]
+pub(crate) fn assert_retrieval_empty_reply_helper() {
+    tests::owner_empty_reply_is_not_a_bus_receipt_or_a_body_guess();
+}
+
+#[cfg(any(test, feature = "mrk-retrieval-test-support"))]
 mod tests {
     // Synthetic DATA only. These tests never connect to a bus or a keyring.
     // The crate's unfiltered legacy tests are NOT safe substitutes for this set.
@@ -962,7 +974,7 @@ mod tests {
             let message = reply(&(AsVariant(&slice), path("/session")));
             let body = message.body();
             let result = decode_open_session(&body, &sender);
-            if (1..=128).contains(&length) {
+            if length <= 128 {
                 let decoded = result.unwrap();
                 assert_eq!(decoded.peer_bytes, slice);
                 assert_eq!(decoded.session.as_str(), "/session");
@@ -984,7 +996,7 @@ mod tests {
         // No DH/domain or established-session assertion belongs to these fixtures.
     }
 
-    struct BusFields<'a> { signature: Option<&'a str>, descriptors: u32 }
+    struct BusFields<'a> { signature: Option<&'a str>, descriptors: u32, sender: &'a str }
     impl Type for BusFields<'_> {
         const SIGNATURE: &'static Signature = WireHeaderFields::SIGNATURE;
     }
@@ -993,7 +1005,7 @@ mod tests {
             use serde::ser::SerializeSeq;
             let mut fields = serializer.serialize_seq(None)?;
             fields.serialize_element(&(5u8, AsVariant(&1u32)))?;
-            fields.serialize_element(&(7u8, AsVariant(&BUS)))?;
+            fields.serialize_element(&(7u8, AsVariant(&self.sender)))?;
             if let Some(signature) = self.signature {
                 fields.serialize_element(&(8u8, AsVariant(&BorrowedSignature(signature))))?;
             }
@@ -1002,7 +1014,10 @@ mod tests {
         }
     }
     fn raw_bus_reply(signature: Option<&str>, primary_len: u32, body: &[u8], descriptors: u32) -> Message {
-        let header = (PrimaryHeader::new(MessageType::MethodReturn, primary_len), BusFields { signature, descriptors });
+        raw_empty_reply(BUS, signature, primary_len, body, descriptors)
+    }
+    fn raw_empty_reply(sender: &str, signature: Option<&str>, primary_len: u32, body: &[u8], descriptors: u32) -> Message {
+        let header = (PrimaryHeader::new(MessageType::MethodReturn, primary_len), BusFields { signature, descriptors, sender });
         let data = to_bytes(Context::new_dbus(LE, 0), &header).unwrap();
         let mut bytes = data.bytes().to_vec();
         bytes.resize((bytes.len() + 7) & !7, 0);
@@ -1033,6 +1048,32 @@ mod tests {
         let owner_body = owner.body();
         let absent = raw_bus_reply(None, owner_body.len() as u32, owner_body.data().bytes(), 0);
         invalid(decode_name_owner(&absent.body()));
+    }
+
+    #[cfg_attr(test, test)]
+    pub(super) fn owner_empty_reply_is_not_a_bus_receipt_or_a_body_guess() {
+        let owner = owner();
+        for signature in [None, Some("")] {
+            let message = raw_empty_reply(owner.as_str(), signature, 0, &[], 0);
+            check_empty_owner_reply(&message.body(), &owner).unwrap();
+            invalid(check_empty_bus_reply(&message.body()));
+            invalid(check_empty_owner_reply(&raw_empty_reply(":1.24", signature, 0, &[], 0).body(), &owner));
+            invalid(check_empty_owner_reply(&raw_empty_reply(owner.as_str(), signature, 1, &[0], 0).body(), &owner));
+            invalid(check_empty_owner_reply(&raw_empty_reply(owner.as_str(), signature, 1, &[], 0).body(), &owner));
+            invalid(check_empty_owner_reply(&raw_empty_reply(owner.as_str(), signature, 0, &[0], 0).body(), &owner));
+            invalid(check_empty_owner_reply(&raw_empty_reply(owner.as_str(), signature, 0, &[], 1).body(), &owner));
+        }
+        invalid(check_empty_owner_reply(&raw_empty_reply(owner.as_str(), Some("s"), 0, &[], 0).body(), &owner));
+        let bus = UniqueName::try_from(BUS).unwrap();
+        invalid(check_empty_owner_reply(&raw_bus_reply(None, 0, &[], 0).body(), &bus));
+        let call = Message::method_call("/", "Test").unwrap().build(&()).unwrap();
+        let error = Message::error(&call.header(), "org.example.Refused").unwrap()
+            .sender(owner.clone()).unwrap().build(&()).unwrap();
+        invalid(check_empty_owner_reply(&error.body(), &owner));
+        let signal = Message::signal("/session", "org.example.Test", "Closed").unwrap()
+            .sender(owner.clone()).unwrap().build(&()).unwrap();
+        invalid(check_empty_owner_reply(&signal.body(), &owner));
+        invalid(check_empty_owner_reply(&reply(&0u32).body(), &owner));
     }
 
     fn owner_signal<T: Serialize + DynamicType>(value: &T) -> Message {

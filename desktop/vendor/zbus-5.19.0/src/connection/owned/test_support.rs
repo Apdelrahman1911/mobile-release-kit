@@ -622,6 +622,71 @@ pub async fn unix_pending_authentication_shutdown(endpoint: PathBuf) {
     drop(listener);
 }
 
+/// NATIVE, separately admitted: the actual keyring constructor checks the
+/// connected peer UID before any authentication byte. Two original attempts
+/// use this one private listener; both settle before their storage is dropped.
+/// The test owner retains responsibility for this sole socket pathname.
+pub async fn keyring_unix_peer_uid_before_authentication(endpoint: PathBuf) {
+    use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
+
+    let listener = tokio::net::UnixListener::bind(&endpoint).unwrap();
+    let current_uid = rustix::process::geteuid().as_raw();
+    for wrong in [true, false] {
+        let expected_uid = if wrong { current_uid ^ 1 } else { current_uid };
+        let mut attempt = OwnedConnectionAttempt::unix_profile(endpoint.clone(), true, Some(expected_uid)).unwrap();
+        let mut peer = None;
+        let mut returned = false;
+        let mut bytes = [0u8; 512];
+        let mut received = 0;
+        poll_fn(|cx| {
+            if peer.is_none() {
+                if let Poll::Ready(result) = listener.poll_accept(cx) { peer = Some(result.unwrap().0); }
+            }
+            if !returned {
+                match attempt.poll_build(cx) {
+                    Poll::Pending => {},
+                    Poll::Ready(result) => {
+                        assert!(wrong, "matching silent peer must leave original authentication pending");
+                        assert!(matches!(result, Err(Error::InputOutput(ref error)) if error.kind() == io::ErrorKind::PermissionDenied));
+                        returned = true;
+                    }
+                }
+            }
+            if !wrong && received == 0 {
+                if let Some(peer) = peer.as_mut() {
+                    let mut buffer = ReadBuf::new(&mut bytes);
+                    if let Poll::Ready(result) = Pin::new(peer).poll_read(cx, &mut buffer) {
+                        result.unwrap(); received = buffer.filled().len();
+                        assert!(received > 0, "matching peer closed before authentication");
+                    }
+                }
+            }
+            if peer.is_some() && (wrong && returned || !wrong && received > 0) { Poll::Ready(()) }
+            else { Poll::Pending }
+        }).await;
+        assert!(attempt.shared.lock().unwrap().control.is_some());
+        if !wrong {
+            assert!(once(|cx| attempt.poll_local_shutdown(cx)).await.is_pending());
+            assert!(poll_fn(|cx| attempt.poll_build(cx)).await.is_err());
+        }
+        let result = settle(&mut attempt).await;
+        assert_eq!(result.reader, ReaderOutcome::NotStarted);
+        assert!(result.clean());
+        let mut peer = peer.unwrap();
+        loop {
+            assert!(received < bytes.len());
+            let count = peer.read(&mut bytes[received..]).await.unwrap();
+            if count == 0 { break; }
+            received += count;
+        }
+        if wrong { assert_eq!(received, 0, "wrong-account peer received authentication bytes"); }
+        else { assert!(received > 0); }
+        drop(peer);
+        drop(attempt);
+    }
+    drop(listener);
+}
+
 /// NATIVE, separately admitted: paired socket read/write wakeup, actual reader
 /// join and received-FD disposition. Synthetic Authenticated is NOT auth proof.
 /// The single 8MiB body is fixture data, not an aggregate-memory/bounds claim.

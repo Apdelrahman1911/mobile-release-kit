@@ -240,7 +240,7 @@ impl OwnedConnectionAttempt {
     /// No I/O/task is started here. The exact runtime and validated filesystem
     /// socket path are latched before the caller first polls this attempt.
     pub fn unix(endpoint: PathBuf) -> Result<Self> {
-        Self::unix_profile(endpoint, false)
+        Self::unix_profile(endpoint, false, None)
     }
 
     /// Application reservation for the fixed keyring wire profile, including
@@ -251,10 +251,13 @@ impl OwnedConnectionAttempt {
     /// Like `unix`, construction does not start I/O or a task.
     pub fn keyring_unix(endpoint: PathBuf) -> Result<Self> {
         if !cfg!(target_os = "linux") { return Err(Error::Unsupported); }
-        Self::unix_profile(endpoint, true)
+        // The private application profile belongs to its own selected account.
+        // Capture it before the future starts; do not infer it from a pathname
+        // or SASL GUID. This is peer-UID checking, NOT provider attestation.
+        Self::unix_profile(endpoint, true, Some(rustix::process::geteuid().as_raw()))
     }
 
-    fn unix_profile(endpoint: PathBuf, keyring_wire: bool) -> Result<Self> {
+    fn unix_profile(endpoint: PathBuf, keyring_wire: bool, expected_uid: Option<u32>) -> Result<Self> {
         if keyring_wire { Self::keyring_control_census()?; }
         let bytes = endpoint.as_os_str().as_bytes();
         if !endpoint.is_absolute() || bytes.is_empty() || bytes.len() > 107 || bytes.contains(&0)
@@ -271,6 +274,13 @@ impl OwnedConnectionAttempt {
             // and before the first poll of the original Builder/handshake.
             if startup_shared.install_control(control)? { return Err(stopped()); }
             let socket = tokio::net::UnixStream::from_std(socket)?;
+            if let Some(expected_uid) = expected_uid {
+                // Ordinary fixed SO_PEERCRED API: no NSS, process discovery,
+                // task or authentication byte before this original-peer check.
+                if socket.peer_cred()?.uid() != expected_uid {
+                    return Err(io::Error::from(io::ErrorKind::PermissionDenied).into());
+                }
+            }
             Builder::unix_stream(socket).max_queued(1).build_owned(&startup_shared, keyring_wire).await
         };
         if keyring_wire { crate::keyring_wire::future_fits(&startup)?; }

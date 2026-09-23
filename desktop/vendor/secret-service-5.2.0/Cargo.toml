@@ -38,12 +38,14 @@ repository = "https://github.com/hwchen/secret-service-rs.git"
 features = ["rt-tokio-crypto-rust"]
 
 [features]
+mrk-retrieval-test-support = ["crypto-rust"]
 crypto-openssl = ["dep:openssl"]
 crypto-rust = [
     "dep:aes",
     "dep:cbc",
     "dep:sha2",
     "dep:hkdf",
+    "dep:zeroize",
 ]
 rt-async-io = ["zbus/async-io"]
 rt-async-io-crypto-openssl = [
@@ -74,6 +76,7 @@ path = "examples/example.rs"
 
 [dependencies.aes]
 version = "0.9"
+features = ["zeroize"]
 optional = true
 
 [dependencies.cbc]
@@ -81,6 +84,7 @@ version = "0.2"
 features = [
     "block-padding",
     "alloc",
+    "zeroize",
 ]
 optional = true
 
@@ -118,6 +122,12 @@ optional = true
 [dependencies.zbus]
 version = "5"
 features = ["blocking-api"]
+default-features = false
+
+[dependencies.zeroize]
+version = "1.9"
+features = ["alloc"]
+optional = true
 default-features = false
 
 [dev-dependencies.test-with]

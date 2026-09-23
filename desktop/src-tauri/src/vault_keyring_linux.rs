@@ -1,4 +1,4 @@
-//! Fixed non-mutating key-identity lookup, owned by asset_session::OriginalWork.
+//! Fixed existing-unlocked-key retrieval, owned by asset_session::OriginalWork.
 //!
 //! No renderer/session command calls this phase. Endpoint/provider qualification,
 //! and native qualification remain OFF. Only this private entry selects the
@@ -23,16 +23,18 @@ const SERVICE: &str = "org.freedesktop.secrets";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Problem {
     InvalidInput, Unavailable, InvalidReply, IdentityMismatch, OwnerChanged,
-    StreamFailed, Interrupted, CleanupUnknown, Capacity,
+    StreamFailed, Interrupted, CleanupUnknown, Capacity, MissingKey, Locked, Crypto,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Step { AddMatch, GetNameOwner, SearchItems, Attributes, RemoveMatch }
-impl Step { pub(crate) fn cleanup(self) -> bool { self == Self::RemoveMatch } }
+pub(crate) enum Step { AddMatch, GetNameOwner, SearchItems, Attributes, Locked, OpenSession, GetSecret, CloseSession, RemoveMatch }
+impl Step { pub(crate) fn cleanup(self) -> bool { matches!(self, Self::CloseSession | Self::RemoveMatch) } }
 pub(crate) enum Next { Admit(Step), FirstPoll, AdmitShutdown, FirstPollShutdown, Settled }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase { Unstarted, Connecting, Admit(Step), Calling(Step), Holding }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Registration { Unsent, Possible, Registered, Removed, Unknown }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemoteSession { Unopened, Possible, Known, Closing, Closed, Unknown }
 
 struct Query {
     collection: OwnedObjectPath, vault_id: Box<str>, generation_id: Box<str>,
@@ -104,6 +106,10 @@ pub(crate) struct LookupBook {
     phase: Phase, attempt: Option<OwnedConnectionAttempt>,
     stream_ended: bool, pending: Option<Pending>, first_poll_ready: bool, connect_failure: Option<zbus::Error>,
     raw: Option<zbus::Result<Message>>, raw_pending: bool, removal_reply: Option<RemovalReply>,
+    call_end: Option<Instant>, call_outer_end: Option<Instant>, cleanup_cutoff_seen: bool,
+    session: RemoteSession, session_path: Option<Arc<OwnedObjectPath>>,
+    exchange: Option<checked_lookup::CheckedDhExchange>, session_key: Option<checked_lookup::CheckedSessionKey>,
+    key_candidate: Option<checked_lookup::WrappingKeyCandidate>, close_error: Option<ErrorClass>,
     owner: Option<Arc<UniqueName<'static>>>, query: Option<Arc<Query>>, rule: Option<Arc<MatchRule<'static>>>,
     candidate: Option<Arc<OwnedObjectPath>>, observation: Option<Observation>,
     problem: Option<Problem>, problem_at: Option<Instant>, registration: Registration,
@@ -122,6 +128,8 @@ impl LookupBook {
     pub(crate) fn new() -> Self {
         Self { entered: false, constructor_refused: false, cleanup_failed_seen: false, charge: None, phase: Phase::Unstarted, attempt: None,
             stream_ended: false, pending: None, first_poll_ready: false, connect_failure: None, raw: None, raw_pending: false, removal_reply: None,
+            call_end: None, call_outer_end: None, cleanup_cutoff_seen: false, session: RemoteSession::Unopened, session_path: None,
+            exchange: None, session_key: None, key_candidate: None, close_error: None,
             owner: None, query: None, rule: None, candidate: None, observation: None,
             problem: None, problem_at: None, registration: Registration::Unsent,
             shutdown: Shutdown::Unrequested, shutdown_ready: false, local_settlement: None,
@@ -137,6 +145,7 @@ impl LookupBook {
         self.charge.is_none() && self.attempt.is_none() && self.pending.is_none() && self.raw.is_none()
             && self.connect_failure.is_none() && self.query.is_none() && self.rule.is_none()
             && self.owner.is_none() && self.candidate.is_none() && self.observation.is_none()
+            && self.session_path.is_none() && self.exchange.is_none() && self.session_key.is_none() && self.key_candidate.is_none()
     }
     pub(crate) fn can_begin(&self) -> bool {
         !self.entered && self.phase == Phase::Unstarted && self.problem.is_none() && self.allocations_released()
@@ -151,7 +160,8 @@ impl LookupBook {
         if !self.memory_held() || !self.resources_settled() { return false; }
         self.cleanup_failed_seen |= self.attempt.as_ref().is_some_and(OwnedConnectionAttempt::cleanup_failed);
         drop((self.attempt.take(), self.query.take(), self.rule.take(), self.owner.take(),
-            self.candidate.take(), self.observation.take()));
+            self.candidate.take(), self.observation.take(), self.session_path.take(),
+            self.exchange.take(), self.session_key.take(), self.key_candidate.take()));
         self.charge.take(); // Exactly once, AFTER actual charged holding disposal.
         true
     }
@@ -159,16 +169,52 @@ impl LookupBook {
     pub(crate) fn problem(&self) -> Option<Problem> { self.problem }
     pub(crate) fn problem_at(&self) -> Option<Instant> { self.problem_at }
     pub(crate) fn cleanup_unknown(&self) -> bool {
-        self.cleanup_failed_seen || self.registration == Registration::Unknown || self.local_settlement.is_some_and(|result| !result.clean())
+        self.local_cleanup_unknown() || self.registration == Registration::Unknown || self.session == RemoteSession::Unknown
+    }
+    // A failed remote Close/removal is permanent failed operation evidence,
+    // not loss of this coordinator's ability to settle its remaining originals.
+    // Existing local/poison/document Unknown gates remain unchanged.
+    pub(crate) fn local_cleanup_unknown(&self) -> bool {
+        self.cleanup_failed_seen || self.local_settlement.is_some_and(|result| !result.clean())
             || self.attempt.as_ref().is_some_and(OwnedConnectionAttempt::cleanup_failed)
+    }
+    pub(crate) fn document_cleanup_unknown(&self) -> bool {
+        // Defer only remote semantic uncertainty until independent LOCAL
+        // originals have settled. Never defer actual custody/poison failures.
+        self.local_cleanup_unknown() || self.resources_settled() && self.cleanup_unknown()
     }
     pub(crate) fn observation(&self) -> Option<&Observation> {
         if self.problem.is_none() { self.observation.as_ref() } else { None }
     }
     fn fail(&mut self, problem: Problem) {
-        if self.problem.is_none() { self.problem = Some(problem); self.problem_at = Some(Instant::now()); }
+        self.fail_at(problem, Instant::now());
+    }
+    fn fail_at(&mut self, problem: Problem, at: Instant) {
+        if self.problem.is_none() { self.problem = Some(problem); self.problem_at = Some(at); }
+        // No late success can recreate authority after STOP, failure or cutoff.
+        // These owned buffers zeroize; the original raw result remains retained.
+        self.exchange = None; self.session_key = None; self.key_candidate = None;
     }
     pub(crate) fn interrupt(&mut self) { self.fail(Problem::Interrupted); }
+
+    // This is deliberately private evidence, not a key getter/publication gate.
+    // The absent store consumer cannot export/assign even this settled candidate.
+    fn key_ready(&self) -> bool {
+        self.problem.is_none() && self.key_candidate.is_some() && self.session == RemoteSession::Closed
+            && self.registration == Registration::Removed && self.resources_settled()
+            && !self.cleanup_unknown() && self.local_settlement.is_some_and(|result| result.clean())
+    }
+
+    // Fallible RNG/crypto preparation belongs to this SAME charged coordinator,
+    // outside the document mutex. It cannot dispatch or grant the later RPC.
+    pub(crate) fn prepare_exchange(&mut self) -> Result<(), Problem> {
+        if !self.expected(Step::OpenSession) || self.problem.is_some() || self.shutdown != Shutdown::Unrequested
+            || self.exchange.is_some() || self.session != RemoteSession::Unopened { return Err(Problem::CleanupUnknown); }
+        match checked_lookup::CheckedDhExchange::generate() {
+            Ok(exchange) => { self.exchange = Some(exchange); Ok(()) }
+            Err(_) => { self.fail(Problem::Crypto); Err(Problem::Crypto) }
+        }
+    }
 
     pub(crate) fn begin(&mut self, input: LookupInput, dispatch_end: Instant,
         charge: crate::asset_session::KeyringMemoryAdmission) -> Result<(), Problem> {
@@ -226,18 +272,24 @@ impl LookupBook {
         self.admit_original(step, dispatch_end, |book, step| make(book, step).map(RpcOriginal::Data))
     }
     fn admit_original(&mut self, step: Step, dispatch_end: Instant, make: impl FnOnce(&mut Self, Step) -> Result<RpcOriginal, Problem>) -> Result<(), Problem> {
-        if !self.expected(step) || (!step.cleanup() && self.problem.is_some())
-            || matches!(self.shutdown, Shutdown::Entered | Shutdown::Settled) {
+        if !self.expected(step) || (!step.cleanup() && self.problem.is_some()) || self.cleanup_cutoff_seen
+            || self.shutdown != Shutdown::Unrequested {
             return Err(self.problem.unwrap_or(Problem::CleanupUnknown));
         }
-        if step.cleanup() && !matches!(self.registration, Registration::Possible | Registration::Registered) {
+        if step == Step::RemoveMatch && !matches!(self.registration, Registration::Possible | Registration::Registered)
+            || step == Step::CloseSession && (self.session != RemoteSession::Known || self.session_path.is_none()) {
             return Err(Problem::CleanupUnknown);
         }
+        // A remote cleanup must leave time for independent original local stop.
+        // Latch ONCE; retain through Pending and raw reconciliation, never renew.
+        let outer_end = dispatch_end;
+        let dispatch_end = if step.cleanup() { cleanup_progress_end(Instant::now(), outer_end) } else { outer_end };
         let future = make(self, step)?;
         // A preceding raw result stays retained through reconciliation and the
         // final stream/document gate, then this one successor replaces it.
         if let Some(Err(error)) = self.raw.as_ref() { self.raw_error.get_or_insert_with(|| error_class(error)); }
-        self.raw = None; self.phase = Phase::Calling(step);
+        self.raw = None; self.phase = Phase::Calling(step); self.call_end = Some(dispatch_end);
+        self.call_outer_end = step.cleanup().then_some(outer_end);
         self.pending = Some(Pending::Rpc { future, polled: false, dispatch_end });
         Ok(())
     }
@@ -264,11 +316,33 @@ impl LookupBook {
                 let item = self.candidate.clone().ok_or(Problem::CleanupUnknown)?;
                 checked_lookup::start_owned_attributes(attempt, owner.as_ref(), item.as_ref())
             }
+            Step::Locked => {
+                let owner = self.owner.as_ref().ok_or(Problem::CleanupUnknown)?;
+                let item = self.candidate.as_ref().ok_or(Problem::CleanupUnknown)?;
+                checked_lookup::start_owned_locked(attempt, owner.as_ref(), item.as_ref())
+            }
+            Step::OpenSession => {
+                let owner = self.owner.as_ref().ok_or(Problem::CleanupUnknown)?;
+                let exchange = self.exchange.as_ref().ok_or(Problem::CleanupUnknown)?;
+                checked_lookup::start_owned_open_session(attempt, owner.as_ref(), exchange.public_key())
+            }
+            Step::GetSecret => {
+                let owner = self.owner.as_ref().ok_or(Problem::CleanupUnknown)?;
+                let item = self.candidate.as_ref().ok_or(Problem::CleanupUnknown)?;
+                let session = self.session_path.as_ref().ok_or(Problem::CleanupUnknown)?;
+                checked_lookup::start_owned_get_secret(attempt, owner.as_ref(), item.as_ref(), session.as_ref())
+            }
+            Step::CloseSession => {
+                let owner = self.owner.as_ref().ok_or(Problem::CleanupUnknown)?;
+                let session = self.session_path.as_ref().ok_or(Problem::CleanupUnknown)?;
+                checked_lookup::start_owned_close_session(attempt, owner.as_ref(), session.as_ref())
+            }
         }.map_err(|_| Problem::Unavailable)?;
         Ok(RpcOriginal::Native)
     }
     fn cleanup_or_hold(&mut self) {
-        if matches!(self.shutdown, Shutdown::Entered | Shutdown::Settled) {
+        if self.shutdown != Shutdown::Unrequested {
+            self.abandon_remote_session();
             if matches!(self.registration, Registration::Possible | Registration::Registered) {
                 self.registration = Registration::Unknown;
                 self.fail(Problem::CleanupUnknown);
@@ -276,20 +350,55 @@ impl LookupBook {
             self.phase = Phase::Holding;
             return;
         }
-        self.phase = if matches!(self.registration, Registration::Possible | Registration::Registered) {
+        self.phase = if self.session == RemoteSession::Known {
+            Phase::Admit(Step::CloseSession)
+        } else if matches!(self.registration, Registration::Possible | Registration::Registered) {
             Phase::Admit(Step::RemoveMatch)
         } else { Phase::Holding };
+    }
+    fn abandon_remote_session(&mut self) {
+        if matches!(self.session, RemoteSession::Possible | RemoteSession::Known | RemoteSession::Closing) {
+            self.session = RemoteSession::Unknown;
+            self.fail(Problem::CleanupUnknown);
+        }
     }
     pub(crate) fn admission_refused(&mut self, step: Step, problem: Problem) {
         self.fail(problem);
         if !self.expected(step) { return; }
-        if step.cleanup() { self.registration = Registration::Unknown; self.phase = Phase::Holding; }
-        else { self.cleanup_or_hold(); }
+        match step {
+            Step::CloseSession => self.session = RemoteSession::Unknown,
+            Step::RemoveMatch => self.registration = Registration::Unknown,
+            _ => {}
+        }
+        self.cleanup_or_hold();
     }
 
     pub(crate) fn expected_shutdown(&self) -> bool {
         self.attempt.is_some() && self.shutdown == Shutdown::Unrequested && !self.never_polled()
-            && (self.problem.is_some() || self.phase == Phase::Holding)
+            && self.local_shutdown_due(Instant::now())
+    }
+    // A later STOP can replace WORK with an earlier, immutable cleanup end.
+    // Contract this SAME call's progress clock once against that real original
+    // stop time, not the observation tick. A fresh call admitted after STOP
+    // already has the smaller endpoint and retains its admission midpoint.
+    pub(crate) fn constrain_cleanup_endpoint(&mut self, stop_at: Instant, outer_end: Instant) {
+        if !matches!(self.phase, Phase::Calling(step) if step.cleanup())
+            || !self.call_outer_end.is_some_and(|old| outer_end < old) { return; }
+        self.call_outer_end = Some(outer_end);
+        let cutoff = cleanup_progress_end(stop_at, outer_end);
+        if let Some(end) = self.call_end.as_mut() { *end = (*end).min(cutoff); }
+        if let Some(Pending::Rpc { dispatch_end, .. }) = self.pending.as_mut() {
+            *dispatch_end = (*dispatch_end).min(cutoff);
+        }
+        // No poll/drop, raw reconciliation, failure-clock change or new grant.
+    }
+    fn local_shutdown_due(&self, now: Instant) -> bool {
+        let unfinished = self.pending.is_some() || self.raw_pending;
+        let stalled = match self.phase {
+            Phase::Calling(step) if step.cleanup() => unfinished && self.call_end.is_some_and(|end| now >= end),
+            _ => unfinished && self.problem.is_some(),
+        };
+        self.cleanup_cutoff_seen || stalled || self.phase == Phase::Holding
     }
     pub(crate) fn admit_shutdown(&mut self, dispatch_end: Instant) -> Result<(), Problem> {
         if !self.expected_shutdown() {
@@ -330,6 +439,7 @@ impl LookupBook {
         if self.attempt.is_none() { self.shutdown_admission_refused(Problem::CleanupUnknown); return; }
         self.commit_removal_reply();
         self.shutdown = Shutdown::Entered;
+        self.abandon_remote_session();
         self.poll_shutdown(cx);
         cx.waker().wake_by_ref();
     }
@@ -352,6 +462,7 @@ impl LookupBook {
         if let Poll::Ready(result) = result {
             self.local_settlement = Some(result);
             self.shutdown = Shutdown::Settled;
+            self.abandon_remote_session();
             if !result.clean() { self.fail(Problem::CleanupUnknown); }
             if matches!(self.registration, Registration::Possible | Registration::Registered) {
                 self.registration = Registration::Unknown;
@@ -402,14 +513,15 @@ impl LookupBook {
             self.fail(Problem::CleanupUnknown);
             return; // Never poll without private, one-use stream readiness.
         }
-        let refusal = if matches!(self.shutdown, Shutdown::Entered | Shutdown::Settled) {
+        let refusal = if self.shutdown != Shutdown::Unrequested {
             Some(Problem::CleanupUnknown)
         } else { match self.pending.as_mut() {
             Some(Pending::Connect { dispatch_end, .. } | Pending::Rpc { dispatch_end, .. }) => match current_gate {
                 Err(problem) => Some(problem),
                 Ok(current_end) => {
                     *dispatch_end = (*dispatch_end).min(current_end);
-                    (Instant::now() >= *dispatch_end).then_some(if self.phase == Phase::Calling(Step::RemoveMatch) {
+                    if matches!(self.phase, Phase::Calling(_)) { self.call_end = Some(*dispatch_end); }
+                    (Instant::now() >= *dispatch_end).then_some(if matches!(self.phase, Phase::Calling(step) if step.cleanup()) {
                         Problem::CleanupUnknown
                     } else { Problem::Interrupted })
                 }
@@ -418,7 +530,11 @@ impl LookupBook {
         } };
         if let Some(problem) = refusal {
             self.fail(problem);
-            if self.phase == Phase::Calling(Step::RemoveMatch) { self.registration = Registration::Unknown; }
+            match self.phase {
+                Phase::Calling(Step::CloseSession) => self.session = RemoteSession::Unknown,
+                Phase::Calling(Step::RemoveMatch) => self.registration = Registration::Unknown,
+                _ => {}
+            }
             if self.refuse_unpolled_pending().is_ok() { self.pending = None; }
             else { self.fail(Problem::CleanupUnknown); }
             self.cleanup_or_hold(); cx.waker().wake_by_ref(); return;
@@ -444,6 +560,16 @@ impl LookupBook {
                 self.stream_ended = true; self.fail(Problem::StreamFailed);
             }
             _ => {}
+        }
+        if matches!(self.phase, Phase::Calling(step) if step.cleanup())
+            && (self.pending.is_some() || self.raw_pending)
+        {
+            if let Some(end) = self.call_end.filter(|end| Instant::now() >= *end) {
+                // Detection may be late; it cannot move the already-latched
+                // cleanup progress cutoff or recreate key authority.
+                self.cleanup_cutoff_seen = true;
+                self.fail_at(Problem::CleanupUnknown, end);
+            }
         }
 
         // A never-polled future has dispatched nothing. After ONE native poll
@@ -484,7 +610,7 @@ impl LookupBook {
         if self.expected_shutdown() { return Poll::Ready(Next::AdmitShutdown); }
         if matches!(self.pending.as_ref(), Some(Pending::Rpc { polled: false, .. }))
             && !(matches!(turn, StreamTurn::Idle)
-                || (self.phase == Phase::Calling(Step::RemoveMatch) && matches!(turn, StreamTurn::Failed | StreamTurn::Ended)))
+                || (matches!(self.phase, Phase::Calling(step) if step.cleanup()) && matches!(turn, StreamTurn::Failed | StreamTurn::Ended)))
         {
             // A message that arrived after serialized admission may have another
             // owner event behind it. Finish the bounded nonblocking drain before
@@ -505,7 +631,7 @@ impl LookupBook {
 
         if matches!(turn, StreamTurn::Observed(_)) { cx.waker().wake_by_ref(); }
         if let Phase::Admit(step) = self.phase {
-            if matches!(self.shutdown, Shutdown::Entered | Shutdown::Settled) {
+            if self.shutdown != Shutdown::Unrequested {
                 self.cleanup_or_hold(); cx.waker().wake_by_ref(); return Poll::Pending;
             }
             if !step.cleanup() && self.problem.is_some() {
@@ -552,7 +678,14 @@ impl LookupBook {
                 }
             } },
             Some(Pending::Rpc { future, polled, .. }) => {
-                if !*polled && self.phase == Phase::Calling(Step::AddMatch) { self.registration = Registration::Possible; }
+                if !*polled {
+                    match self.phase {
+                        Phase::Calling(Step::AddMatch) => self.registration = Registration::Possible,
+                        Phase::Calling(Step::OpenSession) => self.session = RemoteSession::Possible,
+                        Phase::Calling(Step::CloseSession) => self.session = RemoteSession::Closing,
+                        _ => {}
+                    }
+                }
                 *polled = true;
                 let result = match future {
                     RpcOriginal::Native => match self.attempt.as_mut() {
@@ -579,7 +712,20 @@ impl LookupBook {
         self.raw_pending = false;
         let Phase::Calling(step) = self.phase else { self.fail(Problem::CleanupUnknown); self.phase = Phase::Holding; return; };
         let result = self.decode_reply(step, reconciled);
-        if step.cleanup() {
+        if step == Step::CloseSession {
+            if result.is_ok() { self.session = RemoteSession::Closed; }
+            else {
+                self.session = RemoteSession::Unknown;
+                self.close_error = Some(match self.raw.as_ref() {
+                    Some(Err(error)) => error_class(error), _ => ErrorClass::Protocol,
+                });
+                self.fail(Problem::CleanupUnknown);
+            }
+            // Session.Close is NOT the final bus removal. Its raw Message is
+            // retained through this reconciliation and successor admission.
+            self.cleanup_or_hold(); return;
+        }
+        if step == Step::RemoveMatch {
             self.removal_reply = Some(if result.is_ok() {
                 RemovalReply::Confirmed
             } else {
@@ -602,13 +748,21 @@ impl LookupBook {
             self.phase = Phase::Holding; return;
         }
         if let Err(problem) = result { self.fail(problem); }
+        if step == Step::OpenSession && self.session == RemoteSession::Possible {
+            // A dispatched malformed/error reply supplies no trustworthy path.
+            self.session = RemoteSession::Unknown; self.fail(Problem::CleanupUnknown);
+        }
         if self.problem.is_some() { self.cleanup_or_hold(); return; }
         self.phase = match step {
             Step::AddMatch => Phase::Admit(Step::GetNameOwner),
             Step::GetNameOwner => Phase::Admit(Step::SearchItems),
             Step::SearchItems if self.candidate.is_some() => Phase::Admit(Step::Attributes),
-            Step::SearchItems | Step::Attributes => Phase::Admit(Step::RemoveMatch),
-            Step::RemoveMatch => Phase::Holding,
+            Step::SearchItems => Phase::Admit(Step::RemoveMatch),
+            Step::Attributes => Phase::Admit(Step::Locked),
+            Step::Locked => Phase::Admit(Step::OpenSession),
+            Step::OpenSession => Phase::Admit(Step::GetSecret),
+            Step::GetSecret => Phase::Admit(Step::CloseSession),
+            Step::CloseSession | Step::RemoveMatch => Phase::Holding,
         };
     }
     fn commit_removal_reply(&mut self) {
@@ -627,14 +781,33 @@ impl LookupBook {
         // Retain the original MethodError Message through the exact same stream
         // gate as success. Never FDO-convert/format it or invent a sequence.
         let message = result.as_ref().map_err(|_| Problem::Unavailable)?;
-        if !reconciled { return Err(Problem::StreamFailed); }
         let body = message.body();
+        if step == Step::OpenSession {
+            let owner = self.owner.as_ref().ok_or(Problem::CleanupUnknown)?;
+            let (peer, path) = checked_lookup::decode_open_session(&body, owner.as_ref()).map_err(|_| Problem::InvalidReply)?;
+            // The original, owner-validated tuple can establish cleanup custody
+            // even when cancellation or semantic DH rejection denies the key.
+            // Never guess a path from a malformed/wrong-owner/root tuple.
+            self.session_path = Some(Arc::new(OwnedObjectPath::try_from(path.to_owned()).map_err(|_| Problem::InvalidReply)?));
+            self.session = RemoteSession::Known;
+            if !reconciled { return Err(Problem::StreamFailed); }
+            if let Some(problem) = self.problem { return Err(problem); }
+            if self.shutdown != Shutdown::Unrequested { return Err(Problem::CleanupUnknown); }
+            let exchange = self.exchange.take().ok_or(Problem::CleanupUnknown)?;
+            self.session_key = Some(exchange.derive(peer).map_err(|_| Problem::Crypto)?);
+            return Ok(());
+        }
+        if !reconciled { return Err(Problem::StreamFailed); }
         match step {
             Step::AddMatch => {
                 checked_lookup::check_empty_bus_reply(&body).map_err(|_| Problem::InvalidReply)?;
                 self.registration = Registration::Registered;
             }
             Step::RemoveMatch => { checked_lookup::check_empty_bus_reply(&body).map_err(|_| Problem::InvalidReply)?; }
+            Step::CloseSession => {
+                let owner = self.owner.as_ref().ok_or(Problem::CleanupUnknown)?;
+                checked_lookup::check_empty_owner_reply(&body, owner.as_ref()).map_err(|_| Problem::InvalidReply)?;
+            }
             _ if self.problem.is_some() => return Err(self.problem.unwrap_or(Problem::CleanupUnknown)),
             Step::GetNameOwner => {
                 if self.owner.is_some() { return Err(Problem::CleanupUnknown); }
@@ -645,18 +818,36 @@ impl LookupBook {
                 let owner = self.owner.as_ref().ok_or(Problem::CleanupUnknown)?;
                 match checked_lookup::decode_item_path(&body, owner.as_ref()).map_err(|_| Problem::InvalidReply)? {
                     Some(path) => self.candidate = Some(Arc::new(OwnedObjectPath::try_from(path.to_owned()).map_err(|_| Problem::InvalidReply)?)),
-                    None => self.observation = Some(Observation::Absent),
+                    None => { self.observation = Some(Observation::Absent); return Err(Problem::MissingKey); }
                 }
             }
             Step::Attributes => {
                 let owner = self.owner.as_ref().ok_or(Problem::CleanupUnknown)?;
                 let query = self.query.as_ref().ok_or(Problem::CleanupUnknown)?;
                 checked_lookup::check_attributes(&body, owner.as_ref(), &query.attributes()).map_err(|_| Problem::IdentityMismatch)?;
-                self.observation = Some(Observation::Candidate(self.candidate.take().ok_or(Problem::CleanupUnknown)?));
+                self.observation = Some(Observation::Candidate(self.candidate.clone().ok_or(Problem::CleanupUnknown)?));
             }
+            Step::Locked => {
+                let owner = self.owner.as_ref().ok_or(Problem::CleanupUnknown)?;
+                if checked_lookup::decode_locked(&body, owner.as_ref()).map_err(|_| Problem::InvalidReply)? {
+                    return Err(Problem::Locked); // Never Unlock/Prompt or reset a missing key.
+                }
+            }
+            Step::GetSecret => {
+                let owner = self.owner.as_ref().ok_or(Problem::CleanupUnknown)?;
+                let session = self.session_path.as_ref().ok_or(Problem::CleanupUnknown)?;
+                let (iv, ciphertext) = checked_lookup::decode_get_secret(&body, owner.as_ref(), session.as_ref()).map_err(|_| Problem::InvalidReply)?;
+                let key = self.session_key.take().ok_or(Problem::CleanupUnknown)?;
+                self.key_candidate = Some(key.decrypt_wrapping_key(iv, ciphertext).map_err(|_| Problem::Crypto)?);
+            }
+            Step::OpenSession => return Err(Problem::CleanupUnknown), // Handled before the semantic gate above.
         }
         Ok(())
     }
+}
+
+fn cleanup_progress_end(now: Instant, outer_end: Instant) -> Instant {
+    outer_end.checked_duration_since(now).map_or(outer_end, |remaining| now + remaining / 2)
 }
 
 fn raw_message(result: &zbus::Result<Message>) -> Option<&Message> {
@@ -706,11 +897,24 @@ impl LookupBook {
     // Actual-driver DATA seam for the real DocumentState/OriginalWork gate
     // regression. No Connection, stream, task or native receipt is fabricated.
     pub(crate) fn cleanup_data(dispatch_end: Instant, future: impl Future<Output = zbus::Result<Message>> + Send + 'static) -> Self {
+        Self::cleanup_step_data(Step::RemoveMatch, dispatch_end, future)
+    }
+    pub(crate) fn cleanup_step_data(step: Step, dispatch_end: Instant,
+        future: impl Future<Output = zbus::Result<Message>> + Send + 'static) -> Self {
+        assert!(step.cleanup());
         let mut book = Self::new();
         book.claim(crate::asset_session::KeyringMemoryAdmission::data(0, 0).unwrap()).unwrap();
-        book.phase = Phase::Admit(Step::RemoveMatch); book.registration = Registration::Registered;
-        book.admit_with(Step::RemoveMatch, dispatch_end, |_, _| Ok(Box::pin(future))).unwrap();
+        book.phase = Phase::Admit(step); book.registration = Registration::Registered;
+        if step == Step::CloseSession {
+            book.session = RemoteSession::Known;
+            book.session_path = Some(Arc::new(OwnedObjectPath::try_from("/session".to_owned()).unwrap()));
+            book.owner = Some(Arc::new(UniqueName::try_from(":1.23".to_owned()).unwrap()));
+        }
+        book.admit_with(step, dispatch_end, |_, _| Ok(Box::pin(future))).unwrap();
         book
+    }
+    pub(crate) fn cleanup_progress_data(&self, at: Instant) -> (Option<Instant>, bool, bool, bool) {
+        (self.call_end, self.local_shutdown_due(at), self.pending.is_some(), self.raw_pending)
     }
     pub(crate) fn idle_data_turn(&mut self, cx: &mut Context<'_>) -> Poll<Next> {
         self.advance(cx, StreamTurn::Idle)
@@ -800,6 +1004,17 @@ mod original_finality_tests {
     }
     #[tokio::test(flavor = "current_thread")]
     #[ignore = "requires separately reviewed isolated Unix fixture admission"]
+    async fn owned_keyring_peer_uid_before_authentication() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::path::PathBuf::from(std::env::var_os("MRK_OWNED_UNIX_FIXTURE_ROOT")
+            .expect("the native test owner must supply a private fixture directory"));
+        let metadata = std::fs::symlink_metadata(&root).unwrap();
+        assert!(root.is_absolute() && metadata.is_dir() && !metadata.file_type().is_symlink());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+        finite(owned_test_support::keyring_unix_peer_uid_before_authentication(root.join("keyring-peer.sock"))).await;
+    }
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires separately reviewed isolated Unix fixture admission"]
     async fn owned_unix_pending_write_and_received_fd_shutdown() {
         // LEGACY profile: the 8MiB write/received-FD fixture is deliberately
         // separate and is NOT evidence for the 64KiB/zero-FD Keyring profile.
@@ -876,13 +1091,46 @@ mod tests {
         assert!(!book.raw_pending);
         // These lower-level DATA books have no native shutdown to admit. Apply
         // only the production semantic result; no SDK settlement is invented.
-        if step.cleanup() { book.commit_removal_reply(); }
+        if step == Step::RemoveMatch { book.commit_removal_reply(); }
     }
     fn select_owner(book: &mut LookupBook, registered: &mut Vec<Step>) {
         call(book, Step::AddMatch, Ok(reply(BUS, &())), registered);
         call(book, Step::GetNameOwner, Ok(reply(BUS, &":1.23")), registered);
         assert_eq!(book.owner.as_ref().unwrap().as_str(), ":1.23");
     }
+    fn select_item(book: &mut LookupBook, registered: &mut Vec<Step>) {
+        select_owner(book, registered);
+        let paths = [zbus::zvariant::ObjectPath::try_from("/one").unwrap()];
+        call(book, Step::SearchItems, Ok(reply(":1.23", &&paths[..])), registered);
+        let attributes: std::collections::HashMap<_, _> = book.query.as_ref().unwrap().attributes().into_iter().collect();
+        let message = reply(":1.23", &zbus::zvariant::as_value::Serialize(&attributes)); drop(attributes);
+        call(book, Step::Attributes, Ok(message), registered);
+    }
+    fn open_reply(sender: &'static str, peer: &[u8], path: &str) -> Message {
+        reply(sender, &(zbus::zvariant::as_value::Serialize(&peer), zbus::zvariant::ObjectPath::try_from(path).unwrap()))
+    }
+    fn secret_reply(iv: &[u8; 16], ciphertext: &[u8; 48]) -> Message {
+        reply(":1.23", &((zbus::zvariant::ObjectPath::try_from("/session").unwrap(), &iv[..], &ciphertext[..], "application/octet-stream"),))
+    }
+    fn prepared_open() -> (LookupBook, Vec<Step>, [u8; 1], [u8; 16], [u8; 48]) {
+        let mut book = data_book(); let mut registered = Vec::new();
+        select_item(&mut book, &mut registered);
+        call(&mut book, Step::Locked, Ok(reply(":1.23", &zbus::zvariant::as_value::Serialize(&false))), &mut registered);
+        let (exchange, peer, iv, ciphertext) = checked_lookup::test_support::exchange_and_secret().unwrap();
+        book.exchange = Some(exchange); // Real deterministic library helper, no fabricated key candidate.
+        (book, registered, peer, iv, ciphertext)
+    }
+    fn retrieved_key() -> (LookupBook, Vec<Step>) {
+        let (mut book, mut registered, peer, iv, ciphertext) = prepared_open();
+        call(&mut book, Step::OpenSession, Ok(open_reply(":1.23", &peer, "/session")), &mut registered);
+        call(&mut book, Step::GetSecret, Ok(secret_reply(&iv, &ciphertext)), &mut registered);
+        assert!(book.key_candidate.is_some() && !book.key_ready());
+        (book, registered)
+    }
+    #[test]
+    fn sdk_checked_retrieval_crypto_contract() { checked_lookup::test_support::assert_crypto_helpers(); }
+    #[test]
+    fn sdk_checked_retrieval_wire_contract() { checked_lookup::test_support::assert_facade_helpers(); }
     #[test]
     fn lookup_charge_precedes_constructor_and_is_refunded_only_after_disposal() {
         let mut book = LookupBook::new(); let value = input();
@@ -918,7 +1166,7 @@ mod tests {
         assert!(raw.raw.is_some() && raw.started());
     }
     #[test]
-    fn lookup_driver_runs_only_fixed_search_attributes_and_one_cleanup() {
+    fn lookup_driver_runs_fixed_retrieval_or_missing_key_and_cleanup() {
         for candidate in [false, true] {
             let mut book = data_book(); let mut registered = Vec::new();
             select_owner(&mut book, &mut registered);
@@ -932,19 +1180,160 @@ mod tests {
                 drop(attributes);
                 call(&mut book, Step::Attributes, Ok(message), &mut registered);
                 assert!(matches!(book.observation(), Some(Observation::Candidate(path)) if path.as_str() == "/one"));
-            } else { assert!(matches!(book.observation(), Some(Observation::Absent))); }
+                call(&mut book, Step::Locked, Ok(reply(":1.23", &zbus::zvariant::as_value::Serialize(&false))), &mut registered);
+                let (exchange, peer, iv, ciphertext) = checked_lookup::test_support::exchange_and_secret().unwrap();
+                book.exchange = Some(exchange);
+                call(&mut book, Step::OpenSession, Ok(open_reply(":1.23", &peer, "/session")), &mut registered);
+                assert_eq!(book.session, RemoteSession::Known);
+                call(&mut book, Step::GetSecret, Ok(secret_reply(&iv, &ciphertext)), &mut registered);
+                assert!(book.key_candidate.is_some() && !book.key_ready());
+                call(&mut book, Step::CloseSession, Ok(reply(":1.23", &())), &mut registered);
+                assert_eq!(book.session, RemoteSession::Closed);
+                assert!(book.removal_reply.is_none());
+            } else { assert_eq!(book.problem(), Some(Problem::MissingKey)); assert!(book.key_candidate.is_none()); }
             call(&mut book, Step::RemoveMatch, Ok(reply(BUS, &())), &mut registered);
-            let expected = if candidate { vec![Step::AddMatch, Step::GetNameOwner, Step::SearchItems, Step::Attributes, Step::RemoveMatch] }
+            let expected = if candidate { vec![Step::AddMatch, Step::GetNameOwner, Step::SearchItems, Step::Attributes,
+                Step::Locked, Step::OpenSession, Step::GetSecret, Step::CloseSession, Step::RemoveMatch] }
                 else { vec![Step::AddMatch, Step::GetNameOwner, Step::SearchItems, Step::RemoveMatch] };
             assert_eq!(registered, expected);
             assert_eq!(book.registration, Registration::Removed);
             assert_eq!(book.phase, Phase::Holding);
-            assert!(book.problem().is_none());
+            assert_eq!(book.problem(), if candidate { None } else { Some(Problem::MissingKey) });
+            assert!(!book.key_ready()); // No actual SDK finality/document grant in these DATA books.
             assert!(!book.resources_settled()); // successful RPC/removal is not SDK joins
             let mut extra = 0;
             assert!(book.admit_with(Step::RemoveMatch, data_deadline(), |_, _| { extra += 1; Ok(Box::pin(std::future::pending())) }).is_err());
             assert_eq!(extra, 0);
         }
+    }
+    #[test]
+    fn locked_existing_key_never_opens_or_prompts() {
+        let mut book = data_book(); let mut registered = Vec::new(); select_item(&mut book, &mut registered);
+        call(&mut book, Step::Locked, Ok(reply(":1.23", &zbus::zvariant::as_value::Serialize(&true))), &mut registered);
+        assert_eq!(book.problem(), Some(Problem::Locked));
+        assert_eq!(book.session, RemoteSession::Unopened);
+        assert!(book.exchange.is_none() && book.key_candidate.is_none());
+        call(&mut book, Step::RemoveMatch, Ok(reply(BUS, &())), &mut registered);
+        assert_eq!(registered, [Step::AddMatch, Step::GetNameOwner, Step::SearchItems, Step::Attributes, Step::Locked, Step::RemoveMatch]);
+    }
+    #[test]
+    fn original_open_path_survives_invalid_crypto_or_cancellation() {
+        for cancelled in [false, true] {
+            let (mut book, mut registered, peer, _, _) = prepared_open();
+            let message = open_reply(":1.23", if cancelled { &peer[..] } else { &[] }, "/session");
+            book.admit_with(Step::OpenSession, data_deadline(), |_, step| { registered.push(step); Ok(Box::pin(std::future::ready(Ok(message)))) }).unwrap();
+            assert_eq!(book.session, RemoteSession::Unopened);
+            assert!(tick(&mut book, DataTurn::Idle).is_pending());
+            assert_eq!(book.session, RemoteSession::Possible); // FIRST poll, not constructor or decoder.
+            if cancelled { book.interrupt(); }
+            assert!(tick(&mut book, DataTurn::Drained).is_pending());
+            assert_eq!(book.problem(), Some(if cancelled { Problem::Interrupted } else { Problem::Crypto }));
+            assert_eq!(book.session, RemoteSession::Known);
+            assert_eq!(book.session_path.as_ref().unwrap().as_str(), "/session");
+            assert!(book.exchange.is_none() && book.session_key.is_none() && book.key_candidate.is_none());
+            call(&mut book, Step::CloseSession, Ok(reply(":1.23", &())), &mut registered);
+            assert!(book.removal_reply.is_none());
+            call(&mut book, Step::RemoveMatch, Ok(reply(BUS, &())), &mut registered);
+            assert!(!registered.contains(&Step::GetSecret));
+            assert_eq!(book.session, RemoteSession::Closed);
+        }
+    }
+    #[test]
+    fn untrusted_open_session_paths_never_authorize_cleanup() {
+        for (sender, path) in [(":1.24", "/session"), (":1.23", "/")] {
+            let (mut book, mut registered, peer, _, _) = prepared_open();
+            call(&mut book, Step::OpenSession, Ok(open_reply(sender, &peer, path)), &mut registered);
+            assert_eq!(book.session, RemoteSession::Unknown);
+            assert!(book.session_path.is_none() && book.cleanup_unknown());
+            assert!(!book.document_cleanup_unknown()); // Remaining local originals are still owned.
+            call(&mut book, Step::RemoveMatch, Ok(reply(BUS, &())), &mut registered);
+            assert!(!registered.contains(&Step::CloseSession) && !registered.contains(&Step::GetSecret));
+        }
+    }
+    #[test]
+    fn close_errors_and_refusals_still_allow_independent_removal() {
+        for refusal in 0..3 {
+            let (mut book, mut registered) = retrieved_key();
+            if refusal == 0 {
+                book.admission_refused(Step::CloseSession, Problem::CleanupUnknown);
+            } else {
+                let result = if refusal == 1 { Ok(reply(":1.23", &0u32)) } else { Err(zbus::Error::InvalidReply) };
+                call(&mut book, Step::CloseSession, result, &mut registered);
+            }
+            assert_eq!(book.session, RemoteSession::Unknown);
+            assert!(book.problem_at().is_some() && book.key_candidate.is_none());
+            assert!(book.cleanup_unknown() && !book.document_cleanup_unknown() && book.removal_reply.is_none());
+            assert!(book.expected(Step::RemoveMatch) && !book.expected_shutdown());
+            let first_failure = book.problem_at();
+            call(&mut book, Step::RemoveMatch, Ok(reply(BUS, &())), &mut registered);
+            assert_eq!(book.registration, Registration::Removed);
+            assert_eq!(book.problem_at(), first_failure);
+            assert!(!book.resources_settled() && book.memory_held() && !book.key_ready());
+            let mut retries = 0;
+            assert!(book.admit_with(Step::CloseSession, data_deadline(), |_, _| { retries += 1; Ok(Box::pin(std::future::pending())) }).is_err());
+            assert_eq!(retries, 0);
+        }
+    }
+    #[test]
+    fn cleanup_midpoint_and_pending_original_do_not_renew_or_restore_key() {
+        use std::time::Duration;
+        let now = Instant::now(); let end = now + Duration::from_secs(2);
+        assert_eq!(cleanup_progress_end(now, end), now + Duration::from_secs(1));
+        assert_eq!(cleanup_progress_end(end, end), end);
+        assert_eq!(cleanup_progress_end(end + Duration::from_millis(1), end), end);
+
+        let (mut book, _) = retrieved_key();
+        let polls = Arc::new(AtomicUsize::new(0)); let drops = Arc::new(AtomicUsize::new(0)); let ready = Arc::new(AtomicBool::new(false));
+        let outer_end = data_deadline();
+        book.admit_with(Step::CloseSession, outer_end, |_, _| Ok(held(&polls, &drops, &ready, Ok(reply(":1.23", &())), false))).unwrap();
+        let cutoff = book.call_end.unwrap();
+        assert!(cutoff < outer_end);
+        assert!(tick(&mut book, DataTurn::Idle).is_pending());
+        assert_eq!(book.session, RemoteSession::Closing);
+        book.interrupt(); let first_failure = book.problem_at();
+        assert!(!book.local_shutdown_due(Instant::now())); // Old failure does not preempt eligible cleanup.
+        assert!(tick(&mut book, DataTurn::Idle).is_pending());
+        assert_eq!(book.call_end, Some(cutoff));
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        let expired = Instant::now() - Duration::from_millis(1);
+        book.call_end = Some(expired); // DATA clock input to the ACTUAL driver, no sleep or new lease.
+        assert!(tick(&mut book, DataTurn::Idle).is_pending());
+        assert!(book.cleanup_cutoff_seen && book.local_shutdown_due(Instant::now()));
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert!(book.key_candidate.is_none());
+        ready.store(true, Ordering::SeqCst);
+        assert!(tick(&mut book, DataTurn::Idle).is_pending());
+        assert_eq!(drops.load(Ordering::SeqCst), 1); // Only its actual Ready consumed the original.
+        assert!(tick(&mut book, DataTurn::Drained).is_pending());
+        assert_eq!(book.problem_at(), first_failure);
+        assert_eq!(book.call_end, Some(expired));
+        let mut successors = 0;
+        assert!(book.admit_with(Step::RemoveMatch, outer_end, |_, _| { successors += 1; Ok(Box::pin(std::future::pending())) }).is_err());
+        assert_eq!(successors, 0);
+        assert!(!book.key_ready() && !book.resources_settled() && book.memory_held());
+        // DATA cannot manufacture the required original SDK local shutdown.
+    }
+    #[test]
+    fn late_open_after_local_shutdown_never_reopens_remote_cleanup() {
+        let (mut book, _, peer, _, _) = prepared_open();
+        let polls = Arc::new(AtomicUsize::new(0)); let drops = Arc::new(AtomicUsize::new(0)); let ready = Arc::new(AtomicBool::new(false));
+        let message = open_reply(":1.23", &peer, "/session");
+        book.admit_with(Step::OpenSession, data_deadline(), |_, _| Ok(held(&polls, &drops, &ready, Ok(message), false))).unwrap();
+        assert!(tick(&mut book, DataTurn::Idle).is_pending());
+        assert_eq!(book.session, RemoteSession::Possible);
+        book.interrupt();
+        book.shutdown = Shutdown::Entered; // Predicate input, NOT a native receipt/settlement.
+        assert!(tick(&mut book, DataTurn::Idle).is_pending());
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        ready.store(true, Ordering::SeqCst);
+        assert!(tick(&mut book, DataTurn::Idle).is_pending());
+        assert!(tick(&mut book, DataTurn::Drained).is_pending());
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(book.session_path.as_ref().unwrap().as_str(), "/session");
+        assert_eq!(book.session, RemoteSession::Unknown);
+        assert!(!book.expected(Step::CloseSession) && !book.expected(Step::GetSecret));
+        assert!(book.exchange.is_none() && book.session_key.is_none() && book.key_candidate.is_none());
+        assert!(!book.resources_settled() && book.memory_held());
     }
     #[test]
     fn lookup_refusal_never_registers_an_attribute_fanout_or_replacement_owner() {
@@ -1242,15 +1631,20 @@ mod tests {
     }
     #[test]
     fn cutoff_refuses_first_poll_but_never_drops_an_already_polled_original() {
-        for step in [Step::AddMatch, Step::GetNameOwner, Step::SearchItems, Step::Attributes, Step::RemoveMatch] {
+        for step in [Step::AddMatch, Step::GetNameOwner, Step::SearchItems, Step::Attributes, Step::Locked,
+            Step::OpenSession, Step::GetSecret, Step::CloseSession, Step::RemoveMatch] {
             let mut book = data_book(); book.phase = Phase::Admit(step);
             book.registration = if step == Step::AddMatch { Registration::Unsent } else { Registration::Registered };
+            if step == Step::CloseSession {
+                book.session = RemoteSession::Known;
+                book.session_path = Some(Arc::new(OwnedObjectPath::try_from("/session".to_owned()).unwrap()));
+            }
             let polls = Arc::new(AtomicUsize::new(0)); let drops = Arc::new(AtomicUsize::new(0)); let ready = Arc::new(AtomicBool::new(false));
             book.admit_with(step, Instant::now(), |_, _| Ok(held(&polls, &drops, &ready, Ok(reply(BUS, &())), false))).unwrap();
             assert!(tick(&mut book, DataTurn::Idle).is_pending());
             assert_eq!(polls.load(Ordering::SeqCst), 0);
             assert_eq!(drops.load(Ordering::SeqCst), 1);
-            assert_eq!(book.phase, if step.cleanup() || step == Step::AddMatch { Phase::Holding } else { Phase::Admit(Step::RemoveMatch) });
+            assert_eq!(book.phase, if matches!(step, Step::RemoveMatch | Step::AddMatch) { Phase::Holding } else { Phase::Admit(Step::RemoveMatch) });
             assert!(!book.resources_settled());
         }
         let mut book = data_book(); book.phase = Phase::Admit(Step::RemoveMatch); book.registration = Registration::Registered;
