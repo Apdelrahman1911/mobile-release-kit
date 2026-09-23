@@ -6,7 +6,7 @@ use std::{ffi::OsStr, io::Write, path::{Path, PathBuf}, sync::{Arc, Mutex, Mutex
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tauri::Manager;
-use crate::{asset_session::{InstalledEvidenceWitness, InstalledProjectWitness, InstalledSessionSnapshot}, bridge::{AppInfo, Project},
+use crate::{asset_session::{InstalledEvidenceWitness, InstalledProjectWitness, InstalledSessionSnapshot, InstalledSessionFailure}, bridge::{AppInfo, Project},
     candidate_evidence_protocol as evidence, edit_owner::{EditOwner, InstalledConfigFinality, InstalledWorkflowFinality},
     github_workflow_edit_protocol as workflow,
     edit_protocol::{self as edit, ConfigEditStatus, EditProjection}, error::BridgeError, supervisor::{HeldAppInfo, Supervisor}};
@@ -344,12 +344,15 @@ impl SessionWait {
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct SessionDiagnostic { step: SessionStep, evaluations: u16, rejection: SessionRejection, wait: SessionWait }
+struct SessionDiagnostic {
+    step: SessionStep, evaluations: u16, rejection: SessionRejection, wait: SessionWait, first_failure: InstalledSessionFailure,
+}
 impl SessionDiagnostic {
     fn sample(step: Step, evaluations: u16, previous: Option<Self>) -> Option<Self> {
         let Step::Session(step) = step else { return None; };
         Some(Self { step, evaluations, rejection: SessionRejection::NotRecorded,
-            wait: previous.filter(|old| old.step == step).map_or(SessionWait::NotSampled, |old| old.wait) })
+            wait: previous.filter(|old| old.step == step).map_or(SessionWait::NotSampled, |old| old.wait),
+            first_failure: InstalledSessionFailure::not_recorded() })
     }
 }
 
@@ -711,6 +714,9 @@ fn failure_sink(case: Case) -> Option<rustix::fd::OwnedFd> {
 }
 
 const FAILURE_PAIR_LIMIT: usize = 512;
+// Existing conservative 311B plus five 3B prefixes and closed maxima
+// 19/15/12/26/14. Never omit/truncate a field to fit the unchanged 512B sink.
+const SESSION_FAILURE_FRAME_BOUND: usize = 412;
 fn failure_pair(trace: (Step, Boundary), progress: BootstrapProgress, session: Option<SessionDiagnostic>) -> Option<([u8; FAILURE_PAIR_LIMIT], usize)> {
     fn append(bytes: &mut [u8; FAILURE_PAIR_LIMIT], length: &mut usize, part: &[u8]) -> Option<()> {
         let end = length.checked_add(part.len())?;
@@ -730,7 +736,7 @@ fn failure_pair(trace: (Step, Boundary), progress: BootstrapProgress, session: O
         (Step::Session(step), Some(diagnostic)) if diagnostic.step == step => {
             if diagnostic.evaluations > 128 || step.recipe_index().is_some_and(|index| index >= 64)
                 || diagnostic.rejection == SessionRejection::EvaluationBudget && diagnostic.evaluations != 128 { return None; }
-            append(&mut bytes, &mut length, b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=")?;
+            append(&mut bytes, &mut length, b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v2;index=")?;
             if let Some(index) = step.recipe_index() {
                 let (digits, begin) = decimal(u16::from(index))?; append(&mut bytes, &mut length, &digits[begin..])?;
             } else { append(&mut bytes, &mut length, b"none")?; }
@@ -740,7 +746,19 @@ fn failure_pair(trace: (Step, Boundary), progress: BootstrapProgress, session: O
             append(&mut bytes, &mut length, diagnostic.rejection.token())?;
             append(&mut bytes, &mut length, b";wait=")?;
             append(&mut bytes, &mut length, diagnostic.wait.token())?;
+            append(&mut bytes, &mut length, b";o=")?;
+            append(&mut bytes, &mut length, diagnostic.first_failure.origin_token())?;
+            append(&mut bytes, &mut length, b";d=")?;
+            append(&mut bytes, &mut length, diagnostic.first_failure.detail_token())?;
+            append(&mut bytes, &mut length, b";a=")?;
+            append(&mut bytes, &mut length, diagnostic.first_failure.association_token())?;
+            append(&mut bytes, &mut length, b";q=")?;
+            let (query, size) = diagnostic.first_failure.query_token();
+            append(&mut bytes, &mut length, &query[..size])?;
+            append(&mut bytes, &mut length, b";w=")?;
+            append(&mut bytes, &mut length, diagnostic.first_failure.worker_token())?;
             append(&mut bytes, &mut length, b"\n")?;
+            if length > SESSION_FAILURE_FRAME_BOUND { return None; }
         },
         (Step::Session(_), _) | (_, Some(_)) => return None,
         (_, None) => {},
@@ -782,21 +800,29 @@ fn assert_failure_pair_contract() {
     }
     let step = SessionStep::Read(63,SA::Prepare("android-keystore","save"));
     let trace = (Step::Session(step),Boundary::Settlement);
-    let first = SessionDiagnostic { step, evaluations:128, rejection:SessionRejection::EvaluationBudget, wait:SessionWait::DisplayMismatch };
+    let first = SessionDiagnostic { step, evaluations:128, rejection:SessionRejection::EvaluationBudget, wait:SessionWait::DisplayMismatch, first_failure:InstalledSessionFailure::not_recorded() };
     let expected = [step.failure_line(), Boundary::Settlement.failure_line(), BootstrapProgress::Advanced.failure_line(),
-        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=63;evaluations=128;reject=evaluation-budget;wait=rendered-display-mismatch\n"].concat();
+        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v2;index=63;evaluations=128;reject=evaluation-budget;wait=rendered-display-mismatch;o=not-recorded;d=none;a=unassociated;q=na;w=na\n"].concat();
     assert!(failure_pair(trace,BootstrapProgress::Advanced,Some(first)).is_some_and(|(bytes,length)|
         length <= FAILURE_PAIR_LIMIT && bytes.get(..length) == Some(expected.as_slice())));
     let longest = SessionDiagnostic { step:SessionStep::QuitPreserved,evaluations:128,
-        rejection:SessionRejection::UnavailableScript,wait:SessionWait::ControlsMismatch };
+        rejection:SessionRejection::UnavailableScript,wait:SessionWait::ControlsMismatch, first_failure:InstalledSessionFailure::not_recorded() };
     let expected = [longest.step.failure_line(),Boundary::Settlement.failure_line(),BootstrapProgress::AppInfoReturnedBeforeHold.failure_line(),
-        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=none;evaluations=128;reject=unavailable-projection-script;wait=rendered-control-mismatch\n"].concat();
+        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v2;index=none;evaluations=128;reject=unavailable-projection-script;wait=rendered-control-mismatch;o=not-recorded;d=none;a=unassociated;q=na;w=na\n"].concat();
     assert!(failure_pair((Step::Session(longest.step),Boundary::Settlement),BootstrapProgress::AppInfoReturnedBeforeHold,Some(longest))
         .is_some_and(|(bytes,length)|length <= FAILURE_PAIR_LIMIT && bytes.get(..length) == Some(expected.as_slice())));
+    let bound = SessionDiagnostic { first_failure:InstalledSessionFailure::contract_sample(), ..longest };
+    let expected = [bound.step.failure_line(),Boundary::Settlement.failure_line(),BootstrapProgress::AppInfoReturnedBeforeHold.failure_line(),
+        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v2;index=none;evaluations=128;reject=unavailable-projection-script;wait=rendered-control-mismatch;o=supervisor-disabled;d=none;a=bound;q=unavailable.spawn-other.xf;w=settle-unknown\n"].concat();
+    assert!(failure_pair((Step::Session(bound.step),Boundary::Settlement),BootstrapProgress::AppInfoReturnedBeforeHold,Some(bound))
+        .is_some_and(|(bytes,length)|length <= SESSION_FAILURE_FRAME_BOUND && bytes.get(..length) == Some(expected.as_slice())
+            && bytes[..length].is_ascii() && bytes[..length].iter().filter(|byte| **byte == b'\n').count() == 4));
+    assert_eq!(311 + 5 * 3 + 19 + 15 + 12 + 26 + 14, SESSION_FAILURE_FRAME_BOUND);
+    assert_eq!(FAILURE_PAIR_LIMIT - SESSION_FAILURE_FRAME_BOUND, 100);
     for evaluations in [0,9,10,99,100,128] {
         for step in [SessionStep::Navigate,SessionStep::Read(0,SA::Prepare("android-keystore","save")),SessionStep::Read(63,SA::ReviewRemoval(1))] {
-            let diagnostic = SessionDiagnostic { step,evaluations,rejection:SessionRejection::NotRecorded,wait:SessionWait::NotSampled };
-            let expected = format!("MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index={};evaluations={evaluations};reject=not-recorded;wait=not-sampled\n",
+            let diagnostic = SessionDiagnostic { step,evaluations,rejection:SessionRejection::NotRecorded,wait:SessionWait::NotSampled, first_failure:InstalledSessionFailure::not_recorded() };
+            let expected = format!("MRK_INSTALLED_SHELL_SESSION_FAILURE=v2;index={};evaluations={evaluations};reject=not-recorded;wait=not-sampled;o=not-recorded;d=none;a=unassociated;q=na;w=na\n",
                 step.recipe_index().map_or_else(|| "none".to_owned(),|index|index.to_string()));
             assert!(failure_pair((Step::Session(step),Boundary::Settlement),BootstrapProgress::Advanced,Some(diagnostic))
                 .is_some_and(|(bytes,length)|bytes[..length].ends_with(expected.as_bytes())));
@@ -817,7 +843,8 @@ fn assert_failure_pair_contract() {
     assert!(SessionDiagnostic::sample(Step::Close,128,Some(first)).is_none());
     let failed = AtomicBool::new(false); let mut retained = None;
     latch_session_diagnostic(&failed,&mut retained,first);
-    latch_session_diagnostic(&failed,&mut retained,SessionDiagnostic { step:other,wait:SessionWait::ReplyPending,..first });
+    latch_session_diagnostic(&failed,&mut retained,SessionDiagnostic { step:other,wait:SessionWait::ReplyPending,
+        first_failure:bound.first_failure,..first });
     assert!(retained == Some(first));
     let mut frozen_trace = trace; let mut progress = BootstrapProgress::Advanced;
     assert!(!latch_failure(&failed,&mut frozen_trace,&mut progress,(Step::Session(other),Boundary::Deadline),BootstrapProgress::NotSampled));
@@ -830,12 +857,20 @@ fn assert_failure_pair_contract() {
     }
     latch_session_diagnostic(&failed,&mut retained,first);
     assert!(retained == deadline_diagnostic && frozen_trace == (trace.0,Boundary::Deadline));
+    let failed = AtomicBool::new(false); let mut retained = None;
+    latch_session_diagnostic(&failed,&mut retained,bound);
+    latch_session_diagnostic(&failed,&mut retained,first);
+    assert!(retained == Some(bound));
+    assert!(!latch_failure(&failed,&mut frozen_trace,&mut progress,(trace.0,Boundary::Deadline),BootstrapProgress::NotSampled));
+    assert!(retained == Some(bound));
+    assert!(SessionDiagnostic::sample(Step::Session(bound.step),128,Some(bound)).unwrap().first_failure
+        == InstalledSessionFailure::not_recorded());
 
     let gtk = SessionDiagnostic { step:SessionStep::ActivateFile(3),evaluations:16,
-        rejection:SessionRejection::GtkObserverEndpoint,wait:SessionWait::GtkActionInsensitive };
+        rejection:SessionRejection::GtkObserverEndpoint,wait:SessionWait::GtkActionInsensitive, first_failure:InstalledSessionFailure::not_recorded() };
     let gtk_trace = (Step::Session(gtk.step),Boundary::Gtk);
     let expected = [gtk.step.failure_line(),Boundary::Gtk.failure_line(),BootstrapProgress::Advanced.failure_line(),
-        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=3;evaluations=16;reject=gtk-observer-endpoint;wait=gtk-action-insensitive\n"].concat();
+        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v2;index=3;evaluations=16;reject=gtk-observer-endpoint;wait=gtk-action-insensitive;o=not-recorded;d=none;a=unassociated;q=na;w=na\n"].concat();
     assert!(failure_pair(gtk_trace,BootstrapProgress::Advanced,Some(gtk)).is_some_and(|(bytes,length)|
         length <= FAILURE_PAIR_LIMIT && bytes.get(..length) == Some(expected.as_slice())));
     let same = SessionDiagnostic::sample(gtk_trace.0,16,Some(gtk)).unwrap();
@@ -893,7 +928,7 @@ fn assert_failure_pair_contract() {
     }
     let step = SessionStep::Read(29,SA::Prepare("android-keystore","save"));
     let trace = (Step::Session(step),Boundary::Settlement);
-    let pending = SessionDiagnostic { step,evaluations:73,rejection:SessionRejection::NotRecorded,wait:SessionWait::ReplyPending };
+    let pending = SessionDiagnostic { step,evaluations:73,rejection:SessionRejection::NotRecorded,wait:SessionWait::ReplyPending, first_failure:InstalledSessionFailure::not_recorded() };
     let sampled = SessionDiagnostic::sample(trace.0,73,Some(pending)).unwrap();
     assert!(sampled.wait == SessionWait::ReplyPending && sampled.rejection == SessionRejection::NotRecorded);
     assert!(SessionRejection::ReplyAssessmentInvalidRequest.token().len() == 32);
@@ -901,8 +936,8 @@ fn assert_failure_pair_contract() {
         SessionRejection::ReplyCodeUnavailable,SessionRejection::CapabilityUnavailable] {
         let diagnostic = SessionDiagnostic { rejection,..sampled };
         let expected = [step.failure_line(),Boundary::Settlement.failure_line(),BootstrapProgress::Advanced.failure_line(),
-            b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=29;evaluations=73;reject=",rejection.token(),
-            b";wait=native-reply-pending\n"].concat();
+            b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v2;index=29;evaluations=73;reject=",rejection.token(),
+            b";wait=native-reply-pending;o=not-recorded;d=none;a=unassociated;q=na;w=na\n"].concat();
         assert!(failure_pair(trace,BootstrapProgress::Advanced,Some(diagnostic)).is_some_and(|(bytes,length)|
             length <= FAILURE_PAIR_LIMIT && bytes.get(..length) == Some(expected.as_slice())));
     }
@@ -1821,8 +1856,11 @@ impl Observation {
         }
     }
     fn session_fail(&self, r: &mut Record, rejection: SessionRejection) {
+        self.session_fail_with_first_origin(r, rejection, InstalledSessionFailure::not_recorded());
+    }
+    fn session_fail_with_first_origin(&self, r: &mut Record, rejection: SessionRejection, first_failure: InstalledSessionFailure) {
         if let Some(mut diagnostic) = SessionDiagnostic::sample(r.trace.0,r.evaluations,r.session.diagnostic) {
-            diagnostic.rejection = rejection;
+            diagnostic.rejection = rejection; diagnostic.first_failure = first_failure;
             latch_session_diagnostic(&self.failed,&mut r.session.diagnostic,diagnostic);
         } else { self.fail(); }
     }
@@ -3990,7 +4028,10 @@ impl Observation {
         }
         let Some(snapshot)=state.document.installed_session_snapshot() else { return; };
         if snapshot.unknown {
-            if let Some(mut r)=self.record() { self.session_fail(&mut r,SessionRejection::UnknownNativeSnapshot); } else { self.fail(); }
+            if let Some(mut r)=self.record() {
+                self.session_fail_with_first_origin(&mut r,SessionRejection::UnknownNativeSnapshot,
+                    snapshot.first_failure.unwrap_or_else(InstalledSessionFailure::not_recorded));
+            } else { self.fail(); }
             return;
         }
         let step=match self.record().map(|r| r.step) { Some(Step::Session(step))=>step,_=>return };

@@ -9,7 +9,9 @@ fn empty_state() -> DocumentState {
         exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false,
         quit_pending: false, retiring: false, lock_pending: false, compatibility_picker_pending: false,
         session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None,
-        quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new() }
+        quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new(),
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        first_origin: None }
 }
 fn section<'a>(text: &'a str, start: &str, end: &str) -> &'a str {
     text.split_once(start).unwrap().1.split_once(end).unwrap().0

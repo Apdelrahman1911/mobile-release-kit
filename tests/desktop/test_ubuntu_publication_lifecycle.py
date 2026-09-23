@@ -3771,6 +3771,66 @@ class FailureLabelSinkContracts(unittest.TestCase):
         for raw in bad:
             with self.subTest(raw=raw[:80]): self.assertIsNone(L._shell_label_pair(raw))
 
+        # v1 stays distinguishable as lacking origin metadata. v2 never accepts
+        # an omitted field, guessed association or arbitrary original error.
+        self.assertNotIn("firstOrigin", L._shell_label_pair(historical)["session"])
+        def frame(origin=b"not-recorded", origin_detail=b"none", association=b"unassociated", query=b"na", worker=b"na"):
+            return (good[:-1].replace(b"=v1;", b"=v2;") + b";o=" + origin + b";d=" + origin_detail
+                    + b";a=" + association + b";q=" + query + b";w=" + worker + b"\n")
+        v2 = frame()
+        expected = deepcopy(L._shell_label_pair(good))
+        expected["session"]["firstOrigin"] = {"origin": "not-recorded", "detail": "none", "association": "unassociated", "query": "na", "worker": "na"}
+        self.assertEqual(L._shell_label_pair(v2), expected)
+        bound = frame(b"supervisor-disabled", b"none", b"bound", b"unavailable.spawn-other.xf", b"settle-unknown")
+        expected["session"]["firstOrigin"] = {"origin": "supervisor-disabled", "detail": "none", "association": "bound",
+                                               "query": "unavailable.spawn-other.xf", "worker": "settle-unknown"}
+        self.assertEqual(L._shell_label_pair(bound), expected)
+        self.assertLessEqual(len(bound), 412)
+        self.assertEqual(bound.count(b"\n"), 4)
+        self.assertTrue(bound.isascii())
+        for origin in L.SHELL_SESSION_ORIGINS:
+            origin_detail = b"other" if origin == b"op-cleanup" else b"failed" if origin == b"coord-join" else b"unavailable" if origin == b"staged-refusal" else b"none"
+            self.assertEqual(L._shell_label_pair(frame(origin, origin_detail))["session"]["firstOrigin"]["origin"], origin.decode("ascii"))
+        for origin, details in ((b"op-cleanup", (b"deadline", b"review-expired", b"context-stale", b"cleanup-unknown", b"user-cancelled", b"shutdown", b"document-lost", b"other")),
+                                (b"staged-refusal", (b"new", b"pending", b"returned", b"failed", b"unavailable"))):
+            for origin_detail in details:
+                self.assertEqual(L._shell_label_pair(frame(origin, origin_detail, b"bound", b"unregistered"))["session"]["firstOrigin"]["detail"], origin_detail.decode("ascii"))
+        for error in L.SHELL_SESSION_QUERY_ERRORS:
+            value = error + b".none.pr"
+            self.assertEqual(L._shell_label_pair(frame(b"registry", b"none", b"bound", value, b"none-recorded"))["session"]["firstOrigin"]["query"], value.decode("ascii"))
+        for cause in L.SHELL_SESSION_QUERY_CAUSES:
+            value = b"cleanup." + cause + b".cf"
+            self.assertEqual(L._shell_label_pair(frame(b"coord-join", b"failed", b"bound", value, b"acquire-f"))["session"]["firstOrigin"]["query"], value.decode("ascii"))
+        for join in L.SHELL_SESSION_MANAGEMENT_JOINS:
+            value = b"timeout.none." + bytes([join, join])
+            self.assertIsNotNone(L._shell_label_pair(frame(b"registry", b"none", b"bound", value, b"unavailable")))
+        for worker in L.SHELL_SESSION_WORKERS:
+            value = b"unregistered" if worker == b"na" else b"unavailable"
+            self.assertEqual(L._shell_label_pair(frame(b"registry", b"none", b"bound", value, worker))["session"]["firstOrigin"]["worker"], worker.decode("ascii"))
+        for stage in L.SHELL_SESSION_WORKER_STAGES:
+            self.assertIsNotNone(L._shell_label_pair(frame(b"registry", b"none", b"bound", b"cleanup.none.pp", stage + b"-c")))
+        for suffix in L.SHELL_SESSION_WORKER_JOINS:
+            self.assertIsNotNone(L._shell_label_pair(frame(b"registry", b"none", b"bound", b"cleanup.none.pp", b"observe-" + bytes([suffix]))))
+        bad_v2 = [v2[:-1], v2 + b"\n", v2 + detail, bound.replace(b"=v2;", b"=v1;"), bound.replace(b"=v2;", b"=v3;"),
+            bound.replace(b";o=supervisor-disabled", b""), bound.replace(b";d=none", b""), bound.replace(b";a=bound", b""),
+            bound.replace(b";q=unavailable.spawn-other.xf", b""), bound.replace(b";w=settle-unknown", b""),
+            bound.replace(b";d=none", b";d=none;d=none"), bound.replace(b";a=bound", b";a=bound;a=unassociated"),
+            bound.replace(b";o=supervisor-disabled;d=none", b";d=none;o=supervisor-disabled"),
+            bound.replace(b";w=settle-unknown", b";w=settle-unknown;extra=1"), bound.replace(b"\n", b"\r\n"),
+            bound.replace(b"supervisor-disabled", b"supervisor-future"), bound.replace(b";d=none", b";d=failed"),
+            bound.replace(b";a=bound", b";a=unknown"), bound.replace(b";a=bound", b";a=unassociated"),
+            frame(b"not-recorded", b"none", b"bound", b"unavailable", b"unavailable"),
+            frame(b"op-cleanup", b"none"), frame(b"coord-join", b"none"), frame(b"staged-refusal", b"deadline"),
+            frame(b"registry", b"none", b"bound"), frame(b"registry", b"none", b"unassociated", b"unregistered"),
+            frame(b"registry", b"none", b"bound", b"unregistered", b"none-recorded"),
+            *(frame(b"registry", b"none", b"bound", query, b"unavailable") for query in (
+                b"none.spawn-other.pp", b"future.none.pp", b"cleanup.future.pp", b"cleanup.none.p", b"cleanup.none.ppp",
+                b"cleanup.none.pz", b"cleanup.none.pr.extra", b"cleanup..pr", b"cleanup_none_pr", b"cleanup.none.PR")),
+            *(frame(b"registry", b"none", b"bound", b"cleanup.none.pp", worker) for worker in (
+                b"inspect-r", b"inspect-c-extra", b"future-c", b"maps-future", b"settle-unknownx", b"\xff"))]
+        for raw in bad_v2:
+            with self.subTest(version="v2", raw=raw[:80]): self.assertIsNone(L._shell_label_pair(raw))
+
     def test_finite_pair_refuses_partial_reordered_duplicate_or_injected_data(self):
         step = b"MRK_INSTALLED_SHELL_FAILURE_STEP=PrepareSave\n"
         boundary = b"MRK_INSTALLED_SHELL_FAILURE_PHASE=request\n"

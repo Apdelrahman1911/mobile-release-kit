@@ -1838,6 +1838,37 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertEqual(capability.count("_ => SessionRejection::CapabilityUnavailable"), 1)
         self.assertEqual(token_by_variant["CapabilityUnavailable"], "capability-unavailable")
         session = (SOURCE / "desktop/src-tauri/src/asset_session.rs").read_text()
+        query_source = (SOURCE / "desktop/src-tauri/src/installed_shell_shutdown_observation.rs").read_text()
+        supervisor = (SOURCE / "desktop/src-tauri/src/supervisor.rs").read_text()
+        origins = session.split("impl UnknownOrigin {", 1)[1].split("pub(super) struct FirstOrigin", 1)[0]
+        details = session.split("impl OriginDetail {", 1)[1].split("impl UnknownOrigin", 1)[0]
+        errors = query_source.split("impl QueryError {", 1)[1].split("enum QueryCause", 1)[0]
+        causes = query_source.split("impl QueryCause {", 1)[1].split("fn management_token", 1)[0]
+        for block, expected, maximum in ((origins, lifecycle.SHELL_SESSION_ORIGINS, 19), (details, lifecycle.SHELL_SESSION_DETAILS, 15),
+                                         (errors, lifecycle.SHELL_SESSION_QUERY_ERRORS, 11), (causes, lifecycle.SHELL_SESSION_QUERY_CAUSES, 11)):
+            tokens = tuple(value.encode("ascii") for value in re.findall(r'=> b"([a-z-]+)"', block))
+            self.assertEqual(tokens, expected)
+            self.assertEqual(len(tokens), len(set(tokens)))
+            self.assertLessEqual(max(map(len, tokens)), maximum)
+        joins = query_source.split("fn management_token", 1)[1].split("enum QueryProjection", 1)[0]
+        self.assertEqual("".join(re.findall(r"=> b'([a-z])'", joins)).encode("ascii"), lifecycle.SHELL_SESSION_MANAGEMENT_JOINS)
+        workers = query_source.split("impl WorkerProjection {", 1)[1].split("pub(crate) struct InstalledSessionQueryDiagnostic", 1)[0]
+        native = supervisor.split("impl ObservationFailure {", 1)[1].split("impl ChildObservation", 1)[0]
+        literals = {value.encode("ascii") for value in re.findall(r'=> b"([a-z-]+)"', workers + native)}
+        self.assertEqual(literals, set(lifecycle.SHELL_SESSION_WORKERS))
+        stages = re.findall(r'WorkerStage::[A-Za-z]+ => join.token\(b"([a-z]+)-c", b"\1-x", b"\1-f"\)', workers)
+        self.assertEqual(tuple(stage.encode("ascii") for stage in stages), lifecycle.SHELL_SESSION_WORKER_STAGES)
+        self.assertEqual(lifecycle.SHELL_SESSION_WORKER_JOINS, b"cxf")
+        associations = session.split("pub(crate) fn association_token", 1)[1].split("pub(crate) fn query_token", 1)[0]
+        self.assertEqual(tuple(value.encode("ascii") for value in re.findall(r'b"([a-z-]+)"', associations)), lifecycle.SHELL_SESSION_ASSOCIATIONS)
+        projection = query_source.split("fn session_query_diagnostic(", 1)[1].split("pub(crate) fn assert_installed_session_query_diagnostic_contract", 1)[0]
+        self.assertIn("Weak::ptr_eq(&row.asset, asset)", projection)
+        self.assertIn("Profile::Passive(Method::AssessCredentials)", projection)
+        self.assertEqual(projection.count(".try_lock()"), 3)
+        for forbidden in (".lock(", ".await", ".poll(", ".join(", "Instant::now", "row.owner.key", "asset.id", "state.slot"):
+            self.assertNotIn(forbidden, projection)
+        restore = session.split("fn restore_failed_install_retirement(", 1)[1].split("impl DocumentBinding", 1)[0]
+        self.assertLess(restore.index("first_unknown_origin!(state, UnknownOrigin::InstallRetirement, Some(_owner))"), restore.index("state.slot ="))
         snapshot = session.split("fn snapshot(&self, state: &DocumentState)", 1)[1].split("let operation =", 1)[0]
         owner_reason = session.split("fn session_owner_reason(", 1)[1].split("fn observe_session_owner_reason(", 1)[0]
         self.assertEqual(set(re.findall(r"Reason::([A-Za-z]+)", snapshot)),
@@ -1853,10 +1884,19 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
                                  {"step": "SelectProject", "boundary": boundary.decode("ascii").strip().split("=", 1)[1],
                                   "bootstrapProgress": context.decode("ascii").strip().split("=", 1)[1]})
         self.assertLessEqual(max(map(len, steps)) + max(map(len, boundaries)) + max(map(len, progress)), 512)
-        longest_session = (len(b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=none;evaluations=128;reject=;wait=\n")
+        longest_session = (len(b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v2;index=none;evaluations=128;reject=;wait=\n")
                            + max(map(len, lifecycle.SHELL_SESSION_REJECTIONS)) + max(map(len, lifecycle.SHELL_SESSION_WAITS)))
-        self.assertLessEqual(max(map(len, steps)) + max(map(len, boundaries)) + max(map(len, progress)) + longest_session, 512)
+        prior_bound = max(map(len, steps)) + max(map(len, boundaries)) + max(map(len, progress)) + longest_session
+        self.assertEqual(prior_bound, 311)
+        query_bound = max(len(b"unregistered"), len(b"unavailable"), max(map(len, lifecycle.SHELL_SESSION_QUERY_ERRORS))
+                          + 1 + max(map(len, lifecycle.SHELL_SESSION_QUERY_CAUSES)) + 1 + 2)
+        worker_bound = max(max(map(len, lifecycle.SHELL_SESSION_WORKERS)), max(map(len, lifecycle.SHELL_SESSION_WORKER_STAGES)) + 2)
+        complete_bound = (prior_bound + 5 * 3 + max(map(len, lifecycle.SHELL_SESSION_ORIGINS)) + max(map(len, lifecycle.SHELL_SESSION_DETAILS))
+                          + max(map(len, lifecycle.SHELL_SESSION_ASSOCIATIONS)) + query_bound + worker_bound)
+        self.assertEqual((query_bound, worker_bound, complete_bound), (26, 14, 412))
+        self.assertLessEqual(complete_bound, 512)
         self.assertIn("const FAILURE_PAIR_LIMIT: usize = 512;", source)
+        self.assertIn("const SESSION_FAILURE_FRAME_BOUND: usize = 412;", source)
         self.assertIn("fn assert_failure_pair_contract()", source)
         self.assertIn("    assert_failure_pair_contract();", source)
         self.assertLess(source.index("    assert_failure_pair_contract();"), source.index("let returned = super::run_builder("))

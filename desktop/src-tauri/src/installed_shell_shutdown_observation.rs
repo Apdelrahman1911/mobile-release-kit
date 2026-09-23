@@ -131,7 +131,287 @@ mod session {
         originals: Vec<Original>, inner: Arc<Inner>, valid: bool, retired: bool, report_attempted: bool,
     }
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum QueryError { None, Timeout, Cleanup, Shutdown, Protocol, Engine, Io, Busy, Unavailable, Other }
+    impl QueryError {
+        fn stored(error: Option<&BridgeError>) -> Self {
+            match error.map(|error| error.code.as_str()) {
+                None => Self::None, Some("query_timeout") => Self::Timeout, Some("cleanup_unknown") => Self::Cleanup,
+                Some("shutting_down") => Self::Shutdown, Some("protocol_error") => Self::Protocol,
+                Some("engine_failed") => Self::Engine, Some("io_error") => Self::Io, Some("busy") => Self::Busy,
+                Some("runtime_unavailable") => Self::Unavailable, Some(_) => Self::Other,
+            }
+        }
+        fn token(self) -> &'static [u8] {
+            match self {
+                Self::None => b"none", Self::Timeout => b"timeout", Self::Cleanup => b"cleanup", Self::Shutdown => b"shutdown",
+                Self::Protocol => b"protocol", Self::Engine => b"engine", Self::Io => b"io", Self::Busy => b"busy",
+                Self::Unavailable => b"unavailable", Self::Other => b"other",
+            }
+        }
+    }
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum QueryCause { None, SelectionProfile, SelectionCompile, SelectionMethod, Inspection, AcquisitionEntry,
+        AcquisitionCustody, AcquisitionLock, Capability, Preparation, FinalGate, FinalClaim,
+        SpawnProcessFd, SpawnSystemFd, SpawnMemory, SpawnResource, SpawnDenied, SpawnMissing, SpawnExec, SpawnOther, Response }
+    impl QueryCause {
+        fn stored(cause: Option<crate::error::LinuxPassiveCause>) -> Self {
+            use crate::error::{LinuxPassiveCause as C, LinuxSpawnFailure as S};
+            match cause {
+                None => Self::None, Some(C::SelectionProfileClosed) => Self::SelectionProfile,
+                Some(C::SelectionCompileBinding) => Self::SelectionCompile, Some(C::SelectionMethodOutsideProfile) => Self::SelectionMethod,
+                Some(C::Inspection(_)) => Self::Inspection, Some(C::AcquisitionEntryNotReleased) => Self::AcquisitionEntry,
+                Some(C::AcquisitionCustodyMissing) => Self::AcquisitionCustody, Some(C::AcquisitionLock) => Self::AcquisitionLock,
+                Some(C::Capability(_)) => Self::Capability, Some(C::Preparation(_)) => Self::Preparation,
+                Some(C::FinalClaimOwnerGate) => Self::FinalGate, Some(C::FinalClaim(_)) => Self::FinalClaim,
+                Some(C::ReturnedSpawn(S::ProcessFdLimit)) => Self::SpawnProcessFd,
+                Some(C::ReturnedSpawn(S::SystemFdLimit)) => Self::SpawnSystemFd,
+                Some(C::ReturnedSpawn(S::Memory)) => Self::SpawnMemory,
+                Some(C::ReturnedSpawn(S::ResourceUnavailable)) => Self::SpawnResource,
+                Some(C::ReturnedSpawn(S::PermissionDenied)) => Self::SpawnDenied,
+                Some(C::ReturnedSpawn(S::NotFound)) => Self::SpawnMissing,
+                Some(C::ReturnedSpawn(S::ExecFormat)) => Self::SpawnExec,
+                Some(C::ReturnedSpawn(S::Other)) => Self::SpawnOther, Some(C::EngineResponse) => Self::Response,
+            }
+        }
+        fn token(self) -> &'static [u8] {
+            match self {
+                Self::None => b"none", Self::SelectionProfile => b"sel-profile", Self::SelectionCompile => b"sel-compile",
+                Self::SelectionMethod => b"sel-method", Self::Inspection => b"inspection", Self::AcquisitionEntry => b"acq-entry",
+                Self::AcquisitionCustody => b"acq-custody", Self::AcquisitionLock => b"acq-lock", Self::Capability => b"capability",
+                Self::Preparation => b"prepare", Self::FinalGate => b"final-gate", Self::FinalClaim => b"final-claim",
+                Self::SpawnProcessFd => b"spawn-pfd", Self::SpawnSystemFd => b"spawn-sfd", Self::SpawnMemory => b"spawn-mem",
+                Self::SpawnResource => b"spawn-res", Self::SpawnDenied => b"spawn-deny", Self::SpawnMissing => b"spawn-miss",
+                Self::SpawnExec => b"spawn-exec", Self::SpawnOther => b"spawn-other", Self::Response => b"response",
+            }
+        }
+    }
+    fn management_token(receipt: ManagementJoin) -> u8 {
+        match receipt {
+            ManagementJoin::Pending => b'p', ManagementJoin::Returned => b'r', ManagementJoin::Missing => b'm',
+            ManagementJoin::Cancelled => b'c', ManagementJoin::Panicked => b'x', ManagementJoin::Failed => b'f',
+            ManagementJoin::InvalidReturn => b'i',
+        }
+    }
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum QueryProjection { NotApplicable, Unregistered, Unavailable,
+        Recorded { error: QueryError, cause: QueryCause, driver: ManagementJoin, watchdog: ManagementJoin } }
+    impl QueryProjection {
+        fn stored(state: &OwnerState) -> Self {
+            Self::Recorded { error: QueryError::stored(state.error.as_ref()),
+                cause: QueryCause::stored(state.error.as_ref().and_then(BridgeError::linux_passive_cause)),
+                driver: state.driver_join, watchdog: state.watchdog_join }
+        }
+    }
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum WorkerStage { Inspect, Acquire, Observe, Write, Stdout, Stderr, Settle }
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum WorkerJoin { Cancelled, Panicked, Failed }
+    impl WorkerJoin {
+        fn returned(receipt: ManagementJoin) -> Option<Self> {
+            match receipt {
+                ManagementJoin::Cancelled => Some(Self::Cancelled), ManagementJoin::Panicked => Some(Self::Panicked),
+                ManagementJoin::Failed => Some(Self::Failed), _ => None,
+            }
+        }
+        fn token(self, cancelled: &'static [u8], panicked: &'static [u8], failed: &'static [u8]) -> &'static [u8] {
+            match self { Self::Cancelled => cancelled, Self::Panicked => panicked, Self::Failed => failed }
+        }
+    }
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum WorkerProjection { NotApplicable, Unavailable, NoneRecorded, Observation(installed_native_fixture::ObservationFailure),
+        Join(WorkerStage, WorkerJoin), SettlementUnknown }
+    impl WorkerProjection {
+        fn stored(resources: &Resources) -> Self {
+            // Fixed lifecycle order only, NOT temporal/causal first failure.
+            for (stage, receipt) in [(WorkerStage::Inspect, resources.inspection_return),
+                (WorkerStage::Acquire, resources.acquisition_return), (WorkerStage::Observe, resources.native_observation_return)] {
+                if let Some(failed) = receipt.and_then(WorkerJoin::returned) { return Self::Join(stage, failed); }
+            }
+            if let Some(failure) = resources.native_observation_failure { return Self::Observation(failure); }
+            // Existing IO books retain a failed original handle, not the
+            // erased JoinError category. Do not repoll it or invent c/x DATA.
+            for (stage, failed) in [(WorkerStage::Write, resources.failed_writer.is_some()),
+                (WorkerStage::Stdout, resources.failed_stdout.is_some()), (WorkerStage::Stderr, resources.failed_stderr.is_some())] {
+                if failed { return Self::Join(stage, WorkerJoin::Failed); }
+            }
+            match resources.native_return.as_ref() {
+                Some(Ok(CloseOutcome::Unknown)) => Self::SettlementUnknown,
+                Some(Err(error)) => Self::Join(WorkerStage::Settle, WorkerJoin::returned(ManagementJoin::error(error)).unwrap_or(WorkerJoin::Failed)),
+                _ => Self::NoneRecorded,
+            }
+        }
+        fn token(self) -> &'static [u8] {
+            match self {
+                Self::NotApplicable => b"na", Self::Unavailable => b"unavailable", Self::NoneRecorded => b"none-recorded",
+                Self::Observation(failure) => failure.token(), Self::SettlementUnknown => b"settle-unknown",
+                Self::Join(stage, join) => match stage {
+                    WorkerStage::Inspect => join.token(b"inspect-c", b"inspect-x", b"inspect-f"),
+                    WorkerStage::Acquire => join.token(b"acquire-c", b"acquire-x", b"acquire-f"),
+                    WorkerStage::Observe => join.token(b"observe-c", b"observe-x", b"observe-f"),
+                    WorkerStage::Write => join.token(b"write-c", b"write-x", b"write-f"),
+                    WorkerStage::Stdout => join.token(b"stdout-c", b"stdout-x", b"stdout-f"),
+                    WorkerStage::Stderr => join.token(b"stderr-c", b"stderr-x", b"stderr-f"),
+                    WorkerStage::Settle => join.token(b"settle-c", b"settle-x", b"settle-f"),
+                },
+            }
+        }
+    }
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct InstalledSessionQueryDiagnostic { query: QueryProjection, worker: WorkerProjection }
+    impl InstalledSessionQueryDiagnostic {
+        pub(crate) const fn not_applicable() -> Self { Self { query: QueryProjection::NotApplicable, worker: WorkerProjection::NotApplicable } }
+        fn unavailable() -> Self { Self { query: QueryProjection::Unavailable, worker: WorkerProjection::Unavailable } }
+        pub(crate) fn query_token(self) -> ([u8; 26], usize) {
+            let mut bytes = [0; 26];
+            let literal: &[u8] = match self.query {
+                QueryProjection::NotApplicable => b"na", QueryProjection::Unregistered => b"unregistered", QueryProjection::Unavailable => b"unavailable",
+                QueryProjection::Recorded { error, cause, driver, watchdog } => {
+                    let (error, cause) = (error.token(), cause.token());
+                    let end = error.len() + 1 + cause.len();
+                    bytes[..error.len()].copy_from_slice(error); bytes[error.len()] = b'.';
+                    bytes[error.len() + 1..end].copy_from_slice(cause); bytes[end] = b'.';
+                    bytes[end + 1] = management_token(driver); bytes[end + 2] = management_token(watchdog);
+                    return (bytes, end + 3);
+                },
+            };
+            bytes[..literal.len()].copy_from_slice(literal); (bytes, literal.len())
+        }
+        pub(crate) fn worker_token(self) -> &'static [u8] { self.worker.token() }
+        pub(crate) fn contract_sample() -> Self {
+            Self { query: QueryProjection::Recorded { error: QueryError::Unavailable, cause: QueryCause::SpawnOther,
+                driver: ManagementJoin::Panicked, watchdog: ManagementJoin::Failed }, worker: WorkerProjection::SettlementUnknown }
+        }
+    }
+    fn session_query_diagnostic(originals: &Mutex<SessionQueryBook>, asset: &Weak<OriginalWork>) -> InstalledSessionQueryDiagnostic {
+        let Ok(book) = originals.try_lock() else { return InstalledSessionQueryDiagnostic::unavailable(); };
+        if book.failed || book.taken || book.originals.len() > 16 { return InstalledSessionQueryDiagnostic::unavailable(); }
+        let mut matching = book.originals.iter().filter(|row| Weak::ptr_eq(&row.asset, asset));
+        let Some(row) = matching.next() else {
+            return InstalledSessionQueryDiagnostic { query: QueryProjection::Unregistered, worker: WorkerProjection::NotApplicable };
+        };
+        if matching.next().is_some() || !matches!(row.owner.profile, Profile::Passive(Method::AssessCredentials)) {
+            return InstalledSessionQueryDiagnostic::unavailable();
+        }
+        // One nonblocking projection of the exact retained R1, with no owner
+        // registry/ID/current-slot lookup, poll, join, clock, error relatch or
+        // native/output read. Q and K are independently unavailable if their
+        // own book cannot be sampled; none-recorded never means settled.
+        let query = row.owner.state.try_lock().ok().filter(|state| state.endpoint == row.endpoint)
+            .map_or(QueryProjection::Unavailable, |state| QueryProjection::stored(&state));
+        let worker = row.owner.resources.try_lock().ok().map_or(WorkerProjection::Unavailable, |resources| WorkerProjection::stored(&resources));
+        InstalledSessionQueryDiagnostic { query, worker }
+    }
+
+    pub(crate) fn assert_installed_session_query_diagnostic_contract(asset: &Arc<OriginalWork>, other: &Arc<OriginalWork>) -> InstalledSessionQueryDiagnostic {
+        // Existing explicit-call DATA contract only: synthetic empty books,
+        // no Supervisor/runtime, original task, process, reader or native join.
+        fn query(value: InstalledSessionQueryDiagnostic) -> Vec<u8> {
+            let (bytes, length) = value.query_token(); bytes[..length].to_vec()
+        }
+        fn owner(profile: Profile, endpoint: Instant) -> Arc<Owner> {
+            let (stop, _) = watch::channel(false);
+            Arc::new(Owner { key: 0, id: String::new(), profile, github_receipt: None,
+                state: Mutex::new(OwnerState::new(endpoint, None)), resources: AsyncMutex::new(Resources::default()),
+                stop, changed: Notify::new(), permit: Mutex::new(None), driver: AsyncMutex::new(None),
+                watchdog: AsyncMutex::new(None), observer: AsyncMutex::new(None) })
+        }
+        fn row(asset: &Arc<OriginalWork>, owner: &Arc<Owner>, endpoint: Instant) -> Original {
+            Original { asset: Arc::downgrade(asset), owner: owner.clone(), endpoint, hold: SessionQueryHold::Observe,
+                selected: false, held: false, asset_released: false, attempted: false }
+        }
+        let association = Arc::downgrade(asset);
+        let book = Mutex::new(SessionQueryBook::default());
+        let absent = session_query_diagnostic(&book, &association);
+        assert!(query(absent) == b"unregistered" && absent.worker_token() == b"na");
+        let guard = book.try_lock().unwrap();
+        let contended = session_query_diagnostic(&book, &association);
+        assert!(query(contended) == b"unavailable" && contended.worker_token() == b"unavailable");
+        drop(guard);
+        let endpoint = Instant::now();
+        let original = owner(Profile::Passive(Method::AssessCredentials), endpoint);
+        book.try_lock().unwrap().originals.push(row(asset, &original, endpoint));
+        let sampled = session_query_diagnostic(&book, &association);
+        assert!(query(sampled) == b"none.none.pp" && sampled.worker_token() == b"none-recorded");
+        // Equal public operation IDs are not weak identity or R1 association.
+        assert!(asset.id == other.id && !Arc::ptr_eq(asset, other));
+        assert!(query(session_query_diagnostic(&book, &Arc::downgrade(other))) == b"unregistered");
+        let held_state = original.state.try_lock().unwrap();
+        let sampled = session_query_diagnostic(&book, &association);
+        assert!(query(sampled) == b"unavailable" && sampled.worker_token() == b"none-recorded");
+        drop(held_state);
+        let held_resources = original.resources.try_lock().unwrap();
+        let sampled = session_query_diagnostic(&book, &association);
+        assert!(query(sampled) == b"none.none.pp" && sampled.worker_token() == b"unavailable");
+        drop(held_resources);
+        book.try_lock().unwrap().originals.push(row(asset, &original, endpoint));
+        assert!(session_query_diagnostic(&book, &association) == InstalledSessionQueryDiagnostic::unavailable());
+        book.try_lock().unwrap().originals.pop();
+        book.try_lock().unwrap().taken = true;
+        assert!(session_query_diagnostic(&book, &association) == InstalledSessionQueryDiagnostic::unavailable());
+        { let mut book = book.try_lock().unwrap(); book.taken = false; book.failed = true; }
+        assert!(session_query_diagnostic(&book, &association) == InstalledSessionQueryDiagnostic::unavailable());
+        { let mut book = book.try_lock().unwrap(); book.failed = false;
+            book.originals[0].owner = owner(Profile::Passive(Method::Capabilities), endpoint); }
+        assert!(session_query_diagnostic(&book, &association) == InstalledSessionQueryDiagnostic::unavailable());
+
+        assert!(QueryError::stored(None).token() == b"none" && QueryCause::stored(None).token() == b"none");
+        for (code, token) in [("query_timeout", b"timeout".as_slice()), ("cleanup_unknown", b"cleanup"), ("shutting_down", b"shutdown"),
+            ("protocol_error", b"protocol"), ("engine_failed", b"engine"), ("io_error", b"io"), ("busy", b"busy"),
+            ("runtime_unavailable", b"unavailable"), ("unlisted\nprivate", b"other")] {
+            assert!(QueryError::stored(Some(&BridgeError::new(code, "not exported"))).token() == token);
+            assert!(token.len() <= 11);
+        }
+        use crate::{error::{LinuxPassiveCause as C, LinuxSpawnFailure as S}, installed_runtime::AdmissionFailure as A};
+        for (cause, token) in [(C::SelectionProfileClosed, b"sel-profile".as_slice()), (C::SelectionCompileBinding, b"sel-compile"),
+            (C::SelectionMethodOutsideProfile, b"sel-method"), (C::Inspection(Some(A::Bounds)), b"inspection"),
+            (C::AcquisitionEntryNotReleased, b"acq-entry"), (C::AcquisitionCustodyMissing, b"acq-custody"), (C::AcquisitionLock, b"acq-lock"),
+            (C::Capability(A::Bounds), b"capability"), (C::Preparation(A::Bounds), b"prepare"),
+            (C::FinalClaimOwnerGate, b"final-gate"), (C::FinalClaim(A::Bounds), b"final-claim"),
+            (C::ReturnedSpawn(S::ProcessFdLimit), b"spawn-pfd"), (C::ReturnedSpawn(S::SystemFdLimit), b"spawn-sfd"),
+            (C::ReturnedSpawn(S::Memory), b"spawn-mem"), (C::ReturnedSpawn(S::ResourceUnavailable), b"spawn-res"),
+            (C::ReturnedSpawn(S::PermissionDenied), b"spawn-deny"), (C::ReturnedSpawn(S::NotFound), b"spawn-miss"),
+            (C::ReturnedSpawn(S::ExecFormat), b"spawn-exec"), (C::ReturnedSpawn(S::Other), b"spawn-other"), (C::EngineResponse, b"response")] {
+            let error = BridgeError::unavailable("not exported").with_linux_passive_cause(Some(cause));
+            let mut state = original.state.try_lock().unwrap(); state.error = Some(error);
+            let projected = QueryProjection::stored(&state);
+            assert!(matches!(projected, QueryProjection::Recorded { error: QueryError::Unavailable, cause: value, .. } if value.token() == token));
+            assert!(state.error.as_ref().and_then(BridgeError::linux_passive_cause) == Some(cause) && token.len() <= 11);
+        }
+        assert!(QueryCause::stored(Some(C::Inspection(None))).token() == b"inspection");
+        for (receipt, token) in [(ManagementJoin::Pending,b'p'), (ManagementJoin::Returned,b'r'), (ManagementJoin::Missing,b'm'),
+            (ManagementJoin::Cancelled,b'c'), (ManagementJoin::Panicked,b'x'), (ManagementJoin::Failed,b'f'), (ManagementJoin::InvalidReturn,b'i')] {
+            assert!(management_token(receipt) == token);
+            assert!(WorkerJoin::returned(receipt).is_some() == matches!(token, b'c' | b'x' | b'f'));
+        }
+        use installed_native_fixture::ObservationFailure as F;
+        let mut resources = Resources::default();
+        for (failure, token) in [(F::ChildId,b"child-id".as_slice()), (F::Entry,b"observe-entry"), (F::MapsRead,b"maps-read"),
+            (F::MapsCheck,b"maps-check"), (F::EnvironmentRead,b"env-read"), (F::EnvironmentCheck,b"env-check"), (F::HoldRefused,b"hold-refused")] {
+            resources.native_observation_failure = Some(failure);
+            assert!(WorkerProjection::stored(&resources).token() == token && token.len() <= 14);
+        }
+        resources.acquisition_return = Some(ManagementJoin::Panicked);
+        assert!(WorkerProjection::stored(&resources).token() == b"acquire-x");
+        resources.inspection_return = Some(ManagementJoin::Cancelled);
+        assert!(WorkerProjection::stored(&resources).token() == b"inspect-c");
+        resources.inspection_return = Some(ManagementJoin::Returned); resources.acquisition_return = Some(ManagementJoin::Returned);
+        resources.native_observation_return = Some(ManagementJoin::Failed);
+        assert!(WorkerProjection::stored(&resources).token() == b"observe-f");
+        resources.native_observation_return = Some(ManagementJoin::Returned); resources.native_observation_failure = None;
+        resources.native_return = Some(Ok(CloseOutcome::Unknown));
+        assert!(WorkerProjection::stored(&resources).token() == b"settle-unknown");
+        resources.native_return = Some(Ok(CloseOutcome::Settled));
+        assert!(WorkerProjection::stored(&resources).token() == b"none-recorded");
+        assert!(query(InstalledSessionQueryDiagnostic::contract_sample()) == b"unavailable.spawn-other.xf");
+        assert!(InstalledSessionQueryDiagnostic::contract_sample().query_token().1 == 26);
+        contended
+    }
+
     impl Supervisor {
+        pub(crate) fn installed_session_query_diagnostic(&self, asset: &Weak<OriginalWork>) -> InstalledSessionQueryDiagnostic {
+            session_query_diagnostic(&self.inner.native_test.session, asset)
+        }
         pub(crate) fn arm_installed_session_query(&self, asset: &Arc<OriginalWork>, hold: SessionQueryHold) -> Result<(), BridgeError> {
             let mut book = lock(&self.inner.native_test.session);
             need(self.passive_method_available("credentials.assess") && !self.stopping() && !self.disabled()
@@ -293,6 +573,6 @@ mod session {
     }
 }
 #[cfg(all(debug_assertions, feature = "custom-protocol"))]
-pub(crate) use session::{InstalledSessionQueries, SessionQueryHold};
+pub(crate) use session::{InstalledSessionQueries, InstalledSessionQueryDiagnostic, SessionQueryHold, assert_installed_session_query_diagnostic_contract};
 #[cfg(all(debug_assertions, feature = "custom-protocol"))]
 pub(super) use session::{SessionQueryBook, register_session_query, session_child_case, hold_session_query};

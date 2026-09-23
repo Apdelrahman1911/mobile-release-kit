@@ -259,6 +259,30 @@ SHELL_SESSION_WAITS = (
     b"native-phase-not-ready", b"rendered-display-mismatch", b"rendered-control-mismatch",
     b"gtk-dialog-absent", b"gtk-action-insensitive",
 )
+# v2 first document transition, plus a single later cached original R1 sample.
+# Neither association nor none-recorded establishes causation or settlement.
+SHELL_SESSION_ORIGINS = (
+    b"not-recorded", b"op-cleanup", b"registry", b"coord-lock", b"coord-join", b"supervisor-disabled",
+    b"staged-collision", b"install-retire", b"retain-retire", b"drain-retire", b"staged-refusal", b"gate-poisoned", b"exhausted",
+)
+SHELL_SESSION_DETAILS = (
+    b"none", b"deadline", b"review-expired", b"context-stale", b"cleanup-unknown", b"user-cancelled", b"shutdown",
+    b"document-lost", b"other", b"new", b"pending", b"returned", b"failed", b"unavailable",
+)
+SHELL_SESSION_ASSOCIATIONS = (b"bound", b"unassociated")
+SHELL_SESSION_QUERY_ERRORS = (b"none", b"timeout", b"cleanup", b"shutdown", b"protocol", b"engine", b"io", b"busy", b"unavailable", b"other")
+SHELL_SESSION_QUERY_CAUSES = (
+    b"none", b"sel-profile", b"sel-compile", b"sel-method", b"inspection", b"acq-entry", b"acq-custody", b"acq-lock",
+    b"capability", b"prepare", b"final-gate", b"final-claim", b"spawn-pfd", b"spawn-sfd", b"spawn-mem", b"spawn-res",
+    b"spawn-deny", b"spawn-miss", b"spawn-exec", b"spawn-other", b"response",
+)
+SHELL_SESSION_MANAGEMENT_JOINS = b"prmcxfi"
+SHELL_SESSION_WORKERS = (
+    b"na", b"unavailable", b"none-recorded", b"child-id", b"observe-entry", b"maps-read", b"maps-check", b"env-read", b"env-check",
+    b"hold-refused", b"settle-unknown",
+)
+SHELL_SESSION_WORKER_STAGES = (b"inspect", b"acquire", b"observe", b"write", b"stdout", b"stderr", b"settle")
+SHELL_SESSION_WORKER_JOINS = b"cxf"
 SHELL_PATH_MARKER = b"MRK_INSTALLED_SHELL_PROJECT_PATHS="
 SHELL_PATH_RECEIPT = {'assetAuthorityCreated': False,
  'cancel': [{'field': 'version.source', 'operation': 3}, {'field': 'metadata.root', 'operation': 7}],
@@ -3417,12 +3441,44 @@ def _shell_labels_prepare(value, case):
         raise
 
 
+def _shell_session_first_origin(origin, detail, association, query, worker):
+    """Closed DATA only; no lookup or inference from the public step/current owner."""
+    if origin not in SHELL_SESSION_ORIGINS or detail not in SHELL_SESSION_DETAILS or association not in SHELL_SESSION_ASSOCIATIONS:
+        return None
+    details = {
+        b"op-cleanup": (b"deadline", b"review-expired", b"context-stale", b"cleanup-unknown", b"user-cancelled", b"shutdown", b"document-lost", b"other"),
+        b"coord-join": (b"failed",),
+        b"staged-refusal": (b"new", b"pending", b"returned", b"failed", b"unavailable"),
+    }.get(origin, (b"none",))
+    if detail not in details:
+        return None
+    if query not in (b"na", b"unregistered", b"unavailable"):
+        parts = query.split(b".")
+        if (len(parts) != 3 or parts[0] not in SHELL_SESSION_QUERY_ERRORS or parts[1] not in SHELL_SESSION_QUERY_CAUSES
+                or len(parts[2]) != 2 or any(join not in SHELL_SESSION_MANAGEMENT_JOINS for join in parts[2])
+                or parts[0] == b"none" and parts[1] != b"none"):
+            return None
+    if worker not in SHELL_SESSION_WORKERS:
+        parts = worker.rsplit(b"-", 1)
+        if (len(parts) != 2 or parts[0] not in SHELL_SESSION_WORKER_STAGES
+                or len(parts[1]) != 1 or parts[1][0] not in SHELL_SESSION_WORKER_JOINS):
+            return None
+    if (association == b"unassociated" and (query, worker) != (b"na", b"na")
+            or association == b"bound" and query == b"na"
+            or query == b"unregistered" and worker != b"na"
+            or origin == b"not-recorded" and (detail, association, query, worker) != (b"none", b"unassociated", b"na", b"na")):
+        return None
+    return {"origin": origin.decode("ascii"), "detail": detail.decode("ascii"), "association": association.decode("ascii"),
+            "query": query.decode("ascii"), "worker": worker.decode("ascii")}
+
+
 def _shell_label_pair(raw):
     if type(raw) is not bytes or not 0 < len(raw) <= SHELL_FAILURE_LABEL_LIMIT:
         return None
     lines = raw.splitlines(keepends=True)
-    # Current Session traces require their complete fourth record. Historical
-    # incomplete records are retained as historical, not filled by inference.
+    # Session traces require their complete fourth record. Historical v1 keeps
+    # its prior shape, distinguishable by absent firstOrigin metadata; never
+    # invent provenance for it or accept a truncated v2 as a historical frame.
     if (len(lines) not in (3, 4) or lines[0] not in SHELL_FAILURE_STEPS or lines[1] not in SHELL_FAILURE_BOUNDARIES
             or lines[2] not in SHELL_BOOTSTRAP_PROGRESS):
         return None
@@ -3433,11 +3489,14 @@ def _shell_label_pair(raw):
     if len(lines) != (4 if session else 3):
         return None
     if session:
-        match = re.fullmatch(rb"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=(none|0|[1-9][0-9]?);"
-                             rb"evaluations=(0|[1-9][0-9]{0,2});reject=([a-z-]{1,32});wait=([a-z-]{1,32})\n", lines[3])
+        historical = lines[3].startswith(b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;")
+        version = b"v1" if historical else b"v2"
+        suffix = (rb"\n" if historical else rb";o=([a-z-]{1,19});d=([a-z-]{1,15});a=([a-z-]{1,12});q=([a-z.-]{1,26});w=([a-z-]{1,14})\n")
+        match = re.fullmatch(rb"MRK_INSTALLED_SHELL_SESSION_FAILURE=" + version + rb";index=(none|0|[1-9][0-9]?);"
+                             rb"evaluations=(0|[1-9][0-9]{0,2});reject=([a-z-]{1,32});wait=([a-z-]{1,32})" + suffix, lines[3])
         if match is None:
             return None
-        index_raw, evaluations_raw, rejection, wait = match.groups()
+        index_raw, evaluations_raw, rejection, wait = match.groups()[:4]
         index = None if index_raw == b"none" else int(index_raw)
         evaluations = int(evaluations_raw)
         unindexed = {"SessionNavigate", "SessionReload", "SessionLoss", "SessionDeadline", "SessionQuitPreserved"}
@@ -3449,6 +3508,11 @@ def _shell_label_pair(raw):
             return None
         result["session"] = {"recipeIndex": index, "evaluations": evaluations,
                              "rejection": rejection.decode("ascii"), "lastWait": wait.decode("ascii")}
+        if not historical:
+            first_origin = _shell_session_first_origin(*match.groups()[4:])
+            if first_origin is None:
+                return None
+            result["session"]["firstOrigin"] = first_origin
     return result
 
 

@@ -50,7 +50,8 @@ mod shell_shutdown_observation;
 pub(crate) use shell_shutdown_observation::HeldAppInfo;
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", target_os = "linux", target_arch = "x86_64", target_env = "gnu",
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
-pub(crate) use shell_shutdown_observation::{InstalledSessionQueries, SessionQueryHold};
+pub(crate) use shell_shutdown_observation::{InstalledSessionQueries, InstalledSessionQueryDiagnostic, SessionQueryHold,
+    assert_installed_session_query_diagnostic_contract};
 
 fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
     // No user callback/serialization runs while these small bookkeeping locks
@@ -303,10 +304,13 @@ struct Resources {
     github_environment: Option<JoinHandle<Result<Option<bool>, ()>>>,
     #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
-    native_observation: Option<JoinHandle<Result<Vec<installed_native_fixture::ChildObservation>, ()>>>,
+    native_observation: Option<JoinHandle<Result<Vec<installed_native_fixture::ChildObservation>, installed_native_fixture::ObservationFailure>>>,
     #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
     native_observation_return: Option<ManagementJoin>,
+    #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    native_observation_failure: Option<installed_native_fixture::ObservationFailure>,
     #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
     native_snapshots: Vec<installed_native_fixture::ChildObservation>,
@@ -1175,6 +1179,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         // Same original Child, retained before the reader starts, and not yet
         // offered to any wait/reaper. A lost read/close/join retains this slot.
         let Some(id) = resources.child.as_ref().and_then(Child::id) else {
+            resources.native_observation_failure = Some(installed_native_fixture::ObservationFailure::ChildId);
             owner.unknown(&inner); return DriverEnd::RetainedUnknown;
         };
         let observing_inner = inner.clone();
@@ -1183,7 +1188,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         let (release, enter) = oneshot::channel();
         resources.native_observation_return = Some(ManagementJoin::Pending);
         resources.native_observation = Some(tokio::task::spawn_blocking(move || {
-            enter.blocking_recv().map_err(|_| ())?;
+            enter.blocking_recv().map_err(|_| installed_native_fixture::ObservationFailure::Entry)?;
             installed_native_fixture::observe_original_child(id, observing_key, endpoint, observing_stop, &observing_inner, observed_case)
         }));
         let _ = release.send(());
@@ -1193,7 +1198,14 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         });
         match result {
             Ok(Ok(snapshots)) => { resources.native_observation.take(); resources.native_snapshots = snapshots; },
-            _ => { owner.unknown(&inner); return DriverEnd::RetainedUnknown; },
+            Ok(Err(failure)) => {
+                // Preserve only the formerly erased returned refusal, under
+                // this SAME already-held resource guard. Original handle,
+                // Unknown policy and subsequent settlement gates are unchanged.
+                resources.native_observation_failure = Some(failure);
+                owner.unknown(&inner); return DriverEnd::RetainedUnknown;
+            },
+            Err(_) => { owner.unknown(&inner); return DriverEnd::RetainedUnknown; },
         }
         if Instant::now() >= endpoint { owner.fail(BridgeError::timeout()); }
     }
@@ -1440,6 +1452,17 @@ mod installed_native_fixture {
     pub(super) struct Mapping { role: String, path: String, device_major: u64, device_minor: u64, inode: u64 }
     #[derive(Debug, Eq, PartialEq)]
     pub(super) struct ChildObservation { maps: Vec<Mapping>, environment_clear: bool }
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(super) enum ObservationFailure { ChildId, Entry, MapsRead, MapsCheck, EnvironmentRead, EnvironmentCheck, HoldRefused }
+    impl ObservationFailure {
+        pub(super) fn token(self) -> &'static [u8] {
+            match self {
+                Self::ChildId => b"child-id", Self::Entry => b"observe-entry", Self::MapsRead => b"maps-read",
+                Self::MapsCheck => b"maps-check", Self::EnvironmentRead => b"env-read", Self::EnvironmentCheck => b"env-check",
+                Self::HoldRefused => b"hold-refused",
+            }
+        }
+    }
     impl ChildObservation {
         #[cfg(feature = "desktop-shell")]
         pub(super) fn environment_clear(&self) -> bool { self.environment_clear }
@@ -1520,18 +1543,19 @@ mod installed_native_fixture {
         }
         Ok(if found.len() == 6 && found.values().all(|(_, code)| *code) { Some(found.into_values().map(|(row, _)| row).collect()) } else { None })
     }
-    fn child_snapshot(id: u32, end: Instant, stop: &watch::Receiver<bool>) -> Result<Option<ChildObservation>, ()> {
-        need(id > 0)?;
+    fn child_snapshot(id: u32, end: Instant, stop: &watch::Receiver<bool>) -> Result<Option<ChildObservation>, ObservationFailure> {
+        need(id > 0).map_err(|_| ObservationFailure::ChildId)?;
         while live(end, stop) {
-            let raw = original_bytes(Path::new(&format!("/proc/{id}/maps")), 1 << 20, false)?;
-            if let Some(maps) = mappings(&raw)? {
-                let mut environment = original_bytes(Path::new(&format!("/proc/{id}/environ")), 8192, false)?;
+            let raw = original_bytes(Path::new(&format!("/proc/{id}/maps")), 1 << 20, false).map_err(|_| ObservationFailure::MapsRead)?;
+            if let Some(maps) = mappings(&raw).map_err(|_| ObservationFailure::MapsCheck)? {
+                let mut environment = original_bytes(Path::new(&format!("/proc/{id}/environ")), 8192, false)
+                    .map_err(|_| ObservationFailure::EnvironmentRead)?;
                 let clear = environment.last() == Some(&0) && {
                     let entries = environment[..environment.len() - 1].split(|byte| *byte == 0).collect::<Vec<_>>();
                     entries.len() == 2 && entries.contains(&b"LANG=C".as_slice()) && entries.contains(&b"LC_ALL=C".as_slice())
                 };
                 environment.fill(0); // No raw environment leaves this original reader.
-                need(clear)?;
+                need(clear).map_err(|_| ObservationFailure::EnvironmentCheck)?;
                 return Ok(if live(end, stop) { Some(ChildObservation { maps, environment_clear: true }) } else { None });
             }
             std::thread::sleep(Duration::from_millis(1));
@@ -1576,7 +1600,7 @@ mod installed_native_fixture {
         Ok(root.join("passive-release"))
     }
     pub(super) fn observe_original_child(id: u32, _key: u64, end: Instant, stop: watch::Receiver<bool>, inner: &Inner, case: Case)
-        -> Result<Vec<ChildObservation>, ()> {
+        -> Result<Vec<ChildObservation>, ObservationFailure> {
         let mut snapshots = Vec::new();
         let Some(first) = child_snapshot(id, end, &stop)? else { return Ok(snapshots); };
         snapshots.push(first);
@@ -1584,7 +1608,7 @@ mod installed_native_fixture {
             #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
             Case::SessionObserve | Case::SessionLoss | Case::SessionDeadline => {
                 // Same original child/IO checkpoint, no new owner or clock.
-                shell_shutdown_observation::hold_session_query(inner, _key, end, &stop, case)?;
+                shell_shutdown_observation::hold_session_query(inner, _key, end, &stop, case).map_err(|_| ObservationFailure::HoldRefused)?;
             },
             Case::Shutdown => {
                 inner.native_test.held.store(true, Ordering::SeqCst);
@@ -1592,19 +1616,19 @@ mod installed_native_fixture {
                 while live(end, &stop) { std::thread::sleep(Duration::from_millis(1)); }
             },
             Case::Overlap => {
-                let release = ready(end)?;
+                let release = ready(end).map_err(|_| ObservationFailure::HoldRefused)?;
                 while live(end, &stop) {
-                    let value = original_bytes(&release, 32, true)?;
+                    let value = original_bytes(&release, 32, true).map_err(|_| ObservationFailure::HoldRefused)?;
                     if value.as_slice() == b"release\n" {
                         if let Some(second) = child_snapshot(id, end, &stop)? { snapshots.push(second); }
                         return Ok(snapshots);
                     }
-                    need(value.as_slice() == b"pending\n")?;
+                    need(value.as_slice() == b"pending\n").map_err(|_| ObservationFailure::HoldRefused)?;
                     std::thread::sleep(Duration::from_millis(1));
                 }
             },
             Case::Observe => {},
-            _ => return Err(()),
+            _ => return Err(ObservationFailure::Entry),
         }
         Ok(snapshots)
     }
