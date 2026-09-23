@@ -271,7 +271,7 @@ mod tests {
             assert_eq!(error.frame_diagnostic_line().is_some(), allowed);
             if allowed {
                 let line = error.frame_diagnostic_line().unwrap();
-                assert_eq!(line, "MRK_WINDOWS_RUNTIME_PUBLISH_FRAME_V1=qcall=none;qphase=none;qret=none;qrefusal=none;mcall=none;mphase=none;mret=none\n");
+                assert_eq!(line, "MRK_WINDOWS_RUNTIME_PUBLISH_FRAME_V2=qcall=none;qphase=none;qret=none;qrefusal=none;mcall=none;mphase=none;mret=none;mcount=none\n");
                 assert!(error.diagnostic_line().unwrap().len() + line.len() <= 512);
             }
         }

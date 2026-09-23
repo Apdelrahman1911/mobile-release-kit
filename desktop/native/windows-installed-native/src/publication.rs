@@ -281,7 +281,7 @@ impl Order {
 enum Effect { Directory(usize), Writer, Control(bool), Write, Flush, Seal, Scalar(S::TOKEN_INFORMATION_CLASS) }
 
 // Normalize while copying retained Rust DATA. Neither this value nor its Debug
-// representation carries a handle, scalar/count magnitude, path or native buffer.
+// representation carries a handle, raw scalar/count magnitude, path or native buffer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ObservedReturn { label: &'static str, code: Option<u32> }
 impl ObservedReturn {
@@ -302,6 +302,25 @@ impl ObservedReturn {
             const HEX: &[u8; 16] = b"0123456789abcdef";
             line.push(':');
             for shift in (0..8).rev() { line.push(HEX[((code >> (shift * 4)) & 15) as usize] as char); }
+        }
+    }
+}
+/// Closed observation of the caller's exact-four invariant, not an OS fault.
+/// Sentinel means equality to u32::MAX, not proof that output was unwritten.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ObservedScalarLength { Unobserved, Sentinel, Zero, One, Two, Three, Four, OverFour }
+impl ObservedScalarLength {
+    fn from_count(count: u32) -> Self {
+        match count {
+            u32::MAX => Self::Sentinel, 0 => Self::Zero, 1 => Self::One,
+            2 => Self::Two, 3 => Self::Three, 4 => Self::Four, _ => Self::OverFour,
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Self::Unobserved => "none", Self::Sentinel => "sentinel", Self::Zero => "zero",
+            Self::One => "one", Self::Two => "two", Self::Three => "three",
+            Self::Four => "four", Self::OverFour => "over4",
         }
     }
 }
@@ -352,30 +371,32 @@ fn observed_refusal(refusal: Option<CompletionRefusal>) -> &'static str {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PublicationFrameObservation {
     qcall: &'static str, qphase: &'static str, qret: ObservedReturn, qrefusal: &'static str,
-    mcall: &'static str, mphase: &'static str, mret: ObservedReturn,
+    mcall: &'static str, mphase: &'static str, mret: ObservedReturn, mcount: ObservedScalarLength,
 }
 impl PublicationFrameObservation {
     fn from_frames(query: Option<(Call, Phase, Option<Returned>, Option<CompletionRefusal>)>,
-        mutation: Option<(Effect, Phase, Option<Returned>)>) -> Self {
+        mutation: Option<(Effect, Phase, Option<Returned>, ObservedScalarLength)>) -> Self {
         let (qcall, qphase, qret, qrefusal) = query.map_or(("none", "none", ObservedReturn::from_return(None), "none"),
             |(call, phase, returned, refusal)| (observed_query(call), observed_phase(phase), ObservedReturn::from_return(returned), observed_refusal(refusal)));
-        let (mcall, mphase, mret) = mutation.map_or(("none", "none", ObservedReturn::from_return(None)),
-            |(effect, phase, returned)| (observed_mutation(effect), observed_phase(phase), ObservedReturn::from_return(returned)));
-        Self { qcall, qphase, qret, qrefusal, mcall, mphase, mret }
+        let (mcall, mphase, mret, mcount) = mutation.map_or(("none", "none", ObservedReturn::from_return(None), ObservedScalarLength::Unobserved),
+            |(effect, phase, returned, length)| (observed_mutation(effect), observed_phase(phase), ObservedReturn::from_return(returned), length));
+        Self { qcall, qphase, qret, qrefusal, mcall, mphase, mret, mcount }
     }
     /// Bounded companion line; reads only this normalized copy, never an owner.
     pub fn diagnostic_line(self) -> Option<String> {
         let mut line = String::with_capacity(256);
-        line.push_str("MRK_WINDOWS_RUNTIME_PUBLISH_FRAME_V1=qcall="); line.push_str(self.qcall);
+        line.push_str("MRK_WINDOWS_RUNTIME_PUBLISH_FRAME_V2=qcall="); line.push_str(self.qcall);
         line.push_str(";qphase="); line.push_str(self.qphase); line.push_str(";qret="); self.qret.append(&mut line);
         line.push_str(";qrefusal="); line.push_str(self.qrefusal);
         line.push_str(";mcall="); line.push_str(self.mcall); line.push_str(";mphase="); line.push_str(self.mphase);
-        line.push_str(";mret="); self.mret.append(&mut line); line.push('\n');
+        line.push_str(";mret="); self.mret.append(&mut line);
+        line.push_str(";mcount="); line.push_str(self.mcount.label()); line.push('\n');
         if line.len() <= 256 { Some(line) } else { None }
     }
 }
 struct Mutation {
     effect: Effect, phase: Cell<Phase>, returned: Cell<Option<Returned>>, slot: Option<usize>,
+    length_observation: Cell<ObservedScalarLength>,
     path: Vec<u16>, descriptor: UnsafeCell<Aligned>, attributes: S::SECURITY_ATTRIBUTES,
     handle: F::HANDLE, output: *mut F::HANDLE, data: Vec<u8>, count: UnsafeCell<u32>, scalar: UnsafeCell<u32>,
     _pin: PhantomPinned,
@@ -389,6 +410,13 @@ fn write_return(ok: i32, error: u32, written: u32, requested: usize) -> Result<(
     mutation_return(ok, error)?;
     if requested == 0 || requested > BUFFER || written as usize > requested { return Err(Error::Unknown); }
     need(written as usize == requested) // short/zero is failure, never a write-repair loop
+}
+fn scalar_count_return(count: u32, observed: &Cell<ObservedScalarLength>) -> Result<()> {
+    if observed.get() == ObservedScalarLength::Unobserved {
+        observed.set(ObservedScalarLength::from_count(count));
+    }
+    // The original count still decides admission; the first diagnostic never does.
+    if count != 4 { Err(Error::Unknown) } else { Ok(()) }
 }
 fn later_originals_closed(states: impl IntoIterator<Item = SlotState>) -> bool {
     let mut any = false;
@@ -443,7 +471,7 @@ impl Publication {
         });
         let mutation = self.mutation.as_ref().map(|held| {
             let frame = held.as_ref().get_ref();
-            (frame.effect, frame.phase.get(), frame.returned.get())
+            (frame.effect, frame.phase.get(), frame.returned.get(), frame.length_observation.get())
         });
         PublicationFrameObservation::from_frames(query, mutation)
     }
@@ -604,6 +632,7 @@ impl Publication {
             wide(&format!("\\\\?\\{dos}"))
         } else { Vec::new() };
         let mut frame = Box::pin(Mutation { effect, phase: Cell::new(Phase::Prepared), returned: Cell::new(None), slot,
+            length_observation: Cell::new(ObservedScalarLength::Unobserved),
             path, descriptor: UnsafeCell::new(Aligned([0; BUFFER])), attributes: S::SECURITY_ATTRIBUTES::default(),
             handle, output: null_mut(), data, count: UnsafeCell::new(u32::MAX), scalar: UnsafeCell::new(u32::MAX), _pin: PhantomPinned });
         // SAFETY: pinned, exclusively held, not yet entered. Register all pointers
@@ -663,7 +692,9 @@ impl Publication {
             // SAFETY: known completion, not a failed or pending output count.
             write_return(ok, error, unsafe { *frame.count.get() }, frame.data.len())
         } else if matches!(effect, Effect::Scalar(_)) && outcome.is_ok() {
-            if unsafe { *frame.count.get() } != 4 { Err(Error::Unknown) } else { Ok(()) }
+            // SAME authorized read, before the unchanged exact-four refusal.
+            let count = unsafe { *frame.count.get() };
+            scalar_count_return(count, &frame.length_observation)
         } else { outcome };
         if outcome == Err(Error::Unknown) { return self.mutation_unknown(); }
         frame.phase.set(Phase::Complete);
@@ -1316,36 +1347,74 @@ mod tests {
             let mut line = String::new(); ObservedReturn::from_return(returned).append(&mut line);
             assert_eq!(line, expected);
         }
+        assert_eq!(ObservedScalarLength::Unobserved.label(), "none");
+        for (count, expected) in [(0, "zero"), (1, "one"), (2, "two"), (3, "three"),
+            (4, "four"), (5, "over4"), (u32::MAX - 1, "over4"), (u32::MAX, "sentinel")] {
+            let observed = Cell::new(ObservedScalarLength::Unobserved);
+            assert_eq!(scalar_count_return(count, &observed), if count == 4 { Ok(()) } else { Err(Error::Unknown) });
+            assert_eq!(observed.get().label(), expected);
+        }
         let largest = PublicationFrameObservation::from_frames(
             Some((Call::Token(S::TokenVirtualizationEnabled), Phase::Returned,
                 Some(Returned::Count(u32::MAX, u32::MAX)), Some(CompletionRefusal::TokenInvalidHandle))),
-            Some((Effect::Control(true), Phase::Returned, Some(Returned::Count(u32::MAX, u32::MAX)))))
+            Some((Effect::Control(true), Phase::Returned, Some(Returned::Count(u32::MAX, u32::MAX)), ObservedScalarLength::Sentinel)))
             .diagnostic_line().ok_or(Error::State)?;
-        assert!(largest.is_ascii() && largest.len() <= 208 && largest.bytes().filter(|b| *b == b'\n').count() == 1);
-        assert!(151 + largest.len() <= 512);
+        assert!(largest.is_ascii() && largest.len() <= 224 && largest.bytes().filter(|b| *b == b'\n').count() == 1);
+        assert!(151 + largest.len() <= 375); // Below the unchanged combined512 cap.
         let mut owner = Publication::new(&"d".repeat(64))?;
         let absent = owner.retained_frame_observation();
         assert_eq!(absent, PublicationFrameObservation::from_frames(None, None));
         crate::tests::enter_inert(&mut owner.book, Call::Token(S::TokenElevation), null_mut())?;
         owner.book.arena()?.phase.set(Phase::Returned);
         owner.book.arena()?.returned.set(Some(Returned::Boolean(1, 0)));
-        // This fixture never enters mutate/invoke. Its output storage stays
-        // unobserved; only the retained Rust effect/phase/return is copied.
-        owner.mutation = Some(ManuallyDrop::new(Box::pin(Mutation {
-            effect: Effect::Scalar(S::TokenHasRestrictions), phase: Cell::new(Phase::Returned),
-            returned: Cell::new(Some(Returned::Boolean(0, F::ERROR_IO_PENDING))), slot: None,
+        // This fixture never enters mutate/invoke. Invalid returns must leave
+        // its raw output storage unobserved; snapshots copy only retained DATA.
+        let mutation = |phase, returned| ManuallyDrop::new(Box::pin(Mutation {
+            effect: Effect::Scalar(S::TokenHasRestrictions), phase: Cell::new(phase),
+            returned: Cell::new(returned), slot: None,
+            length_observation: Cell::new(ObservedScalarLength::Unobserved),
             path: Vec::new(), descriptor: UnsafeCell::new(Aligned([0; BUFFER])), attributes: S::SECURITY_ATTRIBUTES::default(),
             handle: null_mut(), output: null_mut(), data: Vec::new(), count: UnsafeCell::new(u32::MAX),
             scalar: UnsafeCell::new(u32::MAX), _pin: PhantomPinned,
-        })));
+        }));
+        owner.mutation = Some(mutation(Phase::Returned, Some(Returned::Boolean(0, F::ERROR_IO_PENDING))));
         let saved = owner.retained_frame_observation();
-        assert_eq!(saved.diagnostic_line().as_deref(), Some("MRK_WINDOWS_RUNTIME_PUBLISH_FRAME_V1=qcall=token-elevation;qphase=returned;qret=bool-nonzero:00000000;qrefusal=none;mcall=has-restrictions;mphase=returned;mret=bool-zero:000003e5\n"));
+        assert_eq!(saved.diagnostic_line().as_deref(), Some("MRK_WINDOWS_RUNTIME_PUBLISH_FRAME_V2=qcall=token-elevation;qphase=returned;qret=bool-nonzero:00000000;qrefusal=none;mcall=has-restrictions;mphase=returned;mret=bool-zero:000003e5;mcount=none\n"));
         owner.book.arena()?.returned.set(Some(Returned::Boolean(0, 5)));
         assert_ne!(saved, owner.retained_frame_observation());
+        for (phase, returned, expected) in [
+            (Phase::Prepared, Some(Returned::Boolean(1, 0)), Error::Unknown),
+            (Phase::Entered, Some(Returned::Boolean(1, 0)), Error::Unknown),
+            (Phase::Returned, None, Error::Unknown),
+            (Phase::Returned, Some(Returned::Scalar(0)), Error::Unknown),
+            (Phase::Returned, Some(Returned::Boolean(0, 0)), Error::Unknown),
+            (Phase::Returned, Some(Returned::Boolean(0, F::ERROR_IO_PENDING)), Error::Unknown),
+            (Phase::Returned, Some(Returned::Boolean(1, F::ERROR_ACCESS_DENIED)), Error::Unknown),
+            (Phase::Returned, Some(Returned::Boolean(0, F::ERROR_ACCESS_DENIED)), Error::Unavailable),
+        ] {
+            let mut refused = Publication::new(&"d".repeat(64))?;
+            refused.mutation = Some(mutation(phase, returned));
+            assert_eq!(refused.finish_mutation().err(), Some(expected));
+            assert_eq!(refused.retained_frame_observation().mcount, ObservedScalarLength::Unobserved);
+            // Drop only this never-native test arena; an actual Unknown is retained.
+            if let Some(frame) = refused.mutation.take() { drop(ManuallyDrop::into_inner(frame)); }
+        }
+        let frame = owner.mutation.as_ref().ok_or(Error::State)?.as_ref().get_ref();
+        frame.returned.set(Some(Returned::Boolean(1, 0)));
+        assert_eq!(scalar_count_return(2, &frame.length_observation), Err(Error::Unknown));
+        let length_saved = owner.retained_frame_observation();
+        assert_eq!(length_saved.mcount, ObservedScalarLength::Two);
+        assert!(length_saved.diagnostic_line().ok_or(Error::State)?.ends_with(";mcount=two\n"));
+        // Pure DATA classification, not a second native call. The new argument
+        // still drives exact-four refusal while the first category stays fixed.
+        assert_eq!(scalar_count_return(4, &frame.length_observation), Ok(()));
+        assert_eq!(scalar_count_return(3, &frame.length_observation), Err(Error::Unknown));
+        assert_eq!(length_saved, owner.retained_frame_observation());
         // Release only the two never-native fixture allocations, not live owners.
         drop(ManuallyDrop::into_inner(owner.book.active.take().ok_or(Error::State)?));
         drop(ManuallyDrop::into_inner(owner.mutation.take().ok_or(Error::State)?));
         assert_eq!(owner.retained_frame_observation(), absent);
+        assert_eq!(length_saved.mcount, ObservedScalarLength::Two);
         assert_eq!(saved.qret, ObservedReturn::from_return(Some(Returned::Boolean(1, 0))));
         need(write_return(1, 0, 4, 4).is_ok())?;
         for count in [0, 1, 3] { need(write_return(1, 0, count, 4) == Err(Error::Unsafe))?; }
@@ -1484,6 +1553,7 @@ mod tests {
         let mut owner = Publication::new(&"a".repeat(64))?;
         owner.mutation = Some(ManuallyDrop::new(Box::pin(Mutation { effect: Effect::Flush,
             phase: Cell::new(Phase::Entered), returned: Cell::new(None), slot: None, path: Vec::new(),
+            length_observation: Cell::new(ObservedScalarLength::Unobserved),
             descriptor: UnsafeCell::new(Aligned([0; BUFFER])), attributes: S::SECURITY_ATTRIBUTES::default(),
             handle: null_mut(), output: null_mut(), data: Vec::new(), count: UnsafeCell::new(u32::MAX), scalar: UnsafeCell::new(u32::MAX), _pin: PhantomPinned })));
         // Pure ownership control: no fabricated HANDLE and no native call.

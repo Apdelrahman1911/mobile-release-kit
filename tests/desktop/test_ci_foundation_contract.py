@@ -9880,6 +9880,7 @@ class WindowsReaderGateTests(unittest.TestCase):
         self.assertLess(failure.index("line.as_bytes()"), failure.index("error.frame_diagnostic_line()"))
         self.assertIn("if line.len() + frame.len() <= 512", failure)
         self.assertIn("let _ = std::io::Write::write_all(&mut std::io::stderr(), frame.as_bytes());", failure)
+        self.assertEqual(binary.count("std::io::Write::write_all"), 2)  # one attempt per line, not an atomic combined write
         producer = bridge.split("fn produce(", 1)[1].split("\n/// No arguments", 1)[0]
         entry = bridge.split("pub fn publish_fixed()", 1)[1].split("\n#[cfg(test)]", 1)[0]
         self.assertEqual(producer.count("owner.published_and_settled()"), 1)
@@ -9908,15 +9909,27 @@ class WindowsReaderGateTests(unittest.TestCase):
             self.assertNotIn(forbidden, formatter + binary)
         snapshot = source.split("pub fn retained_frame_observation(&self)", 1)[1].split("/// No native effect.", 1)[0]
         for retained in ("self.book.active.as_ref()", "self.mutation.as_ref()", "frame.call", "frame.effect",
-                         "frame.phase.get()", "frame.returned.get()", "frame.completion_refusal.get()"):
+                         "frame.phase.get()", "frame.returned.get()", "frame.completion_refusal.get()", "frame.length_observation.get()"):
             self.assertIn(retained, snapshot)
         for forbidden in ("unsafe {", "frame.handle", "frame.output", "frame.iosb", "frame.count", "frame.scalar",
                           "frame.bytes", "frame.input", "frame.path", "Instant::", ".tick(", ".clone("):
             self.assertNotIn(forbidden, snapshot)
         companion = source.split("pub fn diagnostic_line(self)", 1)[1].split("struct Mutation {", 1)[0]
-        self.assertIn('"MRK_WINDOWS_RUNTIME_PUBLISH_FRAME_V1=qcall="', companion)
+        self.assertIn('"MRK_WINDOWS_RUNTIME_PUBLISH_FRAME_V2=qcall="', companion)
         self.assertIn('";qrefusal="', companion)
+        self.assertIn('line.push_str(";mcount="); line.push_str(self.mcount.label());', companion)
         self.assertIn("if line.len() <= 256 { Some(line) } else { None }", companion)
+        self.assertEqual(source.count("length_observation: Cell::new(ObservedScalarLength::Unobserved)"), 3)
+        scalar_branch = source.split("} else if matches!(effect, Effect::Scalar(_)) && outcome.is_ok() {", 1)[1].split("} else { outcome };", 1)[0]
+        self.assertEqual(scalar_branch.count("unsafe { *frame.count.get() }"), 1)
+        self.assertIn("let count = unsafe { *frame.count.get() };", scalar_branch)
+        self.assertIn("scalar_count_return(count, &frame.length_observation)", scalar_branch)
+        scalar_return = source.split("fn scalar_count_return(", 1)[1].split("fn later_originals_closed(", 1)[0]
+        self.assertIn("if observed.get() == ObservedScalarLength::Unobserved {", scalar_return)
+        self.assertIn("observed.set(ObservedScalarLength::from_count(count));", scalar_return)
+        self.assertIn("if count != 4 { Err(Error::Unknown) } else { Ok(()) }", scalar_return)
+        for forbidden in ("unsafe", "frame.", "Instant::", ".tick(", "GetTokenInformation"):
+            self.assertNotIn(forbidden, scalar_return)
         query = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/lib.rs").read_text(encoding="utf-8")
         self.assertEqual(query.count("self.completion_unknown("), 6)
         ordered_open = (
