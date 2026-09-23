@@ -2500,6 +2500,21 @@ impl DocumentBinding {
         drop(state); let _ = start.send(()); Ok(id)
     }
     pub(crate) async fn project_result(&self, id: u32) -> Result<Option<Project>, AssetError> {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+            target_os = "macos", target_arch = "aarch64"))]
+        { self.project_result_original(id, None).await }
+        #[cfg(not(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+            target_os = "macos", target_arch = "aarch64")))]
+        { self.project_result_original(id).await }
+    }
+    async fn project_result_original(&self, id: u32,
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+            target_os = "macos", target_arch = "aarch64"))]
+        mut selection: Option<&mut Option<InstalledMacProjectSelectionData>>,
+    ) -> Result<Option<Project>, AssetError> {
         loop {
             self.reconcile();
             {
@@ -2507,7 +2522,18 @@ impl DocumentBinding {
                 let slot = state.slot.as_ref().filter(|slot| slot.owner.id == id).ok_or_else(|| AssetError::new(Reason::ContextStale))?;
                 if state.unknown { return Err(AssetError::new(Reason::CleanupUnknown)); }
                 if slot.phase == Phase::Idle && slot.owner.resources_settled() {
-                    if slot.reason == Reason::None || slot.reason == Reason::UserCancelled { return Ok(slot.project.clone()); }
+                    if slot.reason == Reason::None || slot.reason == Reason::UserCancelled {
+                        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+                            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+                            target_os = "macos", target_arch = "aarch64"))]
+                        if let (Some(companion), Some(project)) = (selection.as_deref_mut(), slot.project.as_ref()) {
+                            // This guard still binds the original id/slot. Only
+                            // saved DATA crosses the return, never an observer
+                            // callback/Record lock or a later success witness.
+                            *companion = Some(installed_macos_observation::capture_project_selection(&self.inner, id, slot, project));
+                        }
+                        return Ok(slot.project.clone());
+                    }
                     return Err(AssetError::new(slot.reason));
                 }
             }
@@ -2684,6 +2710,141 @@ async fn run_quit(document: DocumentBinding, owner: Arc<OriginalWork>, app: taur
     target_os = "macos", target_arch = "aarch64"))]
 mod installed_macos_observation {
     use super::*;
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum SelectionCustody { Bound, Unavailable, Inconsistent }
+    impl SelectionCustody {
+        pub(crate) fn label(self) -> &'static str { match self {
+            Self::Bound => "bound-original-data", Self::Unavailable => "unavailable-original-data",
+            Self::Inconsistent => "inconsistent-original-data",
+        }}
+    }
+    // Short-lived, bounded return companion, not a ProjectWitness, native
+    // owner or serializable DTO. Only fixed relational labels may be exported.
+    pub(crate) struct ProjectSelectionData {
+        operation_id: u32, returned: Option<Project>, custody: SelectionCustody,
+        selected: Option<std::path::PathBuf>, identity: Option<[u64; 5]>,
+    }
+    pub(crate) fn selection_path_bounded(path: &std::path::Path) -> bool {
+        path.to_str().is_some_and(|text| text.len() <= asset_source::PATH_LIMIT && text.starts_with('/')
+            && !text.as_bytes().contains(&0) && (text == "/" || text[1..].split('/').all(|part|
+                !part.is_empty() && part != "." && part != ".." && part.len() <= 255)))
+    }
+    fn selection_project_bounded(project: &Project) -> bool {
+        crate::protocol::valid_id(&project.id) && project.name.len() <= 255
+            && selection_path_bounded(std::path::Path::new(&project.path))
+    }
+    fn recorded_identity(root: &asset_source::RegisteredRoot) -> Option<[u64; 5]> {
+        // Pure projection of stored scalars. Fixture index5/nlink is NOT part
+        // of RegisteredRoot; dev/ino stay lossless u64s, never JSON numbers.
+        let identity = root.identity.preflight_identity();
+        Some([identity.device.parse().ok()?, identity.inode.parse().ok()?,
+            u64::from(identity.mode), u64::from(identity.uid), u64::from(identity.gid)])
+    }
+    fn saved_project_selection(id: u32, original_bound: bool, project: &Project,
+        response: Option<&InstalledNativeResponseWitness>, registration: Option<&(u32, asset_source::RegisteredRoot)>) -> ProjectSelectionData {
+        let mut data = ProjectSelectionData { operation_id: id, returned: None, custody: SelectionCustody::Inconsistent,
+            selected: None, identity: None };
+        if !original_bound || id == 0 || !selection_project_bounded(project) { return data; }
+        data.returned = Some(project.clone());
+        // These independent axes describe saved response/registry facts, even
+        // if their transfer is inconsistent. A foreign response id never
+        // supplies a selected path; an absent registration supplies no inode.
+        data.selected = response.filter(|saved| saved.operation_id == id && saved.response == NativeResponse::Accept)
+            .and_then(|saved| saved.selected.as_deref()).filter(|path| selection_path_bounded(path))
+            .map(std::path::Path::to_path_buf);
+        data.identity = registration.and_then(|(_, root)| recorded_identity(root));
+        let inconsistent = response.is_some_and(|saved| saved.operation_id != id || saved.response != NativeResponse::Accept
+                || !saved.callback_returned || saved.selected.as_deref().and_then(std::path::Path::to_str) != Some(project.path.as_str()))
+            || registration.is_some_and(|(generation, root)| *generation != 2 || root.path.to_str() != Some(project.path.as_str()));
+        data.custody = if inconsistent { SelectionCustody::Inconsistent }
+            else if response.is_none() || registration.is_none() || data.identity.is_none() { SelectionCustody::Unavailable }
+            else { SelectionCustody::Bound };
+        data
+    }
+    impl ProjectSelectionData {
+        pub(crate) fn for_result(&self, id: u32, returned: &Project) -> (SelectionCustody, Option<[u64; 5]>, Option<&std::path::Path>) {
+            // The shell must carry this companion with that SAME public
+            // result. Neither a replaced slot nor renderer id is queried here.
+            if self.operation_id != id || !self.returned.as_ref().is_some_and(|project| same_project(project, returned)) {
+                return (SelectionCustody::Inconsistent, None, None);
+            }
+            (self.custody, self.identity, self.selected.as_deref())
+        }
+    }
+    pub(super) fn capture_project_selection(document: &Arc<Inner>, id: u32, slot: &Slot, project: &Project) -> ProjectSelectionData {
+        // Called only under project_result_original's existing document guard,
+        // immediately before its selected return. No extra lifecycle gate:
+        // later owner.ended/joins/edit readiness cannot hide these saved facts.
+        let original_bound = slot.operation == Operation::ChooseProject && slot.owner.id == id && original_call(document, &slot.owner)
+            && slot.project.as_ref().is_some_and(|saved| same_project(saved, project));
+        if !original_bound { return saved_project_selection(id, false, project, None, None); }
+        let response = slot.owner.gui.installed_native_response().ok().flatten();
+        let registration = if selection_project_bounded(project) { document.bridge.native_project(&project.id).ok() } else { None };
+        saved_project_selection(id, original_bound, project, response.as_ref(), registration.as_ref())
+    }
+    pub(crate) fn selection_saved_data_checks() -> bool {
+        // Synthetic stored DATA only. No document/bridge, native object, task,
+        // probe, ProjectWitness or runtime is made. These are not receipts.
+        let owner = OriginalWork::new(2, false, Weak::new());
+        let Ok(mut coordinator) = owner.coordinator.lock() else { return false; };
+        coordinator.receipt = JoinReceipt::Returned; drop(coordinator);
+        let project = Project { id: "project-1".into(), name: "other".into(), path: "/synthetic/other".into() };
+        let root = asset_source::RegisteredRoot { path: project.path.clone().into(), identity: asset_source::DirectoryIdentity::synthetic_evidence_identity() };
+        let registration = (2, root);
+        let response = InstalledNativeResponseWitness { operation_id: 2, response: NativeResponse::Accept,
+            selected: Some(project.path.clone().into()), callback_returned: true };
+        let Ok(mut saved) = owner.gui.installed_native_response_witness.lock() else { return false; };
+        *saved = Some(response.clone()); drop(saved);
+        let Ok(saved) = owner.gui.installed_native_response() else { return false; };
+        // The immediate resources_settled predicate can be true while the
+        // unchanged completed() predicate's ended/probed-child requirements
+        // are false. A synthetic positive binding tests only DATA reduction.
+        if !owner.resources_settled() || owner.ended.load(Ordering::SeqCst)
+            || !owner.child.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::New) { return false; }
+        let data = saved_project_selection(2, true, &project, saved.as_ref(), Some(&registration));
+        if data.for_result(2, &project) != (SelectionCustody::Bound, Some([1, 2, 0o40700, 123, 123]), Some(std::path::Path::new(&project.path)))
+            || owner.ended.load(Ordering::SeqCst) || owner.project_path_settled(true) { return false; }
+        for (native, registered, custody, has_identity, has_path) in [
+            (None, Some(&registration), SelectionCustody::Unavailable, true, false),
+            (Some(&response), None, SelectionCustody::Unavailable, false, true),
+            (None, None, SelectionCustody::Unavailable, false, false),
+        ] {
+            let data = saved_project_selection(2, true, &project, native, registered);
+            let (actual, identity, path) = data.for_result(2, &project);
+            if actual != custody || identity.is_some() != has_identity || path.is_some() != has_path { return false; }
+        }
+        for (response, expected_path) in [
+            (InstalledNativeResponseWitness { operation_id: 3, ..response.clone() }, None),
+            (InstalledNativeResponseWitness { response: NativeResponse::Decline, ..response.clone() }, None),
+            (InstalledNativeResponseWitness { selected: None, ..response.clone() }, None),
+            (InstalledNativeResponseWitness { selected: Some("/synthetic/first-save".into()), ..response.clone() }, Some(std::path::Path::new("/synthetic/first-save"))),
+            (InstalledNativeResponseWitness { callback_returned: false, ..response.clone() }, Some(std::path::Path::new("/synthetic/other"))),
+        ] {
+            let data = saved_project_selection(2, true, &project, Some(&response), Some(&registration));
+            if data.for_result(2, &project) != (SelectionCustody::Inconsistent, Some([1, 2, 0o40700, 123, 123]), expected_path) { return false; }
+        }
+        for registration in [(3, registration.1.clone()), (2, asset_source::RegisteredRoot { path: "/synthetic/unrelated".into(), ..registration.1.clone() })] {
+            if saved_project_selection(2, true, &project, Some(&response), Some(&registration)).for_result(2, &project).0
+                != SelectionCustody::Inconsistent { return false; }
+        }
+        let foreign = saved_project_selection(2, false, &project, Some(&response), Some(&registration));
+        if foreign.for_result(2, &project) != (SelectionCustody::Inconsistent, None, None)
+            || data.for_result(1, &project) != (SelectionCustody::Inconsistent, None, None) { return false; }
+        for changed in [Project { id: "project-2".into(), ..project.clone() }, Project { name: "changed".into(), ..project.clone() },
+            Project { path: "/synthetic/changed".into(), ..project.clone() }] {
+            if data.for_result(2, &changed) != (SelectionCustody::Inconsistent, None, None) { return false; }
+        }
+        let maximum = format!("/{}", vec!["x".repeat(255); 16].join("/"));
+        if maximum.len() != asset_source::PATH_LIMIT || !selection_path_bounded(std::path::Path::new(&maximum))
+            || selection_path_bounded(std::path::Path::new(&(maximum + "/x"))) { return false; }
+        for path in ["relative", "/bad/../path", "/bad//path", "/bad/path/", "/bad/\0path"] {
+            let malformed = Project { path: path.into(), ..project.clone() };
+            if selection_path_bounded(std::path::Path::new(path))
+                || saved_project_selection(2, true, &malformed, Some(&response), Some(&registration)).for_result(2, &malformed)
+                    != (SelectionCustody::Inconsistent, None, None) { return false; }
+        }
+        true
+    }
     pub(crate) struct ProjectWitness {
         document: Weak<Inner>, owner: Weak<OriginalWork>, project: Project,
         generation: u32, root: asset_source::RegisteredRoot, edit: crate::edit_owner::InstalledMacDocumentWitness,
@@ -2748,6 +2909,10 @@ mod installed_macos_observation {
         left.id == right.id && left.name == right.name && left.path == right.path
     }
     impl DocumentBinding {
+        pub(crate) async fn installed_macos_project_result(&self, id: u32, selection: &mut Option<ProjectSelectionData>) -> Result<Option<Project>, AssetError> {
+            *selection = None;
+            self.project_result_original(id, Some(selection)).await
+        }
         fn macos_registered(&self, witness: &ProjectWitness) -> bool {
             // Call only under this actual document's admission mutex.
             let Ok(roster) = self.inner.bridge.native_roster() else { return false; };
@@ -2884,7 +3049,9 @@ mod installed_macos_observation {
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
     target_os = "macos", target_arch = "aarch64"))]
-pub(crate) use installed_macos_observation::{ProjectWitness as InstalledMacProjectWitness, PickerWitness as InstalledMacPickerWitness};
+pub(crate) use installed_macos_observation::{ProjectWitness as InstalledMacProjectWitness, PickerWitness as InstalledMacPickerWitness,
+    ProjectSelectionData as InstalledMacProjectSelectionData, SelectionCustody as InstalledMacSelectionCustody,
+    selection_path_bounded as installed_macos_selection_path_bounded, selection_saved_data_checks as installed_macos_selection_saved_data_checks};
 
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),

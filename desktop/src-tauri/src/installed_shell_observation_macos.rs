@@ -9,7 +9,9 @@ use std::{ffi::OsStr, fs::OpenOptions, io::{Read, Write},
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tauri::Manager;
-use crate::{asset_session::{DocumentBinding, InstalledMacProjectWitness, InstalledMacPickerWitness, NativeResponse}, bridge::{AppInfo, Project},
+use crate::{asset_session::{DocumentBinding, InstalledMacProjectWitness, InstalledMacPickerWitness, NativeResponse,
+        InstalledMacProjectSelectionData, InstalledMacSelectionCustody, installed_macos_selection_path_bounded,
+        installed_macos_selection_saved_data_checks}, bridge::{AppInfo, Project},
     edit_owner::{EditOwner, InstalledConfigFinality, InstalledMacReviewWitness}, edit_protocol::{self as edit, ConfigEditStatus, EditProjection},
     error::BridgeError, supervisor::Supervisor};
 use super::owned_macos::observation::{observed_panel, observe_panel_action, prepare_open_input,
@@ -52,11 +54,12 @@ const FAILURE_REASONS: &[&str] = &[
     "project-result-path-sibling", "project-result-path-tmp-spelling", "project-result-path-data-spelling",
 ];
 const _: () = assert!(FAILURE_REASONS.len() < u8::MAX as usize);
-fn latch_failure(first: &AtomicU8, failed: &AtomicBool, reason: &'static str) {
+fn latch_failure(first: &AtomicU8, failed: &AtomicBool, reason: &'static str) -> bool {
     // Unknown internal labels degrade only to generic failure, never raw text.
     let code = FAILURE_REASONS.iter().position(|label| *label == reason).map_or(1, |index| index as u8 + 1);
-    let _ = first.compare_exchange(0, code, Ordering::SeqCst, Ordering::SeqCst);
+    let won = first.compare_exchange(0, code, Ordering::SeqCst, Ordering::SeqCst).is_ok();
     failed.store(true, Ordering::SeqCst);
+    won
 }
 fn first_failure_reason(first: &AtomicU8) -> Option<&'static str> {
     FAILURE_REASONS.get(usize::from(first.load(Ordering::SeqCst).checked_sub(1)?)).copied()
@@ -594,6 +597,7 @@ struct Record {
     identity_binding: Option<IdentitySample>,
     initial_navigation: bool, info: bool, catalog: bool, methods: usize, capability: bool,
     project_calls: u8, cancel_returned: bool, project_returned: bool, project: Option<Project>,
+    project_selection: Option<ProjectSelectionSample>,
     project_witness: Option<InstalledMacProjectWitness>, picker_witness: Option<InstalledMacPickerWitness>,
     cancel_settled: bool, project_settled: bool, selected_native: bool, panel_attached: [bool; 4],
     native_actions_returned: [bool; 5], snapshot_requests: u8, snapshot_pending: bool, snapshots: u8,
@@ -620,23 +624,28 @@ struct FailureSnapshot {
     original_window: Option<OriginalWindowSample>,
     last_panel: Option<PanelSample>, native_action: Option<NativeActionSample>,
     accessibility: Option<OpenInputSample>, identity_binding: Option<IdentitySample>,
+    project_selection: Option<ProjectSelectionSample>,
 }
 impl FailureSnapshot {
     fn from_record(r: &Record) -> Self {
         Self { source: "record", step: r.step, pending: r.pending, native_dispatch: r.native_dispatch,
             original_window: r.original_window,
-            last_panel: r.last_panel, native_action: r.native_action, accessibility: r.open_sample(), identity_binding: r.identity_binding }
+            last_panel: r.last_panel, native_action: r.native_action, accessibility: r.open_sample(), identity_binding: r.identity_binding,
+            project_selection: r.project_selection }
     }
     fn at_expiry(mut self, progress: OpenProgress) -> Self {
         // Non-accessibility fields are the original pre-arm sample, NOT fresh
         // pending/panel absence observations. The schema labels this explicitly.
         self.source = "prearm-open-progress";
+        self.project_selection = None; // Never attach fresh return DATA to a pre-arm snapshot.
         self.accessibility = self.accessibility.map(|sample| sample.reconciled(progress));
         self
     }
     fn frame(self, reason: &'static str) -> Option<Vec<u8>> {
         let step = format!("{:?}", self.step);
         if step.len() > 32 || !step.is_ascii() || !FAILURE_REASONS.contains(&reason) { return None; }
+        if self.project_selection.is_some() && (self.source != "record" || !project_selection_failure_reason(reason)
+            || !matches!(self.step, Step::OpenProject | Step::ProjectSettled)) { return None; }
         let context = edit::bounded(&failure_context(&self), 8192).ok()?;
         if !context.is_ascii() { return None; }
         let mut frame = format!("MRK_MACOS_AQUA_FAILURE_STEP={step}\nMRK_MACOS_AQUA_FAILURE_REASON={reason}\nMRK_MACOS_AQUA_FAILURE_CONTEXT=").into_bytes();
@@ -665,10 +674,12 @@ fn failure_context(r: &FailureSnapshot) -> Value {
     let action = r.native_action.map(|action| json!({"step":format!("{:?}", action.step), "id":action.id,
         "action":action.diagnostic.action, "domain":action.diagnostic.domain,
         "site":action.diagnostic.site, "error":action.diagnostic.error}));
-    json!({"snapshotSource":r.source,"pending":pending, "nativeHandler":native, "lastPanel":panel, "nativeAction":action,
+    let mut value = json!({"snapshotSource":r.source,"pending":pending, "nativeHandler":native, "lastPanel":panel, "nativeAction":action,
         "originalWindow":r.original_window.map(OriginalWindowSample::value),
         "accessibility":r.accessibility.map(OpenInputSample::value),
-        "accessibilityBinding":r.identity_binding.map(IdentitySample::value)})
+        "accessibilityBinding":r.identity_binding.map(IdentitySample::value)});
+    if let Some(selection) = r.project_selection { value["projectSelection"] = selection.value(); }
+    value
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DiagnosticReturn { Stopped, Written, OutputFailed, ChannelClosed, Panicked }
@@ -750,6 +761,7 @@ impl Observation {
                 ax_trusted: false, prepared_open: None, accessibility: None, open_progress: None, identity_binding: None,
                 initial_navigation: false, info: false, catalog: false, methods: 0, capability: false,
                 project_calls: 0, cancel_returned: false, project_returned: false, project: None,
+                project_selection: None,
                 project_witness: None, picker_witness: None,
                 cancel_settled: false, project_settled: false, selected_native: false, panel_attached: [false; 4],
                 native_actions_returned: [false; 5], snapshot_requests: 0, snapshot_pending: false, snapshots: 0,
@@ -895,7 +907,7 @@ impl Observation {
         let Some(mut r) = self.record() else { return; };
         if !r.info || r.catalog || !valid || r.reload_requested { self.fail(); return; } r.catalog = true;
     }
-    pub(super) fn project_result(&self, result: &Result<Option<Project>, crate::asset_commands::AssetError>) {
+    pub(super) fn project_result(&self, result: &Result<Option<Project>, crate::asset_commands::AssetError>, selection: Option<&InstalledMacProjectSelectionData>) {
         let Some(mut r) = self.record() else { return; };
         match project_return_route(self.case, r.step, r.reload_requested, r.cancel_returned, r.project_returned, result) {
             Ok(ProjectReturn::Lost) => { r.project_returned = true; return; },
@@ -905,7 +917,14 @@ impl Observation {
         }
         let Ok(Some(project)) = result else { self.fail_with("project-result-shape"); return; };
         if let Some(reason) = selected_project_failure(r.step, r.project.is_some(), project, &self.project_path, self.case.name()) {
-            self.fail_with(reason); return;
+            if project_selection_failure_reason(reason) {
+                let sample = ProjectSelectionSample::from_data(selection, project, self.case, &r.fixture);
+                // The Record guard coordinates the first CAS winner and its
+                // fixed detail with report_failure's snapshot. No later winner
+                // or cleanup can overwrite it, and no success field is filled.
+                latch_project_selection(&self.failure_reason, &self.failed, &mut r.project_selection, reason, sample);
+            } else { self.fail_with(reason); }
+            return;
         }
         r.project_returned = true; r.project = Some(project.clone());
     }
@@ -2099,6 +2118,147 @@ fn assurance(v: &Value, basis: &str) -> bool { v["assurance"]["basis"] == basis 
 fn format_valid(v: &Value) -> bool { v["valid"] == true && v["state"] == "format-valid" && v["issues"].as_array().is_some_and(Vec::is_empty)
     && v["requirements"].as_array().is_some_and(|r| r.len() <= 128 && r.iter().all(|r| r["state"] == "unknown")) && assurance(v,"schema-policy") }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecordedSelectionObject { FixtureRoot, CapturedApp, CapturedRelease, MetadataChanged, Different, Unavailable }
+impl RecordedSelectionObject {
+    fn label(self) -> &'static str { match self {
+        Self::FixtureRoot => "fixture-root-all5", Self::CapturedApp => "captured-app-all5",
+        Self::CapturedRelease => "captured-release-all5", Self::MetadataChanged => "captured-object-metadata-changed",
+        Self::Different => "different-object", Self::Unavailable => "unavailable",
+    }}
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelectionLocation { CurrentProject, CurrentApp, CurrentRelease, OtherCase, CaseCwd, CaseHome, CaseTmp,
+    NamespaceOther, OutsideNamespace, Unavailable }
+impl SelectionLocation {
+    fn label(self) -> &'static str { match self {
+        Self::CurrentProject => "current-project", Self::CurrentApp => "current-app", Self::CurrentRelease => "current-release",
+        Self::OtherCase => "other-case", Self::CaseCwd => "case-cwd", Self::CaseHome => "case-home", Self::CaseTmp => "case-tmp",
+        Self::NamespaceOther => "namespace-other", Self::OutsideNamespace => "outside-namespace", Self::Unavailable => "unavailable",
+    }}
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProjectSelectionSample { custody: InstalledMacSelectionCustody, object: RecordedSelectionObject, location: SelectionLocation }
+impl ProjectSelectionSample {
+    fn from_data(data: Option<&InstalledMacProjectSelectionData>, returned: &Project, case: Case, fixture: &Fixture) -> Self {
+        let (custody, identity, selected) = data.map_or((InstalledMacSelectionCustody::Unavailable, None, None),
+            |data| data.for_result(case.selected_id(), returned));
+        Self { custody, object: selection_recorded_object(identity, &fixture.root_identity, &fixture.app_identity, fixture.release.as_ref()),
+            location: selection_location(selected, &fixture.root, case) }
+    }
+    fn value(self) -> Value {
+        json!({"custody":self.custody.label(), "recordedObject":self.object.label(), "lexicalLocation":self.location.label()})
+    }
+}
+fn selection_recorded_object(identity: Option<[u64; 5]>, root: &[u64; 6], app: &[u64; 6], release: Option<&[u64; 6]>) -> RecordedSelectionObject {
+    let Some(identity) = identity else { return RecordedSelectionObject::Unavailable; };
+    for (captured, matched) in [(Some(root), RecordedSelectionObject::FixtureRoot), (Some(app), RecordedSelectionObject::CapturedApp),
+        (release, RecordedSelectionObject::CapturedRelease)] {
+        let Some(captured) = captured else { continue; };
+        if identity[..2] == captured[..2] {
+            // Exactly dev/ino/mode/uid/gid. The captured nlink at index5 has no
+            // registry counterpart, and a metadata change is not a new object.
+            return if identity[..] == captured[..5] { matched } else { RecordedSelectionObject::MetadataChanged };
+        }
+    }
+    RecordedSelectionObject::Different
+}
+fn selection_location(selected: Option<&Path>, root: &Path, case: Case) -> SelectionLocation {
+    let Some(selected) = selected.filter(|path| installed_macos_selection_path_bounded(path)) else { return SelectionLocation::Unavailable; };
+    if !installed_macos_selection_path_bounded(root) || root.file_name() != Some(OsStr::new(case.name())) { return SelectionLocation::Unavailable; }
+    let Some(namespace) = root.parent().filter(|path| *path != Path::new("/")) else { return SelectionLocation::Unavailable; };
+    // Only fixed roles within the already bound fixture namespace. Component
+    // comparisons do not treat lookalike prefixes or aliases as this location.
+    if selected == root { return SelectionLocation::CurrentProject; }
+    if selected == root.join("app").as_path() { return SelectionLocation::CurrentApp; }
+    if selected == root.join("release").as_path() { return SelectionLocation::CurrentRelease; }
+    for other in [Case::FirstSave, Case::NoopStale, Case::PickerLoss, Case::SaveLoss] {
+        if other != case && selected.starts_with(namespace.join(other.name())) { return SelectionLocation::OtherCase; }
+    }
+    let cwd = namespace.join("state").join(case.name());
+    if selected == cwd.as_path() { return SelectionLocation::CaseCwd; }
+    if selected.starts_with(cwd.join("home")) { return SelectionLocation::CaseHome; }
+    if selected.starts_with(cwd.join("tmp")) { return SelectionLocation::CaseTmp; }
+    if selected.starts_with(namespace) { SelectionLocation::NamespaceOther } else { SelectionLocation::OutsideNamespace }
+}
+fn project_selection_failure_reason(reason: &str) -> bool {
+    matches!(reason, "project-result-path" | "project-result-path-app-child" | "project-result-path-descendant"
+        | "project-result-path-ancestor" | "project-result-path-sibling" | "project-result-path-tmp-spelling" | "project-result-path-data-spelling")
+}
+fn latch_project_selection(first: &AtomicU8, failed: &AtomicBool, detail: &mut Option<ProjectSelectionSample>, reason: &'static str, sample: ProjectSelectionSample) {
+    // The caller holds Record until both publications are complete. No second
+    // detail atomic, diagnostic writer, or independent first-winner decision.
+    if latch_failure(first, failed, reason) && project_selection_failure_reason(reason) { *detail = Some(sample); }
+}
+
+fn project_selection_data_checks() -> bool {
+    if !installed_macos_selection_saved_data_checks() { return false; }
+    let root = [7, 100, 0o40700, 501, 20, 3];
+    let app = [7, 101, 0o40700, 501, 20, 2];
+    let release = [7, 102, 0o40755, 501, 20, 2];
+    let first5 = |identity: [u64; 6]| [identity[0], identity[1], identity[2], identity[3], identity[4]];
+    for (identity, expected) in [(Some(first5(root)), RecordedSelectionObject::FixtureRoot),
+        (Some(first5(app)), RecordedSelectionObject::CapturedApp), (Some(first5(release)), RecordedSelectionObject::CapturedRelease),
+        (Some([7, 999, 0o40700, 501, 20]), RecordedSelectionObject::Different), (None, RecordedSelectionObject::Unavailable)] {
+        if selection_recorded_object(identity, &root, &app, Some(&release)) != expected { return false; }
+    }
+    for captured in [root, app, release] {
+        for index in 2..5 {
+            let mut changed = first5(captured); changed[index] += 1;
+            if selection_recorded_object(Some(changed), &root, &app, Some(&release)) != RecordedSelectionObject::MetadataChanged { return false; }
+        }
+    }
+    let mut changed_links = root; changed_links[5] = u64::MAX;
+    if selection_recorded_object(Some(first5(root)), &changed_links, &app, None) != RecordedSelectionObject::FixtureRoot
+        || selection_recorded_object(Some(first5(release)), &root, &app, None) != RecordedSelectionObject::Different
+        || selection_recorded_object(Some([8, 100, 0o40700, 501, 20]), &root, &app, None) != RecordedSelectionObject::Different { return false; }
+    let path = Path::new("/private/tmp/mrk-selection-data/first-save");
+    for (selected, expected) in [
+        ("/private/tmp/mrk-selection-data/first-save", SelectionLocation::CurrentProject),
+        ("/private/tmp/mrk-selection-data/first-save/app", SelectionLocation::CurrentApp),
+        ("/private/tmp/mrk-selection-data/first-save/release", SelectionLocation::CurrentRelease),
+        ("/private/tmp/mrk-selection-data/noop-stale/app", SelectionLocation::OtherCase),
+        ("/private/tmp/mrk-selection-data/picker-loss", SelectionLocation::OtherCase),
+        ("/private/tmp/mrk-selection-data/save-loss", SelectionLocation::OtherCase),
+        ("/private/tmp/mrk-selection-data/state/first-save", SelectionLocation::CaseCwd),
+        ("/private/tmp/mrk-selection-data/state/first-save/home", SelectionLocation::CaseHome),
+        ("/private/tmp/mrk-selection-data/state/first-save/home/nested", SelectionLocation::CaseHome),
+        ("/private/tmp/mrk-selection-data/state/first-save/tmp/nested", SelectionLocation::CaseTmp),
+        ("/private/tmp/mrk-selection-data/state/first-save/home-other", SelectionLocation::NamespaceOther),
+        ("/private/tmp/mrk-selection-data/noop-stale-other", SelectionLocation::NamespaceOther),
+        ("/private/tmp/mrk-selection-data/state/noop-stale/home", SelectionLocation::NamespaceOther),
+        ("/private/tmp/mrk-selection-data/first-save/app/nested", SelectionLocation::NamespaceOther),
+        ("/private/tmp/mrk-selection-data", SelectionLocation::NamespaceOther),
+        ("/private/tmp/mrk-selection-data-other/first-save", SelectionLocation::OutsideNamespace),
+        ("/tmp/mrk-selection-data/first-save", SelectionLocation::OutsideNamespace),
+        ("/System/Volumes/Data/private/tmp/mrk-selection-data/first-save", SelectionLocation::OutsideNamespace),
+        ("/unrelated/private-location", SelectionLocation::OutsideNamespace),
+        ("relative", SelectionLocation::Unavailable), ("/bad/../path", SelectionLocation::Unavailable),
+        ("/bad//path", SelectionLocation::Unavailable), ("/bad/path/", SelectionLocation::Unavailable),
+    ] {
+        if selection_location(Some(Path::new(selected)), path, Case::FirstSave) != expected { return false; }
+    }
+    if selection_location(None, path, Case::FirstSave) != SelectionLocation::Unavailable
+        || selection_location(Some(path), path, Case::NoopStale) != SelectionLocation::Unavailable { return false; }
+    // Unequal spelling of the same recorded object and an unrelated object
+    // stay distinct; neither removes the original lexical failure.
+    let alias = Path::new("/tmp/mrk-selection-data/first-save");
+    let same_object = ProjectSelectionSample { custody: InstalledMacSelectionCustody::Bound,
+        object: selection_recorded_object(Some(first5(root)), &root, &app, None), location: selection_location(Some(alias), path, Case::FirstSave) };
+    let different = ProjectSelectionSample { object: RecordedSelectionObject::Different, ..same_object };
+    if same_object == different || project_path_mismatch_reason(alias, path) != "project-result-path-tmp-spelling" { return false; }
+    for first_reason in FAILURE_REASONS {
+        let first = AtomicU8::new(0); let failed = AtomicBool::new(false); let mut detail = None;
+        latch_project_selection(&first, &failed, &mut detail, *first_reason, same_object);
+        let expected = project_selection_failure_reason(first_reason).then_some(same_object);
+        if detail != expected || !failed.load(Ordering::SeqCst) || first_failure_reason(&first) != Some(*first_reason) { return false; }
+        latch_project_selection(&first, &failed, &mut detail, "project-result-path", different);
+        latch_failure(&first, &failed, "observer-deadline");
+        if detail != expected || first_failure_reason(&first) != Some(*first_reason) { return false; }
+    }
+    true
+}
+
 // Same selected-result/snapshot predicates, in their original order. Only a
 // closed site label leaves these pure classifiers; never the supplied data.
 fn project_path_mismatch_reason(actual: &Path, expected: &Path) -> &'static str {
@@ -2734,6 +2894,7 @@ fn observer_data_checks() -> bool {
         || project_return_route(Case::PickerLoss, Step::PickerPending, false, false, false, &error) != Err("asset_source_refused")
         || project_return_route(Case::SaveLoss, Step::Lost, true, false, false, &error) != Err("asset_source_refused") { return false; }
 
+    if !project_selection_data_checks() { return false; }
     if !project_snapshot_failure_data_checks() { return false; }
     // Every closed reason survives later generic cleanup/deadline failures.
     for reason in FAILURE_REASONS {

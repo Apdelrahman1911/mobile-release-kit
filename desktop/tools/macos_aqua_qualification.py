@@ -73,6 +73,22 @@ FAILURE_REASONS = frozenset((
     "project-result-path-app-child project-result-path-descendant project-result-path-ancestor "
     "project-result-path-sibling project-result-path-tmp-spelling project-result-path-data-spelling"
 ).split())
+PROJECT_SELECTION_CUSTODY = frozenset(("bound-original-data", "unavailable-original-data", "inconsistent-original-data"))
+PROJECT_SELECTION_OBJECTS = frozenset(("fixture-root-all5", "captured-app-all5", "captured-release-all5",
+                                     "captured-object-metadata-changed", "different-object", "unavailable"))
+PROJECT_SELECTION_LOCATIONS = frozenset(("current-project", "current-app", "current-release", "other-case",
+                                       "case-cwd", "case-home", "case-tmp", "namespace-other", "outside-namespace", "unavailable"))
+# Only when saved native/registry/returned paths agree can the unchanged
+# lexical failure reason constrain the selected-location axis this tightly.
+PROJECT_SELECTION_BOUND_LOCATIONS = {
+    "project-result-path": frozenset(("other-case", "case-cwd", "case-home", "case-tmp", "namespace-other", "outside-namespace")),
+    "project-result-path-app-child": frozenset(("current-app",)),
+    "project-result-path-descendant": frozenset(("current-release", "namespace-other")),
+    "project-result-path-ancestor": frozenset(("namespace-other", "outside-namespace")),
+    "project-result-path-sibling": frozenset(("other-case", "namespace-other")),
+    "project-result-path-tmp-spelling": frozenset(("outside-namespace",)),
+    "project-result-path-data-spelling": frozenset(("outside-namespace",)),
+}
 NATIVE_STEPS = frozenset("CancelProject SetProject OpenProject QuitCancel Quit PickerPending".split())
 # Closed same-origin action DATA, not a panel query or an action/finality permit.
 NATIVE_ACTION_STEPS = {
@@ -735,6 +751,27 @@ def _original_window_context(value):
     return value
 
 
+def _project_selection_context(value, source, step, reason, case):
+    """Saved relational DATA, never a path, fresh identity or native receipt."""
+    label = "project-selection-context"
+    need(type(value) is dict and set(value) == {"custody", "recordedObject", "lexicalLocation"}
+         and all(type(part) is str for part in value.values()), label)
+    custody, recorded, location = value["custody"], value["recordedObject"], value["lexicalLocation"]
+    need(custody in PROJECT_SELECTION_CUSTODY and recorded in PROJECT_SELECTION_OBJECTS
+         and location in PROJECT_SELECTION_LOCATIONS, label)
+    need(source == "record" and step in ("OpenProject", "ProjectSettled")
+         and reason in PROJECT_SELECTION_BOUND_LOCATIONS
+         and (case is None or type(case) is str and case in ("first-save", "noop-stale", "save-loss")), label)
+    if custody == "bound-original-data":
+        need(recorded != "unavailable" and location in PROJECT_SELECTION_BOUND_LOCATIONS[reason], label)
+    elif custody == "unavailable-original-data":
+        need(recorded == "unavailable" or location == "unavailable", label)
+    need(location != "current-project" or custody == "inconsistent-original-data", label)
+    # Only noop-stale captured a release directory before this original return.
+    need(recorded != "captured-release-all5" or case is None or case == "noop-stale", label)
+    return value
+
+
 def failure_context(stdout, stderr, case=None):
     row = _failure_row(stdout, stderr, b"MRK_MACOS_AQUA_FAILURE_CONTEXT", FAILURE_CONTEXT_LIMIT)
     if row is None:
@@ -742,7 +779,7 @@ def failure_context(stdout, stderr, case=None):
     try:
         value = json.loads(row.decode("ascii"), object_pairs_hook=_pairs,
                            parse_constant=lambda _: (_ for _ in ()).throw(Refused("failure-context")))
-        need(type(value) is dict and set(value) - {"accessibilityBinding", "snapshotSource", "originalWindow"} in (
+        need(type(value) is dict and set(value) - {"accessibilityBinding", "snapshotSource", "originalWindow", "projectSelection"} in (
             {"pending", "nativeHandler", "lastPanel"},
             {"pending", "nativeHandler", "lastPanel", "nativeAction"},
             {"pending", "nativeHandler", "lastPanel", "nativeAction", "accessibility"}), "failure-context")
@@ -750,6 +787,9 @@ def failure_context(stdout, stderr, case=None):
             need(type(value["snapshotSource"]) is str and value["snapshotSource"] in ("record", "prearm-open-progress"), "failure-context")
         if "originalWindow" in value:
             value["originalWindow"] = _original_window_context(value["originalWindow"])
+        if "projectSelection" in value:
+            value["projectSelection"] = _project_selection_context(value["projectSelection"], value.get("snapshotSource"),
+                failure_step(stdout, stderr), failure_reason(stdout, stderr), case)
         pending, native, panel = value["pending"], value["nativeHandler"], value["lastPanel"]
         if pending is not None:
             need(type(pending) is dict and set(pending) == {"kind", "step"}
@@ -785,6 +825,7 @@ def failure_context(stdout, stderr, case=None):
             # The fixed pre-arm original fields are historical, while only the
             # one atomic progress/expiry sample was refreshed at the deadline.
             need(pending == {"kind": "accessibility", "step": "OpenProject"}
+                 and "projectSelection" not in value
                  and native == {"step": "OpenProject", "entered": True, "returned": True}
                  and sample is not None and sample["prepared"] and sample["requested"]
                  and sample["expired"] and sample["timely"] is False

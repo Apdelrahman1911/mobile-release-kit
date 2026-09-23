@@ -91,6 +91,16 @@ def context_row(value):
     return b"MRK_MACOS_AQUA_FAILURE_CONTEXT=" + json.dumps(value, separators=(",", ":")).encode("ascii") + b"\n"
 
 
+def project_selection_context_data(custody="bound-original-data", recorded="fixture-root-all5", location="outside-namespace"):
+    return {"snapshotSource": "record", "pending": None, "nativeHandler": None, "lastPanel": None,
+            "projectSelection": {"custody": custody, "recordedObject": recorded, "lexicalLocation": location}}
+
+
+def project_selection_row(value, reason="project-result-path", step="ProjectSettled"):
+    return (f"MRK_MACOS_AQUA_FAILURE_STEP={step}\nMRK_MACOS_AQUA_FAILURE_REASON={reason}\n".encode("ascii")
+            + context_row(value) + b"MRK_MACOS_AQUA=failed\n")
+
+
 def action_context_data(step="OpenProject", *, site=None, domain="objc-exception", error="io"):
     action, kind, panel_id, call_site = {
         "CancelProject": ("project-cancel", "project", 1, "project-cancel"),
@@ -439,6 +449,89 @@ class AquaDataTests(unittest.TestCase):
             self.assertIsNone(M.failure_context(bad, b""))
         with self.assertRaisesRegex(M.Refused, "^inner-failure-marker$"):
             M.parse_result(captured(M.expected_result(BINDING, "first-save")), row, BINDING, "first-save")
+
+    def test_project_selection_axes_are_closed_independent_saved_data(self):
+        for case in ("first-save", "noop-stale", "save-loss"):
+            for recorded in M.PROJECT_SELECTION_OBJECTS - {"unavailable"}:
+                if recorded == "captured-release-all5" and case != "noop-stale":
+                    continue
+                for reason, locations in M.PROJECT_SELECTION_BOUND_LOCATIONS.items():
+                    for location in locations:
+                        value = project_selection_context_data(recorded=recorded, location=location)
+                        for step in ("OpenProject", "ProjectSettled"):
+                            self.assertEqual(M.failure_context(b"", project_selection_row(value, reason, step), case), value)
+            for recorded, location in (("fixture-root-all5", "unavailable"), ("unavailable", "outside-namespace"),
+                                       ("unavailable", "unavailable")):
+                value = project_selection_context_data("unavailable-original-data", recorded, location)
+                self.assertEqual(M.failure_context(b"", project_selection_row(value), case), value)
+            for recorded in ("fixture-root-all5", "different-object", "unavailable"):
+                for location in M.PROJECT_SELECTION_LOCATIONS:
+                    value = project_selection_context_data("inconsistent-original-data", recorded, location)
+                    self.assertEqual(M.failure_context(b"", project_selection_row(value), case), value)
+        historical = context_data()
+        self.assertEqual(M.failure_context(context_row(historical), b"", "first-save"), historical)
+        # Full current context plus the longest new labels stays within the
+        # stricter unchanged decoder limit, not just the producer's ceiling.
+        full = accessibility_context_data()
+        full.update(snapshotSource="record", originalWindow=deepcopy(M.expected_result(BINDING, "first-save")["native"]["originalWindow"]),
+                    accessibilityBinding=deepcopy(M.expected_result(BINDING, "first-save")["native"]["projectOpenBinding"]),
+                    projectSelection=project_selection_context_data("inconsistent-original-data", "captured-object-metadata-changed")["projectSelection"])
+        self.assertEqual(M.failure_context(b"", project_selection_row(full), "first-save"), full)
+        self.assertEqual(M.FAILURE_CONTEXT_LIMIT, 4096)
+        self.assertLessEqual(len(context_row(full).split(b"=", 1)[1].rstrip(b"\n")), M.FAILURE_CONTEXT_LIMIT)
+        self.assertLessEqual(len(project_selection_row(full)), 8448)
+
+    def test_project_selection_rejects_unbound_frames_private_fields_and_inconsistent_shapes(self):
+        good = project_selection_context_data()
+        variants = []
+        for value in (None, True, [], "PRIVATE", {}, {**good["projectSelection"], "path": "/PRIVATE"},
+                      {**good["projectSelection"], "sha256": "PRIVATE"}, {**good["projectSelection"], "inode": 1}):
+            item = deepcopy(good); item["projectSelection"] = value; variants.append(item)
+        for key in good["projectSelection"]:
+            item = deepcopy(good); del item["projectSelection"][key]; variants.append(item)
+            for value in (None, True, 1, [], {}, "PRIVATE"):
+                item = deepcopy(good); item["projectSelection"][key] = value; variants.append(item)
+        for recorded, location in (("unavailable", "outside-namespace"), ("fixture-root-all5", "unavailable"),
+                                   ("fixture-root-all5", "current-project")):
+            variants.append(project_selection_context_data(recorded=recorded, location=location))
+        variants.append(project_selection_context_data("unavailable-original-data", "fixture-root-all5", "outside-namespace"))
+        variants.append(project_selection_context_data("unavailable-original-data", "unavailable", "current-project"))
+        variants.append(project_selection_context_data(recorded="captured-release-all5"))
+        for source in (None, "prearm-open-progress", "PRIVATE"):
+            item = deepcopy(good); item["snapshotSource"] = source; variants.append(item)
+        item = deepcopy(good); del item["snapshotSource"]; variants.append(item)
+        for item in variants:
+            self.assertIsNone(M.failure_context(b"", project_selection_row(item), "first-save"))
+        for reason, locations in M.PROJECT_SELECTION_BOUND_LOCATIONS.items():
+            for location in M.PROJECT_SELECTION_LOCATIONS - locations:
+                self.assertIsNone(M.failure_context(b"", project_selection_row(project_selection_context_data(location=location), reason), "first-save"))
+        for case in ("picker-loss", "PRIVATE", True):
+            self.assertIsNone(M.failure_context(b"", project_selection_row(good), case))
+        row = project_selection_row(good)
+        for bad in (context_row(good), project_selection_row(good, "observer-deadline"), project_selection_row(good, step="Snapshot"),
+                    row + b"MRK_MACOS_AQUA_FAILURE_REASON=project-result-path\n",
+                    row.replace(b'"custody":"bound-original-data"', b'"custody":"bound-original-data","custody":"bound-original-data"'),
+                    row.replace(b'"recordedObject":"fixture-root-all5"', b'"recordedObject":NaN'),
+                    row.replace(b'"lexicalLocation":"outside-namespace"', b'"lexicalLocation":"' + b"x" * M.FAILURE_CONTEXT_LIMIT + b'"')):
+            self.assertIsNone(M.failure_context(b"", bad, "first-save"))
+        with self.assertRaisesRegex(M.Refused, "^inner-failure-marker$"):
+            M.parse_result(captured(M.expected_result(BINDING, "first-save")), row, BINDING, "first-save")
+
+    def test_project_selection_original_exception_does_not_become_finality_or_readback(self):
+        value = project_selection_context_data()
+        with inert_exception_owner(stderr=project_selection_row(value)) as call:
+            fixtures = InertFixtures()
+            with self.assertRaises(RuntimeError) as caught:
+                M.run_cases(BINDING, fixtures, call.owner.run_owned, UID, "runner", self.fail)
+            self.assertIs(caught.exception, call.original)
+            report = M.diagnostic(caught.exception, None, fixtures)
+            self.assertEqual(report["innerFailureContext"], value)
+            self.assertEqual((report["innerFailureStep"], report["innerFailureReason"]), ("ProjectSettled", "project-result-path"))
+            self.assertEqual((report["invocationFinality"], report["innerDiagnosticCompleteness"]), ("unknown", "unknown"))
+            self.assertIsNone(report["appReturncode"])
+            self.assertFalse(report["originalCallReturned"])
+            self.assertTrue(fixtures.inflight)
+            self.assertEqual((fixtures.before, fixtures.reads), (["first-save"], []))
 
     def test_original_window_success_requires_the_returned_positive_witness(self):
         for case in M.CASES:
@@ -868,6 +961,7 @@ class AquaDataTests(unittest.TestCase):
         largest["accessibility"].update(site=max(M.ACCESSIBILITY_SITES, key=lambda site: (len(site), site)),
                                         error="cleanup-unknown", state="requested")
         largest["accessibilityBinding"]["start"]["result"] = "permission-denied"
+        largest["projectSelection"] = project_selection_context_data("inconsistent-original-data", "captured-object-metadata-changed")["projectSelection"]
         largest["accessibilityBinding"]["configuration"].update(parent="type-invalid", prompt="type-invalid", site="prompt-get", error="cleanup-unknown")
         self.assertLessEqual(len(context_row(largest).split(b"=", 1)[1].rstrip(b"\n")), M.FAILURE_CONTEXT_LIMIT)
 
@@ -1055,6 +1149,10 @@ class AquaDataTests(unittest.TestCase):
                 fixtures, emitted = InertFixtures(), []
                 marker = (f"MRK_MACOS_AQUA_FAILURE_STEP={step}\n"
                           f"MRK_MACOS_AQUA_FAILURE_REASON={reason}\n").encode("ascii")
+                detail = None
+                if reason in M.PROJECT_SELECTION_BOUND_LOCATIONS:
+                    detail = project_selection_context_data(location=sorted(M.PROJECT_SELECTION_BOUND_LOCATIONS[reason])[0])
+                    marker += context_row(detail)
                 def runner(argv, **_):
                     return CompletedProcess(args=argv, returncode=1, stdout=b"", stderr=marker)
                 with self.assertRaisesRegex(M.Refused, "^app-return$") as caught:
@@ -1069,6 +1167,7 @@ class AquaDataTests(unittest.TestCase):
                 self.assertEqual(report["innerDiagnosticSource"], "completed-output")
                 self.assertEqual(report["innerDiagnosticCompleteness"], "complete")
                 self.assertEqual(report["typedLifetimeFacts"], [])
+                self.assertEqual(report["innerFailureContext"], detail)
                 self.assertEqual(fixtures.before, ["first-save"])
                 self.assertEqual((fixtures.reads, emitted), ([], []))
         self.assertIsNone(M.diagnostic(M.Refused("fixture-refused"), None, None)["innerFailureReason"])
@@ -1695,6 +1794,105 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn('if Path::new(&project.path) != expected_path { return Some(project_path_mismatch_reason(Path::new(&project.path), expected_path)); }', classifier)
         self.assertNotIn("project_calls", handler)
         self.assertNotIn("r.step =", handler)
+
+    def test_project_selection_capture_is_immediate_original_data_not_later_success(self):
+        source_root = PATH.parents[1] / "src-tauri" / "src"
+        asset = (source_root / "asset_session.rs").read_text(encoding="utf-8")
+        shell = (source_root / "shell.rs").read_text(encoding="utf-8")
+        observer = (source_root / "installed_shell_observation_macos.rs").read_text(encoding="utf-8")
+        result = asset.split("pub(crate) async fn project_result(", 1)[1].split("pub(crate) fn choose_project_path(", 1)[0]
+        self.assertEqual(result.count("loop {"), 1)
+        self.assertEqual(result.count("self.reconcile();"), 1)
+        self.assertEqual(result.count("tokio::time::sleep(Duration::from_millis(50)).await"), 1)
+        original = result.split("async fn project_result_original(", 1)[1]
+        for predicate in ("let state = self.lock();", "slot.owner.id == id", "if state.unknown",
+                          "slot.phase == Phase::Idle && slot.owner.resources_settled()",
+                          "slot.reason == Reason::None || slot.reason == Reason::UserCancelled"):
+            self.assertLess(original.index(predicate), original.index("capture_project_selection(&self.inner, id, slot, project)"))
+        self.assertLess(original.index("capture_project_selection(&self.inner, id, slot, project)"), original.index("return Ok(slot.project.clone());"))
+        self.assertIn("return Err(AssetError::new(slot.reason));", original)
+        capture = asset.split("pub(super) fn capture_project_selection(", 1)[1].split("pub(crate) fn selection_saved_data_checks()", 1)[0]
+        for required in ("slot.operation == Operation::ChooseProject", "slot.owner.id == id", "original_call(document, &slot.owner)",
+                         "same_project(saved, project)", "slot.owner.gui.installed_native_response()", "document.bridge.native_project(&project.id)"):
+            self.assertIn(required, capture)
+        for forbidden in ("installed_macos_project(", "completed(", ".ended.load", "resources_settled(", ".edits", "registry_result(",
+                          "native_roster(", ".reconcile(", ".join", ".poll", ".await", "Record", "self.record(", "metadata("):
+            self.assertNotIn(forbidden, capture)
+        projection = asset.split("fn recorded_identity(", 1)[1].split("fn saved_project_selection(", 1)[0]
+        for required in ("root.identity.preflight_identity()", "identity.device.parse().ok()?", "identity.inode.parse().ok()?",
+                         "u64::from(identity.mode)", "u64::from(identity.uid)", "u64::from(identity.gid)"):
+            self.assertIn(required, projection)
+        for forbidden in ("metadata(", "std::fs", "as f64", "unwrap_or(0)", "canonicalize"):
+            self.assertNotIn(forbidden, projection)
+        saved = asset.split("fn saved_project_selection(", 1)[1].split("pub(crate) fn selection_saved_data_checks()", 1)[0]
+        self.assertIn("saved.operation_id == id && saved.response == NativeResponse::Accept", saved)
+        self.assertIn("!saved.callback_returned", saved)
+        self.assertIn("*generation != 2", saved)
+        self.assertIn("same_project(project, returned)", saved)
+        checks = asset.split("pub(crate) fn selection_saved_data_checks()", 1)[1].split("pub(crate) struct ProjectWitness", 1)[0]
+        self.assertIn("owner.gui.installed_native_response()", checks)
+        self.assertIn("!owner.resources_settled() || owner.ended.load(Ordering::SeqCst)", checks)
+        self.assertIn("book.receipt == JoinReceipt::New", checks)
+        self.assertIn("owner.ended.load(Ordering::SeqCst) || owner.project_path_settled(true)", checks)
+        self.assertIn("data.for_result(2, &project) != (SelectionCustody::Bound", checks)
+        completed = asset.split("fn completed(document:", 1)[1].split("fn same_project(", 1)[0]
+        self.assertIn("!owner.ended.load(Ordering::SeqCst) || !owner.resources_settled()", completed)
+        self.assertIn("book.receipt == if probed { JoinReceipt::Returned } else { JoinReceipt::New }", completed)
+        command = shell.split("async fn choose_project(webview:", 1)[1].split("async fn choose_project_path(", 1)[0]
+        self.assertEqual(command.count("state.document.installed_macos_project_result(id, &mut selection).await"), 1)
+        self.assertEqual(command.count("state.document.project_result(id).await"), 1)  # Ordinary/Linux return is unchanged.
+        self.assertIn("q.project_result(&result);", command)  # Linux hook signature is unchanged.
+        self.assertLess(command.index("}.await;"), command.index("q.project_result(&result, selection.as_ref())"))
+        for source in (result, command):
+            self.assertIn('feature = "macos-installed-observation"', source)
+            self.assertIn('not(feature = "macos-installed-installer")', source)
+            self.assertIn('target_os = "macos", target_arch = "aarch64"', source)
+        handler = observer.split("pub(super) fn project_result(", 1)[1].split("pub(super) fn snapshot_request(", 1)[0]
+        self.assertLess(handler.index("selected_project_failure("), handler.index("ProjectSelectionSample::from_data("))
+        self.assertLess(handler.index("if project_selection_failure_reason(reason)"), handler.index("latch_project_selection("))
+        self.assertLess(handler.index("latch_project_selection("), handler.index("r.project_returned = true; r.project = Some(project.clone());"))
+        for forbidden in ("state.document", "installed_macos_project(", "r.project_witness =", "observe_panel", "metadata("):
+            self.assertNotIn(forbidden, handler)
+
+    def test_project_selection_labels_identity_axes_and_first_winner_are_bounded(self):
+        source_root = PATH.parents[1] / "src-tauri" / "src"
+        asset = (source_root / "asset_session.rs").read_text(encoding="utf-8")
+        observer = (source_root / "installed_shell_observation_macos.rs").read_text(encoding="utf-8")
+        custody = asset.split("impl SelectionCustody", 1)[1].split("// Short-lived", 1)[0]
+        objects = observer.split("impl RecordedSelectionObject", 1)[1].split("enum SelectionLocation", 1)[0]
+        locations = observer.split("impl SelectionLocation", 1)[1].split("struct ProjectSelectionSample", 1)[0]
+        for source, expected in ((custody, M.PROJECT_SELECTION_CUSTODY), (objects, M.PROJECT_SELECTION_OBJECTS),
+                                 (locations, M.PROJECT_SELECTION_LOCATIONS)):
+            self.assertEqual(set(M.re.findall(r'=> "([a-z0-9-]+)"', source)), expected)
+        reasons = observer.split("fn project_selection_failure_reason(", 1)[1].split("fn latch_project_selection(", 1)[0]
+        self.assertEqual(set(M.re.findall(r'"(project-result-path[a-z-]*)"', reasons)), set(M.PROJECT_SELECTION_BOUND_LOCATIONS))
+        sample = observer.split("impl ProjectSelectionSample", 1)[1].split("fn selection_recorded_object(", 1)[0]
+        self.assertIn("data.for_result(case.selected_id(), returned)", sample)
+        value = sample.split("fn value(self)", 1)[1]
+        for forbidden in ("path", "identity", "inode", "hash", "project_witness", "project_returned"):
+            self.assertNotIn(forbidden, value)
+        axes = observer.split("fn selection_recorded_object(", 1)[1].split("fn project_selection_failure_reason(", 1)[0]
+        self.assertIn("identity[..2] == captured[..2]", axes)
+        self.assertIn("identity[..] == captured[..5]", axes)
+        self.assertIn('namespace.join("state").join(case.name())', axes)
+        self.assertIn("selected.starts_with(namespace)", axes)
+        for forbidden in ("std::fs", "canonicalize", "metadata(", "observe_panel", "Instant::now", "json!", "digest("):
+            self.assertNotIn(forbidden, axes)
+        latch = observer.split("fn latch_project_selection(", 1)[1].split("fn project_selection_data_checks()", 1)[0]
+        self.assertIn("if latch_failure(first, failed, reason) && project_selection_failure_reason(reason) { *detail = Some(sample); }", latch)
+        self.assertNotIn("compare_exchange", latch)
+        snapshot = observer.split("struct FailureSnapshot", 1)[1].split("fn failure_context(", 1)[0]
+        self.assertIn("project_selection: r.project_selection", snapshot)
+        self.assertIn("self.project_selection = None", snapshot)
+        self.assertIn('self.source != "record" || !project_selection_failure_reason(reason)', snapshot)
+        self.assertIn("8192", snapshot)
+        self.assertIn("8448", snapshot)
+        checks = observer.split("fn project_selection_data_checks()", 1)[1].split("// Same selected-result", 1)[0]
+        for required in ("installed_macos_selection_saved_data_checks()", "changed_links[5] = u64::MAX", "for index in 2..5",
+                         "same_object == different", "for first_reason in FAILURE_REASONS", "detail != expected",
+                         'latch_failure(&first, &failed, "observer-deadline")'):
+            self.assertIn(required, checks)
+        self.assertIn("if !project_selection_data_checks() { return false; }", observer.split("fn observer_data_checks()", 1)[1])
 
     def test_project_path_mismatch_categories_are_bounded_failure_only_data(self):
         observer = (PATH.parents[1] / "src-tauri" / "src" / "installed_shell_observation_macos.rs").read_text(encoding="utf-8")

@@ -678,16 +678,33 @@ async fn choose_project(state: State<'_, ShellState>) -> Result<Option<Project>,
 #[tauri::command]
 async fn choose_project(webview: Webview, app: tauri::AppHandle, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Option<Project>, AssetError> {
     fixture_command!(state, Project, observed, AssetError::new(Reason::Unqualified));
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+        target_os = "macos", target_arch = "aarch64"))]
+    let mut selection = None;
     let result = async {
         asset_window(&webview)?; asset_commands::status(asset_body(&request)?)?;
         let id = state.document.choose_project(app)?;
         // Only an observer of the retained original operation; no path or native
         // handle belongs to this invoke future, even if the renderer disappears.
-        state.document.project_result(id).await
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+            target_os = "macos", target_arch = "aarch64"))]
+        { state.document.installed_macos_project_result(id, &mut selection).await }
+        #[cfg(not(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+            target_os = "macos", target_arch = "aarch64")))]
+        { state.document.project_result(id).await }
     }.await;
     fixture_result!(observed, project, &result);
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     if let Some(q) = &state.observation { q.project_result(&result); }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+        target_os = "macos", target_arch = "aarch64"))]
+    // The original result released its document guard before this Record
+    // callback. Never look up a possibly replaced slot from the observer.
+    if let Some(q) = &state.observation { q.project_result(&result, selection.as_ref()); }
     result
 }
 
