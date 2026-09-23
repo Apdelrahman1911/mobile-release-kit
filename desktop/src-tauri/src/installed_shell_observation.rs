@@ -228,7 +228,23 @@ pub(super) enum SessionRejection { NotRecorded, UnknownNativeSnapshot, NativeRea
     GtkDialogProperties, GtkSelectionSetter, GtkResponseWidget, GtkActionWidget, GtkDialogRecord,
     GtkObserverEndpoint, GtkSelectionState, GtkActivationState, GtkFilenameState, GtkFilenameAbsent,
     GtkFilenameDifferent, GtkResponseState, GtkResponseContract, GtkReturnRole, GtkReturnState,
-    GtkDestroyState, GtkReleaseState }
+    GtkDestroyState, GtkReleaseState,
+    LostNativeSnapshot, UnboundNativeSnapshot, RequestCounterUnderflow,
+    RequestCounterSurplus, StaleReplyContract, CapabilityCleanupUnknown,
+    CapabilityShutdown, CapabilityDocumentLost, CapabilityUnsupportedPlatform,
+    CapabilityUnqualified, CapabilityClosed, CapabilityUnavailable,
+    ReplyAssetInvalidRequest, ReplyAssetClosed, ReplyAssetUnqualified,
+    ReplyAssetUnsupportedPlatform, ReplyAssetUnsupportedFilesystem, ReplyAssetUnsupportedFormat,
+    ReplyAssetBusy, ReplyAssetSourceRefused, ReplyAssetSourceChanged,
+    ReplyAssetMaterialLimit, ReplyAssetParserLimit, ReplyAssetProjectOverlap,
+    ReplyAssetExclusionUnconfirmed, ReplyAssetCapacity, ReplyAssessmentContextStale,
+    ReplyAssetUserCancelled, ReplyAssetReviewExpired, ReplyAssetDeadline,
+    ReplyAssetDocumentLost, ReplyAssetShutdown, ReplyAssetCleanupUnknown,
+    ReplyAssessmentInvalidRequest, ReplyAssessmentLimit, ReplyAssessmentVersion,
+    ReplyAssessmentPolicyStale, ReplyAssessmentContextInvalid, ReplyAssessmentUnavailable,
+    ReplyBusy, ReplyShuttingDown, ReplyQueryTimeout,
+    ReplyCleanupUnknown, ReplyCodeUnavailable,
+}
 impl SessionRejection {
     fn token(self) -> &'static [u8] {
         match self {
@@ -262,6 +278,50 @@ impl SessionRejection {
             Self::GtkReturnState => b"gtk-return-state",
             Self::GtkDestroyState => b"gtk-destroy-state",
             Self::GtkReleaseState => b"gtk-release-state",
+            Self::LostNativeSnapshot => b"lost-native-snapshot",
+            Self::UnboundNativeSnapshot => b"unbound-native-snapshot",
+            Self::RequestCounterUnderflow => b"request-counter-underflow",
+            Self::RequestCounterSurplus => b"request-counter-surplus",
+            Self::StaleReplyContract => b"stale-reply-contract",
+            Self::CapabilityCleanupUnknown => b"capability-cleanup-unknown",
+            Self::CapabilityShutdown => b"capability-shutdown",
+            Self::CapabilityDocumentLost => b"capability-document-lost",
+            Self::CapabilityUnsupportedPlatform => b"capability-unsupported-platform",
+            Self::CapabilityUnqualified => b"capability-unqualified",
+            Self::CapabilityClosed => b"capability-closed",
+            Self::CapabilityUnavailable => b"capability-unavailable",
+            Self::ReplyAssetInvalidRequest => b"reply-asset-invalid-request",
+            Self::ReplyAssetClosed => b"reply-asset-closed",
+            Self::ReplyAssetUnqualified => b"reply-asset-unqualified",
+            Self::ReplyAssetUnsupportedPlatform => b"reply-asset-unsupported-platform",
+            Self::ReplyAssetUnsupportedFilesystem => b"reply-asset-unsupported-fs",
+            Self::ReplyAssetUnsupportedFormat => b"reply-asset-unsupported-format",
+            Self::ReplyAssetBusy => b"reply-asset-busy",
+            Self::ReplyAssetSourceRefused => b"reply-asset-source-refused",
+            Self::ReplyAssetSourceChanged => b"reply-asset-source-changed",
+            Self::ReplyAssetMaterialLimit => b"reply-asset-material-limit",
+            Self::ReplyAssetParserLimit => b"reply-asset-parser-limit",
+            Self::ReplyAssetProjectOverlap => b"reply-asset-project-overlap",
+            Self::ReplyAssetExclusionUnconfirmed => b"reply-asset-excl-unconfirmed",
+            Self::ReplyAssetCapacity => b"reply-asset-capacity",
+            Self::ReplyAssessmentContextStale => b"reply-assessment-context-stale",
+            Self::ReplyAssetUserCancelled => b"reply-asset-user-cancelled",
+            Self::ReplyAssetReviewExpired => b"reply-asset-review-expired",
+            Self::ReplyAssetDeadline => b"reply-asset-deadline",
+            Self::ReplyAssetDocumentLost => b"reply-asset-document-lost",
+            Self::ReplyAssetShutdown => b"reply-asset-shutdown",
+            Self::ReplyAssetCleanupUnknown => b"reply-asset-cleanup-unknown",
+            Self::ReplyAssessmentInvalidRequest => b"reply-assessment-invalid-request",
+            Self::ReplyAssessmentLimit => b"reply-assessment-limit",
+            Self::ReplyAssessmentVersion => b"reply-assessment-version",
+            Self::ReplyAssessmentPolicyStale => b"reply-assessment-policy-stale",
+            Self::ReplyAssessmentContextInvalid => b"reply-assessment-context-invalid",
+            Self::ReplyAssessmentUnavailable => b"reply-assessment-unavailable",
+            Self::ReplyBusy => b"reply-busy",
+            Self::ReplyShuttingDown => b"reply-shutting-down",
+            Self::ReplyQueryTimeout => b"reply-query-timeout",
+            Self::ReplyCleanupUnknown => b"reply-cleanup-unknown",
+            Self::ReplyCodeUnavailable => b"reply-code-unavailable",
         }
     }
 }
@@ -290,6 +350,55 @@ impl SessionDiagnostic {
         let Step::Session(step) = step else { return None; };
         Some(Self { step, evaluations, rejection: SessionRejection::NotRecorded,
             wait: previous.filter(|old| old.step == step).map_or(SessionWait::NotSampled, |old| old.wait) })
+    }
+}
+
+// Map only cached public DATA to closed tokens; never render the input string.
+fn session_reply_rejection(code: &str) -> SessionRejection {
+    match code {
+        "asset_invalid_request" => SessionRejection::ReplyAssetInvalidRequest,
+        "asset_closed" => SessionRejection::ReplyAssetClosed,
+        "asset_unqualified" => SessionRejection::ReplyAssetUnqualified,
+        "asset_unsupported_platform" => SessionRejection::ReplyAssetUnsupportedPlatform,
+        "asset_unsupported_filesystem" => SessionRejection::ReplyAssetUnsupportedFilesystem,
+        "asset_unsupported_format" => SessionRejection::ReplyAssetUnsupportedFormat,
+        "asset_busy" => SessionRejection::ReplyAssetBusy,
+        "asset_source_refused" => SessionRejection::ReplyAssetSourceRefused,
+        "asset_source_changed" => SessionRejection::ReplyAssetSourceChanged,
+        "asset_material_limit" => SessionRejection::ReplyAssetMaterialLimit,
+        "asset_parser_limit" => SessionRejection::ReplyAssetParserLimit,
+        "asset_project_overlap" => SessionRejection::ReplyAssetProjectOverlap,
+        "asset_exclusion_unconfirmed" => SessionRejection::ReplyAssetExclusionUnconfirmed,
+        "asset_capacity" => SessionRejection::ReplyAssetCapacity,
+        "assessment_context_stale" => SessionRejection::ReplyAssessmentContextStale,
+        "asset_user_cancelled" => SessionRejection::ReplyAssetUserCancelled,
+        "asset_review_expired" => SessionRejection::ReplyAssetReviewExpired,
+        "asset_deadline" => SessionRejection::ReplyAssetDeadline,
+        "asset_document_lost" => SessionRejection::ReplyAssetDocumentLost,
+        "asset_shutdown" => SessionRejection::ReplyAssetShutdown,
+        "asset_cleanup_unknown" => SessionRejection::ReplyAssetCleanupUnknown,
+        "assessment_invalid_request" => SessionRejection::ReplyAssessmentInvalidRequest,
+        "assessment_limit" => SessionRejection::ReplyAssessmentLimit,
+        "assessment_version" => SessionRejection::ReplyAssessmentVersion,
+        "assessment_policy_stale" => SessionRejection::ReplyAssessmentPolicyStale,
+        "assessment_context_invalid" => SessionRejection::ReplyAssessmentContextInvalid,
+        "assessment_unavailable" => SessionRejection::ReplyAssessmentUnavailable,
+        "busy" => SessionRejection::ReplyBusy,
+        "shutting_down" => SessionRejection::ReplyShuttingDown,
+        "query_timeout" => SessionRejection::ReplyQueryTimeout,
+        "cleanup_unknown" => SessionRejection::ReplyCleanupUnknown,
+        _ => SessionRejection::ReplyCodeUnavailable,
+    }
+}
+fn session_capability_rejection(reason: Option<&str>) -> SessionRejection {
+    match reason {
+        Some("cleanup-unknown") => SessionRejection::CapabilityCleanupUnknown,
+        Some("shutdown") => SessionRejection::CapabilityShutdown,
+        Some("document-lost") => SessionRejection::CapabilityDocumentLost,
+        Some("unsupported-platform") => SessionRejection::CapabilityUnsupportedPlatform,
+        Some("unqualified") => SessionRejection::CapabilityUnqualified,
+        Some("closed") => SessionRejection::CapabilityClosed,
+        _ => SessionRejection::CapabilityUnavailable,
     }
 }
 
@@ -766,6 +875,51 @@ fn assert_failure_pair_contract() {
         assert!(failed.load(Ordering::SeqCst) && progress == BootstrapProgress::Advanced);
         assert!(trace == if deadline_first { (gtk_trace.0,Boundary::Deadline) } else { gtk_trace });
         assert!(retained == Some(if deadline_first { same } else { gtk }));
+    }
+    // Inert codes only: these contracts do not identify a historical failure.
+    for (code, rejection) in [("asset_deadline",SessionRejection::ReplyAssetDeadline),
+        ("assessment_context_stale",SessionRejection::ReplyAssessmentContextStale),
+        ("assessment_unavailable",SessionRejection::ReplyAssessmentUnavailable),
+        ("asset_unsupported_filesystem",SessionRejection::ReplyAssetUnsupportedFilesystem),
+        ("asset_exclusion_unconfirmed",SessionRejection::ReplyAssetExclusionUnconfirmed),
+        ("",SessionRejection::ReplyCodeUnavailable), ("future_code",SessionRejection::ReplyCodeUnavailable),
+        ("asset_deadline\n/private/inert",SessionRejection::ReplyCodeUnavailable)] {
+        assert!(session_reply_rejection(code) == rejection);
+    }
+    for (reason, rejection) in [(Some("cleanup-unknown"),SessionRejection::CapabilityCleanupUnknown),
+        (Some("shutdown"),SessionRejection::CapabilityShutdown), (None,SessionRejection::CapabilityUnavailable),
+        (Some("none"),SessionRejection::CapabilityUnavailable), (Some("future-reason"),SessionRejection::CapabilityUnavailable)] {
+        assert!(session_capability_rejection(reason) == rejection);
+    }
+    let step = SessionStep::Read(29,SA::Prepare("android-keystore","save"));
+    let trace = (Step::Session(step),Boundary::Settlement);
+    let pending = SessionDiagnostic { step,evaluations:73,rejection:SessionRejection::NotRecorded,wait:SessionWait::ReplyPending };
+    let sampled = SessionDiagnostic::sample(trace.0,73,Some(pending)).unwrap();
+    assert!(sampled.wait == SessionWait::ReplyPending && sampled.rejection == SessionRejection::NotRecorded);
+    assert!(SessionRejection::ReplyAssessmentInvalidRequest.token().len() == 32);
+    for rejection in [SessionRejection::ReplyAssessmentInvalidRequest,SessionRejection::ReplyAssessmentUnavailable,
+        SessionRejection::ReplyCodeUnavailable,SessionRejection::CapabilityUnavailable] {
+        let diagnostic = SessionDiagnostic { rejection,..sampled };
+        let expected = [step.failure_line(),Boundary::Settlement.failure_line(),BootstrapProgress::Advanced.failure_line(),
+            b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=29;evaluations=73;reject=",rejection.token(),
+            b";wait=native-reply-pending\n"].concat();
+        assert!(failure_pair(trace,BootstrapProgress::Advanced,Some(diagnostic)).is_some_and(|(bytes,length)|
+            length <= FAILURE_PAIR_LIMIT && bytes.get(..length) == Some(expected.as_slice())));
+    }
+    let typed = SessionDiagnostic { rejection:SessionRejection::ReplyAssetDeadline,..sampled };
+    for deadline_first in [false,true] {
+        let failed = AtomicBool::new(false); let mut retained = Some(sampled);
+        let mut frozen_trace = trace; let mut progress = BootstrapProgress::Advanced;
+        for deadline in [deadline_first,!deadline_first] {
+            if deadline {
+                if latch_failure(&failed,&mut frozen_trace,&mut progress,(trace.0,Boundary::Deadline),BootstrapProgress::Advanced) {
+                    retained = Some(sampled);
+                }
+            } else { latch_session_diagnostic(&failed,&mut retained,typed); }
+        }
+        latch_session_diagnostic(&failed,&mut retained,SessionDiagnostic { rejection:SessionRejection::LostNativeSnapshot,..typed });
+        assert!(retained == Some(if deadline_first { sampled } else { typed }));
+        assert!(frozen_trace == if deadline_first { (trace.0,Boundary::Deadline) } else { trace });
     }
 }
 
@@ -3644,20 +3798,27 @@ impl Observation {
                 && matches!(r.step,Step::Session(SessionStep::Reload | SessionStep::Loss)) };
         if !valid { self.fail(); return; } r.session.navigation += 1;
     }
-    fn session_native_ready(&self, r: &Record, action: SA, snapshot: &InstalledSessionSnapshot) -> Result<Option<SessionWait>,()> {
+    fn session_native_ready(&self, r: &Record, action: SA, snapshot: &InstalledSessionSnapshot) -> Result<Option<SessionWait>,SessionRejection> {
         let s = &r.session;
-        if snapshot.unknown || snapshot.lost || !snapshot.bound || snapshot.status["capability"]["available"] != true { return Err(()); }
+        if snapshot.unknown { return Err(SessionRejection::UnknownNativeSnapshot); }
+        if snapshot.lost { return Err(SessionRejection::LostNativeSnapshot); }
+        if !snapshot.bound { return Err(SessionRejection::UnboundNativeSnapshot); }
+        if snapshot.status["capability"]["available"] != true {
+            return Err(session_capability_rejection(snapshot.status["capability"]["reason"].as_str()));
+        }
         for index in 1..10 {
             let extra_context = action == SA::Open && index == SessionCommand::Context.index();
             let expected = session_action_command(action).is_some_and(|command| command.index() == index) || extra_context;
             let stale = matches!(action,SA::Stale("save")) && index == SessionCommand::Commit.index()
                 || matches!(action,SA::Stale("bind")) && index == SessionCommand::Bind.index();
-            let delta = s.requests[index].checked_sub(s.base_requests[index]).ok_or(())?;
-            if delta > u8::from(expected || stale) { return Err(()); }
+            let delta = s.requests[index].checked_sub(s.base_requests[index]).ok_or(SessionRejection::RequestCounterUnderflow)?;
+            if delta > u8::from(expected || stale) { return Err(SessionRejection::RequestCounterSurplus); }
             if expected && delta == 0 { return Ok(Some(SessionWait::RequestNotSeen)); }
             if s.returns[index] < s.requests[index] { return Ok(Some(SessionWait::ReplyPending)); }
-            if expected && s.replies[index].error.is_some() { return Err(()); }
-            if stale && delta != 0 && !matches!(s.replies[index].error.as_deref(),Some("asset_invalid_request"|"assessment_context_stale")) { return Err(()); }
+            if expected {
+                if let Some(code) = s.replies[index].error.as_deref() { return Err(session_reply_rejection(code)); }
+            }
+            if stale && delta != 0 && !matches!(s.replies[index].error.as_deref(),Some("asset_invalid_request"|"assessment_context_stale")) { return Err(SessionRejection::StaleReplyContract); }
         }
         if !snapshot.settled { return Ok(Some(SessionWait::OwnerUnsettled)); }
         let op = &snapshot.status["operation"];
@@ -3892,7 +4053,7 @@ impl Observation {
                 SessionStep::Read(_,action) => match self.session_native_ready(&r,action,&snapshot) {
                     Ok(None)=>{},
                     Ok(Some(wait))=>{self.session_wait(&mut r,wait);return;},
-                    Err(_)=>{self.session_fail(&mut r,SessionRejection::NativeReadinessInvariant);return;},
+                    Err(rejection)=>{self.session_fail(&mut r,rejection);return;},
                 },
                 SessionStep::QuitPreserved => {
                     if !snapshot.quit_declined || snapshot.quit_pending || !r.session.quit_cancel.settled(false) { return; }

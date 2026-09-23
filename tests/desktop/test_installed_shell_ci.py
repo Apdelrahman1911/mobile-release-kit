@@ -1782,6 +1782,11 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         # management/custody finality is established by these source assertions.
 
     def test_literal_allowlists_correspond_to_bounded_rust_step_boundary_encoder(self):
+        workflow = (SOURCE / ".github/workflows/desktop-ubuntu-publication.yml").read_text()
+        entry = (SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_bytes()
+        self.assertEqual(workflow.count("MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256:"), 2)
+        self.assertEqual(re.findall(r"MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '([0-9a-f]{64})'", workflow),
+                         [hashlib.sha256(entry).hexdigest()] * 2)
         lifecycle = S.local("ubuntu_publication_lifecycle")
         source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
         steps = {line.encode("ascii") + b"\n" for line in re.findall(
@@ -1802,6 +1807,46 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
             tokens = tuple(value.encode("ascii") for value in re.findall(r'=> b"([a-z-]+)"', block))
             self.assertEqual(tokens, expected)
             self.assertEqual(len(tokens), len(set(tokens)))
+            self.assertTrue(all(re.fullmatch(rb"[a-z-]{1,32}", token) for token in tokens))
+        token_by_variant = dict(re.findall(r'Self::([A-Za-z]+) => b"([a-z-]+)"', rejections))
+        reply = source.split("fn session_reply_rejection(", 1)[1].split("fn session_capability_rejection(", 1)[0]
+        capability = source.split("fn session_capability_rejection(", 1)[1].split("fn session_file_wait_pending(", 1)[0]
+        asset = (SOURCE / "desktop/src-tauri/src/asset_commands.rs").read_text()
+        assessment = (SOURCE / "desktop/src-tauri/src/credential_assessment.rs").read_text()
+        asset = asset.split("impl AssetError {", 1)[1].split("pub(crate) fn invalid(", 1)[0]
+        assessment = assessment.split("impl AssessmentError {", 1)[1].split("fn invalid(", 1)[0]
+        asset_codes = set(re.findall(r'=> "([a-z_]+)"', asset))
+        assessment_codes = set(re.findall(r'=> \("([a-z_]+)",', assessment))
+        self.assertEqual((len(asset_codes), len(assessment_codes)), (21, 11))
+        self.assertEqual(asset_codes & assessment_codes, {"assessment_context_stale"})
+        mapped = re.findall(r'"([a-z_]+)" => SessionRejection::([A-Za-z]+)', reply)
+        self.assertEqual(len(mapped), 31)
+        self.assertEqual({code for code, _ in mapped}, asset_codes | assessment_codes)
+        self.assertEqual(len({variant for _, variant in mapped}), 31)
+        shortened = {"asset_unsupported_filesystem": "reply-asset-unsupported-fs",
+                     "asset_exclusion_unconfirmed": "reply-asset-excl-unconfirmed"}
+        for code, variant in mapped:
+            self.assertEqual(token_by_variant[variant], shortened.get(code, "reply-" + code.replace("_", "-")))
+        self.assertEqual(reply.count("_ => SessionRejection::ReplyCodeUnavailable"), 1)
+        self.assertEqual(token_by_variant["ReplyCodeUnavailable"], "reply-code-unavailable")
+        reasons = re.findall(r'Some\("([a-z-]+)"\) => SessionRejection::([A-Za-z]+)', capability)
+        self.assertEqual(len(reasons), 6)
+        self.assertEqual({reason for reason, _ in reasons},
+                         {"cleanup-unknown", "shutdown", "document-lost", "unsupported-platform", "unqualified", "closed"})
+        for reason, variant in reasons:
+            self.assertEqual(token_by_variant[variant], "capability-" + reason)
+        self.assertEqual(capability.count("_ => SessionRejection::CapabilityUnavailable"), 1)
+        self.assertEqual(token_by_variant["CapabilityUnavailable"], "capability-unavailable")
+        session = (SOURCE / "desktop/src-tauri/src/asset_session.rs").read_text()
+        snapshot = session.split("fn snapshot(&self, state: &DocumentState)", 1)[1].split("let operation =", 1)[0]
+        owner_reason = session.split("fn session_owner_reason(", 1)[1].split("fn observe_session_owner_reason(", 1)[0]
+        self.assertEqual(set(re.findall(r"Reason::([A-Za-z]+)", snapshot)),
+                         {"CleanupUnknown", "Shutdown", "DocumentLost", "UnsupportedPlatform", "Unqualified", "Closed", "None"})
+        self.assertEqual(set(re.findall(r"Reason::([A-Za-z]+)", owner_reason)), {"CleanupUnknown", "Shutdown"})
+        for helper in (reply, capability):
+            self.assertIn("-> SessionRejection", helper)
+            for forbidden in ("format!", "to_owned", "to_string", "BridgeError", "linux_passive_cause", "diagnostic", "snapshot", "self."):
+                self.assertNotIn(forbidden, helper)
         for boundary in boundaries:
             for context in progress:
                 self.assertEqual(lifecycle._shell_label_pair(b"MRK_INSTALLED_SHELL_FAILURE_STEP=SelectProject\n" + boundary + context),

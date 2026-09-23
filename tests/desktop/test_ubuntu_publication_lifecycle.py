@@ -3731,6 +3731,13 @@ class FailureLabelSinkContracts(unittest.TestCase):
                b"reject=gtk-observer-endpoint;wait=gtk-action-insensitive\n")
         self.assertEqual(L._shell_label_pair(gtk), {"step": "SessionActivateFile", "boundary": "gtk", "bootstrapProgress": "advanced",
             "session": {"recipeIndex": 3, "evaluations": 16, "rejection": "gtk-observer-endpoint", "lastWait": "gtk-action-insensitive"}})
+        historical = header + (b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=29;evaluations=73;"
+                               b"reject=native-readiness-invariant;wait=native-reply-pending\n")
+        self.assertEqual(L._shell_label_pair(historical)["session"], {"recipeIndex": 29, "evaluations": 73,
+            "rejection": "native-readiness-invariant", "lastWait": "native-reply-pending"})
+        unavailable = [L._shell_label_pair(good.replace(b"evaluation-budget", token))["session"]["rejection"]
+                       for token in (b"reply-code-unavailable", b"reply-assessment-unavailable", b"capability-unavailable")]
+        self.assertEqual(unavailable, ["reply-code-unavailable", "reply-assessment-unavailable", "capability-unavailable"])
         for rejection in L.SHELL_SESSION_REJECTIONS:
             for wait in L.SHELL_SESSION_WAITS:
                 raw = header + b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=0;evaluations=128;reject=" + rejection + b";wait=" + wait + b"\n"
@@ -3754,6 +3761,10 @@ class FailureLabelSinkContracts(unittest.TestCase):
             good.replace(b"index=63", b"index=-1"), good.replace(b"evaluations=128", b"evaluations=129"),
             good.replace(b"evaluations=128", b"evaluations=0128"), good.replace(b"evaluations=128", b"evaluations=127"),
             good.replace(b"evaluation-budget", b"not-an-allowed-condition"), good.replace(b"rendered-display-mismatch", b"unknown"),
+            good.replace(b"evaluation-budget", b"asset_deadline"), good.replace(b"evaluation-budget", b"reply-future-code"),
+            good.replace(b"evaluation-budget", b"x" * 33),
+            good.replace(b"evaluation-budget", b"reply-code-unavailable;code=asset_deadline"),
+            good.replace(b"evaluation-budget", b"reply-code-unavailable\n/private/inert"),
             good.replace(b"v1;", b"v2;"), good.replace(b";wait=", b";extra=1;wait="),
             good.replace(b";reject=", b";index=63;reject="), good.replace(b"\n", b"\r\n"),
             good + b"/private/inert\n", good + b"x" * 512]
@@ -3935,6 +3946,8 @@ class FailureLabelSinkContracts(unittest.TestCase):
         self.assertNotIn("installed_session_snapshot", report)
         self.assertNotIn("session_wait", report)
         self.assertNotIn("session_fail", report)
+        self.assertNotIn("session_reply_rejection", report)
+        self.assertNotIn("session_capability_rejection", report)
         encoder = source.split("fn failure_pair(", 1)[1].split("fn assert_failure_pair_contract", 1)[0]
         self.assertIn("diagnostic.step == step", encoder)
         self.assertIn("diagnostic.evaluations > 128", encoder)
@@ -3945,7 +3958,44 @@ class FailureLabelSinkContracts(unittest.TestCase):
         self.assertIn("if r.evaluations>=128", tick)
         self.assertIn("SessionRejection::EvaluationBudget", tick)
         self.assertIn("Ok(Some(wait))=>{self.session_wait(&mut r,wait);return;}", tick)
+        self.assertIn("match self.session_native_ready(&r,action,&snapshot)", tick)
+        self.assertIn("Err(rejection)=>{self.session_fail(&mut r,rejection);return;}", tick)
         self.assertIn("r.evaluations+=1", tick)
+        # Exact source correspondence preserves priority, not executed Rust/native evidence.
+        ready = source.split("fn session_native_ready(", 1)[1].split("fn session_accept_action(", 1)[0]
+        self.assertEqual(ready.strip(), '''&self, r: &Record, action: SA, snapshot: &InstalledSessionSnapshot) -> Result<Option<SessionWait>,SessionRejection> {
+        let s = &r.session;
+        if snapshot.unknown { return Err(SessionRejection::UnknownNativeSnapshot); }
+        if snapshot.lost { return Err(SessionRejection::LostNativeSnapshot); }
+        if !snapshot.bound { return Err(SessionRejection::UnboundNativeSnapshot); }
+        if snapshot.status["capability"]["available"] != true {
+            return Err(session_capability_rejection(snapshot.status["capability"]["reason"].as_str()));
+        }
+        for index in 1..10 {
+            let extra_context = action == SA::Open && index == SessionCommand::Context.index();
+            let expected = session_action_command(action).is_some_and(|command| command.index() == index) || extra_context;
+            let stale = matches!(action,SA::Stale("save")) && index == SessionCommand::Commit.index()
+                || matches!(action,SA::Stale("bind")) && index == SessionCommand::Bind.index();
+            let delta = s.requests[index].checked_sub(s.base_requests[index]).ok_or(SessionRejection::RequestCounterUnderflow)?;
+            if delta > u8::from(expected || stale) { return Err(SessionRejection::RequestCounterSurplus); }
+            if expected && delta == 0 { return Ok(Some(SessionWait::RequestNotSeen)); }
+            if s.returns[index] < s.requests[index] { return Ok(Some(SessionWait::ReplyPending)); }
+            if expected {
+                if let Some(code) = s.replies[index].error.as_deref() { return Err(session_reply_rejection(code)); }
+            }
+            if stale && delta != 0 && !matches!(s.replies[index].error.as_deref(),Some("asset_invalid_request"|"assessment_context_stale")) { return Err(SessionRejection::StaleReplyContract); }
+        }
+        if !snapshot.settled { return Ok(Some(SessionWait::OwnerUnsettled)); }
+        let op = &snapshot.status["operation"];
+        let stable = match action {
+            SA::Prepare(_,"save") | SA::Reassess(..) | SA::Keep | SA::ReviewRemoval(_) => op["phase"] == "preview" && op["settlement"] == "known",
+            SA::Prepare(_,"missing" | "mismatch") => op["phase"] == "selected" && op["settlement"] == "known",
+            SA::Choose(_,_,None) => op["phase"] == "selected" && op["settlement"] == "known",
+            SA::Choose(_,_,Some(_)) | SA::Assign | SA::Remove | SA::CancelOperation | SA::ConfirmDiscard | SA::Platform(_) | SA::Open => op["phase"] == "idle" && op["settlement"] == "known",
+            _ => true,
+        };
+        Ok((!stable).then_some(SessionWait::PhaseNotReady))
+    }''')
 
     def test_session_gtk_first_rejection_waits_and_callbacks_preserve_original_custody(self):
         source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
