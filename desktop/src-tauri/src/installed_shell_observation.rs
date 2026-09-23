@@ -4323,6 +4323,8 @@ impl Observation {
                     if !snapshot.owner.as_ref().zip(before.owner.as_ref()).is_some_and(|(now,old)| Arc::ptr_eq(now,old))
                         || !session_original_clock(original_work,snapshot.work_end,snapshot.settled)
                         || !snapshot.status["operation"]["preview"].is_null() { self.fail(); return; }
+                    // Finish the immutable before-sample borrow without delaying cleanup recording.
+                    let context_unchanged=snapshot.status["context"]==before.status["context"];
                     if let Some(cleanup)=snapshot.cleanup_end {
                         if r.session.cleanup.is_some_and(|old| old!=cleanup) { self.fail(); return; } r.session.cleanup=Some(cleanup);
                     }
@@ -4332,7 +4334,7 @@ impl Observation {
                         && snapshot.status["operation"]["selectionToken"].is_null() && snapshot.status["operation"]["assessment"].is_null()
                         && snapshot.status["operation"]["reason"]=="document-lost" }
                         else { !snapshot.lost && snapshot.bound && snapshot.status["operation"]["reason"]=="deadline"
-                            && !snapshot.status["context"].is_null() && snapshot.status["context"]==before.status["context"]
+                            && !snapshot.status["context"].is_null() && context_unchanged
                             && snapshot.status["operation"]["assessment"].is_null()
                             && snapshot.cleanup_end==original_work.and_then(|end| end.checked_add(Duration::from_secs(2))) };
                     if !valid || snapshot.cleanup_end.is_none() || r.session.replies[SessionCommand::Prepare.index()].error.as_deref()!=Some(if step==SessionStep::Loss { "asset_document_lost" } else { "asset_deadline" }) { self.fail(); return; }
