@@ -313,6 +313,35 @@ impl IdentitySample {
 }
 #[derive(Clone, Copy)]
 struct NativeDispatch { step: Step, entered: bool, returned: bool }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct OriginalWindowSample {
+    native_returned: bool, result: &'static str,
+    state: Option<mrk_macos_installed_native::OriginalWindowState>, admitted: bool,
+}
+impl OriginalWindowSample {
+    fn positive(self) -> bool {
+        self.native_returned && self.result == "ok"
+            && self.state.is_some_and(mrk_macos_installed_native::OriginalWindowState::ready)
+    }
+    fn value(self) -> Value {
+        json!({"mechanism":"passive-original-window-callback-v1","accessorReturned":true,
+            "nativeReturned":self.native_returned,"result":self.result,"admitted":self.admitted,
+            "state":self.state.map(|s| json!({"applicationPresent":s.application_present,"active":s.active,
+                "mainPresent":s.main_present,"originalMain":s.original_main,
+                "ordinaryWindow":s.ordinary_window,"noAttachedSheet":s.no_attached_sheet}))})
+    }
+}
+fn original_window_needed(attached: bool, step: Step, pending: Option<Pending>, sample: Option<OriginalWindowSample>) -> bool {
+    attached && step == Step::Bootstrap && pending.is_none() && !sample.is_some_and(|s| s.admitted)
+}
+// Only after the accessor/native synchronous return. Keep returned scalar DATA
+// even if the endpoint failed, but never convert that late return to readiness.
+fn publish_original_window(slot: &mut Option<OriginalWindowSample>, mut returned: OriginalWindowSample,
+    needed: bool, timely: bool, failed: bool) {
+    if slot.is_some_and(|s| s.admitted) { return; }
+    returned.admitted = needed && timely && !failed && returned.positive();
+    *slot = Some(returned);
+}
 #[derive(Clone, Copy)]
 struct NativeActionSample {
     step: Step, id: u32, diagnostic: mrk_macos_installed_native::PanelActionDiagnostic,
@@ -512,6 +541,7 @@ impl Session {
 }
 struct Record {
     step: Step, pending: Option<Pending>, evaluations: u16, attached: bool, started: bool, loaded: bool,
+    original_window: Option<OriginalWindowSample>,
     native_dispatch: Option<NativeDispatch>, last_panel: Option<PanelSample>, native_action: Option<NativeActionSample>,
     ax_trusted: bool, prepared_open: Option<PreparedOpenInput>, accessibility: Option<OpenInputSample>,
     open_progress: Option<Arc<OpenRelease>>,
@@ -541,12 +571,14 @@ impl Record {
 #[derive(Clone, Copy)]
 struct FailureSnapshot {
     source: &'static str, step: Step, pending: Option<Pending>, native_dispatch: Option<NativeDispatch>,
+    original_window: Option<OriginalWindowSample>,
     last_panel: Option<PanelSample>, native_action: Option<NativeActionSample>,
     accessibility: Option<OpenInputSample>, identity_binding: Option<IdentitySample>,
 }
 impl FailureSnapshot {
     fn from_record(r: &Record) -> Self {
         Self { source: "record", step: r.step, pending: r.pending, native_dispatch: r.native_dispatch,
+            original_window: r.original_window,
             last_panel: r.last_panel, native_action: r.native_action, accessibility: r.open_sample(), identity_binding: r.identity_binding }
     }
     fn at_expiry(mut self, progress: OpenProgress) -> Self {
@@ -588,6 +620,7 @@ fn failure_context(r: &FailureSnapshot) -> Value {
         "action":action.diagnostic.action, "domain":action.diagnostic.domain,
         "site":action.diagnostic.site, "error":action.diagnostic.error}));
     json!({"snapshotSource":r.source,"pending":pending, "nativeHandler":native, "lastPanel":panel, "nativeAction":action,
+        "originalWindow":r.original_window.map(OriginalWindowSample::value),
         "accessibility":r.accessibility.map(OpenInputSample::value),
         "accessibilityBinding":r.identity_binding.map(IdentitySample::value)})
 }
@@ -666,6 +699,7 @@ impl Observation {
         let project_path = fixture.root.clone();
         let record = Mutex::new(Record {
                 step: Step::Bootstrap, pending: None, evaluations: 0, attached: false, started: false, loaded: false,
+                original_window: None,
                 native_dispatch: None, last_panel: None, native_action: None,
                 ax_trusted: false, prepared_open: None, accessibility: None, open_progress: None, identity_binding: None,
                 initial_navigation: false, info: false, catalog: false, methods: 0, capability: false,
@@ -740,6 +774,34 @@ impl Observation {
             self.fail(); return Err(BridgeError::invalid());
         }
         r.attached = true; Ok(())
+    }
+    pub(super) fn observe_original_window(&self, window: &tauri::Window) {
+        if std::thread::current().id() != self.main || !mrk_macos_installed_native::main_thread() {
+            self.fail_with("native-wrong-thread"); return;
+        }
+        if !self.timely() { return; }
+        {
+            let Some(r) = self.record() else { return; };
+            if !original_window_needed(r.attached, r.step, r.pending, r.original_window) { return; }
+        } // No record guard may span the synchronous accessor/native reads.
+        if !self.timely() { return; }
+        // The existing Tauri event callback borrows its captured original
+        // Window. No label lookup, saved pointer, extra Window clone or task.
+        let returned = match window.ns_window() {
+            Ok(original) => {
+                let sample = mrk_macos_installed_native::installed_original_window(original as usize);
+                OriginalWindowSample { native_returned: true, result: sample.result, state: sample.state, admitted: false }
+            },
+            Err(_) => OriginalWindowSample { native_returned: false, result: "accessor-error", state: None, admitted: false },
+        };
+        let Some(mut r) = self.record() else { return; };
+        if returned.result != "ok" { self.fail(); }
+        // Actual calls returned. Recheck the SAME endpoint/absorbing failure;
+        // nil/inactive/different-main are nonterminal unsatisfied snapshots.
+        let needed = original_window_needed(r.attached, r.step, r.pending, r.original_window);
+        let timely = self.timely();
+        let failed = self.failed.load(Ordering::SeqCst);
+        publish_original_window(&mut r.original_window, returned, needed, timely, failed);
     }
     pub(super) fn navigation(&self, trusted: bool, allowed: bool) {
         let Some(mut r) = self.record() else { return; };
@@ -1111,7 +1173,10 @@ impl Observation {
             let Some(mut r) = self.record() else { return; };
             if !r.attached || !r.loaded || r.pending.is_some() { return; }
             if r.step == Step::Bootstrap {
-                if !r.info || !r.catalog || !r.capability || !state.document.installed_macos_live() { return; }
+                // Natural callbacks are opportunities only. No timely witness
+                // is not proof of permanent inactivity; the same endpoint wins.
+                if !r.original_window.is_some_and(|s| s.admitted) || !r.info || !r.catalog || !r.capability
+                    || !state.document.installed_macos_live() { return; }
                 r.step = Step::Environment;
             }
             match r.step {
@@ -1740,6 +1805,7 @@ impl Observation {
         let r = self.record()?;
         let accessibility = r.open_sample();
         let common = r.attached && r.loaded && r.info && r.catalog && r.capability && r.actual_exit && r.originals_final
+            && r.original_window.is_some_and(|s| s.admitted && s.positive())
             && r.relay_joined && r.pending.is_none() && r.step == Step::Exit && r.file_readback
             && r.ax_trusted && r.prepared_open.is_none()
             && (if self.case == Case::PickerLoss { accessibility.is_none() && r.identity_binding.is_none() }
@@ -1773,6 +1839,7 @@ impl Observation {
             "runAttempt":option_env!("GITHUB_RUN_ATTEMPT"),"case":self.case.name(),"instrumentedEngineeringApp":true,
             "shippingBinaryQualified":false,"distributionQualified":false,"methods":"eight-passive","actionsAvailable":false,
             "native":{"projectCancelSettled":r.cancel_settled,"selectedPathMatched":r.selected_native && r.project_settled,
+                "originalWindow":r.original_window.map(OriginalWindowSample::value),
                 "panelAttachments":r.panel_attached,"controlReturns":r.native_actions_returned,
                 "accessibilityTrustedWithoutPrompt":r.ax_trusted,"projectOpenInput":accessibility.map(OpenInputSample::value),
                 "projectOpenBinding":r.identity_binding.map(IdentitySample::value),
@@ -2005,6 +2072,49 @@ fn native_recheck_data_check() -> bool {
     if receiver.try_recv() != Ok(None) || receiver.try_recv().is_ok() || sink.claim.load(Ordering::SeqCst) != 2 { return false; }
     true
 }
+fn original_window_witness_data_check() -> bool {
+    // Inert returned DATA/policy only; no Window, callback, native query or
+    // fabricated sample from this check is published as runtime evidence.
+    use mrk_macos_installed_native::OriginalWindowState;
+    let state = OriginalWindowState { application_present: true, active: true, main_present: true,
+        original_main: true, ordinary_window: true, no_attached_sheet: true };
+    let positive = OriginalWindowSample { native_returned: true, result: "ok", state: Some(state), admitted: false };
+    let negative = OriginalWindowSample { state: Some(OriginalWindowState { active: false, ..state }), ..positive };
+    let mut slot = None;
+    if original_window_needed(false, Step::Bootstrap, None, slot)
+        || original_window_needed(true, Step::Environment, None, slot)
+        || original_window_needed(true, Step::Bootstrap, Some(Pending::FailureClose), slot)
+        || !original_window_needed(true, Step::Bootstrap, None, slot) { return false; }
+    publish_original_window(&mut slot, negative, true, true, false);
+    if slot.is_some_and(|s| s.admitted || s.positive())
+        || !original_window_needed(true, Step::Bootstrap, None, slot) { return false; }
+    // A later natural callback may succeed; no second-focus/timer obligation.
+    publish_original_window(&mut slot, positive, true, true, false);
+    if !slot.is_some_and(|s| s.admitted && s.positive())
+        || original_window_needed(true, Step::Bootstrap, None, slot) { return false; }
+    let original = slot;
+    publish_original_window(&mut slot, negative, false, false, true);
+    if slot != original { return false; }
+    for (needed, timely, failed) in [(false, true, false), (true, false, false),
+        (true, true, true), (true, false, true)] {
+        let mut refused = None;
+        publish_original_window(&mut refused, positive, needed, timely, failed);
+        if !refused.is_some_and(|s| s.positive() && !s.admitted) { return false; }
+    }
+    for (native_returned, result) in [(false, "accessor-error"), (true, "entry-refused"),
+        (true, "native-error"), (true, "invalid-return")] {
+        let mut refused = None;
+        publish_original_window(&mut refused,
+            OriginalWindowSample { native_returned, result, state: None, admitted: false }, true, true, false);
+        if !refused.is_some_and(|s| !s.admitted && !s.positive()) { return false; }
+    }
+    let first = AtomicU8::new(0); let failed = AtomicBool::new(false);
+    latch_failure(&first, &failed, "observer-deadline");
+    let mut refused = None;
+    publish_original_window(&mut refused, positive, true, true, failed.load(Ordering::SeqCst));
+    refused.is_some_and(|s| !s.admitted) && failed.load(Ordering::SeqCst)
+        && first_failure_reason(&first) == Some("observer-deadline")
+}
 fn observer_data_checks() -> bool {
     use mrk_macos_installed_native::{PanelKind, PanelObservation, PanelResponse};
     crate::asset_session::assert_project_selection_gate_contract();
@@ -2014,7 +2124,8 @@ fn observer_data_checks() -> bool {
     if !profile.project_selection_profile_available() || profile.project_path_selection_profile_available()
         || profile.evidence_selection_profile_available() { return false; }
     if !mrk_macos_installed_native::installed_observation_flags_data_check()
-        || !super::owned_macos::observation::open_release_data_check() || !native_recheck_data_check() { return false; }
+        || !super::owned_macos::observation::open_release_data_check() || !native_recheck_data_check()
+        || !original_window_witness_data_check() { return false; }
     let mut prepared = OpenInputSample::preparing(2);
     prepared.prepared = true;
     if prepared.succeeded() || prepared.entered != Some(false) || prepared.attempted != Some(false) || prepared.returned { return false; }

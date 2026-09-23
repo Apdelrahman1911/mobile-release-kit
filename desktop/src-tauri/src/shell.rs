@@ -1839,6 +1839,14 @@ fn builder() -> tauri::Builder<tauri::Wry> {
         ])
         .on_window_event(|window, event| {
             if window.label() != MAIN_WINDOW { return; }
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+            if !matches!(event, tauri::WindowEvent::Destroyed | tauri::WindowEvent::CloseRequested { .. }) {
+                // Tauri supplies its captured ORIGINAL Window here. The label
+                // only routes; missing pre-setup observer state remains inert.
+                if let Some(state) = window.try_state::<ShellState>() {
+                    if let Some(q) = &state.observation { q.observe_original_window(window); }
+                }
+            }
             if let tauri::WindowEvent::Destroyed = event {
                 if let Some(state) = window.try_state::<ShellState>() {
                     state.document.lost();

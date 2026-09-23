@@ -239,6 +239,10 @@ def expected_result(binding, case):
     return {"schemaVersion": 1, **binding.public(), "case": case, "instrumentedEngineeringApp": True,
         "shippingBinaryQualified": False, "distributionQualified": False, "methods": "eight-passive", "actionsAvailable": False,
         "native": {"projectCancelSettled": first, "selectedPathMatched": case != "picker-loss",
+            "originalWindow": {"mechanism": "passive-original-window-callback-v1", "accessorReturned": True,
+                "nativeReturned": True, "result": "ok", "admitted": True,
+                "state": {"applicationPresent": True, "active": True, "mainPresent": True,
+                    "originalMain": True, "ordinaryWindow": True, "noAttachedSheet": True}},
             "panelAttachments": [True, True, first, first],
             "controlReturns": [first, case != "picker-loss", case != "picker-loss", first, True],
             "accessibilityTrustedWithoutPrompt": True,
@@ -603,6 +607,34 @@ def _accessibility_binding_context(value, case):
         return None
 
 
+def _original_window_context(value):
+    if value is None:
+        return None  # No returned sample, not a nil/inactive native observation.
+    label = "original-window-context"
+    need(type(value) is dict and set(value) == {"mechanism", "accessorReturned", "nativeReturned",
+                                               "result", "admitted", "state"}, label)
+    need(type(value["mechanism"]) is str and value["mechanism"] == "passive-original-window-callback-v1"
+         and type(value["accessorReturned"]) is bool and value["accessorReturned"]
+         and type(value["nativeReturned"]) is bool and type(value["admitted"]) is bool
+         and type(value["result"]) is str
+         and value["result"] in ("ok", "accessor-error", "entry-refused", "native-error", "invalid-return"), label)
+    need(value["nativeReturned"] == (value["result"] != "accessor-error"), label)
+    state = value["state"]
+    if value["result"] != "ok":
+        need(state is None and not value["admitted"], label)
+    else:
+        need(type(state) is dict and set(state) == {"applicationPresent", "active", "mainPresent",
+                                                  "originalMain", "ordinaryWindow", "noAttachedSheet"}
+             and all(type(fact) is bool for fact in state.values()), label)
+        need(state["applicationPresent"] or not any(state.values()), label)
+        need(state["mainPresent"] or not any(state[key] for key in
+             ("originalMain", "ordinaryWindow", "noAttachedSheet")), label)
+        # A positive read returned after failure/expiry can be truthful DATA
+        # with admitted=False; it still cannot satisfy successful case evidence.
+        need(not value["admitted"] or all(state.values()), label)
+    return value
+
+
 def failure_context(stdout, stderr, case=None):
     row = _failure_row(stdout, stderr, b"MRK_MACOS_AQUA_FAILURE_CONTEXT", FAILURE_CONTEXT_LIMIT)
     if row is None:
@@ -610,12 +642,14 @@ def failure_context(stdout, stderr, case=None):
     try:
         value = json.loads(row.decode("ascii"), object_pairs_hook=_pairs,
                            parse_constant=lambda _: (_ for _ in ()).throw(Refused("failure-context")))
-        need(type(value) is dict and set(value) - {"accessibilityBinding", "snapshotSource"} in (
+        need(type(value) is dict and set(value) - {"accessibilityBinding", "snapshotSource", "originalWindow"} in (
             {"pending", "nativeHandler", "lastPanel"},
             {"pending", "nativeHandler", "lastPanel", "nativeAction"},
             {"pending", "nativeHandler", "lastPanel", "nativeAction", "accessibility"}), "failure-context")
         if "snapshotSource" in value:
             need(type(value["snapshotSource"]) is str and value["snapshotSource"] in ("record", "prearm-open-progress"), "failure-context")
+        if "originalWindow" in value:
+            value["originalWindow"] = _original_window_context(value["originalWindow"])
         pending, native, panel = value["pending"], value["nativeHandler"], value["lastPanel"]
         if pending is not None:
             need(type(pending) is dict and set(pending) == {"kind", "step"}

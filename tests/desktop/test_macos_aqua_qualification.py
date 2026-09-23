@@ -430,6 +430,64 @@ class AquaDataTests(unittest.TestCase):
         with self.assertRaisesRegex(M.Refused, "^inner-failure-marker$"):
             M.parse_result(captured(M.expected_result(BINDING, "first-save")), row, BINDING, "first-save")
 
+    def test_original_window_success_requires_the_returned_positive_witness(self):
+        for case in M.CASES:
+            good = M.expected_result(BINDING, case)
+            self.assertEqual(M.parse_result(captured(good), b"", BINDING, case), good)
+            variants = []
+            missing = deepcopy(good); del missing["native"]["originalWindow"]; variants.append(missing)
+            unknown = deepcopy(good); unknown["native"]["originalWindow"] = None; variants.append(unknown)
+            for key, value in (("mechanism", "label-lookup"), ("accessorReturned", False),
+                               ("nativeReturned", False), ("result", "native-error"),
+                               ("admitted", False), ("state", None), ("address", 1)):
+                bad = deepcopy(good); bad["native"]["originalWindow"][key] = value; variants.append(bad)
+            for key in good["native"]["originalWindow"]["state"]:
+                for value in (False, None, 1):
+                    bad = deepcopy(good); bad["native"]["originalWindow"]["state"][key] = value; variants.append(bad)
+            for bad in variants:
+                with self.assertRaises(M.Refused):
+                    M.parse_result(captured(bad), b"", BINDING, case)
+
+    def test_original_window_failure_keeps_unknown_unsatisfied_error_and_late_distinct(self):
+        base = {"pending": None, "nativeHandler": None, "lastPanel": None}
+        positive = M.expected_result(BINDING, "first-save")["native"]["originalWindow"]
+        samples = [None, deepcopy(positive)]
+        late = deepcopy(positive); late["admitted"] = False; samples.append(late)
+        inactive = deepcopy(late); inactive["state"]["active"] = False; samples.append(inactive)
+        absent = deepcopy(late); absent["state"] = dict.fromkeys(absent["state"], False); samples.append(absent)
+        no_main = deepcopy(absent); no_main["state"].update(applicationPresent=True, active=True); samples.append(no_main)
+        for result in ("accessor-error", "entry-refused", "native-error", "invalid-return"):
+            error = deepcopy(late); error.update(result=result, state=None, nativeReturned=result != "accessor-error")
+            samples.append(error)
+        for sample in samples:
+            value = {**base, "originalWindow": sample}
+            self.assertEqual(M.failure_context(context_row(value), b""), value)
+        # Even positive historical DATA cannot turn a failure row into success.
+        with self.assertRaisesRegex(M.Refused, "^inner-failure-marker$"):
+            M.parse_result(captured(M.expected_result(BINDING, "first-save")),
+                           context_row({**base, "originalWindow": positive}), BINDING, "first-save")
+
+    def test_original_window_context_refuses_contradictions_and_open_fields(self):
+        base = {"pending": None, "nativeHandler": None, "lastPanel": None}
+        good = M.expected_result(BINDING, "first-save")["native"]["originalWindow"]
+        variants = []
+        for key, value in (("mechanism", "foreign"), ("accessorReturned", False), ("accessorReturned", 1),
+                           ("nativeReturned", False), ("nativeReturned", 1), ("result", "foreign"),
+                           ("result", "native-error"), ("admitted", 1), ("state", None), ("address", "PRIVATE")):
+            bad = deepcopy(good); bad[key] = value; variants.append(bad)
+        for key in good:
+            bad = deepcopy(good); del bad[key]; variants.append(bad)
+        for key in good["state"]:
+            bad = deepcopy(good); bad["state"][key] = 1; variants.append(bad)
+            bad = deepcopy(good); del bad["state"][key]; variants.append(bad)
+        for key in ("applicationPresent", "mainPresent", "active", "originalMain", "ordinaryWindow", "noAttachedSheet"):
+            bad = deepcopy(good); bad["state"][key] = False; variants.append(bad)
+        bad = deepcopy(good); bad["admitted"] = False; bad["state"]["applicationPresent"] = False; variants.append(bad)
+        bad = deepcopy(good); bad["admitted"] = False; bad["state"]["mainPresent"] = False; variants.append(bad)
+        bad = deepcopy(good); bad["state"]["windowTitle"] = "PRIVATE"; variants.append(bad)
+        for bad in variants:
+            self.assertIsNone(M.failure_context(context_row({**base, "originalWindow": bad}), b""))
+
     def test_semantic_action_actual_return_and_timeout_are_not_completion(self):
         good = accessibility_context_data()
         self.assertEqual(M.failure_context(b"", context_row(good), "first-save"), good)
@@ -620,6 +678,9 @@ class AquaDataTests(unittest.TestCase):
         # Conservative closed-label size fixture only, not claimed native facts.
         largest = deepcopy(good)
         largest["snapshotSource"] = "prearm-open-progress"
+        largest["originalWindow"] = deepcopy(M.expected_result(BINDING, "first-save")["native"]["originalWindow"])
+        largest["originalWindow"]["admitted"] = False
+        largest["originalWindow"]["state"] = dict.fromkeys(largest["originalWindow"]["state"], False)
         for proof in (largest["accessibilityBinding"]["binding"], largest["accessibility"]["initialOriginalProof"],
                       largest["accessibility"]["originalProof"]):
             proof.update(parent="type-invalid", panel="encoding-invalid", originals="multiple", site="panel-attached-sheet", error="cleanup-unknown", children=17)
@@ -825,6 +886,64 @@ class AquaDataTests(unittest.TestCase):
         self.assertEqual((fixtures.reads, emitted), ([], []))
         self.assertIsNone(M.diagnostic(M.Refused("fixture-refused"), None, None)["innerFailureReason"])
 
+    def test_original_window_source_is_borrowed_passive_and_same_endpoint_only(self):
+        source_root = PATH.parents[1] / "src-tauri" / "src"
+        shell = (source_root / "shell.rs").read_text(encoding="utf-8")
+        observer = (source_root / "installed_shell_observation_macos.rs").read_text(encoding="utf-8")
+        native_root = PATH.parents[1] / "native" / "macos-installed-native" / "src"
+        native = (native_root / "native.m").read_text(encoding="utf-8")
+        native_rust = (native_root / "lib.rs").read_text(encoding="utf-8")
+        hook = shell.split(".on_window_event(|window, event| {", 1)[1].split("if let tauri::WindowEvent::Destroyed = event", 1)[0]
+        terminal = "if !matches!(event, tauri::WindowEvent::Destroyed | tauri::WindowEvent::CloseRequested { .. })"
+        self.assertIn('feature = "macos-installed-observation"', hook)
+        self.assertIn('target_os = "macos"', hook)
+        self.assertLess(hook.index(terminal), hook.index("window.try_state::<ShellState>()"))
+        self.assertLess(hook.index("window.try_state::<ShellState>()"), hook.index("q.observe_original_window(window)"))
+        self.assertNotIn("window.state::<ShellState>()", hook)
+        self.assertNotIn("Focused(true)", hook)  # No second-focus dependency.
+        body = observer.split("pub(super) fn observe_original_window(", 1)[1].split("pub(super) fn navigation(", 1)[0]
+        self.assertEqual(body.count("window.ns_window()"), 1)
+        self.assertEqual(body.count("installed_original_window("), 1)
+        self.assertLess(body.index("mrk_macos_installed_native::main_thread()"), body.index("window.ns_window()"))
+        self.assertLess(body.index("} // No record guard"), body.index("window.ns_window()"))
+        self.assertLess(body.index("installed_original_window("), body.index("let Some(mut r) = self.record()"))
+        self.assertLess(body.index("let Some(mut r) = self.record()"), body.index("let timely = self.timely()"))
+        self.assertLess(body.index("let timely = self.timely()"), body.index("self.failed.load(Ordering::SeqCst)"))
+        self.assertLess(body.index("self.failed.load(Ordering::SeqCst)"), body.index("publish_original_window("))
+        for forbidden in ("run_on_main_thread", "get_window(", "get_webview_window(", "with_webview(",
+                          ".clone()", "Instant::now()", "Duration::", "thread::spawn", "std::mem::forget"):
+            self.assertNotIn(forbidden, body)
+        self.assertIn('if returned.result != "ok" { self.fail(); }', body)
+        publication = observer.split("fn publish_original_window(", 1)[1].split("struct NativeActionSample", 1)[0]
+        self.assertIn("if slot.is_some_and(|s| s.admitted) { return; }", publication)
+        self.assertIn("returned.admitted = needed && timely && !failed && returned.positive();", publication)
+        self.assertIn("r.original_window.is_some_and(|s| s.admitted && s.positive())", observer)
+        bootstrap = observer.split("if r.step == Step::Bootstrap {", 1)[1].split("r.step = Step::Environment;", 1)[0]
+        for gate in ("!r.original_window.is_some_and(|s| s.admitted)", "!r.info", "!r.catalog", "!r.capability",
+                     "!state.document.installed_macos_live()"):
+            self.assertIn(gate, bootstrap)
+        scalar = native.split("int mrk_observation_original_window(", 1)[1].split("#endif", 1)[0]
+        self.assertLess(scalar.index("pthread_main_np()"), scalar.index("NSApplication *app = NSApp"))
+        self.assertIn("(uintptr_t)(void *)main == original", scalar)
+        self.assertLess(scalar.index("[main attachedSheet]"), scalar.index("*flags = observed"))
+        for forbidden in ("sharedApplication", "NSApplicationLoad", "activateIgnoringOtherApps", "setActivationPolicy",
+                          "makeKeyAndOrderFront", "CFRunLoop", "dispatch_", "retain", "release", "NSWindow *original"):
+            self.assertNotIn(forbidden, scalar)
+        decoder = native_rust.split("fn original_window_state(", 1)[1].split("fn semantic_data_check(", 1)[0]
+        self.assertIn("flags & !63 != 0", decoder)
+        self.assertIn("flags & 4 == 0 && flags & 56 != 0", decoder)
+        self.assertIn("flags == 0 && matches!(code, 1 | 2)", decoder)
+        self.assertIn('result: "invalid-return", state: None', decoder)
+        self.assertIn("original_window_data_check()", native_rust.split("pub fn installed_observation_flags_data_check()", 1)[1])
+        checks = observer.split("fn original_window_witness_data_check()", 1)[1].split("fn observer_data_checks()", 1)[0]
+        self.assertIn("publish_original_window(&mut slot, negative, true, true, false)", checks)
+        self.assertIn("publish_original_window(&mut slot, positive, true, true, false)", checks)
+        self.assertIn("(true, false, false)", checks)
+        self.assertIn("(true, true, true)", checks)
+        self.assertIn('first_failure_reason(&first) == Some("observer-deadline")', checks)
+        for forbidden in ("installed_original_window(", ".ns_window()", ".value()", "run_on_main_thread"):
+            self.assertNotIn(forbidden, checks)
+
     def test_observer_reason_catalog_and_readiness_call_contract(self):
         source_root = PATH.parents[1] / "src-tauri" / "src"
         observer = (source_root / "installed_shell_observation_macos.rs").read_text(encoding="utf-8")
@@ -851,8 +970,15 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn("|| profile.evidence_selection_profile_available() { return false; }", checks)
         self.assertNotIn(".resolve(", checks)
         main = observer.split("pub(crate) fn main()", 1)[1]
-        for native_entry in ("Fixture::capture(", "Observation::new(", "super::run_builder("):
+        for native_entry in ("Fixture::capture(", "Observation::new(", "observe(&q)"):
             self.assertLess(main.index("if !observer_data_checks()"), main.index(native_entry))
+        observation = observer.split("fn observe(q: &Arc<Observation>)", 1)[1].split("pub(crate) fn main()", 1)[0]
+        self.assertEqual(main.count("observe(&q)"), 1)
+        self.assertEqual(observer.count("super::run_builder("), 1)
+        self.assertEqual(observation.count("super::run_builder("), 1)
+        self.assertLess(observation.index("installed_accessibility_trusted()"), observation.index("if trusted != Ok(true)"))
+        self.assertLess(observation.index("if trusted != Ok(true)"), observation.index("super::run_builder("))
+        self.assertLess(observation.index("if !q.timely() { return None; }"), observation.index("super::run_builder("))
         reasons = observer.split("const FAILURE_REASONS: &[&str] = &[", 1)[1].split("];", 1)[0]
         labels = M.re.findall(r'"([a-z_-]+)"', reasons)
         self.assertEqual(len(labels), len(set(labels)))

@@ -173,6 +173,31 @@ int mrk_publish(int from, const char *source, int to, const char *destination) {
 }
 int mrk_main_thread(void) { return pthread_main_np(); }
 
+#ifdef MRK_INSTALLED_OBSERVATION
+// Closed result: 0=returned snapshot, 1=entry refused, 2=AppKit read error.
+// The supplied address is comparison DATA, never an object to dereference.
+int mrk_observation_original_window(uintptr_t original, uint32_t *flags) {
+    if (!flags) return 1;
+    *flags = 0;
+    if (!pthread_main_np() || !original) return 1;
+    @try {
+        NSApplication *app = NSApp; // Do not initialize or activate an application.
+        if (!app) return 0;
+        uint32_t observed = 1u; // application present
+        if ([app isActive]) observed |= 2u;
+        NSWindow *main = [app mainWindow];
+        if (main) {
+            observed |= 4u;
+            if ((uintptr_t)(void *)main == original) observed |= 8u;
+            if (![main isKindOfClass:[NSPanel class]]) observed |= 16u;
+            if (![main attachedSheet]) observed |= 32u;
+        }
+        *flags = observed; // Publish no partial flags if an AppKit read throws.
+        return 0;
+    } @catch (NSException *e) { (void)e; return 2; }
+}
+#endif
+
 // Closed ABI result: Other=0, Accept=1, Decline=2. This same pure mapping is
 // exercised by narrow native-crate test definitions; no panel is fabricated.
 int mrk_panel_response(int kind, int64_t code, int programmatic) {

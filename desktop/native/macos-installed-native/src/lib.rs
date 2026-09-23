@@ -198,6 +198,7 @@ impl Panel {
 #[cfg(feature = "installed-observation")]
 pub use observation::{PanelAction, PanelActionDiagnostic, PanelObservation, OpenIdentity, OpenDiagnostic, OpenReport,
     OpenInputReturn, IdentityConfiguration, IdentityStartReturn, IdentityBinding, IdentityBindingReturn, PanelConfirmProof,
+    OriginalWindowState, OriginalWindowReturn, installed_original_window,
     installed_accessibility_trusted, installed_observation_flags_data_check};
 #[cfg(feature = "installed-observation")]
 mod observation {
@@ -305,6 +306,7 @@ mod observation {
         pub closed: bool,
     }
     unsafe extern "C" {
+        fn mrk_observation_original_window(original: usize, flags: *mut u32) -> c_int;
         fn mrk_panel_observe(panel: *mut c_void, kind: *mut c_int, flags: *mut u32,
             response: *mut c_int, path: *mut u8, capacity: usize) -> c_int;
         fn mrk_panel_observe_action(panel: *mut c_void, action: c_int, directory: *const c_char,
@@ -592,6 +594,64 @@ mod observation {
     pub fn installed_accessibility_trusted() -> Result<bool, ()> {
         match unsafe { mrk_observation_ax_trusted() } { 1 => Some(true), -1 => None, 0 => Some(false), _ => None }.ok_or(())
     }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct OriginalWindowState {
+        pub application_present: bool, pub active: bool, pub main_present: bool,
+        pub original_main: bool, pub ordinary_window: bool, pub no_attached_sheet: bool,
+    }
+    impl OriginalWindowState {
+        pub fn ready(self) -> bool {
+            self.application_present && self.active && self.main_present && self.original_main
+                && self.ordinary_window && self.no_attached_sheet
+        }
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct OriginalWindowReturn { pub result: &'static str, pub state: Option<OriginalWindowState> }
+    fn original_window_state(flags: u32) -> Option<OriginalWindowState> {
+        if flags & !63 != 0 || flags & 1 == 0 && flags != 0
+            || flags & 4 == 0 && flags & 56 != 0 { return None; }
+        Some(OriginalWindowState { application_present: flags & 1 != 0, active: flags & 2 != 0,
+            main_present: flags & 4 != 0, original_main: flags & 8 != 0,
+            ordinary_window: flags & 16 != 0, no_attached_sheet: flags & 32 != 0 })
+    }
+    fn original_window_return(code: c_int, flags: u32) -> OriginalWindowReturn {
+        if code == 0 {
+            if let Some(state) = original_window_state(flags) {
+                return OriginalWindowReturn { result: "ok", state: Some(state) };
+            }
+        } else if flags == 0 && matches!(code, 1 | 2) {
+            return OriginalWindowReturn { result: if code == 1 { "entry-refused" } else { "native-error" }, state: None };
+        }
+        OriginalWindowReturn { result: "invalid-return", state: None }
+    }
+    /// A synchronous read only: no supplied-address dereference, saved pointer,
+    /// new native retain, activation request or ownership/finality authority.
+    pub fn installed_original_window(original: usize) -> OriginalWindowReturn {
+        let mut flags = 0;
+        // SAFETY: fixed writable scalar output; the integer is only compared to
+        // NSApp's own mainWindow address. Native code checks main before AppKit.
+        let code = unsafe { mrk_observation_original_window(original, &mut flags) };
+        original_window_return(code, flags)
+    }
+    fn original_window_data_check() -> bool {
+        // Inert scalar decoding only, never an AppKit call or evidence sample.
+        for flags in 0..128 {
+            let valid = flags < 64 && (flags == 0 || flags & 1 != 0)
+                && (flags & 4 != 0 || flags & 56 == 0);
+            let sample = original_window_return(0, flags);
+            if sample.state.is_some() != valid || (sample.result == "ok") != valid
+                || sample.state.is_some_and(OriginalWindowState::ready) != (flags == 63) { return false; }
+        }
+        for code in [-1, 1, 2, 3, c_int::MAX] {
+            let sample = original_window_return(code, 0);
+            let expected = match code {
+                1 => "entry-refused", 2 => "native-error", _ => "invalid-return",
+            };
+            if sample.state.is_some() || sample.result != expected
+                || original_window_return(code, 63).result != "invalid-return" { return false; }
+        }
+        original_window_return(0, u32::MAX).result == "invalid-return"
+    }
     fn semantic_data_check() -> bool {
         // Inert decoders only: these values never manufacture native evidence.
         if std::mem::size_of::<IdentityWire>() != 52 || std::mem::size_of::<OpenWire>() != 124
@@ -642,7 +702,7 @@ mod observation {
     /// Pure checks called by the existing instrumented observer entry, not a
     /// native query or a separate test executable/qualification route.
     pub fn installed_observation_flags_data_check() -> bool {
-        action_diagnostics_data_check() && identity_data_check() && semantic_data_check()
+        action_diagnostics_data_check() && identity_data_check() && semantic_data_check() && original_window_data_check()
             && [0, 0x1000, 0x2000, 0x12000, 0x3000, 0xf000, 0x1f002, 0x1ffff]
             .into_iter().all(observation_flags_valid)
             && [2, 0x4000, 0x8000, 0x10000, 0x14000, 0x1f000, 0x20000, u32::MAX]
