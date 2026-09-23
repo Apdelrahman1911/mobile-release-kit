@@ -83,20 +83,23 @@ webkit2gtk = { version = "=2.0.2", optional = true, default-features = false, fe
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))'.dependencies]
 rustix = { version = "=1.1.5", default-features = false, features = ["std", "fs", "process", "thread", "system"] }
 mrk-linux-mount-observation = { path = "../native/linux-mount-observation" }
+secret-service = { version = "=5.2.0", path = "../vendor/secret-service-5.2.0", default-features = false, features = ["rt-tokio-crypto-rust"] }
+zbus = { version = "=5.19.0", default-features = false, features = ["tokio"] }
+ordered-stream = "=0.2.0"
 
 [build-dependencies]
 tauri-build = { version = "=2.6.3", optional = true, features = [] }
 
 # Keep complete runtime byte hashing inside the original test admission clocks:
 # optimize the existing hash implementation, never omit checks or widen deadlines.
-[profile.test.package.sha2]
+[profile.test.package."sha2:0.10.9"]
 opt-level = 3
 debug-assertions = true
 overflow-checks = true
 
 # The shared normal/observer connection build uses the dev profile. Preserve
 # complete byte hashing under the same original runtime admission deadlines.
-[profile.dev.package.sha2]
+[profile.dev.package."sha2:0.10.9"]
 opt-level = 3
 debug-assertions = true
 overflow-checks = true

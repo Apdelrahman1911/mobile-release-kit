@@ -46,6 +46,8 @@ mod credential_format;
 mod asset_commands;
 mod asset_source;
 mod asset_session;
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+mod vault_keyring_linux;
 pub mod edit_protocol;
 pub mod github_workflow_edit_protocol;
 pub mod metadata_text_edit_protocol;

@@ -176,6 +176,8 @@ pub(crate) struct OriginalWork {
     pub(crate) wake: Notify, coordinator: Mutex<CoordinatorBook>, child: AsyncMutex<ChildBook>,
     source: Arc<Mutex<SourceBook>>, pub(crate) gui: Arc<GuiCall>,
     retirement: Mutex<Retirement>, retired: AtomicBool,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    keyring: Mutex<crate::vault_keyring_linux::LookupBook>,
 }
 impl OriginalWork {
     fn new(id: u32, gui_needed: bool, document: Weak<Inner>) -> Arc<Self> {
@@ -183,6 +185,8 @@ impl OriginalWork {
             wake: Notify::new(), coordinator: Mutex::new(CoordinatorBook { handle: None, receipt: JoinReceipt::New }),
             child: AsyncMutex::new(ChildBook { handle: None, receipt: JoinReceipt::New }), source: Arc::new(Mutex::new(SourceBook::new())),
             retirement: Mutex::new(Retirement::default()), retired: AtomicBool::new(true),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            keyring: Mutex::new(crate::vault_keyring_linux::LookupBook::new()),
             gui: Arc::new(GuiCall { owner: owner.clone(), document, facts: Mutex::new(GuiFacts { dispatched: false, constructing: false,
                 created: false, showing: false, response: false, accepted: false, declined: false, accepted_at: None,
                 destroyed: false, released: !gui_needed, not_created: !gui_needed, close_queued: false, close_ack: false, release_queued: false,
@@ -226,7 +230,11 @@ impl OriginalWork {
         let coordinator = self.coordinator.try_lock().is_ok_and(|book| matches!(book.receipt, JoinReceipt::Returned | JoinReceipt::Failed) && book.handle.is_none());
         let child = self.child.try_lock().is_ok_and(|book| matches!(book.receipt, JoinReceipt::New | JoinReceipt::Returned | JoinReceipt::Failed) && book.handle.is_none());
         let source = self.source.try_lock().is_ok_and(|book| book.not_started() || book.settled());
-        coordinator && child && source && self.gui.settled()
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let keyring = self.keyring.try_lock().is_ok_and(|book| book.resources_settled());
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        let keyring = true;
+        coordinator && child && source && self.gui.settled() && keyring
     }
     fn resources_settled(&self) -> bool { self.original_resources_settled() && self.retired.load(Ordering::SeqCst) }
     fn normally_declined(&self) -> bool {
@@ -589,6 +597,146 @@ struct Inner {
 }
 #[derive(Clone)]
 pub(crate) struct DocumentBinding { inner: Arc<Inner> }
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn keyring_slot_gate(state: &DocumentState, owner: &Arc<OriginalWork>, step: Option<crate::vault_keyring_linux::Step>, now: Instant)
+    -> Result<Instant, crate::vault_keyring_linux::Problem> {
+    use crate::vault_keyring_linux::Problem;
+    let slot = state.slot.as_ref().filter(|slot| Arc::ptr_eq(&slot.owner, owner) && slot.operation == Operation::Prepare)
+        .ok_or(Problem::Interrupted)?;
+    // Only fixed own-subscription removal may pass after STOP/document loss.
+    // It still belongs to this exact current OriginalWork; no public Boolean
+    // can substitute for the book's expected step or real slot identity.
+    if step.is_some_and(crate::vault_keyring_linux::Step::cleanup) {
+        // STOP/loss never grants a fresh cleanup lease. An already-polled RPC
+        // may settle late, but a NEW removal cannot begin beyond this original
+        // cutoff or after Unknown. The ordinary no-STOP path uses its work end.
+        let end = slot.cleanup_end.or_else(|| owner.endpoint()).ok_or(Problem::CleanupUnknown)?;
+        if now >= end || state.unknown || state.exhausted || slot.phase == Phase::Unknown
+            || matches!(slot.settlement, Settlement::Unknown | Settlement::LateKnown)
+        { return Err(Problem::CleanupUnknown); }
+        return Ok(end);
+    }
+    if !state.lifetime.original_bound() || state.lost_observed || state.exhausted || state.unknown || state.stopping
+        || state.quit_pending || state.retiring || state.lock_pending || owner.interrupted()
+        || slot.phase != Phase::Assessing || slot.cleanup_end.is_some()
+    { return Err(Problem::Interrupted); }
+    owner.endpoint().filter(|end| now < *end).ok_or(Problem::Interrupted)
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn keyring_poll_gate(state: &DocumentState, owner: &Arc<OriginalWork>, book: &crate::vault_keyring_linux::LookupBook, now: Instant)
+    -> Result<Instant, crate::vault_keyring_linux::Problem> {
+    keyring_slot_gate(state, owner, book.current_step(), now)
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl DocumentBinding {
+    // Deliberately PRIVATE and UNCALLED by renderer/session prepare/bind. A later
+    // native profile must integrate this into the already-registered coordinator;
+    // no second task or alternate owner is created by this source-only phase.
+    fn enter_keyring_lookup(&self, owner: &Arc<OriginalWork>, input: crate::vault_keyring_linux::LookupInput)
+        -> Result<(), crate::vault_keyring_linux::Problem> {
+        use crate::vault_keyring_linux::Problem;
+        let mut state = self.lock(); let now = Instant::now(); self.expire(&mut state, now);
+        let dispatch_end = keyring_slot_gate(&state, owner, None, now)?;
+        if !owner.coordinator.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Pending && book.handle.is_some()) {
+            return Err(Problem::CleanupUnknown);
+        }
+        let mut book = owner.keyring.lock().map_err(|_| Problem::CleanupUnknown)?;
+        book.begin(input, dispatch_end)
+        // No IO is polled while the document/registry mutex is held.
+    }
+    fn admit_keyring_step(&self, owner: &Arc<OriginalWork>, step: crate::vault_keyring_linux::Step)
+        -> Result<(), crate::vault_keyring_linux::Problem> {
+        use crate::vault_keyring_linux::Problem;
+        let mut state = self.lock(); let now = Instant::now(); self.expire(&mut state, now);
+        let dispatch_end = keyring_slot_gate(&state, owner, Some(step), now)?;
+        let mut book = owner.keyring.lock().map_err(|_| Problem::CleanupUnknown)?;
+        if !book.expected(step) { return Err(Problem::CleanupUnknown); }
+        book.admit(step, dispatch_end)
+    }
+    fn report_keyring_problem(&self, owner: &Arc<OriginalWork>) {
+        use crate::vault_keyring_linux::Problem;
+        // Read and RELEASE the backend mutex before acquiring the document gate.
+        let (problem, cleanup_unknown) = match owner.keyring.lock() {
+            Ok(book) => (book.problem().zip(book.problem_at()), book.cleanup_unknown()),
+            Err(error) => { drop(error); let mut state = self.lock(); self.coordinator_failed(&mut state); return; }
+        };
+        let Some((problem, at)) = problem else { return; };
+        let mut state = self.lock();
+        if cleanup_unknown { if !state.unknown { self.coordinator_failed(&mut state); } return; }
+        if let Some(slot) = state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, owner)) {
+            let reason = match problem {
+                Problem::Interrupted => Reason::UserCancelled,
+                Problem::CleanupUnknown => Reason::CleanupUnknown,
+                _ => Reason::SourceRefused,
+            };
+            // The original failure time, not this later observer tick, owns the
+            // existing cleanup clock. Original deadline/STOP remains absorbing.
+            if slot.cleanup_end.is_none() { slot.stop(reason, at); self.bump(&mut state); }
+        }
+    }
+    async fn drive_keyring_lookup(&self, owner: &Arc<OriginalWork>, input: crate::vault_keyring_linux::LookupInput)
+        -> Result<(), crate::vault_keyring_linux::Problem> {
+        use crate::vault_keyring_linux::{Next, Problem};
+        self.enter_keyring_lookup(owner, input)?;
+        loop {
+            let next = std::future::poll_fn(|cx| {
+                let turn = {
+                    let mut book = match owner.keyring.lock() { Ok(book) => book, Err(_) => return Poll::Ready(Err(Problem::CleanupUnknown)) };
+                    if owner.interrupted() { book.interrupt(); }
+                    book.poll(cx)
+                }; // Release book BEFORE acquiring document: never inverted locks.
+                match turn {
+                    Poll::Pending => Poll::Pending,
+                    Poll::Ready(Next::Admit(step)) => Poll::Ready(Ok(step)),
+                    Poll::Ready(Next::FirstPoll) => {
+                        // FINAL admission after bounded stream work. The current
+                        // exact slot/Unknown/effective cutoff is read under the
+                        // original document -> book order. This is the local
+                        // linearization point: later cancellation cannot revoke
+                        // an already-consumed admission retroactively. It is not
+                        // an instantaneous-stop/no-later-native-poll guarantee.
+                        let mut state = self.lock(); self.expire(&mut state, Instant::now());
+                        let mut book = match owner.keyring.lock() { Ok(book) => book, Err(_) => return Poll::Ready(Err(Problem::CleanupUnknown)) };
+                        if owner.interrupted() { book.interrupt(); }
+                        let current_gate = keyring_poll_gate(&state, owner, &book, Instant::now());
+                        drop(state);
+                        // No stream turn, await, lock or fallible setup here.
+                        book.first_poll(cx, current_gate);
+                        Poll::Pending
+                    }
+                }
+            });
+            tokio::pin!(next);
+            let next = tokio::select! {
+                next = &mut next => Some(next),
+                _ = owner.wake.notified() => None,
+                _ = tokio::time::sleep(Duration::from_millis(25)) => None,
+            };
+            self.report_keyring_problem(owner);
+            match next {
+                Some(Ok(step)) => if let Err(problem) = self.admit_keyring_step(owner, step) {
+                    match owner.keyring.lock() {
+                        Ok(mut book) => book.admission_refused(step, problem),
+                        Err(error) => { drop(error); let mut state = self.lock(); self.coordinator_failed(&mut state); return Err(Problem::CleanupUnknown); }
+                    }
+                },
+                Some(Err(problem)) => {
+                    let mut state = self.lock(); self.coordinator_failed(&mut state);
+                    // Failed coordinator cannot continue polling. Its actual
+                    // poisoned book/resources remain retained and unfinal.
+                    return Err(problem);
+                }
+                None => self.tick(),
+            }
+            // Do not return/stage merely because Candidate/Absent or RemoveMatch
+            // is ready. Keep the original coordinator pumping any retained live
+            // stream until the missing maintained SDK task-join path exists.
+        }
+    }
+}
 
 fn passive_document_gate(state: &DocumentState) -> Result<(), BridgeError> {
     // Existing passive services do not require editing/crash-hook qualification.
@@ -3761,5 +3909,136 @@ mod tests {
         let original = state.slot.as_ref().unwrap();
         assert_eq!(endpoints, (original.cleanup_end, original.review_end, original.owner.endpoint()));
         assert!(!complete_empty_session_lock(&mut state));
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn keyring_gate_requires_current_original_and_never_renews_cleanup_cutoff() {
+        use crate::vault_keyring_linux::{Problem, Step};
+        let mut state = empty_state();
+        state.lifetime.crash_hook_installed(); state.lifetime.started(true); state.lifetime.finished(true);
+        let owner = OriginalWork::new(1, false, Weak::new()); let now = Instant::now();
+        owner.set_endpoint(Some(now + WORK));
+        let mut slot = Slot::new(owner.clone(), Operation::Prepare, None, None, None); slot.phase = Phase::Assessing;
+        state.slot = Some(slot);
+        assert_eq!(keyring_slot_gate(&state, &owner, None, now), Ok(now + WORK));
+        let other = OriginalWork::new(1, false, Weak::new()); // even the same numeric ID is not this original
+        assert_eq!(keyring_slot_gate(&state, &other, Some(Step::RemoveMatch), now), Err(Problem::Interrupted));
+        state.slot.as_mut().unwrap().operation = Operation::InspectEvidence;
+        assert!(keyring_slot_gate(&state, &owner, Some(Step::RemoveMatch), now).is_err());
+        state.slot.as_mut().unwrap().operation = Operation::Prepare;
+        assert!(keyring_slot_gate(&state, &owner, Some(Step::SearchItems), now + WORK).is_err());
+        state.slot.as_mut().unwrap().stop(Reason::UserCancelled, now);
+        state.lifetime.invalidate(); state.lost_observed = true; state.stopping = true;
+        let cleanup_end = state.slot.as_ref().unwrap().cleanup_end.unwrap();
+        assert_eq!(cleanup_end, now + CLEANUP);
+        assert!(keyring_slot_gate(&state, &owner, Some(Step::SearchItems), now).is_err());
+        assert_eq!(keyring_slot_gate(&state, &owner, Some(Step::RemoveMatch), cleanup_end - Duration::from_nanos(1)), Ok(cleanup_end));
+        assert_eq!(keyring_slot_gate(&state, &owner, Some(Step::RemoveMatch), cleanup_end), Err(Problem::CleanupUnknown));
+        assert_eq!(keyring_slot_gate(&state, &owner, Some(Step::RemoveMatch), cleanup_end + Duration::from_nanos(1)), Err(Problem::CleanupUnknown));
+        state.slot.as_mut().unwrap().phase = Phase::Unknown;
+        assert_eq!(keyring_slot_gate(&state, &owner, Some(Step::RemoveMatch), now), Err(Problem::CleanupUnknown));
+        assert_eq!(state.slot.as_ref().unwrap().cleanup_end, Some(cleanup_end));
+        assert_eq!(owner.endpoint(), Some(now + WORK)); // checks never create/extend a lease
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn keyring_final_gate_rechecks_changes_after_stream_readiness() {
+        use crate::vault_keyring_linux::{LookupBook, Next, Problem, Step};
+        use std::sync::atomic::AtomicUsize;
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum Change { Cutoff, SlotUnknown, DocumentUnknown, OtherOriginal, AlreadyPolled }
+        struct DataCall { polls: Arc<AtomicUsize>, drops: Arc<AtomicUsize>, ready: Arc<AtomicBool> }
+        impl Future for DataCall {
+            type Output = zbus::Result<zbus::Message>;
+            fn poll(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<Self::Output> {
+                self.polls.fetch_add(1, Ordering::SeqCst);
+                if self.ready.load(Ordering::SeqCst) { Poll::Ready(Err(zbus::Error::InvalidReply)) } else { Poll::Pending }
+            }
+        }
+        impl Drop for DataCall { fn drop(&mut self) { self.drops.fetch_add(1, Ordering::SeqCst); } }
+        for change in [Change::Cutoff, Change::SlotUnknown, Change::DocumentUnknown, Change::OtherOriginal, Change::AlreadyPolled] {
+            let mut state = empty_state();
+            state.lifetime.crash_hook_installed(); state.lifetime.started(true); state.lifetime.finished(true);
+            let now = Instant::now(); let work_end = now + WORK;
+            let owner = OriginalWork::new(1, false, Weak::new()); owner.set_endpoint(Some(work_end));
+            let mut slot = Slot::new(owner.clone(), Operation::Prepare, None, None, None); slot.phase = Phase::Assessing;
+            state.slot = Some(slot);
+            let admitted_end = keyring_slot_gate(&state, &owner, Some(Step::RemoveMatch), now).unwrap();
+            assert_eq!(admitted_end, work_end);
+            let polls = Arc::new(AtomicUsize::new(0)); let drops = Arc::new(AtomicUsize::new(0));
+            let ready = Arc::new(AtomicBool::new(false));
+            *owner.keyring.lock().unwrap() = LookupBook::cleanup_data(admitted_end,
+                DataCall { polls: polls.clone(), drops: drops.clone(), ready: ready.clone() });
+            let mut cx = TaskContext::from_waker(Waker::noop());
+            {
+                let mut book = owner.keyring.lock().unwrap();
+                assert!(matches!(book.idle_data_turn(&mut cx), Poll::Ready(Next::FirstPoll)));
+                assert_eq!(polls.load(Ordering::SeqCst), 0); // Stream readiness is NOT permission to send.
+                if change == Change::AlreadyPolled {
+                    let gate = keyring_poll_gate(&state, &owner, &book, now);
+                    book.first_poll(&mut cx, gate);
+                    assert_eq!(polls.load(Ordering::SeqCst), 1);
+                }
+            }
+            // Change the ACTUAL slot after stream readiness, before final gate.
+            // This is the rejected SOURCE01 interleaving, not a replacement gate
+            // model or a fake live DBus/SDK task-settlement receipt.
+            let mut gate_at = now;
+            match change {
+                Change::Cutoff => {
+                    state.slot.as_mut().unwrap().stop(Reason::UserCancelled, now);
+                    gate_at = state.slot.as_ref().unwrap().cleanup_end.unwrap();
+                    assert_eq!(gate_at, now + CLEANUP); assert!(gate_at < admitted_end);
+                }
+                Change::SlotUnknown | Change::AlreadyPolled => {
+                    let slot = state.slot.as_mut().unwrap(); slot.stop(Reason::UserCancelled, now);
+                    slot.phase = Phase::Unknown; slot.settlement = Settlement::Unknown;
+                }
+                Change::DocumentUnknown => state.unknown = true,
+                Change::OtherOriginal => {
+                    // Same numeric ID cannot stand in for the original Arc.
+                    state.slot.as_mut().unwrap().owner = OriginalWork::new(owner.id, false, Weak::new());
+                }
+            }
+            let mut book = owner.keyring.lock().unwrap();
+            let gate = keyring_poll_gate(&state, &owner, &book, gate_at);
+            assert_eq!(gate, Err(if change == Change::OtherOriginal { Problem::Interrupted } else { Problem::CleanupUnknown }));
+            if change == Change::AlreadyPolled {
+                // The final gate now denies every NEW call, but an already-polled
+                // original bypasses re-admission and remains owned until Ready.
+                book.interrupt();
+                assert!(book.idle_data_turn(&mut cx).is_pending());
+                assert_eq!(polls.load(Ordering::SeqCst), 2); assert_eq!(drops.load(Ordering::SeqCst), 0);
+                ready.store(true, Ordering::SeqCst);
+                assert!(book.idle_data_turn(&mut cx).is_pending());
+                assert_eq!(polls.load(Ordering::SeqCst), 3); assert_eq!(drops.load(Ordering::SeqCst), 1);
+                assert!(book.idle_data_turn(&mut cx).is_pending()); // Keep the original failure, not success.
+            } else {
+                book.first_poll(&mut cx, gate);
+                assert_eq!(polls.load(Ordering::SeqCst), 0); assert_eq!(drops.load(Ordering::SeqCst), 1);
+            }
+            assert!(book.cleanup_unknown() && !book.resources_settled());
+            assert_eq!(owner.endpoint(), Some(work_end));
+        }
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn unstarted_keyring_preserves_session_predicate_but_entered_sdk_never_grants_finality() {
+        // Existing DATA-only receipts exercise the predicate, not native joins.
+        // The newly retained Builder future is NEVER polled or connected here.
+        let owner = OriginalWork::new(1, false, Weak::new());
+        owner.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+        assert!(owner.original_resources_settled());
+        let input = crate::vault_keyring_linux::LookupInput::new(std::path::Path::new("/synthetic/never-opened/bus"),
+            "/collection", "reserved-vault", "reserved-generation").unwrap();
+        owner.keyring.lock().unwrap().begin(input, Instant::now() + WORK).unwrap();
+        assert!(!owner.original_resources_settled());
+        owner.stop(); owner.set_endpoint(Some(Instant::now()));
+        owner.coordinator.lock().unwrap().receipt = JoinReceipt::Failed;
+        assert!(!owner.original_resources_settled());
+        assert!(owner.keyring.lock().unwrap().started());
     }
 }
