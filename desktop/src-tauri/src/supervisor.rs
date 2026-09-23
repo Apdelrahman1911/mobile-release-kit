@@ -1185,11 +1185,15 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         let observing_inner = inner.clone();
         let observing_key = owner.key;
         let observing_stop = owner.stop.subscribe();
+        // Same joined acquisition and retained Child. A failed nonblocking
+        // projection leaves only generic diagnostics, never a new authority.
+        let observing_payload_history = resources.passive.as_ref().and_then(|native|
+            native.try_lock().ok().and_then(|slots| slots.historical_payload_snapshot()));
         let (release, enter) = oneshot::channel();
         resources.native_observation_return = Some(ManagementJoin::Pending);
         resources.native_observation = Some(tokio::task::spawn_blocking(move || {
             enter.blocking_recv().map_err(|_| installed_native_fixture::ObservationFailure::Entry)?;
-            installed_native_fixture::observe_original_child(id, observing_key, endpoint, observing_stop, &observing_inner, observed_case)
+            installed_native_fixture::observe_original_child(id, observing_key, endpoint, observing_stop, &observing_inner, observed_case, observing_payload_history)
         }));
         let _ = release.send(());
         let result = join_slot(&mut resources.native_observation).await;
@@ -1365,6 +1369,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
 mod installed_native_fixture {
     use super::*;
+    use crate::installed_runtime::{HistoricalPayloadRole, HistoricalPayloadSnapshot};
     use std::{fs, io::{Read, Write}, os::unix::fs::{MetadataExt, OpenOptionsExt}, path::{Path, PathBuf}};
     use rustix::process::{getrlimit, setrlimit, Resource, Rlimit};
 
@@ -2135,6 +2140,7 @@ mod installed_native_fixture {
     pub(super) enum MapRefusal {
         Utf8, Newline, Row, Columns, Address, Order, Permissions, Offset, Device, Inode,
         ExecutableAnonymous, ExecutablePseudo, ExecutableFile, ExecutablePublicPath(u16),
+        ExecutableHistoricalPayload(HistoricalPayloadRole),
         Metadata(MapRole, MapMetadataRefusal), Duplicate(MapRole),
     }
     impl MapRefusal {
@@ -2147,6 +2153,10 @@ mod installed_native_fixture {
                 Self::ExecutablePseudo => b"map-x-pseudo", Self::ExecutableFile => b"map-x-file",
                 Self::ExecutablePublicPath(index) => PUBLIC_MAP_PATH_CANDIDATES.get(usize::from(index))
                     .map_or(Self::ExecutableFile.token(), |(_, token)| *token),
+                Self::ExecutableHistoricalPayload(role) => match role {
+                    HistoricalPayloadRole::Python => b"map-x-hist-py", HistoricalPayloadRole::Ssl => b"map-x-hist-ss",
+                    HistoricalPayloadRole::Crypto => b"map-x-hist-cr",
+                },
                 Self::Metadata(role, reason) => role.diagnostic_tokens()[match reason {
                     MapMetadataRefusal::Stat => 0, MapMetadataRefusal::Type => 1, MapMetadataRefusal::Owner => 2,
                     MapMetadataRefusal::Links => 3, MapMetadataRefusal::Mode => 4, MapMetadataRefusal::Inode => 5,
@@ -2202,6 +2212,14 @@ mod installed_native_fixture {
             .and_then(|index| u16::try_from(index).ok())
             .map_or(MapRefusal::ExecutableFile, MapRefusal::ExecutablePublicPath)
     }
+    fn historical_executable_file_refusal(refusal: MapRefusal, historical: Option<HistoricalPayloadSnapshot>,
+        major: u64, minor: u64, inode: u64) -> MapRefusal {
+        // The original refused row only; public spelling tokens keep precedence.
+        // Equality to a closed admission-time tuple does NOT prove live content.
+        if refusal != MapRefusal::ExecutableFile { return refusal; }
+        historical.and_then(|data| data.matching_role(major, minor, inode))
+            .map_or(refusal, MapRefusal::ExecutableHistoricalPayload)
+    }
     fn role(path: &str) -> Option<MapRole> {
         for (role, suffix) in [(MapRole::Python, "/python/bin/python3"), (MapRole::Ssl, "/python/lib/libssl.so.3"),
             (MapRole::Crypto, "/python/lib/libcrypto.so.3")] {
@@ -2237,7 +2255,7 @@ mod installed_native_fixture {
     fn complete_mappings(found: BTreeMap<&'static str, (Mapping, bool)>) -> Option<Vec<Mapping>> {
         if found.len() == 6 && found.values().all(|(_, code)| *code) { Some(found.into_values().map(|(row, _)| row).collect()) } else { None }
     }
-    fn mappings(raw: &[u8]) -> Result<Option<Vec<Mapping>>, MapRefusal> {
+    fn mappings(raw: &[u8], historical: Option<HistoricalPayloadSnapshot>) -> Result<Option<Vec<Mapping>>, MapRefusal> {
         let text = std::str::from_utf8(raw).map_err(|_| MapRefusal::Utf8)?;
         need(text.is_empty() || text.ends_with('\n')).map_err(|_| MapRefusal::Newline)?;
         let mut found = BTreeMap::new();
@@ -2267,7 +2285,7 @@ mod installed_native_fixture {
                     if path.is_empty() { MapRefusal::ExecutableAnonymous } else { MapRefusal::ExecutablePseudo })?;
                 continue;
             }
-            let Some(role) = role(path) else { need(!executable).map_err(|_| executable_file_refusal(path))?; continue; };
+            let Some(role) = role(path) else { need(!executable).map_err(|_| historical_executable_file_refusal(executable_file_refusal(path), historical, major, minor, inode))?; continue; };
             let st = fs::metadata(path).map_err(|_| MapRefusal::Metadata(role, MapMetadataRefusal::Stat))?;
             check_map_metadata(MapMetadata { regular: st.is_file(), uid: st.uid(), gid: st.gid(), links: st.nlink(), mode: st.mode(),
                 inode: st.ino(), major: nix::sys::stat::major(st.dev()), minor: nix::sys::stat::minor(st.dev()) }, inode, major, minor)
@@ -2277,11 +2295,14 @@ mod installed_native_fixture {
         }
         Ok(complete_mappings(found))
     }
-    #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
+    #[cfg(all(debug_assertions, any(all(feature = "desktop-shell", feature = "custom-protocol"),
+        all(not(feature = "desktop-shell"), not(feature = "custom-protocol")))))]
     pub(super) fn assert_mappings_diagnostic_contract() {
         // Explicit-call DATA only. These parser inputs have no recognized file
         // paths, so no filesystem, /proc reader or native worker is invoked.
         use MapRefusal as R;
+        let mappings = |raw: &[u8]| self::mappings(raw, None);
+        crate::installed_runtime::assert_historical_payload_diagnostic_contract();
         let failures: &[(&[u8], R)] = &[
             (b"\xff", R::Utf8), (b"x", R::Newline), (b"\n", R::Row),
             (b"1-2 r--p 0 00:00\n", R::Columns), (b"x r--p 0 00:00 0\n", R::Address),
@@ -2353,10 +2374,13 @@ mod installed_native_fixture {
             for reason in [M::Stat, M::Type, M::Owner, M::Links, M::Mode, M::Inode, M::Device] { tokens.push(R::Metadata(role, reason).token()); }
             tokens.push(R::Duplicate(role).token());
         }
-        assert_eq!(tokens.len(), 61);
+        for role in [HistoricalPayloadRole::Python, HistoricalPayloadRole::Ssl, HistoricalPayloadRole::Crypto] {
+            tokens.push(R::ExecutableHistoricalPayload(role).token());
+        }
+        assert_eq!(tokens.len(), 64);
         assert!(tokens.iter().all(|token| !token.is_empty() && token.len() <= 14
             && token.iter().all(|byte| byte.is_ascii_lowercase() || *byte == b'-')));
-        tokens.sort(); tokens.dedup(); assert_eq!(tokens.len(), 61);
+        tokens.sort(); tokens.dedup(); assert_eq!(tokens.len(), 64);
 
         // Every new parser row is role(None): no existing metadata or /proc read.
         assert_eq!(PUBLIC_MAP_PATH_CANDIDATES.len(), 648);
@@ -2401,12 +2425,45 @@ mod installed_native_fixture {
             assert_eq!(executable_file_refusal(path), R::ExecutableFile);
             assert_eq!(mappings(format!("1-2 r-xp 0 00:00 0 {path}\n").as_bytes()), Err(R::ExecutableFile));
         }
+        // Complete synthetic historical DATA; these unrecognized spellings
+        // never reach metadata lookup and no path/tuple is exported by a token.
+        let history = Some(HistoricalPayloadSnapshot::for_contract([(8, 1, 11), (8, 1, 22), (8, 1, 33)]));
+        for (inode, role) in [(11, HistoricalPayloadRole::Python), (22, HistoricalPayloadRole::Ssl), (33, HistoricalPayloadRole::Crypto)] {
+            assert_eq!(self::mappings(format!("1-2 r-xp 0 08:01 {inode} /unrecognized (deleted)\n").as_bytes(), history),
+                Err(R::ExecutableHistoricalPayload(role)));
+        }
+        for row in ["1-2 r-xp 0 09:01 11 /unrecognized\n", "1-2 r-xp 0 08:02 11 /unrecognized\n",
+            "1-2 r-xp 0 08:01 12 /unrecognized\n", "1-2 r-xp 0 08:01 0 /unrecognized\n"] {
+            assert_eq!(self::mappings(row.as_bytes(), history), Err(R::ExecutableFile));
+        }
+        let same_row = b"1-2 r-xp 0 08:01 11 /unrecognized\n";
+        assert_eq!(self::mappings(same_row, None), Err(R::ExecutableFile));
+        let ambiguous = Some(HistoricalPayloadSnapshot::for_contract([(8, 1, 11), (8, 1, 11), (8, 1, 33)]));
+        assert_eq!(self::mappings(same_row, ambiguous), Err(R::ExecutableFile));
+        let zero = Some(HistoricalPayloadSnapshot::for_contract([(8, 1, 0), (8, 1, 22), (8, 1, 33)]));
+        assert_eq!(self::mappings(b"1-2 r-xp 0 08:01 0 /unrecognized\n", zero), Err(R::ExecutableFile));
+        assert_eq!(self::mappings(b"1-2 r--p 0 08:01 11 /unrecognized\n", history), Ok(None));
+        assert_eq!(self::mappings(b"1-2 r-xp 0 08:01 11\n", history), Err(R::ExecutableAnonymous));
+        assert_eq!(self::mappings(b"1-2 r-xp 0 08:01 11 [heap]\n", history), Err(R::ExecutablePseudo));
+        let public = format!("1-2 r-xp 0 08:01 11 {}\n", PUBLIC_MAP_PATH_CANDIDATES[0].0);
+        assert_eq!(self::mappings(public.as_bytes(), history), Err(R::ExecutablePublicPath(0)));
+        let mut earlier = b"x r-xp 0 08:01 11 /unrecognized\n".to_vec(); earlier.extend_from_slice(same_row);
+        assert_eq!(self::mappings(&earlier, history), Err(R::Address));
+        let mut later = same_row.to_vec(); later.extend_from_slice(b"x r-xp 0 08:01 11 /unrecognized\n");
+        assert_eq!(self::mappings(&later, history), Err(R::ExecutableHistoricalPayload(HistoricalPayloadRole::Python)));
+        let mut first_generic = b"1-2 r-xp 0 08:01 99 /unrecognized\n".to_vec(); first_generic.extend_from_slice(same_row);
+        assert_eq!(self::mappings(&first_generic, history), Err(R::ExecutableFile));
     }
-    fn child_snapshot(id: u32, end: Instant, stop: &watch::Receiver<bool>) -> Result<Option<ChildObservation>, ObservationFailure> {
+    #[cfg(all(debug_assertions, not(feature = "desktop-shell"), not(feature = "custom-protocol")))]
+    #[test]
+    fn historical_payload_mapping_diagnostic_is_only_data() {
+        assert_mappings_diagnostic_contract();
+    }
+    fn child_snapshot(id: u32, end: Instant, stop: &watch::Receiver<bool>, historical: Option<HistoricalPayloadSnapshot>) -> Result<Option<ChildObservation>, ObservationFailure> {
         need(id > 0).map_err(|_| ObservationFailure::ChildId)?;
         while live(end, stop) {
             let raw = original_bytes(Path::new(&format!("/proc/{id}/maps")), 1 << 20, false).map_err(|_| ObservationFailure::MapsRead)?;
-            if let Some(maps) = mappings(&raw).map_err(ObservationFailure::MapsCheck)? {
+            if let Some(maps) = mappings(&raw, historical).map_err(ObservationFailure::MapsCheck)? {
                 let mut environment = original_bytes(Path::new(&format!("/proc/{id}/environ")), 8192, false)
                     .map_err(|_| ObservationFailure::EnvironmentRead)?;
                 let clear = environment.last() == Some(&0) && {
@@ -2458,10 +2515,11 @@ mod installed_native_fixture {
         written?;
         Ok(root.join("passive-release"))
     }
-    pub(super) fn observe_original_child(id: u32, _key: u64, end: Instant, stop: watch::Receiver<bool>, inner: &Inner, case: Case)
+    pub(super) fn observe_original_child(id: u32, _key: u64, end: Instant, stop: watch::Receiver<bool>, inner: &Inner, case: Case,
+        historical: Option<HistoricalPayloadSnapshot>)
         -> Result<Vec<ChildObservation>, ObservationFailure> {
         let mut snapshots = Vec::new();
-        let Some(first) = child_snapshot(id, end, &stop)? else { return Ok(snapshots); };
+        let Some(first) = child_snapshot(id, end, &stop, historical)? else { return Ok(snapshots); };
         snapshots.push(first);
         match case {
             #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
@@ -2479,7 +2537,7 @@ mod installed_native_fixture {
                 while live(end, &stop) {
                     let value = original_bytes(&release, 32, true).map_err(|_| ObservationFailure::HoldRefused)?;
                     if value.as_slice() == b"release\n" {
-                        if let Some(second) = child_snapshot(id, end, &stop)? { snapshots.push(second); }
+                        if let Some(second) = child_snapshot(id, end, &stop, historical)? { snapshots.push(second); }
                         return Ok(snapshots);
                     }
                     need(value.as_slice() == b"pending\n").map_err(|_| ObservationFailure::HoldRefused)?;

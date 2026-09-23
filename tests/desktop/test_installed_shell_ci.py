@@ -1857,7 +1857,7 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         literals = {value.encode("ascii") for value in re.findall(r'=> b"([a-z-]+)"', workers + native)}
         maps = supervisor.split("impl MapRole {", 1)[1].split("impl ObservationFailure {", 1)[0]
         map_tokens = tuple(value.encode("ascii") for value in re.findall(r'b"(map-[a-z-]+)"', maps))
-        self.assertEqual((len(map_tokens), len(set(map_tokens))), (61, 61))
+        self.assertEqual((len(map_tokens), len(set(map_tokens))), (64, 64))
         self.assertTrue(all(re.fullmatch(rb"[a-z-]{1,14}", token) for token in map_tokens))
         public_table = supervisor.split("    static PUBLIC_MAP_PATH_CANDIDATES: [(&str, &[u8]); 648] = [\n", 1)[1].split("    ];\n", 1)[0]
         public_rows = re.findall(r'^        \("([^"]+)", b"(map-x-[a-z]{2})"\),$', public_table, re.MULTILINE)
@@ -1882,9 +1882,10 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertTrue(set(public_paths).isdisjoint(accepted))
         role = supervisor.split("    fn role(path: &str) -> Option<MapRole> {", 1)[1].split("    #[derive(Clone, Copy)]", 1)[0]
         self.assertEqual(hashlib.sha256(role.encode()).hexdigest(), "aa4101e33f69e2bff0480a304a86c1a7923f82a0592f49de4b329b927b1c18dc")
-        parser = supervisor.split("    fn mappings(raw: &[u8]) -> Result<Option<Vec<Mapping>>, MapRefusal> {", 1)[1].split(
-            '    #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]', 1)[0]
-        refusal = "need(!executable).map_err(|_| executable_file_refusal(path))?"
+        parser = supervisor.split("    fn mappings(raw: &[u8], historical: Option<HistoricalPayloadSnapshot>) -> Result<Option<Vec<Mapping>>, MapRefusal> {", 1)[1].split(
+            '    #[cfg(all(debug_assertions, any(all(feature = "desktop-shell", feature = "custom-protocol"),\n'
+            '        all(not(feature = "desktop-shell"), not(feature = "custom-protocol")))))]', 1)[0]
+        refusal = "need(!executable).map_err(|_| historical_executable_file_refusal(executable_file_refusal(path), historical, major, minor, inode))?"
         self.assertEqual(parser.count(refusal), 1)
         self.assertEqual(hashlib.sha256(parser.replace(refusal, "need(!executable).map_err(|_| MapRefusal::ExecutableFile)?").encode()).hexdigest(),
                          "6b884ac9df8f44c52c96a34f926445e11f18564946f4f126e600afbab94d24fe")

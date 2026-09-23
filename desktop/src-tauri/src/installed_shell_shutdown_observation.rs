@@ -390,6 +390,7 @@ mod session {
         let mut resources = Resources::default();
         for (failure, token) in [(F::ChildId,b"child-id".as_slice()), (F::Entry,b"observe-entry"), (F::MapsRead,b"maps-read"),
             (F::MapsCheck(R::Newline),b"map-p-nl"), (F::MapsCheck(R::Metadata(MapRole::Crypto, M::Owner)),b"map-m-owner-cr"),
+            (F::MapsCheck(R::ExecutableHistoricalPayload(crate::installed_runtime::HistoricalPayloadRole::Python)),b"map-x-hist-py"),
             (F::EnvironmentRead,b"env-read"), (F::EnvironmentCheck,b"env-check"), (F::HoldRefused,b"hold-refused")] {
             resources.native_observation_failure = Some(failure);
             assert!(WorkerProjection::stored(&resources).token() == token && token.len() <= 14);

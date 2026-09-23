@@ -3810,6 +3810,7 @@ class FailureLabelSinkContracts(unittest.TestCase):
         self.assertEqual((len(L.SHELL_SESSION_PUBLIC_MAP_WORKERS), L.SHELL_SESSION_PUBLIC_MAP_WORKERS[0], L.SHELL_SESSION_PUBLIC_MAP_WORKERS[-1]),
                          (648, b"map-x-aa", b"map-x-yx"))
         for worker in (b"maps-check", b"map-p-nl", b"map-p-order", b"map-x-file", b"map-m-owner-cr", b"map-dup-py",
+                       b"map-x-hist-py", b"map-x-hist-ss", b"map-x-hist-cr",
                        *L.SHELL_SESSION_PUBLIC_MAP_WORKERS):
             raw = frame(b"supervisor-disabled", b"none", b"bound", b"cleanup.none.pp", worker)
             self.assertEqual(L._shell_label_pair(raw)["session"]["firstOrigin"], {
@@ -3840,7 +3841,9 @@ class FailureLabelSinkContracts(unittest.TestCase):
                 b"inspect-r", b"inspect-c-extra", b"future-c", b"maps-future", b"settle-unknownx", b"\xff",
                 b"map-p-future", b"map-m-time-py", b"map-m-owner-zz", b"map-m-owner-pyx", b"map-x-file\n/private/inert",
                 b"map-x-yy", b"map-x-zz", b"map-x-a", b"map-x-aaa", b"map-x-AA", b"map-x-aa ",
-                b"map-x-aa;extra=1", b"map-x-aa/path", b"map-x-aa\n/private/inert"))]
+                 b"map-x-aa;extra=1", b"map-x-aa/path", b"map-x-aa\n/private/inert",
+                 b"map-x-hist-zz", b"map-x-hist-pyx", b"map-x-hist-ss ", b"map-x-hist-cr;extra=1",
+                 b"map-x-hist-py\n/private/inert"))]
         for raw in bad_v2:
             with self.subTest(version="v2", raw=raw[:80]): self.assertIsNone(L._shell_label_pair(raw))
 

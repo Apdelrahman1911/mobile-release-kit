@@ -360,6 +360,8 @@ SHELL_SESSION_WORKERS = (
     # Historical maps-check above remains generic and distinguishable.
     b"map-p-utf", b"map-p-nl", b"map-p-row", b"map-p-cols", b"map-p-addr", b"map-p-order", b"map-p-perm", b"map-p-offset", b"map-p-dev", b"map-p-inode",
     b"map-x-anon", b"map-x-pseudo", b"map-x-file",
+    # Same refused row matches a historical admission tuple, NOT live content.
+    b"map-x-hist-py", b"map-x-hist-ss", b"map-x-hist-cr",
     b"map-m-stat-py", b"map-m-type-py", b"map-m-owner-py", b"map-m-links-py", b"map-m-mode-py", b"map-m-inode-py", b"map-m-dev-py", b"map-dup-py",
     b"map-m-stat-ss", b"map-m-type-ss", b"map-m-owner-ss", b"map-m-links-ss", b"map-m-mode-ss", b"map-m-inode-ss", b"map-m-dev-ss", b"map-dup-ss",
     b"map-m-stat-cr", b"map-m-type-cr", b"map-m-owner-cr", b"map-m-links-cr", b"map-m-mode-cr", b"map-m-inode-cr", b"map-m-dev-cr", b"map-dup-cr",
