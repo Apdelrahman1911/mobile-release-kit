@@ -441,13 +441,18 @@ pub(super) enum SessionCommand { Status, Open, Context, Choose, Prepare, Delete,
 impl SessionCommand { fn index(self) -> usize { self as usize } }
 #[derive(Default)]
 struct SessionReply { status: Option<Value>, error: Option<String> }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SessionPresentation { Native, DeadlineError }
+struct SessionSample {
+    snapshot: InstalledSessionSnapshot, presentation: SessionPresentation, display: Option<Value>,
+}
 struct SessionFile { id: u32, index: u8, kind: &'static str, select: bool, picker: Picker }
 struct SessionRecord {
     admission_issued: bool, admitted: bool, fixture: Option<SessionFixture>,
     diagnostic: Option<SessionDiagnostic>,
     draft: Option<Value>,
     requests: [u8;10], returns: [u8;10], base_requests: [u8;10], replies: [SessionReply;10],
-    before: Option<InstalledSessionSnapshot>, sampled: Option<InstalledSessionSnapshot>, remembered: Option<InstalledSessionSnapshot>,
+    before: Option<InstalledSessionSnapshot>, sampled: Option<SessionSample>, remembered: Option<InstalledSessionSnapshot>,
     replacement: Option<(String,u32,usize)>, files: Vec<SessionFile>,
     kind: &'static str, platform: &'static str, recipe_done: usize, captures: u8, captures_closed: u8,
     assessed: u8, kept: u8, assigned: u8, removed: u8, reassessed: bool, context_revoked: bool, replaced: bool,
@@ -476,7 +481,7 @@ fn session_field_names(kind: &str) -> &'static [&'static str] {
     match kind { "android-keystore" => &["storePassword","keyAlias","keyPassword"], "google-wif" => &["provider","serviceAccount"],
         "project-read-token" => &["token"], _ => &[] }
 }
-fn session_display(snapshot: &InstalledSessionSnapshot) -> Option<Value> {
+fn session_display(snapshot: &InstalledSessionSnapshot, presentation: SessionPresentation) -> Option<Value> {
     let status = &snapshot.status;
     let records: Option<Vec<_>> = status["records"].as_array()?.iter().enumerate().map(|(i,record)| {
         let kind = record["kind"].as_str()?;
@@ -502,9 +507,33 @@ fn session_display(snapshot: &InstalledSessionSnapshot) -> Option<Value> {
         serde_json::json!({"state":label(&assessment["state"])?,"fields":fields?,"assurance":["Native validation: not run","Service validation: not run","Release readiness: unknown"]})
     };
     Some(serde_json::json!({"mode":if status["mode"] == "session" { "Session open · no persistence" } else { "Session closed" },
-        "context":!status["context"].is_null() && !snapshot.lost,"records":records?,"review":review,"assessment":assessed,
+        // A rejected Prepare invalidates frontend observation trust even when
+        // the native context survives. Only its guarded Deadline step selects
+        // this presentation; a native reason/event alone is not that reply.
+        "context":!status["context"].is_null() && !snapshot.lost && presentation != SessionPresentation::DeadlineError,
+        "records":records?,"review":review,"assessment":assessed,
         "phase":operation.get("phase").cloned().unwrap_or(Value::Null),
         "settlement":operation.get("settlement").cloned().unwrap_or(Value::Null)}))
+}
+fn assert_session_display_contract() {
+    // Pure presentation DATA, not an original owner or native admission.
+    let mut snapshot = InstalledSessionSnapshot {
+        status: serde_json::json!({"mode":"session","context":{"revision":1},"records":[],
+            "operation":{"phase":"idle","settlement":"known","reason":"deadline","preview":null,"assessment":null}}),
+        owner:None, review_end:None, cleanup_end:None, work_end:None, payloads:Vec::new(), sources:Vec::new(),
+        settled:true, lost:false, bound:true, unknown:false, quit_pending:false, quit_declined:false, empty:true, first_failure:None,
+    };
+    let ordinary = session_display(&snapshot,SessionPresentation::Native).expect("ordinary session display");
+    assert_eq!(ordinary,serde_json::json!({"mode":"Session open · no persistence","context":true,"records":[],
+        "review":null,"assessment":null,"phase":"idle","settlement":"known"}));
+    let mut expected_error = ordinary.clone(); expected_error["context"] = Value::Bool(false);
+    let error = session_display(&snapshot,SessionPresentation::DeadlineError).expect("deadline error display");
+    assert_eq!(error,expected_error); // No other field is ignored or rewritten.
+    assert!(session_script(SessionStep::Deadline,"android-keystore","android",None,Some(&error),SessionPresentation::Native).is_none());
+    assert!(session_script(SessionStep::Deadline,"android-keystore","android",None,Some(&error),SessionPresentation::DeadlineError).is_some());
+    assert!(session_script(SessionStep::Loss,"android-keystore","android",None,Some(&error),SessionPresentation::DeadlineError).is_none());
+    snapshot.lost = true; snapshot.bound = false;
+    assert_eq!(session_display(&snapshot,SessionPresentation::Native),Some(expected_error));
 }
 fn session_action_command(action: SA) -> Option<SessionCommand> {
     match action { SA::Open => Some(SessionCommand::Open), SA::Platform(_) => Some(SessionCommand::Context),
@@ -4258,6 +4287,7 @@ impl Observation {
         let script={
             let Some(mut r)=self.record_at(Boundary::Settlement) else { return; };
             if r.pending.is_some() { return; }
+            let mut presentation=SessionPresentation::Native;
             match step {
                 SessionStep::Run(index,action) => {
                     if r.session.recipe_done!=usize::from(index) || self.case.session().and_then(|c| c.recipe().get(usize::from(index)))!=Some(&action) { self.session_fail(&mut r,SessionRejection::StepPendingInvariant); return; }
@@ -4302,8 +4332,13 @@ impl Observation {
                         && snapshot.status["operation"]["selectionToken"].is_null() && snapshot.status["operation"]["assessment"].is_null()
                         && snapshot.status["operation"]["reason"]=="document-lost" }
                         else { !snapshot.lost && snapshot.bound && snapshot.status["operation"]["reason"]=="deadline"
+                            && !snapshot.status["context"].is_null() && snapshot.status["context"]==before.status["context"]
+                            && snapshot.status["operation"]["assessment"].is_null()
                             && snapshot.cleanup_end==original_work.and_then(|end| end.checked_add(Duration::from_secs(2))) };
                     if !valid || snapshot.cleanup_end.is_none() || r.session.replies[SessionCommand::Prepare.index()].error.as_deref()!=Some(if step==SessionStep::Loss { "asset_document_lost" } else { "asset_deadline" }) { self.fail(); return; }
+                    // Select only after this same original's settled snapshot,
+                    // unchanged clocks and actual own Prepare rejection match.
+                    if step==SessionStep::Deadline { presentation=SessionPresentation::DeadlineError; }
                 },
                 SessionStep::Finality => {
                     if r.session.requests!=r.session.returns { return; }
@@ -4319,10 +4354,12 @@ impl Observation {
                 let Some(record)=snapshot.status["records"].get(usize::from(index)) else { self.fail(); return; };
                 Some(format!("Replace session item {} · revision {}",index+1,record["revision"].as_u64().unwrap_or(0)))
             } else { None };
-            let display=session_display(&snapshot);
-            let script=session_script(step,r.session.kind,r.session.platform,replacement.as_deref(),display.as_ref());
+            let display=session_display(&snapshot,presentation);
+            let script=session_script(step,r.session.kind,r.session.platform,replacement.as_deref(),display.as_ref(),presentation);
             if script.is_none() { self.session_fail(&mut r,SessionRejection::UnavailableScript); return; }
-            r.session.sampled=Some(snapshot); r.evaluations+=1; r.pending=Some(Pending::Session(step));
+            // Freeze the expected display with its original sample. A callback
+            // must not derive presentation from a newer status or reply.
+            r.session.sampled=Some(SessionSample { snapshot,presentation,display }); r.evaluations+=1; r.pending=Some(Pending::Session(step));
             if !self.failed.load(Ordering::SeqCst) {
                 r.session.diagnostic=SessionDiagnostic::sample(r.step,r.evaluations,r.session.diagnostic);
             }
@@ -4343,7 +4380,10 @@ impl Observation {
             self.session_wait(&mut r,wait); return;
         }
         if value["state"]!="ready" { self.session_fail(&mut r,SessionRejection::StepPendingInvariant); return; }
-        let Some(snapshot)=r.session.sampled.take() else { self.session_fail(&mut r,SessionRejection::StepPendingInvariant); return; };
+        let Some(SessionSample { snapshot,presentation,display })=r.session.sampled.take() else { self.session_fail(&mut r,SessionRejection::StepPendingInvariant); return; };
+        if (step==SessionStep::Deadline)!=(presentation==SessionPresentation::DeadlineError) {
+            self.session_fail(&mut r,SessionRejection::StepPendingInvariant); return;
+        }
         match step {
             SessionStep::Navigate => {
                 if !keys(value,&["state"]) { self.fail(); return; } r.step=Step::Session(SessionStep::Run(0,SA::Open));
@@ -4361,7 +4401,7 @@ impl Observation {
             },
             SessionStep::Read(index,action) => {
                 if !keys(value,&["state","display","controls"]) { self.fail(); return; }
-                if session_display(&snapshot).as_ref()!=value.get("display") { self.session_wait(&mut r,SessionWait::DisplayMismatch); return; }
+                if display.as_ref()!=value.get("display") { self.session_wait(&mut r,SessionWait::DisplayMismatch); return; }
                 let controls=&value["controls"];
                 let valid=match action {
                     SA::Kind(kind) => controls["kind"].as_str()==Some(kind)
@@ -4378,13 +4418,13 @@ impl Observation {
                 self.session_next(&mut r,index);
             },
             SessionStep::QuitPreserved => {
-                if !keys(value,&["state","display","controls"]) || session_display(&snapshot).as_ref()!=value.get("display") {
+                if !keys(value,&["state","display","controls"]) || display.as_ref()!=value.get("display") {
                     self.session_wait(&mut r,SessionWait::DisplayMismatch); return;
                 }
                 r.session.quit_preserved=true; let index=r.session.recipe_done as u8; self.session_next(&mut r,index);
             },
             SessionStep::Loss | SessionStep::Deadline => {
-                if !keys(value,&["state","display","controls"]) || session_display(&snapshot).as_ref()!=value.get("display") {
+                if !keys(value,&["state","display","controls"]) || display.as_ref()!=value.get("display") {
                     self.session_wait(&mut r,SessionWait::DisplayMismatch); return;
                 }
                 if step==SessionStep::Loss { r.session.loss=true; r.session.loss_rendered=true; } else { r.session.deadline=true; }
@@ -4530,7 +4570,8 @@ impl Observation {
     }
 }
 
-fn session_script(step: SessionStep, kind: &str, platform: &str, replacement: Option<&str>, expected_display: Option<&Value>) -> Option<String> {
+fn session_script(step: SessionStep, kind: &str, platform: &str, replacement: Option<&str>, expected_display: Option<&Value>, presentation: SessionPresentation) -> Option<String> {
+    if (step==SessionStep::Deadline)!=(presentation==SessionPresentation::DeadlineError) { return None; }
     let body=match step {
         SessionStep::Navigate=>r#"const b=document.querySelector('nav[aria-label="Workspace navigation"] button[aria-label="Credentials"]');
             if(!b||b.disabled)return {state:'wait'};show(b);b.click();return {state:'ready'};"#.to_owned(),
@@ -4600,11 +4641,20 @@ fn session_script(step: SessionStep, kind: &str, platform: &str, replacement: Op
             window.location.reload();return {state:'ready'};"#.into(),
         SessionStep::Read(..) | SessionStep::QuitPreserved | SessionStep::Deadline | SessionStep::Loss=>{
             let expected=serde_json::to_string(expected_display?).ok()?;
+            let deadline=if presentation==SessionPresentation::DeadlineError { r#"const contexts=[...p.querySelectorAll('.session-context')].filter(c=>text(c.querySelector('h3'))==='Release context');
+                if(contexts.length!==1)throw 0;const badges=contexts[0].querySelectorAll(':scope > .inline-heading > .badge');
+                if(badges.length!==1||text(badges[0])!=='Context not current')return {state:'wait'};show(badges[0]);
+                const alerts=p.querySelectorAll(':scope > .notice-danger[role="alert"]');if(alerts.length!==1)return {state:'wait'};
+                const codes=alerts[0].querySelectorAll('.error-code'),titles=alerts[0].querySelectorAll('strong');
+                if(codes.length!==1||titles.length!==1||text(codes[0])!=='asset_deadline'||text(titles[0])!=='The session action was not confirmed')return {state:'wait'};
+                show(alerts[0]);show(codes[0]);show(titles[0]);
+                if(p.querySelector('.session-review,.session-assessment')||[...p.querySelectorAll('button')].some(b=>['Keep for this session','Assign to this context','Remove session copy'].includes(text(b))))return {state:'wait'};
+                const recovery=button('Check session status',p);if(!recovery||recovery.disabled)return {state:'wait'};show(recovery);"# } else { "" };
             let loss=if step==SessionStep::Loss { r#"const old=window.__mrkInstalledSessionButton;
                 if(!old||old.label!=='loss-discard'||!(old.button instanceof HTMLButtonElement)||!p.querySelector('.notice-warning'))throw 0;
                 if(old.button.isConnected&&!old.button.disabled)throw 0;old.button.click();delete window.__mrkInstalledSessionButton;"# } else { "" };
             format!(r#"const p=panel(),display=readDisplay();if(!equal(display,{expected}))return {{state:'wait'}};
-                const controls=readControls();{loss}return {{state:'ready',display,controls}};"#)
+                {deadline}const controls=readControls();{loss}return {{state:'ready',display,controls}};"#)
         }, _=>return None,
     };
     // Session selects explicitly use untrusted standard DOM change events;
@@ -5421,6 +5471,7 @@ pub(crate) fn main() -> std::process::ExitCode {
         crate::runtime::assert_installed_session_selection_contract();
         crate::asset_session::assert_installed_session_owner_contract();
         assert_session_recipe_contract();
+        assert_session_display_contract();
     }
     if case == Case::Positive {
         crate::asset_session::assert_project_selection_gate_contract();
