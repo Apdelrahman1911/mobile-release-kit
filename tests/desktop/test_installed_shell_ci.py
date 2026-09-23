@@ -1859,7 +1859,40 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         map_tokens = tuple(value.encode("ascii") for value in re.findall(r'b"(map-[a-z-]+)"', maps))
         self.assertEqual((len(map_tokens), len(set(map_tokens))), (61, 61))
         self.assertTrue(all(re.fullmatch(rb"[a-z-]{1,14}", token) for token in map_tokens))
-        self.assertEqual(literals | set(map_tokens) | {b"maps-check"}, set(lifecycle.SHELL_SESSION_WORKERS))
+        public_table = supervisor.split("    static PUBLIC_MAP_PATH_CANDIDATES: [(&str, &[u8]); 648] = [\n", 1)[1].split("    ];\n", 1)[0]
+        public_rows = re.findall(r'^        \("([^"]+)", b"(map-x-[a-z]{2})"\),$', public_table, re.MULTILINE)
+        self.assertEqual(public_table.splitlines(), [f'        ("{path}", b"{token}"),' for path, token in public_rows])
+        public_paths = [path for path, _ in public_rows]
+        public_tokens = tuple(token.encode("ascii") for _, token in public_rows)
+        self.assertEqual((len(public_rows), len(set(public_tokens))), (648, 648))
+        self.assertEqual(public_paths, sorted(set(public_paths)))
+        self.assertTrue(all(path.isascii() and path.isprintable() and
+                            (path == "/bin/sh" or path.startswith(("/usr/bin/", "/usr/lib/"))) for path in public_paths))
+        self.assertEqual((max(map(len, public_paths)), sum(map(len, public_paths))), (87, 29840))
+        self.assertEqual(public_tokens, tuple(b"map-x-" + bytes([97 + index // 26, 97 + index % 26]) for index in range(648)))
+        canonical = b"".join(token + b"\t" + path.encode("ascii") + b"\n" for path, token in zip(public_paths, public_tokens))
+        self.assertEqual(hashlib.sha256(canonical).hexdigest(), "bf18de45262438226bbc80a1cc8a3c078821b4a1dc88ec16a00961c05c990710")
+        self.assertEqual(public_tokens, lifecycle.SHELL_SESSION_PUBLIC_MAP_WORKERS)
+        self.assertTrue(set(public_tokens).isdisjoint(map_tokens))
+        version = "/var/lib/mobile-release-kit/versions/x86_64-unknown-linux-gnu/e3375ff140d69df54b2445f756711e0245d397ba6ded76e8559732ec2e4e3801"
+        accepted = {version + suffix for suffix in ("/python/bin/python3", "/python/lib/libssl.so.3", "/python/lib/libcrypto.so.3")}
+        accepted.update(prefix + name for prefix in ("/usr/lib/x86_64-linux-gnu/", "/lib/x86_64-linux-gnu/")
+                        for name in ("ld-linux-x86-64.so.2", "libc.so.6", "libm.so.6"))
+        accepted.add("/lib64/ld-linux-x86-64.so.2")
+        self.assertTrue(set(public_paths).isdisjoint(accepted))
+        role = supervisor.split("    fn role(path: &str) -> Option<MapRole> {", 1)[1].split("    #[derive(Clone, Copy)]", 1)[0]
+        self.assertEqual(hashlib.sha256(role.encode()).hexdigest(), "aa4101e33f69e2bff0480a304a86c1a7923f82a0592f49de4b329b927b1c18dc")
+        parser = supervisor.split("    fn mappings(raw: &[u8]) -> Result<Option<Vec<Mapping>>, MapRefusal> {", 1)[1].split(
+            '    #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]', 1)[0]
+        refusal = "need(!executable).map_err(|_| executable_file_refusal(path))?"
+        self.assertEqual(parser.count(refusal), 1)
+        self.assertEqual(hashlib.sha256(parser.replace(refusal, "need(!executable).map_err(|_| MapRefusal::ExecutableFile)?").encode()).hexdigest(),
+                         "6b884ac9df8f44c52c96a34f926445e11f18564946f4f126e600afbab94d24fe")
+        lookup = supervisor.split("    fn executable_file_refusal(path: &str) -> MapRefusal {", 1)[1].split("    fn role(", 1)[0]
+        self.assertIn(".position(|(candidate, _)| path == *candidate)", lookup)
+        for forbidden in ("fs::", "original_bytes", "/proc/", "read_link", "canonicalize", "trim", "format!", "to_owned", ".await", "Instant::now"):
+            self.assertNotIn(forbidden, lookup)
+        self.assertEqual(literals | set(map_tokens) | set(public_tokens) | {b"maps-check"}, set(lifecycle.SHELL_SESSION_WORKERS))
         self.assertEqual(len(lifecycle.SHELL_SESSION_WORKERS), len(set(lifecycle.SHELL_SESSION_WORKERS)))
         self.assertIn("installed_native_fixture::assert_mappings_diagnostic_contract();", query_source)
         stages = re.findall(r'WorkerStage::[A-Za-z]+ => join.token\(b"([a-z]+)-c", b"\1-x", b"\1-f"\)', workers)
