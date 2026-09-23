@@ -13,7 +13,7 @@ use crate::{asset_session::{DocumentBinding, InstalledMacProjectWitness, Install
     edit_owner::{EditOwner, InstalledConfigFinality, InstalledMacReviewWitness}, edit_protocol::{self as edit, ConfigEditStatus, EditProjection},
     error::BridgeError, supervisor::Supervisor};
 use super::owned_macos::observation::{observed_panel, observe_panel_action, prepare_open_input,
-    ObservedPanel, OpenAction, OpenActionBody, OpenProgress, OpenRelease, PanelAction, PreparedOpenInput};
+    ObservedPanel, OpenAction, OpenActionBody, OpenRecheckBody, OpenProgress, OpenRelease, PanelAction, PreparedOpenInput};
 
 // Closed public categories only. The first winner is published before failure;
 // no Record lock, native call, path, or arbitrary error text enters this latch.
@@ -215,16 +215,41 @@ fn native_proof_value(p: mrk_macos_installed_native::IdentityBinding) -> Value {
             "panelIdentifier":c[4],"parentSingleton":c[5],"noNestedSheet":c[6],"nativeChild":c[7],
             "nativeParent":c[8],"nativeRole":c[9],"stableIdentifier":c[10],"finalEligibility":c[11]}})
 }
-fn confirm_proof_value(p: mrk_macos_installed_native::PanelConfirmProof) -> Value {
+fn prompt_button_value(p: mrk_macos_installed_native::PromptButtonProof) -> Value {
     let c = p.checks;
-    json!({"returned":true,"attempted":p.attempted,
-        "checks":{"eligible":c[0],"openPanel":c[1],"capability":c[2],"confirmAllowed":c[3],
-            "stableOriginal":c[4]},"site":p.site,"error":p.error})
+    json!({"checks":{"parentBound":c[0],"sheetBound":c[1],"completeSearch":c[2],"uniqueButton":c[3],
+        "enabled":c[4],"pressAdvertised":c[5],"finalRecheck":c[6]},"calls":p.calls,"nodes":p.nodes,
+        "cfSlots":p.cf_slots,"cfSlotsRetired":p.cf_slots_retired,"cleanupReturned":p.cleanup_returned,"axError":p.ax_error})
 }
 struct OpenActionReceipt { token: OpenAction, body: OpenActionBody, returned_at: Instant }
+struct OpenRecheckReceipt { token: OpenAction, stage: u32, body: OpenRecheckBody, returned_at: Instant }
+struct OpenRecheckSlot {
+    receipt: std::sync::mpsc::Receiver<OpenRecheckReceipt>,
+    dispatched: bool, uncertain: bool, returned: Option<OpenRecheckReceipt>,
+}
+impl OpenRecheckSlot {
+    fn settled(&self, token: &OpenAction, stage: u32, end: Instant) -> bool {
+        !self.uncertain && if self.dispatched {
+            self.returned.as_ref().is_some_and(|r| token.same(&r.token) && r.stage == stage
+                && r.returned_at < end && r.body.custody_known())
+        } else { self.returned.is_none() }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OpenWorkerReturn { Body, NoGo, ChannelClosed, Panicked }
+fn worker_retirement_ready(worker: Option<OpenWorkerReturn>, same_receipt: bool,
+    rechecks_settled: Option<bool>, body_known: bool, state: &str) -> bool {
+    worker == Some(OpenWorkerReturn::Body) && same_receipt && rechecks_settled == Some(true)
+        && body_known && state == "returned"
+}
 struct OpenFlight {
     input: PreparedOpenInput, token: OpenAction,
     receipt: std::sync::mpsc::Receiver<OpenActionReceipt>, returned: Option<OpenActionReceipt>,
+    go: Option<std::sync::mpsc::SyncSender<Option<Instant>>>,
+    worker: Option<std::thread::JoinHandle<OpenWorkerReturn>>, worker_returned: Option<OpenWorkerReturn>,
+    // Only the worker acquires this during the armed allowance. Main sends
+    // actual-body receipts without its lock; relay inspects only AFTER join.
+    rechecks: Arc<Mutex<[OpenRecheckSlot; 2]>>,
     baseline: FailureSnapshot,
 }
 #[derive(Clone, Copy)]
@@ -232,19 +257,20 @@ struct OpenInputSample {
     id: u32, prepared: bool, requested: bool, dispatch_attempted: bool, state: &'static str,
     entered: Option<bool>, native_entered: Option<bool>, returned: bool, joined: bool, retired: bool,
     expired: bool, timely: Option<bool>, custody_known: Option<bool>,
-    attempted: Option<bool>, confirm_returned: Option<bool>, triggered: Option<bool>,
+    attempted: Option<bool>, press_returned: Option<bool>, triggered: Option<bool>,
+    worker_registered: bool, worker_joined: bool, rechecks_settled: Option<bool>,
     diagnostic: Option<mrk_macos_installed_native::OpenDiagnostic>, report: Option<mrk_macos_installed_native::OpenReport>,
 }
 impl OpenInputSample {
     fn preparing(id: u32) -> Self {
         Self { id, prepared: false, requested: false, dispatch_attempted: false, state: "prepared",
             entered: Some(false), native_entered: Some(false), returned: false, joined: false, retired: false,
-            expired: false, timely: None, custody_known: None, attempted: Some(false), confirm_returned: Some(false),
-            triggered: None, diagnostic: None, report: None }
+            expired: false, timely: None, custody_known: None, attempted: Some(false), press_returned: Some(false),
+            triggered: None, worker_registered: false, worker_joined: false, rechecks_settled: None, diagnostic: None, report: None }
     }
     fn requested(&mut self) {
         self.requested = true; self.state = "requested";
-        self.entered = None; self.native_entered = None; self.attempted = None; self.confirm_returned = None;
+        self.entered = None; self.native_entered = None; self.attempted = None; self.press_returned = None;
     }
     fn reconciled(mut self, progress: OpenProgress) -> Self {
         // One atomic phase/history sample, never an acquisition of action or
@@ -265,32 +291,34 @@ impl OpenInputSample {
         *self = self.reconciled(progress);
         self.report = body.native.and_then(|n| n.report);
         if let Some(r) = self.report {
-            self.attempted = Some(r.attempted); self.confirm_returned = Some(r.confirm_returned); self.triggered = r.triggered;
+            self.attempted = Some(r.attempted); self.press_returned = Some(r.press_returned); self.triggered = r.triggered;
             self.diagnostic = Some(r.diagnostic);
         } else {
-            self.attempted = body.native.is_none().then_some(false); self.confirm_returned = self.attempted;
+            self.attempted = body.native.is_none_or(|n| !n.entered).then_some(false); self.press_returned = self.attempted;
             self.diagnostic = Some(mrk_macos_installed_native::OpenDiagnostic { site: "admission",
                 error: if !body.custody_known() { "custody" } else if self.expired { "deadline" } else { "ineligible" } });
         }
     }
     fn succeeded(self) -> bool {
         self.prepared && self.requested && self.dispatch_attempted && self.state == "retired"
+            && self.worker_registered && self.worker_joined && self.rechecks_settled == Some(true)
             && self.entered == Some(true) && self.native_entered == Some(true) && self.returned && self.joined && self.retired
             && !self.expired && self.timely == Some(true) && self.custody_known == Some(true)
-            && self.attempted == Some(true) && self.confirm_returned == Some(true) && self.triggered == Some(true)
+            && self.attempted == Some(true) && self.press_returned == Some(true) && self.triggered == Some(true)
             && self.report.is_some_and(|r| r.succeeded() && self.diagnostic == Some(r.diagnostic))
     }
     fn value(self) -> Value {
-        json!({"mechanism":"accessibility-confirm-original-open-panel-v1","step":"OpenProject","id":self.id,
+        json!({"mechanism":"accessibility-press-original-prompt-button-v1","step":"OpenProject","id":self.id,
             "prepared":self.prepared,"requested":self.requested,"dispatchAttempted":self.dispatch_attempted,"state":self.state,
             "bodyEntered":self.entered,"nativeEntered":self.native_entered,"bodyReturned":self.returned,
-            "receiptJoined":self.joined,"barrierRetired":self.retired,"expired":self.expired,"timely":self.timely,
-            "custodyKnown":self.custody_known,"attempted":self.attempted,"confirmReturned":self.confirm_returned,"triggered":self.triggered,
+            "receiptJoined":self.joined,"workerRegistered":self.worker_registered,"workerJoined":self.worker_joined,
+            "rechecksSettled":self.rechecks_settled,"barrierRetired":self.retired,"expired":self.expired,"timely":self.timely,
+            "custodyKnown":self.custody_known,"attempted":self.attempted,"pressReturned":self.press_returned,"triggered":self.triggered,
             "site":self.diagnostic.map(|d| d.site),"error":self.diagnostic.map(|d| d.error),
             "initialOriginalProof":self.report.and_then(|r| r.initial_proof).map(native_proof_value),
             "originalProof":self.report.and_then(|r| r.proof).map(native_proof_value),
-            "confirmEligibility":self.report.and_then(|r| r.eligibility).map(confirm_proof_value),
-            "confirmRecheck":self.report.and_then(|r| r.recheck).map(confirm_proof_value)})
+            "promptChecks":{"initial":self.report.and_then(|r| r.prompt[0]),"final":self.report.and_then(|r| r.prompt[1])},
+            "promptButton":self.report.map(|r| prompt_button_value(r.button))})
     }
 }
 #[derive(Clone, Copy)]
@@ -307,7 +335,9 @@ impl IdentitySample {
         json!({"mechanism":"public-original-sheet-v1","case":self.case.name(),"id":self.id,"kind":"project",
             "start":{"returned":true,"result":self.start_result},
             "configuration":{"attempted":c.attempted,"parentSetterEntered":c.parent_setter_entered,
-                "parentSetterReturned":c.parent_setter_returned,"parent":c.parent,"site":c.site,"error":c.error},
+                "parentSetterReturned":c.parent_setter_returned,"parent":c.parent,
+                "promptSetterEntered":c.prompt_setter_entered,"promptSetterReturned":c.prompt_setter_returned,"prompt":c.prompt,
+                "site":c.site,"error":c.error},
             "binding":self.binding.map(native_proof_value)})
     }
 }
@@ -1162,7 +1192,7 @@ impl Observation {
     pub(super) fn tick(self: &Arc<Self>, app: &tauri::AppHandle) {
         if std::thread::current().id() == self.main { self.fail(); return; }
         // Drain the one prepared original even after failure/deadline: known
-        // non-entry may retire its barrier, never dispatch a late Confirm.
+        // non-entry may retire its barrier, never dispatch a late Press.
         if self.accessibility_step(app) {
             if !self.timely() { self.report_failure(); self.failure_shutdown(app); }
             return;
@@ -1360,21 +1390,96 @@ impl Observation {
         }; // All guards gone BEFORE the caller resumes any AppKit selector.
         Some(allowed && self.timely() && (after || !token.stopped() && !token.expired()))
     }
-    fn action_main(self: &Arc<Self>, token: OpenAction, end: Instant,
-        done: std::sync::mpsc::SyncSender<OpenActionReceipt>) {
-        let entered = token.enter(); // Actual wrapper event also survives prior Unknown.
-        let body = if std::thread::current().id() != self.main || !entered {
-            token.unknown(); self.fail_with("native-default-custody"); OpenActionBody::no_native(None)
+    fn action_recheck_main(self: &Arc<Self>, token: OpenAction, stage: u32, end: Instant,
+        done: std::sync::mpsc::SyncSender<OpenRecheckReceipt>) {
+        let body = if std::thread::current().id() != self.main {
+            token.unknown(); self.fail_with("native-default-custody"); OpenRecheckBody::no_native(None)
+        } else { token.recheck(end, stage, |after| self.action_admission(&token, after)) };
+        // token.recheck ACTUALLY returned, including every native/TLS/owner
+        // guard. A queued-main dispatch return never stands in for this receipt.
+        if !body.custody_known() { token.unknown(); self.fail_with("native-default-custody"); }
+        let receipt = OpenRecheckReceipt { token: token.clone(), stage, body, returned_at: Instant::now() };
+        if done.try_send(receipt).is_err() { token.unknown(); self.fail_with("native-default-custody"); }
+        // Successful send is last; no post-send native query or guard remains.
+    }
+    fn worker_admission(&self, token: &OpenAction, after: bool) -> Option<bool> {
+        // This last-boundary permit is ONLY scalar/atomic/clock observation.
+        // Owner/Record/GuiFacts locks belong to main's read-only recheck, never
+        // to the AX client's final permit or the independent deadline relay.
+        if std::thread::current().id() == self.main || token.state() != "entered" || Instant::now() >= self.end {
+            return None; // Past original45s: retain CF/queued-main originals, never begin more cleanup calls.
+        }
+        Some(!self.failed.load(Ordering::SeqCst) && !token.expired() && (after || !token.stopped()))
+    }
+    fn worker_recheck(self: &Arc<Self>, app: &tauri::AppHandle, token: &OpenAction, stage: u32, end: Instant,
+        rechecks: &Arc<Mutex<[OpenRecheckSlot; 2]>>,
+        senders: &mut [Option<std::sync::mpsc::SyncSender<OpenRecheckReceipt>>; 2])
+        -> Result<(mrk_macos_installed_native::OpenRecheckReturn, bool), u32> {
+        if !(1..=2).contains(&stage) { return Err(9); }
+        let Ok(mut ledger) = rechecks.lock() else { return Err(9); };
+        let slot = &mut ledger[stage as usize - 1];
+        if slot.dispatched || slot.returned.is_some() || slot.uncertain { return Err(9); }
+        let Some(done) = senders[stage as usize - 1].take() else { return Err(9); };
+        if token.expired() || Instant::now() >= end { return Err(8); }
+        match self.worker_admission(token, false) { Some(true) => {}, Some(false) => return Err(3), None => return Err(9) }
+        slot.dispatched = true; // Exact receiver was rooted BEFORE spawn/GO.
+        let q = self.clone(); let original = token.clone();
+        if app.run_on_main_thread(move || q.action_recheck_main(original, stage, end, done)).is_err() {
+            slot.uncertain = true; token.unknown(); self.fail_with("native-default-custody");
+            return Err(9); // Err does not mean cancellation or definite no entry.
+        }
+        use std::sync::mpsc::RecvTimeoutError;
+        let receipt = match slot.receipt.recv_timeout(end.saturating_duration_since(Instant::now())) {
+            Ok(receipt) => Some(receipt),
+            Err(RecvTimeoutError::Disconnected) => None,
+            Err(RecvTimeoutError::Timeout) => {
+                token.expire(); self.fail_with("native-default-deadline");
+                // Only this same queued body/receiver, only until original45s.
+                // Late known cleanup is retained DATA, never fresh success.
+                slot.receipt.recv_timeout(self.end.saturating_duration_since(Instant::now())).ok()
+            },
+        };
+        slot.returned = receipt;
+        if !slot.settled(token, stage, self.end) {
+            slot.uncertain = true; token.unknown(); self.fail_with("native-default-custody"); return Err(9);
+        }
+        let receipt = slot.returned.as_ref().expect("settled matching main receipt");
+        if let Some(native) = receipt.body.native {
+            // Preserve the actual original proof even on a late/STOP return.
+            // The FFI callback rechecks the SAME armed endpoint before success.
+            return Ok((native, receipt.body.admitted == Some(true)));
+        }
+        Err(if token.expired() || Instant::now() >= end { 8 } else { 3 })
+    }
+    fn action_worker(self: &Arc<Self>, app: tauri::AppHandle, token: OpenAction,
+        go: std::sync::mpsc::Receiver<Option<Instant>>, done: std::sync::mpsc::SyncSender<OpenActionReceipt>,
+        rechecks: Arc<Mutex<[OpenRecheckSlot; 2]>>,
+        mut senders: [Option<std::sync::mpsc::SyncSender<OpenRecheckReceipt>>; 2]) -> OpenWorkerReturn {
+        let end = match go.recv() {
+            Ok(Some(end)) => end,
+            Ok(None) => return OpenWorkerReturn::NoGo,
+            Err(_) => return OpenWorkerReturn::ChannelClosed,
+        }; // No native body can precede original handle registration and GO.
+        let entered = token.enter();
+        let body = if !entered || std::thread::current().id() == self.main {
+            OpenActionBody::no_native(None)
         } else if token.expired() || Instant::now() >= end {
             token.expire(); self.fail_with("native-default-deadline"); OpenActionBody::no_native(Some(false))
-        } else { token.run(end, |after| self.action_admission(&token, after)) };
-        // The actual body and all native/TLS/owner guards returned. No Record
-        // publication can delay the relay's independent timeout latch/receipt.
+        } else {
+            let native = mrk_macos_installed_native::installed_prompt_button(token.identity(), end,
+                |after| self.worker_admission(&token, after),
+                |stage| self.worker_recheck(&app, &token, stage, end, &rechecks, &mut senders));
+            OpenActionBody { native: Some(native), admitted: self.worker_admission(&token, true) }
+        };
+        if Instant::now() >= end { token.expire(); self.fail_with("native-default-deadline"); }
         if !body.custody_known() { token.unknown(); self.fail_with("native-default-custody"); }
+        else if !body.succeeded() { self.fail_with("native-default-input"); }
         if !token.returned() { self.fail_with("native-default-custody"); }
         let receipt = OpenActionReceipt { token: token.clone(), body, returned_at: Instant::now() };
         if done.try_send(receipt).is_err() { token.unknown(); self.fail_with("native-default-custody"); }
-        // Successful send is last: no post-send native work or custody change.
+        // A receipt is NOT this thread's completion. The relay must separately
+        // observe is_finished and join the registered handle before retirement.
+        OpenWorkerReturn::Body
     }
     fn open_unknown(&self, token: &OpenAction) {
         token.unknown(); self.fail_with("native-default-custody");
@@ -1429,97 +1534,184 @@ impl Observation {
             (input, token, FailureSnapshot::from_record(&r))
         };
         let (done, receipt) = std::sync::mpsc::sync_channel(1);
-        *custody = Some(OpenFlight { input, token: token.clone(), receipt, returned: None, baseline });
-        let flight = custody.as_mut().expect("original stored before arming");
-        // One endpoint includes queue/admission/getters/Confirm/receipt/publication.
-        // From here: no blocking Record/PANEL/GuiFacts/owner lock on this relay.
+        let (go, go_receipt) = std::sync::mpsc::sync_channel(1);
+        let (first_done, first_receipt) = std::sync::mpsc::sync_channel(1);
+        let (final_done, final_receipt) = std::sync::mpsc::sync_channel(1);
+        let rechecks = Arc::new(Mutex::new([
+            OpenRecheckSlot { receipt: first_receipt, dispatched: false, uncertain: false, returned: None },
+            OpenRecheckSlot { receipt: final_receipt, dispatched: false, uncertain: false, returned: None },
+        ]));
+        *custody = Some(OpenFlight { input, token: token.clone(), receipt, returned: None, go: Some(go),
+            worker: None, worker_returned: None, rechecks: rechecks.clone(), baseline });
+        let flight = custody.as_mut().expect("original stored before spawn");
+        let q = self.clone(); let worker_token = token.clone(); let application = app.clone();
+        let started = std::thread::Builder::new().name("mrk-aqua-open".into()).spawn(move ||
+            q.action_worker(application, worker_token, go_receipt, done, rechecks, [Some(first_done), Some(final_done)]));
+        match started {
+            Ok(handle) => { flight.worker = Some(handle); } // Register ACTUAL handle before arming or GO.
+            Err(_) => {
+                // std::thread::spawn returned a definite failure: no worker/GO
+                // or main recheck exists. This is not a dispatch ambiguity.
+                self.fail_with("native-default-input");
+                let Ok(mut r) = self.record.try_lock() else { self.open_unknown(&token); return true; };
+                let retired = flight.input.no_entry(true);
+                if !self.action_original(&r, &token) || !retired { self.open_unknown(&token); return true; }
+                if let Some(sample) = r.accessibility.as_mut() {
+                    *sample = sample.reconciled(token.progress()); sample.custody_known = Some(true);
+                    sample.entered = Some(false); sample.native_entered = Some(false);
+                    sample.attempted = Some(false); sample.press_returned = Some(false);
+                    sample.diagnostic = Some(mrk_macos_installed_native::OpenDiagnostic { site: "admission", error: "ineligible" });
+                }
+                let current = r.step;
+                if !retire_returned_open(&mut r.pending, current, token.id) { self.open_unknown(&token); return true; }
+                drop(r); *custody = None; drop(custody);
+                if token.refuse_original_at(prearm_refusal_at.min(self.end), crate::asset_commands::Reason::SourceRefused).is_err() {
+                    self.open_unknown(&token);
+                }
+                return true;
+            },
+        }
+        if let Some(sample) = flight.baseline.accessibility.as_mut() { sample.worker_registered = true; }
+        let registered = if let Ok(mut r) = self.record.try_lock() {
+            let original = self.action_original(&r, &token);
+            if let Some(sample) = r.accessibility.as_mut().filter(|s| s.id == token.id) { sample.worker_registered = true; }
+            original
+        } else { false };
+        // One endpoint includes GO, queued-main proofs, AX, cleanup, receipt,
+        // actual worker join and scalar publication. No spawn or blocking
+        // Record/PANEL/GuiFacts/owner lock is allowed on this armed relay.
         let end = self.end.min(Instant::now() + Duration::from_secs(2));
-        let refusal_at = Instant::now(); // Original no-entry failure anchor, before Record.
-        if Instant::now() >= end || !self.timely() || token.stopped() {
-            if Instant::now() >= end {
+        let refusal_at = Instant::now();
+        let mut go_published = false;
+        let ready = registered && self.timely() && !token.stopped() && Instant::now() < end;
+        if ready && token.queue() {
+            if flight.go.take().is_some_and(|sender| sender.try_send(Some(end)).is_ok()) { go_published = true; }
+            else { self.open_unknown(&token); }
+        } else {
+            if Instant::now() >= end { token.expire(); self.fail_with("native-default-deadline"); }
+            else { self.fail_with("native-default-input"); }
+            // Definite no-GO still needs the registered worker's ACTUAL return
+            // and join. It has never entered the native/body state machine.
+            if !flight.go.take().is_some_and(|sender| sender.try_send(None).is_ok()) { self.open_unknown(&token); }
+        }
+        if let Ok(mut r) = self.record.try_lock() {
+            if let Some(s) = r.accessibility.as_mut().filter(|s| s.id == token.id) { *s = s.reconciled(token.progress()); }
+        }
+        let mut deadline_observed = false;
+        loop {
+            // Receipt arrival does not stop this independent deadline owner.
+            // Latch BEFORE receiving, inspecting finality, reporting or joining.
+            let now = Instant::now();
+            if now >= end && !deadline_observed {
+                deadline_observed = true;
                 token.expire(); self.fail_with("native-default-deadline");
                 self.report_expiry(flight.baseline, token.progress());
             }
-            else { self.fail_with("native-default-input"); }
+            if now >= self.end { self.open_unknown(&token); return true; }
+            if flight.returned.is_none() {
+                if let Ok(receipt) = flight.receipt.try_recv() { flight.returned = Some(receipt); }
+            }
+            if flight.worker.as_ref().is_some_and(|handle| handle.is_finished()) {
+                let returned = match flight.worker.take().expect("positively finished original").join() {
+                    Ok(returned) => returned,
+                    Err(payload) => { std::mem::forget(payload); OpenWorkerReturn::Panicked },
+                };
+                flight.worker_returned = Some(returned); // Actual join, not a receipt or process exit.
+                if Instant::now() >= end {
+                    token.expire(); self.fail_with("native-default-deadline");
+                    self.report_expiry(flight.baseline, token.progress());
+                }
+                break;
+            }
+            // A worker can remain alive AFTER its body receipt. Observe only
+            // this same handle to the original2s/45s endpoints; never detach.
+            let wait_end = if token.expired() { self.end } else { end };
+            let remaining = wait_end.saturating_duration_since(Instant::now());
+            if !remaining.is_zero() {
+                std::thread::sleep(remaining.min(Duration::from_millis(if token.expired() { 5 } else { 1 })));
+            }
+        }
+        if flight.returned.is_none() {
+            if let Ok(receipt) = flight.receipt.try_recv() { flight.returned = Some(receipt); }
+        }
+        // Only after actual worker join: no live worker holds the ledger. Main
+        // never takes it; retained queued/uncertain stages cannot be lost here.
+        let rechecks_settled = flight.rechecks.try_lock().ok().map(|ledger|
+            ledger.iter().enumerate().all(|(index, slot)| slot.settled(&token, index as u32 + 1, self.end)));
+        if let Ok(mut r) = self.record.try_lock() {
+            if let Some(sample) = r.accessibility.as_mut().filter(|s| s.id == token.id) {
+                sample.worker_registered = true; sample.worker_joined = true; sample.rechecks_settled = rechecks_settled;
+            }
+        } else { self.open_unknown(&token); return true; }
+        if Instant::now() >= self.end || !flight.token.same(&token) || rechecks_settled != Some(true) {
+            self.open_unknown(&token); return true;
+        }
+        if !go_published && flight.worker_returned == Some(OpenWorkerReturn::NoGo) && flight.returned.is_none() {
             let Ok(mut r) = self.record.try_lock() else { self.open_unknown(&token); return true; };
-            if !self.action_original(&r, &token) || !flight.input.no_entry(true) { self.open_unknown(&token); return true; }
+            let retired = flight.input.no_entry(true);
+            if !self.action_original(&r, &token) || !retired { self.open_unknown(&token); return true; }
             if let Some(s) = r.accessibility.as_mut() {
-                s.state = "retired"; s.retired = true; s.expired = token.expired(); s.custody_known = Some(true);
-                s.entered = Some(false); s.native_entered = Some(false); s.attempted = Some(false); s.confirm_returned = Some(false);
-                s.diagnostic = Some(mrk_macos_installed_native::OpenDiagnostic { site: "admission", error: if token.expired() { "deadline" } else { "ineligible" } });
+                *s = s.reconciled(token.progress()); s.custody_known = Some(true);
+                s.entered = Some(false); s.native_entered = Some(false); s.attempted = Some(false); s.press_returned = Some(false);
+                s.diagnostic = Some(mrk_macos_installed_native::OpenDiagnostic { site: "admission",
+                    error: if token.expired() { "deadline" } else { "ineligible" } });
             }
             let current = r.step;
             if !retire_returned_open(&mut r.pending, current, token.id) { self.open_unknown(&token); return true; }
-            let stop_at = if token.expired() { end } else { refusal_at };
-            let reason = if token.expired() { crate::asset_commands::Reason::Deadline } else { crate::asset_commands::Reason::SourceRefused };
+            let deadline_first = first_failure_reason(&self.failure_reason) == Some("native-default-deadline");
+            let stop_at = if deadline_first { end } else { refusal_at.min(end) };
+            let reason = if deadline_first { crate::asset_commands::Reason::Deadline } else { crate::asset_commands::Reason::SourceRefused };
             drop(r); *custody = None; drop(custody);
             if token.refuse_original_at(stop_at, reason).is_err() { self.open_unknown(&token); }
             return true;
         }
-        if !token.queue() { self.open_unknown(&token); return true; }
-        if let Ok(mut r) = self.record.try_lock() {
-            if let Some(s) = r.accessibility.as_mut().filter(|s| s.id == token.id) { *s = s.reconciled(token.progress()); }
-        }
-        let q = self.clone(); let dispatched = token.clone();
-        if app.run_on_main_thread(move || q.action_main(dispatched, end, done)).is_err() {
-            self.open_unknown(&token); return true; // Err never means cancellation/no entry.
-        }
-        use std::sync::mpsc::RecvTimeoutError;
-        let returned = match flight.receipt.recv_timeout(end.saturating_duration_since(Instant::now())) {
-            Ok(receipt) => Some(receipt),
-            Err(RecvTimeoutError::Disconnected) => { self.open_unknown(&token); None },
-            Err(RecvTimeoutError::Timeout) => {
-                // This atomic latch happens BEFORE any Record/log/cleanup wait.
-                token.expire(); self.fail_with("native-default-deadline");
-                self.report_expiry(flight.baseline, token.progress());
-                if let Ok(mut r) = self.record.try_lock() {
-                    if let Some(s) = r.accessibility.as_mut().filter(|s| s.id == token.id) {
-                        *s = s.reconciled(token.progress());
-                    }
-                }
-                // SAME receiver, original45s endpoint: observe cleanup only.
-                flight.receipt.recv_timeout(self.end.saturating_duration_since(Instant::now())).ok()
-            },
-        };
-        if Instant::now() >= end {
-            token.expire(); self.fail_with("native-default-deadline");
-            self.report_expiry(flight.baseline, token.progress());
-        }
-        flight.returned = returned;
         let Some(receipt) = flight.returned.as_ref() else { self.open_unknown(&token); return true; };
         let returned_at = receipt.returned_at;
-        let same = flight.token.same(&token) && token.same(&receipt.token)
-            && receipt.returned_at <= Instant::now() && receipt.returned_at < self.end && Instant::now() < self.end;
-        let known = same && receipt.body.custody_known() && token.state() == "returned";
-        let joined = known && token.joined();
-        if !joined { self.open_unknown(&token); }
-        if !receipt.body.succeeded() { self.fail_with("native-default-input"); }
+        let body = receipt.body;
+        let same = go_published && token.same(&receipt.token) && returned_at <= Instant::now() && returned_at < self.end;
+        let known = worker_retirement_ready(flight.worker_returned, same, rechecks_settled, body.custody_known(), token.state());
+        if !body.succeeded() { self.fail_with("native-default-input"); }
         let Ok(mut r) = self.record.try_lock() else { self.open_unknown(&token); return true; };
         if !self.action_original(&r, &token) { self.open_unknown(&token); return true; }
+        let joined = known && token.joined();
         let retired = joined && token.retire();
         let timely = Instant::now() < end && !token.expired();
-        if let Some(s) = r.accessibility.as_mut() { s.complete(receipt.body, &token, timely); }
+        if let Some(s) = r.accessibility.as_mut() {
+            s.worker_joined = true; s.rechecks_settled = rechecks_settled; s.complete(body, &token, timely);
+        }
         if !retired { self.open_unknown(&token); return true; }
         let current = r.step;
         if !retire_returned_open(&mut r.pending, current, token.id) { self.open_unknown(&token); return true; }
-        // Every successful scalar publication is still inside the SAME allowance.
-        if Instant::now() >= end { token.expire(); self.fail_with("native-default-deadline");
-            if let Some(s) = r.accessibility.as_mut() { s.expired = true; s.timely = Some(false); } }
-        let success = self.timely() && !token.stopped() && r.accessibility.is_some_and(OpenInputSample::succeeded);
+        // The exact same endpoint also includes scalar publication.
+        if Instant::now() >= end {
+            token.expire(); self.fail_with("native-default-deadline");
+            if let Some(s) = r.accessibility.as_mut() { s.expired = true; s.timely = Some(false); }
+        }
+        let mut success = self.timely() && !token.stopped() && r.accessibility.is_some_and(OpenInputSample::succeeded);
         if success {
             if r.native_actions_returned[2] { self.fail_with("native-duplicate-action"); return true; }
             r.native_actions_returned[2] = true; r.selected_native = true; r.step = Step::ProjectSettled;
         }
+        if Instant::now() >= end {
+            token.expire(); self.fail_with("native-default-deadline"); success = false;
+            if let Some(s) = r.accessibility.as_mut() { s.expired = true; s.timely = Some(false); }
+        }
         let failed = !success && self.failed.load(Ordering::SeqCst);
-        let stop_at = if token.expired() { end } else { returned_at.min(end) };
-        let reason = if token.expired() { crate::asset_commands::Reason::Deadline } else { crate::asset_commands::Reason::SourceRefused };
-        // The original action, receipt, pending marker and release barrier are
-        // known retired. Only now may the same GUI's ordinary failure path lock
-        // its document and request cleanup; no outer guard crosses that call.
+        // A timely known input failure predating a slow thread join keeps its
+        // earlier original timestamp/reason; later expiry cannot overwrite it.
+        let earlier_input_failure = !body.succeeded() && returned_at < end
+            && first_failure_reason(&self.failure_reason) == Some("native-default-input");
+        let deadline_first = token.expired() && !earlier_input_failure;
+        let stop_at = if deadline_first { end } else { returned_at.min(end) };
+        let reason = if deadline_first { crate::asset_commands::Reason::Deadline } else { crate::asset_commands::Reason::SourceRefused };
+        // Body, main rechecks, CF cleanup, receipt AND actual input worker are
+        // all known retired. Only now may ordinary same-original failure cleanup
+        // acquire its document/GUI locks. No outer guard crosses that call.
         drop(r); *custody = None; drop(custody);
         if failed && token.refuse_original_at(stop_at, reason).is_err() { self.open_unknown(&token); }
         true
     }
+
     fn native_step(&self, step: Step) {
         let timely = self.timely();
         {
@@ -2044,37 +2236,53 @@ fn route() -> Option<(PathBuf,u32)> {
 // Pure regression checks in the already-required instrumented native entry.
 // These do not call AppKit, acquire files, dispatch actions, or supply receipts.
 fn native_recheck_data_check() -> bool {
-    use mrk_macos_installed_native::{PanelConfirmProof, IdentityBinding, OpenDiagnostic, OpenReport};
+    use mrk_macos_installed_native::{PromptButtonProof, IdentityBinding, OpenDiagnostic, OpenReport};
     let proof = IdentityBinding { attempted: true, parent: Some("match"), panel: Some("match"), checks: [Some(true); 12],
         children: Some(1), originals: Some("one"), site: "complete", error: "none" };
-    let control = PanelConfirmProof { attempted: true, checks: [Some(true); 5], site: "complete", error: "none" };
-    let report = OpenReport { diagnostic: OpenDiagnostic { site: "confirm", error: "none" }, attempted: true,
-        confirm_returned: true, triggered: Some(true), custody_known: true, initial_proof: Some(proof), proof: Some(proof),
-        eligibility: Some(control), recheck: Some(control) };
+    let button = PromptButtonProof { checks: [true; 7], calls: 101, nodes: 8,
+        cf_slots: 60, cf_slots_retired: 60, cleanup_returned: true, ax_error: 0 };
+    let report = OpenReport { diagnostic: OpenDiagnostic { site: "press", error: "none" }, attempted: true,
+        press_returned: true, triggered: Some(true), custody_known: true, initial_proof: Some(proof), proof: Some(proof),
+        prompt: [Some(true); 2], button };
     let full = OpenInputSample { id: 2, prepared: true, requested: true, dispatch_attempted: true, state: "retired",
         entered: Some(true), native_entered: Some(true), returned: true, joined: true, retired: true, expired: false,
-        timely: Some(true), custody_known: Some(true), attempted: Some(true), confirm_returned: Some(true), triggered: Some(true),
+        timely: Some(true), custody_known: Some(true), attempted: Some(true), press_returned: Some(true), triggered: Some(true),
+        worker_registered: true, worker_joined: true, rechecks_settled: Some(true),
         diagnostic: Some(report.diagnostic), report: Some(report) };
-    if !full.succeeded() || full.value().get("calls").is_some() || full.value().get("cleanupReturned").is_some() { return false; }
-    let mutations: [fn(&mut OpenInputSample); 12] = [|s| s.expired = true, |s| s.timely = Some(false),
+    if !full.succeeded() || full.value().get("confirmReturned").is_some() { return false; }
+    let mutations: [fn(&mut OpenInputSample); 15] = [|s| s.expired = true, |s| s.timely = Some(false),
         |s| s.joined = false, |s| s.returned = false, |s| s.entered = None, |s| s.native_entered = Some(false),
         |s| s.retired = false, |s| s.state = "unknown", |s| s.custody_known = Some(false),
-        |s| s.requested = false, |s| s.dispatch_attempted = false, |s| s.report = None];
+        |s| s.requested = false, |s| s.dispatch_attempted = false, |s| s.report = None,
+        |s| s.worker_registered = false, |s| s.worker_joined = false, |s| s.rechecks_settled = None];
     for mutation in mutations { let mut failed = full; mutation(&mut failed); if failed.succeeded() { return false; } }
-    for report in [OpenReport { triggered: Some(false), ..report }, OpenReport { confirm_returned: false, ..report },
-        OpenReport { custody_known: false, ..report }, OpenReport { recheck: None, ..report },
-        OpenReport { initial_proof: None, ..report }, OpenReport { eligibility: None, ..report }] {
+    for report in [OpenReport { triggered: Some(false), ..report }, OpenReport { press_returned: false, ..report },
+        OpenReport { custody_known: false, ..report }, OpenReport { proof: None, ..report },
+        OpenReport { initial_proof: None, ..report }, OpenReport { prompt: [Some(true), Some(false)], ..report },
+        OpenReport { button: PromptButtonProof { cleanup_returned: false, ..button }, ..report },
+        OpenReport { button: PromptButtonProof { checks: [true, true, true, false, false, false, false], ..button }, ..report }] {
         if (OpenInputSample { report: Some(report), ..full }).succeeded() { return false; }
+    }
+    // The exact live retirement predicate: an actual matching body receipt
+    // before worker completion cannot authorize join/barrier retirement.
+    for worker in [None, Some(OpenWorkerReturn::Body), Some(OpenWorkerReturn::NoGo),
+        Some(OpenWorkerReturn::ChannelClosed), Some(OpenWorkerReturn::Panicked)] {
+        for receipt in [false, true] { for settled in [None, Some(false), Some(true)] {
+            for known in [false, true] { for state in ["entered", "returned", "unknown"] {
+                let expected = worker == Some(OpenWorkerReturn::Body) && receipt && settled == Some(true) && known && state == "returned";
+                if worker_retirement_ready(worker, receipt, settled, known, state) != expected { return false; }
+            } }
+        } }
     }
     let unknown = full.reconciled(OpenProgress { state: "unknown", requested: true, dispatched: true,
         entered: true, returned: true, joined: true, retired: true, expired: true });
     if unknown.succeeded() || !unknown.joined || !unknown.retired || unknown.custody_known != Some(false)
         || unknown.timely != Some(false) || unknown.report != full.report { return false; }
-    let mut baseline = OpenInputSample::preparing(2); baseline.prepared = true; baseline.requested();
+    let mut baseline = OpenInputSample::preparing(2); baseline.prepared = true; baseline.requested(); baseline.worker_registered = true;
     let progress = OpenProgress { state: "unknown", requested: true, dispatched: true, entered: true,
         returned: true, joined: false, retired: false, expired: true };
     let sample = baseline.reconciled(progress);
-    if !sample.dispatch_attempted || sample.entered != Some(true) || !sample.returned
+    if !sample.dispatch_attempted || sample.entered != Some(true) || !sample.returned || sample.worker_joined
         || sample.custody_known != Some(false) || sample.native_entered.is_some() || sample.report.is_some() { return false; }
     // Channel DATA only: exercise the real one-shot handoff without a worker,
     // sink, sleep or a fake completion/JoinHandle. Native runs own the actual one.
@@ -2154,7 +2362,7 @@ fn observer_data_checks() -> bool {
     prepared.prepared = true;
     if prepared.succeeded() || prepared.entered != Some(false) || prepared.attempted != Some(false) || prepared.returned { return false; }
     prepared.requested();
-    if prepared.succeeded() || prepared.entered.is_some() || prepared.attempted.is_some() || prepared.confirm_returned.is_some()
+    if prepared.succeeded() || prepared.entered.is_some() || prepared.attempted.is_some() || prepared.press_returned.is_some()
         || prepared.returned || prepared.retired { return false; }
     for id in [1, 2] {
         let mut pending = Some(Pending::Accessibility(id));
@@ -2344,13 +2552,15 @@ pub(crate) fn main() -> std::process::ExitCode {
     // One cleanup path for every post-construction return. Receipt submission
     // never counts as writer return/join, nor does process containment.
     let returned = q.diagnostic.finish(q.end);
-    let Some(returned) = returned else {
-        // Preserve this original Arc, including its real JoinHandle and any
-        // unresolved action receiver/owners, through process lifetime. A default
-        // Drop/detach must not turn an unfinished reporter into finality.
+    let input_clear = q.open_custody.try_lock().map(|custody| custody.is_none()).unwrap_or(false);
+    if returned.is_none() || !input_clear {
+        // Even a JOINED diagnostic writer does not dispose of an unresolved
+        // input handle, queued-main receipt, native original or CF ledger.
+        // Preserve their exact common owner through process lifetime.
         std::mem::forget(q);
         return std::process::ExitCode::FAILURE;
-    };
+    }
+    let returned = returned.expect("diagnostic join observed above");
     if returned != DiagnosticReturn::Stopped || !q.timely() { return std::process::ExitCode::FAILURE; }
     let Some(report) = report else { return std::process::ExitCode::FAILURE; };
     // A post-Stop deadline/output failure is truthfully unreported. No new

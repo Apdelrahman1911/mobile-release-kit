@@ -19,6 +19,9 @@
 #include <stdio.h>
 #ifdef MRK_INSTALLED_OBSERVATION
 #import <ApplicationServices/ApplicationServices.h>
+#include <math.h>
+#include <stdatomic.h>
+#include <stdlib.h>
 #endif
 
 int mrk_platform(void) {
@@ -217,15 +220,16 @@ int mrk_panel_response(int kind, int64_t code, int programmatic) {
 typedef struct {
     uint32_t flags, checked, matched, parent, panel, children, originals, site, error;
 } MRKIdentityProof;
-typedef struct { uint32_t flags, checked, matched, site, error; } MRKConfirmProof;
-_Static_assert(sizeof(MRKConfirmProof) == 20, "Confirm proof ABI");
 typedef struct {
-    uint32_t flags, parent, site, error;
+    uint32_t flags, parent, prompt, site, error;
     MRKIdentityProof binding;
 } MRKIdentityWire;
+_Static_assert(sizeof(MRKIdentityWire) == 56, "fixed original identity scalar ABI");
 enum { MRK_ID_ARMED = 1u, MRK_ID_CONFIG_ATTEMPTED = 2u, MRK_ID_PARENT_ENTERED = 4u,
-    MRK_ID_PARENT_RETURNED = 8u, MRK_ID_CONFIG_COMPLETE = 16u };
-enum { MRK_ID_OBJECTS = 1u, MRK_ID_TAGS, MRK_ID_PARENT_SET, MRK_ID_PARENT_GET, MRK_ID_COMPLETE };
+    MRK_ID_PARENT_RETURNED = 8u, MRK_ID_CONFIG_COMPLETE = 16u,
+    MRK_ID_PROMPT_ENTERED = 32u, MRK_ID_PROMPT_RETURNED = 64u };
+enum { MRK_ID_OBJECTS = 1u, MRK_ID_TAGS, MRK_ID_PARENT_SET, MRK_ID_PARENT_GET, MRK_ID_COMPLETE,
+    MRK_ID_PROMPT_SET, MRK_ID_PROMPT_GET };
 enum { MRK_ID_UNOBSERVED, MRK_ID_NIL, MRK_ID_MATCH, MRK_ID_DIFFERENT, MRK_ID_TYPE_INVALID };
 enum { MRK_PANEL_ID_UNOBSERVED, MRK_PANEL_ID_NIL, MRK_PANEL_ID_TYPE_INVALID, MRK_PANEL_ID_EMPTY,
     MRK_PANEL_ID_LIMIT, MRK_PANEL_ID_NUL, MRK_PANEL_ID_ENCODING, MRK_PANEL_ID_VALID,
@@ -234,9 +238,6 @@ enum { MRK_PROOF_OBJECTS = 1u, MRK_PROOF_ATTACHMENT, MRK_PROOF_DIRECTORY, MRK_PR
     MRK_PROOF_PANEL_ID, MRK_PROOF_PARENT_SHEETS, MRK_PROOF_PANEL_SHEETS, MRK_PROOF_PANEL_SHEET,
     MRK_PROOF_CHILDREN, MRK_PROOF_PARENT, MRK_PROOF_ROLE, MRK_PROOF_STABLE,
     MRK_PROOF_FINAL, MRK_PROOF_COMPLETE, MRK_PROOF_ALL = 0xfffu };
-enum { MRK_CONFIRM_OBJECTS = 1u, MRK_CONFIRM_PANEL, MRK_CONFIRM_CAPABILITY,
-    MRK_CONFIRM_ALLOWED, MRK_CONFIRM_STABLE, MRK_CONFIRM_COMPLETE };
-enum { MRK_CONFIRM_ATTEMPTED = 1u };
 #endif
 
 @interface MRKInstalledPanel : NSObject {
@@ -253,9 +254,9 @@ enum { MRK_CONFIRM_ATTEMPTED = 1u };
     BOOL observationDirectoryReturned, observationActionAttempted, observationActionReturned;
     char observationDirectory[4097];
     char observationParentTag[64], observationPanelTag[64];
+    char observationPrompt[8];
     MRKIdentityWire observationIdentity;
-    // Confirm uses the already-retained original window; no extra element owner.
-    BOOL observationConfirmBodyAttempted;
+    unsigned observationRechecks;
 #endif
 }
 @end
@@ -506,21 +507,22 @@ int mrk_panel_observe_action(void *opaque, int action, const char *directory, ui
 #undef MRK_ACTION_RETURN
 }
 
-// Public original-panel Confirm is one synchronous main-thread operation. None of this
-// ABI carries an AppKit object, native BOOL, title, path or private identifier.
+// Main-only original proof and off-main public AX input have separate ABIs.
+// Only copied bounded identity/control DATA crosses threads; never an AppKit object.
 enum { MRK_OPEN_NONE, MRK_OPEN_THREAD, MRK_OPEN_INPUT, MRK_OPEN_INELIGIBLE, MRK_OPEN_UNSUPPORTED,
     MRK_OPEN_AMBIGUOUS, MRK_OPEN_MALFORMED, MRK_OPEN_LIMIT, MRK_OPEN_DEADLINE, MRK_OPEN_CUSTODY,
-    MRK_OPEN_NOT_TRIGGERED, MRK_OPEN_CHANGED = 13, MRK_OPEN_EXCEPTION = 14 };
-enum { MRK_OPEN_ENTRY = 1u, MRK_OPEN_CONFIRM_ELIGIBILITY, MRK_OPEN_PROOF, MRK_OPEN_CONFIRM_RECHECK,
-    MRK_OPEN_ADMISSION, MRK_OPEN_CONFIRM, MRK_OPEN_INITIAL_PROOF };
+    MRK_OPEN_INVALID_ELEMENT, MRK_OPEN_CANNOT_COMPLETE, MRK_OPEN_OTHER,
+    MRK_OPEN_CHANGED, MRK_OPEN_EXCEPTION, MRK_OPEN_CLEANUP_UNKNOWN };
+enum { MRK_OPEN_ENTRY = 1u, MRK_OPEN_APPLICATION, MRK_OPEN_WINDOWS, MRK_OPEN_PARENT_ID,
+    MRK_OPEN_SHEET, MRK_OPEN_TOPOLOGY, MRK_OPEN_TREE, MRK_OPEN_BUTTON, MRK_OPEN_BUTTON_RECHECK,
+    MRK_OPEN_INITIAL_PROOF, MRK_OPEN_FINAL_PROOF, MRK_OPEN_ADMISSION, MRK_OPEN_PRESS, MRK_OPEN_CLEANUP };
 enum { MRK_OPEN_ATTEMPTED = 1u, MRK_OPEN_RETURNED = 2u, MRK_OPEN_TRIGGERED = 4u, MRK_OPEN_KNOWN = 8u };
-typedef struct {
-    uint32_t flags, site, error;
-    MRKIdentityProof initial_proof, proof;
-    MRKConfirmProof eligibility, recheck;
-} MRKOpenResult;
-_Static_assert(sizeof(MRKOpenResult) == 124, "fixed original/Confirm scalar result ABI required");
-typedef int (*MRKOpenAdmission)(void *, int);
+typedef struct { uint32_t flags, site, error, checks, calls, nodes, owned, released; int32_t ax_error; } MRKOpenResult;
+typedef struct { uint32_t known, error, prompt; MRKIdentityProof proof; } MRKOpenRecheck;
+_Static_assert(sizeof(MRKOpenResult) == 36 && sizeof(MRKOpenRecheck) == 48, "fixed prompt input scalar ABI");
+typedef struct { float seconds; uint64_t required_ns; } MRKOpenTimeout;
+typedef int (*MRKOpenAdmission)(void *, uint64_t, int, MRKOpenTimeout *);
+typedef int (*MRKOpenRecheckCall)(void *, int);
 
 int mrk_observation_ax_trusted(void) {
     if (!pthread_main_np()) return -1;
@@ -615,13 +617,26 @@ static BOOL mrk_panel_configure_open_identity(MRKInstalledPanel *s) {
         NSString *parentTag = [@"mrk-parent-" stringByAppendingString:[[NSUUID UUID] UUIDString]];
         if (![parentTag getCString:s->observationParentTag maxLength:64 encoding:NSASCIIStringEncoding]
             || !mrk_identity_tag(s->observationParentTag, "mrk-parent-")) return NO;
+        // NSSavePanel.prompt identifies the real default Open button. This
+        // observation-only short title is not identity/authentication authority.
+        memcpy(s->observationPrompt, "MRK", 3);
+        memcpy(s->observationPrompt + 3, s->observationParentTag + strlen("mrk-parent-"), 4);
+        for (unsigned i = 3; i < 7; ++i)
+            if (s->observationPrompt[i] >= 'a' && s->observationPrompt[i] <= 'f') s->observationPrompt[i] -= 'a' - 'A';
+        NSString *prompt = [NSString stringWithCString:s->observationPrompt encoding:NSASCIIStringEncoding];
+        if (!prompt) return NO;
         d->site = MRK_ID_PARENT_SET; d->flags |= MRK_ID_PARENT_ENTERED;
         [s->parent setAccessibilityIdentifier:parentTag];
         d->flags |= MRK_ID_PARENT_RETURNED;
         d->site = MRK_ID_PARENT_GET;
         d->parent = mrk_identity_class([s->parent accessibilityIdentifier], parentTag);
-        // Parent-only setter DATA. No panel setter or invented setter return;
-        // its actual public identifier is read only at admitted preparation.
+        d->site = MRK_ID_PROMPT_SET; d->flags |= MRK_ID_PROMPT_ENTERED;
+        [(NSOpenPanel *)s->window setPrompt:prompt]; d->flags |= MRK_ID_PROMPT_RETURNED;
+        d->site = MRK_ID_PROMPT_GET;
+        d->prompt = mrk_identity_class([(NSOpenPanel *)s->window prompt], prompt);
+        if (d->prompt != MRK_ID_MATCH) { d->error = MRK_OPEN_CHANGED; return NO; }
+        // Only the parent identifier is set. No panel-identifier setter or
+        // invented identifier return; that value is read at admitted preparation.
         d->flags |= MRK_ID_CONFIG_COMPLETE; d->site = MRK_ID_COMPLETE; d->error = MRK_OPEN_NONE;
         return YES;
     } @catch (NSException *e) {
@@ -718,113 +733,328 @@ static int mrk_original_proof(MRKInstalledPanel *s, MRKIdentityProof *p, BOOL fr
         p->site = MRK_PROOF_COMPLETE; p->error = MRK_OPEN_NONE; return MRK_OPEN_NONE;
     } @catch (NSException *e) { (void)e; s->unknown = YES; p->error = MRK_OPEN_EXCEPTION; return MRK_OPEN_EXCEPTION; }
 }
-static BOOL mrk_confirm_check(MRKConfirmProof *p, unsigned bit, BOOL matched, uint32_t error) {
-    p->checked |= 1u << bit;
-    if (matched) { p->matched |= 1u << bit; return YES; }
-    p->error = error; return NO;
-}
-static BOOL mrk_confirm_originals(MRKInstalledPanel *s, NSWindow *parent, NSWindow *panel,
-    void (^completion)(NSModalResponse)) {
-    // Borrowed aliases of existing main-only originals, never extra owners or
-    // lookup results. A changed slot cannot authorize messages to a replacement.
-    return parent && panel && completion && s->parent == parent && s->window == panel && s->completion == completion;
-}
-static int mrk_confirm_proof(MRKInstalledPanel *s, MRKConfirmProof *p,
-    NSWindow *parent, NSWindow *panel, void (^completion)(NSModalResponse)) {
-    p->flags = MRK_CONFIRM_ATTEMPTED; p->site = MRK_CONFIRM_OBJECTS;
-    if (!mrk_confirm_originals(s, parent, panel, completion)) {
-        s->unknown = YES; mrk_confirm_check(p, 0, NO, MRK_OPEN_CUSTODY); return p->error;
+static BOOL mrk_prompt_valid(const uint8_t *parent, const uint8_t *prompt) {
+    if (!prompt || memcmp(prompt, "MRK", 3) || prompt[7]) return NO;
+    for (unsigned i = 0; i < 4; ++i) {
+        char c = parent[strlen("mrk-parent-") + i];
+        if (c >= 'a' && c <= 'f') c -= 'a' - 'A';
+        if (prompt[3 + i] != c) return NO;
     }
-    if (!mrk_confirm_check(p, 0, mrk_original_eligible(s), MRK_OPEN_INELIGIBLE)) return p->error;
-    @try {
-        p->site = MRK_CONFIRM_PANEL;
-        if (!mrk_confirm_check(p, 1, [panel isKindOfClass:[NSOpenPanel class]], MRK_OPEN_UNSUPPORTED)) return p->error;
-        p->site = MRK_CONFIRM_CAPABILITY;
-        if (!mrk_confirm_check(p, 2, [panel respondsToSelector:@selector(isAccessibilitySelectorAllowed:)]
-            && [panel respondsToSelector:@selector(accessibilityPerformConfirm)], MRK_OPEN_UNSUPPORTED)) return p->error;
-        p->site = MRK_CONFIRM_ALLOWED;
-        if (!mrk_confirm_check(p, 3, [panel isAccessibilitySelectorAllowed:@selector(accessibilityPerformConfirm)],
-            MRK_OPEN_INELIGIBLE)) return p->error;
-        p->site = MRK_CONFIRM_STABLE;
-        if (!mrk_confirm_originals(s, parent, panel, completion)) {
-            s->unknown = YES; mrk_confirm_check(p, 4, NO, MRK_OPEN_CUSTODY); return p->error;
-        }
-        if (!mrk_confirm_check(p, 4, mrk_original_eligible(s), MRK_OPEN_INELIGIBLE)) return p->error;
-        p->site = MRK_CONFIRM_COMPLETE; p->error = MRK_OPEN_NONE; return MRK_OPEN_NONE;
-    } @catch (NSException *e) {
-        (void)e; s->unknown = YES; p->error = MRK_OPEN_EXCEPTION; return p->error;
-    }
+    return YES;
 }
-int mrk_panel_observe_open_identity(void *opaque, uint8_t *parent, uint8_t *panel, size_t capacity) {
+int mrk_panel_observe_open_identity(void *opaque, uint8_t *parent, uint8_t *panel, uint8_t *prompt, size_t capacity) {
     if (!pthread_main_np()) return MRK_OPEN_THREAD;
-    if (!opaque || !parent || !panel || capacity != 64) return MRK_OPEN_INPUT;
-    memset(parent, 0, capacity); memset(panel, 0, capacity);
+    if (!opaque || !parent || !panel || !prompt || capacity != 64) return MRK_OPEN_INPUT;
+    memset(parent, 0, capacity); memset(panel, 0, capacity); memset(prompt, 0, 8);
     MRKInstalledPanel *s = opaque; MRKIdentityProof *p = &s->observationIdentity.binding;
     if (p->site) return MRK_OPEN_INELIGIBLE;
     int status = mrk_original_proof(s, p, YES);
-    if (!status) { memcpy(parent, s->observationParentTag, capacity); memcpy(panel, s->observationPanelTag, capacity); }
-    return status; // Original-only preparation; Confirm eligibility is timed later.
-}
-static void mrk_confirm_body(MRKInstalledPanel *s, const uint8_t *parent, const uint8_t *panel,
-    MRKOpenAdmission admit, void *context, MRKOpenResult *r) {
-    if (s->observationConfirmBodyAttempted || s->unknown
-        || s->observationIdentity.binding.site != MRK_PROOF_COMPLETE || s->observationIdentity.binding.error
-        || memcmp(parent, s->observationParentTag, 64) || memcmp(panel, s->observationPanelTag, 64)) {
-        r->error = MRK_OPEN_CUSTODY; s->unknown = YES; return;
+    if (!status) {
+        memcpy(parent, s->observationParentTag, capacity); memcpy(panel, s->observationPanelTag, capacity);
+        memcpy(prompt, s->observationPrompt, 8);
     }
-    s->observationConfirmBodyAttempted = YES;
-    NSWindow *const originalParent = s->parent;
-    NSWindow *const originalPanel = s->window;
-    void (^const originalCompletion)(NSModalResponse) = s->completion;
-    r->error = admit(context, 0); if (r->error) return;
-    // Preparation's saved proof does not authorize later Confirm eligibility.
-    // Preserve this fresh full original proof independently from final proof.
-    r->site = MRK_OPEN_INITIAL_PROOF;
-    r->error = mrk_original_proof(s, &r->initial_proof, NO); if (r->error) return;
-    r->site = MRK_OPEN_ADMISSION;
-    r->error = admit(context, 0); if (r->error) return;
-    r->site = MRK_OPEN_CONFIRM_ELIGIBILITY;
-    r->error = mrk_confirm_proof(s, &r->eligibility, originalParent, originalPanel, originalCompletion); if (r->error) return;
-    // A slow getter cannot permit a later action or restart this endpoint.
-    r->site = MRK_OPEN_ADMISSION;
-    r->error = admit(context, 0); if (r->error) return;
-    r->site = MRK_OPEN_PROOF;
-    r->error = mrk_original_proof(s, &r->proof, NO); if (r->error) return;
-    r->site = MRK_OPEN_ADMISSION;
-    r->error = admit(context, 0); if (r->error) return;
-    r->site = MRK_OPEN_CONFIRM_RECHECK;
-    r->error = mrk_confirm_proof(s, &r->recheck, originalParent, originalPanel, originalCompletion); if (r->error) return;
-    // All returned AppKit getters precede this final scoped owner/clock gate.
-    // No lock, getter, lookup, replacement or renewed clock follows its permit.
-    r->site = MRK_OPEN_ADMISSION;
-    r->error = admit(context, 0); if (r->error) return;
-    r->site = MRK_OPEN_CONFIRM;
-    s->observationActionAttempted = YES; r->flags |= MRK_OPEN_ATTEMPTED;
-    BOOL triggered = [originalPanel accessibilityPerformConfirm];
-    s->observationActionReturned = YES; r->flags |= MRK_OPEN_RETURNED;
-    if (triggered) r->flags |= MRK_OPEN_TRIGGERED; else r->error = MRK_OPEN_NOT_TRIGGERED;
-    // A real callback may already have happened: custody, not pre-action
-    // no-response eligibility, is required after actual selector return.
-    if (!mrk_confirm_originals(s, originalParent, originalPanel, originalCompletion)
-        || s->unknown || s->callbackActive || !s->started || s->kind != 1 || s->closeAttempted || s->closed) {
-        s->unknown = YES; r->error = MRK_OPEN_CUSTODY; return;
-    }
-    int after = admit(context, 1); if (!r->error || after == MRK_OPEN_CUSTODY) r->error = after;
+    return status;
 }
-void mrk_panel_observe_confirm(void *opaque, const uint8_t *parent, const uint8_t *panel, size_t capacity,
-    MRKOpenAdmission admit, void *context, MRKOpenResult *out) {
+void mrk_panel_observe_open_recheck(void *opaque, const uint8_t *parent, const uint8_t *panel,
+    const uint8_t *prompt, unsigned stage, MRKOpenRecheck *out) {
     if (!out) return;
-    MRKOpenResult r = {0}; r.site = MRK_OPEN_ENTRY;
+    MRKOpenRecheck r = {0}; r.error = MRK_OPEN_CUSTODY;
     MRKInstalledPanel *s = opaque;
     @try {
-        if (!pthread_main_np()) r.error = MRK_OPEN_THREAD;
-        else if (!s || !parent || !panel || capacity != 64 || !admit || !context
-            || !mrk_identity_tag((const char *)parent, "mrk-parent-") || !mrk_identity_utf8(panel)
-            || !memcmp(parent, panel, capacity)) r.error = MRK_OPEN_INPUT;
-        else mrk_confirm_body(s, parent, panel, admit, context, &r);
+        if (!pthread_main_np() || !s || !parent || !panel || !prompt || (stage != 1 && stage != 2)) goto done;
+        if (s->unknown || memcmp(parent, s->observationParentTag, 64) || memcmp(panel, s->observationPanelTag, 64)
+            || memcmp(prompt, s->observationPrompt, 8) || s->observationRechecks != stage - 1) {
+            s->unknown = YES; goto done;
+        }
+        s->observationRechecks = stage; // Original read-only body is one-shot, not an action.
+        r.error = mrk_original_proof(s, &r.proof, NO);
+        if (!r.error) {
+            NSString *expected = [NSString stringWithCString:s->observationPrompt encoding:NSASCIIStringEncoding];
+            id actual = [(NSOpenPanel *)s->window prompt];
+            r.prompt = mrk_identity_class(actual, expected) == MRK_ID_MATCH ? 1u : 2u;
+            if (r.prompt != 1) r.error = MRK_OPEN_CHANGED;
+        }
+        if (!s->unknown && r.error != MRK_OPEN_CUSTODY && r.error != MRK_OPEN_EXCEPTION) r.known = 1;
     } @catch (NSException *e) { (void)e; if (s) s->unknown = YES; r.error = MRK_OPEN_EXCEPTION; }
-    if (pthread_main_np() && s && !s->unknown && r.error != MRK_OPEN_CUSTODY && r.error != MRK_OPEN_EXCEPTION)
-        r.flags |= MRK_OPEN_KNOWN;
-    *out = r; // Scalar actual-return DATA only. No element/CF pointer or cleanup receipt.
+done:
+    *out = r; // The actual main/TLS guard is released by Rust before its receipt.
+}
+
+enum { MRK_PROMPT_CALLS = 512, MRK_PROMPT_NODES = 64, MRK_PROMPT_DEPTH = 8, MRK_PROMPT_CF = 256 };
+typedef union { CFTypeRef value; CFArrayRef array; } MRKPromptOwned;
+typedef struct { AXUIElementRef element; unsigned parent, depth; } MRKPromptNode;
+typedef struct {
+    MRKOpenAdmission admit; MRKOpenRecheckCall recheck; void *context; MRKOpenResult result;
+    CFTypeID elementType;
+    MRKPromptOwned owned[MRK_PROMPT_CF]; unsigned count;
+    MRKPromptNode nodes[MRK_PROMPT_NODES]; unsigned length, button;
+    BOOL cleanupKnown;
+} MRKPrompt;
+// One registered worker per original process. On exception/uncertain CF cleanup
+// the exact fixed ledger remains retained for process lifetime, never Drop/retry.
+static MRKPrompt mrk_prompt_original;
+static atomic_flag mrk_prompt_claimed = ATOMIC_FLAG_INIT;
+static BOOL mrk_ax_fail(MRKPrompt *s, uint32_t error) {
+    if (!s->result.error) s->result.error = error;
+    return NO;
+}
+static BOOL mrk_ax_status(MRKPrompt *s, AXError error) {
+    if (error == kAXErrorSuccess) return YES;
+    if (!s->result.ax_error) s->result.ax_error = error; // Actual first failing AX return, even after an earlier deadline.
+    switch (error) {
+        case kAXErrorAttributeUnsupported: case kAXErrorActionUnsupported: case kAXErrorNoValue:
+        case kAXErrorNotImplemented: case kAXErrorAPIDisabled: return mrk_ax_fail(s, MRK_OPEN_UNSUPPORTED);
+        case kAXErrorInvalidUIElement: return mrk_ax_fail(s, MRK_OPEN_INVALID_ELEMENT);
+        case kAXErrorIllegalArgument: return mrk_ax_fail(s, MRK_OPEN_INPUT);
+        case kAXErrorCannotComplete: return mrk_ax_fail(s, MRK_OPEN_CANNOT_COMPLETE);
+        default: return mrk_ax_fail(s, MRK_OPEN_OTHER);
+    }
+}
+static MRKPromptOwned *mrk_ax_slot(MRKPrompt *s) {
+    if (s->count == MRK_PROMPT_CF) { mrk_ax_fail(s, MRK_OPEN_LIMIT); return NULL; }
+    return &s->owned[s->count++]; // Register actual out-slot BEFORE every Create/Copy.
+}
+static BOOL mrk_ax_admit(MRKPrompt *s, uint64_t required_ns, int after, MRKOpenTimeout *timeout) {
+    int result = s->admit(s->context, required_ns, after, timeout);
+    if (!result) return YES;
+    if (result != MRK_OPEN_DEADLINE && result != MRK_OPEN_INELIGIBLE && result != MRK_OPEN_CUSTODY) {
+        s->cleanupKnown = NO; result = MRK_OPEN_CUSTODY;
+    }
+    if (result == MRK_OPEN_CUSTODY) s->cleanupKnown = NO;
+    return mrk_ax_fail(s, (uint32_t)result);
+}
+static BOOL mrk_ax_before(MRKPrompt *s, AXUIElementRef element) {
+    if (s->result.calls > MRK_PROMPT_CALLS - 2) return mrk_ax_fail(s, MRK_OPEN_LIMIT);
+    MRKOpenTimeout timeout = {0};
+    if (!mrk_ax_admit(s, 0, 0, &timeout)) return NO;
+    if (!isfinite(timeout.seconds) || timeout.seconds <= 0 || (double)timeout.seconds > 0.1
+        || timeout.required_ns == 0 || timeout.required_ns > 100000000
+        || timeout.required_ns != (uint64_t)ceil((double)timeout.seconds * 1000000000.0))
+        return mrk_ax_fail(s, MRK_OPEN_INPUT);
+    s->result.calls++;
+    BOOL installed = mrk_ax_status(s, AXUIElementSetMessagingTimeout(element, timeout.seconds));
+    // Same endpoint after the setter; never give the upcoming call more time
+    // than remains. The callback is atomic/clock-only, with no owner lock.
+    BOOL admitted = mrk_ax_admit(s, timeout.required_ns, 0, NULL);
+    return installed && admitted;
+}
+static BOOL mrk_ax_type(MRKPrompt *s, CFTypeRef value, CFTypeID type) {
+    return value && CFGetTypeID(value) == type ? YES : mrk_ax_fail(s, MRK_OPEN_MALFORMED);
+}
+static CFTypeRef mrk_ax_copy(MRKPrompt *s, AXUIElementRef element, CFStringRef attribute, BOOL optional) {
+    MRKPromptOwned *slot = mrk_ax_slot(s); if (!slot || !mrk_ax_before(s, element)) return NULL;
+    s->result.calls++;
+    AXError status = AXUIElementCopyAttributeValue(element, attribute, &slot->value);
+    // Optional Title exists only for labelled objects. An actual absent value
+    // with no returned object is a nonmatch; IPC/malformed errors are not absence.
+    BOOL absent = optional && !slot->value && (status == kAXErrorNoValue || status == kAXErrorAttributeUnsupported);
+    BOOL returned = absent || mrk_ax_status(s, status), admitted = mrk_ax_admit(s, 0, 0, NULL);
+    if (!returned || !admitted || absent) return NULL;
+    if (!slot->value) { mrk_ax_fail(s, MRK_OPEN_MALFORMED); return NULL; }
+    return slot->value;
+}
+static CFArrayRef mrk_ax_array(MRKPrompt *s, AXUIElementRef element, CFStringRef attribute, CFIndex limit, BOOL optional) {
+    // A returned zero count is an ordinary empty array, not an illegal index0
+    // Copy converted to absence. Count and bounded Copy both spend the common
+    // timeout/call budget; a changed or truncated array cannot prove a search.
+    if (!mrk_ax_before(s, element)) return NULL;
+    CFIndex expected = -1; s->result.calls++;
+    AXError count_status = AXUIElementGetAttributeValueCount(element, attribute, &expected);
+    BOOL absent = optional && (count_status == kAXErrorNoValue || count_status == kAXErrorAttributeUnsupported);
+    BOOL counted = absent || mrk_ax_status(s, count_status), admitted = mrk_ax_admit(s, 0, 0, NULL);
+    if (!counted || !admitted || absent) return NULL;
+    if (expected < 0) { mrk_ax_fail(s, MRK_OPEN_MALFORMED); return NULL; }
+    if (expected > limit) { mrk_ax_fail(s, MRK_OPEN_LIMIT); return NULL; }
+    if (!expected) { if (!optional) mrk_ax_fail(s, MRK_OPEN_UNSUPPORTED); return NULL; }
+    MRKPromptOwned *slot = mrk_ax_slot(s); if (!slot || !mrk_ax_before(s, element)) return NULL;
+    s->result.calls++;
+    AXError status = AXUIElementCopyAttributeValues(element, attribute, 0, limit + 1, &slot->array);
+    BOOL copied = mrk_ax_status(s, status); admitted = mrk_ax_admit(s, 0, 0, NULL);
+    if (!copied || !admitted || !mrk_ax_type(s, slot->value, CFArrayGetTypeID())) return NULL;
+    CFIndex count = CFArrayGetCount(slot->array);
+    if (count < 0 || count > limit) { mrk_ax_fail(s, MRK_OPEN_LIMIT); return NULL; }
+    if (count != expected) { mrk_ax_fail(s, MRK_OPEN_CHANGED); return NULL; }
+    for (CFIndex i = 0; i < count; ++i)
+        if (!mrk_ax_type(s, CFArrayGetValueAtIndex(slot->array, i), s->elementType)) return NULL;
+    return slot->array;
+}
+static BOOL mrk_ax_equal_attribute(MRKPrompt *s, AXUIElementRef element, CFStringRef attribute, CFTypeRef expected) {
+    CFTypeRef actual = mrk_ax_copy(s, element, attribute, NO);
+    if (!actual || !mrk_ax_type(s, actual, CFGetTypeID(expected))) return NO;
+    return CFEqual(actual, expected) ? YES : mrk_ax_fail(s, MRK_OPEN_CHANGED);
+}
+static BOOL mrk_ax_projection(MRKPrompt *s, AXUIElementRef app, CFStringRef parent_text, CFStringRef panel_text,
+    AXUIElementRef *parent, AXUIElementRef *sheet) {
+    s->result.site = MRK_OPEN_WINDOWS;
+    CFArrayRef windows = mrk_ax_array(s, app, kAXWindowsAttribute, 4, NO); if (!windows) return NO;
+    AXUIElementRef found_parent = NULL, found_sheet = NULL;
+    s->result.site = MRK_OPEN_PARENT_ID;
+    for (CFIndex i = 0; i < CFArrayGetCount(windows); ++i) {
+        AXUIElementRef candidate = (AXUIElementRef)CFArrayGetValueAtIndex(windows, i);
+        CFTypeRef name = mrk_ax_copy(s, candidate, kAXIdentifierAttribute, NO);
+        if (!name || !mrk_ax_type(s, name, CFStringGetTypeID())) return NO;
+        if (CFStringGetLength(name) >= 64) return mrk_ax_fail(s, MRK_OPEN_LIMIT);
+        if (CFEqual(name, parent_text)) {
+            if (found_parent) return mrk_ax_fail(s, MRK_OPEN_AMBIGUOUS);
+            found_parent = candidate;
+        }
+    }
+    if (!found_parent) return mrk_ax_fail(s, MRK_OPEN_UNSUPPORTED);
+    if (*parent && !CFEqual(*parent, found_parent)) return mrk_ax_fail(s, MRK_OPEN_CHANGED);
+    s->result.checks |= 1u; s->result.site = MRK_OPEN_SHEET;
+    CFArrayRef children = mrk_ax_array(s, found_parent, kAXChildrenAttribute, 16, NO); if (!children) return NO;
+    for (CFIndex i = 0; i < CFArrayGetCount(children); ++i) {
+        AXUIElementRef candidate = (AXUIElementRef)CFArrayGetValueAtIndex(children, i);
+        CFTypeRef role = mrk_ax_copy(s, candidate, kAXRoleAttribute, NO);
+        if (!role || !mrk_ax_type(s, role, CFStringGetTypeID())) return NO;
+        if (CFEqual(role, kAXSheetRole)) {
+            if (found_sheet) return mrk_ax_fail(s, MRK_OPEN_AMBIGUOUS);
+            found_sheet = candidate;
+        }
+    }
+    if (!found_sheet) return mrk_ax_fail(s, MRK_OPEN_UNSUPPORTED);
+    if (*sheet && !CFEqual(*sheet, found_sheet)) return mrk_ax_fail(s, MRK_OPEN_CHANGED);
+    s->result.site = MRK_OPEN_TOPOLOGY;
+    if (!mrk_ax_equal_attribute(s, found_sheet, kAXIdentifierAttribute, panel_text)
+        || !mrk_ax_equal_attribute(s, found_sheet, kAXParentAttribute, found_parent)) return NO;
+    s->result.checks |= 2u; *parent = found_parent; *sheet = found_sheet; return YES;
+}
+static BOOL mrk_ax_scan(MRKPrompt *s, AXUIElementRef sheet, CFStringRef prompt) {
+    s->result.site = MRK_OPEN_TREE;
+    s->nodes[0] = (MRKPromptNode){sheet, 0, 0}; s->length = 1; unsigned matches = 0;
+    for (unsigned at = 0; at < s->length; ++at) {
+        MRKPromptNode node = s->nodes[at]; s->result.nodes++;
+        if (at && !mrk_ax_equal_attribute(s, node.element, kAXParentAttribute, s->nodes[node.parent].element)) return NO;
+        CFTypeRef role = mrk_ax_copy(s, node.element, kAXRoleAttribute, NO);
+        if (!role || !mrk_ax_type(s, role, CFStringGetTypeID())) return NO;
+        if (CFEqual(role, kAXButtonRole)) {
+            CFTypeRef title = mrk_ax_copy(s, node.element, kAXTitleAttribute, YES);
+            if (s->result.error) return NO;
+            if (title) {
+                if (!mrk_ax_type(s, title, CFStringGetTypeID())) return NO;
+                if (CFStringGetLength(title) > 512) return mrk_ax_fail(s, MRK_OPEN_LIMIT);
+                if (CFEqual(title, prompt)) { matches++; s->button = at; }
+            }
+        }
+        CFArrayRef children = mrk_ax_array(s, node.element, kAXChildrenAttribute, 16, YES);
+        if (s->result.error) return NO;
+        CFIndex count = children ? CFArrayGetCount(children) : 0;
+        if (count && node.depth == MRK_PROMPT_DEPTH) return mrk_ax_fail(s, MRK_OPEN_LIMIT);
+        for (CFIndex i = 0; i < count; ++i) {
+            AXUIElementRef child = (AXUIElementRef)CFArrayGetValueAtIndex(children, i);
+            for (unsigned previous = 0; previous < s->length; ++previous)
+                if (CFEqual(child, s->nodes[previous].element)) return mrk_ax_fail(s, MRK_OPEN_MALFORMED);
+            if (s->length == MRK_PROMPT_NODES) return mrk_ax_fail(s, MRK_OPEN_LIMIT);
+            s->nodes[s->length++] = (MRKPromptNode){child, at, node.depth + 1};
+        }
+    }
+    s->result.checks |= 4u; // Complete bounded search, never a first-match shortcut.
+    if (matches != 1) return mrk_ax_fail(s, matches ? MRK_OPEN_AMBIGUOUS : MRK_OPEN_UNSUPPORTED);
+    s->result.checks |= 8u; return YES;
+}
+static BOOL mrk_ax_button(MRKPrompt *s, CFStringRef prompt) {
+    AXUIElementRef button = s->nodes[s->button].element;
+    if (!mrk_ax_equal_attribute(s, button, kAXRoleAttribute, kAXButtonRole)
+        || !mrk_ax_equal_attribute(s, button, kAXTitleAttribute, prompt)) return NO;
+    CFTypeRef enabled = mrk_ax_copy(s, button, kAXEnabledAttribute, NO);
+    if (!enabled || !mrk_ax_type(s, enabled, CFBooleanGetTypeID())) return NO;
+    if (!CFBooleanGetValue(enabled)) return mrk_ax_fail(s, MRK_OPEN_INELIGIBLE);
+    s->result.checks |= 16u;
+    MRKPromptOwned *slot = mrk_ax_slot(s); if (!slot || !mrk_ax_before(s, button)) return NO;
+    s->result.calls++;
+    AXError status = AXUIElementCopyActionNames(button, &slot->array);
+    // This public API has no range-limited variant. Its <=16 bound is expressly
+    // post-return, not a preallocation promise; its out-slot is already owned.
+    BOOL copied = mrk_ax_status(s, status), admitted = mrk_ax_admit(s, 0, 0, NULL);
+    if (!copied || !admitted
+        || !mrk_ax_type(s, slot->value, CFArrayGetTypeID())) return NO;
+    CFIndex count = CFArrayGetCount(slot->array); unsigned presses = 0;
+    if (count < 0 || count > 16) return mrk_ax_fail(s, MRK_OPEN_LIMIT);
+    for (CFIndex i = 0; i < count; ++i) {
+        CFTypeRef action = CFArrayGetValueAtIndex(slot->array, i);
+        if (!mrk_ax_type(s, action, CFStringGetTypeID())) return NO;
+        if (CFEqual(action, kAXPressAction)) presses++;
+    }
+    if (presses != 1) return mrk_ax_fail(s, presses ? MRK_OPEN_AMBIGUOUS : MRK_OPEN_UNSUPPORTED);
+    s->result.checks |= 32u;
+    for (unsigned at = s->button; at; at = s->nodes[at].parent)
+        if (!mrk_ax_equal_attribute(s, s->nodes[at].element, kAXParentAttribute, s->nodes[s->nodes[at].parent].element)) return NO;
+    return YES;
+}
+static BOOL mrk_ax_original(MRKPrompt *s, int stage) {
+    s->result.site = stage == 1 ? MRK_OPEN_INITIAL_PROOF : MRK_OPEN_FINAL_PROOF;
+    int code = s->recheck(s->context, stage);
+    if (code == MRK_OPEN_CUSTODY) s->cleanupKnown = NO;
+    return code ? mrk_ax_fail(s, (uint32_t)code) : YES;
+}
+static void mrk_ax_open(MRKPrompt *s, const uint8_t *parent_tag, const uint8_t *panel_tag, const uint8_t *prompt) {
+    if (!mrk_ax_admit(s, 0, 0, NULL) || !mrk_ax_original(s, 1)) return;
+    s->result.calls++; s->elementType = AXUIElementGetTypeID(); // Count and reuse this local AX API too.
+    MRKPromptOwned *parent_text = mrk_ax_slot(s), *panel_text = mrk_ax_slot(s), *prompt_text = mrk_ax_slot(s), *application = mrk_ax_slot(s);
+    if (!parent_text || !panel_text || !prompt_text || !application) return;
+    s->result.site = MRK_OPEN_APPLICATION;
+    parent_text->value = CFStringCreateWithCString(NULL, (const char *)parent_tag, kCFStringEncodingASCII);
+    panel_text->value = CFStringCreateWithBytes(NULL, panel_tag, (CFIndex)strnlen((const char *)panel_tag, 64), kCFStringEncodingUTF8, false);
+    prompt_text->value = CFStringCreateWithCString(NULL, (const char *)prompt, kCFStringEncodingASCII);
+    s->result.calls++; application->value = AXUIElementCreateApplication(getpid()); // THIS PID only.
+    if (!mrk_ax_type(s, parent_text->value, CFStringGetTypeID()) || !mrk_ax_type(s, panel_text->value, CFStringGetTypeID())
+        || !mrk_ax_type(s, prompt_text->value, CFStringGetTypeID()) || !mrk_ax_type(s, application->value, s->elementType)) return;
+    AXUIElementRef parent = NULL, sheet = NULL;
+    if (!mrk_ax_projection(s, (AXUIElementRef)application->value, parent_text->value, panel_text->value, &parent, &sheet)
+        || !mrk_ax_scan(s, sheet, prompt_text->value)) return;
+    s->result.site = MRK_OPEN_BUTTON;
+    if (!mrk_ax_button(s, prompt_text->value)) return;
+    if (!mrk_ax_projection(s, (AXUIElementRef)application->value, parent_text->value, panel_text->value, &parent, &sheet)) return;
+    s->result.site = MRK_OPEN_BUTTON_RECHECK;
+    if (!mrk_ax_button(s, prompt_text->value)) return;
+    s->result.checks |= 64u;
+    if (!mrk_ax_original(s, 2)) return;
+    s->result.site = MRK_OPEN_ADMISSION;
+    AXUIElementRef button = s->nodes[s->button].element;
+    if (!mrk_ax_before(s, button)) return;
+    // Last permit is atomic/clock-only. No query, wait, lock or replacement
+    // follows it. Every error (even CannotComplete) permanently spends Press.
+    s->result.site = MRK_OPEN_PRESS; s->result.calls++; s->result.flags |= MRK_OPEN_ATTEMPTED;
+    AXError status = AXUIElementPerformAction(button, kAXPressAction);
+    s->result.flags |= MRK_OPEN_RETURNED;
+    if (status == kAXErrorSuccess) s->result.flags |= MRK_OPEN_TRIGGERED;
+    mrk_ax_status(s, status); mrk_ax_admit(s, 0, 1, NULL);
+}
+void mrk_observation_prompt_press(const uint8_t *parent, const uint8_t *panel, const uint8_t *prompt, size_t capacity,
+    MRKOpenAdmission admission, MRKOpenRecheckCall recheck, void *context, MRKOpenResult *out) {
+    if (!out) return;
+    MRKOpenResult refused = {0}; refused.site = MRK_OPEN_ENTRY;
+    if (pthread_main_np()) { refused.error = MRK_OPEN_THREAD; *out = refused; return; }
+    if (!parent || !panel || !prompt || capacity != 64 || !admission || !recheck || !context
+        || !mrk_identity_tag((const char *)parent, "mrk-parent-") || !mrk_identity_utf8(panel)
+        || !memcmp(parent, panel, capacity) || !mrk_prompt_valid(parent, prompt)) {
+        refused.error = MRK_OPEN_INPUT; *out = refused; return;
+    }
+    if (atomic_flag_test_and_set(&mrk_prompt_claimed)) { refused.error = MRK_OPEN_CUSTODY; *out = refused; return; }
+    MRKPrompt *s = &mrk_prompt_original; s->admit = admission; s->recheck = recheck; s->context = context;
+    s->cleanupKnown = YES; s->result.site = MRK_OPEN_ENTRY;
+    @try { mrk_ax_open(s, parent, panel, prompt); }
+    @catch (NSException *e) { (void)e; mrk_ax_fail(s, MRK_OPEN_EXCEPTION); s->cleanupKnown = NO; }
+    s->result.owned = s->count; // Reserved original slots, NOT a fabricated CFRelease count.
+    if (s->cleanupKnown) {
+        for (unsigned left = s->count; left; --left) {
+            // Deadline8 still permits same-original late cleanup before45s.
+            // Custody9 (including original45s expiry) retains every remaining
+            // slot instead of beginning another release after its owner ends.
+            mrk_ax_admit(s, 0, (s->result.flags & MRK_OPEN_ATTEMPTED) != 0, NULL);
+            if (!s->cleanupKnown) break;
+            MRKPromptOwned *slot = &s->owned[left - 1];
+            @try { if (slot->value) CFRelease(slot->value); slot->value = NULL; s->result.released++; }
+            @catch (NSException *e) {
+                (void)e; s->cleanupKnown = NO;
+                if (!s->result.error) { s->result.site = MRK_OPEN_CLEANUP; mrk_ax_fail(s, MRK_OPEN_CLEANUP_UNKNOWN); }
+                break; // This release is never retried; remaining ledger stays retained.
+            }
+        }
+    }
+    mrk_ax_admit(s, 0, (s->result.flags & MRK_OPEN_ATTEMPTED) != 0, NULL);
+    if (s->cleanupKnown && s->result.released == s->result.owned) s->result.flags |= MRK_OPEN_KNOWN;
+    s->admit = NULL; s->recheck = NULL; s->context = NULL; // No dangling worker-stack callback in the retained CF ledger.
+    *out = s->result; // All ordinary CF releases returned, or exact originals stay registered above.
 }
 #endif

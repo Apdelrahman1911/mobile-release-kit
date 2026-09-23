@@ -121,10 +121,10 @@ pub(super) mod observation {
             }
         }
     }
-    fn original_admitted(id: u32, call: &Arc<GuiCall>, original: &Arc<OriginalWork>, after_confirm: bool) -> Option<bool> {
+    fn original_admitted(id: u32, call: &Arc<GuiCall>, original: &Arc<OriginalWork>, after_press: bool) -> Option<bool> {
         let owner = call.owner()?;
         if owner.id != id || !Arc::ptr_eq(&owner, original) || !Arc::ptr_eq(&owner.gui, call) { return None; }
-        if after_confirm { let _facts = call.facts()?; Some(true) }
+        if after_press { let _facts = call.facts()?; Some(true) }
         else { allowed(call, &owner).ok() }
     }
     pub(crate) struct PreparedOpenInput {
@@ -157,6 +157,16 @@ pub(super) mod observation {
         pub(crate) fn succeeded(self) -> bool {
             self.admitted == Some(true) && self.native.is_some_and(|n|
                 n.entered && n.custody_known && n.report.is_some_and(native::OpenReport::succeeded))
+        }
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) struct OpenRecheckBody {
+        pub(crate) native: Option<native::OpenRecheckReturn>, pub(crate) admitted: Option<bool>,
+    }
+    impl OpenRecheckBody {
+        pub(crate) fn no_native(admitted: Option<bool>) -> Self { Self { native: None, admitted } }
+        pub(crate) fn custody_known(self) -> bool {
+            self.admitted.is_some() && self.native.is_none_or(|r| r.custody_known)
         }
     }
     thread_local! { static OPEN_BODY: Cell<Option<u32>> = const { Cell::new(None) }; }
@@ -211,38 +221,42 @@ pub(super) mod observation {
             self.call.failed_at(reason, at);
             Ok(()) // STOP requested, not a native callback/release/join receipt.
         }
-        pub(crate) fn run(&self, end: Instant, mut admit: impl FnMut(bool) -> Option<bool>) -> OpenActionBody {
-            if !native::main_thread() || self.state() != "entered" { return OpenActionBody::no_native(None); }
-            if self.expired() || Instant::now() >= end { return OpenActionBody::no_native(Some(false)); }
+        pub(crate) fn identity(&self) -> native::OpenIdentity { self.identity }
+        /// Read-only native main recheck; worker entry/return lives elsewhere.
+        /// The enclosing dispatcher sends its receipt only AFTER this function
+        /// returns and all PANEL/original/main-body guards have been dropped.
+        pub(crate) fn recheck(&self, end: Instant, stage: u32, mut admit: impl FnMut(bool) -> Option<bool>) -> OpenRecheckBody {
+            if !native::main_thread() || self.state() != "entered" || !(1..=2).contains(&stage) {
+                return OpenRecheckBody::no_native(None);
+            }
+            if self.expired() || Instant::now() >= end { return OpenRecheckBody::no_native(Some(false)); }
             let before = admit(false);
             if before != Some(true) || self.stopped() || self.expired() || Instant::now() >= end {
-                return OpenActionBody::no_native(before.map(|_| false));
+                return OpenRecheckBody::no_native(before.map(|_| false));
             }
-            let Some(_body) = OpenBodyGuard::enter(self) else { return OpenActionBody::no_native(None); };
+            let Some(_body) = OpenBodyGuard::enter(self) else { return OpenRecheckBody::no_native(None); };
             PANEL.with(|book| {
-                let Ok(mut book) = book.try_borrow_mut() else { return OpenActionBody::no_native(None); };
-                let Some(entry) = book.as_mut().filter(|e| e.id == self.id) else { return OpenActionBody::no_native(None); };
-                let Ok((call, owner)) = original(entry) else { return OpenActionBody::no_native(None); };
+                let Ok(mut book) = book.try_borrow_mut() else { return OpenRecheckBody::no_native(None); };
+                let Some(entry) = book.as_mut().filter(|e| e.id == self.id) else { return OpenRecheckBody::no_native(None); };
+                let Ok((call, owner)) = original(entry) else { return OpenRecheckBody::no_native(None); };
                 if !Arc::ptr_eq(&call, &self.call) || !Arc::ptr_eq(&owner, &self.owner)
                     || !entry.open_release.as_ref().is_some_and(|r| Arc::ptr_eq(r, &self.release)) {
-                    return OpenActionBody::no_native(None);
+                    return OpenRecheckBody::no_native(None);
                 }
                 let before = admit(false);
                 if before != Some(true) || self.state() != "entered" || self.stopped() || self.expired() || Instant::now() >= end {
-                    return OpenActionBody::no_native(before.map(|_| false));
+                    return OpenRecheckBody::no_native(before.map(|_| false));
                 }
-                let Some(panel) = entry.panel.as_mut() else { return OpenActionBody::no_native(None); };
-                // No Record/GuiFacts/owner lock survives either admission into
-                // this synchronous AppKit call. Relay independently observes E.
-                let returned = panel.installed_panel_confirm(&self.identity, end, |after| {
-                    let allowed = admit(after);
-                    if self.state() != "entered" { return None; }
-                    allowed.map(|yes| yes && (after || !self.expired() && !self.stopped() && Instant::now() < end))
-                });
+                let Some(panel) = entry.panel.as_mut() else { return OpenRecheckBody::no_native(None); };
+                // No Record/GuiFacts/owner lock crosses the actual native proof.
+                // No AX client IPC or Press is made from the main thread.
+                let returned = panel.installed_open_recheck(&self.identity, stage);
                 let after = admit(true);
-                OpenActionBody { native: Some(returned), admitted: if returned.custody_known { after } else { None } }
-            }) // PANEL and main-only body guard drop before wrapper publication.
+                OpenRecheckBody { native: returned,
+                    admitted: if returned.is_some_and(|r| r.custody_known) { after } else { None } }
+            })
         }
+
     }
     pub(crate) fn prepare_open_input(id: u32, returned: &mut Option<native::IdentityBindingReturn>) -> Result<PreparedOpenInput, ObservationError> {
         *returned = None;
