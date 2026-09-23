@@ -6,6 +6,9 @@
 #include <stdbool.h>
 
 enum { ELEMENTS = 32, CHILDREN = 16, DEPTH = 4, QUERIES = 256, HOLDERS = 192 };
+enum { BOOTSTRAP_IDLE, BOOTSTRAP_AWAIT_LAUNCH, BOOTSTRAP_LAUNCHING,
+    BOOTSTRAP_AWAIT_EVENT, BOOTSTRAP_STOPPING, BOOTSTRAP_STOPPED,
+    BOOTSTRAP_RETURNED, BOOTSTRAP_RETIRED };
 typedef struct {
     id object; unsigned depth, via; const char *role;
     int parent, window, enabled, press, allowed, children; BOOL read;
@@ -23,6 +26,8 @@ typedef struct {
     // last-in-budget observations, never an atomic refusal snapshot or authority.
     BOOL parentReadinessPhase;
     unsigned readinessEvents, readinessMain, readinessPair;
+    NSApplication *application; NSTimer *bootstrapTimer;
+    unsigned bootstrapPhase; BOOL bootstrapDispatching;
 } Probe;
 static Probe p; // Original holders remain rooted even on exception/Unknown.
 static NSAutoreleasePool *pool;
@@ -38,6 +43,20 @@ static void reason(Probe *s, const char *value) {
 static void unknown(Probe *s, const char *value) {
     reason(s, value); s->known = NO;
     if (s->state && !s->releaseEntered) s->state->unknown = YES;
+}
+static BOOL emit(void);
+static void fail_closed(const char *value) __attribute__((noreturn));
+static void fail_closed(const char *value) {
+    unknown(&p, value); p.parentReadinessPhase = NO;
+    (void)emit();
+    // In particular, no callback unwinds original holders or the outer pool
+    // through AppKit's still-active run/dispatch/private-pool frames.
+    _exit(70);
+}
+static void bootstrap_gate(void) {
+    if (!pthread_main_np() || !p.known || (p.application && NSApp != p.application))
+        fail_closed("preparation");
+    if (!(now() < p.end)) fail_closed("preparation-deadline");
 }
 static BOOL originals(Probe *s) {
     return s->state && s->parent && s->panel && s->completion
@@ -198,15 +217,8 @@ static void pump(void) {
         untilDate:until inMode:NSDefaultRunLoopMode dequeue:YES];
     if (now() >= p.end) return;
     if (event) {
-        BOOL activated = NO;
-        if (p.parentReadinessPhase) {
-            p.readinessEvents |= 1;
-            activated = [event subtype] == NSEventSubtypeApplicationActivated;
-            if (now() >= p.end) return;
-        }
         [NSApp sendEvent:event];
         if (now() >= p.end) return;
-        if (p.parentReadinessPhase) p.readinessEvents |= activated ? 7 : 3;
     }
     if (now() >= p.end) return;
     [NSApp updateWindows];
@@ -223,34 +235,143 @@ static void sample_parent_readiness(void) {
     if (now() >= p.end) return;
     p.readinessPair |= eligible ? 12 : 4;
 }
+
+// The ordinary AppKit loop owns bootstrap only. Its dispatch fence may receive
+// other own-app events, but never forwards input to responders. No panel or AX
+// holder exists until the original run has actually returned and its one timer
+// has been retired. The application is also its sole fixed launch delegate.
+@interface MRKPanelProbeApplication : NSApplication <NSApplicationDelegate>
+- (void)bootstrapDeadline:(NSTimer *)timer;
+@end
+@implementation MRKPanelProbeApplication
+- (void)applicationDidFinishLaunching:(NSNotification *)notification {
+    @try {
+        bootstrap_gate();
+        if (self != p.application || p.bootstrapPhase != BOOTSTRAP_AWAIT_LAUNCH || !notification)
+            fail_closed("preparation");
+        id sender = [notification object]; bootstrap_gate();
+        if (sender != self) fail_closed("preparation");
+        p.bootstrapPhase = BOOTSTRAP_LAUNCHING;
+        p.parent = [NSWindow alloc]; bootstrap_gate();
+        if (!p.parent) fail_closed("parent-create");
+        p.parent = [p.parent initWithContentRect:NSMakeRect(0, 0, 640, 480)
+            styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+            backing:NSBackingStoreBuffered defer:NO];
+        bootstrap_gate();
+        if (!p.parent) fail_closed("parent-create");
+        [p.parent setReleasedWhenClosed:NO]; bootstrap_gate();
+        [p.parent setTitle:@"MRK read-only panel probe"]; bootstrap_gate();
+        p.parentReadinessPhase = YES;
+        [self activate]; bootstrap_gate();
+        [p.parent makeKeyAndOrderFront:nil]; bootstrap_gate();
+        [p.parent makeMainWindow]; bootstrap_gate();
+        p.bootstrapPhase = BOOTSTRAP_AWAIT_EVENT;
+        // Launch notification is setup, not event/readiness/finality evidence.
+    } @catch (NSException *error) { (void)error; fail_closed("exception"); }
+}
+- (void)sendEvent:(NSEvent *)event {
+    @try {
+        bootstrap_gate();
+        if (self != p.application || !event) fail_closed("preparation");
+        BOOL bootstrapping = p.bootstrapPhase != BOOTSTRAP_RETIRED;
+        if (bootstrapping) {
+            if (p.bootstrapPhase != BOOTSTRAP_AWAIT_EVENT || p.bootstrapDispatching)
+                fail_closed("preparation");
+            p.bootstrapDispatching = YES;
+        }
+        NSEventType type = [event type]; bootstrap_gate();
+        if (type != NSEventTypeAppKitDefined) {
+            if (bootstrapping) p.bootstrapDispatching = NO;
+            return; // No mouse/key/gesture/system/application-defined dispatch.
+        }
+        BOOL activated = NO;
+        if (bootstrapping) {
+            p.readinessEvents |= 1;
+            activated = [event subtype] == NSEventSubtypeApplicationActivated;
+            bootstrap_gate();
+        }
+        [super sendEvent:event]; bootstrap_gate();
+        if (bootstrapping) {
+            p.readinessEvents |= activated ? 7 : 3;
+            sample_parent_readiness(); bootstrap_gate();
+            NSWindow *main = [self mainWindow]; bootstrap_gate();
+            p.readinessMain = !main ? 1 : main == p.parent ? 2 : 3;
+            if (p.parent && main == p.parent) {
+                p.bootstrapPhase = BOOTSTRAP_STOPPING;
+                p.parentReadinessPhase = NO;
+                // stop is checked by run after this REAL NSEvent dispatch.
+                // The phase/active fence prohibits a second or reentrant stop.
+                [self stop:nil]; bootstrap_gate();
+                p.bootstrapPhase = BOOTSTRAP_STOPPED;
+            }
+            p.bootstrapDispatching = NO;
+        }
+    } @catch (NSException *error) { (void)error; fail_closed("exception"); }
+}
+- (void)bootstrapDeadline:(NSTimer *)timer {
+    @try {
+        if (!pthread_main_np() || self != p.application || NSApp != self
+            || !timer || timer != p.bootstrapTimer
+            || p.bootstrapPhase < BOOTSTRAP_AWAIT_LAUNCH
+            || p.bootstrapPhase > BOOTSTRAP_STOPPED) fail_closed("preparation");
+        double observed = now();
+        p.timely = NO;
+        // An early callback is also refusal: never rearm or extend the endpoint.
+        if (!(observed >= p.end)) fail_closed("preparation-deadline");
+        fail_closed(p.bootstrapPhase < BOOTSTRAP_STOPPING
+            ? "parent-main-window" : "preparation-deadline");
+    } @catch (NSException *error) { (void)error; fail_closed("exception"); }
+}
+- (void)reportException:(NSException *)error {
+    (void)error; fail_closed("exception"); // Never log private detail or continue.
+}
+@end
+
+static void bootstrap(void) {
+    bootstrap_gate();
+    if (NSApp || p.application || p.bootstrapTimer || p.bootstrapPhase != BOOTSTRAP_IDLE)
+        fail_closed("preparation");
+    p.application = [MRKPanelProbeApplication sharedApplication]; bootstrap_gate();
+    if (!p.application || NSApp != p.application) fail_closed("preparation");
+    BOOL policy = [p.application setActivationPolicy:NSApplicationActivationPolicyRegular];
+    bootstrap_gate();
+    if (!policy) fail_closed("activation-policy");
+    [p.application setDelegate:(id<NSApplicationDelegate>)p.application]; bootstrap_gate();
+    double remaining = p.end - now();
+    if (!(remaining > 0)) fail_closed("preparation-deadline");
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:remaining]; bootstrap_gate();
+    if (!deadline) fail_closed("preparation");
+    p.bootstrapTimer = [NSTimer alloc]; bootstrap_gate();
+    if (!p.bootstrapTimer) fail_closed("preparation");
+    p.bootstrapTimer = [p.bootstrapTimer initWithFireDate:deadline interval:0.0
+        target:p.application selector:@selector(bootstrapDeadline:) userInfo:nil repeats:NO];
+    bootstrap_gate();
+    if (!p.bootstrapTimer) fail_closed("preparation");
+    NSRunLoop *loop = [NSRunLoop mainRunLoop]; bootstrap_gate();
+    if (!loop) fail_closed("preparation");
+    [loop addTimer:p.bootstrapTimer forMode:NSRunLoopCommonModes]; bootstrap_gate();
+    p.bootstrapPhase = BOOTSTRAP_AWAIT_LAUNCH;
+    [p.application run];
+    bootstrap_gate();
+    if (p.bootstrapPhase != BOOTSTRAP_STOPPED || p.bootstrapDispatching || !p.parent)
+        fail_closed("parent-main-window");
+    p.bootstrapPhase = BOOTSTRAP_RETURNED;
+    // Same main thread: invalidation and the sole owned release must actually
+    // return before native body admission. Unknown retains originals and exits.
+    [p.bootstrapTimer invalidate]; bootstrap_gate();
+    [p.bootstrapTimer release]; p.bootstrapTimer = nil; bootstrap_gate();
+    p.bootstrapPhase = BOOTSTRAP_RETIRED;
+    NSWindow *main = [p.application mainWindow]; bootstrap_gate();
+    if (!p.parent || main != p.parent) fail_closed("parent-main-window");
+}
 static BOOL prepare(void) {
-    p.stringClass = [NSString class]; p.arrayClass = [NSArray class]; p.urlClass = [NSURL class];
-    [NSApplication sharedApplication];
-    if (![NSApp setActivationPolicy:NSApplicationActivationPolicyRegular]) {
-        reason(&p, "activation-policy"); return NO;
-    }
-    [NSApp finishLaunching];
-    p.parent = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 640, 480)
-        styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
-        backing:NSBackingStoreBuffered defer:NO];
-    if (!p.parent) { reason(&p, "parent-create"); return NO; }
-    [p.parent setReleasedWhenClosed:NO]; [p.parent setTitle:@"MRK read-only panel probe"];
-    [NSApp activate];
-    [p.parent makeKeyAndOrderFront:nil]; [p.parent makeMainWindow];
-    // Activation is a request. Only this original getter's in-budget return,
-    // not diagnostic classifications, may satisfy the unchanged parent guard.
-    BOOL originalMain = NO;
-    p.parentReadinessPhase = YES;
-    while (now() < p.end) {
-        NSWindow *main = [NSApp mainWindow];
-        if (now() >= p.end) break;
-        p.readinessMain = !main ? 1 : main == p.parent ? 2 : 3;
-        if (main == p.parent) { originalMain = YES; break; }
-        sample_parent_readiness();
-        pump();
-    }
-    p.parentReadinessPhase = NO;
-    if (!originalMain) { reason(&p, "parent-main-window"); return NO; }
+    bootstrap_gate();
+    p.stringClass = [NSString class]; bootstrap_gate();
+    p.arrayClass = [NSArray class]; bootstrap_gate();
+    p.urlClass = [NSURL class]; bootstrap_gate();
+    bootstrap();
+    // Original run, timer retirement and a fresh actual mainWindow guard have
+    // returned. Existing panel/read/Other retirement stays outside AppKit run.
     if (now() >= p.end) { reason(&p, "preparation-deadline"); return NO; }
     p.state = mrk_panel_reserve();
     if (!p.state) { reason(&p, "panel-reserve"); return NO; }
