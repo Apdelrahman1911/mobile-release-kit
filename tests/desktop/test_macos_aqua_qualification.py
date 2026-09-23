@@ -1046,25 +1046,31 @@ class AquaDataTests(unittest.TestCase):
             self.assertIsNone(fixtures.inner_diagnostic_source)
 
     def test_failure_reason_diagnostic_does_not_promote_nonzero(self):
-        fixtures, emitted = InertFixtures(), []
-        marker = (b"MRK_MACOS_AQUA_FAILURE_STEP=CancelProject\n"
-                  b"MRK_MACOS_AQUA_FAILURE_REASON=asset_source_refused\n")
-        def runner(argv, **_):
-            return CompletedProcess(args=argv, returncode=1, stdout=b"", stderr=marker)
-        with self.assertRaisesRegex(M.Refused, "^app-return$") as caught:
-            M.run_cases(BINDING, fixtures, runner, UID, "runner", emitted.append)
-        report = M.diagnostic(caught.exception, None, fixtures)
-        self.assertEqual((report["status"], report["innerFailureStep"], report["innerFailureReason"]),
-                         ("failed", "CancelProject", "asset_source_refused"))
-        self.assertEqual(report["appReturncode"], 1)
-        self.assertIs(report["originalCallReturned"], True)
-        self.assertEqual(report["invocationFinality"], "no-pending-invocation")
-        self.assertFalse(fixtures.inflight)
-        self.assertEqual(report["innerDiagnosticSource"], "completed-output")
-        self.assertEqual(report["innerDiagnosticCompleteness"], "complete")
-        self.assertEqual(report["typedLifetimeFacts"], [])
-        self.assertEqual(fixtures.before, ["first-save"])
-        self.assertEqual((fixtures.reads, emitted), ([], []))
+        cases = [("CancelProject", "asset_source_refused")] + [("ProjectSettled", reason) for reason in (
+            "project-result-path", "project-result-path-app-child", "project-result-path-descendant",
+            "project-result-path-ancestor", "project-result-path-sibling", "project-result-path-tmp-spelling",
+            "project-result-path-data-spelling")]
+        for step, reason in cases:
+            with self.subTest(step=step, reason=reason):
+                fixtures, emitted = InertFixtures(), []
+                marker = (f"MRK_MACOS_AQUA_FAILURE_STEP={step}\n"
+                          f"MRK_MACOS_AQUA_FAILURE_REASON={reason}\n").encode("ascii")
+                def runner(argv, **_):
+                    return CompletedProcess(args=argv, returncode=1, stdout=b"", stderr=marker)
+                with self.assertRaisesRegex(M.Refused, "^app-return$") as caught:
+                    M.run_cases(BINDING, fixtures, runner, UID, "runner", emitted.append)
+                report = M.diagnostic(caught.exception, None, fixtures)
+                self.assertEqual((report["status"], report["innerFailureStep"], report["innerFailureReason"]),
+                                 ("failed", step, reason))
+                self.assertEqual(report["appReturncode"], 1)
+                self.assertIs(report["originalCallReturned"], True)
+                self.assertEqual(report["invocationFinality"], "no-pending-invocation")
+                self.assertFalse(fixtures.inflight)
+                self.assertEqual(report["innerDiagnosticSource"], "completed-output")
+                self.assertEqual(report["innerDiagnosticCompleteness"], "complete")
+                self.assertEqual(report["typedLifetimeFacts"], [])
+                self.assertEqual(fixtures.before, ["first-save"])
+                self.assertEqual((fixtures.reads, emitted), ([], []))
         self.assertIsNone(M.diagnostic(M.Refused("fixture-refused"), None, None)["innerFailureReason"])
 
     def test_original_window_source_is_borrowed_passive_and_same_endpoint_only(self):
@@ -1684,10 +1690,39 @@ class AquaDataTests(unittest.TestCase):
         predicates = ("!matches!(step, Step::OpenProject | Step::ProjectSettled) || already_selected",
                       "Path::new(&project.path) != expected_path", "project.name != expected_name", "!crate::protocol::valid_id(&project.id)")
         self.assertEqual(sorted(classifier.index(value) for value in predicates), [classifier.index(value) for value in predicates])
-        for label in ("order", "path", "name", "id"):
+        for label in ("order", "name", "id"):
             self.assertIn(f'return Some("project-result-{label}")', classifier)
+        self.assertIn('if Path::new(&project.path) != expected_path { return Some(project_path_mismatch_reason(Path::new(&project.path), expected_path)); }', classifier)
         self.assertNotIn("project_calls", handler)
         self.assertNotIn("r.step =", handler)
+
+    def test_project_path_mismatch_categories_are_bounded_failure_only_data(self):
+        observer = (PATH.parents[1] / "src-tauri" / "src" / "installed_shell_observation_macos.rs").read_text(encoding="utf-8")
+        helper = observer.split("fn project_path_mismatch_reason(", 1)[1].split("fn selected_project_failure(", 1)[0]
+        labels = M.re.findall(r'"(project-result-path(?:-[a-z-]+)?)"', helper)
+        self.assertEqual(set(labels), {"project-result-path", "project-result-path-app-child", "project-result-path-descendant",
+                                      "project-result-path-ancestor", "project-result-path-sibling", "project-result-path-tmp-spelling",
+                                      "project-result-path-data-spelling"})
+        self.assertEqual(len(labels), 7)
+        ordered = ('if !bounded(actual_text) || !bounded(expected_text) || actual == expected',
+                   'actual.strip_prefix(expected)', 'relative == Path::new("app")',
+                   'expected.starts_with(actual)', 'actual.parent() == expected.parent()',
+                   'expected_text.strip_prefix("/private/tmp/")', 'actual_text.strip_prefix("/System/Volumes/Data")')
+        self.assertEqual(sorted(helper.index(value) for value in ordered), [helper.index(value) for value in ordered])
+        for predicate in ("text.len() <= crate::asset_source::PATH_LIMIT", "text.starts_with('/')", "!text.as_bytes().contains(&0)",
+                          'text[1..].split(\'/\')', '!part.is_empty() && part != "." && part != ".." && part.len() <= 255',
+                          'actual_text.strip_prefix("/tmp/") == Some(suffix)', '== Some(expected_text)'):
+            self.assertIn(predicate, helper)
+        for forbidden in ("std::fs", "canonicalize", "observe_panel", "Instant::now", "self.", "format!", "json!",
+                          "to_owned", "to_string", "collect", "latch_failure", "return None", "return actual_text", "return expected_text"):
+            self.assertNotIn(forbidden, helper)
+        checks = observer.split("fn project_path_mismatch_data_checks()", 1)[1].split("// Synchronous expressions", 1)[0]
+        for category in set(labels):
+            self.assertIn(f'"{category}"', checks)
+        self.assertIn("for step in [Step::OpenProject, Step::ProjectSettled]", checks)
+        self.assertIn('selected_project_failure(step, true, &project, root, "first-save") != Some("project-result-order")', checks)
+        data = observer.split("fn project_snapshot_failure_data_checks()", 1)[1].split("fn project_path_mismatch_data_checks()", 1)[0]
+        self.assertIn("if !project_path_mismatch_data_checks() { return false; }", data)
 
     def test_project_snapshot_first_failure_classifiers_preserve_existing_gates(self):
         observer = (PATH.parents[1] / "src-tauri" / "src" / "installed_shell_observation_macos.rs").read_text(encoding="utf-8")

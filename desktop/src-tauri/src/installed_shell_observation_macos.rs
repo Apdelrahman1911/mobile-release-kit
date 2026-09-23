@@ -48,6 +48,8 @@ const FAILURE_REASONS: &[&str] = &[
     "project-witness-identity", "project-witness-response", "project-witness-selection", "project-witness-callback",
     "edit-status-schema", "edit-status-generation", "edit-status-owner", "edit-status-projection",
     "relay-join-contract", "exit-edit-status", "exit-finality-contract", "observer-report-unavailable",
+    "project-result-path-app-child", "project-result-path-descendant", "project-result-path-ancestor",
+    "project-result-path-sibling", "project-result-path-tmp-spelling", "project-result-path-data-spelling",
 ];
 const _: () = assert!(FAILURE_REASONS.len() < u8::MAX as usize);
 fn latch_failure(first: &AtomicU8, failed: &AtomicBool, reason: &'static str) {
@@ -2099,10 +2101,32 @@ fn format_valid(v: &Value) -> bool { v["valid"] == true && v["state"] == "format
 
 // Same selected-result/snapshot predicates, in their original order. Only a
 // closed site label leaves these pure classifiers; never the supplied data.
+fn project_path_mismatch_reason(actual: &Path, expected: &Path) -> &'static str {
+    // Called only after the original path inequality already refused this
+    // result. Relationships are lexical DATA, never object equivalence or a
+    // replacement selection. No path, suffix or supplied name leaves here.
+    const OTHER: &str = "project-result-path";
+    let (Some(actual_text), Some(expected_text)) = (actual.to_str(), expected.to_str()) else { return OTHER; };
+    let bounded = |text: &str| text.len() <= crate::asset_source::PATH_LIMIT && text.starts_with('/')
+        && !text.as_bytes().contains(&0) && (text == "/" || text[1..].split('/').all(|part|
+            !part.is_empty() && part != "." && part != ".." && part.len() <= 255));
+    if !bounded(actual_text) || !bounded(expected_text) || actual == expected { return OTHER; }
+    if let Ok(relative) = actual.strip_prefix(expected) {
+        if relative == Path::new("app") { return "project-result-path-app-child"; }
+        return "project-result-path-descendant";
+    }
+    if expected.starts_with(actual) { return "project-result-path-ancestor"; }
+    if actual.parent() == expected.parent() { return "project-result-path-sibling"; }
+    if expected_text.strip_prefix("/private/tmp/").is_some_and(|suffix| actual_text.strip_prefix("/tmp/") == Some(suffix)) {
+        return "project-result-path-tmp-spelling";
+    }
+    if actual_text.strip_prefix("/System/Volumes/Data") == Some(expected_text) { return "project-result-path-data-spelling"; }
+    OTHER
+}
 fn selected_project_failure(step: Step, already_selected: bool, project: &Project,
     expected_path: &Path, expected_name: &str) -> Option<&'static str> {
     if !matches!(step, Step::OpenProject | Step::ProjectSettled) || already_selected { return Some("project-result-order"); }
-    if Path::new(&project.path) != expected_path { return Some("project-result-path"); }
+    if Path::new(&project.path) != expected_path { return Some(project_path_mismatch_reason(Path::new(&project.path), expected_path)); }
     if project.name != expected_name { return Some("project-result-name"); }
     if !crate::protocol::valid_id(&project.id) { return Some("project-result-id"); }
     None
@@ -2150,6 +2174,7 @@ fn snapshot_value_failure(v: &Value, expected_path: &Path, saved: bool, base: &V
 fn project_snapshot_failure_data_checks() -> bool {
     // Fixed synthetic values exercise only the classifiers. No native call,
     // Observation, writer, process, filesystem probe or ownership is created.
+    if !project_path_mismatch_data_checks() { return false; }
     let root = Path::new("/synthetic/first-save");
     let mut project = Project { id: "project-1".into(), name: "first-save".into(), path: "/synthetic/first-save".into() };
     for step in [Step::OpenProject, Step::ProjectSettled] {
@@ -2161,7 +2186,7 @@ fn project_snapshot_failure_data_checks() -> bool {
     }
     project.path = "/synthetic/other".into(); project.name = "other".into(); project.id = "invalid id".into();
     if selected_project_failure(Step::ProjectSettled, true, &project, root, "first-save") != Some("project-result-order")
-        || selected_project_failure(Step::ProjectSettled, false, &project, root, "first-save") != Some("project-result-path") { return false; }
+        || selected_project_failure(Step::ProjectSettled, false, &project, root, "first-save") != Some("project-result-path-sibling") { return false; }
     project.path = "/synthetic/first-save".into();
     if selected_project_failure(Step::ProjectSettled, false, &project, root, "first-save") != Some("project-result-name") { return false; }
     project.name = "first-save".into();
@@ -2222,6 +2247,58 @@ fn project_snapshot_failure_data_checks() -> bool {
         let mut changed = value.clone(); changed["root"] = json!("/synthetic/other"); changed["observationScope"] = Value::Null;
         if snapshot_value_failure(&changed, root, saved, &base) != Some("snapshot-value-root") { return false; }
     }
+    true
+}
+
+fn project_path_mismatch_data_checks() -> bool {
+    // Synthetic lexical inputs only; these names are never opened or selected.
+    let root = Path::new("/private/tmp/mrk-path-data/first-save");
+    let good = Project { id: "project-1".into(), name: "first-save".into(), path: "/private/tmp/mrk-path-data/first-save".into() };
+    for step in [Step::OpenProject, Step::ProjectSettled] {
+        if selected_project_failure(step, false, &good, root, "first-save").is_some() { return false; }
+    }
+    for (path, expected) in [
+        ("/private/tmp/mrk-path-data/first-save/app", "project-result-path-app-child"),
+        ("/private/tmp/mrk-path-data/first-save/app/nested", "project-result-path-descendant"),
+        ("/private/tmp/mrk-path-data/first-save/apple", "project-result-path-descendant"),
+        ("/private/tmp/mrk-path-data", "project-result-path-ancestor"),
+        ("/", "project-result-path-ancestor"),
+        ("/private/tmp/mrk-path-data/noop-stale", "project-result-path-sibling"),
+        ("/private/tmp/mrk-path-data/first-save-more", "project-result-path-sibling"),
+        ("/tmp/mrk-path-data/first-save", "project-result-path-tmp-spelling"),
+        ("/System/Volumes/Data/private/tmp/mrk-path-data/first-save", "project-result-path-data-spelling"),
+        ("/private/tmp/mrk-path", "project-result-path"),
+        ("/tmp/mrk-path-data/first-save-more", "project-result-path"),
+        ("/tmp/another-namespace/first-save", "project-result-path"),
+        ("/System/Volumes/DataExtra/private/tmp/mrk-path-data/first-save", "project-result-path"),
+        ("/System/Volumes/Data/private/tmp/mrk-path-data/first-save-more", "project-result-path"),
+        ("/unrelated/other", "project-result-path"),
+        ("relative/first-save", "project-result-path"),
+        ("", "project-result-path"),
+        ("/private/tmp/mrk-path-data/first-save/../app", "project-result-path"),
+        ("/private/tmp/mrk-path-data/first-save/./app", "project-result-path"),
+        ("/private/tmp/mrk-path-data/first-save//app", "project-result-path"),
+        ("/private/tmp/mrk-path-data/first-save/app/", "project-result-path"),
+        ("/private/tmp/mrk-path-data/first-save/\0app", "project-result-path"),
+    ] {
+        // Path still wins over the later name/id failures, but never over the
+        // original phase/duplicate guard. No category can become acceptance.
+        let project = Project { id: "invalid id".into(), name: "untrusted-name".into(), path: path.into() };
+        for step in [Step::OpenProject, Step::ProjectSettled] {
+            if selected_project_failure(step, false, &project, root, "first-save") != Some(expected)
+                || selected_project_failure(step, true, &project, root, "first-save") != Some("project-result-order") { return false; }
+        }
+        if selected_project_failure(Step::SetProject, false, &project, root, "first-save") != Some("project-result-order") { return false; }
+    }
+    let oversized = "/private/tmp/mrk-path-data/first-save/".to_owned() + &"x".repeat(crate::asset_source::PATH_LIMIT);
+    let long_component = "/private/tmp/mrk-path-data/first-save/".to_owned() + &"x".repeat(256);
+    if project_path_mismatch_reason(Path::new(&oversized), root) != "project-result-path"
+        || project_path_mismatch_reason(Path::new(&long_component), root) != "project-result-path"
+        || project_path_mismatch_reason(root, Path::new("relative/expected")) != "project-result-path"
+        || project_path_mismatch_reason(root, root) != "project-result-path" { return false; }
+    use std::os::unix::ffi::OsStrExt;
+    if project_path_mismatch_reason(Path::new(OsStr::from_bytes(b"/private/tmp/mrk-path-data/first-save/\xff")), root)
+        != "project-result-path" { return false; }
     true
 }
 

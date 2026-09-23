@@ -69,7 +69,9 @@ FAILURE_REASONS = frozenset((
     "snapshot-return-order snapshot-return-project "
     "project-witness-identity project-witness-response project-witness-selection project-witness-callback "
     "edit-status-schema edit-status-generation edit-status-owner edit-status-projection "
-    "relay-join-contract exit-edit-status exit-finality-contract observer-report-unavailable"
+    "relay-join-contract exit-edit-status exit-finality-contract observer-report-unavailable "
+    "project-result-path-app-child project-result-path-descendant project-result-path-ancestor "
+    "project-result-path-sibling project-result-path-tmp-spelling project-result-path-data-spelling"
 ).split())
 NATIVE_STEPS = frozenset("CancelProject SetProject OpenProject QuitCancel Quit PickerPending".split())
 # Closed same-origin action DATA, not a panel query or an action/finality permit.
