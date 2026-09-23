@@ -1385,6 +1385,7 @@ impl Observation {
         }
     }
     fn accessibility_step(self: &Arc<Self>, app: &tauri::AppHandle) -> bool {
+        let prearm_refusal_at = Instant::now(); // Before any original-custody/Record wait.
         // Main never takes this private relay-custody lock. It retains the
         // original packet/receiver on every unknown path, including >45s.
         let Ok(mut custody) = self.open_custody.try_lock() else { self.fail_with("native-default-custody"); return true; };
@@ -1403,6 +1404,9 @@ impl Observation {
             }
             let allowed = input.admitted(false); // Before the one action clock is armed.
             if !self.timely() || allowed != Some(true) {
+                let observer_expired = Instant::now() >= self.end;
+                let stop_at = if observer_expired { self.end } else { prearm_refusal_at };
+                let reason = if observer_expired { crate::asset_commands::Reason::Deadline } else { crate::asset_commands::Reason::SourceRefused };
                 let retired = input.no_entry(allowed.is_some() && input.admitted(true).is_some());
                 if let Some(s) = r.accessibility.as_mut() {
                     s.state = token.state(); s.retired = retired; s.custody_known = Some(retired);
@@ -1412,7 +1416,12 @@ impl Observation {
                 let current = r.step;
                 if !retired || !retire_returned_open(&mut r.pending, current, id) {
                     token.unknown(); r.prepared_open = Some(input); self.fail_with("native-default-custody");
+                    return true;
                 }
+                // No action endpoint exists in this pre-arm branch. Use the
+                // captured refusal/original observer endpoint, never a new one.
+                drop(r); drop(input); drop(custody);
+                if token.refuse_original_at(stop_at, reason).is_err() { self.open_unknown(&token); }
                 return true;
             }
             if !token.request() { r.prepared_open = Some(input); self.fail_with("native-default-custody"); return true; }
@@ -1425,6 +1434,7 @@ impl Observation {
         // One endpoint includes queue/admission/getters/Confirm/receipt/publication.
         // From here: no blocking Record/PANEL/GuiFacts/owner lock on this relay.
         let end = self.end.min(Instant::now() + Duration::from_secs(2));
+        let refusal_at = Instant::now(); // Original no-entry failure anchor, before Record.
         if Instant::now() >= end || !self.timely() || token.stopped() {
             if Instant::now() >= end {
                 token.expire(); self.fail_with("native-default-deadline");
@@ -1440,7 +1450,11 @@ impl Observation {
             }
             let current = r.step;
             if !retire_returned_open(&mut r.pending, current, token.id) { self.open_unknown(&token); return true; }
-            drop(r); *custody = None; return true;
+            let stop_at = if token.expired() { end } else { refusal_at };
+            let reason = if token.expired() { crate::asset_commands::Reason::Deadline } else { crate::asset_commands::Reason::SourceRefused };
+            drop(r); *custody = None; drop(custody);
+            if token.refuse_original_at(stop_at, reason).is_err() { self.open_unknown(&token); }
+            return true;
         }
         if !token.queue() { self.open_unknown(&token); return true; }
         if let Ok(mut r) = self.record.try_lock() {
@@ -1473,6 +1487,7 @@ impl Observation {
         }
         flight.returned = returned;
         let Some(receipt) = flight.returned.as_ref() else { self.open_unknown(&token); return true; };
+        let returned_at = receipt.returned_at;
         let same = flight.token.same(&token) && token.same(&receipt.token)
             && receipt.returned_at <= Instant::now() && receipt.returned_at < self.end && Instant::now() < self.end;
         let known = same && receipt.body.custody_known() && token.state() == "returned";
@@ -1490,11 +1505,20 @@ impl Observation {
         // Every successful scalar publication is still inside the SAME allowance.
         if Instant::now() >= end { token.expire(); self.fail_with("native-default-deadline");
             if let Some(s) = r.accessibility.as_mut() { s.expired = true; s.timely = Some(false); } }
-        if self.timely() && !token.stopped() && r.accessibility.is_some_and(OpenInputSample::succeeded) {
+        let success = self.timely() && !token.stopped() && r.accessibility.is_some_and(OpenInputSample::succeeded);
+        if success {
             if r.native_actions_returned[2] { self.fail_with("native-duplicate-action"); return true; }
             r.native_actions_returned[2] = true; r.selected_native = true; r.step = Step::ProjectSettled;
         }
-        drop(r); *custody = None; true
+        let failed = !success && self.failed.load(Ordering::SeqCst);
+        let stop_at = if token.expired() { end } else { returned_at.min(end) };
+        let reason = if token.expired() { crate::asset_commands::Reason::Deadline } else { crate::asset_commands::Reason::SourceRefused };
+        // The original action, receipt, pending marker and release barrier are
+        // known retired. Only now may the same GUI's ordinary failure path lock
+        // its document and request cleanup; no outer guard crosses that call.
+        drop(r); *custody = None; drop(custody);
+        if failed && token.refuse_original_at(stop_at, reason).is_err() { self.open_unknown(&token); }
+        true
     }
     fn native_step(&self, step: Step) {
         let timely = self.timely();

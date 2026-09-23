@@ -343,15 +343,17 @@ impl GuiCall {
         self.changed();
     }
     pub(crate) fn failed(&self, reason: Reason) {
+        self.failed_at(reason, Instant::now());
+    }
+    pub(crate) fn failed_at(&self, reason: Reason, at: Instant) {
+        // The original failure time precedes lock acquisition. A delayed
+        // observer cannot grant this same operation another cleanup allowance.
         let Some(inner) = self.document.upgrade() else { return; };
         let document = DocumentBinding { inner };
         let Some(owner) = self.owner() else { return; };
         let mut state = document.lock();
-        if let Some(mut facts) = self.facts() { if facts.refusal.is_none() { facts.refusal = Some(reason); } }
-        let now = Instant::now();
-        if let Some(slot) = state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, &owner)) { slot.stop(reason, now); }
-        if state.quit.as_ref().is_some_and(|quit| Arc::ptr_eq(quit, &owner)) { stop_quit(&mut state, now); }
-        owner.stop(); document.bump(&mut state); self.changed();
+        fail_gui_original_locked(&mut state, self, &owner, reason, at);
+        document.bump(&mut state); self.changed();
     }
     pub(crate) fn begin_response(&self, response: NativeResponse, quit: bool) -> Option<bool> {
         let Some(inner) = self.document.upgrade() else { return None; };
@@ -388,6 +390,15 @@ impl GuiCall {
             owner.set_endpoint(None);
         }
     }
+}
+
+fn fail_gui_original_locked(state: &mut DocumentState, call: &GuiCall, owner: &Arc<OriginalWork>, reason: Reason, at: Instant) {
+    // Same transition and notification order as the ordinary native failure
+    // path. This only requests STOP; it supplies no response or settlement.
+    if let Some(mut facts) = call.facts() { if facts.refusal.is_none() { facts.refusal = Some(reason); } }
+    if let Some(slot) = state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, owner)) { slot.stop(reason, at); }
+    if state.quit.as_ref().is_some_and(|quit| Arc::ptr_eq(quit, owner)) { stop_quit(state, at); }
+    owner.stop();
 }
 
 struct Slot {
@@ -3581,6 +3592,62 @@ mod tests {
         assert_eq!(slot.cleanup_end, Some(start + WORK + CLEANUP));
         assert_eq!(slot.review_end, Some(review)); assert!(slot.owner.stopped());
         assert_eq!(first_cleanup_end(review + WORK, Some(review + WORK), Some(review)), review + CLEANUP);
+    }
+
+    #[test]
+    fn gui_failure_stops_exact_original_without_response_or_settlement() {
+        // Actual state transition, closed DATA only: no bridge, native panel,
+        // worker, callback or purported execution/settlement receipt.
+        let at = Instant::now(); let mut state = empty_state();
+        let owner = OriginalWork::new(7, true, Weak::new()); owner.set_endpoint(None);
+        owner.coordinator.lock().unwrap().receipt = JoinReceipt::Pending;
+        {
+            let mut facts = owner.gui.facts().unwrap();
+            facts.dispatched = true; facts.created = true; facts.showing = true;
+        }
+        let mut work = Slot::new(owner.clone(), Operation::ChooseProject, None, None, None);
+        work.phase = Phase::Picking; state.slot = Some(work);
+        assert!(!quit_question_admitted(&state));
+
+        fail_gui_original_locked(&mut state, &owner.gui, &owner, Reason::SourceRefused, at);
+        let work = state.slot.as_ref().unwrap();
+        assert!(Arc::ptr_eq(&work.owner, &owner) && owner.stopped() && work.discard);
+        assert!(work.operation == Operation::ChooseProject && work.phase == Phase::Stopping);
+        assert_eq!(work.reason, Reason::SourceRefused);
+        assert_eq!(work.cleanup_end, Some(at + CLEANUP));
+        assert_eq!((work.review_end, owner.endpoint()), (None, None));
+        {
+            let facts = owner.gui.facts().unwrap();
+            assert_eq!(facts.refusal, Some(Reason::SourceRefused));
+            assert!(facts.dispatched && facts.created && facts.showing);
+            assert!(!facts.response && !facts.accepted && !facts.declined && facts.accepted_at.is_none());
+            assert!(!facts.not_created && !facts.destroyed && !facts.released && !facts.close_queued
+                && !facts.close_ack && !facts.release_queued && facts.selected.is_none());
+        }
+        assert!(!owner.resources_settled() && !quit_question_admitted(&state));
+        assert!(owner.coordinator.lock().unwrap().receipt == JoinReceipt::Pending);
+
+        // Later receipt/lock delay does not choose a fresh cleanup endpoint;
+        // an existing Unknown or first reason cannot be repaired by STOP.
+        state.slot.as_mut().unwrap().phase = Phase::Unknown;
+        state.slot.as_mut().unwrap().settlement = Settlement::Unknown; state.unknown = true;
+        fail_gui_original_locked(&mut state, &owner.gui, &owner, Reason::Deadline, at + WORK);
+        let work = state.slot.as_ref().unwrap();
+        assert!(state.unknown && work.phase == Phase::Unknown && work.settlement == Settlement::Unknown);
+        assert_eq!((work.reason, work.cleanup_end), (Reason::SourceRefused, Some(at + CLEANUP)));
+        assert_eq!(owner.gui.facts().unwrap().refusal, Some(Reason::SourceRefused));
+
+        // A reused numeric operation ID is never authority over a successor's
+        // Slot/quit, GUI facts, clocks or STOP bit. Only the old original stops.
+        let other = OriginalWork::new(owner.id, true, Weak::new()); other.set_endpoint(None);
+        let mut foreign = Slot::new(other.clone(), Operation::ChooseProject, None, None, None);
+        foreign.phase = Phase::Picking; state.slot = Some(foreign); state.quit = Some(other.clone());
+        fail_gui_original_locked(&mut state, &owner.gui, &owner, Reason::Deadline, at + WORK + CLEANUP);
+        let work = state.slot.as_ref().unwrap();
+        assert!(Arc::ptr_eq(&work.owner, &other) && work.phase == Phase::Picking && !other.stopped());
+        assert_eq!((work.reason, work.cleanup_end, state.quit_cleanup_end), (Reason::None, None, None));
+        assert_eq!(other.gui.facts().unwrap().refusal, None);
+        assert!(!owner.resources_settled() && !quit_question_admitted(&state));
     }
 
     #[test]

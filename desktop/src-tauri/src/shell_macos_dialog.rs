@@ -201,6 +201,16 @@ pub(super) mod observation {
         pub(crate) fn admitted(&self, after: bool) -> Option<bool> {
             original_admitted(self.id, &self.call, &self.owner, after)
         }
+        pub(crate) fn refuse_original_at(&self, at: Instant, reason: Reason) -> Result<(), ObservationError> {
+            // Only an actually retired original action/no-entry may request
+            // this known failure cleanup. A historical retired bit + Unknown
+            // is not retirement. The facts guard returns before failed_at.
+            if !matches!(reason, Reason::SourceRefused | Reason::Deadline) || self.state() != "retired"
+                || original_admitted(self.id, &self.call, &self.owner, true) != Some(true)
+                || self.state() != "retired" { return Err(ObservationError::OpenCustody); }
+            self.call.failed_at(reason, at);
+            Ok(()) // STOP requested, not a native callback/release/join receipt.
+        }
         pub(crate) fn run(&self, end: Instant, mut admit: impl FnMut(bool) -> Option<bool>) -> OpenActionBody {
             if !native::main_thread() || self.state() != "entered" { return OpenActionBody::no_native(None); }
             if self.expired() || Instant::now() >= end { return OpenActionBody::no_native(Some(false)); }

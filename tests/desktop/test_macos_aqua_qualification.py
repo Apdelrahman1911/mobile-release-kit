@@ -879,6 +879,9 @@ class AquaDataTests(unittest.TestCase):
         self.assertEqual((report["status"], report["innerFailureStep"], report["innerFailureReason"]),
                          ("failed", "CancelProject", "asset_source_refused"))
         self.assertEqual(report["appReturncode"], 1)
+        self.assertIs(report["originalCallReturned"], True)
+        self.assertEqual(report["invocationFinality"], "no-pending-invocation")
+        self.assertFalse(fixtures.inflight)
         self.assertEqual(report["innerDiagnosticSource"], "completed-output")
         self.assertEqual(report["innerDiagnosticCompleteness"], "complete")
         self.assertEqual(report["typedLifetimeFacts"], [])
@@ -1143,6 +1146,28 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn("receipt: std::sync::mpsc::Receiver<OpenActionReceipt>", observer)
         self.assertIn("open_custody: Mutex<Option<OpenFlight>>", observer)
         self.assertIn("*custody = Some(OpenFlight", relay)
+        self.assertEqual(relay.count("token.refuse_original_at("), 3)
+        prearm = relay.split("let (done, receipt)", 1)[0]
+        self.assertLess(prearm.index("let prearm_refusal_at = Instant::now()"), prearm.index("self.open_custody.try_lock()"))
+        self.assertIn("let stop_at = if observer_expired { self.end } else { prearm_refusal_at };", prearm)
+        self.assertLess(prearm.index("!retire_returned_open("), prearm.index("drop(r); drop(input); drop(custody);"))
+        self.assertLess(prearm.index("drop(r); drop(input); drop(custody);"), prearm.index("token.refuse_original_at("))
+        noentry = timed.split("if !token.queue()", 1)[0]
+        self.assertLess(noentry.index("let refusal_at = Instant::now()"), noentry.index("self.record.try_lock()"))
+        self.assertIn("let stop_at = if token.expired() { end } else { refusal_at };", noentry)
+        self.assertLess(noentry.index("!flight.input.no_entry(true)"), noentry.index("!retire_returned_open("))
+        self.assertLess(noentry.index("!retire_returned_open("), noentry.index("drop(r); *custody = None; drop(custody);"))
+        self.assertLess(noentry.index("drop(r); *custody = None; drop(custody);"), noentry.index("token.refuse_original_at("))
+        returned = relay.split("flight.returned = returned;", 1)[1]
+        self.assertIn("let returned_at = receipt.returned_at;", returned)
+        self.assertIn("let stop_at = if token.expired() { end } else { returned_at.min(end) };", returned)
+        self.assertIn("let failed = !success && self.failed.load(Ordering::SeqCst);", returned)
+        self.assertIn("if failed && token.refuse_original_at(stop_at, reason).is_err()", returned)
+        for earlier, later in (("token.retire()", "!retire_returned_open("),
+                               ("!retire_returned_open(", "if Instant::now() >= end"),
+                               ("if Instant::now() >= end", "drop(r); *custody = None; drop(custody);"),
+                               ("drop(r); *custody = None; drop(custody);", "token.refuse_original_at(")):
+            self.assertLess(returned.index(earlier), returned.index(later))
         main = observer.split("fn action_main(", 1)[1].split("fn open_unknown(", 1)[0]
         self.assertNotIn("self.record()", main)
         self.assertLess(main.index("token.run("), main.index("token.returned()"))
@@ -1197,6 +1222,28 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn("self.progress.fetch_or(OPEN_EXPIRED", shell)
         self.assertIn("queued.snapshot() != (OpenProgress", shell)
         self.assertIn("OpenPhase::Joined, OpenPhase::Retired", shell)
+        refusal = shell.split("pub(crate) fn refuse_original_at(", 1)[1].split("pub(crate) fn run(", 1)[0]
+        self.assertEqual(refusal.count('self.state() != "retired"'), 2)
+        self.assertIn("original_admitted(self.id, &self.call, &self.owner, true) != Some(true)", refusal)
+        self.assertIn("Reason::SourceRefused | Reason::Deadline", refusal)
+        self.assertLess(refusal.index('self.state() != "retired"'), refusal.index("self.call.failed_at(reason, at)"))
+        self.assertEqual(refusal.count("self.call.failed_at("), 1)
+        for forbidden in ("Instant::now", "PANEL.with", ".installed_", "observe_panel_action", "set_endpoint", ".retire()"):
+            self.assertNotIn(forbidden, refusal)
+        asset = (PATH.parents[1] / "src-tauri/src/asset_session.rs").read_text(encoding="utf-8")
+        failed = asset.split("pub(crate) fn failed(&self,", 1)[1].split("pub(crate) fn begin_response(", 1)[0]
+        self.assertIn("self.failed_at(reason, Instant::now());", failed)
+        self.assertLess(failed.index("let mut state = document.lock()"), failed.index("fail_gui_original_locked("))
+        self.assertLess(failed.index("fail_gui_original_locked("), failed.index("document.bump(&mut state); self.changed();"))
+        self.assertNotIn("drop(state)", failed)  # Existing intra-document notification order.
+        transition = asset.split("fn fail_gui_original_locked(", 1)[1].split("struct Slot", 1)[0]
+        self.assertIn("Arc::ptr_eq(&slot.owner, owner)", transition)
+        self.assertIn("Arc::ptr_eq(quit, owner)", transition)
+        self.assertLess(transition.index("facts.refusal"), transition.index("slot.stop(reason, at)"))
+        self.assertLess(transition.index("slot.stop(reason, at)"), transition.index("stop_quit(state, at)"))
+        self.assertLess(transition.index("stop_quit(state, at)"), transition.index("owner.stop()"))
+        for forbidden in ("Instant::now", "not_created(", "begin_response(", "selected_path(", "owner.id ==", "state.unknown = false"):
+            self.assertNotIn(forbidden, transition)
         native = (PATH.parents[1] / "native/macos-installed-native/src/native.m").read_text(encoding="utf-8")
         release = native.split("int mrk_panel_release(", 1)[1].split("// Observation helpers", 1)[0]
         self.assertIn("s->unknown || s->callbackActive || !s->closed", release)
