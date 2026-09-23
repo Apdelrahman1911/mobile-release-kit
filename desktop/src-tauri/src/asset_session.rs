@@ -604,24 +604,49 @@ fn keyring_slot_gate(state: &DocumentState, owner: &Arc<OriginalWork>, step: Opt
     use crate::vault_keyring_linux::Problem;
     let slot = state.slot.as_ref().filter(|slot| Arc::ptr_eq(&slot.owner, owner) && slot.operation == Operation::Prepare)
         .ok_or(Problem::Interrupted)?;
-    // Only fixed own-subscription removal may pass after STOP/document loss.
+    // Fixed own-subscription removal may pass after STOP/document loss.
     // It still belongs to this exact current OriginalWork; no public Boolean
     // can substitute for the book's expected step or real slot identity.
     if step.is_some_and(crate::vault_keyring_linux::Step::cleanup) {
-        // STOP/loss never grants a fresh cleanup lease. An already-polled RPC
-        // may settle late, but a NEW removal cannot begin beyond this original
-        // cutoff or after Unknown. The ordinary no-STOP path uses its work end.
-        let end = slot.cleanup_end.or_else(|| owner.endpoint()).ok_or(Problem::CleanupUnknown)?;
-        if now >= end || state.unknown || state.exhausted || slot.phase == Phase::Unknown
-            || matches!(slot.settlement, Settlement::Unknown | Settlement::LateKnown)
-        { return Err(Problem::CleanupUnknown); }
-        return Ok(end);
+        return keyring_cleanup_endpoint(state, owner, now);
     }
     if !state.lifetime.original_bound() || state.lost_observed || state.exhausted || state.unknown || state.stopping
         || state.quit_pending || state.retiring || state.lock_pending || owner.interrupted()
         || slot.phase != Phase::Assessing || slot.cleanup_end.is_some()
     { return Err(Problem::Interrupted); }
     owner.endpoint().filter(|end| now < *end).ok_or(Problem::Interrupted)
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn keyring_cleanup_endpoint(state: &DocumentState, owner: &Arc<OriginalWork>, now: Instant)
+    -> Result<Instant, crate::vault_keyring_linux::Problem> {
+    use crate::vault_keyring_linux::Problem;
+    let slot = state.slot.as_ref().filter(|slot| Arc::ptr_eq(&slot.owner, owner) && slot.operation == Operation::Prepare)
+        .ok_or(Problem::Interrupted)?;
+    // STOP/loss never grants a new lease. This same endpoint guards both remote
+    // removal and the DISTINCT local shutdown admission, including its first poll.
+    let end = slot.cleanup_end.or_else(|| owner.endpoint()).ok_or(Problem::CleanupUnknown)?;
+    if now >= end || state.unknown || state.exhausted || slot.phase == Phase::Unknown
+        || matches!(slot.settlement, Settlement::Unknown | Settlement::LateKnown)
+    { return Err(Problem::CleanupUnknown); }
+    Ok(end)
+}
+
+// Only the actual document/current-slot gate can construct this non-Clone
+// token. It is consumed immediately under the same locked original book; it is
+// neither a caller Boolean nor a fake Step::RemoveMatch.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) struct KeyringShutdownAdmission { endpoint: Instant }
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl KeyringShutdownAdmission {
+    pub(crate) fn into_endpoint(self) -> Instant { self.endpoint }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn keyring_shutdown_gate(state: &DocumentState, owner: &Arc<OriginalWork>, book: &crate::vault_keyring_linux::LookupBook, now: Instant)
+    -> Result<KeyringShutdownAdmission, crate::vault_keyring_linux::Problem> {
+    if !book.shutdown_waiting_first_poll() { return Err(crate::vault_keyring_linux::Problem::CleanupUnknown); }
+    Ok(KeyringShutdownAdmission { endpoint: keyring_cleanup_endpoint(state, owner, now)? })
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -656,17 +681,29 @@ impl DocumentBinding {
         if !book.expected(step) { return Err(Problem::CleanupUnknown); }
         book.admit(step, dispatch_end)
     }
-    fn report_keyring_problem(&self, owner: &Arc<OriginalWork>) {
+    fn admit_keyring_shutdown(&self, owner: &Arc<OriginalWork>)
+        -> Result<(), crate::vault_keyring_linux::Problem> {
         use crate::vault_keyring_linux::Problem;
+        let mut state = self.lock(); let now = Instant::now(); self.expire(&mut state, now);
+        let mut book = owner.keyring.lock().map_err(|_| Problem::CleanupUnknown)?;
+        self.record_keyring_problem(&mut state, owner, book.problem().zip(book.problem_at()), book.cleanup_unknown());
+        let end = keyring_cleanup_endpoint(&state, owner, Instant::now())?;
+        book.admit_shutdown(end)
+    }
+    fn report_keyring_problem(&self, owner: &Arc<OriginalWork>) {
         // Read and RELEASE the backend mutex before acquiring the document gate.
         let (problem, cleanup_unknown) = match owner.keyring.lock() {
             Ok(book) => (book.problem().zip(book.problem_at()), book.cleanup_unknown()),
             Err(error) => { drop(error); let mut state = self.lock(); self.coordinator_failed(&mut state); return; }
         };
-        let Some((problem, at)) = problem else { return; };
         let mut state = self.lock();
-        if cleanup_unknown { if !state.unknown { self.coordinator_failed(&mut state); } return; }
-        if let Some(slot) = state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, owner)) {
+        self.record_keyring_problem(&mut state, owner, problem, cleanup_unknown);
+    }
+    fn record_keyring_problem(&self, state: &mut DocumentState, owner: &Arc<OriginalWork>,
+        problem: Option<(crate::vault_keyring_linux::Problem, Instant)>, cleanup_unknown: bool) {
+        use crate::vault_keyring_linux::Problem;
+        if let (Some((problem, at)), Some(slot)) = (problem,
+            state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, owner))) {
             let reason = match problem {
                 Problem::Interrupted => Reason::UserCancelled,
                 Problem::CleanupUnknown => Reason::CleanupUnknown,
@@ -674,8 +711,11 @@ impl DocumentBinding {
             };
             // The original failure time, not this later observer tick, owns the
             // existing cleanup clock. Original deadline/STOP remains absorbing.
-            if slot.cleanup_end.is_none() { slot.stop(reason, at); self.bump(&mut state); }
+            if slot.cleanup_end.is_none() { slot.stop(reason, at); self.bump(state); }
         }
+        // Record the real first failure clock BEFORE generic Unknown handling,
+        // whose fallback timestamp must not accidentally renew cleanup.
+        if cleanup_unknown && !state.unknown { self.coordinator_failed(state); }
     }
     async fn drive_keyring_lookup(&self, owner: &Arc<OriginalWork>, input: crate::vault_keyring_linux::LookupInput)
         -> Result<(), crate::vault_keyring_linux::Problem> {
@@ -690,7 +730,7 @@ impl DocumentBinding {
                 }; // Release book BEFORE acquiring document: never inverted locks.
                 match turn {
                     Poll::Pending => Poll::Pending,
-                    Poll::Ready(Next::Admit(step)) => Poll::Ready(Ok(step)),
+                    Poll::Ready(next @ (Next::Admit(_) | Next::AdmitShutdown | Next::Settled)) => Poll::Ready(Ok(next)),
                     Poll::Ready(Next::FirstPoll) => {
                         // FINAL admission after bounded stream work. The current
                         // exact slot/Unknown/effective cutoff is read under the
@@ -701,10 +741,23 @@ impl DocumentBinding {
                         let mut state = self.lock(); self.expire(&mut state, Instant::now());
                         let mut book = match owner.keyring.lock() { Ok(book) => book, Err(_) => return Poll::Ready(Err(Problem::CleanupUnknown)) };
                         if owner.interrupted() { book.interrupt(); }
+                        self.record_keyring_problem(&mut state, owner, book.problem().zip(book.problem_at()), book.cleanup_unknown());
                         let current_gate = keyring_poll_gate(&state, owner, &book, Instant::now());
                         drop(state);
                         // No stream turn, await, lock or fallible setup here.
                         book.first_poll(cx, current_gate);
+                        Poll::Pending
+                    }
+                    Poll::Ready(Next::FirstPollShutdown) => {
+                        let mut state = self.lock(); self.expire(&mut state, Instant::now());
+                        let mut book = match owner.keyring.lock() { Ok(book) => book, Err(_) => return Poll::Ready(Err(Problem::CleanupUnknown)) };
+                        if owner.interrupted() { book.interrupt(); }
+                        self.record_keyring_problem(&mut state, owner, book.problem().zip(book.problem_at()), book.cleanup_unknown());
+                        let admission = keyring_shutdown_gate(&state, owner, &book, Instant::now());
+                        drop(state);
+                        // The typed grant is consumed now: no await, new lock,
+                        // stream work or successor setup can intervene.
+                        book.first_poll_shutdown(cx, admission);
                         Poll::Pending
                     }
                 }
@@ -717,11 +770,29 @@ impl DocumentBinding {
             };
             self.report_keyring_problem(owner);
             match next {
-                Some(Ok(step)) => if let Err(problem) = self.admit_keyring_step(owner, step) {
+                Some(Ok(Next::Admit(step))) => if let Err(problem) = self.admit_keyring_step(owner, step) {
                     match owner.keyring.lock() {
                         Ok(mut book) => book.admission_refused(step, problem),
                         Err(error) => { drop(error); let mut state = self.lock(); self.coordinator_failed(&mut state); return Err(Problem::CleanupUnknown); }
                     }
+                },
+                Some(Ok(Next::AdmitShutdown)) => if let Err(problem) = self.admit_keyring_shutdown(owner) {
+                    match owner.keyring.lock() {
+                        Ok(mut book) => book.shutdown_admission_refused(problem),
+                        Err(error) => { drop(error); let mut state = self.lock(); self.coordinator_failed(&mut state); return Err(Problem::CleanupUnknown); }
+                    }
+                },
+                Some(Ok(Next::Settled)) => {
+                    let book = owner.keyring.lock().map_err(|_| Problem::CleanupUnknown)?;
+                    if !book.resources_settled() { return Err(Problem::CleanupUnknown); }
+                    // This settles only this local child phase. The original
+                    // coordinator join/stage and Unknown/LateKnown gates still
+                    // decide retirement and any operation/result authority.
+                    return book.problem().map_or(Ok(()), Err);
+                },
+                Some(Ok(Next::FirstPoll | Next::FirstPollShutdown)) => {
+                    let mut state = self.lock(); self.coordinator_failed(&mut state);
+                    return Err(Problem::CleanupUnknown);
                 },
                 Some(Err(problem)) => {
                     let mut state = self.lock(); self.coordinator_failed(&mut state);
@@ -731,9 +802,8 @@ impl DocumentBinding {
                 }
                 None => self.tick(),
             }
-            // Do not return/stage merely because Candidate/Absent or RemoveMatch
-            // is ready. Keep the original coordinator pumping any retained live
-            // stream until the missing maintained SDK task-join path exists.
+            // Candidate/Absent or RemoveMatch alone cannot return/stage. All
+            // retained originals continue until the SDK's real local finality.
         }
     }
 }
@@ -3543,8 +3613,9 @@ pub(crate) fn assert_installed_evidence_gate_contract() {
 
 #[cfg(test)]
 mod tests {
-    // Synthetic in-memory predicates only. No DesktopBridge constructor/RNG,
-    // runtime, task spawn, dialog, fd, source path access or native receipts.
+    // Synthetic in-memory predicates. No DesktopBridge constructor/RNG, dialog,
+    // source path access or native receipts. One explicit Tokio test stages
+    // (but NEVER polls) the owned startup; it does not start an SDK task or I/O.
     use super::*;
     #[test]
     fn project_path_shares_exclusions_but_not_asset_authority_or_synthetic_finality() { assert_project_path_document_contracts(); }
@@ -4015,6 +4086,7 @@ mod tests {
                 assert!(book.idle_data_turn(&mut cx).is_pending());
                 assert_eq!(polls.load(Ordering::SeqCst), 3); assert_eq!(drops.load(Ordering::SeqCst), 1);
                 assert!(book.idle_data_turn(&mut cx).is_pending()); // Keep the original failure, not success.
+                book.shutdown_admission_refused(Problem::CleanupUnknown); // Existing Unknown also denies NEW local shutdown.
             } else {
                 book.first_poll(&mut cx, gate);
                 assert_eq!(polls.load(Ordering::SeqCst), 0); assert_eq!(drops.load(Ordering::SeqCst), 1);
@@ -4026,7 +4098,70 @@ mod tests {
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     #[test]
-    fn unstarted_keyring_preserves_session_predicate_but_entered_sdk_never_grants_finality() {
+    fn keyring_local_shutdown_has_its_own_current_slot_cutoff_and_one_use_grant() {
+        use crate::vault_keyring_linux::{LookupBook, Next, Problem};
+        let mut state = empty_state();
+        let owner = OriginalWork::new(1, false, Weak::new());
+        let now = Instant::now(); let end = now + WORK;
+        owner.set_endpoint(Some(end));
+        let mut slot = Slot::new(owner.clone(), Operation::Prepare, None, None, None);
+        slot.phase = Phase::Assessing; state.slot = Some(slot);
+        let mut book = LookupBook::shutdown_gate_data(end);
+        let original_failure_at = book.problem_at();
+        assert!(original_failure_at.is_some() && !book.cleanup_unknown());
+        let mut cx = TaskContext::from_waker(Waker::noop());
+        assert!(book.current_step().is_none()); // It never impersonates RemoveMatch.
+        assert!(keyring_shutdown_gate(&state, &owner, &book, now).is_err());
+        assert!(matches!(book.idle_data_turn(&mut cx), Poll::Ready(Next::FirstPollShutdown)));
+        let grant = keyring_shutdown_gate(&state, &owner, &book, now).unwrap();
+        assert_eq!(grant.into_endpoint(), end);
+        let other = OriginalWork::new(owner.id, false, Weak::new());
+        assert!(matches!(keyring_shutdown_gate(&state, &other, &book, now), Err(Problem::Interrupted)));
+
+        state.slot.as_mut().unwrap().stop(Reason::UserCancelled, now);
+        state.stopping = true; state.lost_observed = true;
+        let cleanup_end = state.slot.as_ref().unwrap().cleanup_end.unwrap();
+        assert!(cleanup_end < end);
+        assert_eq!(keyring_shutdown_gate(&state, &owner, &book, now).unwrap().into_endpoint(), cleanup_end);
+        assert!(matches!(keyring_shutdown_gate(&state, &owner, &book, cleanup_end), Err(Problem::CleanupUnknown)));
+        state.unknown = true;
+        let denied = keyring_shutdown_gate(&state, &owner, &book, now);
+        assert!(matches!(denied, Err(Problem::CleanupUnknown)));
+        book.first_poll_shutdown(&mut cx, denied);
+        assert!(!book.shutdown_waiting_first_poll() && !book.resources_settled());
+        assert!(book.cleanup_unknown());
+        assert_eq!(book.problem_at(), original_failure_at);
+        assert_eq!(state.slot.as_ref().unwrap().cleanup_end, Some(cleanup_end));
+        assert_eq!(owner.endpoint(), Some(end));
+
+        // Even an earlier, valid typed grant cannot outlive the original
+        // staged endpoint when the consumer finally reaches its first poll.
+        let mut expired = LookupBook::shutdown_gate_data(Instant::now());
+        let expired_failure_at = expired.problem_at();
+        assert!(matches!(expired.idle_data_turn(&mut cx), Poll::Ready(Next::FirstPollShutdown)));
+        state.unknown = false;
+        let earlier_grant = keyring_shutdown_gate(&state, &owner, &expired, now).unwrap();
+        expired.first_poll_shutdown(&mut cx, Ok(earlier_grant));
+        assert_eq!(expired.problem(), Some(Problem::CleanupUnknown));
+        assert!(!expired.shutdown_waiting_first_poll() && !expired.resources_settled());
+        assert!(expired.cleanup_unknown());
+        assert_eq!(expired.problem_at(), expired_failure_at);
+
+        // A real typed grant cannot manufacture an absent SDK attempt or hide
+        // the already-reconciled failed removal on that impossible path.
+        let mut absent = LookupBook::shutdown_gate_data(end);
+        let absent_failure_at = absent.problem_at();
+        assert!(matches!(absent.idle_data_turn(&mut cx), Poll::Ready(Next::FirstPollShutdown)));
+        let grant = keyring_shutdown_gate(&state, &owner, &absent, now).unwrap();
+        absent.first_poll_shutdown(&mut cx, Ok(grant));
+        assert!(absent.cleanup_unknown() && !absent.resources_settled());
+        assert!(!absent.shutdown_waiting_first_poll());
+        assert_eq!(absent.problem_at(), absent_failure_at);
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[tokio::test]
+    async fn unstarted_keyring_preserves_session_predicate_but_entered_sdk_never_grants_finality() {
         // Existing DATA-only receipts exercise the predicate, not native joins.
         // The newly retained Builder future is NEVER polled or connected here.
         let owner = OriginalWork::new(1, false, Weak::new());

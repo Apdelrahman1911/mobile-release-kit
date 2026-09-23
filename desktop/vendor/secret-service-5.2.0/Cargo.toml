@@ -124,6 +124,11 @@ default-features = false
 version = "0.15"
 default-features = false
 
+# Also select the same maintained zbus when this SDK is the Cargo root. Cargo
+# ignores dependency-root patches in app builds; the app has its own root patch.
+[patch.crates-io]
+zbus = { path = "../zbus-5.19.0" }
+
 [dev-dependencies.tokio]
 version = "1"
 features = [

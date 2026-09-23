@@ -17,3 +17,10 @@ admission preserves absent signatures for genuinely empty bus replies only.
 Legacy lookup/session/blocking APIs are unchanged by Consumer01. Inline tests
 are synthetic DATA tests; never run the default legacy suite against a user's
 keyring. Persistent credentials remain disabled in the Desktop application.
+
+Original-task finality adds two concrete owned-path checked_lookup starters.
+They reuse the same bounded route validation and Query/Attributes bodies while
+storing owned arguments in maintained zbus's fixed original RPC slot. Ordinary
+Connection-based APIs remain unchanged; no connection trait, codec duplication,
+proxy/cache task or native/public activation is added. The standalone SDK root
+patch selects the same maintained zbus5.19.0 as the application root.

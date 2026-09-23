@@ -1,17 +1,19 @@
 //! Fixed non-mutating key-identity lookup, owned by asset_session::OriginalWork.
 //!
 //! No renderer/session command calls this phase. Endpoint/provider qualification,
-//! pre-allocation limits and maintained SDK task joins are still missing. A
-//! started book therefore NEVER grants finality, even when lookup/removal return.
-//! Connection::close, graceful_shutdown and coordinator return are not joins.
+//! pre-allocation limits and native qualification are still missing. Local
+//! finality requires the maintained SDK's consumed original task/resource result;
+//! a lookup, RemoveMatch or coordinator return alone is never a task join.
 
-use std::{future::Future, os::unix::ffi::OsStrExt, path::{Component, Path}, pin::Pin,
+use std::{os::unix::ffi::OsStrExt, path::{Component, Path, PathBuf}, pin::Pin,
     sync::Arc, task::{Context, Poll}, time::Instant};
+#[cfg(test)]
+use std::future::Future;
 use ordered_stream::{OrderedStream, PollResult};
 use secret_service::checked_lookup;
-use zbus::{address::{transport::{Unix, UnixSocket}, Transport}, connection::Builder,
-    message::Type, names::UniqueName, zvariant::OwnedObjectPath, Address, Connection,
-    MatchRule, Message, MessageStream};
+use zbus::{connection::{LocalSettlement, OwnedConnectionAttempt},
+    message::Type, names::UniqueName, zvariant::OwnedObjectPath,
+    MatchRule, Message};
 
 const BUS: &str = "org.freedesktop.DBus";
 const BUS_PATH: &str = "/org/freedesktop/DBus";
@@ -25,7 +27,7 @@ pub(crate) enum Problem {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Step { AddMatch, GetNameOwner, SearchItems, Attributes, RemoveMatch }
 impl Step { pub(crate) fn cleanup(self) -> bool { self == Self::RemoveMatch } }
-pub(crate) enum Next { Admit(Step), FirstPoll }
+pub(crate) enum Next { Admit(Step), FirstPoll, AdmitShutdown, FirstPollShutdown, Settled }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase { Unstarted, Connecting, Admit(Step), Calling(Step), Holding }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,7 +46,7 @@ impl Query {
 /// Mechanical bounded backend input only, NOT endpoint/peer/provider admission.
 /// A later reviewed profile must supply these reserved identities; no persistent
 /// ID encoding or durable reservation is invented here.
-pub(crate) struct LookupInput { address: Address, query: Arc<Query>, rule: Arc<MatchRule<'static>> }
+pub(crate) struct LookupInput { endpoint: PathBuf, query: Arc<Query>, rule: Arc<MatchRule<'static>> }
 impl LookupInput {
     pub(crate) fn new(endpoint: &Path, collection: &str, vault_id: &str, generation_id: &str) -> Result<Self, Problem> {
         let bytes = endpoint.as_os_str().as_bytes();
@@ -57,40 +59,75 @@ impl LookupInput {
         let rule = MatchRule::builder().msg_type(Type::Signal).sender(BUS).map_err(|_| Problem::InvalidInput)?
             .interface(BUS).map_err(|_| Problem::InvalidInput)?.path(BUS_PATH).map_err(|_| Problem::InvalidInput)?
             .member("NameOwnerChanged").map_err(|_| Problem::InvalidInput)?.arg(0, SERVICE).map_err(|_| Problem::InvalidInput)?.build();
-        Ok(Self { address: Address::new(Transport::Unix(Unix::new(UnixSocket::File(endpoint.to_path_buf())))),
+        Ok(Self { endpoint: endpoint.to_path_buf(),
             query: Arc::new(Query { collection, vault_id: vault_id.into(), generation_id: generation_id.into() }), rule: Arc::new(rule) })
     }
 }
 
-type ConnectFuture = Pin<Box<dyn Future<Output = zbus::Result<Connection>> + Send>>;
+#[cfg(test)]
+type ConnectFuture = Pin<Box<dyn Future<Output = zbus::Result<()>> + Send>>;
+#[cfg(test)]
 type RpcFuture = Pin<Box<dyn Future<Output = zbus::Result<Message>> + Send>>;
+enum ConnectOriginal { Native, #[cfg(test)] Data(ConnectFuture) }
+enum RpcOriginal { Native, #[cfg(test)] Data(RpcFuture) }
 enum Pending {
-    Connect { future: ConnectFuture, polled: bool, dispatch_end: Instant },
-    Rpc { future: RpcFuture, polled: bool, dispatch_end: Instant },
+    Connect { future: ConnectOriginal, polled: bool, dispatch_end: Instant },
+    Rpc { future: RpcOriginal, polled: bool, dispatch_end: Instant },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shutdown { Unrequested, Staged(Instant), Entered, Settled, Refused }
+
+// Retain non-owning error facts after the actual raw error has been reconciled.
+// In particular, a MethodError's Message may own received descriptors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ErrorClass { Io(std::io::ErrorKind, Option<i32>), Remote, Handshake, Protocol, Other }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemovalReply { Confirmed, Failed(ErrorClass) }
+fn error_class(error: &zbus::Error) -> ErrorClass {
+    match error {
+        zbus::Error::InputOutput(error) | zbus::Error::Connection(error, _) => ErrorClass::Io(error.kind(), error.raw_os_error()),
+        zbus::Error::MethodError(..) => ErrorClass::Remote,
+        zbus::Error::Handshake(_) => ErrorClass::Handshake,
+        zbus::Error::InvalidReply | zbus::Error::InvalidField | zbus::Error::ExcessData
+            | zbus::Error::MissingField | zbus::Error::InvalidSerial | zbus::Error::Variant(_)
+            | zbus::Error::Names(_) => ErrorClass::Protocol,
+        _ => ErrorClass::Other,
+    }
 }
 
 pub(crate) enum Observation { Absent, Candidate(Arc<OwnedObjectPath>) }
 
 pub(crate) struct LookupBook {
-    entered: bool, phase: Phase, connection: Option<Connection>, stream: Option<MessageStream>,
+    entered: bool, phase: Phase, attempt: Option<OwnedConnectionAttempt>,
     stream_ended: bool, pending: Option<Pending>, first_poll_ready: bool, connect_failure: Option<zbus::Error>,
-    raw: Option<zbus::Result<Message>>, raw_pending: bool,
+    raw: Option<zbus::Result<Message>>, raw_pending: bool, removal_reply: Option<RemovalReply>,
     owner: Option<Arc<UniqueName<'static>>>, query: Option<Arc<Query>>, rule: Option<Arc<MatchRule<'static>>>,
     candidate: Option<Arc<OwnedObjectPath>>, observation: Option<Observation>,
     problem: Option<Problem>, problem_at: Option<Instant>, registration: Registration,
+    shutdown: Shutdown, shutdown_ready: bool, local_settlement: Option<LocalSettlement>,
+    build_error: Option<ErrorClass>, raw_error: Option<ErrorClass>, cleanup_error: Option<ErrorClass>,
 }
 impl LookupBook {
     pub(crate) fn new() -> Self {
-        Self { entered: false, phase: Phase::Unstarted, connection: None, stream: None,
-            stream_ended: false, pending: None, first_poll_ready: false, connect_failure: None, raw: None, raw_pending: false,
+        Self { entered: false, phase: Phase::Unstarted, attempt: None,
+            stream_ended: false, pending: None, first_poll_ready: false, connect_failure: None, raw: None, raw_pending: false, removal_reply: None,
             owner: None, query: None, rule: None, candidate: None, observation: None,
-            problem: None, problem_at: None, registration: Registration::Unsent }
+            problem: None, problem_at: None, registration: Registration::Unsent,
+            shutdown: Shutdown::Unrequested, shutdown_ready: false, local_settlement: None,
+            build_error: None, raw_error: None, cleanup_error: None }
     }
-    pub(crate) fn resources_settled(&self) -> bool { !self.entered }
+    pub(crate) fn resources_settled(&self) -> bool {
+        !self.entered || (self.shutdown == Shutdown::Settled && self.local_settlement.is_some()
+            && self.pending.is_none() && !self.raw_pending && self.raw.is_none() && self.connect_failure.is_none())
+    }
     pub(crate) fn started(&self) -> bool { self.entered }
     pub(crate) fn problem(&self) -> Option<Problem> { self.problem }
     pub(crate) fn problem_at(&self) -> Option<Instant> { self.problem_at }
-    pub(crate) fn cleanup_unknown(&self) -> bool { self.registration == Registration::Unknown }
+    pub(crate) fn cleanup_unknown(&self) -> bool {
+        self.registration == Registration::Unknown || self.local_settlement.is_some_and(|result| !result.clean())
+            || self.attempt.as_ref().is_some_and(OwnedConnectionAttempt::cleanup_failed)
+    }
     pub(crate) fn observation(&self) -> Option<&Observation> {
         if self.problem.is_none() { self.observation.as_ref() } else { None }
     }
@@ -100,20 +137,23 @@ impl LookupBook {
     pub(crate) fn interrupt(&mut self) { self.fail(Problem::Interrupted); }
 
     pub(crate) fn begin(&mut self, input: LookupInput, dispatch_end: Instant) -> Result<(), Problem> {
-        let LookupInput { address, query, rule } = input;
-        self.begin_with(query, rule, dispatch_end, Box::pin(async move {
-            // Explicit local file socket only. No environment/session fallback,
-            // method_timeout, registered names, proxies or server interfaces.
-            Builder::address(address)?.max_queued(1).build().await
-        }))
+        let LookupInput { endpoint, query, rule } = input;
+        let attempt = OwnedConnectionAttempt::unix(endpoint).map_err(|_| Problem::Unavailable)?;
+        self.begin_original(query, rule, dispatch_end, ConnectOriginal::Native, Some(attempt))
     }
+    #[cfg(test)]
     fn begin_with(&mut self, query: Arc<Query>, rule: Arc<MatchRule<'static>>, dispatch_end: Instant, future: ConnectFuture) -> Result<(), Problem> {
+        self.begin_original(query, rule, dispatch_end, ConnectOriginal::Data(future), None)
+    }
+    fn begin_original(&mut self, query: Arc<Query>, rule: Arc<MatchRule<'static>>, dispatch_end: Instant,
+        future: ConnectOriginal, attempt: Option<OwnedConnectionAttempt>) -> Result<(), Problem> {
         if self.entered || self.phase != Phase::Unstarted || self.pending.is_some() || self.problem.is_some() {
             return Err(Problem::CleanupUnknown);
         }
         // Permanent BEFORE the first Builder::build poll, including failed build
         // and no returned Connection. Neither cancellation nor panic can reset it.
         self.entered = true;
+        self.attempt = attempt;
         self.query = Some(query); self.rule = Some(rule);
         self.phase = Phase::Connecting; self.pending = Some(Pending::Connect { future, polled: false, dispatch_end });
         Ok(())
@@ -125,12 +165,17 @@ impl LookupBook {
         self.phase == Phase::Admit(step) && self.pending.is_none() && !self.raw_pending
     }
     pub(crate) fn admit(&mut self, step: Step, dispatch_end: Instant) -> Result<(), Problem> {
-        self.admit_with(step, dispatch_end, Self::rpc)
+        self.admit_original(step, dispatch_end, Self::rpc)
     }
     // Single actual dispatch-registration seam. Tests inject a DATA future here,
     // not an alternate lifecycle model, fake connection or native-test bypass.
+    #[cfg(test)]
     fn admit_with(&mut self, step: Step, dispatch_end: Instant, make: impl FnOnce(&Self, Step) -> Result<RpcFuture, Problem>) -> Result<(), Problem> {
-        if !self.expected(step) || (!step.cleanup() && self.problem.is_some()) {
+        self.admit_original(step, dispatch_end, |book, step| make(book, step).map(RpcOriginal::Data))
+    }
+    fn admit_original(&mut self, step: Step, dispatch_end: Instant, make: impl FnOnce(&mut Self, Step) -> Result<RpcOriginal, Problem>) -> Result<(), Problem> {
+        if !self.expected(step) || (!step.cleanup() && self.problem.is_some())
+            || matches!(self.shutdown, Shutdown::Entered | Shutdown::Settled) {
             return Err(self.problem.unwrap_or(Problem::CleanupUnknown));
         }
         if step.cleanup() && !matches!(self.registration, Registration::Possible | Registration::Registered) {
@@ -139,36 +184,46 @@ impl LookupBook {
         let future = make(self, step)?;
         // A preceding raw result stays retained through reconciliation and the
         // final stream/document gate, then this one successor replaces it.
+        if let Some(Err(error)) = self.raw.as_ref() { self.raw_error.get_or_insert_with(|| error_class(error)); }
         self.raw = None; self.phase = Phase::Calling(step);
         self.pending = Some(Pending::Rpc { future, polled: false, dispatch_end });
         Ok(())
     }
-    fn rpc(&self, step: Step) -> Result<RpcFuture, Problem> {
-        let connection = self.connection.as_ref().ok_or(Problem::CleanupUnknown)?.clone();
+    fn rpc(&mut self, step: Step) -> Result<RpcOriginal, Problem> {
+        let attempt = self.attempt.as_mut().ok_or(Problem::CleanupUnknown)?;
         match step {
             Step::AddMatch | Step::RemoveMatch => {
                 let rule = self.rule.clone().ok_or(Problem::CleanupUnknown)?;
                 let method = if step == Step::AddMatch { "AddMatch" } else { "RemoveMatch" };
-                Ok(Box::pin(async move { connection.call_method(Some(BUS), BUS_PATH, Some(BUS), method, rule.as_ref()).await }))
+                attempt.start_raw_call(BUS.try_into().map_err(|_| Problem::InvalidInput)?,
+                    BUS_PATH.try_into().map_err(|_| Problem::InvalidInput)?, BUS.try_into().map_err(|_| Problem::InvalidInput)?,
+                    method.try_into().map_err(|_| Problem::InvalidInput)?, rule.as_ref().clone())
             }
-            Step::GetNameOwner => Ok(Box::pin(async move {
-                connection.call_method(Some(BUS), BUS_PATH, Some(BUS), "GetNameOwner", &SERVICE).await
-            })),
+            Step::GetNameOwner => attempt.start_raw_call(BUS.try_into().map_err(|_| Problem::InvalidInput)?,
+                BUS_PATH.try_into().map_err(|_| Problem::InvalidInput)?, BUS.try_into().map_err(|_| Problem::InvalidInput)?,
+                "GetNameOwner".try_into().map_err(|_| Problem::InvalidInput)?, SERVICE),
             Step::SearchItems => {
                 let owner = self.owner.clone().ok_or(Problem::CleanupUnknown)?;
                 let query = self.query.clone().ok_or(Problem::CleanupUnknown)?;
-                Ok(Box::pin(async move {
-                    checked_lookup::search_items_reply(&connection, owner.as_ref(), &query.collection, &query.attributes()).await
-                }))
+                checked_lookup::start_owned_search_items(attempt, owner.as_ref(), &query.collection, &query.attributes())
             }
             Step::Attributes => {
                 let owner = self.owner.clone().ok_or(Problem::CleanupUnknown)?;
                 let item = self.candidate.clone().ok_or(Problem::CleanupUnknown)?;
-                Ok(Box::pin(async move { checked_lookup::attributes_reply(&connection, owner.as_ref(), item.as_ref()).await }))
+                checked_lookup::start_owned_attributes(attempt, owner.as_ref(), item.as_ref())
             }
-        }
+        }.map_err(|_| Problem::Unavailable)?;
+        Ok(RpcOriginal::Native)
     }
     fn cleanup_or_hold(&mut self) {
+        if matches!(self.shutdown, Shutdown::Entered | Shutdown::Settled) {
+            if matches!(self.registration, Registration::Possible | Registration::Registered) {
+                self.registration = Registration::Unknown;
+                self.fail(Problem::CleanupUnknown);
+            }
+            self.phase = Phase::Holding;
+            return;
+        }
         self.phase = if matches!(self.registration, Registration::Possible | Registration::Registered) {
             Phase::Admit(Step::RemoveMatch)
         } else { Phase::Holding };
@@ -180,21 +235,111 @@ impl LookupBook {
         else { self.cleanup_or_hold(); }
     }
 
+    pub(crate) fn expected_shutdown(&self) -> bool {
+        self.attempt.is_some() && self.shutdown == Shutdown::Unrequested && !self.never_polled()
+            && (self.problem.is_some() || self.phase == Phase::Holding)
+    }
+    pub(crate) fn admit_shutdown(&mut self, dispatch_end: Instant) -> Result<(), Problem> {
+        if !self.expected_shutdown() {
+            self.commit_removal_reply();
+            return Err(Problem::CleanupUnknown);
+        }
+        self.shutdown = Shutdown::Staged(dispatch_end);
+        Ok(()) // No native cleanup is first-polled under the document mutex.
+    }
+    pub(crate) fn shutdown_admission_refused(&mut self, problem: Problem) {
+        // Failed removal is deferred only through this local-stop admission,
+        // never hidden after denial, expiry or an impossible ownership state.
+        self.commit_removal_reply();
+        if matches!(self.shutdown, Shutdown::Unrequested | Shutdown::Staged(_)) {
+            self.shutdown = Shutdown::Refused;
+            self.shutdown_ready = false;
+            self.fail(problem);
+        }
+    }
+    pub(crate) fn shutdown_waiting_first_poll(&self) -> bool {
+        self.shutdown_ready && matches!(self.shutdown, Shutdown::Staged(_))
+    }
+    pub(crate) fn first_poll_shutdown(&mut self, cx: &mut Context<'_>,
+        admission: Result<crate::asset_session::KeyringShutdownAdmission, Problem>) {
+        if !std::mem::take(&mut self.shutdown_ready) {
+            self.shutdown_admission_refused(Problem::CleanupUnknown);
+            self.fail(Problem::CleanupUnknown); return;
+        }
+        let Shutdown::Staged(original_end) = self.shutdown else {
+            self.shutdown_admission_refused(Problem::CleanupUnknown);
+            self.fail(Problem::CleanupUnknown); return;
+        };
+        let end = match admission {
+            Ok(admission) => original_end.min(admission.into_endpoint()),
+            Err(problem) => { self.shutdown_admission_refused(problem); return; }
+        };
+        if Instant::now() >= end { self.shutdown_admission_refused(Problem::CleanupUnknown); return; }
+        if self.attempt.is_none() { self.shutdown_admission_refused(Problem::CleanupUnknown); return; }
+        self.commit_removal_reply();
+        self.shutdown = Shutdown::Entered;
+        self.poll_shutdown(cx);
+        cx.waker().wake_by_ref();
+    }
+    fn poll_shutdown(&mut self, cx: &mut Context<'_>) {
+        if self.shutdown != Shutdown::Entered { return; }
+        self.commit_removal_reply();
+        if self.pending.is_none() && !self.raw_pending {
+            // No original Message escapes this book. Retain non-owning error
+            // facts, then consume raw/MethodError and handshake FD holdings.
+            if let Some(error) = self.connect_failure.take() { self.build_error.get_or_insert_with(|| error_class(&error)); }
+            if let Some(Err(error)) = self.raw.take() { self.raw_error.get_or_insert_with(|| error_class(&error)); }
+            if self.attempt.as_mut().is_none_or(|attempt| attempt.release_stream().is_err()) {
+                self.fail(Problem::CleanupUnknown);
+            }
+        }
+        let Some(attempt) = self.attempt.as_mut() else { self.fail(Problem::CleanupUnknown); return; };
+        let result = attempt.poll_local_shutdown(cx);
+        let failed = attempt.cleanup_failed();
+        if failed { self.fail(Problem::CleanupUnknown); }
+        if let Poll::Ready(result) = result {
+            self.local_settlement = Some(result);
+            self.shutdown = Shutdown::Settled;
+            if !result.clean() { self.fail(Problem::CleanupUnknown); }
+            if matches!(self.registration, Registration::Possible | Registration::Registered) {
+                self.registration = Registration::Unknown;
+                self.fail(Problem::CleanupUnknown);
+            }
+        }
+    }
+
     /// One coordinator polls BOTH originals, bounded to one stream item and one
     /// future poll per turn. No observer owns/takes these holdings. A failed or
     /// poisoned coordinator retains Unknown holdings; it cannot keep driving.
     pub(crate) fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Next> {
         let reconciling = self.raw_pending;
         let boundary = if reconciling { self.raw.as_ref().and_then(raw_message).map(Message::recv_position) } else { None };
-        let turn = match self.stream.as_mut() {
-            Some(stream) if !self.stream_ended => stream_turn(stream, cx, boundary.as_ref()),
+        let turn = if self.removal_reply.is_some() {
+            // This terminal raw result already consumed the original stream's
+            // ordering evidence. Own shutdown must not sample a new EOF/error
+            // and retroactively replace that result. Custody is still retained.
+            StreamTurn::Reconciled
+        } else { match self.attempt.as_mut() {
+            Some(attempt) if !self.stream_ended => stream_turn(attempt, cx, boundary.as_ref()),
             _ => StreamTurn::Ended,
-        };
+        } };
         self.advance(cx, turn)
     }
 
     fn never_polled(&self) -> bool {
         matches!(self.pending.as_ref(), Some(Pending::Connect { polled: false, .. } | Pending::Rpc { polled: false, .. }))
+    }
+    fn refuse_unpolled_pending(&mut self) -> Result<(), Problem> {
+        match self.pending.as_ref() {
+            Some(Pending::Connect { future: ConnectOriginal::Native, polled: false, .. }) =>
+                self.attempt.as_mut().ok_or(Problem::CleanupUnknown)?.refuse_unpolled_build().map_err(|_| Problem::CleanupUnknown),
+            Some(Pending::Rpc { future: RpcOriginal::Native, polled: false, .. }) =>
+                self.attempt.as_mut().ok_or(Problem::CleanupUnknown)?.refuse_unpolled_call().map_err(|_| Problem::CleanupUnknown),
+            #[cfg(test)]
+            Some(Pending::Connect { future: ConnectOriginal::Data(_), polled: false, .. }
+                | Pending::Rpc { future: RpcOriginal::Data(_), polled: false, .. }) => Ok(()),
+            _ => Err(Problem::CleanupUnknown),
+        }
     }
     /// Consume only this turn's readiness AFTER the final actual document gate.
     /// No stream poll, await, setup or lock acquisition may intervene between
@@ -205,7 +350,9 @@ impl LookupBook {
             self.fail(Problem::CleanupUnknown);
             return; // Never poll without private, one-use stream readiness.
         }
-        let refusal = match self.pending.as_mut() {
+        let refusal = if matches!(self.shutdown, Shutdown::Entered | Shutdown::Settled) {
+            Some(Problem::CleanupUnknown)
+        } else { match self.pending.as_mut() {
             Some(Pending::Connect { dispatch_end, .. } | Pending::Rpc { dispatch_end, .. }) => match current_gate {
                 Err(problem) => Some(problem),
                 Ok(current_end) => {
@@ -216,11 +363,12 @@ impl LookupBook {
                 }
             },
             None => Some(Problem::CleanupUnknown),
-        };
+        } };
         if let Some(problem) = refusal {
             self.fail(problem);
             if self.phase == Phase::Calling(Step::RemoveMatch) { self.registration = Registration::Unknown; }
-            self.pending = None; // A never-polled future made no native request.
+            if self.refuse_unpolled_pending().is_ok() { self.pending = None; }
+            else { self.fail(Problem::CleanupUnknown); }
             self.cleanup_or_hold(); cx.waker().wake_by_ref(); return;
         }
         self.poll_pending(cx);
@@ -231,6 +379,10 @@ impl LookupBook {
     // real recv_position boundary above, never a caller ordering receipt.
     fn advance(&mut self, cx: &mut Context<'_>, turn: StreamTurn) -> Poll<Next> {
         self.first_poll_ready = false; // Readiness cannot survive another stream turn.
+        self.shutdown_ready = false;
+        // Production no longer samples here after terminal reconciliation.
+        // Exclude stale DATA turns at this same state-machine boundary too.
+        let turn = if self.removal_reply.is_some() { StreamTurn::Reconciled } else { turn };
         let reconciling = self.raw_pending;
         let has_boundary = reconciling && self.raw.as_ref().and_then(raw_message).is_some();
         match turn {
@@ -248,9 +400,36 @@ impl LookupBook {
             || (matches!(self.pending.as_ref(), Some(Pending::Rpc { polled: false, .. }))
                 && matches!(self.phase, Phase::Calling(step) if !step.cleanup())));
         if skip_unpolled {
-            self.pending = None; // no remote request, no fabricated raw reply
+            if self.refuse_unpolled_pending().is_ok() { self.pending = None; }
+            else { self.fail(Problem::CleanupUnknown); }
             self.cleanup_or_hold(); cx.waker().wake_by_ref(); return Poll::Pending;
         }
+        // Consume the actual raw boundary BEFORE even staging local shutdown.
+        // In particular, never discard a genuine RemoveMatch NoneBefore turn
+        // and let shutdown's own reader error substitute for it on a later poll.
+        if reconciling {
+            if !has_boundary || matches!(turn, StreamTurn::Failed | StreamTurn::Ended) {
+                self.finish_reply(false); cx.waker().wake_by_ref();
+            } else if matches!(turn, StreamTurn::Drained) {
+                self.finish_reply(true); cx.waker().wake_by_ref();
+            }
+        }
+        self.poll_shutdown(cx); // Already-entered cleanup is never gated anew.
+        if self.resources_settled() && self.entered { return Poll::Ready(Next::Settled); }
+        if matches!(self.shutdown, Shutdown::Staged(_)) {
+            // Drive a retained original before the FINAL gate, never after it
+            // and before the first shutdown poll. A stalled RPC cannot prevent
+            // this independent local shutdown admission.
+            if !self.never_polled() && self.poll_pending(cx) {
+                // A newly returned original has not had its own boundary
+                // sampled yet. Give it one next bounded stream turn before the
+                // final gate; a still-Pending original never blocks shutdown.
+                cx.waker().wake_by_ref(); return Poll::Pending;
+            }
+            self.shutdown_ready = true;
+            return Poll::Ready(Next::FirstPollShutdown);
+        }
+        if self.expected_shutdown() { return Poll::Ready(Next::AdmitShutdown); }
         if matches!(self.pending.as_ref(), Some(Pending::Rpc { polled: false, .. }))
             && !(matches!(turn, StreamTurn::Idle)
                 || (self.phase == Phase::Calling(Step::RemoveMatch) && matches!(turn, StreamTurn::Failed | StreamTurn::Ended)))
@@ -270,19 +449,13 @@ impl LookupBook {
             return Poll::Ready(Next::FirstPoll);
         }
         if self.poll_pending(cx) { return Poll::Pending; }
+        if reconciling && !self.raw_pending { return Poll::Pending; }
 
-        if reconciling {
-            if !has_boundary || matches!(turn, StreamTurn::Failed | StreamTurn::Ended) {
-                // Transport errors have no position. Stream errors/end are not
-                // NoneBefore receipts. Only own-subscription cleanup may follow.
-                self.finish_reply(false); cx.waker().wake_by_ref(); return Poll::Pending;
-            }
-            if matches!(turn, StreamTurn::Drained) {
-                self.finish_reply(true); cx.waker().wake_by_ref(); return Poll::Pending;
-            }
-        }
         if matches!(turn, StreamTurn::Observed(_)) { cx.waker().wake_by_ref(); }
         if let Phase::Admit(step) = self.phase {
+            if matches!(self.shutdown, Shutdown::Entered | Shutdown::Settled) {
+                self.cleanup_or_hold(); cx.waker().wake_by_ref(); return Poll::Pending;
+            }
             if !step.cleanup() && self.problem.is_some() {
                 self.cleanup_or_hold(); cx.waker().wake_by_ref(); return Poll::Pending;
             }
@@ -292,8 +465,9 @@ impl LookupBook {
                 return Poll::Ready(Next::Admit(step));
             }
         }
-        // A live stream is pumped even in Holding. A started book deliberately
-        // cannot complete before maintained actual-original joins are supplied.
+        // A nonterminal stream is pumped even in Holding. Only the consumed
+        // maintained join/disposal result, never Holding or reconciliation
+        // itself, can complete a book.
         Poll::Pending
     }
 
@@ -301,12 +475,20 @@ impl LookupBook {
     // In the latter case STOP/Unknown/cutoff never causes re-adoption/cancellation.
     fn poll_pending(&mut self, cx: &mut Context<'_>) -> bool {
         match self.pending.as_mut() {
-            Some(Pending::Connect { future, polled, .. }) => { *polled = true; match future.as_mut().poll(cx) {
+            Some(Pending::Connect { future, polled, .. }) => { *polled = true;
+                let result = match future {
+                    ConnectOriginal::Native => match self.attempt.as_mut() {
+                        Some(attempt) => attempt.poll_build(cx),
+                        None => Poll::Ready(Err(zbus::Error::InvalidField)),
+                    },
+                    #[cfg(test)]
+                    ConnectOriginal::Data(future) => future.as_mut().poll(cx),
+                };
+                match result {
                 Poll::Pending => {},
-                Poll::Ready(Ok(connection)) => {
-                    // Store the Connection before stream activation can fail.
-                    self.connection = Some(connection);
-                    if let Some(connection) = &self.connection { self.stream = Some(MessageStream::from(connection)); }
+                Poll::Ready(Ok(())) => {
+                    // Connection/stream/task never leave the retained SDK
+                    // attempt, including an original failed startup.
                     self.pending = None;
                     self.phase = if self.problem.is_none() { Phase::Admit(Step::AddMatch) } else { Phase::Holding };
                     cx.waker().wake_by_ref(); return true;
@@ -314,13 +496,24 @@ impl LookupBook {
                 Poll::Ready(Err(error)) => {
                     self.connect_failure = Some(error); self.pending = None;
                     self.fail(Problem::Unavailable); self.phase = Phase::Holding;
-                    return true; // No returned Connection is not SDK task joins.
+                    return true; // This result alone is not the original reader join.
                 }
             } },
             Some(Pending::Rpc { future, polled, .. }) => {
                 if !*polled && self.phase == Phase::Calling(Step::AddMatch) { self.registration = Registration::Possible; }
                 *polled = true;
-                if let Poll::Ready(result) = future.as_mut().poll(cx) {
+                let result = match future {
+                    RpcOriginal::Native => match self.attempt.as_mut() {
+                        Some(attempt) => attempt.poll_raw_call(cx),
+                        None => Poll::Ready(Err(zbus::Error::InvalidField)),
+                    },
+                    #[cfg(test)]
+                    RpcOriginal::Data(future) => future.as_mut().poll(cx),
+                };
+                if let Poll::Ready(result) = result {
+                    // Failure is known now, not at a later observer/drain tick.
+                    // The raw result is nevertheless retained and reconciled.
+                    if result.is_err() { self.fail(Problem::Unavailable); }
                     self.raw = Some(result); self.raw_pending = true; self.pending = None;
                     cx.waker().wake_by_ref(); return true;
                 }
@@ -335,13 +528,24 @@ impl LookupBook {
         let Phase::Calling(step) = self.phase else { self.fail(Problem::CleanupUnknown); self.phase = Phase::Holding; return; };
         let result = self.decode_reply(step, reconciled);
         if step.cleanup() {
-            if result.is_ok() {
-                self.registration = Registration::Removed;
-                // This PLAIN stream has no implicit asynchronous RemoveMatch.
-                self.stream = None;
+            self.removal_reply = Some(if result.is_ok() {
+                RemovalReply::Confirmed
             } else {
-                self.registration = Registration::Unknown;
+                let error = match self.raw.as_ref() {
+                    Some(Err(error)) => error_class(error),
+                    _ => ErrorClass::Protocol,
+                };
+                // Latch failure NOW, before another admission or observer tick.
+                // The prior raw Err clock, if any, remains authoritative.
                 self.fail(Problem::CleanupUnknown);
+                RemovalReply::Failed(error)
+            });
+            // No successor can replace this final raw slot. Its owning Message
+            // and private stream stay retained until admitted local disposal.
+            // Defer only semantic Unknown while staging the local stop; prior
+            // document/slot Unknown still forbids admission, unchanged.
+            if matches!(self.shutdown, Shutdown::Entered | Shutdown::Settled | Shutdown::Refused) {
+                self.commit_removal_reply();
             }
             self.phase = Phase::Holding; return;
         }
@@ -354,6 +558,17 @@ impl LookupBook {
             Step::SearchItems | Step::Attributes => Phase::Admit(Step::RemoveMatch),
             Step::RemoveMatch => Phase::Holding,
         };
+    }
+    fn commit_removal_reply(&mut self) {
+        match self.removal_reply {
+            Some(RemovalReply::Confirmed) => self.registration = Registration::Removed,
+            Some(RemovalReply::Failed(error)) => {
+                self.cleanup_error = Some(error);
+                self.registration = Registration::Unknown;
+                self.fail(Problem::CleanupUnknown);
+            }
+            None => {}
+        }
     }
     fn decode_reply(&mut self, step: Step, reconciled: bool) -> Result<(), Problem> {
         let result = self.raw.as_ref().ok_or(Problem::CleanupUnknown)?;
@@ -396,7 +611,7 @@ fn raw_message(result: &zbus::Result<Message>) -> Option<&Message> {
     match result { Ok(message) | Err(zbus::Error::MethodError(_, _, message)) => Some(message), _ => None }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StreamTurn { Idle, Pending, Observed(Option<Problem>), Drained, Failed, Ended }
+enum StreamTurn { Idle, Pending, Observed(Option<Problem>), Drained, Failed, Ended, Reconciled }
 
 fn stream_turn<S>(stream: &mut S, cx: &mut Context<'_>, before: Option<&S::Ordering>) -> StreamTurn
 where S: OrderedStream<Data = zbus::Result<Message>> + Unpin {
@@ -437,6 +652,74 @@ impl LookupBook {
     }
     pub(crate) fn idle_data_turn(&mut self, cx: &mut Context<'_>) -> Poll<Next> {
         self.advance(cx, StreamTurn::Idle)
+    }
+    pub(crate) fn shutdown_gate_data(dispatch_end: Instant) -> Self {
+        // Only exercises the real document/one-use admission logic. There is
+        // NO native attempt, task, connection or finality result in this book.
+        let mut book = Self::new();
+        book.entered = true; book.phase = Phase::Calling(Step::RemoveMatch);
+        book.registration = Registration::Registered;
+        book.raw = Some(Err(zbus::Error::InvalidReply)); book.raw_pending = true;
+        book.shutdown = Shutdown::Staged(dispatch_end);
+        book.finish_reply(false); // Real terminal failure, not a caller receipt.
+        book
+    }
+}
+
+#[cfg(test)]
+mod original_finality_tests {
+    use std::{future::Future, time::Duration};
+    use zbus::connection::owned_test_support;
+
+    async fn finite(check: impl Future<Output = ()>) {
+        // Expiration is a test FAILURE, never evidence of task termination.
+        tokio::time::timeout(Duration::from_secs(10), check).await
+            .expect("owned SDK fixture did not consume its original work");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn owned_task_join_outcomes() {
+        finite(owned_test_support::original_task_join_outcomes()).await;
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn owned_startup_error_roster() {
+        finite(owned_test_support::original_startup_error_roster()).await;
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn owned_startup_survives_observer_loss() {
+        finite(owned_test_support::original_startup_survives_observer_loss()).await;
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn owned_full_queue_reader_shutdown() {
+        finite(owned_test_support::original_full_queue_reader_shutdown()).await;
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn owned_raw_call_survives_observer_loss() {
+        finite(owned_test_support::original_raw_call_survives_observer_loss()).await;
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn owned_writer_close_failure() {
+        finite(owned_test_support::original_writer_close_failure()).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires separately reviewed isolated Unix fixture admission"]
+    async fn owned_unix_pending_authentication_shutdown() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::path::PathBuf::from(std::env::var_os("MRK_OWNED_UNIX_FIXTURE_ROOT")
+            .expect("the native test owner must supply a private fixture directory"));
+        assert!(root.is_absolute());
+        let metadata = std::fs::symlink_metadata(&root).unwrap();
+        assert!(metadata.is_dir() && !metadata.file_type().is_symlink());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+        // The admitted owner validates ancestor/identity/ownership and cleans
+        // ONLY this newly created pathname. No default or host bus fallback.
+        finite(owned_test_support::unix_pending_authentication_shutdown(root.join("owned-startup.sock"))).await;
+    }
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires separately reviewed isolated Unix fixture admission"]
+    async fn owned_unix_pending_write_and_received_fd_shutdown() {
+        finite(owned_test_support::unix_pending_write_and_received_fd_shutdown()).await;
     }
 }
 
@@ -495,6 +778,8 @@ mod tests {
                 book.first_poll(&mut cx, Ok(data_deadline()));
                 Poll::Pending
             }
+            Poll::Ready(Next::AdmitShutdown | Next::FirstPollShutdown | Next::Settled) =>
+                panic!("DATA RPCs cannot manufacture a maintained SDK finality receipt"),
         }
     }
     fn call(book: &mut LookupBook, step: Step, result: zbus::Result<Message>, registered: &mut Vec<Step>) {
@@ -504,6 +789,9 @@ mod tests {
         assert!(book.raw_pending);
         assert!(tick(book, DataTurn::Drained).is_pending()); // actual state-machine reconciliation
         assert!(!book.raw_pending);
+        // These lower-level DATA books have no native shutdown to admit. Apply
+        // only the production semantic result; no SDK settlement is invented.
+        if step.cleanup() { book.commit_removal_reply(); }
     }
     fn select_owner(book: &mut LookupBook, registered: &mut Vec<Step>) {
         call(book, Step::AddMatch, Ok(reply(BUS, &())), registered);
@@ -594,18 +882,147 @@ mod tests {
             let original = zbus::Error::MethodError("org.example.Refused".try_into().unwrap(), None, message);
             book.admit_with(Step::SearchItems, data_deadline(), |_, _| Ok(Box::pin(std::future::ready(Err(original))))).unwrap();
             assert!(tick(&mut book, DataTurn::Idle).is_pending());
+            assert_eq!(book.problem(), Some(Problem::Unavailable)); // Latched at the actual raw Err, before drain.
+            let original_failure_at = book.problem_at().unwrap();
             assert_eq!(raw_message(book.raw.as_ref().unwrap()).unwrap().data().bytes().as_ptr(), bytes);
             assert!(tick(&mut book, DataTurn::Idle).is_pending()); // Pending with boundary is not drained
             assert!(book.raw_pending);
             assert!(tick(&mut book, failure).is_pending());
             assert!(!book.raw_pending);
             assert!(book.problem().is_some());
+            assert_eq!(book.problem_at(), Some(original_failure_at));
             assert_eq!(book.phase, Phase::Admit(Step::RemoveMatch));
             assert!(matches!(book.raw, Some(Err(zbus::Error::MethodError(_, _, _)))));
         }
         let mut stream = DataStream(VecDeque::from([DataTurn::Drained]));
         let mut cx = Context::from_waker(Waker::noop());
         assert_eq!(stream_turn(&mut stream, &mut cx, None), StreamTurn::Failed);
+    }
+
+    #[test]
+    fn terminal_removal_reconciliation_precedes_shutdown_and_closes_stream_sampling() {
+        #[derive(Clone, Copy)]
+        enum ReplyKind { Valid, Malformed, MethodError }
+        fn removal(result: zbus::Result<Message>) -> LookupBook {
+            let mut book = data_book();
+            book.phase = Phase::Admit(Step::RemoveMatch); book.registration = Registration::Registered;
+            book.admit_with(Step::RemoveMatch, data_deadline(), |_, _| Ok(Box::pin(std::future::ready(result)))).unwrap();
+            assert!(tick(&mut book, DataTurn::Idle).is_pending());
+            assert!(book.raw_pending && book.removal_reply.is_none());
+            book
+        }
+        let mut cx = Context::from_waker(Waker::noop());
+        for kind in [ReplyKind::Valid, ReplyKind::Malformed, ReplyKind::MethodError] {
+            for staged in [false, true] {
+                let raw = match kind {
+                    ReplyKind::Valid => Ok(reply(BUS, &())),
+                    ReplyKind::Malformed => Ok(reply(BUS, &"not an empty reply")),
+                    ReplyKind::MethodError => {
+                        let call = Message::method_call("/", "Test").unwrap().build(&()).unwrap();
+                        let message = Message::error(&call.header(), "org.example.Refused").unwrap()
+                            .sender(BUS).unwrap().build(&"detail").unwrap();
+                        Err(zbus::Error::MethodError("org.example.Refused".try_into().unwrap(), None, message))
+                    }
+                };
+                let bytes = raw_message(&raw).unwrap().data().bytes().as_ptr();
+                let mut book = removal(raw);
+                let raw_failure_at = book.problem_at();
+                assert_eq!(raw_failure_at.is_some(), matches!(kind, ReplyKind::MethodError));
+                // Neither an earlier Item nor Pending proves this raw boundary.
+                for turn in [StreamTurn::Observed(None), StreamTurn::Pending] {
+                    assert!(book.advance(&mut cx, turn).is_pending());
+                    assert!(book.raw_pending && book.removal_reply.is_none());
+                }
+                let end = data_deadline();
+                if staged { book.shutdown = Shutdown::Staged(end); }
+                let next = book.advance(&mut cx, StreamTurn::Drained);
+                if staged { assert!(matches!(next, Poll::Ready(Next::FirstPollShutdown))); }
+                else { assert!(next.is_pending()); }
+                assert!(!book.raw_pending);
+                let expected = match kind {
+                    ReplyKind::Valid => RemovalReply::Confirmed,
+                    ReplyKind::Malformed => RemovalReply::Failed(ErrorClass::Protocol),
+                    ReplyKind::MethodError => RemovalReply::Failed(ErrorClass::Remote),
+                };
+                assert_eq!(book.removal_reply, Some(expected));
+                assert_eq!(book.registration, Registration::Registered); // Not a local-stop receipt.
+                let problem = book.problem(); let problem_at = book.problem_at();
+                assert_eq!(problem.is_none(), matches!(kind, ReplyKind::Valid));
+                if raw_failure_at.is_some() { assert_eq!(problem_at, raw_failure_at); }
+                assert!(!book.cleanup_unknown()); // Only this bounded stop admission is pending.
+                // A reader awakened by own shutdown may produce either turn.
+                // Terminal reconciliation cannot be replaced by that later error.
+                for stale in [StreamTurn::Failed, StreamTurn::Ended] {
+                    let _ = book.advance(&mut cx, stale);
+                    assert_eq!(book.removal_reply, Some(expected));
+                    assert_eq!(book.problem(), problem); assert_eq!(book.problem_at(), problem_at);
+                }
+                // The real poll entry must skip sampling too, not only advance.
+                // This DATA book has no stream: sampling it would yield Ended.
+                let _ = book.poll(&mut cx);
+                assert_eq!(book.problem(), problem); assert_eq!(book.problem_at(), problem_at);
+                if staged { assert_eq!(book.shutdown, Shutdown::Staged(end)); }
+                assert_eq!(raw_message(book.raw.as_ref().unwrap()).unwrap().data().bytes().as_ptr(), bytes);
+                book.shutdown_admission_refused(Problem::Interrupted);
+                assert_eq!(book.registration, if matches!(kind, ReplyKind::Valid) { Registration::Removed } else { Registration::Unknown });
+                assert_eq!(book.cleanup_unknown(), !matches!(kind, ReplyKind::Valid));
+                if problem_at.is_some() { assert_eq!(book.problem_at(), problem_at); }
+                assert_eq!(raw_message(book.raw.as_ref().unwrap()).unwrap().data().bytes().as_ptr(), bytes);
+                assert!(!book.resources_settled());
+            }
+        }
+        for turn in [StreamTurn::Failed, StreamTurn::Ended] {
+            let mut book = removal(Ok(reply(BUS, &())));
+            book.shutdown = Shutdown::Staged(data_deadline());
+            assert!(matches!(book.advance(&mut cx, turn), Poll::Ready(Next::FirstPollShutdown)));
+            assert_eq!(book.removal_reply, Some(RemovalReply::Failed(ErrorClass::Protocol)));
+            let problem_at = book.problem_at();
+            book.shutdown_admission_refused(Problem::CleanupUnknown);
+            assert!(book.cleanup_unknown() && !book.resources_settled());
+            assert_eq!(book.problem_at(), problem_at); // Missing drain is NEVER Confirmed.
+        }
+
+        // If an entered original returns while shutdown is staged, its new raw
+        // boundary gets one following turn. A still-stalled RPC does not block
+        // the independent local-stop gate, nor is its original dropped.
+        let polls = Arc::new(AtomicUsize::new(0)); let drops = Arc::new(AtomicUsize::new(0));
+        let ready = Arc::new(AtomicBool::new(false));
+        let mut book = data_book(); book.phase = Phase::Admit(Step::RemoveMatch); book.registration = Registration::Registered;
+        book.admit_with(Step::RemoveMatch, data_deadline(), |_, _| Ok(held(&polls, &drops, &ready, Ok(reply(BUS, &())), false))).unwrap();
+        assert!(tick(&mut book, DataTurn::Idle).is_pending());
+        book.interrupt(); let problem_at = book.problem_at();
+        let end = data_deadline(); book.shutdown = Shutdown::Staged(end);
+        assert!(matches!(book.advance(&mut cx, StreamTurn::Pending), Poll::Ready(Next::FirstPollShutdown)));
+        assert_eq!(polls.load(Ordering::SeqCst), 2); assert_eq!(drops.load(Ordering::SeqCst), 0);
+        ready.store(true, Ordering::SeqCst);
+        assert!(book.advance(&mut cx, StreamTurn::Idle).is_pending());
+        assert!(book.raw_pending && !book.shutdown_waiting_first_poll());
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(matches!(book.advance(&mut cx, StreamTurn::Drained), Poll::Ready(Next::FirstPollShutdown)));
+        assert_eq!(book.removal_reply, Some(RemovalReply::Confirmed));
+        assert_eq!(book.shutdown, Shutdown::Staged(end)); assert_eq!(book.problem_at(), problem_at);
+        assert!(book.raw.is_some() && !book.resources_settled());
+
+        // All invalid consumers commit failed removal, even if no document
+        // grant can be obtained. The real token's denial/expiry/absent-attempt
+        // consumption is additionally covered by the asset_session gate test.
+        for invalid in 0..3 {
+            let mut book = LookupBook::shutdown_gate_data(data_deadline());
+            let problem_at = book.problem_at();
+            match invalid {
+                0 => book.first_poll_shutdown(&mut cx, Err(Problem::CleanupUnknown)), // Missing readiness.
+                1 => {
+                    book.shutdown = Shutdown::Unrequested; book.shutdown_ready = true;
+                    book.first_poll_shutdown(&mut cx, Err(Problem::CleanupUnknown)); // Wrong stage.
+                }
+                _ => {
+                    book.shutdown = Shutdown::Unrequested;
+                    assert!(book.admit_shutdown(data_deadline()).is_err()); // Impossible attempt.
+                }
+            }
+            assert!(book.cleanup_unknown() && !book.resources_settled());
+            assert_eq!(book.problem_at(), problem_at); assert!(book.raw.is_some());
+        }
     }
 
     struct HeldCall {
@@ -648,6 +1065,7 @@ mod tests {
         book.admit_with(Step::RemoveMatch, data_deadline(), |_, _| Ok(Box::pin(std::future::ready(Err(zbus::Error::InvalidReply))))).unwrap();
         assert!(tick(&mut book, DataTurn::Idle).is_pending());
         assert!(tick(&mut book, DataTurn::Idle).is_pending()); // transport error, no invented boundary
+        book.commit_removal_reply(); // DATA has no local shutdown admission.
         assert!(book.cleanup_unknown());
         assert_eq!(book.phase, Phase::Holding);
         assert_eq!(book.problem(), Some(Problem::OwnerChanged));
@@ -662,7 +1080,7 @@ mod tests {
         let mut cx = Context::from_waker(Waker::noop());
         assert!(matches!(book.poll(&mut cx), Poll::Ready(Next::FirstPoll)));
         book.first_poll(&mut cx, Ok(data_deadline()));
-        assert!(book.connect_failure.is_some() && book.connection.is_none());
+        assert!(book.connect_failure.is_some() && book.attempt.is_none());
         book.interrupt();
         assert_eq!(book.problem(), Some(Problem::Unavailable));
         assert!(!book.resources_settled());
@@ -729,6 +1147,7 @@ mod tests {
         ready.store(true, Ordering::SeqCst);
         assert!(tick(&mut book, DataTurn::Idle).is_pending());
         assert!(tick(&mut book, DataTurn::Drained).is_pending());
+        book.commit_removal_reply(); // DATA has no local shutdown admission.
         assert_eq!(book.registration, Registration::Removed); // late own removal, not overall success
         assert_eq!(book.problem(), Some(Problem::Interrupted));
         assert!(!book.resources_settled());

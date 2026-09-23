@@ -64,6 +64,53 @@ pub async fn attributes_reply(
     connection.call_method(Some(owner.clone()), item, Some("org.freedesktop.DBus.Properties"), "Get", &attributes_body()).await
 }
 
+// The fixed owned connection cannot lend out an ordinary Connection (or a
+// MessageStream convertible back into one). These two concrete starters reuse
+// the same validators and request body, but retain owned arguments in its one
+// original RPC slot. They do not first-poll a native operation.
+#[cfg(all(unix, feature = "rt-tokio"))]
+struct OwnedQuery([(String, String); 4]);
+#[cfg(all(unix, feature = "rt-tokio"))]
+impl Type for OwnedQuery {
+    const SIGNATURE: &'static Signature = Query::SIGNATURE;
+}
+#[cfg(all(unix, feature = "rt-tokio"))]
+impl Serialize for OwnedQuery {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let pairs = self.0.each_ref().map(|(key, value)| (key.as_str(), value.as_str()));
+        Query(&pairs).serialize(serializer)
+    }
+}
+
+/// Stage the same bounded SearchItems call in a fixed owned original attempt.
+#[cfg(all(unix, feature = "rt-tokio"))]
+pub fn start_owned_search_items(
+    attempt: &mut zbus::connection::OwnedConnectionAttempt,
+    owner: &UniqueName<'_>, collection: &ObjectPath<'_>, attributes: &[(&str, &str); 4],
+) -> zbus::Result<()> {
+    route(owner, collection)?;
+    query(attributes)?;
+    let body = OwnedQuery(attributes.map(|(key, value)| (key.to_owned(), value.to_owned())));
+    attempt.start_raw_call(
+        owner.as_str().to_owned().try_into()?, collection.as_str().to_owned().try_into()?,
+        "org.freedesktop.Secret.Collection".try_into()?, "SearchItems".try_into()?, body,
+    )
+}
+
+/// Stage the same fixed Properties.Get, without a proxy or property-cache task.
+#[cfg(all(unix, feature = "rt-tokio"))]
+pub fn start_owned_attributes(
+    attempt: &mut zbus::connection::OwnedConnectionAttempt,
+    owner: &UniqueName<'_>, item: &ObjectPath<'_>,
+) -> zbus::Result<()> {
+    route(owner, item)?;
+    if item.as_str() == "/" { return Err(zbus::Error::InvalidField); }
+    attempt.start_raw_call(
+        owner.as_str().to_owned().try_into()?, item.as_str().to_owned().try_into()?,
+        "org.freedesktop.DBus.Properties".try_into()?, "Get".try_into()?, attributes_body(),
+    )
+}
+
 /// Borrow zero or one <=512-byte item path; `/` is never an item candidate.
 pub fn decode_item_path<'a>(body: &'a Body, owner: &UniqueName<'_>) -> Result<Option<&'a str>, Error> {
     let path = bounded_reply::decode_search_items(body, owner)?.0;
@@ -119,6 +166,15 @@ mod tests {
         let decoded: std::collections::HashMap<&str, &str> = call_body.deserialize().unwrap();
         assert_eq!(decoded.len(), 4);
         for (key, value) in expected { assert_eq!(decoded.get(key), Some(&value)); }
+        #[cfg(all(unix, feature = "rt-tokio"))]
+        {
+            let owned = OwnedQuery(expected.map(|(key, value)| (key.to_owned(), value.to_owned())));
+            let owned_call = Message::method_call("/collection", "SearchItems").unwrap().build(&owned).unwrap();
+            let owned_body = owned_call.body();
+            assert_eq!(owned_body.signature(), call_body.signature());
+            assert_eq!(owned_body.data().bytes(), call_body.data().bytes());
+            assert_eq!(owned_body.deserialize::<std::collections::HashMap<&str, &str>>().unwrap(), decoded);
+        }
         let get = Message::method_call("/item", "Get").unwrap().build(&attributes_body()).unwrap();
         assert_eq!(get.body().signature().to_string_no_parens(), "ss");
         assert_eq!(get.body().deserialize::<(&str, &str)>().unwrap(), (ITEM_INTERFACE, ATTRIBUTES_PROPERTY));
