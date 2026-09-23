@@ -7,7 +7,7 @@
 #![forbid(unsafe_code)]
 
 use std::{collections::BTreeSet, sync::{Mutex, OnceLock}};
-use mrk_windows_installed_native::{CloseOutcome, Error as NativeError, Publication, PUBLICATION_PAYLOADS};
+use mrk_windows_installed_native::{CloseOutcome, Error as NativeError, Publication, PublicationFrameObservation, PUBLICATION_PAYLOADS};
 use sha2::{Digest, Sha256};
 use crate::runtime::windows_version::{Inventory, VersionSpec, MANIFEST_BYTES, TARGET};
 
@@ -28,7 +28,7 @@ pub enum PublicationError {
     /// The original fixed target-D creation returned ERROR_ALREADY_EXISTS;
     /// no output was created/exposed and the original owner actually settled.
     OccupiedTargetSettled,
-    Failed { cause: PublicationFailure, possibly_exposed: bool, originals_unknown: bool },
+    Failed { cause: PublicationFailure, possibly_exposed: bool, originals_unknown: bool, frame: Option<PublicationFrameObservation> },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -74,7 +74,7 @@ impl PublicationError {
             Self::AlreadyStarted => ("already-started", "unobserved", None, "unobserved", "unobserved"),
             Self::OwnerUnavailable => ("owner-unavailable", "unobserved", None, "unobserved", "unobserved"),
             Self::OccupiedTargetSettled => return None, // Expected exit2 remains silent.
-            Self::Failed { cause, possibly_exposed, originals_unknown } =>
+            Self::Failed { cause, possibly_exposed, originals_unknown, .. } =>
                 (cause.phase.label(), cause.class(), cause.ordinal, observed(possibly_exposed), observed(originals_unknown)),
         };
         let mut line = String::with_capacity(192);
@@ -87,6 +87,13 @@ impl PublicationError {
         line.push_str(";possiblyExposed="); line.push_str(exposed);
         line.push_str(";originalsUnknown="); line.push_str(unknown); line.push('\n');
         if line.len() <= 256 { Some(line) } else { None }
+    }
+    pub fn frame_diagnostic_line(self) -> Option<String> {
+        match self {
+            Self::Failed { cause, frame: Some(frame), .. }
+                if cause.phase == FailurePhase::Admit && cause.native == Some(NativeError::Unknown) => frame.diagnostic_line(),
+            _ => None,
+        }
     }
 }
 type Checked<T> = Result<T, ()>;
@@ -193,13 +200,16 @@ pub fn publish_fixed() -> Result<(), PublicationError> {
         Ok(()) => PublicationFailure::policy(FailurePhase::FinalPostcondition, None),
         Err(first) => first,
     };
+    let frame = if cause.phase == FailurePhase::Admit && cause.native == Some(NativeError::Unknown) {
+        Some(original.retained_frame_observation())
+    } else { None };
     let possibly_exposed = original.possibly_exposed();
     let settlement = original.fail_and_settle_once();
     if settlement == CloseOutcome::Settled && original.occupied_target_and_settled() {
         return Err(PublicationError::OccupiedTargetSettled);
     }
     let originals_unknown = settlement == CloseOutcome::Unknown;
-    Err(PublicationError::Failed { cause, possibly_exposed, originals_unknown })
+    Err(PublicationError::Failed { cause, possibly_exposed, originals_unknown, frame })
 }
 
 #[cfg(test)]
@@ -236,20 +246,40 @@ mod tests {
             (FailurePhase::ReadbackNext, "readback-next"), (FailurePhase::ReadbackCount, "readback-count"), (FailurePhase::ReadbackSize, "readback-size"),
             (FailurePhase::ReadbackVerify, "readback-verify"), (FailurePhase::FinishReadback, "finish-readback"),
             (FailurePhase::Seal, "seal"), (FailurePhase::FinalPostcondition, "final-postcondition")] {
-            let error = PublicationError::Failed { cause: PublicationFailure::policy(phase, None), possibly_exposed: false, originals_unknown: true };
+            let error = PublicationError::Failed { cause: PublicationFailure::policy(phase, None), possibly_exposed: false, originals_unknown: true, frame: None };
             assert_eq!(error.diagnostic_line(), Some(format!("MRK_WINDOWS_RUNTIME_PUBLISH_FAILURE_V1=phase={label};class=policy;ordinal=none;possiblyExposed=false;originalsUnknown=true\n")));
         }
         for (native, class) in [(NativeError::Unavailable, "unavailable"), (NativeError::Unsafe, "unsafe"),
             (NativeError::Bounds, "bounds"), (NativeError::State, "state"), (NativeError::Unknown, "unknown")] {
-            let error = PublicationError::Failed { cause: PublicationFailure::native(FailurePhase::CopyNext, Some(46), native), possibly_exposed: true, originals_unknown: false };
+            let error = PublicationError::Failed { cause: PublicationFailure::native(FailurePhase::CopyNext, Some(46), native), possibly_exposed: true, originals_unknown: false, frame: None };
             assert_eq!(error.diagnostic_line(), Some(format!("MRK_WINDOWS_RUNTIME_PUBLISH_FAILURE_V1=phase=copy-next;class={class};ordinal=46;possiblyExposed=true;originalsUnknown=false\n")));
         }
         for (ordinal, encoded) in [(None, "none"), (Some(0), "0"), (Some(9), "9"), (Some(10), "10"),
             (Some(46), "46"), (Some(47), "none"), (Some(usize::MAX), "none")] {
-            let error = PublicationError::Failed { cause: PublicationFailure::policy(FailurePhase::CopyCount, ordinal), possibly_exposed: true, originals_unknown: true };
+            let error = PublicationError::Failed { cause: PublicationFailure::policy(FailurePhase::CopyCount, ordinal), possibly_exposed: true, originals_unknown: true, frame: None };
             let line = error.diagnostic_line().unwrap();
             assert_eq!(line, format!("MRK_WINDOWS_RUNTIME_PUBLISH_FAILURE_V1=phase=copy-count;class=policy;ordinal={encoded};possiblyExposed=true;originalsUnknown=true\n"));
             assert!(line.is_ascii() && line.len() <= 256 && line.bytes().filter(|b| *b == b'\n').count() == 1);
+        }
+        // Creating/copying this empty DATA owner enters no native call. The
+        // companion is allowed only for first Admit/Unknown, never another cause.
+        let frame = Publication::new(&"d".repeat(64)).unwrap().retained_frame_observation();
+        for (phase, native, allowed) in [(FailurePhase::Admit, NativeError::Unknown, true),
+            (FailurePhase::Admit, NativeError::Unsafe, false), (FailurePhase::Create, NativeError::Unknown, false)] {
+            let error = PublicationError::Failed { cause: PublicationFailure::native(phase, None, native),
+                possibly_exposed: false, originals_unknown: true, frame: Some(frame) };
+            assert_eq!(error.frame_diagnostic_line().is_some(), allowed);
+            if allowed {
+                let line = error.frame_diagnostic_line().unwrap();
+                assert_eq!(line, "MRK_WINDOWS_RUNTIME_PUBLISH_FRAME_V1=qcall=none;qphase=none;qret=none;qrefusal=none;mcall=none;mphase=none;mret=none\n");
+                assert!(error.diagnostic_line().unwrap().len() + line.len() <= 512);
+            }
+        }
+        for error in [PublicationError::Invocation, PublicationError::Profile, PublicationError::AlreadyStarted,
+            PublicationError::OwnerUnavailable, PublicationError::OccupiedTargetSettled,
+            PublicationError::Failed { cause: PublicationFailure::native(FailurePhase::Admit, None, NativeError::Unknown),
+                possibly_exposed: false, originals_unknown: true, frame: None }] {
+            assert!(error.frame_diagnostic_line().is_none());
         }
     }
     #[test]

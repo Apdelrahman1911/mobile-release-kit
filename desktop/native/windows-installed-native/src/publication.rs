@@ -279,6 +279,101 @@ impl Order {
 
 #[derive(Clone, Copy)]
 enum Effect { Directory(usize), Writer, Control(bool), Write, Flush, Seal, Scalar(S::TOKEN_INFORMATION_CLASS) }
+
+// Normalize while copying retained Rust DATA. Neither this value nor its Debug
+// representation carries a handle, scalar/count magnitude, path or native buffer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ObservedReturn { label: &'static str, code: Option<u32> }
+impl ObservedReturn {
+    fn from_return(value: Option<Returned>) -> Self {
+        let (label, code) = match value {
+            None => ("none", None),
+            Some(Returned::Scalar(_)) => ("scalar", None),
+            Some(Returned::Boolean(value, error)) => (if value == 0 { "bool-zero" } else { "bool-nonzero" }, Some(error)),
+            Some(Returned::Count(value, error)) => (if value == 0 { "count-zero" } else { "count-positive" }, Some(error)),
+            Some(Returned::Nt(status)) => ("nt", Some(status as u32)),
+            Some(Returned::Hresult(status)) => ("hr", Some(status as u32)),
+        };
+        Self { label, code }
+    }
+    fn append(self, line: &mut String) {
+        line.push_str(self.label);
+        if let Some(code) = self.code {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            line.push(':');
+            for shift in (0..8).rev() { line.push(HEX[((code >> (shift * 4)) & 15) as usize] as char); }
+        }
+    }
+}
+fn observed_query(call: Call) -> &'static str {
+    match call {
+        Call::Architecture => "architecture", Call::Folder => "folder",
+        Call::WindowsDirectory => "windows-directory", Call::SystemDirectory => "system-directory",
+        Call::Mapping => "mapping", Call::DriveType => "drive-type", Call::Open(_) => "nt-create",
+        Call::ProcessToken(_) => "process-token", Call::ThreadToken(_) => "thread-token", Call::Close(_) => "close",
+        Call::Info(class, _) => match class {
+            FS::FileBasicInfo => "info-basic", FS::FileStandardInfo => "info-standard",
+            FS::FileAttributeTagInfo => "info-tag", FS::FileIdInfo => "info-id",
+            FS::FileCaseSensitiveInfo => "info-case", _ => "info-other",
+        },
+        Call::HandleInfo => "handle-info", Call::FinalName => "final-name", Call::FileType => "file-type",
+        Call::VolumeName => "volume-name", Call::VolumeDevice => "volume-device", Call::Streams => "streams",
+        Call::Security => "security", Call::Privilege(_) => "privilege", Call::Read(_) => "read", Call::Entries => "entries",
+        Call::Token(class) => match class {
+            S::TokenStatistics => "token-statistics", S::TokenType => "token-type",
+            S::TokenElevation => "token-elevation", S::TokenElevationType => "token-elevation-type",
+            S::TokenUIAccess => "token-ui-access", S::TokenVirtualizationEnabled => "token-virtualization",
+            S::TokenUser => "token-user", S::TokenIntegrityLevel => "token-integrity",
+            S::TokenGroups => "token-groups", S::TokenPrivileges => "token-privileges", _ => "token-other",
+        },
+    }
+}
+fn observed_mutation(effect: Effect) -> &'static str {
+    match effect {
+        Effect::Directory(_) => "directory", Effect::Writer => "writer",
+        Effect::Control(false) => "control-file", Effect::Control(true) => "control-directory",
+        Effect::Write => "write", Effect::Flush => "flush", Effect::Seal => "seal",
+        Effect::Scalar(S::TokenHasRestrictions) => "has-restrictions",
+        Effect::Scalar(S::TokenIsAppContainer) => "is-app-container", Effect::Scalar(_) => "scalar-other",
+    }
+}
+fn observed_phase(phase: Phase) -> &'static str {
+    match phase { Phase::Prepared => "prepared", Phase::Entered => "entered", Phase::Returned => "returned", Phase::Complete => "complete" }
+}
+fn observed_refusal(refusal: Option<CompletionRefusal>) -> &'static str {
+    match refusal {
+        None => "none", Some(CompletionRefusal::OpenInvalidHandle) => "open-invalid-handle",
+        Some(CompletionRefusal::OpenIoStatus) => "open-iosb-status", Some(CompletionRefusal::OpenNotOpened) => "open-not-opened",
+        Some(CompletionRefusal::OpenDuplicate) => "open-duplicate", Some(CompletionRefusal::TokenInvalidHandle) => "token-invalid-handle",
+        Some(CompletionRefusal::TokenDuplicate) => "token-duplicate",
+    }
+}
+/// Closed, copied first-failure DATA only. This is never ownership or finality.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PublicationFrameObservation {
+    qcall: &'static str, qphase: &'static str, qret: ObservedReturn, qrefusal: &'static str,
+    mcall: &'static str, mphase: &'static str, mret: ObservedReturn,
+}
+impl PublicationFrameObservation {
+    fn from_frames(query: Option<(Call, Phase, Option<Returned>, Option<CompletionRefusal>)>,
+        mutation: Option<(Effect, Phase, Option<Returned>)>) -> Self {
+        let (qcall, qphase, qret, qrefusal) = query.map_or(("none", "none", ObservedReturn::from_return(None), "none"),
+            |(call, phase, returned, refusal)| (observed_query(call), observed_phase(phase), ObservedReturn::from_return(returned), observed_refusal(refusal)));
+        let (mcall, mphase, mret) = mutation.map_or(("none", "none", ObservedReturn::from_return(None)),
+            |(effect, phase, returned)| (observed_mutation(effect), observed_phase(phase), ObservedReturn::from_return(returned)));
+        Self { qcall, qphase, qret, qrefusal, mcall, mphase, mret }
+    }
+    /// Bounded companion line; reads only this normalized copy, never an owner.
+    pub fn diagnostic_line(self) -> Option<String> {
+        let mut line = String::with_capacity(256);
+        line.push_str("MRK_WINDOWS_RUNTIME_PUBLISH_FRAME_V1=qcall="); line.push_str(self.qcall);
+        line.push_str(";qphase="); line.push_str(self.qphase); line.push_str(";qret="); self.qret.append(&mut line);
+        line.push_str(";qrefusal="); line.push_str(self.qrefusal);
+        line.push_str(";mcall="); line.push_str(self.mcall); line.push_str(";mphase="); line.push_str(self.mphase);
+        line.push_str(";mret="); self.mret.append(&mut line); line.push('\n');
+        if line.len() <= 256 { Some(line) } else { None }
+    }
+}
 struct Mutation {
     effect: Effect, phase: Cell<Phase>, returned: Cell<Option<Returned>>, slot: Option<usize>,
     path: Vec<u16>, descriptor: UnsafeCell<Aligned>, attributes: S::SECURITY_ATTRIBUTES,
@@ -339,6 +434,19 @@ pub struct Publication {
 unsafe impl Send for Publication {}
 
 impl Publication {
+    /// Call only for the first Admit/Unknown result, before settlement can
+    /// change frames. Copy no UnsafeCell/native output, handle, clock or input.
+    pub fn retained_frame_observation(&self) -> PublicationFrameObservation {
+        let query = self.book.active.as_ref().map(|held| {
+            let frame = held.as_ref().get_ref();
+            (frame.call, frame.phase.get(), frame.returned.get(), frame.completion_refusal.get())
+        });
+        let mutation = self.mutation.as_ref().map(|held| {
+            let frame = held.as_ref().get_ref();
+            (frame.effect, frame.phase.get(), frame.returned.get())
+        });
+        PublicationFrameObservation::from_frames(query, mutation)
+    }
     /// No native effect. D must already be the safe app's compiled manifest hash.
     pub fn new(digest: &str) -> Result<Self> {
         need(digest_name(digest))?;
@@ -1159,6 +1267,86 @@ mod tests {
     }
     #[test]
     fn real_return_classification_never_repairs_a_write_or_invents_a_flush() -> Result<()> {
+        // Existing selected inert policy also proves the closed diagnostic
+        // vocabulary: input ordinals/classes/return magnitudes never leak.
+        for (call, label) in [
+            (Call::Architecture, "architecture"), (Call::Folder, "folder"),
+            (Call::WindowsDirectory, "windows-directory"), (Call::SystemDirectory, "system-directory"),
+            (Call::Mapping, "mapping"), (Call::DriveType, "drive-type"), (Call::Open(usize::MAX), "nt-create"),
+            (Call::ProcessToken(usize::MAX), "process-token"), (Call::ThreadToken(usize::MAX), "thread-token"),
+            (Call::Close(usize::MAX), "close"), (Call::Info(FS::FileBasicInfo, usize::MAX), "info-basic"),
+            (Call::Info(FS::FileStandardInfo, 0), "info-standard"), (Call::Info(FS::FileAttributeTagInfo, 0), "info-tag"),
+            (Call::Info(FS::FileIdInfo, 0), "info-id"), (Call::Info(FS::FileCaseSensitiveInfo, 0), "info-case"),
+            (Call::Info(i32::MAX, usize::MAX), "info-other"), (Call::HandleInfo, "handle-info"),
+            (Call::FinalName, "final-name"), (Call::FileType, "file-type"), (Call::VolumeName, "volume-name"),
+            (Call::VolumeDevice, "volume-device"), (Call::Streams, "streams"), (Call::Security, "security"),
+            (Call::Token(S::TokenStatistics), "token-statistics"), (Call::Token(S::TokenType), "token-type"),
+            (Call::Token(S::TokenElevation), "token-elevation"), (Call::Token(S::TokenElevationType), "token-elevation-type"),
+            (Call::Token(S::TokenUIAccess), "token-ui-access"), (Call::Token(S::TokenVirtualizationEnabled), "token-virtualization"),
+            (Call::Token(S::TokenUser), "token-user"), (Call::Token(S::TokenIntegrityLevel), "token-integrity"),
+            (Call::Token(S::TokenGroups), "token-groups"), (Call::Token(S::TokenPrivileges), "token-privileges"),
+            (Call::Token(i32::MAX), "token-other"), (Call::Read(usize::MAX), "read"), (Call::Entries, "entries"),
+        ] { assert_eq!(observed_query(call), label); }
+        for name in [PrivilegeName::ChangeNotify, PrivilegeName::Shutdown, PrivilegeName::Undock,
+            PrivilegeName::IncreaseWorkingSet, PrivilegeName::TimeZone] {
+            assert_eq!(observed_query(Call::Privilege(name)), "privilege");
+        }
+        for (effect, label) in [(Effect::Directory(usize::MAX), "directory"), (Effect::Writer, "writer"),
+            (Effect::Control(false), "control-file"), (Effect::Control(true), "control-directory"),
+            (Effect::Write, "write"), (Effect::Flush, "flush"), (Effect::Seal, "seal"),
+            (Effect::Scalar(S::TokenHasRestrictions), "has-restrictions"),
+            (Effect::Scalar(S::TokenIsAppContainer), "is-app-container"), (Effect::Scalar(i32::MAX), "scalar-other")] {
+            assert_eq!(observed_mutation(effect), label);
+        }
+        for (phase, label) in [(Phase::Prepared, "prepared"), (Phase::Entered, "entered"),
+            (Phase::Returned, "returned"), (Phase::Complete, "complete")] { assert_eq!(observed_phase(phase), label); }
+        for (refusal, label) in [(None, "none"), (Some(CompletionRefusal::OpenInvalidHandle), "open-invalid-handle"),
+            (Some(CompletionRefusal::OpenIoStatus), "open-iosb-status"), (Some(CompletionRefusal::OpenNotOpened), "open-not-opened"),
+            (Some(CompletionRefusal::OpenDuplicate), "open-duplicate"), (Some(CompletionRefusal::TokenInvalidHandle), "token-invalid-handle"),
+            (Some(CompletionRefusal::TokenDuplicate), "token-duplicate")] { assert_eq!(observed_refusal(refusal), label); }
+        for (returned, expected) in [(None, "none"), (Some(Returned::Scalar(0)), "scalar"),
+            (Some(Returned::Scalar(u32::MAX)), "scalar"), (Some(Returned::Boolean(0, 0)), "bool-zero:00000000"),
+            (Some(Returned::Boolean(1, u32::MAX)), "bool-nonzero:ffffffff"),
+            (Some(Returned::Boolean(i32::MIN, 5)), "bool-nonzero:00000005"),
+            (Some(Returned::Count(0, F::ERROR_IO_PENDING)), "count-zero:000003e5"),
+            (Some(Returned::Count(u32::MAX, 0)), "count-positive:00000000"),
+            (Some(Returned::Nt(F::STATUS_PENDING)), "nt:00000103"), (Some(Returned::Nt(0)), "nt:00000000"),
+            (Some(Returned::Nt(i32::MIN)), "nt:80000000"), (Some(Returned::Hresult(-1)), "hr:ffffffff"),
+            (Some(Returned::Hresult(HRESULT_PENDING)), "hr:8000000a")] {
+            let mut line = String::new(); ObservedReturn::from_return(returned).append(&mut line);
+            assert_eq!(line, expected);
+        }
+        let largest = PublicationFrameObservation::from_frames(
+            Some((Call::Token(S::TokenVirtualizationEnabled), Phase::Returned,
+                Some(Returned::Count(u32::MAX, u32::MAX)), Some(CompletionRefusal::TokenInvalidHandle))),
+            Some((Effect::Control(true), Phase::Returned, Some(Returned::Count(u32::MAX, u32::MAX)))))
+            .diagnostic_line().ok_or(Error::State)?;
+        assert!(largest.is_ascii() && largest.len() <= 208 && largest.bytes().filter(|b| *b == b'\n').count() == 1);
+        assert!(151 + largest.len() <= 512);
+        let mut owner = Publication::new(&"d".repeat(64))?;
+        let absent = owner.retained_frame_observation();
+        assert_eq!(absent, PublicationFrameObservation::from_frames(None, None));
+        crate::tests::enter_inert(&mut owner.book, Call::Token(S::TokenElevation), null_mut())?;
+        owner.book.arena()?.phase.set(Phase::Returned);
+        owner.book.arena()?.returned.set(Some(Returned::Boolean(1, 0)));
+        // This fixture never enters mutate/invoke. Its output storage stays
+        // unobserved; only the retained Rust effect/phase/return is copied.
+        owner.mutation = Some(ManuallyDrop::new(Box::pin(Mutation {
+            effect: Effect::Scalar(S::TokenHasRestrictions), phase: Cell::new(Phase::Returned),
+            returned: Cell::new(Some(Returned::Boolean(0, F::ERROR_IO_PENDING))), slot: None,
+            path: Vec::new(), descriptor: UnsafeCell::new(Aligned([0; BUFFER])), attributes: S::SECURITY_ATTRIBUTES::default(),
+            handle: null_mut(), output: null_mut(), data: Vec::new(), count: UnsafeCell::new(u32::MAX),
+            scalar: UnsafeCell::new(u32::MAX), _pin: PhantomPinned,
+        })));
+        let saved = owner.retained_frame_observation();
+        assert_eq!(saved.diagnostic_line().as_deref(), Some("MRK_WINDOWS_RUNTIME_PUBLISH_FRAME_V1=qcall=token-elevation;qphase=returned;qret=bool-nonzero:00000000;qrefusal=none;mcall=has-restrictions;mphase=returned;mret=bool-zero:000003e5\n"));
+        owner.book.arena()?.returned.set(Some(Returned::Boolean(0, 5)));
+        assert_ne!(saved, owner.retained_frame_observation());
+        // Release only the two never-native fixture allocations, not live owners.
+        drop(ManuallyDrop::into_inner(owner.book.active.take().ok_or(Error::State)?));
+        drop(ManuallyDrop::into_inner(owner.mutation.take().ok_or(Error::State)?));
+        assert_eq!(owner.retained_frame_observation(), absent);
+        assert_eq!(saved.qret, ObservedReturn::from_return(Some(Returned::Boolean(1, 0))));
         need(write_return(1, 0, 4, 4).is_ok())?;
         for count in [0, 1, 3] { need(write_return(1, 0, count, 4) == Err(Error::Unsafe))?; }
         need(write_return(1, 0, 5, 4) == Err(Error::Unknown))?;

@@ -9876,6 +9876,10 @@ class WindowsReaderGateTests(unittest.TestCase):
         self.assertIn("let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());", failure)
         self.assertIn("\n            std::process::ExitCode::FAILURE\n", failure)
         self.assertEqual(binary.count("error.diagnostic_line()"), 1)
+        self.assertEqual(binary.count("error.frame_diagnostic_line()"), 1)
+        self.assertLess(failure.index("line.as_bytes()"), failure.index("error.frame_diagnostic_line()"))
+        self.assertIn("if line.len() + frame.len() <= 512", failure)
+        self.assertIn("let _ = std::io::Write::write_all(&mut std::io::stderr(), frame.as_bytes());", failure)
         producer = bridge.split("fn produce(", 1)[1].split("\n/// No arguments", 1)[0]
         entry = bridge.split("pub fn publish_fixed()", 1)[1].split("\n#[cfg(test)]", 1)[0]
         self.assertEqual(producer.count("owner.published_and_settled()"), 1)
@@ -9886,11 +9890,14 @@ class WindowsReaderGateTests(unittest.TestCase):
                       "        Ok(()) => PublicationFailure::policy(FailurePhase::FinalPostcondition, None),\n"
                       "        Err(first) => first,", entry)
         ordered = [entry.index(part) for part in ("let cause = match produce(",
+            "let frame = if cause.phase == FailurePhase::Admit && cause.native == Some(NativeError::Unknown)",
+            "Some(original.retained_frame_observation())",
             "let possibly_exposed = original.possibly_exposed();", "let settlement = original.fail_and_settle_once();",
             "if settlement == CloseOutcome::Settled && original.occupied_target_and_settled()",
             "let originals_unknown = settlement == CloseOutcome::Unknown;",
-            "Err(PublicationError::Failed { cause, possibly_exposed, originals_unknown })")]
+            "Err(PublicationError::Failed { cause, possibly_exposed, originals_unknown, frame })")]
         self.assertEqual(ordered, sorted(ordered))
+        self.assertEqual(entry.count("original.retained_frame_observation()"), 1)
         formatter = bridge.split("pub fn diagnostic_line(self)", 1)[1].split("type Checked<T>", 1)[0]
         self.assertIn('"MRK_WINDOWS_RUNTIME_PUBLISH_FAILURE_V1=phase="', formatter)
         self.assertIn("ordinal.filter(|index| *index < 47)", formatter)
@@ -9899,6 +9906,34 @@ class WindowsReaderGateTests(unittest.TestCase):
         for forbidden in ("OWNER", "owner.", "original.", "format!", "format_args!", "write!", "writeln!",
                           "panic!", "unwrap(", "expect(", "{:?}", "{:#?}", ".to_string("):
             self.assertNotIn(forbidden, formatter + binary)
+        snapshot = source.split("pub fn retained_frame_observation(&self)", 1)[1].split("/// No native effect.", 1)[0]
+        for retained in ("self.book.active.as_ref()", "self.mutation.as_ref()", "frame.call", "frame.effect",
+                         "frame.phase.get()", "frame.returned.get()", "frame.completion_refusal.get()"):
+            self.assertIn(retained, snapshot)
+        for forbidden in ("unsafe {", "frame.handle", "frame.output", "frame.iosb", "frame.count", "frame.scalar",
+                          "frame.bytes", "frame.input", "frame.path", "Instant::", ".tick(", ".clone("):
+            self.assertNotIn(forbidden, snapshot)
+        companion = source.split("pub fn diagnostic_line(self)", 1)[1].split("struct Mutation {", 1)[0]
+        self.assertIn('"MRK_WINDOWS_RUNTIME_PUBLISH_FRAME_V1=qcall="', companion)
+        self.assertIn('";qrefusal="', companion)
+        self.assertIn("if line.len() <= 256 { Some(line) } else { None }", companion)
+        query = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/lib.rs").read_text(encoding="utf-8")
+        self.assertEqual(query.count("self.completion_unknown("), 6)
+        ordered_open = (
+            "if !valid_handle(handle) { return self.completion_unknown(CompletionRefusal::OpenInvalidHandle); }",
+            "if io != F::STATUS_SUCCESS { return self.completion_unknown(CompletionRefusal::OpenIoStatus); }",
+            "if info != WP::FILE_OPENED as usize { return self.completion_unknown(CompletionRefusal::OpenNotOpened); }",
+            "if self.duplicate_live(index, handle) { return self.completion_unknown(CompletionRefusal::OpenDuplicate); }",
+        )
+        offsets = [query.index(part) for part in ordered_open]
+        self.assertEqual(offsets, sorted(offsets))  # early returns retain lazy predicate order
+        self.assertLess(query.index("if !valid_handle(handle) { return self.completion_unknown(CompletionRefusal::TokenInvalidHandle); }"),
+                        query.index("if self.duplicate_live(index, handle) { return self.completion_unknown(CompletionRefusal::TokenDuplicate); }"))
+        recorder = query.split("fn completion_unknown<T>", 1)[1].split("fn take_complete", 1)[0]
+        self.assertIn("if saved.get().is_none() { saved.set(Some(refusal)); }", recorder)
+        self.assertIn("self.unknown()", recorder)
+        for forbidden in ("unsafe", "output", "iosb", "duplicate_live", "Instant::", ".tick("):
+            self.assertNotIn(forbidden, recorder.split("if let Some(frame)", 1)[1])
         self.assertEqual(bridge.count("#[test]"), 3)
         for forbidden in ("std::process::Command", "std::env::args", "std::fs::", "print!", "println!"):
             self.assertNotIn(forbidden, binary)

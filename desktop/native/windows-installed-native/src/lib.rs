@@ -35,7 +35,7 @@ pub use qualification_result::{write_fullwalk_result_once, FullwalkFacts};
 #[cfg(feature = "runtime-publication")]
 mod publication;
 #[cfg(feature = "runtime-publication")]
-pub use publication::{Publication, PUBLICATION_PAYLOADS};
+pub use publication::{Publication, PublicationFrameObservation, PUBLICATION_PAYLOADS};
 pub use decode::{DirectoryEntry, FileIdentity, Metadata};
 pub use security::{AceFact, GroupFact, SecurityFacts, Sid, TokenFacts, TokenIdentity};
 
@@ -129,6 +129,11 @@ fn token_information_length(class: S::TOKEN_INFORMATION_CLASS) -> Result<u32> {
 }
 #[derive(Clone, Copy, Debug)]
 enum Returned { Boolean(i32, u32), Count(u32, u32), Hresult(i32), Nt(i32), Scalar(u32) }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CompletionRefusal {
+    OpenInvalidHandle, OpenIoStatus, OpenNotOpened, OpenDuplicate,
+    TokenInvalidHandle, TokenDuplicate,
+}
 #[repr(C, align(8))]
 struct Aligned([u8; BUFFER]);
 struct Arena {
@@ -136,6 +141,7 @@ struct Arena {
     token_length: u32,
     phase: Cell<Phase>,
     returned: Cell<Option<Returned>>,
+    completion_refusal: Cell<Option<CompletionRefusal>>,
     input: Vec<u16>,
     handle: F::HANDLE,
     output_handle: *mut F::HANDLE,
@@ -275,6 +281,16 @@ impl NativeBook {
         self.active.as_ref().map(|a| a.as_ref().get_ref()).ok_or(Error::Unknown)
     }
     fn unknown<T>(&mut self) -> Result<T> { self.unknown = true; Err(Error::Unknown) }
+    fn completion_unknown<T>(&mut self, refusal: CompletionRefusal) -> Result<T> {
+        // Only the six original successful-acquisition refusal branches call
+        // this. Save their first rejecting predicate in the SAME retained arena;
+        // no native output, handle or clock is read by this diagnostic recorder.
+        if let Some(frame) = self.active.as_ref() {
+            let saved = &frame.as_ref().get_ref().completion_refusal;
+            if saved.get().is_none() { saved.set(Some(refusal)); }
+        }
+        self.unknown()
+    }
     fn take_complete(&mut self) -> Result<Complete> {
         self.arena()?.phase.set(Phase::Complete);
         let frame = self.active.take().ok_or(Error::Unknown)?;
@@ -292,6 +308,7 @@ impl NativeBook {
             _ => 0, // never consumed by a non-token dispatch
         };
         let mut frame = Box::pin(Arena { call, token_length, phase: Cell::new(Phase::Prepared), returned: Cell::new(None),
+            completion_refusal: Cell::new(None),
             input, handle, output_handle: null_mut(), unicode: F::UNICODE_STRING::default(),
             attributes: OBJECT_ATTRIBUTES::default(), directory: false,
             bytes: UnsafeCell::new(Aligned([0; BUFFER])), count: UnsafeCell::new(u32::MAX),
@@ -390,8 +407,12 @@ impl NativeBook {
             // SAFETY: STATUS_SUCCESS completes the create; contradictory IOSB is
             // nevertheless retained as Unknown, never offered for ordinary close.
             let (io, info) = unsafe { ((*frame.iosb.get()).Anonymous.Status, (*frame.iosb.get()).Information) };
-            if !valid_handle(handle) || io != F::STATUS_SUCCESS || info != WP::FILE_OPENED as usize
-                || self.duplicate_live(index, handle) { return self.unknown(); }
+            // Preserve the original short-circuit order, including the lazy
+            // duplicate check. Tags describe the already-executed predicate.
+            if !valid_handle(handle) { return self.completion_unknown(CompletionRefusal::OpenInvalidHandle); }
+            if io != F::STATUS_SUCCESS { return self.completion_unknown(CompletionRefusal::OpenIoStatus); }
+            if info != WP::FILE_OPENED as usize { return self.completion_unknown(CompletionRefusal::OpenNotOpened); }
+            if self.duplicate_live(index, handle) { return self.completion_unknown(CompletionRefusal::OpenDuplicate); }
             self.slot_mut(index)?.state = SlotState::Owned;
         } else if let Call::ProcessToken(index) | Call::ThreadToken(index) = call {
             if self.slot(index)?.state != SlotState::Acquiring { return self.unknown(); }
@@ -399,7 +420,8 @@ impl NativeBook {
             // SAFETY: synchronous completed BOOL token call, excluding IO_PENDING.
             let handle = unsafe { *self.slot(index)?.output.get() };
             if value != 0 {
-                if !valid_handle(handle) || self.duplicate_live(index, handle) { return self.unknown(); }
+                if !valid_handle(handle) { return self.completion_unknown(CompletionRefusal::TokenInvalidHandle); }
+                if self.duplicate_live(index, handle) { return self.completion_unknown(CompletionRefusal::TokenDuplicate); }
                 self.slot_mut(index)?.state = SlotState::Owned;
             } else {
                 if !handle.is_null() { return self.unknown(); }

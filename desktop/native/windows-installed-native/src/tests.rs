@@ -14,7 +14,7 @@ impl Drop for Inert {
         for slot in self.book.slots.drain(..) { drop(ManuallyDrop::into_inner(slot)); }
     }
 }
-fn enter_inert(book: &mut NativeBook, call: Call, handle: F::HANDLE) -> Result<()> {
+pub(super) fn enter_inert(book: &mut NativeBook, call: Call, handle: F::HANDLE) -> Result<()> {
     assert!(book.active.is_none());
     let token_length = match call {
         Call::Token(class) => token_information_length(class)?,
@@ -26,6 +26,7 @@ fn enter_inert(book: &mut NativeBook, call: Call, handle: F::HANDLE) -> Result<(
     };
     book.active = Some(ManuallyDrop::new(Box::pin(Arena {
         call, token_length, phase: Cell::new(Phase::Prepared), returned: Cell::new(None),
+        completion_refusal: Cell::new(None),
         input: Vec::new(), handle, output_handle, unicode: F::UNICODE_STRING::default(),
         attributes: OBJECT_ATTRIBUTES::default(), directory: false,
         bytes: UnsafeCell::new(Aligned([0; BUFFER])), count: UnsafeCell::new(u32::MAX),
@@ -200,6 +201,7 @@ fn pending_and_lost_completion_keep_the_exact_arena_and_slots() -> Result<()> {
         assert!(book.is_unknown());
         assert!(book.first_unavailable.is_none());
         assert_eq!(book.arena()? as *const Arena, arena);
+        assert_eq!(book.arena()?.completion_refusal.get(), None);
         assert_eq!(book.slot(key.index)?.output.get(), destination);
         assert_eq!(book.state(&key)?, if acquiring { SlotState::Acquiring } else { SlotState::Owned });
         assert!(!book.settled());
@@ -213,6 +215,7 @@ fn pending_and_lost_completion_keep_the_exact_arena_and_slots() -> Result<()> {
         F::STATUS_SUCCESS, WP::FILE_OPENED as usize), Err(Error::Unknown)));
     assert_eq!(book.state(&key)?, SlotState::Acquiring); // Unknown never promotes
     assert!(book.active.is_some());
+    assert_eq!(book.arena()?.completion_refusal.get(), None);
     assert!(book.first_unavailable.is_none());
     Ok(())
 }
@@ -278,14 +281,14 @@ fn acquisition_needs_a_definite_consistent_receipt() -> Result<()> {
         assert_eq!(owner.creation(true, 0, (101, 102, 201, 202), false), Err(Error::State));
         assert!(!owner.passed());
     }
-    for (status, handle, io, information, no_handle) in [
-        (F::STATUS_ACCESS_DENIED, null_mut(), F::STATUS_PENDING, usize::MAX, true),
-        (F::STATUS_ACCESS_DENIED, 31usize as F::HANDLE, F::STATUS_PENDING, usize::MAX, false),
-        (F::STATUS_SUCCESS, null_mut(), F::STATUS_SUCCESS, WP::FILE_OPENED as usize, false),
-        (F::STATUS_SUCCESS, F::INVALID_HANDLE_VALUE, F::STATUS_SUCCESS, WP::FILE_OPENED as usize, false),
-        (F::STATUS_SUCCESS, 32usize as F::HANDLE, F::STATUS_PENDING, WP::FILE_OPENED as usize, false),
-        (F::STATUS_SUCCESS, 33usize as F::HANDLE, F::STATUS_SUCCESS, usize::MAX, false),
-        (1, null_mut(), F::STATUS_SUCCESS, WP::FILE_OPENED as usize, false),
+    for (status, handle, io, information, no_handle, refusal) in [
+        (F::STATUS_ACCESS_DENIED, null_mut(), F::STATUS_PENDING, usize::MAX, true, None),
+        (F::STATUS_ACCESS_DENIED, 31usize as F::HANDLE, F::STATUS_PENDING, usize::MAX, false, None),
+        (F::STATUS_SUCCESS, null_mut(), F::STATUS_SUCCESS, WP::FILE_OPENED as usize, false, Some(CompletionRefusal::OpenInvalidHandle)),
+        (F::STATUS_SUCCESS, F::INVALID_HANDLE_VALUE, F::STATUS_PENDING, usize::MAX, false, Some(CompletionRefusal::OpenInvalidHandle)),
+        (F::STATUS_SUCCESS, 32usize as F::HANDLE, F::STATUS_PENDING, usize::MAX, false, Some(CompletionRefusal::OpenIoStatus)),
+        (F::STATUS_SUCCESS, 33usize as F::HANDLE, F::STATUS_SUCCESS, usize::MAX, false, Some(CompletionRefusal::OpenNotOpened)),
+        (1, null_mut(), F::STATUS_SUCCESS, WP::FILE_OPENED as usize, false, None),
     ] {
         let mut fixture = Inert::new(); let book = &mut fixture.book;
         let key = book.reserve(Kind::File, None, "receipt", "receipt".to_owned())?;
@@ -307,6 +310,7 @@ fn acquisition_needs_a_definite_consistent_receipt() -> Result<()> {
             assert!(matches!(result, Err(Error::Unknown)));
             assert!(book.active.is_some() && book.is_unknown());
             assert!(book.first_unavailable.is_none());
+            assert_eq!(book.arena()?.completion_refusal.get(), refusal);
         }
     }
     let mut fixture = Inert::new(); let book = &mut fixture.book;
@@ -318,6 +322,32 @@ fn acquisition_needs_a_definite_consistent_receipt() -> Result<()> {
         F::STATUS_SUCCESS, WP::FILE_OPENED as usize), Err(Error::Unknown)));
     assert_eq!(book.state(&first)?, SlotState::Owned);
     assert!(book.first_unavailable.is_none());
+    assert_eq!(book.arena()?.completion_refusal.get(), Some(CompletionRefusal::OpenDuplicate));
+    // A later recorder cannot replace the original rejecting predicate.
+    assert_eq!(book.completion_unknown::<()>(CompletionRefusal::TokenDuplicate), Err(Error::Unknown));
+    assert_eq!(book.arena()?.completion_refusal.get(), Some(CompletionRefusal::OpenDuplicate));
+
+    for thread in [false, true] {
+        for (handle, refusal) in [(null_mut(), Some(CompletionRefusal::TokenInvalidHandle)),
+            (F::INVALID_HANDLE_VALUE, Some(CompletionRefusal::TokenInvalidHandle)),
+            (34usize as F::HANDLE, Some(CompletionRefusal::TokenDuplicate)), (35usize as F::HANDLE, None)] {
+            let mut fixture = Inert::new(); let book = &mut fixture.book;
+            let held = book.reserve(Kind::File, None, "held", "held".to_owned())?;
+            own_inert(book, &held, 34)?;
+            let key = book.reserve(if thread { Kind::ThreadToken } else { Kind::ProcessToken }, None, "", String::new())?;
+            enter_inert(book, if thread { Call::ThreadToken(key.index) } else { Call::ProcessToken(key.index) }, null_mut())?;
+            let result = return_inert(book, Returned::Boolean(1, 0), Some(handle), 0, 0);
+            if let Some(expected) = refusal {
+                assert!(matches!(result, Err(Error::Unknown)));
+                assert_eq!(book.arena()?.completion_refusal.get(), Some(expected));
+                assert_eq!(book.state(&key)?, SlotState::Acquiring);
+            } else {
+                assert!(result.is_ok());
+                assert!(book.active.is_none() && !book.is_unknown());
+                assert_eq!(book.state(&key)?, SlotState::Owned);
+            }
+        }
+    }
 
     // Completed original-scalar families and every fixed public selector. These
     // frames are inert; no native query, path, token or privilege is observed.
