@@ -8248,11 +8248,29 @@ class WindowsReaderGateTests(unittest.TestCase):
     def publication_environment():
         environment = dict.fromkeys((*helper.WINDOWS_FULLWALK_OUTCOMES.values(),
             "MRK_WINDOWS_ORDINARY_PREFLIGHT_STEP_OUTCOME", "MRK_WINDOWS_FULLWALK_PREFLIGHT_STEP_OUTCOME",
-            "MRK_WINDOWS_FULLWALK_OWNER_STEP_OUTCOME", "MRK_WINDOWS_FULLWALK_FINALIZE_STEP_OUTCOME"), "success")
+            "MRK_WINDOWS_FULLWALK_OWNER_STEP_OUTCOME", "MRK_WINDOWS_FULLWALK_FINALIZE_STEP_OUTCOME",
+            "MRK_WINDOWS_PRODUCER_SCALAR_STEP_OUTCOME", "MRK_WINDOWS_PRODUCER_SCALAR_FINALIZE_STEP_OUTCOME"), "success")
         for suffix in helper.WINDOWS_RUNTIME_PUBLICATION_STEPS.values():
             for ending in ("_STEP_OUTCOME", "_FINALIZE_STEP_OUTCOME"):
                 environment["MRK_WINDOWS_PRODUCER_" + suffix + ending] = "success"
         return environment
+
+    @staticmethod
+    def publication_scalar_originals(data, derived_count="one"):
+        # Synthetic parser DATA only, never native scalar/filtered-token evidence.
+        pre = data["pre"]
+        binding = {key: pre[key] for key in ("profile", "sourceSha", "sourceTree", "runId", "attempt")}
+        binding.update(artifactSha256=pre["ownerArtifactSha256"],
+            precheckSha256=hashlib.sha256(data["precheck_raw"]).hexdigest(),
+            commandSha256=helper.windows_fullwalk_command_sha(pre["ownerArtifact"], helper.WINDOWS_RUNTIME_PUBLICATION_SCALAR))
+        scalar = {**binding, "qualifierTest": helper.WINDOWS_RUNTIME_PUBLICATION_SCALAR,
+            "sourceReturn": "bool-nonzero", "sourceCount": "one", "sourceValue": "zero", "sourceAdmitted": "true",
+            "derivedReturn": "bool-nonzero", "derivedCount": derived_count, "derivedValue": "nonzero", "derivedAdmitted": "false",
+            "createCalls": "1", "filterFlags": "1", "restrictingSidInputs": "0", "tokenOriginals": "2", "tokenOriginalsClosed": "2",
+            "parentBookSettled": "true", "unknown": "false", "resultCloseGate": "original-scalar-exit-zero-required"}
+        exited = {**binding, "role": "scalar", "originalWaitReturned": "true", "exitCode": "0",
+            "writerCloseGate": "original-scalar-step-success-required"}
+        return helper.windows_fullwalk_text("production-scalar", scalar), helper.windows_fullwalk_text("production-exit", exited)
 
     @staticmethod
     def native_source_blobs(context):
@@ -8272,6 +8290,12 @@ class WindowsReaderGateTests(unittest.TestCase):
         files = {root / name: data["blobs"][role] for role, (name, _) in helper.WINDOWS_FULLWALK_BLOBS.items()}
         if production:
             files.update({root / name: data["blobs"][role] for role, (name, _) in helper.WINDOWS_RUNTIME_PUBLICATION_PROOFS.items()})
+            scalar_raw, scalar_exit = WindowsReaderGateTests.publication_scalar_originals(data)
+            scalar = helper.windows_runtime_publication_scalar_data(context, scalar_raw, scalar_exit, data["precheck_raw"], "success")
+            files[root / "producer-scalar-result.private.txt"] = scalar_raw
+            files[root / "producer-scalar-exit.private.txt"] = scalar_exit
+            files[root / "producer-scalar-checks.json"] = encode(helper.windows_installed_phase_receipt(
+                context, "windows-runtime-publication-scalar-finalize", **scalar))
         files.update({root / "metadata.json": b"INERT existing native metadata boundary",
                       root / "app-metadata.json": b"INERT existing app metadata boundary"})
         native_sources = WindowsReaderGateTests.native_source_blobs(context)
@@ -8931,11 +8955,12 @@ class WindowsReaderGateTests(unittest.TestCase):
             with self.assertRaises(helper.CheckFailure): helper.windows_fullwalk_precheck_data(c, raw)
         for kind in ("publication", "finality", "unknown"):
             with self.assertRaises(helper.CheckFailure): helper.windows_fullwalk_kind(context, kind)
-        roles = {"stage": "stageExit", "helperSuccess": "helperSuccessExit", "before": "beforeExit",
+        scalar_raw, scalar_exit = self.publication_scalar_originals(data)
+        roles = {"scalar": None, "stage": "stageExit", "helperSuccess": "helperSuccessExit", "before": "beforeExit",
                  "helperOccupied": "helperOccupiedExit", "after": "publisherExit"}
         exits = {}
         for role, blob in roles.items():
-            raw = data["blobs"][blob]
+            raw = scalar_exit if role == "scalar" else data["blobs"][blob]
             parsed = helper.windows_runtime_publication_exit(context, raw, pre_raw, role, "success")
             exits[role] = parsed
             self.assertEqual(parsed["exitCode"], "2" if role == "helperOccupied" else "0")
@@ -8958,7 +8983,7 @@ class WindowsReaderGateTests(unittest.TestCase):
         self.assertEqual(exits["helperSuccess"]["commandSha256"],
                          hashlib.sha256(('"' + pre["helperArtifact"] + '"').encode("utf-16-le")).hexdigest())
         self.assertNotEqual(exits["stage"]["artifactSha256"], exits["helperSuccess"]["artifactSha256"])
-        for role in ("stage", "helperSuccess", "before", "helperOccupied", "after", "other"):
+        for role in ("scalar", "stage", "helperSuccess", "before", "helperOccupied", "after", "other"):
             if role != "helperOccupied":
                 with self.subTest(wrong_original_role=role), self.assertRaises(helper.CheckFailure):
                     helper.windows_runtime_publication_exit(context, data["blobs"]["helperOccupiedExit"], pre_raw, role, "success")
@@ -8966,6 +8991,46 @@ class WindowsReaderGateTests(unittest.TestCase):
             helper.windows_fullwalk_publication_data(context, data["legacy"]["blobs"]["publisherReceipt"], pre_raw, data["roster_raw"])
         with self.assertRaises(helper.CheckFailure):
             helper.windows_fullwalk_publisher_exit(context, data["legacy"]["blobs"]["publisherExit"], pre_raw, "success")
+        # Both queries must have succeeded on their original calls. An arbitrary
+        # failed/ambiguous query or acquisition is never the negative proof.
+        for count in ("one", "four"):
+            raw, exited = self.publication_scalar_originals(data, count)
+            facts = helper.windows_runtime_publication_scalar_data(context, raw, exited, pre_raw, "success")
+            self.assertEqual((facts["sourceCount"], facts["derivedCount"]), ("one", count))
+            self.assertTrue(facts["sourceZero"] and facts["sourceFalseOnlyAdmitted"] and facts["derivedNonzero"])
+            self.assertFalse(facts["derivedFalseOnlyAdmitted"])
+            self.assertEqual((facts["createCalls"], facts["tokenOriginals"], facts["tokenOriginalsClosed"]), (1, 2, 2))
+            self.assertTrue(facts["parentBookSettled"] and facts["originalProcessWaitReturned"])
+            self.assertFalse(facts["unknown"])
+        scalar = helper.windows_fullwalk_wire(scalar_raw, "production-scalar")
+        for key, value in (("profile", helper.WINDOWS_FULLWALK_PROFILE), ("sourceSha", "f" * 40), ("sourceTree", "f" * 40),
+                ("runId", "654321"), ("attempt", "2"), ("qualifierTest", helper.WINDOWS_RUNTIME_PUBLICATION_STAGE),
+                ("artifactSha256", "f" * 64), ("precheckSha256", "f" * 64), ("commandSha256", "f" * 64),
+                *(("sourceCount", value) for value in ("none", "zero", "two", "three", "four", "over4", "sentinel")),
+                *(("derivedCount", value) for value in ("none", "zero", "two", "three", "over4", "sentinel")),
+                ("sourceReturn", "bool-zero"), ("sourceReturn", "unknown"), ("sourceValue", "nonzero"), ("sourceAdmitted", "false"),
+                ("derivedReturn", "bool-zero"), ("derivedReturn", "unknown"), ("derivedValue", "zero"), ("derivedValue", "unobserved"),
+                ("derivedAdmitted", "true"), ("createCalls", "0"), ("createCalls", "2"), ("filterFlags", "0"),
+                ("restrictingSidInputs", "1"), ("tokenOriginals", "1"), ("tokenOriginalsClosed", "0"), ("tokenOriginalsClosed", "1"),
+                ("parentBookSettled", "false"), ("unknown", "true"), ("resultCloseGate", "self-closed")):
+            changed = helper.windows_fullwalk_text("production-scalar", {**scalar, key: value})
+            with self.subTest(scalar_field=key, value=value), self.assertRaises(helper.CheckFailure):
+                helper.windows_runtime_publication_scalar_data(context, changed, scalar_exit, pre_raw, "success")
+        failed_query = helper.windows_fullwalk_text("production-scalar", {**scalar, "derivedReturn": "bool-zero",
+            "derivedCount": "none", "derivedValue": "unobserved", "derivedAdmitted": "false"})
+        for malformed in (b"", scalar_raw[:-1], scalar_raw + b"\n", scalar_raw.replace(b"\n", b"\r\n"),
+                scalar_raw.replace(b"sourceCount=one\n", b"", 1), scalar_raw + b"extra=false\n",
+                scalar_raw.replace(b"sourceValue=zero", b"derivedValue=nonzero", 1), b"x" * 4097, failed_query):
+            with self.subTest(scalar_malformed=len(malformed)), self.assertRaises(helper.CheckFailure):
+                helper.windows_runtime_publication_scalar_data(context, malformed, scalar_exit, pre_raw, "success")
+        for outcome in (None, "failure", "skipped", "cancelled", "unavailable"):
+            with self.subTest(scalar_step=outcome), self.assertRaises(helper.CheckFailure):
+                helper.windows_runtime_publication_scalar_data(context, scalar_raw, scalar_exit, pre_raw, outcome)
+        for key, value in (("role", "stage"), ("originalWaitReturned", "false"), ("exitCode", "1"),
+                           ("writerCloseGate", "self-closed"), ("commandSha256", "f" * 64)):
+            changed = helper.windows_fullwalk_text("production-exit", {**exits["scalar"], key: value})
+            with self.subTest(scalar_exit=key), self.assertRaises(helper.CheckFailure):
+                helper.windows_runtime_publication_scalar_data(context, scalar_raw, changed, pre_raw, "success")
 
     def test_windows_fullwalk_actual_producer_observation_wire_requires_complete_independent_rows(self):
         data = self.publication_data()
@@ -9162,6 +9227,48 @@ class WindowsReaderGateTests(unittest.TestCase):
                     helper.windows_runtime_publication_finalize(chosen, role)
         with patch.dict(helper.os.environ, {}, clear=True), self.assertRaises(helper.CheckFailure):
             helper.windows_runtime_publication_finalize(context, "stage")
+        with patch.object(helper, "windows_installed_context", return_value=context) as admission, \
+             patch.object(helper, "windows_runtime_publication_scalar_finalize") as finalize, \
+             patch.object(helper, "run", side_effect=AssertionError("Scalar DATA route command")), \
+             patch.object(helper, "tools", side_effect=AssertionError("Scalar DATA route compiler")):
+            helper.windows_installed_phase("windows-runtime-publication-scalar-finalize", helper.WINDOWS_INSTALLED_SCOPE)
+            finalize.assert_called_once_with(context)
+            admission.assert_called_once_with(create=False, retention_only=True)
+        for profile in (None, helper.WINDOWS_FULLWALK_PROFILE):
+            chosen = {**self.context(), **({"qualificationProfile": profile} if profile else {})}
+            with patch.object(helper, "windows_fullwalk_check_precheck", side_effect=AssertionError("Wrong scalar profile reached precheck")), \
+                 patch.dict(helper.os.environ, environment, clear=True), self.assertRaises(helper.CheckFailure):
+                helper.windows_runtime_publication_scalar_finalize(chosen)
+        with patch.dict(helper.os.environ, {}, clear=True), self.assertRaises(helper.CheckFailure):
+            helper.windows_runtime_publication_scalar_finalize(context)
+        data = self.publication_data()
+        context, pre_raw, root = data["context"], data["precheck_raw"], Path(data["context"]["root"])
+        raw, exited = self.publication_scalar_originals(data)
+        facts = helper.windows_runtime_publication_scalar_data(context, raw, exited, pre_raw, "success")
+        record = helper.windows_installed_phase_receipt(context, "windows-runtime-publication-scalar-finalize", **facts)
+        files = {root / "producer-scalar-result.private.txt": raw, root / "producer-scalar-exit.private.txt": exited,
+                 root / "producer-scalar-checks.json": helper.canonical_json(record)}
+        environment = self.publication_environment()
+        def evidence(originals, outcomes, finalized=True):
+            with patch.dict(helper.os.environ, outcomes, clear=True), \
+                 patch.object(helper, "windows_installed_bytes", side_effect=lambda path, limit: originals[path]), \
+                 patch.object(helper, "run", side_effect=AssertionError("Scalar DATA evidence cannot launch")), \
+                 patch.object(helper, "tools", side_effect=AssertionError("Scalar DATA evidence cannot compile")):
+                return helper.windows_runtime_publication_scalar_evidence(context, pre_raw, finalized=finalized)
+        self.assertEqual(evidence(files, environment), facts)
+        self.assertEqual(evidence(files, {"MRK_WINDOWS_PRODUCER_SCALAR_STEP_OUTCOME": "success"}, finalized=False), facts)
+        for key in ("MRK_WINDOWS_PRODUCER_SCALAR_STEP_OUTCOME", "MRK_WINDOWS_PRODUCER_SCALAR_FINALIZE_STEP_OUTCOME"):
+            for outcome in (None, "failure", "skipped", "cancelled", "unavailable"):
+                outcomes = dict(environment)
+                if outcome is None: del outcomes[key]
+                else: outcomes[key] = outcome
+                with self.subTest(scalar_gate=key, outcome=outcome), self.assertRaises(helper.CheckFailure):
+                    evidence(files, outcomes)
+        for key, value in (("extra", False), ("sourceSha", "f" * 40), ("sourceTree", "f" * 40),
+                           ("tokenOriginalsClosed", 1), ("derivedNonzero", False), ("unknown", True)):
+            changed = {**files, root / "producer-scalar-checks.json": helper.canonical_json({**record, key: value})}
+            with self.subTest(scalar_finalizer=key), self.assertRaises(helper.CheckFailure):
+                evidence(changed, environment)
 
     def test_windows_fullwalk_actual_producer_six_serial_originals_do_not_enlarge_or_renew_the_owner_budget(self):
         # Aggregate DATA only. Complete production proof validation is exercised
@@ -9690,10 +9797,11 @@ class WindowsReaderGateTests(unittest.TestCase):
         files, packages, graph = self.fullwalk_originals(data)
         context, root = data["context"], Path(data["context"]["root"])
         environment = {**self.publication_environment(), "MRK_WINDOWS_RETIREMENT_STEP_OUTCOME": "must-not-be-read"}
-        roles = ("stage", "helperSuccess", "before", "helperOccupied", "publisher", "ordinary", "fullwalk")
+        # Preserve the existing selector name; scalar is a distinct eighth result.
+        roles = ("scalar", "stage", "helperSuccess", "before", "helperOccupied", "publisher", "ordinary", "fullwalk")
         finalizers = {role: "MRK_WINDOWS_PRODUCER_" + suffix + "_FINALIZE_STEP_OUTCOME"
                       for role, suffix in helper.WINDOWS_RUNTIME_PUBLICATION_STEPS.items()}
-        finalizers.update(publisher="MRK_WINDOWS_FIXTURE_FINALIZE_STEP_OUTCOME",
+        finalizers.update(scalar="MRK_WINDOWS_PRODUCER_SCALAR_FINALIZE_STEP_OUTCOME", publisher="MRK_WINDOWS_FIXTURE_FINALIZE_STEP_OUTCOME",
             ordinary="MRK_WINDOWS_ORDINARY_FINALIZE_STEP_OUTCOME", fullwalk="MRK_WINDOWS_FULLWALK_FINALIZE_STEP_OUTCOME")
         def retain(originals, outcomes):
             with patch.dict(helper.os.environ, outcomes, clear=True), self.fullwalk_edges(data, originals, packages, graph), \
@@ -9728,12 +9836,15 @@ class WindowsReaderGateTests(unittest.TestCase):
                 self.assertEqual(public["buildBindings"]["anchoredHelperBuilds"], 1)
                 self.assertEqual(public["buildBindings"]["helperNativeFeatures"], ["runtime-publication"])
                 self.assertTrue(public["buildBindings"]["normalHelperNotLibtest"])
+                self.assertTrue(public["results"]["scalar"]["facts"]["derivedNonzero"])
             else:
                 self.assertNotEqual(public["results"][failed]["status"], "passed")
                 if failed != "ordinary":
                     self.assertEqual(public["results"]["ordinary"]["status"], "passed")
+                if failed != "scalar":
+                    self.assertEqual(public["results"]["scalar"]["status"], "passed")
         names = {role: "producer-" + role + "-checks.json" for role in helper.WINDOWS_RUNTIME_PUBLICATION_STEPS}
-        names.update(publisher="windows-installed-fixture-checks.json", ordinary="windows-installed-native-checks.json",
+        names.update(scalar="producer-scalar-checks.json", publisher="windows-installed-fixture-checks.json", ordinary="windows-installed-native-checks.json",
                      fullwalk="windows-installed-fullwalk-checks.json")
         for role, name in names.items():
             row = helper.bounded_json(files[root / name], 64 << 10)
@@ -9759,7 +9870,40 @@ class WindowsReaderGateTests(unittest.TestCase):
         shared = (base / "qualification_result.rs").read_text(encoding="utf-8")
         owner = (base / "ordinary_owner.rs").read_text(encoding="utf-8")
         library = (base / "lib.rs").read_text(encoding="utf-8")
+        publication = (base / "publication.rs").read_text(encoding="utf-8")
         self.assertIn("#[cfg(test)]\nmod qualification_fixture;", library)
+        scalar = publication.split("#[cfg(test)]\nmod scalar_qualification {", 1)[1]
+        fields = helper.WINDOWS_RUNTIME_PUBLICATION_SCALAR_FIELDS
+        block = scalar.split("const FIELDS: [&str; " + str(len(fields)) + "] = [", 1)[1].split("];", 1)[0]
+        self.assertEqual(tuple(re.findall(r'"([^"]+)"', block)), fields)
+        self.assertIn('const HEADER: &str = "' + helper.WINDOWS_RUNTIME_PUBLICATION_SCALAR_HEADER + '";', scalar)
+        self.assertIn('const TEST: &str = "' + helper.WINDOWS_RUNTIME_PUBLICATION_SCALAR + '";', scalar)
+        self.assertEqual(scalar.count("#[test]"), 1)
+        self.assertEqual(scalar.count("#[ignore = "), 1)
+        for variant in ("QualificationSourceToken", "QualificationRestrictedToken"):
+            self.assertIn("#[cfg(test)]\n    " + variant + "(usize)", library)
+        self.assertIn("Call::QualificationSourceToken(source.index)", scalar)
+        self.assertIn("Call::QualificationRestrictedToken(derived.index)", scalar)
+        self.assertIn('reserve(Kind::ProcessToken, Some(source.index), "", String::new())', scalar)
+        self.assertIn("source_fact.length == ObservedScalarLength::One && source_fact.zero && source_fact.admitted", scalar)
+        self.assertIn("&& !derived_fact.zero && !derived_fact.admitted", scalar)
+        self.assertIn("let value = complete.scalar()?;", scalar)
+        self.assertIn("match scalar_value(value)", scalar)
+        self.assertIn("Err(Error::Unsafe) if value > 1 => false", scalar)
+        self.assertIn("Some(Returned::Boolean(v, 0)) if v != 0", scalar)
+        self.assertIn("complete.frame.length_observation.get()", scalar)
+        self.assertEqual(scalar.count("original.fail_and_settle_once()"), 1)
+        self.assertEqual(scalar.count("std::panic::catch_unwind("), 2)
+        self.assertIn("std::hint::black_box(&mut original)", scalar)
+        self.assertIn("create_calls == 1 && owned == 2 && closed == owned && original.book.slots.len() == 2", scalar)
+        self.assertLess(scalar.index("original.fail_and_settle_once()"), scalar.index("let (source, derived) = observed?;"))
+        self.assertLess(scalar.index("let (source, derived) = observed?;"), scalar.index("write_fixture_record("))
+        self.assertIn("write_fixture_record(&root.join(RESULT), &raw, LIMIT, original.end)?;", scalar)
+        for forbidden in ("GetTokenInformation(", "IsTokenRestricted(", "CreateRestrictedToken(", "CloseHandle(",
+                          "scalar.get()", "count.get()", "Impersonate", "SetThreadToken", "CreateProcess"):
+            self.assertNotIn(forbidden, scalar)
+        self.assertIn("S::TOKEN_QUERY | S::TOKEN_DUPLICATE, a.output_handle", library)
+        self.assertIn("S::DISABLE_MAX_PRIVILEGE, 0, null(), 0, null(), 0, null(), a.output_handle", library)
         for kind in ("precheck", "publication", "finality", "prerequisite", "invocation"):
             header, fields, _ = helper.WINDOWS_FULLWALK_SCHEMAS[kind]
             name = kind.upper()
@@ -9830,13 +9974,13 @@ class WindowsReaderGateTests(unittest.TestCase):
         self.assertIn("complete_write_bounded(ok,actual,expected,closed,OWNER_LIMIT)", shared)
         self.assertIn("complete_write_bounded(ok,actual,expected,closed,ORDINARY_ARTIFACT_LIMIT)", shared)
         self.assertIn("complete_write_bounded(ok != 0, b.count, value.len(), true, limit)", shared)
-        for body in (fixture, shared):
+        for body in (fixture, shared, scalar):
             for forbidden in ("std::thread::spawn", "std::process::Command", "SetNamedSecurityInfoW(", "RemoveDirectoryW("):
                 self.assertNotIn(forbidden, body)
 
     def test_windows_fullwalk_source_derived_selectors_include_only_eight_existing_producer_policies(self):
         for profile, total, selected in ((helper.WINDOWS_FULLWALK_PROFILE, 17, 9),
-                                         (helper.WINDOWS_RUNTIME_PUBLICATION_PROFILE, 25, 17)):
+                                         (helper.WINDOWS_RUNTIME_PUBLICATION_PROFILE, 26, 17)):
             context = {**self.context(), "qualificationProfile": profile}
             sources = self.native_source_blobs(context)
             with patch.object(helper, "windows_installed_bytes", side_effect=lambda path, limit: sources[path]), \
@@ -9844,7 +9988,8 @@ class WindowsReaderGateTests(unittest.TestCase):
                 self.assertEqual(helper.windows_installed_native_test_total(context), total)
                 names = helper.windows_installed_native_inert(context)
                 self.assertEqual(len(names), selected)
-                self.assertEqual(total - len(names), 8)
+                self.assertEqual(total - len(names), 9 if profile == helper.WINDOWS_RUNTIME_PUBLICATION_PROFILE else 8)
+                self.assertNotIn(helper.WINDOWS_RUNTIME_PUBLICATION_SCALAR, names)
             self.assertEqual(names[:9], helper.WINDOWS_INSTALLED_INERT)
         self.assertEqual(len(helper.WINDOWS_RUNTIME_PUBLICATION_NATIVE_INERT), 8)
         self.assertEqual(len(helper.WINDOWS_RUNTIME_PUBLICATION_APP_INERT), 3)
@@ -9923,13 +10068,30 @@ class WindowsReaderGateTests(unittest.TestCase):
         scalar_branch = source.split("} else if matches!(effect, Effect::Scalar(_)) && outcome.is_ok() {", 1)[1].split("} else { outcome };", 1)[0]
         self.assertEqual(scalar_branch.count("unsafe { *frame.count.get() }"), 1)
         self.assertIn("let count = unsafe { *frame.count.get() };", scalar_branch)
-        self.assertIn("scalar_count_return(count, &frame.length_observation)", scalar_branch)
+        self.assertIn("scalar_count_return(effect, count, &frame.length_observation)", scalar_branch)
         scalar_return = source.split("fn scalar_count_return(", 1)[1].split("fn later_originals_closed(", 1)[0]
         self.assertIn("if observed.get() == ObservedScalarLength::Unobserved {", scalar_return)
         self.assertIn("observed.set(ObservedScalarLength::from_count(count));", scalar_return)
-        self.assertIn("if count != 4 { Err(Error::Unknown) } else { Ok(()) }", scalar_return)
+        self.assertIn("Effect::Scalar(S::TokenHasRestrictions) => matches!(count, 1 | 4)", scalar_return)
+        self.assertIn("Effect::Scalar(S::TokenIsAppContainer) => count == 4", scalar_return)
+        self.assertIn("_ => false", scalar_return)
+        self.assertIn("if accepted { Ok(()) } else { Err(Error::Unknown) }", scalar_return)
         for forbidden in ("unsafe", "frame.", "Instant::", ".tick(", "GetTokenInformation"):
             self.assertNotIn(forbidden, scalar_return)
+        seed = source.split("fn scalar_initial(", 1)[1].split("fn scalar_value(", 1)[0]
+        self.assertIn("Effect::Scalar(S::TokenHasRestrictions)", seed)
+        self.assertIn("u32::from_ne_bytes([0xff, 0, 0, 0])", seed)
+        self.assertIn("else { u32::MAX }", seed)
+        self.assertEqual(source.count("scalar: UnsafeCell::new(scalar_initial("), 3)
+        consumer = source.split("impl MutationComplete {", 1)[1].split("fn mutation_return(", 1)[0]
+        self.assertIn("self.frame.phase.get() == Phase::Complete", consumer)
+        self.assertIn("Effect::Scalar(S::TokenHasRestrictions | S::TokenIsAppContainer)", consumer)
+        self.assertIn("Ok(unsafe { *self.frame.scalar.get() })", consumer)
+        self.assertEqual(source.count("unsafe { *self.frame.scalar.get() }"), 1)
+        self.assertIn("scalar_value(complete.scalar()?)", source)
+        self.assertIn("fn scalar_value(value: u32) -> Result<u32> { need(value <= 1)?; Ok(value) }", source)
+        self.assertIn("restricted == 0", source)
+        self.assertIn("frame.scalar.get().cast(), 4, frame.count.get()", source)
         query = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/lib.rs").read_text(encoding="utf-8")
         self.assertEqual(query.count("self.completion_unknown("), 6)
         ordered_open = (
@@ -9955,7 +10117,7 @@ class WindowsReaderGateTests(unittest.TestCase):
         source = (SOURCE / ".github/workflows/desktop-foundation.yml").read_text(encoding="utf-8")
         workflow = source.split("  windows-installed-native:\n", 1)[1]
         self.assertIn("options: [foundation, windows-snapshot, windows-installed-native, windows-installed-fullwalk,", source)
-        ordered = ("ordinary-preflight", "fixture-publisher", "producer-stage", "producer-stage-finalize",
+        ordered = ("ordinary-preflight", "fixture-publisher", "producer-scalar", "producer-scalar-finalize", "producer-stage", "producer-stage-finalize",
                    "producer-success", "producer-success-finalize", "producer-before", "producer-before-finalize",
                    "producer-occupied", "producer-occupied-finalize", "producer-after", "fixture-finalize", "ordinary-owner", "ordinary-finalize",
                    "fullwalk-preflight", "fullwalk-owner", "fullwalk-finalize", "fixture-retirement", "runtime-data", "retain")
@@ -10000,7 +10162,8 @@ class WindowsReaderGateTests(unittest.TestCase):
                       "       github.event_name == 'workflow_dispatch' && inputs.scope == 'windows-runtime-publication'", workflow)
         self.assertEqual(workflow.count("& $env:MRK_WINDOWS_HELPER_ARTIFACT\n"), 2)
         for step_id, role, test, code, gate, filename in (
-                ("producer-stage", "stage", helper.WINDOWS_RUNTIME_PUBLICATION_STAGE, 0, "ordinary-preflight", "producer-stage-exit.private.txt"),
+                ("producer-scalar", "scalar", helper.WINDOWS_RUNTIME_PUBLICATION_SCALAR, 0, "ordinary-preflight", "producer-scalar-exit.private.txt"),
+                ("producer-stage", "stage", helper.WINDOWS_RUNTIME_PUBLICATION_STAGE, 0, "producer-scalar-finalize", "producer-stage-exit.private.txt"),
                 ("producer-success", "helperSuccess", None, 0, "producer-stage-finalize", "producer-success-exit.private.txt"),
                 ("producer-before", "before", helper.WINDOWS_RUNTIME_PUBLICATION_BEFORE, 0, "producer-success-finalize", "producer-before-exit.private.txt"),
                 ("producer-occupied", "helperOccupied", None, 2, "producer-before-finalize", "producer-occupied-exit.private.txt"),
@@ -10010,6 +10173,7 @@ class WindowsReaderGateTests(unittest.TestCase):
             self.assertEqual(step.count(command + "\n"), 1)
             self.assertIn("if: success() && inputs.scope == 'windows-runtime-publication'", step)
             self.assertIn("steps." + gate + ".outcome == 'success'", step)
+            self.assertIn("timeout-minutes: 4", step)
             self.assertIn("$env:GITHUB_REF -cne 'refs/heads/verify/desktop-windows-runtime-publication'", step)
             self.assertIn(command + "\n            $originalExitCode = $LASTEXITCODE", step)
             self.assertIn("if ($originalExitCode -isnot [int])", step)
@@ -10025,6 +10189,10 @@ class WindowsReaderGateTests(unittest.TestCase):
             self.assertLess(step.index("$stream.Dispose()"), step.index("if ($originalExitCode -ne " + str(code) + ")"))
             self.assertLess(step.index("if ($originalExitCode -ne " + str(code) + ")"), step.index("exit 0"))
             self.assertEqual(step.count("exit 0"), 1)
+            self.assertNotIn(command + " |", step)
+            if test is not None:
+                self.assertIn("MRK_WINDOWS_NATIVE_ARTIFACT: ${{ steps.ordinary-preflight.outputs.artifact }}", step)
+                self.assertIn("MRK_WINDOWS_NATIVE_ARTIFACT_SHA256: ${{ steps.ordinary-preflight.outputs.artifactSha256 }}", step)
             if test is None:
                 self.assertIn("$command = '\"' + $env:MRK_WINDOWS_HELPER_ARTIFACT + '\"'", step)
                 self.assertIn("::Combine($expectedRoot, 'mrk-windows-runtime-publish.exe')", step)
@@ -10067,12 +10235,17 @@ class WindowsReaderGateTests(unittest.TestCase):
             for forbidden in ("MRK_PYTHON", "always()", "continue-on-error", "Start-Process", "Process.Start", "Copy-Item", "Remove-Item",
                               "Set-Acl", "icacls", "Wait-Process", "Stop-Process", "ConvertTo-Json"):
                 self.assertNotIn(forbidden, step)
-        for name in ("stage", "success", "before", "occupied"):
+        for name in ("scalar", "stage", "success", "before", "occupied"):
             step = workflow.split("        id: producer-" + name + "-finalize\n", 1)[1].split("      - name:", 1)[0]
             self.assertIn("steps.producer-" + name + ".outcome == 'success'", step)
             self.assertIn("inputs.scope == 'windows-runtime-publication'", step)
             self.assertEqual(workflow.count("ci_foundation.py windows-runtime-publication-" + name + "-finalize'"), 1)
             self.assertNotIn("always()", step); self.assertNotIn("MRK_WINDOWS_HELPER_ARTIFACT", step)
+        for step_id in ("producer-stage-finalize", "producer-success-finalize", "producer-before-finalize",
+                        "producer-occupied-finalize", "fixture-finalize", "retain"):
+            step = workflow.split("        id: " + step_id + "\n", 1)[1].split("      - name:", 1)[0]
+            for suffix in ("_STEP_OUTCOME", "_FINALIZE_STEP_OUTCOME"):
+                self.assertIn("MRK_WINDOWS_PRODUCER_SCALAR" + suffix + ":", step)
         for step_id in ("fixture-finalize", "ordinary-owner", "ordinary-finalize", "fullwalk-preflight", "fullwalk-owner", "fullwalk-finalize", "retain"):
             step = workflow.split("        id: " + step_id + "\n", 1)[1].split("      - name:", 1)[0]
             for name in ("STAGE", "SUCCESS", "BEFORE", "OCCUPIED"):
@@ -10080,7 +10253,8 @@ class WindowsReaderGateTests(unittest.TestCase):
                     self.assertIn("MRK_WINDOWS_PRODUCER_" + name + suffix + ":", step)
         ordinary_to_fullwalk = workflow.split("        id: ordinary-owner\n", 1)[1].split("        id: fullwalk-owner\n", 1)[0]
         self.assertNotIn("& $env:MRK_WINDOWS_HELPER_ARTIFACT", ordinary_to_fullwalk)
-        for test in (helper.WINDOWS_RUNTIME_PUBLICATION_STAGE, helper.WINDOWS_RUNTIME_PUBLICATION_BEFORE, helper.WINDOWS_RUNTIME_PUBLICATION_AFTER):
+        for test in (helper.WINDOWS_RUNTIME_PUBLICATION_SCALAR, helper.WINDOWS_RUNTIME_PUBLICATION_STAGE,
+                     helper.WINDOWS_RUNTIME_PUBLICATION_BEFORE, helper.WINDOWS_RUNTIME_PUBLICATION_AFTER):
             self.assertNotIn(test, ordinary_to_fullwalk)
         self.assertNotIn("Remove-Item", workflow)
         self.assertIn("timeout-minutes: 35", workflow)

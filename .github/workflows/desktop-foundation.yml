@@ -652,9 +652,84 @@ jobs:
             [Console]::Error.WriteLine('MRK_WINDOWS_PUBLISHER_REFUSED=original-or-exit-record')
             exit 1
           }
+      - name: Verify count-one false and actual filtered-token refusal on the original native artifact
+        id: producer-scalar
+        if: success() && inputs.scope == 'windows-runtime-publication' && steps.ordinary-preflight.outcome == 'success'
+        timeout-minutes: 4
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          MRK_WINDOWS_NATIVE_ARTIFACT: ${{ steps.ordinary-preflight.outputs.artifact }}
+          MRK_WINDOWS_NATIVE_ARTIFACT_SHA256: ${{ steps.ordinary-preflight.outputs.artifactSha256 }}
+          MRK_WINDOWS_SOURCE_TREE: ${{ steps.ordinary-preflight.outputs.sourceTree }}
+          MRK_WINDOWS_PRECHECK_SHA256: ${{ steps.ordinary-preflight.outputs.precheckSha256 }}
+          MRK_WINDOWS_ORDINARY_PREFLIGHT_STEP_OUTCOME: ${{ steps.ordinary-preflight.outcome }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          try {
+            $expectedRoot = [System.IO.Path]::Combine($env:RUNNER_TEMP, "mrk-windows-installed-native-$($env:GITHUB_RUN_ID)-1")
+            if ($env:GITHUB_RUN_ATTEMPT -cne '1' -or $env:MRK_DESKTOP_CI_ROOT -cne $expectedRoot -or
+                $env:GITHUB_EVENT_NAME -cne 'workflow_dispatch' -or $env:MRK_DESKTOP_DISPATCH_SCOPE -cne 'windows-runtime-publication' -or
+                $env:GITHUB_REF -cne 'refs/heads/verify/desktop-windows-runtime-publication' -or
+                $env:MRK_DESKTOP_EXPECTED_SHA -cne $env:GITHUB_SHA -or $env:GITHUB_WORKFLOW_SHA -cne $env:GITHUB_SHA -or
+                $env:GITHUB_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:MRK_WINDOWS_SOURCE_TREE -cnotmatch '^[0-9a-f]{40}$' -or
+                $env:MRK_WINDOWS_NATIVE_ARTIFACT_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+                $env:MRK_WINDOWS_PRECHECK_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+                $env:MRK_WINDOWS_ORDINARY_PREFLIGHT_STEP_OUTCOME -cne 'success') { throw 'binding' }
+            $expectedDeps = [System.IO.Path]::Combine($expectedRoot, 'target', 'x86_64-pc-windows-msvc', 'debug', 'deps')
+            if ([System.IO.Path]::GetDirectoryName($env:MRK_WINDOWS_NATIVE_ARTIFACT) -cne $expectedDeps -or
+                [System.IO.Path]::GetFileName($env:MRK_WINDOWS_NATIVE_ARTIFACT) -cnotmatch '^mrk_windows_installed_native-[0-9a-f]{16}\.exe$') { throw 'artifact' }
+            Set-Location -LiteralPath $expectedRoot
+            # One fixed direct foreground original, never a Process object, launcher, pipe, retry or kill.
+            & $env:MRK_WINDOWS_NATIVE_ARTIFACT publication::scalar_qualification::hosted_has_restrictions_false_only_contract --exact --ignored --nocapture --test-threads=1
+            $originalExitCode = $LASTEXITCODE
+            if ($originalExitCode -isnot [int]) { throw 'original-exit' }
+            $command = '"' + $env:MRK_WINDOWS_NATIVE_ARTIFACT + '" publication::scalar_qualification::hosted_has_restrictions_false_only_contract --exact --ignored --nocapture --test-threads=1'
+            $commandSha256 = [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::Unicode.GetBytes($command))).ToLowerInvariant()
+            $lines = @(
+              'MRK_WINDOWS_RUNTIME_PUBLICATION_ORIGINAL_EXIT_V1'
+              'profile=windows-runtime-publication-v1'
+              "sourceSha=$($env:GITHUB_SHA)"
+              "sourceTree=$($env:MRK_WINDOWS_SOURCE_TREE)"
+              "runId=$($env:GITHUB_RUN_ID)"
+              'attempt=1'
+              'role=scalar'
+              "artifactSha256=$($env:MRK_WINDOWS_NATIVE_ARTIFACT_SHA256)"
+              "precheckSha256=$($env:MRK_WINDOWS_PRECHECK_SHA256)"
+              "commandSha256=$commandSha256"
+              'originalWaitReturned=true'
+              "exitCode=$originalExitCode"
+              'writerCloseGate=original-scalar-step-success-required'
+            )
+            $raw = [System.Text.UTF8Encoding]::new($false, $true).GetBytes(($lines -join "`n") + "`n")
+            if ($raw.Length -eq 0 -or $raw.Length -gt 4096) { throw 'exit-bound' }
+            $path = [System.IO.Path]::Combine($expectedRoot, 'producer-scalar-exit.private.txt')
+            $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            try { $stream.Write($raw, 0, $raw.Length); $stream.Flush() } finally { $stream.Dispose() }
+            # Only THIS later original step success closes the preceding exit record.
+            if ($originalExitCode -ne 0) { throw 'expected-original-exit' }
+            exit 0
+          } catch {
+            [Console]::Error.WriteLine('MRK_WINDOWS_PRODUCER_REFUSED=scalar-original-or-exit-record')
+            exit 1
+          }
+      - name: Validate separately closed same-call scalar qualification as DATA
+        id: producer-scalar-finalize
+        if: success() && inputs.scope == 'windows-runtime-publication' && steps.producer-scalar.outcome == 'success'
+        timeout-minutes: 2
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          MRK_WINDOWS_ORDINARY_PREFLIGHT_STEP_OUTCOME: ${{ steps.ordinary-preflight.outcome }}
+          MRK_WINDOWS_PRODUCER_SCALAR_STEP_OUTCOME: ${{ steps.producer-scalar.outcome }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-runtime-publication-scalar-finalize'
       - name: Stage only the fixed private runtime input with original native custody
         id: producer-stage
-        if: success() && inputs.scope == 'windows-runtime-publication' && steps.ordinary-preflight.outcome == 'success'
+        if: success() && inputs.scope == 'windows-runtime-publication' && steps.producer-scalar-finalize.outcome == 'success'
         timeout-minutes: 4
         shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
         env:
@@ -724,6 +799,8 @@ jobs:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
           MRK_WINDOWS_ORDINARY_PREFLIGHT_STEP_OUTCOME: ${{ steps.ordinary-preflight.outcome }}
+          MRK_WINDOWS_PRODUCER_SCALAR_STEP_OUTCOME: ${{ steps.producer-scalar.outcome }}
+          MRK_WINDOWS_PRODUCER_SCALAR_FINALIZE_STEP_OUTCOME: ${{ steps.producer-scalar-finalize.outcome }}
           MRK_WINDOWS_PRODUCER_STAGE_STEP_OUTCOME: ${{ steps.producer-stage.outcome }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-runtime-publication-stage-finalize'
@@ -818,6 +895,8 @@ jobs:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
           MRK_WINDOWS_ORDINARY_PREFLIGHT_STEP_OUTCOME: ${{ steps.ordinary-preflight.outcome }}
+          MRK_WINDOWS_PRODUCER_SCALAR_STEP_OUTCOME: ${{ steps.producer-scalar.outcome }}
+          MRK_WINDOWS_PRODUCER_SCALAR_FINALIZE_STEP_OUTCOME: ${{ steps.producer-scalar-finalize.outcome }}
           MRK_WINDOWS_PRODUCER_STAGE_STEP_OUTCOME: ${{ steps.producer-stage.outcome }}
           MRK_WINDOWS_PRODUCER_STAGE_FINALIZE_STEP_OUTCOME: ${{ steps.producer-stage-finalize.outcome }}
           MRK_WINDOWS_PRODUCER_SUCCESS_STEP_OUTCOME: ${{ steps.producer-success.outcome }}
@@ -903,6 +982,8 @@ jobs:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
           MRK_WINDOWS_ORDINARY_PREFLIGHT_STEP_OUTCOME: ${{ steps.ordinary-preflight.outcome }}
+          MRK_WINDOWS_PRODUCER_SCALAR_STEP_OUTCOME: ${{ steps.producer-scalar.outcome }}
+          MRK_WINDOWS_PRODUCER_SCALAR_FINALIZE_STEP_OUTCOME: ${{ steps.producer-scalar-finalize.outcome }}
           MRK_WINDOWS_PRODUCER_STAGE_STEP_OUTCOME: ${{ steps.producer-stage.outcome }}
           MRK_WINDOWS_PRODUCER_STAGE_FINALIZE_STEP_OUTCOME: ${{ steps.producer-stage-finalize.outcome }}
           MRK_WINDOWS_PRODUCER_SUCCESS_STEP_OUTCOME: ${{ steps.producer-success.outcome }}
@@ -1009,6 +1090,8 @@ jobs:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
           MRK_WINDOWS_ORDINARY_PREFLIGHT_STEP_OUTCOME: ${{ steps.ordinary-preflight.outcome }}
+          MRK_WINDOWS_PRODUCER_SCALAR_STEP_OUTCOME: ${{ steps.producer-scalar.outcome }}
+          MRK_WINDOWS_PRODUCER_SCALAR_FINALIZE_STEP_OUTCOME: ${{ steps.producer-scalar-finalize.outcome }}
           MRK_WINDOWS_PRODUCER_STAGE_STEP_OUTCOME: ${{ steps.producer-stage.outcome }}
           MRK_WINDOWS_PRODUCER_STAGE_FINALIZE_STEP_OUTCOME: ${{ steps.producer-stage-finalize.outcome }}
           MRK_WINDOWS_PRODUCER_SUCCESS_STEP_OUTCOME: ${{ steps.producer-success.outcome }}
@@ -1106,6 +1189,8 @@ jobs:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
           MRK_WINDOWS_ORDINARY_PREFLIGHT_STEP_OUTCOME: ${{ steps.ordinary-preflight.outcome }}
+          MRK_WINDOWS_PRODUCER_SCALAR_STEP_OUTCOME: ${{ steps.producer-scalar.outcome }}
+          MRK_WINDOWS_PRODUCER_SCALAR_FINALIZE_STEP_OUTCOME: ${{ steps.producer-scalar-finalize.outcome }}
           MRK_WINDOWS_PUBLISHER_STEP_OUTCOME: ${{ inputs.scope == 'windows-runtime-publication' && steps.producer-after.outcome || steps.fixture-publisher.outcome }}
           MRK_WINDOWS_PRODUCER_STAGE_STEP_OUTCOME: ${{ steps.producer-stage.outcome }}
           MRK_WINDOWS_PRODUCER_STAGE_FINALIZE_STEP_OUTCOME: ${{ steps.producer-stage-finalize.outcome }}
@@ -1444,6 +1529,8 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           MRK_WINDOWS_RUNTIME_DATA_STEP_OUTCOME: ${{ steps.runtime-data.outcome }}
           MRK_WINDOWS_ORDINARY_PREFLIGHT_STEP_OUTCOME: ${{ steps.ordinary-preflight.outcome }}
+          MRK_WINDOWS_PRODUCER_SCALAR_STEP_OUTCOME: ${{ steps.producer-scalar.outcome }}
+          MRK_WINDOWS_PRODUCER_SCALAR_FINALIZE_STEP_OUTCOME: ${{ steps.producer-scalar-finalize.outcome }}
           MRK_WINDOWS_PUBLISHER_STEP_OUTCOME: ${{ inputs.scope == 'windows-runtime-publication' && steps.producer-after.outcome || steps.fixture-publisher.outcome }}
           MRK_WINDOWS_PRODUCER_STAGE_STEP_OUTCOME: ${{ steps.producer-stage.outcome }}
           MRK_WINDOWS_PRODUCER_STAGE_FINALIZE_STEP_OUTCOME: ${{ steps.producer-stage-finalize.outcome }}

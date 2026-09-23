@@ -108,9 +108,28 @@ enum PrivilegeName { ChangeNotify, Shutdown, Undock, IncreaseWorkingSet, TimeZon
 enum Call {
     Architecture, Folder, WindowsDirectory, SystemDirectory, Mapping, DriveType,
     Open(usize), ProcessToken(usize), ThreadToken(usize), Close(usize),
+    #[cfg(test)]
+    QualificationSourceToken(usize),
+    #[cfg(test)]
+    QualificationRestrictedToken(usize),
     Info(FS::FILE_INFO_BY_HANDLE_CLASS, usize), HandleInfo, FinalName, FileType,
     VolumeName, VolumeDevice, Streams, Security,
     Token(S::TOKEN_INFORMATION_CLASS), Privilege(PrivilegeName), Read(usize), Entries,
+}
+impl Call {
+    // Pure slot classification, shared by native and inert registration. The
+    // qualification variants never exist in a production native unit.
+    fn token_output(self) -> Option<usize> {
+        match self {
+            Self::ProcessToken(index) | Self::ThreadToken(index) => Some(index),
+            #[cfg(test)]
+            Self::QualificationSourceToken(index) | Self::QualificationRestrictedToken(index) => Some(index),
+            _ => None,
+        }
+    }
+    fn acquisition_output(self) -> Option<usize> {
+        match self { Self::Open(index) => Some(index), _ => self.token_output() }
+    }
 }
 // A fixed output uses its complete SDK type, not the arena's spare capacity.
 // Variable outputs retain the one bounded buffer; no size-discovery query/retry.
@@ -317,7 +336,7 @@ impl NativeBook {
         // SAFETY: frame is pinned but not entered; initialize its self-referential
         // input pointers before publishing the arena and before native effects.
         let setup = unsafe { frame.as_mut().get_unchecked_mut() };
-        if let Call::Open(index) | Call::ProcessToken(index) | Call::ThreadToken(index) = call {
+        if let Some(index) = call.acquisition_output() {
             let slot = self.slot(index)?;
             if slot.state != SlotState::Reserved { return Err(Error::State); }
             setup.output_handle = slot.output.get();
@@ -348,22 +367,18 @@ impl NativeBook {
     // native call. The active arena and every output cell already belong to us.
     fn mark_entered(&mut self, call: Call) -> Result<()> {
         if self.arena()?.phase.get() != Phase::Prepared { return self.unknown(); }
-        match call {
-            Call::Open(i) | Call::ProcessToken(i) | Call::ThreadToken(i) => {
-                if self.slot(i)?.state != SlotState::Reserved { return self.unknown(); }
-                self.slot_mut(i)?.state = SlotState::Acquiring;
-            }
-            Call::Close(i) => {
-                let attempted = self.arena()?.handle;
-                let slot = self.slot_mut(i)?;
-                if slot.state != SlotState::Owned { return self.unknown(); }
-                // SAFETY: no earlier call is outstanding. Retire BEFORE entry;
-                // the arena holds the one attempted value, never an RAII owner.
-                if unsafe { *slot.output.get() } != attempted { return self.unknown(); }
-                slot.state = SlotState::Closing;
-                unsafe { *slot.output.get() = null_mut(); }
-            }
-            _ => {}
+        if let Some(i) = call.acquisition_output() {
+            if self.slot(i)?.state != SlotState::Reserved { return self.unknown(); }
+            self.slot_mut(i)?.state = SlotState::Acquiring;
+        } else if let Call::Close(i) = call {
+            let attempted = self.arena()?.handle;
+            let slot = self.slot_mut(i)?;
+            if slot.state != SlotState::Owned { return self.unknown(); }
+            // SAFETY: no earlier call is outstanding. Retire BEFORE entry;
+            // the arena holds the one attempted value, never an RAII owner.
+            if unsafe { *slot.output.get() } != attempted { return self.unknown(); }
+            slot.state = SlotState::Closing;
+            unsafe { *slot.output.get() = null_mut(); }
         }
         self.started = true;
         self.arena()?.phase.set(Phase::Entered);
@@ -414,9 +429,17 @@ impl NativeBook {
             if info != WP::FILE_OPENED as usize { return self.completion_unknown(CompletionRefusal::OpenNotOpened); }
             if self.duplicate_live(index, handle) { return self.completion_unknown(CompletionRefusal::OpenDuplicate); }
             self.slot_mut(index)?.state = SlotState::Owned;
-        } else if let Call::ProcessToken(index) | Call::ThreadToken(index) = call {
+        } else if let Some(index) = call.token_output() {
             if self.slot(index)?.state != SlotState::Acquiring { return self.unknown(); }
             let (value, _) = match returned { Returned::Boolean(v, e) => (v, e), _ => return self.unknown() };
+            #[cfg(test)]
+            if matches!(call, Call::QualificationSourceToken(_) | Call::QualificationRestrictedToken(_))
+                && !matches!(returned, Returned::Boolean(v, 0) if v != 0)
+                && !matches!(returned, Returned::Boolean(0, e) if e != 0) {
+                // Inconsistent qualification acquisition never authorizes its
+                // output cell. Pending was already refused above.
+                return self.unknown();
+            }
             // SAFETY: synchronous completed BOOL token call, excluding IO_PENDING.
             let handle = unsafe { *self.slot(index)?.output.get() };
             if value != 0 {
@@ -547,6 +570,12 @@ unsafe fn invoke(a: &Arena) -> Returned {
                 &a.attributes, a.iosb.get(), null(), 0, FS::FILE_SHARE_READ, N::FILE_OPEN,
                 N::FILE_SYNCHRONOUS_IO_NONALERT | if a.directory { N::FILE_DIRECTORY_FILE } else { N::FILE_NON_DIRECTORY_FILE }, null(), 0)),
             Call::ProcessToken(_) => boolean(T::OpenProcessToken(T::GetCurrentProcess(), S::TOKEN_QUERY, a.output_handle)),
+            #[cfg(test)]
+            Call::QualificationSourceToken(_) => boolean(T::OpenProcessToken(T::GetCurrentProcess(),
+                S::TOKEN_QUERY | S::TOKEN_DUPLICATE, a.output_handle)),
+            #[cfg(test)]
+            Call::QualificationRestrictedToken(_) => boolean(S::CreateRestrictedToken(a.handle,
+                S::DISABLE_MAX_PRIVILEGE, 0, null(), 0, null(), 0, null(), a.output_handle)),
             Call::ThreadToken(_) => boolean(T::OpenThreadToken(T::GetCurrentThread(), S::TOKEN_QUERY, 1, a.output_handle)),
             Call::Close(_) => boolean(F::CloseHandle(a.handle)),
             Call::HandleInfo => boolean(F::GetHandleInformation(a.handle, a.buffer().cast())),

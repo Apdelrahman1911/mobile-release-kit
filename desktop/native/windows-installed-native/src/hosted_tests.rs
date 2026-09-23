@@ -61,7 +61,8 @@ pub(super) fn write_unavailable(book: &NativeBook, observation: &Result<bool>, o
         }
         Call::Read(_) => ("ReadFile", "null", "boolean"),
         Call::Entries => ("GetFileInformationByHandleEx", r#""FileIdExtdDirectoryInfo""#, "boolean"),
-        Call::DriveType | Call::ThreadToken(_) | Call::Close(_) | Call::FileType => return,
+        Call::DriveType | Call::ThreadToken(_) | Call::Close(_) | Call::FileType
+            | Call::QualificationSourceToken(_) | Call::QualificationRestrictedToken(_) => return,
     };
     // Pair the original API with its actual return class. A malformed synthetic
     // pair, pending result or permitted EOF is not a printable terminal failure.

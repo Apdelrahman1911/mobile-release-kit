@@ -330,6 +330,10 @@ fn observed_query(call: Call) -> &'static str {
         Call::WindowsDirectory => "windows-directory", Call::SystemDirectory => "system-directory",
         Call::Mapping => "mapping", Call::DriveType => "drive-type", Call::Open(_) => "nt-create",
         Call::ProcessToken(_) => "process-token", Call::ThreadToken(_) => "thread-token", Call::Close(_) => "close",
+        #[cfg(test)]
+        Call::QualificationSourceToken(_) => "qualification-source-token",
+        #[cfg(test)]
+        Call::QualificationRestrictedToken(_) => "qualification-filtered-token",
         Call::Info(class, _) => match class {
             FS::FileBasicInfo => "info-basic", FS::FileStandardInfo => "info-standard",
             FS::FileAttributeTagInfo => "info-tag", FS::FileIdInfo => "info-id",
@@ -402,6 +406,16 @@ struct Mutation {
     _pin: PhantomPinned,
 }
 struct MutationComplete { frame: Pin<Box<Mutation>> }
+impl MutationComplete {
+    fn scalar(&self) -> Result<u32> {
+        need(self.frame.phase.get() == Phase::Complete
+            && matches!(self.frame.effect, Effect::Scalar(S::TokenHasRestrictions | S::TokenIsAppContainer)))?;
+        // SAFETY: definite completion ended native access to this pinned,
+        // completely initialized DWORD object. An accepted needed-size of one
+        // does NOT assert a one-byte ABI or four native-written output bytes.
+        Ok(unsafe { *self.frame.scalar.get() })
+    }
+}
 fn mutation_return(ok: i32, error: u32) -> Result<()> {
     if ok != 0 { return if error == 0 { Ok(()) } else { Err(Error::Unknown) }; }
     if error == 0 || error == F::ERROR_IO_PENDING { Err(Error::Unknown) } else { Err(Error::Unavailable) }
@@ -411,12 +425,22 @@ fn write_return(ok: i32, error: u32, written: u32, requested: usize) -> Result<(
     if requested == 0 || requested > BUFFER || written as usize > requested { return Err(Error::Unknown); }
     need(written as usize == requested) // short/zero is failure, never a write-repair loop
 }
-fn scalar_count_return(count: u32, observed: &Cell<ObservedScalarLength>) -> Result<()> {
+fn scalar_initial(effect: Effect) -> u32 {
+    if matches!(effect, Effect::Scalar(S::TokenHasRestrictions)) { u32::from_ne_bytes([0xff, 0, 0, 0]) }
+    else { u32::MAX }
+}
+fn scalar_value(value: u32) -> Result<u32> { need(value <= 1)?; Ok(value) }
+fn scalar_count_return(effect: Effect, count: u32, observed: &Cell<ObservedScalarLength>) -> Result<()> {
     if observed.get() == ObservedScalarLength::Unobserved {
         observed.set(ObservedScalarLength::from_count(count));
     }
     // The original count still decides admission; the first diagnostic never does.
-    if count != 4 { Err(Error::Unknown) } else { Ok(()) }
+    let accepted = match effect {
+        Effect::Scalar(S::TokenHasRestrictions) => matches!(count, 1 | 4),
+        Effect::Scalar(S::TokenIsAppContainer) => count == 4,
+        _ => false,
+    };
+    if accepted { Ok(()) } else { Err(Error::Unknown) }
 }
 fn later_originals_closed(states: impl IntoIterator<Item = SlotState>) -> bool {
     let mut any = false;
@@ -634,7 +658,7 @@ impl Publication {
         let mut frame = Box::pin(Mutation { effect, phase: Cell::new(Phase::Prepared), returned: Cell::new(None), slot,
             length_observation: Cell::new(ObservedScalarLength::Unobserved),
             path, descriptor: UnsafeCell::new(Aligned([0; BUFFER])), attributes: S::SECURITY_ATTRIBUTES::default(),
-            handle, output: null_mut(), data, count: UnsafeCell::new(u32::MAX), scalar: UnsafeCell::new(u32::MAX), _pin: PhantomPinned });
+            handle, output: null_mut(), data, count: UnsafeCell::new(u32::MAX), scalar: UnsafeCell::new(scalar_initial(effect)), _pin: PhantomPinned });
         // SAFETY: pinned, exclusively held, not yet entered. Register all pointers
         // and original output cells before publishing the mutation arena.
         let setup = unsafe { frame.as_mut().get_unchecked_mut() };
@@ -692,9 +716,10 @@ impl Publication {
             // SAFETY: known completion, not a failed or pending output count.
             write_return(ok, error, unsafe { *frame.count.get() }, frame.data.len())
         } else if matches!(effect, Effect::Scalar(_)) && outcome.is_ok() {
-            // SAME authorized read, before the unchanged exact-four refusal.
+            // SAME authorized read; class-local needed-size compatibility never
+            // derives a write extent or authorizes another output observation.
             let count = unsafe { *frame.count.get() };
-            scalar_count_return(count, &frame.length_observation)
+            scalar_count_return(effect, count, &frame.length_observation)
         } else { outcome };
         if outcome == Err(Error::Unknown) { return self.mutation_unknown(); }
         frame.phase.set(Phase::Complete);
@@ -705,9 +730,7 @@ impl Publication {
     fn scalar(&mut self, index: usize, class: S::TOKEN_INFORMATION_CLASS) -> Result<u32> {
         need([S::TokenHasRestrictions, S::TokenIsAppContainer].contains(&class))?;
         let complete = self.mutate(Effect::Scalar(class), Some(index), "", &[], Vec::new())?;
-        // SAFETY: Complete certifies the exact four-byte synchronous output.
-        let value = unsafe { *complete.frame.scalar.get() };
-        need(value <= 1)?; Ok(value)
+        scalar_value(complete.scalar()?)
     }
 
     fn add_directory(&mut self, slot: usize, parent: Option<usize>, dos: String, scope: AuthorityScope, created: bool) -> Result<usize> {
@@ -1265,6 +1288,8 @@ mod tests {
                 (S::TokenPrimary as u32, 1, elevation_type, 1, 0, 0, 0),
                 (S::TokenPrimary as u32, 1, elevation_type, 0, 1, 0, 0),
                 (S::TokenPrimary as u32, 1, elevation_type, 0, 0, 1, 0),
+                (S::TokenPrimary as u32, 1, elevation_type, 0, 0, 0x100, 0),
+                (S::TokenPrimary as u32, 1, elevation_type, 0, 0, 0x01000000, 0),
                 (S::TokenPrimary as u32, 1, elevation_type, 0, 0, 0, 1),
             ] {
                 need(installer_facts(identity, kind, elevated, elevation, ui, virtualized, restricted, app,
@@ -1298,6 +1323,8 @@ mod tests {
     }
     #[test]
     fn real_return_classification_never_repairs_a_write_or_invents_a_flush() -> Result<()> {
+        let has = Effect::Scalar(S::TokenHasRestrictions);
+        let app = Effect::Scalar(S::TokenIsAppContainer);
         // Existing selected inert policy also proves the closed diagnostic
         // vocabulary: input ordinals/classes/return magnitudes never leak.
         for (call, label) in [
@@ -1305,6 +1332,8 @@ mod tests {
             (Call::WindowsDirectory, "windows-directory"), (Call::SystemDirectory, "system-directory"),
             (Call::Mapping, "mapping"), (Call::DriveType, "drive-type"), (Call::Open(usize::MAX), "nt-create"),
             (Call::ProcessToken(usize::MAX), "process-token"), (Call::ThreadToken(usize::MAX), "thread-token"),
+            (Call::QualificationSourceToken(usize::MAX), "qualification-source-token"),
+            (Call::QualificationRestrictedToken(usize::MAX), "qualification-filtered-token"),
             (Call::Close(usize::MAX), "close"), (Call::Info(FS::FileBasicInfo, usize::MAX), "info-basic"),
             (Call::Info(FS::FileStandardInfo, 0), "info-standard"), (Call::Info(FS::FileAttributeTagInfo, 0), "info-tag"),
             (Call::Info(FS::FileIdInfo, 0), "info-id"), (Call::Info(FS::FileCaseSensitiveInfo, 0), "info-case"),
@@ -1350,10 +1379,19 @@ mod tests {
         assert_eq!(ObservedScalarLength::Unobserved.label(), "none");
         for (count, expected) in [(0, "zero"), (1, "one"), (2, "two"), (3, "three"),
             (4, "four"), (5, "over4"), (u32::MAX - 1, "over4"), (u32::MAX, "sentinel")] {
-            let observed = Cell::new(ObservedScalarLength::Unobserved);
-            assert_eq!(scalar_count_return(count, &observed), if count == 4 { Ok(()) } else { Err(Error::Unknown) });
-            assert_eq!(observed.get().label(), expected);
+            for effect in [has, app, Effect::Scalar(i32::MAX), Effect::Flush] {
+                let observed = Cell::new(ObservedScalarLength::Unobserved);
+                let admitted = match effect {
+                    Effect::Scalar(S::TokenHasRestrictions) => matches!(count, 1 | 4),
+                    Effect::Scalar(S::TokenIsAppContainer) => count == 4,
+                    _ => false,
+                };
+                assert_eq!(scalar_count_return(effect, count, &observed), if admitted { Ok(()) } else { Err(Error::Unknown) });
+                assert_eq!(observed.get().label(), expected);
+            }
         }
+        assert_eq!(scalar_initial(has).to_ne_bytes(), [0xff, 0, 0, 0]);
+        for effect in [app, Effect::Scalar(i32::MAX), Effect::Flush] { assert_eq!(scalar_initial(effect), u32::MAX); }
         let largest = PublicationFrameObservation::from_frames(
             Some((Call::Token(S::TokenVirtualizationEnabled), Phase::Returned,
                 Some(Returned::Count(u32::MAX, u32::MAX)), Some(CompletionRefusal::TokenInvalidHandle))),
@@ -1369,15 +1407,15 @@ mod tests {
         owner.book.arena()?.returned.set(Some(Returned::Boolean(1, 0)));
         // This fixture never enters mutate/invoke. Invalid returns must leave
         // its raw output storage unobserved; snapshots copy only retained DATA.
-        let mutation = |phase, returned| ManuallyDrop::new(Box::pin(Mutation {
-            effect: Effect::Scalar(S::TokenHasRestrictions), phase: Cell::new(phase),
+        let mutation = |effect, phase, returned| ManuallyDrop::new(Box::pin(Mutation {
+            effect, phase: Cell::new(phase),
             returned: Cell::new(returned), slot: None,
             length_observation: Cell::new(ObservedScalarLength::Unobserved),
             path: Vec::new(), descriptor: UnsafeCell::new(Aligned([0; BUFFER])), attributes: S::SECURITY_ATTRIBUTES::default(),
             handle: null_mut(), output: null_mut(), data: Vec::new(), count: UnsafeCell::new(u32::MAX),
-            scalar: UnsafeCell::new(u32::MAX), _pin: PhantomPinned,
+            scalar: UnsafeCell::new(scalar_initial(effect)), _pin: PhantomPinned,
         }));
-        owner.mutation = Some(mutation(Phase::Returned, Some(Returned::Boolean(0, F::ERROR_IO_PENDING))));
+        owner.mutation = Some(mutation(has, Phase::Returned, Some(Returned::Boolean(0, F::ERROR_IO_PENDING))));
         let saved = owner.retained_frame_observation();
         assert_eq!(saved.diagnostic_line().as_deref(), Some("MRK_WINDOWS_RUNTIME_PUBLISH_FRAME_V2=qcall=token-elevation;qphase=returned;qret=bool-nonzero:00000000;qrefusal=none;mcall=has-restrictions;mphase=returned;mret=bool-zero:000003e5;mcount=none\n"));
         owner.book.arena()?.returned.set(Some(Returned::Boolean(0, 5)));
@@ -1385,15 +1423,19 @@ mod tests {
         for (phase, returned, expected) in [
             (Phase::Prepared, Some(Returned::Boolean(1, 0)), Error::Unknown),
             (Phase::Entered, Some(Returned::Boolean(1, 0)), Error::Unknown),
+            (Phase::Complete, Some(Returned::Boolean(1, 0)), Error::Unknown),
             (Phase::Returned, None, Error::Unknown),
             (Phase::Returned, Some(Returned::Scalar(0)), Error::Unknown),
+            (Phase::Returned, Some(Returned::Count(4, 0)), Error::Unknown),
+            (Phase::Returned, Some(Returned::Nt(0)), Error::Unknown),
+            (Phase::Returned, Some(Returned::Hresult(0)), Error::Unknown),
             (Phase::Returned, Some(Returned::Boolean(0, 0)), Error::Unknown),
             (Phase::Returned, Some(Returned::Boolean(0, F::ERROR_IO_PENDING)), Error::Unknown),
             (Phase::Returned, Some(Returned::Boolean(1, F::ERROR_ACCESS_DENIED)), Error::Unknown),
             (Phase::Returned, Some(Returned::Boolean(0, F::ERROR_ACCESS_DENIED)), Error::Unavailable),
         ] {
             let mut refused = Publication::new(&"d".repeat(64))?;
-            refused.mutation = Some(mutation(phase, returned));
+            refused.mutation = Some(mutation(has, phase, returned));
             assert_eq!(refused.finish_mutation().err(), Some(expected));
             assert_eq!(refused.retained_frame_observation().mcount, ObservedScalarLength::Unobserved);
             // Drop only this never-native test arena; an actual Unknown is retained.
@@ -1401,14 +1443,16 @@ mod tests {
         }
         let frame = owner.mutation.as_ref().ok_or(Error::State)?.as_ref().get_ref();
         frame.returned.set(Some(Returned::Boolean(1, 0)));
-        assert_eq!(scalar_count_return(2, &frame.length_observation), Err(Error::Unknown));
+        assert_eq!(scalar_count_return(has, 2, &frame.length_observation), Err(Error::Unknown));
         let length_saved = owner.retained_frame_observation();
         assert_eq!(length_saved.mcount, ObservedScalarLength::Two);
         assert!(length_saved.diagnostic_line().ok_or(Error::State)?.ends_with(";mcount=two\n"));
         // Pure DATA classification, not a second native call. The new argument
-        // still drives exact-four refusal while the first category stays fixed.
-        assert_eq!(scalar_count_return(4, &frame.length_observation), Ok(()));
-        assert_eq!(scalar_count_return(3, &frame.length_observation), Err(Error::Unknown));
+        // still drives class-local refusal while the first category stays fixed.
+        assert_eq!(scalar_count_return(has, 4, &frame.length_observation), Ok(()));
+        assert_eq!(scalar_count_return(has, 1, &frame.length_observation), Ok(()));
+        assert_eq!(scalar_count_return(app, 1, &frame.length_observation), Err(Error::Unknown));
+        assert_eq!(scalar_count_return(has, 3, &frame.length_observation), Err(Error::Unknown));
         assert_eq!(length_saved, owner.retained_frame_observation());
         // Release only the two never-native fixture allocations, not live owners.
         drop(ManuallyDrop::into_inner(owner.book.active.take().ok_or(Error::State)?));
@@ -1416,6 +1460,46 @@ mod tests {
         assert_eq!(owner.retained_frame_observation(), absent);
         assert_eq!(length_saved.mcount, ObservedScalarLength::Two);
         assert_eq!(saved.qret, ObservedReturn::from_return(Some(Returned::Boolean(1, 0))));
+        // Only never-native fixtures write these initialized objects. A short
+        // fixture write models one possibility, never an observed OS extent.
+        for effect in [has, app, Effect::Scalar(i32::MAX)] {
+            for count in [0, 1, 2, 3, 4, 5, u32::MAX] {
+                for (written, bytes) in [(0, [0u8; 4]), (1, [0; 4]), (4, [0; 4]),
+                    (1, [1, 0, 0, 0]), (1, [0xff, 0, 0, 0]),
+                    (4, [0, 1, 0, 0]), (4, [0, 0, 0, 1])] {
+                    let mut fixture = Publication::new(&"d".repeat(64))?;
+                    fixture.mutation = Some(mutation(effect, Phase::Returned, Some(Returned::Boolean(1, 0))));
+                    let frame = fixture.mutation.as_ref().ok_or(Error::State)?.as_ref().get_ref();
+                    let mut expected = scalar_initial(effect).to_ne_bytes();
+                    expected[..written].copy_from_slice(&bytes[..written]);
+                    // SAFETY: this pinned fixture has never entered native code.
+                    unsafe {
+                        *frame.count.get() = count;
+                        std::ptr::copy_nonoverlapping(bytes.as_ptr(), frame.scalar.get().cast::<u8>(), written);
+                    }
+                    let allowed = match effect {
+                        Effect::Scalar(S::TokenHasRestrictions) => matches!(count, 1 | 4),
+                        Effect::Scalar(S::TokenIsAppContainer) => count == 4,
+                        _ => false,
+                    };
+                    if allowed {
+                        let complete = fixture.finish_mutation()?;
+                        assert_eq!(complete.frame.length_observation.get(), ObservedScalarLength::from_count(count));
+                        let value = complete.scalar()?; // the production one-read consumer
+                        assert_eq!(value, u32::from_ne_bytes(expected));
+                        assert_eq!(scalar_value(value), if value <= 1 { Ok(value) } else { Err(Error::Unsafe) });
+                        assert_eq!(scalar_value(value).is_ok_and(|v| v == 0), expected == [0; 4]);
+                        assert!(fixture.mutation.is_none() && !fixture.book.is_unknown());
+                    } else {
+                        assert_eq!(fixture.finish_mutation().err(), Some(Error::Unknown));
+                        assert!(fixture.book.is_unknown() && fixture.mutation.is_some());
+                        assert_eq!(fixture.retained_frame_observation().mcount, ObservedScalarLength::from_count(count));
+                        // No scalar consumer exists on the failed completion.
+                        drop(ManuallyDrop::into_inner(fixture.mutation.take().ok_or(Error::State)?));
+                    }
+                }
+            }
+        }
         need(write_return(1, 0, 4, 4).is_ok())?;
         for count in [0, 1, 3] { need(write_return(1, 0, count, 4) == Err(Error::Unsafe))?; }
         need(write_return(1, 0, 5, 4) == Err(Error::Unknown))?;
@@ -1555,7 +1639,7 @@ mod tests {
             phase: Cell::new(Phase::Entered), returned: Cell::new(None), slot: None, path: Vec::new(),
             length_observation: Cell::new(ObservedScalarLength::Unobserved),
             descriptor: UnsafeCell::new(Aligned([0; BUFFER])), attributes: S::SECURITY_ATTRIBUTES::default(),
-            handle: null_mut(), output: null_mut(), data: Vec::new(), count: UnsafeCell::new(u32::MAX), scalar: UnsafeCell::new(u32::MAX), _pin: PhantomPinned })));
+            handle: null_mut(), output: null_mut(), data: Vec::new(), count: UnsafeCell::new(u32::MAX), scalar: UnsafeCell::new(scalar_initial(Effect::Flush)), _pin: PhantomPinned })));
         // Pure ownership control: no fabricated HANDLE and no native call.
         need(owner.fail_and_settle_once() == CloseOutcome::Unknown && owner.mutation.is_some())?;
         need(owner.fail_and_settle_once() == CloseOutcome::Unknown && owner.mutation.is_some())?;
@@ -1569,5 +1653,113 @@ mod tests {
         owner.order.grant_attempted = true; owner.order.fail(false);
         need(owner.possibly_exposed() && !owner.order.exposure && owner.order.sealed_files == 0
             && !owner.published_and_settled())
+    }
+}
+
+// Real native proof is a separate, explicitly ignored selector. Never place it
+// in publication::tests or call it from the inert/source preflight route.
+#[cfg(test)]
+mod scalar_qualification {
+    use super::*;
+    use crate::qualification_fixture as fixture;
+    use crate::qualification_result::{args_are, decimal, diagnostic_data, fixed_path, is_hex, write_fixture_record, LIMIT};
+
+    const TEST: &str = "publication::scalar_qualification::hosted_has_restrictions_false_only_contract";
+    const RESULT: &str = "producer-scalar-result.private.txt";
+    const HEADER: &str = "MRK_WINDOWS_HAS_RESTRICTIONS_QUALIFICATION_V1";
+    const FIELDS: [&str; 25] = ["profile", "sourceSha", "sourceTree", "runId", "attempt", "qualifierTest",
+        "artifactSha256", "precheckSha256", "commandSha256", "sourceReturn", "sourceCount", "sourceValue", "sourceAdmitted",
+        "derivedReturn", "derivedCount", "derivedValue", "derivedAdmitted", "createCalls", "filterFlags", "restrictingSidInputs",
+        "tokenOriginals", "tokenOriginalsClosed", "parentBookSettled", "unknown", "resultCloseGate"];
+
+    struct ScalarFact { length: ObservedScalarLength, zero: bool, admitted: bool }
+    fn observe(original: &mut Publication, index: usize) -> Result<ScalarFact> {
+        let complete = original.mutate(Effect::Scalar(S::TokenHasRestrictions), Some(index), "", &[], Vec::new())?;
+        need(matches!(complete.frame.returned.get(), Some(Returned::Boolean(v, 0)) if v != 0))?;
+        let length = complete.frame.length_observation.get(); // no second raw count read
+        let value = complete.scalar()?; // SAME completed typed-object read as production
+        let admitted = match scalar_value(value) {
+            Ok(flag) => flag == 0,
+            Err(Error::Unsafe) if value > 1 => false, // real noncanonical nonzero, not an arbitrary query failure
+            _ => return Err(Error::Unknown),
+        };
+        Ok(ScalarFact { length, zero: value == 0, admitted })
+    }
+
+    #[test]
+    #[ignore = "same-call count-one false and actual filtered-token refusal; fixed disposable production verification only"]
+    fn hosted_has_restrictions_false_only_contract() -> Result<()> {
+        fixture::profile()?;
+        need(fixture::active_profile()? == fixture::PRODUCTION_PROFILE)?;
+        fixture::outcome("MRK_WINDOWS_ORDINARY_PREFLIGHT_STEP_OUTCOME")?;
+        let root = fixed_path(&std::env::var("MRK_DESKTOP_CI_ROOT").map_err(|_| Error::State)?)?;
+        let temp = fixed_path(&std::env::var("RUNNER_TEMP").map_err(|_| Error::State)?)?;
+        let run = std::env::var("GITHUB_RUN_ID").map_err(|_| Error::State)?;
+        need(decimal(&run) && root == temp.join(format!("mrk-windows-installed-native-{run}-1"))
+            && std::env::current_dir().map_err(|_| Error::Unavailable)? == root)?;
+        let image = std::env::current_exe().map_err(|_| Error::Unavailable)?;
+        args_are(TEST, &image)?;
+        let artifact = fixed_path(&std::env::var("MRK_WINDOWS_NATIVE_ARTIFACT").map_err(|_| Error::State)?)?;
+        let leaf = artifact.file_name().and_then(|v| v.to_str()).ok_or(Error::Unsafe)?;
+        need(image == artifact && artifact.parent() == Some(root.join("target").join(TARGET).join("debug").join("deps").as_path())
+            && leaf.strip_prefix("mrk_windows_installed_native-").and_then(|v| v.strip_suffix(".exe")).is_some_and(|v| is_hex(v, 16)))?;
+        let mut record = fixture::Wire { values: BTreeMap::new() };
+        for (key, value) in [("profile", fixture::PRODUCTION_PROFILE), ("sourceSha", option_env!("GITHUB_SHA").ok_or(Error::State)?),
+            ("sourceTree", option_env!("MRK_WINDOWS_SOURCE_TREE").ok_or(Error::State)?), ("runId", run.as_str()),
+            ("attempt", "1"), ("qualifierTest", TEST)] { record.put(key, value); }
+        for (key, name) in [("artifactSha256", "MRK_WINDOWS_NATIVE_ARTIFACT_SHA256"), ("precheckSha256", "MRK_WINDOWS_PRECHECK_SHA256")] {
+            let value = std::env::var(name).map_err(|_| Error::State)?;
+            need(is_hex(&value, 64))?; record.put(key, value);
+        }
+        record.binding()?;
+        record.put("commandSha256", fixture::command_sha(artifact.to_str().ok_or(Error::Unsafe)?, TEST)?);
+        let mut original = Publication::new(option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256").ok_or(Error::State)?)?;
+        let mut create_calls = 0usize;
+        // No early return/panic can skip the single settlement of both ORIGINAL
+        // token slots. No local HANDLE is acquired and adopted after entry.
+        let observed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(ScalarFact, ScalarFact)> {
+            let source = original.book.reserve(Kind::ProcessToken, None, "", String::new())?;
+            let acquired = original.book.call(Call::QualificationSourceToken(source.index), null_mut(), Vec::new())?;
+            need(matches!(acquired.arena.returned()?, Returned::Boolean(v, 0) if v != 0))?;
+            let source_fact = observe(&mut original, source.index)?;
+            // Count4-only evidence does not reproduce the observed count1 case.
+            need(source_fact.length == ObservedScalarLength::One && source_fact.zero && source_fact.admitted)?;
+            let derived = original.book.reserve(Kind::ProcessToken, Some(source.index), "", String::new())?;
+            let source_handle = original.book.handle(source.index)?;
+            create_calls += 1;
+            let created = original.book.call(Call::QualificationRestrictedToken(derived.index), source_handle, Vec::new())?;
+            need(matches!(created.arena.returned()?, Returned::Boolean(v, 0) if v != 0))?;
+            let derived_fact = observe(&mut original, derived.index)?;
+            need(matches!(derived_fact.length, ObservedScalarLength::One | ObservedScalarLength::Four)
+                && !derived_fact.zero && !derived_fact.admitted)?;
+            Ok((source_fact, derived_fact))
+        })).unwrap_or(Err(Error::Unknown));
+        let owned = original.book.slots.iter().filter(|s| s.state == SlotState::Owned).count();
+        if matches!(observed, Err(Error::Unknown)) { original.book.mark_interrupted(); }
+        let settlement = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| original.fail_and_settle_once()))
+            .unwrap_or(CloseOutcome::Unknown);
+        if settlement != CloseOutcome::Settled || !original.book.settled() || original.book.is_unknown() {
+            diagnostic_data("scalar-qualification-original-settlement", None, true, None);
+            loop { std::thread::park(); std::hint::black_box(&mut original); }
+        }
+        let (source, derived) = observed?;
+        let closed = original.book.slots.iter().filter(|s| s.state == SlotState::Closed).count();
+        need(create_calls == 1 && owned == 2 && closed == owned && original.book.slots.len() == 2)?;
+        for (prefix, actual) in [("source", source), ("derived", derived)] {
+            record.put(&format!("{prefix}Return"), "bool-nonzero");
+            record.put(&format!("{prefix}Count"), actual.length.label());
+            record.put(&format!("{prefix}Value"), if actual.zero { "zero" } else { "nonzero" });
+            record.put(&format!("{prefix}Admitted"), actual.admitted);
+        }
+        record.put("createCalls", create_calls); record.put("filterFlags", S::DISABLE_MAX_PRIVILEGE);
+        record.put("restrictingSidInputs", 0); record.put("tokenOriginals", owned); record.put("tokenOriginalsClosed", closed);
+        record.put("parentBookSettled", original.book.settled()); record.put("unknown", original.book.is_unknown());
+        record.put("resultCloseGate", "original-scalar-exit-zero-required");
+        let raw = record.encoded(HEADER, &FIELDS, LIMIT)?;
+        original.tick()?;
+        // Reuse the existing pinned, create-new, one-write original receipt
+        // writer and explicit close. Unknown retains its owning stack too.
+        write_fixture_record(&root.join(RESULT), &raw, LIMIT, original.end)?;
+        original.tick()
     }
 }

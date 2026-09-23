@@ -887,6 +887,7 @@ WINDOWS_RUNTIME_PUBLICATION_PROFILE = "windows-runtime-publication-v1"
 WINDOWS_RUNTIME_PUBLICATION_DISPATCH = "windows-runtime-publication"
 WINDOWS_RUNTIME_PUBLICATION_REF = "refs/heads/verify/desktop-windows-runtime-publication"
 WINDOWS_RUNTIME_PUBLICATION_HELPER = "mrk-windows-runtime-publish"
+WINDOWS_RUNTIME_PUBLICATION_SCALAR = "publication::scalar_qualification::hosted_has_restrictions_false_only_contract"
 WINDOWS_RUNTIME_PUBLICATION_STAGE = "qualification_fixture::hosted_stage_fixed_runtime_input"
 WINDOWS_RUNTIME_PUBLICATION_BEFORE = "qualification_fixture::hosted_observe_produced_version_before_collision"
 WINDOWS_RUNTIME_PUBLICATION_AFTER = "qualification_fixture::hosted_compare_after_occupied_producer"
@@ -1176,6 +1177,11 @@ WINDOWS_RUNTIME_PUBLICATION_PREREQUISITE_HEADER = "MRK_WINDOWS_RUNTIME_PUBLICATI
 WINDOWS_RUNTIME_PUBLICATION_EXIT_FIELDS = ("profile", "sourceSha", "sourceTree", "runId", "attempt",
     "role", "artifactSha256", "precheckSha256", "commandSha256", "originalWaitReturned", "exitCode", "writerCloseGate")
 WINDOWS_RUNTIME_PUBLICATION_EXIT_HEADER = "MRK_WINDOWS_RUNTIME_PUBLICATION_ORIGINAL_EXIT_V1"
+WINDOWS_RUNTIME_PUBLICATION_SCALAR_HEADER = "MRK_WINDOWS_HAS_RESTRICTIONS_QUALIFICATION_V1"
+WINDOWS_RUNTIME_PUBLICATION_SCALAR_FIELDS = ("profile", "sourceSha", "sourceTree", "runId", "attempt", "qualifierTest",
+    "artifactSha256", "precheckSha256", "commandSha256", "sourceReturn", "sourceCount", "sourceValue", "sourceAdmitted",
+    "derivedReturn", "derivedCount", "derivedValue", "derivedAdmitted", "createCalls", "filterFlags", "restrictingSidInputs",
+    "tokenOriginals", "tokenOriginalsClosed", "parentBookSettled", "unknown", "resultCloseGate")
 WINDOWS_RUNTIME_PUBLICATION_OBSERVATION_FIELDS = ("profile", "sourceSha", "sourceTree", "runId", "attempt",
     "observerTest", "artifactBytes", "artifactSha256", "artifactIdentity", "precheckBytes", "precheckSha256",
     "rosterBytes", "rosterSha256", "manifestSha256", "protocolSha256", "inventorySha256", "coreSha256",
@@ -1214,11 +1220,13 @@ WINDOWS_FULLWALK_SCHEMAS = {
     "production-precheck": (WINDOWS_RUNTIME_PUBLICATION_PRECHECK_HEADER, WINDOWS_RUNTIME_PUBLICATION_PRECHECK_FIELDS, 16 << 10),
     "production-prerequisite": (WINDOWS_RUNTIME_PUBLICATION_PREREQUISITE_HEADER, WINDOWS_RUNTIME_PUBLICATION_PREREQUISITE_FIELDS, 16 << 10),
     "production-exit": (WINDOWS_RUNTIME_PUBLICATION_EXIT_HEADER, WINDOWS_RUNTIME_PUBLICATION_EXIT_FIELDS, 4096),
+    "production-scalar": (WINDOWS_RUNTIME_PUBLICATION_SCALAR_HEADER, WINDOWS_RUNTIME_PUBLICATION_SCALAR_FIELDS, 4096),
     "production-observation": (WINDOWS_RUNTIME_PUBLICATION_OBSERVATION_HEADER, WINDOWS_RUNTIME_PUBLICATION_OBSERVATION_FIELDS, 64 << 10),
 }
 WINDOWS_FULLWALK_INVOCATION_NUMBERS = frozenset({"attempt", "artifactBytes", "originTickMs", "aggregateBudgetMs", "deadlineTickMs"})
 WINDOWS_FULLWALK_DATA_PHASES = (
     "windows-installed-fixture-finalize", "windows-installed-fullwalk", "windows-installed-fullwalk-finalize",
+    "windows-runtime-publication-scalar-finalize",
     "windows-runtime-publication-stage-finalize", "windows-runtime-publication-success-finalize",
     "windows-runtime-publication-before-finalize", "windows-runtime-publication-occupied-finalize",
 )
@@ -9161,7 +9169,8 @@ def windows_fullwalk_write(path: Path, raw: bytes, limit: int) -> None:
 def windows_fullwalk_command_sha(path: str, test: str) -> str:
     require(test in (WINDOWS_FULLWALK_TEST, WINDOWS_FULLWALK_OWNER, WINDOWS_ORDINARY_OWNER,
                     WINDOWS_INSTALLED_TEST, WINDOWS_FULLWALK_PUBLISHER, WINDOWS_FULLWALK_RETIRE,
-                    WINDOWS_RUNTIME_PUBLICATION_STAGE, WINDOWS_RUNTIME_PUBLICATION_BEFORE, WINDOWS_RUNTIME_PUBLICATION_AFTER),
+                    WINDOWS_RUNTIME_PUBLICATION_STAGE, WINDOWS_RUNTIME_PUBLICATION_BEFORE, WINDOWS_RUNTIME_PUBLICATION_AFTER,
+                    WINDOWS_RUNTIME_PUBLICATION_SCALAR),
             "Windows fullwalk command role differs")
     command = '"' + str(windows_ordinary_path(path)) + '" ' + test + " --exact --ignored --nocapture --test-threads=1"
     raw = command.encode("utf-16-le")
@@ -9322,7 +9331,7 @@ def windows_fullwalk_publisher_exit(context: dict, raw: bytes, precheck_raw: byt
 def windows_runtime_publication_exit(context: dict, raw: bytes, precheck_raw: bytes, role: str, outcome: str) -> dict:
     require(windows_runtime_publication_profile(context) and outcome == "success",
             "Windows actual producer original step has not returned and closed")
-    roles = {"stage": ("owner", WINDOWS_RUNTIME_PUBLICATION_STAGE, "0"),
+    roles = {"scalar": ("owner", WINDOWS_RUNTIME_PUBLICATION_SCALAR, "0"), "stage": ("owner", WINDOWS_RUNTIME_PUBLICATION_STAGE, "0"),
              "helperSuccess": ("helper", None, "0"), "before": ("owner", WINDOWS_RUNTIME_PUBLICATION_BEFORE, "0"),
              "helperOccupied": ("helper", None, "2"), "after": ("owner", WINDOWS_RUNTIME_PUBLICATION_AFTER, "0")}
     require(role in roles, "Windows actual producer original role differs")
@@ -9338,6 +9347,62 @@ def windows_runtime_publication_exit(context: dict, raw: bytes, precheck_raw: by
         "writerCloseGate": "original-" + role + "-step-success-required"}
     require(all(row[key] == value for key, value in expected.items()), "Windows actual producer role/exit/command binding differs")
     return row
+
+
+def windows_runtime_publication_scalar_data(context: dict, raw: bytes, exit_raw: bytes,
+                                            precheck_raw: bytes, outcome: str) -> dict:
+    """Closed same-call native facts, never an arbitrary query/acquisition refusal."""
+    windows_runtime_publication_exit(context, exit_raw, precheck_raw, "scalar", outcome)
+    pre = windows_fullwalk_precheck_data(context, precheck_raw)
+    row = windows_fullwalk_wire(raw, "production-scalar")
+    windows_fullwalk_binding(row, context)
+    require(row["derivedCount"] in {"one", "four"}, "Windows filtered-token needed-size is not admitted")
+    expected = {"profile": WINDOWS_RUNTIME_PUBLICATION_PROFILE,
+        **{key: str(context[key]) for key in ("sourceSha", "sourceTree", "runId", "attempt")},
+        "qualifierTest": WINDOWS_RUNTIME_PUBLICATION_SCALAR, "artifactSha256": pre["ownerArtifactSha256"],
+        "precheckSha256": hashlib.sha256(precheck_raw).hexdigest(),
+        "commandSha256": windows_fullwalk_command_sha(pre["ownerArtifact"], WINDOWS_RUNTIME_PUBLICATION_SCALAR),
+        "sourceReturn": "bool-nonzero", "sourceCount": "one", "sourceValue": "zero", "sourceAdmitted": "true",
+        "derivedReturn": "bool-nonzero", "derivedCount": row["derivedCount"], "derivedValue": "nonzero", "derivedAdmitted": "false",
+        "createCalls": "1", "filterFlags": "1", "restrictingSidInputs": "0", "tokenOriginals": "2", "tokenOriginalsClosed": "2",
+        "parentBookSettled": "true", "unknown": "false", "resultCloseGate": "original-scalar-exit-zero-required"}
+    require(row == expected, "Windows same-call scalar facts/source/creation/settlement differ")
+    return {"qualificationProfile": WINDOWS_RUNTIME_PUBLICATION_PROFILE, "qualifierTest": WINDOWS_RUNTIME_PUBLICATION_SCALAR,
+        "artifactSha256": expected["artifactSha256"], "commandSha256": expected["commandSha256"],
+        "precheckSha256": expected["precheckSha256"], "sourceCount": "one", "sourceZero": True, "sourceFalseOnlyAdmitted": True,
+        "derivedCount": row["derivedCount"], "derivedNonzero": True, "derivedFalseOnlyAdmitted": False,
+        "createCalls": 1, "filterFlags": 1, "restrictingSidInputs": 0, "tokenOriginals": 2, "tokenOriginalsClosed": 2,
+        "parentBookSettled": True, "unknown": False, "nativeOriginalExitCode": 0, "originalProcessWaitReturned": True,
+        "resultClosedBySeparateExitAndStepGates": True,
+        "result": {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()},
+        "exit": {"size": len(exit_raw), "sha256": hashlib.sha256(exit_raw).hexdigest()}}
+
+
+def windows_runtime_publication_scalar_evidence(context: dict, precheck_raw: bytes, *, finalized: bool) -> dict:
+    root = Path(context["root"])
+    facts = windows_runtime_publication_scalar_data(context,
+        windows_installed_bytes(root / "producer-scalar-result.private.txt", 4096),
+        windows_installed_bytes(root / "producer-scalar-exit.private.txt", 4096), precheck_raw,
+        os.environ.get("MRK_WINDOWS_PRODUCER_SCALAR_STEP_OUTCOME", "unavailable"))
+    if finalized:
+        require(os.environ.get("MRK_WINDOWS_PRODUCER_SCALAR_FINALIZE_STEP_OUTCOME") == "success",
+                "Windows scalar qualification finalizer has not closed")
+        expected = windows_installed_phase_receipt(context, "windows-runtime-publication-scalar-finalize", **facts)
+        require(same_compile_json(bounded_json(windows_installed_bytes(root / "producer-scalar-checks.json", 64 << 10), 64 << 10), expected),
+                "Windows scalar qualification original finalizer changed")
+    return facts
+
+
+def windows_runtime_publication_scalar_finalize(context: dict) -> None:
+    require(windows_runtime_publication_profile(context)
+            and os.environ.get("MRK_WINDOWS_ORDINARY_PREFLIGHT_STEP_OUTCOME") == "success",
+            "Windows scalar qualification requires the closed original preflight")
+    pre, pre_raw, _, owner, _, _, _ = windows_fullwalk_check_precheck(context)
+    require(windows_ordinary_original(owner) == pre["ownerArtifactIdentity"], "Windows scalar qualifier original artifact changed")
+    facts = windows_runtime_publication_scalar_evidence(context, pre_raw, finalized=False)
+    windows_installed_inputs(context, retention_only=True)
+    write_json(Path(context["root"]) / "producer-scalar-checks.json",
+        windows_installed_phase_receipt(context, "windows-runtime-publication-scalar-finalize", **facts))
 
 
 def windows_runtime_publication_observation(context: dict, raw: bytes, precheck_raw: bytes,
@@ -9528,6 +9593,7 @@ def windows_runtime_publication_finalize(context: dict, through: str) -> None:
             and os.environ.get("MRK_WINDOWS_ORDINARY_PREFLIGHT_STEP_OUTCOME") == "success",
             "Windows actual producer phase requires the original closed preflight")
     pre, pre_raw, roster_raw, owner, app, compiled, _ = windows_fullwalk_check_precheck(context)
+    windows_runtime_publication_scalar_evidence(context, pre_raw, finalized=True)
     require(windows_ordinary_original(owner) == pre["ownerArtifactIdentity"]
             and windows_ordinary_original(app, app_role=True) == pre["appArtifactIdentity"]
             and windows_ordinary_original(compiled["helperCompiledArtifact"]) == pre["helperArtifactIdentity"],
@@ -9936,6 +10002,7 @@ def windows_fullwalk_headless_precheck(context: dict, owner_identity: str) -> di
         require(not path.exists() and not path.is_symlink(), "Windows fullwalk fixed one-use output is occupied")
     if windows_runtime_publication_profile(context):
         for name in (*[name for name, _ in WINDOWS_RUNTIME_PUBLICATION_PROOFS.values()],
+                     "producer-scalar-result.private.txt", "producer-scalar-exit.private.txt", "producer-scalar-checks.json",
                      *("producer-" + role + "-checks.json" for role in WINDOWS_RUNTIME_PUBLICATION_STEPS)):
             path = root / name
             require(not path.exists() and not path.is_symlink(), "Windows production one-use output is occupied")
@@ -10342,7 +10409,8 @@ def windows_fullwalk_retain(context: dict) -> None:
     outcome_names = {"publisher": "MRK_WINDOWS_PUBLISHER_STEP_OUTCOME", "ordinary": "MRK_WINDOWS_ORDINARY_OWNER_STEP_OUTCOME",
         "fullwalk": "MRK_WINDOWS_FULLWALK_OWNER_STEP_OUTCOME"}
     if production:
-        outcome_names = {**{role: "MRK_WINDOWS_PRODUCER_" + suffix + "_STEP_OUTCOME"
+        outcome_names = {"scalar": "MRK_WINDOWS_PRODUCER_SCALAR_STEP_OUTCOME",
+                        **{role: "MRK_WINDOWS_PRODUCER_" + suffix + "_STEP_OUTCOME"
                            for role, suffix in WINDOWS_RUNTIME_PUBLICATION_STEPS.items()}, **outcome_names}
     else:
         outcome_names["retirement"] = "MRK_WINDOWS_RETIREMENT_STEP_OUTCOME"
@@ -10375,6 +10443,13 @@ def windows_fullwalk_retain(context: dict) -> None:
             summary["buildBindings"].update(helperArtifactSha256=helper["sha256"],
                 helperCompileMessagesSha256=helper["messages"]["sha256"], helperCompileArgvSha256=compiled["helperInvocationSha256"],
                 anchoredHelperBuilds=1, helperNativeFeatures=["runtime-publication"], normalHelperNotLibtest=True)
+            if outcomes["scalar"] == "success" and os.environ.get("MRK_WINDOWS_PRODUCER_SCALAR_FINALIZE_STEP_OUTCOME") == "success":
+                try:
+                    scalar = windows_runtime_publication_scalar_evidence(context, pre_raw, finalized=True)
+                except (OSError, ValueError, TypeError, KeyError):
+                    pass
+                else:
+                    summary["results"]["scalar"].update(status="passed", facts=scalar)
             # Retain each positively finalized original even when a later role
             # fails. Never project private paths, file IDs, ACLs or raw records.
             for role, suffix in WINDOWS_RUNTIME_PUBLICATION_STEPS.items():
@@ -12032,6 +12107,7 @@ def windows_installed_phase(name: str, scope: str) -> None:
         {"windows-installed-fixture-finalize": windows_fullwalk_fixture_finalize,
          "windows-installed-fullwalk": windows_fullwalk_preflight,
          "windows-installed-fullwalk-finalize": windows_fullwalk_finalize,
+         "windows-runtime-publication-scalar-finalize": windows_runtime_publication_scalar_finalize,
          "windows-runtime-publication-stage-finalize": lambda c: windows_runtime_publication_finalize(c, "stage"),
          "windows-runtime-publication-success-finalize": lambda c: windows_runtime_publication_finalize(c, "helperSuccess"),
          "windows-runtime-publication-before-finalize": lambda c: windows_runtime_publication_finalize(c, "before"),

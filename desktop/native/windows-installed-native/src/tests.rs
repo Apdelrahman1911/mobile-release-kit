@@ -20,9 +20,8 @@ pub(super) fn enter_inert(book: &mut NativeBook, call: Call, handle: F::HANDLE) 
         Call::Token(class) => token_information_length(class)?,
         _ => 0,
     };
-    let output_handle = match call {
-        Call::Open(i) | Call::ProcessToken(i) | Call::ThreadToken(i) => book.slot(i)?.output.get(),
-        _ => null_mut(),
+    let output_handle = match call.acquisition_output() {
+        Some(i) => book.slot(i)?.output.get(), _ => null_mut(),
     };
     book.active = Some(ManuallyDrop::new(Box::pin(Arena {
         call, token_length, phase: Cell::new(Phase::Prepared), returned: Cell::new(None),
@@ -327,15 +326,20 @@ fn acquisition_needs_a_definite_consistent_receipt() -> Result<()> {
     assert_eq!(book.completion_unknown::<()>(CompletionRefusal::TokenDuplicate), Err(Error::Unknown));
     assert_eq!(book.arena()?.completion_refusal.get(), Some(CompletionRefusal::OpenDuplicate));
 
-    for thread in [false, true] {
+    for flavor in 0..4 {
         for (handle, refusal) in [(null_mut(), Some(CompletionRefusal::TokenInvalidHandle)),
             (F::INVALID_HANDLE_VALUE, Some(CompletionRefusal::TokenInvalidHandle)),
             (34usize as F::HANDLE, Some(CompletionRefusal::TokenDuplicate)), (35usize as F::HANDLE, None)] {
             let mut fixture = Inert::new(); let book = &mut fixture.book;
             let held = book.reserve(Kind::File, None, "held", "held".to_owned())?;
             own_inert(book, &held, 34)?;
-            let key = book.reserve(if thread { Kind::ThreadToken } else { Kind::ProcessToken }, None, "", String::new())?;
-            enter_inert(book, if thread { Call::ThreadToken(key.index) } else { Call::ProcessToken(key.index) }, null_mut())?;
+            let key = book.reserve(if flavor == 1 { Kind::ThreadToken } else { Kind::ProcessToken }, None, "", String::new())?;
+            let call = match flavor {
+                0 => Call::ProcessToken(key.index), 1 => Call::ThreadToken(key.index),
+                2 => Call::QualificationSourceToken(key.index), _ => Call::QualificationRestrictedToken(key.index),
+            };
+            enter_inert(book, call, null_mut())?;
+            assert_eq!(book.arena()?.output_handle, book.slot(key.index)?.output.get());
             let result = return_inert(book, Returned::Boolean(1, 0), Some(handle), 0, 0);
             if let Some(expected) = refusal {
                 assert!(matches!(result, Err(Error::Unknown)));
@@ -347,6 +351,26 @@ fn acquisition_needs_a_definite_consistent_receipt() -> Result<()> {
                 assert_eq!(book.state(&key)?, SlotState::Owned);
             }
         }
+    }
+    for restricted in [false, true] {
+        for returned in [Returned::Boolean(0, F::ERROR_IO_PENDING), Returned::Boolean(0, 0),
+            Returned::Boolean(1, F::ERROR_ACCESS_DENIED), Returned::Scalar(0), Returned::Count(1, 0), Returned::Nt(0)] {
+            let mut fixture = Inert::new(); let book = &mut fixture.book;
+            let key = book.reserve(Kind::ProcessToken, None, "", String::new())?;
+            let call = if restricted { Call::QualificationRestrictedToken(key.index) } else { Call::QualificationSourceToken(key.index) };
+            enter_inert(book, call, null_mut())?;
+            assert!(matches!(return_inert(book, returned, None, 0, 0), Err(Error::Unknown)));
+            assert!(book.active.is_some() && book.is_unknown());
+            assert_eq!(book.state(&key)?, SlotState::Acquiring);
+            assert_eq!(book.arena()?.completion_refusal.get(), None); // no output predicate was reached
+        }
+        let mut fixture = Inert::new(); let book = &mut fixture.book;
+        let key = book.reserve(Kind::ProcessToken, None, "", String::new())?;
+        let call = if restricted { Call::QualificationRestrictedToken(key.index) } else { Call::QualificationSourceToken(key.index) };
+        enter_inert(book, call, null_mut())?;
+        return_inert(book, Returned::Boolean(0, F::ERROR_ACCESS_DENIED), Some(null_mut()), 0, 0)?;
+        assert_eq!(book.state(&key)?, SlotState::NoHandle);
+        assert!(book.active.is_none() && !book.is_unknown());
     }
 
     // Completed original-scalar families and every fixed public selector. These
