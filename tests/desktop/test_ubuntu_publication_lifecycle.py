@@ -3716,6 +3716,58 @@ class SessionFixtureContracts(unittest.TestCase):
 
 
 class FailureLabelSinkContracts(unittest.TestCase):
+    def test_path_prefix_requires_complete_frame_closed_reason_and_recipe_shape(self):
+        def frame(step=b"PathActivate", index=b"0", rejection=b"gtk-initial-folder"):
+            return (b"MRK_INSTALLED_SHELL_PATH_FAILURE=v1;index=" + index + b";reject=" + rejection + b"\n"
+                    b"MRK_INSTALLED_SHELL_FAILURE_STEP=" + step + b"\nMRK_INSTALLED_SHELL_FAILURE_PHASE=gtk\n"
+                    b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n")
+        good = frame()
+        self.assertEqual(L._shell_label_pair(good), {"step": "PathActivate", "boundary": "gtk", "bootstrapProgress": "advanced",
+            "path": {"recipeIndex": 0, "rejection": "gtk-initial-folder"}})
+        indexed = (b"PathBrowse", b"PathSet", b"PathActivate", b"PathSettlement", b"PathField")
+        unindexed = (b"PathDraft", b"PathPreview", b"PathNavigation")
+        for step in indexed:
+            for index in range(11):
+                self.assertEqual(L._shell_label_pair(frame(step, str(index).encode("ascii")))["path"]["recipeIndex"], index)
+            self.assertIsNone(L._shell_label_pair(frame(step, b"none")))
+        for step in unindexed:
+            self.assertEqual(L._shell_label_pair(frame(step, b"none"))["path"], {"recipeIndex": None, "rejection": "gtk-initial-folder"})
+            # Preview round0..2 never masquerades as a recipe identifier.
+            for index in (b"0", b"1", b"2"):
+                self.assertIsNone(L._shell_label_pair(frame(step, index)))
+        for rejection in L.SHELL_PATH_REJECTIONS:
+            self.assertEqual(L._shell_label_pair(frame(rejection=rejection))["path"]["rejection"], rejection.decode("ascii"))
+        longest = frame(b"PathNavigation", b"none", b"gtk-fixture-transition").replace(
+            b"=gtk\n", b"=settlement\n").replace(b"=advanced\n", b"=app-info-returned-before-hold\n")
+        self.assertIsNotNone(L._shell_label_pair(longest))
+        self.assertLessEqual(len(longest), L.SHELL_PATH_FAILURE_FRAME_BOUND)
+        self.assertEqual(L.SHELL_FAILURE_LABEL_LIMIT, 512)
+        # Including cuts exactly at line boundaries: the leading version record
+        # prevents a short new write from impersonating an old three-line frame.
+        for end in range(len(good)):
+            with self.subTest(prefix_bytes=end):
+                self.assertIsNone(L._shell_label_pair(good[:end]))
+        prefix, legacy = good.split(b"\n", 1)
+        prefix += b"\n"
+        for step in indexed + unindexed:
+            old = legacy.replace(b"PathActivate", step)
+            self.assertEqual(L._shell_label_pair(old), {"step": step.decode("ascii"), "boundary": "gtk", "bootstrapProgress": "advanced"})
+        bad = [good.replace(b"=v1;", b"=v2;"), good.replace(b"=v1;", b"=V1;"),
+               frame(index=b"11"), frame(index=b"255"), frame(index=b"00"), frame(index=b"01"),
+               frame(index=b"-1"), frame(index=b"+1"), frame(index=b"NONE"), frame(index=b"0 "),
+               frame(step=b"SessionActivateFile"), frame(step=b"PrepareSave"), frame(step=b"PathUnknown"),
+               frame(rejection=b"gtk-future"), frame(rejection=b"gtk_initial_folder"), frame(rejection=b"GTK-thread"),
+               frame(rejection=b"x" * 23), frame(rejection=b"gtk-thread;extra=1"), frame(rejection=b"gtk-thread\n/private/inert"),
+               good.replace(b";reject=", b";index=0;reject="), good.replace(b";reject=", b";extra=1;reject="),
+               good.replace(b"index=0;reject=gtk-initial-folder", b"reject=gtk-initial-folder;index=0"),
+               good.replace(b"\n", b"\r\n"), prefix + legacy + legacy, prefix + prefix + legacy, legacy + prefix,
+               good + b"\n", good + b"x" * 512, good.decode("ascii"), bytearray(good),
+               prefix + legacy.replace(b"PathActivate", b"SessionReview") +
+               b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=0;evaluations=1;reject=not-recorded;wait=not-sampled\n"]
+        for raw in bad:
+            with self.subTest(kind=type(raw).__name__, length=len(raw)):
+                self.assertIsNone(L._shell_label_pair(raw))
+
     def test_session_record_requires_exact_index_bounds_categories_and_complete_frame(self):
         header = (b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionReview\n"
                   b"MRK_INSTALLED_SHELL_FAILURE_PHASE=settlement\n"
@@ -3998,8 +4050,8 @@ class FailureLabelSinkContracts(unittest.TestCase):
         self.assertNotIn("runtime.reason", outstanding)
         self.assertNotIn("r.held", outstanding)
         report = source.split("fn report_failure(&self)", 1)[1].split("pub(super) fn attach", 1)[0]
-        self.assertIn("Ok(r) => (r.trace, r.bootstrap, r.session.diagnostic)", report)
-        self.assertIn("failure_pair(trace, progress, session)", report)
+        self.assertIn("Ok(r) => (r.trace, r.bootstrap, r.session.diagnostic, r.paths.diagnostic)", report)
+        self.assertIn("failure_pair(trace, progress, session, path)", report)
         self.assertEqual(report.count("rustix::io::write"), 1)
         self.assertNotIn("retain_held_app_info", report)
         tick = source.split("pub(super) fn tick(", 1)[1].split("pub(super) fn", 1)[0]
@@ -4007,6 +4059,89 @@ class FailureLabelSinkContracts(unittest.TestCase):
         self.assertIn("(*step, Boundary::Deadline), progress", tick)
         self.assertIn("Duration::from_secs(45)", source)
         self.assertIn("assert_failure_pair_contract();", source)
+
+    def test_path_first_rejection_preserves_borrows_guard_order_and_first_winner(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        shell = (SOURCE / "desktop/src-tauri/src/shell.rs").read_text()
+        def body(text, name):
+            return text.split("fn " + name + "(", 1)[1].split("\n    }", 1)[0]
+        diagnostic = source.split("struct PathDiagnostic", 1)[1].split("#[derive(Clone, Copy)]", 1)[0]
+        self.assertIn("{ step: PathStep, rejection: PathRejection }", diagnostic)
+        self.assertIn("Some(Self { step, rejection: PathRejection::NotRecorded })", diagnostic)
+        for forbidden in ("PathBuf", "String", "filename", "Instant", "snapshot"):
+            self.assertNotIn(forbidden, diagnostic)
+        cache = body(source, "record_at")
+        self.assertIn("r.paths.diagnostic = PathDiagnostic::sample(r.step);", cache)
+        self.assertLess(cache.index("if !self.failed.load(Ordering::SeqCst)"), cache.index("r.paths.diagnostic ="))
+        latch = source.split("fn latch_path_diagnostic(", 1)[1].split("const PROJECT_SOURCE", 1)[0]
+        self.assertIn("if !failed.swap(true, Ordering::SeqCst) { *diagnostic = Some(next); }", latch)
+        helper = body(source, "path_fail")
+        self.assertIn("PathDiagnostic::sample(r.trace.0)", helper)
+        self.assertIn("latch_path_diagnostic(&self.failed,&mut r.paths.diagnostic,diagnostic)", helper)
+        self.assertNotIn("self.record", helper)
+        pure = source.split("fn assert_failure_pair_contract()", 1)[1].split("// Original destruction facts", 1)[0]
+        self.assertIn("for order in [[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]]", pure)
+        self.assertIn("0 => failed.store(true,Ordering::SeqCst)", pure)
+        self.assertIn("retained == Some(if order[0] == 1 { path_gtk } else { path_plain })", pure)
+        self.assertIn("step:PathStep::Activate(4),rejection:PathRejection::GtkReturnState", pure)
+
+        admitting = body(shell, "observed_path_dialog")
+        borrowed = admitting.split("let original = DIALOG.with(|book| {", 1)[1].split("        });", 1)[0]
+        self.assertIn("map_err(|_| R::GtkDialogBook)", borrowed)
+        self.assertIn("Err(R::GtkDialogOriginal)", borrowed)
+        self.assertNotIn("q.", borrowed); self.assertNotIn(".facts()", borrowed)
+        self.assertLess(admitting.index("        });"), admitting.index("Err(reason) => { q.path_failed(reason); return Err(()); }"))
+        guards = ["gtk::is_initialized_main_thread()", "DIALOG.with", "context.upgrade()", "call.upgrade()", "call.owner()",
+                  "owner.id != id", "owner.interrupted()", "let original_facts = call.facts()", "if !original_facts",
+                  "q.path_dialog(id,index)?", "app.get_webview_window(MAIN_WINDOW)", "dialog.title()", "if initial {", "dialog.current_folder()"]
+        self.assertEqual([admitting.index(guard) for guard in guards], sorted(admitting.index(guard) for guard in guards))
+        facts = admitting.split("let original_facts =", 1)[1].split("if !original_facts", 1)[0]
+        self.assertTrue(facts.rstrip().endswith("f.refusal.is_none());")); self.assertNotIn("q.", facts)
+        self.assertEqual(admitting.count("dialog.current_folder()"), 1)
+        self.assertIn("let Some(folder) = dialog.current_folder() else { return Ok(None); };", admitting)
+        self.assertIn("if Some(folder.as_path()) != q.project_path() { q.path_failed(R::GtkInitialFolder); return Err(()); }", admitting)
+        selecting = body(shell, "select_observed_path"); activating = body(shell, "activate_observed_path")
+        self.assertEqual(selecting.count("dialog.set_filename(path)"), 1)
+        self.assertLess(selecting.index("q.path_selection(id,index)?"), selecting.index("dialog.set_filename(path)"))
+        self.assertIn("if !dialog.set_filename(path) { q.path_failed(R::GtkSelectionSetter); return Err(()); }", selecting)
+        self.assertLess(activating.index("if !button.is_sensitive() { return Ok(false); }"), activating.index("q.path_activation(id,index)?"))
+        self.assertLess(activating.index("q.path_activation(id,index)?"), activating.index("button.emit_clicked()"))
+        self.assertEqual(activating.count("button.emit_clicked()"), 1)
+        for forbidden in (".filename(", ".response(", ".begin_response(", "set_current_folder", "Instant::", "sleep"):
+            self.assertNotIn(forbidden, admitting + selecting + activating)
+        self.assertNotIn("set_filename", activating)
+        self.assertEqual(shell.count("dialog.filename()"), 1)
+        for name in ("path_failed", "path_dialog", "path_selection", "path_activation", "path_filename", "path_response", "path_gtk_returned"):
+            callback = body(source, name)
+            self.assertEqual(callback.count("self.record_at(Boundary::Gtk)"), 1)
+            self.assertIn("self.path_fail(&mut r,", callback)
+            self.assertNotIn("self.path_failed(", callback); self.assertNotIn("self.record()", callback)
+        for name, guards in (("path_dialog", ("PATH_CASES.get", "self.failed.load", "Instant::now()", "self.case !=")),
+                             ("path_selection", ("self.case !=", "Instant::now()", "self.failed.load", "id !=")),
+                             ("path_activation", ("PATH_CASES.get", "self.case !=", "Instant::now()", "self.failed.load", "id !="))):
+            callback = body(source, name)
+            self.assertEqual([callback.index(guard) for guard in guards], sorted(callback.index(guard) for guard in guards))
+            self.assertEqual(callback.count("Instant::now()"), 1)
+            self.assertIn("PathRejection::GtkObserverEndpoint", callback)
+        filename = body(source, "path_filename")
+        guards = ["id.checked_sub", "self.case !=", "self.failed.load", "Instant::now()", "PATH_CASES[index].field != field",
+                  "path.is_none()", "path != self.path_target", "!r.paths.operations[index].picker.activated", "fixture.transition(id)"]
+        self.assertEqual([filename.index(guard) for guard in guards], sorted(filename.index(guard) for guard in guards))
+        self.assertEqual(filename.count("fixture.transition(id)"), 1); self.assertEqual(filename.count("Instant::now()"), 2)
+        self.assertNotIn(".filename(", filename)
+        self.assertLess(filename.index("PathRejection::GtkFilenameAbsent"), filename.index("PathRejection::GtkFilenameDifferent"))
+        self.assertLess(filename.index("PathRejection::GtkFixtureTransition"), filename.rindex("PathRejection::GtkObserverEndpoint"))
+        self.assertLess(filename.rindex("PathRejection::GtkObserverEndpoint"), filename.index("picker.filename = true"))
+        returned = body(source, "path_gtk_returned")
+        self.assertIn("r.pending.take() != Some(Pending::Path(path)) || r.step != Step::Paths(path)", returned)
+        self.assertEqual(returned.count(".activation_returned(result)"), 1)
+        self.assertNotIn(".responded", returned); self.assertNotIn("self.failed.load", returned)
+        self.assertIn("self.path_fail(&mut r,PathRejection::GtkReturnState)", returned)
+        self.assertIn("if let Some(mut r) = self.record() { self.path_fail(&mut r,PathRejection::GtkDispatch); } else { self.fail(); }", body(source, "tick"))
+        for name, reason in (("native_destroyed", "GtkDestroyState"), ("native_released", "GtkReleaseState")):
+            path_branch = body(source, name).split("if self.case == Case::ProjectPaths", 1)[1].split("if self.case == Case::Positive", 1)[0]
+            self.assertIn("self.path_fail(&mut r,PathRejection::" + reason + ")", path_branch)
+        # Source contracts and the inert Rust checks are not native receipts.
 
     def test_session_diagnostics_are_cached_same_step_and_first_failure_only(self):
         source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()

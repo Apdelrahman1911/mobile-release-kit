@@ -47,6 +47,7 @@ EMFILE_MARKER = "MRK_INSTALLED_NATIVE_EMFILE_RETAINED_UNKNOWN"
 SHELL_SESSION_CASES = ("session-inputs", "session-refusals", "session-loss", "session-deadline")
 SHELL_CASES = ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply", *SHELL_SESSION_CASES)
 SHELL_FAILURE_LABEL_LIMIT = 512
+SHELL_PATH_FAILURE_FRAME_BOUND = 256
 # Literal observer labels only; never a prefix parser or raw-output escape.
 SHELL_FAILURE_STEPS = (
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=Bootstrap\n",
@@ -201,6 +202,14 @@ SHELL_BOOTSTRAP_PROGRESS = (
     b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=app-info-returned-before-hold\n",
 )
 # Only public observer categories; these do not establish native state/finality.
+SHELL_PATH_REJECTIONS = (
+    b"not-recorded", b"gtk-thread", b"gtk-dialog-book", b"gtk-dialog-original", b"gtk-owner-binding",
+    b"gtk-owner-interrupted", b"gtk-owner-facts", b"gtk-dialog-properties", b"gtk-initial-folder", b"gtk-target",
+    b"gtk-selection-setter", b"gtk-response-widget", b"gtk-action-widget", b"gtk-observer-endpoint", b"gtk-dialog-record",
+    b"gtk-selection-state", b"gtk-activation-state", b"gtk-filename-state", b"gtk-filename-absent", b"gtk-filename-different",
+    b"gtk-fixture-transition", b"gtk-response-state", b"gtk-response-contract", b"gtk-return-state", b"gtk-dispatch",
+    b"gtk-destroy-state", b"gtk-release-state",
+)
 SHELL_SESSION_REJECTIONS = (
     b"not-recorded", b"unknown-native-snapshot", b"native-readiness-invariant", b"evaluation-budget",
     b"unavailable-projection-script", b"evaluation-dispatch", b"step-pending-invariant",
@@ -3565,6 +3574,13 @@ def _shell_label_pair(raw):
     if type(raw) is not bytes or not 0 < len(raw) <= SHELL_FAILURE_LABEL_LIMIT:
         return None
     lines = raw.splitlines(keepends=True)
+    path_detail = None
+    if lines[0].startswith(b"MRK_INSTALLED_SHELL_PATH_FAILURE="):
+        # Prefix first, so no proper prefix of this new frame can masquerade
+        # as an old three-line Path result with the detail silently lost.
+        if len(lines) != 4 or len(raw) > SHELL_PATH_FAILURE_FRAME_BOUND:
+            return None
+        path_detail, lines = lines[0], lines[1:]
     # Session traces require their complete fourth record. Historical v1 keeps
     # its prior shape, distinguishable by absent firstOrigin metadata; never
     # invent provenance for it or accept a truncated v2 as a historical frame.
@@ -3577,6 +3593,18 @@ def _shell_label_pair(raw):
     session = result["step"].startswith("Session")  # Membership was checked above, not prefix admission.
     if len(lines) != (4 if session else 3):
         return None
+    if path_detail is not None:
+        match = re.fullmatch(rb"MRK_INSTALLED_SHELL_PATH_FAILURE=v1;index=(none|0|[1-9]|10);reject=([a-z-]{1,22})\n", path_detail)
+        if match is None:
+            return None
+        index_raw, rejection = match.groups()
+        index = None if index_raw == b"none" else int(index_raw)
+        indexed = {"PathBrowse", "PathSet", "PathActivate", "PathSettlement", "PathField"}
+        unindexed = {"PathDraft", "PathPreview", "PathNavigation"}
+        if (rejection not in SHELL_PATH_REJECTIONS or result["step"] not in indexed | unindexed
+                or result["step"] in indexed and index is None or result["step"] in unindexed and index is not None):
+            return None
+        result["path"] = {"recipeIndex": index, "rejection": rejection.decode("ascii")}
     if session:
         historical = lines[3].startswith(b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;")
         version = b"v1" if historical else b"v2"

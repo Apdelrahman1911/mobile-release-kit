@@ -1801,6 +1801,28 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertEqual(len(lifecycle.SHELL_FAILURE_BOUNDARIES), 8)
         self.assertEqual(set(lifecycle.SHELL_BOOTSTRAP_PROGRESS), progress)
         self.assertEqual(len(lifecycle.SHELL_BOOTSTRAP_PROGRESS), len(progress))
+        path_rejections = source.split("impl PathRejection {", 1)[1].split("struct PathDiagnostic", 1)[0]
+        path_tokens = tuple(value.encode("ascii") for value in re.findall(r'=> b"([a-z-]+)"', path_rejections))
+        self.assertEqual(path_tokens, lifecycle.SHELL_PATH_REJECTIONS)
+        self.assertEqual((len(path_tokens), len(set(path_tokens))), (27, 27))
+        self.assertTrue(all(re.fullmatch(rb"[a-z-]{1,22}", token) for token in path_tokens))
+        path_recipe = source.split("impl PathStep {", 1)[1].split("fn failure_line", 1)[0]
+        self.assertEqual(set(re.findall(r"Self::([A-Za-z]+)\(index\)", path_recipe)),
+                         {"Browse", "Set", "Activate", "Settled", "ReadField"})
+        self.assertIn("=> Some(index)", path_recipe); self.assertIn("_ => None", path_recipe)
+        self.assertIn("const PATH_CASES: [PathCase; 11]", source)
+        path_bound = (max(map(len, steps)) + max(map(len, boundaries)) + max(map(len, progress))
+                      + len(b"MRK_INSTALLED_SHELL_PATH_FAILURE=v1;index=none;reject=\n") + max(map(len, path_tokens)))
+        self.assertEqual(path_bound, 251)
+        self.assertLessEqual(path_bound, lifecycle.SHELL_PATH_FAILURE_FRAME_BOUND)
+        self.assertEqual(lifecycle.SHELL_PATH_FAILURE_FRAME_BOUND, 256)
+        self.assertIn("const PATH_FAILURE_FRAME_BOUND: usize = 256;", source)
+        encoder = source.split("fn failure_pair(", 1)[1].split("fn assert_failure_pair_contract", 1)[0]
+        self.assertLess(encoder.index('b"MRK_INSTALLED_SHELL_PATH_FAILURE=v1;index="'), encoder.index("trace.0.failure_line()"))
+        self.assertIn("diagnostic.step == step && session.is_none()", encoder)
+        self.assertIn("step.recipe_index().is_some_and(|index| index > 10)", encoder)
+        self.assertIn("(Step::Paths(_), _) | (_, Some(_)) => return None", encoder)
+        self.assertIn("if path.is_some() && length > PATH_FAILURE_FRAME_BOUND { return None; }", encoder)
         rejections = source.split("impl SessionRejection {", 1)[1].split("enum SessionWait", 1)[0]
         waits = source.split("impl SessionWait {", 1)[1].split("struct SessionDiagnostic", 1)[0]
         for block, expected in ((rejections, lifecycle.SHELL_SESSION_REJECTIONS), (waits, lifecycle.SHELL_SESSION_WAITS)):
@@ -2034,13 +2056,22 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         deadline = tick.split("        if Instant::now() >= self.end {", 1)[1].split(
             "        if std::thread::current().id() == self.main", 1)[0]
         self.assertIn("if let Some(mut r) = self.record() {", deadline)
-        self.assertIn("if !self.failed.swap(true, Ordering::SeqCst) { r.trace = (r.step, Boundary::Deadline); }", deadline)
+        winner = "if latch_failure(&self.failed, trace, bootstrap, (*step, Boundary::Deadline), progress) {"
+        self.assertIn(winner, deadline)
+        self.assertLess(deadline.index("SessionDiagnostic::sample(r.step,r.evaluations,r.session.diagnostic)"), deadline.index(winner))
+        self.assertLess(deadline.index("PathDiagnostic::sample(r.step)"), deadline.index(winner))
+        self.assertIn(winner + "\n                    r.session.diagnostic = diagnostic;\n                    r.paths.diagnostic = path_diagnostic;\n                }", deadline)
+        latch = source.split("fn latch_failure(", 1)[1].split("fn latch_session_diagnostic(", 1)[0]
+        self.assertEqual(latch.count("failed.swap(true, Ordering::SeqCst)"), 1)
+        self.assertIn("if !failed.swap(true, Ordering::SeqCst) { *trace = next_trace; *progress = next_progress; true } else { false }", latch)
         self.assertEqual(deadline.count("Boundary::Deadline"), 1)
         self.assertIn("\n            }\n            self.report_failure(); return;\n        }", deadline)
         self.assertIn("if self.failed.load(Ordering::SeqCst) { self.report_failure(); return; }", tick)
         self.assertIn("if std::thread::current().id() == self.main { self.fail(); self.report_failure(); return; }", tick)
         self.assertNotIn("self.end ||", tick)
-        self.assertIn("if !self.failed.load(Ordering::SeqCst) { r.trace = (r.step, boundary); }", source)
+        cache = source.split("fn record_at(&self", 1)[1].split("fn session_wait(", 1)[0]
+        self.assertIn("if !self.failed.load(Ordering::SeqCst) {\n            r.trace = (r.step, boundary);", cache)
+        self.assertIn("r.paths.diagnostic = PathDiagnostic::sample(r.step);\n        }", cache)
 
     def test_test_only_original_fd_sink_has_one_attempt_before_existing_stderr(self):
         source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()

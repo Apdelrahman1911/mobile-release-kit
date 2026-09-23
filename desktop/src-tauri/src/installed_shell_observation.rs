@@ -596,6 +596,11 @@ fn latch_session_diagnostic(failed: &AtomicBool, diagnostic: &mut Option<Session
     // callback or deadline cannot relabel this first cached rejection.
     if !failed.swap(true, Ordering::SeqCst) { *diagnostic = Some(next); }
 }
+fn latch_path_diagnostic(failed: &AtomicBool, diagnostic: &mut Option<PathDiagnostic>, next: PathDiagnostic) {
+    // The caller holds Record, including the matching trace. Generic failure,
+    // an earlier callback or a deadline winner cannot be relabelled later.
+    if !failed.swap(true, Ordering::SeqCst) { *diagnostic = Some(next); }
+}
 
 const PROJECT_SOURCE: &str = "plugins { id(\"com.android.application\") }\nandroid { defaultConfig { applicationId = \"org.example.mrk.observed\" } }\n";
 const APP_ID: &str = "org.example.mrk.observed";
@@ -717,7 +722,10 @@ const FAILURE_PAIR_LIMIT: usize = 512;
 // Existing conservative 311B plus five 3B prefixes and closed maxima
 // 19/15/12/26/14. Never omit/truncate a field to fit the unchanged 512B sink.
 const SESSION_FAILURE_FRAME_BOUND: usize = 412;
-fn failure_pair(trace: (Step, Boundary), progress: BootstrapProgress, session: Option<SessionDiagnostic>) -> Option<([u8; FAILURE_PAIR_LIMIT], usize)> {
+// At most 174B of existing lines plus a 77B closed prefix, within the same sink.
+const PATH_FAILURE_FRAME_BOUND: usize = 256;
+fn failure_pair(trace: (Step, Boundary), progress: BootstrapProgress, session: Option<SessionDiagnostic>,
+    path: Option<PathDiagnostic>) -> Option<([u8; FAILURE_PAIR_LIMIT], usize)> {
     fn append(bytes: &mut [u8; FAILURE_PAIR_LIMIT], length: &mut usize, part: &[u8]) -> Option<()> {
         let end = length.checked_add(part.len())?;
         bytes.get_mut(*length..end)?.copy_from_slice(part); *length = end; Some(())
@@ -729,9 +737,26 @@ fn failure_pair(trace: (Step, Boundary), progress: BootstrapProgress, session: O
     }
     let mut bytes = [0_u8; FAILURE_PAIR_LIMIT];
     let mut length = 0;
+    match (trace.0, path) {
+        (Step::Paths(step), Some(diagnostic)) if diagnostic.step == step && session.is_none() => {
+            if step.recipe_index().is_some_and(|index| index > 10) { return None; }
+            // Prefix first: a short write must not look like a complete legacy
+            // three-line Path frame with its new diagnostic silently omitted.
+            append(&mut bytes, &mut length, b"MRK_INSTALLED_SHELL_PATH_FAILURE=v1;index=")?;
+            if let Some(index) = step.recipe_index() {
+                let (digits, begin) = decimal(u16::from(index))?; append(&mut bytes, &mut length, &digits[begin..])?;
+            } else { append(&mut bytes, &mut length, b"none")?; }
+            append(&mut bytes, &mut length, b";reject=")?;
+            append(&mut bytes, &mut length, diagnostic.rejection.token())?;
+            append(&mut bytes, &mut length, b"\n")?;
+        },
+        (Step::Paths(_), _) | (_, Some(_)) => return None,
+        (_, None) => {},
+    }
     append(&mut bytes, &mut length, trace.0.failure_line())?;
     append(&mut bytes, &mut length, trace.1.failure_line())?;
     append(&mut bytes, &mut length, progress.failure_line())?;
+    if path.is_some() && length > PATH_FAILURE_FRAME_BOUND { return None; }
     match (trace.0, session) {
         (Step::Session(step), Some(diagnostic)) if diagnostic.step == step => {
             if diagnostic.evaluations > 128 || step.recipe_index().is_some_and(|index| index >= 64)
@@ -769,13 +794,13 @@ fn failure_pair(trace: (Step, Boundary), progress: BootstrapProgress, session: O
 fn assert_failure_pair_contract() {
     // Pure byte contracts only; no open, write, GTK or process work.
     for trace in [(Step::Bootstrap, Boundary::Bootstrap), (Step::PrepareSave, Boundary::Request),
-        (Step::Paths(PathStep::Settled(10)), Boundary::Settlement), (Step::SelectProject, Boundary::Deadline),
+        (Step::SelectProject, Boundary::Deadline),
         (Step::Exit, Boundary::Exit)] {
         for progress in [BootstrapProgress::NotSampled, BootstrapProgress::Attachment, BootstrapProgress::PageLoad,
             BootstrapProgress::OriginalRegistrySample, BootstrapProgress::AppInfoCatalog, BootstrapProgress::HeldAppInfo,
             BootstrapProgress::Advanced, BootstrapProgress::AppInfoReturnedBeforeHold] {
             let expected = [trace.0.failure_line(), trace.1.failure_line(), progress.failure_line()].concat();
-            assert!(failure_pair(trace, progress, None).is_some_and(|(bytes, length)|
+            assert!(failure_pair(trace, progress, None, None).is_some_and(|(bytes, length)|
                 length <= FAILURE_PAIR_LIMIT && bytes.get(..length) == Some(expected.as_slice())));
         }
     }
@@ -803,18 +828,18 @@ fn assert_failure_pair_contract() {
     let first = SessionDiagnostic { step, evaluations:128, rejection:SessionRejection::EvaluationBudget, wait:SessionWait::DisplayMismatch, first_failure:InstalledSessionFailure::not_recorded() };
     let expected = [step.failure_line(), Boundary::Settlement.failure_line(), BootstrapProgress::Advanced.failure_line(),
         b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v2;index=63;evaluations=128;reject=evaluation-budget;wait=rendered-display-mismatch;o=not-recorded;d=none;a=unassociated;q=na;w=na\n"].concat();
-    assert!(failure_pair(trace,BootstrapProgress::Advanced,Some(first)).is_some_and(|(bytes,length)|
+    assert!(failure_pair(trace,BootstrapProgress::Advanced,Some(first),None).is_some_and(|(bytes,length)|
         length <= FAILURE_PAIR_LIMIT && bytes.get(..length) == Some(expected.as_slice())));
     let longest = SessionDiagnostic { step:SessionStep::QuitPreserved,evaluations:128,
         rejection:SessionRejection::UnavailableScript,wait:SessionWait::ControlsMismatch, first_failure:InstalledSessionFailure::not_recorded() };
     let expected = [longest.step.failure_line(),Boundary::Settlement.failure_line(),BootstrapProgress::AppInfoReturnedBeforeHold.failure_line(),
         b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v2;index=none;evaluations=128;reject=unavailable-projection-script;wait=rendered-control-mismatch;o=not-recorded;d=none;a=unassociated;q=na;w=na\n"].concat();
-    assert!(failure_pair((Step::Session(longest.step),Boundary::Settlement),BootstrapProgress::AppInfoReturnedBeforeHold,Some(longest))
+    assert!(failure_pair((Step::Session(longest.step),Boundary::Settlement),BootstrapProgress::AppInfoReturnedBeforeHold,Some(longest),None)
         .is_some_and(|(bytes,length)|length <= FAILURE_PAIR_LIMIT && bytes.get(..length) == Some(expected.as_slice())));
     let bound = SessionDiagnostic { first_failure:InstalledSessionFailure::contract_sample(), ..longest };
     let expected = [bound.step.failure_line(),Boundary::Settlement.failure_line(),BootstrapProgress::AppInfoReturnedBeforeHold.failure_line(),
         b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v2;index=none;evaluations=128;reject=unavailable-projection-script;wait=rendered-control-mismatch;o=supervisor-disabled;d=none;a=bound;q=unavailable.spawn-other.xf;w=settle-unknown\n"].concat();
-    assert!(failure_pair((Step::Session(bound.step),Boundary::Settlement),BootstrapProgress::AppInfoReturnedBeforeHold,Some(bound))
+    assert!(failure_pair((Step::Session(bound.step),Boundary::Settlement),BootstrapProgress::AppInfoReturnedBeforeHold,Some(bound),None)
         .is_some_and(|(bytes,length)|length <= SESSION_FAILURE_FRAME_BOUND && bytes.get(..length) == Some(expected.as_slice())
             && bytes[..length].is_ascii() && bytes[..length].iter().filter(|byte| **byte == b'\n').count() == 4));
     assert_eq!(311 + 5 * 3 + 19 + 15 + 12 + 26 + 14, SESSION_FAILURE_FRAME_BOUND);
@@ -824,18 +849,18 @@ fn assert_failure_pair_contract() {
             let diagnostic = SessionDiagnostic { step,evaluations,rejection:SessionRejection::NotRecorded,wait:SessionWait::NotSampled, first_failure:InstalledSessionFailure::not_recorded() };
             let expected = format!("MRK_INSTALLED_SHELL_SESSION_FAILURE=v2;index={};evaluations={evaluations};reject=not-recorded;wait=not-sampled;o=not-recorded;d=none;a=unassociated;q=na;w=na\n",
                 step.recipe_index().map_or_else(|| "none".to_owned(),|index|index.to_string()));
-            assert!(failure_pair((Step::Session(step),Boundary::Settlement),BootstrapProgress::Advanced,Some(diagnostic))
+            assert!(failure_pair((Step::Session(step),Boundary::Settlement),BootstrapProgress::Advanced,Some(diagnostic),None)
                 .is_some_and(|(bytes,length)|bytes[..length].ends_with(expected.as_bytes())));
         }
     }
-    assert!(failure_pair(trace,BootstrapProgress::Advanced,None).is_none());
-    assert!(failure_pair((Step::Bootstrap,Boundary::Bootstrap),BootstrapProgress::NotSampled,Some(first)).is_none());
+    assert!(failure_pair(trace,BootstrapProgress::Advanced,None,None).is_none());
+    assert!(failure_pair((Step::Bootstrap,Boundary::Bootstrap),BootstrapProgress::NotSampled,Some(first),None).is_none());
     for bad in [SessionDiagnostic { step:SessionStep::Read(62,SA::Prepare("android-keystore","save")),..first },
         SessionDiagnostic { evaluations:129,..first },SessionDiagnostic { evaluations:127,..first }] {
-        assert!(failure_pair(trace,BootstrapProgress::Advanced,Some(bad)).is_none());
+        assert!(failure_pair(trace,BootstrapProgress::Advanced,Some(bad),None).is_none());
     }
     let outside = SessionDiagnostic { step:SessionStep::Read(64,SA::Prepare("android-keystore","save")),..first };
-    assert!(failure_pair((Step::Session(outside.step),Boundary::Settlement),BootstrapProgress::Advanced,Some(outside)).is_none());
+    assert!(failure_pair((Step::Session(outside.step),Boundary::Settlement),BootstrapProgress::Advanced,Some(outside),None).is_none());
     let sampled = SessionDiagnostic::sample(trace.0,127,Some(first)).unwrap();
     assert!(sampled.wait == SessionWait::DisplayMismatch && sampled.rejection == SessionRejection::NotRecorded && sampled.evaluations == 127);
     let other = SessionStep::Read(62,SA::Prepare("android-keystore","save"));
@@ -871,7 +896,7 @@ fn assert_failure_pair_contract() {
     let gtk_trace = (Step::Session(gtk.step),Boundary::Gtk);
     let expected = [gtk.step.failure_line(),Boundary::Gtk.failure_line(),BootstrapProgress::Advanced.failure_line(),
         b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v2;index=3;evaluations=16;reject=gtk-observer-endpoint;wait=gtk-action-insensitive;o=not-recorded;d=none;a=unassociated;q=na;w=na\n"].concat();
-    assert!(failure_pair(gtk_trace,BootstrapProgress::Advanced,Some(gtk)).is_some_and(|(bytes,length)|
+    assert!(failure_pair(gtk_trace,BootstrapProgress::Advanced,Some(gtk),None).is_some_and(|(bytes,length)|
         length <= FAILURE_PAIR_LIMIT && bytes.get(..length) == Some(expected.as_slice())));
     let same = SessionDiagnostic::sample(gtk_trace.0,16,Some(gtk)).unwrap();
     assert!(same.wait == SessionWait::GtkActionInsensitive && same.rejection == SessionRejection::NotRecorded);
@@ -938,7 +963,7 @@ fn assert_failure_pair_contract() {
         let expected = [step.failure_line(),Boundary::Settlement.failure_line(),BootstrapProgress::Advanced.failure_line(),
             b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v2;index=29;evaluations=73;reject=",rejection.token(),
             b";wait=native-reply-pending;o=not-recorded;d=none;a=unassociated;q=na;w=na\n"].concat();
-        assert!(failure_pair(trace,BootstrapProgress::Advanced,Some(diagnostic)).is_some_and(|(bytes,length)|
+        assert!(failure_pair(trace,BootstrapProgress::Advanced,Some(diagnostic),None).is_some_and(|(bytes,length)|
             length <= FAILURE_PAIR_LIMIT && bytes.get(..length) == Some(expected.as_slice())));
     }
     let typed = SessionDiagnostic { rejection:SessionRejection::ReplyAssetDeadline,..sampled };
@@ -955,6 +980,79 @@ fn assert_failure_pair_contract() {
         latch_session_diagnostic(&failed,&mut retained,SessionDiagnostic { rejection:SessionRejection::LostNativeSnapshot,..typed });
         assert!(retained == Some(if deadline_first { sampled } else { typed }));
         assert!(frozen_trace == if deadline_first { (trace.0,Boundary::Deadline) } else { trace });
+    }
+
+    // Path frames start with their version; recipe IDs never name previews.
+    for index in 0..=10 {
+        for step in [PathStep::Browse(index),PathStep::Set(index),PathStep::Activate(index),PathStep::Settled(index),PathStep::ReadField(index)] {
+            assert_eq!(step.recipe_index(),Some(index));
+            let diagnostic = PathDiagnostic::sample(Step::Paths(step)).unwrap();
+            let prefix = format!("MRK_INSTALLED_SHELL_PATH_FAILURE=v1;index={index};reject=not-recorded\n");
+            let expected = [prefix.as_bytes(),step.failure_line(),Boundary::Gtk.failure_line(),BootstrapProgress::Advanced.failure_line()].concat();
+            assert!(failure_pair((Step::Paths(step),Boundary::Gtk),BootstrapProgress::Advanced,None,Some(diagnostic))
+                .is_some_and(|(bytes,length)|length <= PATH_FAILURE_FRAME_BOUND && bytes.get(..length) == Some(expected.as_slice())));
+        }
+    }
+    for step in [PathStep::Start,PathStep::ReadDraft,PathStep::Preview(0),PathStep::Preview(1),PathStep::Preview(2),
+        PathStep::ReadPreview(0),PathStep::ReadPreview(1),PathStep::ReadPreview(2),PathStep::Ios,PathStep::Metadata,
+        PathStep::Settings,PathStep::General,PathStep::FinalIos] {
+        assert_eq!(step.recipe_index(),None);
+        let diagnostic = PathDiagnostic::sample(Step::Paths(step)).unwrap();
+        let expected = [b"MRK_INSTALLED_SHELL_PATH_FAILURE=v1;index=none;reject=not-recorded\n".as_slice(),step.failure_line(),
+            Boundary::Settlement.failure_line(),BootstrapProgress::AppInfoReturnedBeforeHold.failure_line()].concat();
+        assert!(failure_pair((Step::Paths(step),Boundary::Settlement),BootstrapProgress::AppInfoReturnedBeforeHold,None,Some(diagnostic))
+            .is_some_and(|(bytes,length)|length <= PATH_FAILURE_FRAME_BOUND && bytes.get(..length) == Some(expected.as_slice())));
+    }
+    let path_step = PathStep::Activate(0);
+    let path_trace = (Step::Paths(path_step),Boundary::Gtk);
+    let path_plain = PathDiagnostic::sample(path_trace.0).unwrap();
+    let path_gtk = PathDiagnostic { step:path_step,rejection:PathRejection::GtkInitialFolder };
+    let expected = [b"MRK_INSTALLED_SHELL_PATH_FAILURE=v1;index=0;reject=gtk-initial-folder\n".as_slice(),
+        path_step.failure_line(),Boundary::Gtk.failure_line(),BootstrapProgress::Advanced.failure_line()].concat();
+    assert!(failure_pair(path_trace,BootstrapProgress::Advanced,None,Some(path_gtk))
+        .is_some_and(|(bytes,length)|bytes.get(..length) == Some(expected.as_slice()) && bytes[..length].is_ascii()
+            && bytes[..length].iter().filter(|byte| **byte == b'\n').count() == 4));
+    assert!(failure_pair(path_trace,BootstrapProgress::Advanced,None,None).is_none());
+    assert!(failure_pair(path_trace,BootstrapProgress::Advanced,Some(first),Some(path_gtk)).is_none());
+    assert!(failure_pair(gtk_trace,BootstrapProgress::Advanced,Some(gtk),Some(path_gtk)).is_none());
+    assert!(failure_pair((Step::Close,Boundary::Gtk),BootstrapProgress::Advanced,None,Some(path_gtk)).is_none());
+    for step in [PathStep::Set(0),PathStep::Activate(1)] {
+        assert!(failure_pair(path_trace,BootstrapProgress::Advanced,None,Some(PathDiagnostic { step,..path_gtk })).is_none());
+    }
+    for index in [11,255] {
+        for step in [PathStep::Browse(index),PathStep::Set(index),PathStep::Activate(index),PathStep::Settled(index),PathStep::ReadField(index)] {
+            let diagnostic = PathDiagnostic::sample(Step::Paths(step)).unwrap();
+            assert!(failure_pair((Step::Paths(step),Boundary::Gtk),BootstrapProgress::Advanced,None,Some(diagnostic)).is_none());
+        }
+    }
+    assert!(PathDiagnostic::sample(Step::Close).is_none());
+    assert!(174 + 77 <= PATH_FAILURE_FRAME_BOUND && PATH_FAILURE_FRAME_BOUND < FAILURE_PAIR_LIMIT);
+    // Each possible first winner retains matching trace/reason. A later return
+    // at another recipe cannot erase a real GTK cause or invent one for generic
+    // failure/deadline. The actual callbacks perform these writes under Record.
+    for order in [[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]] {
+        let failed = AtomicBool::new(false);
+        let original_trace = (path_trace.0,Boundary::Settlement);
+        let mut trace = original_trace; let mut progress = BootstrapProgress::Advanced;
+        let mut retained = Some(path_plain);
+        for event in order {
+            match event {
+                0 => failed.store(true,Ordering::SeqCst),
+                1 => {
+                    if !failed.load(Ordering::SeqCst) { trace = path_trace; retained = PathDiagnostic::sample(path_trace.0); }
+                    latch_path_diagnostic(&failed,&mut retained,path_gtk);
+                },
+                2 => {
+                    let next = PathDiagnostic::sample(path_trace.0);
+                    if latch_failure(&failed,&mut trace,&mut progress,(path_trace.0,Boundary::Deadline),BootstrapProgress::Advanced) { retained = next; }
+                },
+                _ => unreachable!(),
+            }
+        }
+        latch_path_diagnostic(&failed,&mut retained,PathDiagnostic { step:PathStep::Activate(4),rejection:PathRejection::GtkReturnState });
+        assert!(failed.load(Ordering::SeqCst) && progress == BootstrapProgress::Advanced);
+        assert!(retained == Some(if order[0] == 1 { path_gtk } else { path_plain }));
+        assert!(trace == match order[0] { 0 => original_trace,1 => path_trace,_ => (path_trace.0,Boundary::Deadline) });
     }
 }
 
@@ -1052,6 +1150,13 @@ fn assert_picker_activation_return_contract() {
 enum PathStep { Start, ReadDraft, Preview(u8), ReadPreview(u8), Browse(u8), Set(u8), Activate(u8),
     Settled(u8), ReadField(u8), Ios, Metadata, Settings, General, FinalIos }
 impl PathStep {
+    fn recipe_index(self) -> Option<u8> {
+        match self {
+            Self::Browse(index) | Self::Set(index) | Self::Activate(index) | Self::Settled(index) | Self::ReadField(index) => Some(index),
+            // Preview indices are rounds, not entries in PATH_CASES.
+            _ => None,
+        }
+    }
     fn failure_line(self) -> &'static [u8] {
         match self {
             Self::Start | Self::ReadDraft => b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathDraft\n",
@@ -1063,6 +1168,55 @@ impl PathStep {
             Self::ReadField(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathField\n",
             _ => b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathNavigation\n",
         }
+    }
+}
+// Closed observer DATA only: no filename, private path, identifier or native
+// query is retained or produced by these diagnostics.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PathRejection { NotRecorded, GtkThread, GtkDialogBook, GtkDialogOriginal, GtkOwnerBinding,
+    GtkOwnerInterrupted, GtkOwnerFacts, GtkDialogProperties, GtkInitialFolder, GtkTarget, GtkSelectionSetter,
+    GtkResponseWidget, GtkActionWidget, GtkObserverEndpoint, GtkDialogRecord, GtkSelectionState, GtkActivationState,
+    GtkFilenameState, GtkFilenameAbsent, GtkFilenameDifferent, GtkFixtureTransition, GtkResponseState,
+    GtkResponseContract, GtkReturnState, GtkDispatch, GtkDestroyState, GtkReleaseState }
+impl PathRejection {
+    fn token(self) -> &'static [u8] {
+        match self {
+            Self::NotRecorded => b"not-recorded",
+            Self::GtkThread => b"gtk-thread",
+            Self::GtkDialogBook => b"gtk-dialog-book",
+            Self::GtkDialogOriginal => b"gtk-dialog-original",
+            Self::GtkOwnerBinding => b"gtk-owner-binding",
+            Self::GtkOwnerInterrupted => b"gtk-owner-interrupted",
+            Self::GtkOwnerFacts => b"gtk-owner-facts",
+            Self::GtkDialogProperties => b"gtk-dialog-properties",
+            Self::GtkInitialFolder => b"gtk-initial-folder",
+            Self::GtkTarget => b"gtk-target",
+            Self::GtkSelectionSetter => b"gtk-selection-setter",
+            Self::GtkResponseWidget => b"gtk-response-widget",
+            Self::GtkActionWidget => b"gtk-action-widget",
+            Self::GtkObserverEndpoint => b"gtk-observer-endpoint",
+            Self::GtkDialogRecord => b"gtk-dialog-record",
+            Self::GtkSelectionState => b"gtk-selection-state",
+            Self::GtkActivationState => b"gtk-activation-state",
+            Self::GtkFilenameState => b"gtk-filename-state",
+            Self::GtkFilenameAbsent => b"gtk-filename-absent",
+            Self::GtkFilenameDifferent => b"gtk-filename-different",
+            Self::GtkFixtureTransition => b"gtk-fixture-transition",
+            Self::GtkResponseState => b"gtk-response-state",
+            Self::GtkResponseContract => b"gtk-response-contract",
+            Self::GtkReturnState => b"gtk-return-state",
+            Self::GtkDispatch => b"gtk-dispatch",
+            Self::GtkDestroyState => b"gtk-destroy-state",
+            Self::GtkReleaseState => b"gtk-release-state",
+        }
+    }
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PathDiagnostic { step: PathStep, rejection: PathRejection }
+impl PathDiagnostic {
+    fn sample(step: Step) -> Option<Self> {
+        let Step::Paths(step) = step else { return None; };
+        Some(Self { step, rejection: PathRejection::NotRecorded })
     }
 }
 #[derive(Clone, Copy)]
@@ -1085,13 +1239,14 @@ const PATH_CASES: [PathCase; 11] = [
 #[derive(Default)]
 struct PathOperation { picker: Picker, requested: bool, returned: bool, settled: bool, visible: bool }
 struct Paths {
+    diagnostic: Option<PathDiagnostic>,
     operations: [PathOperation; 11], base: Option<Value>, draft: Option<Value>, patched: Option<Value>,
     previews_requested: u8, previews: [Option<Value>; 3], previews_visible: u8, draft_visible: bool,
     pair_visible: bool, final_pair_visible: bool, fixture: Option<PathFixture>,
 }
 impl Paths {
     fn new(root: Option<&Path>) -> Self {
-        Self { operations: std::array::from_fn(|_| PathOperation::default()), base:None, draft:None, patched:None,
+        Self { diagnostic:None, operations: std::array::from_fn(|_| PathOperation::default()), base:None, draft:None, patched:None,
             previews_requested:0, previews:std::array::from_fn(|_| None), previews_visible:0, draft_visible:false,
             pair_visible:false, final_pair_visible:false, fixture:root.and_then(|root| PathFixture::capture(root).ok()) }
     }
@@ -1845,6 +2000,7 @@ impl Observation {
         if !self.failed.load(Ordering::SeqCst) {
             r.trace = (r.step, boundary);
             r.session.diagnostic = SessionDiagnostic::sample(r.step,r.evaluations,r.session.diagnostic);
+            r.paths.diagnostic = PathDiagnostic::sample(r.step);
         }
         Some(r)
     }
@@ -1864,15 +2020,21 @@ impl Observation {
             latch_session_diagnostic(&self.failed,&mut r.session.diagnostic,diagnostic);
         } else { self.fail(); }
     }
+    fn path_fail(&self, r: &mut Record, rejection: PathRejection) {
+        if let Some(mut diagnostic) = PathDiagnostic::sample(r.trace.0) {
+            diagnostic.rejection = rejection;
+            latch_path_diagnostic(&self.failed,&mut r.paths.diagnostic,diagnostic);
+        } else { self.fail(); }
+    }
     fn report_failure(&self) {
         if !self.failed.load(Ordering::SeqCst) || self.failure_reported.load(Ordering::SeqCst) { return; }
-        let (trace, progress, session) = match self.record.try_lock() { Ok(r) => (r.trace, r.bootstrap, r.session.diagnostic), Err(_) => return };
+        let (trace, progress, session, path) = match self.record.try_lock() { Ok(r) => (r.trace, r.bootstrap, r.session.diagnostic, r.paths.diagnostic), Err(_) => return };
         if self.failure_reported.swap(true, Ordering::SeqCst) { return; }
-        // Fixed enums and bounded cached session counters, outside every
+        // Fixed enums and bounded cached counters/recipe indices, outside every
         // record/GTK lock. No identifiers, DTOs, inputs or exception bodies.
         // One unbuffered attempt before stderr: partial/EINTR/error is not
         // retried, formatted or allowed to affect the original failure latch.
-        if let Some((bytes, length)) = failure_pair(trace, progress, session) {
+        if let Some((bytes, length)) = failure_pair(trace, progress, session, path) {
             if let Some(pair) = bytes.get(..length) { let _ = rustix::io::write(&self.failure_sink, pair); }
         }
         super::diagnostic(trace.0.failure_line()); super::diagnostic(trace.1.failure_line());
@@ -2668,13 +2830,22 @@ impl Observation {
             || !matches!(r.step,Step::Paths(PathStep::Browse(i) | PathStep::Set(i) | PathStep::Activate(i)) if i as usize == index) { self.fail(); return; }
         r.paths.operations[index].picker.created = true;
     }
+    pub(super) fn path_failed(&self, rejection: PathRejection) {
+        // Shell callers have left every DIALOG/GuiFacts borrow. Record-held
+        // callbacks use path_fail directly and never reacquire this mutex.
+        let Some(mut r) = self.record_at(Boundary::Gtk) else { return; };
+        self.path_fail(&mut r,rejection);
+    }
     pub(super) fn path_dialog(&self, id: u32, index: u8) -> Result<(PF,bool),()> {
-        let Some(r) = self.record_at(Boundary::Gtk) else { return Err(()); };
-        let Some(case) = PATH_CASES.get(index as usize) else { return Err(()); };
-        if self.failed.load(Ordering::SeqCst) || Instant::now() >= self.end || self.case != Case::ProjectPaths
-            || id != u32::from(index)+3 || !r.paths.operations[index as usize].requested
+        let Some(mut r) = self.record_at(Boundary::Gtk) else { return Err(()); };
+        let Some(case) = PATH_CASES.get(index as usize) else { self.path_fail(&mut r,PathRejection::GtkDialogRecord); return Err(()); };
+        if self.failed.load(Ordering::SeqCst) { return Err(()); }
+        if Instant::now() >= self.end { self.path_fail(&mut r,PathRejection::GtkObserverEndpoint); return Err(()); }
+        if self.case != Case::ProjectPaths || id != u32::from(index)+3 || !r.paths.operations[index as usize].requested
             || !r.paths.operations[index as usize].picker.created
-            || !matches!(r.pending,Some(Pending::Path(PathStep::Set(i) | PathStep::Activate(i))) if i == index) { self.fail(); return Err(()); }
+            || !matches!(r.pending,Some(Pending::Path(PathStep::Set(i) | PathStep::Activate(i))) if i == index) {
+            self.path_fail(&mut r,PathRejection::GtkDialogRecord); return Err(());
+        }
         Ok((case.field,!r.paths.operations[index as usize].picker.selected))
     }
     pub(super) fn path_target(&self, index: u8) -> Option<PathBuf> {
@@ -2684,57 +2855,69 @@ impl Observation {
     }
     pub(super) fn path_selection(&self, id: u32, index: u8) -> Result<(),()> {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return Err(()); };
-        if self.case != Case::ProjectPaths || Instant::now() >= self.end || self.failed.load(Ordering::SeqCst)
-            || id != u32::from(index)+3 || r.pending != Some(Pending::Path(PathStep::Set(index))) { self.fail(); return Err(()); }
-        let Some(op) = r.paths.operations.get_mut(index as usize) else { self.fail(); return Err(()); };
-        if !op.picker.created || op.picker.selected || op.picker.activated { self.fail(); return Err(()); }
+        if self.case != Case::ProjectPaths { self.path_fail(&mut r,PathRejection::GtkDialogRecord); return Err(()); }
+        if Instant::now() >= self.end { self.path_fail(&mut r,PathRejection::GtkObserverEndpoint); return Err(()); }
+        if self.failed.load(Ordering::SeqCst) { return Err(()); }
+        if id != u32::from(index)+3 || r.pending != Some(Pending::Path(PathStep::Set(index))) {
+            self.path_fail(&mut r,PathRejection::GtkDialogRecord); return Err(());
+        }
+        let Some(op) = r.paths.operations.get_mut(index as usize) else { self.path_fail(&mut r,PathRejection::GtkDialogRecord); return Err(()); };
+        if !op.picker.created || op.picker.selected || op.picker.activated { self.path_fail(&mut r,PathRejection::GtkSelectionState); return Err(()); }
         op.picker.selected = true; Ok(())
     }
     pub(super) fn path_activation(&self, id: u32, index: u8) -> Result<(),()> {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return Err(()); };
-        let Some(case) = PATH_CASES.get(index as usize) else { return Err(()); };
-        if self.case != Case::ProjectPaths || Instant::now() >= self.end || self.failed.load(Ordering::SeqCst)
-            || id != u32::from(index)+3 || r.pending != Some(Pending::Path(PathStep::Activate(index))) { self.fail(); return Err(()); }
+        let Some(case) = PATH_CASES.get(index as usize) else { self.path_fail(&mut r,PathRejection::GtkDialogRecord); return Err(()); };
+        if self.case != Case::ProjectPaths { self.path_fail(&mut r,PathRejection::GtkDialogRecord); return Err(()); }
+        if Instant::now() >= self.end { self.path_fail(&mut r,PathRejection::GtkObserverEndpoint); return Err(()); }
+        if self.failed.load(Ordering::SeqCst) { return Err(()); }
+        if id != u32::from(index)+3 || r.pending != Some(Pending::Path(PathStep::Activate(index))) {
+            self.path_fail(&mut r,PathRejection::GtkDialogRecord); return Err(());
+        }
         let op = &mut r.paths.operations[index as usize];
-        if !op.picker.created || op.picker.activated || op.picker.selected != case.path.is_some() { self.fail(); return Err(()); }
+        if !op.picker.created || op.picker.activated || op.picker.selected != case.path.is_some() { self.path_fail(&mut r,PathRejection::GtkActivationState); return Err(()); }
         op.picker.activated = true; Ok(())
     }
     pub(super) fn path_filename(&self, id: u32, field: PF, path: Option<&Path>) {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return; };
-        let Some(index) = id.checked_sub(3).filter(|i| *i < 11) else { self.fail(); return; };
+        let Some(index) = id.checked_sub(3).filter(|i| *i < 11) else { self.path_fail(&mut r,PathRejection::GtkFilenameState); return; };
         let index = index as usize;
-        if self.case != Case::ProjectPaths || self.failed.load(Ordering::SeqCst) || Instant::now() >= self.end
-            || PATH_CASES[index].field != field || path.is_none() || path != self.path_target(index as u8).as_deref()
-            || !r.paths.operations[index].picker.activated || r.paths.operations[index].picker.filename
-            || r.paths.operations[index].picker.responded { self.fail(); return; }
+        if self.case != Case::ProjectPaths { self.path_fail(&mut r,PathRejection::GtkFilenameState); return; }
+        if self.failed.load(Ordering::SeqCst) { return; }
+        if Instant::now() >= self.end { self.path_fail(&mut r,PathRejection::GtkObserverEndpoint); return; }
+        if PATH_CASES[index].field != field { self.path_fail(&mut r,PathRejection::GtkFilenameState); return; }
+        if path.is_none() { self.path_fail(&mut r,PathRejection::GtkFilenameAbsent); return; }
+        if path != self.path_target(index as u8).as_deref() { self.path_fail(&mut r,PathRejection::GtkFilenameDifferent); return; }
+        if !r.paths.operations[index].picker.activated || r.paths.operations[index].picker.filename
+            || r.paths.operations[index].picker.responded { self.path_fail(&mut r,PathRejection::GtkFilenameState); return; }
         // Exactly after the production filename() return and BEFORE its
         // selected_path publication. This callback changes only fixed fixture
         // metadata; it does not start a worker or manufacture a source result.
-        if id >= 10 && !r.paths.fixture.as_mut().is_some_and(|fixture| fixture.transition(id).is_ok()) { self.fail(); return; }
-        if Instant::now() >= self.end { self.fail(); return; }
+        if id >= 10 && !r.paths.fixture.as_mut().is_some_and(|fixture| fixture.transition(id).is_ok()) { self.path_fail(&mut r,PathRejection::GtkFixtureTransition); return; }
+        if Instant::now() >= self.end { self.path_fail(&mut r,PathRejection::GtkObserverEndpoint); return; }
         r.paths.operations[index].picker.filename = true;
     }
     pub(super) fn path_response(&self, id: u32, accepted: bool, cancelled: bool, disposal: bool) {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return; };
-        let Some(index) = id.checked_sub(3).filter(|i| *i < 11) else { self.fail(); return; };
+        let Some(index) = id.checked_sub(3).filter(|i| *i < 11) else { self.path_fail(&mut r,PathRejection::GtkResponseState); return; };
         let select = PATH_CASES[index as usize].path.is_some(); let p = &mut r.paths.operations[index as usize].picker;
-        if self.case != Case::ProjectPaths || !p.activated || p.destroyed || p.released { self.fail(); return; }
+        if self.case != Case::ProjectPaths || !p.activated || p.destroyed || p.released { self.path_fail(&mut r,PathRejection::GtkResponseState); return; }
         if !p.responded && !disposal && (select && accepted && !cancelled && p.filename || !select && cancelled && !accepted && !p.filename) { p.responded = true; }
         else if p.responded && p.returned && disposal && !accepted && !cancelled && !p.disposal { p.disposal = true; }
-        else { self.fail(); }
+        else { self.path_fail(&mut r,PathRejection::GtkResponseContract); }
     }
     fn path_gtk_returned(&self, path: PathStep, result: Result<bool,()>) {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return; };
-        if r.pending.take() != Some(Pending::Path(path)) || r.step != Step::Paths(path) { self.fail(); return; }
-        let (index,selecting) = match path { PathStep::Set(i) => (i,true), PathStep::Activate(i) => (i,false), _ => { self.fail(); return; } };
-        let Some(op) = r.paths.operations.get_mut(index as usize) else { self.fail(); return; };
+        if r.pending.take() != Some(Pending::Path(path)) || r.step != Step::Paths(path) { self.path_fail(&mut r,PathRejection::GtkReturnState); return; }
+        let (index,selecting) = match path { PathStep::Set(i) => (i,true), PathStep::Activate(i) => (i,false), _ => { self.path_fail(&mut r,PathRejection::GtkReturnState); return; } };
+        let Some(op) = r.paths.operations.get_mut(index as usize) else { self.path_fail(&mut r,PathRejection::GtkReturnState); return; };
         match result {
             Ok(false) if !op.picker.activated && (!selecting || !op.picker.selected) => {},
             Ok(true) if selecting && op.picker.selected && !op.picker.activated => r.step = Step::Paths(PathStep::Activate(index)),
             Ok(true) if !selecting => {
-                if !op.picker.activation_returned(result) { self.fail(); return; }
+                if !op.picker.activation_returned(result) { self.path_fail(&mut r,PathRejection::GtkReturnState); return; }
                 r.step = Step::Paths(PathStep::Settled(index));
-            }, _ => self.fail(),
+            }, _ => self.path_fail(&mut r,PathRejection::GtkReturnState),
         }
     }
     pub(super) fn preview_request(&self, base: &Value, draft: &Value) {
@@ -2846,10 +3029,12 @@ impl Observation {
             // this relay was acquiring the record. Report only after unlock.
             if let Some(mut r) = self.record() {
                 let diagnostic = SessionDiagnostic::sample(r.step,r.evaluations,r.session.diagnostic);
+                let path_diagnostic = PathDiagnostic::sample(r.step);
                 let Record { step, trace, bootstrap, .. } = &mut *r;
                 let progress = *bootstrap;
                 if latch_failure(&self.failed, trace, bootstrap, (*step, Boundary::Deadline), progress) {
                     r.session.diagnostic = diagnostic;
+                    r.paths.diagnostic = path_diagnostic;
                 }
             }
             self.report_failure(); return;
@@ -3041,7 +3226,9 @@ impl Observation {
                     let result = if matches!(path,PathStep::Set(_)) { super::owned_gtk::select_observed_path(&app,&q,index) }
                         else { super::owned_gtk::activate_observed_path(&app,&q,index) };
                     q.path_gtk_returned(path,result);
-                }).is_err() { self.fail(); }
+                }).is_err() {
+                    if let Some(mut r) = self.record() { self.path_fail(&mut r,PathRejection::GtkDispatch); } else { self.fail(); }
+                }
             },
             Step::Cancel | Step::SetProject | Step::SelectProject => {
                 let q = self.clone(); let app = app.clone();
@@ -3450,7 +3637,7 @@ impl Observation {
         }
         if self.case == Case::ProjectPaths && (3..=13).contains(&id) {
             let p = &mut r.paths.operations[(id-3) as usize].picker;
-            if !seen || !p.responded || p.destroyed { self.fail(); return; }
+            if !seen || !p.responded || p.destroyed { self.path_fail(&mut r,PathRejection::GtkDestroyState); return; }
             p.destroyed = true; return;
         }
         if self.case == Case::Positive && (3..=4).contains(&id) {
@@ -3475,7 +3662,7 @@ impl Observation {
         }
         if self.case == Case::ProjectPaths && (3..=13).contains(&id) {
             let p = &mut r.paths.operations[(id-3) as usize].picker;
-            if !seen || !p.destroyed || p.released { self.fail(); return; }
+            if !seen || !p.destroyed || p.released { self.path_fail(&mut r,PathRejection::GtkReleaseState); return; }
             p.released = true; return;
         }
         if self.case == Case::Positive && (3..=4).contains(&id) {
