@@ -7,7 +7,7 @@
 #![forbid(unsafe_code)]
 
 use std::{collections::BTreeSet, sync::{Mutex, OnceLock}};
-use mrk_windows_installed_native::{CloseOutcome, Publication, PUBLICATION_PAYLOADS};
+use mrk_windows_installed_native::{CloseOutcome, Error as NativeError, Publication, PUBLICATION_PAYLOADS};
 use sha2::{Digest, Sha256};
 use crate::runtime::windows_version::{Inventory, VersionSpec, MANIFEST_BYTES, TARGET};
 
@@ -28,7 +28,66 @@ pub enum PublicationError {
     /// The original fixed target-D creation returned ERROR_ALREADY_EXISTS;
     /// no output was created/exposed and the original owner actually settled.
     OccupiedTargetSettled,
-    Failed { possibly_exposed: bool, originals_unknown: bool },
+    Failed { cause: PublicationFailure, possibly_exposed: bool, originals_unknown: bool },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FailurePhase {
+    Admit, Decode, Create, StartCopy, CopyNext, CopyCount, CopySize, CopyVerify, FinishCopy,
+    ReadbackNext, ReadbackCount, ReadbackSize, ReadbackVerify, FinishReadback, Seal, FinalPostcondition,
+}
+impl FailurePhase {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Admit => "admit", Self::Decode => "decode", Self::Create => "create",
+            Self::StartCopy => "start-copy", Self::CopyNext => "copy-next", Self::CopyCount => "copy-count",
+            Self::CopySize => "copy-size", Self::CopyVerify => "copy-verify", Self::FinishCopy => "finish-copy",
+            Self::ReadbackNext => "readback-next", Self::ReadbackCount => "readback-count",
+            Self::ReadbackSize => "readback-size", Self::ReadbackVerify => "readback-verify",
+            Self::FinishReadback => "finish-readback", Self::Seal => "seal", Self::FinalPostcondition => "final-postcondition",
+        }
+    }
+}
+/// Closed DATA from the first returning operation, never a native owner or receipt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PublicationFailure { phase: FailurePhase, ordinal: Option<usize>, native: Option<NativeError> }
+impl PublicationFailure {
+    fn native(phase: FailurePhase, ordinal: Option<usize>, error: NativeError) -> Self {
+        Self { phase, ordinal, native: Some(error) }
+    }
+    fn policy(phase: FailurePhase, ordinal: Option<usize>) -> Self { Self { phase, ordinal, native: None } }
+    fn class(self) -> &'static str {
+        match self.native {
+            None => "policy", Some(NativeError::Unavailable) => "unavailable", Some(NativeError::Unsafe) => "unsafe",
+            Some(NativeError::Bounds) => "bounds", Some(NativeError::State) => "state", Some(NativeError::Unknown) => "unknown",
+        }
+    }
+}
+impl PublicationError {
+    /// One bounded ASCII failure line; no owner/native reads or arbitrary error formatting.
+    /// Pre-owner errors (including AlreadyStarted) assert no exposure or finality facts.
+    pub fn diagnostic_line(self) -> Option<String> {
+        let observed = |value| if value { "true" } else { "false" };
+        let (phase, class, ordinal, exposed, unknown) = match self {
+            Self::Invocation => ("invocation", "unobserved", None, "unobserved", "unobserved"),
+            Self::Profile => ("profile", "unobserved", None, "unobserved", "unobserved"),
+            Self::AlreadyStarted => ("already-started", "unobserved", None, "unobserved", "unobserved"),
+            Self::OwnerUnavailable => ("owner-unavailable", "unobserved", None, "unobserved", "unobserved"),
+            Self::OccupiedTargetSettled => return None, // Expected exit2 remains silent.
+            Self::Failed { cause, possibly_exposed, originals_unknown } =>
+                (cause.phase.label(), cause.class(), cause.ordinal, observed(possibly_exposed), observed(originals_unknown)),
+        };
+        let mut line = String::with_capacity(192);
+        line.push_str("MRK_WINDOWS_RUNTIME_PUBLISH_FAILURE_V1=phase="); line.push_str(phase);
+        line.push_str(";class="); line.push_str(class); line.push_str(";ordinal=");
+        if let Some(index) = ordinal.filter(|index| *index < 47) {
+            if index >= 10 { line.push(char::from(b'0' + (index / 10) as u8)); }
+            line.push(char::from(b'0' + (index % 10) as u8));
+        } else { line.push_str("none"); }
+        line.push_str(";possiblyExposed="); line.push_str(exposed);
+        line.push_str(";originalsUnknown="); line.push_str(unknown); line.push('\n');
+        if line.len() <= 256 { Some(line) } else { None }
+    }
 }
 type Checked<T> = Result<T, ()>;
 fn require(value: bool) -> Checked<()> { if value { Ok(()) } else { Err(()) } }
@@ -81,36 +140,39 @@ impl Expected {
     }
 }
 
-fn produce(owner: &mut Publication, spec: &VersionSpec) -> Checked<()> {
-    let manifest = owner.admit_once().map_err(|_| ())?;
-    let expected = Expected::decode(spec, &manifest)?;
-    owner.create_once(expected.sizes).map_err(|_| ())?;
+fn produce(owner: &mut Publication, spec: &VersionSpec) -> Result<(), PublicationFailure> {
+    let manifest = owner.admit_once().map_err(|error| PublicationFailure::native(FailurePhase::Admit, None, error))?;
+    let expected = Expected::decode(spec, &manifest).map_err(|_| PublicationFailure::policy(FailurePhase::Decode, None))?;
+    owner.create_once(expected.sizes).map_err(|error| PublicationFailure::native(FailurePhase::Create, None, error))?;
     for index in 0..PUBLICATION_PAYLOADS.len() {
-        owner.start_copy(index).map_err(|_| ())?;
+        let ordinal = Some(index);
+        owner.start_copy(index).map_err(|error| PublicationFailure::native(FailurePhase::StartCopy, ordinal, error))?;
         let mut count = 0u64;
         let mut hasher = Sha256::new();
         loop {
-            let bytes = owner.copy_next().map_err(|_| ())?;
+            let bytes = owner.copy_next().map_err(|error| PublicationFailure::native(FailurePhase::CopyNext, ordinal, error))?;
             if bytes.is_empty() { break; } // native original EOF, not a length guess
-            count = count.checked_add(bytes.len() as u64).ok_or(())?;
-            require(count <= expected.sizes[index])?; hasher.update(&bytes);
+            count = count.checked_add(bytes.len() as u64).ok_or_else(|| PublicationFailure::policy(FailurePhase::CopyCount, ordinal))?;
+            require(count <= expected.sizes[index]).map_err(|_| PublicationFailure::policy(FailurePhase::CopySize, ordinal))?;
+            hasher.update(&bytes);
         }
-        expected.verify(index, count, hasher)?;
+        expected.verify(index, count, hasher).map_err(|_| PublicationFailure::policy(FailurePhase::CopyVerify, ordinal))?;
         // No readback can replace a failed flush or actual writer CloseHandle.
-        owner.finish_copy().map_err(|_| ())?;
+        owner.finish_copy().map_err(|error| PublicationFailure::native(FailurePhase::FinishCopy, ordinal, error))?;
         let mut count = 0u64;
         let mut hasher = Sha256::new();
         loop {
-            let bytes = owner.readback_next().map_err(|_| ())?;
+            let bytes = owner.readback_next().map_err(|error| PublicationFailure::native(FailurePhase::ReadbackNext, ordinal, error))?;
             if bytes.is_empty() { break; }
-            count = count.checked_add(bytes.len() as u64).ok_or(())?;
-            require(count <= expected.sizes[index])?; hasher.update(&bytes);
+            count = count.checked_add(bytes.len() as u64).ok_or_else(|| PublicationFailure::policy(FailurePhase::ReadbackCount, ordinal))?;
+            require(count <= expected.sizes[index]).map_err(|_| PublicationFailure::policy(FailurePhase::ReadbackSize, ordinal))?;
+            hasher.update(&bytes);
         }
-        expected.verify(index, count, hasher)?;
-        owner.finish_readback().map_err(|_| ())?;
+        expected.verify(index, count, hasher).map_err(|_| PublicationFailure::policy(FailurePhase::ReadbackVerify, ordinal))?;
+        owner.finish_readback().map_err(|error| PublicationFailure::native(FailurePhase::FinishReadback, ordinal, error))?;
     }
-    owner.seal_once().map_err(|_| ())?;
-    require(owner.published_and_settled())
+    owner.seal_once().map_err(|error| PublicationFailure::native(FailurePhase::Seal, None, error))?;
+    require(owner.published_and_settled()).map_err(|_| PublicationFailure::policy(FailurePhase::FinalPostcondition, None))
 }
 
 /// No arguments, environment paths, current directory, self-executable lookup,
@@ -124,14 +186,20 @@ pub fn publish_fixed() -> Result<(), PublicationError> {
     // replace, retry, repair or settle the original owner behind this static.
     let mut original = OWNER.get().ok_or(PublicationError::OwnerUnavailable)?
         .lock().map_err(|_| PublicationError::OwnerUnavailable)?;
-    if produce(&mut original, &spec).is_ok() && original.published_and_settled() { return Ok(()); }
+    // Keep BOTH original deadline-sensitive postconditions and their short-circuit.
+    // A later finality/settlement observation cannot replace produce's first cause.
+    let cause = match produce(&mut original, &spec) {
+        Ok(()) if original.published_and_settled() => return Ok(()),
+        Ok(()) => PublicationFailure::policy(FailurePhase::FinalPostcondition, None),
+        Err(first) => first,
+    };
     let possibly_exposed = original.possibly_exposed();
     let settlement = original.fail_and_settle_once();
     if settlement == CloseOutcome::Settled && original.occupied_target_and_settled() {
         return Err(PublicationError::OccupiedTargetSettled);
     }
     let originals_unknown = settlement == CloseOutcome::Unknown;
-    Err(PublicationError::Failed { possibly_exposed, originals_unknown })
+    Err(PublicationError::Failed { cause, possibly_exposed, originals_unknown })
 }
 
 #[cfg(test)]
@@ -156,6 +224,33 @@ mod tests {
         assert_eq!(PUBLICATION_PAYLOADS[MANIFEST], "manifest.json");
         assert_eq!(PUBLICATION_PAYLOADS.iter().filter(|p| p.starts_with("python/")).count(), 38);
         assert_eq!(PUBLICATION_PAYLOADS.iter().filter(|p| p.ends_with("_bootstrap.py")).count(), 6);
+        // Reuse this already-selected policy test; do not create a filtered-out test.
+        for (error, phase) in [(PublicationError::Invocation, "invocation"), (PublicationError::Profile, "profile"),
+            (PublicationError::AlreadyStarted, "already-started"), (PublicationError::OwnerUnavailable, "owner-unavailable")] {
+            assert_eq!(error.diagnostic_line(), Some(format!("MRK_WINDOWS_RUNTIME_PUBLISH_FAILURE_V1=phase={phase};class=unobserved;ordinal=none;possiblyExposed=unobserved;originalsUnknown=unobserved\n")));
+        }
+        assert_eq!(PublicationError::OccupiedTargetSettled.diagnostic_line(), None);
+        for (phase, label) in [(FailurePhase::Admit, "admit"), (FailurePhase::Decode, "decode"), (FailurePhase::Create, "create"),
+            (FailurePhase::StartCopy, "start-copy"), (FailurePhase::CopyNext, "copy-next"), (FailurePhase::CopyCount, "copy-count"),
+            (FailurePhase::CopySize, "copy-size"), (FailurePhase::CopyVerify, "copy-verify"), (FailurePhase::FinishCopy, "finish-copy"),
+            (FailurePhase::ReadbackNext, "readback-next"), (FailurePhase::ReadbackCount, "readback-count"), (FailurePhase::ReadbackSize, "readback-size"),
+            (FailurePhase::ReadbackVerify, "readback-verify"), (FailurePhase::FinishReadback, "finish-readback"),
+            (FailurePhase::Seal, "seal"), (FailurePhase::FinalPostcondition, "final-postcondition")] {
+            let error = PublicationError::Failed { cause: PublicationFailure::policy(phase, None), possibly_exposed: false, originals_unknown: true };
+            assert_eq!(error.diagnostic_line(), Some(format!("MRK_WINDOWS_RUNTIME_PUBLISH_FAILURE_V1=phase={label};class=policy;ordinal=none;possiblyExposed=false;originalsUnknown=true\n")));
+        }
+        for (native, class) in [(NativeError::Unavailable, "unavailable"), (NativeError::Unsafe, "unsafe"),
+            (NativeError::Bounds, "bounds"), (NativeError::State, "state"), (NativeError::Unknown, "unknown")] {
+            let error = PublicationError::Failed { cause: PublicationFailure::native(FailurePhase::CopyNext, Some(46), native), possibly_exposed: true, originals_unknown: false };
+            assert_eq!(error.diagnostic_line(), Some(format!("MRK_WINDOWS_RUNTIME_PUBLISH_FAILURE_V1=phase=copy-next;class={class};ordinal=46;possiblyExposed=true;originalsUnknown=false\n")));
+        }
+        for (ordinal, encoded) in [(None, "none"), (Some(0), "0"), (Some(9), "9"), (Some(10), "10"),
+            (Some(46), "46"), (Some(47), "none"), (Some(usize::MAX), "none")] {
+            let error = PublicationError::Failed { cause: PublicationFailure::policy(FailurePhase::CopyCount, ordinal), possibly_exposed: true, originals_unknown: true };
+            let line = error.diagnostic_line().unwrap();
+            assert_eq!(line, format!("MRK_WINDOWS_RUNTIME_PUBLISH_FAILURE_V1=phase=copy-count;class=policy;ordinal={encoded};possiblyExposed=true;originalsUnknown=true\n"));
+            assert!(line.is_ascii() && line.len() <= 256 && line.bytes().filter(|b| *b == b'\n').count() == 1);
+        }
     }
     #[test]
     fn roster_refuses_extras_omissions_case_aliases_and_extra_directories() {

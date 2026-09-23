@@ -15,6 +15,13 @@ fn main() -> std::process::ExitCode {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(mobile_release_desktop::runtime_publication_windows::PublicationError::OccupiedTargetSettled) =>
             std::process::ExitCode::from(2),
-        Err(_) => std::process::ExitCode::FAILURE,
+        Err(error) => {
+            if let Some(line) = error.diagnostic_line() {
+                // Closed DATA only. A failed/hung sink never supplies native finality
+                // or changes the original error's exit1; no owner is queried here.
+                let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+            }
+            std::process::ExitCode::FAILURE
+        },
     }
 }

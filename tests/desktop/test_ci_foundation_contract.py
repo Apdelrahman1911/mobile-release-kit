@@ -9869,8 +9869,37 @@ class WindowsReaderGateTests(unittest.TestCase):
         self.assertIn("settlement == CloseOutcome::Settled", bridge)
         self.assertIn("Err(PublicationError::OccupiedTargetSettled)", bridge)
         self.assertIn("PublicationError::OccupiedTargetSettled", binary)
+        self.assertIn("Ok(()) => std::process::ExitCode::SUCCESS", binary)
         self.assertIn("std::process::ExitCode::from(2)", binary)
-        self.assertIn("Err(_) => std::process::ExitCode::FAILURE", binary)
+        failure = binary.split("Err(error) => {", 1)[1]
+        self.assertIn("if let Some(line) = error.diagnostic_line() {", failure)
+        self.assertIn("let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());", failure)
+        self.assertIn("\n            std::process::ExitCode::FAILURE\n", failure)
+        self.assertEqual(binary.count("error.diagnostic_line()"), 1)
+        producer = bridge.split("fn produce(", 1)[1].split("\n/// No arguments", 1)[0]
+        entry = bridge.split("pub fn publish_fixed()", 1)[1].split("\n#[cfg(test)]", 1)[0]
+        self.assertEqual(producer.count("owner.published_and_settled()"), 1)
+        self.assertEqual(entry.count("original.published_and_settled()"), 1)
+        self.assertIn("require(owner.published_and_settled()).map_err(|_| PublicationFailure::policy(FailurePhase::FinalPostcondition, None))", producer)
+        self.assertIn("let cause = match produce(&mut original, &spec) {\n"
+                      "        Ok(()) if original.published_and_settled() => return Ok(()),\n"
+                      "        Ok(()) => PublicationFailure::policy(FailurePhase::FinalPostcondition, None),\n"
+                      "        Err(first) => first,", entry)
+        ordered = [entry.index(part) for part in ("let cause = match produce(",
+            "let possibly_exposed = original.possibly_exposed();", "let settlement = original.fail_and_settle_once();",
+            "if settlement == CloseOutcome::Settled && original.occupied_target_and_settled()",
+            "let originals_unknown = settlement == CloseOutcome::Unknown;",
+            "Err(PublicationError::Failed { cause, possibly_exposed, originals_unknown })")]
+        self.assertEqual(ordered, sorted(ordered))
+        formatter = bridge.split("pub fn diagnostic_line(self)", 1)[1].split("type Checked<T>", 1)[0]
+        self.assertIn('"MRK_WINDOWS_RUNTIME_PUBLISH_FAILURE_V1=phase="', formatter)
+        self.assertIn("ordinal.filter(|index| *index < 47)", formatter)
+        self.assertIn("if line.len() <= 256 { Some(line) } else { None }", formatter)
+        self.assertIn("Self::OccupiedTargetSettled => return None", formatter)
+        for forbidden in ("OWNER", "owner.", "original.", "format!", "format_args!", "write!", "writeln!",
+                          "panic!", "unwrap(", "expect(", "{:?}", "{:#?}", ".to_string("):
+            self.assertNotIn(forbidden, formatter + binary)
+        self.assertEqual(bridge.count("#[test]"), 3)
         for forbidden in ("std::process::Command", "std::env::args", "std::fs::", "print!", "println!"):
             self.assertNotIn(forbidden, binary)
 
@@ -9952,6 +9981,41 @@ class WindowsReaderGateTests(unittest.TestCase):
                 self.assertIn("$command = '\"' + $env:MRK_WINDOWS_HELPER_ARTIFACT + '\"'", step)
                 self.assertIn("::Combine($expectedRoot, 'mrk-windows-runtime-publish.exe')", step)
                 self.assertNotIn("--ignored", step); self.assertNotIn("--test-threads", step)
+                phases = [line.strip() for line in step.splitlines() if line.strip().startswith("$diagnosticPhase = ")]
+                self.assertEqual(phases, ["$diagnosticPhase = '" + phase + "'" for phase in
+                    ("binding", "artifact", "prior", "invoke", "returned-code", "exit-record", "expected-exit")])
+                initialization = step.split("          try {", 1)[0]
+                for initial in ("$diagnosticPhase = 'binding'", "$diagnosticReturned = $false", "$diagnosticExit = 'unobserved'"):
+                    self.assertIn(initial, initialization)
+                self.assertEqual(step.count("$LASTEXITCODE"), 1)
+                self.assertEqual([line.strip() for line in step.splitlines() if line.strip().startswith("$diagnosticReturned = ")],
+                    ["$diagnosticReturned = $false", "$diagnosticReturned = $true"])
+                canonical = "$diagnosticExit = $originalExitCode.ToString([System.Globalization.CultureInfo]::InvariantCulture)"
+                self.assertIn("$originalExitCode = $LASTEXITCODE\n"
+                              "            $diagnosticReturned = $true\n"
+                              "            $diagnosticPhase = 'returned-code'\n"
+                              "            if ($originalExitCode -isnot [int]) { throw 'original-exit' }\n"
+                              "            " + canonical, step)
+                self.assertEqual([line.strip() for line in step.splitlines() if line.strip().startswith("$diagnosticExit = ")],
+                    ["$diagnosticExit = 'unobserved'", canonical])
+                ordered_phases = [step.index(part) for part in ("$diagnosticPhase = 'artifact'", "$expectedHelper = ",
+                    "$diagnosticPhase = 'prior'", "if ($env:MRK_WINDOWS_PRODUCER_STAGE_STEP_OUTCOME",
+                    "$diagnosticPhase = 'invoke'", "Set-Location -LiteralPath $expectedRoot", command,
+                    canonical, "$diagnosticPhase = 'exit-record'", "$command = ", "$stream.Dispose()",
+                    "$diagnosticPhase = 'expected-exit'", "if ($originalExitCode -ne " + str(code) + ")")]
+                self.assertEqual(ordered_phases, sorted(ordered_phases))
+                # No phase change during disposal: a second failure cannot hide the exit-record phase.
+                self.assertIn("try { $stream.Write($raw, 0, $raw.Length); $stream.Flush() } finally { $stream.Dispose() }", step)
+                diagnostic = step.split("          } catch {\n", 1)[1]
+                self.assertIn("$returnedText = if ($diagnosticReturned) { 'true' } else { 'false' }", diagnostic)
+                self.assertIn('$diagnosticLine = "MRK_WINDOWS_PRODUCER_FAILURE_V1=role=' + role
+                    + ';phase=$diagnosticPhase;returned=$returnedText;exit=$diagnosticExit"', diagnostic)
+                self.assertIn("if ($diagnosticLine.Length -le 254) { [Console]::Error.WriteLine($diagnosticLine) }", diagnostic)
+                self.assertIn("            try {\n", diagnostic)
+                self.assertIn("            } catch { }\n            exit 1", diagnostic)
+                self.assertEqual(diagnostic.count("[Console]::Error.WriteLine("), 1)
+                for private in ("$_", "Exception", "$env:", "$command", "$path", "$stream", "throw", "exit 0"):
+                    self.assertNotIn(private, diagnostic)
             for forbidden in ("MRK_PYTHON", "always()", "continue-on-error", "Start-Process", "Process.Start", "Copy-Item", "Remove-Item",
                               "Set-Acl", "icacls", "Wait-Process", "Stop-Process", "ConvertTo-Json"):
                 self.assertNotIn(forbidden, step)

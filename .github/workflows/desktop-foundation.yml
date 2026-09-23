@@ -745,6 +745,9 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
+          $diagnosticPhase = 'binding'
+          $diagnosticReturned = $false
+          $diagnosticExit = 'unobserved'
           try {
             $expectedRoot = [System.IO.Path]::Combine($env:RUNNER_TEMP, "mrk-windows-installed-native-$($env:GITHUB_RUN_ID)-1")
             if ($env:GITHUB_RUN_ATTEMPT -cne '1' -or $env:MRK_DESKTOP_CI_ROOT -cne $expectedRoot -or
@@ -755,15 +758,22 @@ jobs:
                 $env:MRK_WINDOWS_HELPER_ARTIFACT_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
                 $env:MRK_WINDOWS_PRECHECK_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
                 $env:MRK_WINDOWS_ORDINARY_PREFLIGHT_STEP_OUTCOME -cne 'success') { throw 'binding' }
+            $diagnosticPhase = 'artifact'
             $expectedHelper = [System.IO.Path]::Combine($expectedRoot, 'mrk-windows-runtime-publish.exe')
             if ($env:MRK_WINDOWS_HELPER_ARTIFACT -cne $expectedHelper) { throw 'artifact' }
+            $diagnosticPhase = 'prior'
             if ($env:MRK_WINDOWS_PRODUCER_STAGE_STEP_OUTCOME -cne 'success' -or
                 $env:MRK_WINDOWS_PRODUCER_STAGE_FINALIZE_STEP_OUTCOME -cne 'success') { throw 'prior-original-finality' }
+            $diagnosticPhase = 'invoke'
             Set-Location -LiteralPath $expectedRoot
             # One fixed direct foreground original, never a Process object, launcher, pipe, retry or kill.
             & $env:MRK_WINDOWS_HELPER_ARTIFACT
             $originalExitCode = $LASTEXITCODE
+            $diagnosticReturned = $true
+            $diagnosticPhase = 'returned-code'
             if ($originalExitCode -isnot [int]) { throw 'original-exit' }
+            $diagnosticExit = $originalExitCode.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+            $diagnosticPhase = 'exit-record'
             $command = '"' + $env:MRK_WINDOWS_HELPER_ARTIFACT + '"'
             $commandSha256 = [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::Unicode.GetBytes($command))).ToLowerInvariant()
             $lines = @(
@@ -787,10 +797,16 @@ jobs:
             $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
             try { $stream.Write($raw, 0, $raw.Length); $stream.Flush() } finally { $stream.Dispose() }
             # Only THIS later original step success closes the preceding exit record.
+            $diagnosticPhase = 'expected-exit'
             if ($originalExitCode -ne 0) { throw 'expected-original-exit' }
             exit 0
           } catch {
-            [Console]::Error.WriteLine('MRK_WINDOWS_PRODUCER_REFUSED=helperSuccess-original-or-exit-record')
+            # Closed DATA only; a diagnostic failure cannot replace failure exit1.
+            try {
+              $returnedText = if ($diagnosticReturned) { 'true' } else { 'false' }
+              $diagnosticLine = "MRK_WINDOWS_PRODUCER_FAILURE_V1=role=helperSuccess;phase=$diagnosticPhase;returned=$returnedText;exit=$diagnosticExit"
+              if ($diagnosticLine.Length -le 254) { [Console]::Error.WriteLine($diagnosticLine) }
+            } catch { }
             exit 1
           }
       - name: Validate separately closed helperSuccess evidence as DATA
@@ -916,6 +932,9 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
+          $diagnosticPhase = 'binding'
+          $diagnosticReturned = $false
+          $diagnosticExit = 'unobserved'
           try {
             $expectedRoot = [System.IO.Path]::Combine($env:RUNNER_TEMP, "mrk-windows-installed-native-$($env:GITHUB_RUN_ID)-1")
             if ($env:GITHUB_RUN_ATTEMPT -cne '1' -or $env:MRK_DESKTOP_CI_ROOT -cne $expectedRoot -or
@@ -926,19 +945,26 @@ jobs:
                 $env:MRK_WINDOWS_HELPER_ARTIFACT_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
                 $env:MRK_WINDOWS_PRECHECK_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
                 $env:MRK_WINDOWS_ORDINARY_PREFLIGHT_STEP_OUTCOME -cne 'success') { throw 'binding' }
+            $diagnosticPhase = 'artifact'
             $expectedHelper = [System.IO.Path]::Combine($expectedRoot, 'mrk-windows-runtime-publish.exe')
             if ($env:MRK_WINDOWS_HELPER_ARTIFACT -cne $expectedHelper) { throw 'artifact' }
+            $diagnosticPhase = 'prior'
             if ($env:MRK_WINDOWS_PRODUCER_STAGE_STEP_OUTCOME -cne 'success' -or
                 $env:MRK_WINDOWS_PRODUCER_STAGE_FINALIZE_STEP_OUTCOME -cne 'success') { throw 'prior-original-finality' }
             if ($env:MRK_WINDOWS_PRODUCER_SUCCESS_STEP_OUTCOME -cne 'success' -or
                 $env:MRK_WINDOWS_PRODUCER_SUCCESS_FINALIZE_STEP_OUTCOME -cne 'success') { throw 'prior-original-finality' }
             if ($env:MRK_WINDOWS_PRODUCER_BEFORE_STEP_OUTCOME -cne 'success' -or
                 $env:MRK_WINDOWS_PRODUCER_BEFORE_FINALIZE_STEP_OUTCOME -cne 'success') { throw 'prior-original-finality' }
+            $diagnosticPhase = 'invoke'
             Set-Location -LiteralPath $expectedRoot
             # One fixed direct foreground original, never a Process object, launcher, pipe, retry or kill.
             & $env:MRK_WINDOWS_HELPER_ARTIFACT
             $originalExitCode = $LASTEXITCODE
+            $diagnosticReturned = $true
+            $diagnosticPhase = 'returned-code'
             if ($originalExitCode -isnot [int]) { throw 'original-exit' }
+            $diagnosticExit = $originalExitCode.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+            $diagnosticPhase = 'exit-record'
             $command = '"' + $env:MRK_WINDOWS_HELPER_ARTIFACT + '"'
             $commandSha256 = [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::Unicode.GetBytes($command))).ToLowerInvariant()
             $lines = @(
@@ -962,10 +988,16 @@ jobs:
             $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
             try { $stream.Write($raw, 0, $raw.Length); $stream.Flush() } finally { $stream.Dispose() }
             # Only THIS later original step success closes the preceding exit record.
+            $diagnosticPhase = 'expected-exit'
             if ($originalExitCode -ne 2) { throw 'expected-original-exit' }
             exit 0
           } catch {
-            [Console]::Error.WriteLine('MRK_WINDOWS_PRODUCER_REFUSED=helperOccupied-original-or-exit-record')
+            # Closed DATA only; a diagnostic failure cannot replace failure exit1.
+            try {
+              $returnedText = if ($diagnosticReturned) { 'true' } else { 'false' }
+              $diagnosticLine = "MRK_WINDOWS_PRODUCER_FAILURE_V1=role=helperOccupied;phase=$diagnosticPhase;returned=$returnedText;exit=$diagnosticExit"
+              if ($diagnosticLine.Length -le 254) { [Console]::Error.WriteLine($diagnosticLine) }
+            } catch { }
             exit 1
           }
       - name: Validate separately closed helperOccupied evidence as DATA
