@@ -535,7 +535,8 @@ class AquaDataTests(unittest.TestCase):
         good = accessibility_context_data()
         for key, bad in (("mechanism", "accessibility-confirm-original-open-panel-v1"),
                          ("mechanism", "accessibility-press-original-default-frame-v1"),
-                         ("mechanism", "accessibility-press-original-semantic-element-v1"), ("id", True), ("id", 1),
+                         ("mechanism", "accessibility-press-original-semantic-element-v1"),
+                         ("mechanism", "accessibility-press-original-prompt-button-v1"), ("id", True), ("id", 1),
                          ("bodyReturned", False), ("nativeEntered", False), ("receiptJoined", False),
                          ("workerRegistered", False), ("workerJoined", False), ("rechecksSettled", False),
                          ("custodyKnown", False), ("pressReturned", False), ("triggered", None), ("prepared", False),
@@ -559,13 +560,26 @@ class AquaDataTests(unittest.TestCase):
             target[path[-1]] = False
             expected = deepcopy(value); expected["accessibility"] = None
             self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), expected, path)
-        for key, bad in (("calls", True), ("calls", 0), ("calls", 513), ("nodes", 0), ("nodes", 65),
+        for key, bad in (("calls", True), ("calls", 0), ("calls", 513), ("directChildrenExamined", True),
+                         ("directChildrenExamined", 0), ("directChildrenExamined", 1), ("directChildrenExamined", 33), ("nodes", 4),
                          ("cfSlots", 257), ("cfSlotsRetired", 31), ("cfSlotsRetired", 33),
                          ("cleanupReturned", False), ("axError", True), ("axError", -25215), ("axError", -25199),
                          ("buttonTitle", "PRIVATE"), ("sheet", "PRIVATE")):
             value = deepcopy(good); value["accessibility"]["promptButton"][key] = bad
             expected = deepcopy(value); expected["accessibility"] = None
             self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), expected, (key, bad))
+        for old, current in (("completeSearch", "completeDirectSheetChildren"), ("uniqueButton", "uniqueDirectPromptButton"),
+                             ("finalRecheck", "sameDirectButtonRechecked")):
+            for replace in (False, True):
+                value = deepcopy(good); checks = value["accessibility"]["promptButton"]["checks"]
+                checks[old] = True
+                if replace: del checks[current]
+                expected = deepcopy(value); expected["accessibility"] = None
+                self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), expected, (old, replace))
+        value = deepcopy(good); button = value["accessibility"]["promptButton"]
+        button["nodes"] = button.pop("directChildrenExamined")
+        expected = deepcopy(value); expected["accessibility"] = None
+        self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), expected)
 
     def test_success_requires_all_semantic_native_and_original_join_obligations(self):
         for case in M.CASES:
@@ -573,7 +587,7 @@ class AquaDataTests(unittest.TestCase):
             self.assertEqual(M.parse_result(captured(good), b"", BINDING, case), good)
             if case == "picker-loss": continue
             sample = good["native"]["projectOpenInput"]
-            self.assertEqual(sample["mechanism"], "accessibility-press-original-prompt-button-v1")
+            self.assertEqual(sample["mechanism"], "accessibility-press-original-direct-sheet-button-v2")
             for key, bad in (("expired", True), ("timely", False), ("barrierRetired", False), ("receiptJoined", False),
                              ("workerRegistered", False), ("workerJoined", False), ("rechecksSettled", False),
                              ("custodyKnown", False), ("bodyReturned", False), ("triggered", False), ("attempted", False),
@@ -588,9 +602,11 @@ class AquaDataTests(unittest.TestCase):
                 value["native"]["projectOpenInput"]["originalProof"]["children"] = count
                 value["native"]["projectOpenBinding"]["binding"]["children"] = count
                 self.assertEqual(M.parse_result(captured(value), b"", BINDING, case), value)
-            value = deepcopy(good)
-            value["native"]["projectOpenInput"]["promptButton"].update(calls=512, nodes=64, cfSlots=256, cfSlotsRetired=256)
-            self.assertEqual(M.parse_result(captured(value), b"", BINDING, case), value)
+            for examined in (2, 32):
+                value = deepcopy(good)
+                value["native"]["projectOpenInput"]["promptButton"].update(
+                    calls=512, directChildrenExamined=examined, cfSlots=256, cfSlotsRetired=256)
+                self.assertEqual(M.parse_result(captured(value), b"", BINDING, case), value)
 
     def test_original_prompt_refusal_keeps_original_proof_and_never_invents_action(self):
         # Preparing can fail before an input worker exists. Retain that exact
@@ -628,23 +644,51 @@ class AquaDataTests(unittest.TestCase):
         invalid = deepcopy(initial); invalid["accessibility"]["promptChecks"]["initial"] = True
         expected = deepcopy(invalid); expected["accessibility"] = None
         self.assertEqual(M.failure_context(b"", context_row(invalid), "first-save"), expected)
-        # Complete ambiguous/absent matches are different from an incomplete
-        # bounded search. Neither may be converted to a first-match action.
-        refusals = (("ambiguous", "button", 3), ("limit", "tree", 2), ("ineligible", "button", 4))
-        refusals += tuple(("limit", site, 2) for site in sorted(M.ACCESSIBILITY_TREE_LIMIT_SITES))
-        for error, site, completed in refusals:
+        def refused_frame(error, site, completed, examined):
             value = accessibility_context_data(); sample = value["accessibility"]
             sample.update(attempted=False, pressReturned=False, triggered=None, site=site, error=error,
                           originalProof=None, promptChecks={"initial": True, "final": None})
+            sample["promptButton"]["directChildrenExamined"] = examined
             sample["promptButton"]["checks"] = {key: index < completed for index, key in enumerate(M.ACCESSIBILITY_BUTTON_CHECKS)}
             value["accessibilityBinding"] = binding_context_data()["accessibilityBinding"]
+            return value
+
+        # Literal refusal DATA, not simulated AX execution: missing/grouped-only
+        # or duplicate matches, malformed/foreign direct children, lost candidate
+        # eligibility, and absent/ambiguous/replaced second-census candidates.
+        refusals = (("unsupported", "direct-sheet-children", 3, 1), ("ambiguous", "direct-sheet-children", 3, 2),
+            ("malformed", "direct-sheet-children", 2, 2), ("changed", "direct-sheet-children", 2, 1),
+            ("ineligible", "button", 4, 1), ("changed", "button", 4, 1), ("unsupported", "button", 5, 1),
+            ("unsupported", "direct-sheet-recheck", 6, 2), ("ambiguous", "direct-sheet-recheck", 6, 3),
+            ("changed", "direct-sheet-recheck", 6, 2), ("ineligible", "direct-sheet-recheck", 6, 2))
+        for error, site, completed, examined in refusals:
+            value = refused_frame(error, site, completed, examined)
             self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), value)
-            self.assertFalse(M._accessibility_succeeded(sample))
+            self.assertFalse(M._accessibility_succeeded(value["accessibility"]))
             for key in ("attempted", "pressReturned", "triggered"):
                 bad = deepcopy(value); bad["accessibility"][key] = True
                 expected = deepcopy(bad); expected["accessibility"] = None
                 self.assertEqual(M.failure_context(b"", context_row(bad), "first-save"), expected)
-            if site in M.ACCESSIBILITY_TREE_LIMIT_SITES:
+
+        # Every frame obeys the cumulative two-roster grammar, not just limits.
+        for completed, examined in ((0, 1), (1, 1), (3, 0), (5, 17), (7, 1)):
+            bad = refused_frame("changed", "direct-sheet-recheck", completed, examined)
+            expected = deepcopy(bad); expected["accessibility"] = None
+            self.assertEqual(M.failure_context(b"", context_row(bad), "first-save"), expected, (completed, examined))
+
+        for site in sorted(M.ACCESSIBILITY_DIRECT_LIMIT_SITES):
+            for completed in (2, 6):
+                title = site == "direct-sheet-title-limit"
+                minimum, maximum = ((1, 16) if title else (0, 0)) if completed == 2 else ((2, 32) if title else (1, 16))
+                for examined in (0, 1, 2, 16, 17, 32, 33):
+                    value = refused_frame("limit", site, completed, examined)
+                    expected = deepcopy(value)
+                    if not minimum <= examined <= maximum: expected["accessibility"] = None
+                    self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), expected,
+                                     (site, completed, examined))
+                    self.assertFalse(M._accessibility_succeeded(value["accessibility"]))
+                value = refused_frame("limit", site, completed, minimum)
+                sample = value["accessibility"]
                 late = deepcopy(value); late["accessibility"].update(expired=True, timely=False)
                 self.assertEqual(M.failure_context(b"", context_row(late), "first-save"), late)
                 for cleanup_returned in (True, False):
@@ -656,17 +700,19 @@ class AquaDataTests(unittest.TestCase):
                     self.assertEqual(M.failure_context(b"", context_row(unknown), "first-save"), unknown)
                     self.assertFalse(M._accessibility_succeeded(lost))
                 for path, invalid in ((("error",), "ambiguous"), (("error",), "none"),
-                    (("site",), "tree-unknown-limit"), (("attempted",), None), (("pressReturned",), None),
+                    (("site",), "direct-sheet-unknown-limit"), (("site",), "tree-title-limit"),
+                    (("site",), "tree-depth-limit"), (("site",), "tree-node-limit"),
+                    (("attempted",), None), (("attempted",), True), (("pressReturned",), None),
                     (("nativeEntered",), False), (("initialOriginalProof",), None),
                     (("originalProof",), sample["initialOriginalProof"]),
                     (("promptChecks", "initial"), False), (("promptChecks", "final"), True),
-                    (("promptButton", "nodes"), 0), (("promptButton", "axError"), -25204),
-                    (("promptButton", "checks", "completeSearch"), True)):
+                    (("promptButton", "calls"), 0), (("promptButton", "axError"), -25204),
+                    (("promptButton", "checks"), {key: index < 3 for index, key in enumerate(M.ACCESSIBILITY_BUTTON_CHECKS)})):
                     bad = deepcopy(value); target = bad["accessibility"]
                     for part in path[:-1]: target = target[part]
                     target[path[-1]] = invalid
                     expected = deepcopy(bad); expected["accessibility"] = None
-                    self.assertEqual(M.failure_context(b"", context_row(bad), "first-save"), expected, (site, path))
+                    self.assertEqual(M.failure_context(b"", context_row(bad), "first-save"), expected, (site, completed, path))
         final = accessibility_context_data(); sample = final["accessibility"]
         sample.update(attempted=False, pressReturned=False, triggered=None, site="original-proof", error="changed")
         sample["promptChecks"]["final"] = False
@@ -767,7 +813,7 @@ class AquaDataTests(unittest.TestCase):
             proof.update(parent="type-invalid", panel="encoding-invalid", originals="multiple", site="panel-attached-sheet", error="cleanup-unknown", children=17)
             proof["checks"] = dict.fromkeys(M.ACCESSIBILITY_PROOF_CHECKS, False)
         largest["accessibility"]["promptChecks"] = {"initial": False, "final": False}
-        largest["accessibility"]["promptButton"].update(calls=512, nodes=64, cfSlots=256, cfSlotsRetired=256, cleanupReturned=False, axError=-25214)
+        largest["accessibility"]["promptButton"].update(calls=512, directChildrenExamined=32, cfSlots=256, cfSlotsRetired=256, cleanupReturned=False, axError=-25214)
         largest["accessibility"]["promptButton"]["checks"] = dict.fromkeys(M.ACCESSIBILITY_BUTTON_CHECKS, False)
         largest["accessibility"].update(site=max(M.ACCESSIBILITY_SITES, key=lambda site: (len(site), site)),
                                         error="cleanup-unknown", state="requested")
@@ -1187,39 +1233,68 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn("d->prompt != MRK_ID_MATCH", configured)
         start = native.split("int mrk_panel_start(", 1)[1].split("int mrk_panel_poll(", 1)[0]
         self.assertLess(start.index("mrk_panel_configure_open_identity(s)"), start.index("beginSheetModalForWindow:"))
-        for bound in ("MRK_PROMPT_CALLS = 512", "MRK_PROMPT_NODES = 64", "MRK_PROMPT_DEPTH = 8", "MRK_PROMPT_CF = 256"):
+        for bound in ("MRK_PROMPT_CALLS = 512", "MRK_PROMPT_CF = 256"):
             self.assertIn(bound, native)
+        for retired in ("MRKPromptNode", "MRK_PROMPT_NODES", "MRK_PROMPT_DEPTH", "s->nodes", "mrk_ax_scan("):
+            self.assertNotIn(retired, native)
         arrays = native.split("static CFArrayRef mrk_ax_array(", 1)[1].split("static BOOL mrk_ax_equal_attribute(", 1)[0]
         self.assertLess(arrays.index("AXUIElementGetAttributeValueCount"), arrays.index("AXUIElementCopyAttributeValues"))
         self.assertIn("if (!expected)", arrays)
         self.assertIn("attribute, 0, limit + 1, &slot->array", arrays)
         self.assertIn("count != expected", arrays)
+        self.assertIn("mrk_ax_type(s, CFArrayGetValueAtIndex(slot->array, i), s->elementType)", arrays)
         self.assertNotIn("kAXErrorCannotComplete", arrays)  # Never ordinary absence.
-        scan = native.split("static BOOL mrk_ax_scan(", 1)[1].split("static BOOL mrk_ax_button(", 1)[0]
-        self.assertIn("CFEqual(role, kAXButtonRole)", scan)
-        self.assertIn("CFEqual(title, prompt)", scan)
-        self.assertIn("CFEqual(child, s->nodes[previous].element)", scan)
-        self.assertIn("node.depth == MRK_PROMPT_DEPTH", scan)
-        self.assertLess(scan.index("for (unsigned at = 0; at < s->length; ++at)"), scan.index("s->result.checks |= 4u"))
-        self.assertLess(scan.index("s->result.checks |= 4u"), scan.index("if (matches != 1)"))
-        self.assertLess(scan.index("if (matches != 1)"), scan.index("s->result.checks |= 8u"))
-        projection = native.split("static BOOL mrk_ax_projection(", 1)[1].split("static BOOL mrk_ax_scan(", 1)[0]
+        roster = native.split("static BOOL mrk_ax_direct_roster(", 1)[1].split("static BOOL mrk_ax_button(", 1)[0]
+        self.assertEqual(roster.count("kAXChildrenAttribute"), 1)
+        self.assertIn("mrk_ax_array(s, sheet, kAXChildrenAttribute, 16, NO)", roster)
+        self.assertIn("CFEqual(role, kAXButtonRole)", roster)
+        self.assertIn("CFEqual(title, prompt)) { matches++; candidate = child; }", roster)
+        self.assertIn("CFEqual(child, CFArrayGetValueAtIndex(children, previous))", roster)
+        self.assertIn("mrk_ax_equal_attribute(s, child, kAXParentAttribute, sheet)", roster)
+        self.assertLess(roster.index("for (CFIndex at = 0; at < count; ++at)"), roster.index("s->result.direct_children_examined++"))
+        self.assertLess(roster.index("s->result.direct_children_examined++"), roster.index("CFEqual(child,"))
+        self.assertLess(roster.index("CFStringGetLength(title)"), roster.index("s->result.checks |= 4u"))
+        self.assertLess(roster.index("s->result.checks |= 4u"), roster.index("if (matches != 1)"))
+        self.assertLess(roster.index("if (matches != 1)"), roster.index("s->result.checks |= 8u"))
+        self.assertLess(roster.index("s->result.checks |= 8u"), roster.index("*found = candidate"))
+        self.assertEqual(native.count("s->result.direct_children_examined++"), 1)
+        for forbidden in ("kAXEnabledAttribute", "AXUIElementCopyActionNames", "CFRetain", "CFRelease", "s->button ="):
+            self.assertNotIn(forbidden, roster)
+        projection = native.split("static BOOL mrk_ax_projection(", 1)[1].split("static BOOL mrk_ax_direct_roster(", 1)[0]
         for binding in ("kAXIdentifierAttribute", "kAXSheetRole", "kAXParentAttribute", "CFEqual(*parent, found_parent)", "CFEqual(*sheet, found_sheet)"):
             self.assertIn(binding, projection)
         button = native.split("static BOOL mrk_ax_button(", 1)[1].split("static BOOL mrk_ax_original(", 1)[0]
         for fact in ("kAXButtonRole", "kAXTitleAttribute", "kAXEnabledAttribute", "CFBooleanGetValue", "AXUIElementCopyActionNames", "presses != 1", "kAXParentAttribute"):
             self.assertIn(fact, button)
+        self.assertIn("AXUIElementRef button = s->button;", button)
+        self.assertIn("return mrk_ax_equal_attribute(s, button, kAXParentAttribute, sheet);", button)
+        self.assertNotIn("kAXChildrenAttribute", button)
         action = native.split("static void mrk_ax_open(", 1)[1].split("void mrk_observation_prompt_press(", 1)[0]
         self.assertEqual(action.count("s->result.calls++; s->elementType = AXUIElementGetTypeID()"), 1)
         self.assertEqual(action.count("AXUIElementCreateApplication(getpid())"), 1)
         self.assertEqual(native.count("AXUIElementPerformAction(button, kAXPressAction)"), 1)
-        self.assertLess(action.index("mrk_ax_original(s, 1)"), action.index("mrk_ax_scan(s, sheet"))
+        first_census = "mrk_ax_direct_roster(s, sheet, prompt_text->value, &candidate)"
+        second_census = "mrk_ax_direct_roster(s, sheet, prompt_text->value, &rechecked)"
+        self.assertEqual(action.count("mrk_ax_direct_roster("), 2)
+        self.assertEqual(action.count("mrk_ax_projection("), 2)
+        self.assertEqual(action.count("mrk_ax_button(s, sheet, prompt_text->value)"), 2)
+        self.assertEqual(native.count("s->button ="), 1)
+        self.assertLess(action.index("mrk_ax_original(s, 1)"), action.index(first_census))
+        self.assertLess(action.index(first_census), action.index("s->button = candidate;"))
+        self.assertLess(action.index("s->button = candidate;"), action.index("mrk_ax_button("))
+        self.assertLess(action.index("mrk_ax_button("), action.rindex("mrk_ax_projection("))
+        self.assertLess(action.rindex("mrk_ax_projection("), action.index(second_census))
+        self.assertLess(action.index(second_census), action.index("if (!CFEqual(s->button, rechecked))"))
+        self.assertLess(action.index("if (!CFEqual(s->button, rechecked))"), action.rindex("mrk_ax_button("))
+        self.assertLess(action.rindex("mrk_ax_button("), action.index("s->result.checks |= 64u"))
+        self.assertLess(action.index("s->result.checks |= 64u"), action.index("mrk_ax_original(s, 2)"))
+        self.assertIn("AXUIElementRef button = s->button;", action)
         self.assertLess(action.index("mrk_ax_original(s, 2)"), action.index("mrk_ax_before(s, button)"))
         self.assertLess(action.index("mrk_ax_before(s, button)"), action.index("MRK_OPEN_ATTEMPTED"))
         self.assertLess(action.index("MRK_OPEN_ATTEMPTED"), action.index("AXUIElementPerformAction"))
         self.assertLess(action.index("AXUIElementPerformAction"), action.index("MRK_OPEN_RETURNED"))
         after_permit = action.split("if (!mrk_ax_before(s, button)) return;", 1)[1]
-        for forbidden in ("mrk_ax_copy", "mrk_ax_array", "mrk_ax_original", "mrk_ax_button", "sleep", "dispatch"):
+        for forbidden in ("mrk_ax_copy", "mrk_ax_array", "mrk_ax_original", "mrk_ax_button", "mrk_ax_direct_roster", "sleep", "dispatch"):
             self.assertNotIn(forbidden, after_permit)
         timeout = native.split("static BOOL mrk_ax_before(", 1)[1].split("static BOOL mrk_ax_type(", 1)[0]
         self.assertIn("AXUIElementSetMessagingTimeout(element, timeout.seconds)", timeout)
@@ -1244,26 +1319,31 @@ class AquaDataTests(unittest.TestCase):
         self.assertNotIn('site: "binding"', preparation)
         wire = rust.split("fn open_return(", 1)[1].split("pub struct OpenInputReturn", 1)[0]
         sites = M.re.findall(r'"([a-z-]+)"', wire.split("site: *[", 1)[1].split("]", 1)[0])
-        tree_sites = ["tree-title-limit", "tree-child-count-limit", "tree-child-copy-limit", "tree-depth-limit", "tree-node-limit"]
-        self.assertEqual(sites[:14], "entry application windows parent-identifier sheet topology tree button "
-                         "button-recheck initial-original-proof original-proof admission press cleanup".split())
-        self.assertEqual(sites[14:], tree_sites)
-        self.assertEqual(set(tree_sites), M.ACCESSIBILITY_TREE_LIMIT_SITES)
+        direct_sites = ["direct-sheet-title-limit", "direct-sheet-child-count-limit", "direct-sheet-child-copy-limit"]
+        self.assertEqual(sites[:14], "entry application windows parent-identifier sheet topology direct-sheet-children button "
+                         "direct-sheet-recheck initial-original-proof original-proof admission press cleanup".split())
+        self.assertEqual(sites[14:], direct_sites)
+        self.assertEqual(set(direct_sites), M.ACCESSIBILITY_DIRECT_LIMIT_SITES)
         self.assertEqual(set(sites), M.ACCESSIBILITY_SITES)
         enum = native.split("enum { MRK_OPEN_ENTRY = 1u,", 1)[1].split("};", 1)[0]
-        self.assertEqual(M.re.findall(r"MRK_OPEN_[A-Z_]+", enum)[-6:], ["MRK_OPEN_CLEANUP"]
-                         + ["MRK_OPEN_" + site.upper().replace("-", "_") for site in tree_sites])
-        helper = native.split("static BOOL mrk_ax_tree_limit(", 1)[1].split("static BOOL mrk_ax_status(", 1)[0]
-        self.assertIn("if (s->result.site == MRK_OPEN_TREE && !s->result.error) s->result.site = site;", helper)
+        self.assertEqual(M.re.findall(r"MRK_OPEN_[A-Z_]+", enum)[-4:], ["MRK_OPEN_CLEANUP", "MRK_OPEN_DIRECT_TITLE_LIMIT",
+                         "MRK_OPEN_DIRECT_CHILD_COUNT_LIMIT", "MRK_OPEN_DIRECT_CHILD_COPY_LIMIT"])
+        helper = native.split("static BOOL mrk_ax_direct_limit(", 1)[1].split("static BOOL mrk_ax_status(", 1)[0]
+        self.assertIn("s->result.site == MRK_OPEN_DIRECT_CHILDREN || s->result.site == MRK_OPEN_DIRECT_RECHECK", helper)
+        self.assertIn("&& !s->result.error) s->result.site = site;", helper)
         self.assertIn("return mrk_ax_fail(s, MRK_OPEN_LIMIT);", helper)
         for condition, site, section in (("expected > limit", "CHILD_COUNT", arrays),
-            ("count < 0 || count > limit", "CHILD_COPY", arrays), ("CFStringGetLength(title) > 512", "TITLE", scan),
-            ("count && node.depth == MRK_PROMPT_DEPTH", "DEPTH", scan), ("s->length == MRK_PROMPT_NODES", "NODE", scan)):
+            ("count < 0 || count > limit", "CHILD_COPY", arrays), ("CFStringGetLength(title) > 512", "TITLE", roster)):
             self.assertIn(f"if ({condition}) " + ("{ " if section is arrays else "return ")
-                          + f"mrk_ax_tree_limit(s, MRK_OPEN_TREE_{site}_LIMIT)", section)
-        self.assertEqual(native.count("mrk_ax_tree_limit("), 6)
+                          + f"mrk_ax_direct_limit(s, MRK_OPEN_DIRECT_{site}_LIMIT)", section)
+        self.assertEqual(native.count("mrk_ax_direct_limit("), 4)
         self.assertIn("w.checks & (w.checks + 1) != 0", wire)
-        self.assertIn("w.calls > 512 || w.nodes > 64 || w.owned > 256", wire)
+        self.assertIn("w.calls > 512 || w.direct_children_examined > 32 || w.owned > 256", wire)
+        self.assertIn("w.direct_children_examined > 16 && w.checks < 63", wire)
+        self.assertIn("w.checks == 127 && w.direct_children_examined < 2", wire)
+        for phase in ("(3, false) => w.direct_children_examined == 0", "(3, true) => (1..=16)",
+                      "(63, false) => (1..=16)", "(63, true) => (2..=32)"):
+            self.assertIn(phase, wire)
         self.assertIn("button.cleanup_returned && w.released != w.owned", wire)
         self.assertIn("r.triggered == Some(false) && w.ax_error == 0", wire)
 

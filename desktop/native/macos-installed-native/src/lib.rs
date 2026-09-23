@@ -197,7 +197,7 @@ impl Panel {
 // nondefault feature forwarding selects BOTH this Rust seam and the C controls.
 #[cfg(feature = "installed-observation")]
 pub use observation::{PanelAction, PanelActionDiagnostic, PanelObservation, OpenIdentity, OpenDiagnostic, OpenReport,
-    OpenInputReturn, OpenRecheckReturn, PromptButtonProof, installed_prompt_button,
+    OpenInputReturn, OpenRecheckReturn, DirectSheetButtonProof, installed_prompt_button,
     IdentityConfiguration, IdentityStartReturn, IdentityBinding, IdentityBindingReturn,
     OriginalWindowState, OriginalWindowReturn, installed_original_window,
     installed_accessibility_trusted, installed_observation_flags_data_check};
@@ -521,7 +521,7 @@ mod observation {
     }
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
-    struct OpenWire { flags: u32, site: u32, error: u32, checks: u32, calls: u32, nodes: u32,
+    struct OpenWire { flags: u32, site: u32, error: u32, checks: u32, calls: u32, direct_children_examined: u32,
         owned: u32, released: u32, ax_error: i32 }
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
@@ -555,13 +555,13 @@ mod observation {
     /// either a definite empty out-slot or its CFRelease actually returned;
     /// these counters deliberately do not claim that many non-null objects.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub struct PromptButtonProof {
-        pub checks: [bool; 7], pub calls: u32, pub nodes: u32,
+    pub struct DirectSheetButtonProof {
+        pub checks: [bool; 7], pub calls: u32, pub direct_children_examined: u32,
         pub cf_slots: u32, pub cf_slots_retired: u32, pub cleanup_returned: bool, pub ax_error: i32,
     }
-    impl PromptButtonProof {
+    impl DirectSheetButtonProof {
         pub fn matched(self) -> bool {
-            self.checks == [true; 7] && (1..=512).contains(&self.calls) && (1..=64).contains(&self.nodes)
+            self.checks == [true; 7] && (1..=512).contains(&self.calls) && (2..=32).contains(&self.direct_children_examined)
                 && (1..=256).contains(&self.cf_slots) && self.cf_slots_retired == self.cf_slots
                 && self.cleanup_returned && self.ax_error == 0
         }
@@ -571,7 +571,7 @@ mod observation {
         pub diagnostic: OpenDiagnostic, pub attempted: bool, pub press_returned: bool,
         pub triggered: Option<bool>, pub custody_known: bool,
         pub initial_proof: Option<IdentityBinding>, pub proof: Option<IdentityBinding>,
-        pub prompt: [Option<bool>; 2], pub button: PromptButtonProof,
+        pub prompt: [Option<bool>; 2], pub button: DirectSheetButtonProof,
     }
     impl OpenReport {
         pub fn succeeded(self) -> bool {
@@ -582,18 +582,19 @@ mod observation {
         }
     }
     fn open_return(w: OpenWire, rechecks: [Option<OpenRecheckReturn>; 2], known: bool) -> Option<OpenReport> {
-        // Completed bits form a prefix. A partial/truncated search never gets
-        // completeSearch/uniqueButton, even when a matching title was seen.
+        // V2 completion bits form a prefix: a full first direct roster and
+        // unique prompt button, then eligibility and a complete same-button
+        // second census. No descendant-search or partial-roster claim is made.
         if w.flags & !15 != 0 || w.checks > 127 || w.checks & (w.checks + 1) != 0
-            || w.calls > 512 || w.nodes > 64 || w.owned > 256 || w.released > w.owned
+            || w.calls > 512 || w.direct_children_examined > 32 || w.owned > 256 || w.released > w.owned
             || !(w.ax_error == 0 || (-25214..=-25200).contains(&w.ax_error)) { return None; }
-        let button = PromptButtonProof { checks: std::array::from_fn(|i| w.checks & (1 << i) != 0), calls: w.calls,
-            nodes: w.nodes, cf_slots: w.owned, cf_slots_retired: w.released,
+        let button = DirectSheetButtonProof { checks: std::array::from_fn(|i| w.checks & (1 << i) != 0), calls: w.calls,
+            direct_children_examined: w.direct_children_examined, cf_slots: w.owned, cf_slots_retired: w.released,
             cleanup_returned: w.flags & 8 != 0, ax_error: w.ax_error };
         let r = OpenReport { diagnostic: OpenDiagnostic {
-            site: *["entry", "application", "windows", "parent-identifier", "sheet", "topology", "tree", "button",
-                "button-recheck", "initial-original-proof", "original-proof", "admission", "press", "cleanup",
-                "tree-title-limit", "tree-child-count-limit", "tree-child-copy-limit", "tree-depth-limit", "tree-node-limit"]
+            site: *["entry", "application", "windows", "parent-identifier", "sheet", "topology", "direct-sheet-children", "button",
+                "direct-sheet-recheck", "initial-original-proof", "original-proof", "admission", "press", "cleanup",
+                "direct-sheet-title-limit", "direct-sheet-child-count-limit", "direct-sheet-child-copy-limit"]
                 .get(w.site.checked_sub(1)? as usize)?, error: *OPEN_ERRORS.get(w.error as usize)?, },
             attempted: w.flags & 1 != 0, press_returned: w.flags & 2 != 0,
             triggered: (w.flags & 2 != 0).then_some(w.flags & 4 != 0),
@@ -606,17 +607,29 @@ mod observation {
             || button.cleanup_returned && w.released != w.owned
             || matches!(w.error, 9 | 14 | 15) && r.custody_known
             || w.calls != 0 && !rechecks[0].is_some_and(OpenRecheckReturn::matched)
-            || w.nodes != 0 && w.checks & 3 != 3 || w.checks & 4 != 0 && w.nodes == 0
+            || w.direct_children_examined != 0 && w.checks & 3 != 3
+            || w.checks & 4 != 0 && w.direct_children_examined == 0
+            || w.direct_children_examined > 16 && w.checks < 63
+            || w.checks == 127 && w.direct_children_examined < 2
             || rechecks[1].is_some() && w.checks != 127
             || r.triggered == Some(false) && w.ax_error == 0
             || r.triggered == Some(true) && w.ax_error != 0
             || w.ax_error != 0 && w.error == 0
             || w.error == 0 && !r.succeeded() { return None; }
-        // These are only the five local tree refusals, before complete search
-        // or a final proof/Press. Later uncertain cleanup preserves the refusal.
-        if matches!(w.site, 15..=19) && (w.error != 7 || w.checks != 3 || w.nodes == 0
-            || w.calls == 0 || w.owned == 0 || w.ax_error != 0 || w.flags & 7 != 0
-            || !rechecks[0].is_some_and(OpenRecheckReturn::matched) || rechecks[1].is_some()) { return None; }
+        // Count/Copy precedes child validation in each pass. Title is checked
+        // only after that child's counter increment. Unknown cleanup preserves
+        // the exact first-failure phase/counter; it cannot relax this grammar.
+        if matches!(w.site, 15..=17) {
+            let phase_count = match (w.checks, w.site == 15) {
+                (3, false) => w.direct_children_examined == 0,
+                (3, true) => (1..=16).contains(&w.direct_children_examined),
+                (63, false) => (1..=16).contains(&w.direct_children_examined),
+                (63, true) => (2..=32).contains(&w.direct_children_examined),
+                _ => false,
+            };
+            if w.error != 7 || !phase_count || w.calls == 0 || w.owned == 0 || w.ax_error != 0 || w.flags & 7 != 0
+                || !rechecks[0].is_some_and(OpenRecheckReturn::matched) || rechecks[1].is_some() { return None; }
+        }
         Some(r)
     }
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -773,14 +786,16 @@ mod observation {
         let rw = RecheckWire { known: 1, error: 0, prompt: 1, proof: p };
         let Some(recheck) = recheck_return(rw) else { return false; };
         let rechecks = [Some(recheck); 2];
-        let full = OpenWire { flags: 15, site: 13, error: 0, checks: 127, calls: 101, nodes: 8,
+        let full = OpenWire { flags: 15, site: 13, error: 0, checks: 127, calls: 101, direct_children_examined: 8,
             owned: 60, released: 60, ax_error: 0 };
         if !open_return(full, rechecks, true).is_some_and(OpenReport::succeeded) { return false; }
-        // No missing bound/search/unique/enabled/action/recheck fact may pass.
+        // Neither incomplete census, a missing unique direct button, nor an
+        // unperformed same-original recheck may pass through the v2 proof.
         for bit in 0..7 {
             if open_return(OpenWire { checks: full.checks & !(1 << bit), ..full }, rechecks, true).is_some() { return false; }
         }
-        for bad in [OpenWire { calls: 513, ..full }, OpenWire { nodes: 65, ..full },
+        for bad in [OpenWire { calls: 513, ..full }, OpenWire { direct_children_examined: 33, ..full },
+            OpenWire { direct_children_examined: 1, ..full },
             OpenWire { owned: 257, released: 257, ..full }, OpenWire { released: 59, ..full },
             OpenWire { ax_error: 1, ..full }, OpenWire { checks: 255, ..full }, OpenWire { flags: 31, ..full }] {
             if open_return(bad, rechecks, true).is_some() { return false; }
@@ -789,31 +804,48 @@ mod observation {
             RecheckWire { known: 0, ..rw }, RecheckWire { proof: IdentityProofWire::default(), ..rw }] {
             if recheck_return(bad).is_some() { return false; }
         }
-        // The complete search can return zero/two candidates; a truncated
-        // prefix cannot become a unique match. Both are known refusal only.
-        for (checks, error) in [(7, 4), (7, 5), (3, 7)] {
-            let failed = OpenWire { flags: 8, site: 7, error, checks, ..full };
+        for examined in [2, 32] {
+            if !open_return(OpenWire { direct_children_examined: examined, ..full }, rechecks, true)
+                .is_some_and(OpenReport::succeeded) { return false; }
+        }
+        // Full first roster: zero/two prompt matches. Full recheck: absent,
+        // duplicate, foreign or replaced candidate. None can authorize Press.
+        for (checks, error) in [(7, 4), (7, 5), (3, 7), (63, 4), (63, 5), (63, 13)] {
+            let failed = OpenWire { flags: 8, site: if checks == 63 { 9 } else { 7 }, error, checks, ..full };
             if !open_return(failed, [Some(recheck), None], true).is_some_and(|r| !r.attempted && !r.succeeded()) { return false; }
         }
-        for (site, label) in (15..=19).zip(["tree-title-limit", "tree-child-count-limit", "tree-child-copy-limit",
-            "tree-depth-limit", "tree-node-limit"]) {
-            let failed = OpenWire { flags: 8, site, error: 7, checks: 3, ..full };
-            for (flags, released, known) in [(8, full.owned, true), (8, full.owned, false), (0, 16, false)] {
-                let returned = open_return(OpenWire { flags, released, ..failed }, [Some(recheck), None], known);
-                if !returned.is_some_and(|r| r.diagnostic == OpenDiagnostic { site: label, error: "limit" }
-                    && !r.attempted && !r.press_returned && r.triggered.is_none() && !r.succeeded()
-                    && r.custody_known == known && r.button.cleanup_returned == (flags & 8 != 0)
-                    && r.button.cf_slots_retired == released) { return false; }
+        for (checks, examined) in [(3, 17), (7, 0), (7, 17), (15, 17), (31, 17)] {
+            let failed = OpenWire { flags: 8, site: 7, error: 7, checks, direct_children_examined: examined, ..full };
+            if open_return(failed, [Some(recheck), None], true).is_some() { return false; }
+        }
+        for (site, label) in (15..=17).zip(["direct-sheet-title-limit", "direct-sheet-child-count-limit",
+            "direct-sheet-child-copy-limit"]) {
+            for checks in [3, 63] {
+                let bounds = match (checks, site == 15) { (3, false) => (0, 0), (3, true) => (1, 16),
+                    (63, false) => (1, 16), _ => (2, 32) };
+                for examined in [0, 1, 2, 16, 17, 32, 33] {
+                    let failed = OpenWire { flags: 8, site, error: 7, checks, direct_children_examined: examined, ..full };
+                    let valid = (bounds.0..=bounds.1).contains(&examined);
+                    for (flags, released, known) in [(8, full.owned, true), (8, full.owned, false), (0, 16, false)] {
+                        let returned = open_return(OpenWire { flags, released, ..failed }, [Some(recheck), None], known);
+                        if returned.is_some() != valid { return false; }
+                        if valid && !returned.is_some_and(|r| r.diagnostic == OpenDiagnostic { site: label, error: "limit" }
+                            && !r.attempted && !r.press_returned && r.triggered.is_none() && !r.succeeded()
+                            && r.custody_known == known && r.button.cleanup_returned == (flags & 8 != 0)
+                            && r.button.cf_slots_retired == released && r.button.direct_children_examined == examined)
+                            { return false; }
+                    }
+                }
+                let failed = OpenWire { flags: 8, site, error: 7, checks, direct_children_examined: bounds.0, ..full };
+                for bad in [OpenWire { error: 0, ..failed }, OpenWire { error: 5, ..failed },
+                    OpenWire { calls: 0, ..failed }, OpenWire { owned: 0, released: 0, ..failed },
+                    OpenWire { checks: 7, ..failed }, OpenWire { ax_error: -25204, ..failed },
+                    OpenWire { flags: 9, ..failed }, OpenWire { site: 18, ..failed }, OpenWire { site: 19, ..failed }] {
+                    if open_return(bad, [Some(recheck), None], true).is_some() { return false; }
+                }
+                if open_return(failed, [None; 2], true).is_some() || open_return(failed, rechecks, true).is_some()
+                    || open_return(OpenWire { site, ..full }, rechecks, true).is_some() { return false; }
             }
-            for bad in [OpenWire { error: 0, ..failed }, OpenWire { error: 5, ..failed },
-                OpenWire { nodes: 0, ..failed }, OpenWire { calls: 0, ..failed },
-                OpenWire { owned: 0, released: 0, ..failed }, OpenWire { checks: 7, ..failed },
-                OpenWire { ax_error: -25204, ..failed }, OpenWire { flags: 9, ..failed },
-                OpenWire { site: 20, ..failed }] {
-                if open_return(bad, [Some(recheck), None], true).is_some() { return false; }
-            }
-            if open_return(failed, [None; 2], true).is_some() || open_return(failed, rechecks, true).is_some()
-                || open_return(OpenWire { site, ..full }, rechecks, true).is_some() { return false; }
         }
         let changed = recheck_return(RecheckWire { prompt: 2, error: 13, ..rw });
         if !changed.is_some_and(|r| r.custody_known && !r.matched()) { return false; }

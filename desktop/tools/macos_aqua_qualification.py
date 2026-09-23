@@ -89,13 +89,13 @@ NATIVE_ACTION_SITES = {
     "button-hidden": ("would-block", 24, True), "project-cancel": ("none", 1, True),
     "project-open": ("none", 4, True), "quit-cancel": ("none", 8, True), "quit-confirm": ("none", 16, True),
 }
-ACCESSIBILITY_TREE_LIMIT_SITES = frozenset((
-    "tree-title-limit tree-child-count-limit tree-child-copy-limit tree-depth-limit tree-node-limit"
+ACCESSIBILITY_DIRECT_LIMIT_SITES = frozenset((
+    "direct-sheet-title-limit direct-sheet-child-count-limit direct-sheet-child-copy-limit"
 ).split())
 ACCESSIBILITY_SITES = frozenset((
-    "entry application windows parent-identifier sheet topology tree button button-recheck "
+    "entry application windows parent-identifier sheet topology direct-sheet-children button direct-sheet-recheck "
     "initial-original-proof original-proof admission press cleanup"
-).split()) | ACCESSIBILITY_TREE_LIMIT_SITES
+).split()) | ACCESSIBILITY_DIRECT_LIMIT_SITES
 ACCESSIBILITY_ERRORS = frozenset((
     "none wrong-thread invalid-input ineligible unsupported ambiguous malformed limit deadline custody "
     "invalid-element cannot-complete ax-other changed objc-exception cleanup-unknown"
@@ -116,7 +116,8 @@ ACCESSIBILITY_PROOF_SITES = frozenset((
     "panel-attached-sheet native-children native-parent native-role stable-identifier final-eligibility complete"
 ).split())
 ACCESSIBILITY_BUTTON_CHECKS = (
-    "parentBound", "sheetBound", "completeSearch", "uniqueButton", "enabled", "pressAdvertised", "finalRecheck",
+    "parentBound", "sheetBound", "completeDirectSheetChildren", "uniqueDirectPromptButton",
+    "enabled", "pressAdvertised", "sameDirectButtonRechecked",
 )
 SOURCE = (b'plugins { id("com.android.application") }\n'
           b'android { defaultConfig { applicationId = "org.example.mrk.observed" } }\n')
@@ -213,7 +214,7 @@ def _expected_identity_proof():
 
 def _expected_prompt_button():
     # A literal parser fixture, not observed AX counts or a native receipt.
-    return {"checks": dict.fromkeys(ACCESSIBILITY_BUTTON_CHECKS, True), "calls": 48, "nodes": 4,
+    return {"checks": dict.fromkeys(ACCESSIBILITY_BUTTON_CHECKS, True), "calls": 48, "directChildrenExamined": 4,
             "cfSlots": 32, "cfSlotsRetired": 32, "cleanupReturned": True, "axError": 0}
 
 
@@ -254,7 +255,7 @@ def expected_result(binding, case):
             "controlReturns": [first, case != "picker-loss", case != "picker-loss", first, True],
             "accessibilityTrustedWithoutPrompt": True,
             "projectOpenInput": None if case == "picker-loss" else {
-                "mechanism": "accessibility-press-original-prompt-button-v1", "step": "OpenProject", "id": 2 if first else 1,
+                "mechanism": "accessibility-press-original-direct-sheet-button-v2", "step": "OpenProject", "id": 2 if first else 1,
                 "prepared": True, "requested": True, "dispatchAttempted": True, "state": "retired",
                 "bodyEntered": True, "nativeEntered": True, "bodyReturned": True, "receiptJoined": True,
                 "workerRegistered": True, "workerJoined": True, "rechecksSettled": True,
@@ -455,22 +456,25 @@ def _accessibility_native_proof(value):
 def _accessibility_prompt_button(value):
     """Bounded returned AX/CF DATA, never a title, object or action permit."""
     label = "accessibility-prompt-button"
-    need(type(value) is dict and set(value) == {"checks", "calls", "nodes", "cfSlots", "cfSlotsRetired",
+    need(type(value) is dict and set(value) == {"checks", "calls", "directChildrenExamined", "cfSlots", "cfSlotsRetired",
                                                "cleanupReturned", "axError"}, label)
     checks = value["checks"]
     need(type(checks) is dict and set(checks) == set(ACCESSIBILITY_BUTTON_CHECKS)
          and all(type(v) is bool for v in checks.values()), label)
     ordered = tuple(checks[key] for key in ACCESSIBILITY_BUTTON_CHECKS)
     need(all(not flag or all(ordered[:index]) for index, flag in enumerate(ordered)), label)
-    for key, maximum in (("calls", 512), ("nodes", 64), ("cfSlots", 256)):
+    for key, maximum in (("calls", 512), ("directChildrenExamined", 32), ("cfSlots", 256)):
         need(type(value[key]) is int and 0 <= value[key] <= maximum, label)
     need(type(value["cfSlotsRetired"]) is int and 0 <= value["cfSlotsRetired"] <= value["cfSlots"]
          and type(value["cleanupReturned"]) is bool, label)
     need(not value["cleanupReturned"] or value["cfSlotsRetired"] == value["cfSlots"], label)
     need(type(value["axError"]) is int and (value["axError"] == 0 or -25214 <= value["axError"] <= -25200), label)
     need(not any(ordered) or value["calls"] > 0 and value["cfSlots"] > 0, label)
-    need(value["nodes"] == 0 or checks["parentBound"] and checks["sheetBound"], label)
-    need(not checks["completeSearch"] or value["nodes"] > 0, label)
+    examined = value["directChildrenExamined"]
+    need(examined == 0 or checks["parentBound"] and checks["sheetBound"], label)
+    need(not checks["completeDirectSheetChildren"] or examined >= 1, label)
+    need(examined <= 16 or all(ordered[:6]), label)
+    need(not checks["sameDirectButtonRechecked"] or examined >= 2, label)
     return value
 
 
@@ -497,7 +501,7 @@ def _accessibility_context(value, native, panel, *, expected_id=None):
         observed = ("bodyEntered", "nativeEntered", "attempted", "pressReturned", "triggered", "timely", "custodyKnown", "rechecksSettled")
         need(type(value) is dict and set(value) == {"mechanism", "step", "id", "state", "site", "error",
              "initialOriginalProof", "originalProof", "promptChecks", "promptButton", *flags, *observed}, label)
-        need(value["mechanism"] == "accessibility-press-original-prompt-button-v1" and value["step"] == "OpenProject"
+        need(value["mechanism"] == "accessibility-press-original-direct-sheet-button-v2" and value["step"] == "OpenProject"
              and type(value["id"]) is int and value["id"] in (1, 2), label)
         if expected_id is not None:
             need(value["id"] == expected_id, label)
@@ -593,15 +597,21 @@ def _accessibility_context(value, native, panel, *, expected_id=None):
             need(button is not None and button["axError"] == -25204, label)
         if error == "invalid-element":
             need(button is not None and button["axError"] == -25202, label)
-        if site in ACCESSIBILITY_TREE_LIMIT_SITES:
-            # A later cleanup/custody failure must not erase the first bound
-            # diagnostic or turn a partial tree into a completed search/action.
-            need(error == "limit" and button is not None and button["nodes"] > 0 and button["axError"] == 0
-                 and tuple(button["checks"][key] for key in ACCESSIBILITY_BUTTON_CHECKS)
-                 == (True, True, False, False, False, False, False)
+        if site in ACCESSIBILITY_DIRECT_LIMIT_SITES:
+            # Count/Copy precedes the per-child pass. Title follows its counter
+            # increment. Preserve the first phase/counter through late/Unknown
+            # cleanup; neither partial roster grants a final proof or Press.
+            need(error == "limit" and button is not None and button["axError"] == 0
+                 and button["calls"] > 0 and button["cfSlots"] > 0
                  and proofs[0] is not None and proofs[0]["error"] == "none" and proofs[1] is None
                  and prompt == {"initial": True, "final": None} and value["attempted"] is False
                  and value["pressReturned"] is False and value["triggered"] is None, label)
+            ordered = tuple(button["checks"][key] for key in ACCESSIBILITY_BUTTON_CHECKS)
+            examined, title = button["directChildrenExamined"], site == "direct-sheet-title-limit"
+            initial = ordered == (True, True, False, False, False, False, False)
+            recheck = ordered == (True, True, True, True, True, True, False)
+            need(initial and (1 <= examined <= 16 if title else examined == 0)
+                 or recheck and (2 <= examined <= 32 if title else 1 <= examined <= 16), label)
         for name, proof in (("initial-original-proof", proofs[0]), ("original-proof", proofs[1])):
             if site == name and proof is not None and proof["error"] != "none":
                 need(proof["error"] == error, label)
