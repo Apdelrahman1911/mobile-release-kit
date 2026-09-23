@@ -57,7 +57,19 @@ FAILURE_REASONS = frozenset((
     "asset_unsupported_filesystem asset_unsupported_format asset_busy asset_source_refused "
     "asset_source_changed asset_material_limit asset_parser_limit asset_project_overlap "
     "asset_exclusion_unconfirmed asset_capacity assessment_context_stale asset_user_cancelled "
-    "asset_review_expired asset_deadline asset_document_lost asset_shutdown asset_cleanup_unknown"
+    "asset_review_expired asset_deadline asset_document_lost asset_shutdown asset_cleanup_unknown "
+    "project-result-shape project-result-order project-result-path project-result-name project-result-id "
+    "snapshot-request-order snapshot-request-project "
+    "snapshot-error-runtime snapshot-error-protocol snapshot-error-invalid snapshot-error-shutdown "
+    "snapshot-error-timeout snapshot-error-cleanup snapshot-error-busy snapshot-error-unavailable "
+    "snapshot-error-project snapshot-error-limit snapshot-error-io snapshot-error-engine snapshot-error-other "
+    "snapshot-value-root snapshot-value-scope snapshot-config-path snapshot-value-assurance "
+    "snapshot-value-issues snapshot-hints-android snapshot-hints-version snapshot-discovery-state "
+    "snapshot-config-state snapshot-config-data snapshot-config-content snapshot-config-issues "
+    "snapshot-return-order snapshot-return-project "
+    "project-witness-identity project-witness-response project-witness-selection project-witness-callback "
+    "edit-status-schema edit-status-generation edit-status-owner edit-status-projection "
+    "relay-join-contract exit-edit-status exit-finality-contract observer-report-unavailable"
 ).split())
 NATIVE_STEPS = frozenset("CancelProject SetProject OpenProject QuitCancel Quit PickerPending".split())
 # Closed same-origin action DATA, not a panel query or an action/finality permit.

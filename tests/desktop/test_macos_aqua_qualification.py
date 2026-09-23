@@ -381,6 +381,16 @@ class AquaDataTests(unittest.TestCase):
         with self.assertRaisesRegex(M.Refused, "^inner-failure-marker$"):
             M.parse_result(captured(M.expected_result(BINDING, "first-save")), good, BINDING, "first-save")
 
+    def test_projectsettled_site_reason_is_still_a_failed_result(self):
+        # Synthetic diagnostic DATA only: not the retained native failure or
+        # a reconstruction of its unknown project/snapshot result.
+        frame = (b"MRK_MACOS_AQUA_FAILURE_STEP=ProjectSettled\n"
+                 b"MRK_MACOS_AQUA_FAILURE_REASON=snapshot-error-cleanup\n")
+        self.assertEqual(M.failure_step(b"", frame), "ProjectSettled")
+        self.assertEqual(M.failure_reason(b"", frame), "snapshot-error-cleanup")
+        with self.assertRaisesRegex(M.Refused, "^inner-failure-marker$"):
+            M.parse_result(captured(M.expected_result(BINDING, "first-save")), frame, BINDING, "first-save")
+
     def test_failure_step_rejects_partial_and_ambiguous_exception_buffers(self):
         prefix = b"MRK_MACOS_AQUA_FAILURE_STEP"
         good = prefix + b"=CancelProject\n"
@@ -1667,10 +1677,66 @@ class AquaDataTests(unittest.TestCase):
         handler = observer.split("pub(super) fn project_result(", 1)[1].split("pub(super) fn snapshot_request(", 1)[0]
         self.assertLess(handler.index("match project_return_route("), handler.index("let Ok(Some(project))"))
         self.assertIn("Err(reason) => { self.fail_with(reason); return; }", handler)
-        self.assertIn("!matches!(r.step, Step::OpenProject | Step::ProjectSettled) || r.project.is_some()", handler)
-        self.assertIn("Path::new(&project.path) != self.project_path || project.name != self.case.name() || !crate::protocol::valid_id(&project.id)", handler)
+        self.assertIn('let Ok(Some(project)) = result else { self.fail_with("project-result-shape"); return; };', handler)
+        classified = "selected_project_failure(r.step, r.project.is_some(), project, &self.project_path, self.case.name())"
+        self.assertLess(handler.index(classified), handler.index("r.project_returned = true; r.project = Some(project.clone());"))
+        classifier = observer.split("fn selected_project_failure(", 1)[1].split("fn snapshot_error_reason(", 1)[0]
+        predicates = ("!matches!(step, Step::OpenProject | Step::ProjectSettled) || already_selected",
+                      "Path::new(&project.path) != expected_path", "project.name != expected_name", "!crate::protocol::valid_id(&project.id)")
+        self.assertEqual(sorted(classifier.index(value) for value in predicates), [classifier.index(value) for value in predicates])
+        for label in ("order", "path", "name", "id"):
+            self.assertIn(f'return Some("project-result-{label}")', classifier)
         self.assertNotIn("project_calls", handler)
         self.assertNotIn("r.step =", handler)
+
+    def test_project_snapshot_first_failure_classifiers_preserve_existing_gates(self):
+        observer = (PATH.parents[1] / "src-tauri" / "src" / "installed_shell_observation_macos.rs").read_text(encoding="utf-8")
+        errors = observer.split("fn snapshot_error_reason(", 1)[1].split("fn snapshot_value_failure(", 1)[0]
+        self.assertIn('_ => "snapshot-error-other"', errors)
+        labels = M.re.findall(r'=> "([a-z-]+)"', errors)
+        self.assertEqual(len(labels), 13)
+        self.assertTrue(set(labels) <= M.FAILURE_REASONS)
+        for forbidden in ("format!", ".to_owned(", ".to_string(", ".message", "return code"):
+            self.assertNotIn(forbidden, errors)
+        values = observer.split("fn snapshot_value_failure(", 1)[1].split("fn project_snapshot_failure_data_checks(", 1)[0]
+        ordered = ("snapshot-value-root", "snapshot-value-scope", "snapshot-config-path", "snapshot-value-assurance",
+                   "snapshot-value-issues", "snapshot-hints-android", "snapshot-hints-version", "snapshot-discovery-state",
+                   "snapshot-config-state", "snapshot-config-data", "snapshot-config-content", "snapshot-config-issues")
+        self.assertEqual(sorted(values.index(label) for label in ordered), [values.index(label) for label in ordered])
+        for predicate in ('v["root"].as_str() != expected_path.to_str()', 'config["path"] != "release/mobile-release.json"',
+                          'hints["android"]["applicationId"] == APP_ID && hints["android"]["module"] == ":app"',
+                          'hints["android"]["buildFile"] == "app/build.gradle.kts"',
+                          'hints["versionSource"] == "version.properties" && hints["versionNameKey"] == "VERSION_NAME"',
+                          'hints["versionBuildKey"] == "BUILD_NUMBER"',
+                          'v["discovery"]["partial"] == false && v["discovery"]["state"] == "unverified"',
+                          'config["state"] != "format-valid"', 'config["data"] != *base',
+                          'config["content"] != json!({"bytes":CONFIG.len(), "sha256":digest(CONFIG)})',
+                          'config["state"] != "missing"', '!config["data"].is_null()', '!config["content"].is_null()',
+                          'issues.len() == 1 && issues[0]["code"] == "config.missing"'):
+            self.assertIn(predicate, values)
+        for forbidden in ("Instant::now", "self.", "std::fs", "observe_panel", "latch_failure", "format!"):
+            self.assertNotIn(forbidden, values)
+        snapshot = observer.split("pub(super) fn snapshot(&self", 1)[1].split("pub(super) fn suggest_request(", 1)[0]
+        guards = ("snapshot_value_failure(value, &self.project_path, saved, &self.base)",
+                  "if let Some(reason) = failure", "if !r.snapshot_pending", "if !r.project.as_ref()",
+                  "if r.snapshots + 1 != r.snapshot_requests", "r.snapshot_pending = false; r.snapshots += 1;")
+        self.assertEqual(sorted(snapshot.index(guard) for guard in guards), [snapshot.index(guard) for guard in guards])
+        self.assertIn("Err(error) => Some(snapshot_error_reason(&error.code))", snapshot)
+        self.assertNotIn("error.message", snapshot)
+        tick = observer.split("pub(super) fn tick(", 1)[1].split("Step::PickerPending =>", 1)[0]
+        witness = tick.split("Step::ProjectSettled =>", 1)[1]
+        self.assertIn("let Some(returned) = &r.project else { return; };", witness)
+        self.assertIn("let Some((project,witness,response)) = state.document.installed_macos_project(self.case.selected_id()) else { return; };", witness)
+        self.assertEqual(witness.count("installed_macos_project("), 1)
+        for label in ("identity", "response", "selection", "callback"):
+            self.assertLess(witness.index(f'self.fail_with("project-witness-{label}")'), witness.index("r.project_witness = Some(witness)"))
+        main = observer.split("pub(crate) fn main()", 1)[1]
+        self.assertIn('if report.is_none() { q.fail_with("observer-report-unavailable"); q.report_failure(); }', main)
+        self.assertLess(main.index("observe(&q)"), main.index('q.fail_with("observer-report-unavailable")'))
+        self.assertLess(main.index('q.fail_with("observer-report-unavailable")'), main.index("q.diagnostic.finish(q.end)"))
+        data = observer.split("fn observer_data_checks()", 1)[1].split("fn observe(q:", 1)[0]
+        self.assertIn("if !project_snapshot_failure_data_checks() { return false; }", data)
+        self.assertIn('latch_failure(&first, &failed, "observer-deadline")', data)
 
     def test_loss_requires_actual_route_but_not_both_events(self):
         for case in ("picker-loss", "save-loss"):

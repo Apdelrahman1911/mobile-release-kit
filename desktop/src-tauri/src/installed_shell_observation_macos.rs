@@ -36,6 +36,18 @@ const FAILURE_REASONS: &[&str] = &[
     "asset_source_changed", "asset_material_limit", "asset_parser_limit", "asset_project_overlap",
     "asset_exclusion_unconfirmed", "asset_capacity", "assessment_context_stale", "asset_user_cancelled",
     "asset_review_expired", "asset_deadline", "asset_document_lost", "asset_shutdown", "asset_cleanup_unknown",
+    "project-result-shape", "project-result-order", "project-result-path", "project-result-name", "project-result-id",
+    "snapshot-request-order", "snapshot-request-project",
+    "snapshot-error-runtime", "snapshot-error-protocol", "snapshot-error-invalid", "snapshot-error-shutdown",
+    "snapshot-error-timeout", "snapshot-error-cleanup", "snapshot-error-busy", "snapshot-error-unavailable",
+    "snapshot-error-project", "snapshot-error-limit", "snapshot-error-io", "snapshot-error-engine", "snapshot-error-other",
+    "snapshot-value-root", "snapshot-value-scope", "snapshot-config-path", "snapshot-value-assurance",
+    "snapshot-value-issues", "snapshot-hints-android", "snapshot-hints-version", "snapshot-discovery-state",
+    "snapshot-config-state", "snapshot-config-data", "snapshot-config-content", "snapshot-config-issues",
+    "snapshot-return-order", "snapshot-return-project",
+    "project-witness-identity", "project-witness-response", "project-witness-selection", "project-witness-callback",
+    "edit-status-schema", "edit-status-generation", "edit-status-owner", "edit-status-projection",
+    "relay-join-contract", "exit-edit-status", "exit-finality-contract", "observer-report-unavailable",
 ];
 const _: () = assert!(FAILURE_REASONS.len() < u8::MAX as usize);
 fn latch_failure(first: &AtomicU8, failed: &AtomicBool, reason: &'static str) {
@@ -889,10 +901,9 @@ impl Observation {
             Ok(ProjectReturn::Selected) => {},
             Err(reason) => { self.fail_with(reason); return; },
         }
-        let Ok(Some(project)) = result else { self.fail(); return; };
-        if !matches!(r.step, Step::OpenProject | Step::ProjectSettled) || r.project.is_some()
-            || Path::new(&project.path) != self.project_path || project.name != self.case.name() || !crate::protocol::valid_id(&project.id) {
-            self.fail(); return;
+        let Ok(Some(project)) = result else { self.fail_with("project-result-shape"); return; };
+        if let Some(reason) = selected_project_failure(r.step, r.project.is_some(), project, &self.project_path, self.case.name()) {
+            self.fail_with(reason); return;
         }
         r.project_returned = true; r.project = Some(project.clone());
     }
@@ -900,32 +911,27 @@ impl Observation {
         let Some(mut r) = self.record() else { return; };
         let allowed = r.snapshot_requests == 0 && matches!(r.step, Step::OpenProject | Step::ProjectSettled | Step::Snapshot)
             || self.case == Case::FirstSave && r.snapshot_requests == 1 && matches!(r.step, Step::Refresh | Step::Readback);
-        if !allowed || r.snapshot_pending || r.reload_requested || !r.project.as_ref().is_some_and(|p| p.id == project) {
-            self.fail(); return;
+        if !allowed || r.snapshot_pending || r.reload_requested {
+            self.fail_with("snapshot-request-order"); return;
+        }
+        if !r.project.as_ref().is_some_and(|p| p.id == project) {
+            self.fail_with("snapshot-request-project"); return;
         }
         r.snapshot_requests += 1; r.snapshot_pending = true;
     }
     pub(super) fn snapshot(&self, project: &str, result: &Result<Value, BridgeError>) {
         let Some(mut r) = self.record() else { return; };
         let saved = self.case == Case::NoopStale || r.snapshot_requests == 2;
-        let valid = result.as_ref().is_ok_and(|v| {
-            let config = &v["config"]; let hints = &v["discovery"]["hints"];
-            v["root"].as_str() == self.project_path.to_str() && v["observationScope"] == "single-request-non-atomic"
-                && config["path"] == "release/mobile-release.json" && assurance(v, "static-text")
-                && v["issues"].as_array().is_some_and(Vec::is_empty)
-                && hints["android"]["applicationId"] == APP_ID && hints["android"]["module"] == ":app"
-                && hints["android"]["buildFile"] == "app/build.gradle.kts" && hints["versionSource"] == "version.properties"
-                && hints["versionNameKey"] == "VERSION_NAME" && hints["versionBuildKey"] == "BUILD_NUMBER"
-                && v["discovery"]["partial"] == false && v["discovery"]["state"] == "unverified"
-                && if saved { config["state"] == "format-valid" && config["data"] == self.base
-                    && config["content"] == json!({"bytes":CONFIG.len(), "sha256":digest(CONFIG)})
-                    && config["issues"].as_array().is_some_and(Vec::is_empty) }
-                else { config["state"] == "missing" && config["data"].is_null() && config["content"].is_null()
-                    && config["issues"].as_array().is_some_and(|issues| issues.len() == 1 && issues[0]["code"] == "config.missing") }
-        });
-        if !valid || !r.snapshot_pending || !r.project.as_ref().is_some_and(|p| p.id == project) || r.snapshots + 1 != r.snapshot_requests {
-            self.fail(); return;
+        let failure = match result {
+            Ok(value) => snapshot_value_failure(value, &self.project_path, saved, &self.base),
+            Err(error) => Some(snapshot_error_reason(&error.code)),
+        };
+        if let Some(reason) = failure { self.fail_with(reason); return; }
+        if !r.snapshot_pending { self.fail_with("snapshot-return-order"); return; }
+        if !r.project.as_ref().is_some_and(|p| p.id == project) {
+            self.fail_with("snapshot-return-project"); return;
         }
+        if r.snapshots + 1 != r.snapshot_requests { self.fail_with("snapshot-return-order"); return; }
         r.snapshot_pending = false; r.snapshots += 1;
     }
     pub(super) fn suggest_request(&self, hints: &Value) {
@@ -1135,55 +1141,55 @@ impl Observation {
     pub(super) fn close_request(&self) { self.fail(); } // Native Quit/loss, never synthetic Close IPC, owns EOF.
     pub(super) fn edit_status(&self, status: &ConfigEditStatus, edits: &EditOwner) {
         let Some(mut r) = self.record() else { return; };
-        if status.schema_version != 1 || !edit::token(&status.window_generation) { self.fail(); return; }
+        if status.schema_version != 1 || !edit::token(&status.window_generation) { self.fail_with("edit-status-schema"); return; }
         if r.status_revision.is_some_and(|old| old > status.status_revision) { return; }
         if let Some(before) = &r.generation {
-            if before != &status.window_generation && !r.reload_requested { self.fail(); return; }
+            if before != &status.window_generation && !r.reload_requested { self.fail_with("edit-status-generation"); return; }
         } else { r.generation = Some(status.window_generation.clone()); }
         if status.capability.available && status.capability.reason == edit::EditAvailability::Available && !r.reload_requested { r.capability = true; }
         for p in status.last_terminal.iter().chain(status.active.iter()) {
             let Some(round) = r.sessions.iter().position(|s| s.projection.session_id == p.session_id) else {
-                if r.open_pending { continue; } self.fail(); return;
+                if r.open_pending { continue; } self.fail_with("edit-status-owner"); return;
             };
             let old = &r.sessions[round].projection;
             if p.domain != edit::EditDomain::Configuration || p.workflow.is_some() || p.metadata_text.is_some()
                 || p.project_id != old.project_id || p.owner_generation != old.owner_generation || p.late_settled
                 || !edit::token(&p.session_id) || p.phase == edit::Phase::Unknown || p.native_finality == edit::NativeFinality::Unknown
                 || phase(p.phase) < phase(old.phase) || p.apply_submitted && !r.sessions[round].apply_requested
-                || old.apply_submitted && !p.apply_submitted { self.fail(); return; }
+                || old.apply_submitted && !p.apply_submitted { self.fail_with("edit-status-projection"); return; }
             if let Some(c) = &p.checkout {
                 if !edit::token(&c.revision) || c.base != *self.expected_base(round)
-                    || old.checkout.as_ref().is_some_and(|v| v.revision != c.revision || v.base != c.base) { self.fail(); return; }
-            } else if old.checkout.is_some() { self.fail(); return; }
+                    || old.checkout.as_ref().is_some_and(|v| v.revision != c.revision || v.base != c.base) { self.fail_with("edit-status-projection"); return; }
+            } else if old.checkout.is_some() { self.fail_with("edit-status-projection"); return; }
             if let Some(prepared) = &p.prepared {
-                let Some(review) = self.review_sample(&prepared.view,round) else { self.fail(); return; };
+                let Some(review) = self.review_sample(&prepared.view,round) else { self.fail_with("edit-status-projection"); return; };
                 if !r.sessions[round].prepare_requested || !edit::token(&prepared.plan_token)
                     || !p.checkout.as_ref().is_some_and(|c| c.revision == prepared.revision)
                     || (prepared.draft_revision,prepared.baseline_generation) != self.revisions(round)
                     || old.prepared.as_ref().is_some_and(|v| v.plan_token != prepared.plan_token)
-                    || r.sessions[round].review.as_ref().is_some_and(|v| v != &review) { self.fail(); return; }
+                    || r.sessions[round].review.as_ref().is_some_and(|v| v != &review) { self.fail_with("edit-status-projection"); return; }
                 r.sessions[round].review = Some(review);
-            } else if r.sessions[round].review.is_some() { self.fail(); return; }
+            } else if r.sessions[round].review.is_some() { self.fail_with("edit-status-projection"); return; }
             let cancelled = self.case == Case::SaveLoss || self.case == Case::FirstSave && round == 1;
             let expected_native = if cancelled && phase(p.phase) >= phase(edit::Phase::Finalizing) {
                 if self.case == Case::SaveLoss { edit::NativeEditReason::WindowLost } else { edit::NativeEditReason::Shutdown }
             } else { edit::NativeEditReason::None };
-            if p.native_reason != expected_native { self.fail(); return; }
+            if p.native_reason != expected_native { self.fail_with("edit-status-projection"); return; }
             if let Some(core) = &p.core_outcome {
                 let (effect,journal,reason) = if cancelled { (edit::Effect::NotStarted,edit::Journal::NotCreated,edit::CoreReason::Cancelled) }
                     else if self.case == Case::FirstSave { (edit::Effect::Committed,edit::Journal::Clean,edit::CoreReason::None) }
                     else if round == 0 { (edit::Effect::Unchanged,edit::Journal::NotCreated,edit::CoreReason::None) }
                     else { (edit::Effect::NotStarted,edit::Journal::NotCreated,edit::CoreReason::StaleRevision) };
                 if core.effect != effect || core.journal != journal || core.reason != reason || core.resources != edit::ResourceState::Settled {
-                    self.fail(); return;
+                    self.fail_with("edit-status-projection"); return;
                 }
             }
             if p.phase == edit::Phase::Final {
                 if p.native_finality != edit::NativeFinality::Settled || p.core_outcome.is_none() || p.prepared.is_none()
-                    || p.apply_submitted != !cancelled || cancelled && !(r.reload_requested || r.close_count == 2) { self.fail(); return; }
+                    || p.apply_submitted != !cancelled || cancelled && !(r.reload_requested || r.close_count == 2) { self.fail_with("edit-status-projection"); return; }
                 if r.sessions[round].finality.is_none() {
-                    let Some(facts) = edits.installed_observation_final(&p.session_id) else { self.fail(); return; };
-                    if !finality(&facts,p,if cancelled { 2 } else { 3 }) { self.fail(); return; }
+                    let Some(facts) = edits.installed_observation_final(&p.session_id) else { self.fail_with("edit-status-projection"); return; };
+                    if !finality(&facts,p,if cancelled { 2 } else { 3 }) { self.fail_with("edit-status-projection"); return; }
                     r.sessions[round].finality = Some(facts);
                 }
             }
@@ -1223,11 +1229,16 @@ impl Observation {
                 Step::ProjectSettled => {
                     let Some(returned) = &r.project else { return; };
                     let Some((project,witness,response)) = state.document.installed_macos_project(self.case.selected_id()) else { return; };
-                    if project.id != returned.id || project.path != returned.path || project.name != returned.name
-                        || response.operation_id != self.case.selected_id() || response.response != NativeResponse::Accept
-                        || response.selected.as_deref() != Some(self.project_path.as_path()) || !response.callback_returned {
-                        self.fail(); return;
+                    if project.id != returned.id || project.path != returned.path || project.name != returned.name {
+                        self.fail_with("project-witness-identity"); return;
                     }
+                    if response.operation_id != self.case.selected_id() || response.response != NativeResponse::Accept {
+                        self.fail_with("project-witness-response"); return;
+                    }
+                    if response.selected.as_deref() != Some(self.project_path.as_path()) {
+                        self.fail_with("project-witness-selection"); return;
+                    }
+                    if !response.callback_returned { self.fail_with("project-witness-callback"); return; }
                     r.project_witness = Some(witness); r.project_settled = true; r.step = Step::Snapshot; return;
                 },
                 Step::PickerPending => {
@@ -2008,14 +2019,14 @@ impl Observation {
     }
     pub(super) fn relay_joined(&self, joined: bool) {
         let Some(mut r) = self.record() else { return; };
-        if !joined || r.relay_joined { self.fail(); return; } r.relay_joined = true;
+        if !joined || r.relay_joined { self.fail_with("relay-join-contract"); return; } r.relay_joined = true;
     }
     pub(super) fn actual_exit(&self, ready: bool, document: &DocumentBinding, edits: &EditOwner) {
-        if let Ok(status) = edits.status() { self.edit_status(&status,edits); } else { self.fail(); }
+        if let Ok(status) = edits.status() { self.edit_status(&status,edits); } else { self.fail_with("exit-edit-status"); }
         let Some(mut r) = self.record() else { return; };
         let finality = document.installed_macos_final(self.case.quit_id(),r.project_witness.as_ref(),r.picker_witness.as_ref(),self.case.loses_document());
         if !ready || !finality || !r.relay_joined || r.actual_exit || r.step != Step::Exit || r.pending.is_some()
-            || !r.native_actions_returned[4] || !r.sessions.iter().all(|s| s.finality.is_some()) { self.fail(); return; }
+            || !r.native_actions_returned[4] || !r.sessions.iter().all(|s| s.finality.is_some()) { self.fail_with("exit-finality-contract"); return; }
         r.originals_final = true; r.actual_exit = true;
     }
     fn finish(&self) -> Option<Value> {
@@ -2085,6 +2096,134 @@ fn assurance(v: &Value, basis: &str) -> bool { v["assurance"]["basis"] == basis 
         .iter().all(|k| v["assurance"][*k] == false) }
 fn format_valid(v: &Value) -> bool { v["valid"] == true && v["state"] == "format-valid" && v["issues"].as_array().is_some_and(Vec::is_empty)
     && v["requirements"].as_array().is_some_and(|r| r.len() <= 128 && r.iter().all(|r| r["state"] == "unknown")) && assurance(v,"schema-policy") }
+
+// Same selected-result/snapshot predicates, in their original order. Only a
+// closed site label leaves these pure classifiers; never the supplied data.
+fn selected_project_failure(step: Step, already_selected: bool, project: &Project,
+    expected_path: &Path, expected_name: &str) -> Option<&'static str> {
+    if !matches!(step, Step::OpenProject | Step::ProjectSettled) || already_selected { return Some("project-result-order"); }
+    if Path::new(&project.path) != expected_path { return Some("project-result-path"); }
+    if project.name != expected_name { return Some("project-result-name"); }
+    if !crate::protocol::valid_id(&project.id) { return Some("project-result-id"); }
+    None
+}
+fn snapshot_error_reason(code: &str) -> &'static str {
+    // BridgeError contains arbitrary strings. Do not format or copy one into a
+    // diagnostic, including when it resembles an allowed observer reason.
+    match code {
+        "runtime_unavailable" => "snapshot-error-runtime", "protocol_error" => "snapshot-error-protocol",
+        "invalid_request" => "snapshot-error-invalid", "shutting_down" => "snapshot-error-shutdown",
+        "query_timeout" => "snapshot-error-timeout", "cleanup_unknown" => "snapshot-error-cleanup",
+        "busy" => "snapshot-error-busy", "unavailable" => "snapshot-error-unavailable",
+        "unknown_project" => "snapshot-error-project", "output_limit" => "snapshot-error-limit",
+        "io_error" => "snapshot-error-io", "engine_failed" => "snapshot-error-engine",
+        _ => "snapshot-error-other",
+    }
+}
+fn snapshot_value_failure(v: &Value, expected_path: &Path, saved: bool, base: &Value) -> Option<&'static str> {
+    let config = &v["config"]; let hints = &v["discovery"]["hints"];
+    if v["root"].as_str() != expected_path.to_str() { return Some("snapshot-value-root"); }
+    if v["observationScope"] != "single-request-non-atomic" { return Some("snapshot-value-scope"); }
+    if config["path"] != "release/mobile-release.json" { return Some("snapshot-config-path"); }
+    if !assurance(v, "static-text") { return Some("snapshot-value-assurance"); }
+    if !v["issues"].as_array().is_some_and(Vec::is_empty) { return Some("snapshot-value-issues"); }
+    if !(hints["android"]["applicationId"] == APP_ID && hints["android"]["module"] == ":app"
+        && hints["android"]["buildFile"] == "app/build.gradle.kts") { return Some("snapshot-hints-android"); }
+    if !(hints["versionSource"] == "version.properties" && hints["versionNameKey"] == "VERSION_NAME"
+        && hints["versionBuildKey"] == "BUILD_NUMBER") { return Some("snapshot-hints-version"); }
+    if !(v["discovery"]["partial"] == false && v["discovery"]["state"] == "unverified") { return Some("snapshot-discovery-state"); }
+    if saved {
+        if config["state"] != "format-valid" { return Some("snapshot-config-state"); }
+        if config["data"] != *base { return Some("snapshot-config-data"); }
+        if config["content"] != json!({"bytes":CONFIG.len(), "sha256":digest(CONFIG)}) { return Some("snapshot-config-content"); }
+        if !config["issues"].as_array().is_some_and(Vec::is_empty) { return Some("snapshot-config-issues"); }
+    } else {
+        if config["state"] != "missing" { return Some("snapshot-config-state"); }
+        if !config["data"].is_null() { return Some("snapshot-config-data"); }
+        if !config["content"].is_null() { return Some("snapshot-config-content"); }
+        if !config["issues"].as_array().is_some_and(|issues| issues.len() == 1 && issues[0]["code"] == "config.missing") {
+            return Some("snapshot-config-issues");
+        }
+    }
+    None
+}
+fn project_snapshot_failure_data_checks() -> bool {
+    // Fixed synthetic values exercise only the classifiers. No native call,
+    // Observation, writer, process, filesystem probe or ownership is created.
+    let root = Path::new("/synthetic/first-save");
+    let mut project = Project { id: "project-1".into(), name: "first-save".into(), path: "/synthetic/first-save".into() };
+    for step in [Step::OpenProject, Step::ProjectSettled] {
+        if selected_project_failure(step, false, &project, root, "first-save").is_some()
+            || selected_project_failure(step, true, &project, root, "first-save") != Some("project-result-order") { return false; }
+    }
+    for step in [Step::ChooseProject, Step::SetProject, Step::Snapshot] {
+        if selected_project_failure(step, false, &project, root, "first-save") != Some("project-result-order") { return false; }
+    }
+    project.path = "/synthetic/other".into(); project.name = "other".into(); project.id = "invalid id".into();
+    if selected_project_failure(Step::ProjectSettled, true, &project, root, "first-save") != Some("project-result-order")
+        || selected_project_failure(Step::ProjectSettled, false, &project, root, "first-save") != Some("project-result-path") { return false; }
+    project.path = "/synthetic/first-save".into();
+    if selected_project_failure(Step::ProjectSettled, false, &project, root, "first-save") != Some("project-result-name") { return false; }
+    project.name = "first-save".into();
+    if selected_project_failure(Step::ProjectSettled, false, &project, root, "first-save") != Some("project-result-id") { return false; }
+    for (code, expected) in [
+        ("runtime_unavailable", "snapshot-error-runtime"), ("protocol_error", "snapshot-error-protocol"),
+        ("invalid_request", "snapshot-error-invalid"), ("shutting_down", "snapshot-error-shutdown"),
+        ("query_timeout", "snapshot-error-timeout"), ("cleanup_unknown", "snapshot-error-cleanup"),
+        ("busy", "snapshot-error-busy"), ("unavailable", "snapshot-error-unavailable"),
+        ("unknown_project", "snapshot-error-project"), ("output_limit", "snapshot-error-limit"),
+        ("io_error", "snapshot-error-io"), ("engine_failed", "snapshot-error-engine"),
+        ("", "snapshot-error-other"), ("untrusted-private-code", "snapshot-error-other"),
+        ("observer-deadline", "snapshot-error-other"), ("snapshot-error-runtime", "snapshot-error-other"),
+    ] {
+        let error = BridgeError::new(code, "untrusted-private-message");
+        if snapshot_error_reason(&error.code) != expected { return false; }
+    }
+    let Ok(base) = crate::protocol::strict_json(CONFIG) else { return false; };
+    let mutations: &[(&[&str], Value, &str)] = &[
+        (&["root"], json!("/synthetic/other"), "snapshot-value-root"),
+        (&["observationScope"], Value::Null, "snapshot-value-scope"),
+        (&["config", "path"], Value::Null, "snapshot-config-path"),
+        (&["assurance", "writesPerformed"], json!(true), "snapshot-value-assurance"),
+        (&["issues"], json!([{}]), "snapshot-value-issues"),
+        (&["discovery", "hints", "android", "applicationId"], Value::Null, "snapshot-hints-android"),
+        (&["discovery", "hints", "versionSource"], Value::Null, "snapshot-hints-version"),
+        (&["discovery", "partial"], json!(true), "snapshot-discovery-state"),
+        (&["config", "state"], Value::Null, "snapshot-config-state"),
+        (&["config", "data"], json!(false), "snapshot-config-data"),
+        (&["config", "content"], json!(false), "snapshot-config-content"),
+        (&["config", "issues"], json!(false), "snapshot-config-issues"),
+        (&["config"], Value::Null, "snapshot-config-path"),
+        (&["discovery"], json!([]), "snapshot-hints-android"),
+    ];
+    for saved in [false, true] {
+        let value = json!({"root":"/synthetic/first-save", "observationScope":"single-request-non-atomic",
+            "config":{"path":"release/mobile-release.json", "state":if saved { "format-valid" } else { "missing" },
+                "data":if saved { base.clone() } else { Value::Null },
+                "content":if saved { json!({"bytes":CONFIG.len(),"sha256":digest(CONFIG)}) } else { Value::Null },
+                "issues":if saved { json!([]) } else { json!([{"code":"config.missing"}]) }},
+            "discovery":{"state":"unverified", "partial":false, "hints":{
+                "android":{"applicationId":APP_ID, "module":":app", "buildFile":"app/build.gradle.kts"},
+                "versionSource":"version.properties", "versionNameKey":"VERSION_NAME", "versionBuildKey":"BUILD_NUMBER"}},
+            "assurance":{"basis":"static-text", "releaseReadiness":"unknown", "projectCodeExecuted":false,
+                "toolsProbed":false, "credentialsRead":false, "gitObserved":false, "storeContacted":false, "writesPerformed":false}, "issues":[]});
+        if snapshot_value_failure(&value, root, saved, &base).is_some() { return false; }
+        for (path, replacement, expected) in mutations {
+            let mut changed = value.clone(); let mut field = &mut changed;
+            for key in *path { field = &mut field[*key]; }
+            *field = replacement.clone();
+            if snapshot_value_failure(&changed, root, saved, &base) != Some(*expected) { return false; }
+        }
+        for (field, expected) in [("config", "snapshot-config-path"), ("discovery", "snapshot-hints-android")] {
+            let mut missing = value.clone(); let Some(object) = missing.as_object_mut() else { return false; };
+            object.remove(field);
+            if snapshot_value_failure(&missing, root, saved, &base) != Some(expected) { return false; }
+        }
+        let mut changed = value.clone(); changed["root"] = json!("/synthetic/other"); changed["observationScope"] = Value::Null;
+        if snapshot_value_failure(&changed, root, saved, &base) != Some("snapshot-value-root") { return false; }
+    }
+    true
+}
 
 // Synchronous expressions operate only existing production controls. No direct
 // invoke/reducer access, DTO injection, synthetic event, Promise or hidden UI.
@@ -2518,6 +2657,7 @@ fn observer_data_checks() -> bool {
         || project_return_route(Case::PickerLoss, Step::PickerPending, false, false, false, &error) != Err("asset_source_refused")
         || project_return_route(Case::SaveLoss, Step::Lost, true, false, false, &error) != Err("asset_source_refused") { return false; }
 
+    if !project_snapshot_failure_data_checks() { return false; }
     // Every closed reason survives later generic cleanup/deadline failures.
     for reason in FAILURE_REASONS {
         if !reason.is_ascii() || reason.len() > 48 { return false; }
@@ -2566,7 +2706,7 @@ pub(crate) fn main() -> std::process::ExitCode {
         .and_then(|fixture| Observation::new(case,fixture).ok());
     let Some(q) = input.map(Arc::new) else { super::diagnostic(b"MRK_MACOS_AQUA=fixture-refused\n"); return std::process::ExitCode::FAILURE; };
     let report = observe(&q);
-    if report.is_none() { q.fail(); q.report_failure(); }
+    if report.is_none() { q.fail_with("observer-report-unavailable"); q.report_failure(); }
     // One cleanup path for every post-construction return. Receipt submission
     // never counts as writer return/join, nor does process containment.
     let returned = q.diagnostic.finish(q.end);
