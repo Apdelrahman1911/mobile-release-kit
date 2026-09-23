@@ -178,6 +178,8 @@ pub(crate) struct OriginalWork {
     retirement: Mutex<Retirement>, retired: AtomicBool,
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     keyring: Mutex<crate::vault_keyring_linux::LookupBook>,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    large_work_started: AtomicBool,
 }
 impl OriginalWork {
     fn new(id: u32, gui_needed: bool, document: Weak<Inner>) -> Arc<Self> {
@@ -187,6 +189,8 @@ impl OriginalWork {
             retirement: Mutex::new(Retirement::default()), retired: AtomicBool::new(true),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             keyring: Mutex::new(crate::vault_keyring_linux::LookupBook::new()),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            large_work_started: AtomicBool::new(false),
             gui: Arc::new(GuiCall { owner: owner.clone(), document, facts: Mutex::new(GuiFacts { dispatched: false, constructing: false,
                 created: false, showing: false, response: false, accepted: false, declined: false, accepted_at: None,
                 destroyed: false, released: !gui_needed, not_created: !gui_needed, close_queued: false, close_ack: false, release_queued: false,
@@ -236,7 +240,27 @@ impl OriginalWork {
         let keyring = true;
         coordinator && child && source && self.gui.settled() && keyring
     }
-    fn resources_settled(&self) -> bool { self.original_resources_settled() && self.retired.load(Ordering::SeqCst) }
+    fn resources_settled(&self) -> bool {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let allocations = self.keyring.try_lock().is_ok_and(|book| book.allocations_released());
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        let allocations = true;
+        self.original_resources_settled() && self.retired.load(Ordering::SeqCst) && allocations
+    }
+    fn lookup_allocations_allowed(&self) -> bool {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        { self.keyring.try_lock().is_ok_and(|book| !book.memory_held()) }
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        { true }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn dispose_keyring_storage(&self) -> bool {
+        let Ok(retirement) = self.retirement.try_lock() else { return false; };
+        if !self.retired.load(Ordering::SeqCst) || !lookup_memory::retirement_empty(&retirement)
+            || !self.original_resources_settled() { return false; }
+        let Ok(mut book) = self.keyring.try_lock() else { return false; };
+        book.dispose_settled_storage()
+    }
     fn normally_declined(&self) -> bool {
         // A normal body may also return after refusal/not-created. Neither that
         // nor a failed join is evidence of a genuine native Cancel response.
@@ -268,8 +292,12 @@ impl OriginalWork {
         *holding = retirement; Ok(())
     }
     fn release_retirement(&self) -> bool {
-        let retirement = match self.retirement.try_lock() { Ok(mut holding) => std::mem::take(&mut *holding), Err(_) => return false };
-        drop(retirement); // No admission lock, native handle or await here.
+        let Ok(mut holding) = self.retirement.try_lock() else { return false; };
+        let retirement = std::mem::take(&mut *holding);
+        // Still off the document/admission lock, but retain THIS custody mutex
+        // through the actual drop and receipt. A census cannot see empty data
+        // while an off-lock drain is merely scheduled or still in progress.
+        drop(retirement);
         self.retired.store(true, Ordering::SeqCst); true
     }
 }
@@ -662,14 +690,9 @@ impl DocumentBinding {
     // no second task or alternate owner is created by this source-only phase.
     fn enter_keyring_lookup(&self, owner: &Arc<OriginalWork>, input: crate::vault_keyring_linux::LookupInput)
         -> Result<(), crate::vault_keyring_linux::Problem> {
-        use crate::vault_keyring_linux::Problem;
         let mut state = self.lock(); let now = Instant::now(); self.expire(&mut state, now);
         let dispatch_end = keyring_slot_gate(&state, owner, None, now)?;
-        if !owner.coordinator.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Pending && book.handle.is_some()) {
-            return Err(Problem::CleanupUnknown);
-        }
-        let mut book = owner.keyring.lock().map_err(|_| Problem::CleanupUnknown)?;
-        book.begin(input, dispatch_end)
+        lookup_memory::enter(&state, owner, input, dispatch_end)
         // No IO is polled while the document/registry mutex is held.
     }
     fn admit_keyring_step(&self, owner: &Arc<OriginalWork>, step: crate::vault_keyring_linux::Step)
@@ -707,6 +730,7 @@ impl DocumentBinding {
             let reason = match problem {
                 Problem::Interrupted => Reason::UserCancelled,
                 Problem::CleanupUnknown => Reason::CleanupUnknown,
+                Problem::Capacity => Reason::Capacity,
                 _ => Reason::SourceRefused,
             };
             // The original failure time, not this later observer tick, owns the
@@ -808,6 +832,363 @@ impl DocumentBinding {
     }
 }
 
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+mod lookup_memory {
+    use super::*;
+    use crate::vault_keyring_linux::Problem;
+
+    const WORKING_BYTES: usize = 96 * 1024 * 1024;
+    const IDENTITIES: usize = 128;
+    const ARC_CELLS: usize = 2 * std::mem::size_of::<usize>();
+
+    const FIXED_CONTROL_BYTES: usize = crate::vault_keyring_linux::LOOKUP_CONTROL_BYTES
+        + std::mem::size_of::<OriginalWork>() + std::mem::size_of::<GuiCall>() + std::mem::size_of::<Slot>()
+        + std::mem::size_of::<Mutex<SourceBook>>() + 16 * std::mem::size_of::<usize>();
+    // SDK futures <=32KiB and other SDK cells <=16KiB leave THIS app share
+    // <=16KiB, not another control allowance on top of the fixed 64KiB row.
+    const _: () = assert!(FIXED_CONTROL_BYTES <= 16 * 1024);
+
+    // Constructible only by this document's locked census. It is not Clone,
+    // configurable wire credit, a global allocator or a process-RSS promise.
+    pub(crate) struct Admission { _private: () }
+    impl Admission {
+        fn checked(live: usize, scratch: usize) -> Result<Self, Problem> {
+            let total = live.checked_add(scratch)
+                .and_then(|bytes| bytes.checked_add(zbus::connection::OwnedConnectionAttempt::KEYRING_WIRE_BYTES))
+                .ok_or(Problem::Capacity)?;
+            if total > WORKING_BYTES { return Err(Problem::Capacity); }
+            Ok(Self { _private: () })
+        }
+        #[cfg(test)]
+        pub(crate) fn data(live: usize, scratch: usize) -> Result<Self, Problem> { Self::checked(live, scratch) }
+    }
+
+    struct Seen { ids: [usize; IDENTITIES], used: usize }
+    impl Seen {
+        fn new() -> Self { Self { ids: [0; IDENTITIES], used: 0 } }
+        fn insert<T>(&mut self, value: &Arc<T>) -> Result<bool, Problem> {
+            let id = Arc::as_ptr(value) as usize;
+            if self.ids[..self.used].contains(&id) { return Ok(false); }
+            if self.used == self.ids.len() { return Err(Problem::Capacity); }
+            self.ids[self.used] = id; self.used += 1; Ok(true)
+        }
+    }
+
+    pub(super) fn retirement_empty(value: &Retirement) -> bool {
+        value.old_slot.is_none() && value.candidate.is_none() && value.staged.is_none() && value.payload.is_none()
+            && value.context.is_none() && value.slot_context.is_none() && value.assessment.is_none()
+            && value.records.capacity() == 0 && value.assignments.capacity() == 0
+    }
+    fn retirement_known(owner: &OriginalWork, value: &Retirement) -> Result<(), Problem> {
+        // Empty + no positive drain receipt is NOT zero live bytes. The actual
+        // off-document drop now retains this same retirement mutex throughout.
+        if owner.retired.load(Ordering::SeqCst) != retirement_empty(value) { return Err(Problem::CleanupUnknown); }
+        Ok(())
+    }
+    fn child_joined(book: &ChildBook) -> bool {
+        book.handle.is_none() && matches!(book.receipt, JoinReceipt::New | JoinReceipt::Returned)
+    }
+
+    struct Census<'a> {
+        current: &'a Arc<OriginalWork>, current_source: &'a SourceBook, current_retirement: &'a Retirement,
+        bytes: usize, payloads: Seen, materials: Seen, contexts: Seen, sources: Seen, owners: Seen,
+    }
+    impl<'a> Census<'a> {
+        fn new(current: &'a Arc<OriginalWork>, source: &'a SourceBook, retirement: &'a Retirement) -> Self {
+            Self { current, current_source: source, current_retirement: retirement, bytes: 0,
+                payloads: Seen::new(), materials: Seen::new(), contexts: Seen::new(), sources: Seen::new(), owners: Seen::new() }
+        }
+        fn add(&mut self, bytes: usize) -> Result<(), Problem> {
+            self.bytes = self.bytes.checked_add(bytes).ok_or(Problem::Capacity)?; Ok(())
+        }
+        fn cells<T>(&mut self, count: usize) -> Result<(), Problem> {
+            self.add(count.checked_mul(std::mem::size_of::<T>()).ok_or(Problem::Capacity)?)
+        }
+        fn arc_cells<T>(&mut self) -> Result<(), Problem> { self.add(std::mem::size_of::<T>())?; self.add(ARC_CELLS) }
+        fn token(&mut self, token: &Token) -> Result<(), Problem> { self.add(token.0.capacity()) }
+        fn key(&mut self, key: &RecordKey) -> Result<(), Problem> { self.token(&key.id) }
+        fn context(&mut self, context: &Arc<NativeContext>) -> Result<(), Problem> {
+            if !self.contexts.insert(context)? { return Ok(()); }
+            self.arc_cells::<NativeContext>()?;
+            self.add(context.draft.capacity())?; self.add(context.project_id.capacity())?; self.add(context.project.path.capacity())
+        }
+        fn payload(&mut self, payload: &Arc<Payload>) -> Result<(), Problem> {
+            if !self.payloads.insert(payload)? { return Ok(()); }
+            // This unchanged per-payload metadata allowance includes the native
+            // FileObservation projection: one exact-capacity 256-cell vector
+            // plus <=64KiB exact-capacity strings, not a retained parser arena.
+            self.add(RECORD_METADATA_BYTES)?;
+            if let Some(fields) = &payload.fields { self.add(fields.retained_bytes().ok_or(Problem::Capacity)?)?; }
+            if let Some(material) = &payload.material {
+                if self.materials.insert(material)? {
+                    self.arc_cells::<Material>()?; self.add(material.captured.bytes.capacity())?;
+                    self.add(material.captured.origin.retained_bytes().ok_or(Problem::Capacity)?)?; self.add(ARC_CELLS)?;
+                }
+            }
+            Ok(())
+        }
+        fn source(&mut self, source: &Arc<Mutex<SourceBook>>, book: &SourceBook) -> Result<(), Problem> {
+            if !self.sources.insert(source)? { return Ok(()); }
+            self.arc_cells::<Mutex<SourceBook>>()?; self.add(book.retained_bytes().ok_or(Problem::Capacity)?)
+        }
+        fn records(&mut self, records: &Vec<Record>) -> Result<(), Problem> {
+            self.cells::<Record>(records.capacity())?;
+            for record in records { self.key(&record.key)?; self.payload(&record.payload)?; } Ok(())
+        }
+        fn assignments(&mut self, values: &Vec<Assignment>) -> Result<(), Problem> {
+            self.cells::<Assignment>(values.capacity())?;
+            for value in values { self.token(&value.record_id)?; } Ok(())
+        }
+        fn candidate(&mut self, candidate: &Candidate) -> Result<(), Problem> {
+            self.payload(&candidate.payload)?; self.token(&candidate.record_id)?;
+            if let Some(key) = &candidate.existing { self.key(key)?; } Ok(())
+        }
+        fn tokens(&mut self, tokens: &TokenBatch) -> Result<(), Problem> {
+            for token in [&tokens.selection, &tokens.record, &tokens.preview, &tokens.bind] { self.token(token)?; } Ok(())
+        }
+        fn command_error(&mut self) -> Result<(), Problem> {
+            // CommandError is an Arc of a two-variant enum whose two payloads
+            // contain static strings/scalars only; sum both alternatives plus
+            // tag/alignment and Arc cells rather than inspect/private-clone it.
+            self.add(std::mem::size_of::<AssetError>())?;
+            self.add(std::mem::size_of::<crate::credential_assessment::AssessmentError>())?;
+            self.add(2 * ARC_CELLS)
+        }
+        fn staged(&mut self, staged: &Staged) -> Result<(), Problem> {
+            match staged {
+                Staged::Selected { payload, tokens } => { self.payload(payload)?; self.tokens(tokens) },
+                Staged::Prepared { result: Err(_), tokens } => { self.command_error()?; self.tokens(tokens) },
+                Staged::Delete(tokens) => self.tokens(tokens),
+                Staged::Committed { bind } => { if let Some(token) = bind { self.token(token)?; } Ok(()) },
+                Staged::Bound(value) => self.token(&value.record_id),
+                Staged::Refused(_) => Ok(()),
+                // No invented census for opaque AssessmentResult vectors or
+                // unrelated project/evidence/path DTOs in this closed slice.
+                _ => Err(Problem::Unavailable),
+            }
+        }
+        fn slot(&mut self, slot: &Slot) -> Result<(), Problem> {
+            if slot.assessment.is_some() || slot.project.is_some() || slot.evidence.is_some()
+                || slot.project_path.is_some() || slot.path_result.is_some() { return Err(Problem::Unavailable); }
+            self.add(std::mem::size_of::<Slot>())?;
+            if let Some(context) = &slot.context { self.context(context)?; }
+            if let Some(key) = &slot.target { self.key(key)?; }
+            if let Some(candidate) = &slot.candidate { self.candidate(candidate)?; }
+            if let Some(token) = &slot.selection { self.token(token)?; }
+            if let Some(preview) = &slot.preview {
+                self.token(&preview.token)?;
+                if let Some(token) = &preview.bind_token { self.token(token)?; }
+                if let Some(key) = &preview.record { self.key(key)?; }
+                if let Some(token) = &preview.subject.record_id { self.token(token)?; }
+            }
+            if let Some(staged) = &slot.staged { self.staged(staged)?; }
+            if slot.error.is_some() { self.command_error()?; }
+            if let Some(key) = &slot.result_record { self.key(key)?; }
+            if let Some(payload) = &slot.retired_payload { self.payload(payload)?; }
+            self.owner(&slot.owner)
+        }
+        fn retirement(&mut self, retirement: &Retirement) -> Result<(), Problem> {
+            if retirement.assessment.is_some() { return Err(Problem::Unavailable); }
+            if let Some(candidate) = &retirement.candidate { self.candidate(candidate)?; }
+            if let Some(staged) = &retirement.staged { self.staged(staged)?; }
+            if let Some(payload) = &retirement.payload { self.payload(payload)?; }
+            if let Some(context) = &retirement.context { self.context(context)?; }
+            if let Some(context) = &retirement.slot_context { self.context(context)?; }
+            self.records(&retirement.records)?; self.assignments(&retirement.assignments)?;
+            if let Some(slot) = &retirement.old_slot { self.slot(slot)?; } Ok(())
+        }
+        fn owner(&mut self, owner: &Arc<OriginalWork>) -> Result<(), Problem> {
+            if !self.owners.insert(owner)? { return Ok(()); }
+            self.arc_cells::<OriginalWork>()?; self.arc_cells::<GuiCall>()?;
+            let gui = owner.gui.facts.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+            if !(gui.not_created || gui.destroyed && gui.released) { return Err(Problem::CleanupUnknown); }
+            if let Some(path) = &gui.selected { self.add(path.capacity())?; }
+            if Arc::ptr_eq(owner, self.current) {
+                retirement_known(owner, self.current_retirement)?;
+                self.source(&owner.source, self.current_source)?; self.retirement(self.current_retirement)
+            } else {
+                // A retained old/quit owner has no remaining original which may
+                // allocate after this snapshot. Busy/failed/ambiguous is refusal.
+                let coordinator = owner.coordinator.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+                let child = owner.child.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+                let source = owner.source.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+                let retirement = owner.retirement.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+                let keyring = owner.keyring.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+                if coordinator.receipt != JoinReceipt::Returned || coordinator.handle.is_some() || !child_joined(&child)
+                    || !(source.not_started() || source.settled()) || !keyring.resources_settled() || !keyring.allocations_released()
+                { return Err(Problem::CleanupUnknown); }
+                retirement_known(owner, &retirement)?;
+                self.source(&owner.source, &source)?; self.retirement(&retirement)
+            }
+        }
+        fn document(&mut self, state: &DocumentState) -> Result<(), Problem> {
+            if state.retiring { return Err(Problem::CleanupUnknown); }
+            self.add(std::mem::size_of::<DocumentState>())?;
+            self.records(&state.records)?; self.assignments(&state.assignments)?;
+            if let Some(context) = &state.context { self.context(context)?; }
+            if let Some(slot) = &state.slot { self.slot(slot)?; }
+            if let Some(quit) = &state.quit { self.owner(quit)?; } Ok(())
+        }
+    }
+
+    pub(super) fn live_bytes(state: &DocumentState, owner: &Arc<OriginalWork>, source: &SourceBook, retirement: &Retirement) -> Result<usize, Problem> {
+        let mut census = Census::new(owner, source, retirement); census.document(state)?; Ok(census.bytes)
+    }
+    pub(super) fn enter(state: &DocumentState, owner: &Arc<OriginalWork>,
+        input: crate::vault_keyring_linux::LookupInput, end: Instant) -> Result<(), Problem> {
+        let coordinator = owner.coordinator.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+        let child = owner.child.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+        let source = owner.source.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+        let retirement = owner.retirement.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+        let mut book = owner.keyring.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+        if coordinator.receipt != JoinReceipt::Pending || coordinator.handle.is_none() || !child_joined(&child)
+            || !(source.not_started() || source.settled()) || owner.large_work_started.load(Ordering::SeqCst)
+            || !book.can_begin() { return Err(Problem::CleanupUnknown); }
+        let live = live_bytes(state, owner, &source, &retirement)?;
+        // Child/parser originals are positively joined; credential_format drops
+        // arenas before ChildEnd. Non-Token child/R1/Value work has NEVER
+        // started in this owner; no caller-local Captured result is omitted.
+        // Thus no parser/request scratch is silently presumed inside 6MiB.
+        let charge = Admission::checked(live, 0)?;
+        let result = book.begin(input, end, charge);
+        // These are the ACTUAL child/source/retirement dispatch locks; none is
+        // released between the census and publishing the one nonduplicable charge.
+        drop((book, retirement, source, child, coordinator)); result
+    }
+
+    #[cfg(test)]
+    mod tests {
+        // Fixed-census DATA only. Synthetic bookkeeping below is never a native
+        // source/SDK/coordinator receipt, allocation measurement or provider test.
+        use super::*;
+
+        fn empty_payload() -> Arc<Payload> { Arc::new(Payload { kind: Kind::GoogleWif, material: None, fields: None }) }
+        fn material(capacity: usize) -> Arc<Material> {
+            let observation = credential_format::inspect(credential_format::FileKind::AndroidKeystore, &[], &mut || false)
+                .ok().expect("inert empty observation");
+            Arc::new(Material { captured: asset_source::CapturedSource::memory_data(Vec::with_capacity(capacity)), observation })
+        }
+        fn data_context() -> Arc<NativeContext> {
+            Arc::new(NativeContext { revision: 1, project_id: "data-project".into(),
+                project: asset_source::RegisteredRoot { path: "/inert/project".into(), identity: asset_source::DirectoryIdentity::synthetic_evidence_identity() },
+                registry_generation: 1, draft: Vec::with_capacity(97), platform: Platform::Android, stage: Stage::Candidate, purpose: Purpose::Signing })
+        }
+        fn tokens() -> TokenBatch {
+            TokenBatch { selection: Token(String::new()), record: Token(String::new()), preview: Token(String::new()), bind: Token(String::new()) }
+        }
+        fn live(state: &DocumentState, owner: &Arc<OriginalWork>) -> Result<usize, Problem> {
+            let source = owner.source.lock().unwrap(); let retirement = owner.retirement.lock().unwrap();
+            live_bytes(state, owner, &source, &retirement)
+        }
+
+        #[test]
+        fn app_control_cells_fit_the_shared_sixteen_kib_row() {
+            assert!(FIXED_CONTROL_BYTES <= 16 * 1024);
+            assert_eq!(zbus::connection::OwnedConnectionAttempt::KEYRING_WIRE_BYTES, 1024 * 1024);
+        }
+        #[test]
+        fn lookup_allowance_checks_boundary_overflow_and_capture_overlap() {
+            let wire = zbus::connection::OwnedConnectionAttempt::KEYRING_WIRE_BYTES;
+            assert!(Admission::checked(WORKING_BYTES - wire, 0).is_ok());
+            assert!(matches!(Admission::checked(WORKING_BYTES - wire + 1, 0), Err(Problem::Capacity)));
+            assert!(matches!(Admission::checked(usize::MAX, 1), Err(Problem::Capacity)));
+            assert!(matches!(Admission::checked(1, usize::MAX), Err(Problem::Capacity)));
+            assert!(matches!(Admission::checked(SESSION_BYTES, 32 * 1024 * 1024 + 1), Err(Problem::Capacity)));
+            assert_eq!(SESSION_BYTES, 64 * 1024 * 1024); // The committed quota is independent and unchanged.
+            let owner = OriginalWork::new(1, false, Weak::new()); let source = SourceBook::new(); let retirement = Retirement::default();
+            let mut census = Census::new(&owner, &source, &retirement);
+            assert_eq!(census.cells::<Record>(usize::MAX), Err(Problem::Capacity));
+        }
+        #[test]
+        fn lookup_identity_census_is_fixed_and_duplicate_arcs_spend_no_slot() {
+            let values: Vec<_> = (0..IDENTITIES + 1).map(Arc::new).collect();
+            let mut seen = Seen::new();
+            for value in &values[..IDENTITIES] { assert_eq!(seen.insert(value), Ok(true)); }
+            assert_eq!(seen.insert(&values[0].clone()), Ok(false));
+            assert_eq!(seen.insert(&values[IDENTITIES]), Err(Problem::Capacity));
+            assert_eq!(seen.used, IDENTITIES);
+        }
+        #[test]
+        fn lookup_payload_material_context_and_source_arcs_deduplicate_separately() {
+            let owner = OriginalWork::new(1, false, Weak::new()); let source = SourceBook::new(); let retirement = Retirement::default();
+            let mut census = Census::new(&owner, &source, &retirement);
+            let captured = material(29);
+            let first = Arc::new(Payload { kind: Kind::AndroidKeystore, material: Some(captured.clone()), fields: None });
+            census.payload(&first).unwrap(); let once = census.bytes;
+            census.payload(&first.clone()).unwrap(); assert_eq!(census.bytes, once);
+            let second = Arc::new(Payload { kind: Kind::AndroidKeystore, material: Some(captured), fields: None });
+            census.payload(&second).unwrap(); assert_eq!(census.bytes, once + RECORD_METADATA_BYTES);
+            let distinct = material(29);
+            let extra = RECORD_METADATA_BYTES + std::mem::size_of::<Material>() + ARC_CELLS
+                + distinct.captured.bytes.capacity() + distinct.captured.origin.retained_bytes().unwrap() + ARC_CELLS;
+            let third = Arc::new(Payload { kind: Kind::AndroidKeystore, material: Some(distinct), fields: None });
+            let before = census.bytes; census.payload(&third).unwrap(); assert_eq!(census.bytes, before + extra);
+
+            let context = data_context(); census.context(&context).unwrap(); let once = census.bytes;
+            census.context(&context.clone()).unwrap(); assert_eq!(census.bytes, once);
+            let extra = std::mem::size_of::<NativeContext>() + ARC_CELLS + context.draft.capacity()
+                + context.project_id.capacity() + context.project.path.capacity();
+            let other = data_context(); census.context(&other).unwrap(); assert_eq!(census.bytes, once + extra);
+
+            let source = Arc::new(Mutex::new(SourceBook::unstarted_backing_data()));
+            let book = source.lock().unwrap(); census.source(&source, &book).unwrap(); let once = census.bytes;
+            census.source(&source.clone(), &book).unwrap(); assert_eq!(census.bytes, once);
+            let other = Arc::new(Mutex::new(SourceBook::unstarted_backing_data()));
+            let other_book = other.lock().unwrap(); let extra = std::mem::size_of::<Mutex<SourceBook>>() + ARC_CELLS + other_book.retained_bytes().unwrap();
+            census.source(&other, &other_book).unwrap(); assert_eq!(census.bytes, once + extra);
+        }
+        #[test]
+        fn lookup_census_counts_retained_old_slots_records_contexts_and_refused_source_backing() {
+            let owner = OriginalWork::new(1, false, Weak::new()); let mut state = crate::asset_session::tests::empty_state();
+            state.slot = Some(Slot::new(owner.clone(), Operation::Prepare, None, None, None));
+            let baseline = live(&state, &owner).unwrap();
+            let old = OriginalWork::new(2, false, Weak::new());
+            old.coordinator.lock().unwrap().receipt = JoinReceipt::Returned; // Model only, no claimed original task.
+            *old.source.lock().unwrap() = SourceBook::unstarted_backing_data();
+            let retained_source = old.source.lock().unwrap().retained_bytes().unwrap();
+            let shared = empty_payload(); let old_payload = empty_payload(); let retained_record = empty_payload(); let context = data_context();
+            let mut old_slot = Slot::new(old, Operation::ChooseFile, Some(context.clone()), None, None);
+            old_slot.candidate = Some(Candidate { payload: old_payload.clone(), record_id: Token(String::new()), existing: None });
+            old_slot.staged = Some(Staged::Selected { payload: old_payload, tokens: tokens() });
+            let retirement = Retirement { old_slot: Some(Box::new(old_slot)), payload: Some(shared.clone()), context: Some(context),
+                records: vec![Record { key: RecordKey { id: Token(String::new()), revision: 1 }, payload: retained_record, mutation_pending: false }],
+                ..Retirement::default() };
+            assert!(owner.retain_retirement(retirement).is_ok());
+            state.slot.as_mut().unwrap().candidate = Some(Candidate { payload: shared.clone(), record_id: Token(String::new()), existing: None });
+            state.slot.as_mut().unwrap().retired_payload = Some(shared);
+            let total = live(&state, &owner).unwrap();
+            assert!(total >= baseline + 3 * RECORD_METADATA_BYTES + retained_source + 97);
+            state.retiring = true; assert_eq!(live(&state, &owner), Err(Problem::CleanupUnknown)); state.retiring = false;
+            assert!(owner.release_retirement()); // DATA-only drop, no original resource to settle.
+            state.slot.as_mut().unwrap().candidate = None; state.slot.as_mut().unwrap().retired_payload = None;
+            assert_eq!(live(&state, &owner), Ok(baseline));
+            owner.retired.store(false, Ordering::SeqCst);
+            assert_eq!(live(&state, &owner), Err(Problem::CleanupUnknown)); // Empty in-flight holding is not zero.
+        }
+        #[test]
+        fn lookup_census_refuses_unsupported_retained_dto_shapes() {
+            let owner = OriginalWork::new(1, false, Weak::new()); let mut state = crate::asset_session::tests::empty_state();
+            let mut slot = Slot::new(owner.clone(), Operation::Prepare, None, None, None);
+            slot.evidence = Some(EvidenceBinding { operation_id: 1, kind: evidence_wire::OperationKind::Observe, selection_id: None, epoch: 1 });
+            state.slot = Some(slot);
+            assert_eq!(live(&state, &owner), Err(Problem::Unavailable));
+            state.slot.as_mut().unwrap().evidence = None;
+            assert!(live(&state, &owner).is_ok());
+        }
+    }
+}
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) use lookup_memory::Admission as KeyringMemoryAdmission;
+
+fn lookup_allocation_gate(state: &DocumentState) -> Result<(), AssetError> {
+    // All large/copy admissions share the current document mutex. STOP, status,
+    // lock/loss and reconciliation intentionally do not call this predicate.
+    if state.slot.as_ref().is_some_and(|slot| !slot.owner.lookup_allocations_allowed()) {
+        return Err(AssetError::new(Reason::Busy));
+    }
+    Ok(())
+}
 fn passive_document_gate(state: &DocumentState) -> Result<(), BridgeError> {
     // Existing passive services do not require editing/crash-hook qualification.
     // The caller still holds this same document mutex through Supervisor claim.
@@ -829,7 +1210,7 @@ fn common_document_gate(state: &DocumentState, session: bool, owner_gate: impl F
     if session && state.slot.as_ref().is_some_and(|slot| (slot.operation.evidence() || slot.operation.project_path())
         && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) { return Err(AssetError::new(Reason::Busy)); }
     if state.quit_pending || state.retiring || state.lock_pending { return Err(AssetError::new(Reason::Busy)); }
-    Ok(())
+    lookup_allocation_gate(state)
 }
 fn ordinary_asset_platform_gate() -> Result<(), AssetError> {
     // Private asset custody is separate from the installed project-only
@@ -1673,6 +2054,7 @@ impl DocumentBinding {
             }
         }
         let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        lookup_allocation_gate(&state)?; // Before draft/project/field backing copies.
         self.inner.bridge.diagnostics.context_changed(); self.inner.bridge.preflight.context_changed();
         self.inner.bridge.android_build.context_changed(); self.gate(&state, true)?;
         let (registry_generation, project) = self.registry_result(&mut state, self.inner.bridge.native_project(args.project_id))?;
@@ -1771,6 +2153,16 @@ async fn child(owner: &Arc<OriginalWork>, job: ChildJob) -> Result<ChildEnd, Rea
     let mut book = owner.child.lock().await;
     if book.handle.is_some() || !matches!(book.receipt, JoinReceipt::New | JoinReceipt::Returned) { return Err(Reason::CleanupUnknown); }
     if owner.interrupted() { return Err(Reason::UserCancelled); }
+    // Reciprocal to lookup_memory::enter: retain this exact child mutex while
+    // checking the charge and registering the original blocking dispatch.
+    if !owner.lookup_allocations_allowed() { return Err(Reason::Busy); }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if !matches!(&job, ChildJob::Tokens) {
+        // A joined Captured ChildEnd may still be a caller-local large holding.
+        // This closed slice refuses later lookup in that same owner rather than
+        // presume that Returned means the result was published/disposed.
+        owner.large_work_started.store(true, Ordering::SeqCst);
+    }
     book.receipt = JoinReceipt::Pending;
     let (start, enter) = oneshot::channel();
     let worker = owner.clone();
@@ -1828,6 +2220,20 @@ fn random_tokens(stop: &mut dyn FnMut() -> bool) -> Result<TokenBatch, Reason> {
         bytes.fill(0); Ok(Token(token)) // Best effort only, not an erasure claim.
     }
     Ok(TokenBatch { selection: one(stop)?, record: one(stop)?, preview: one(stop)?, bind: one(stop)? })
+}
+
+fn prepare_copy_start(state: &mut DocumentState, owner: &Arc<OriginalWork>) -> Result<bool, Reason> {
+    if state.stopping || state.unknown || !state.lifetime.original_bound() || owner.interrupted() { return Err(Reason::UserCancelled); }
+    if state.retiring || state.quit_pending || state.lock_pending || !owner.lookup_allocations_allowed() { return Err(Reason::Busy); }
+    let slot = state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, owner) && slot.operation == Operation::Prepare)
+        .ok_or(Reason::ContextStale)?;
+    if slot.cleanup_end.is_some() { return Err(slot.reason); }
+    // Sticky, conservative boundary: this slice refuses lookup after ANY R1
+    // request/Value or non-Token child work started in this owner, even after a later phase change.
+    // Its memory is not the native parser's 6MiB arena and is not in the census.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    owner.large_work_started.store(true, Ordering::SeqCst);
+    let changed = slot.phase != Phase::Assessing; slot.phase = Phase::Assessing; Ok(changed)
 }
 
 fn assemble_request(payload: &Payload, context: &NativeContext) -> Result<AssessmentRequest, CommandError> {
@@ -1917,6 +2323,10 @@ impl DocumentBinding {
         if slot.cleanup_end.is_some() { return Err(slot.reason); }
         if slot.phase != phase { slot.phase = phase; self.bump(&mut state); } Ok(())
     }
+    fn begin_prepare_copy(&self, owner: &Arc<OriginalWork>) -> Result<(), Reason> {
+        let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        if prepare_copy_start(&mut state, owner)? { self.bump(&mut state); } Ok(())
+    }
     fn tick(&self) { let mut state = self.lock(); self.expire(&mut state, Instant::now()); }
     fn stage(&self, owner: &Arc<OriginalWork>, staged: Staged) {
         let mut state = self.lock(); self.expire(&mut state, Instant::now());
@@ -1993,6 +2403,24 @@ impl DocumentBinding {
                     }
                 }
             }
+        }
+
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if slot.owner.original_resources_settled() && slot.owner.retired.load(Ordering::SeqCst)
+            && slot.owner.keyring.try_lock().is_ok_and(|book| book.memory_held()) {
+            // A settled SDK/book still owns its charged backing. Register this
+            // disposal before releasing the actual document gate. In particular
+            // dispose a just-consumed orphan ChildEnd BEFORE refunding anything.
+            let owner = slot.owner.clone(); state.slot = Some(slot); state.retiring = true;
+            drop(state); drop(orphan_result);
+            let disposed = owner.dispose_keyring_storage();
+            let mut state = self.lock(); state.retiring = false;
+            if !disposed { self.coordinator_failed(&mut state); return; }
+            self.bump(&mut state); drop(state);
+            // At most one such pass for this one-shot owner: storage is gone,
+            // entered/error/Unknown facts are untouched. Continue ordinary
+            // publication/retirement now instead of waiting for slot replacement.
+            self.reconcile(); return;
         }
 
         let resources = slot.owner.resources_settled();
@@ -2286,6 +2714,7 @@ impl DocumentBinding {
         // path original nonreplaceable here even if a future caller omits one;
         // an absent path slot in its invoke waiter then implies known settlement.
         if project_path_pending(state) { return Err(AssetError::new(Reason::Busy)); }
+        lookup_allocation_gate(state)?;
         settle_evidence_status(state);
         let owner = slot.owner.clone();
         let old_slot = state.slot.take().map(Box::new);
@@ -2489,7 +2918,7 @@ async fn execute_job(document: &DocumentBinding, owner: &Arc<OriginalWork>, job:
                 Ok(ChildEnd::Tokens(tokens)) => tokens,
                 Ok(ChildEnd::Refused(reason)) | Err(reason) => return Staged::Refused(reason), _ => return Staged::Refused(Reason::CleanupUnknown),
             };
-            if let Err(reason) = document.phase(owner, Phase::Assessing) { return Staged::Refused(reason); }
+            if let Err(reason) = document.begin_prepare_copy(owner) { return Staged::Refused(reason); }
             let result = match assemble_request(&payload, &context) {
                 Ok(request) => {
                     if owner.interrupted() { return Staged::Refused(Reason::UserCancelled); }
@@ -3982,6 +4411,114 @@ mod tests {
         assert!(!complete_empty_session_lock(&mut state));
     }
 
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn keyring_memory_model() -> (DocumentState, Arc<OriginalWork>) {
+        let mut state = empty_state();
+        state.lifetime.crash_hook_installed(); state.lifetime.started(true); state.lifetime.finished(true);
+        let owner = OriginalWork::new(1, false, Weak::new());
+        let mut slot = Slot::new(owner.clone(), Operation::Prepare, None, None, None); slot.phase = Phase::Assessing;
+        state.slot = Some(slot); (state, owner)
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn lookup_charge_blocks_context_copy_and_same_owner_child_before_dispatch() {
+        let (mut state, owner) = keyring_memory_model();
+        *owner.keyring.lock().unwrap() = crate::vault_keyring_linux::LookupBook::constructor_refusal_data();
+        let copied = std::cell::Cell::new(false);
+        let context_copy = (|| -> Result<(), AssetError> {
+            lookup_allocation_gate(&state)?; // Same predicate, before context() allocates a draft.
+            copied.set(true); let _ = commands::draft_bytes(&Value::Object(Map::new()))?; Ok(())
+        })();
+        assert_eq!(context_copy.err().map(|error| error.reason), Some(Reason::Busy)); assert!(!copied.get());
+        assert_eq!(common_document_gate(&state, true, || Ok(())).err().map(|error| error.reason), Some(Reason::Busy));
+        assert_eq!(prepare_copy_start(&mut state, &owner), Err(Reason::Busy));
+        assert!(!owner.large_work_started.load(Ordering::SeqCst));
+        let mut original = Box::pin(child(&owner, ChildJob::Tokens));
+        let mut cx = TaskContext::from_waker(Waker::noop());
+        assert!(matches!(original.as_mut().poll(&mut cx), Poll::Ready(Err(Reason::Busy))));
+        drop(original);
+        let book = owner.child.try_lock().unwrap();
+        assert!(book.handle.is_none() && book.receipt == JoinReceipt::New); drop(book);
+        // STOP still works and cannot refund or relax the reciprocal predicate.
+        state.slot.as_mut().unwrap().stop(Reason::UserCancelled, Instant::now());
+        assert!(owner.stopped() && owner.keyring.lock().unwrap().memory_held());
+        assert_eq!(lookup_allocation_gate(&state).err().map(|error| error.reason), Some(Reason::Busy));
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn lookup_request_copy_start_is_sticky_and_busy_books_never_enter() {
+        use crate::vault_keyring_linux::{LookupInput, Problem};
+        let (mut state, owner) = keyring_memory_model();
+        assert!(prepare_copy_start(&mut state, &owner).is_ok());
+        assert!(owner.large_work_started.load(Ordering::SeqCst));
+        state.slot.as_mut().unwrap().phase = Phase::Admitting;
+        assert!(prepare_copy_start(&mut state, &owner).is_ok());
+        assert!(owner.large_work_started.load(Ordering::SeqCst));
+        let enter = || lookup_memory::enter(&state, &owner,
+            LookupInput::new(std::path::Path::new("/inert/not-opened"), "/collection", "data-vault", "data-generation").unwrap(),
+            Instant::now() + WORK);
+        // Exercise the actual nonblocking custody-lock seams before any SDK
+        // construction; these model owners have no original coordinator handle.
+        {
+            let _held = owner.child.try_lock().unwrap();
+            assert_eq!(enter(), Err(Problem::CleanupUnknown));
+        }
+        {
+            let _held = owner.source.lock().unwrap();
+            assert_eq!(enter(), Err(Problem::CleanupUnknown));
+        }
+        {
+            let _held = owner.retirement.lock().unwrap();
+            assert_eq!(enter(), Err(Problem::CleanupUnknown));
+        }
+        {
+            let _held = owner.keyring.lock().unwrap();
+            assert_eq!(enter(), Err(Problem::CleanupUnknown));
+        }
+        assert!(!owner.keyring.lock().unwrap().started());
+        assert!(!owner.keyring.lock().unwrap().memory_held());
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn lookup_refund_requires_join_predicates_disposal_and_keeps_unknown_started_facts() {
+        let (mut state, owner) = keyring_memory_model();
+        *owner.keyring.lock().unwrap() = crate::vault_keyring_linux::LookupBook::constructor_refusal_data();
+        assert!(!owner.dispose_keyring_storage());
+        owner.coordinator.lock().unwrap().receipt = JoinReceipt::Pending;
+        assert!(!owner.dispose_keyring_storage());
+        // These are explicit predicate DATA inputs, not fabricated native joins.
+        // Constructor refusal has positively created NO original SDK resource.
+        owner.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+        assert!(owner.original_resources_settled() && !owner.resources_settled());
+        owner.retired.store(false, Ordering::SeqCst); assert!(!owner.dispose_keyring_storage());
+        owner.retired.store(true, Ordering::SeqCst);
+        {
+            let _draining = owner.retirement.lock().unwrap();
+            assert!(!owner.dispose_keyring_storage());
+        }
+        state.unknown = true;
+        let slot = state.slot.as_mut().unwrap(); slot.phase = Phase::Unknown; slot.settlement = Settlement::Unknown;
+        owner.stop(); let at = owner.keyring.lock().unwrap().problem_at();
+        assert!(owner.keyring.lock().unwrap().memory_held());
+        assert!(owner.dispose_keyring_storage()); assert!(!owner.dispose_keyring_storage());
+        assert!(owner.resources_settled());
+        let book = owner.keyring.lock().unwrap();
+        assert!(book.started() && book.allocations_released() && !book.memory_held() && !book.can_begin());
+        assert_eq!(book.problem_at(), at); drop(book);
+        assert!(state.unknown && state.slot.as_ref().unwrap().phase == Phase::Unknown
+            && state.slot.as_ref().unwrap().settlement == Settlement::Unknown);
+        let other = OriginalWork::new(2, false, Weak::new());
+        other.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+        *other.keyring.lock().unwrap() = crate::vault_keyring_linux::LookupBook::shutdown_gate_data(Instant::now() + WORK);
+        assert!(!other.dispose_keyring_storage());
+        let held = other.keyring.lock().unwrap().memory_held();
+        assert!(held && !other.resources_settled());
+    }
+
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     #[test]
     fn keyring_gate_requires_current_original_and_never_renews_cleanup_cutoff() {
@@ -4169,11 +4706,13 @@ mod tests {
         assert!(owner.original_resources_settled());
         let input = crate::vault_keyring_linux::LookupInput::new(std::path::Path::new("/synthetic/never-opened/bus"),
             "/collection", "reserved-vault", "reserved-generation").unwrap();
-        owner.keyring.lock().unwrap().begin(input, Instant::now() + WORK).unwrap();
+        owner.keyring.lock().unwrap().begin(input, Instant::now() + WORK, KeyringMemoryAdmission::data(0, 0).unwrap()).unwrap();
         assert!(!owner.original_resources_settled());
         owner.stop(); owner.set_endpoint(Some(Instant::now()));
         owner.coordinator.lock().unwrap().receipt = JoinReceipt::Failed;
         assert!(!owner.original_resources_settled());
         assert!(owner.keyring.lock().unwrap().started());
+        assert!(owner.keyring.lock().unwrap().memory_held());
+        assert!(!owner.dispose_keyring_storage());
     }
 }

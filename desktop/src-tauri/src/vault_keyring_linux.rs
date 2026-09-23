@@ -1,7 +1,8 @@
 //! Fixed non-mutating key-identity lookup, owned by asset_session::OriginalWork.
 //!
 //! No renderer/session command calls this phase. Endpoint/provider qualification,
-//! pre-allocation limits and native qualification are still missing. Local
+//! and native qualification remain OFF. Only this private entry selects the
+//! closed bounded wire profile; the legacy SDK fixtures are separate. Local
 //! finality requires the maintained SDK's consumed original task/resource result;
 //! a lookup, RemoveMatch or coordinator return alone is never a task join.
 
@@ -22,7 +23,7 @@ const SERVICE: &str = "org.freedesktop.secrets";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Problem {
     InvalidInput, Unavailable, InvalidReply, IdentityMismatch, OwnerChanged,
-    StreamFailed, Interrupted, CleanupUnknown,
+    StreamFailed, Interrupted, CleanupUnknown, Capacity,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Step { AddMatch, GetNameOwner, SearchItems, Attributes, RemoveMatch }
@@ -99,7 +100,8 @@ fn error_class(error: &zbus::Error) -> ErrorClass {
 pub(crate) enum Observation { Absent, Candidate(Arc<OwnedObjectPath>) }
 
 pub(crate) struct LookupBook {
-    entered: bool, phase: Phase, attempt: Option<OwnedConnectionAttempt>,
+    entered: bool, constructor_refused: bool, cleanup_failed_seen: bool, charge: Option<crate::asset_session::KeyringMemoryAdmission>,
+    phase: Phase, attempt: Option<OwnedConnectionAttempt>,
     stream_ended: bool, pending: Option<Pending>, first_poll_ready: bool, connect_failure: Option<zbus::Error>,
     raw: Option<zbus::Result<Message>>, raw_pending: bool, removal_reply: Option<RemovalReply>,
     owner: Option<Arc<UniqueName<'static>>>, query: Option<Arc<Query>>, rule: Option<Arc<MatchRule<'static>>>,
@@ -108,9 +110,17 @@ pub(crate) struct LookupBook {
     shutdown: Shutdown, shutdown_ready: bool, local_settlement: Option<LocalSettlement>,
     build_error: Option<ErrorClass>, raw_error: Option<ErrorClass>, cleanup_error: Option<ErrorClass>,
 }
+// App share of the SAME 64KiB whole-attempt control row. The document adds
+// its fixed owner/slot/source cells and asserts the combined share <=16KiB.
+// Query/path/string heap backing belongs to the separate 32KiB input-copy row.
+pub(crate) const LOOKUP_CONTROL_BYTES: usize = std::mem::size_of::<LookupBook>()
+    + std::mem::size_of::<LookupInput>() + std::mem::size_of::<Query>() + std::mem::size_of::<Pending>()
+    + std::mem::size_of::<MatchRule<'static>>() + std::mem::size_of::<UniqueName<'static>>()
+    + std::mem::size_of::<OwnedObjectPath>() + 32 * std::mem::size_of::<usize>();
+
 impl LookupBook {
     pub(crate) fn new() -> Self {
-        Self { entered: false, phase: Phase::Unstarted, attempt: None,
+        Self { entered: false, constructor_refused: false, cleanup_failed_seen: false, charge: None, phase: Phase::Unstarted, attempt: None,
             stream_ended: false, pending: None, first_poll_ready: false, connect_failure: None, raw: None, raw_pending: false, removal_reply: None,
             owner: None, query: None, rule: None, candidate: None, observation: None,
             problem: None, problem_at: None, registration: Registration::Unsent,
@@ -118,14 +128,38 @@ impl LookupBook {
             build_error: None, raw_error: None, cleanup_error: None }
     }
     pub(crate) fn resources_settled(&self) -> bool {
-        !self.entered || (self.shutdown == Shutdown::Settled && self.local_settlement.is_some()
+        !self.entered || ((self.constructor_refused && self.attempt.is_none()
+            || self.shutdown == Shutdown::Settled && self.local_settlement.is_some())
             && self.pending.is_none() && !self.raw_pending && self.raw.is_none() && self.connect_failure.is_none())
+    }
+    pub(crate) fn memory_held(&self) -> bool { self.charge.is_some() }
+    pub(crate) fn allocations_released(&self) -> bool {
+        self.charge.is_none() && self.attempt.is_none() && self.pending.is_none() && self.raw.is_none()
+            && self.connect_failure.is_none() && self.query.is_none() && self.rule.is_none()
+            && self.owner.is_none() && self.candidate.is_none() && self.observation.is_none()
+    }
+    pub(crate) fn can_begin(&self) -> bool {
+        !self.entered && self.phase == Phase::Unstarted && self.problem.is_none() && self.allocations_released()
+            && self.shutdown == Shutdown::Unrequested && self.local_settlement.is_none()
+    }
+    // Called only by the original document's reconciliation after coordinator,
+    // child/source and retirement joins/disposal. SDK settlement alone does not
+    // refund: even its settled attempt and the query/rule/observation still own
+    // backing. Retain the charge if any destructor fails, and all terminal facts
+    // after success. This is never a fresh, retryable LookupBook.
+    pub(crate) fn dispose_settled_storage(&mut self) -> bool {
+        if !self.memory_held() || !self.resources_settled() { return false; }
+        self.cleanup_failed_seen |= self.attempt.as_ref().is_some_and(OwnedConnectionAttempt::cleanup_failed);
+        drop((self.attempt.take(), self.query.take(), self.rule.take(), self.owner.take(),
+            self.candidate.take(), self.observation.take()));
+        self.charge.take(); // Exactly once, AFTER actual charged holding disposal.
+        true
     }
     pub(crate) fn started(&self) -> bool { self.entered }
     pub(crate) fn problem(&self) -> Option<Problem> { self.problem }
     pub(crate) fn problem_at(&self) -> Option<Instant> { self.problem_at }
     pub(crate) fn cleanup_unknown(&self) -> bool {
-        self.registration == Registration::Unknown || self.local_settlement.is_some_and(|result| !result.clean())
+        self.cleanup_failed_seen || self.registration == Registration::Unknown || self.local_settlement.is_some_and(|result| !result.clean())
             || self.attempt.as_ref().is_some_and(OwnedConnectionAttempt::cleanup_failed)
     }
     pub(crate) fn observation(&self) -> Option<&Observation> {
@@ -136,26 +170,44 @@ impl LookupBook {
     }
     pub(crate) fn interrupt(&mut self) { self.fail(Problem::Interrupted); }
 
-    pub(crate) fn begin(&mut self, input: LookupInput, dispatch_end: Instant) -> Result<(), Problem> {
+    pub(crate) fn begin(&mut self, input: LookupInput, dispatch_end: Instant,
+        charge: crate::asset_session::KeyringMemoryAdmission) -> Result<(), Problem> {
+        self.begin_constructed(input, dispatch_end, charge, OwnedConnectionAttempt::keyring_unix)
+    }
+    fn claim(&mut self, charge: crate::asset_session::KeyringMemoryAdmission) -> Result<(), Problem> {
+        // Reject duplicates BEFORE allocating even an unpolled SDK constructor.
+        if !self.can_begin() { return Err(Problem::CleanupUnknown); }
+        // Permanent before construction/first poll. No cancellation, error,
+        // coordinator return or eventual refund restores one-shot entry.
+        self.entered = true; self.charge = Some(charge); Ok(())
+    }
+    fn begin_constructed(&mut self, input: LookupInput, dispatch_end: Instant,
+        charge: crate::asset_session::KeyringMemoryAdmission,
+        make: impl FnOnce(PathBuf) -> zbus::Result<OwnedConnectionAttempt>) -> Result<(), Problem> {
+        self.claim(charge)?;
         let LookupInput { endpoint, query, rule } = input;
-        let attempt = OwnedConnectionAttempt::unix(endpoint).map_err(|_| Problem::Unavailable)?;
-        self.begin_original(query, rule, dispatch_end, ConnectOriginal::Native, Some(attempt))
+        self.query = Some(query); self.rule = Some(rule);
+        match make(endpoint) {
+            Ok(attempt) => {
+                self.attempt = Some(attempt); self.phase = Phase::Connecting;
+                self.pending = Some(Pending::Connect { future: ConnectOriginal::Native, polled: false, dispatch_end });
+                Ok(())
+            }
+            Err(error) => {
+                // No SDK attempt/task ever existed on THIS constructor refusal.
+                // This is distinct from a failed original build future, whose
+                // attempt and true shutdown/join roster remain mandatory.
+                self.build_error = Some(error_class(&error)); drop(error);
+                self.constructor_refused = true; self.phase = Phase::Holding;
+                self.fail(Problem::Unavailable); Err(Problem::Unavailable)
+            }
+        }
     }
     #[cfg(test)]
     fn begin_with(&mut self, query: Arc<Query>, rule: Arc<MatchRule<'static>>, dispatch_end: Instant, future: ConnectFuture) -> Result<(), Problem> {
-        self.begin_original(query, rule, dispatch_end, ConnectOriginal::Data(future), None)
-    }
-    fn begin_original(&mut self, query: Arc<Query>, rule: Arc<MatchRule<'static>>, dispatch_end: Instant,
-        future: ConnectOriginal, attempt: Option<OwnedConnectionAttempt>) -> Result<(), Problem> {
-        if self.entered || self.phase != Phase::Unstarted || self.pending.is_some() || self.problem.is_some() {
-            return Err(Problem::CleanupUnknown);
-        }
-        // Permanent BEFORE the first Builder::build poll, including failed build
-        // and no returned Connection. Neither cancellation nor panic can reset it.
-        self.entered = true;
-        self.attempt = attempt;
-        self.query = Some(query); self.rule = Some(rule);
-        self.phase = Phase::Connecting; self.pending = Some(Pending::Connect { future, polled: false, dispatch_end });
+        self.claim(crate::asset_session::KeyringMemoryAdmission::data(0, 0).unwrap())?;
+        self.query = Some(query); self.rule = Some(rule); self.phase = Phase::Connecting;
+        self.pending = Some(Pending::Connect { future: ConnectOriginal::Data(future), polled: false, dispatch_end });
         Ok(())
     }
     pub(crate) fn current_step(&self) -> Option<Step> {
@@ -296,7 +348,7 @@ impl LookupBook {
         let Some(attempt) = self.attempt.as_mut() else { self.fail(Problem::CleanupUnknown); return; };
         let result = attempt.poll_local_shutdown(cx);
         let failed = attempt.cleanup_failed();
-        if failed { self.fail(Problem::CleanupUnknown); }
+        if failed { self.cleanup_failed_seen = true; self.fail(Problem::CleanupUnknown); }
         if let Poll::Ready(result) = result {
             self.local_settlement = Some(result);
             self.shutdown = Shutdown::Settled;
@@ -642,11 +694,21 @@ where S: OrderedStream<Data = zbus::Result<Message>> + Unpin {
 
 #[cfg(test)]
 impl LookupBook {
+    pub(crate) fn constructor_refusal_data() -> Self {
+        // Actual constructor-refusal bookkeeping, with no SDK/native original.
+        let input = LookupInput::new(Path::new("/inert/not-opened"), "/collection", "data-vault", "data-generation").unwrap();
+        let mut book = Self::new();
+        assert_eq!(book.begin_constructed(input, Instant::now(),
+            crate::asset_session::KeyringMemoryAdmission::data(0, 0).unwrap(),
+            |_| Err(zbus::Error::InvalidReply)), Err(Problem::Unavailable));
+        book
+    }
     // Actual-driver DATA seam for the real DocumentState/OriginalWork gate
     // regression. No Connection, stream, task or native receipt is fabricated.
     pub(crate) fn cleanup_data(dispatch_end: Instant, future: impl Future<Output = zbus::Result<Message>> + Send + 'static) -> Self {
         let mut book = Self::new();
-        book.entered = true; book.phase = Phase::Admit(Step::RemoveMatch); book.registration = Registration::Registered;
+        book.claim(crate::asset_session::KeyringMemoryAdmission::data(0, 0).unwrap()).unwrap();
+        book.phase = Phase::Admit(Step::RemoveMatch); book.registration = Registration::Registered;
         book.admit_with(Step::RemoveMatch, dispatch_end, |_, _| Ok(Box::pin(future))).unwrap();
         book
     }
@@ -657,13 +719,33 @@ impl LookupBook {
         // Only exercises the real document/one-use admission logic. There is
         // NO native attempt, task, connection or finality result in this book.
         let mut book = Self::new();
-        book.entered = true; book.phase = Phase::Calling(Step::RemoveMatch);
+        book.claim(crate::asset_session::KeyringMemoryAdmission::data(0, 0).unwrap()).unwrap();
+        book.phase = Phase::Calling(Step::RemoveMatch);
         book.registration = Registration::Registered;
         book.raw = Some(Err(zbus::Error::InvalidReply)); book.raw_pending = true;
         book.shutdown = Shutdown::Staged(dispatch_end);
         book.finish_reply(false); // Real terminal failure, not a caller receipt.
         book
     }
+}
+
+#[cfg(test)]
+mod bounded_wire_tests {
+    use zbus::connection::owned_test_support;
+
+    #[test]
+    fn bounded_frames_refuse_before_allocation() { owned_test_support::bounded_wire_frames(); }
+    #[test]
+    fn bounded_headers_refuse_before_generic_decode() { owned_test_support::bounded_wire_headers(); }
+    #[test]
+    fn bounded_serializer_and_control_census() { owned_test_support::bounded_wire_capacity(); }
+    #[test]
+    fn bounded_authentication_and_hello() { owned_test_support::bounded_wire_authentication(); }
+    #[test]
+    fn errors_complete_only_original_registrations() { owned_test_support::bounded_wire_error_registration(); }
+    #[test]
+    #[ignore = "requires separately reviewed isolated Unix fixture admission"]
+    fn bounded_unix_original_rights_disposal() { owned_test_support::bounded_wire_original_rights_disposal(); }
 }
 
 #[cfg(test)]
@@ -719,6 +801,8 @@ mod original_finality_tests {
     #[tokio::test(flavor = "current_thread")]
     #[ignore = "requires separately reviewed isolated Unix fixture admission"]
     async fn owned_unix_pending_write_and_received_fd_shutdown() {
+        // LEGACY profile: the 8MiB write/received-FD fixture is deliberately
+        // separate and is NOT evidence for the 64KiB/zero-FD Keyring profile.
         finite(owned_test_support::unix_pending_write_and_received_fd_shutdown()).await;
     }
 }
@@ -753,7 +837,8 @@ mod tests {
         // Seed only inert pre-call state. There is deliberately no Connection;
         // all RPCs below enter through the real admit_with dispatch seam.
         let input = input(); let mut book = LookupBook::new();
-        book.entered = true; book.query = Some(input.query); book.rule = Some(input.rule);
+        book.claim(crate::asset_session::KeyringMemoryAdmission::data(0, 0).unwrap()).unwrap();
+        book.query = Some(input.query); book.rule = Some(input.rule);
         book.phase = Phase::Admit(Step::AddMatch); book
     }
     fn reply<T: serde::Serialize + zbus::zvariant::DynamicType>(sender: &'static str, data: &T) -> Message {
@@ -797,6 +882,40 @@ mod tests {
         call(book, Step::AddMatch, Ok(reply(BUS, &())), registered);
         call(book, Step::GetNameOwner, Ok(reply(BUS, &":1.23")), registered);
         assert_eq!(book.owner.as_ref().unwrap().as_str(), ":1.23");
+    }
+    #[test]
+    fn lookup_charge_precedes_constructor_and_is_refunded_only_after_disposal() {
+        let mut book = LookupBook::new(); let value = input();
+        let query = Arc::downgrade(&value.query); let rule = Arc::downgrade(&value.rule);
+        let charge = crate::asset_session::KeyringMemoryAdmission::data(0, 0).unwrap();
+        let calls = std::cell::Cell::new(0);
+        assert_eq!(book.begin_constructed(value, data_deadline(), charge, |_| {
+            calls.set(calls.get() + 1); Err(zbus::Error::InvalidReply)
+        }), Err(Problem::Unavailable));
+        assert_eq!(calls.get(), 1); assert!(book.started() && book.memory_held());
+        assert!(book.resources_settled() && !book.allocations_released()); // no attempt was constructed
+        assert!(query.upgrade().is_some() && rule.upgrade().is_some());
+        let failed_at = book.problem_at(); book.interrupt();
+        assert!(book.memory_held() && book.started());
+        assert_eq!(book.begin_constructed(input(), data_deadline(),
+            crate::asset_session::KeyringMemoryAdmission::data(0, 0).unwrap(),
+            |_| panic!("duplicate entry reached SDK construction")), Err(Problem::CleanupUnknown));
+        assert!(book.dispose_settled_storage());
+        assert!(!book.memory_held() && book.allocations_released() && book.started() && !book.can_begin());
+        assert!(query.upgrade().is_none() && rule.upgrade().is_none());
+        assert_eq!(book.problem(), Some(Problem::Unavailable)); assert_eq!(book.problem_at(), failed_at);
+        assert!(!book.dispose_settled_storage()); // no second refund
+    }
+    #[test]
+    fn lookup_charge_is_not_refunded_by_stop_raw_or_unjoined_original() {
+        let value = input(); let mut book = LookupBook::new();
+        book.begin_with(value.query, value.rule, data_deadline(), Box::pin(std::future::pending())).unwrap();
+        book.interrupt(); assert!(book.memory_held() && !book.dispose_settled_storage());
+        assert!(book.pending.is_some() && book.started());
+        let mut raw = LookupBook::shutdown_gate_data(data_deadline());
+        assert!(raw.memory_held() && raw.raw.is_some());
+        assert!(!raw.dispose_settled_storage() && raw.memory_held());
+        assert!(raw.raw.is_some() && raw.started());
     }
     #[test]
     fn lookup_driver_runs_only_fixed_search_attributes_and_one_cleanup() {

@@ -70,6 +70,23 @@ pub(crate) fn offline_fixture_root(held: &std::fs::File, path: &Path) -> Result<
 // to recapture bytes. Every later registration probe must match fresh originals.
 pub(crate) struct OriginWitness { path: PathBuf, ancestry: Vec<DirectoryIdentity>, leaf: FileIdentity }
 pub(crate) struct CapturedSource { pub(crate) bytes: Vec<u8>, pub(crate) origin: Arc<OriginWitness> }
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl OriginWitness {
+    // Pure retained DATA accounting; this neither reopens nor qualifies a path.
+    pub(crate) fn retained_bytes(&self) -> Option<usize> {
+        std::mem::size_of::<Self>().checked_add(self.path.capacity())?
+            .checked_add(self.ancestry.capacity().checked_mul(std::mem::size_of::<DirectoryIdentity>())?)
+    }
+}
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl CapturedSource {
+    pub(crate) fn memory_data(bytes: Vec<u8>) -> Self {
+        // Inert census DATA, not source-custody/identity or native test evidence.
+        let common = DirectoryIdentity { dev: 1, ino: 2, mode: 0o100600, uid: 123, gid: 123 };
+        Self { bytes, origin: Arc::new(OriginWitness { path: "/inert/census".into(), ancestry: Vec::new(),
+            leaf: FileIdentity { common, nlink: 1, size: 0, mtime: (0, 0), ctime: (0, 0) } }) }
+    }
+}
 pub(crate) struct ProjectProbe { path: PathBuf, identity: DirectoryIdentity }
 impl ProjectProbe {
     pub(crate) fn path(&self) -> &Path { &self.path }
@@ -139,6 +156,22 @@ mod linux {
             self.terminal && self.slots.iter().all(|slot| matches!(slot.state, OriginalState::Closed | OriginalState::NoHandle) && slot.fd.is_none())
         }
         pub(crate) fn not_started(&self) -> bool { !self.begun && self.slots.is_empty() }
+        // Heap backing only; the census separately includes this fixed book,
+        // mutex and Arc cells. settled()/not_started() NEVER imply zero capacity.
+        pub(crate) fn retained_bytes(&self) -> Option<usize> {
+            let slots = self.slots.capacity().checked_mul(std::mem::size_of::<Descriptor>())?;
+            let probes = self.probes.capacity().checked_mul(std::mem::size_of::<LeafProbe>())?;
+            let mut bytes = slots.checked_add(probes)?;
+            for slot in &self.slots { bytes = bytes.checked_add(slot.name.capacity())?; }
+            for probe in &self.probes { bytes = bytes.checked_add(probe.name.capacity())?; }
+            Some(bytes)
+        }
+        #[cfg(test)]
+        pub(crate) fn unstarted_backing_data() -> Self {
+            // Model the capacity retained if the second reservation refuses.
+            // No original descriptor, native call or settlement is fabricated.
+            let mut book = Self::new(); book.slots.try_reserve_exact(4).unwrap(); book
+        }
         fn begin(&mut self, capacity: usize, probes: usize) -> Result<(), Reason> {
             if self.begun || !self.slots.is_empty() { return Err(Reason::CleanupUnknown); }
             if capacity > DESCRIPTOR_LIMIT || probes > 32 { return Err(Reason::Capacity); }
@@ -579,6 +612,27 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::*;
+        #[test]
+        fn lookup_source_charge_includes_refused_and_closed_retained_names() {
+            let mut book = SourceBook::unstarted_backing_data();
+            assert!(book.not_started() && !book.settled());
+            let cells = book.slots.capacity() * std::mem::size_of::<Descriptor>();
+            assert_eq!(book.retained_bytes(), Some(cells)); assert!(cells > 0);
+            book.begin(4, 1).unwrap(); book.reserve(None, b"/inert").unwrap();
+            let common = DirectoryIdentity { dev: 1, ino: 2, mode: 0o100600, uid: 123, gid: 123 };
+            let mut name = Vec::with_capacity(91); name.extend_from_slice(b"data"); name.clear();
+            book.probes.push(LeafProbe { parent: 0, name,
+                identity: FileIdentity { common, nlink: 1, size: 0, mtime: (0, 0), ctime: (0, 0) } });
+            let retained = book.slots.capacity() * std::mem::size_of::<Descriptor>()
+                + book.probes.capacity() * std::mem::size_of::<LeafProbe>()
+                + book.slots[0].name.capacity() + book.probes[0].name.capacity();
+            // Closed/NoHandle are in-memory predicate inputs, NOT close receipts.
+            book.slots[0].state = OriginalState::NoHandle; book.terminal = true;
+            assert!(book.settled()); assert_eq!(book.retained_bytes(), Some(retained));
+            assert!(book.retained_bytes().unwrap() > cells);
+            book.slots.clear(); book.probes.clear();
+            assert!(book.retained_bytes().unwrap() >= cells); // Vec capacity remains.
+        }
         #[test]
         fn project_path_containment_type_and_original_custody_are_conservative() { assert_project_path_source_contracts(); }
         #[test]

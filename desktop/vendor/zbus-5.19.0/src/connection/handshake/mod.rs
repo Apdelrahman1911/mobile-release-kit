@@ -21,6 +21,12 @@ pub use auth_mechanism::AuthMechanism;
 use client::Client;
 use command::Command;
 use common::Common;
+#[cfg(all(unix, feature = "tokio"))]
+pub(super) const fn keyring_command_layout() -> crate::keyring_wire::control::TypeLayout {
+    crate::keyring_wire::control::TypeLayout::of::<Command>()
+}
+#[cfg(all(unix, feature = "tokio", any(test, feature = "mrk-owned-test-support")))]
+pub(crate) use common::keyring_contract::keyring_authentication_and_hello_use_the_bounded_transport;
 #[cfg(feature = "p2p")]
 use server::Server;
 
@@ -55,9 +61,11 @@ impl Authenticated {
         bus: bool,
         user_id: Option<u32>,
     ) -> Result<Self> {
-        Client::new(socket, mechanism, server_guid, bus, user_id)
-            .perform()
-            .await
+        let bounded = socket.read().is_keyring_wire();
+        let original = Client::new(socket, mechanism, server_guid, bus, user_id).perform();
+        if bounded { crate::keyring_wire::future_fits(original.as_ref().get_ref())?; }
+        let result = original.await;
+        if bounded { result.map_err(crate::keyring_wire::local_error) } else { result }
     }
 
     /// Create a server-side `Authenticated` for the given `socket`.

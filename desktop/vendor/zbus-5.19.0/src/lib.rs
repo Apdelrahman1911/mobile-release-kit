@@ -70,6 +70,7 @@ mod guid;
 pub use guid::*;
 
 pub mod message;
+mod keyring_wire;
 pub use message::Message;
 
 pub mod connection;

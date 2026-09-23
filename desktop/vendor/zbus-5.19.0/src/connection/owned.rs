@@ -151,9 +151,18 @@ impl Shared {
         // Nothing fallible is placed between obtaining the actual Task and
         // installation into the retained slot. A startup panic leaves Starting
         // or a poisoned state, never a fabricated NotStarted receipt.
+        let reader = match connection.socket_reader(socket_read, already_read, already_received_fds)
+            .spawn_owned(&connection.inner.executor) {
+            Ok(task) => task,
+            Err(error) => {
+                // This refusal precedes the actual spawn. The same owner still
+                // retains Connection/stream/control for original settlement.
+                state.reader = ReaderSlot::Terminal(ReaderOutcome::NotStarted);
+                return Err(error);
+            }
+        };
         state.reader = ReaderSlot::Running {
-            task: connection.socket_reader(socket_read, already_read, already_received_fds)
-                .spawn(&connection.inner.executor),
+            task: reader,
             cancellation_requested: false,
         };
         Ok(())
@@ -224,12 +233,29 @@ pub struct OwnedConnectionAttempt {
     write_error: Option<LocalIoError>,
     unreconciled: bool,
     settled: bool,
+    keyring_wire: bool,
 }
 
 impl OwnedConnectionAttempt {
     /// No I/O/task is started here. The exact runtime and validated filesystem
     /// socket path are latched before the caller first polls this attempt.
     pub fn unix(endpoint: PathBuf) -> Result<Self> {
+        Self::unix_profile(endpoint, false)
+    }
+
+    /// Application reservation for the fixed keyring wire profile, including
+    /// every simultaneously retained SDK slot. Not a general process-RSS cap.
+    pub const KEYRING_WIRE_BYTES: usize = crate::keyring_wire::ATTEMPT_BYTES;
+
+    /// A zero-FD, 4-KiB SASL/header, 64-KiB frame client from its first byte.
+    /// Like `unix`, construction does not start I/O or a task.
+    pub fn keyring_unix(endpoint: PathBuf) -> Result<Self> {
+        if !cfg!(target_os = "linux") { return Err(Error::Unsupported); }
+        Self::unix_profile(endpoint, true)
+    }
+
+    fn unix_profile(endpoint: PathBuf, keyring_wire: bool) -> Result<Self> {
+        if keyring_wire { Self::keyring_control_census()?; }
         let bytes = endpoint.as_os_str().as_bytes();
         if !endpoint.is_absolute() || bytes.is_empty() || bytes.len() > 107 || bytes.contains(&0)
             || endpoint.components().any(|p| !matches!(p, Component::RootDir | Component::Normal(_)))
@@ -237,7 +263,7 @@ impl OwnedConnectionAttempt {
         let runtime = Handle::try_current().map_err(|_| Error::Unsupported)?;
         let shared = Shared::new();
         let startup_shared = shared.clone();
-        let startup = Box::pin(async move {
+        let startup = async move {
             let socket = tokio::net::UnixStream::connect(endpoint).await?;
             let socket = socket.into_std()?;
             let control = socket.try_clone()?;
@@ -245,15 +271,42 @@ impl OwnedConnectionAttempt {
             // and before the first poll of the original Builder/handshake.
             if startup_shared.install_control(control)? { return Err(stopped()); }
             let socket = tokio::net::UnixStream::from_std(socket)?;
-            Builder::unix_stream(socket).max_queued(1).build_owned(&startup_shared).await
-        });
+            Builder::unix_stream(socket).max_queued(1).build_owned(&startup_shared, keyring_wire).await
+        };
+        if keyring_wire { crate::keyring_wire::future_fits(&startup)?; }
+        let startup = Box::pin(startup);
         Ok(Self {
             shared, runtime, startup: Some(startup), startup_polled: false,
             startup_consumed: false, startup_succeeded: false,
             call: None, call_state: CallState::NeverCreated,
             shutdown_entered: false, close: None, close_consumed: false,
-            write_error: None, unreconciled: false, settled: false,
+            write_error: None, unreconciled: false, settled: false, keyring_wire,
         })
+    }
+
+    pub(crate) fn keyring_control_census() -> Result<crate::keyring_wire::control::FixedCensus> {
+        use crate::keyring_wire::control::{self, LayoutInputs, TypeLayout};
+        crate::keyring_wire::header_slot_bytes().ok_or(Error::Unsupported)?;
+        let (keyring_read, keyring_write) = super::socket::unix::keyring_half_layouts();
+        let [pending_mutex, reply_queue_entry, pending_map_entry, drained_sender] =
+            super::pending_method_calls::keyring_control_layouts();
+        control::fixed_census(LayoutInputs {
+            retained_mutex: TypeLayout::of::<Mutex<Retained>>(),
+            connection_inner: TypeLayout::of::<super::ConnectionInner>(),
+            socket_status: TypeLayout::of::<super::SocketStatus>(),
+            senders_mutex: TypeLayout::of::<crate::async_lock::Mutex<std::collections::HashMap<
+                Option<crate::OwnedMatchRule>, super::MsgBroadcaster>>>(),
+            pending_mutex,
+            split_stream: TypeLayout::of::<tokio::net::UnixStream>(),
+            keyring_read, keyring_write,
+            owned_attempt: TypeLayout::of::<Self>(),
+            unfiltered_queue_entry: TypeLayout::of::<(Result<Message>, usize)>(),
+            reply_queue_entry,
+            sender_map_entry: TypeLayout::of::<(Option<crate::OwnedMatchRule>, super::MsgBroadcaster)>(),
+            pending_map_entry, drained_sender,
+            command: super::handshake::keyring_command_layout(),
+            local_error_backing_bytes: crate::keyring_wire::local_error_backing_bytes(),
+        }).map_err(|_| Error::Unsupported)
     }
 
     pub fn poll_build(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
@@ -264,6 +317,7 @@ impl OwnedConnectionAttempt {
         self.startup_polled = true;
         let Poll::Ready(result) = startup.as_mut().poll(cx) else { return Poll::Pending; };
         self.startup = None; // Consume ONLY after the original future returned.
+        let result = if self.keyring_wire { result.map_err(crate::keyring_wire::local_error) } else { result };
         let mut state = match self.shared.lock() {
             Ok(state) => state,
             Err(error) => { self.unreconciled = true; return Poll::Ready(Err(error)); }
@@ -313,9 +367,11 @@ impl OwnedConnectionAttempt {
             if state.stopping { return Err(stopped()); }
             state.connection.as_ref().ok_or_else(state_error)?.clone()
         };
-        self.call = Some(Box::pin(async move {
+        let call = async move {
             connection.call_method(Some(destination), path, Some(interface), member, &body).await
-        }));
+        };
+        if self.keyring_wire { crate::keyring_wire::future_fits(&call)?; }
+        self.call = Some(Box::pin(call));
         self.call_state = CallState::Staged;
         Ok(())
     }
@@ -329,7 +385,7 @@ impl OwnedConnectionAttempt {
             Poll::Ready(result) => {
                 self.call = None;
                 self.call_state = CallState::Returned;
-                Poll::Ready(result)
+                Poll::Ready(if self.keyring_wire { result.map_err(crate::keyring_wire::local_error) } else { result })
             }
         }
     }
@@ -397,12 +453,17 @@ impl OwnedConnectionAttempt {
             { return Poll::Pending; }
             if self.close.is_none() && !self.close_consumed {
                 if let Some(connection) = state.connection.as_ref().cloned() {
-                    self.close = Some(Box::pin(async move {
+                    let close = async move {
                         // The true reader join is already consumed. A reader
                         // parked in broadcast therefore cannot hold this lock.
                         connection.inner.msg_senders.lock().await.clear();
                         connection.close().await
-                    }));
+                    };
+                    if self.keyring_wire && crate::keyring_wire::future_fits(&close).is_err() {
+                        self.unreconciled = true;
+                        return Poll::Pending;
+                    }
+                    self.close = Some(Box::pin(close));
                 } else {
                     self.close_consumed = true; // Exact terminal no-connection startup.
                 }

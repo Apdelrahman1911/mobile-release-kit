@@ -86,6 +86,7 @@ type Interfaces<'a> = HashMap<ObjectPath<'a>, HashMap<InterfaceName<'static>, Ar
 #[must_use]
 pub struct Builder<'a> {
     target: Option<Target>,
+    keyring_wire: bool,
     max_queued: Option<usize>,
     // This is only set for p2p server case or pre-authenticated sockets.
     guid: Option<Guid<'a>>,
@@ -589,6 +590,7 @@ impl<'a> Builder<'a> {
     pub(super) async fn build_owned(
         mut self,
         custody: &super::owned::Shared,
+        keyring_wire: bool,
     ) -> Result<()> {
         if !matches!(self.target, Some(Target::TokioUnixStream(_)))
             || !self.interfaces.is_empty() || !self.names.is_empty()
@@ -606,10 +608,11 @@ impl<'a> Builder<'a> {
         #[cfg(feature = "async-io")]
         if executor.needs_internal_driver() { return Err(Error::Unsupported); }
 
+        self.keyring_wire = keyring_wire;
         let mut auth = self.connect(true).await?;
         let socket_read = auth.socket_read.take().ok_or(Error::InvalidField)?;
-        let already_read = auth.already_received_bytes.drain(..).collect();
-        let already_received_fds = auth.already_received_fds.drain(..).collect();
+        let already_read = std::mem::take(&mut auth.already_received_bytes);
+        let already_received_fds = std::mem::take(&mut auth.already_received_fds);
         let mut connection = Connection::new(auth, true, executor, None).await?;
         connection.set_max_queued(1);
         // The retained state receives Connection, plain receiver and the REAL
@@ -681,6 +684,7 @@ impl<'a> Builder<'a> {
     fn new(target: Target) -> Self {
         Self {
             target: Some(target),
+            keyring_wire: false,
             #[cfg(feature = "p2p")]
             p2p: false,
             max_queued: None,
@@ -777,7 +781,9 @@ impl<'a> Builder<'a> {
         // once.
         let split = match self.target.take().unwrap() {
             #[cfg(all(unix, feature = "tokio"))]
-            Target::TokioUnixStream(stream) => stream.into(),
+            Target::TokioUnixStream(stream) => if self.keyring_wire {
+                super::socket::unix::keyring_split(stream)
+            } else { stream.into() },
             #[cfg(all(any(unix, windows), feature = "async-io"))]
             Target::AsyncIoUnixStream(stream) => Async::new(stream)?.into(),
             #[cfg(feature = "tokio")]

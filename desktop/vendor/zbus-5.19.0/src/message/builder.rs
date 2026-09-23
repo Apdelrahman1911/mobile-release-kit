@@ -36,6 +36,7 @@ macro_rules! dbus_context {
 #[derive(Debug, Clone)]
 pub struct Builder<'a> {
     header: Header<'a>,
+    keyring_wire: bool,
 }
 
 impl<'a> Builder<'a> {
@@ -43,7 +44,12 @@ impl<'a> Builder<'a> {
         let primary = PrimaryHeader::new(msg_type, 0);
         let fields = Fields::new();
         let header = Header::new(primary, fields);
-        Self { header }
+        Self { header, keyring_wire: false }
+    }
+
+    pub(crate) fn keyring_wire(mut self, enabled: bool) -> Self {
+        self.keyring_wire = enabled;
+        self
     }
 
     /// Add flags to the message.
@@ -179,6 +185,8 @@ impl<'a> Builder<'a> {
 
         let signature = body.signature();
 
+        if self.keyring_wire { crate::keyring_wire::checked_signature(&signature)?; }
+
         self.build_generic(signature, body_size, move |cursor| {
             // SAFETY: build_generic puts FDs and the body in the same Message.
             unsafe { zvariant::to_writer(cursor, ctxt, body) }
@@ -223,7 +231,7 @@ impl<'a> Builder<'a> {
         self.build_generic(
             signature,
             body_size,
-            move |cursor: &mut Cursor<&mut Vec<u8>>| {
+            move |cursor| {
                 cursor.write_all(body_bytes)?;
 
                 #[cfg(unix)]
@@ -242,10 +250,12 @@ impl<'a> Builder<'a> {
         write_body: WriteFunc,
     ) -> Result<Message>
     where
-        WriteFunc: FnOnce(&mut Cursor<&mut Vec<u8>>) -> Result<BuildGenericResult>,
+        WriteFunc: FnOnce(&mut crate::keyring_wire::MessageWriter<'_>) -> Result<BuildGenericResult>,
     {
         let ctxt = dbus_context!(self, 0);
         let mut header = self.header;
+
+        if self.keyring_wire { crate::keyring_wire::checked_signature(&signature)?; }
 
         header.fields_mut().signature = Cow::Owned(signature);
 
@@ -255,6 +265,7 @@ impl<'a> Builder<'a> {
         #[cfg(unix)]
         {
             let fds_len = body_size.num_fds();
+            if self.keyring_wire && fds_len != 0 { return Err(Error::InvalidField); }
             if fds_len != 0 {
                 header.fields_mut().unix_fds = Some(fds_len);
             }
@@ -263,21 +274,38 @@ impl<'a> Builder<'a> {
         let hdr_len = *zvariant::serialized_size(ctxt, &header)?;
         // We need to align the body to 8-byte boundary.
         let body_padding = padding_for_8_bytes(hdr_len);
-        let body_offset = hdr_len + body_padding;
-        let total_len = body_offset + body_size.size();
+        let body_offset = hdr_len.checked_add(body_padding).ok_or(Error::ExcessData)?;
+        let total_len = body_offset.checked_add(body_size.size()).ok_or(Error::ExcessData)?;
         if total_len > MAX_MESSAGE_SIZE {
             return Err(Error::ExcessData);
         }
-        let mut bytes: Vec<u8> = Vec::with_capacity(total_len);
-        let mut cursor = Cursor::new(&mut bytes);
+        if self.keyring_wire && (hdr_len.checked_sub(16).ok_or(Error::InvalidField)? > crate::keyring_wire::HEADER_BYTES
+            || total_len > crate::keyring_wire::FRAME_BYTES) { return Err(Error::ExcessData); }
+        let mut bytes = if self.keyring_wire {
+            let mut bytes = crate::keyring_wire::buffer(total_len, crate::keyring_wire::FRAME_BYTES)?;
+            bytes.resize(total_len, 0);
+            bytes
+        } else { Vec::with_capacity(total_len) };
+        let mut cursor = if self.keyring_wire {
+            crate::keyring_wire::MessageWriter::Keyring(Cursor::new(bytes.as_mut_slice()))
+        } else {
+            crate::keyring_wire::MessageWriter::Legacy(Cursor::new(&mut bytes))
+        };
 
         // SAFETY: There are no FDs involved.
         unsafe { zvariant::to_writer(&mut cursor, ctxt, &header) }?;
         cursor.write_all(&[0u8; 8][..body_padding])?;
         #[cfg(unix)]
-        let fds: Vec<_> = write_body(&mut cursor)?.into_iter().collect();
+        let fds = write_body(&mut cursor)?;
         #[cfg(not(unix))]
         write_body(&mut cursor)?;
+        if self.keyring_wire && cursor.position() != total_len as u64 { return Err(Error::ExcessData); }
+        drop(cursor);
+        if self.keyring_wire {
+            #[cfg(unix)]
+            if !fds.is_empty() { return Err(Error::InvalidField); }
+            crate::keyring_wire::preflight(&bytes)?;
+        }
 
         let primary_header = header.into_primary();
         #[cfg(unix)]
@@ -304,8 +332,29 @@ impl<'m> From<Header<'m>> for Builder<'m> {
         fields.signature = Cow::Owned(Signature::Unit);
         fields.unix_fds = None;
 
-        Self { header }
+        Self { header, keyring_wire: false }
     }
+}
+
+#[cfg(all(unix, feature = "tokio", any(test, feature = "mrk-owned-test-support")))]
+pub(crate) fn keyring_serializer_cannot_outgrow_its_estimate() {
+    use super::{Endian, Message};
+    use std::io::Write;
+    use zvariant::{Signature, serialized::{Context, Size}};
+    let builder = Message::method_call("/", "Check").unwrap().keyring_wire(true);
+    let context = Context::new_dbus(Endian::native(), 0);
+    let result = builder.build_generic(Signature::U32, Size::new(4, context), |writer| {
+        writer.write_all(&[0; 5])?;
+        #[cfg(unix)]
+        return Ok(Vec::new());
+        #[cfg(not(unix))]
+        return Ok(());
+    });
+    assert!(result.is_err());
+    let large = vec![1u8; crate::keyring_wire::FRAME_BYTES];
+    assert!(Message::method_call("/", "Check").unwrap().keyring_wire(true).build(&large).is_err());
+    // The shared writer did not silently impose this subset on legacy SDK.
+    assert!(Message::method_call("/", "Check").unwrap().build(&large).is_ok());
 }
 
 #[cfg(test)]
@@ -313,6 +362,10 @@ mod tests {
     use super::{Endian, Message};
     use crate::Error;
     use test_log::test;
+
+    #[cfg(all(unix, feature = "tokio"))]
+    #[test]
+    fn keyring_capped_serializer() { super::keyring_serializer_cannot_outgrow_its_estimate(); }
 
     #[test]
     fn test_raw() -> Result<(), Error> {

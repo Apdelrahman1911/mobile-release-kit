@@ -8,6 +8,8 @@ use crate::{Error, Result, utils::padding_for_8_bytes, zvariant::ObjectPath};
 
 mod builder;
 pub use builder::Builder;
+#[cfg(all(unix, feature = "tokio", any(test, feature = "mrk-owned-test-support")))]
+pub(crate) use builder::keyring_serializer_cannot_outgrow_its_estimate;
 
 mod field_code;
 pub(crate) use field_code::FieldCode;

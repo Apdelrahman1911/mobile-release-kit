@@ -177,6 +177,12 @@ pub(crate) struct Fields { kind: Kind, values: Vec<Option<String>> }
 impl Fields {
     pub(crate) fn empty_firebase() -> Self { Self { kind: Kind::AndroidFirebase, values: Vec::new() } }
     pub(crate) fn byte_count(&self) -> usize { self.values.iter().flatten().map(String::capacity).sum() }
+    // Lookup admission counts retained allocation capacity, including empty
+    // value cells. Keep the independent committed-record charge unchanged.
+    pub(crate) fn retained_bytes(&self) -> Option<usize> {
+        let cells = self.values.capacity().checked_mul(std::mem::size_of::<Option<String>>())?;
+        self.values.iter().flatten().try_fold(cells, |bytes, value| bytes.checked_add(value.capacity()))
+    }
     pub(crate) fn into_value(&self) -> Value {
         let mut object = Map::new();
         for (name, value) in field_names(self.kind).iter().zip(&self.values) {
@@ -438,6 +444,16 @@ pub(crate) fn assert_project_path_wiring_contract() {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn lookup_fields_charge_keeps_empty_cells_and_string_capacity() {
+        let mut value = String::with_capacity(79); value.push_str("data"); value.truncate(1);
+        let mut values = Vec::with_capacity(7); values.push(Some(value)); values.push(None);
+        let fields = Fields { kind: Kind::GoogleWif, values };
+        let cells = fields.values.capacity() * std::mem::size_of::<Option<String>>();
+        assert_eq!(fields.retained_bytes(), Some(cells + fields.byte_count()));
+        assert!(cells > 0 && fields.byte_count() > 1);
+        assert_eq!(Fields::empty_firebase().retained_bytes(), Some(0));
+    }
     #[test]
     fn project_path_command_is_registered_once_for_the_fixed_main_local_capability() { assert_project_path_wiring_contract(); }
     #[test]

@@ -60,6 +60,7 @@ const DEFAULT_MAX_QUEUED: usize = 64;
 #[derive(Debug)]
 pub(crate) struct ConnectionInner {
     server_guid: OwnedGuid,
+    keyring_wire: bool,
     #[cfg(unix)]
     cap_unix_fd: bool,
     #[cfg(feature = "p2p")]
@@ -236,7 +237,9 @@ impl Connection {
         self.inner.socket_status.activity_event.notify(usize::MAX);
         let mut write = self.inner.socket_write.lock().await;
 
-        write.send_message(msg).await
+        let original = write.send_message(msg);
+        if self.inner.keyring_wire { crate::keyring_wire::transport_future_fits(original.as_ref().get_ref())?; }
+        original.await
     }
 
     /// Send a method call.
@@ -318,7 +321,11 @@ impl Connection {
         M::Error: Into<Error>,
         B: serde::ser::Serialize + zvariant::DynamicType,
     {
-        let _permit = acquire_serial_num_semaphore().await;
+        // The bounded route must not copy a caller-controlled environment value
+        // just to detect Flatpak. Always take the SAME ordinary serial/send
+        // permit; this preserves the stricter ordering needed by that proxy.
+        let _permit = if self.inner.keyring_wire { Some(SERIAL_NUM_SEMAPHORE.acquire().await) }
+            else { acquire_serial_num_semaphore().await };
 
         let mut builder = Message::method_call(path, method_name)?;
         if let Some(sender) = self.unique_name() {
@@ -333,7 +340,7 @@ impl Connection {
         for flag in flags {
             builder = builder.with_flags(flag)?;
         }
-        let msg = builder.build(body)?;
+        let msg = builder.keyring_wire(self.inner.keyring_wire).build(body)?;
 
         let serial = msg.primary_header().serial_num();
         if flags.contains(Flags::NoReplyExpected) {
@@ -1103,12 +1110,19 @@ impl Connection {
             }};
         }
         // The unfiltered message channel.
-        let (msg_sender, msg_receiver) = create_msg_broadcast_channel!(DEFAULT_MAX_QUEUED);
+        let keyring_wire = auth.socket_write.is_keyring_wire();
+        let (msg_sender, msg_receiver) = create_msg_broadcast_channel!(if keyring_wire { 1 } else { DEFAULT_MAX_QUEUED });
+        if keyring_wire && (msg_sender.capacity() != 1 || msg_receiver.capacity() != 1) {
+            return Err(Error::Unsupported);
+        }
         let mut msg_senders = HashMap::new();
         msg_senders.insert(None, msg_sender);
+        if keyring_wire && (msg_senders.len() != 1 || msg_senders.capacity() != 3) {
+            return Err(Error::Unsupported);
+        }
 
         let msg_senders = Arc::new(Mutex::new(msg_senders));
-        let pending_method_calls = PendingMethodCalls::default();
+        let pending_method_calls = PendingMethodCalls::with_keyring_wire(keyring_wire);
         let subscriptions = Mutex::new(HashMap::new());
 
         let connection = Self {
@@ -1120,6 +1134,7 @@ impl Connection {
                 }),
                 socket_write: Mutex::new(auth.socket_write),
                 server_guid: auth.server_guid,
+                keyring_wire,
                 #[cfg(unix)]
                 cap_unix_fd,
                 #[cfg(feature = "p2p")]
@@ -1241,14 +1256,16 @@ impl Connection {
     /// After this call, all reading and writing operations will fail.
     pub async fn close(self) -> Result<()> {
         self.inner.socket_status.activity_event.notify(usize::MAX);
-        let result = self
-            .inner
-            .socket_write
-            .lock()
-            .await
-            .close()
-            .await
-            .map_err(Into::into);
+        let result = {
+            let mut write = self.inner.socket_write.lock().await;
+            let original = write.close();
+            match if self.inner.keyring_wire {
+                crate::keyring_wire::transport_future_fits(original.as_ref().get_ref())
+            } else { Ok(()) } {
+                Ok(()) => original.await.map_err(Into::into),
+                Err(error) => Err(error.into()),
+            }
+        };
         self.inner
             .socket_status
             .closed

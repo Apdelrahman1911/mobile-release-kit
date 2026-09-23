@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use tracing::{instrument, trace, warn};
+use tracing::{Instrument, trace, trace_span, warn};
+#[cfg(any(target_os = "freebsd", target_os = "dragonfly"))]
+use tracing::instrument;
 
 use crate::{Message, conn::socket::ReadHalf, is_flatpak, names::OwnedUniqueName};
 
@@ -82,10 +84,20 @@ impl Client {
     }
 
     /// Perform the authentication handshake with the server.
-    #[instrument(skip(self), level = "trace")]
     async fn authenticate(&mut self) -> Result<()> {
+        let bounded = self.common.is_keyring_wire();
+        let original = self.authenticate_inner();
+        // Do not even register a tracing callsite on the bounded route. An
+        // arbitrary subscriber's allocation/private formatting is not part of
+        // this fixed client allowance. Legacy tracing remains available.
+        if bounded { original.await }
+        else { original.instrument(trace_span!("authenticate")).await }
+    }
+
+    async fn authenticate_inner(&mut self) -> Result<()> {
+        let bounded = self.common.is_keyring_wire();
         let mechanism = self.common.mechanism();
-        trace!("Trying {mechanism} mechanism");
+        if !bounded { trace!("Trying {mechanism} mechanism"); }
         let user_id = self.user_id.clone();
         let auth_cmd = match mechanism {
             AuthMechanism::Anonymous => Command::Auth(Some(mechanism), Some("zbus".into())),
@@ -95,7 +107,7 @@ impl Client {
 
         match self.common.read_command().await? {
             Command::Ok(guid) => {
-                trace!("Received OK from server");
+                if !bounded { trace!("Received OK from server"); }
                 self.set_guid(guid)?;
 
                 Ok(())
@@ -114,8 +126,14 @@ impl Client {
     }
 
     /// Sends out all commands after authentication.
-    #[instrument(skip(self), level = "trace")]
     async fn send_secondary_commands(&mut self) -> Result<usize> {
+        let bounded = self.common.is_keyring_wire();
+        let original = self.send_secondary_commands_inner();
+        if bounded { original.await }
+        else { original.instrument(trace_span!("send_secondary_commands")).await }
+    }
+
+    async fn send_secondary_commands_inner(&mut self) -> Result<usize> {
         let mut commands = Vec::with_capacity(4);
 
         let can_pass_fd = self.common.socket_mut().read_mut().can_pass_unix_fd();
@@ -140,7 +158,7 @@ impl Client {
         };
         commands.push(Command::Begin);
         let hello_method = if self.bus {
-            Some(create_hello_method_call())
+            Some(create_hello_method_call(self.common.is_keyring_wire())?)
         } else {
             None
         };
@@ -153,16 +171,23 @@ impl Client {
         Ok(commands.len() - 1)
     }
 
-    #[instrument(skip(self), level = "trace")]
     async fn receive_secondary_responses(&mut self, expected_n_responses: usize) -> Result<()> {
+        let bounded = self.common.is_keyring_wire();
+        let original = self.receive_secondary_responses_inner(expected_n_responses);
+        if bounded { original.await }
+        else { original.instrument(trace_span!("receive_secondary_responses", expected_n_responses)).await }
+    }
+
+    async fn receive_secondary_responses_inner(&mut self, expected_n_responses: usize) -> Result<()> {
+        let bounded = self.common.is_keyring_wire();
         for response in self.common.read_commands(expected_n_responses).await? {
             match response {
                 Command::Ok(guid) => {
-                    trace!("Received OK from server");
+                    if !bounded { trace!("Received OK from server"); }
                     self.set_guid(guid)?;
                 }
                 Command::AgreeUnixFD => self.common.set_cap_unix_fd(true),
-                Command::Error(e) => warn!("UNIX file descriptor passing rejected: {e}"),
+                Command::Error(e) => if !bounded { warn!("UNIX file descriptor passing rejected: {e}"); },
                 cmd => {
                     return Err(Error::Handshake(format!(
                         "Unexpected command from server: {cmd}"
@@ -173,13 +198,9 @@ impl Client {
 
         Ok(())
     }
-}
-
-#[async_trait]
-impl Handshake for Client {
-    #[instrument(skip(self), level = "trace")]
-    async fn perform(mut self) -> Result<Authenticated> {
-        trace!("Initializing");
+    async fn perform_inner(mut self) -> Result<Authenticated> {
+        let bounded = self.common.is_keyring_wire();
+        if !bounded { trace!("Initializing"); }
 
         #[cfg(any(target_os = "freebsd", target_os = "dragonfly"))]
         self.send_zero_byte().await?;
@@ -192,7 +213,7 @@ impl Handshake for Client {
                 .await?;
         }
 
-        trace!("Handshake done");
+        if !bounded { trace!("Handshake done"); }
         #[cfg(unix)]
         let (socket, mut recv_buffer, received_fds, cap_unix_fd, _) = self.common.into_components();
         #[cfg(not(unix))]
@@ -222,15 +243,25 @@ impl Handshake for Client {
     }
 }
 
-fn create_hello_method_call() -> Message {
+#[async_trait]
+impl Handshake for Client {
+    async fn perform(self) -> Result<Authenticated> {
+        let bounded = self.common.is_keyring_wire();
+        let original = self.perform_inner();
+        if bounded { original.await }
+        else { original.instrument(trace_span!("perform")).await }
+    }
+}
+
+fn create_hello_method_call(keyring_wire: bool) -> Result<Message> {
     Message::method_call("/org/freedesktop/DBus", "Hello")
         .unwrap()
         .destination("org.freedesktop.DBus")
         .unwrap()
         .interface("org.freedesktop.DBus")
         .unwrap()
+        .keyring_wire(keyring_wire)
         .build(&())
-        .unwrap()
 }
 
 async fn receive_hello_response(
@@ -239,15 +270,20 @@ async fn receive_hello_response(
 ) -> Result<OwnedUniqueName> {
     use crate::message::Type;
 
-    let reply = read
+    let bounded = read.is_keyring_wire();
+    #[cfg(unix)]
+    let mut fds = Vec::new();
+    let original = read
         .receive_message(
             0,
             recv_buffer,
             #[cfg(unix)]
-            &mut vec![],
-        )
-        .await?;
+            &mut fds,
+        );
+    if bounded { crate::keyring_wire::transport_future_fits(original.as_ref().get_ref())?; }
+    let reply = original.await?;
     match reply.message_type() {
+        Type::MethodReturn if bounded => crate::keyring_wire::hello_name(&reply),
         Type::MethodReturn => reply.body().deserialize(),
         Type::Error => Err(Error::from(reply)),
         m => Err(Error::Handshake(format!("Unexpected message `{m:?}`"))),

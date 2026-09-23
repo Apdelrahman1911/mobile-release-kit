@@ -27,6 +27,154 @@ use rustix::net::{
 #[cfg(unix)]
 use crate::utils::FDS_MAX;
 
+// Only the fixed owned constructor selects these halves, before authentication.
+// No wrapper performs peer lookups, creates a task or duplicates a connection.
+#[cfg(all(unix, feature = "tokio"))]
+pub(crate) fn keyring_split(stream: tokio::net::UnixStream) -> super::BoxedSplit {
+    let (read, write) = stream.into_split();
+    super::Split::new(Box::new(KeyringRead(read)), Box::new(KeyringWrite(write)))
+}
+
+#[cfg(all(unix, feature = "tokio"))]
+#[derive(Debug)]
+struct KeyringRead(tokio::net::unix::OwnedReadHalf);
+#[cfg(all(unix, feature = "tokio"))]
+#[derive(Debug)]
+struct KeyringWrite(tokio::net::unix::OwnedWriteHalf);
+
+#[cfg(all(unix, feature = "tokio"))]
+pub(in crate::connection) const fn keyring_half_layouts() -> (
+    crate::keyring_wire::control::TypeLayout, crate::keyring_wire::control::TypeLayout,
+) {
+    use crate::keyring_wire::control::TypeLayout;
+    (TypeLayout::of::<KeyringRead>(), TypeLayout::of::<KeyringWrite>())
+}
+
+#[cfg(all(unix, feature = "tokio"))]
+#[async_trait::async_trait]
+impl super::ReadHalf for KeyringRead {
+    fn is_keyring_wire(&self) -> bool { true }
+    async fn recvmsg(&mut self, buf: &mut [u8]) -> super::RecvmsgResult {
+        let stream = self.0.as_ref();
+        poll_fn(|cx| loop {
+            match stream.try_io(tokio::io::Interest::READABLE, || fd_recvmsg_keyring(stream.as_fd(), buf)) {
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {},
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => match stream.poll_read_ready(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(result) => result?,
+                },
+                result => return Poll::Ready(result.map(|count| (count, Vec::new()))),
+            }
+        }).await
+    }
+}
+
+#[cfg(all(unix, feature = "tokio"))]
+#[async_trait::async_trait]
+impl super::WriteHalf for KeyringWrite {
+    fn is_keyring_wire(&self) -> bool { true }
+    async fn sendmsg(&mut self, buffer: &[u8], fds: &[BorrowedFd<'_>]) -> std::io::Result<usize> {
+        if !fds.is_empty() || buffer.len() > crate::keyring_wire::FRAME_BYTES {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        }
+        #[cfg(not(target_os = "linux"))]
+        { Err(std::io::ErrorKind::Unsupported.into()) }
+        #[cfg(target_os = "linux")]
+        {
+            let stream = self.0.as_ref();
+            poll_fn(|cx| loop {
+                // This profile cannot send rights. Avoid the legacy FDS_MAX
+                // ancillary scratch and its extra async-trait adapter entirely.
+                match stream.try_io(tokio::io::Interest::WRITABLE, || {
+                    rustix::net::send(stream.as_fd(), buffer, SendFlags::NOSIGNAL).map_err(Into::into)
+                }) {
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {},
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => match stream.poll_write_ready(cx) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(result) => result?,
+                    },
+                    Ok(0) => return Poll::Ready(Err(std::io::ErrorKind::WriteZero.into())),
+                    result => return Poll::Ready(result),
+                }
+            }).await
+        }
+    }
+    async fn close(&mut self) -> std::io::Result<()> {
+        let original = super::WriteHalf::close(&mut self.0);
+        crate::keyring_wire::transport_future_fits(original.as_ref().get_ref())?;
+        original.await
+    }
+}
+
+#[cfg(all(unix, feature = "tokio"))]
+fn fd_recvmsg_keyring(fd: BorrowedFd<'_>, buffer: &mut [u8]) -> std::io::Result<usize> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        // The closed constructor is Linux-only. Do not infer other kernels'
+        // ancillary-disposal semantics from the Linux qualification.
+        let _ = (fd, buffer);
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut iov = [IoSliceMut::new(buffer)];
+        // Zero capacity is deliberate: no ancillary message, known or unknown
+        // to rustix's iterator, can be silently admitted. Linux reports CTRUNC
+        // for control that cannot fit and closes every undisclosed right. No
+        // received FD is installed, collected or left for an error-path drain.
+        let mut ancillary = RecvAncillaryBuffer::new(&mut []);
+        let message = recvmsg(fd, &mut iov, &mut ancillary, RecvFlags::CMSG_CLOEXEC)?;
+        if message.flags.contains(rustix::net::ReturnFlags::CTRUNC) {
+            return Err(std::io::ErrorKind::InvalidData.into());
+        }
+        if message.bytes == 0 { return Err(std::io::ErrorKind::UnexpectedEof.into()); }
+        Ok(message.bytes)
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "tokio", any(test, feature = "mrk-owned-test-support")))]
+pub(crate) mod keyring_tests {
+    use super::*;
+    use std::{io::Read, mem::MaybeUninit, os::unix::net::UnixStream};
+
+    // Native, credential-free, unnamed socket pairs only. Run separately from
+    // DATA selectors in the reviewed private Unix execution environment.
+    #[cfg_attr(test, test)]
+    #[cfg_attr(test, ignore = "requires the admitted private Linux Unix-socket fixture")]
+    pub(crate) fn keyring_zero_control_refuses_and_disposes_original_rights() {
+        for count in [1, 17] {
+            let (receive, send) = UnixStream::pair().unwrap();
+            receive.set_nonblocking(true).unwrap();
+            let (mut witness, right) = UnixStream::pair().unwrap();
+            witness.set_nonblocking(true).unwrap();
+            {
+                let rights = [right.as_fd(); 17];
+                let mut scratch = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(17))];
+                let mut ancillary = SendAncillaryBuffer::new(&mut scratch);
+                assert!(ancillary.push(SendAncillaryMessage::ScmRights(&rights[..count])));
+                assert_eq!(sendmsg(&send, &[IoSlice::new(b"x")], &mut ancillary, SendFlags::NOSIGNAL).unwrap(), 1);
+            }
+            drop(right);
+            // The original queued right(s), not a process-wide FD count, prove
+            // both retention before recv and disposal by this exact refusal.
+            assert_eq!(witness.read(&mut [0u8; 1]).unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+            assert_eq!(fd_recvmsg_keyring(receive.as_fd(), &mut [0u8; 1]).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+            assert_eq!(witness.read(&mut [0u8; 1]).unwrap(), 0);
+        }
+        let (receive, send) = UnixStream::pair().unwrap();
+        receive.set_nonblocking(true).unwrap();
+        assert_eq!(rustix::net::send(&send, b"ok", SendFlags::NOSIGNAL).unwrap(), 2);
+        let mut bytes = [0u8; 2];
+        assert_eq!(fd_recvmsg_keyring(receive.as_fd(), &mut bytes).unwrap(), 2);
+        assert_eq!(&bytes, b"ok");
+        // Also refuse a control message other than rights, regardless of which
+        // ancillary kinds rustix's typed iterator knows how to expose.
+        rustix::net::sockopt::set_socket_passcred(&receive, true).unwrap();
+        assert_eq!(rustix::net::send(&send, b"c", SendFlags::NOSIGNAL).unwrap(), 1);
+        assert_eq!(fd_recvmsg_keyring(receive.as_fd(), &mut bytes).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+    }
+}
+
 #[cfg(all(unix, feature = "async-io"))]
 #[async_trait::async_trait]
 impl super::ReadHalf for Arc<Async<UnixStream>> {

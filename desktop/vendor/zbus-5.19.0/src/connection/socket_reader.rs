@@ -7,7 +7,7 @@ use std::{
 };
 
 use event_listener::Event;
-use tracing::{debug, instrument, trace};
+use tracing::{Instrument, debug, trace, trace_span};
 
 use crate::{
     Executor, Message, OwnedMatchRule, Task,
@@ -55,21 +55,42 @@ impl SocketReader {
         executor.spawn(self.receive_msg(), "socket reader")
     }
 
+    #[cfg(all(unix, feature = "tokio"))]
+    pub(super) fn spawn_owned(self, executor: &Executor<'_>) -> crate::Result<Task<()>> {
+        let bounded = self.socket.is_keyring_wire();
+        let original = self.receive_msg();
+        if bounded {
+            use crate::keyring_wire::control::{reader_layout_supported, TypeLayout};
+            if !reader_layout_supported(TypeLayout {
+                size: std::mem::size_of_val(&original), align: std::mem::align_of_val(&original),
+            }) { return Err(crate::Error::ExcessData); }
+        }
+        Ok(executor.spawn(original, "socket reader"))
+    }
+
     // Keep receiving messages and put them on the queue.
-    #[instrument(name = "socket reader", skip(self), level = "trace")]
-    async fn receive_msg(mut self) {
+    async fn receive_msg(self) {
+        let bounded = self.socket.is_keyring_wire();
+        let original = self.receive_msg_inner();
+        if bounded { original.await }
+        else { original.instrument(trace_span!("socket reader")).await }
+    }
+
+    async fn receive_msg_inner(mut self) {
+        let bounded = self.socket.is_keyring_wire();
         loop {
-            trace!("Waiting for message on the socket..");
+            if !bounded { trace!("Waiting for message on the socket.."); }
             let msg = self.read_socket().await;
+            let msg = if bounded { msg.map_err(crate::keyring_wire::local_error) } else { msg };
             match &msg {
                 Ok(msg) => {
-                    trace!("Message received on the socket: {:?}", msg);
+                    if !bounded { trace!("Message received on the socket: {:?}", msg); }
                     if matches!(msg.message_type(), Type::MethodReturn | Type::Error) {
                         self.dispatch_pending_reply(msg);
                     }
                 }
                 Err(e) => {
-                    trace!("Error reading from the socket: {:?}", e);
+                    if !bounded { trace!("Error reading from the socket: {:?}", e); }
                     self.fail_pending_method_calls(e.clone());
                 }
             };
@@ -82,7 +103,7 @@ impl SocketReader {
                             Ok(true) => (),
                             Ok(false) => continue,
                             Err(e) => {
-                                debug!("Error matching message against rule: {:?}", e);
+                                if !bounded { debug!("Error matching message against rule: {:?}", e); }
 
                                 continue;
                             }
@@ -98,7 +119,7 @@ impl SocketReader {
                     //
                     // In either case, just log it unless this is the channel for the generic
                     // unfiltered stream, where the channel is not created on-demand.
-                    if rule.is_some() {
+                    if !bounded && rule.is_some() {
                         trace!(
                             "Error broadcasting message to stream for `{:?}`: {:?}",
                             rule, e
@@ -106,13 +127,13 @@ impl SocketReader {
                     }
                 }
             }
-            trace!("Broadcasted to all streams: {:?}", msg);
+            if !bounded { trace!("Broadcasted to all streams: {:?}", msg); }
 
             if msg.is_err() {
                 senders.clear();
                 self.socket_status.closed.store(true, Ordering::Release);
                 self.socket_status.closed_event.notify(usize::MAX);
-                trace!("Socket reading task stopped");
+                if !bounded { trace!("Socket reading task stopped"); }
 
                 return;
             }
@@ -125,37 +146,34 @@ impl SocketReader {
             Type::MethodReturn | Type::Error
         ));
 
-        let reply_serial = match msg.header().reply_serial() {
-            Some(serial) => serial,
-            None => return,
-        };
-
-        let result = match msg.message_type() {
-            Type::MethodReturn => Ok(msg.clone()),
-            Type::Error => Err(msg.clone().into()),
-            Type::MethodCall | Type::Signal => return,
-        };
-        self.pending_method_calls
-            .complete_call(reply_serial, msg.recv_position(), result);
+        self.pending_method_calls.complete_message(msg);
     }
 
     fn fail_pending_method_calls(&self, error: crate::Error) {
         self.pending_method_calls.fail_all(error);
     }
 
-    #[instrument(skip(self), level = "trace")]
     async fn read_socket(&mut self) -> crate::Result<Message> {
+        let bounded = self.socket.is_keyring_wire();
+        let original = self.read_socket_inner();
+        if bounded { original.await }
+        else { original.instrument(trace_span!("read_socket")).await }
+    }
+
+    async fn read_socket_inner(&mut self) -> crate::Result<Message> {
         self.socket_status.activity_event.notify(usize::MAX);
         let seq = self.prev_seq + 1;
-        let msg = self
+        let bounded = self.socket.is_keyring_wire();
+        let original = self
             .socket
             .receive_message(
                 seq,
                 &mut self.already_received_bytes,
                 #[cfg(unix)]
                 &mut self.already_received_fds,
-            )
-            .await?;
+            );
+        if bounded { crate::keyring_wire::transport_future_fits(original.as_ref().get_ref())?; }
+        let msg = original.await?;
         self.prev_seq = seq;
 
         Ok(msg)

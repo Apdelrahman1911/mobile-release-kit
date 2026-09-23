@@ -11,7 +11,7 @@ pub(crate) mod command;
 #[cfg(unix)]
 pub(crate) use command::Command;
 mod tcp;
-mod unix;
+pub(super) mod unix;
 mod vsock;
 
 #[cfg(feature = "async-io")]
@@ -72,6 +72,9 @@ pub trait Socket {
 /// See [`Socket`] for more details.
 #[async_trait::async_trait]
 pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
+    /// Maintained owned-client profile; ordinary transports keep legacy limits.
+    #[doc(hidden)]
+    fn is_keyring_wire(&self) -> bool { false }
     /// Receive a message on the socket.
     ///
     /// This is the higher-level method to receive a full D-Bus message.
@@ -96,6 +99,10 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
         already_received_bytes: &mut Vec<u8>,
         #[cfg(unix)] already_received_fds: &mut Vec<OwnedFd>,
     ) -> crate::Result<Message> {
+        if self.is_keyring_wire() {
+            return crate::keyring_wire::receive(self, seq, already_received_bytes,
+                #[cfg(unix)] already_received_fds).await;
+        }
         #[cfg(unix)]
         let mut fds = vec![];
         let mut bytes = if already_received_bytes.len() < MIN_MESSAGE_SIZE {
@@ -257,6 +264,9 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
 /// See [`Socket`] for more details.
 #[async_trait::async_trait]
 pub trait WriteHalf: std::fmt::Debug + Send + Sync + 'static {
+    /// Maintained owned-client profile; ordinary transports keep legacy limits.
+    #[doc(hidden)]
+    fn is_keyring_wire(&self) -> bool { false }
     /// Send a message on the socket.
     ///
     /// This is the higher-level method to send a full D-Bus message.
@@ -264,10 +274,11 @@ pub trait WriteHalf: std::fmt::Debug + Send + Sync + 'static {
     /// The default implementation uses `sendmsg` to send the message. Implementers should override
     /// either this or `sendmsg`.
     async fn send_message(&mut self, msg: &Message) -> crate::Result<()> {
+        let bounded = self.is_keyring_wire();
         let data = msg.data();
         let serial = msg.primary_header().serial_num();
 
-        trace!("Sending message: {:?}", msg);
+        if !self.is_keyring_wire() { trace!("Sending message: {:?}", msg); }
         let mut pos = 0;
         while pos < data.len() {
             #[cfg(unix)]
@@ -276,15 +287,16 @@ pub trait WriteHalf: std::fmt::Debug + Send + Sync + 'static {
             } else {
                 vec![]
             };
-            pos += self
+            let original = self
                 .sendmsg(
                     &data[pos..],
                     #[cfg(unix)]
                     &fds,
-                )
-                .await?;
+                );
+            if bounded { crate::keyring_wire::transport_future_fits(original.as_ref().get_ref())?; }
+            pos += original.await?;
         }
-        trace!("Sent message with serial: {}", serial);
+        if !bounded { trace!("Sent message with serial: {}", serial); }
 
         Ok(())
     }
@@ -340,6 +352,7 @@ pub trait WriteHalf: std::fmt::Debug + Send + Sync + 'static {
 
 #[async_trait::async_trait]
 impl ReadHalf for Box<dyn ReadHalf> {
+    fn is_keyring_wire(&self) -> bool { (**self).is_keyring_wire() }
     fn can_pass_unix_fd(&self) -> bool {
         (**self).can_pass_unix_fd()
     }
@@ -350,18 +363,23 @@ impl ReadHalf for Box<dyn ReadHalf> {
         already_received_bytes: &mut Vec<u8>,
         #[cfg(unix)] already_received_fds: &mut Vec<OwnedFd>,
     ) -> crate::Result<Message> {
-        (**self)
+        let bounded = self.is_keyring_wire();
+        let original = (**self)
             .receive_message(
                 seq,
                 already_received_bytes,
                 #[cfg(unix)]
                 already_received_fds,
-            )
-            .await
+            );
+        if bounded { crate::keyring_wire::transport_future_fits(original.as_ref().get_ref())?; }
+        original.await
     }
 
     async fn recvmsg(&mut self, buf: &mut [u8]) -> RecvmsgResult {
-        (**self).recvmsg(buf).await
+        let bounded = self.is_keyring_wire();
+        let original = (**self).recvmsg(buf);
+        if bounded { crate::keyring_wire::transport_future_fits(original.as_ref().get_ref())?; }
+        original.await
     }
 
     async fn peer_credentials(&mut self) -> io::Result<ConnectionCredentials> {
@@ -375,8 +393,12 @@ impl ReadHalf for Box<dyn ReadHalf> {
 
 #[async_trait::async_trait]
 impl WriteHalf for Box<dyn WriteHalf> {
+    fn is_keyring_wire(&self) -> bool { (**self).is_keyring_wire() }
     async fn send_message(&mut self, msg: &Message) -> crate::Result<()> {
-        (**self).send_message(msg).await
+        let bounded = self.is_keyring_wire();
+        let original = (**self).send_message(msg);
+        if bounded { crate::keyring_wire::transport_future_fits(original.as_ref().get_ref())?; }
+        original.await
     }
 
     async fn sendmsg(
@@ -384,13 +406,15 @@ impl WriteHalf for Box<dyn WriteHalf> {
         buffer: &[u8],
         #[cfg(unix)] fds: &[BorrowedFd<'_>],
     ) -> io::Result<usize> {
-        (**self)
+        let bounded = self.is_keyring_wire();
+        let original = (**self)
             .sendmsg(
                 buffer,
                 #[cfg(unix)]
                 fds,
-            )
-            .await
+            );
+        if bounded { crate::keyring_wire::transport_future_fits(original.as_ref().get_ref())?; }
+        original.await
     }
 
     #[cfg(any(target_os = "freebsd", target_os = "dragonfly"))]
@@ -399,7 +423,10 @@ impl WriteHalf for Box<dyn WriteHalf> {
     }
 
     async fn close(&mut self) -> io::Result<()> {
-        (**self).close().await
+        let bounded = self.is_keyring_wire();
+        let original = (**self).close();
+        if bounded { crate::keyring_wire::transport_future_fits(original.as_ref().get_ref())?; }
+        original.await
     }
 
     fn can_pass_unix_fd(&self) -> bool {

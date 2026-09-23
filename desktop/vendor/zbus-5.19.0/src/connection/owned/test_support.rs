@@ -1,17 +1,48 @@
 //! Finite checks of the actual retained SDK originals, enabled only by the
 //! explicit debug Linux application test graph. Nothing runs on import.
 //!
-//! The first six helpers use memory-only socket halves and actual Tokio Tasks;
-//! they are NOT transport/authentication evidence. The final two helpers use
-//! isolated Unix sockets and must be selected separately after native admission.
+//! Memory-only helpers use scripted messages or bounded byte halves and actual
+//! Tokio Tasks; they are NOT native transport/authentication evidence. Helpers
+//! using Unix sockets require separate explicit native fixture admission.
 //! No ordinary Connection or MessageStream leaves this module.
+
+// These thin DATA entry points exercise the same private SDK implementations as
+// its unit tests, through the app's existing dev-only feature. No new harness or
+// vendored-SDK dev dependency graph is needed, and no checks run on import.
+pub fn bounded_wire_frames() { crate::keyring_wire::tests::keyring_fragmented_frames_refuse_before_oversized_allocation(); }
+pub fn bounded_wire_headers() { crate::keyring_wire::tests::keyring_borrowed_header_and_signature_gate(); }
+pub fn bounded_wire_capacity() {
+    crate::keyring_wire::tests::keyring_capped_writer_and_fixed_control_budget();
+    crate::message::keyring_serializer_cannot_outgrow_its_estimate();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+    let activity = Arc::new(AtomicUsize::new(0));
+    tracing::subscriber::with_default(BoundedTraceProbe(activity.clone()), || {
+        // Positive controls: a disabled subscriber must not make silence pass.
+        tracing::trace!("bounded fixture subscriber positive event");
+        drop(tracing::trace_span!("bounded fixture subscriber positive span"));
+        assert_eq!(activity.swap(0, Ordering::SeqCst), 2);
+        runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(10), bounded_original_queue_and_write())
+                .await.expect("bounded original fixture did not consume its original work");
+        });
+        assert_eq!(activity.load(Ordering::SeqCst), 0, "bounded work emitted a tracing span/event");
+    });
+}
+pub fn bounded_wire_authentication() { crate::connection::handshake::keyring_authentication_and_hello_use_the_bounded_transport(); }
+pub fn bounded_wire_error_registration() { crate::connection::pending_method_calls::keyring_error_completion_consumes_only_the_matching_registration(); }
+
+/// NATIVE: only the separately admitted Linux unnamed-pair fixture may call it.
+#[cfg(target_os = "linux")]
+pub fn bounded_wire_original_rights_disposal() {
+    crate::connection::socket::unix::keyring_tests::keyring_zero_control_refuses_and_disposes_original_rights();
+}
 
 use std::{
     collections::VecDeque,
     future::{pending, poll_fn},
     os::fd::AsFd,
     path::PathBuf,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use tokio::sync::{Notify, oneshot};
@@ -118,6 +149,214 @@ fn memory_attempt(messages: VecDeque<Message>, close_error: Option<io::ErrorKind
         if fail_after_reader { Err(Error::InvalidReply) } else { Ok(()) }
     }));
     (attempt, counts)
+}
+
+// Count without formatting or retaining fields. This thread-local subscriber
+// covers the current-thread fixture and its actual reader task, not other tests.
+struct BoundedTraceProbe(Arc<AtomicUsize>);
+impl tracing::Subscriber for BoundedTraceProbe {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool { true }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(self.0.fetch_add(1, Ordering::SeqCst) as u64 + 1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, _: &tracing::Event<'_>) { self.0.fetch_add(1, Ordering::SeqCst); }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+#[derive(Debug, Default)]
+struct BoundedFixture {
+    received_bytes: AtomicUsize,
+    largest_receive: AtomicUsize,
+    outbound_bytes: AtomicUsize,
+    write_released: AtomicBool,
+    release_write: Notify,
+}
+
+#[derive(Debug)]
+struct BoundedByteRead {
+    input: Arc<[u8]>,
+    position: usize,
+    counts: Arc<Counts>,
+    fixture: Arc<BoundedFixture>,
+}
+impl Drop for BoundedByteRead {
+    fn drop(&mut self) { self.counts.read_drops.fetch_add(1, Ordering::SeqCst); }
+}
+#[async_trait::async_trait]
+impl ReadHalf for BoundedByteRead {
+    fn is_keyring_wire(&self) -> bool { true }
+    // Do NOT override receive_message: real bounded framing/preflight and all
+    // erased transport-future gates must consume these fragmented fixture bytes.
+    async fn recvmsg(&mut self, buffer: &mut [u8]) -> std::io::Result<(usize, Vec<OwnedFd>)> {
+        if self.position == self.input.len() { return pending().await; }
+        assert!(!buffer.is_empty());
+        self.fixture.largest_receive.fetch_max(buffer.len(), Ordering::SeqCst);
+        let count = buffer.len().min(47).min(self.input.len() - self.position);
+        buffer[..count].copy_from_slice(&self.input[self.position..self.position + count]);
+        self.position += count;
+        self.fixture.received_bytes.store(self.position, Ordering::SeqCst);
+        if self.position % crate::keyring_wire::FRAME_BYTES == 0 {
+            self.counts.reads.fetch_add(1, Ordering::SeqCst);
+            self.counts.read_changed.notify_one();
+        }
+        Ok((count, Vec::new()))
+    }
+}
+
+#[derive(Debug)]
+struct BoundedByteWrite {
+    counts: Arc<Counts>,
+    fixture: Arc<BoundedFixture>,
+}
+impl Drop for BoundedByteWrite {
+    fn drop(&mut self) { self.counts.write_drops.fetch_add(1, Ordering::SeqCst); }
+}
+#[async_trait::async_trait]
+impl WriteHalf for BoundedByteWrite {
+    fn is_keyring_wire(&self) -> bool { true }
+    // The real bounded serializer/default send_message retains its Message
+    // through this Pending sendmsg; no prepared-message send override is used.
+    async fn sendmsg(&mut self, buffer: &[u8], fds: &[std::os::fd::BorrowedFd<'_>]) -> io::Result<usize> {
+        assert!(fds.is_empty());
+        assert_eq!(buffer.len(), crate::keyring_wire::FRAME_BYTES);
+        assert_eq!(buffer[1], 1); // Actual method call, not a fabricated reply.
+        assert_eq!(buffer[buffer.len() - 1], 0x52);
+        crate::keyring_wire::preflight(buffer).unwrap();
+        assert_eq!(self.counts.sends.fetch_add(1, Ordering::SeqCst), 0);
+        self.fixture.outbound_bytes.store(buffer.len(), Ordering::SeqCst);
+        loop {
+            let released = self.fixture.release_write.notified();
+            if self.fixture.write_released.load(Ordering::SeqCst) { break; }
+            released.await;
+        }
+        Err(io::ErrorKind::Interrupted.into())
+    }
+    async fn close(&mut self) -> io::Result<()> {
+        assert!(self.fixture.write_released.load(Ordering::SeqCst));
+        assert_eq!(self.counts.read_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(self.counts.closes.fetch_add(1, Ordering::SeqCst), 0);
+        Ok(())
+    }
+}
+
+fn bounded_signal_bytes(value: u8) -> Vec<u8> {
+    let builder = || Message::signal("/fixture", "org.example.Fixture", "Changed").unwrap().keyring_wire(true);
+    let overhead = builder().build(&Vec::<u8>::new()).unwrap().data().len();
+    let message = builder().build(&vec![value; crate::keyring_wire::FRAME_BYTES - overhead]).unwrap();
+    assert_eq!(message.data().len(), crate::keyring_wire::FRAME_BYTES);
+    message.data().to_vec()
+}
+
+/// DATA only: actual bounded queues/futures/serialization and original joins.
+/// The supplied Authenticated value and byte halves are NOT native transport or
+/// authentication evidence. Fixture input/output backing is separate from the
+/// attempted allowance; this does not measure allocator overhead or process RSS.
+async fn bounded_original_queue_and_write() {
+    use crate::keyring_wire::{FRAME_BYTES, future_fits};
+    assert_eq!(Handle::current().runtime_flavor(), tokio::runtime::RuntimeFlavor::CurrentThread);
+    let mut attempt = OwnedConnectionAttempt::keyring_unix(PathBuf::from("/synthetic/never-opened/bus")).unwrap();
+    assert!(attempt.keyring_wire && !attempt.startup_polled);
+    future_fits(attempt.startup.as_ref().unwrap().as_ref().get_ref()).unwrap();
+    let shared = attempt.shared.clone();
+    let counts = Arc::new(Counts::default());
+    let fixture = Arc::new(BoundedFixture::default());
+    let mut bytes = bounded_signal_bytes(0x31);
+    bytes.extend_from_slice(&bounded_signal_bytes(0x32));
+    let input: Arc<[u8]> = bytes.into();
+    let input_lifetime = Arc::downgrade(&input);
+    let read = BoundedByteRead { input, position: 0, counts: counts.clone(), fixture: fixture.clone() };
+    let write = BoundedByteWrite { counts: counts.clone(), fixture: fixture.clone() };
+    // Only the unpolled native connect is replaced. Keep the real constructor's
+    // census/flags/runtime/Shared, then the ordinary Connection and reader path.
+    attempt.startup = Some(Box::pin(async move {
+        let auth = Authenticated {
+            socket_read: None, socket_write: Box::new(write),
+            server_guid: crate::Guid::try_from("0123456789abcdef0123456789abcdef")?.into(),
+            cap_unix_fd: false, already_received_bytes: Vec::new(), already_received_fds: Vec::new(),
+            unique_name: Some(":1.42".try_into()?),
+        };
+        let connection = Connection::new(auth, true, Executor::new(), None).await?;
+        assert!(connection.inner.keyring_wire && !connection.inner.cap_unix_fd);
+        assert_eq!(connection.inner.msg_receiver.capacity(), 1);
+        shared.install_connection(connection, Box::new(read), Vec::new(), Vec::new())
+    }));
+    poll_fn(|cx| attempt.poll_build(cx)).await.unwrap();
+    loop {
+        let changed = counts.read_changed.notified();
+        if counts.reads.load(Ordering::SeqCst) == 2 { break; }
+        changed.await;
+    }
+    assert_eq!(fixture.received_bytes.load(Ordering::SeqCst), 2 * FRAME_BYTES);
+    assert_eq!(fixture.largest_receive.load(Ordering::SeqCst), FRAME_BYTES - 16);
+    let connection_lifetime = {
+        let state = attempt.shared.lock().unwrap();
+        let connection = state.connection.as_ref().unwrap();
+        assert_eq!(state.stream.as_ref().unwrap().max_queued(), 1);
+        assert_eq!(connection.inner.msg_receiver.len(), 1);
+        assert!(mutex_held(&connection.inner.msg_senders, &mut Context::from_waker(std::task::Waker::noop())));
+        Arc::downgrade(&connection.inner)
+    };
+    // First max frame is queued; the second has been assembled by the bounded
+    // receive and parks the actual reader in broadcast, holding its queue lock.
+    let overhead = Message::method_call("/fixture", "Check").unwrap().sender(":1.42").unwrap()
+        .destination(":1.23").unwrap().interface("org.example.Fixture").unwrap()
+        .keyring_wire(true).build(&Vec::<u8>::new()).unwrap().data().len();
+    raw_call(&mut attempt, vec![0x52u8; FRAME_BYTES - overhead]).unwrap();
+    future_fits(attempt.call.as_ref().unwrap().as_ref().get_ref()).unwrap();
+    poll_fn(|cx| {
+        assert!(attempt.poll_raw_call(cx).is_pending());
+        if counts.sends.load(Ordering::SeqCst) == 1 { Poll::Ready(()) } else { Poll::Pending }
+    }).await;
+    assert_eq!(fixture.outbound_bytes.load(Ordering::SeqCst), FRAME_BYTES);
+    assert!(attempt.call.is_some() && attempt.call_state == CallState::Entered);
+    assert!(attempt.refuse_unpolled_call().is_err() && attempt.release_stream().is_err());
+    {
+        let state = attempt.shared.lock().unwrap();
+        assert!(mutex_held(&state.connection.as_ref().unwrap().inner.socket_write,
+            &mut Context::from_waker(std::task::Waker::noop())));
+    }
+    // No close/finality while the original serializer/send future is retained.
+    // Join the REAL reader while both stream and Pending original RPC still live.
+    let reader = poll_fn(|cx| {
+        assert!(attempt.poll_local_shutdown(cx).is_pending());
+        let state = attempt.shared.lock().unwrap();
+        assert!(state.stopping && state.pending_failed && state.stream.is_some());
+        match state.reader { ReaderSlot::Terminal(outcome) => Poll::Ready(outcome), _ => Poll::Pending }
+    }).await;
+    assert_eq!(reader, ReaderOutcome::RequestedCancellation);
+    assert!(attempt.shutdown_entered && attempt.call.is_some());
+    assert!(!fixture.write_released.load(Ordering::SeqCst));
+    assert_eq!(counts.read_drops.load(Ordering::SeqCst), 1);
+    assert!(input_lifetime.upgrade().is_none());
+    assert_eq!(counts.closes.load(Ordering::SeqCst), 0);
+    assert_eq!(counts.write_drops.load(Ordering::SeqCst), 0);
+    // This fixture-only release follows the observed original shutdown, never
+    // substitutes for it or produces a finality receipt. No native I/O occurs.
+    fixture.write_released.store(true, Ordering::SeqCst);
+    fixture.release_write.notify_one();
+    let result = poll_fn(|cx| attempt.poll_raw_call(cx)).await;
+    assert!(matches!(result, Err(Error::InputOutput(ref error)) if error.kind() == io::ErrorKind::Interrupted));
+    drop(result);
+    assert!(attempt.call.is_none() && attempt.call_state == CallState::Returned);
+    let queued = match once(|cx| Pin::new(&mut attempt).poll_next_before(cx, None)).await {
+        Poll::Ready(PollResult::Item { data: Ok(message), .. }) => message,
+        _ => panic!("original capacity-one queue lost its first bounded frame"),
+    };
+    assert_eq!(queued.data().len(), FRAME_BYTES);
+    assert_eq!(queued.data()[FRAME_BYTES - 1], 0x31);
+    drop(queued);
+    let result = settle(&mut attempt).await;
+    assert_eq!(result.reader, reader);
+    assert!(result.clean() && !attempt.cleanup_failed());
+    assert_eq!(counts.reads.load(Ordering::SeqCst), 2);
+    assert_eq!(counts.sends.load(Ordering::SeqCst), 1);
+    assert_eq!(counts.closes.load(Ordering::SeqCst), 1);
+    assert_eq!(counts.read_drops.load(Ordering::SeqCst), 1);
+    assert_eq!(counts.write_drops.load(Ordering::SeqCst), 1);
+    assert!(connection_lifetime.upgrade().is_none());
 }
 
 async fn once<T>(mut poll: impl FnMut(&mut Context<'_>) -> Poll<T>) -> Poll<T> {
