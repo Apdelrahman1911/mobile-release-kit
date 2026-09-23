@@ -169,7 +169,8 @@ fn writer_close_transition_observed(a: &Metadata, b: &Metadata, trace: Option<Co
     let (written_size, observed_size) = (a.size, b.size);
     if !copy_guard(written_size == observed_size, CopyMember::Size, trace) { return false; }
     let (written_allocation, observed_allocation) = (a.allocation_size, b.allocation_size);
-    copy_allocation_guard(written_allocation == observed_allocation, trace,
+    // Closing this own writer may release allocation slack, never logical data.
+    copy_allocation_guard(observed_size <= observed_allocation && observed_allocation <= written_allocation, trace,
         || changed_allocation(observed_allocation, written_allocation, observed_size))
         && copy_guard(b.write >= a.write, CopyMember::WriteTime, trace)
         && copy_guard(b.change >= a.change, CopyMember::ChangeTime, trace)
@@ -640,8 +641,9 @@ fn copy_allocation_guard(value: bool, trace: Option<CopyRefusal<'_>>, allocation
     value
 }
 fn changed_allocation(new: u64, old: u64, size: u64) -> CopyAllocation {
-    // Called only after unequal allocations, from cached operands of the reached
-    // original comparisons. Equal/passed/earlier refusals never classify here.
+    // Called only after a reached allocation refusal, using cached operands.
+    // Equal-but-under-EOF close observations also classify as BelowSize;
+    // passed comparisons and earlier refusals never classify here.
     if new < size { CopyAllocation::BelowSize } else if new < old { CopyAllocation::Shrank } else { CopyAllocation::Grew }
 }
 
@@ -2228,28 +2230,56 @@ mod tests {
                     }
                 }
             }
-            // Allocation contraction/growth remains a refusal, not a new policy.
-            // A growing allocation still labels below-size when that relation wins.
+            // SOURCE still requires exact allocation equality. A growing source
+            // allocation labels below-size when that earlier relation wins.
             for (size, old, new, allocation) in [(4, 4096, 3, A::BelowSize), (4, 4096, 4, A::Shrank),
                 (4, 4096, 4095, A::Shrank), (4, 4096, 4097, A::Grew), (4, 2, 3, A::BelowSize),
                 (0, 1, 0, A::Shrank), (0, 0, 1, A::Grew), (u64::MAX, u64::MAX, u64::MAX - 1, A::BelowSize),
                 (u64::MAX - 1, u64::MAX - 1, u64::MAX, A::Grew)] {
-                for edge in [E::SourceUnchanged, E::WriterCloseTransition] {
-                    let (mut a, mut b) = (copied.clone(), copied.clone());
-                    a.metadata.size = size; b.metadata.size = size;
-                    a.metadata.allocation_size = old; b.metadata.allocation_size = new;
-                    let first = Cell::new(None);
-                    assert_eq!(need(observe(edge, &a, &b, &first)), Err(Error::Unsafe));
-                    assert!(!plain(edge, &a, &b));
-                    assert_eq!(first.get(), Some(PublicationCopyObservation { edge, member: M::Allocation, allocation }));
-                }
+                let edge = E::SourceUnchanged;
+                let (mut a, mut b) = (copied.clone(), copied.clone());
+                a.metadata.size = size; b.metadata.size = size;
+                a.metadata.allocation_size = old; b.metadata.allocation_size = new;
+                let first = Cell::new(None);
+                assert_eq!(need(observe(edge, &a, &b, &first)), Err(Error::Unsafe));
+                assert!(!plain(edge, &a, &b));
+                assert_eq!(first.get(), Some(PublicationCopyObservation { edge, member: M::Allocation, allocation }));
             }
+            // SOURCE equality remains a comparator, not a second metadata
+            // admission: equal-under-EOF DATA stays equal on this edge only.
             for (size, allocation) in [(0, 0), (4, 0), (4, 4096), (u64::MAX, u64::MAX)] {
                 let mut a = copied.clone(); a.metadata.size = size; a.metadata.allocation_size = allocation;
-                for edge in [E::SourceUnchanged, E::WriterCloseTransition] {
-                    let first = Cell::new(None);
-                    assert!(observe(edge, &a, &a, &first)); assert!(plain(edge, &a, &a)); assert!(first.get().is_none());
-                }
+                let edge = E::SourceUnchanged; let first = Cell::new(None);
+                assert!(observe(edge, &a, &a, &first)); assert!(plain(edge, &a, &a)); assert!(first.get().is_none());
+            }
+            // Only the own writer-close edge permits allocation contraction to
+            // (or above) EOF. Comparisons cover zero/u64 limits without rounding.
+            for (size, old, new, refusal) in [(4, 4096, 4096, None), (4, 4096, 4095, None), (4, 4096, 4, None),
+                (0, 0, 0, None), (0, 1, 0, None), (u64::MAX, u64::MAX, u64::MAX, None),
+                (u64::MAX - 1, u64::MAX, u64::MAX - 1, None),
+                (4, 0, 0, Some(A::BelowSize)), (4, 4096, 3, Some(A::BelowSize)), (4, 4096, 4097, Some(A::Grew)),
+                (4, 2, 3, Some(A::BelowSize)), (4, 3, 4, Some(A::Grew)), (0, 0, 1, Some(A::Grew)),
+                (u64::MAX, u64::MAX, u64::MAX - 1, Some(A::BelowSize)),
+                (u64::MAX - 1, u64::MAX - 1, u64::MAX, Some(A::Grew))] {
+                let edge = E::WriterCloseTransition;
+                let (mut a, mut b) = (copied.clone(), copied.clone());
+                a.metadata.size = size; b.metadata.size = size;
+                a.metadata.allocation_size = old; b.metadata.allocation_size = new;
+                let first = Cell::new(None);
+                let accepted = refusal.is_none();
+                assert_eq!(observe(edge, &a, &b, &first), accepted); assert_eq!(plain(edge, &a, &b), accepted);
+                assert_eq!(first.get(), refusal.map(|allocation| PublicationCopyObservation { edge, member: M::Allocation, allocation }));
+            }
+            // Accepted shrink must not hide later clock/security drift or
+            // preempt the first refusal when several later fields also differ.
+            let later_members = [M::WriteTime, M::ChangeTime, M::Security];
+            for (position, member) in later_members.iter().copied().enumerate() {
+                let (mut a, mut b) = (copied.clone(), readback.clone());
+                b.metadata.allocation_size = b.metadata.size;
+                for later in &later_members[position..] { drift(*later, &mut a, &mut b); }
+                let edge = E::WriterCloseTransition; let first = Cell::new(None);
+                assert!(!observe(edge, &a, &b, &first)); assert!(!plain(edge, &a, &b));
+                assert_eq!(first.get(), Some(PublicationCopyObservation { edge, member, allocation: A::None }));
             }
             for (size, allocation, accepted) in [(0, 0, true), (4, 3, false), (4, 4, true),
                 (u64::MAX, u64::MAX, true), (u64::MAX, u64::MAX - 1, false)] {
