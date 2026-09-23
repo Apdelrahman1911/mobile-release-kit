@@ -20,7 +20,7 @@ fn main() -> std::process::ExitCode {
                 // Closed DATA only. A failed/hung sink never supplies native finality
                 // or changes the original error's exit1; no owner is queried here.
                 let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
-                if let Some(frame) = error.frame_diagnostic_line() {
+                if let Some(frame) = error.frame_diagnostic_line().or_else(|| error.admission_diagnostic_line()) {
                     if line.len() + frame.len() <= 512 {
                         let _ = std::io::Write::write_all(&mut std::io::stderr(), frame.as_bytes());
                     }

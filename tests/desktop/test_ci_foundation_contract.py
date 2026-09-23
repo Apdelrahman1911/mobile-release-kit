@@ -10038,12 +10038,16 @@ class WindowsReaderGateTests(unittest.TestCase):
         ordered = [entry.index(part) for part in ("let cause = match produce(",
             "let frame = if cause.phase == FailurePhase::Admit && cause.native == Some(NativeError::Unknown)",
             "Some(original.retained_frame_observation())",
+            "let admission = if cause.admission_observation_allowed()",
+            "original.retained_admission_observation()",
             "let possibly_exposed = original.possibly_exposed();", "let settlement = original.fail_and_settle_once();",
             "if settlement == CloseOutcome::Settled && original.occupied_target_and_settled()",
             "let originals_unknown = settlement == CloseOutcome::Unknown;",
-            "Err(PublicationError::Failed { cause, possibly_exposed, originals_unknown, frame })")]
+            "Err(PublicationError::Failed { cause, possibly_exposed, originals_unknown, frame, admission })")]
         self.assertEqual(ordered, sorted(ordered))
         self.assertEqual(entry.count("original.retained_frame_observation()"), 1)
+        self.assertEqual(entry.count("original.retained_admission_observation()"), 1)
+        self.assertIn("self.phase == FailurePhase::Admit && self.native == Some(NativeError::Unsafe)", bridge)
         formatter = bridge.split("pub fn diagnostic_line(self)", 1)[1].split("type Checked<T>", 1)[0]
         self.assertIn('"MRK_WINDOWS_RUNTIME_PUBLISH_FAILURE_V1=phase="', formatter)
         self.assertIn("ordinal.filter(|index| *index < 47)", formatter)
@@ -10088,7 +10092,13 @@ class WindowsReaderGateTests(unittest.TestCase):
         self.assertIn("Effect::Scalar(S::TokenHasRestrictions | S::TokenIsAppContainer)", consumer)
         self.assertIn("Ok(unsafe { *self.frame.scalar.get() })", consumer)
         self.assertEqual(source.count("unsafe { *self.frame.scalar.get() }"), 1)
-        self.assertIn("scalar_value(complete.scalar()?)", source)
+        scalar = source.split("    fn scalar(&mut self,", 1)[1].split("    fn add_directory(", 1)[0]
+        self.assertIn('let complete = self.mutate(Effect::Scalar(class), Some(index), "", &[], Vec::new())?;', scalar)
+        self.assertEqual(scalar.count("self.mutate("), 1)
+        self.assertEqual(scalar.count("complete.scalar()"), 1)
+        self.assertIn("trace.result(scalar_value(trace.result(complete.scalar(), C::ScalarCompletion)?), C::ScalarCanonical)", scalar)
+        for forbidden in ("count.get()", "scalar.get()", "GetTokenInformation(", "invoke_mutation("):
+            self.assertNotIn(forbidden, scalar)
         self.assertIn("fn scalar_value(value: u32) -> Result<u32> { need(value <= 1)?; Ok(value) }", source)
         self.assertIn("restricted == 0", source)
         self.assertIn("frame.scalar.get().cast(), 4, frame.count.get()", source)

@@ -65,6 +65,165 @@ pub enum SlotState { Reserved, Acquiring, Owned, NoHandle, Closing, Closed, Unkn
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CloseOutcome { Settled, Unknown }
 
+// Closed, allocation-free DATA from the first returning admission refusal.
+// The recorder lives in the original book, never TLS/a logger/a replacement owner.
+use AdmissionCheck as C;
+
+macro_rules! admission_labels {
+    ($name:ident { $($variant:ident => $label:literal),+ $(,)? }) => {
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        pub(crate) enum $name { $($variant),+ }
+        impl $name {
+            fn label(self) -> &'static str { match self { $(Self::$variant => $label),+ } }
+            #[cfg(test)]
+            const ALL: &'static [Self] = &[$(Self::$variant),+];
+        }
+    };
+}
+admission_labels!(AdmissionRole {
+    Owner => "owner", Installer => "installer", Primary => "primary-token",
+    ThreadBefore => "thread-before", ThreadAfter => "thread-after",
+    StatisticsBefore => "statistics-before", StatisticsAfter => "statistics-after",
+    TokenType => "token-type", Elevation => "elevation", ElevationType => "elevation-type",
+    UiAccess => "ui-access", Virtualization => "virtualization", Restrictions => "has-restrictions",
+    AppContainer => "app-container", User => "user", Integrity => "integrity",
+    Groups => "groups", Privileges => "privileges", Volume => "volume",
+    ProgramFiles => "program-files", Mrk => "mrk", RuntimeInput => "runtime-input",
+    Target => "target", Version => "version", Python => "python", Manifest => "manifest"
+});
+admission_labels!(AdmissionOp {
+    Owner => "owner", Architecture => "architecture", TokenOpen => "token-open",
+    HandleInfo => "handle-info", ThreadToken => "thread-token", TokenData => "token-data",
+    Scalar => "scalar", InstallerPolicy => "installer-policy", Location => "location",
+    Mapping => "mapping", Volume => "volume", Metadata => "metadata", Streams => "streams",
+    SecurityAncestor => "security-ancestor", SecurityVersion => "security-version",
+    Directory => "directory", Identity => "identity",
+    Inventory => "inventory", Read => "read", FinalManifest => "final-manifest",
+    MutationInput => "mutation-input"
+});
+admission_labels!(AdmissionCheck {
+    OutputBytes => "output-bytes", OutputCount => "output-count", TextCount => "text-count",
+    Span => "span", Utf16Width => "utf16-width", Utf16Encoding => "utf16-encoding",
+    Terminator => "terminator", TextLength => "text-length", LocationDrive => "location-drive",
+    LocationComponents => "location-components", MappingSize => "mapping-size",
+    MappingFrame => "mapping-frame", MappingDevice => "mapping-device", MappingDigits => "mapping-digits",
+    Attributes => "attributes", MetadataSize => "metadata-size", AttributeAgreement => "attribute-agreement",
+    DirectoryBoolean => "directory-boolean", DeletePending => "delete-pending", ObjectKind => "object-kind",
+    DirectoryAttribute => "directory-attribute", FileSize => "file-size", AllocationSize => "allocation-size",
+    FileLinks => "file-links", FileId => "file-id", DirectoryOffset => "directory-offset",
+    DirectoryNameLength => "directory-name-length", DirectoryNext => "directory-next",
+    DirectoryName => "directory-name", DirectoryDot => "directory-dot",
+    StreamMissing => "stream-missing", StreamFrame => "stream-frame", StreamName => "stream-name",
+    StreamSize => "stream-size", StreamAllocation => "stream-allocation", StreamPadding => "stream-padding",
+    SidRevision => "sid-revision", SidCount => "sid-count", SidExtent => "sid-extent",
+    DescriptorSize => "descriptor-size", DescriptorRevision => "descriptor-revision",
+    DescriptorReserved => "descriptor-reserved", DescriptorControl => "descriptor-control",
+    DescriptorRequired => "descriptor-required", DescriptorSacl => "descriptor-sacl",
+    OwnerOffset => "owner-offset", AclOffset => "acl-offset", OwnerTrust => "owner-trust",
+    AclRevision => "acl-revision", AclReserved => "acl-reserved", AclSize => "acl-size",
+    AclCount => "acl-count", OwnerAclOverlap => "owner-acl-overlap", GroupOffset => "group-offset",
+    GroupOverlap => "group-overlap", AceType => "ace-type", AceSize => "ace-size",
+    AceSidSize => "ace-sid-size", AceFlags => "ace-flags", AceInheritance => "ace-inheritance",
+    AceMask => "ace-mask", AceDangerousRights => "ace-dangerous-rights",
+    StatisticsSize => "statistics-size", StatisticsType => "statistics-type",
+    StatisticsGroups => "statistics-groups", StatisticsPrivileges => "statistics-privileges",
+    Inherited => "inherited", DriveShape => "drive-shape", DriveType => "drive-type",
+    MappingCount => "mapping-count", LocationChanged => "location-changed",
+    ChildParent => "child-parent", ChildName => "child-name", VolumeName => "volume-name",
+    VolumeDeviceSize => "volume-device-size", VolumeDeviceType => "volume-device-type",
+    VolumeRemote => "volume-remote", FileType => "file-type", CaseSensitive => "case-sensitive",
+    CanonicalName => "canonical-name", AncestorName => "ancestor-name", ReadCount => "read-count",
+    ThreadAbsent => "thread-absent", OrderFresh => "order-fresh", InstallerFresh => "installer-fresh",
+    ArchitectureProcess => "architecture-process", ArchitectureNative => "architecture-native",
+    PrimaryOpen => "primary-open", ScalarWidth => "scalar-width", ScalarCompletion => "scalar-completion",
+    ScalarCanonical => "scalar-canonical", TokenPrimary => "token-primary", Elevated => "elevated",
+    UiAccess => "ui-access", Virtualization => "virtualization", Restricted => "restricted",
+    AppContainer => "app-container", UserBuffer => "user-buffer", IntegrityBuffer => "integrity-buffer",
+    PointerValue => "pointer-value", PointerOffset => "pointer-offset", PointerMinimum => "pointer-minimum",
+    PointerAlignment => "pointer-alignment", UserAttributes => "user-attributes",
+    IntegrityAttributes => "integrity-attributes", SystemIntegrity => "system-integrity",
+    SystemElevation => "system-elevation", AccountShape => "account-shape",
+    AccountIntegrity => "account-integrity", AccountElevation => "account-elevation",
+    GroupCount => "group-count", GroupSize => "group-size", GroupCountMatch => "group-count-match",
+    GroupFlags => "group-flags", GroupDenyEnabled => "group-deny-enabled", GroupDuplicate => "group-duplicate",
+    AdminOwner => "admin-owner", PrivilegesCount => "privileges-count", PrivilegesSize => "privileges-size",
+    PrivilegesCountMatch => "privileges-count-match", PrivilegeLuid => "privilege-luid",
+    PrivilegeDuplicate => "privilege-duplicate", PrivilegeFlags => "privilege-flags",
+    StatisticsChanged => "statistics-changed", LocationOwner => "location-owner",
+    LocationOrdinaryUser => "location-ordinary-user", LocationStarted => "location-started",
+    MappingChanged => "mapping-changed", VolumeSerial => "volume-serial", Links => "links",
+    CreationTime => "creation-time", WriteTime => "write-time", ChangeTime => "change-time",
+    MetadataChanged => "metadata-changed", DirectoryChanged => "directory-changed",
+    VolumeChanged => "volume-changed", IdentityAlias => "identity-alias", Component => "component",
+    DirectoryKind => "directory-kind", SelectedCase => "selected-case", SelectedDuplicate => "selected-duplicate",
+    DotKind => "dot-kind", DotIdentity => "dot-identity", EntryDuplicate => "entry-duplicate",
+    EntryKind => "entry-kind", EntryIdentity => "entry-identity", EntryAttributes => "entry-attributes",
+    SourceEntry => "source-entry", SourceKind => "source-kind", RosterName => "roster-name",
+    RosterKind => "roster-kind", RosterMissing => "roster-missing", ManifestSize => "manifest-size",
+    ManifestLimit => "manifest-limit", ManifestReportedSize => "manifest-reported-size",
+    ManifestFinalSize => "manifest-final-size", ManifestFinalFacts => "manifest-final-facts",
+    MutationData => "mutation-data", MutationDescriptor => "mutation-descriptor"
+});
+
+#[derive(Clone, Copy)]
+pub(crate) enum AdmissionIndex { Directory, Ace, Group, Privilege }
+impl AdmissionIndex {
+    fn limit(self) -> usize { match self { Self::Directory => 8192, Self::Ace => 2048, Self::Group => 256, Self::Privilege => 64 } }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PublicationAdmissionObservation {
+    role: AdmissionRole, operation: AdmissionOp, check: AdmissionCheck, index: Option<u16>,
+}
+impl PublicationAdmissionObservation {
+    /// Already normalized DATA only; no owner, native output, path or clock read.
+    pub fn diagnostic_line(self) -> Option<String> {
+        let mut line = String::with_capacity(256);
+        line.push_str("MRK_WINDOWS_RUNTIME_PUBLISH_ADMISSION_V1=role="); line.push_str(self.role.label());
+        line.push_str(";op="); line.push_str(self.operation.label());
+        line.push_str(";check="); line.push_str(self.check.label()); line.push_str(";index=");
+        if let Some(index) = self.index { line.push_str(&index.to_string()); } else { line.push_str("none"); }
+        line.push('\n'); if line.len() <= 256 { Some(line) } else { None }
+    }
+}
+struct AdmissionTrace {
+    active: Cell<bool>, role: Cell<AdmissionRole>, first: Cell<Option<PublicationAdmissionObservation>>,
+}
+impl AdmissionTrace {
+    fn new() -> Self { Self { active: Cell::new(false), role: Cell::new(AdmissionRole::Owner), first: Cell::new(None) } }
+    fn at(&self, operation: AdmissionOp) -> Refusal<'_> {
+        Refusal { owner: if self.active.get() { Some(self) } else { None }, role: self.role.get(), operation, index: None }
+    }
+}
+#[derive(Clone, Copy)]
+pub(crate) struct Refusal<'a> {
+    owner: Option<&'a AdmissionTrace>, role: AdmissionRole, operation: AdmissionOp, index: Option<u16>,
+}
+impl<'a> Refusal<'a> {
+    pub(crate) fn none() -> Self { Self { owner: None, role: AdmissionRole::Owner, operation: AdmissionOp::Owner, index: None } }
+    pub(crate) fn role(self, role: AdmissionRole) -> Self { Self { role, ..self } }
+    pub(crate) fn index(self, kind: AdmissionIndex, index: usize) -> Self {
+        // Literal zero-based bounds; invalid indices become absent DATA, never a clamp/authority.
+        Self { index: if index < kind.limit() { Some(index as u16) } else { None }, ..self }
+    }
+    pub(crate) fn error(self, error: Error, check: AdmissionCheck) -> Error {
+        if error == Error::Unsafe {
+            if let Some(owner) = self.owner {
+                if owner.first.get().is_none() {
+                    owner.first.set(Some(PublicationAdmissionObservation { role: self.role, operation: self.operation, check, index: self.index }));
+                }
+            }
+        }
+        error
+    }
+    pub(crate) fn unsafe_at(self, check: AdmissionCheck) -> Error { self.error(Error::Unsafe, check) }
+    pub(crate) fn need(self, value: bool, check: AdmissionCheck) -> Result<()> {
+        if value { Ok(()) } else { Err(self.unsafe_at(check)) }
+    }
+    pub(crate) fn result<T>(self, result: Result<T>, check: AdmissionCheck) -> Result<T> {
+        result.map_err(|error| self.error(error, check))
+    }
+}
+
 // The key cannot be constructed or cloned outside the crate. Keeping its Arc
 // prevents an old key from matching a different book after allocator address reuse.
 // It owns NO native handle; dropping it never retires its book's slot.
@@ -201,10 +360,14 @@ impl Complete {
             Returned::Scalar(value) | Returned::Count(value, _) => Ok(value), _ => Err(Error::State),
         }
     }
-    fn text(&self, capacity: usize, counted: bool) -> Result<String> {
+    fn bytes_in(&self, length: usize, trace: Refusal<'_>) -> Result<&[u8]> { trace.result(self.bytes(length), C::OutputBytes) }
+    fn count_in(&self, trace: Refusal<'_>) -> Result<usize> { trace.result(self.count(), C::OutputCount) }
+    fn nt_bytes_in(&self, trace: Refusal<'_>) -> Result<&[u8]> { trace.result(self.nt_bytes(), C::OutputBytes) }
+    fn text(&self, capacity: usize, counted: bool) -> Result<String> { self.text_in(capacity, counted, Refusal::none()) }
+    fn text_in(&self, capacity: usize, counted: bool, trace: Refusal<'_>) -> Result<String> {
         let count = if counted { self.scalar()? as usize } else { capacity };
-        if counted && (count == 0 || count >= capacity) { return Err(Error::Unsafe); }
-        decode::terminated(self.bytes(capacity.checked_mul(2).ok_or(Error::Bounds)?)?,
+        if counted && (count == 0 || count >= capacity) { return Err(trace.unsafe_at(C::TextCount)); }
+        decode::Observed::new(trace).terminated(self.bytes_in(capacity.checked_mul(2).ok_or(Error::Bounds)?, trace)?,
             if counted { Some(count) } else { None })
     }
 }
@@ -212,6 +375,7 @@ impl Complete {
 /// Non-cloneable storage book, not runtime authority. Calls are synchronous and
 /// must remain in original retained blocking work; no cancel-by-drop is supported.
 pub struct NativeBook {
+    admission: AdmissionTrace,
     identity: Arc<()>,
     slots: Vec<Held<Slot>>,
     active: Option<Held<Arena>>,
@@ -235,7 +399,7 @@ unsafe impl Send for NativeBook {}
 impl Default for NativeBook { fn default() -> Self { Self::new() } }
 impl NativeBook {
     pub fn new() -> Self {
-        Self { identity: Arc::new(()), slots: Vec::new(), active: None, unknown: false, started: false,
+        Self { admission: AdmissionTrace::new(), identity: Arc::new(()), slots: Vec::new(), active: None, unknown: false, started: false,
             retiring: false, entries: 0, bytes_read: 0, process_token: None,
             user: None, roots_started: false,
             #[cfg(test)]
@@ -488,7 +652,8 @@ impl NativeBook {
     }
     fn noninherited(&mut self, index: usize) -> Result<()> {
         let result = self.original_call(index, Call::HandleInfo)?;
-        if decode::u32_at(result.bytes(4)?, 0)? & F::HANDLE_FLAG_INHERIT != 0 { return Err(Error::Unsafe); }
+        let trace = self.admission.at(AdmissionOp::HandleInfo);
+        if decode::Observed::new(trace).u32_at(result.bytes_in(4, trace)?, 0)? & F::HANDLE_FLAG_INHERIT != 0 { return Err(trace.unsafe_at(C::Inherited)); }
         Ok(())
     }
     /// Call only after the actual worker has returned, never because a clock
@@ -615,19 +780,24 @@ impl NativeBook {
             LocationKind::Windows => (Call::WindowsDirectory, NAME_UNITS, true),
             LocationKind::System => (Call::SystemDirectory, NAME_UNITS, true),
         };
-        let path = self.call(call, null_mut(), Vec::new())?.text(capacity, counted)?;
-        let (drive, components) = decode::dos_location(&path)?;
+        let (path, trace) = {
+            let complete = self.call(call, null_mut(), Vec::new())?;
+            let trace = self.admission.at(AdmissionOp::Location);
+            (complete.text_in(capacity, counted, trace)?, trace)
+        };
+        let (drive, components) = decode::Observed::new(trace).dos_location(&path)?;
         let device = self.mapping(&drive)?;
         Ok(KnownLocation { book: Arc::clone(&self.identity), kind, path, drive, device, components })
     }
     fn mapping(&mut self, drive: &str) -> Result<String> {
-        if drive.len() != 2 || !drive.as_bytes()[0].is_ascii_alphabetic() || drive.as_bytes()[1] != b':' { return Err(Error::Unsafe); }
+        if drive.len() != 2 || !drive.as_bytes()[0].is_ascii_alphabetic() || drive.as_bytes()[1] != b':' { return Err(self.admission.at(AdmissionOp::Mapping).unsafe_at(C::DriveShape)); }
         let root = format!("{drive}\\");
-        if self.call(Call::DriveType, null_mut(), wide(&root))?.scalar()? != WP::DRIVE_FIXED { return Err(Error::Unsafe); }
+        if self.call(Call::DriveType, null_mut(), wide(&root))?.scalar()? != WP::DRIVE_FIXED { return Err(self.admission.at(AdmissionOp::Mapping).unsafe_at(C::DriveType)); }
         let result = self.call(Call::Mapping, null_mut(), wide(drive))?;
         let count = result.scalar()? as usize;
-        if count < 2 || count > MAP_UNITS { return Err(Error::Unsafe); }
-        decode::mapping(result.bytes(count * 2)?)
+        let trace = self.admission.at(AdmissionOp::Mapping);
+        if count < 2 || count > MAP_UNITS { return Err(trace.unsafe_at(C::MappingCount)); }
+        decode::Observed::new(trace).mapping(result.bytes_in(count * 2, trace)?)
     }
     pub fn known_locations_once(&mut self) -> Result<KnownLocations> {
         self.clear()?;
@@ -640,7 +810,7 @@ impl NativeBook {
         self.clear()?;
         if !Arc::ptr_eq(&self.identity, &location.book) { return Err(Error::State); }
         let now = self.location(location.kind)?;
-        if now.path != location.path || now.drive != location.drive || now.device != location.device { return Err(Error::Unsafe); }
+        if now.path != location.path || now.drive != location.drive || now.device != location.device { return Err(self.admission.at(AdmissionOp::Location).unsafe_at(C::LocationChanged)); }
         Ok(())
     }
     /// Opens only the volume from this book's actual OS discovery. This creates
@@ -661,7 +831,8 @@ impl NativeBook {
         self.clear()?;
         let index = self.index(parent)?;
         let parent = self.slot(index)?;
-        if parent.kind != Kind::Directory || !decode::component(name) { return Err(Error::Unsafe); }
+        if parent.kind != Kind::Directory { return Err(self.admission.at(AdmissionOp::Directory).unsafe_at(C::ChildParent)); }
+        if !decode::component(name) { return Err(self.admission.at(AdmissionOp::Directory).unsafe_at(C::ChildName)); }
         let canonical = format!("{}{}{}", parent.canonical, if parent.canonical.ends_with('\\') { "" } else { "\\" }, name);
         if canonical.encode_utf16().count() >= NAME_UNITS { return Err(Error::Bounds); }
         let original = self.reserve(kind.into(), Some(index), name, canonical)?;
@@ -670,44 +841,61 @@ impl NativeBook {
     }
     pub fn local_ntfs(&mut self, original: &Original) -> Result<()> {
         self.clear()?; let index = self.index(original)?;
-        let name = self.original_call(index, Call::VolumeName)?.text(261, false)?;
-        if name != "NTFS" { return Err(Error::Unsafe); }
+        let (name, trace) = {
+            let complete = self.original_call(index, Call::VolumeName)?;
+            let trace = self.admission.at(AdmissionOp::Volume);
+            (complete.text_in(261, false, trace)?, trace)
+        };
+        if name != "NTFS" { return Err(trace.unsafe_at(C::VolumeName)); }
         let result = self.original_call(index, Call::VolumeDevice)?;
-        let bytes = result.nt_bytes()?;
-        if bytes.len() != size_of::<NS::FILE_FS_DEVICE_INFORMATION>()
-            || decode::u32_at(bytes, offset_of!(NS::FILE_FS_DEVICE_INFORMATION, DeviceType))? != FS::FILE_DEVICE_DISK
-            || decode::u32_at(bytes, offset_of!(NS::FILE_FS_DEVICE_INFORMATION, Characteristics))? & NS::FILE_REMOTE_DEVICE != 0 { return Err(Error::Unsafe); }
+        let trace = self.admission.at(AdmissionOp::Volume);
+        let d = decode::Observed::new(trace);
+        let bytes = result.nt_bytes_in(trace)?;
+        if bytes.len() != size_of::<NS::FILE_FS_DEVICE_INFORMATION>() { return Err(trace.unsafe_at(C::VolumeDeviceSize)); }
+        if d.u32_at(bytes, offset_of!(NS::FILE_FS_DEVICE_INFORMATION, DeviceType))? != FS::FILE_DEVICE_DISK { return Err(trace.unsafe_at(C::VolumeDeviceType)); }
+        if d.u32_at(bytes, offset_of!(NS::FILE_FS_DEVICE_INFORMATION, Characteristics))? & NS::FILE_REMOTE_DEVICE != 0 { return Err(trace.unsafe_at(C::VolumeRemote)); }
         Ok(())
     }
     pub fn metadata(&mut self, original: &Original) -> Result<Metadata> {
         self.clear()?; let index = self.index(original)?;
         let kind = match self.slot(index)?.kind { Kind::Directory => FileKind::Directory, Kind::File => FileKind::File, _ => return Err(Error::State) };
-        if self.original_call(index, Call::FileType)?.scalar()? != FS::FILE_TYPE_DISK { return Err(Error::Unsafe); }
+        if self.original_call(index, Call::FileType)?.scalar()? != FS::FILE_TYPE_DISK { return Err(self.admission.at(AdmissionOp::Metadata).unsafe_at(C::FileType)); }
         let basic = self.original_call(index, Call::Info(FS::FileBasicInfo, size_of::<FS::FILE_BASIC_INFO>()))?;
         let standard = self.original_call(index, Call::Info(FS::FileStandardInfo, size_of::<FS::FILE_STANDARD_INFO>()))?;
         let tag = self.original_call(index, Call::Info(FS::FileAttributeTagInfo, size_of::<FS::FILE_ATTRIBUTE_TAG_INFO>()))?;
         let id = self.original_call(index, Call::Info(FS::FileIdInfo, size_of::<FS::FILE_ID_INFO>()))?;
-        let facts = decode::metadata(kind, basic.bytes(size_of::<FS::FILE_BASIC_INFO>())?,
-            standard.bytes(size_of::<FS::FILE_STANDARD_INFO>())?, tag.bytes(size_of::<FS::FILE_ATTRIBUTE_TAG_INFO>())?, id.bytes(size_of::<FS::FILE_ID_INFO>())?)?;
+        let trace = self.admission.at(AdmissionOp::Metadata);
+        let facts = decode::Observed::new(trace).metadata(kind, basic.bytes_in(size_of::<FS::FILE_BASIC_INFO>(), trace)?,
+            standard.bytes_in(size_of::<FS::FILE_STANDARD_INFO>(), trace)?, tag.bytes_in(size_of::<FS::FILE_ATTRIBUTE_TAG_INFO>(), trace)?, id.bytes_in(size_of::<FS::FILE_ID_INFO>(), trace)?)?;
         if kind == FileKind::Directory {
             let case = self.original_call(index, Call::Info(FS::FileCaseSensitiveInfo, size_of::<FS::FILE_CASE_SENSITIVE_INFO>()))?;
-            if decode::u32_at(case.bytes(4)?, 0)? != 0 { return Err(Error::Unsafe); }
+            let trace = self.admission.at(AdmissionOp::Metadata);
+            if decode::Observed::new(trace).u32_at(case.bytes_in(4, trace)?, 0)? != 0 { return Err(trace.unsafe_at(C::CaseSensitive)); }
         }
-        let name = self.original_call(index, Call::FinalName)?.text(NAME_UNITS, true)?;
-        if name != self.slot(index)?.canonical { return Err(Error::Unsafe); }
+        let (name, trace) = {
+            let complete = self.original_call(index, Call::FinalName)?;
+            let trace = self.admission.at(AdmissionOp::Metadata);
+            (complete.text_in(NAME_UNITS, true, trace)?, trace)
+        };
+        if name != self.slot(index)?.canonical { return Err(trace.unsafe_at(C::CanonicalName)); }
         Ok(facts)
     }
     pub fn security(&mut self, original: &Original, scope: AuthorityScope) -> Result<SecurityFacts> {
         self.clear()?; let index = self.index(original)?;
         let kind = match self.slot(index)?.kind { Kind::Directory => FileKind::Directory, Kind::File => FileKind::File, _ => return Err(Error::State) };
         let result = self.original_call(index, Call::Security)?;
-        security::descriptor(result.bytes(result.count()?)?, kind, scope)
+        { let trace = self.admission.at(match scope {
+                AuthorityScope::AncestorOutsideVersion => AdmissionOp::SecurityAncestor,
+                AuthorityScope::ImmutableVersion => AdmissionOp::SecurityVersion,
+            });
+            security::Observed::new(trace).descriptor(result.bytes_in(result.count_in(trace)?, trace)?, kind, scope) }
     }
     pub fn no_alternate_streams(&mut self, original: &Original) -> Result<()> {
         self.clear()?; let index = self.index(original)?;
         let kind = match self.slot(index)?.kind { Kind::Directory => FileKind::Directory, Kind::File => FileKind::File, _ => return Err(Error::State) };
         let result = self.original_call(index, Call::Streams)?;
-        decode::streams(result.nt_bytes()?, kind)
+        { let trace = self.admission.at(AdmissionOp::Streams);
+            decode::Observed::new(trace).streams(result.nt_bytes_in(trace)?, kind) }
     }
     /// One sequential bounded batch on the ORIGINAL directory. Never restart.
     /// None means actual ERROR_NO_MORE_FILES, not an empty/malformed batch.
@@ -720,7 +908,7 @@ impl NativeBook {
     /// the caller owes exact-name EOF matching and original canonical/full-ID checks.
     pub fn next_ancestor_entries(&mut self, original: &Original, selected_name: &str) -> Result<Option<Vec<DirectoryEntry>>> {
         self.clear()?; // absorbing native Unknown precedes even argument refusal
-        if !decode::component(selected_name) { return Err(Error::Unsafe); }
+        if !decode::component(selected_name) { return Err(self.admission.at(AdmissionOp::Directory).unsafe_at(C::AncestorName)); }
         self.directory_entries(original, DirectoryMode::Ancestor(selected_name.to_owned()))
     }
     fn directory_entries(&mut self, original: &Original, mode: DirectoryMode) -> Result<Option<Vec<DirectoryEntry>>> {
@@ -737,9 +925,11 @@ impl NativeBook {
         if matches!(result.arena.returned()?, Returned::Boolean(0, F::ERROR_NO_MORE_FILES)) {
             self.slot_mut(index)?.directory_ended = true; return Ok(None);
         }
+        let trace = self.admission.at(AdmissionOp::Directory);
+        let d = decode::Observed::new(trace);
         let entries = match &self.slot(index)?.directory_mode {
-            DirectoryMode::Strict => decode::directory(result.bytes(BUFFER)?)?,
-            DirectoryMode::Ancestor(name) => decode::ancestor_directory(result.bytes(BUFFER)?, name)?,
+            DirectoryMode::Strict => d.directory(result.bytes_in(BUFFER, trace)?)?,
+            DirectoryMode::Ancestor(name) => d.ancestor_directory(result.bytes_in(BUFFER, trace)?, name)?,
             DirectoryMode::Unstarted => return Err(Error::State),
         };
         self.entries = self.entries.checked_add(entries.len()).ok_or(Error::Bounds)?;
@@ -762,22 +952,23 @@ impl NativeBook {
         let request = count.min(remaining.min(BUFFER as u64 - 1) as usize + 1);
         self.slot_mut(index)?.read_ended = true; // an error never authorizes retry
         let result = self.original_call(index, Call::Read(request))?;
-        let consumed = result.count()?;
-        if consumed > request { return Err(Error::Unsafe); }
+        let trace = self.admission.at(AdmissionOp::Read);
+        let consumed = result.count_in(trace)?;
+        if consumed > request { return Err(trace.unsafe_at(C::ReadCount)); }
         self.bytes_read = self.bytes_read.checked_add(consumed as u64).ok_or(Error::Bounds)?;
         if self.bytes_read > MAX_TOTAL_BYTES { return Err(Error::Bounds); }
         let slot = self.slot_mut(index)?;
         slot.read_bytes = slot.read_bytes.checked_add(consumed as u64).ok_or(Error::Bounds)?;
         if slot.read_bytes > MAX_FILE_BYTES { return Err(Error::Bounds); }
         slot.read_ended = consumed == 0;
-        Ok(result.bytes(consumed)?.to_vec())
+        Ok(result.bytes_in(consumed, self.admission.at(AdmissionOp::Read))?.to_vec())
     }
     fn absent_thread_token(&mut self) -> Result<()> {
         let key = self.reserve(Kind::ThreadToken, None, "", String::new())?;
         let result = self.call(Call::ThreadToken(key.index), null_mut(), Vec::new())?;
         match result.arena.returned()? {
             Returned::Boolean(0, F::ERROR_NO_TOKEN) if self.slot(key.index)?.state == SlotState::NoHandle => Ok(()),
-            _ => Err(Error::Unsafe), // any acquired impersonation token stays owned
+            _ => Err(self.admission.at(AdmissionOp::ThreadToken).unsafe_at(C::ThreadAbsent)), // any acquired impersonation token stays owned
         }
     }
     fn token(&mut self, index: usize, class: S::TOKEN_INFORMATION_CLASS) -> Result<Complete> {

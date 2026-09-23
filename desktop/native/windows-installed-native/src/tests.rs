@@ -59,8 +59,78 @@ fn own_inert(book: &mut NativeBook, original: &Original, number: usize) -> Resul
     Ok(())
 }
 
+// Recorder fixtures are DATA only; they neither call admission nor fabricate a
+// successful original. Production keeps the same recorder inside NativeBook.
+pub(super) fn admission_trace(role: AdmissionRole) -> AdmissionTrace {
+    let trace = AdmissionTrace::new(); trace.active.set(true); trace.role.set(role); trace
+}
+pub(super) fn admission_fault(trace: &AdmissionTrace, role: AdmissionRole, operation: AdmissionOp,
+    check: AdmissionCheck, index: Option<u16>) {
+    assert_eq!(trace.first.get(), Some(PublicationAdmissionObservation { role, operation, check, index }));
+}
+
 #[test]
 fn original_destinations_are_stable_registered_and_book_bound() -> Result<()> {
+    {
+        use super::{AdmissionRole as R, AdmissionOp as O};
+        let book = NativeBook::new(); let trace = &book.admission;
+        assert_eq!(trace.at(O::Metadata).need(false, C::FileId), Err(Error::Unsafe));
+        assert!(trace.first.get().is_none()); // Ordinary/default book is unarmed.
+        trace.active.set(true); trace.role.set(R::Version);
+        let outer = trace.at(O::Metadata);
+        assert_eq!(outer.result(Ok(37), C::OutputCount), Ok(37));
+        for error in [Error::Unavailable, Error::Bounds, Error::State, Error::Unknown] {
+            assert_eq!(outer.result::<()>(Err(error), C::OutputCount), Err(error));
+            assert!(trace.first.get().is_none());
+        }
+        let leaf = outer.role(R::Manifest).index(AdmissionIndex::Directory, 7);
+        let later = Cell::new(false);
+        let first = (|| {
+            leaf.need(false, C::Span)?;
+            later.set(true); outer.need(false, C::MetadataChanged)
+        })();
+        assert_eq!(outer.result(first, C::MetadataSize), Err(Error::Unsafe));
+        assert!(!later.get());
+        admission_fault(trace, R::Manifest, O::Metadata, C::Span, Some(7));
+        let saved = trace.first.get();
+        trace.role.set(R::Installer);
+        assert_eq!(trace.at(O::InstallerPolicy).need(false, C::Elevated), Err(Error::Unsafe));
+        trace.active.set(false);
+        assert_eq!(trace.at(O::Owner).need(false, C::OrderFresh), Err(Error::Unsafe));
+        assert_eq!(trace.first.get(), saved); // First leaf, not last wrapper/context.
+        assert!(NativeBook::new().admission.first.get().is_none());
+        assert_eq!(Refusal::none().need(false, C::FileId), Err(Error::Unsafe));
+
+        for (kind, limit) in [(AdmissionIndex::Directory, 8192), (AdmissionIndex::Ace, 2048),
+            (AdmissionIndex::Group, 256), (AdmissionIndex::Privilege, 64)] {
+            assert_eq!(kind.limit(), limit);
+            for index in [0, limit - 1, limit, usize::MAX] {
+                let row = admission_trace(R::Groups);
+                assert_eq!(row.at(O::InstallerPolicy).index(kind, index).need(false, C::Span), Err(Error::Unsafe));
+                let expected = if index < limit { Some(index as u16) } else { None };
+                admission_fault(&row, R::Groups, O::InstallerPolicy, C::Span, expected);
+                let line = row.first.get().ok_or(Error::State)?.diagnostic_line().ok_or(Error::State)?;
+                let ordinal = expected.map_or_else(|| "none".to_owned(), |n| n.to_string());
+                assert!(line.ends_with(&format!(";index={ordinal}\n")));
+            }
+        }
+        for labels in [AdmissionRole::ALL.iter().map(|v| v.label()).collect::<Vec<_>>(),
+            AdmissionOp::ALL.iter().map(|v| v.label()).collect(), AdmissionCheck::ALL.iter().map(|v| v.label()).collect()] {
+            let mut seen = std::collections::BTreeSet::new();
+            for label in labels {
+                assert!(!label.is_empty() && label.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'));
+                assert!(seen.insert(label));
+            }
+        }
+        let role = AdmissionRole::ALL.iter().copied().max_by_key(|v| v.label().len()).ok_or(Error::State)?;
+        let operation = AdmissionOp::ALL.iter().copied().max_by_key(|v| v.label().len()).ok_or(Error::State)?;
+        let check = AdmissionCheck::ALL.iter().copied().max_by_key(|v| v.label().len()).ok_or(Error::State)?;
+        let largest = PublicationAdmissionObservation { role, operation, check, index: Some(8191) };
+        let line = largest.diagnostic_line().ok_or(Error::State)?;
+        assert!(line.is_ascii() && line.len() <= 256 && line.ends_with('\n'));
+        assert_eq!(line.bytes().filter(|b| *b == b'\n').count(), 1);
+        assert!(256 + line.len() <= 512); // Base line has its own unchanged256 bound.
+    }
     {
         use qualification_fixture::{fixture_capacity,CursorEpoch};
         fixture_capacity(19,8,37,2)?; // Publisher peak39, not a forty-slot expansion.
@@ -819,6 +889,46 @@ fn acl_distinguishes_sibling_creation_from_replacement_and_mutation() -> Result<
 #[test]
 fn acl_bounds_and_actual_trusted_sid_are_required() -> Result<()> {
     {
+        use super::{AdmissionRole as R, AdmissionOp as O};
+        let owner = sid(5, &[18]); let everyone = sid(1, &[0]);
+        let allow = SS::ACCESS_ALLOWED_ACE_TYPE as u8; let deny = SS::ACCESS_DENIED_ACE_TYPE as u8;
+        let sibling = descriptor(&owner, &[(allow, 0, F::GENERIC_READ, everyone.clone()),
+            (allow, 0, FS::FILE_WRITE_DATA, everyone.clone())]);
+        for (scope, role, operation) in [(AuthorityScope::AncestorOutsideVersion, R::Target, O::SecurityAncestor),
+            (AuthorityScope::ImmutableVersion, R::Version, O::SecurityVersion)] {
+            let trace = admission_trace(role);
+            let observed = security::Observed::new(trace.at(operation)).descriptor(&sibling, FileKind::Directory, scope);
+            assert_eq!(observed, security::descriptor(&sibling, FileKind::Directory, scope));
+            if scope == AuthorityScope::ImmutableVersion {
+                assert_eq!(observed, Err(Error::Unsafe));
+                admission_fault(&trace, role, operation, C::AceDangerousRights, Some(1));
+            } else { assert!(observed.is_ok() && trace.first.get().is_none()); }
+        }
+        // Each row has later bad DATA as well: the original first leaf wins.
+        for (kind, flags, mask, expected) in [
+            (255, 0x80, 0x08000000, C::AceType),
+            (allow, 0x80, 0x08000000, C::AceFlags),
+            (allow, S::INHERIT_ONLY_ACE as u8, 0x08000000, C::AceInheritance),
+            (deny, 0, 0x08000000, C::AceMask),
+            (allow, (S::OBJECT_INHERIT_ACE | S::INHERIT_ONLY_ACE) as u8, 0x08000000, C::AceMask),
+            (allow, 0, FS::WRITE_DAC, C::AceDangerousRights),
+        ] {
+            let raw = descriptor(&owner, &[(kind, flags, mask, everyone.clone())]);
+            let trace = admission_trace(R::Manifest);
+            let observed = security::Observed::new(trace.at(O::SecurityVersion)).descriptor(&raw, FileKind::File, AuthorityScope::ImmutableVersion);
+            assert_eq!(observed, security::descriptor(&raw, FileKind::File, AuthorityScope::ImmutableVersion));
+            assert_eq!(observed, Err(Error::Unsafe));
+            admission_fault(&trace, R::Manifest, O::SecurityVersion, expected, Some(0));
+        }
+        for (raw, expected) in [(vec![0; 19], C::DescriptorSize),
+            (descriptor(&everyone, &[]), C::OwnerTrust)] {
+            let trace = admission_trace(R::Volume);
+            let observed = security::Observed::new(trace.at(O::SecurityAncestor)).descriptor(&raw, FileKind::Directory, AuthorityScope::AncestorOutsideVersion);
+            assert_eq!(observed, security::descriptor(&raw, FileKind::Directory, AuthorityScope::AncestorOutsideVersion));
+            admission_fault(&trace, R::Volume, O::SecurityAncestor, expected, None);
+        }
+    }
+    {
         use qualification_fixture::{fixture_descriptor,check_descriptor};
         let raw=fixture_descriptor(true,true)?;
         for control in [S::SE_SELF_RELATIVE|S::SE_DACL_PRESENT,
@@ -1054,6 +1164,9 @@ fn token_context_pointer_bounds_and_enableable_authority_are_checked() -> Result
         assert_eq!(completed.bytes(65_536)?.len(), 65_536);
         assert!(matches!(completed.bytes(65_537), Err(Error::Unsafe)));
         assert_eq!(completed.count(), Err(Error::Unsafe)); // untouched sentinel
+        let trace = admission_trace(AdmissionRole::User);
+        assert_eq!(completed.bytes_in(65_537, trace.at(AdmissionOp::TokenData)), Err(Error::Unsafe));
+        admission_fault(&trace, AdmissionRole::User, AdmissionOp::TokenData, C::OutputBytes, None);
         assert!(book.active.is_none() && !book.is_unknown());
     }
     for (class, header) in [
@@ -1076,7 +1189,12 @@ fn token_context_pointer_bounds_and_enableable_authority_are_checked() -> Result
         // SAFETY: this fixture arena has never been passed to native code.
         unsafe { *book.arena()?.count.get() = count; }
         let completed = return_inert(book, Returned::Boolean(1, 0), None, F::STATUS_PENDING, usize::MAX)?;
-        assert_eq!(completed.count(), if count <= 65_536 { Ok(count as usize) } else { Err(Error::Unsafe) });
+        let expected = if count <= 65_536 { Ok(count as usize) } else { Err(Error::Unsafe) };
+        assert_eq!(completed.count(), expected);
+        let trace = admission_trace(AdmissionRole::User);
+        assert_eq!(completed.count_in(trace.at(AdmissionOp::TokenData)), expected);
+        if expected.is_err() { admission_fault(&trace, AdmissionRole::User, AdmissionOp::TokenData, C::OutputCount, None); }
+        else { assert!(trace.first.get().is_none()); }
     }
 
     let allowed = [101, 102, 103, 104, 105];
@@ -1089,6 +1207,18 @@ fn token_context_pointer_bounds_and_enableable_authority_are_checked() -> Result
     put64(&mut statistics, offset_of!(S::TOKEN_STATISTICS, AuthenticationId), identity.authentication_id);
     put64(&mut statistics, offset_of!(S::TOKEN_STATISTICS, ModifiedId), identity.modified_id);
     assert_eq!(security::statistics(&statistics), Ok(identity));
+    for role in [AdmissionRole::StatisticsBefore, AdmissionRole::StatisticsAfter] {
+        for (group_count, privilege_count, check) in [(1, 1, None), (257, 65, Some(C::StatisticsGroups)),
+            (1, 65, Some(C::StatisticsPrivileges))] {
+            let mut raw = statistics.clone();
+            put32(&mut raw, offset_of!(S::TOKEN_STATISTICS, GroupCount), group_count);
+            put32(&mut raw, offset_of!(S::TOKEN_STATISTICS, PrivilegeCount), privilege_count);
+            let trace = admission_trace(role);
+            assert_eq!(security::Observed::new(trace.at(AdmissionOp::TokenData)).statistics(&raw), security::statistics(&raw));
+            if let Some(check) = check { admission_fault(&trace, role, AdmissionOp::TokenData, check, None); }
+            else { assert!(trace.first.get().is_none()); }
+        }
+    }
     assert_eq!(security::statistics(&statistics[..55]), Err(Error::Unsafe));
     statistics.push(0);
     assert_eq!(security::statistics(&statistics), Err(Error::Unsafe));
@@ -1420,6 +1550,16 @@ fn metadata_and_directory_keep_the_full_identity_not_a_low_half() -> Result<()> 
     let mut full = [0u8; 16]; full[0] = 1; full[15] = 0x80;
     let at = offset_of!(FS::FILE_ID_INFO, FileId); id[at..at+16].copy_from_slice(&full);
     let before = decode::metadata(FileKind::File, &basic, &standard, &tag, &id)?;
+    for (directory, pending, check) in [(0, 0, None), (2, 1, Some(C::DirectoryBoolean)), (0, 1, Some(C::DeletePending))] {
+        let mut row = standard.clone();
+        row[offset_of!(FS::FILE_STANDARD_INFO, Directory)] = directory;
+        row[offset_of!(FS::FILE_STANDARD_INFO, DeletePending)] = pending;
+        let trace = admission_trace(AdmissionRole::Manifest);
+        assert_eq!(decode::Observed::new(trace.at(AdmissionOp::Metadata)).metadata(FileKind::File, &basic, &row, &tag, &id),
+            decode::metadata(FileKind::File, &basic, &row, &tag, &id));
+        if let Some(check) = check { admission_fault(&trace, AdmissionRole::Manifest, AdmissionOp::Metadata, check, None); }
+        else { assert!(trace.first.get().is_none()); }
+    }
     assert_eq!(before.identity, FileIdentity { volume_serial: 0x1122334455667788, file_id: full });
     put64(&mut basic, offset_of!(FS::FILE_BASIC_INFO, LastAccessTime), 1234);
     assert_eq!(decode::metadata(FileKind::File, &basic, &standard, &tag, &id)?, before);
@@ -1452,6 +1592,18 @@ fn metadata_and_directory_keep_the_full_identity_not_a_low_half() -> Result<()> 
     put32(&mut target, offset_of!(FS::FILE_ID_EXTD_DIR_INFO, FileAttributes), FS::FILE_ATTRIBUTE_DIRECTORY);
     sibling.extend_from_slice(&target);
     let ancestors = decode::ancestor_directory(&sibling, "Program Files")?;
+    {
+        let trace = admission_trace(AdmissionRole::Volume);
+        assert_eq!(decode::Observed::new(trace.at(AdmissionOp::Directory)).ancestor_directory(&sibling, "Program Files")?, ancestors);
+        assert!(trace.first.get().is_none());
+        assert_eq!(decode::Observed::new(trace.at(AdmissionOp::Directory)).directory(&sibling), decode::directory(&sibling));
+        admission_fault(&trace, AdmissionRole::Volume, AdmissionOp::Directory, C::Attributes, Some(0));
+        let trace = admission_trace(AdmissionRole::ProgramFiles);
+        let short = &sibling[..sibling.len() - 1];
+        assert_eq!(decode::Observed::new(trace.at(AdmissionOp::Directory)).ancestor_directory(short, "Program Files"),
+            decode::ancestor_directory(short, "Program Files"));
+        admission_fault(&trace, AdmissionRole::ProgramFiles, AdmissionOp::Directory, C::Span, Some(1));
+    }
     assert_eq!(ancestors.len(), 2);
     assert_eq!(ancestors[1].name, "Program Files");
     assert_eq!(ancestors[1].file_id, target_id);
@@ -1596,6 +1748,32 @@ fn stream_and_component_refusals_cannot_be_treated_as_absence() -> Result<()> {
     assert_eq!(decode::mapping(&mapped)?, "\\Device\\HarddiskVolume3");
     let subst: Vec<u8> = "\\??\\C:\\elsewhere\0\0".encode_utf16().flat_map(u16::to_le_bytes).collect();
     assert_eq!(decode::mapping(&subst), Err(Error::Unsafe));
+    for (raw, kind, check) in [(Vec::new(), FileKind::Directory, None), (unnamed.clone(), FileKind::File, None),
+        (Vec::new(), FileKind::File, Some(C::StreamMissing)), (stream(":hidden:$DATA"), FileKind::File, Some(C::StreamName)),
+        (multiple, FileKind::File, Some(C::StreamFrame))] {
+        let trace = admission_trace(AdmissionRole::Manifest);
+        assert_eq!(decode::Observed::new(trace.at(AdmissionOp::Streams)).streams(&raw, kind), decode::streams(&raw, kind));
+        if let Some(check) = check { admission_fault(&trace, AdmissionRole::Manifest, AdmissionOp::Streams, check, None); }
+        else { assert!(trace.first.get().is_none()); }
+    }
+    for (raw, count, check) in [(vec![b'x', 0, 0, 0], Some(1), None),
+        (vec![0], None, Some(C::Utf16Width)), (vec![0, 0xd8], None, Some(C::Utf16Encoding)),
+        (vec![b'x', 0], None, Some(C::Terminator)), (vec![0, 0], None, Some(C::TextLength)),
+        (vec![b'x', 0, 0, 0], Some(2), Some(C::TextLength))] {
+        let trace = admission_trace(AdmissionRole::ProgramFiles);
+        assert_eq!(decode::Observed::new(trace.at(AdmissionOp::Location)).terminated(&raw, count), decode::terminated(&raw, count));
+        if let Some(check) = check { admission_fault(&trace, AdmissionRole::ProgramFiles, AdmissionOp::Location, check, None); }
+        else { assert!(trace.first.get().is_none()); }
+    }
+    for (raw, check) in [(mapped, None), (subst, Some(C::MappingDevice))] {
+        let trace = admission_trace(AdmissionRole::ProgramFiles);
+        assert_eq!(decode::Observed::new(trace.at(AdmissionOp::Mapping)).mapping(&raw), decode::mapping(&raw));
+        if let Some(check) = check { admission_fault(&trace, AdmissionRole::ProgramFiles, AdmissionOp::Mapping, check, None); }
+        else { assert!(trace.first.get().is_none()); }
+    }
+    let trace = admission_trace(AdmissionRole::Manifest);
+    assert_eq!(decode::Observed::new(trace.at(AdmissionOp::Read)).span(&[], usize::MAX, 1), Err(Error::Bounds));
+    assert!(trace.first.get().is_none()); // Overflow is still Bounds, not Unsafe.
     Ok(())
 }
 

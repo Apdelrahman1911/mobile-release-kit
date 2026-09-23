@@ -1,7 +1,7 @@
 //! Conservative owner/DACL and current-primary-token DATA policy. Unknown ACEs
 //! are refused, not evaluated with an approximation of Windows Authz semantics.
-use super::{AuthorityScope, Error, FileKind, Result, BUFFER};
-use super::decode::{span, u16_at, u32_at, u64_at};
+use super::{AuthorityScope, Error, FileKind, Result, Refusal, AdmissionCheck as C, AdmissionIndex, BUFFER};
+use super::decode::{span, u32_at, u64_at};
 use std::mem::{offset_of, size_of};
 use windows_sys::Win32::{Foundation as F, Security as S, Storage::FileSystem as FS};
 use windows_sys::Win32::System::SystemServices as SS;
@@ -23,20 +23,29 @@ impl Sid {
             && u32_at(&self.bytes, 8) == Ok(21)
     }
 }
-pub(crate) fn sid_at(raw: &[u8], offset: usize, end: usize) -> Result<Sid> {
-    let head = span(raw, offset, 8)?;
-    if head[0] != 1 || head[1] > 15 { return Err(Error::Unsafe); }
-    let length = 8usize.checked_add(head[1] as usize * 4).ok_or(Error::Bounds)?;
-    if offset.checked_add(length).ok_or(Error::Bounds)? > end { return Err(Error::Unsafe); }
-    Ok(Sid { bytes: span(raw, offset, length)?.to_vec() })
+#[derive(Clone, Copy)]
+pub(crate) struct Observed<'a>(Refusal<'a>);
+impl<'a> Observed<'a> {
+    pub(crate) fn new(trace: Refusal<'a>) -> Self { Self(trace) }
+    pub(crate) fn sid_at(self, raw: &[u8], offset: usize, end: usize) -> Result<Sid> {
+        let d = super::decode::Observed::new(self.0);
+        let head = d.span(raw, offset, 8)?;
+        if head[0] != 1 { return Err(self.0.unsafe_at(C::SidRevision)); }
+        if head[1] > 15 { return Err(self.0.unsafe_at(C::SidCount)); }
+        let length = 8usize.checked_add(head[1] as usize * 4).ok_or(Error::Bounds)?;
+        if offset.checked_add(length).ok_or(Error::Bounds)? > end { return Err(self.0.unsafe_at(C::SidExtent)); }
+        Ok(Sid { bytes: d.span(raw, offset, length)?.to_vec() })
+    }
 }
+pub(crate) fn sid_at(raw: &[u8], offset: usize, end: usize) -> Result<Sid> { Observed::new(Refusal::none()).sid_at(raw, offset, end) }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AceFact { pub allow: bool, pub flags: u8, pub mask: u32, pub sid: Sid }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SecurityFacts { pub owner: Sid, pub control: u16, pub revision: u8, pub aces: Vec<AceFact> }
-fn expand(mask: u32) -> Result<u32> {
+impl Observed<'_> {
+fn expand(self, mask: u32) -> Result<u32> {
     let generic = F::GENERIC_READ | F::GENERIC_WRITE | F::GENERIC_EXECUTE | F::GENERIC_ALL;
-    if mask & !(generic | FS::FILE_ALL_ACCESS) != 0 { return Err(Error::Unsafe); }
+    if mask & !(generic | FS::FILE_ALL_ACCESS) != 0 { return Err(self.0.unsafe_at(C::AceMask)); }
     let mut effective = mask & !generic;
     for (flag, rights) in [(F::GENERIC_READ, FS::FILE_GENERIC_READ), (F::GENERIC_WRITE, FS::FILE_GENERIC_WRITE),
         (F::GENERIC_EXECUTE, FS::FILE_GENERIC_EXECUTE), (F::GENERIC_ALL, FS::FILE_ALL_ACCESS)] {
@@ -44,87 +53,109 @@ fn expand(mask: u32) -> Result<u32> {
     }
     Ok(effective)
 }
-fn safe_ace(ace: &AceFact, kind: FileKind, scope: AuthorityScope) -> Result<()> {
+fn safe_ace(self, ace: &AceFact, kind: FileKind, scope: AuthorityScope) -> Result<()> {
     let allowed_flags = S::OBJECT_INHERIT_ACE | S::CONTAINER_INHERIT_ACE | S::NO_PROPAGATE_INHERIT_ACE | S::INHERIT_ONLY_ACE | S::INHERITED_ACE;
     let flags = ace.flags as u32;
-    if flags & !allowed_flags != 0 || (flags & (S::NO_PROPAGATE_INHERIT_ACE | S::INHERIT_ONLY_ACE) != 0
-        && flags & (S::OBJECT_INHERIT_ACE | S::CONTAINER_INHERIT_ACE) == 0) { return Err(Error::Unsafe); }
-    let effective = expand(ace.mask)?; // reject unknown mask even for deny/inherit-only
+    if flags & !allowed_flags != 0 { return Err(self.0.unsafe_at(C::AceFlags)); }
+    if flags & (S::NO_PROPAGATE_INHERIT_ACE | S::INHERIT_ONLY_ACE) != 0
+        && flags & (S::OBJECT_INHERIT_ACE | S::CONTAINER_INHERIT_ACE) == 0 { return Err(self.0.unsafe_at(C::AceInheritance)); }
+    let effective = self.expand(ace.mask)?; // reject unknown mask even for deny/inherit-only
     if !ace.allow || flags & S::INHERIT_ONLY_ACE != 0 || ace.sid.trusted() { return Ok(()); }
     let mut dangerous = FS::DELETE | FS::FILE_DELETE_CHILD | FS::WRITE_DAC | FS::WRITE_OWNER
         | FS::FILE_WRITE_EA | FS::FILE_WRITE_ATTRIBUTES;
     if kind == FileKind::File || scope == AuthorityScope::ImmutableVersion {
         dangerous |= FS::FILE_WRITE_DATA | FS::FILE_APPEND_DATA; // directory ADD_FILE/ADD_SUBDIRECTORY
     }
-    if effective & dangerous != 0 { Err(Error::Unsafe) } else { Ok(()) }
+    if effective & dangerous != 0 { Err(self.0.unsafe_at(C::AceDangerousRights)) } else { Ok(()) }
+}
 }
 fn overlap(a: (usize, usize), b: (usize, usize)) -> bool { a.0 < b.1 && b.0 < a.1 }
 pub(crate) fn descriptor(raw: &[u8], kind: FileKind, scope: AuthorityScope) -> Result<SecurityFacts> {
-    if raw.len() > BUFFER || raw.len() < size_of::<S::SECURITY_DESCRIPTOR_RELATIVE>() { return Err(Error::Unsafe); }
+    Observed::new(Refusal::none()).descriptor(raw, kind, scope)
+}
+impl Observed<'_> {
+pub(crate) fn descriptor(self, raw: &[u8], kind: FileKind, scope: AuthorityScope) -> Result<SecurityFacts> {
+    let d = super::decode::Observed::new(self.0);
+    if raw.len() > BUFFER || raw.len() < size_of::<S::SECURITY_DESCRIPTOR_RELATIVE>() { return Err(self.0.unsafe_at(C::DescriptorSize)); }
     let header = size_of::<S::SECURITY_DESCRIPTOR_RELATIVE>();
     let revision = raw[offset_of!(S::SECURITY_DESCRIPTOR_RELATIVE, Revision)];
-    let control = u16_at(raw, offset_of!(S::SECURITY_DESCRIPTOR_RELATIVE, Control))?;
+    let control = d.u16_at(raw, offset_of!(S::SECURITY_DESCRIPTOR_RELATIVE, Control))?;
     let known = S::SE_OWNER_DEFAULTED | S::SE_GROUP_DEFAULTED | S::SE_DACL_PRESENT | S::SE_DACL_DEFAULTED
         | S::SE_SACL_PRESENT | S::SE_SACL_DEFAULTED | S::SE_DACL_AUTO_INHERIT_REQ | S::SE_SACL_AUTO_INHERIT_REQ
         | S::SE_DACL_AUTO_INHERITED | S::SE_SACL_AUTO_INHERITED | S::SE_DACL_PROTECTED | S::SE_SACL_PROTECTED | S::SE_SELF_RELATIVE;
-    if revision != 1 || raw[offset_of!(S::SECURITY_DESCRIPTOR_RELATIVE, Sbz1)] != 0 || control & !known != 0
-        || control & (S::SE_SELF_RELATIVE | S::SE_DACL_PRESENT) != (S::SE_SELF_RELATIVE | S::SE_DACL_PRESENT)
-        || u32_at(raw, offset_of!(S::SECURITY_DESCRIPTOR_RELATIVE, Sacl))? != 0 { return Err(Error::Unsafe); }
-    let owner_at = u32_at(raw, offset_of!(S::SECURITY_DESCRIPTOR_RELATIVE, Owner))? as usize;
-    let acl_at = u32_at(raw, offset_of!(S::SECURITY_DESCRIPTOR_RELATIVE, Dacl))? as usize;
-    if owner_at < header || owner_at % 4 != 0 || acl_at < header || acl_at % 4 != 0 { return Err(Error::Unsafe); }
-    let owner = sid_at(raw, owner_at, raw.len())?;
-    if !owner.trusted() { return Err(Error::Unsafe); }
-    let acl = span(raw, acl_at, size_of::<S::ACL>())?;
+    if revision != 1 { return Err(self.0.unsafe_at(C::DescriptorRevision)); }
+    if raw[offset_of!(S::SECURITY_DESCRIPTOR_RELATIVE, Sbz1)] != 0 { return Err(self.0.unsafe_at(C::DescriptorReserved)); }
+    if control & !known != 0 { return Err(self.0.unsafe_at(C::DescriptorControl)); }
+    if control & (S::SE_SELF_RELATIVE | S::SE_DACL_PRESENT) != (S::SE_SELF_RELATIVE | S::SE_DACL_PRESENT) { return Err(self.0.unsafe_at(C::DescriptorRequired)); }
+    if d.u32_at(raw, offset_of!(S::SECURITY_DESCRIPTOR_RELATIVE, Sacl))? != 0 { return Err(self.0.unsafe_at(C::DescriptorSacl)); }
+    let owner_at = d.u32_at(raw, offset_of!(S::SECURITY_DESCRIPTOR_RELATIVE, Owner))? as usize;
+    let acl_at = d.u32_at(raw, offset_of!(S::SECURITY_DESCRIPTOR_RELATIVE, Dacl))? as usize;
+    if owner_at < header || owner_at % 4 != 0 { return Err(self.0.unsafe_at(C::OwnerOffset)); }
+    if acl_at < header || acl_at % 4 != 0 { return Err(self.0.unsafe_at(C::AclOffset)); }
+    let owner = self.sid_at(raw, owner_at, raw.len())?;
+    if !owner.trusted() { return Err(self.0.unsafe_at(C::OwnerTrust)); }
+    let acl = d.span(raw, acl_at, size_of::<S::ACL>())?;
     let acl_revision = acl[offset_of!(S::ACL, AclRevision)];
-    if !matches!(acl_revision, 2 | 4) || acl[offset_of!(S::ACL, Sbz1)] != 0 || u16_at(acl, offset_of!(S::ACL, Sbz2))? != 0 { return Err(Error::Unsafe); }
-    let size = u16_at(acl, offset_of!(S::ACL, AclSize))? as usize;
-    let count = u16_at(acl, offset_of!(S::ACL, AceCount))? as usize;
-    if size < size_of::<S::ACL>() || size % 4 != 0 || count > 2048 { return Err(Error::Unsafe); }
-    span(raw, acl_at, size)?;
+    if !matches!(acl_revision, 2 | 4) { return Err(self.0.unsafe_at(C::AclRevision)); }
+    if acl[offset_of!(S::ACL, Sbz1)] != 0 || d.u16_at(acl, offset_of!(S::ACL, Sbz2))? != 0 { return Err(self.0.unsafe_at(C::AclReserved)); }
+    let size = d.u16_at(acl, offset_of!(S::ACL, AclSize))? as usize;
+    let count = d.u16_at(acl, offset_of!(S::ACL, AceCount))? as usize;
+    if size < size_of::<S::ACL>() || size % 4 != 0 { return Err(self.0.unsafe_at(C::AclSize)); }
+    if count > 2048 { return Err(self.0.unsafe_at(C::AclCount)); }
+    d.span(raw, acl_at, size)?;
     let acl_end = acl_at.checked_add(size).ok_or(Error::Bounds)?;
     let owner_range = (owner_at, owner_at + owner.bytes.len());
-    if overlap(owner_range, (acl_at, acl_end)) { return Err(Error::Unsafe); }
-    let group_at = u32_at(raw, offset_of!(S::SECURITY_DESCRIPTOR_RELATIVE, Group))? as usize;
+    if overlap(owner_range, (acl_at, acl_end)) { return Err(self.0.unsafe_at(C::OwnerAclOverlap)); }
+    let group_at = d.u32_at(raw, offset_of!(S::SECURITY_DESCRIPTOR_RELATIVE, Group))? as usize;
     if group_at != 0 {
-        if group_at < header || group_at % 4 != 0 { return Err(Error::Unsafe); }
-        let group = sid_at(raw, group_at, raw.len())?;
+        if group_at < header || group_at % 4 != 0 { return Err(self.0.unsafe_at(C::GroupOffset)); }
+        let group = self.sid_at(raw, group_at, raw.len())?;
         let range = (group_at, group_at + group.bytes.len());
-        if overlap(range, (acl_at, acl_end)) || (range != owner_range && overlap(range, owner_range)) { return Err(Error::Unsafe); }
+        if overlap(range, (acl_at, acl_end)) || (range != owner_range && overlap(range, owner_range)) { return Err(self.0.unsafe_at(C::GroupOverlap)); }
     }
     let mut aces = Vec::new();
     aces.try_reserve(count).map_err(|_| Error::Bounds)?;
     let mut offset = acl_at + size_of::<S::ACL>();
-    for _ in 0..count {
-        let head = span(raw, offset, size_of::<S::ACE_HEADER>())?;
+    for index in 0..count {
+        let trace = self.0.index(AdmissionIndex::Ace, index);
+        let d = super::decode::Observed::new(trace);
+        let observed = Self(trace);
+        let head = d.span(raw, offset, size_of::<S::ACE_HEADER>())?;
         let ace_type = head[offset_of!(S::ACE_HEADER, AceType)] as u32;
         // Refuse EVERY unsupported ACE before considering INHERIT_ONLY or allow.
-        let allow = match ace_type { SS::ACCESS_ALLOWED_ACE_TYPE => true, SS::ACCESS_DENIED_ACE_TYPE => false, _ => return Err(Error::Unsafe) };
-        let size = u16_at(head, offset_of!(S::ACE_HEADER, AceSize))? as usize;
+        let allow = match ace_type { SS::ACCESS_ALLOWED_ACE_TYPE => true, SS::ACCESS_DENIED_ACE_TYPE => false, _ => return Err(trace.unsafe_at(C::AceType)) };
+        let size = d.u16_at(head, offset_of!(S::ACE_HEADER, AceSize))? as usize;
         let sid_offset = offset_of!(S::ACCESS_ALLOWED_ACE, SidStart);
         let end = offset.checked_add(size).ok_or(Error::Bounds)?;
-        if size < sid_offset + 8 || size % 4 != 0 || end > acl_end { return Err(Error::Unsafe); }
-        let sid = sid_at(raw, offset + sid_offset, end)?;
-        if offset + sid_offset + sid.bytes.len() != end { return Err(Error::Unsafe); }
+        if size < sid_offset + 8 || size % 4 != 0 || end > acl_end { return Err(trace.unsafe_at(C::AceSize)); }
+        let sid = observed.sid_at(raw, offset + sid_offset, end)?;
+        if offset + sid_offset + sid.bytes.len() != end { return Err(trace.unsafe_at(C::AceSidSize)); }
         let ace = AceFact { allow, flags: head[offset_of!(S::ACE_HEADER, AceFlags)],
-            mask: u32_at(raw, offset + offset_of!(S::ACCESS_ALLOWED_ACE, Mask))?, sid };
-        safe_ace(&ace, kind, scope)?;
+            mask: d.u32_at(raw, offset + offset_of!(S::ACCESS_ALLOWED_ACE, Mask))?, sid };
+        observed.safe_ace(&ace, kind, scope)?;
         aces.push(ace); offset = end;
     }
     // Remaining bytes belong to ACL free space, not implicit extra ACEs. The
     // caller retains actual inheritance/defaulted/control facts and every ACE.
     Ok(SecurityFacts { owner, control, revision: acl_revision, aces })
 }
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TokenIdentity { pub token_id: u64, pub authentication_id: u64, pub modified_id: u64, pub groups: u32, pub privileges: u32 }
-pub(crate) fn statistics(raw: &[u8]) -> Result<TokenIdentity> {
-    if raw.len() != size_of::<S::TOKEN_STATISTICS>() || u32_at(raw, offset_of!(S::TOKEN_STATISTICS, TokenType))? != S::TokenPrimary as u32 { return Err(Error::Unsafe); }
-    let groups = u32_at(raw, offset_of!(S::TOKEN_STATISTICS, GroupCount))?;
-    let privileges = u32_at(raw, offset_of!(S::TOKEN_STATISTICS, PrivilegeCount))?;
-    if groups > 256 || privileges > 64 { return Err(Error::Unsafe); }
-    Ok(TokenIdentity { token_id: u64_at(raw, offset_of!(S::TOKEN_STATISTICS, TokenId))?,
-        authentication_id: u64_at(raw, offset_of!(S::TOKEN_STATISTICS, AuthenticationId))?,
-        modified_id: u64_at(raw, offset_of!(S::TOKEN_STATISTICS, ModifiedId))?, groups, privileges })
+pub(crate) fn statistics(raw: &[u8]) -> Result<TokenIdentity> { Observed::new(Refusal::none()).statistics(raw) }
+impl Observed<'_> {
+pub(crate) fn statistics(self, raw: &[u8]) -> Result<TokenIdentity> {
+    let d = super::decode::Observed::new(self.0);
+    if raw.len() != size_of::<S::TOKEN_STATISTICS>() { return Err(self.0.unsafe_at(C::StatisticsSize)); }
+    if d.u32_at(raw, offset_of!(S::TOKEN_STATISTICS, TokenType))? != S::TokenPrimary as u32 { return Err(self.0.unsafe_at(C::StatisticsType)); }
+    let groups = d.u32_at(raw, offset_of!(S::TOKEN_STATISTICS, GroupCount))?;
+    let privileges = d.u32_at(raw, offset_of!(S::TOKEN_STATISTICS, PrivilegeCount))?;
+    if groups > 256 { return Err(self.0.unsafe_at(C::StatisticsGroups)); }
+    if privileges > 64 { return Err(self.0.unsafe_at(C::StatisticsPrivileges)); }
+    Ok(TokenIdentity { token_id: d.u64_at(raw, offset_of!(S::TOKEN_STATISTICS, TokenId))?,
+        authentication_id: d.u64_at(raw, offset_of!(S::TOKEN_STATISTICS, AuthenticationId))?,
+        modified_id: d.u64_at(raw, offset_of!(S::TOKEN_STATISTICS, ModifiedId))?, groups, privileges })
+}
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GroupFact { pub sid: Sid, pub attributes: u32 }

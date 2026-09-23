@@ -6,6 +6,7 @@
 //! SHA256/strict manifest policy remains in the safe application; the only data
 //! interface here is the fixed roster, bounded sizes and original byte chunks.
 use super::*;
+use super::{AdmissionRole as R, AdmissionOp as O, AdmissionCheck as C};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 use windows_sys::Win32::System::SystemServices as SS;
@@ -161,77 +162,111 @@ struct Installer {
     identity: TokenIdentity, user: Sid, integrity: Sid, elevation_type: u32,
     groups: Vec<GroupFact>, privileges: Vec<(u64, u32)>,
 }
-fn pointed_sid(raw: &[u8], field: usize, minimum: usize) -> Result<Sid> {
-    let pointer = usize::try_from(decode::u64_at(raw, field)?).map_err(|_| Error::Unsafe)?;
-    let at = pointer.checked_sub(raw.as_ptr() as usize).ok_or(Error::Unsafe)?;
-    need(at >= minimum && at % 4 == 0)?;
-    security::sid_at(raw, at, raw.len()) // no unvalidated pointer dereference
+#[derive(Clone, Copy)]
+struct InstallerData<'a>(Refusal<'a>);
+impl InstallerData<'_> {
+fn pointed_sid(self, raw: &[u8], field: usize, minimum: usize) -> Result<Sid> {
+    let d = decode::Observed::new(self.0);
+    let pointer = usize::try_from(d.u64_at(raw, field)?).map_err(|_| self.0.unsafe_at(C::PointerValue))?;
+    let at = pointer.checked_sub(raw.as_ptr() as usize).ok_or_else(|| self.0.unsafe_at(C::PointerOffset))?;
+    self.0.need(at >= minimum, C::PointerMinimum)?;
+    self.0.need(at % 4 == 0, C::PointerAlignment)?;
+    security::Observed::new(self.0).sid_at(raw, at, raw.len()) // no unvalidated pointer dereference
 }
-fn installer_groups(raw: &[u8], count: u32) -> Result<Vec<GroupFact>> {
+fn installer_groups(self, raw: &[u8], count: u32) -> Result<Vec<GroupFact>> {
     let header = offset_of!(S::TOKEN_GROUPS, Groups);
-    need(count <= 256 && raw.len() <= BUFFER && decode::u32_at(raw, 0)? == count)?;
+    let d = decode::Observed::new(self.0);
+    self.0.need(count <= 256, C::GroupCount)?;
+    self.0.need(raw.len() <= BUFFER, C::GroupSize)?;
+    self.0.need(d.u32_at(raw, 0)? == count, C::GroupCountMatch)?;
     let extent = header.checked_add(count as usize * size_of::<S::SID_AND_ATTRIBUTES>()).ok_or(Error::Bounds)?;
-    decode::span(raw, 0, extent)?;
+    d.span(raw, 0, extent)?;
     let known = (SS::SE_GROUP_MANDATORY | SS::SE_GROUP_ENABLED_BY_DEFAULT | SS::SE_GROUP_ENABLED | SS::SE_GROUP_OWNER
         | SS::SE_GROUP_USE_FOR_DENY_ONLY | SS::SE_GROUP_INTEGRITY | SS::SE_GROUP_INTEGRITY_ENABLED
         | SS::SE_GROUP_RESOURCE | SS::SE_GROUP_LOGON_ID) as u32;
     let mut result: Vec<GroupFact> = Vec::new();
     for i in 0..count as usize {
+        let trace = self.0.index(AdmissionIndex::Group, i);
+        let d = decode::Observed::new(trace);
         let base = header + i * size_of::<S::SID_AND_ATTRIBUTES>();
-        let principal = pointed_sid(raw, base + offset_of!(S::SID_AND_ATTRIBUTES, Sid), extent)?;
-        let attributes = decode::u32_at(raw, base + offset_of!(S::SID_AND_ATTRIBUTES, Attributes))?;
-        need(attributes & !known == 0
-            && !(attributes & SS::SE_GROUP_USE_FOR_DENY_ONLY as u32 != 0 && attributes & SS::SE_GROUP_ENABLED as u32 != 0)
-            && !result.iter().any(|g| g.sid == principal))?;
+        let principal = Self(trace).pointed_sid(raw, base + offset_of!(S::SID_AND_ATTRIBUTES, Sid), extent)?;
+        let attributes = d.u32_at(raw, base + offset_of!(S::SID_AND_ATTRIBUTES, Attributes))?;
+        trace.need(attributes & !known == 0, C::GroupFlags)?;
+        trace.need(!(attributes & SS::SE_GROUP_USE_FOR_DENY_ONLY as u32 != 0 && attributes & SS::SE_GROUP_ENABLED as u32 != 0), C::GroupDenyEnabled)?;
+        trace.need(!result.iter().any(|g| g.sid == principal), C::GroupDuplicate)?;
         result.push(GroupFact { sid: principal, attributes });
     }
     // Explicit Administrators ownership in new SECURITY_ATTRIBUTES is possible
     // without adjusting privileges only with this actually enabled owner group.
-    need(result.iter().any(|g| g.sid.bytes() == admins()
+    self.0.need(result.iter().any(|g| g.sid.bytes() == admins()
         && g.attributes & (SS::SE_GROUP_ENABLED | SS::SE_GROUP_OWNER) as u32
             == (SS::SE_GROUP_ENABLED | SS::SE_GROUP_OWNER) as u32
-        && g.attributes & (SS::SE_GROUP_USE_FOR_DENY_ONLY | SS::SE_GROUP_INTEGRITY | SS::SE_GROUP_RESOURCE) as u32 == 0))?;
+        && g.attributes & (SS::SE_GROUP_USE_FOR_DENY_ONLY | SS::SE_GROUP_INTEGRITY | SS::SE_GROUP_RESOURCE) as u32 == 0), C::AdminOwner)?;
     Ok(result)
 }
-fn installer_privileges(raw: &[u8], count: u32) -> Result<Vec<(u64, u32)>> {
+fn installer_privileges(self, raw: &[u8], count: u32) -> Result<Vec<(u64, u32)>> {
     let head = offset_of!(S::TOKEN_PRIVILEGES, Privileges);
     let step = size_of::<S::LUID_AND_ATTRIBUTES>();
-    need(count <= 64 && raw.len() == head + count as usize * step && decode::u32_at(raw, 0)? == count)?;
+    let d = decode::Observed::new(self.0);
+    self.0.need(count <= 64, C::PrivilegesCount)?;
+    self.0.need(raw.len() == head + count as usize * step, C::PrivilegesSize)?;
+    self.0.need(d.u32_at(raw, 0)? == count, C::PrivilegesCountMatch)?;
     let mut result = Vec::new();
     for i in 0..count as usize {
+        let trace = self.0.index(AdmissionIndex::Privilege, i);
+        let d = decode::Observed::new(trace);
         let at = head + i * step;
-        let luid = decode::u64_at(raw, at + offset_of!(S::LUID_AND_ATTRIBUTES, Luid))?;
-        let attributes = decode::u32_at(raw, at + offset_of!(S::LUID_AND_ATTRIBUTES, Attributes))?;
-        need(luid != 0 && !result.iter().any(|(prior, _)| *prior == luid)
-            && attributes & !(S::SE_PRIVILEGE_ENABLED | S::SE_PRIVILEGE_ENABLED_BY_DEFAULT | S::SE_PRIVILEGE_USED_FOR_ACCESS) == 0)?;
+        let luid = d.u64_at(raw, at + offset_of!(S::LUID_AND_ATTRIBUTES, Luid))?;
+        let attributes = d.u32_at(raw, at + offset_of!(S::LUID_AND_ATTRIBUTES, Attributes))?;
+        trace.need(luid != 0, C::PrivilegeLuid)?;
+        trace.need(!result.iter().any(|(prior, _)| *prior == luid), C::PrivilegeDuplicate)?;
+        trace.need(attributes & !(S::SE_PRIVILEGE_ENABLED | S::SE_PRIVILEGE_ENABLED_BY_DEFAULT | S::SE_PRIVILEGE_USED_FOR_ACCESS) == 0, C::PrivilegeFlags)?;
         result.push((luid, attributes));
     }
     Ok(result)
 }
 #[allow(clippy::too_many_arguments)]
+fn installer_facts(self, identity: TokenIdentity, token_type: u32, elevated: u32, elevation_type: u32,
+    ui_access: u32, virtualization: u32, restricted: u32, app_container: u32,
+    user: &[u8], integrity: &[u8], groups: &[u8], privileges: &[u8]) -> Result<Installer> {
+    self.0.need(token_type == S::TokenPrimary as u32, C::TokenPrimary)?;
+    self.0.need(elevated == 1, C::Elevated)?;
+    self.0.need(ui_access == 0, C::UiAccess)?;
+    self.0.need(virtualization == 0, C::Virtualization)?;
+    self.0.need(restricted == 0, C::Restricted)?;
+    self.0.need(app_container == 0, C::AppContainer)?;
+    self.0.need(user.len() <= BUFFER, C::UserBuffer)?;
+    self.0.need(integrity.len() <= BUFFER, C::IntegrityBuffer)?;
+    let u = Self(self.0.role(R::User));
+    let principal = u.pointed_sid(user, offset_of!(S::TOKEN_USER, User) + offset_of!(S::SID_AND_ATTRIBUTES, Sid), size_of::<S::TOKEN_USER>())?;
+    u.0.need(decode::Observed::new(u.0).u32_at(user, offset_of!(S::TOKEN_USER, User) + offset_of!(S::SID_AND_ATTRIBUTES, Attributes))? == 0, C::UserAttributes)?;
+    let i = Self(self.0.role(R::Integrity));
+    let label = i.pointed_sid(integrity, offset_of!(S::TOKEN_MANDATORY_LABEL, Label) + offset_of!(S::SID_AND_ATTRIBUTES, Sid), size_of::<S::TOKEN_MANDATORY_LABEL>())?;
+    i.0.need(decode::Observed::new(i.0).u32_at(integrity, offset_of!(S::TOKEN_MANDATORY_LABEL, Label) + offset_of!(S::SID_AND_ATTRIBUTES, Attributes))?
+        == (SS::SE_GROUP_INTEGRITY | SS::SE_GROUP_INTEGRITY_ENABLED) as u32, C::IntegrityAttributes)?;
+    if principal.bytes() == system() {
+        i.0.need(label.bytes() == sid(16, &[16384]), C::SystemIntegrity)?;
+        self.0.need([S::TokenElevationTypeDefault as u32, S::TokenElevationTypeFull as u32].contains(&elevation_type), C::SystemElevation)?;
+    } else {
+        let bytes = principal.bytes();
+        u.0.need(bytes.len() == 28 && bytes[1] == 5 && bytes[2..8] == [0, 0, 0, 0, 0, 5]
+            && decode::Observed::new(u.0).u32_at(bytes, 8)? == 21, C::AccountShape)?;
+        i.0.need(label.bytes() == sid(16, &[12288]), C::AccountIntegrity)?;
+        self.0.need(elevation_type == S::TokenElevationTypeFull as u32, C::AccountElevation)?;
+    }
+    Ok(Installer { identity, user: principal, integrity: label, elevation_type,
+        groups: Self(self.0.role(R::Groups)).installer_groups(groups, identity.groups)?,
+        privileges: Self(self.0.role(R::Privileges)).installer_privileges(privileges, identity.privileges)? })
+}
+
+}
+fn installer_groups(raw: &[u8], count: u32) -> Result<Vec<GroupFact>> { InstallerData(Refusal::none()).installer_groups(raw, count) }
+#[allow(clippy::too_many_arguments)]
 fn installer_facts(identity: TokenIdentity, token_type: u32, elevated: u32, elevation_type: u32,
     ui_access: u32, virtualization: u32, restricted: u32, app_container: u32,
     user: &[u8], integrity: &[u8], groups: &[u8], privileges: &[u8]) -> Result<Installer> {
-    need(token_type == S::TokenPrimary as u32 && elevated == 1 && ui_access == 0
-        && virtualization == 0 && restricted == 0 && app_container == 0
-        && user.len() <= BUFFER && integrity.len() <= BUFFER)?;
-    let principal = pointed_sid(user, offset_of!(S::TOKEN_USER, User) + offset_of!(S::SID_AND_ATTRIBUTES, Sid), size_of::<S::TOKEN_USER>())?;
-    need(decode::u32_at(user, offset_of!(S::TOKEN_USER, User) + offset_of!(S::SID_AND_ATTRIBUTES, Attributes))? == 0)?;
-    let label = pointed_sid(integrity, offset_of!(S::TOKEN_MANDATORY_LABEL, Label) + offset_of!(S::SID_AND_ATTRIBUTES, Sid), size_of::<S::TOKEN_MANDATORY_LABEL>())?;
-    need(decode::u32_at(integrity, offset_of!(S::TOKEN_MANDATORY_LABEL, Label) + offset_of!(S::SID_AND_ATTRIBUTES, Attributes))?
-        == (SS::SE_GROUP_INTEGRITY | SS::SE_GROUP_INTEGRITY_ENABLED) as u32)?;
-    if principal.bytes() == system() {
-        need(label.bytes() == sid(16, &[16384])
-            && [S::TokenElevationTypeDefault as u32, S::TokenElevationTypeFull as u32].contains(&elevation_type))?;
-    } else {
-        let bytes = principal.bytes();
-        need(bytes.len() == 28 && bytes[1] == 5 && bytes[2..8] == [0, 0, 0, 0, 0, 5]
-            && decode::u32_at(bytes, 8)? == 21 && label.bytes() == sid(16, &[12288])
-            && elevation_type == S::TokenElevationTypeFull as u32)?;
-    }
-    Ok(Installer { identity, user: principal, integrity: label, elevation_type,
-        groups: installer_groups(groups, identity.groups)?,
-        privileges: installer_privileges(privileges, identity.privileges)? })
+    InstallerData(Refusal::none()).installer_facts(identity, token_type, elevated, elevation_type, ui_access,
+        virtualization, restricted, app_container, user, integrity, groups, privileges)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -449,6 +484,7 @@ fn later_originals_closed(states: impl IntoIterator<Item = SlotState>) -> bool {
 }
 
 struct Directory {
+    role: R,
     initial: usize, control: Option<usize>, parent: Option<usize>, dos: String,
     scope: AuthorityScope, facts: Facts, entries: Option<Vec<DirectoryEntry>>, created: bool,
 }
@@ -486,6 +522,14 @@ pub struct Publication {
 unsafe impl Send for Publication {}
 
 impl Publication {
+    /// Only copied first-refusal DATA, before failure settlement changes any owner.
+    pub fn retained_admission_observation(&self) -> Option<PublicationAdmissionObservation> { self.book.admission.first.get() }
+    fn with_role<T>(&mut self, role: R, body: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        let before = self.book.admission.role.replace(role);
+        let result = body(self);
+        self.book.admission.role.set(before);
+        result
+    }
     /// Call only for the first Admit/Unknown result, before settlement can
     /// change frames. Copy no UnsafeCell/native output, handle, clock or input.
     pub fn retained_frame_observation(&self) -> PublicationFrameObservation {
@@ -538,17 +582,25 @@ impl Publication {
         self.ready()?; let key = self.key(index);
         self.book.noninherited(index)?;
         let metadata = self.book.metadata(&key)?;
-        need(metadata.identity.volume_serial != 0 && metadata.links == 1
-            && metadata.creation > 0 && metadata.write > 0 && metadata.change > 0)?;
+        let trace = self.book.admission.at(O::Metadata);
+        trace.need(metadata.identity.volume_serial != 0, C::VolumeSerial)?;
+        trace.need(metadata.links == 1, C::Links)?;
+        trace.need(metadata.creation > 0, C::CreationTime)?;
+        trace.need(metadata.write > 0, C::WriteTime)?;
+        trace.need(metadata.change > 0, C::ChangeTime)?;
         self.book.no_alternate_streams(&key)?;
         let security = self.book.security(&key, scope)?;
-        need(self.book.metadata(&key)? == metadata)?; self.tick()?;
+        let after = self.book.metadata(&key)?;
+        self.book.admission.at(O::Metadata).need(after == metadata, C::MetadataChanged)?; self.tick()?;
         Ok(Facts { metadata, security })
     }
     fn recheck_dir(&mut self, index: usize) -> Result<()> {
         let dir = self.directories.get(index).ok_or(Error::State)?;
-        let (slot, scope, before) = (dir.current(), dir.scope, dir.facts.clone());
-        need(self.checked(slot, scope)? == before)
+        let (slot, scope, before, role) = (dir.current(), dir.scope, dir.facts.clone(), dir.role);
+        self.with_role(role, |this| {
+            let after = this.checked(slot, scope)?;
+            this.book.admission.at(O::Metadata).need(after == before, C::DirectoryChanged)
+        })
     }
     fn after_child(&mut self, parent: usize) -> Result<()> {
         let dir = self.directories.get(parent).ok_or(Error::State)?;
@@ -558,47 +610,71 @@ impl Publication {
         self.directories[parent].facts = after; Ok(())
     }
     fn unique_identity(&self, metadata: &Metadata) -> Result<()> {
-        if let Some(root) = self.directories.first() { need(root.facts.metadata.identity.volume_serial == metadata.identity.volume_serial)?; }
-        need(!self.directories.iter().any(|d| d.facts.metadata.identity == metadata.identity)
-            && !self.copied.iter().any(|c| c.source_facts.metadata.identity == metadata.identity || c.destination.metadata.identity == metadata.identity))
+        let trace = self.book.admission.at(O::Identity);
+        if let Some(root) = self.directories.first() { trace.need(root.facts.metadata.identity.volume_serial == metadata.identity.volume_serial, C::VolumeChanged)?; }
+        trace.need(!self.directories.iter().any(|d| d.facts.metadata.identity == metadata.identity)
+            && !self.copied.iter().any(|c| c.source_facts.metadata.identity == metadata.identity || c.destination.metadata.identity == metadata.identity), C::IdentityAlias)
     }
     fn collect_installer(&mut self, index: usize) -> Result<Installer> {
-        self.ready()?; self.book.absent_thread_token()?;
+        self.ready()?;
+        self.book.admission.role.set(R::ThreadBefore); self.book.absent_thread_token()?;
+        self.book.admission.role.set(R::StatisticsBefore);
         let before = self.book.token(index, S::TokenStatistics)?;
-        let initial = security::statistics(before.bytes(before.count()?)?)?;
-        let mut scalar = |class| -> Result<u32> {
+        let trace = self.book.admission.at(O::TokenData);
+        let initial = security::Observed::new(trace).statistics(before.bytes_in(before.count_in(trace)?, trace)?)?;
+        let mut scalar = |class, role| -> Result<u32> {
+            self.book.admission.role.set(role);
             let value = self.book.token(index, class)?;
-            need(value.count()? == 4)?; decode::u32_at(value.bytes(4)?, 0)
+            let trace = self.book.admission.at(O::TokenData);
+            trace.need(value.count_in(trace)? == 4, C::ScalarWidth)?;
+            decode::Observed::new(trace).u32_at(value.bytes_in(4, trace)?, 0)
         };
-        let token_type = scalar(S::TokenType)?;
-        let elevated = scalar(S::TokenElevation)?;
-        let elevation_type = scalar(S::TokenElevationType)?;
-        let ui_access = scalar(S::TokenUIAccess)?;
-        let virtualization = scalar(S::TokenVirtualizationEnabled)?;
+        let token_type = scalar(S::TokenType, R::TokenType)?;
+        let elevated = scalar(S::TokenElevation, R::Elevation)?;
+        let elevation_type = scalar(S::TokenElevationType, R::ElevationType)?;
+        let ui_access = scalar(S::TokenUIAccess, R::UiAccess)?;
+        let virtualization = scalar(S::TokenVirtualizationEnabled, R::Virtualization)?;
+        self.book.admission.role.set(R::Restrictions);
         let restricted = self.scalar(index, S::TokenHasRestrictions)?;
+        self.book.admission.role.set(R::AppContainer);
         let app_container = self.scalar(index, S::TokenIsAppContainer)?;
+        self.book.admission.role.set(R::User);
         let user = self.book.token(index, S::TokenUser)?;
+        self.book.admission.role.set(R::Integrity);
         let integrity = self.book.token(index, S::TokenIntegrityLevel)?;
+        self.book.admission.role.set(R::Groups);
         let groups = self.book.token(index, S::TokenGroups)?;
+        self.book.admission.role.set(R::Privileges);
         let privileges = self.book.token(index, S::TokenPrivileges)?;
-        let facts = installer_facts(initial, token_type, elevated, elevation_type, ui_access, virtualization,
-            restricted, app_container, user.bytes(user.count()?)?, integrity.bytes(integrity.count()?)?,
-            groups.bytes(groups.count()?)?, privileges.bytes(privileges.count()?)?)?;
+        let trace = self.book.admission.at(O::InstallerPolicy).role(R::Installer);
+        let token_data = self.book.admission.at(O::TokenData);
+        let u = token_data.role(R::User); let i = token_data.role(R::Integrity);
+        let g = token_data.role(R::Groups); let p = token_data.role(R::Privileges);
+        let facts = InstallerData(trace).installer_facts(initial, token_type, elevated, elevation_type, ui_access, virtualization,
+            restricted, app_container, user.bytes_in(user.count_in(u)?, u)?, integrity.bytes_in(integrity.count_in(i)?, i)?,
+            groups.bytes_in(groups.count_in(g)?, g)?, privileges.bytes_in(privileges.count_in(p)?, p)?)?;
+        self.book.admission.role.set(R::StatisticsAfter);
         let after = self.book.token(index, S::TokenStatistics)?;
-        need(security::statistics(after.bytes(after.count()?)?)? == initial)?;
-        self.book.absent_thread_token()?; self.tick()?; Ok(facts)
+        let trace = self.book.admission.at(O::TokenData);
+        trace.need(security::Observed::new(trace).statistics(after.bytes_in(after.count_in(trace)?, trace)?)? == initial, C::StatisticsChanged)?;
+        self.book.admission.role.set(R::ThreadAfter); self.book.absent_thread_token()?;
+        self.tick()?; Ok(facts)
     }
     fn open_process_token(&mut self) -> Result<usize> {
+        self.book.admission.role.set(R::Primary);
         let key = self.book.reserve(Kind::ProcessToken, None, "", String::new())?;
         let result = self.book.call(Call::ProcessToken(key.index), null_mut(), Vec::new())?;
-        need(matches!(result.arena.returned()?, Returned::Boolean(v, 0) if v != 0))?;
+        self.book.admission.at(O::TokenOpen).need(matches!(result.arena.returned()?, Returned::Boolean(v, 0) if v != 0), C::PrimaryOpen)?;
         self.book.noninherited(key.index)?; Ok(key.index)
     }
     fn admit_installer(&mut self) -> Result<()> {
-        need(self.installer.is_none() && self.book.user.is_none() && self.book.process_token.is_none())?;
+        self.book.admission.role.set(R::Installer);
+        self.book.admission.at(O::Owner).need(self.installer.is_none() && self.book.user.is_none() && self.book.process_token.is_none(), C::InstallerFresh)?;
         let arch = self.book.call(Call::Architecture, null_mut(), Vec::new())?;
-        need(decode::u16_at(arch.bytes(4)?, 0)? == SI::IMAGE_FILE_MACHINE_UNKNOWN
-            && decode::u16_at(arch.bytes(4)?, 2)? == SI::IMAGE_FILE_MACHINE_AMD64)?;
+        let trace = self.book.admission.at(O::Architecture);
+        let d = decode::Observed::new(trace);
+        trace.need(d.u16_at(arch.bytes_in(4, trace)?, 0)? == SI::IMAGE_FILE_MACHINE_UNKNOWN, C::ArchitectureProcess)?;
+        trace.need(d.u16_at(arch.bytes_in(4, trace)?, 2)? == SI::IMAGE_FILE_MACHINE_AMD64, C::ArchitectureNative)?;
         let index = self.open_process_token()?;
         self.book.process_token = Some(index);
         self.installer = Some(self.collect_installer(index)?); Ok(())
@@ -645,7 +721,8 @@ impl Publication {
     }
     fn mutate(&mut self, effect: Effect, slot: Option<usize>, dos: &str, raw: &[u8], data: Vec<u8>) -> Result<MutationComplete> {
         self.ready()?;
-        need(data.len() <= BUFFER && raw.len() <= BUFFER)?;
+        self.book.admission.at(O::MutationInput).need(data.len() <= BUFFER, C::MutationData)?;
+        self.book.admission.at(O::MutationInput).need(raw.len() <= BUFFER, C::MutationDescriptor)?;
         let acquiring = matches!(effect, Effect::Writer | Effect::Control(_));
         let handle = if acquiring || matches!(effect, Effect::Directory(_)) { null_mut() }
             else { self.book.handle(slot.ok_or(Error::State)?)? };
@@ -728,52 +805,60 @@ impl Publication {
         outcome?; self.tick()?; Ok(complete)
     }
     fn scalar(&mut self, index: usize, class: S::TOKEN_INFORMATION_CLASS) -> Result<u32> {
-        need([S::TokenHasRestrictions, S::TokenIsAppContainer].contains(&class))?;
+        self.book.admission.at(O::Scalar).need([S::TokenHasRestrictions, S::TokenIsAppContainer].contains(&class), C::ScalarCompletion)?;
         let complete = self.mutate(Effect::Scalar(class), Some(index), "", &[], Vec::new())?;
-        scalar_value(complete.scalar()?)
+        let trace = self.book.admission.at(O::Scalar);
+        trace.result(scalar_value(trace.result(complete.scalar(), C::ScalarCompletion)?), C::ScalarCanonical)
     }
 
-    fn add_directory(&mut self, slot: usize, parent: Option<usize>, dos: String, scope: AuthorityScope, created: bool) -> Result<usize> {
-        let facts = self.checked(slot, scope)?; self.unique_identity(&facts.metadata)?;
+    fn add_directory(&mut self, slot: usize, parent: Option<usize>, dos: String, scope: AuthorityScope, created: bool, role: R) -> Result<usize> {
+        self.with_role(role, |this| {
+        let facts = this.checked(slot, scope)?; this.unique_identity(&facts.metadata)?;
         if created { exact_security(&facts.security, FileKind::Directory, false, false)?; }
-        let index = self.directories.len();
-        self.directories.push(Directory { initial: slot, control: None, parent, dos, scope, facts, entries: None, created });
+        let index = this.directories.len();
+        this.directories.push(Directory { role, initial: slot, control: None, parent, dos, scope, facts, entries: None, created });
         Ok(index)
+        })
     }
     fn entries(&mut self, index: usize, selected: Option<&str>) -> Result<Vec<DirectoryEntry>> {
-        if let Some(entries) = &self.directories.get(index).ok_or(Error::State)?.entries { return Ok(entries.clone()); }
-        self.recheck_dir(index)?;
-        let slot = self.directories[index].current(); let key = self.key(slot);
+        let role = self.directories.get(index).ok_or(Error::State)?.role;
+        self.with_role(role, |this| {
+        if let Some(entries) = &this.directories.get(index).ok_or(Error::State)?.entries { return Ok(entries.clone()); }
+        this.recheck_dir(index)?;
+        let slot = this.directories[index].current(); let key = this.key(slot);
         let mut entries = Vec::new();
         loop {
-            self.ready()?;
-            let batch = match selected { Some(name) => self.book.next_ancestor_entries(&key, name)?, None => self.book.next_entries(&key)? };
-            self.tick()?;
+            this.ready()?;
+            let batch = match selected { Some(name) => this.book.next_ancestor_entries(&key, name)?, None => this.book.next_entries(&key)? };
+            this.tick()?;
             match batch { Some(batch) => entries.extend(batch), None => break }
         }
-        let own = &self.directories[index].facts.metadata;
-        let parent = self.directories[index].parent.map(|i| &self.directories[i].facts.metadata);
-        check_entry_frame(&entries, own, parent)?;
-        self.recheck_dir(index)?;
-        self.directories[index].entries = Some(entries.clone()); Ok(entries)
+        let own = &this.directories[index].facts.metadata;
+        let parent = this.directories[index].parent.map(|i| &this.directories[i].facts.metadata);
+        check_entry_frame_in(&entries, own, parent, this.book.admission.at(O::Directory))?;
+        this.recheck_dir(index)?;
+        this.directories[index].entries = Some(entries.clone()); Ok(entries)
+        })
     }
     fn selected(&mut self, parent: usize, name: &str) -> Result<Option<DirectoryEntry>> {
         let entries = self.entries(parent, Some(name))?;
-        selected_entry(&entries, name)
+        selected_entry_in(&entries, name, self.book.admission.at(O::Directory))
     }
     fn child_path(&self, parent: usize, name: &str) -> Result<String> {
-        need(decode::component(name))?;
+        self.book.admission.at(O::Directory).need(decode::component(name), C::Component)?;
         let path = &self.directories.get(parent).ok_or(Error::State)?.dos;
         Ok(format!("{}{}{}", path, if path.ends_with('\\') { "" } else { "\\" }, name))
     }
-    fn existing_dir(&mut self, parent: usize, name: &str, scope: AuthorityScope) -> Result<usize> {
-        let entry = self.selected(parent, name)?.ok_or(Error::Unavailable)?;
-        need(entry.kind == FileKind::Directory)?; self.recheck_dir(parent)?;
-        let parent_key = self.key(self.directories[parent].current());
-        let key = self.book.open_child(&parent_key, name, FileKind::Directory)?;
-        let path = self.child_path(parent, name)?;
-        let index = self.add_directory(key.index, Some(parent), path, scope, false)?;
-        match_entry(&entry, &self.directories[index].facts.metadata)?; self.recheck_dir(parent)?; Ok(index)
+    fn existing_dir(&mut self, parent: usize, name: &str, scope: AuthorityScope, role: R) -> Result<usize> {
+        self.with_role(role, |this| {
+        let entry = this.selected(parent, name)?.ok_or(Error::Unavailable)?;
+        this.book.admission.at(O::Directory).need(entry.kind == FileKind::Directory, C::DirectoryKind)?; this.recheck_dir(parent)?;
+        let parent_key = this.key(this.directories[parent].current());
+        let key = this.book.open_child(&parent_key, name, FileKind::Directory)?;
+        let path = this.child_path(parent, name)?;
+        let index = this.add_directory(key.index, Some(parent), path, scope, false, role)?;
+        match_entry_in(&entry, &this.directories[index].facts.metadata, this.book.admission.at(O::Directory))?; this.recheck_dir(parent)?; Ok(index)
+        })
     }
     fn new_dir(&mut self, parent: usize, name: &str) -> Result<usize> {
         self.recheck_installer()?; self.recheck_location()?; self.recheck_dir(parent)?;
@@ -789,23 +874,25 @@ impl Publication {
             && self.creations[intent].returned.is_some_and(|(ok, error)| ok != 0 && error == 0))?;
         let parent_key = self.key(self.directories[parent].current());
         let original = self.book.open_child(&parent_key, name, FileKind::Directory)?;
-        let index = self.add_directory(original.index, Some(parent), path, AuthorityScope::ImmutableVersion, true)?;
+        let index = self.add_directory(original.index, Some(parent), path, AuthorityScope::ImmutableVersion, true, R::Owner)?;
         self.after_child(parent)?; self.output_dirs.push(index); Ok(index)
     }
     fn shared_dir(&mut self, parent: usize, name: &str) -> Result<usize> {
-        if self.selected(parent, name)?.is_some() { self.existing_dir(parent, name, AuthorityScope::AncestorOutsideVersion) }
+        if self.selected(parent, name)?.is_some() { self.existing_dir(parent, name, AuthorityScope::AncestorOutsideVersion, R::Owner) }
         else { self.new_dir(parent, name) } // collision during creation is terminal, never adoption
     }
     fn open_source(&mut self, index: usize) -> Result<(usize, Facts)> {
-        let (parent, name) = self.payload_parent(index, true)?;
-        let entries = self.directories[parent].entries.as_ref().ok_or(Error::State)?;
-        let entry = selected_entry(entries, name)?.ok_or(Error::Unsafe)?;
-        need(entry.kind == FileKind::File)?; self.recheck_dir(parent)?;
-        let parent_key = self.key(self.directories[parent].current());
-        let key = self.book.open_child(&parent_key, name, FileKind::File)?;
-        let facts = self.checked(key.index, AuthorityScope::ImmutableVersion)?;
-        match_entry(&entry, &facts.metadata)?; self.unique_identity(&facts.metadata)?;
-        self.recheck_dir(parent)?; Ok((key.index, facts))
+        self.with_role(if index == MANIFEST { R::Manifest } else { R::Owner }, |this| {
+        let (parent, name) = this.payload_parent(index, true)?;
+        let entries = this.directories[parent].entries.as_ref().ok_or(Error::State)?;
+        let entry = selected_entry_in(entries, name, this.book.admission.at(O::Directory))?.ok_or_else(|| this.book.admission.at(O::Directory).unsafe_at(C::SourceEntry))?;
+        this.book.admission.at(O::Directory).need(entry.kind == FileKind::File, C::SourceKind)?; this.recheck_dir(parent)?;
+        let parent_key = this.key(this.directories[parent].current());
+        let key = this.book.open_child(&parent_key, name, FileKind::File)?;
+        let facts = this.checked(key.index, AuthorityScope::ImmutableVersion)?;
+        match_entry_in(&entry, &facts.metadata, this.book.admission.at(O::Directory))?; this.unique_identity(&facts.metadata)?;
+        this.recheck_dir(parent)?; Ok((key.index, facts))
+        })
     }
     fn payload_parent(&self, index: usize, source: bool) -> Result<(usize, &'static str)> {
         let path = *PUBLICATION_PAYLOADS.get(index).ok_or(Error::State)?;
@@ -818,50 +905,70 @@ impl Publication {
     /// Read the ONE bounded original manifest to genuine EOF. Caller must decode
     /// these same cached bytes against compiled D/Q before create_once.
     pub fn admit_once(&mut self) -> Result<Vec<u8>> {
-        self.step(|this| {
-            this.order.live(Stage::Fresh)?; this.admit_installer()?;
+        // Diagnostic-only scope. Never reset a first refusal, including reentry.
+        self.book.admission.active.set(true); self.book.admission.role.set(R::Owner);
+        let result = self.step(|this| {
+            this.book.admission.at(O::Owner).result(this.order.live(Stage::Fresh), C::OrderFresh)?;
+            this.admit_installer()?;
+            this.book.admission.role.set(R::ProgramFiles);
             let location = this.book.location(LocationKind::ProgramFiles)?;
-            need(Arc::ptr_eq(&this.book.identity, &location.book) && this.book.user.is_none() && !this.book.roots_started)?;
-            need(this.book.mapping(&location.drive)? == location.device)?;
+            let trace = this.book.admission.at(O::Location);
+            trace.need(Arc::ptr_eq(&this.book.identity, &location.book), C::LocationOwner)?;
+            trace.need(this.book.user.is_none(), C::LocationOrdinaryUser)?;
+            trace.need(!this.book.roots_started, C::LocationStarted)?;
+            {
+                let mapped = this.book.mapping(&location.drive)?;
+                this.book.admission.at(O::Mapping).need(mapped == location.device, C::MappingChanged)?;
+            }
             let name = format!("{}\\", location.device);
             let key = this.book.reserve(Kind::Directory, None, &name, name.clone())?;
+            this.book.admission.role.set(R::Volume);
             this.book.call(Call::Open(key.index), null_mut(), Vec::new())?;
             this.book.noninherited(key.index)?; this.book.local_ntfs(&key)?;
             let components = location.components.clone();
             let root_dos = format!("{}\\", location.drive);
             this.location = Some(location); this.book.roots_started = true;
-            let mut parent = this.add_directory(key.index, None, root_dos, AuthorityScope::AncestorOutsideVersion, false)?;
-            for component in components { parent = this.existing_dir(parent, &component, AuthorityScope::AncestorOutsideVersion)?; }
-            this.recheck_location()?;
-            let mrk = this.existing_dir(parent, "Mobile Release Kit", AuthorityScope::AncestorOutsideVersion)?;
+            let mut parent = this.add_directory(key.index, None, root_dos, AuthorityScope::AncestorOutsideVersion, false, R::Volume)?;
+            for component in components { parent = this.existing_dir(parent, &component, AuthorityScope::AncestorOutsideVersion, R::ProgramFiles)?; }
+            this.book.admission.role.set(R::ProgramFiles); this.recheck_location()?;
+            let mrk = this.existing_dir(parent, "Mobile Release Kit", AuthorityScope::AncestorOutsideVersion, R::Mrk)?;
             this.mrk = Some(mrk);
-            let input = this.existing_dir(mrk, "runtime-input", AuthorityScope::AncestorOutsideVersion)?;
-            let target = this.existing_dir(input, TARGET, AuthorityScope::AncestorOutsideVersion)?;
+            let input = this.existing_dir(mrk, "runtime-input", AuthorityScope::AncestorOutsideVersion, R::RuntimeInput)?;
+            let target = this.existing_dir(input, TARGET, AuthorityScope::AncestorOutsideVersion, R::Target)?;
             let digest = this.digest.clone();
-            let root = this.existing_dir(target, &digest, AuthorityScope::ImmutableVersion)?;
+            let root = this.existing_dir(target, &digest, AuthorityScope::ImmutableVersion, R::Version)?;
             this.source_root = Some(root);
             // Strict root/python cursors are each bound exactly once, through EOF.
             let root_entries = this.entries(root, None)?;
-            exact_names(&root_entries, false)?;
-            let python = this.existing_dir(root, "python", AuthorityScope::ImmutableVersion)?;
+            exact_names_in(&root_entries, false, this.book.admission.at(O::Inventory).role(R::Version))?;
+            let python = this.existing_dir(root, "python", AuthorityScope::ImmutableVersion, R::Python)?;
             this.source_python = Some(python);
-            exact_names(&this.entries(python, None)?, true)?;
+            {
+                let python_entries = this.entries(python, None)?;
+                exact_names_in(&python_entries, true, this.book.admission.at(O::Inventory).role(R::Python))?;
+            }
             this.source_dirs = vec![input, target, root, python];
             let (manifest, facts) = this.open_source(MANIFEST)?;
-            need(facts.metadata.size > 0 && facts.metadata.size <= MANIFEST_LIMIT as u64)?;
+            this.book.admission.role.set(R::Manifest);
+            this.book.admission.at(O::Read).need(facts.metadata.size > 0 && facts.metadata.size <= MANIFEST_LIMIT as u64, C::ManifestSize)?;
             this.manifest_original = Some(manifest); this.manifest_facts = Some(facts.clone());
             loop {
                 this.ready()?;
                 let chunk = this.book.read_next(&this.key(manifest), BUFFER)?; this.tick()?;
                 if chunk.is_empty() { break; }
                 let size = this.manifest.len().checked_add(chunk.len()).ok_or(Error::Bounds)?;
-                need(size <= MANIFEST_LIMIT && size as u64 <= facts.metadata.size)?;
+                this.book.admission.at(O::Read).need(size <= MANIFEST_LIMIT, C::ManifestLimit)?;
+                this.book.admission.at(O::Read).need(size as u64 <= facts.metadata.size, C::ManifestReportedSize)?;
                 this.manifest.extend(chunk);
             }
-            need(this.manifest.len() as u64 == facts.metadata.size
-                && this.checked(manifest, AuthorityScope::ImmutableVersion)? == facts)?;
+            // Keep original short-circuit: no final native query after size refusal.
+            this.book.admission.at(O::FinalManifest).need(this.manifest.len() as u64 == facts.metadata.size, C::ManifestFinalSize)?;
+            let after = this.checked(manifest, AuthorityScope::ImmutableVersion)?;
+            this.book.admission.at(O::FinalManifest).need(after == facts, C::ManifestFinalFacts)?;
             this.order.stage = Stage::Manifest; Ok(this.manifest.clone())
-        })
+        });
+        self.book.admission.active.set(false);
+        result
     }
     /// The safe app has authenticated D/Q, all37 suppliers and this exact roster.
     /// Sizes count BOTH source and readback under the original aggregate budget.
@@ -1208,35 +1315,51 @@ unsafe fn invoke_mutation(frame: &Mutation) -> Returned {
     }
 }
 fn check_entry_frame(entries: &[DirectoryEntry], own: &Metadata, parent: Option<&Metadata>) -> Result<()> {
+    check_entry_frame_in(entries, own, parent, Refusal::none())
+}
+fn check_entry_frame_in(entries: &[DirectoryEntry], own: &Metadata, parent: Option<&Metadata>, trace: Refusal<'_>) -> Result<()> {
     let mut seen = BTreeSet::new();
-    for entry in entries {
-        need(seen.insert(entry.name.to_ascii_lowercase()))?;
+    for (index, entry) in entries.iter().enumerate() {
+        let row = trace.index(AdmissionIndex::Directory, index);
+        row.need(seen.insert(entry.name.to_ascii_lowercase()), C::EntryDuplicate)?;
         if entry.name == "." || entry.name == ".." {
-            need(entry.kind == FileKind::Directory)?;
+            row.need(entry.kind == FileKind::Directory, C::DotKind)?;
             let bound = if entry.name == "." { Some(own) } else { parent };
-            if let Some(bound) = bound { need(entry.file_id == bound.identity.file_id)?; }
+            if let Some(bound) = bound { row.need(entry.file_id == bound.identity.file_id, C::DotIdentity)?; }
         }
     }
     Ok(())
 }
 fn selected_entry(entries: &[DirectoryEntry], name: &str) -> Result<Option<DirectoryEntry>> {
+    selected_entry_in(entries, name, Refusal::none())
+}
+fn selected_entry_in(entries: &[DirectoryEntry], name: &str, trace: Refusal<'_>) -> Result<Option<DirectoryEntry>> {
     let mut selected = None;
-    for entry in entries.iter().filter(|entry| entry.name.eq_ignore_ascii_case(name)) {
-        need(entry.name == name && selected.is_none())?; selected = Some(entry.clone());
+    for (index, entry) in entries.iter().enumerate().filter(|(_, entry)| entry.name.eq_ignore_ascii_case(name)) {
+        let row = trace.index(AdmissionIndex::Directory, index);
+        row.need(entry.name == name, C::SelectedCase)?;
+        row.need(selected.is_none(), C::SelectedDuplicate)?;
+        selected = Some(entry.clone());
     }
     Ok(selected)
 }
-fn match_entry(entry: &DirectoryEntry, metadata: &Metadata) -> Result<()> {
-    need(entry.kind == metadata.kind && entry.file_id == metadata.identity.file_id && entry.attributes == metadata.attributes)
+fn match_entry(entry: &DirectoryEntry, metadata: &Metadata) -> Result<()> { match_entry_in(entry, metadata, Refusal::none()) }
+fn match_entry_in(entry: &DirectoryEntry, metadata: &Metadata, trace: Refusal<'_>) -> Result<()> {
+    trace.need(entry.kind == metadata.kind, C::EntryKind)?;
+    trace.need(entry.file_id == metadata.identity.file_id, C::EntryIdentity)?;
+    trace.need(entry.attributes == metadata.attributes, C::EntryAttributes)
 }
-fn exact_names(entries: &[DirectoryEntry], python: bool) -> Result<()> {
+fn exact_names(entries: &[DirectoryEntry], python: bool) -> Result<()> { exact_names_in(entries, python, Refusal::none()) }
+fn exact_names_in(entries: &[DirectoryEntry], python: bool, trace: Refusal<'_>) -> Result<()> {
     let mut expected: BTreeSet<String> = PUBLICATION_PAYLOADS.iter().filter(|p| p.starts_with("python/") == python)
         .map(|p| p.strip_prefix("python/").unwrap_or(p).to_string()).collect();
     if !python { expected.insert("python".to_owned()); }
-    for entry in entries.iter().filter(|e| e.name != "." && e.name != "..") {
-        need(expected.remove(&entry.name) && entry.kind == if !python && entry.name == "python" { FileKind::Directory } else { FileKind::File })?;
+    for (index, entry) in entries.iter().enumerate().filter(|(_, e)| e.name != "." && e.name != "..") {
+        let row = trace.index(AdmissionIndex::Directory, index);
+        row.need(expected.remove(&entry.name), C::RosterName)?;
+        row.need(entry.kind == if !python && entry.name == "python" { FileKind::Directory } else { FileKind::File }, C::RosterKind)?;
     }
-    need(expected.is_empty())
+    trace.need(expected.is_empty(), C::RosterMissing)
 }
 fn exact_entries(entries: &[DirectoryEntry], expected: &BTreeMap<String, Metadata>) -> Result<()> {
     let mut seen = BTreeSet::new();
@@ -1261,6 +1384,7 @@ mod tests {
     }
     #[test]
     fn installer_admission_is_positive_bounded_and_not_ordinary_refusal() -> Result<()> {
+        use crate::tests::{admission_trace, admission_fault};
         let identity = TokenIdentity { token_id: 1, authentication_id: 2, modified_id: 3, groups: 1, privileges: 0 };
         let group_head = offset_of!(S::TOKEN_GROUPS, Groups);
         let group_attributes = group_head + offset_of!(S::SID_AND_ATTRIBUTES, Attributes);
@@ -1279,22 +1403,76 @@ mod tests {
                 offset_of!(S::TOKEN_MANDATORY_LABEL, Label) + offset_of!(S::SID_AND_ATTRIBUTES, Attributes),
                 (SS::SE_GROUP_INTEGRITY | SS::SE_GROUP_INTEGRITY_ENABLED) as u32);
             let elevation_type = (if local_system { S::TokenElevationTypeDefault } else { S::TokenElevationTypeFull }) as u32;
-            need(installer_facts(identity, S::TokenPrimary as u32, 1, elevation_type, 0, 0, 0, 0,
-                &user, &integrity, &groups, &privileges).is_ok())?;
-            for (kind, elevated, elevation, ui, virtualized, restricted, app) in [
-                (S::TokenImpersonation as u32, 1, elevation_type, 0, 0, 0, 0),
-                (S::TokenPrimary as u32, 0, elevation_type, 0, 0, 0, 0),
-                (S::TokenPrimary as u32, 1, S::TokenElevationTypeLimited as u32, 0, 0, 0, 0),
-                (S::TokenPrimary as u32, 1, elevation_type, 1, 0, 0, 0),
-                (S::TokenPrimary as u32, 1, elevation_type, 0, 1, 0, 0),
-                (S::TokenPrimary as u32, 1, elevation_type, 0, 0, 1, 0),
-                (S::TokenPrimary as u32, 1, elevation_type, 0, 0, 0x100, 0),
-                (S::TokenPrimary as u32, 1, elevation_type, 0, 0, 0x01000000, 0),
-                (S::TokenPrimary as u32, 1, elevation_type, 0, 0, 0, 1),
+            let trace = admission_trace(R::Installer);
+            let plain = installer_facts(identity, S::TokenPrimary as u32, 1, elevation_type, 0, 0, 0, 0,
+                &user, &integrity, &groups, &privileges);
+            assert_eq!(InstallerData(trace.at(O::InstallerPolicy)).installer_facts(identity, S::TokenPrimary as u32,
+                1, elevation_type, 0, 0, 0, 0, &user, &integrity, &groups, &privileges), plain);
+            assert!(plain.is_ok() && trace.first.get().is_none());
+            assert_eq!(security::token_facts(identity, S::TokenPrimary as u32, 1, elevation_type, 0, 0,
+                &user, &integrity, &groups, &privileges, &[1, 2, 3, 4, 5]), Err(Error::Unsafe));
+            for (kind, elevated, elevation, ui, virtualized, restricted, app, check) in [
+                (S::TokenImpersonation as u32, 1, elevation_type, 0, 0, 0, 0, C::TokenPrimary),
+                (S::TokenPrimary as u32, 0, elevation_type, 0, 0, 0, 0, C::Elevated),
+                (S::TokenPrimary as u32, 1, S::TokenElevationTypeLimited as u32, 0, 0, 0, 0,
+                    if local_system { C::SystemElevation } else { C::AccountElevation }),
+                (S::TokenPrimary as u32, 1, elevation_type, 1, 0, 0, 0, C::UiAccess),
+                (S::TokenPrimary as u32, 1, elevation_type, 0, 1, 0, 0, C::Virtualization),
+                (S::TokenPrimary as u32, 1, elevation_type, 0, 0, 1, 0, C::Restricted),
+                (S::TokenPrimary as u32, 1, elevation_type, 0, 0, 0x100, 0, C::Restricted),
+                (S::TokenPrimary as u32, 1, elevation_type, 0, 0, 0x01000000, 0, C::Restricted),
+                (S::TokenPrimary as u32, 1, elevation_type, 0, 0, 0, 1, C::AppContainer),
             ] {
-                need(installer_facts(identity, kind, elevated, elevation, ui, virtualized, restricted, app,
-                    &user, &integrity, &groups, &privileges).is_err())?;
+                let trace = admission_trace(R::Installer);
+                let observed = InstallerData(trace.at(O::InstallerPolicy)).installer_facts(identity, kind, elevated, elevation,
+                    ui, virtualized, restricted, app, &user, &integrity, &groups, &privileges);
+                assert_eq!(observed, installer_facts(identity, kind, elevated, elevation, ui, virtualized, restricted, app,
+                    &user, &integrity, &groups, &privileges));
+                assert_eq!(observed, Err(Error::Unsafe));
+                admission_fault(&trace, R::Installer, O::InstallerPolicy, check, None);
             }
+        }
+        for (flags, check, index) in [(0x08000000, C::GroupFlags, Some(0)),
+            ((SS::SE_GROUP_USE_FOR_DENY_ONLY | SS::SE_GROUP_ENABLED) as u32, C::GroupDenyEnabled, Some(0)),
+            (0, C::AdminOwner, None)] {
+            groups[group_attributes..group_attributes + 4].copy_from_slice(&flags.to_le_bytes());
+            let trace = admission_trace(R::Groups);
+            assert_eq!(InstallerData(trace.at(O::InstallerPolicy)).installer_groups(&groups, 1), installer_groups(&groups, 1));
+            admission_fault(&trace, R::Groups, O::InstallerPolicy, check, index);
+        }
+        let group_pointer = group_head + offset_of!(S::SID_AND_ATTRIBUTES, Sid);
+        let extent = group_head + size_of::<S::SID_AND_ATTRIBUTES>();
+        for (pointer, check) in [(0, C::PointerOffset), (groups.as_ptr() as usize, C::PointerMinimum),
+            (groups.as_ptr() as usize + extent + 1, C::PointerAlignment)] {
+            groups[group_pointer..group_pointer + 8].copy_from_slice(&(pointer as u64).to_le_bytes());
+            let trace = admission_trace(R::Groups);
+            assert_eq!(InstallerData(trace.at(O::InstallerPolicy)).installer_groups(&groups, 1), installer_groups(&groups, 1));
+            admission_fault(&trace, R::Groups, O::InstallerPolicy, check, Some(0));
+        }
+        let pointer = groups.as_ptr() as usize + extent;
+        groups[group_pointer..group_pointer + 8].copy_from_slice(&(pointer as u64).to_le_bytes());
+        let extent = group_head + 2 * size_of::<S::SID_AND_ATTRIBUTES>();
+        let mut duplicate = token_buffer(&admins(), extent, group_pointer, group_attributes,
+            (SS::SE_GROUP_ENABLED | SS::SE_GROUP_OWNER) as u32);
+        duplicate[..4].copy_from_slice(&2u32.to_le_bytes());
+        let second = group_head + size_of::<S::SID_AND_ATTRIBUTES>() + offset_of!(S::SID_AND_ATTRIBUTES, Sid);
+        let pointer = duplicate.as_ptr() as usize + extent;
+        duplicate[second..second + 8].copy_from_slice(&(pointer as u64).to_le_bytes());
+        let trace = admission_trace(R::Groups);
+        assert_eq!(InstallerData(trace.at(O::InstallerPolicy)).installer_groups(&duplicate, 2), installer_groups(&duplicate, 2));
+        admission_fault(&trace, R::Groups, O::InstallerPolicy, C::GroupDuplicate, Some(1));
+        let head = offset_of!(S::TOKEN_PRIVILEGES, Privileges); let step = size_of::<S::LUID_AND_ATTRIBUTES>();
+        for (luid, flags, check) in [(0u64, 0u32, C::PrivilegeLuid), (1, 0x08000000, C::PrivilegeDuplicate),
+            (2, 0x08000000, C::PrivilegeFlags)] {
+            let mut raw = vec![0u8; head + 2 * step]; raw[..4].copy_from_slice(&2u32.to_le_bytes());
+            raw[head..head + 8].copy_from_slice(&1u64.to_le_bytes());
+            raw[head + step..head + step + 8].copy_from_slice(&luid.to_le_bytes());
+            let at = head + step + offset_of!(S::LUID_AND_ATTRIBUTES, Attributes);
+            raw[at..at + 4].copy_from_slice(&flags.to_le_bytes());
+            let trace = admission_trace(R::Privileges);
+            assert_eq!(InstallerData(trace.at(O::InstallerPolicy)).installer_privileges(&raw, 2),
+                InstallerData(Refusal::none()).installer_privileges(&raw, 2));
+            admission_fault(&trace, R::Privileges, O::InstallerPolicy, check, Some(1));
         }
         groups[group_attributes..group_attributes + 4].copy_from_slice(&(SS::SE_GROUP_USE_FOR_DENY_ONLY as u32).to_le_bytes());
         need(installer_groups(&groups, 1).is_err())?;
@@ -1304,6 +1482,31 @@ mod tests {
 
     #[test]
     fn fixed_roster_and_production_masks() -> Result<()> {
+        {
+            use crate::tests::{admission_trace, admission_fault};
+            let own = metadata(FileKind::Directory);
+            let file = DirectoryEntry { name: "manifest.json".to_owned(), file_id: [1; 16], kind: FileKind::File, attributes: FS::FILE_ATTRIBUTE_ARCHIVE };
+            let alias = DirectoryEntry { name: "Manifest.json".to_owned(), ..file.clone() };
+            let trace = admission_trace(R::Manifest);
+            assert_eq!(selected_entry_in(&[alias.clone()], &file.name, trace.at(O::Directory)), selected_entry(&[alias], &file.name));
+            admission_fault(&trace, R::Manifest, O::Directory, C::SelectedCase, Some(0));
+            let trace = admission_trace(R::Version);
+            let duplicate = [file.clone(), file.clone()];
+            assert_eq!(check_entry_frame_in(&duplicate, &own, None, trace.at(O::Directory)), check_entry_frame(&duplicate, &own, None));
+            admission_fault(&trace, R::Version, O::Directory, C::EntryDuplicate, Some(1));
+            let trace = admission_trace(R::Manifest);
+            assert_eq!(selected_entry_in(&duplicate, &file.name, trace.at(O::Directory)), selected_entry(&duplicate, &file.name));
+            admission_fault(&trace, R::Manifest, O::Directory, C::SelectedDuplicate, Some(1));
+            let trace = admission_trace(R::Manifest);
+            assert_eq!(match_entry_in(&file, &own, trace.at(O::Directory)), match_entry(&file, &own));
+            admission_fault(&trace, R::Manifest, O::Directory, C::EntryKind, None);
+            let trace = admission_trace(R::Python);
+            assert_eq!(exact_names_in(&[file.clone()], true, trace.at(O::Inventory)), exact_names(&[file], true));
+            admission_fault(&trace, R::Python, O::Inventory, C::RosterName, Some(0));
+            let trace = admission_trace(R::Version);
+            assert_eq!(exact_names_in(&[], false, trace.at(O::Inventory)), exact_names(&[], false));
+            admission_fault(&trace, R::Version, O::Inventory, C::RosterMissing, None);
+        }
         need(PUBLICATION_PAYLOADS.len() == 47 && PUBLICATION_PAYLOADS[MANIFEST] == "manifest.json")?;
         need(PUBLICATION_PAYLOADS.windows(2).all(|p| p[0] < p[1]))?;
         need(PUBLICATION_PAYLOADS.iter().filter(|p| p.starts_with("python/")).count() == 38)?;
@@ -1468,6 +1671,8 @@ mod tests {
                     (1, [1, 0, 0, 0]), (1, [0xff, 0, 0, 0]),
                     (4, [0, 1, 0, 0]), (4, [0, 0, 0, 1])] {
                     let mut fixture = Publication::new(&"d".repeat(64))?;
+                    fixture.book.admission.active.set(true);
+                    fixture.book.admission.role.set(if matches!(effect, Effect::Scalar(S::TokenHasRestrictions)) { R::Restrictions } else { R::AppContainer });
                     fixture.mutation = Some(mutation(effect, Phase::Returned, Some(Returned::Boolean(1, 0))));
                     let frame = fixture.mutation.as_ref().ok_or(Error::State)?.as_ref().get_ref();
                     let mut expected = scalar_initial(effect).to_ne_bytes();
@@ -1485,13 +1690,18 @@ mod tests {
                     if allowed {
                         let complete = fixture.finish_mutation()?;
                         assert_eq!(complete.frame.length_observation.get(), ObservedScalarLength::from_count(count));
-                        let value = complete.scalar()?; // the production one-read consumer
+                        let trace = fixture.book.admission.at(O::Scalar);
+                        let value = trace.result(complete.scalar(), C::ScalarCompletion)?; // the production one-read consumer
                         assert_eq!(value, u32::from_ne_bytes(expected));
-                        assert_eq!(scalar_value(value), if value <= 1 { Ok(value) } else { Err(Error::Unsafe) });
+                        assert_eq!(trace.result(scalar_value(value), C::ScalarCanonical), if value <= 1 { Ok(value) } else { Err(Error::Unsafe) });
+                        if value > 1 {
+                            crate::tests::admission_fault(&fixture.book.admission, fixture.book.admission.role.get(), O::Scalar, C::ScalarCanonical, None);
+                        } else { assert!(fixture.retained_admission_observation().is_none()); }
                         assert_eq!(scalar_value(value).is_ok_and(|v| v == 0), expected == [0; 4]);
                         assert!(fixture.mutation.is_none() && !fixture.book.is_unknown());
                     } else {
                         assert_eq!(fixture.finish_mutation().err(), Some(Error::Unknown));
+                        assert!(fixture.retained_admission_observation().is_none());
                         assert!(fixture.book.is_unknown() && fixture.mutation.is_some());
                         assert_eq!(fixture.retained_frame_observation().mcount, ObservedScalarLength::from_count(count));
                         // No scalar consumer exists on the failed completion.
@@ -1577,7 +1787,7 @@ mod tests {
         let facts = Facts { metadata: metadata(FileKind::Directory),
             security: security::descriptor(&raw, FileKind::Directory, AuthorityScope::AncestorOutsideVersion)? };
         for (i, dos) in paths.into_iter().enumerate() {
-            owner.directories.push(Directory { initial: i, control: None, parent: i.checked_sub(1), dos,
+            owner.directories.push(Directory { role: R::Owner, initial: i, control: None, parent: i.checked_sub(1), dos,
                 scope: AuthorityScope::AncestorOutsideVersion, facts: facts.clone(), entries: None, created: false });
         }
         let path = owner.child_path(2, &owner.digest)?;
@@ -1635,6 +1845,10 @@ mod tests {
     #[test]
     fn original_unknown_retains_mutation_storage_without_close_retry() -> Result<()> {
         let mut owner = Publication::new(&"a".repeat(64))?;
+        owner.book.admission.active.set(true); owner.book.admission.role.set(R::Restrictions);
+        assert_eq!(owner.book.admission.at(O::Scalar).result(scalar_value(2), C::ScalarCanonical), Err(Error::Unsafe));
+        let first = owner.retained_admission_observation();
+        owner.book.admission.active.set(false);
         owner.mutation = Some(ManuallyDrop::new(Box::pin(Mutation { effect: Effect::Flush,
             phase: Cell::new(Phase::Entered), returned: Cell::new(None), slot: None, path: Vec::new(),
             length_observation: Cell::new(ObservedScalarLength::Unobserved),
@@ -1643,6 +1857,7 @@ mod tests {
         // Pure ownership control: no fabricated HANDLE and no native call.
         need(owner.fail_and_settle_once() == CloseOutcome::Unknown && owner.mutation.is_some())?;
         need(owner.fail_and_settle_once() == CloseOutcome::Unknown && owner.mutation.is_some())?;
+        assert_eq!(owner.retained_admission_observation(), first);
         need(!owner.published_and_settled() && !owner.occupied_target_and_settled()
             && owner.ready() == Err(Error::Unknown))
     }
