@@ -89,10 +89,13 @@ NATIVE_ACTION_SITES = {
     "button-hidden": ("would-block", 24, True), "project-cancel": ("none", 1, True),
     "project-open": ("none", 4, True), "quit-cancel": ("none", 8, True), "quit-confirm": ("none", 16, True),
 }
+ACCESSIBILITY_TREE_LIMIT_SITES = frozenset((
+    "tree-title-limit tree-child-count-limit tree-child-copy-limit tree-depth-limit tree-node-limit"
+).split())
 ACCESSIBILITY_SITES = frozenset((
     "entry application windows parent-identifier sheet topology tree button button-recheck "
     "initial-original-proof original-proof admission press cleanup"
-).split())
+).split()) | ACCESSIBILITY_TREE_LIMIT_SITES
 ACCESSIBILITY_ERRORS = frozenset((
     "none wrong-thread invalid-input ineligible unsupported ambiguous malformed limit deadline custody "
     "invalid-element cannot-complete ax-other changed objc-exception cleanup-unknown"
@@ -590,6 +593,15 @@ def _accessibility_context(value, native, panel, *, expected_id=None):
             need(button is not None and button["axError"] == -25204, label)
         if error == "invalid-element":
             need(button is not None and button["axError"] == -25202, label)
+        if site in ACCESSIBILITY_TREE_LIMIT_SITES:
+            # A later cleanup/custody failure must not erase the first bound
+            # diagnostic or turn a partial tree into a completed search/action.
+            need(error == "limit" and button is not None and button["nodes"] > 0 and button["axError"] == 0
+                 and tuple(button["checks"][key] for key in ACCESSIBILITY_BUTTON_CHECKS)
+                 == (True, True, False, False, False, False, False)
+                 and proofs[0] is not None and proofs[0]["error"] == "none" and proofs[1] is None
+                 and prompt == {"initial": True, "final": None} and value["attempted"] is False
+                 and value["pressReturned"] is False and value["triggered"] is None, label)
         for name, proof in (("initial-original-proof", proofs[0]), ("original-proof", proofs[1])):
             if site == name and proof is not None and proof["error"] != "none":
                 need(proof["error"] == error, label)

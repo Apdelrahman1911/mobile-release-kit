@@ -515,7 +515,9 @@ enum { MRK_OPEN_NONE, MRK_OPEN_THREAD, MRK_OPEN_INPUT, MRK_OPEN_INELIGIBLE, MRK_
     MRK_OPEN_CHANGED, MRK_OPEN_EXCEPTION, MRK_OPEN_CLEANUP_UNKNOWN };
 enum { MRK_OPEN_ENTRY = 1u, MRK_OPEN_APPLICATION, MRK_OPEN_WINDOWS, MRK_OPEN_PARENT_ID,
     MRK_OPEN_SHEET, MRK_OPEN_TOPOLOGY, MRK_OPEN_TREE, MRK_OPEN_BUTTON, MRK_OPEN_BUTTON_RECHECK,
-    MRK_OPEN_INITIAL_PROOF, MRK_OPEN_FINAL_PROOF, MRK_OPEN_ADMISSION, MRK_OPEN_PRESS, MRK_OPEN_CLEANUP };
+    MRK_OPEN_INITIAL_PROOF, MRK_OPEN_FINAL_PROOF, MRK_OPEN_ADMISSION, MRK_OPEN_PRESS, MRK_OPEN_CLEANUP,
+    MRK_OPEN_TREE_TITLE_LIMIT, MRK_OPEN_TREE_CHILD_COUNT_LIMIT, MRK_OPEN_TREE_CHILD_COPY_LIMIT,
+    MRK_OPEN_TREE_DEPTH_LIMIT, MRK_OPEN_TREE_NODE_LIMIT };
 enum { MRK_OPEN_ATTEMPTED = 1u, MRK_OPEN_RETURNED = 2u, MRK_OPEN_TRIGGERED = 4u, MRK_OPEN_KNOWN = 8u };
 typedef struct { uint32_t flags, site, error, checks, calls, nodes, owned, released; int32_t ax_error; } MRKOpenResult;
 typedef struct { uint32_t known, error, prompt; MRKIdentityProof proof; } MRKOpenRecheck;
@@ -798,6 +800,11 @@ static BOOL mrk_ax_fail(MRKPrompt *s, uint32_t error) {
     if (!s->result.error) s->result.error = error;
     return NO;
 }
+static BOOL mrk_ax_tree_limit(MRKPrompt *s, uint32_t site) {
+    // Shared array callers outside the tree and an earlier failure keep their site.
+    if (s->result.site == MRK_OPEN_TREE && !s->result.error) s->result.site = site;
+    return mrk_ax_fail(s, MRK_OPEN_LIMIT);
+}
 static BOOL mrk_ax_status(MRKPrompt *s, AXError error) {
     if (error == kAXErrorSuccess) return YES;
     if (!s->result.ax_error) s->result.ax_error = error; // Actual first failing AX return, even after an earlier deadline.
@@ -864,7 +871,7 @@ static CFArrayRef mrk_ax_array(MRKPrompt *s, AXUIElementRef element, CFStringRef
     BOOL counted = absent || mrk_ax_status(s, count_status), admitted = mrk_ax_admit(s, 0, 0, NULL);
     if (!counted || !admitted || absent) return NULL;
     if (expected < 0) { mrk_ax_fail(s, MRK_OPEN_MALFORMED); return NULL; }
-    if (expected > limit) { mrk_ax_fail(s, MRK_OPEN_LIMIT); return NULL; }
+    if (expected > limit) { mrk_ax_tree_limit(s, MRK_OPEN_TREE_CHILD_COUNT_LIMIT); return NULL; }
     if (!expected) { if (!optional) mrk_ax_fail(s, MRK_OPEN_UNSUPPORTED); return NULL; }
     MRKPromptOwned *slot = mrk_ax_slot(s); if (!slot || !mrk_ax_before(s, element)) return NULL;
     s->result.calls++;
@@ -872,7 +879,7 @@ static CFArrayRef mrk_ax_array(MRKPrompt *s, AXUIElementRef element, CFStringRef
     BOOL copied = mrk_ax_status(s, status); admitted = mrk_ax_admit(s, 0, 0, NULL);
     if (!copied || !admitted || !mrk_ax_type(s, slot->value, CFArrayGetTypeID())) return NULL;
     CFIndex count = CFArrayGetCount(slot->array);
-    if (count < 0 || count > limit) { mrk_ax_fail(s, MRK_OPEN_LIMIT); return NULL; }
+    if (count < 0 || count > limit) { mrk_ax_tree_limit(s, MRK_OPEN_TREE_CHILD_COPY_LIMIT); return NULL; }
     if (count != expected) { mrk_ax_fail(s, MRK_OPEN_CHANGED); return NULL; }
     for (CFIndex i = 0; i < count; ++i)
         if (!mrk_ax_type(s, CFArrayGetValueAtIndex(slot->array, i), s->elementType)) return NULL;
@@ -932,19 +939,19 @@ static BOOL mrk_ax_scan(MRKPrompt *s, AXUIElementRef sheet, CFStringRef prompt) 
             if (s->result.error) return NO;
             if (title) {
                 if (!mrk_ax_type(s, title, CFStringGetTypeID())) return NO;
-                if (CFStringGetLength(title) > 512) return mrk_ax_fail(s, MRK_OPEN_LIMIT);
+                if (CFStringGetLength(title) > 512) return mrk_ax_tree_limit(s, MRK_OPEN_TREE_TITLE_LIMIT);
                 if (CFEqual(title, prompt)) { matches++; s->button = at; }
             }
         }
         CFArrayRef children = mrk_ax_array(s, node.element, kAXChildrenAttribute, 16, YES);
         if (s->result.error) return NO;
         CFIndex count = children ? CFArrayGetCount(children) : 0;
-        if (count && node.depth == MRK_PROMPT_DEPTH) return mrk_ax_fail(s, MRK_OPEN_LIMIT);
+        if (count && node.depth == MRK_PROMPT_DEPTH) return mrk_ax_tree_limit(s, MRK_OPEN_TREE_DEPTH_LIMIT);
         for (CFIndex i = 0; i < count; ++i) {
             AXUIElementRef child = (AXUIElementRef)CFArrayGetValueAtIndex(children, i);
             for (unsigned previous = 0; previous < s->length; ++previous)
                 if (CFEqual(child, s->nodes[previous].element)) return mrk_ax_fail(s, MRK_OPEN_MALFORMED);
-            if (s->length == MRK_PROMPT_NODES) return mrk_ax_fail(s, MRK_OPEN_LIMIT);
+            if (s->length == MRK_PROMPT_NODES) return mrk_ax_tree_limit(s, MRK_OPEN_TREE_NODE_LIMIT);
             s->nodes[s->length++] = (MRKPromptNode){child, at, node.depth + 1};
         }
     }

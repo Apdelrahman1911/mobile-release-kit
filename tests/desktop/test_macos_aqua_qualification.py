@@ -630,7 +630,9 @@ class AquaDataTests(unittest.TestCase):
         self.assertEqual(M.failure_context(b"", context_row(invalid), "first-save"), expected)
         # Complete ambiguous/absent matches are different from an incomplete
         # bounded search. Neither may be converted to a first-match action.
-        for error, site, completed in (("ambiguous", "button", 3), ("limit", "tree", 2), ("ineligible", "button", 4)):
+        refusals = (("ambiguous", "button", 3), ("limit", "tree", 2), ("ineligible", "button", 4))
+        refusals += tuple(("limit", site, 2) for site in sorted(M.ACCESSIBILITY_TREE_LIMIT_SITES))
+        for error, site, completed in refusals:
             value = accessibility_context_data(); sample = value["accessibility"]
             sample.update(attempted=False, pressReturned=False, triggered=None, site=site, error=error,
                           originalProof=None, promptChecks={"initial": True, "final": None})
@@ -642,6 +644,29 @@ class AquaDataTests(unittest.TestCase):
                 bad = deepcopy(value); bad["accessibility"][key] = True
                 expected = deepcopy(bad); expected["accessibility"] = None
                 self.assertEqual(M.failure_context(b"", context_row(bad), "first-save"), expected)
+            if site in M.ACCESSIBILITY_TREE_LIMIT_SITES:
+                late = deepcopy(value); late["accessibility"].update(expired=True, timely=False)
+                self.assertEqual(M.failure_context(b"", context_row(late), "first-save"), late)
+                for cleanup_returned in (True, False):
+                    unknown = deepcopy(late); lost = unknown["accessibility"]
+                    lost.update(state="unknown", custodyKnown=False, receiptJoined=False,
+                                barrierRetired=False, rechecksSettled=False)
+                    lost["promptButton"].update(cleanupReturned=cleanup_returned,
+                        cfSlotsRetired=lost["promptButton"]["cfSlots"] if cleanup_returned else 16)
+                    self.assertEqual(M.failure_context(b"", context_row(unknown), "first-save"), unknown)
+                    self.assertFalse(M._accessibility_succeeded(lost))
+                for path, invalid in ((("error",), "ambiguous"), (("error",), "none"),
+                    (("site",), "tree-unknown-limit"), (("attempted",), None), (("pressReturned",), None),
+                    (("nativeEntered",), False), (("initialOriginalProof",), None),
+                    (("originalProof",), sample["initialOriginalProof"]),
+                    (("promptChecks", "initial"), False), (("promptChecks", "final"), True),
+                    (("promptButton", "nodes"), 0), (("promptButton", "axError"), -25204),
+                    (("promptButton", "checks", "completeSearch"), True)):
+                    bad = deepcopy(value); target = bad["accessibility"]
+                    for part in path[:-1]: target = target[part]
+                    target[path[-1]] = invalid
+                    expected = deepcopy(bad); expected["accessibility"] = None
+                    self.assertEqual(M.failure_context(b"", context_row(bad), "first-save"), expected, (site, path))
         final = accessibility_context_data(); sample = final["accessibility"]
         sample.update(attempted=False, pressReturned=False, triggered=None, site="original-proof", error="changed")
         sample["promptChecks"]["final"] = False
@@ -744,7 +769,8 @@ class AquaDataTests(unittest.TestCase):
         largest["accessibility"]["promptChecks"] = {"initial": False, "final": False}
         largest["accessibility"]["promptButton"].update(calls=512, nodes=64, cfSlots=256, cfSlotsRetired=256, cleanupReturned=False, axError=-25214)
         largest["accessibility"]["promptButton"]["checks"] = dict.fromkeys(M.ACCESSIBILITY_BUTTON_CHECKS, False)
-        largest["accessibility"].update(site="initial-original-proof", error="cleanup-unknown", state="requested")
+        largest["accessibility"].update(site=max(M.ACCESSIBILITY_SITES, key=lambda site: (len(site), site)),
+                                        error="cleanup-unknown", state="requested")
         largest["accessibilityBinding"]["start"]["result"] = "permission-denied"
         largest["accessibilityBinding"]["configuration"].update(parent="type-invalid", prompt="type-invalid", site="prompt-get", error="cleanup-unknown")
         self.assertLessEqual(len(context_row(largest).split(b"=", 1)[1].rstrip(b"\n")), M.FAILURE_CONTEXT_LIMIT)
@@ -1217,6 +1243,25 @@ class AquaDataTests(unittest.TestCase):
         self.assertEqual(preparation.count('OpenDiagnostic { site: "entry"'), 2)
         self.assertNotIn('site: "binding"', preparation)
         wire = rust.split("fn open_return(", 1)[1].split("pub struct OpenInputReturn", 1)[0]
+        sites = M.re.findall(r'"([a-z-]+)"', wire.split("site: *[", 1)[1].split("]", 1)[0])
+        tree_sites = ["tree-title-limit", "tree-child-count-limit", "tree-child-copy-limit", "tree-depth-limit", "tree-node-limit"]
+        self.assertEqual(sites[:14], "entry application windows parent-identifier sheet topology tree button "
+                         "button-recheck initial-original-proof original-proof admission press cleanup".split())
+        self.assertEqual(sites[14:], tree_sites)
+        self.assertEqual(set(tree_sites), M.ACCESSIBILITY_TREE_LIMIT_SITES)
+        self.assertEqual(set(sites), M.ACCESSIBILITY_SITES)
+        enum = native.split("enum { MRK_OPEN_ENTRY = 1u,", 1)[1].split("};", 1)[0]
+        self.assertEqual(M.re.findall(r"MRK_OPEN_[A-Z_]+", enum)[-6:], ["MRK_OPEN_CLEANUP"]
+                         + ["MRK_OPEN_" + site.upper().replace("-", "_") for site in tree_sites])
+        helper = native.split("static BOOL mrk_ax_tree_limit(", 1)[1].split("static BOOL mrk_ax_status(", 1)[0]
+        self.assertIn("if (s->result.site == MRK_OPEN_TREE && !s->result.error) s->result.site = site;", helper)
+        self.assertIn("return mrk_ax_fail(s, MRK_OPEN_LIMIT);", helper)
+        for condition, site, section in (("expected > limit", "CHILD_COUNT", arrays),
+            ("count < 0 || count > limit", "CHILD_COPY", arrays), ("CFStringGetLength(title) > 512", "TITLE", scan),
+            ("count && node.depth == MRK_PROMPT_DEPTH", "DEPTH", scan), ("s->length == MRK_PROMPT_NODES", "NODE", scan)):
+            self.assertIn(f"if ({condition}) " + ("{ " if section is arrays else "return ")
+                          + f"mrk_ax_tree_limit(s, MRK_OPEN_TREE_{site}_LIMIT)", section)
+        self.assertEqual(native.count("mrk_ax_tree_limit("), 6)
         self.assertIn("w.checks & (w.checks + 1) != 0", wire)
         self.assertIn("w.calls > 512 || w.nodes > 64 || w.owned > 256", wire)
         self.assertIn("button.cleanup_returned && w.released != w.owned", wire)

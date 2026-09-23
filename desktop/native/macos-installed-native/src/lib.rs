@@ -592,7 +592,8 @@ mod observation {
             cleanup_returned: w.flags & 8 != 0, ax_error: w.ax_error };
         let r = OpenReport { diagnostic: OpenDiagnostic {
             site: *["entry", "application", "windows", "parent-identifier", "sheet", "topology", "tree", "button",
-                "button-recheck", "initial-original-proof", "original-proof", "admission", "press", "cleanup"]
+                "button-recheck", "initial-original-proof", "original-proof", "admission", "press", "cleanup",
+                "tree-title-limit", "tree-child-count-limit", "tree-child-copy-limit", "tree-depth-limit", "tree-node-limit"]
                 .get(w.site.checked_sub(1)? as usize)?, error: *OPEN_ERRORS.get(w.error as usize)?, },
             attempted: w.flags & 1 != 0, press_returned: w.flags & 2 != 0,
             triggered: (w.flags & 2 != 0).then_some(w.flags & 4 != 0),
@@ -611,6 +612,11 @@ mod observation {
             || r.triggered == Some(true) && w.ax_error != 0
             || w.ax_error != 0 && w.error == 0
             || w.error == 0 && !r.succeeded() { return None; }
+        // These are only the five local tree refusals, before complete search
+        // or a final proof/Press. Later uncertain cleanup preserves the refusal.
+        if matches!(w.site, 15..=19) && (w.error != 7 || w.checks != 3 || w.nodes == 0
+            || w.calls == 0 || w.owned == 0 || w.ax_error != 0 || w.flags & 7 != 0
+            || !rechecks[0].is_some_and(OpenRecheckReturn::matched) || rechecks[1].is_some()) { return None; }
         Some(r)
     }
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -788,6 +794,26 @@ mod observation {
         for (checks, error) in [(7, 4), (7, 5), (3, 7)] {
             let failed = OpenWire { flags: 8, site: 7, error, checks, ..full };
             if !open_return(failed, [Some(recheck), None], true).is_some_and(|r| !r.attempted && !r.succeeded()) { return false; }
+        }
+        for (site, label) in (15..=19).zip(["tree-title-limit", "tree-child-count-limit", "tree-child-copy-limit",
+            "tree-depth-limit", "tree-node-limit"]) {
+            let failed = OpenWire { flags: 8, site, error: 7, checks: 3, ..full };
+            for (flags, released, known) in [(8, full.owned, true), (8, full.owned, false), (0, 16, false)] {
+                let returned = open_return(OpenWire { flags, released, ..failed }, [Some(recheck), None], known);
+                if !returned.is_some_and(|r| r.diagnostic == OpenDiagnostic { site: label, error: "limit" }
+                    && !r.attempted && !r.press_returned && r.triggered.is_none() && !r.succeeded()
+                    && r.custody_known == known && r.button.cleanup_returned == (flags & 8 != 0)
+                    && r.button.cf_slots_retired == released) { return false; }
+            }
+            for bad in [OpenWire { error: 0, ..failed }, OpenWire { error: 5, ..failed },
+                OpenWire { nodes: 0, ..failed }, OpenWire { calls: 0, ..failed },
+                OpenWire { owned: 0, released: 0, ..failed }, OpenWire { checks: 7, ..failed },
+                OpenWire { ax_error: -25204, ..failed }, OpenWire { flags: 9, ..failed },
+                OpenWire { site: 20, ..failed }] {
+                if open_return(bad, [Some(recheck), None], true).is_some() { return false; }
+            }
+            if open_return(failed, [None; 2], true).is_some() || open_return(failed, rechecks, true).is_some()
+                || open_return(OpenWire { site, ..full }, rechecks, true).is_some() { return false; }
         }
         let changed = recheck_return(RecheckWire { prompt: 2, error: 13, ..rw });
         if !changed.is_some_and(|r| r.custody_known && !r.matched()) { return false; }
