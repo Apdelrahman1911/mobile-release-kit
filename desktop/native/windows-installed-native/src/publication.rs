@@ -252,7 +252,12 @@ fn installer_facts(self, identity: TokenIdentity, token_type: u32, elevated: u32
         u.0.need(bytes.len() == 28 && bytes[1] == 5 && bytes[2..8] == [0, 0, 0, 0, 0, 5]
             && decode::Observed::new(u.0).u32_at(bytes, 8)? == 21, C::AccountShape)?;
         i.0.need(label.bytes() == sid(16, &[12288]), C::AccountIntegrity)?;
-        self.0.need(elevation_type == S::TokenElevationTypeFull as u32, C::AccountElevation)?;
+        // Default means no linked token, not absence of elevation. The independent
+        // elevated == 1/High checks above and admin-owner/group/privilege checks below
+        // remain mandatory; no Limited/unknown kind or normalization is allowed.
+        // https://learn.microsoft.com/en-us/windows/win32/api/winnt/ne-winnt-token_elevation_type
+        // https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-token_elevation
+        self.0.need([S::TokenElevationTypeDefault as u32, S::TokenElevationTypeFull as u32].contains(&elevation_type), C::AccountElevation)?;
     }
     Ok(Installer { identity, user: principal, integrity: label, elevation_type,
         groups: Self(self.0.role(R::Groups)).installer_groups(groups, identity.groups)?,
@@ -1393,7 +1398,11 @@ mod tests {
             (SS::SE_GROUP_MANDATORY | SS::SE_GROUP_ENABLED | SS::SE_GROUP_OWNER) as u32);
         groups[..4].copy_from_slice(&1u32.to_le_bytes());
         let privileges = vec![0u8; offset_of!(S::TOKEN_PRIVILEGES, Privileges)];
-        for local_system in [false, true] {
+        for (local_system, elevation_type) in [
+            (false, S::TokenElevationTypeDefault), (false, S::TokenElevationTypeFull),
+            (true, S::TokenElevationTypeDefault), (true, S::TokenElevationTypeFull),
+        ] {
+            let elevation_type = elevation_type as u32;
             let principal = if local_system { system() } else { sid(5, &[21, 1, 2, 3, 1001]) };
             let user = token_buffer(&principal, size_of::<S::TOKEN_USER>(),
                 offset_of!(S::TOKEN_USER, User) + offset_of!(S::SID_AND_ATTRIBUTES, Sid),
@@ -1402,19 +1411,35 @@ mod tests {
                 offset_of!(S::TOKEN_MANDATORY_LABEL, Label) + offset_of!(S::SID_AND_ATTRIBUTES, Sid),
                 offset_of!(S::TOKEN_MANDATORY_LABEL, Label) + offset_of!(S::SID_AND_ATTRIBUTES, Attributes),
                 (SS::SE_GROUP_INTEGRITY | SS::SE_GROUP_INTEGRITY_ENABLED) as u32);
-            let elevation_type = (if local_system { S::TokenElevationTypeDefault } else { S::TokenElevationTypeFull }) as u32;
             let trace = admission_trace(R::Installer);
             let plain = installer_facts(identity, S::TokenPrimary as u32, 1, elevation_type, 0, 0, 0, 0,
                 &user, &integrity, &groups, &privileges);
             assert_eq!(InstallerData(trace.at(O::InstallerPolicy)).installer_facts(identity, S::TokenPrimary as u32,
                 1, elevation_type, 0, 0, 0, 0, &user, &integrity, &groups, &privileges), plain);
             assert!(plain.is_ok() && trace.first.get().is_none());
+            let accepted = plain?;
+            assert_eq!(accepted.identity, identity);
+            assert_eq!(accepted.elevation_type, elevation_type);
+            let other_kind = if elevation_type == S::TokenElevationTypeDefault as u32 {
+                S::TokenElevationTypeFull as u32
+            } else { S::TokenElevationTypeDefault as u32 };
+            let other = installer_facts(identity, S::TokenPrimary as u32, 1, other_kind, 0, 0, 0, 0,
+                &user, &integrity, &groups, &privileges)?;
+            assert_ne!(accepted, other); // full Installer equality must retain elevation-kind drift
             assert_eq!(security::token_facts(identity, S::TokenPrimary as u32, 1, elevation_type, 0, 0,
                 &user, &integrity, &groups, &privileges, &[1, 2, 3, 4, 5]), Err(Error::Unsafe));
             for (kind, elevated, elevation, ui, virtualized, restricted, app, check) in [
                 (S::TokenImpersonation as u32, 1, elevation_type, 0, 0, 0, 0, C::TokenPrimary),
                 (S::TokenPrimary as u32, 0, elevation_type, 0, 0, 0, 0, C::Elevated),
+                (S::TokenPrimary as u32, 2, elevation_type, 0, 0, 0, 0, C::Elevated),
+                (S::TokenPrimary as u32, u32::MAX, elevation_type, 0, 0, 0, 0, C::Elevated),
                 (S::TokenPrimary as u32, 1, S::TokenElevationTypeLimited as u32, 0, 0, 0, 0,
+                    if local_system { C::SystemElevation } else { C::AccountElevation }),
+                (S::TokenPrimary as u32, 1, 0, 0, 0, 0, 0,
+                    if local_system { C::SystemElevation } else { C::AccountElevation }),
+                (S::TokenPrimary as u32, 1, 4, 0, 0, 0, 0,
+                    if local_system { C::SystemElevation } else { C::AccountElevation }),
+                (S::TokenPrimary as u32, 1, u32::MAX, 0, 0, 0, 0,
                     if local_system { C::SystemElevation } else { C::AccountElevation }),
                 (S::TokenPrimary as u32, 1, elevation_type, 1, 0, 0, 0, C::UiAccess),
                 (S::TokenPrimary as u32, 1, elevation_type, 0, 1, 0, 0, C::Virtualization),
@@ -1430,6 +1455,82 @@ mod tests {
                     &user, &integrity, &groups, &privileges));
                 assert_eq!(observed, Err(Error::Unsafe));
                 admission_fault(&trace, R::Installer, O::InstallerPolicy, check, None);
+            }
+        }
+        {
+            // Full-policy Default rows, not merely a successful enum-membership test.
+            let elevation_type = S::TokenElevationTypeDefault as u32;
+            let integrity_flags = (SS::SE_GROUP_INTEGRITY | SS::SE_GROUP_INTEGRITY_ENABLED) as u32;
+            let user = token_buffer(&sid(5, &[21, 1, 2, 3, 1001]), size_of::<S::TOKEN_USER>(),
+                offset_of!(S::TOKEN_USER, User) + offset_of!(S::SID_AND_ATTRIBUTES, Sid),
+                offset_of!(S::TOKEN_USER, User) + offset_of!(S::SID_AND_ATTRIBUTES, Attributes), 0);
+            let integrity = token_buffer(&sid(16, &[12288]), size_of::<S::TOKEN_MANDATORY_LABEL>(),
+                offset_of!(S::TOKEN_MANDATORY_LABEL, Label) + offset_of!(S::SID_AND_ATTRIBUTES, Sid),
+                offset_of!(S::TOKEN_MANDATORY_LABEL, Label) + offset_of!(S::SID_AND_ATTRIBUTES, Attributes), integrity_flags);
+            for (principal, user_flags, level, flags, role, check) in [
+                (admins(), 0, 12288, integrity_flags, R::User, C::AccountShape),
+                (sid(5, &[21, 1, 2, 3, 1001]), 1, 12288, integrity_flags, R::User, C::UserAttributes),
+                (sid(5, &[21, 1, 2, 3, 1001]), 0, 8192, integrity_flags, R::Integrity, C::AccountIntegrity),
+                (sid(5, &[21, 1, 2, 3, 1001]), 0, 16384, integrity_flags, R::Integrity, C::AccountIntegrity),
+                (sid(5, &[21, 1, 2, 3, 1001]), 0, 12288, SS::SE_GROUP_INTEGRITY as u32, R::Integrity, C::IntegrityAttributes),
+            ] {
+                let bad_user = token_buffer(&principal, size_of::<S::TOKEN_USER>(),
+                    offset_of!(S::TOKEN_USER, User) + offset_of!(S::SID_AND_ATTRIBUTES, Sid),
+                    offset_of!(S::TOKEN_USER, User) + offset_of!(S::SID_AND_ATTRIBUTES, Attributes), user_flags);
+                let bad_integrity = token_buffer(&sid(16, &[level]), size_of::<S::TOKEN_MANDATORY_LABEL>(),
+                    offset_of!(S::TOKEN_MANDATORY_LABEL, Label) + offset_of!(S::SID_AND_ATTRIBUTES, Sid),
+                    offset_of!(S::TOKEN_MANDATORY_LABEL, Label) + offset_of!(S::SID_AND_ATTRIBUTES, Attributes), flags);
+                let trace = admission_trace(R::Installer);
+                let observed = InstallerData(trace.at(O::InstallerPolicy)).installer_facts(identity, S::TokenPrimary as u32,
+                    1, elevation_type, 0, 0, 0, 0, &bad_user, &bad_integrity, &groups, &privileges);
+                assert_eq!(observed, installer_facts(identity, S::TokenPrimary as u32, 1, elevation_type, 0, 0, 0, 0,
+                    &bad_user, &bad_integrity, &groups, &privileges));
+                assert_eq!(observed, Err(Error::Unsafe));
+                admission_fault(&trace, role, O::InstallerPolicy, check, None);
+            }
+            for (principal, flags, check, ordinal) in [
+                (admins(), SS::SE_GROUP_ENABLED as u32, C::AdminOwner, None),
+                (admins(), SS::SE_GROUP_OWNER as u32, C::AdminOwner, None),
+                (admins(), (SS::SE_GROUP_OWNER | SS::SE_GROUP_USE_FOR_DENY_ONLY) as u32, C::AdminOwner, None),
+                (admins(), (SS::SE_GROUP_ENABLED | SS::SE_GROUP_OWNER | SS::SE_GROUP_USE_FOR_DENY_ONLY) as u32, C::GroupDenyEnabled, Some(0)),
+                (sid(5, &[32, 545]), (SS::SE_GROUP_ENABLED | SS::SE_GROUP_OWNER) as u32, C::AdminOwner, None),
+                (admins(), 0x08000000, C::GroupFlags, Some(0)),
+            ] {
+                let mut bad_groups = token_buffer(&principal, group_head + size_of::<S::SID_AND_ATTRIBUTES>(),
+                    group_head + offset_of!(S::SID_AND_ATTRIBUTES, Sid), group_attributes, flags);
+                bad_groups[..4].copy_from_slice(&1u32.to_le_bytes());
+                let trace = admission_trace(R::Installer);
+                let observed = InstallerData(trace.at(O::InstallerPolicy)).installer_facts(identity, S::TokenPrimary as u32,
+                    1, elevation_type, 0, 0, 0, 0, &user, &integrity, &bad_groups, &privileges);
+                assert_eq!(observed, installer_facts(identity, S::TokenPrimary as u32, 1, elevation_type, 0, 0, 0, 0,
+                    &user, &integrity, &bad_groups, &privileges));
+                assert_eq!(observed, Err(Error::Unsafe));
+                admission_fault(&trace, R::Groups, O::InstallerPolicy, check, ordinal);
+            }
+            let with_privilege = TokenIdentity { privileges: 1, ..identity };
+            let head = offset_of!(S::TOKEN_PRIVILEGES, Privileges);
+            for (flags, refused) in [(S::SE_PRIVILEGE_ENABLED | S::SE_PRIVILEGE_ENABLED_BY_DEFAULT, false), (0x08000000, true)] {
+                let mut raw = vec![0u8; head + size_of::<S::LUID_AND_ATTRIBUTES>()];
+                raw[..4].copy_from_slice(&1u32.to_le_bytes());
+                let luid_at = head + offset_of!(S::LUID_AND_ATTRIBUTES, Luid);
+                raw[luid_at..luid_at + 8].copy_from_slice(&1u64.to_le_bytes());
+                let flags_at = head + offset_of!(S::LUID_AND_ATTRIBUTES, Attributes);
+                raw[flags_at..flags_at + 4].copy_from_slice(&flags.to_le_bytes());
+                let trace = admission_trace(R::Installer);
+                let observed = InstallerData(trace.at(O::InstallerPolicy)).installer_facts(with_privilege, S::TokenPrimary as u32,
+                    1, elevation_type, 0, 0, 0, 0, &user, &integrity, &groups, &raw);
+                assert_eq!(observed, installer_facts(with_privilege, S::TokenPrimary as u32, 1, elevation_type, 0, 0, 0, 0,
+                    &user, &integrity, &groups, &raw));
+                if refused {
+                    assert_eq!(observed, Err(Error::Unsafe));
+                    admission_fault(&trace, R::Privileges, O::InstallerPolicy, C::PrivilegeFlags, Some(0));
+                } else {
+                    let facts = observed?;
+                    assert_eq!(facts.identity, with_privilege);
+                    assert_eq!(facts.elevation_type, elevation_type);
+                    assert_eq!(facts.privileges, vec![(1, flags)]);
+                    assert!(trace.first.get().is_none());
+                }
             }
         }
         for (flags, check, index) in [(0x08000000, C::GroupFlags, Some(0)),
