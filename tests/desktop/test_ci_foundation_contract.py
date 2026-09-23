@@ -727,6 +727,14 @@ class FixedCompilerHelperTests(unittest.TestCase):
             self.assertIs(called.call_args.kwargs["stdout"], destination)
             self.assertTrue(called.call_args.kwargs["check"])
             self.assertEqual(called.call_args.kwargs["timeout"], 600)
+        with patch.object(helper.subprocess, "run", return_value=completed) as called, redirect_stdout(io.StringIO()) as logs:
+            destination, diagnostics = io.StringIO(), io.StringIO()
+            self.assertEqual(helper.run(argv, check="windows-installed-helper-locked-metadata", cwd=Path("/unused"),
+                env=environment, timeout=600, output=destination, diagnostics=diagnostics), "")
+            called.assert_called_once_with(argv, cwd=Path("/unused"), env=environment, check=True, timeout=600,
+                                           text=True, stdout=destination, stderr=diagnostics)
+            self.assertEqual(logs.getvalue(), "Fixed check: windows-installed-helper-locked-metadata\n")
+            for private in (*argv, *environment, *environment.values()): self.assertNotIn(private, logs.getvalue())
 
     def test_failure_diagnostics_never_include_command_paths_or_captured_values(self):
         private = "PRIVATE-CANARY-NOT-FOR-OUTPUT"
@@ -3315,6 +3323,9 @@ class WindowsCompositionRoutingTests(unittest.TestCase):
             helper.COMPILE_SCOPE: (set(helper.COMPILE_PHASES), platforms),
             helper.GTK_COMPILE_SCOPE: (set(helper.COMPILE_PHASES), {"linux"}),
             helper.WORKFLOW_NATIVE_SCOPE: (set(helper.WORKFLOW_NATIVE_PHASES), {"linux"}),
+            helper.METADATA_NATIVE_SCOPE: (set(helper.METADATA_NATIVE_PHASES), {"linux"}),
+            helper.ENVIRONMENT_NATIVE_SCOPE: (set(helper.ENVIRONMENT_NATIVE_PHASES), {"linux", "macos"}),
+            helper.OFFLINE_NATIVE_SCOPE: (set(helper.OFFLINE_NATIVE_PHASES), {"linux", "macos"}),
             helper.GITHUB_READONLY_SCOPE: (set(helper.GITHUB_READONLY_PHASES), {"linux"}),
             helper.GITHUB_TLS_SCOPE: (set(helper.GITHUB_TLS_PHASES), {"linux"}),
             helper.WINDOWS_SNAPSHOT_SCOPE: ({"prepare", "acquire", "compile", "windows-snapshot", "clean"}, {"windows"}),
@@ -3368,25 +3379,49 @@ class WindowsCompositionRoutingTests(unittest.TestCase):
                 with self.assertRaises(helper.CheckFailure):
                     helper.prepare("windows", scope)
 
-        # Fixed bounded SOURCE reads only: main and real hosted admission are never called.
+        # Same finite8MiB per-source bound as the admitted source inventory;
+        # main and real hosted admission are never called by this DATA check.
         with HELPER.open("rb") as stream:
-            raw = stream.read(512 * 1024 + 1)
-        self.assertLessEqual(len(raw), 512 * 1024)
+            raw = stream.read(8 * 1024 * 1024 + 1)
+        self.assertLessEqual(len(raw), 8 * 1024 * 1024)
         source = raw.decode("utf-8")
         main = source.split("def main() -> int:\n", 1)[1].split('\n\nif __name__ == "__main__":', 1)[0]
-        self.assertIn('"workflow-core", "windows-snapshot", "github-owner", "github-tls", "github-tls-deadline"))', main)
+        main_ast = next(node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef) and node.name == "main")
+        argument = [node for node in ast.walk(main_ast) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name) and node.func.value.id == "parser" and node.func.attr == "add_argument"
+            and node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value == "phase"]
+        self.assertEqual(len(argument), 1)
+        choices = next(keyword.value for keyword in argument[0].keywords if keyword.arg == "choices")
+        self.assertIsInstance(choices, ast.Tuple)
+        self.assertEqual(["*" + node.value.id if isinstance(node, ast.Starred) else node.value for node in choices.elts],
+            ["*BOUNDARY_PHASES", "workflow-owner", "workflow-transaction-eof", "workflow-core", "metadata-owner",
+             "metadata-transaction-eof", "metadata-core", "windows-snapshot", "github-owner", "github-tls", "github-tls-deadline",
+             "environment-native", "offline-cli11", "retain", "windows-installed-native", "windows-installed-native-finalize",
+             "windows-installed-runtime-data", "*WINDOWS_FULLWALK_DATA_PHASES", "*WINDOWS_INSTALLED_PASSIVE_DATA_PHASES", "*CONVENTIONAL_PHASES"])
         self.assertIn('scope = os.environ.get("MRK_DESKTOP_HOSTED_CHECKS", "")', main)
-        self.assertLess(main.index("admit_phase(scope, args.phase)"), main.index("platform = admitted_host()"))
-        self.assertLess(main.index("platform = admitted_host()"), main.index("prepare(platform, scope)"))
+        installed = main.split("if scope == WINDOWS_INSTALLED_SCOPE", 1)[1].split("if scope in CONVENTIONAL_SCOPES", 1)[0]
+        self.assertEqual(" ".join(installed.split()),
+            'or args.phase in {"windows-installed-native", "windows-installed-native-finalize", "windows-installed-runtime-data", '
+            '*WINDOWS_FULLWALK_DATA_PHASES, *WINDOWS_INSTALLED_PASSIVE_DATA_PHASES}: windows_installed_phase(args.phase, scope) return 0')
+        self.assertLess(main.index("windows_installed_phase(args.phase, scope)"), main.index("admit_phase(scope, args.phase)"))
+        self.assertLess(main.index("admit_phase(scope, args.phase)"), main.index("platform = (admitted_host("))
+        self.assertLess(main.index("platform = (admitted_host("), main.index("prepare(platform, scope)"))
+        self.assertIn('platform = (admitted_host(retention_only=True) if (scope == METADATA_NATIVE_SCOPE and args.phase == "clean"\n'
+                      '                    or scope == ENVIRONMENT_NATIVE_SCOPE and args.phase == "retain"\n'
+                      '                    or scope == OFFLINE_NATIVE_SCOPE and args.phase != "prepare") else admitted_host())', main)
         self.assertIn('prepare(platform, scope) if args.phase == "prepare" else phase(args.phase, platform, scope)', main)
         self.assertNotIn("--scope", main)
         self.assertIn("def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:", source)
         self.assertIn("def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:", source)
-        host = source.split("def admitted_host() -> str:\n", 1)[1].split("\n\ndef admitted_scope(", 1)[0]
+        host = source.split("def admitted_host(*, retention_only: bool = False) -> str:\n", 1)[1].split("\n\ndef admitted_scope(", 1)[0]
         self.assertEqual(host.count("admitted_scope(platform)"), 1)
+        self.assertIn('os.environ.get("MRK_DESKTOP_HOSTED_CHECKS") in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, '
+                      '*ENVIRONMENT_NATIVE_SCOPES, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES}', host)
+        self.assertIn('require(not retention_only or os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {METADATA_NATIVE_SCOPE, *ENVIRONMENT_NATIVE_SCOPES}', host)
         self.assertIn('if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] == WINDOWS_SNAPSHOT_SCOPE:\n        admitted_scope(platform)', host)
-        self.assertIn('if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {WORKFLOW_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE}:', host)
-        self.assertIn('os.environ.get("ImageOS") == "ubuntu24" and os.uname().machine == "x86_64"', host)
+        self.assertIn('if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE}:', host)
+        self.assertIn('os.environ.get("RUNNER_OS") == "Linux" and os.environ.get("RUNNER_ARCH") == "X64"', host)
+        self.assertIn('os.environ.get("ImageOS") == "ubuntu24" and (retention_only or os.uname().machine == "x86_64")', host)
         self.assertIn('os.geteuid() != 0', host)
 
     def test_windows_context_requires_both_scopes_and_original_event_binding(self):
@@ -3514,15 +3549,16 @@ class WindowsCompositionRoutingTests(unittest.TestCase):
                 helper.load_context("windows", helper.WINDOWS_SNAPSHOT_SCOPE)
 
         with HELPER.open("rb") as stream:
-            raw = stream.read(512 * 1024 + 1)
-        self.assertLessEqual(len(raw), 512 * 1024)
+            raw = stream.read(8 * 1024 * 1024 + 1)
+        self.assertLessEqual(len(raw), 8 * 1024 * 1024)
         source = raw.decode("utf-8")
         prepare = source.split("def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:\n", 1)[1].split("\n\ndef load_context(", 1)[0]
         self.assertTrue(prepare.startswith('    admit_phase(scope, "prepare")\n    admit_platform(scope, platform)\n'))
         self.assertLess(prepare.index('require(admitted_scope(platform) == scope'), prepare.index('source = Path('))
-        self.assertIn('directories = GITHUB_TLS_DIRECTORIES if native_tls else GITHUB_READONLY_DIRECTORIES if native_github else WORKFLOW_NATIVE_DIRECTORIES if native_workflow else (\n'
+        self.assertIn('native_metadata = scope == METADATA_NATIVE_SCOPE\n    native_edit = native_workflow or native_metadata', prepare)
+        self.assertIn('directories = METADATA_NATIVE_DIRECTORIES if native_metadata else GITHUB_TLS_DIRECTORIES if native_tls else GITHUB_READONLY_DIRECTORIES if native_github else WORKFLOW_NATIVE_DIRECTORIES if native_workflow else (\n'
                       '        "home", "cargo", "rustup", "tmp", "target", "windows-snapshot", "appdata", "localappdata") if windows else (', prepare)
-        self.assertIn('empty_files = ("gitconfig-empty",) if native_workflow or native_github or native_tls or windows else ("npmrc-user", "npmrc-global", "gitconfig-empty")', prepare)
+        self.assertIn('empty_files = ("gitconfig-empty",) if native_edit or native_github or native_tls or windows else ("npmrc-user", "npmrc-global", "gitconfig-empty")', prepare)
         self.assertIn('"executionScope": scope,', prepare)
         self.assertIn('if windows:\n        context.update(scope=scope, event=os.environ["GITHUB_EVENT_NAME"], ref=os.environ["GITHUB_REF"])', prepare)
         self.assertEqual(prepare.count('write_json(root / "context.json", context)'), 2)
@@ -7808,7 +7844,7 @@ class WindowsReaderGateTests(unittest.TestCase):
     def test_windows_reader_existing_job_and_phase_routes_remain_narrow(self):
         text = HELPER.read_text(encoding="utf-8")
         phase = text.split("def windows_installed_phase(", 1)[1].split("def main(", 1)[0]
-        self.assertIn('retention_only=name in {\n        "retain", "windows-installed-native-finalize", *WINDOWS_FULLWALK_DATA_PHASES}', phase)
+        self.assertIn('retention_only=name in {\n        "retain", "windows-installed-native-finalize", *WINDOWS_FULLWALK_DATA_PHASES, *WINDOWS_INSTALLED_PASSIVE_DATA_PHASES}', phase)
         self.assertLess(phase.index('if name == "windows-installed-native-finalize"'), phase.index('phases = ("acquire", "compile", "windows-installed-native")'))
         self.assertLess(phase.index('if name == "windows-installed-runtime-data"'), phase.index('phases = ("acquire", "compile", "windows-installed-native")'))
         retained = phase.split('if name == "retain":', 1)[1].split('phases = ("acquire", "compile", "windows-installed-native")', 1)[0]
@@ -8090,8 +8126,8 @@ class WindowsReaderGateTests(unittest.TestCase):
             row["inventorySha256"] = hashlib.sha256(raw.encode("ascii")).hexdigest()
 
     @staticmethod
-    def publication_observation_raw(fields, objects, proofs):
-        raw = helper.windows_fullwalk_text("production-observation", fields)
+    def publication_observation_raw(fields, objects, proofs, *, kind="production-observation"):
+        raw = helper.windows_fullwalk_text(kind, fields)
         raw += "".join("proof=" + row["role"] + "|" + str(row["size"]) + "|" + row["sha256"] + "\n"
                        for row in proofs).encode("ascii")
         names = ("volume", "fileId", "creation", "write", "change", "size", "allocation", "links", "attributes")
@@ -9979,17 +10015,21 @@ class WindowsReaderGateTests(unittest.TestCase):
                 self.assertNotIn(forbidden, body)
 
     def test_windows_fullwalk_source_derived_selectors_include_only_eight_existing_producer_policies(self):
-        for profile, total, selected in ((helper.WINDOWS_FULLWALK_PROFILE, 17, 9),
-                                         (helper.WINDOWS_RUNTIME_PUBLICATION_PROFILE, 26, 17)):
+        for profile, selected in ((helper.WINDOWS_FULLWALK_PROFILE, 9),
+                                  (helper.WINDOWS_RUNTIME_PUBLICATION_PROFILE, 17)):
             context = {**self.context(), "qualificationProfile": profile}
             sources = self.native_source_blobs(context)
+            # New ignored/nonselected contracts still belong to the compiled
+            # source total. Do not fossilize a historical filtered-out count.
+            total = sum(len(helper.re.findall(rb"(?m)^\s*#\[test\]\s*$", raw)) for raw in sources.values())
             with patch.object(helper, "windows_installed_bytes", side_effect=lambda path, limit: sources[path]), \
                  patch.object(helper, "run", side_effect=AssertionError("Source count cannot list a libtest")):
                 self.assertEqual(helper.windows_installed_native_test_total(context), total)
                 names = helper.windows_installed_native_inert(context)
                 self.assertEqual(len(names), selected)
-                self.assertEqual(total - len(names), 9 if profile == helper.WINDOWS_RUNTIME_PUBLICATION_PROFILE else 8)
+                self.assertGreater(total - len(names), 0)
                 self.assertNotIn(helper.WINDOWS_RUNTIME_PUBLICATION_SCALAR, names)
+                self.assertFalse(set(names) & set(helper.WINDOWS_INSTALLED_PASSIVE_NATIVE_INERT))
             self.assertEqual(names[:9], helper.WINDOWS_INSTALLED_INERT)
         self.assertEqual(len(helper.WINDOWS_RUNTIME_PUBLICATION_NATIVE_INERT), 8)
         self.assertEqual(len(helper.WINDOWS_RUNTIME_PUBLICATION_APP_INERT), 3)
@@ -10695,17 +10735,36 @@ class WindowsReaderGateTests(unittest.TestCase):
             self.assertNotIn(unavailable, shared)
         # These are SOURCE guards, not a claim Linux executed the Rust refusal.
         self.assertIn("FULLWALK_PREREQUISITES_REVIEWED: bool = true;", native)
-        closed = "need(variant == OwnerVariant::Ordinary || FULLWALK_PREREQUISITES_REVIEWED)?;"
+        closed = ("need(variant != OwnerVariant::Fullwalk || FULLWALK_PREREQUISITES_REVIEWED)?;",
+                  "need(!batch || FULLWALK_PREREQUISITES_REVIEWED)?;",
+                  "need(variant != OwnerVariant::Fullwalk || batch)?;")
+        passive_start = driver.index("if variant == OwnerVariant::Passive {")
+        passive_end = driver.index("\n    }", passive_start) + len("\n    }")
+        passive = driver[passive_start:passive_end]
+        self.assertEqual(passive.count("need("), 1)
+        self.assertIn('need(!batch && std::env::var("MRK_DESKTOP_DISPATCH_SCOPE").as_deref() == Ok("windows-installed-passive")', passive)
+        self.assertLess(passive.index("fixture::profile()?;"), passive.index("need(!batch"))
+        for variable, value, ending in (
+            ("GITHUB_REF", "refs/heads/verify/desktop-windows-installed-passive", ""),
+            ("GITHUB_EVENT_NAME", "workflow_dispatch", ""),
+            ("MRK_WINDOWS_PASSIVE_PUBLICATION_STEP_OUTCOME", "success", ""),
+            ("MRK_WINDOWS_PASSIVE_PUBLICATION_FINALIZE_STEP_OUTCOME", "success", ")?;"),
+        ):
+            self.assertIn('&& std::env::var("' + variable + '").as_deref() == Ok("' + value + '")' + ending, passive)
         for first_effect in ("super::hosted_tests::hosted_source()?", 'std::env::var("MRK_DESKTOP_CI_ROOT")',
                              "NativeBook::new()", "owned_file_traced(", "current.create(", "grant(", "Launch::"):
-            self.assertLess(driver.index(closed), driver.index(first_effect))
-        for entry, variant in (("hosted_ordinary_original_handle_contract", "Ordinary"), ("hosted_protected_version_fullwalk_contract", "Fullwalk")):
+            for guard in closed:
+                self.assertLess(driver.index(guard), driver.index(first_effect))
+            self.assertLess(passive_end, driver.index(first_effect))
+        for entry, variant in (("hosted_ordinary_original_handle_contract", "Ordinary"),
+                               ("hosted_protected_version_fullwalk_contract", "Fullwalk"),
+                               ("hosted_installed_passive_original_handle_contract", "Passive")):
             body = native.split("fn " + entry + "() -> Result<()> {", 1)[1].split("\n}", 1)[0]
             self.assertTrue(body.lstrip().startswith("let entry_tick = unsafe { SI::GetTickCount64() };"))
             self.assertIn("run_owner(OwnerVariant::" + variant + ", entry_tick)", body)
         lib = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/lib.rs").read_text(encoding="utf-8")
         self.assertIn('#[cfg(any(test, feature = "qualification-result"))]\nmod qualification_result;', lib)
-        self.assertIn('#[cfg(feature = "qualification-result")]\npub use qualification_result::{write_fullwalk_result_once, FullwalkFacts};', lib)
+        self.assertIn('#[cfg(feature = "qualification-result")]\npub use qualification_result::{write_fullwalk_result_once, write_passive_result_once, require_passive_qualification, FullwalkFacts, PassiveFacts};', lib)
         self.assertIn("#[cfg(test)]\nmod ordinary_owner;", lib)
         for test_only in ("struct Account", "struct Launch", "fn run_owner", "mod hosted_tests", "T::CreateProcessWithLogonW("):
             self.assertNotIn(test_only, shared)
@@ -10734,6 +10793,451 @@ class WindowsReaderGateTests(unittest.TestCase):
         self.assertLess(child.index("&& absent == if admitted { 6 } else { 4 }"), child.index("ordinary_owner::write_native_result"))
         self.assertIn("require_fact(admitted)?;", child)
 
+
+
+class WindowsInstalledPassiveGateTests(unittest.TestCase):
+    """Inert DATA/source checks, never publisher, loader, account or native evidence."""
+
+    @classmethod
+    def fixture(cls):
+        previous = WindowsReaderGateTests.publication_data()
+        legacy = previous["legacy"]
+        context = {**legacy["context"], "qualificationProfile": helper.WINDOWS_INSTALLED_PASSIVE_PROFILE}
+        owner, app, prepared = legacy["standalone"], legacy["app"], legacy["prepared_case"]["prepared"]
+        normal_helper = {"path": previous["pre"]["helperArtifact"], "size": 97, "sha256": "8" * 64,
+                         "messages": {"size": 17, "sha256": "9" * 64}}
+        argv_hash = lambda argv: hashlib.sha256(helper.canonical_json(argv)).hexdigest()
+        compiled = {"invocationSha256": argv_hash(helper.windows_fullwalk_native_argv("/inert-compiler/cargo.exe", context)),
+            "appInvocationSha256": argv_hash(helper.windows_installed_app_argv("/inert-compiler/cargo.exe", context)),
+            "helperInvocationSha256": argv_hash(helper.windows_installed_helper_argv("/inert-compiler/cargo.exe", context)),
+            "helperCompiledArtifact": normal_helper, "helperOriginalExitCode": 0}
+        roster_raw = legacy["roster_raw"]
+        pre_raw = helper.windows_fullwalk_precheck_text(context, owner, app, compiled, prepared,
+            legacy["pre"]["ownerArtifactIdentity"], legacy["pre"]["appArtifactIdentity"], roster_raw,
+            helper_identity=previous["pre"]["helperArtifactIdentity"])
+        pre = helper.windows_fullwalk_precheck_data(context, pre_raw)
+        prechecked = pre, pre_raw, roster_raw, owner, app, compiled, prepared
+        fields, objects, proofs, blobs = {}, {}, {}, {}
+        tests = {"stage": helper.WINDOWS_INSTALLED_PASSIVE_STAGE, "observation": helper.WINDOWS_INSTALLED_PASSIVE_OBSERVER}
+        def observe(role):
+            fields[role] = {**previous["fields"]["stage" if role == "stage" else "before"],
+                "profile": helper.WINDOWS_INSTALLED_PASSIVE_PROFILE, "observerTest": tests[role],
+                "precheckBytes": len(pre_raw), "precheckSha256": hashlib.sha256(pre_raw).hexdigest(),
+                "actualFixedProducerObserved": "false" if role == "stage" else "true"}
+            objects[role] = deepcopy(previous["objects"]["stage" if role == "stage" else "before"])
+            proofs[role] = ([] if role == "stage" else [{"role": name, "size": len(blobs[name]),
+                "sha256": hashlib.sha256(blobs[name]).hexdigest()} for name in helper.WINDOWS_INSTALLED_PASSIVE_PROOFS])
+            return WindowsReaderGateTests.publication_observation_raw(fields[role], objects[role], proofs[role], kind="passive-observation")
+        def exited(role):
+            selected = "helper" if role == "helperSuccess" else "owner"
+            command = (pre["helperCommandSha256"] if selected == "helper" else
+                helper.windows_fullwalk_command_sha(pre["ownerArtifact"], tests["stage" if role == "stage" else "observation"]))
+            return helper.windows_fullwalk_text("passive-exit", {key: pre[key] for key in
+                ("profile", "sourceSha", "sourceTree", "runId", "attempt")} | {"role": role,
+                "artifactSha256": pre[selected + "ArtifactSha256"], "precheckSha256": hashlib.sha256(pre_raw).hexdigest(),
+                "commandSha256": command, "originalWaitReturned": "true", "exitCode": "0",
+                "writerCloseGate": "original-" + role + "-step-success-required"})
+        blobs["stage"] = observe("stage"); blobs["stageExit"] = exited("stage")
+        blobs["helperSuccessExit"] = exited("helperSuccess")
+        blobs["observation"] = observe("observation"); blobs["observerExit"] = exited("observe")
+        outcomes = dict.fromkeys(("stage", "publish", "publication"), "success")
+        _, publication = helper.windows_installed_passive_setup_data(context, pre_raw, roster_raw, blobs, outcomes, "publication")
+        request = helper.windows_installed_passive_request(context, publication, prechecked)
+        binding = helper.windows_fullwalk_request_data(request, root=context["root"], passive=True)
+        child = deepcopy(legacy["child"])
+        child.update(requestSha256=hashlib.sha256(request).hexdigest(), commandSha256=binding["appCommandSha256"],
+            test=helper.WINDOWS_INSTALLED_PASSIVE_TEST, passive={"completedMethods": 5, "settledOriginalOwners": 9,
+                "payloadImages": 23, "systemImages": 23, "stoppedBeforeClaim": True, "stoppedOwnedChild": True, "productionEnabled": False})
+        child["observation"].update(versionIdentity=helper.windows_fullwalk_file_identity(binding["versionIdentity"]),
+            selectedIdentities=[helper.windows_fullwalk_file_identity(binding[key]) for key in helper.WINDOWS_FULLWALK_REQUEST_FIELDS[-3:]])
+        result = deepcopy(legacy["owner"]); result.pop("aggregate")
+        count = len(helper.PureWindowsPath(context["root"]).parents) + 1 + 12
+        result.update(requestSha256=child["requestSha256"], commandSha256=binding["appCommandSha256"],
+            ownerCommandSha256=binding["ownerCommandSha256"], ownerTest=helper.WINDOWS_INSTALLED_PASSIVE_OWNER,
+            childTest=helper.WINDOWS_INSTALLED_PASSIVE_TEST, nativeResultSha256=hashlib.sha256(helper.canonical_json(child)).hexdigest(),
+            inputOriginals=count, inputOriginalsClosed=count, protectedFullwalk=False, installedPassive=True,
+            ownerAggregateSeconds=90, poisonedParentEnvironment=True)
+        result["aclTransitions"][-1]["role"] = "passive-output"
+        original_exit = {**legacy["exit"], "requestSha256": child["requestSha256"], "ownerTest": helper.WINDOWS_INSTALLED_PASSIVE_OWNER}
+        intent = {key: value for key, value in legacy["intent"].items() if key not in {"fullwalkBatch", "fixedFullwalkChildOnly"}}
+        intent["fixedInstalledPassiveChildOnly"] = True
+        return {"context": context, "pre": pre, "precheck_raw": pre_raw, "roster_raw": roster_raw, "prechecked": prechecked,
+            "fields": fields, "objects": objects, "proofs": proofs, "blobs": blobs, "outcomes": outcomes,
+            "publication": publication, "request": request, "owner": result, "child": child, "exit": original_exit,
+            "intent": intent, "after": legacy["after"]}
+
+    @staticmethod
+    def accept(data, outcome="success"):
+        return helper.windows_installed_passive_records(data["context"], data["request"],
+            *(helper.canonical_json(data[key]) for key in ("owner", "child", "exit", "intent")), outcome,
+            app_after_identity=data["after"])
+
+    @staticmethod
+    def setup(data, through="publication"):
+        index = ("stage", "publish", "publication").index(through)
+        return helper.windows_installed_passive_setup_data(data["context"], data["precheck_raw"], data["roster_raw"],
+            dict(list(data["blobs"].items())[:(2, 3, 5)[index]]), dict(list(data["outcomes"].items())[:index + 1]), through)
+
+    @classmethod
+    def originals(cls, data):
+        """Memory-only original DATA; native/compile I/O admission is a separate check."""
+        root, context = Path(data["context"]["root"]), data["context"]
+        names = {**helper.WINDOWS_INSTALLED_PASSIVE_PROOFS,
+            "observation": ("passive-publication-observation.private.txt", 64 << 10),
+            "observerExit": ("passive-observer-exit.private.txt", 4096)}
+        files = {root / name: data["blobs"][role] for role, (name, _) in names.items()}
+        for role in ("stage", "publish", "publication"):
+            facts, _ = cls.setup(data, role)
+            files[root / ("passive-" + role + "-checks.json")] = helper.canonical_json(helper.windows_installed_phase_receipt(
+                context, "windows-installed-passive-" + role + "-finalize", **facts))
+        files[root / "passive-publication.private.json"] = helper.canonical_json(data["publication"])
+        files[root / "passive-request.txt"] = data["request"]
+        for key, name in (("owner", "passive-owner-result.private.json"), ("child", "passive-output/passive-result.private.json"),
+                          ("exit", "passive-owner-exit.private.json"), ("intent", "passive-owner-intent.private.json")):
+            files[root / name] = helper.canonical_json(data[key])
+        record = lambda raw: {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+        files[root / "windows-installed-passive-preflight-checks.json"] = helper.canonical_json(helper.windows_installed_phase_receipt(
+            context, "windows-installed-passive", request=record(data["request"]),
+            publication=record(files[root / "passive-publication.private.json"]),
+            appArtifactSha256=data["pre"]["appArtifactSha256"], ownerArtifactSha256=data["pre"]["ownerArtifactSha256"], nativeNotStarted=True))
+        files[root / "windows-installed-passive-checks.json"] = helper.canonical_json(helper.windows_installed_phase_receipt(
+            context, "windows-installed-passive-finalize", **cls.accept(data), notVerified=list(helper.WINDOWS_INSTALLED_PASSIVE_NOT_VERIFIED)))
+        environment = dict.fromkeys(("MRK_WINDOWS_PASSIVE_PREFLIGHT_STEP_OUTCOME", "MRK_WINDOWS_PASSIVE_OWNER_PREFLIGHT_STEP_OUTCOME",
+            *("MRK_WINDOWS_PASSIVE_" + role + suffix for role in ("STAGE", "PUBLISH", "PUBLICATION", "OWNER")
+                for suffix in ("_STEP_OUTCOME", "_FINALIZE_STEP_OUTCOME"))), "success")
+        return files, environment
+
+    def inert_io(self, data, files, environment):
+        def read(path, limit):
+            if path not in files:
+                raise FileNotFoundError("Missing synthetic DATA")
+            raw = files[path]
+            self.assertLessEqual(len(raw), limit)
+            return raw
+        stack = ExitStack()
+        stack.enter_context(patch.dict(helper.os.environ, environment, clear=True))
+        stack.enter_context(patch.object(helper, "windows_installed_passive_check_precheck", return_value=data["prechecked"]))
+        stack.enter_context(patch.object(helper, "windows_fullwalk_compile_bindings", return_value=data["prechecked"][3:]))
+        stack.enter_context(patch.object(helper, "windows_installed_bytes", side_effect=read))
+        stack.enter_context(patch.object(helper, "read_bounded_json", side_effect=lambda path, limit: helper.bounded_json(read(path, limit), limit)))
+        stack.enter_context(patch.object(helper, "windows_installed_record", side_effect=lambda path, limit:
+            {"size": len(read(path, limit)), "sha256": hashlib.sha256(read(path, limit)).hexdigest()}))
+        stack.enter_context(patch.object(helper, "windows_ordinary_original", return_value=data["after"]))
+        stack.enter_context(patch.object(helper, "run", side_effect=AssertionError("DATA must not launch")))
+        stack.enter_context(patch.object(helper, "tools", side_effect=AssertionError("DATA must not acquire tools")))
+        return stack
+
+    def test_dispatch_is_one_fixed_ref_attempt_and_data_routes_are_disjoint(self):
+        sha, repository, ref = "1" * 40, "inert/repository", helper.WINDOWS_INSTALLED_PASSIVE_REF
+        environment = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Windows", "RUNNER_ARCH": "X64",
+            "ImageOS": "win25-vs2026", "ImageVersion": "20260920.1.0", "GITHUB_JOB": "windows-installed-native",
+            "GITHUB_RUN_ATTEMPT": "1", "MRK_DESKTOP_HOSTED_CHECKS": helper.WINDOWS_INSTALLED_SCOPE,
+            "GITHUB_SHA": sha, "GITHUB_WORKFLOW_SHA": sha, "GITHUB_REPOSITORY": repository, "GITHUB_REF": ref,
+            "GITHUB_WORKFLOW_REF": repository + "/.github/workflows/desktop-foundation.yml@" + ref, "GITHUB_RUN_ID": "123456",
+            "GITHUB_EVENT_NAME": "workflow_dispatch", "MRK_DESKTOP_DISPATCH_SCOPE": helper.WINDOWS_INSTALLED_PASSIVE_DISPATCH,
+            "MRK_DESKTOP_EXPECTED_SHA": sha}
+        with patch.object(helper, "sys", SimpleNamespace(platform="win32", maxsize=2**63 - 1, version=helper.PYTHON)):
+            with patch.dict(helper.os.environ, environment, clear=True):
+                self.assertEqual(helper.windows_installed_binding()["qualificationProfile"], helper.WINDOWS_INSTALLED_PASSIVE_PROFILE)
+            for key, value in (("GITHUB_EVENT_NAME", "push"), ("GITHUB_REF", helper.WINDOWS_RUNTIME_PUBLICATION_REF),
+                    ("GITHUB_RUN_ATTEMPT", "2"), ("MRK_DESKTOP_EXPECTED_SHA", ""), ("GITHUB_WORKFLOW_SHA", "f" * 40),
+                    ("MRK_DESKTOP_DISPATCH_SCOPE", helper.WINDOWS_FULLWALK_DISPATCH), ("RUNNER_ENVIRONMENT", "self-hosted")):
+                with self.subTest(field=key), patch.dict(helper.os.environ, {**environment, key: value}, clear=True), self.assertRaises(helper.CheckFailure):
+                    helper.windows_installed_binding()
+        context = {**WindowsReaderGateTests.context(), "qualificationProfile": helper.WINDOWS_INSTALLED_PASSIVE_PROFILE}
+        self.assertTrue(helper.windows_installed_prepared_profile(context))
+        self.assertFalse(helper.windows_fullwalk_profile(context))
+        self.assertFalse(helper.windows_runtime_publication_profile(context))
+        targets = ("windows_installed_passive_stage_finalize", "windows_installed_passive_publish_finalize",
+            "windows_installed_passive_publication_finalize", "windows_installed_passive_preflight", "windows_installed_passive_finalize")
+        for phase, target in zip(helper.WINDOWS_INSTALLED_PASSIVE_DATA_PHASES, targets, strict=True):
+            for profile in (helper.WINDOWS_INSTALLED_PASSIVE_PROFILE, helper.WINDOWS_FULLWALK_PROFILE, helper.WINDOWS_RUNTIME_PUBLICATION_PROFILE):
+                chosen = {**context, "qualificationProfile": profile}
+                with self.subTest(phase=phase, profile=profile), patch.object(helper, "windows_installed_context", return_value=chosen) as admission, \
+                     patch.object(helper, target) as selected, patch.object(helper, "run", side_effect=AssertionError("DATA launch")), \
+                     patch.object(helper, "tools", side_effect=AssertionError("DATA compiler")):
+                    if profile == helper.WINDOWS_INSTALLED_PASSIVE_PROFILE:
+                        helper.windows_installed_phase(phase, helper.WINDOWS_INSTALLED_SCOPE)
+                        selected.assert_called_once_with(chosen)
+                    else:
+                        with self.assertRaises(helper.CheckFailure): helper.windows_installed_phase(phase, helper.WINDOWS_INSTALLED_SCOPE)
+                        selected.assert_not_called()
+                    admission.assert_called_once_with(create=False, retention_only=True)
+        for phase in (*helper.WINDOWS_FULLWALK_DATA_PHASES, "windows-installed-native-finalize"):
+            with self.subTest(old_phase=phase), patch.object(helper, "windows_installed_context", return_value=context), \
+                 patch.object(helper, "run", side_effect=AssertionError("old route launch")), self.assertRaises(helper.CheckFailure):
+                helper.windows_installed_phase(phase, helper.WINDOWS_INSTALLED_SCOPE)
+
+    def test_nonpublisher_candidate_and_normal_helper_have_distinct_metadata_and_commands(self):
+        value, lock, base = WindowsReaderGateTests.graph_data()
+        publisher, _, _ = WindowsReaderGateTests.graph_data(publication=True)
+        context = {**base, "qualificationProfile": helper.WINDOWS_INSTALLED_PASSIVE_PROFILE}
+        for role, argv in (("native", helper.windows_fullwalk_native_argv), ("app", helper.windows_installed_app_argv)):
+            self.assertEqual(helper.windows_installed_features(context, role), [])
+            command = argv("/fixed-cargo", context)
+            for fixed in ("--locked", "--offline", "--no-default-features", "--lib", "--no-run"): self.assertIn(fixed, command)
+            self.assertNotIn("--features", command)
+        command = helper.windows_installed_helper_argv("/fixed-cargo", context)
+        self.assertEqual(command[1], "build")
+        self.assertEqual(command[command.index("--features") + 1], "windows-runtime-publisher")
+        self.assertNotIn("--lib", command); self.assertNotIn("--no-run", command)
+        root, source = Path(context["root"]), Path(context["source"])
+        files = {root / "app-metadata.json": helper.canonical_json(value), root / "helper-metadata.json": helper.canonical_json(publisher),
+                 source / helper.WINDOWS_INSTALLED_APP / "Cargo.lock": b"inert parsed lock boundary"}
+        with patch.object(helper, "windows_installed_bytes", side_effect=lambda path, limit: files[path]), \
+             patch.object(helper.tomllib, "loads", return_value=lock), patch.object(helper, "run", side_effect=AssertionError("metadata must be DATA")):
+            app_graph, helper_graph = helper.windows_installed_app_metadata(context), helper.windows_installed_helper_metadata(context)
+            self.assertFalse(app_graph["publication"]); self.assertTrue(helper_graph["publication"])
+            native = app_graph["localIds"]["mrk-windows-installed-native"]
+            self.assertEqual(helper.windows_installed_app_unit_features(app_graph)[native], ["qualification-result"])
+            self.assertEqual(helper.windows_installed_app_unit_features(helper_graph, helper=True)[native], ["runtime-publication"])
+            files[root / "helper-metadata.json"] = files[root / "app-metadata.json"]
+            with self.assertRaises(helper.CheckFailure): helper.windows_installed_helper_metadata(context)
+        phase = HELPER.read_text(encoding="utf-8").split("def windows_installed_phase(", 1)[1].split("def main(", 1)[0]
+        self.assertEqual(phase.count("time.monotonic()"), 1)
+        self.assertIn('"acquire": 840, "compile": 660', phase)
+        self.assertIn('check="windows-installed-helper-locked-metadata"', phase)
+        self.assertIn("helperMetadataOriginalExitCode=0", phase)
+        self.assertIn("windows_installed_helper_handoff(context, deadline)", phase)
+
+    def test_precheck_source_selectors_and_counts_match_the_nonshipping_native_profile(self):
+        data = self.fixture(); context, pre = data["context"], data["pre"]
+        self.assertEqual(len(helper.WINDOWS_INSTALLED_PASSIVE_PRECHECK_FIELDS), 55)
+        self.assertEqual(tuple(pre), helper.WINDOWS_INSTALLED_PASSIVE_PRECHECK_FIELDS)
+        self.assertEqual(pre["headlessContract"], "fixed-installed-passive-original-owner-v1")
+        self.assertEqual((pre["appRootFeatures"], pre["standaloneFeatures"], pre["appNativeDevFeatures"], pre["helperNativeFeatures"]),
+                         ("none", "none", "qualification-result", "runtime-publication"))
+        for key, value in (("appRootFeatures", "windows-runtime-publisher"), ("standaloneFeatures", "runtime-publication"),
+                ("ownerTest", helper.WINDOWS_FULLWALK_OWNER), ("appTest", helper.WINDOWS_FULLWALK_TEST), ("attempt", "2")):
+            raw = helper.windows_fullwalk_text("passive-precheck", {**pre, key: value})
+            with self.subTest(field=key), self.assertRaises(helper.CheckFailure): helper.windows_fullwalk_precheck_data(context, raw)
+        with self.assertRaises(helper.CheckFailure): helper.windows_fullwalk_kind(context, "prerequisite")
+        native_sources = WindowsReaderGateTests.native_source_blobs(context)
+        with patch.object(helper, "windows_installed_bytes", side_effect=lambda path, limit: native_sources[path]), \
+             patch.object(helper, "run", side_effect=AssertionError("source count cannot list binaries")):
+            names = helper.windows_installed_native_inert(context)
+            self.assertEqual(names, (*helper.WINDOWS_INSTALLED_INERT, *helper.WINDOWS_INSTALLED_PASSIVE_NATIVE_INERT))
+            self.assertEqual(helper.windows_installed_native_test_total(context),
+                sum(len(helper.re.findall(rb"(?m)^\s*#\[test\]\s*$", raw)) for raw in native_sources.values()))
+        fixtures = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/qualification_fixture.rs").read_text(encoding="utf-8")
+        fields = fixtures.split("fn passive_precheck_fields()", 1)[1].split("\n}", 1)[0]
+        self.assertIn("PRECHECK_FIELDS[..26]", fields); self.assertIn("PRECHECK_FIELDS[33..]", fields)
+        self.assertIn("fields.extend(HELPER_FIELDS)", fields)
+        self.assertEqual(tuple(helper.re.findall(r'"([^"]+)"', fields)), helper.WINDOWS_INSTALLED_PASSIVE_PRECHECK_FIELDS[26:32])
+        for kind in ("passive-precheck", "passive-observation", "passive-exit"):
+            self.assertIn('"' + helper.WINDOWS_FULLWALK_SCHEMAS[kind][0] + '"', fixtures)
+        self.assertIn('("helperSuccessExit", "passive-publisher-exit.private.txt", LIMIT)', fixtures)
+        for name in helper.WINDOWS_INSTALLED_PASSIVE_NATIVE_INERT:
+            self.assertIn("fn " + name.split("::")[-1] + "(", native_sources[Path(context["source"]) / helper.WINDOWS_INSTALLED_CRATE / "src/tests.rs"].decode("utf-8"))
+        app_sources = "\n".join((SOURCE / name).read_text(encoding="utf-8") for name in (
+            "desktop/src-tauri/src/runtime.rs", "desktop/src-tauri/src/installed_runtime_windows.rs", "desktop/src-tauri/src/installed_windows_passive_tests.rs"))
+        for name in helper.WINDOWS_INSTALLED_PASSIVE_APP_INERT: self.assertIn("fn " + name.split("::")[-1] + "(", app_sources)
+        self.assertNotIn("#[test]", (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/loader.rs").read_text(encoding="utf-8"))
+        app_names = (*helper.WINDOWS_INSTALLED_APP_INERT, *helper.WINDOWS_INSTALLED_PASSIVE_APP_INERT)
+        raw = (f"running {len(app_names)} tests\n" + "".join("test " + name + " ... ok\n" for name in app_names)
+            + f"test result: ok. {len(app_names)} passed; 0 failed; 0 ignored; 0 measured; 181 filtered out; finished in 0.01s\n").encode("ascii")
+        self.assertEqual(helper.windows_installed_app_libtest(raw, passive=True)["names"], list(app_names))
+        for arguments in ({}, {"production": True}, {"production": True, "passive": True}):
+            with self.assertRaises(helper.CheckFailure): helper.windows_installed_app_libtest(raw, **arguments)
+
+    def test_setup_requires_three_actual_original_returns_and_exact_proof_correspondence(self):
+        data = self.fixture()
+        for through, count in (("stage", 2), ("publish", 3), ("publication", 5)):
+            facts, publication = self.setup(data, through)
+            self.assertEqual(len(facts["setupEvidence"]), count)
+            self.assertEqual(publication is not None, through == "publication")
+        facts, publication = self.setup(data)
+        self.assertEqual(facts["observedObjects"], 103)
+        self.assertTrue(publication["comparisonDataOnly"])
+        self.assertFalse(publication["productionEnabled"])
+        for role in data["outcomes"]:
+            changed = deepcopy(data); changed["outcomes"][role] = "failure"
+            with self.subTest(outcome=role), self.assertRaises(helper.CheckFailure): self.setup(changed)
+        for name in ("stageExit", "helperSuccessExit", "observerExit"):
+            for key, value in (("exitCode", "2"), ("originalWaitReturned", "false"), ("writerCloseGate", "unclosed")):
+                changed = deepcopy(data)
+                row = helper.windows_fullwalk_wire(changed["blobs"][name], "passive-exit")
+                changed["blobs"][name] = helper.windows_fullwalk_text("passive-exit", {**row, key: value})
+                with self.subTest(original=name, field=key), self.assertRaises(helper.CheckFailure): self.setup(changed)
+        for role in ("scalar", "helperOccupied", "before", "after"):
+            with self.subTest(old_role=role), self.assertRaises(helper.CheckFailure):
+                helper.windows_runtime_publication_exit(data["context"], data["blobs"]["helperSuccessExit"], data["precheck_raw"], role, "success")
+        mutations = {
+            "missing-object": lambda d: d["objects"]["observation"].pop(),
+            "aliased-full-id": lambda d: d["objects"]["observation"][5]["stamp"].update(fileId=d["objects"]["observation"][0]["stamp"]["fileId"]),
+            "changed-source-stamp": lambda d: d["objects"]["observation"][10]["stamp"].update(change=302),
+            "payload-digest": lambda d: d["objects"]["observation"][-1].update(sha256="f" * 64),
+            "proof-digest": lambda d: d["proofs"]["observation"][2].update(sha256="f" * 64),
+            "proof-role": lambda d: d["proofs"]["observation"][2].update(role="helperSuccess"),
+            "unsettled": lambda d: d["fields"]["observation"].update(parentBookSettled="false"),
+            "open-original": lambda d: d["fields"]["observation"].update(fileOriginalsClosed=119),
+            "producer-not-observed": lambda d: d["fields"]["observation"].update(actualFixedProducerObserved="false"),
+        }
+        for label, mutate in mutations.items():
+            changed = deepcopy(data); mutate(changed)
+            changed["blobs"]["observation"] = WindowsReaderGateTests.publication_observation_raw(
+                changed["fields"]["observation"], changed["objects"]["observation"], changed["proofs"]["observation"], kind="passive-observation")
+            with self.subTest(case=label), self.assertRaises(helper.CheckFailure): self.setup(changed)
+
+    def test_setup_finalizers_cannot_self_certify_or_accept_changed_originals(self):
+        data = self.fixture(); files, environment = self.originals(data)
+        with self.inert_io(data, files, environment):
+            self.assertEqual(helper.windows_installed_passive_setup_evidence(data["context"], "publication", finalized=True)[1], data["publication"])
+        for key in environment:
+            if "OWNER" in key: continue
+            with self.subTest(gate=key), self.inert_io(data, files, {**environment, key: "skipped"}), self.assertRaises(helper.CheckFailure):
+                helper.windows_installed_passive_setup_evidence(data["context"], "publication", finalized=True)
+        for filename in ("passive-publisher-exit.private.txt", "passive-stage-checks.json", "passive-publish-checks.json",
+                         "passive-publication-checks.json", "passive-publication.private.json"):
+            changed = dict(files); path = Path(data["context"]["root"]) / filename
+            changed[path] = changed[path] + b"\n"
+            if filename.endswith("checks.json"):
+                changed[path] = helper.canonical_json({**helper.bounded_json(files[path], 64 << 10), "unreviewed": True})
+            with self.subTest(file=filename), self.inert_io(data, changed, environment), self.assertRaises(helper.CheckFailure):
+                helper.windows_installed_passive_setup_evidence(data["context"], "publication", finalized=True)
+
+    def test_request_role_inventory_and_comparison_receipt_are_closed_data(self):
+        data = self.fixture(); raw = data["request"]
+        request = helper.windows_fullwalk_request_data(raw, root=data["context"]["root"], passive=True)
+        self.assertEqual(tuple(request), helper.WINDOWS_FULLWALK_REQUEST_FIELDS)
+        self.assertEqual(request["publicationReceiptBytes"], len(helper.canonical_json(data["publication"])))
+        self.assertEqual(request["publicationReceiptSha256"], hashlib.sha256(helper.canonical_json(data["publication"])).hexdigest())
+        self.assertEqual(request["role"], "installed-passive")
+        with self.assertRaises(helper.CheckFailure): helper.windows_fullwalk_request_data(raw, root=data["context"]["root"])
+        for original, replacement in ((b"MRK_WINDOWS_INSTALLED_PASSIVE_REQUEST_V1", b"MRK_WINDOWS_FULLWALK_REQUEST_V1"),
+                (b"role=installed-passive", b"role=protected-version-fullwalk"),
+                (helper.WINDOWS_INSTALLED_PASSIVE_TEST.encode("ascii"), helper.WINDOWS_FULLWALK_TEST.encode("ascii")),
+                (request["selectedCoreIdentity"].encode("ascii"), request["selectedPythonIdentity"].encode("ascii")),
+                (("appCommandSha256=" + request["appCommandSha256"]).encode("ascii"), b"appCommandSha256=" + b"f" * 64)):
+            with self.subTest(replacement=replacement[:40]), self.assertRaises(helper.CheckFailure):
+                helper.windows_fullwalk_request_data(raw.replace(original, replacement), root=data["context"]["root"], passive=True)
+
+    def test_owner_child_unknown_original_close_acl_and_single_deadline_fail_closed(self):
+        data = self.fixture(); accepted = self.accept(data)
+        self.assertEqual(accepted["installedPassive"]["completedMethods"], 5)
+        self.assertEqual(accepted["installedPassive"]["settledOriginalOwners"], 9)
+        self.assertEqual(accepted["passiveOwner"]["ownerAggregateSeconds"], 90)
+        self.assertFalse(accepted["productionEnabled"])
+        mutations = {
+            "unknown": lambda d: d["owner"].update(unknown=True),
+            "deadline": lambda d: d["owner"].update(deadlineLatched=True),
+            "missing-original-close": lambda d: d["owner"].update(processCloseReturn=0),
+            "bool-not-native-scalar": lambda d: d["owner"].update(threadCloseReturn=True),
+            "unclosed-input": lambda d: d["owner"].update(inputOriginalsClosed=d["owner"]["inputOriginals"] - 1),
+            "account-unsettled": lambda d: d["owner"].update(accountRemovedAfterSettlement=False),
+            "renewed-endpoint": lambda d: d["owner"].update(ownerAggregateSeconds=91),
+            "historical-envelope": lambda d: d["owner"].update(aggregate={}),
+            "production": lambda d: d["owner"].update(productionEnabled=True),
+            "wrong-exit": lambda d: d["exit"].update(exitCode=1),
+            "owner-no-return": lambda d: d["exit"].update(originalWaitReturned=False),
+            "child-incomplete": lambda d: d["child"]["passive"].update(completedMethods=4),
+            "borrower-open": lambda d: d["child"]["passive"].update(settledOriginalOwners=8),
+            "claim-stop": lambda d: d["child"]["passive"].update(stoppedBeforeClaim=False),
+            "child-stop": lambda d: d["child"]["passive"].update(stoppedOwnedChild=False),
+            "unadmitted-image-count": lambda d: d["child"]["passive"].update(systemImages=32),
+            "snapshot-included": lambda d: d["child"]["passive"].update(snapshot=True),
+            "intent-unbound": lambda d: d["intent"].update(sourceSha="f" * 40),
+            "old-intent": lambda d: d["intent"].update(fullwalkBatch={}),
+            "wrong-output-acl": lambda d: d["owner"]["aclTransitions"][-1].update(role="fullwalk-output"),
+            "excessive-mask": lambda d: d["owner"]["aclTransitions"][-1].update(mask=0x1f01ff),
+            "changed-artifact": lambda d: d["owner"]["aclTransitions"][5]["after"].update(write=201),
+        }
+        for label, mutate in mutations.items():
+            changed = deepcopy(data); mutate(changed)
+            with self.subTest(case=label), self.assertRaises(helper.CheckFailure): self.accept(changed)
+        for outcome in ("failure", "cancelled", "skipped", "unavailable"):
+            with self.subTest(outcome=outcome), self.assertRaises(helper.CheckFailure): self.accept(data, outcome)
+
+    def test_preflight_checks_every_output_before_any_write_and_propagates_access_failure(self):
+        data = self.fixture(); context = data["context"]
+        names = ("passive-request.txt", "passive-output", "passive-owner-intent.private.json", "passive-owner-result.private.json",
+                 "passive-owner-exit.private.json", "windows-installed-passive-preflight-checks.json", "windows-installed-passive-checks.json")
+        for name, error in ((*[(name, helper.CheckFailure) for name in names], (None, PermissionError))):
+            def state(path):
+                if name is None: raise PermissionError("inert denied output")
+                if path.name == name: return SimpleNamespace(st_mode=stat.S_IFLNK)
+                raise FileNotFoundError("inert absent output")
+            with self.subTest(occupied=name), patch.object(helper, "windows_installed_passive_setup_evidence", return_value=(None, data["publication"], data["prechecked"])), \
+                 patch.object(helper, "windows_ordinary_original", return_value=data["pre"]["appArtifactIdentity"]), \
+                 patch.object(helper.Path, "lstat", state), patch.object(helper, "windows_fullwalk_write") as write, \
+                 patch.object(helper, "write_json") as receipt, self.assertRaises(error):
+                try: helper.windows_installed_passive_preflight(context)
+                finally: write.assert_not_called(); receipt.assert_not_called()
+
+    def test_retention_rechecks_originals_and_exposes_only_one_bounded_redacted_result(self):
+        data = self.fixture(); files, environment = self.originals(data)
+        def retain(selected_files, selected_environment):
+            writes = []
+            with self.inert_io(data, selected_files, selected_environment), \
+                 patch.object(helper, "windows_fullwalk_write", side_effect=lambda *args: writes.append(args)):
+                helper.windows_installed_passive_retain(data["context"])
+            self.assertEqual(len(writes), 1)
+            path, raw, limit = writes[0]
+            self.assertEqual(path, Path(data["context"]["root"]) / "public/windows-installed-passive.json")
+            self.assertEqual(limit, 64 << 10); self.assertLess(len(raw), limit)
+            for secret in (b"accountSidSha256", b"accountName", b"fileId", b"securityBefore", b"securityAfter",
+                           b"passive-request.txt", b"passive-output/", b"compiler-message", data["intent"]["accountName"].encode("ascii")):
+                self.assertNotIn(secret, raw)
+            return helper.bounded_json(raw, limit)
+        accepted = retain(files, environment)
+        self.assertTrue(accepted["combinedPassed"])
+        self.assertTrue(all(row["status"] == "passed" for row in accepted["results"].values()))
+        for field in ("productionEnabled", "msiQualified", "saveQualified", "snapshotQualified"): self.assertFalse(accepted[field])
+        self.assertEqual(accepted["notVerified"], list(helper.WINDOWS_INSTALLED_PASSIVE_NOT_VERIFIED))
+        for key in ("MRK_WINDOWS_PASSIVE_OWNER_STEP_OUTCOME", "MRK_WINDOWS_PASSIVE_OWNER_FINALIZE_STEP_OUTCOME"):
+            with self.subTest(gate=key):
+                result = retain(files, {**environment, key: "failure"})
+                self.assertFalse(result["combinedPassed"]); self.assertEqual(result["results"]["owner"]["status"], "failed")
+        for name in ("passive-owner-exit.private.json", "passive-owner-intent.private.json", "windows-installed-passive-checks.json",
+                     "passive-publisher-exit.private.txt"):
+            changed = dict(files); del changed[Path(data["context"]["root"]) / name]
+            with self.subTest(missing=name):
+                result = retain(changed, environment)
+                self.assertFalse(result["combinedPassed"]); self.assertNotEqual(result["results"]["owner"]["status"], "passed")
+
+    def test_workflow_has_only_four_fixed_foreground_originals_and_no_historical_role_replay(self):
+        workflow = (SOURCE / ".github/workflows/desktop-foundation.yml").read_text(encoding="utf-8")
+        self.assertNotIn("verify/desktop-windows-installed-passive", workflow.split("  workflow_dispatch:", 1)[0])
+        self.assertIn("windows-installed-passive", workflow.split("        options:", 1)[1].split("\n", 1)[0])
+        self.assertIn("permissions:\n  contents: read", workflow)
+        job = workflow.split("  windows-installed-native:\n", 1)[1]
+        self.assertIn("runs-on: windows-2025-vs2026", job)
+        self.assertIn("timeout-minutes: 35", job)
+        blocks = {}
+        for block in job.split("      - name:")[1:]:
+            match = helper.re.search(r"(?m)^        id: ([a-z-]+)$", block)
+            if match: blocks[match.group(1)] = block
+        ordered = ("passive-stage", "passive-stage-finalize", "passive-publish", "passive-publish-finalize",
+            "passive-publication", "passive-publication-finalize", "passive-owner-preflight", "passive-owner", "passive-owner-finalize")
+        self.assertEqual(tuple(name for name in blocks if name.startswith("passive-")), ordered)
+        for previous, current in zip(("ordinary-preflight", *ordered[:-1]), ordered, strict=True):
+            condition = blocks[current].split("        if: ", 1)[1].split("\n", 1)[0]
+            self.assertIn("success() && inputs.scope == 'windows-installed-passive'", condition)
+            self.assertIn("steps." + previous + ".outcome == 'success'", condition)
+        commands = (("passive-stage", "MRK_WINDOWS_SETUP_ARTIFACT", helper.WINDOWS_INSTALLED_PASSIVE_STAGE),
+            ("passive-publish", "MRK_WINDOWS_SETUP_ARTIFACT", None),
+            ("passive-publication", "MRK_WINDOWS_SETUP_ARTIFACT", helper.WINDOWS_INSTALLED_PASSIVE_OBSERVER),
+            ("passive-owner", "MRK_WINDOWS_PASSIVE_OWNER_ARTIFACT", helper.WINDOWS_INSTALLED_PASSIVE_OWNER))
+        for step, variable, test in commands:
+            body = blocks[step]
+            line = "& $env:" + variable + (" " + test + " --exact --ignored --nocapture --test-threads=1" if test else "")
+            self.assertEqual([line.strip() for line in body.splitlines() if line.strip().startswith("& ")], [line])
+            self.assertIn("$originalExitCode = $LASTEXITCODE", body)
+            self.assertIn("[System.IO.FileMode]::CreateNew", body)
+            self.assertLess(body.index("$stream.Dispose()"), body.index("if ($originalExitCode -ne 0)"))
+            self.assertNotIn("MRK_PYTHON", body)
+            for forbidden in ("Start-Process", "Stop-Process", "System.Diagnostics.Process", "Task.Run", "-Redirect", "retry("):
+                self.assertNotIn(forbidden, body)
+        combined = "\n".join(blocks[name] for name in ordered)
+        for forbidden in (helper.WINDOWS_FULLWALK_OWNER, helper.WINDOWS_FULLWALK_PUBLISHER, helper.WINDOWS_FULLWALK_RETIRE,
+                          helper.WINDOWS_RUNTIME_PUBLICATION_SCALAR, "helperOccupied", "producer-before", "producer-occupied"):
+            self.assertNotIn(forbidden, combined)
+        self.assertNotIn(helper.WINDOWS_INSTALLED_PASSIVE_TEST, workflow)  # The original native owner alone launches the app child.
+        self.assertIn("inputs.scope != 'windows-installed-passive'", blocks["ordinary-owner"].split("        run:", 1)[0])
+        self.assertIn("inputs.scope != 'windows-installed-passive'", blocks["runtime-data"].split("        run:", 1)[0])
+        self.assertIn("steps.ordinary-preflight.outputs.helperArtifact", blocks["passive-publish"])
+        for phase in helper.WINDOWS_INSTALLED_PASSIVE_DATA_PHASES:
+            self.assertEqual(combined.count("ci_foundation.py " + phase + "'"), 1)
 
 
 if __name__ == "__main__":

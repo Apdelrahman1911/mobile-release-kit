@@ -42,6 +42,8 @@ pub struct RuntimeStatus { pub state: &'static str, pub reason: Option<String>, 
 pub struct RuntimeConfig { bundle_root: PathBuf,
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     passive_installed: PassiveInstalledSelection,
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+    windows_passive_candidate: bool,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
         any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
     environment_fixture_core: Option<PathBuf>,
@@ -49,6 +51,21 @@ pub struct RuntimeConfig { bundle_root: PathBuf,
 
 #[derive(Debug)]
 pub struct VerifiedRuntime { pub python: PathBuf, pub bootstrap: PathBuf, pub core: PathBuf, pub cwd: PathBuf }
+
+// A sealed headless selection, not a Windows shipping availability switch.
+// Native ProgramFiles/SystemRoot selection belongs to the retained book. This
+// profile accepts no caller path or environment flag and cannot create handles.
+#[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+pub(crate) struct PassiveInstalledProfile { _private: () }
+#[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+impl PassiveInstalledProfile {
+    pub(crate) fn compiled(&self) -> Result<windows_version::VersionSpec, BridgeError> {
+        if !cfg!(all(test, not(feature = "desktop-shell"), not(feature = "development-runtime"),
+            not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"),
+            not(feature = "macos-installed-installer"))) { return Err(unavailable()); }
+        windows_version::VersionSpec::compiled()
+    }
+}
 
 // Explicit compile inputs bind the successor staged payload. Neither a nearby
 // manifest nor environment data at app launch can select or qualify a release.
@@ -200,8 +217,10 @@ fn installed_passive_method(name: &str) -> bool {
     { linux_installed_passive_method(name) }
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     { macos_installed_passive_method(name) }
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+    { windows_version::installed_candidate_method(name) }
     #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
-        all(target_os = "macos", target_arch = "aarch64"))))]
+        all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
     { let _ = name; false }
 }
 fn deadline(end: Instant) -> Result<(), BridgeError> { if Instant::now() >= end { Err(BridgeError::timeout()) } else { Ok(()) } }
@@ -359,6 +378,8 @@ fn exact_inventory(root: &Path, expected: &BTreeSet<String>, end: Instant) -> Re
 
 impl RuntimeConfig {
     pub fn packaged(resource_dir: PathBuf) -> Self { Self { bundle_root: resource_dir.join("runtime"),
+        #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+        windows_passive_candidate: false,
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         passive_installed: {
             #[cfg(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
@@ -378,6 +399,16 @@ impl RuntimeConfig {
         let mut config = Self::packaged(PathBuf::new());
         config.passive_installed = PassiveInstalledSelection::CandidateA;
         config
+    }
+    /// One fixed nonshipping Windows candidate. No arbitrary root/profile,
+    /// environment opt-in, development runtime or publisher can select it.
+    #[cfg(all(test, target_os = "windows", target_arch = "x86_64", target_env = "msvc",
+        not(feature = "desktop-shell"), not(feature = "development-runtime"),
+        not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"),
+        not(feature = "macos-installed-installer")))]
+    pub(crate) fn installed_windows_passive_candidate() -> Self {
+        let mut config = Self::packaged(PathBuf::new());
+        config.windows_passive_candidate = true; config
     }
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
         any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
@@ -399,7 +430,9 @@ impl RuntimeConfig {
         { installed_passive_method(name) && self.passive_installed_profile().is_ok() }
         #[cfg(all(not(all(feature = "development-runtime", debug_assertions)), target_os = "macos", target_arch = "aarch64"))]
         { installed_passive_method(name) && self.passive_installed_profile().is_ok() }
-        #[cfg(all(not(all(feature = "development-runtime", debug_assertions)), not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))))]
+        #[cfg(all(not(all(feature = "development-runtime", debug_assertions)), target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+        { installed_passive_method(name) && self.passive_installed_profile().is_ok() }
+        #[cfg(all(not(all(feature = "development-runtime", debug_assertions)), not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))))]
         { let _ = name; false }
     }
     /// Fixed selection DATA for the project-only picker, not an asset session
@@ -472,6 +505,22 @@ impl RuntimeConfig {
         end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
         let profile = self.passive_installed_profile()?;
         if !installed_passive_method(method.name()) { return Err(BridgeError::unavailable("This Mac installed profile supports only the eight passive project/draft/guidance methods.")); }
+        originals.inspect_once(profile, end, stop)
+    }
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+    fn passive_installed_profile(&self) -> Result<PassiveInstalledProfile, BridgeError> {
+        if !self.windows_passive_candidate { return Err(unavailable()); }
+        let profile = PassiveInstalledProfile { _private: () };
+        profile.compiled()?; Ok(profile)
+    }
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+    pub(crate) fn resolve_passive_installed(&self, method: crate::protocol::Method,
+        originals: &mut crate::installed_runtime_windows::PassiveRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        let profile = self.passive_installed_profile()?;
+        if !installed_passive_method(method.name()) {
+            return Err(BridgeError::unavailable("The Windows headless candidate supports only capabilities, catalog and in-memory configuration drafts; project snapshot and all external or mutating operations remain unavailable."));
+        }
         originals.inspect_once(profile, end, stop)
     }
     /// Availability and original-owner admission use this SAME sealed selector.
@@ -1145,6 +1194,30 @@ pub(crate) mod windows_version {
     pub(crate) const BLOCK_SIZE: usize = 64 * 1024;
     pub(crate) const MANIFEST_BYTES: u64 = MANIFEST_LIMIT;
 
+
+    // CPython dynload_win.c passes512 wchar_t to GetModuleFileNameW and
+    // PathCchCombineEx. Count the complete path, a possible \\?\ expansion,
+    // and NUL BEFORE any creation; native8192-unit bounds are not sufficient.
+    fn python_path_units_fit(units: usize) -> bool {
+        units.checked_add(4).and_then(|n| n.checked_add(1)).is_some_and(|n| n <= 512)
+    }
+    pub(crate) fn python_path_fits(path: &str) -> bool {
+        !path.contains('\0') && path.encode_utf16().try_fold(0usize, |n, _| n.checked_add(1))
+            .is_some_and(python_path_units_fit)
+    }
+    pub(crate) struct LaunchLayout { pub(crate) root: String, pub(crate) python: String }
+    pub(crate) fn launch_layout(program_files: &str, spec: &VersionSpec) -> Result<LaunchLayout, BridgeError> {
+        if !python_path_fits(program_files) { return Err(unavailable()); }
+        let mut root = program_files.to_owned();
+        for component in spec.components() { root.push('\\'); root.push_str(component); }
+        let prefix = format!("{root}\\python");
+        let python = format!("{prefix}\\python.exe");
+        let paths = [&python, &format!("{prefix}\\python314.dll"), &format!("{prefix}\\python3.dll"),
+            &prefix, &format!("{prefix}\\DLLs\\python3.dll")];
+        if paths.iter().any(|p| !python_path_fits(p)) { return Err(unavailable()); }
+        Ok(LaunchLayout { root, python })
+    }
+
     // Official CPython 3.14.7 embed-amd64's entire unchanged 37-member roster,
     // including unused images/catalog. Source: accepted Windows payload preparer
     // e49c459629f6453166ffdd504dc33f8d6607e78c62178aa03556a5f763f7f775.
@@ -1189,9 +1262,42 @@ pub(crate) mod windows_version {
         ("winsound.pyd", 32992, "6a27340660de89d5da59445a77ac6b08d471e373304ce7294c198238f09f2dc2"),
     ];
 
+    #[cfg(test)]
+    mod loader_path_tests {
+        use super::*;
+        #[test]
+        fn windows_python_capacity_counts_utf16_nul_and_verbatim_prefix_before_creation() {
+            assert!(python_path_fits(&"a".repeat(507)));
+            assert!(!python_path_fits(&"a".repeat(508)));
+            assert!(python_path_fits(&("a".repeat(505) + "\u{1f680}")));
+            assert!(!python_path_fits(&("a".repeat(506) + "\u{1f680}")));
+            assert!(!python_path_fits("C:\\Python\0ignored"));
+            assert!(!python_path_units_fit(usize::MAX));
+            assert!(!python_path_units_fit(usize::MAX - 3));
+            for method in ["capabilities", "catalog", "config.validate", "config.suggest", "config.preview"] {
+                assert!(installed_candidate_method(method));
+            }
+            for method in ["project.snapshot", "config.save", "environment.requirements", "github.setup.propose", "android.build", "catalog "] {
+                assert!(!installed_candidate_method(method));
+            }
+        }
+        #[test]
+        fn windows_complete_layout_binds_the_longest_python_dlls_fallback() {
+            let spec = VersionSpec::bindings(TARGET, Some(&"a".repeat(64)), Some(&"b".repeat(64))).unwrap();
+            let suffix = format!("\\{}\\python\\DLLs\\python3.dll", spec.components().join("\\"));
+            let remaining = 507 - suffix.encode_utf16().count();
+            let base = format!("C:\\{}", "a".repeat(remaining - 3));
+            assert!(launch_layout(&base, &spec).is_ok());
+            assert!(launch_layout(&(base + "a"), &spec).is_err());
+        }
+    }
+
     pub(crate) fn passive_method(name: &str) -> bool {
         matches!(name, "capabilities" | "catalog" | "project.snapshot"
             | "config.validate" | "config.suggest" | "config.preview")
+    }
+    pub(crate) fn installed_candidate_method(name: &str) -> bool {
+        passive_method(name) && name != "project.snapshot"
     }
 
     #[derive(Debug)]
@@ -1284,6 +1390,21 @@ pub(crate) mod windows_version {
     }
     impl Inventory {
         pub(crate) fn file(&self, path: &str) -> Option<&PayloadFile> { find_file(&self.manifest.files, path) }
+        /// This producing profile is narrower than arbitrary inspected DATA.
+        /// Both pyvenv.cfg sites, .local/manifests, extra _pth/site inputs and
+        /// prefix/DLLs must be absent under the protected complete inventory.
+        pub(crate) fn passive_loader_inventory(&self) -> Result<(), BridgeError> {
+            let root = ["android_build_bootstrap.py", "config_edit_bootstrap.py", "core.zip", "engine_bootstrap.py",
+                "environment_bootstrap.py", "github-ca.pem", "github_connection_bootstrap.py", "offline_preflight_bootstrap.py"];
+            if self.directories != BTreeSet::from(["python".to_owned()])
+                || self.manifest.files.len() != root.len() + SUPPLIER.len() + 1
+                || self.manifest.files.iter().any(|file| {
+                    if let Some(name) = file.path.strip_prefix("python/") {
+                        name != "MRK-EMBEDDED-NOTICES.txt" && !SUPPLIER.iter().any(|(allowed, _, _)| name == *allowed)
+                    } else { !root.contains(&file.path.as_str()) }
+                }) { return Err(unavailable()); }
+            Ok(())
+        }
         pub(crate) fn progress(&self) -> InventoryProgress {
             let mut remaining = BTreeMap::new();
             remaining.insert("manifest.json".to_owned(), InventoryKind::File);
@@ -1350,6 +1471,19 @@ pub(crate) mod windows_version {
             assert!(!progress.complete());
             progress.observe("python", InventoryKind::Directory).unwrap();
             assert!(progress.complete());
+        }
+        #[test]
+        fn windows_passive_inventory_excludes_all_additional_startup_inputs() {
+            assert!(parse(&mut fixture()).unwrap().passive_loader_inventory().is_err()); // Required notice absent.
+            let mut value = fixture();
+            value["files"].as_array_mut().unwrap().push(row("python/MRK-EMBEDDED-NOTICES.txt", 1));
+            assert!(parse(&mut value).unwrap().passive_loader_inventory().is_ok());
+            for extra in ["pyvenv.cfg", "python/pyvenv.cfg", "python/python._pth", "python/python.exe.local",
+                "python/python.exe.manifest", "python/DLLs/python3.dll", "python/sitecustomize.py", "python/extra.pth"] {
+                let mut changed = value.clone();
+                changed["files"].as_array_mut().unwrap().push(row(extra, 1));
+                assert!(parse(&mut changed).unwrap().passive_loader_inventory().is_err());
+            }
         }
         #[test]
         fn windows_manifest_anchors_schema_and_inventory_are_bound_before_use() {

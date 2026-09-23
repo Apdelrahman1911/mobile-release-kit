@@ -213,6 +213,90 @@ fn original_destinations_are_stable_registered_and_book_bound() -> Result<()> {
 }
 
 #[test]
+fn loader_roles_and_shared_cursor_cannot_be_retargeted() -> Result<()> {
+    assert_eq!(SystemImage::ALL.len(), 31);
+    for image in SystemImage::ALL {
+        assert_eq!(SystemImage::from_name(image.name()), Some(*image));
+        assert_eq!(SystemImage::from_name(&image.name().to_ascii_uppercase()), Some(*image));
+    }
+    for name in ["python314.dll", "kernel32.dll:stream", "api-ms-win-core-path-l1-1-0.dll", "..\\kernel32.dll", "kernel32.dll "] {
+        assert_eq!(SystemImage::from_name(name), None);
+    }
+    let names = vec!["Program Files".to_owned(), "Windows".to_owned()];
+    loader::selected_names(&names)?;
+    for bad in [Vec::new(), vec!["Windows".to_owned(), "WINDOWS".to_owned()], vec!["..".to_owned()],
+        (0..36).map(|n| format!("name{n}")).collect()] {
+        assert!(loader::selected_names(&bad).is_err());
+    }
+    let mut mode = DirectoryMode::Unstarted;
+    mode.bind(DirectoryMode::Selected(names.clone()))?;
+    mode.bind(DirectoryMode::Selected(names.clone()))?;
+    assert!(mode.bind(DirectoryMode::Selected(vec!["Windows".to_owned()])).is_err());
+    assert!(mode.bind(DirectoryMode::Strict).is_err());
+    assert!(mode.bind(DirectoryMode::Ancestor("Windows".to_owned())).is_err());
+    let mut fixture = Inert::new();
+    let parent = fixture.book.reserve(Kind::Directory, None, "payload", "\\Device\\HarddiskVolume1\\payload".to_owned())?;
+    let mut system = KnownLocation { book: Arc::clone(&fixture.book.identity), kind: LocationKind::System,
+        path: "C:\\Windows\\System32".to_owned(), drive: "C:".to_owned(), device: "\\Device\\HarddiskVolume1".to_owned(),
+        components: vec!["Windows".to_owned(), "System32".to_owned()] };
+    let before = fixture.book.slots.len();
+    assert!(matches!(fixture.book.open_system_image(&system, &parent, SystemImage::Kernel32, "kernel32.dll"), Err(Error::Unsafe)));
+    assert!(matches!(fixture.book.open_system_image(&system, &parent, SystemImage::Kernel32, "python314.dll"), Err(Error::State)));
+    system.kind = LocationKind::ProgramFiles;
+    assert!(matches!(fixture.book.open_system_image(&system, &parent, SystemImage::Kernel32, "kernel32.dll"), Err(Error::State)));
+    system.kind = LocationKind::System; system.book = Arc::new(());
+    assert!(matches!(fixture.book.open_system_image(&system, &parent, SystemImage::Kernel32, "kernel32.dll"), Err(Error::State)));
+    assert_eq!(fixture.book.slots.len(), before);
+    assert!(!fixture.book.started && fixture.book.active.is_none());
+    assert!(fixture.book.slot(parent.index)?.system_image.is_none());
+    fixture.book.slot_mut(parent.index)?.directory_ended = true;
+    assert!(matches!(fixture.book.next_selected_entries(&parent, &names), Err(Error::State)));
+    assert_eq!(fixture.book.slot(parent.index)?.directory_mode, DirectoryMode::Unstarted);
+    Ok(()) // Every original is inert; no native call occurred.
+}
+
+#[test]
+fn os_image_link_policy_never_weakens_payload_metadata_or_loader_acl() -> Result<()> {
+    let mut basic = vec![0; size_of::<FS::FILE_BASIC_INFO>()];
+    let mut standard = vec![0; size_of::<FS::FILE_STANDARD_INFO>()];
+    let mut tag = vec![0; size_of::<FS::FILE_ATTRIBUTE_TAG_INFO>()];
+    let mut id = vec![0; size_of::<FS::FILE_ID_INFO>()];
+    put32(&mut basic, offset_of!(FS::FILE_BASIC_INFO, FileAttributes), FS::FILE_ATTRIBUTE_NORMAL);
+    put32(&mut tag, offset_of!(FS::FILE_ATTRIBUTE_TAG_INFO, FileAttributes), FS::FILE_ATTRIBUTE_NORMAL);
+    put64(&mut standard, offset_of!(FS::FILE_STANDARD_INFO, EndOfFile), 37);
+    put64(&mut standard, offset_of!(FS::FILE_STANDARD_INFO, AllocationSize), 4096);
+    id[offset_of!(FS::FILE_ID_INFO, FileId)] = 1;
+    for links in [0, 1, 2, u32::MAX] {
+        put32(&mut standard, offset_of!(FS::FILE_STANDARD_INFO, NumberOfLinks), links);
+        assert_eq!(decode::metadata(FileKind::File, &basic, &standard, &tag, &id).is_ok(), links == 1);
+        let os = decode::Observed::new(Refusal::none());
+        assert_eq!(os.system_image_metadata(FileKind::File, &basic, &standard, &tag, &id).is_ok(), links > 0);
+        assert!(os.system_image_metadata(FileKind::Directory, &basic, &standard, &tag, &id).is_err());
+    }
+    put32(&mut standard, offset_of!(FS::FILE_STANDARD_INFO, NumberOfLinks), 2);
+    standard[offset_of!(FS::FILE_STANDARD_INFO, DeletePending)] = 1;
+    assert!(decode::Observed::new(Refusal::none()).system_image_metadata(FileKind::File, &basic, &standard, &tag, &id).is_err());
+    standard[offset_of!(FS::FILE_STANDARD_INFO, DeletePending)] = 0;
+    put32(&mut basic, offset_of!(FS::FILE_BASIC_INFO, FileAttributes), FS::FILE_ATTRIBUTE_REPARSE_POINT);
+    put32(&mut tag, offset_of!(FS::FILE_ATTRIBUTE_TAG_INFO, FileAttributes), FS::FILE_ATTRIBUTE_REPARSE_POINT);
+    assert!(decode::Observed::new(Refusal::none()).system_image_metadata(FileKind::File, &basic, &standard, &tag, &id).is_err());
+    let owner = sid(5, &[18]); let everyone = sid(1, &[0]);
+    for right in [FS::FILE_WRITE_DATA, FS::FILE_APPEND_DATA, FS::DELETE, FS::FILE_DELETE_CHILD, FS::WRITE_DAC, FS::WRITE_OWNER] {
+        let raw = descriptor(&owner, &[(0, 0, right, everyone.clone())]);
+        for kind in [FileKind::Directory, FileKind::File] {
+            assert!(security::descriptor(&raw, kind, AuthorityScope::ImmutableVersion).is_err());
+        }
+    }
+    let selected = vec!["kernel32.dll".to_owned()];
+    let mut raw = entry("kernel32.dll", [1; 16]);
+    put32(&mut raw, offset_of!(FS::FILE_ID_EXTD_DIR_INFO, FileAttributes), FS::FILE_ATTRIBUTE_REPARSE_POINT);
+    assert!(decode::Observed::new(Refusal::none()).selected_directory(&raw, &selected).is_err());
+    let unselected = vec!["user32.dll".to_owned()];
+    assert!(decode::Observed::new(Refusal::none()).selected_directory(&raw, &unselected).is_ok());
+    Ok(())
+}
+
+#[test]
 fn pending_and_lost_completion_keep_the_exact_arena_and_slots() -> Result<()> {
     {
         use qualification_fixture::mutation_return;
@@ -1816,4 +1900,102 @@ fn fullwalk_request() -> String {
     let mut raw = "MRK_WINDOWS_FULLWALK_REQUEST_V1\n".to_owned();
     for (name, value) in fields { raw.push_str(name); raw.push('='); raw.push_str(&value); raw.push('\n'); }
     raw
+}
+
+#[test]
+fn passive_request_and_result_preserve_roles_and_original_finality() -> Result<()> {
+    use qualification_result::{FullwalkRequest, InputTrace, PassiveFacts, PASSIVE_CHILD, FULLWALK_CHILD};
+    let old_raw = fullwalk_request();
+    let raw = old_raw.replace("MRK_WINDOWS_FULLWALK_REQUEST_V1", "MRK_WINDOWS_INSTALLED_PASSIVE_REQUEST_V1")
+        .replace("role=protected-version-fullwalk", "role=installed-passive")
+        .replace(FULLWALK_CHILD, PASSIVE_CHILD).replace("payloadFiles=45", "payloadFiles=46");
+    let parse = |bytes: &[u8]| FullwalkRequest::parse_passive(bytes, &mut InputTrace::default());
+    let request = parse(raw.as_bytes())?;
+    let old = FullwalkRequest::parse(old_raw.as_bytes())?;
+    assert!(parse(old_raw.as_bytes()).is_err());
+    assert!(FullwalkRequest::parse(raw.as_bytes()).is_err());
+    assert_ne!(qualification_result::passive_command(&request.app.path),
+        qualification_result::fullwalk_command(&request.app.path));
+    assert!(qualification_result::passive_command(&request.app.path)
+        .ends_with(&format!("{PASSIVE_CHILD} --exact --ignored --nocapture --test-threads=1")));
+    for changed in [
+        raw.replace("MRK_WINDOWS_INSTALLED_PASSIVE_REQUEST_V1", "MRK_WINDOWS_FULLWALK_REQUEST_V1"),
+        raw.replace("role=installed-passive", "role=protected-version-fullwalk"),
+        raw.replace(PASSIVE_CHILD, FULLWALK_CHILD), raw.replace(PASSIVE_CHILD, qualification_result::PASSIVE_OWNER),
+        raw.replace("appCommandSha256=", "ownerCommandSha256="),
+        raw.replace(&format!("appCommandSha256={}", "4".repeat(64)), "appCommandSha256=not-a-command-digest"),
+        raw.replace("attempt=1", "attempt=2"), raw.clone() + "extra=1\n", raw.replace('\n', "\r\n"),
+    ] { assert!(parse(changed.as_bytes()).is_err()); }
+    let request_sha = "5".repeat(64); let account_sha = "6".repeat(64);
+    let facts = PassiveFacts { version: request.expected(&account_sha, 543), completed_methods: 5,
+        settled_owners: 9, payload_images: 23, system_images: 23, stopped_before_claim: true, stopped_owned_child: true };
+    let output = request.passive_result(&request_sha, &facts)?;
+    assert_eq!(request.accept_passive_result(output.as_bytes(), &request_sha, &account_sha)?, 543);
+    assert!(request.result(&request_sha, &facts.version).is_err());
+    assert!(old.passive_result(&request_sha, &facts).is_err());
+    assert!(old.accept_result(output.as_bytes(), &request_sha, &account_sha).is_err());
+    let old_output = old.result(&request_sha, &old.expected(&account_sha, 543))?;
+    assert!(request.accept_passive_result(old_output.as_bytes(), &request_sha, &account_sha).is_err());
+    for field in 0..10 {
+        let mut changed = facts.clone();
+        match field {
+            0 => changed.completed_methods = 4, 1 => changed.settled_owners = 8,
+            2 => changed.payload_images = 21, 3 => changed.payload_images = 34,
+            4 => changed.system_images = 0, 5 => changed.system_images = 32,
+            6 => changed.stopped_before_claim = false, 7 => changed.stopped_owned_child = false,
+            8 => changed.version.selected_identities[0].file_id[15] ^= 0x80,
+            _ => changed.version.entries = MAX_ENTRIES + 1,
+        }
+        assert!(request.passive_result(&request_sha, &changed).is_err());
+    }
+    for changed in [
+        output.replace("\"settledOriginalOwners\":9", "\"settledOriginalOwners\":8"),
+        output.replace("\"settledOriginalOwners\":9", "\"settledOriginalOwners\":9,\"settledOriginalOwners\":9"),
+        output.replace("\"stoppedBeforeClaim\":true", "\"stoppedBeforeClaim\":false"),
+        output.replace("\"stoppedOwnedChild\":true", "\"stoppedOwnedChild\":false"),
+        output.replace("\"productionEnabled\":false", "\"productionEnabled\":true"),
+        output.replace("\"bookSettled\":true", "\"bookSettled\":false"),
+        output.replace("\"payloadImages\":23", "\"payloadImages\":023"),
+        output.replace(PASSIVE_CHILD, FULLWALK_CHILD), output.trim_end().to_owned(),
+    ] { assert!(request.accept_passive_result(changed.as_bytes(), &request_sha, &account_sha).is_err()); }
+    assert!(request.accept_passive_result(output.as_bytes(), &"7".repeat(64), &account_sha).is_err());
+    assert!(request.accept_passive_result(output.as_bytes(), &request_sha, &"8".repeat(64)).is_err());
+    Ok(())
+}
+
+#[test]
+fn passive_setup_profile_is_disjoint_from_publication_and_fullwalk() -> Result<()> {
+    use qualification_fixture::{profile_route, DISPATCH, PRODUCTION_DISPATCH, PASSIVE_DISPATCH, PASSIVE_PROFILE,
+        passive_precheck_fields, PASSIVE_PRECHECK_HEADER, PRECHECK_HEADER, PRODUCTION_PRECHECK_HEADER,
+        PASSIVE_SETUP_EXIT_HEADER, PRODUCER_EXIT_HEADER, PRODUCER_EXIT_FIELDS,
+        PASSIVE_STAGE, PASSIVE_OBSERVE, PASSIVE_SETUP_PROOFS, Wire};
+    let reference = "refs/heads/verify/desktop-windows-installed-passive";
+    assert_eq!(profile_route(PASSIVE_DISPATCH, reference)?, PASSIVE_PROFILE);
+    for (scope, reference) in [(DISPATCH, reference), (PRODUCTION_DISPATCH, reference),
+        (PASSIVE_DISPATCH, "refs/heads/verify/desktop-windows-runtime-publication"),
+        (PASSIVE_DISPATCH, "refs/heads/verify/desktop-windows-installed-native"), (PASSIVE_DISPATCH, "refs/heads/main")] {
+        assert!(profile_route(scope, reference).is_err());
+    }
+    assert_ne!(PASSIVE_STAGE, qualification_fixture::STAGE_INPUT);
+    assert_ne!(PASSIVE_OBSERVE, qualification_fixture::OBSERVE_BEFORE);
+    assert_eq!(PASSIVE_SETUP_PROOFS.map(|proof| proof.0), ["stage", "stageExit", "helperSuccessExit"]);
+    let fields = passive_precheck_fields();
+    assert_eq!(fields.len(), 55);
+    assert!(!fields.iter().any(|field| field.starts_with("ordinary") || field.starts_with("fullwalk")));
+    for (header, keys, wrong_headers) in [
+        (PASSIVE_PRECHECK_HEADER, fields.as_slice(), [PRECHECK_HEADER, PRODUCTION_PRECHECK_HEADER]),
+        (PASSIVE_SETUP_EXIT_HEADER, PRODUCER_EXIT_FIELDS.as_slice(), [PRODUCER_EXIT_HEADER, PASSIVE_PRECHECK_HEADER]),
+    ] {
+        let mut wire = Wire { values: std::collections::BTreeMap::new() };
+        for key in keys {
+            wire.put(key, if key.ends_with("Sha256") { "1".repeat(64) }
+                else if matches!(*key, "sourceSha" | "sourceTree") { "2".repeat(40) } else { "x".to_owned() });
+        }
+        let raw = wire.encoded(header, keys, 16384)?;
+        Wire::parse(&raw, header, keys, 16384)?;
+        for wrong in wrong_headers { assert!(Wire::parse(&raw, wrong, keys, 16384).is_err()); }
+        let mut duplicate = raw; duplicate.extend_from_slice(b"profile=x\n");
+        assert!(Wire::parse(&duplicate, header, keys, 16384).is_err());
+    }
+    Ok(())
 }

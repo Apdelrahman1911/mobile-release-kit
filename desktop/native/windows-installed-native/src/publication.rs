@@ -862,7 +862,8 @@ impl Publication {
         let index = self.book.slots.len();
         self.book.slots.push(ManuallyDrop::new(Box::pin(Slot { output: UnsafeCell::new(null_mut()),
             state: SlotState::Reserved, kind: kind.into(), parent: Some(parent_slot), name: wide(name), canonical,
-            read_bytes: 0, read_ended: false, directory_ended: false, directory_mode: DirectoryMode::Unstarted, _pin: PhantomPinned })));
+            read_bytes: 0, read_ended: false, directory_ended: false, directory_mode: DirectoryMode::Unstarted,
+            system_image: None, _pin: PhantomPinned })));
         Ok(index)
     }
     fn mutate(&mut self, effect: Effect, slot: Option<usize>, dos: &str, raw: &[u8], data: Vec<u8>) -> Result<MutationComplete> {

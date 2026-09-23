@@ -17,6 +17,26 @@ pub(super) const FULLWALK_OWNER: &str = "ordinary_owner::hosted_protected_versio
 pub(super) const FULLWALK_REQUEST: &str = "fullwalk-request.txt";
 pub(super) const FULLWALK_OUTPUT: &str = "fullwalk-output";
 pub(super) const FULLWALK_RESULT: &str = "fullwalk-result.private.json";
+pub(super) const PASSIVE_CHILD: &str = "supervisor::windows_passive_tests::native_installed_passive_original_owner_contract";
+pub(super) const PASSIVE_OWNER: &str = "ordinary_owner::hosted_installed_passive_original_handle_contract";
+pub(super) const PASSIVE_REQUEST: &str = "passive-request.txt";
+pub(super) const PASSIVE_OUTPUT: &str = "passive-output";
+pub(super) const PASSIVE_RESULT: &str = "passive-result.private.json";
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum ResultRole { Fullwalk, Passive }
+impl ResultRole {
+    fn child(self) -> &'static str { match self { Self::Fullwalk => FULLWALK_CHILD, Self::Passive => PASSIVE_CHILD } }
+    fn owner(self) -> &'static str { match self { Self::Fullwalk => FULLWALK_OWNER, Self::Passive => PASSIVE_OWNER } }
+    fn output(self) -> &'static str { match self { Self::Fullwalk => FULLWALK_OUTPUT, Self::Passive => PASSIVE_OUTPUT } }
+    fn result(self) -> &'static str { match self { Self::Fullwalk => FULLWALK_RESULT, Self::Passive => PASSIVE_RESULT } }
+    fn request_env(self) -> &'static str { match self { Self::Fullwalk => "MRK_WINDOWS_FULLWALK_REQUEST", Self::Passive => "MRK_WINDOWS_PASSIVE_REQUEST" } }
+    fn output_env(self) -> &'static str { match self { Self::Fullwalk => "MRK_WINDOWS_FULLWALK_OUTPUT", Self::Passive => "MRK_WINDOWS_PASSIVE_OUTPUT" } }
+    fn identity_env(self) -> &'static str { match self { Self::Fullwalk => "MRK_WINDOWS_FULLWALK_ARTIFACT_IDENTITY", Self::Passive => "MRK_WINDOWS_PASSIVE_ARTIFACT_IDENTITY" } }
+    fn command(self, path: &str, owner: bool) -> String {
+        format!("\"{path}\" {} {}", if owner { self.owner() } else { self.child() }, FLAGS.join(" "))
+    }
+}
 
 pub(super) fn need(value: bool) -> Result<()> { if value { Ok(()) } else { Err(Error::Unsafe) } }
 // Only closed labels, original statuses and u16 ACL control facts may leave.
@@ -564,6 +584,31 @@ pub struct FullwalkFacts {
     /// Existing fixed order: python/python.exe, engine_bootstrap.py, core.zip.
     pub selected_identities: [FileIdentity; 3],
 }
+/// Actual original-owner observations only. The app fills these after each
+/// real owner/borrow/child/IO/native/management join; this writer grants none.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PassiveFacts {
+    pub version: FullwalkFacts,
+    pub completed_methods: usize,
+    pub settled_owners: usize,
+    pub payload_images: usize,
+    pub system_images: usize,
+    pub stopped_before_claim: bool,
+    pub stopped_owned_child: bool,
+}
+impl PassiveFacts {
+    fn validate(&self) -> Result<()> {
+        self.version.validate()?;
+        need(self.completed_methods == 5 && self.settled_owners == 9
+            && (22..=33).contains(&self.payload_images) && (1..=31).contains(&self.system_images)
+            && self.stopped_before_claim && self.stopped_owned_child)
+    }
+    fn json(&self) -> String {
+        format!("{{\"completedMethods\":{},\"settledOriginalOwners\":{},\"payloadImages\":{},\"systemImages\":{},\"stoppedBeforeClaim\":{},\"stoppedOwnedChild\":{},\"productionEnabled\":false}}",
+            self.completed_methods, self.settled_owners, self.payload_images, self.system_images,
+            self.stopped_before_claim, self.stopped_owned_child)
+    }
+}
 impl FullwalkFacts {
     pub(super) fn validate(&self) -> Result<()> {
         need(self.target == "x86_64-pc-windows-msvc"
@@ -621,6 +666,7 @@ impl FullwalkArtifact {
 }
 #[derive(Clone)]
 pub(super) struct FullwalkRequest {
+    pub role: ResultRole,
     pub source: String, pub tree: String, pub run: String,
     pub app: FullwalkArtifact, pub owner: FullwalkArtifact,
     pub manifest_sha: String, pub protocol_sha: String, pub inventory_sha: String, pub core_sha: String,
@@ -631,12 +677,19 @@ pub(super) struct FullwalkRequest {
 impl FullwalkRequest {
     pub fn parse(raw: &[u8]) -> Result<Self> { Self::parse_traced(raw, &mut InputTrace::default()) }
     pub fn parse_traced(raw: &[u8], trace: &mut InputTrace) -> Result<Self> {
+        Self::parse_role(raw, trace, ResultRole::Fullwalk)
+    }
+    pub fn parse_passive(raw: &[u8], trace: &mut InputTrace) -> Result<Self> {
+        Self::parse_role(raw, trace, ResultRole::Passive)
+    }
+    fn parse_role(raw: &[u8], trace: &mut InputTrace, role: ResultRole) -> Result<Self> {
         trace.need(raw.len() <= LIMIT && raw.is_ascii() && raw.ends_with(b"\n")
             && !raw.contains(&b'\r'), InputCheck::RequestEnvelope)?;
         let text = trace.observed(std::str::from_utf8(raw).map_err(|_| Error::Unsafe), InputCheck::RequestUtf8)?;
         let lines: Vec<_> = text.lines().collect();
         trace.need(lines.len() == 35, InputCheck::RequestLines)?;
-        trace.need(lines[0] == "MRK_WINDOWS_FULLWALK_REQUEST_V1", InputCheck::RequestHeader)?;
+        trace.need(lines[0] == (match role { ResultRole::Fullwalk => "MRK_WINDOWS_FULLWALK_REQUEST_V1",
+            ResultRole::Passive => "MRK_WINDOWS_INSTALLED_PASSIVE_REQUEST_V1" }), InputCheck::RequestHeader)?;
         let mut values = Vec::with_capacity(34);
         for (line, key) in lines[1..].iter().zip([
             "role", "test", "sourceSha", "sourceTree", "runId", "attempt",
@@ -652,7 +705,8 @@ impl FullwalkRequest {
             trace.need(name == key, InputCheck::RequestKey)?;
             trace.need(!value.is_empty(), InputCheck::RequestValue)?; values.push(value);
         }
-        trace.need(values[0] == "protected-version-fullwalk" && values[1] == FULLWALK_CHILD
+        trace.need(values[0] == (match role { ResultRole::Fullwalk => "protected-version-fullwalk", ResultRole::Passive => "installed-passive" })
+            && values[1] == role.child()
             && is_hex(values[2], 40) && values[2] != "0".repeat(40)
             && is_hex(values[3], 40) && values[3] != "0".repeat(40)
             && decimal(values[4]) && values[5] == "1", InputCheck::RequestValues)?;
@@ -682,7 +736,7 @@ impl FullwalkRequest {
         let version = trace.observed(fullwalk_identity(values[30]), InputCheck::RequestIdentity)?;
         let selected = [fullwalk_identity(values[31])?, fullwalk_identity(values[32])?, fullwalk_identity(values[33])?];
         trace.observed(fullwalk_identities(version, &selected), InputCheck::RequestIdentity)?;
-        Ok(Self { source: values[2].to_owned(), tree: values[3].to_owned(), run: values[4].to_owned(), app, owner,
+        Ok(Self { role, source: values[2].to_owned(), tree: values[3].to_owned(), run: values[4].to_owned(), app, owner,
             manifest_sha: values[22].to_owned(), protocol_sha: values[23].to_owned(),
             inventory_sha: values[24].to_owned(), core_sha: values[25].to_owned(), files, payload_bytes,
             publication_bytes, publication_sha: values[29].to_owned(), version, selected })
@@ -716,8 +770,8 @@ impl FullwalkRequest {
     pub fn check_commands(&self, trace: &mut InputTrace) -> Result<()> { self.commands_until(None, trace) }
     fn commands_until(&self, end: Option<Instant>, trace: &mut InputTrace) -> Result<()> {
         for (command, expected) in [
-            (fullwalk_command(&self.app.path), &self.app.command_sha),
-            (fullwalk_owner_command(&self.owner.path), &self.owner.command_sha),
+            (self.role.command(&self.app.path, false), &self.app.command_sha),
+            (self.role.command(&self.owner.path, true), &self.owner.command_sha),
         ] {
             trace.need(command.encode_utf16().count() <= 1023, InputCheck::CommandUnits)?;
             deadline(end)?;
@@ -743,13 +797,23 @@ impl FullwalkRequest {
             entries, payload_bytes: self.payload_bytes, version_identity: self.version, selected_identities: self.selected }
     }
     pub fn result(&self, request_sha: &str, actual: &FullwalkFacts) -> Result<String> {
+        need(self.role == ResultRole::Fullwalk)?;
+        self.result_kind(request_sha, actual, None)
+    }
+    pub fn passive_result(&self, request_sha: &str, actual: &PassiveFacts) -> Result<String> {
+        need(self.role == ResultRole::Passive)?; actual.validate()?;
+        self.result_kind(request_sha, &actual.version, Some(actual))
+    }
+    fn result_kind(&self, request_sha: &str, actual: &FullwalkFacts, passive: Option<&PassiveFacts>) -> Result<String> {
         actual.validate()?;
         need(is_hex(request_sha, 64) && *actual == self.expected(&actual.account_sid_sha256, actual.entries))?;
         let observed = format!("{{\"target\":\"{}\",\"manifestSha256\":\"{}\",\"protocolSha256\":\"{}\",\"inventorySha256\":\"{}\",\"coreSha256\":\"{}\",\"files\":{},\"entries\":{},\"payloadBytes\":{},\"versionIdentity\":{},\"selectedIdentities\":[{},{},{}],\"inspectionComplete\":true,\"bookSettled\":true}}",
             actual.target, actual.manifest_sha256, actual.protocol_sha256, actual.inventory_sha256, actual.core_sha256,
             actual.files, actual.entries, actual.payload_bytes, identity_json(actual.version_identity),
             identity_json(actual.selected_identities[0]), identity_json(actual.selected_identities[1]), identity_json(actual.selected_identities[2]));
-        let raw = format!("{{\"schemaVersion\":1,\"sourceSha\":\"{}\",\"sourceTree\":\"{}\",\"runId\":\"{}\",\"attempt\":1,\"requestSha256\":\"{}\",\"artifactBytes\":{},\"artifactSha256\":\"{}\",\"commandSha256\":\"{}\",\"ownerArtifactSha256\":\"{}\",\"accountSidSha256\":\"{}\",\"test\":\"{FULLWALK_CHILD}\",\"observation\":{},\"resultFile\":{{\"createNew\":true,\"writeCalls\":1,\"closeGate\":\"original-child-exit-zero-required\"}}}}\n",
+        let child = self.role.child();
+        let extra = passive.map(|facts| format!(",\"passive\":{}", facts.json())).unwrap_or_default();
+        let raw = format!("{{\"schemaVersion\":1,\"sourceSha\":\"{}\",\"sourceTree\":\"{}\",\"runId\":\"{}\",\"attempt\":1,\"requestSha256\":\"{}\",\"artifactBytes\":{},\"artifactSha256\":\"{}\",\"commandSha256\":\"{}\",\"ownerArtifactSha256\":\"{}\",\"accountSidSha256\":\"{}\",\"test\":\"{child}\",\"observation\":{}{extra},\"resultFile\":{{\"createNew\":true,\"writeCalls\":1,\"closeGate\":\"original-child-exit-zero-required\"}}}}\n",
             self.source, self.tree, self.run, request_sha, self.app.bytes, self.app.sha,
             self.app.command_sha, self.owner.sha, actual.account_sid_sha256, observed);
         need(raw.len() <= LIMIT)?;
@@ -766,9 +830,26 @@ impl FullwalkRequest {
         need(raw == self.result(request_sha, &self.expected(account_sha, entries))?.as_bytes())?;
         Ok(entries)
     }
+    pub fn accept_passive_result(&self, raw: &[u8], request_sha: &str, account_sha: &str) -> Result<usize> {
+        need(self.role == ResultRole::Passive && !raw.is_empty() && raw.len() <= LIMIT && raw.is_ascii())?;
+        let text = std::str::from_utf8(raw).map_err(|_| Error::Unsafe)?;
+        let count = |key: &str, limit| -> Result<usize> {
+            let tail = text.split_once(&format!("\"{key}\":" )).ok_or(Error::Unsafe)?.1;
+            positive_size(tail.split_once(',').ok_or(Error::Unsafe)?.0, limit)
+        };
+        let entries = count("entries", MAX_ENTRIES)?;
+        let facts = PassiveFacts { version: self.expected(account_sha, entries), completed_methods: 5, settled_owners: 9,
+            payload_images: count("payloadImages", 33)?, system_images: count("systemImages", 31)?,
+            stopped_before_claim: true, stopped_owned_child: true };
+        // Comparison DATA only; the writer never obtains facts from this
+        // expected-value constructor. Exact bytes reject duplicate/extra keys.
+        need(raw == self.passive_result(request_sha, &facts)?.as_bytes())?;
+        Ok(entries)
+    }
 }
 pub(super) fn fullwalk_command(path: &str) -> String { format!("\"{path}\" {FULLWALK_CHILD} {}", FLAGS.join(" ")) }
 fn fullwalk_owner_command(path: &str) -> String { format!("\"{path}\" {FULLWALK_OWNER} {}", FLAGS.join(" ")) }
+pub(super) fn passive_command(path: &str) -> String { ResultRole::Passive.command(path, false) }
 
 #[cfg(feature = "qualification-result")]
 fn fullwalk_digest(raw: &[u8], end: Instant, app: bool) -> Result<String> {
@@ -782,26 +863,46 @@ fn fullwalk_digest(raw: &[u8], end: Instant, app: bool) -> Result<String> {
 /// original/security inputs; even a known late close cannot return success.
 #[cfg(feature = "qualification-result")]
 pub fn write_fullwalk_result_once(actual: &FullwalkFacts, end: Instant) -> Result<()> {
-    deadline(Some(end))?;
+    write_installed_result(ResultRole::Fullwalk, actual, None, end)
+}
+#[cfg(feature = "qualification-result")]
+pub fn write_passive_result_once(actual: &PassiveFacts, end: Instant) -> Result<()> {
     actual.validate()?;
-    let get = |name| std::env::var(name).map_err(|_| Error::State);
-    let raw_request = get("MRK_WINDOWS_FULLWALK_REQUEST")?;
-    let request = FullwalkRequest::parse(raw_request.as_bytes())?;
+    write_installed_result(ResultRole::Passive, &actual.version, Some(actual), end)
+}
+#[cfg(feature = "qualification-result")]
+pub fn require_passive_qualification() -> Result<()> {
+    let raw = std::env::var(ResultRole::Passive.request_env()).map_err(|_| Error::State)?;
+    let request = FullwalkRequest::parse_passive(raw.as_bytes(), &mut InputTrace::default())?;
     request.compiled_traced(&mut InputTrace::default())?;
     need(option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256") == Some(request.manifest_sha.as_str())
         && option_env!("MRK_BUNDLED_PROTOCOL_SHA256") == Some(request.protocol_sha.as_str()))?;
-    let output = fixed_path(&get("MRK_WINDOWS_FULLWALK_OUTPUT")?)?;
+    let artifact = std::env::current_exe().map_err(|_| Error::Unavailable)?;
+    need(artifact.to_str() == Some(request.app.path.as_str()))?;
+    args_are(PASSIVE_CHILD, &artifact)
+}
+#[cfg(feature = "qualification-result")]
+fn write_installed_result(role: ResultRole, actual: &FullwalkFacts, passive: Option<&PassiveFacts>, end: Instant) -> Result<()> {
+    deadline(Some(end))?;
+    actual.validate()?;
+    let get = |name| std::env::var(name).map_err(|_| Error::State);
+    let raw_request = get(role.request_env())?;
+    let request = FullwalkRequest::parse_role(raw_request.as_bytes(), &mut InputTrace::default(), role)?;
+    request.compiled_traced(&mut InputTrace::default())?;
+    need(option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256") == Some(request.manifest_sha.as_str())
+        && option_env!("MRK_BUNDLED_PROTOCOL_SHA256") == Some(request.protocol_sha.as_str()))?;
+    let output = fixed_path(&get(role.output_env())?)?;
     let root = output.parent().ok_or(Error::Unsafe)?;
-    need(output.file_name().and_then(|v| v.to_str()) == Some(FULLWALK_OUTPUT)
+    need(output.file_name().and_then(|v| v.to_str()) == Some(role.output())
         && root.file_name().and_then(|v| v.to_str()) == Some(format!("mrk-windows-installed-native-{}-1", request.run).as_str()))?;
     request.at_root(root)?;
     deadline(Some(end))?;
     let artifact = std::env::current_exe().map_err(|_| Error::Unavailable)?;
     deadline(Some(end))?;
     need(artifact.to_str() == Some(request.app.path.as_str()))?;
-    args_are(FULLWALK_CHILD, &artifact)?;
+    args_are(role.child(), &artifact)?;
     request.commands_until(Some(end), &mut InputTrace::default())?;
-    let after_identity = get("MRK_WINDOWS_FULLWALK_ARTIFACT_IDENTITY")?;
+    let after_identity = get(role.identity_env())?;
     request.app_after(&after_identity)?; // request's original pre-ACL identity stays intact
     let account = unhex(&get("MRK_WINDOWS_ORDINARY_SID")?)?;
     let parent = unhex(&get("MRK_WINDOWS_PARENT_SID")?)?;
@@ -811,7 +912,7 @@ pub fn write_fullwalk_result_once(actual: &FullwalkFacts, end: Instant) -> Resul
         && account != system_sid() && account != builtin(544)
         && fullwalk_digest(&account, end, false)? == actual.account_sid_sha256)?;
     let request_sha = fullwalk_digest(raw_request.as_bytes(), end, false)?;
-    let value = request.result(&request_sha, actual)?; // validates all copied observation DATA before IO
+    let value = match passive { Some(facts) => request.passive_result(&request_sha, facts)?, None => request.result(&request_sha, actual)? }; // validates all copied observation DATA before IO
     deadline(Some(end))?;
     let cwd = std::env::current_dir().map_err(|_| Error::Unavailable)?;
     deadline(Some(end))?;
@@ -839,7 +940,7 @@ pub fn write_fullwalk_result_once(actual: &FullwalkFacts, end: Instant) -> Resul
     let (acl, mut descriptor) = child_security_until(&parent, &account, Some(end))?;
     let attributes = S::SECURITY_ATTRIBUTES { nLength: size_of::<S::SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: (&mut *descriptor as *mut S::SECURITY_DESCRIPTOR).cast(), bInheritHandle: 0 };
-    let result = write_one_until(&output.join(FULLWALK_RESULT), value.as_bytes(), LIMIT, &attributes, Some(end));
+    let result = write_one_until(&output.join(role.result()), value.as_bytes(), LIMIT, &attributes, Some(end));
     // Unknown parks inside the shared writer: these actual caller-owned inputs
     // are still live on this same owning stack. No self-close receipt is emitted.
     std::hint::black_box((&acl, &descriptor, &attributes));

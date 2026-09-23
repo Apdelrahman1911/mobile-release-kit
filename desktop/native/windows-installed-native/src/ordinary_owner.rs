@@ -1,4 +1,4 @@
-//! Qualification-only original owner for two closed headless libtest variants.
+//! Qualification-only original owner for closed headless libtest variants.
 //! Compiled only by cfg(test); no product capability or general launcher.
 //! The fullwalk seam stays closed until separate publication/precheck review.
 //! This same libtest thread owns every synchronous borrower. In particular, a
@@ -26,21 +26,21 @@ const SETTLE_MS: u32 = 10_000;
 // Source wiring alone authorizes no execution, consumer enablement or success.
 pub(super) const FULLWALK_PREREQUISITES_REVIEWED: bool = true;
 #[derive(Clone, Copy, Eq, PartialEq)]
-enum OwnerVariant { Ordinary, Fullwalk }
+enum OwnerVariant { Ordinary, Fullwalk, Passive }
 impl OwnerVariant {
-    fn owner(self) -> &'static str { match self { Self::Ordinary => OWNER, Self::Fullwalk => FULLWALK_OWNER } }
-    fn child(self) -> &'static str { match self { Self::Ordinary => CHILD, Self::Fullwalk => FULLWALK_CHILD } }
-    fn request(self) -> &'static str { match self { Self::Ordinary => REQUEST, Self::Fullwalk => FULLWALK_REQUEST } }
-    fn output(self) -> &'static str { match self { Self::Ordinary => "ordinary-output", Self::Fullwalk => FULLWALK_OUTPUT } }
-    fn result(self) -> &'static str { match self { Self::Ordinary => RESULT, Self::Fullwalk => FULLWALK_RESULT } }
+    fn owner(self) -> &'static str { match self { Self::Ordinary => OWNER, Self::Fullwalk => FULLWALK_OWNER, Self::Passive => PASSIVE_OWNER } }
+    fn child(self) -> &'static str { match self { Self::Ordinary => CHILD, Self::Fullwalk => FULLWALK_CHILD, Self::Passive => PASSIVE_CHILD } }
+    fn request(self) -> &'static str { match self { Self::Ordinary => REQUEST, Self::Fullwalk => FULLWALK_REQUEST, Self::Passive => PASSIVE_REQUEST } }
+    fn output(self) -> &'static str { match self { Self::Ordinary => "ordinary-output", Self::Fullwalk => FULLWALK_OUTPUT, Self::Passive => PASSIVE_OUTPUT } }
+    fn result(self) -> &'static str { match self { Self::Ordinary => RESULT, Self::Fullwalk => FULLWALK_RESULT, Self::Passive => PASSIVE_RESULT } }
     fn intent(self) -> &'static str {
-        match self { Self::Ordinary => "ordinary-owner-intent.private.json", Self::Fullwalk => "fullwalk-owner-intent.private.json" }
+        match self { Self::Ordinary => "ordinary-owner-intent.private.json", Self::Fullwalk => "fullwalk-owner-intent.private.json", Self::Passive => "passive-owner-intent.private.json" }
     }
     fn owner_result(self) -> &'static str {
-        match self { Self::Ordinary => OWNER_RESULT, Self::Fullwalk => "fullwalk-owner-result.private.json" }
+        match self { Self::Ordinary => OWNER_RESULT, Self::Fullwalk => "fullwalk-owner-result.private.json", Self::Passive => "passive-owner-result.private.json" }
     }
     fn command(self, path: &str) -> String {
-        match self { Self::Ordinary => command(path), Self::Fullwalk => fullwalk_command(path) }
+        match self { Self::Ordinary => command(path), Self::Fullwalk => fullwalk_command(path), Self::Passive => passive_command(path) }
     }
 }
 
@@ -632,17 +632,32 @@ impl Launch {
         ];
         match (variant, fullwalk_request) {
             (OwnerVariant::Ordinary, None) => (), // Ordinary environment stays byte-for-byte unchanged.
-            (OwnerVariant::Fullwalk, Some(request)) => {
+            (OwnerVariant::Fullwalk | OwnerVariant::Passive, Some(request)) => {
                 need(request.len() <= LIMIT && request.is_ascii())?;
                 environment.retain(|(name, _)| !matches!(*name,
                     "MRK_WINDOWS_NATIVE_ARTIFACT_BYTES" | "MRK_WINDOWS_NATIVE_ARTIFACT_SHA256"
                     | "MRK_WINDOWS_NATIVE_ARTIFACT_IDENTITY" | "MRK_WINDOWS_NATIVE_COMMAND_SHA256"
                     | "MRK_WINDOWS_ORDINARY_OUTPUT"));
-                environment.extend([
-                    ("MRK_WINDOWS_FULLWALK_REQUEST", request.to_owned()),
-                    ("MRK_WINDOWS_FULLWALK_ARTIFACT_IDENTITY", binding.identity.clone()),
-                    ("MRK_WINDOWS_FULLWALK_OUTPUT", output.to_owned()),
-                ]);
+                if variant == OwnerVariant::Passive {
+                    environment.extend([
+                        ("MRK_WINDOWS_PASSIVE_REQUEST", request.to_owned()),
+                        ("MRK_WINDOWS_PASSIVE_ARTIFACT_IDENTITY", binding.identity.clone()),
+                        ("MRK_WINDOWS_PASSIVE_OUTPUT", output.to_owned()),
+                        ("PYTHONHOME", output.to_owned()), ("PYTHONPATH", output.to_owned()),
+                        ("PYTHONSTARTUP", format!("{output}\\never-present.py")), ("HOME", output.to_owned()),
+                    ]);
+                    // Only this task-owned, fresh test process receives inert
+                    // wrong ambient values. No Windows directory/file changes.
+                    for (name, value) in &mut environment {
+                        if matches!(*name, "PATH" | "SystemRoot" | "WINDIR") { *value = output.to_owned(); }
+                    }
+                } else {
+                    environment.extend([
+                        ("MRK_WINDOWS_FULLWALK_REQUEST", request.to_owned()),
+                        ("MRK_WINDOWS_FULLWALK_ARTIFACT_IDENTITY", binding.identity.clone()),
+                        ("MRK_WINDOWS_FULLWALK_OUTPUT", output.to_owned()),
+                    ]);
+                }
             },
             _ => return Err(Error::State),
         }
@@ -769,15 +784,32 @@ fn hosted_protected_version_fullwalk_contract() -> Result<()> {
     run_owner(OwnerVariant::Fullwalk, entry_tick)
 }
 
+#[test]
+#[ignore = "fixed reviewed installed-passive scope and fresh normal publication required"]
+fn hosted_installed_passive_original_handle_contract() -> Result<()> {
+    let entry_tick = unsafe { SI::GetTickCount64() };
+    run_owner(OwnerVariant::Passive, entry_tick)
+}
+
 fn run_owner(variant: OwnerVariant, entry_tick: u64) -> Result<()> {
     let start = Instant::now();
     let mut deadline_latched = false;
     let batch = matches!(std::env::var("MRK_DESKTOP_DISPATCH_SCOPE").as_deref(),
         Ok(fixture::DISPATCH) | Ok(fixture::PRODUCTION_DISPATCH));
     // Before NativeBook observation, original inputs, account, ACL or launch.
-    need(variant == OwnerVariant::Ordinary || FULLWALK_PREREQUISITES_REVIEWED)?;
+    need(variant != OwnerVariant::Fullwalk || FULLWALK_PREREQUISITES_REVIEWED)?;
     need(!batch || FULLWALK_PREREQUISITES_REVIEWED)?;
-    need(variant == OwnerVariant::Ordinary || batch)?;
+    need(variant != OwnerVariant::Fullwalk || batch)?;
+    if variant == OwnerVariant::Passive {
+        fixture::profile()?;
+        // Separate, closed, single-owner90s aggregate. Do not reset a two-owner
+        // fullwalk envelope or reuse its old supplier/producer success receipts.
+        need(!batch && std::env::var("MRK_DESKTOP_DISPATCH_SCOPE").as_deref() == Ok("windows-installed-passive")
+            && std::env::var("GITHUB_REF").as_deref() == Ok("refs/heads/verify/desktop-windows-installed-passive")
+            && std::env::var("GITHUB_EVENT_NAME").as_deref() == Ok("workflow_dispatch")
+            && std::env::var("MRK_WINDOWS_PASSIVE_PUBLICATION_STEP_OUTCOME").as_deref() == Ok("success")
+            && std::env::var("MRK_WINDOWS_PASSIVE_PUBLICATION_FINALIZE_STEP_OUTCOME").as_deref() == Ok("success"))?;
+    }
     if batch {
         fixture::profile()?;
         for key in ["MRK_WINDOWS_PUBLISHER_STEP_OUTCOME", "MRK_WINDOWS_FIXTURE_FINALIZE_STEP_OUTCOME"] { fixture::outcome(key)?; }
@@ -838,6 +870,7 @@ fn run_owner(variant: OwnerVariant, entry_tick: u64) -> Result<()> {
         let fullwalk = match variant {
             OwnerVariant::Ordinary => None,
             OwnerVariant::Fullwalk => Some(FullwalkRequest::parse_traced(&data, &mut input_trace)?),
+            OwnerVariant::Passive => Some(FullwalkRequest::parse_passive(&data, &mut input_trace)?),
         };
         let selected = match fullwalk.as_ref() {
             None => Binding::parse_traced(&data, &mut input_trace)?,
@@ -879,13 +912,13 @@ fn run_owner(variant: OwnerVariant, entry_tick: u64) -> Result<()> {
         input_trace.need(selected.matches(&artifact_before), InputCheck::ArtifactIdentity)?;
         let bytes = match variant {
             OwnerVariant::Ordinary => files[artifact].read_traced(128 << 20, &mut input_trace)?,
-            OwnerVariant::Fullwalk => files[artifact].read_app_traced(&mut input_trace)?,
+            OwnerVariant::Fullwalk | OwnerVariant::Passive => files[artifact].read_app_traced(&mut input_trace)?,
         };
         owner_effect(start, &mut deadline_latched, &mut aggregate)?;
         input_trace.need(bytes.len() == selected.bytes, InputCheck::ArtifactBytes)?;
         let artifact_sha = match variant {
             OwnerVariant::Ordinary => digest_traced(&bytes, &mut input_trace)?,
-            OwnerVariant::Fullwalk => digest_app_traced(&bytes, &mut input_trace)?,
+            OwnerVariant::Fullwalk | OwnerVariant::Passive => digest_app_traced(&bytes, &mut input_trace)?,
         };
         input_trace.need(artifact_sha == selected.sha, InputCheck::ArtifactDigest)?;
         // Hash/read does not authorize adoption of another artifact or discard
@@ -928,13 +961,31 @@ fn run_owner(variant: OwnerVariant, entry_tick: u64) -> Result<()> {
                 companion_originals.push((owned, before));
                 owner_effect(start, &mut deadline_latched, &mut aggregate)?;
             }
-            let admission = fixture::admit(fullwalk, &root, &mut files, &mut input_trace,
-                start.checked_add(Duration::from_secs(NATIVE_SECONDS)).ok_or(Error::Bounds)?)?;
-            let mut clock = AggregateClock::new(admission.origin, entry_tick, true)?;
-            need(clock.deadline == admission.deadline && entry_tick >= admission.ordinary_prewrite)?;
-            clock.observe(unsafe { SI::GetTickCount64() }, fixture::SECOND_FLOOR_MS)?;
-            companion_originals.extend(admission.originals.iter().cloned());
-            aggregate = Some(clock); prerequisites = Some(admission);
+            if variant == OwnerVariant::Passive {
+                // Fresh publisher/setup comparison DATA only. The candidate
+                // still owes actual complete native payload/loader admission;
+                // neither this file nor its digest can grant runtime custody.
+                input_trace.at(InputRole::Binding, Some(files.len() as u8));
+                let owned = owned_file_traced(&mut files, &root.join("passive-publication.private.json"), false,
+                    FS::FILE_GENERIC_READ, &mut input_trace)?;
+                let before = files[owned].stamp_traced(&mut input_trace)?;
+                let raw = files[owned].read_traced(OWNER_LIMIT, &mut input_trace)?;
+                input_trace.need(raw.len() == fullwalk.publication_bytes, InputCheck::ArtifactBytes)?;
+                let digest = digest_traced(&raw, &mut input_trace)?;
+                input_trace.need(digest == fullwalk.publication_sha, InputCheck::ArtifactDigest)?;
+                let after = files[owned].stamp_traced(&mut input_trace)?;
+                input_trace.need(after == before, InputCheck::ArtifactStable)?;
+                companion_originals.push((owned, before));
+                owner_effect(start, &mut deadline_latched, &mut aggregate)?;
+            } else {
+                let admission = fixture::admit(fullwalk, &root, &mut files, &mut input_trace,
+                    start.checked_add(Duration::from_secs(NATIVE_SECONDS)).ok_or(Error::Bounds)?)?;
+                let mut clock = AggregateClock::new(admission.origin, entry_tick, true)?;
+                need(clock.deadline == admission.deadline && entry_tick >= admission.ordinary_prewrite)?;
+                clock.observe(unsafe { SI::GetTickCount64() }, fixture::SECOND_FLOOR_MS)?;
+                companion_originals.extend(admission.originals.iter().cloned());
+                aggregate = Some(clock); prerequisites = Some(admission);
+            }
         } else if batch {
             let mut invocation = fixture::invocation(&selected.source, &selected.tree, &selected.run,
                 selected.bytes, &selected.sha, &selected.identity, &selected.command_sha, &request_sha, entry_tick)?;
@@ -948,13 +999,14 @@ fn run_owner(variant: OwnerVariant, entry_tick: u64) -> Result<()> {
         let name = String::from_utf16(&current.name[..current.name.len() - 1]).map_err(|_| Error::Unsafe)?;
         let intent_role = match variant {
             OwnerVariant::Ordinary => "fixedNativeChildOnly", OwnerVariant::Fullwalk => "fixedFullwalkChildOnly",
+            OwnerVariant::Passive => "fixedInstalledPassiveChildOnly",
         };
         let batch_intent = match (variant, ordinary_invocation.as_ref(), prerequisites.as_ref(), aggregate.as_ref()) {
             (OwnerVariant::Ordinary, Some(invocation), None, Some(_)) =>
                 format!(",\"fullwalkBatch\":{}", fixture::invocation_json(invocation)?),
             (OwnerVariant::Fullwalk, None, Some(admission), Some(clock)) =>
                 format!(",\"fullwalkBatch\":{}", admission.batch_json(clock)?),
-            (OwnerVariant::Ordinary, None, None, None) => String::new(),
+            (OwnerVariant::Ordinary | OwnerVariant::Passive, None, None, None) => String::new(),
             _ => return Err(Error::State),
         };
         let intent = format!("{{\"schemaVersion\":1,\"sourceSha\":\"{}\",\"runId\":\"{}\",\"attempt\":1,\"accountName\":\"{name}\",\"freshAccountIntent\":true,\"{intent_role}\":true{batch_intent}}}\n",
@@ -1027,9 +1079,12 @@ fn run_owner(variant: OwnerVariant, entry_tick: u64) -> Result<()> {
         let result = owned_file(&mut files, &output.join(variant.result()), false, FS::FILE_GENERIC_READ)?;
         let raw = files[result].read(LIMIT)?;
         owner_effect(start, &mut deadline_latched, &mut aggregate)?;
-        input_trace.need(files.len() == ancestors.len() + if variant == OwnerVariant::Fullwalk { 21 } else { 8 }, InputCheck::FileCount)?;
+        input_trace.need(files.len() == ancestors.len() + match variant {
+            OwnerVariant::Ordinary => 8, OwnerVariant::Fullwalk => 21, OwnerVariant::Passive => 12 }, InputCheck::FileCount)?;
         if let Some(fullwalk) = &fullwalk {
-            fullwalk_entries = Some(fullwalk.accept_result(&raw, &request_sha, &sid_sha)?);
+            fullwalk_entries = Some(if variant == OwnerVariant::Passive {
+                fullwalk.accept_passive_result(&raw, &request_sha, &sid_sha)?
+            } else { fullwalk.accept_result(&raw, &request_sha, &sid_sha)? });
         } else { need(raw == selected.result(&sid_sha).as_bytes())?; }
         result_sha = digest(&raw)?;
         need(files[artifact].stamp()? == artifact_after)?;
@@ -1085,11 +1140,12 @@ fn run_owner(variant: OwnerVariant, entry_tick: u64) -> Result<()> {
     let protected_fullwalk = variant == OwnerVariant::Fullwalk;
     let mut extra = match (variant, fullwalk_binding.as_ref()) {
         (OwnerVariant::Ordinary, None) => String::new(),
-        (OwnerVariant::Fullwalk, Some(fullwalk)) => format!(",\"requestSha256\":\"{}\",\"ownerArtifactBytes\":{},\"ownerArtifactSha256\":\"{}\",\"ownerCommandSha256\":\"{}\",\"fullwalkEntries\":{}",
+        (OwnerVariant::Fullwalk | OwnerVariant::Passive, Some(fullwalk)) => format!(",\"requestSha256\":\"{}\",\"ownerArtifactBytes\":{},\"ownerArtifactSha256\":\"{}\",\"ownerCommandSha256\":\"{}\",\"fullwalkEntries\":{}",
             request_sha, fullwalk.owner.bytes, fullwalk.owner.sha, fullwalk.owner.command_sha,
             fullwalk_entries.ok_or(Error::State)?),
         _ => return Err(Error::State),
     };
+    if variant == OwnerVariant::Passive { extra.push_str(",\"installedPassive\":true,\"ownerAggregateSeconds\":90,\"poisonedParentEnvironment\":true"); }
     if let Some(clock) = aggregate.as_mut() {
         // PRE-WRITE fact only. The original writer/close and the same two clocks
         // must still pass below before this foreground owner can exit zero.

@@ -87,6 +87,45 @@ project configuration, PATH search, or a failed production launch. Development
 paths and sources must be developer-controlled/quiescent. This route does not
 claim a production protected bundle or hostile same-user filesystem protection.
 
+## Windows installed passive candidate (source, not native acceptance)
+
+The Windows x64 MSVC headless test build has one fixed, no-argument candidate
+selector. It connects the existing passive query Supervisor to the same
+`WindowsVersionBook` through inspection, whole-original transfer, preparation,
+one-use claim and explicit settlement. It is unavailable in the normal Desktop,
+development-runtime and publisher profiles; no environment variable, renderer
+path or successful DATA receipt activates it. The generic packaged resolver and
+path-taking process entry remain closed.
+
+Its five methods are `capabilities`, `catalog`, `config.validate`, `config.suggest`
+and `config.preview`. The separate six-method Windows DATA policy does not make
+`project.snapshot` available. Project selection/document ownership, Save,
+credentials, builds, GitHub/Store operations, MSI, WebView2 and a real installed
+UI session remain separate, unqualified work.
+
+Before Python creation, the book admits the complete immutable fixed payload,
+native-known Windows/System32 ancestry, the protected legacy System directory
+or its absence, and the31 fixed physical System32 image names. API-set contracts
+remain OS resolver dependencies, not filenames. Only the sealed same-book,
+native-System32-parent and closed-image-enum role permits positive OS hardlink
+counts; payload and publisher files still require exactly one link. Existing
+owner/DACL, local NTFS, canonical/full-ID, reparse, stream and read-only-sharing
+checks remain mandatory. Shared roots/cursors and the actual48-live-original
+peak have one aggregate budget; branches do not restart it. CPython's complete
+relevant paths must fit512 UTF-16 units including conservative verbatim-prefix
+expansion and NUL before creation.
+
+The fixed command uses the capability's native-derived SystemRoot, protected
+cwd, `-I -S -B` and a cleared environment. Original query10s/cleanup2s clocks,
+child/writer/readers/EOFs, borrower and management joins, one close attempt and
+absorbing Unknown are unchanged. A separate ignored native batch requests five
+unchanged-engine queries, one compile-embedded import/image observation, genuine
+preclaim/outstanding-child cancellation and a closed snapshot check under the
+original ordinary-account owner. Its fresh source-stage/normal-publisher/read-only
+setup does not replay the earlier fullwalk/collision qualification. Added source
+and tests are not execution evidence: actual-diff review, focused checks and the
+source-bound Windows job must succeed before this increment is accepted.
+
 ## Packaged preparation shape (not launch authorization)
 
 Future explicitly reviewed packaging maps its prepared directory to

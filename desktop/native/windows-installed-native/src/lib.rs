@@ -28,10 +28,12 @@ use windows_sys::Win32::UI::Shell as SH;
 
 mod decode;
 mod security;
+mod loader;
+pub use loader::SystemImage;
 #[cfg(any(test, feature = "qualification-result"))]
 mod qualification_result;
 #[cfg(feature = "qualification-result")]
-pub use qualification_result::{write_fullwalk_result_once, FullwalkFacts};
+pub use qualification_result::{write_fullwalk_result_once, write_passive_result_once, require_passive_qualification, FullwalkFacts, PassiveFacts};
 #[cfg(feature = "runtime-publication")]
 mod publication;
 #[cfg(feature = "runtime-publication")]
@@ -43,7 +45,8 @@ pub use security::{AceFact, GroupFact, SecurityFacts, Sid, TokenFacts, TokenIden
 // Win32/System/Com/Urlmon. No Urlmon/COM function or loader dependency is used.
 const HRESULT_PENDING: i32 = 0x8000000a_u32 as i32;
 const BUFFER: usize = 64 * 1024;
-const MAX_LIVE: usize = 48; // Token originals count, too.
+pub const MAX_ORIGINALS: usize = 48; // Token originals count, too; one aggregate book.
+const MAX_LIVE: usize = MAX_ORIGINALS;
 const MAX_RECORDS: usize = 8256;
 const MAX_FILES: usize = 2048;
 const MAX_ENTRIES: usize = 8192;
@@ -238,7 +241,7 @@ impl From<FileKind> for Kind {
 // The ORIGINAL directory cursor gets one purpose and one owned selected name.
 // Another mode/name cannot reinterpret earlier batches or restart enumeration.
 #[derive(Debug, Eq, PartialEq)]
-enum DirectoryMode { Unstarted, Strict, Ancestor(String) }
+enum DirectoryMode { Unstarted, Strict, Ancestor(String), Selected(Vec<String>) }
 impl DirectoryMode {
     fn bind(&mut self, requested: Self) -> Result<()> {
         if requested == Self::Unstarted { return Err(Error::State); }
@@ -257,6 +260,8 @@ struct Slot {
     read_ended: bool,
     directory_ended: bool,
     directory_mode: DirectoryMode,
+    // Only open_system_image can attach this role, before the original open.
+    system_image: Option<SystemImage>,
     _pin: PhantomPinned,
 }
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -457,7 +462,8 @@ impl NativeBook {
         let index = self.slots.len();
         self.slots.push(ManuallyDrop::new(Box::pin(Slot { output: UnsafeCell::new(null_mut()),
             state: SlotState::Reserved, kind, parent, name: encoded, canonical,
-            read_bytes: 0, read_ended: false, directory_ended: false, directory_mode: DirectoryMode::Unstarted, _pin: PhantomPinned })));
+            read_bytes: 0, read_ended: false, directory_ended: false, directory_mode: DirectoryMode::Unstarted,
+            system_image: None, _pin: PhantomPinned })));
         Ok(Original { book: Arc::clone(&self.identity), index })
     }
     fn arena(&self) -> Result<&Arena> {
@@ -771,6 +777,11 @@ pub struct KnownLocation { book: Arc<()>, kind: LocationKind, path: String, driv
 impl KnownLocation {
     pub fn path(&self) -> &str { &self.path }
     pub fn components(&self) -> &[String] { &self.components }
+    /// DATA comparison of two discoveries in this SAME original book. This is
+    /// not a new mapping observation or permission to reopen a consumed cursor.
+    pub fn same_volume(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.book, &other.book) && self.drive == other.drive && self.device == other.device
+    }
 }
 pub struct KnownLocations { pub program_files: KnownLocation, pub windows: KnownLocation, pub system: KnownLocation }
 impl NativeBook {
@@ -865,8 +876,13 @@ impl NativeBook {
         let tag = self.original_call(index, Call::Info(FS::FileAttributeTagInfo, size_of::<FS::FILE_ATTRIBUTE_TAG_INFO>()))?;
         let id = self.original_call(index, Call::Info(FS::FileIdInfo, size_of::<FS::FILE_ID_INFO>()))?;
         let trace = self.admission.at(AdmissionOp::Metadata);
-        let facts = decode::Observed::new(trace).metadata(kind, basic.bytes_in(size_of::<FS::FILE_BASIC_INFO>(), trace)?,
-            standard.bytes_in(size_of::<FS::FILE_STANDARD_INFO>(), trace)?, tag.bytes_in(size_of::<FS::FILE_ATTRIBUTE_TAG_INFO>(), trace)?, id.bytes_in(size_of::<FS::FILE_ID_INFO>(), trace)?)?;
+        let basic = basic.bytes_in(size_of::<FS::FILE_BASIC_INFO>(), trace)?;
+        let standard = standard.bytes_in(size_of::<FS::FILE_STANDARD_INFO>(), trace)?;
+        let tag = tag.bytes_in(size_of::<FS::FILE_ATTRIBUTE_TAG_INFO>(), trace)?;
+        let id = id.bytes_in(size_of::<FS::FILE_ID_INFO>(), trace)?;
+        let facts = if self.slot(index)?.system_image.is_some() {
+            decode::Observed::new(trace).system_image_metadata(kind, basic, standard, tag, id)?
+        } else { decode::Observed::new(trace).metadata(kind, basic, standard, tag, id)? };
         if kind == FileKind::Directory {
             let case = self.original_call(index, Call::Info(FS::FileCaseSensitiveInfo, size_of::<FS::FILE_CASE_SENSITIVE_INFO>()))?;
             let trace = self.admission.at(AdmissionOp::Metadata);
@@ -911,6 +927,14 @@ impl NativeBook {
         if !decode::component(selected_name) { return Err(self.admission.at(AdmissionOp::Directory).unsafe_at(C::AncestorName)); }
         self.directory_entries(original, DirectoryMode::Ancestor(selected_name.to_owned()))
     }
+    /// One finite selection fixed on the ORIGINAL cursor's first call. Shared
+    /// native location branches and the fixed OS-image roster are its only
+    /// installed caller. Unrelated siblings remain DATA, never open authority.
+    pub fn next_selected_entries(&mut self, original: &Original, names: &[String]) -> Result<Option<Vec<DirectoryEntry>>> {
+        self.clear()?;
+        loader::selected_names(names)?;
+        self.directory_entries(original, DirectoryMode::Selected(names.to_vec()))
+    }
     fn directory_entries(&mut self, original: &Original, mode: DirectoryMode) -> Result<Option<Vec<DirectoryEntry>>> {
         self.clear()?; let index = self.index(original)?;
         if self.slot(index)?.kind != Kind::Directory || self.slot(index)?.directory_ended { return Err(Error::State); }
@@ -930,6 +954,7 @@ impl NativeBook {
         let entries = match &self.slot(index)?.directory_mode {
             DirectoryMode::Strict => d.directory(result.bytes_in(BUFFER, trace)?)?,
             DirectoryMode::Ancestor(name) => d.ancestor_directory(result.bytes_in(BUFFER, trace)?, name)?,
+            DirectoryMode::Selected(names) => d.selected_directory(result.bytes_in(BUFFER, trace)?, names)?,
             DirectoryMode::Unstarted => return Err(Error::State),
         };
         self.entries = self.entries.checked_add(entries.len()).ok_or(Error::Bounds)?;

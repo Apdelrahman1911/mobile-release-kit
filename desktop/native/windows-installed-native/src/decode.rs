@@ -106,6 +106,13 @@ fn attributes(self, value: u32) -> Result<()> {
     Ok(())
 }
 pub(crate) fn metadata(self, kind: FileKind, basic: &[u8], standard: &[u8], tag: &[u8], id: &[u8]) -> Result<Metadata> {
+    self.metadata_inner(kind, basic, standard, tag, id, true)
+}
+pub(crate) fn system_image_metadata(self, kind: FileKind, basic: &[u8], standard: &[u8], tag: &[u8], id: &[u8]) -> Result<Metadata> {
+    if kind != FileKind::File { return Err(self.0.unsafe_at(C::ObjectKind)); }
+    self.metadata_inner(kind, basic, standard, tag, id, false)
+}
+fn metadata_inner(self, kind: FileKind, basic: &[u8], standard: &[u8], tag: &[u8], id: &[u8], single_link: bool) -> Result<Metadata> {
     if basic.len() != size_of::<FS::FILE_BASIC_INFO>() || standard.len() != size_of::<FS::FILE_STANDARD_INFO>()
         || tag.len() != size_of::<FS::FILE_ATTRIBUTE_TAG_INFO>() || id.len() != size_of::<FS::FILE_ID_INFO>() { return Err(self.0.unsafe_at(C::MetadataSize)); }
     let attrs = self.u32_at(basic, offset_of!(FS::FILE_BASIC_INFO, FileAttributes))?;
@@ -124,7 +131,7 @@ pub(crate) fn metadata(self, kind: FileKind, basic: &[u8], standard: &[u8], tag:
     if size > i64::MAX as u64 { return Err(self.0.unsafe_at(C::FileSize)); }
     if allocation > i64::MAX as u64 { return Err(self.0.unsafe_at(C::AllocationSize)); }
     if kind == FileKind::File {
-        if links != 1 { return Err(self.0.unsafe_at(C::FileLinks)); }
+        if links == 0 || single_link && links != 1 { return Err(self.0.unsafe_at(C::FileLinks)); }
         if size > MAX_FILE_BYTES { return Err(self.0.unsafe_at(C::FileSize)); }
     }
     let file_id: [u8; 16] = self.span(id, offset_of!(FS::FILE_ID_INFO, FileId), 16)?.try_into().map_err(|_| self.0.unsafe_at(C::Span))?;
@@ -149,13 +156,18 @@ impl Observed<'_> {
         if !component(selected) { return Err(self.0.unsafe_at(C::AncestorName)); }
         self.directory_records(raw, DirectoryPolicy::Ancestor(selected))
     }
+    pub(crate) fn selected_directory(self, raw: &[u8], selected: &[String]) -> Result<Vec<DirectoryEntry>> {
+        super::loader::selected_names(selected)?;
+        self.directory_records(raw, DirectoryPolicy::Selected(selected))
+    }
 }
-enum DirectoryPolicy<'a> { Strict, Ancestor(&'a str) }
+enum DirectoryPolicy<'a> { Strict, Ancestor(&'a str), Selected(&'a [String]) }
 impl DirectoryPolicy<'_> {
     fn ordinary(&self, name: &str) -> bool {
         match self {
             Self::Strict => true,
             Self::Ancestor(selected) => name == "." || name == ".." || name.eq_ignore_ascii_case(selected),
+            Self::Selected(selected) => name == "." || name == ".." || selected.iter().any(|s| name.eq_ignore_ascii_case(s)),
         }
     }
 }
