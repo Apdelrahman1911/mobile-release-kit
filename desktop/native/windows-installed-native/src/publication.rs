@@ -134,8 +134,14 @@ fn exact_security(facts: &SecurityFacts, kind: FileKind, image: bool, sealed: bo
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Facts { metadata: Metadata, security: SecurityFacts }
 fn same_object(a: &Metadata, b: &Metadata) -> bool {
-    a.identity == b.identity && a.kind == b.kind && a.attributes == b.attributes
-        && a.links == b.links && a.creation == b.creation
+    same_object_observed(a, b, None)
+}
+fn same_object_observed(a: &Metadata, b: &Metadata, trace: Option<CopyRefusal<'_>>) -> bool {
+    copy_guard(a.identity == b.identity, CopyMember::Identity, trace)
+        && copy_guard(a.kind == b.kind, CopyMember::Kind, trace)
+        && copy_guard(a.attributes == b.attributes, CopyMember::Attributes, trace)
+        && copy_guard(a.links == b.links, CopyMember::Links, trace)
+        && copy_guard(a.creation == b.creation, CopyMember::Creation, trace)
 }
 fn child_transition(a: &Metadata, b: &Metadata) -> bool {
     // Used ONLY immediately after one recorded successful exclusive child create.
@@ -143,12 +149,48 @@ fn child_transition(a: &Metadata, b: &Metadata) -> bool {
     same_object(a, b) && a.kind == FileKind::Directory && b.write >= a.write && b.change >= a.change
 }
 fn write_transition(a: &Metadata, b: &Metadata, size: u64) -> bool {
-    same_object(a, b) && a.kind == FileKind::File && a.size == 0
-        && b.size == size && b.allocation_size >= size && b.write >= a.write && b.change >= a.change
+    write_transition_observed(a, b, size, None)
+}
+fn write_transition_observed(a: &Metadata, b: &Metadata, size: u64, trace: Option<CopyRefusal<'_>>) -> bool {
+    if !(same_object_observed(a, b, trace) && copy_guard(a.kind == FileKind::File, CopyMember::Kind, trace)
+        && copy_guard(a.size == 0, CopyMember::InitialSize, trace)) { return false; }
+    let written_size = b.size;
+    if !copy_guard(written_size == size, CopyMember::Size, trace) { return false; }
+    let written_allocation = b.allocation_size;
+    copy_allocation_guard(written_allocation >= size, trace, || CopyAllocation::BelowSize)
+        && copy_guard(b.write >= a.write, CopyMember::WriteTime, trace)
+        && copy_guard(b.change >= a.change, CopyMember::ChangeTime, trace)
 }
 fn writer_close_transition(a: &Metadata, b: &Metadata) -> bool {
-    same_object(a, b) && a.kind == FileKind::File && a.size == b.size && a.allocation_size == b.allocation_size
-        && b.write >= a.write && b.change >= a.change
+    writer_close_transition_observed(a, b, None)
+}
+fn writer_close_transition_observed(a: &Metadata, b: &Metadata, trace: Option<CopyRefusal<'_>>) -> bool {
+    if !(same_object_observed(a, b, trace) && copy_guard(a.kind == FileKind::File, CopyMember::Kind, trace)) { return false; }
+    let (written_size, observed_size) = (a.size, b.size);
+    if !copy_guard(written_size == observed_size, CopyMember::Size, trace) { return false; }
+    let (written_allocation, observed_allocation) = (a.allocation_size, b.allocation_size);
+    copy_allocation_guard(written_allocation == observed_allocation, trace,
+        || changed_allocation(observed_allocation, written_allocation, observed_size))
+        && copy_guard(b.write >= a.write, CopyMember::WriteTime, trace)
+        && copy_guard(b.change >= a.change, CopyMember::ChangeTime, trace)
+}
+fn source_unchanged_observed(new: &Facts, old: &Facts, trace: Option<CopyRefusal<'_>>) -> bool {
+    // Exactly the original derived Facts/Metadata Eq order, with new on the left.
+    // Do not reuse same_object: size/allocation precede links/creation here.
+    let (a, b) = (&new.metadata, &old.metadata);
+    if !(copy_guard(a.identity == b.identity, CopyMember::Identity, trace)
+        && copy_guard(a.kind == b.kind, CopyMember::Kind, trace)
+        && copy_guard(a.attributes == b.attributes, CopyMember::Attributes, trace)) { return false; }
+    let (new_size, old_size) = (a.size, b.size);
+    if !copy_guard(new_size == old_size, CopyMember::Size, trace) { return false; }
+    let (new_allocation, old_allocation) = (a.allocation_size, b.allocation_size);
+    copy_allocation_guard(new_allocation == old_allocation, trace,
+        || changed_allocation(new_allocation, old_allocation, new_size))
+        && copy_guard(a.links == b.links, CopyMember::Links, trace)
+        && copy_guard(a.creation == b.creation, CopyMember::Creation, trace)
+        && copy_guard(a.write == b.write, CopyMember::WriteTime, trace)
+        && copy_guard(a.change == b.change, CopyMember::ChangeTime, trace)
+        && copy_guard(new.security == old.security, CopyMember::Security, trace)
 }
 fn acl_transition(a: &Metadata, b: &Metadata) -> bool {
     same_object(a, b) && a.size == b.size && a.allocation_size == b.allocation_size
@@ -509,6 +551,100 @@ struct Copied {
     proof: CopyProof, control: Option<usize>, sealed_closed: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CopyEdge {
+    Order, SourceEof, Installer, Flush, WriterCheck, WriteTransition, WriterClose, SourceCheck,
+    SourceUnchanged, SourceClose, ParentCheck, ReadbackReserve, ReadbackOpen, ReadbackNoninherited,
+    ReadbackCheck, WriterCloseTransition,
+}
+impl CopyEdge {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Order => "order", Self::SourceEof => "source-eof", Self::Installer => "installer",
+            Self::Flush => "flush", Self::WriterCheck => "writer-check", Self::WriteTransition => "write-transition",
+            Self::WriterClose => "writer-close", Self::SourceCheck => "source-check", Self::SourceUnchanged => "source-unchanged",
+            Self::SourceClose => "source-close", Self::ParentCheck => "parent-check", Self::ReadbackReserve => "readback-reserve",
+            Self::ReadbackOpen => "readback-open", Self::ReadbackNoninherited => "readback-noninherited",
+            Self::ReadbackCheck => "readback-check", Self::WriterCloseTransition => "writer-close-transition",
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CopyMember { None, Identity, Kind, Attributes, Links, Creation, InitialSize, Size, Allocation, WriteTime, ChangeTime, Security }
+impl CopyMember {
+    fn label(self) -> &'static str {
+        match self {
+            Self::None => "none", Self::Identity => "identity", Self::Kind => "kind", Self::Attributes => "attributes",
+            Self::Links => "links", Self::Creation => "creation", Self::InitialSize => "initial-size", Self::Size => "size",
+            Self::Allocation => "allocation", Self::WriteTime => "write-time", Self::ChangeTime => "change-time", Self::Security => "security",
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CopyAllocation { None, BelowSize, Shrank, Grew }
+impl CopyAllocation {
+    fn label(self) -> &'static str {
+        match self { Self::None => "none", Self::BelowSize => "below-size", Self::Shrank => "shrank", Self::Grew => "grew" }
+    }
+}
+/// Closed first-Unsafe finish-copy DATA; no handle, raw size or native output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PublicationCopyObservation { edge: CopyEdge, member: CopyMember, allocation: CopyAllocation }
+impl PublicationCopyObservation {
+    fn legal(self) -> bool {
+        use CopyEdge as E; use CopyMember as M; use CopyAllocation as A;
+        match (self.edge, self.member, self.allocation) {
+            (E::WriteTransition, M::Allocation, A::BelowSize)
+            | (E::SourceUnchanged | E::WriterCloseTransition, M::Allocation, A::BelowSize | A::Shrank | A::Grew)
+            | (E::WriteTransition, M::Identity | M::Kind | M::Attributes | M::Links | M::Creation | M::InitialSize
+                | M::Size | M::WriteTime | M::ChangeTime | M::Security, A::None)
+            | (E::SourceUnchanged | E::WriterCloseTransition, M::Identity | M::Kind | M::Attributes | M::Links | M::Creation
+                | M::Size | M::WriteTime | M::ChangeTime | M::Security, A::None)
+            | (E::Order | E::SourceEof | E::Installer | E::Flush | E::WriterCheck | E::WriterClose | E::SourceCheck
+                | E::SourceClose | E::ParentCheck | E::ReadbackReserve | E::ReadbackOpen | E::ReadbackNoninherited
+                | E::ReadbackCheck, M::None, A::None) => true,
+            _ => false,
+        }
+    }
+    pub fn diagnostic_line(self) -> Option<String> {
+        if !self.legal() { return None; }
+        let mut line = String::with_capacity(128);
+        line.push_str("MRK_WINDOWS_RUNTIME_PUBLISH_COPY_V1=edge="); line.push_str(self.edge.label());
+        line.push_str(";member="); line.push_str(self.member.label());
+        line.push_str(";allocation="); line.push_str(self.allocation.label()); line.push('\n');
+        if line.len() <= 256 { Some(line) } else { None }
+    }
+}
+#[derive(Clone, Copy)]
+struct CopyRefusal<'a> { first: &'a Cell<Option<PublicationCopyObservation>>, edge: CopyEdge }
+impl CopyRefusal<'_> {
+    fn record(self, member: CopyMember, allocation: impl FnOnce() -> CopyAllocation) {
+        if self.first.get().is_none() {
+            self.first.set(Some(PublicationCopyObservation { edge: self.edge, member, allocation: allocation() }));
+        }
+    }
+}
+// Receive each already-evaluated Result once; nested refusals are edge-only.
+fn copy_result<T>(result: Result<T>, first: &Cell<Option<PublicationCopyObservation>>, edge: CopyEdge) -> Result<T> {
+    if matches!(result.as_ref(), Err(Error::Unsafe)) {
+        CopyRefusal { first, edge }.record(CopyMember::None, || CopyAllocation::None);
+    }
+    result
+}
+fn copy_guard(value: bool, member: CopyMember, trace: Option<CopyRefusal<'_>>) -> bool {
+    if !value { if let Some(trace) = trace { trace.record(member, || CopyAllocation::None); } }
+    value
+}
+fn copy_allocation_guard(value: bool, trace: Option<CopyRefusal<'_>>, allocation: impl FnOnce() -> CopyAllocation) -> bool {
+    if !value { if let Some(trace) = trace { trace.record(CopyMember::Allocation, allocation); } }
+    value
+}
+fn changed_allocation(new: u64, old: u64, size: u64) -> CopyAllocation {
+    // Called only after unequal allocations, from cached operands of the reached
+    // original comparisons. Equal/passed/earlier refusals never classify here.
+    if new < size { CopyAllocation::BelowSize } else if new < old { CopyAllocation::Shrank } else { CopyAllocation::Grew }
+}
+
 /// The actual non-cloneable owner. Register it before invoking a native method;
 /// retain it after panic/poison/Unknown. Its Drop is NOT a settlement mechanism.
 pub struct Publication {
@@ -519,6 +655,7 @@ pub struct Publication {
     output_dirs: Vec<usize>, version: Option<usize>, python: Option<usize>,
     manifest: Vec<u8>, manifest_original: Option<usize>, manifest_facts: Option<Facts>,
     sizes: Option<[u64; 47]>, transfer: Option<Transfer>, copied: Vec<Copied>, settlement_attempted: bool,
+    copy_failure: Cell<Option<PublicationCopyObservation>>,
 }
 // SAFETY: only the serialized owner moves. All native arguments/output cells
 // are in pinned allocations, and no borrowed handle or UnsafeCell escapes. Like
@@ -529,6 +666,8 @@ unsafe impl Send for Publication {}
 impl Publication {
     /// Only copied first-refusal DATA, before failure settlement changes any owner.
     pub fn retained_admission_observation(&self) -> Option<PublicationAdmissionObservation> { self.book.admission.first.get() }
+    /// Copy the first finish-copy refusal only; never query frames, outputs or time.
+    pub fn retained_copy_observation(&self) -> Option<PublicationCopyObservation> { self.copy_failure.get() }
     fn with_role<T>(&mut self, role: R, body: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         let before = self.book.admission.role.replace(role);
         let result = body(self);
@@ -557,7 +696,7 @@ impl Publication {
             source_dirs: Vec::new(), source_root: None, source_python: None, mrk: None,
             output_dirs: Vec::new(), version: None, python: None,
             manifest: Vec::new(), manifest_original: None, manifest_facts: None,
-            sizes: None, transfer: None, copied: Vec::new(), settlement_attempted: false })
+            sizes: None, transfer: None, copied: Vec::new(), settlement_attempted: false, copy_failure: Cell::new(None) })
     }
     fn tick(&mut self) -> Result<()> {
         self.expired |= Instant::now() >= self.end;
@@ -1056,28 +1195,42 @@ impl Publication {
     /// and once-close the actual writer before any distinct readback original.
     pub fn finish_copy(&mut self) -> Result<()> {
         self.step(|this| {
-            this.order.live(Stage::Copying)?;
+            copy_result(this.order.live(Stage::Copying), &this.copy_failure, CopyEdge::Order)?;
             let t = this.transfer.as_ref().ok_or(Error::State)?;
-            need(t.stage == TransferStage::SourceEof && t.proof.source_eof)?;
+            copy_result(need(t.stage == TransferStage::SourceEof && t.proof.source_eof), &this.copy_failure, CopyEdge::SourceEof)?;
             let (index, source, writer, before, source_before) = (t.index, t.source, t.writer, t.created.clone(), t.source_facts.clone());
-            this.recheck_installer()?;
-            this.mutate(Effect::Flush, Some(writer), "", &[], Vec::new())?;
+            copy_result(this.recheck_installer(), &this.copy_failure, CopyEdge::Installer)?;
+            copy_result(this.mutate(Effect::Flush, Some(writer), "", &[], Vec::new()), &this.copy_failure, CopyEdge::Flush)?;
             this.transfer.as_mut().ok_or(Error::State)?.proof.flushed = true;
-            let written = this.checked(writer, AuthorityScope::ImmutableVersion)?;
-            need(write_transition(&before.metadata, &written.metadata, this.sizes.as_ref().ok_or(Error::State)?[index])
-                && before.security == written.security)?;
-            this.close(writer)?;
+            let written = copy_result(this.checked(writer, AuthorityScope::ImmutableVersion), &this.copy_failure, CopyEdge::WriterCheck)?;
+            {
+                let trace = Some(CopyRefusal { first: &this.copy_failure, edge: CopyEdge::WriteTransition });
+                need(write_transition_observed(&before.metadata, &written.metadata, this.sizes.as_ref().ok_or(Error::State)?[index], trace)
+                    && copy_guard(before.security == written.security, CopyMember::Security, trace))?;
+            }
+            copy_result(this.close(writer), &this.copy_failure, CopyEdge::WriterClose)?;
             this.transfer.as_mut().ok_or(Error::State)?.proof.writer_closed = true;
-            need(this.checked(source, AuthorityScope::ImmutableVersion)? == source_before)?;
-            this.close(source)?;
+            {
+                // Preserve the returned Facts temporary's original drop boundary
+                // before source close; no additional query or retained owner data.
+                let source_now = copy_result(this.checked(source, AuthorityScope::ImmutableVersion), &this.copy_failure, CopyEdge::SourceCheck)?;
+                need(source_unchanged_observed(&source_now, &source_before,
+                    Some(CopyRefusal { first: &this.copy_failure, edge: CopyEdge::SourceUnchanged })))?;
+            }
+            copy_result(this.close(source), &this.copy_failure, CopyEdge::SourceClose)?;
             this.transfer.as_mut().ok_or(Error::State)?.proof.source_closed = true;
             this.ready()?;
-            let (parent, name) = this.payload_parent(index, false)?; this.recheck_dir(parent)?;
-            let readback = this.reserve_later(parent, name, FileKind::File, writer)?;
-            this.book.call(Call::Open(readback), null_mut(), Vec::new())?;
-            this.book.noninherited(readback)?;
-            let observed = this.checked(readback, AuthorityScope::ImmutableVersion)?;
-            need(writer_close_transition(&written.metadata, &observed.metadata) && written.security == observed.security)?;
+            let (parent, name) = this.payload_parent(index, false)?;
+            copy_result(this.recheck_dir(parent), &this.copy_failure, CopyEdge::ParentCheck)?;
+            let readback = copy_result(this.reserve_later(parent, name, FileKind::File, writer), &this.copy_failure, CopyEdge::ReadbackReserve)?;
+            copy_result(this.book.call(Call::Open(readback), null_mut(), Vec::new()), &this.copy_failure, CopyEdge::ReadbackOpen)?;
+            copy_result(this.book.noninherited(readback), &this.copy_failure, CopyEdge::ReadbackNoninherited)?;
+            let observed = copy_result(this.checked(readback, AuthorityScope::ImmutableVersion), &this.copy_failure, CopyEdge::ReadbackCheck)?;
+            {
+                let trace = Some(CopyRefusal { first: &this.copy_failure, edge: CopyEdge::WriterCloseTransition });
+                need(writer_close_transition_observed(&written.metadata, &observed.metadata, trace)
+                    && copy_guard(written.security == observed.security, CopyMember::Security, trace))?;
+            }
             let t = this.transfer.as_mut().ok_or(Error::State)?;
             t.readback = Some(readback); t.readback_facts = Some(observed); t.stage = TransferStage::Readback; Ok(())
         })
@@ -1584,6 +1737,72 @@ mod tests {
     #[test]
     fn fixed_roster_and_production_masks() -> Result<()> {
         {
+            use CopyEdge as E; use CopyMember as M; use CopyAllocation as A;
+            let edges = [(E::Order, "order"), (E::SourceEof, "source-eof"), (E::Installer, "installer"),
+                (E::Flush, "flush"), (E::WriterCheck, "writer-check"), (E::WriteTransition, "write-transition"),
+                (E::WriterClose, "writer-close"), (E::SourceCheck, "source-check"), (E::SourceUnchanged, "source-unchanged"),
+                (E::SourceClose, "source-close"), (E::ParentCheck, "parent-check"), (E::ReadbackReserve, "readback-reserve"),
+                (E::ReadbackOpen, "readback-open"), (E::ReadbackNoninherited, "readback-noninherited"),
+                (E::ReadbackCheck, "readback-check"), (E::WriterCloseTransition, "writer-close-transition")];
+            let members = [(M::None, "none"), (M::Identity, "identity"), (M::Kind, "kind"), (M::Attributes, "attributes"),
+                (M::Links, "links"), (M::Creation, "creation"), (M::InitialSize, "initial-size"), (M::Size, "size"),
+                (M::Allocation, "allocation"), (M::WriteTime, "write-time"), (M::ChangeTime, "change-time"), (M::Security, "security")];
+            let allocations = [(A::None, "none"), (A::BelowSize, "below-size"), (A::Shrank, "shrank"), (A::Grew, "grew")];
+            let common = [M::Identity, M::Kind, M::Attributes, M::Links, M::Creation, M::Size, M::WriteTime, M::ChangeTime, M::Security];
+            for (edge, edge_label) in edges {
+                assert_eq!(edge.label(), edge_label);
+                for (member, member_label) in members {
+                    assert_eq!(member.label(), member_label);
+                    for (allocation, allocation_label) in allocations {
+                        assert_eq!(allocation.label(), allocation_label);
+                        let allowed = if member == M::Allocation {
+                            match edge {
+                                E::WriteTransition => allocation == A::BelowSize,
+                                E::SourceUnchanged | E::WriterCloseTransition => [A::BelowSize, A::Shrank, A::Grew].contains(&allocation),
+                                _ => false,
+                            }
+                        } else {
+                            allocation == A::None && match edge {
+                                E::WriteTransition => common.contains(&member) || member == M::InitialSize,
+                                E::SourceUnchanged | E::WriterCloseTransition => common.contains(&member),
+                                _ => member == M::None,
+                            }
+                        };
+                        let line = PublicationCopyObservation { edge, member, allocation }.diagnostic_line();
+                        assert_eq!(line.is_some(), allowed);
+                        if let Some(line) = line {
+                            assert_eq!(line, format!("MRK_WINDOWS_RUNTIME_PUBLISH_COPY_V1=edge={edge_label};member={member_label};allocation={allocation_label}\n"));
+                            assert!(line.is_ascii() && line.len() <= 256 && line.bytes().filter(|b| *b == b'\n').count() == 1);
+                        }
+                    }
+                }
+                // Comparison refusals carry members, not a guessed nested edge.
+                if [E::WriteTransition, E::SourceUnchanged, E::WriterCloseTransition].contains(&edge) { continue; }
+                let first = Cell::new(None);
+                for _ in 0..2 { copy_result(Ok(()), &first, edge)?; }
+                let value = Box::new(7u8); let address = &*value as *const u8;
+                let returned = copy_result(Ok(value), &first, edge)?;
+                assert_eq!(&*returned as *const u8, address);
+                assert!(first.get().is_none()); // Earlier successful copies leave no edge marker.
+                for error in [Error::Unavailable, Error::Unsafe, Error::Bounds, Error::State, Error::Unknown] {
+                    let saved = Cell::new(None); let evaluations = Cell::new(0);
+                    let result = copy_result({ evaluations.set(evaluations.get() + 1); Err::<u8, _>(error) }, &saved, edge);
+                    assert_eq!(result, Err(error)); assert_eq!(evaluations.get(), 1);
+                    assert_eq!(saved.get(), if error == Error::Unsafe {
+                        Some(PublicationCopyObservation { edge, member: M::None, allocation: A::None })
+                    } else { None });
+                }
+                assert_eq!(copy_result(Err::<(), _>(Error::Unsafe), &first, edge), Err(Error::Unsafe));
+                let saved = first.get();
+                for later in [E::Order, E::ReadbackOpen] {
+                    assert_eq!(copy_result(Err::<(), _>(Error::Unsafe), &first, later), Err(Error::Unsafe));
+                    copy_result(Ok(()), &first, later)?;
+                    assert_eq!(copy_result(Err::<(), _>(Error::Unknown), &first, later), Err(Error::Unknown));
+                    assert_eq!(first.get(), saved);
+                }
+            }
+        }
+        {
             use crate::tests::{admission_trace, admission_fault};
             let own = metadata(FileKind::Directory);
             let file = DirectoryEntry { name: "manifest.json".to_owned(), file_id: [1; 16], kind: FileKind::File, attributes: FS::FILE_ATTRIBUTE_ARCHIVE };
@@ -1937,6 +2156,125 @@ mod tests {
         need(writer_close_transition(&written, &closed))?;
         let mut sealed = closed.clone(); sealed.change = 4; need(acl_transition(&closed, &sealed))?;
         sealed.write += 1; need(!acl_transition(&closed, &sealed))?;
+        {
+            use CopyEdge as E; use CopyMember as M; use CopyAllocation as A;
+            let security = security::descriptor(&descriptor(FileKind::File, false, false)?, FileKind::File, AuthorityScope::ImmutableVersion)?;
+            let initial = Facts { metadata: file.clone(), security: security.clone() };
+            let copied = Facts { metadata: written.clone(), security: security.clone() };
+            let readback = Facts { metadata: closed.clone(), security };
+            let observe = |edge, before: &Facts, after: &Facts, first: &Cell<Option<PublicationCopyObservation>>| {
+                let trace = Some(CopyRefusal { first, edge });
+                match edge {
+                    E::WriteTransition => write_transition_observed(&before.metadata, &after.metadata, 4, trace)
+                        && copy_guard(before.security == after.security, M::Security, trace),
+                    E::WriterCloseTransition => writer_close_transition_observed(&before.metadata, &after.metadata, trace)
+                        && copy_guard(before.security == after.security, M::Security, trace),
+                    E::SourceUnchanged => source_unchanged_observed(after, before, trace),
+                    _ => unreachable!(),
+                }
+            };
+            let plain = |edge, before: &Facts, after: &Facts| match edge {
+                E::WriteTransition => write_transition(&before.metadata, &after.metadata, 4) && before.security == after.security,
+                E::WriterCloseTransition => writer_close_transition(&before.metadata, &after.metadata) && before.security == after.security,
+                E::SourceUnchanged => after == before,
+                _ => unreachable!(),
+            };
+            let drift = |member, before: &mut Facts, after: &mut Facts| match member {
+                M::Identity => after.metadata.identity.file_id = [2; 16], M::Kind => after.metadata.kind = FileKind::Directory,
+                M::Attributes => after.metadata.attributes ^= FS::FILE_ATTRIBUTE_HIDDEN, M::Links => after.metadata.links += 1,
+                M::Creation => after.metadata.creation += 1, M::InitialSize => before.metadata.size = 1,
+                M::Size => after.metadata.size += 1, M::Allocation => after.metadata.allocation_size = 0,
+                M::WriteTime => after.metadata.write = 0, M::ChangeTime => after.metadata.change = 0,
+                M::Security => after.security.revision ^= 1, M::None => unreachable!(),
+            };
+            let write_members = [M::Identity, M::Kind, M::Attributes, M::Links, M::Creation, M::InitialSize,
+                M::Size, M::Allocation, M::WriteTime, M::ChangeTime, M::Security];
+            let close_members = [M::Identity, M::Kind, M::Attributes, M::Links, M::Creation,
+                M::Size, M::Allocation, M::WriteTime, M::ChangeTime, M::Security];
+            let source_members = [M::Identity, M::Kind, M::Attributes, M::Size, M::Allocation,
+                M::Links, M::Creation, M::WriteTime, M::ChangeTime, M::Security];
+            for edge in [E::WriteTransition, E::WriterCloseTransition, E::SourceUnchanged] {
+                let (before, after, members): (&Facts, &Facts, &[M]) = match edge {
+                    E::WriteTransition => (&initial, &copied, &write_members),
+                    E::WriterCloseTransition => (&copied, &readback, &close_members),
+                    E::SourceUnchanged => (&copied, &copied, &source_members),
+                    _ => unreachable!(),
+                };
+                let first = Cell::new(None);
+                for _ in 0..2 {
+                    assert!(observe(edge, before, after, &first));
+                    assert!(plain(edge, before, after)); assert!(first.get().is_none());
+                }
+                for (position, member) in members.iter().copied().enumerate() {
+                    for simultaneous in [false, true] {
+                        let (mut a, mut b) = (before.clone(), after.clone());
+                        drift(member, &mut a, &mut b);
+                        if simultaneous { for later in &members[position + 1..] { drift(*later, &mut a, &mut b); } }
+                        let first = Cell::new(None);
+                        let result = need(observe(edge, &a, &b, &first));
+                        assert_eq!(result, need(plain(edge, &a, &b))); assert_eq!(result, Err(Error::Unsafe));
+                        assert_eq!(first.get(), Some(PublicationCopyObservation { edge, member,
+                            allocation: if member == M::Allocation { A::BelowSize } else { A::None } }));
+                    }
+                }
+                if edge != E::SourceUnchanged {
+                    let (mut a, mut b) = (before.clone(), after.clone());
+                    a.metadata.kind = FileKind::Directory; b.metadata.kind = FileKind::Directory;
+                    for (links, member) in [(1, M::Kind), (2, M::Links)] {
+                        b.metadata.links = links;
+                        let first = Cell::new(None);
+                        assert!(!observe(edge, &a, &b, &first)); assert!(!plain(edge, &a, &b));
+                        assert_eq!(first.get(), Some(PublicationCopyObservation { edge, member, allocation: A::None }));
+                    }
+                }
+            }
+            // Allocation contraction/growth remains a refusal, not a new policy.
+            // A growing allocation still labels below-size when that relation wins.
+            for (size, old, new, allocation) in [(4, 4096, 3, A::BelowSize), (4, 4096, 4, A::Shrank),
+                (4, 4096, 4095, A::Shrank), (4, 4096, 4097, A::Grew), (4, 2, 3, A::BelowSize),
+                (0, 1, 0, A::Shrank), (0, 0, 1, A::Grew), (u64::MAX, u64::MAX, u64::MAX - 1, A::BelowSize),
+                (u64::MAX - 1, u64::MAX - 1, u64::MAX, A::Grew)] {
+                for edge in [E::SourceUnchanged, E::WriterCloseTransition] {
+                    let (mut a, mut b) = (copied.clone(), copied.clone());
+                    a.metadata.size = size; b.metadata.size = size;
+                    a.metadata.allocation_size = old; b.metadata.allocation_size = new;
+                    let first = Cell::new(None);
+                    assert_eq!(need(observe(edge, &a, &b, &first)), Err(Error::Unsafe));
+                    assert!(!plain(edge, &a, &b));
+                    assert_eq!(first.get(), Some(PublicationCopyObservation { edge, member: M::Allocation, allocation }));
+                }
+            }
+            for (size, allocation) in [(0, 0), (4, 0), (4, 4096), (u64::MAX, u64::MAX)] {
+                let mut a = copied.clone(); a.metadata.size = size; a.metadata.allocation_size = allocation;
+                for edge in [E::SourceUnchanged, E::WriterCloseTransition] {
+                    let first = Cell::new(None);
+                    assert!(observe(edge, &a, &a, &first)); assert!(plain(edge, &a, &a)); assert!(first.get().is_none());
+                }
+            }
+            for (size, allocation, accepted) in [(0, 0, true), (4, 3, false), (4, 4, true),
+                (u64::MAX, u64::MAX, true), (u64::MAX, u64::MAX - 1, false)] {
+                let mut b = written.clone(); b.size = size; b.allocation_size = allocation;
+                let first = Cell::new(None);
+                let result = write_transition_observed(&file, &b, size, Some(CopyRefusal { first: &first, edge: E::WriteTransition }));
+                assert_eq!(result, write_transition(&file, &b, size)); assert_eq!(result, accepted);
+                assert_eq!(first.get(), if accepted { None } else {
+                    Some(PublicationCopyObservation { edge: E::WriteTransition, member: M::Allocation, allocation: A::BelowSize })
+                });
+            }
+            let first = Cell::new(None); let classifications = Cell::new(0);
+            let trace = Some(CopyRefusal { first: &first, edge: E::WriterCloseTransition });
+            let classify = || { classifications.set(classifications.get() + 1); A::Grew };
+            assert!(copy_allocation_guard(true, trace, &classify));
+            assert!(!copy_allocation_guard(false, None, &classify));
+            assert_eq!(classifications.get(), 0); assert!(first.get().is_none());
+            assert!(!copy_guard(false, M::Size, trace));
+            let saved = first.get();
+            assert!(!copy_allocation_guard(false, trace, &classify));
+            assert_eq!(classifications.get(), 0); assert_eq!(first.get(), saved);
+            let fresh = Cell::new(None);
+            assert!(!copy_allocation_guard(false, Some(CopyRefusal { first: &fresh, edge: E::WriterCloseTransition }), &classify));
+            assert_eq!(classifications.get(), 1);
+        }
         written.identity.file_id = [2; 16]; need(!write_transition(&file, &written, 4))?;
         let directory = metadata(FileKind::Directory); let mut child = directory.clone();
         child.size = 64; child.allocation_size = 4096; child.write = 2; child.change = 2;
@@ -1950,6 +2288,10 @@ mod tests {
         assert_eq!(owner.book.admission.at(O::Scalar).result(scalar_value(2), C::ScalarCanonical), Err(Error::Unsafe));
         let first = owner.retained_admission_observation();
         owner.book.admission.active.set(false);
+        assert!(owner.retained_copy_observation().is_none());
+        assert_eq!(copy_result(Err::<(), _>(Error::Unsafe), &owner.copy_failure, CopyEdge::WriterCheck), Err(Error::Unsafe));
+        let copy = owner.retained_copy_observation();
+        let copy_line = copy.and_then(PublicationCopyObservation::diagnostic_line);
         owner.mutation = Some(ManuallyDrop::new(Box::pin(Mutation { effect: Effect::Flush,
             phase: Cell::new(Phase::Entered), returned: Cell::new(None), slot: None, path: Vec::new(),
             length_observation: Cell::new(ObservedScalarLength::Unobserved),
@@ -1960,7 +2302,13 @@ mod tests {
         need(owner.fail_and_settle_once() == CloseOutcome::Unknown && owner.mutation.is_some())?;
         assert_eq!(owner.retained_admission_observation(), first);
         need(!owner.published_and_settled() && !owner.occupied_target_and_settled()
-            && owner.ready() == Err(Error::Unknown))
+            && owner.ready() == Err(Error::Unknown))?;
+        assert_eq!(owner.finish_copy(), Err(Error::Unknown));
+        assert_eq!(copy_result(Err::<(), _>(Error::Unsafe), &owner.copy_failure, CopyEdge::ReadbackOpen), Err(Error::Unsafe));
+        assert_eq!(owner.retained_copy_observation(), copy);
+        assert_eq!(copy.and_then(PublicationCopyObservation::diagnostic_line), copy_line);
+        assert!(owner.mutation.is_some());
+        Ok(())
     }
     #[test]
     fn even_the_first_descendant_grant_is_possibly_exposed_on_failure() -> Result<()> {

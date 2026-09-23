@@ -35,7 +35,7 @@ pub use qualification_result::{write_fullwalk_result_once, FullwalkFacts};
 #[cfg(feature = "runtime-publication")]
 mod publication;
 #[cfg(feature = "runtime-publication")]
-pub use publication::{Publication, PublicationFrameObservation, PUBLICATION_PAYLOADS};
+pub use publication::{Publication, PublicationFrameObservation, PublicationCopyObservation, PUBLICATION_PAYLOADS};
 pub use decode::{DirectoryEntry, FileIdentity, Metadata};
 pub use security::{AceFact, GroupFact, SecurityFacts, Sid, TokenFacts, TokenIdentity};
 

@@ -10022,6 +10022,9 @@ class WindowsReaderGateTests(unittest.TestCase):
         self.assertIn("\n            std::process::ExitCode::FAILURE\n", failure)
         self.assertEqual(binary.count("error.diagnostic_line()"), 1)
         self.assertEqual(binary.count("error.frame_diagnostic_line()"), 1)
+        self.assertEqual(binary.count("error.admission_diagnostic_line()"), 1)
+        self.assertEqual(binary.count("error.copy_diagnostic_line()"), 1)
+        self.assertIn("error.frame_diagnostic_line().or_else(|| error.admission_diagnostic_line()).or_else(|| error.copy_diagnostic_line())", failure)
         self.assertLess(failure.index("line.as_bytes()"), failure.index("error.frame_diagnostic_line()"))
         self.assertIn("if line.len() + frame.len() <= 512", failure)
         self.assertIn("let _ = std::io::Write::write_all(&mut std::io::stderr(), frame.as_bytes());", failure)
@@ -10040,19 +10043,28 @@ class WindowsReaderGateTests(unittest.TestCase):
             "Some(original.retained_frame_observation())",
             "let admission = if cause.admission_observation_allowed()",
             "original.retained_admission_observation()",
+            "let copy = if cause.copy_observation_allowed()",
+            "original.retained_copy_observation()",
             "let possibly_exposed = original.possibly_exposed();", "let settlement = original.fail_and_settle_once();",
             "if settlement == CloseOutcome::Settled && original.occupied_target_and_settled()",
             "let originals_unknown = settlement == CloseOutcome::Unknown;",
-            "Err(PublicationError::Failed { cause, possibly_exposed, originals_unknown, frame, admission })")]
+            "Err(PublicationError::Failed { cause, possibly_exposed, originals_unknown, frame, admission, copy })")]
         self.assertEqual(ordered, sorted(ordered))
         self.assertEqual(entry.count("original.retained_frame_observation()"), 1)
         self.assertEqual(entry.count("original.retained_admission_observation()"), 1)
+        self.assertEqual(entry.count("original.retained_copy_observation()"), 1)
         self.assertIn("self.phase == FailurePhase::Admit && self.native == Some(NativeError::Unsafe)", bridge)
+        copy_gate = bridge.split("fn copy_observation_allowed(self)", 1)[1].split("    fn class(self)", 1)[0]
+        self.assertIn("self.phase == FailurePhase::FinishCopy && self.native == Some(NativeError::Unsafe)", copy_gate)
+        self.assertIn("&& self.ordinal.is_some_and(|index| index < 47)", copy_gate)
+        self.assertIn("copy: Option<PublicationCopyObservation>", bridge)
         formatter = bridge.split("pub fn diagnostic_line(self)", 1)[1].split("type Checked<T>", 1)[0]
         self.assertIn('"MRK_WINDOWS_RUNTIME_PUBLISH_FAILURE_V1=phase="', formatter)
         self.assertIn("ordinal.filter(|index| *index < 47)", formatter)
         self.assertIn("if line.len() <= 256 { Some(line) } else { None }", formatter)
         self.assertIn("Self::OccupiedTargetSettled => return None", formatter)
+        self.assertIn("Self::Failed { cause, copy: Some(copy), .. }", formatter)
+        self.assertIn("if cause.copy_observation_allowed() => copy.diagnostic_line()", formatter)
         for forbidden in ("OWNER", "owner.", "original.", "format!", "format_args!", "write!", "writeln!",
                           "panic!", "unwrap(", "expect(", "{:?}", "{:#?}", ".to_string("):
             self.assertNotIn(forbidden, formatter + binary)
@@ -10063,6 +10075,52 @@ class WindowsReaderGateTests(unittest.TestCase):
         for forbidden in ("unsafe {", "frame.handle", "frame.output", "frame.iosb", "frame.count", "frame.scalar",
                           "frame.bytes", "frame.input", "frame.path", "Instant::", ".tick(", ".clone("):
             self.assertNotIn(forbidden, snapshot)
+        copy_snapshot = source.split("pub fn retained_copy_observation(&self)", 1)[1].split("    fn with_role", 1)[0]
+        self.assertEqual(copy_snapshot.strip(), "-> Option<PublicationCopyObservation> { self.copy_failure.get() }")
+        self.assertEqual(source.count("copy_failure: Cell<Option<PublicationCopyObservation>>"), 1)
+        self.assertEqual(source.count("copy_failure: Cell::new(None)"), 1)
+        copy_recorder = source.split("impl CopyRefusal<'_> {", 1)[1].split("fn copy_result<T>", 1)[0]
+        self.assertIn("if self.first.get().is_none()", copy_recorder)
+        self.assertIn("self.first.set(Some(PublicationCopyObservation { edge: self.edge, member, allocation: allocation() }))", copy_recorder)
+        copy_result = source.split("fn copy_result<T>", 1)[1].split("fn copy_guard(", 1)[0]
+        self.assertIn("if matches!(result.as_ref(), Err(Error::Unsafe))", copy_result)
+        self.assertIn("CopyRefusal { first, edge }.record(CopyMember::None, || CopyAllocation::None)", copy_result)
+        self.assertTrue(copy_result.rstrip().endswith("result\n}"))
+        for forbidden in ("unsafe", "Instant::", ".tick(", ".clone(", "self.book", "self.mutation", "println!", "eprintln!"):
+            self.assertNotIn(forbidden, copy_snapshot + copy_recorder + copy_result)
+        copy_companion = source.split("impl PublicationCopyObservation {", 1)[1].split("#[derive(Clone, Copy)]\nstruct CopyRefusal", 1)[0]
+        self.assertIn("if !self.legal() { return None; }", copy_companion)
+        self.assertIn('"MRK_WINDOWS_RUNTIME_PUBLISH_COPY_V1=edge="', copy_companion)
+        self.assertIn('line.push_str(";member="); line.push_str(self.member.label());', copy_companion)
+        self.assertIn('line.push_str(";allocation="); line.push_str(self.allocation.label()); line.push(\'\\n\');', copy_companion)
+        self.assertIn("if line.len() <= 256 { Some(line) } else { None }", copy_companion)
+        finish_copy = source.split("pub fn finish_copy(", 1)[1].split("    pub fn readback_next(", 1)[0]
+        copy_edges = ("this.order.live(Stage::Copying)", "t.stage == TransferStage::SourceEof && t.proof.source_eof",
+            "this.recheck_installer()", 'this.mutate(Effect::Flush, Some(writer), "", &[], Vec::new())',
+            "proof.flushed = true", "this.checked(writer, AuthorityScope::ImmutableVersion)",
+            "write_transition_observed(&before.metadata, &written.metadata, this.sizes.as_ref().ok_or(Error::State)?[index], trace)",
+            "before.security == written.security", "this.close(writer)", "proof.writer_closed = true",
+            "this.checked(source, AuthorityScope::ImmutableVersion)", "source_unchanged_observed(&source_now, &source_before,",
+            "this.close(source)", "proof.source_closed = true", "this.ready()", "this.payload_parent(index, false)",
+            "this.recheck_dir(parent)", "this.reserve_later(parent, name, FileKind::File, writer)",
+            "this.book.call(Call::Open(readback), null_mut(), Vec::new())", "this.book.noninherited(readback)",
+            "this.checked(readback, AuthorityScope::ImmutableVersion)",
+            "writer_close_transition_observed(&written.metadata, &observed.metadata, trace)",
+            "written.security == observed.security", "t.readback = Some(readback)", "t.readback_facts = Some(observed)",
+            "t.stage = TransferStage::Readback")
+        offsets = [finish_copy.index(part) for part in copy_edges]
+        self.assertEqual(offsets, sorted(offsets))
+        for part in copy_edges: self.assertEqual(finish_copy.count(part), 1)
+        self.assertIn("Some(CopyRefusal { first: &this.copy_failure, edge: CopyEdge::SourceUnchanged })))?;\n"
+                      "            }\n            copy_result(this.close(source)", finish_copy)
+        source_same = source.split("fn source_unchanged_observed(", 1)[1].split("fn acl_transition(", 1)[0]
+        same_order = ("a.identity == b.identity", "a.kind == b.kind", "a.attributes == b.attributes", "(a.size, b.size)",
+            "new_size == old_size", "(a.allocation_size, b.allocation_size)", "new_allocation == old_allocation",
+            "changed_allocation(new_allocation, old_allocation, new_size)", "a.links == b.links", "a.creation == b.creation",
+            "a.write == b.write", "a.change == b.change", "new.security == old.security")
+        offsets = [source_same.index(part) for part in same_order]
+        self.assertEqual(offsets, sorted(offsets))
+        for part in same_order: self.assertEqual(source_same.count(part), 1)
         companion = source.split("pub fn diagnostic_line(self)", 1)[1].split("struct Mutation {", 1)[0]
         self.assertIn('"MRK_WINDOWS_RUNTIME_PUBLISH_FRAME_V2=qcall="', companion)
         self.assertIn('";qrefusal="', companion)
@@ -10103,6 +10161,7 @@ class WindowsReaderGateTests(unittest.TestCase):
         self.assertIn("restricted == 0", source)
         self.assertIn("frame.scalar.get().cast(), 4, frame.count.get()", source)
         query = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/lib.rs").read_text(encoding="utf-8")
+        self.assertIn("pub use publication::{Publication, PublicationFrameObservation, PublicationCopyObservation, PUBLICATION_PAYLOADS};", query)
         self.assertEqual(query.count("self.completion_unknown("), 6)
         ordered_open = (
             "if !valid_handle(handle) { return self.completion_unknown(CompletionRefusal::OpenInvalidHandle); }",

@@ -7,7 +7,7 @@
 #![forbid(unsafe_code)]
 
 use std::{collections::BTreeSet, sync::{Mutex, OnceLock}};
-use mrk_windows_installed_native::{CloseOutcome, Error as NativeError, Publication, PublicationFrameObservation, PublicationAdmissionObservation, PUBLICATION_PAYLOADS};
+use mrk_windows_installed_native::{CloseOutcome, Error as NativeError, Publication, PublicationFrameObservation, PublicationAdmissionObservation, PublicationCopyObservation, PUBLICATION_PAYLOADS};
 use sha2::{Digest, Sha256};
 use crate::runtime::windows_version::{Inventory, VersionSpec, MANIFEST_BYTES, TARGET};
 
@@ -28,7 +28,7 @@ pub enum PublicationError {
     /// The original fixed target-D creation returned ERROR_ALREADY_EXISTS;
     /// no output was created/exposed and the original owner actually settled.
     OccupiedTargetSettled,
-    Failed { cause: PublicationFailure, possibly_exposed: bool, originals_unknown: bool, frame: Option<PublicationFrameObservation>, admission: Option<PublicationAdmissionObservation> },
+    Failed { cause: PublicationFailure, possibly_exposed: bool, originals_unknown: bool, frame: Option<PublicationFrameObservation>, admission: Option<PublicationAdmissionObservation>, copy: Option<PublicationCopyObservation> },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -58,6 +58,10 @@ impl PublicationFailure {
     fn policy(phase: FailurePhase, ordinal: Option<usize>) -> Self { Self { phase, ordinal, native: None } }
     fn admission_observation_allowed(self) -> bool {
         self.phase == FailurePhase::Admit && self.native == Some(NativeError::Unsafe)
+    }
+    fn copy_observation_allowed(self) -> bool {
+        self.phase == FailurePhase::FinishCopy && self.native == Some(NativeError::Unsafe)
+            && self.ordinal.is_some_and(|index| index < 47)
     }
     fn class(self) -> &'static str {
         match self.native {
@@ -95,6 +99,13 @@ impl PublicationError {
         match self {
             Self::Failed { cause, admission: Some(admission), .. }
                 if cause.admission_observation_allowed() => admission.diagnostic_line(),
+            _ => None,
+        }
+    }
+    pub fn copy_diagnostic_line(self) -> Option<String> {
+        match self {
+            Self::Failed { cause, copy: Some(copy), .. }
+                if cause.copy_observation_allowed() => copy.diagnostic_line(),
             _ => None,
         }
     }
@@ -216,13 +227,16 @@ pub fn publish_fixed() -> Result<(), PublicationError> {
     let admission = if cause.admission_observation_allowed() {
         original.retained_admission_observation()
     } else { None };
+    let copy = if cause.copy_observation_allowed() {
+        original.retained_copy_observation()
+    } else { None };
     let possibly_exposed = original.possibly_exposed();
     let settlement = original.fail_and_settle_once();
     if settlement == CloseOutcome::Settled && original.occupied_target_and_settled() {
         return Err(PublicationError::OccupiedTargetSettled);
     }
     let originals_unknown = settlement == CloseOutcome::Unknown;
-    Err(PublicationError::Failed { cause, possibly_exposed, originals_unknown, frame, admission })
+    Err(PublicationError::Failed { cause, possibly_exposed, originals_unknown, frame, admission, copy })
 }
 
 #[cfg(test)]
@@ -252,38 +266,74 @@ mod tests {
             (PublicationError::AlreadyStarted, "already-started"), (PublicationError::OwnerUnavailable, "owner-unavailable")] {
             assert_eq!(error.diagnostic_line(), Some(format!("MRK_WINDOWS_RUNTIME_PUBLISH_FAILURE_V1=phase={phase};class=unobserved;ordinal=none;possiblyExposed=unobserved;originalsUnknown=unobserved\n")));
             assert!(error.admission_diagnostic_line().is_none());
+            assert!(error.copy_diagnostic_line().is_none());
         }
         assert_eq!(PublicationError::OccupiedTargetSettled.diagnostic_line(), None);
         assert_eq!(PublicationError::OccupiedTargetSettled.admission_diagnostic_line(), None);
+        assert_eq!(PublicationError::OccupiedTargetSettled.copy_diagnostic_line(), None);
+        // A fresh empty owner's wrong-stage refusal precedes every native handle operation.
+        // Obtain an actual copied observation without a public diagnostic factory.
+        let mut empty = Publication::new(&"d".repeat(64)).unwrap();
+        assert!(empty.retained_copy_observation().is_none());
+        assert_eq!(empty.finish_copy(), Err(NativeError::Unsafe));
+        let copy = empty.retained_copy_observation().unwrap();
+        let copy_line = "MRK_WINDOWS_RUNTIME_PUBLISH_COPY_V1=edge=order;member=none;allocation=none\n";
+        let captured = PublicationError::Failed { cause: PublicationFailure::native(FailurePhase::FinishCopy, Some(2), NativeError::Unsafe),
+            possibly_exposed: false, originals_unknown: false, frame: None, admission: None, copy: Some(copy) };
+        assert_eq!(empty.finish_copy(), Err(NativeError::State));
+        assert_eq!(empty.fail_and_settle_once(), CloseOutcome::Settled);
+        assert_eq!(empty.retained_copy_observation(), Some(copy));
+        assert_eq!(captured.copy_diagnostic_line().as_deref(), Some(copy_line));
+        assert!(!empty.published_and_settled() && !empty.occupied_target_and_settled());
         for (phase, label) in [(FailurePhase::Admit, "admit"), (FailurePhase::Decode, "decode"), (FailurePhase::Create, "create"),
             (FailurePhase::StartCopy, "start-copy"), (FailurePhase::CopyNext, "copy-next"), (FailurePhase::CopyCount, "copy-count"),
             (FailurePhase::CopySize, "copy-size"), (FailurePhase::CopyVerify, "copy-verify"), (FailurePhase::FinishCopy, "finish-copy"),
             (FailurePhase::ReadbackNext, "readback-next"), (FailurePhase::ReadbackCount, "readback-count"), (FailurePhase::ReadbackSize, "readback-size"),
             (FailurePhase::ReadbackVerify, "readback-verify"), (FailurePhase::FinishReadback, "finish-readback"),
             (FailurePhase::Seal, "seal"), (FailurePhase::FinalPostcondition, "final-postcondition")] {
-            let error = PublicationError::Failed { cause: PublicationFailure::policy(phase, None), possibly_exposed: false, originals_unknown: true, frame: None, admission: None };
+            let error = PublicationError::Failed { cause: PublicationFailure::policy(phase, None), possibly_exposed: false, originals_unknown: true, frame: None, admission: None, copy: Some(copy) };
             assert_eq!(error.diagnostic_line(), Some(format!("MRK_WINDOWS_RUNTIME_PUBLISH_FAILURE_V1=phase={label};class=policy;ordinal=none;possiblyExposed=false;originalsUnknown=true\n")));
             assert!(!PublicationFailure::policy(phase, None).admission_observation_allowed());
+            assert!(error.copy_diagnostic_line().is_none());
             // The same closed gate controls both the owner snapshot and formatter.
             // No public factory fabricates native diagnostic values for this crate.
             for native in [NativeError::Unavailable, NativeError::Unsafe, NativeError::Bounds, NativeError::State, NativeError::Unknown] {
-                let cause = PublicationFailure::native(phase, None, native);
-                assert_eq!(cause.admission_observation_allowed(), phase == FailurePhase::Admit && native == NativeError::Unsafe);
-                let absent = PublicationError::Failed { cause, possibly_exposed: false, originals_unknown: true, frame: None, admission: None };
-                assert!(absent.admission_diagnostic_line().is_none());
+                for ordinal in [None, Some(0), Some(2), Some(9), Some(10), Some(46), Some(47), Some(usize::MAX)] {
+                    let cause = PublicationFailure::native(phase, ordinal, native);
+                    let allowed = phase == FailurePhase::FinishCopy && native == NativeError::Unsafe
+                        && ordinal.is_some_and(|index| index < 47);
+                    assert_eq!(cause.admission_observation_allowed(), phase == FailurePhase::Admit && native == NativeError::Unsafe);
+                    assert_eq!(cause.copy_observation_allowed(), allowed);
+                    assert!(!(cause.admission_observation_allowed() && cause.copy_observation_allowed()));
+                    let absent = PublicationError::Failed { cause, possibly_exposed: false, originals_unknown: true, frame: None, admission: None, copy: None };
+                    assert!(absent.admission_diagnostic_line().is_none()); assert!(absent.copy_diagnostic_line().is_none());
+                    let present = PublicationError::Failed { cause, possibly_exposed: false, originals_unknown: true, frame: None, admission: None, copy: Some(copy) };
+                    assert_eq!(present.copy_diagnostic_line().is_some(), allowed);
+                    if allowed {
+                        assert_eq!(present.copy_diagnostic_line().as_deref(), Some(copy_line));
+                        assert!(present.diagnostic_line().unwrap().len() + copy_line.len() <= 512);
+                        assert!(present.frame_diagnostic_line().is_none() && present.admission_diagnostic_line().is_none());
+                    }
+                    let policy = PublicationFailure::policy(phase, ordinal);
+                    assert!(!policy.copy_observation_allowed());
+                    assert!(PublicationError::Failed { cause: policy, possibly_exposed: false, originals_unknown: true,
+                        frame: None, admission: None, copy: Some(copy) }.copy_diagnostic_line().is_none());
+                }
             }
         }
         for (native, class) in [(NativeError::Unavailable, "unavailable"), (NativeError::Unsafe, "unsafe"),
             (NativeError::Bounds, "bounds"), (NativeError::State, "state"), (NativeError::Unknown, "unknown")] {
-            let error = PublicationError::Failed { cause: PublicationFailure::native(FailurePhase::CopyNext, Some(46), native), possibly_exposed: true, originals_unknown: false, frame: None, admission: None };
+            let error = PublicationError::Failed { cause: PublicationFailure::native(FailurePhase::CopyNext, Some(46), native), possibly_exposed: true, originals_unknown: false, frame: None, admission: None, copy: Some(copy) };
             assert_eq!(error.diagnostic_line(), Some(format!("MRK_WINDOWS_RUNTIME_PUBLISH_FAILURE_V1=phase=copy-next;class={class};ordinal=46;possiblyExposed=true;originalsUnknown=false\n")));
+            assert!(error.copy_diagnostic_line().is_none());
         }
         for (ordinal, encoded) in [(None, "none"), (Some(0), "0"), (Some(9), "9"), (Some(10), "10"),
             (Some(46), "46"), (Some(47), "none"), (Some(usize::MAX), "none")] {
-            let error = PublicationError::Failed { cause: PublicationFailure::policy(FailurePhase::CopyCount, ordinal), possibly_exposed: true, originals_unknown: true, frame: None, admission: None };
+            let error = PublicationError::Failed { cause: PublicationFailure::policy(FailurePhase::CopyCount, ordinal), possibly_exposed: true, originals_unknown: true, frame: None, admission: None, copy: Some(copy) };
             let line = error.diagnostic_line().unwrap();
             assert_eq!(line, format!("MRK_WINDOWS_RUNTIME_PUBLISH_FAILURE_V1=phase=copy-count;class=policy;ordinal={encoded};possiblyExposed=true;originalsUnknown=true\n"));
             assert!(line.is_ascii() && line.len() <= 256 && line.bytes().filter(|b| *b == b'\n').count() == 1);
+            assert!(error.copy_diagnostic_line().is_none());
         }
         // Creating/copying this empty DATA owner enters no native call. The
         // FRAME companion is allowed only for first Admit/Unknown, never another cause.
@@ -291,9 +341,10 @@ mod tests {
         for (phase, native, allowed) in [(FailurePhase::Admit, NativeError::Unknown, true),
             (FailurePhase::Admit, NativeError::Unsafe, false), (FailurePhase::Create, NativeError::Unknown, false)] {
             let error = PublicationError::Failed { cause: PublicationFailure::native(phase, None, native),
-                possibly_exposed: false, originals_unknown: true, frame: Some(frame), admission: None };
+                possibly_exposed: false, originals_unknown: true, frame: Some(frame), admission: None, copy: Some(copy) };
             assert_eq!(error.frame_diagnostic_line().is_some(), allowed);
             assert!(error.admission_diagnostic_line().is_none());
+            assert!(error.copy_diagnostic_line().is_none());
             if allowed {
                 let line = error.frame_diagnostic_line().unwrap();
                 assert_eq!(line, "MRK_WINDOWS_RUNTIME_PUBLISH_FRAME_V2=qcall=none;qphase=none;qret=none;qrefusal=none;mcall=none;mphase=none;mret=none;mcount=none\n");
@@ -303,9 +354,10 @@ mod tests {
         for error in [PublicationError::Invocation, PublicationError::Profile, PublicationError::AlreadyStarted,
             PublicationError::OwnerUnavailable, PublicationError::OccupiedTargetSettled,
             PublicationError::Failed { cause: PublicationFailure::native(FailurePhase::Admit, None, NativeError::Unknown),
-                possibly_exposed: false, originals_unknown: true, frame: None, admission: None }] {
+                possibly_exposed: false, originals_unknown: true, frame: None, admission: None, copy: None }] {
             assert!(error.frame_diagnostic_line().is_none());
             assert!(error.admission_diagnostic_line().is_none());
+            assert!(error.copy_diagnostic_line().is_none());
         }
     }
     #[test]
