@@ -5,122 +5,195 @@ use std::{cell::RefCell, path::PathBuf, rc::Rc};
 use crate::asset_session::GuiCall;
 use mrk_windows_installed_native::ui as native;
 
-const BLANK: &str = "about:blank";
-const PACKAGED: &str = "http://tauri.localhost/";
+pub(super) use crate::windows_startup::{EventRoute, REQUEST_URI, SCHEME};
+use crate::windows_startup::{DOCUMENT_URI, PACKAGED_URI, ReplyKind, StartupOrder};
+use std::sync::OnceLock;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum StartupPhase { Blank, PackagedRequested, Lost }
-#[derive(Debug)]
-struct StartupOrder {
-    phase: StartupPhase,
-    blank_navigation: bool,
-    blank_started: bool,
-    blank_finished: bool,
-    hook: bool,
-}
-impl Default for StartupOrder {
-    fn default() -> Self {
-        Self { phase: StartupPhase::Blank, blank_navigation: false,
-            blank_started: false, blank_finished: false, hook: false }
-    }
-}
-impl StartupOrder {
-    fn fail(&mut self) { self.phase = StartupPhase::Lost; }
-    fn navigation(&mut self, blank: bool) -> Option<bool> {
-        match self.phase {
-            StartupPhase::Lost => Some(false),
-            StartupPhase::Blank if blank && !self.blank_navigation && !self.blank_finished => {
-                self.blank_navigation = true; Some(true)
-            }
-            StartupPhase::Blank => { self.fail(); Some(false) }
-            StartupPhase::PackagedRequested if blank => { self.fail(); Some(false) }
-            StartupPhase::PackagedRequested => None, // Existing DocumentLifetime owns this load.
-        }
-    }
-    fn page(&mut self, blank: bool, finished: bool) -> bool {
-        match self.phase {
-            StartupPhase::Lost => true,
-            StartupPhase::Blank if blank => {
-                if finished {
-                    if !self.blank_started || self.blank_finished { self.fail(); }
-                    else { self.blank_finished = true; }
-                } else if self.blank_started { self.fail(); }
-                else { self.blank_started = true; }
-                true
-            }
-            StartupPhase::Blank => { self.fail(); true }
-            StartupPhase::PackagedRequested if blank => { self.fail(); true }
-            StartupPhase::PackagedRequested => false,
-        }
-    }
-    fn installed(&mut self) -> bool {
-        if self.phase != StartupPhase::Blank || self.hook { self.fail(); false }
-        else { self.hook = true; true }
-    }
-    fn claim_navigation(&mut self) -> bool {
-        if self.phase == StartupPhase::Blank && self.blank_started && self.blank_finished && self.hook {
-            self.phase = StartupPhase::PackagedRequested; true
-        } else { false }
-    }
-}
-
+type StartupBook = StartupOrder<tauri::WebviewWindow, tauri::UriSchemeResponder>;
 pub(super) struct Startup {
-    document: DocumentBinding,
-    order: Mutex<StartupOrder>,
-    user_data: PathBuf,
+    document: OnceLock<DocumentBinding>,
+    order: Mutex<StartupBook>,
+    user_data: OnceLock<PathBuf>,
+    thread: std::thread::ThreadId,
+}
+#[derive(Clone, Copy)]
+enum Entered { Callback, Reply(ReplyKind), Navigation, WindowRelease }
+struct OriginalCall<'a> { startup: &'a Startup, kind: Entered, returned: bool }
+impl<'a> OriginalCall<'a> {
+    fn new(startup: &'a Startup, kind: Entered) -> Self {
+        if matches!(kind, Entered::Callback) { startup.with_order(|book| book.callback_entered()); }
+        Self { startup, kind, returned: false }
+    }
+    fn returned(mut self, succeeded: bool) {
+        self.startup.with_order(|book| match self.kind {
+            Entered::Callback => book.callback_returned(),
+            Entered::Reply(kind) => book.reply_returned(kind),
+            Entered::Navigation => book.navigation_returned(succeeded),
+            Entered::WindowRelease => book.window_release_returned(),
+        });
+        self.returned = true;
+    }
+}
+impl Drop for OriginalCall<'_> {
+    fn drop(&mut self) { if !self.returned { self.startup.unknown(); } }
 }
 impl Startup {
-    pub(super) fn user_data(&self) -> &std::path::Path { &self.user_data }
-    fn lost(&self) {
-        if let Ok(mut order) = self.order.lock() { order.fail(); }
-        self.document.lost();
-    }
-    pub(super) fn navigation(&self, url: &tauri::Url) -> bool {
-        let decision = match self.order.lock() {
-            Ok(mut order) => order.navigation(url.as_str() == BLANK),
-            Err(_) => { self.document.lost(); return false; }
+    fn with_order<T>(&self, action: impl FnOnce(&mut StartupBook) -> T) -> T {
+        let (value, lost) = {
+            let mut book = match self.order.lock() {
+                Ok(book) => book,
+                Err(poisoned) => { let mut book = poisoned.into_inner(); book.unknown(); book }
+            };
+            let value = action(&mut book);
+            (value, book.is_lost())
         };
-        match decision {
-            Some(false) => { self.document.lost(); false }
-            Some(true) => true, // Inert original blank only; no document authority.
-            None => self.document.navigation(trusted_document(url)),
-        }
+        // No startup lock is held while invalidating the original document.
+        if lost { if let Some(document) = self.document.get() { document.lost(); } }
+        value
     }
-    pub(super) fn page(&self, webview: &tauri::WebviewWindow, payload: &tauri::webview::PageLoadPayload<'_>) {
-        let (consumed, lost) = match self.order.lock() {
-            Ok(mut order) => {
-                let consumed = order.page(payload.url().as_str() == BLANK,
-                    matches!(payload.event(), tauri::webview::PageLoadEvent::Finished));
-                (consumed, order.phase == StartupPhase::Lost)
+    pub(super) fn lost(&self) { self.with_order(|book| book.lost()); }
+    pub(super) fn unknown(&self) { self.with_order(|book| book.unknown()); }
+    fn on_thread(&self) -> bool {
+        if std::thread::current().id() == self.thread { true }
+        else { self.unknown(); false }
+    }
+    pub(super) fn bind(self: &Arc<Self>, document: DocumentBinding) -> Result<(), native::UiError> {
+        if !self.on_thread() { document.lost(); return Err(native::UiError::State); }
+        if self.document.set(document).is_err() { self.unknown(); return Err(native::UiError::State); }
+        let path = SESSION.with(|slot| {
+            let mut slot = slot.try_borrow_mut().map_err(|_| native::UiError::State)?;
+            let session = slot.as_mut().ok_or(native::UiError::State)?;
+            if session.startup.is_some() { return Err(native::UiError::State); }
+            let path = session.user_data.clone().ok_or(native::UiError::State)?;
+            session.startup = Some(self.clone()); Ok(path)
+        });
+        let path = match path { Ok(path) => path, Err(error) => { self.unknown(); return Err(error); } };
+        if self.user_data.set(path).is_err() || !self.with_order(|book| book.bind_context()) {
+            self.unknown(); return Err(native::UiError::State);
+        }
+        Ok(())
+    }
+    pub(super) fn user_data(&self) -> Result<&std::path::Path, native::UiError> {
+        self.user_data.get().map(PathBuf::as_path).ok_or(native::UiError::State)
+    }
+    fn observe_stop(&self) -> bool {
+        let Some(document) = self.document.get() else { self.unknown(); return false; };
+        if let Some(end) = document.exit_cleanup_end() {
+            self.with_order(|book| book.stop());
+            if std::time::Instant::now() >= end { self.unknown(); return false; }
+        }
+        true
+    }
+    fn native_available(&self) -> bool {
+        // Reentrant native loss/install/close callbacks may hold SESSION. Never
+        // call a responder on that stack; the existing outer callback/exit owner
+        // will resume this same book after the native borrow has unwound.
+        let present = SESSION.with(|slot| match slot.try_borrow_mut() {
+            Err(_) => None,
+            Ok(slot) => Some(slot.as_ref().and_then(|session| session.startup.as_ref())
+                .is_some_and(|original| std::ptr::eq(original.as_ref(), self))),
+        });
+        if present == Some(false) { self.unknown(); }
+        present == Some(true)
+    }
+    fn response(kind: ReplyKind) -> tauri::http::Response<&'static [u8]> {
+        use tauri::http::{header, HeaderValue, Response, StatusCode};
+        let body: &'static [u8] = if kind == ReplyKind::Controlled {
+            b"<!doctype html><html><head><meta charset=\"utf-8\"><title>Mobile Release Kit</title></head><body></body></html>"
+        } else { b"" };
+        let mut response = Response::new(body);
+        *response.status_mut() = if kind == ReplyKind::Controlled { StatusCode::OK } else { StatusCode::BAD_REQUEST };
+        let headers = response.headers_mut();
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        headers.insert(header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static("default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"));
+        headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+        response
+    }
+    fn drive(&self) {
+        if !self.on_thread() || !self.native_available() { return; }
+        loop {
+            if !self.observe_stop() { return; }
+            if let Some(reply) = self.with_order(|book| book.take_reply()) {
+                let call = OriginalCall::new(self, Entered::Reply(reply.kind));
+                // Same creation thread: Wry executes the original response /
+                // native-deferral closure inline. No locks, SESSION borrow or
+                // detached task is held/started here. Its public return does
+                // NOT expose GetDeferral/SetResponse/Complete HRESULT success.
+                reply.original.respond(Self::response(reply.kind));
+                call.returned(true);
+                continue;
             }
-            Err(_) => { self.document.lost(); return; }
-        };
-        if lost { self.document.lost(); return; }
-        if !consumed {
-            let trusted = trusted_document(payload.url());
-            self.document.observe(|lifetime| match payload.event() {
-                tauri::webview::PageLoadEvent::Started => lifetime.started(trusted),
-                tauri::webview::PageLoadEvent::Finished => lifetime.finished(trusted),
-            });
+            if !self.observe_stop() { return; }
+            let Some(window) = self.with_order(|book| book.claim_navigation()) else { return; };
+            let call = OriginalCall::new(self, Entered::Navigation);
+            let succeeded = tauri::Url::parse(PACKAGED_URI).ok().is_some_and(|url| window.navigate(url).is_ok());
+            drop(window); // Actual temporary original reference, outside the book lock.
+            call.returned(succeeded);
         }
-        self.navigate_once(webview);
     }
-    fn navigate_once(&self, webview: &tauri::WebviewWindow) {
-        let claimed = match self.order.lock() {
-            Ok(mut order) => order.claim_navigation(),
-            Err(_) => { self.document.lost(); false }
-        };
-        if !claimed { return; }
-        // The claim is spent before dispatch. A failed/late navigation never
-        // retries, substitutes a cached Finished, or rearms DocumentLifetime.
-        match tauri::Url::parse(PACKAGED) {
-            Ok(url) => { if webview.navigate(url).is_err() { self.lost(); } },
-            Err(_) => self.lost(),
+    pub(super) fn protocol(&self, label: &str, request: tauri::http::Request<Vec<u8>>, responder: tauri::UriSchemeResponder) {
+        let call = OriginalCall::new(self, Entered::Callback);
+        let on_thread = self.on_thread();
+        let exact = on_thread && label == MAIN_WINDOW && request.method() == tauri::http::Method::GET
+            && request.uri().to_string() == REQUEST_URI && request.body().is_empty();
+        self.with_order(|book| book.request(exact, responder));
+        // A wrong-thread responder stays in the original Unknown book; never
+        // use Wry's off-thread hidden dispatch as an invented owned endpoint.
+        if on_thread { self.drive(); }
+        call.returned(true);
+    }
+    pub(super) fn navigation(&self, url: &tauri::Url) -> EventRoute {
+        let call = OriginalCall::new(self, Entered::Callback);
+        let mut route = if self.on_thread() && self.observe_stop() {
+            self.with_order(|book| book.navigation(url.as_str() == DOCUMENT_URI, trusted_document(url)))
+        } else { EventRoute::Rejected };
+        if route == EventRoute::Packaged && !self.document.get().is_some_and(|document| document.navigation(trusted_document(url))) {
+            self.lost(); route = EventRoute::Rejected;
         }
+        self.drive();
+        if self.with_order(|book| book.is_lost()) { route = EventRoute::Rejected; }
+        call.returned(true); route
+    }
+    pub(super) fn page(&self, payload: &tauri::webview::PageLoadPayload<'_>) -> EventRoute {
+        let call = OriginalCall::new(self, Entered::Callback);
+        let mut route = if self.on_thread() && self.observe_stop() {
+            self.with_order(|book| book.page(payload.url().as_str() == DOCUMENT_URI, trusted_document(payload.url()),
+                matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)))
+        } else { EventRoute::Rejected };
+        if route == EventRoute::Packaged {
+            if let Some(document) = self.document.get() {
+                document.observe(|lifetime| match payload.event() {
+                    tauri::webview::PageLoadEvent::Started => lifetime.started(trusted_document(payload.url())),
+                    tauri::webview::PageLoadEvent::Finished => lifetime.finished(trusted_document(payload.url())),
+                });
+            } else { self.unknown(); }
+        }
+        self.drive();
+        if self.with_order(|book| book.is_lost()) { route = EventRoute::Rejected; }
+        call.returned(true); route
+    }
+    pub(super) fn first_party_phase(&self) -> bool { self.with_order(|book| book.first_party_phase()) }
+    fn finality(&self) -> bool { self.with_order(|book| book.finality()) }
+    fn close_for_exit(&self, original_end: std::time::Instant) -> NativeReturn {
+        if !self.on_thread() || !self.document.get().is_some_and(|document| document.exit_cleanup_end() == Some(original_end))
+            || std::time::Instant::now() >= original_end {
+            self.unknown(); return Err(native::UiError::CleanupUnknown);
+        }
+        self.with_order(|book| book.stop());
+        self.drive();
+        if let Some(window) = self.with_order(|book| book.take_window_for_close()) {
+            let call = OriginalCall::new(self, Entered::WindowRelease);
+            drop(window); // Break the original app-manager cycle on the same STA.
+            call.returned(true);
+        }
+        if self.finality() && std::time::Instant::now() < original_end { Ok(()) }
+        else { Err(native::UiError::CleanupUnknown) }
     }
 }
 
-struct Session { original: native::ShellSession, user_data: Option<PathBuf> }
+struct Session { original: native::ShellSession, user_data: Option<PathBuf>, startup: Option<Arc<Startup>> }
 struct OriginalDialog {
     id: u32, original: Rc<native::Dialog>, call: std::sync::Weak<GuiCall>,
 }
@@ -135,7 +208,7 @@ pub(super) fn prepare() -> Result<(), InitializationFailed> {
     SESSION.with(|slot| {
         let mut slot = slot.try_borrow_mut().map_err(|_| InitializationFailed)?;
         if slot.is_some() { return Err(InitializationFailed); }
-        *slot = Some(Box::new(Session { original: native::ShellSession::new(), user_data: None }));
+        *slot = Some(Box::new(Session { original: native::ShellSession::new(), user_data: None, startup: None }));
         let original = slot.as_mut().ok_or(InitializationFailed)?;
         match original.original.prepare() {
             Ok(path) => { original.user_data = Some(path); Ok(()) },
@@ -162,33 +235,56 @@ fn startup_refusal(error: native::UiError) {
         _ => b"The original Windows application could not initialize safely; its unresolved resources are retained.\n",
     });
 }
-pub(super) fn startup(document: DocumentBinding) -> Result<Arc<Startup>, native::UiError> {
-    let user_data = SESSION.with(|slot| slot.try_borrow().map_err(|_| native::UiError::State)?
-        .as_ref().and_then(|session| session.user_data.clone()).ok_or(native::UiError::State))?;
-    Ok(Arc::new(Startup { document, order: Mutex::new(StartupOrder::default()), user_data }))
+pub(super) fn startup() -> Arc<Startup> {
+    Arc::new(Startup { document: OnceLock::new(), order: Mutex::new(StartupBook::default()),
+        user_data: OnceLock::new(), thread: std::thread::current().id() })
 }
-pub(super) fn before_webview() -> Result<(), native::UiError> {
-    SESSION.with(|slot| slot.try_borrow_mut().map_err(|_| native::UiError::State)?
-        .as_mut().ok_or(native::UiError::State)?.original.before_webview())
+pub(super) fn before_webview(startup: &Startup) -> Result<(), native::UiError> {
+    if !startup.on_thread() { return Err(native::UiError::State); }
+    SESSION.with(|slot| {
+        let mut slot = slot.try_borrow_mut().map_err(|_| native::UiError::State)?;
+        let session = slot.as_mut().ok_or(native::UiError::State)?;
+        if !session.startup.as_ref().is_some_and(|original| std::ptr::eq(original.as_ref(), startup)) {
+            return Err(native::UiError::State);
+        }
+        session.original.before_webview()
+    })?;
+    if startup.with_order(|book| book.construction_started()) { Ok(()) } else { Err(native::UiError::State) }
 }
 pub(super) fn install(window: &tauri::WebviewWindow, startup: Arc<Startup>) {
-    let callback = startup.clone(); let original_window = window.clone();
+    if !startup.on_thread() { return; }
+    let registered = startup.with_order(|book| book.register_window(window.clone()));
+    if registered.is_err() { drop(registered); return; }
+    if !startup.with_order(|book| book.queue_hook()) { return; }
+    let callback = startup.clone();
     if window.with_webview(move |platform| {
+        let call = OriginalCall::new(&callback, Entered::Callback);
+        if !callback.on_thread() || !callback.with_order(|book| book.enter_hook()) {
+            call.returned(true); return;
+        }
         let lost = callback.clone();
         let installed = SESSION.with(|slot| slot.try_borrow_mut().map_err(|_| native::UiError::State)?
             .as_mut().ok_or(native::UiError::State)?.original.install(platform.controller(), platform.environment(),
                 Box::new(move || lost.lost())));
-        let ordered = installed.is_ok() && callback.order.lock().is_ok_and(|mut order| order.installed());
-        if !ordered { callback.lost(); return; }
-        callback.document.hook_installed();
-        diagnostic(b"MRKDBG_DESKTOP_BOOTSTRAP=hook-installed\n");
-        callback.navigate_once(&original_window);
-    }).is_err() { startup.lost(); }
+        if installed.is_ok() && callback.with_order(|book| book.accepts_hook_return()) {
+            if let Some(document) = callback.document.get() {
+                document.hook_installed();
+                if callback.with_order(|book| book.hook_installed()) {
+                    diagnostic(b"MRKDBG_DESKTOP_BOOTSTRAP=hook-installed\n");
+                }
+            } else { callback.unknown(); }
+        } else { callback.lost(); }
+        // SESSION's native install borrow has ended before an original reply.
+        callback.drive(); call.returned(true);
+    }).is_err() { startup.unknown(); }
 }
 pub(super) fn build_failed() {
     // Wry may have created a browser before a later build/with_webview failure.
     // No successful controller/environment ownership means no deletion or
     // fabricated settlement. Keep the original profile/book, report failure.
+    let startup = SESSION.with(|slot| slot.try_borrow().ok()
+        .and_then(|slot| slot.as_ref().and_then(|session| session.startup.clone())));
+    if let Some(startup) = startup { startup.with_order(|book| book.construction_failed()); }
     SESSION.with(|slot| {
         if let Ok(mut slot) = slot.try_borrow_mut() {
             if let Some(session) = slot.as_mut() {
@@ -229,20 +325,40 @@ pub(super) async fn settle_for_exit(app: &tauri::AppHandle, document: &DocumentB
     // Core/GUI/relay settlement spent part of the SAME accepted Quit budget.
     // An absent or expired original endpoint never authorizes a renewed scope.
     let Some(original_end) = document.exit_cleanup_end() else { document.lost(); return false; };
+    let Some(startup) = app.try_state::<Arc<Startup>>().map(|state| state.inner().clone()) else {
+        document.lost(); return false;
+    };
     let end = tokio::time::Instant::from_std(original_end);
-    if !original_dispatch(app, move || SESSION.with(|slot| slot.try_borrow_mut().map_err(|_| native::UiError::CleanupUnknown)?
-        .as_mut().ok_or(native::UiError::State)?.original.begin_close(original_end)), document, end).await { return false; }
+    let closing = startup.clone();
+    if !original_dispatch(app, move || {
+        closing.close_for_exit(original_end)?;
+        SESSION.with(|slot| {
+            let mut slot = slot.try_borrow_mut().map_err(|_| native::UiError::CleanupUnknown)?;
+            let session = slot.as_mut().ok_or(native::UiError::State)?;
+            if !session.startup.as_ref().is_some_and(|original| Arc::ptr_eq(original, &closing)) {
+                return Err(native::UiError::CleanupUnknown);
+            }
+            session.original.begin_close(original_end)
+        })?;
+        closing.close_for_exit(original_end)
+    }, document, end).await { return false; }
     loop {
         if tokio::time::Instant::now() >= end { document.lost(); return false; }
         let (returned, mut joined) = oneshot::channel();
+        let settling = startup.clone();
         if app.run_on_main_thread(move || {
-            let result = SESSION.with(|slot| slot.try_borrow_mut().map_err(|_| native::UiError::CleanupUnknown)?
-                .as_mut().ok_or(native::UiError::State)?.original.settle());
+            let result: Result<bool, native::UiError> = (|| {
+                settling.close_for_exit(original_end)?;
+                let native_final = SESSION.with(|slot| slot.try_borrow_mut().map_err(|_| native::UiError::CleanupUnknown)?
+                    .as_mut().ok_or(native::UiError::State)?.original.settle())?;
+                settling.close_for_exit(original_end)?;
+                Ok(native_final && settling.finality())
+            })();
             let _ = returned.send(result);
         }).is_err() { document.lost(); std::future::pending::<()>().await; }
         tokio::select! {
             result = &mut joined => match result {
-                Ok(Ok(true)) if tokio::time::Instant::now() < end => return true,
+                Ok(Ok(true)) if tokio::time::Instant::now() < end && startup.finality() => return true,
                 Ok(Ok(false)) => {},
                 _ => { document.lost(); diagnostic(b"MRK_WINDOWS_SHELL=original-cleanup-unconfirmed\n"); return false; }
             },
@@ -422,47 +538,11 @@ pub(super) mod observation {
         if DIALOG.with(|slot| slot.try_borrow().map(|slot| slot.is_some()).map_err(|_| native::UiError::State))? {
             return Ok(false);
         }
-        SESSION.with(|slot| slot.try_borrow().map_err(|_| native::UiError::State)?
-            .as_ref().ok_or(native::UiError::State)?.original.observed_finality())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{StartupOrder, StartupPhase};
-    #[test]
-    fn original_blank_and_actual_hook_both_precede_one_packaged_navigation() {
-        for hook_first in [false, true] {
-            let mut order = StartupOrder::default();
-            if hook_first { assert!(order.installed()); }
-            assert_eq!(order.navigation(true), Some(true));
-            assert!(order.page(true, false));
-            assert!(!order.claim_navigation());
-            assert!(order.page(true, true));
-            if !hook_first { assert!(!order.claim_navigation()); assert!(order.installed()); }
-            assert!(order.claim_navigation());
-            assert!(!order.claim_navigation());
-            assert_eq!(order.navigation(false), None);
-            assert!(!order.page(false, false));
-            assert!(!order.page(false, true));
-        }
-    }
-    #[test]
-    fn startup_never_admits_unordered_repeat_or_replacement_blank() {
-        for scenario in 0..5 {
-            let mut order = StartupOrder::default();
-            match scenario {
-                0 => { order.page(true, true); },
-                1 => { order.navigation(true); order.navigation(true); },
-                2 => { order.page(true, false); order.page(true, false); },
-                3 => { order.navigation(false); },
-                _ => { order.installed(); order.page(true, false); order.page(true, true);
-                    assert!(order.claim_navigation()); order.page(true, true); },
-            }
-            assert_eq!(order.phase, StartupPhase::Lost);
-            assert!(!order.installed());
-            assert!(!order.claim_navigation());
-            assert_eq!(order.navigation(false), Some(false));
-        }
+        let startup = SESSION.with(|slot| slot.try_borrow().map_err(|_| native::UiError::State)?
+            .as_ref().and_then(|session| session.startup.clone()).ok_or(native::UiError::State))?;
+        if !startup.finality() { return Ok(false); }
+        let native_final = SESSION.with(|slot| slot.try_borrow().map_err(|_| native::UiError::State)?
+            .as_ref().ok_or(native::UiError::State)?.original.observed_finality())?;
+        Ok(native_final && startup.finality())
     }
 }

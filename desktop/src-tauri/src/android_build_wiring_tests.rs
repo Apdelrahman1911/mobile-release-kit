@@ -56,7 +56,7 @@ fn an_empty_unqualified_android_owner_does_not_claim_resource_work() {
 #[test]
 fn android_commands_stay_raw_local_and_closed_without_generic_permissions() {
     let commands = section(include_str!("../build.rs"), "const COMMANDS: &[&str] = &[", "];");
-    let handlers = section(SHELL, ".invoke_handler(tauri::generate_handler![", "])");
+    let handlers = section(SHELL, "(tauri::generate_handler![", "])(invoke)");
     let capability: Value = serde_json::from_str(include_str!("../capabilities/main.json")).unwrap();
     assert_eq!(capability["local"], true); assert_eq!(capability["windows"], serde_json::json!(["main"]));
     assert!(capability.get("remote").is_none());

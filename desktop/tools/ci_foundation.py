@@ -943,6 +943,10 @@ WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS = (
 )
 WINDOWS_NORMAL_UI_SCALAR_TESTS = (
     "asset_session::tests::human_quit_stop_has_one_clock_without_inventing_a_work_endpoint",
+    "windows_startup::tests::controlled_reply_requires_original_registration_and_actual_hook",
+    "windows_startup::tests::real_reply_return_and_ordered_events_precede_one_packaged_navigation",
+    "windows_startup::tests::late_blank_replacement_or_unordered_callbacks_cannot_rearm",
+    "windows_startup::tests::original_reply_and_window_custody_gate_shutdown_finality",
 )
 WINDOWS_NORMAL_UI_SETUP_BUILD_PHASES = ("windows-normal-ui-setup-acquire", "windows-normal-ui-setup-compile")
 WINDOWS_NORMAL_UI_SETUP_DATA_PHASES = ("windows-normal-ui-setup-preflight", "windows-normal-ui-setup-stage-finalize",

@@ -419,7 +419,7 @@ pub(crate) fn assert_project_path_wiring_contract() {
         source.split_once(start).expect("source start").1.split_once(end).expect("source end").0
     }
     let commands = section(include_str!("../build.rs"), "const COMMANDS: &[&str] = &[", "];");
-    let handlers = section(include_str!("shell.rs"), ".invoke_handler(tauri::generate_handler![", "])");
+    let handlers = section(include_str!("shell.rs"), "(tauri::generate_handler![", "])(invoke)");
     let capability: Value = serde_json::from_str(include_str!("../capabilities/main.json")).expect("fixed main capability DATA");
     assert_eq!(commands.matches("\"choose_project_path\"").count(), 1);
     assert_eq!(handlers.split(',').filter(|name| name.trim() == "choose_project_path").count(), 1);

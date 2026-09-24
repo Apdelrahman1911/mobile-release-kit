@@ -46,6 +46,8 @@ pub mod runtime_publication_windows;
 pub mod supervisor;
 pub mod bridge;
 mod document_lifetime;
+#[cfg(any(test, all(feature = "desktop-shell", target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+mod windows_startup;
 mod edit_commands;
 mod metadata_text_commands;
 mod github_commands;

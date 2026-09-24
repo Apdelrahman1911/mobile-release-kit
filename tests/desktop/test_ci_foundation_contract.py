@@ -12563,7 +12563,7 @@ class WindowsNormalUiInertRegressionTests(unittest.TestCase):
     @staticmethod
     def output(scalar=False, filtered=317):
         names = helper.WINDOWS_NORMAL_UI_SCALAR_TESTS if scalar else helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS
-        return ("\nrunning " + str(len(names)) + (" test\n" if scalar else " tests\n")
+        return ("\nrunning " + str(len(names)) + (" test\n" if len(names) == 1 else " tests\n")
             + "".join("test " + name + " ... ok\n" for name in names)
             + f"\ntest result: ok. {len(names)} passed; 0 failed; 0 ignored; 0 measured; {filtered} filtered out; finished in 0.01s\n\n").encode("ascii")
 
@@ -12582,7 +12582,13 @@ class WindowsNormalUiInertRegressionTests(unittest.TestCase):
                   "ordinary_owner::normal_ui::contract_tests::profile_absence_dependents_settle_before_namespace_parents")
         scalar_name = "asset_session::tests::human_quit_stop_has_one_clock_without_inventing_a_work_endpoint"
         self.assertEqual(helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS, native)
-        self.assertEqual(helper.WINDOWS_NORMAL_UI_SCALAR_TESTS, (scalar_name,))
+        startup = (
+            "windows_startup::tests::controlled_reply_requires_original_registration_and_actual_hook",
+            "windows_startup::tests::real_reply_return_and_ordered_events_precede_one_packaged_navigation",
+            "windows_startup::tests::late_blank_replacement_or_unordered_callbacks_cannot_rearm",
+            "windows_startup::tests::original_reply_and_window_custody_gate_shutdown_finality")
+        scalar_names = (scalar_name, *startup)
+        self.assertEqual(helper.WINDOWS_NORMAL_UI_SCALAR_TESTS, scalar_names)
         crate = SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src"
         library = (crate / "lib.rs").read_text()
         for declaration in ("pub mod ui;", "mod project;", "mod tests;", "mod ordinary_owner;"):
@@ -12599,12 +12605,22 @@ class WindowsNormalUiInertRegressionTests(unittest.TestCase):
         app = SOURCE / helper.WINDOWS_INSTALLED_APP / "src"
         self.assertIn("mod asset_session;", (app / "lib.rs").read_text())
         self.assertIn("fn " + scalar_name.rsplit("::",1)[-1] + "()", (app / "asset_session.rs").read_text())
+        self.assertIn('#[cfg(any(test, all(feature = "desktop-shell", target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]\nmod windows_startup;',
+                      (app / "lib.rs").read_text())
+        startup_source = (app / "windows_startup.rs").read_text()
+        self.assertIn("mod tests {", startup_source)
+        self.assertIn("StartupOrder", (app / "shell_windows.rs").read_text())
+        for name in startup:
+            self.assertIn("fn " + name.rsplit("::", 1)[-1] + "()", startup_source)
+        legacy_scalar = ("\nrunning 1 test\ntest " + scalar_name + " ... ok\n"
+            + "\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 317 filtered out; finished in 0.01s\n\n").encode("ascii")
+        with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_inert_output(legacy_scalar, scalar=True)
         # Neither former selection proves the new profile-epoch regressions ran.
         for count in (2, 9):
             legacy = (f"\nrunning {count} tests\n" + "".join("test " + name + " ... ok\n" for name in native[:count])
                 + f"\ntest result: ok. {count} passed; 0 failed; 0 ignored; 0 measured; 317 filtered out; finished in 0.01s\n\n").encode("ascii")
             with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_inert_output(legacy)
-        for scalar, names in ((False,native),(True,(scalar_name,))):
+        for scalar, names in ((False,native),(True,scalar_names)):
             argv=helper.windows_normal_ui_inert_argv({"path":"/inert-never-run/original.exe"},scalar=scalar)
             self.assertEqual(argv,["/inert-never-run/original.exe",*names,"--exact","--nocapture","--test-threads=1"])
             for filtered in (0,317):
@@ -12683,7 +12699,7 @@ class WindowsNormalUiInertRegressionTests(unittest.TestCase):
                     stack.enter_context(redirect_stdout(io.StringIO()))
                     if failure is None:
                         result=helper.windows_normal_ui_scalar_build(context,"/inert/cargo",{},helper.time.monotonic()+60)
-                        self.assertEqual(result["regression"]["result"]["passed"],1)
+                        self.assertEqual(result["regression"]["result"]["passed"],len(helper.WINDOWS_NORMAL_UI_SCALAR_TESTS))
                         self.assertEqual(result["regression"]["result"]["tests"],list(helper.WINDOWS_NORMAL_UI_SCALAR_TESTS))
                     else:
                         with self.assertRaises((helper.CheckFailure,OSError)):

@@ -1674,6 +1674,17 @@ pub fn run() -> Result<(), InitializationFailed> {
 
 fn builder() -> tauri::Builder<tauri::Wry> {
     let builder = tauri::Builder::default();
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+    let windows_startup = owned_windows::startup();
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+    let builder = {
+        // The same original is captured before any WebView exists; the protocol
+        // cannot depend on a manager lookup during runtime construction.
+        let original = windows_startup.clone();
+        builder.register_asynchronous_uri_scheme_protocol(owned_windows::SCHEME, move |context, request, responder| {
+            original.protocol(context.webview_label(), request, responder);
+        })
+    };
     #[cfg(target_os = "macos")]
     let builder = builder.on_web_content_process_terminate(|webview| {
         if webview.label() == MAIN_WINDOW {
@@ -1695,7 +1706,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
                 if main.label() == MAIN_WINDOW { let _ = main.close(); }
             }
         })
-        .setup(|app| {
+        .setup(move |app| {
             diagnostic(b"MRKDBG_DESKTOP_BOOTSTRAP=setup-enter\n");
             let resources = app.path().resource_dir()?;
             let bridge = Arc::new(DesktopBridge::new(resources));
@@ -1739,13 +1750,21 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             #[cfg(not(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
             let page = document.clone();
             #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
-            let startup = owned_windows::startup(document.clone())?;
+            let startup = windows_startup.clone();
+            #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+            {
+                startup.bind(document.clone())?;
+                if !app.manage(startup.clone()) {
+                    startup.unknown();
+                    return Err("The original Windows startup could not be registered.".into());
+                }
+            }
             #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
             let navigation_windows = startup.clone();
             #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
             let page_windows = startup.clone();
             #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
-            let initial_url = WebviewUrl::External(tauri::Url::parse("about:blank")?);
+            let initial_url = WebviewUrl::External(tauri::Url::parse(owned_windows::REQUEST_URI)?);
             #[cfg(not(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
             let initial_url = WebviewUrl::App("index.html".into());
             let window = WebviewWindowBuilder::new(app, MAIN_WINDOW, initial_url)
@@ -1753,12 +1772,19 @@ fn builder() -> tauri::Builder<tauri::Wry> {
                 .on_navigation(move |url| {
                     let _trusted = trusted_document(url);
                     #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
-                    let allowed = navigation_windows.navigation(url);
+                    let route = navigation_windows.navigation(url);
+                    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+                    let allowed = route != owned_windows::EventRoute::Rejected;
+                    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+                    let _observed = (route != owned_windows::EventRoute::Controlled,
+                        _trusted && route != owned_windows::EventRoute::Rejected);
+                    #[cfg(not(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+                    let _observed = (true, _trusted);
                     #[cfg(not(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
                     let allowed = navigation.navigation(_trusted);
                     #[cfg(any(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"), all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
                     if let Some(q) = &navigation_observation {
-                        if !cfg!(target_os = "windows") || url.as_str() != "about:blank" { q.navigation(_trusted, allowed); }
+                        if _observed.0 { q.navigation(_observed.1, allowed); }
                     }
                     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
                     if let Some(q) = &navigation_fixture { q.lifecycle(qualification::EventKind::Navigation, u32::from(_trusted && allowed)); }
@@ -1767,7 +1793,13 @@ fn builder() -> tauri::Builder<tauri::Wry> {
                 .on_page_load(move |_webview, payload| {
                     let trusted = trusted_document(payload.url());
                     #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
-                    page_windows.page(&_webview, &payload);
+                    let route = page_windows.page(&payload);
+                    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+                    let trusted = trusted && route != owned_windows::EventRoute::Rejected;
+                    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+                    let _observe = route != owned_windows::EventRoute::Controlled;
+                    #[cfg(not(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+                    let _observe = true;
                     #[cfg(target_os = "macos")]
                     if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
                         // Wry's actual WK didCommitNavigation callback proves
@@ -1790,7 +1822,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
                     });
                     #[cfg(any(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))), all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
                     if let Some(q) = &page_observation {
-                        if !cfg!(target_os = "windows") || payload.url().as_str() != "about:blank" {
+                        if _observe {
                             q.page_load(trusted, matches!(payload.event(), tauri::webview::PageLoadEvent::Finished));
                         }
                     }
@@ -1802,12 +1834,12 @@ fn builder() -> tauri::Builder<tauri::Wry> {
                 })
                 .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny);
             #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
-            let window = window.data_directory(startup.user_data().to_path_buf())
+            let window = window.data_directory(startup.user_data()?.to_path_buf())
                 // Fixed normal profile: no caller/config browser arguments or
                 // extensions, and no Wry default SmartScreen-disable switch.
                 .additional_browser_args("").browser_extensions_enabled(false);
             #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
-            owned_windows::before_webview()?;
+            owned_windows::before_webview(&startup)?;
             let window = window.build()?;
             #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
             owned_windows::install(&window, startup);
@@ -1864,7 +1896,23 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             if let Some(context) = &fixture { context.start(app.handle().clone())?; }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(|invoke: tauri::ipc::Invoke<tauri::Wry>| {
+            #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+            {
+                let webview = invoke.message.webview_ref();
+                let allowed = webview.label() == MAIN_WINDOW
+                    && webview.try_state::<Arc<owned_windows::Startup>>().is_some_and(|startup| startup.first_party_phase())
+                    && webview.url().is_ok_and(|url| trusted_document(&url));
+                if !allowed {
+                    // Additional first-party refusal only: current URL is not
+                    // historical request-origin proof, and this generated
+                    // handler does not intercept supplier listen/unlisten IPC.
+                    invoke.resolver.reject(BridgeError::new("startup_document_unavailable",
+                        "The original packaged application document is not available."));
+                    return true;
+                }
+            }
+            (tauri::generate_handler![
             app_info, choose_project, choose_project_path, project_snapshot, catalog, environment_requirements, release_version_observe,
             artifact_evidence_choose, artifact_evidence_status, artifact_evidence_observe, artifact_evidence_cancel,
             start_environment_diagnostics, environment_diagnostics_status, cancel_environment_diagnostics,
@@ -1880,10 +1928,13 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             github_connection_status, github_connection_connect_token, github_connection_refresh, github_connection_disconnect,
             vault_status, vault_open, asset_context, asset_choose, credential_prepare,
             vault_prepare_delete, vault_commit, vault_bind, vault_discard, vault_lock,
-        ])
+            ])(invoke)
+        })
         .on_window_event(|window, event| {
             if window.label() != MAIN_WINDOW { return; }
             if let tauri::WindowEvent::Destroyed = event {
+                #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+                if let Some(startup) = window.try_state::<Arc<owned_windows::Startup>>() { startup.lost(); }
                 if let Some(state) = window.try_state::<ShellState>() {
                     state.document.lost();
                     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
