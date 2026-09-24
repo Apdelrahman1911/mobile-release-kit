@@ -11651,12 +11651,13 @@ def windows_normal_ui_gui_compiler_data(raw: bytes, graph: dict, *, source: Path
     return {"path": str(found), "units": units, "buildScripts": script_outputs, "auxiliaryPackageBinary": auxiliary}
 
 
-def windows_normal_ui_pe_data(raw: bytes) -> dict:
+def windows_normal_ui_pe_data(raw: bytes, *, role: str) -> dict:
     """Bounded PE DATA, never LoadLibrary or executable/native availability.
 
     Inspect the actual linked manifest, not an adjacent XML template or copied
     loader DLL. Original Windows startup/activation remains a separate GUI gate.
     """
+    require(type(role) is str and role in ("normal", "observer"), "Windows GUI PE role differs")
     require(type(raw) is bytes and 512 <= len(raw) <= 512 << 20 and raw[:2] == b"MZ", "Windows GUI PE input differs")
     def number(at: int, count: int) -> int:
         require(type(at) is int and 0 <= at <= len(raw) - count, "Windows GUI PE field exceeds file")
@@ -11685,7 +11686,8 @@ def windows_normal_ui_pe_data(raw: bytes) -> dict:
         require(len(matches) == 1, "Windows GUI PE RVA is unmapped/ambiguous")
         return matches[0][0]
     resource_rva, resource_size = number(optional + 112 + 16, 4), number(optional + 112 + 20, 4)
-    require(64 <= resource_size <= 4 << 20, "Windows GUI resource size differs")
+    require(64 <= resource_size <= 4 << 20,
+            f"Windows GUI {role} resource size differs: rva={resource_rva} size={resource_size} allowed=64..4194304")
     resource = address(resource_rva, resource_size)
     visited = set()
     def entries(relative: int) -> list[tuple[int, int]]:
@@ -14727,7 +14729,7 @@ def windows_normal_ui_gui_compile_facts(context: dict, probe: dict, publication:
             "hostUnits": sum(unit["scope"] == "host" for unit in parsed["units"]),
             "targetUnits": sum(unit["scope"] == "target" for unit in parsed["units"]),
             "linkInputs": windows_normal_ui_link_inputs(graph, parsed),
-            "pe": windows_normal_ui_pe_data(windows_installed_bytes(Path(artifact["path"]), 512 << 20))}
+            "pe": windows_normal_ui_pe_data(windows_installed_bytes(Path(artifact["path"]), 512 << 20), role=role)}
     return {"retainedProbe": probe, "publication": publication, "rust": RUST, "node": NODE, "target": TARGETS["windows"],
         "appVersion": probe["appVersion"], "frontend": windows_normal_ui_frontend_files(context),
         "normalFeatures": windows_normal_ui_features("app"), "observerFeatures": windows_normal_ui_features("observer"),

@@ -12222,30 +12222,71 @@ class WindowsNormalUiGuiTests(unittest.TestCase):
             name = import_name.encode("ascii")+b"\0"; raw[0x780:0x780+len(name)] = name
         return bytes(raw)
 
+    def test_observer_resource_link_reuses_guarded_tauri_output_for_tests_only(self):
+        # One bounded SOURCE read; neither Tauri nor a resource compiler runs.
+        with (SOURCE / "desktop/src-tauri/build.rs").open("rb") as stream:
+            raw = stream.read(8192 + 1)
+        self.assertLessEqual(len(raw), 8192)
+        build = raw.decode("utf-8")
+        shell = build[build.index('    #[cfg(feature = "desktop-shell")]\n    {\n'):]
+        generated = ('        if let Err(error) = tauri_build::try_build(attributes) {\n'
+                     '            panic!("Tauri context generation failed: {error}");\n'
+                     '        }\n')
+        guarded = ('        if target == "x86_64-pc-windows-msvc" && cfg!(feature = "windows-installed-observation") {\n'
+                   '            let out_dir = env::var_os("OUT_DIR").expect("Windows observation resource linking requires OUT_DIR");\n'
+                   '            let resource = std::path::PathBuf::from(out_dir).join("resource.lib");\n'
+                   '            println!("cargo:rustc-link-arg-tests={}", resource.display());\n'
+                   '        }\n')
+        self.assertEqual(build.count("tauri_build::try_build(attributes)"), 1)
+        self.assertEqual(build.count("cargo:rustc-link-arg-tests="), 1)
+        self.assertEqual(build.count('env::var_os("OUT_DIR")'), 1)
+        self.assertIn(generated, shell); self.assertIn(guarded, shell)
+        self.assertLess(shell.index(generated), shell.index(guarded))
+        self.assertTrue(shell.endswith(guarded + "    }\n}\n"))
+        for broad in ("cargo:rustc-link-arg=", "cargo:rustc-link-arg-bins=", "compile_for_tests", "set_manifest(",
+                      "std::fs", "read_to_string", "std::process", "Command::new", "resource.rc", "include_str!"):
+            self.assertNotIn(broad, build)
+
     def test_pe_data_requires_exact_manifest_and_refuses_dynamic_loader_or_ambiguous_rva(self):
-        for delay in (False, True):
-            raw = self.pe_fixture("KERNEL32.dll", delay)
-            facts = helper.windows_normal_ui_pe_data(raw)
-            self.assertTrue(facts["commonControlsV6"]); self.assertFalse(facts["dynamicWebView2LoaderImport"])
-            self.assertEqual(facts["dllImports"], ["kernel32.dll"])
-            with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_pe_data(self.pe_fixture("WebView2Loader.dll", delay))
-        for language in (0, 1033):
-            facts = helper.windows_normal_ui_pe_data(self.pe_fixture(language=language))
-            self.assertEqual(facts["manifestLanguage"], language)
-        raw = self.pe_fixture()
-        mutations = [raw[:511], raw.replace(b"6.0.0.0", b"5.0.0.0"), raw.replace(b"6595b64144ccf1df", b"1595b64144ccf1df")]
-        for offset, value, size in ((0x84, 0x14c, 2), (0x230+16, 65536, 4), (0x230+16, 0x80000000, 4),
-                                  (0x218+16, 2, 4), (0x214, 0x80000000, 4), (0x24c, 0x7fffffff, 4)):
-            changed = bytearray(raw); changed[offset:offset+size] = value.to_bytes(size, "little"); mutations.append(bytes(changed))
-        for second_language in (0, 1033):
-            changed = bytearray(raw); changed[0x23e:0x240] = (2).to_bytes(2, "little")
-            changed[0x248:0x24c] = second_language.to_bytes(4, "little"); changed[0x24c:0x250] = (72).to_bytes(4, "little")
-            mutations.append(bytes(changed))
-        changed = bytearray(raw); changed[0x23c:0x240] = b"\x01\x00\x00\x00"; mutations.append(bytes(changed))
-        changed = bytearray(raw); changed[0x86:0x88] = (2).to_bytes(2,"little"); changed[0x1b0:0x1d8] = changed[0x188:0x1b0]; mutations.append(bytes(changed))
-        for malformed in mutations:
-            with self.subTest(prefix=hashlib.sha256(malformed).hexdigest()[:8]), self.assertRaises(helper.CheckFailure):
-                helper.windows_normal_ui_pe_data(malformed)
+        for role in ("normal", "observer"):
+            for delay in (False, True):
+                raw = self.pe_fixture("KERNEL32.dll", delay)
+                facts = helper.windows_normal_ui_pe_data(raw, role=role)
+                self.assertTrue(facts["commonControlsV6"]); self.assertFalse(facts["dynamicWebView2LoaderImport"])
+                self.assertEqual(facts["dllImports"], ["kernel32.dll"])
+                with self.assertRaises(helper.CheckFailure):
+                    helper.windows_normal_ui_pe_data(self.pe_fixture("WebView2Loader.dll", delay), role=role)
+            for language in (0, 1033):
+                facts = helper.windows_normal_ui_pe_data(self.pe_fixture(language=language), role=role)
+                self.assertEqual(facts["manifestLanguage"], language)
+            raw = self.pe_fixture()
+            mutations = [raw[:511], raw.replace(b"6.0.0.0", b"5.0.0.0"), raw.replace(b"6595b64144ccf1df", b"1595b64144ccf1df")]
+            for offset, value, size in ((0x84, 0x14c, 2), (0x230+16, 65536, 4), (0x230+16, 0x80000000, 4),
+                                      (0x218+16, 2, 4), (0x214, 0x80000000, 4), (0x24c, 0x7fffffff, 4)):
+                changed = bytearray(raw); changed[offset:offset+size] = value.to_bytes(size, "little"); mutations.append(bytes(changed))
+            for second_language in (0, 1033):
+                changed = bytearray(raw); changed[0x23e:0x240] = (2).to_bytes(2, "little")
+                changed[0x248:0x24c] = second_language.to_bytes(4, "little"); changed[0x24c:0x250] = (72).to_bytes(4, "little")
+                mutations.append(bytes(changed))
+            changed = bytearray(raw); changed[0x23c:0x240] = b"\x01\x00\x00\x00"; mutations.append(bytes(changed))
+            changed = bytearray(raw); changed[0x86:0x88] = (2).to_bytes(2,"little"); changed[0x1b0:0x1d8] = changed[0x188:0x1b0]; mutations.append(bytes(changed))
+            for malformed in mutations:
+                with self.subTest(role=role, prefix=hashlib.sha256(malformed).hexdigest()[:8]), self.assertRaises(helper.CheckFailure):
+                    helper.windows_normal_ui_pe_data(malformed, role=role)
+            for rva, size in ((0, 0), (0x1000, 0), (0x1000, 1), (0x1000, 63),
+                              (0x1000, (4 << 20) + 1), (0xffffffff, 0xffffffff)):
+                malformed = bytearray(raw)
+                malformed[0x98+128:0x98+132] = rva.to_bytes(4, "little")
+                malformed[0x98+132:0x98+136] = size.to_bytes(4, "little")
+                with self.subTest(role=role, rva=rva, size=size), self.assertRaises(helper.CheckFailure) as caught:
+                    helper.windows_normal_ui_pe_data(bytes(malformed), role=role)
+                message = str(caught.exception)
+                self.assertEqual(message, f"Windows GUI {role} resource size differs: rva={rva} size={size} allowed=64..4194304")
+                self.assertLessEqual(len(message.encode("ascii")), 128)
+                self.assertEqual(message.splitlines(), [message])
+        for role in (None, False, 1, b"normal", [], {}, "app", "normal-smoke", "observer\nPRIVATE", "C:/PRIVATE/app.exe"):
+            with self.assertRaisesRegex(helper.CheckFailure, "^Windows GUI PE role differs$"):
+                helper.windows_normal_ui_pe_data(raw, role=role)
 
     def test_normal_singleton_uses_shared_closed_copy_and_never_adopts_collision_or_changed_source(self):
         with tempfile.TemporaryDirectory() as directory:
