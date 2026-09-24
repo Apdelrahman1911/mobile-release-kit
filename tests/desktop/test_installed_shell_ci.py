@@ -2088,6 +2088,75 @@ def tools_preparation_data():
     return env, root, root_identity, nodes, files
 
 
+def tools_namespace_source_data():
+    """Two finite source pins, not reads of a runner or the checkout."""
+    return [{"path": path, "size": 64 + index, "sha256": "e" * 64}
+            for index, path in enumerate(S.SHELL_TOOLS_NAMESPACE_SOURCES)]
+
+
+def tools_namespace_data(disposition="protected"):
+    """Successful joined DATA fiction; never constructs or installs anything."""
+    env, root, identity, current, files = tools_preparation_data()
+    before = S.D.decode(files["before.json"])
+    original = deepcopy(before); original["phase"] = "namespace-before"
+    if disposition != "protected":
+        raw = b"".join(files["before-packages.tsv"].splitlines(keepends=True)[:2])
+        stderr = S.SHELL_TOOLS_JDK_MISSING
+        query = {"stdout": {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()},
+                 "stderr": {"size": len(stderr), "sha256": hashlib.sha256(stderr).hexdigest()}, "exitCode": 1}
+        files.update({"before-packages.tsv": raw, "before-packages.stderr": stderr, "before-packages.exit": b"1\n"})
+        for document in (original, before):
+            document["packageQuery"] = deepcopy(query)
+            for name in (S.SHELL_TOOLS_JDK_ROOT, S.SHELL_TOOLS_JDK_ROOT + "/bin", *S.SHELL_TOOLS_PROGRAMS[2:]):
+                document["nodes"][name] = {"kind": "parent-unavailable"}
+            for name in ("java", "javac"):
+                target = "/usr/lib/jvm/temurin-17-jdk-amd64/bin/" + name
+                row = document["nodes"]["/etc/alternatives/" + name]
+                row["target"] = target; row["identity"][6] = len(target)
+        original["nodes"][S.SHELL_TOOLS_NAMESPACE_PARENT] = (
+            {"kind": "absent"} if disposition == "absent" else
+            {"kind": "refused", "identity": [1, 500, stat.S_IFDIR | 0o777, 0, 0, 7, 4096, 11, 11]})
+        if disposition == "absent":
+            before["nodes"][S.SHELL_TOOLS_NAMESPACE_PARENT] = {"kind": "absent"}
+        else:
+            before["nodes"][S.SHELL_TOOLS_JDK_ROOT] = {"kind": "absent"}
+    namespace = {"schema": "fixed-disposable-shell-jvm-namespace-before-v1", "qualified": False,
+                 "source": str(S.SOURCE), "sourceFiles": tools_namespace_source_data(), "snapshot": original}
+    namespace_raw = S.D.canonical(namespace)
+    result = {"schema": "fixed-disposable-shell-jvm-namespace-result-v1", "qualified": False,
+              "sourceSha": env["GITHUB_SHA"], "runId": env["GITHUB_RUN_ID"], "attempt": env["GITHUB_RUN_ATTEMPT"],
+              "root": str(root), "rootIdentity": list(identity), "source": str(S.SOURCE),
+              "sourceFiles": tools_namespace_source_data(),
+              "namespaceBefore": {"size": len(namespace_raw), "sha256": hashlib.sha256(namespace_raw).hexdigest()},
+              "disposition": disposition, "stage": "complete",
+              "parents": {path: deepcopy(original["nodes"][path]["identity"]) for path in S.SHELL_TOOLS_NAMESPACE_PARENTS},
+              "original": deepcopy(original["nodes"][S.SHELL_TOOLS_NAMESPACE_PARENT].get("identity")),
+              "preservation": None, "preserved": None, "fresh": None, "query": None,
+              "actions": {key: disposition == "preserve-create" for key in ("preservationCreated", "renameReturned", "freshCreated")},
+              "originalFdsClosed": True, "completed": True, "failure": None}
+    if disposition == "preserve-create":
+        result["preservation"] = {"path": "/usr/lib/mrk-desktop-jvm-original-7-1",
+                                  "identity": [1, 501, stat.S_IFDIR | 0o700, 0, 0, 3, 4096, 12, 12]}
+        result["preserved"] = deepcopy(result["original"]); result["preserved"][-1] = 12
+        result["fresh"] = deepcopy(before["nodes"][S.SHELL_TOOLS_NAMESPACE_PARENT]["identity"])
+        result["query"] = {"stdout": "", "stderr": S.SHELL_TOOLS_JDK_MISSING.decode("ascii"), "exitCode": 1,
+                           "originalReturned": True, "stdoutEof": True, "stderrEof": True, "streamsClosed": True, "stopSent": False}
+    files.update({"before.json": S.D.canonical(before), "namespace-before.json": namespace_raw,
+                  "namespace.stdout": S.D.canonical(result), "namespace.stderr": b"", "namespace.exit": b"0\n"})
+    return env, root, identity, current, files
+
+
+def tools_namespace_read(files):
+    """Bounded in-memory evidence: no fallback to real source/host files."""
+    def read(path, limit):
+        if path.name not in files:
+            raise FileNotFoundError(path.name)
+        raw = files[path.name]
+        S.D.need(type(raw) is bytes and len(raw) <= limit, "Fixture read exceeds the production member bound")
+        return raw
+    return read
+
+
 class InstalledToolsPreparationContracts(unittest.TestCase):
     def test_only_nonroot_fixed_hosted_branch_and_original_fresh_root_are_addressed(self):
         env, root, identity, _, _ = tools_preparation_data()
@@ -2155,7 +2224,7 @@ class InstalledToolsPreparationContracts(unittest.TestCase):
     def test_actual_snapshot_is_retained_before_failed_pair_or_original_status_assertions(self):
         for phase, fault in (("before", None), ("before", "absent"), ("before", "query"), ("before", "refused"),
                              ("after", None), ("after", "step"), ("after", "pair"), ("after", "git")):
-            env, root, identity, nodes, files = tools_preparation_data()
+            env, root, identity, nodes, files = tools_namespace_data()
             if fault == "absent":
                 for name in S.SHELL_TOOLS_PROGRAMS[2:]: nodes[name] = {"kind": "absent"}
             if fault == "query": files[phase + "-packages.tsv"] = b"unexpected\n"
@@ -2166,6 +2235,7 @@ class InstalledToolsPreparationContracts(unittest.TestCase):
             with self.subTest(phase=phase, fault=fault), patch.dict(S.os.environ, env, clear=True), \
                  patch.object(S, "shell_tools_input_root", return_value=root), patch.object(S, "directory_identity", return_value=identity), \
                  patch.object(S, "shell_tools_input_nodes", return_value=nodes), patch.object(S.D, "read", side_effect=lambda path, limit: files[path.name]), \
+                 patch.object(S, "_shell_tools_namespace_sources", return_value=tools_namespace_source_data()), \
                  patch.object(S.D, "write") as writing, patch.object(S.sys, "stdout", new_callable=io.StringIO) as stdout:
                 if fault in (None, "absent"):
                     self.assertIsNone(S.shell_tools_input_snapshot(phase))
@@ -2180,7 +2250,7 @@ class InstalledToolsPreparationContracts(unittest.TestCase):
 
     def test_observation_rebinds_original_packages_aliases_bytes_and_only_stable_parent_identity(self):
         for fault in (None, "directory-time", "git", "python", "jdk", "alias", "ancestor", "before-git", "step", "query", "qualified", "boolean"):
-            env, root, identity, nodes, files = tools_preparation_data()
+            env, root, identity, nodes, files = tools_namespace_data()
             if fault == "directory-time":
                 for path in S.SHELL_TOOLS_DIRECTORIES: nodes[path]["identity"][6:] = [8192, 22, 22]
             if fault in ("git", "python", "jdk"):
@@ -2198,10 +2268,11 @@ class InstalledToolsPreparationContracts(unittest.TestCase):
                 files[phase + ".json"] = S.D.canonical(document)
             with self.subTest(fault=fault), patch.dict(S.os.environ, env, clear=True), patch.object(S, "shell_tools_input_root", return_value=root), \
                  patch.object(S, "directory_identity", return_value=identity), patch.object(S, "shell_tools_input_nodes", return_value=nodes), \
+                 patch.object(S, "_shell_tools_namespace_sources", return_value=tools_namespace_source_data()), \
                  patch.object(S.D, "read", side_effect=lambda path, limit: files[path.name]):
                 if fault in (None, "directory-time"):
                     observed = S.shell_tools_inputs_for_observation(); self.assertIs(observed["qualified"], False)
-                    self.assertEqual(len(observed["preparationFiles"]), 8)
+                    self.assertEqual(len(observed["preparationFiles"]), 12)
                     self.assertEqual(set(observed["packages"]), set(S.SHELL_TOOLS_PACKAGES))
                     self.assertEqual(observed["nodes"]["/usr"]["identity"], nodes["/usr"]["identity"][:5])
                     self.assertEqual(observed["nodes"]["/usr/bin/git"], nodes["/usr/bin/git"])
@@ -2231,6 +2302,414 @@ class InstalledToolsPreparationContracts(unittest.TestCase):
                          and (isinstance(node.func, ast.Name) and node.func.id in ("Check", "run_owned", "command")
                               or isinstance(node.func, ast.Attribute) and node.func.attr in ("run", "Popen", "command", "system", "execv"))]
             self.assertEqual(forbidden, [], helper.name)
+
+
+class InstalledToolsNamespaceContracts(unittest.TestCase):
+    def _result(self, fixture, *, strict_before=True, sources=None):
+        env, root, identity, nodes, files = fixture
+        before = S.D.decode(files["before.json"]) if strict_before else None
+        with patch.dict(S.os.environ, env, clear=True), patch.object(S, "directory_identity", return_value=identity), \
+             patch.object(S, "shell_tools_input_nodes", return_value=nodes), \
+             patch.object(S, "_shell_tools_namespace_sources", return_value=tools_namespace_source_data() if sources is None else sources), \
+             patch.object(S.D, "read", side_effect=tools_namespace_read(files)):
+            return S._shell_tools_namespace_result(root, before=before)
+
+    def test_only_genuine_absent_pair_and_exact_0777_parent_select_new_construction(self):
+        self.assertEqual(S.SHELL_TOOLS_JDK_MISSING,
+                         b"dpkg-query: no packages found matching openjdk-17-jdk-headless\n"
+                         b"dpkg-query: no packages found matching openjdk-17-jre-headless\n")
+        for disposition in ("protected", "absent", "preserve-create"):
+            env, root, identity, _, files = tools_namespace_data(disposition)
+            raw = files["namespace-before.json"]; original = S.D.decode(raw)
+            query = tuple(files["before-packages" + suffix] for suffix in (".tsv", ".stderr", ".exit"))
+            with self.subTest(disposition=disposition), patch.dict(S.os.environ, env, clear=True), \
+                 patch.object(S, "directory_identity", return_value=identity):
+                observed, selected = S.shell_tools_namespace_disposition(raw, root, query)
+                self.assertEqual(selected, disposition); self.assertEqual(observed, original)
+                self.assertIs(observed["qualified"], False)
+                if disposition == "preserve-create":
+                    self.assertEqual(observed["snapshot"]["nodes"]["/usr/lib/jvm"]["kind"], "refused")
+                    self.assertEqual(observed["snapshot"]["nodes"][S.SHELL_TOOLS_JDK_ROOT], {"kind": "parent-unavailable"})
+                    self.assertNotEqual(observed["snapshot"]["nodes"], S.D.decode(files["before.json"])["nodes"])
+            self.assertEqual(files["namespace-before.json"], raw)
+
+    def test_partial_installed_unknown_or_ambiguous_package_state_cannot_relocate(self):
+        env, root, identity, _, files = tools_namespace_data("preserve-create")
+        original = S.D.decode(files["namespace-before.json"])
+        absent, installed, missing = files["before-packages.tsv"], files["after-packages.tsv"], S.SHELL_TOOLS_JDK_MISSING
+        cases = (
+            (installed, b"", b"0\n"),  # An installed pair below an unsafe namespace is not a repair invitation.
+            (b"".join(installed.splitlines(keepends=True)[:3]), missing, b"1\n"),
+            (absent, b"", b"1\n"), (absent, missing, b"0\n"), (absent, missing, b"2\n"),
+            (absent, missing, b"01\n"), (absent, missing, b"1"), (absent, missing, b"256\n"),
+            (absent, b"".join(missing.splitlines(keepends=True)[::-1]), b"1\n"),
+            (absent, missing + b"another failure\n", b"1\n"), (absent, missing.splitlines(keepends=True)[0], b"1\n"),
+            (absent.replace(b"installed", b"unpacked", 1), missing, b"1\n"),
+            (absent.replace(b"amd64", b"arm64", 1), missing, b"1\n"),
+            (absent.replace(b"git\t", b"other\t", 1), missing, b"1\n"),
+            (absent + absent, missing, b"1\n"), (absent[:-1], missing, b"1\n"),
+            (b"".join(absent.splitlines(keepends=True)[1:]), missing, b"1\n"),
+        )
+        for raw, stderr, status in cases:
+            document = deepcopy(original)
+            document["snapshot"]["packageQuery"] = {
+                "stdout": {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()},
+                "stderr": {"size": len(stderr), "sha256": hashlib.sha256(stderr).hexdigest()}, "exitCode": int(status)}
+            with self.subTest(query=(raw[:20], stderr[:20], status)), patch.dict(S.os.environ, env, clear=True), \
+                 patch.object(S, "directory_identity", return_value=identity), self.assertRaises(S.D.Refused):
+                S.shell_tools_namespace_disposition(S.D.canonical(document), root, (raw, stderr, status))
+        with patch.dict(S.os.environ, env, clear=True), patch.object(S, "directory_identity", return_value=identity):
+            with self.assertRaises(S.D.Refused):
+                S.shell_tools_namespace_disposition(files["namespace-before.json"], root, [absent, missing, b"1\n"])
+            with self.assertRaises(S.D.Refused):
+                S.shell_tools_namespace_disposition(files["namespace-before.json"], root, (absent, missing, bytearray(b"1\n")))
+
+    def test_wrong_owner_kind_mode_alias_or_unrelated_refusal_never_selects_repair(self):
+        env, root, identity, _, files = tools_namespace_data("preserve-create")
+        original = S.D.decode(files["namespace-before.json"])
+        query = tuple(files["before-packages" + suffix] for suffix in (".tsv", ".stderr", ".exit"))
+        mutations = [
+            lambda n: n["/usr/lib/jvm"]["identity"].__setitem__(3, 1001),
+            lambda n: n["/usr/lib/jvm"]["identity"].__setitem__(4, 1001),
+            lambda n: n["/usr/lib/jvm"]["identity"].__setitem__(2, stat.S_IFLNK | 0o777),
+            lambda n: n["/usr/lib/jvm"]["identity"].__setitem__(2, stat.S_IFIFO | 0o777),
+            lambda n: n["/usr/lib/jvm"]["identity"].__setitem__(2, stat.S_IFDIR | 0o775),
+            lambda n: n["/usr/lib/jvm"]["identity"].__setitem__(2, stat.S_IFDIR | 0o757),
+            lambda n: n["/usr/lib/jvm"]["identity"].__setitem__(2, stat.S_IFDIR | 0o1777),
+            lambda n: n["/usr/lib/jvm"].update(kind="directory"),
+            lambda n: n["/usr/lib/jvm"]["identity"].__setitem__(5, True),
+            lambda n: n.__setitem__(S.SHELL_TOOLS_JDK_ROOT, {"kind": "absent"}),
+        ]
+        for path in (*S.SHELL_TOOLS_NAMESPACE_PARENTS, *S.SHELL_TOOLS_PROGRAMS[:2], *S.SHELL_TOOLS_LINKS):
+            mutations.append(lambda n, path=path: n.__setitem__(path, {"kind": "refused", "identity": n[path]["identity"]}))
+        for mutate in mutations:
+            document = deepcopy(original); mutate(document["snapshot"]["nodes"])
+            with self.subTest(mutate=mutate), patch.dict(S.os.environ, env, clear=True), \
+                 patch.object(S, "directory_identity", return_value=identity), self.assertRaises(S.D.Refused):
+                S.shell_tools_namespace_disposition(S.D.canonical(document), root, query)
+
+    def test_namespace_envelope_is_closed_canonical_typed_source_and_original_query_data(self):
+        env, root, identity, _, files = tools_namespace_data("preserve-create")
+        original = S.D.decode(files["namespace-before.json"])
+        query = tuple(files["before-packages" + suffix] for suffix in (".tsv", ".stderr", ".exit"))
+        mutations = (
+            lambda d: d.update(extra=True), lambda d: d.update(schema="other"), lambda d: d.update(qualified=0),
+            lambda d: d.update(source="/other"), lambda d: d["sourceFiles"].pop(),
+            lambda d: d["sourceFiles"].reverse(), lambda d: d["sourceFiles"][0].update(size=True),
+            lambda d: d["sourceFiles"][0].update(size=65537), lambda d: d["sourceFiles"][0].update(sha256="z" * 64),
+            lambda d: d["sourceFiles"][0].update(extra=True), lambda d: d["snapshot"].update(originalStepExit=0),
+            lambda d: d["snapshot"].update(phase="before"), lambda d: d["snapshot"].update(sourceSha="b" * 40),
+            lambda d: d["snapshot"].update(runId="8"), lambda d: d["snapshot"].update(attempt="2"),
+            lambda d: d["snapshot"]["rootIdentity"].__setitem__(0, True),
+            lambda d: d["snapshot"]["packageQuery"]["stdout"].update(sha256="0" * 64),
+            lambda d: d["snapshot"]["packageQuery"]["stderr"].update(size=True),
+            lambda d: d["snapshot"]["packageQuery"].update(exitCode=True),
+        )
+        for mutate in mutations:
+            document = deepcopy(original); mutate(document)
+            with self.subTest(mutate=mutate), patch.dict(S.os.environ, env, clear=True), \
+                 patch.object(S, "directory_identity", return_value=identity), self.assertRaises(S.D.Refused):
+                S.shell_tools_namespace_disposition(S.D.canonical(document), root, query)
+        for raw in (files["namespace-before.json"] + b" ", files["namespace-before.json"][:-1],
+                    files["namespace-before.json"][:-2] + b',"qualified":false}\n', b"[]" + b"\n", b"x" * 65537):
+            with self.subTest(raw=raw[:30]), patch.dict(S.os.environ, env, clear=True), \
+                 patch.object(S, "directory_identity", return_value=identity), self.assertRaises(S.D.Refused):
+                S.shell_tools_namespace_disposition(raw, root, query)
+
+    def test_original_namespace_snapshot_is_retained_before_disposition_refusal(self):
+        for fault in (None, "wrong-mode", "unrelated", "ambiguous-query", "root-drift"):
+            env, root, identity, _, files = tools_namespace_data("preserve-create")
+            nodes = S.D.decode(files["namespace-before.json"])["snapshot"]["nodes"]
+            if fault == "wrong-mode": nodes["/usr/lib/jvm"]["identity"][2] = stat.S_IFDIR | 0o775
+            if fault == "unrelated": nodes["/usr/bin/git"] = {"kind": "refused", "identity": nodes["/usr/bin/git"]["identity"]}
+            if fault == "ambiguous-query": files["before-packages.stderr"] += b"unexpected\n"
+            root_identity = Mock(return_value=identity)
+            if fault == "root-drift": root_identity.side_effect = [identity, (1, 3, stat.S_IFDIR | 0o700, 1001, 1001)]
+            with self.subTest(fault=fault), patch.dict(S.os.environ, env, clear=True), \
+                 patch.object(S, "shell_tools_input_root", return_value=root), patch.object(S, "directory_identity", root_identity), \
+                 patch.object(S, "shell_tools_input_nodes", return_value=nodes), \
+                 patch.object(S, "_shell_tools_namespace_sources", return_value=tools_namespace_source_data()), \
+                 patch.object(S.D, "read", side_effect=tools_namespace_read(files)), patch.object(S.D, "write") as writing, \
+                 patch.object(S.sys, "stdout", new_callable=io.StringIO) as stdout:
+                if fault is None:
+                    self.assertIsNone(S.shell_tools_namespace_snapshot())
+                    self.assertEqual(stdout.getvalue(), "preserve-create\n")
+                else:
+                    with self.assertRaises(S.D.Refused): S.shell_tools_namespace_snapshot()
+                    self.assertEqual(stdout.getvalue(), "")
+                writing.assert_called_once()
+                self.assertEqual(writing.call_args.args[0], root / "namespace-before.json")
+                saved = S.D.decode(writing.call_args.args[1])
+                self.assertEqual(saved["snapshot"]["nodes"], nodes)
+                self.assertEqual(saved["snapshot"]["phase"], "namespace-before")
+                self.assertIsNone(saved["snapshot"]["originalStepExit"])
+                self.assertIs(saved["qualified"], False); self.assertIs(saved["snapshot"]["qualified"], False)
+
+    def test_clean_results_bind_all_three_dispositions_and_all_four_original_members(self):
+        for disposition in ("protected", "absent", "preserve-create"):
+            fixture = tools_namespace_data(disposition); files = fixture[-1]
+            expected = {name: {"size": len(files[name]), "sha256": hashlib.sha256(files[name]).hexdigest()}
+                        for name in S.SHELL_TOOLS_NAMESPACE_FILES}
+            with self.subTest(disposition=disposition):
+                self.assertEqual(self._result(fixture), expected)
+                # The pre-APT check addresses actual current nodes; the later join uses strict before.
+                env, root, identity, _, _ = fixture
+                current = S.D.decode(files["before.json"])["nodes"]
+                self.assertEqual(self._result((env, root, identity, current, files), strict_before=False), expected)
+                self.assertEqual(set(expected), {"namespace-before.json", "namespace.stdout", "namespace.stderr", "namespace.exit"})
+
+    def test_result_requires_original_finality_typed_actions_and_exact_source_run_root_pins(self):
+        mutations = (
+            lambda d: d.update(completed=False), lambda d: d.update(originalFdsClosed=False),
+            lambda d: d.update(stage="fresh-mode"), lambda d: d.update(failure="original-fd-close"),
+            lambda d: d.update(qualified=True), lambda d: d.update(extra=True), lambda d: d.pop("query"),
+            lambda d: d.update(schema="other"), lambda d: d.update(disposition="protected"),
+            lambda d: d.update(sourceSha="b" * 40), lambda d: d.update(runId="8"), lambda d: d.update(attempt="2"),
+            lambda d: d.update(root="/tmp/other"), lambda d: d["rootIdentity"].__setitem__(0, True),
+            lambda d: d.update(source="/other"), lambda d: d["sourceFiles"][0].update(size=True),
+            lambda d: d["sourceFiles"][0].update(sha256="0" * 64), lambda d: d["sourceFiles"].reverse(),
+            lambda d: d["namespaceBefore"].update(size=True), lambda d: d["namespaceBefore"].update(sha256="0" * 64),
+            lambda d: d["parents"].pop("/usr"), lambda d: d["parents"]["/usr"].__setitem__(1, 999),
+            lambda d: d["parents"]["/usr"].__setitem__(0, True), lambda d: d["parents"]["/usr"].pop(),
+            lambda d: d["actions"].update(renameReturned=False), lambda d: d["actions"].update(freshCreated=1),
+            lambda d: d["actions"].update(preservationCreated=False), lambda d: d["actions"].update(extra=True),
+        )
+        for mutate in mutations:
+            fixture = tools_namespace_data("preserve-create"); files = fixture[-1]
+            result = S.D.decode(files["namespace.stdout"]); mutate(result); files["namespace.stdout"] = S.D.canonical(result)
+            with self.subTest(mutate=mutate), self.assertRaises(S.D.Refused): self._result(fixture)
+
+    def test_result_refuses_same_inode_wrong_preservation_or_unprotected_fresh_namespace(self):
+        mutations = (
+            lambda d: d["original"].__setitem__(1, 999),
+            lambda d: d["preserved"].__setitem__(1, 999),
+            lambda d: d["preserved"].__setitem__(2, stat.S_IFDIR | 0o755),
+            lambda d: d["preserved"].__setitem__(3, 1001),
+            lambda d: d["fresh"].__setitem__(1, d["original"][1]),
+            lambda d: d["fresh"].__setitem__(1, d["preservation"]["identity"][1]),
+            lambda d: d["fresh"].__setitem__(0, 2),
+            lambda d: d["fresh"].__setitem__(2, stat.S_IFDIR | 0o777),
+            lambda d: d["fresh"].__setitem__(2, stat.S_IFLNK | 0o755),
+            lambda d: d["fresh"].__setitem__(3, 1001),
+            lambda d: d["fresh"].__setitem__(4, True),
+            lambda d: d["preservation"].update(path="/usr/lib/mrk-desktop-jvm-original-7-2"),
+            lambda d: d["preservation"].update(extra=True),
+            lambda d: d["preservation"]["identity"].__setitem__(1, d["original"][1]),
+            lambda d: d["preservation"]["identity"].__setitem__(2, stat.S_IFDIR | 0o755),
+            lambda d: d["preservation"]["identity"].__setitem__(3, 1001),
+            lambda d: d["preservation"]["identity"].__setitem__(0, 2),
+        )
+        for mutate in mutations:
+            fixture = tools_namespace_data("preserve-create"); files = fixture[-1]
+            result = S.D.decode(files["namespace.stdout"]); mutate(result); files["namespace.stdout"] = S.D.canonical(result)
+            with self.subTest(mutate=mutate), self.assertRaises(S.D.Refused): self._result(fixture)
+
+    def test_original_root_query_requires_both_eofs_original_wait_closes_and_no_stop(self):
+        mutations = (
+            lambda q: q.update(originalReturned=False), lambda q: q.update(originalReturned=1),
+            lambda q: q.update(stdoutEof=False), lambda q: q.update(stderrEof=False),
+            lambda q: q.update(streamsClosed=False), lambda q: q.update(streamsClosed=1),
+            lambda q: q.update(stopSent=True), lambda q: q.update(exitCode=True), lambda q: q.update(exitCode=0),
+            lambda q: q.update(stdout="installed\n"), lambda q: q.update(stderr=""),
+            lambda q: q.update(stderr=q["stderr"] + "extra\n"), lambda q: q.update(extra=True),
+        )
+        for mutate in mutations:
+            fixture = tools_namespace_data("preserve-create"); files = fixture[-1]
+            result = S.D.decode(files["namespace.stdout"]); mutate(result["query"]); files["namespace.stdout"] = S.D.canonical(result)
+            with self.subTest(mutate=mutate), self.assertRaises(S.D.Refused): self._result(fixture)
+
+    def test_noop_results_cannot_claim_query_relocation_creation_or_changed_original(self):
+        for disposition in ("protected", "absent"):
+            for fault in ("query", "preservation", "preserved", "fresh", "original", "actions"):
+                fixture = tools_namespace_data(disposition); files = fixture[-1]
+                result = S.D.decode(files["namespace.stdout"])
+                if fault == "actions": result["actions"]["renameReturned"] = True
+                elif fault == "original": result["original"] = [1, 999, stat.S_IFDIR | 0o755, 0, 0, 2, 4096, 11, 11]
+                else: result[fault] = {}
+                files["namespace.stdout"] = S.D.canonical(result)
+                with self.subTest(disposition=disposition, fault=fault), self.assertRaises(S.D.Refused):
+                    self._result(fixture)
+
+    def test_missing_partial_oversized_or_noncanonical_new_member_is_failure(self):
+        self.assertEqual(S.SHELL_TOOLS_NAMESPACE_FILES,
+                         {"namespace-before.json": 65536, "namespace.stdout": 16384, "namespace.stderr": 4096, "namespace.exit": 4})
+        for name, limit in S.SHELL_TOOLS_NAMESPACE_FILES.items():
+            for fault in ("missing", "oversized"):
+                fixture = tools_namespace_data("preserve-create"); files = fixture[-1]
+                if fault == "missing": files.pop(name)
+                else: files[name] = b"x" * (limit + 1)
+                with self.subTest(name=name, fault=fault), self.assertRaises((S.D.Refused, FileNotFoundError)):
+                    self._result(fixture)
+        for name, raw in (("namespace.exit", b"1\n"), ("namespace.exit", b"0"), ("namespace.exit", b"00\n"),
+                          ("namespace.stderr", b"warning\n"), ("namespace.stdout", b"{}\n"),
+                          ("namespace.stdout", b""), ("namespace-before.json", b"{}\n")):
+            fixture = tools_namespace_data("preserve-create"); fixture[-1][name] = raw
+            with self.subTest(name=name, raw=raw), self.assertRaises(S.D.Refused): self._result(fixture)
+        for name in ("namespace-before.json", "namespace.stdout"):
+            for fault in ("trailing", "no-newline", "duplicate"):
+                fixture = tools_namespace_data("preserve-create"); files = fixture[-1]; raw = files[name]
+                files[name] = raw + b" " if fault == "trailing" else raw[:-1] if fault == "no-newline" else raw[:-2] + b',"qualified":false}\n'
+                with self.subTest(name=name, fault=fault), self.assertRaises(S.D.Refused): self._result(fixture)
+
+    def test_raw_snapshot_source_pins_and_strict_before_namespace_must_all_correspond(self):
+        for fault in ("old-pin", "current-source", "consistent-forged-source", "before-inode", "before-mode",
+                      "before-package", "before-git", "before-python", "before-alias", "before-parent"):
+            fixture = tools_namespace_data("preserve-create"); files = fixture[-1]
+            if fault in ("old-pin", "consistent-forged-source"):
+                original = S.D.decode(files["namespace-before.json"])
+                if fault == "old-pin": original["snapshot"]["nodes"]["/usr/lib/jvm"]["identity"][-1] += 1
+                else: original["sourceFiles"][0]["sha256"] = "0" * 64
+                files["namespace-before.json"] = S.D.canonical(original)
+                if fault == "consistent-forged-source":
+                    result = S.D.decode(files["namespace.stdout"]); result["sourceFiles"] = deepcopy(original["sourceFiles"])
+                    raw = files["namespace-before.json"]
+                    result["namespaceBefore"] = {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+                    files["namespace.stdout"] = S.D.canonical(result)
+            elif fault != "current-source":
+                before = S.D.decode(files["before.json"]); nodes = before["nodes"]
+                if fault == "before-inode": nodes["/usr/lib/jvm"]["identity"][1] += 1
+                elif fault == "before-mode": nodes["/usr/lib/jvm"]["identity"][2] = stat.S_IFDIR | 0o777
+                elif fault == "before-package": before["packageQuery"]["exitCode"] = 0
+                elif fault == "before-git": nodes["/usr/bin/git"]["sha256"] = "0" * 64
+                elif fault == "before-python": nodes["/usr/bin/python3.12"]["sha256"] = "0" * 64
+                elif fault == "before-alias": nodes["/etc/alternatives/java"]["target"] = "/other"
+                else: nodes["/usr"]["identity"][1] += 1
+                files["before.json"] = S.D.canonical(before)
+            sources = tools_namespace_source_data()
+            if fault == "current-source": sources[0]["sha256"] = "0" * 64
+            with self.subTest(fault=fault), self.assertRaises(S.D.Refused): self._result(fixture, sources=sources)
+
+    def test_native_rebinding_keeps_all_twelve_pins_and_rejects_current_namespace_replacement(self):
+        for disposition in ("protected", "absent", "preserve-create"):
+            for fault in (None, "directory-time", "namespace-inode", "namespace-mode", "namespace-owner",
+                          "namespace-result", "namespace-missing", "query-bytes"):
+                env, root, identity, nodes, files = tools_namespace_data(disposition)
+                if fault == "directory-time":
+                    for path in S.SHELL_TOOLS_DIRECTORIES: nodes[path]["identity"][6:] = [8192, 22, 22]
+                elif fault == "namespace-inode": nodes["/usr/lib/jvm"]["identity"][1] += 1000
+                elif fault == "namespace-mode": nodes["/usr/lib/jvm"]["identity"][2] = stat.S_IFDIR | 0o777
+                elif fault == "namespace-owner": nodes["/usr/lib/jvm"]["identity"][3] = 1001
+                elif fault == "namespace-result": files["namespace.exit"] = b"1\n"
+                elif fault == "namespace-missing": files.pop("namespace.stdout")
+                elif fault == "query-bytes": files["before-packages.stderr"] += b"extra\n"
+                with self.subTest(disposition=disposition, fault=fault), patch.dict(S.os.environ, env, clear=True), \
+                     patch.object(S, "shell_tools_input_root", return_value=root), patch.object(S, "directory_identity", return_value=identity), \
+                     patch.object(S, "shell_tools_input_nodes", return_value=nodes), \
+                     patch.object(S, "_shell_tools_namespace_sources", return_value=tools_namespace_source_data()), \
+                     patch.object(S.D, "read", side_effect=tools_namespace_read(files)):
+                    if fault in (None, "directory-time"):
+                        observed = S.shell_tools_inputs_for_observation()
+                        self.assertIs(observed["qualified"], False)
+                        expected = {name: {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()} for name, raw in files.items()}
+                        self.assertEqual(observed["preparationFiles"], expected); self.assertEqual(len(expected), 12)
+                        self.assertEqual(observed["nodes"]["/usr/lib/jvm"]["identity"], nodes["/usr/lib/jvm"]["identity"][:5])
+                    else:
+                        with self.assertRaises((S.D.Refused, FileNotFoundError)): S.shell_tools_inputs_for_observation()
+
+    def test_protected_namespace_does_not_waive_a_refused_descendant_in_strict_before(self):
+        env, root, identity, nodes, files = tools_namespace_data("protected")
+        nodes[S.SHELL_TOOLS_PROGRAMS[2]] = {"kind": "refused", "identity": nodes[S.SHELL_TOOLS_PROGRAMS[2]]["identity"]}
+        original = S.D.decode(files["namespace-before.json"]); original["snapshot"]["nodes"] = deepcopy(nodes)
+        query = tuple(files["before-packages" + suffix] for suffix in (".tsv", ".stderr", ".exit"))
+        with patch.dict(S.os.environ, env, clear=True), patch.object(S, "shell_tools_input_root", return_value=root), \
+             patch.object(S, "directory_identity", return_value=identity), patch.object(S, "shell_tools_input_nodes", return_value=nodes), \
+             patch.object(S.D, "read", side_effect=tools_namespace_read(files)), patch.object(S.D, "write") as writing, \
+             patch.object(S, "_shell_tools_namespace_result") as namespace:
+            self.assertEqual(S.shell_tools_namespace_disposition(S.D.canonical(original), root, query)[1], "protected")
+            with self.assertRaisesRegex(S.D.Refused, "must not repair a refused original"):
+                S.shell_tools_input_snapshot("before")
+            namespace.assert_not_called(); writing.assert_called_once()
+            self.assertEqual(S.D.decode(writing.call_args.args[1])["nodes"], nodes)
+
+    def test_namespace_helpers_and_two_literal_cli_selectors_are_nonroot_data_only(self):
+        source = (SOURCE / "desktop/tools/ci_ubuntu_publication.py").read_text()
+        tree = ast.parse(source)
+        helpers = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+                   and node.name.startswith(("shell_tools_namespace", "_shell_tools_namespace"))]
+        self.assertEqual(len(helpers), 7)
+        for helper in helpers:
+            forbidden = [node for node in ast.walk(helper) if isinstance(node, (ast.Import, ast.ImportFrom)) or isinstance(node, ast.Call)
+                         and (isinstance(node.func, ast.Name) and node.func.id in ("Check", "run_owned", "command", "exec", "eval")
+                              or isinstance(node.func, ast.Attribute) and node.func.attr in
+                              ("run", "Popen", "command", "system", "execv", "mkdir", "rename", "replace", "chmod", "fchmod", "chown", "unlink", "rmdir"))]
+            self.assertEqual(forbidden, [], helper.name)
+        for selector, entry in (("installed-shell-tools-namespace-before", "shell_tools_namespace_snapshot"),
+                                ("installed-shell-tools-namespace-check", "shell_tools_namespace_check")):
+            self.assertEqual(source.count('elif sys.argv[1:] == ["' + selector + '"]:\n            ' + entry + "()"), 1)
+        snapshot = source.split("def shell_tools_input_snapshot(phase):", 1)[1].split("def shell_tools_inputs_for_observation", 1)[0]
+        self.assertLess(snapshot.index("must not repair a refused original"), snapshot.index("_shell_tools_namespace_result(root, before=document)"))
+        observation = source.split("def shell_tools_inputs_for_observation():", 1)[1].split("def _shell_tools_offline_observation", 1)[0]
+        self.assertIn('all(row["kind"] != "refused" for row in before["nodes"].values())', observation)
+        self.assertLess(observation.index("Actual Git/Python/JDK pair drifted"), observation.index("pins.update(_shell_tools_namespace_result(root, before=before))"))
+
+    def test_source_pins_read_only_the_two_fixed_original_bounded_leaves(self):
+        self.assertEqual(S.SHELL_TOOLS_NAMESPACE_SOURCES,
+                         {".github/workflows/desktop-ubuntu-publication.yml": 65536, "desktop/tools/ci_ubuntu_publication.py": 1048576})
+        calls = []
+        expected = tools_namespace_source_data()
+        def record(path, limit):
+            relative = str(path.relative_to(S.SOURCE)); calls.append((relative, limit))
+            row = next(row for row in expected if row["path"] == relative)
+            return {**row, "path": path.name}
+        with patch.object(S.D, "file_record", side_effect=record):
+            self.assertEqual(S._shell_tools_namespace_sources(), expected)
+        self.assertEqual(calls, list(S.SHELL_TOOLS_NAMESPACE_SOURCES.items()))
+
+    def test_pre_apt_check_binds_actual_current_namespace_and_never_runs_the_constructor(self):
+        env, root, identity, _, files = tools_namespace_data("preserve-create")
+        for fault in (None, "inode", "mode", "owner", "git", "alias", "parent"):
+            nodes = S.D.decode(files["before.json"])["nodes"]
+            if fault == "inode": nodes["/usr/lib/jvm"]["identity"][1] += 1
+            elif fault == "mode": nodes["/usr/lib/jvm"]["identity"][2] = stat.S_IFDIR | 0o777
+            elif fault == "owner": nodes["/usr/lib/jvm"]["identity"][3] = 1001
+            elif fault == "git": nodes["/usr/bin/git"]["sha256"] = "0" * 64
+            elif fault == "alias": nodes["/etc/alternatives/java"]["target"] = "/other"
+            elif fault == "parent": nodes["/usr/lib"]["identity"][1] += 1
+            with self.subTest(fault=fault), patch.dict(S.os.environ, env, clear=True), \
+                 patch.object(S, "shell_tools_input_root", return_value=root) as root_check, \
+                 patch.object(S, "directory_identity", return_value=identity), patch.object(S, "shell_tools_input_nodes", return_value=nodes), \
+                 patch.object(S, "_shell_tools_namespace_sources", return_value=tools_namespace_source_data()), \
+                 patch.object(S.D, "read", side_effect=tools_namespace_read(files)):
+                if fault is None: self.assertIsNone(S.shell_tools_namespace_check())
+                else:
+                    with self.assertRaises(S.D.Refused): S.shell_tools_namespace_check()
+                root_check.assert_called_once_with()
+
+    def test_exact_retained_n_failure_stays_failed_at_all_three_strict_gates(self):
+        # Run35977908596/1 original before bytes; no filesystem/artifact lookup in this fixture.
+        raw = b"{\"attempt\":\"1\",\"nodes\":{\"/\":{\"identity\":[2049,2,16877,0,0,23,4096,1790240000326184300,1790240000326184300],\"kind\":\"directory\"},\"/etc\":{\"identity\":[2049,42,16877,0,0,141,12288,1790240223664180264,1790240223664180264],\"kind\":\"directory\"},\"/etc/alternatives\":{\"identity\":[2049,142,16877,0,0,2,20480,1790240000125185814,1790240000125185814],\"kind\":\"directory\"},\"/etc/alternatives/java\":{\"identity\":[2049,26774,41471,0,0,1,42,1788816239112644255,1788816239119644148],\"kind\":\"symlink\",\"target\":\"/usr/lib/jvm/temurin-17-jdk-amd64/bin/java\"},\"/etc/alternatives/javac\":{\"identity\":[2049,26778,41471,0,0,1,43,1788816239121644118,1788816239131643967],\"kind\":\"symlink\",\"target\":\"/usr/lib/jvm/temurin-17-jdk-amd64/bin/javac\"},\"/usr\":{\"identity\":[2049,1703,16877,0,0,13,4096,1788815577361378084,1788815577361378084],\"kind\":\"directory\"},\"/usr/bin\":{\"identity\":[2049,1704,16877,0,0,2,69632,1790240221858167909,1790240221858167909],\"kind\":\"directory\"},\"/usr/bin/git\":{\"identity\":[2049,80618,33261,0,0,1,4576040,1786408018000000000,1788815929924713318],\"kind\":\"file\",\"path\":\"git\",\"sha256\":\"d4d2ba562243015206d4248edfec871a74786499292d00ed072dbca2f5ae8073\",\"size\":4576040},\"/usr/bin/java\":{\"identity\":[2049,26827,41471,0,0,1,22,1787152358000000000,1788816215176025079],\"kind\":\"symlink\",\"target\":\"/etc/alternatives/java\"},\"/usr/bin/javac\":{\"identity\":[2049,26832,41471,0,0,1,23,1787152359000000000,1788816215186024697],\"kind\":\"symlink\",\"target\":\"/etc/alternatives/javac\"},\"/usr/bin/python3.12\":{\"identity\":[2049,2112,33261,0,0,1,8025024,1784159201000000000,1787804317903610895],\"kind\":\"file\",\"path\":\"python3.12\",\"sha256\":\"a92f0f95e883390c7256b2e441484aac06b1002dbe1d924141a77c8d82f96223\",\"size\":8025024},\"/usr/lib\":{\"identity\":[2049,4243,16877,0,0,107,4096,1788816537255811338,1788816537255811338],\"kind\":\"directory\"},\"/usr/lib/jvm\":{\"identity\":[2049,3954169,16895,0,0,7,4096,1788816261237317659,1788816263267288505],\"kind\":\"refused\"},\"/usr/lib/jvm/java-17-openjdk-amd64\":{\"kind\":\"parent-unavailable\"},\"/usr/lib/jvm/java-17-openjdk-amd64/bin\":{\"kind\":\"parent-unavailable\"},\"/usr/lib/jvm/java-17-openjdk-amd64/bin/java\":{\"kind\":\"parent-unavailable\"},\"/usr/lib/jvm/java-17-openjdk-amd64/bin/javac\":{\"kind\":\"parent-unavailable\"}},\"originalStepExit\":null,\"packageQuery\":{\"exitCode\":1,\"stderr\":{\"sha256\":\"841d88eb2e59bfe3e1525b9f26cf8b8296f257d54b40383a265437016c672aa7\",\"size\":126},\"stdout\":{\"sha256\":\"4b8b4d9ad02fe88236849379cd4a5ef6b994e45044f4f8b06f57e4c3608b5094\",\"size\":158}},\"phase\":\"before\",\"qualified\":false,\"rootIdentity\":[2049,8937776,16832,1001,1001],\"runId\":\"35977908596\",\"schema\":\"fixed-disposable-shell-tools-inputs-v1\",\"sourceSha\":\"3c98fa240e1f7f692ea2123cbe7d16177427d9d3\"}\n"
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), "f590cbd15720a4632b3636cf210f568f075136adafa1dd157e5b42eef8d12630")
+        before = S.D.decode(raw); after = deepcopy(before); after.update(phase="after", originalStepExit=1)
+        after_raw = S.D.canonical(after)
+        self.assertEqual(hashlib.sha256(after_raw).hexdigest(), "115ba7598458ba16011bc5810b9bacb86ed5423a330ff41c1ccce2881c6c868f")
+        nodes = before["nodes"]; identity = tuple(before["rootIdentity"])
+        self.assertEqual(nodes["/usr/lib/jvm"], {"kind": "refused", "identity":
+                         [2049, 3954169, 16895, 0, 0, 7, 4096, 1788816261237317659, 1788816263267288505]})
+        for name in (S.SHELL_TOOLS_JDK_ROOT, S.SHELL_TOOLS_JDK_ROOT + "/bin", *S.SHELL_TOOLS_PROGRAMS[2:]):
+            self.assertEqual(nodes[name], {"kind": "parent-unavailable"})
+        package_raw = (b"git\tinstalled\t1:2.55.0-0ppa1~ubuntu24.04.2\tamd64\tgit\t1:2.55.0-0ppa1~ubuntu24.04.2\n"
+                       b"python3.12\tinstalled\t3.12.3-1ubuntu0.16\tamd64\tpython3.12\t3.12.3-1ubuntu0.16\n")
+        self.assertEqual(hashlib.sha256(package_raw).hexdigest(), "4b8b4d9ad02fe88236849379cd4a5ef6b994e45044f4f8b06f57e4c3608b5094")
+        files = {"before.json": raw, "after.json": after_raw}
+        for phase in ("before", "after"):
+            files.update({phase + "-packages.tsv": package_raw, phase + "-packages.stderr": S.SHELL_TOOLS_JDK_MISSING,
+                          phase + "-packages.exit": b"1\n"})
+        env, _, _, _, _ = tools_preparation_data()
+        env.update(GITHUB_SHA=before["sourceSha"], GITHUB_RUN_ID=before["runId"], GITHUB_RUN_ATTEMPT=before["attempt"],
+                   MRK_SHELL_TOOLS_PREPARATION_EXIT="1")
+        root = Path("/tmp/mrk-desktop-tools-35977908596-1")
+        with patch.dict(S.os.environ, env, clear=True), patch.object(S, "shell_tools_input_root", return_value=root), \
+             patch.object(S, "directory_identity", return_value=identity), patch.object(S, "shell_tools_input_nodes", return_value=nodes), \
+             patch.object(S.D, "read", side_effect=tools_namespace_read(files)), \
+             patch.object(S, "_shell_tools_namespace_result", return_value={"would-not-waive-original": True}) as namespace:
+            for phase, reason in (("before", "must not repair a refused original"), ("after", "directory or package query failed")):
+                with self.subTest(phase=phase), patch.object(S.D, "write") as writing:
+                    with self.assertRaisesRegex(S.D.Refused, reason): S.shell_tools_input_snapshot(phase)
+                    writing.assert_called_once_with(root / (phase + ".json"), files[phase + ".json"])
+                    namespace.assert_not_called()
+            with self.assertRaisesRegex(S.D.Refused, "original preparation failed"):
+                S.shell_tools_inputs_for_observation()
+            namespace.assert_not_called()
 
 
 class InstalledFailureLabelSourceContracts(unittest.TestCase):

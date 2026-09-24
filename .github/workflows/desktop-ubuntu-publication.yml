@@ -95,6 +95,369 @@ jobs:
           }
           trap finish_tools_inputs EXIT
           query_packages before
+          # Preserve the actual unprepared namespace separately; never relabel it as strict before.
+          /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed-shell-tools-namespace-before
+          set +e
+          (
+            set -e
+            ulimit -v 262144; ulimit -t 15; ulimit -n 64; ulimit -c 0; ulimit -f 16
+            cd /
+            exec /usr/bin/sudo -n /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent \
+              GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+              RUNNER_OS="$RUNNER_OS" RUNNER_ARCH="$RUNNER_ARCH" ImageOS="$ImageOS" ImageVersion="$ImageVersion" \
+              GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" GITHUB_REF="$GITHUB_REF" GITHUB_JOB="$GITHUB_JOB" \
+              GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_SHA="$GITHUB_SHA" GITHUB_WORKFLOW_SHA="$GITHUB_WORKFLOW_SHA" \
+              GITHUB_WORKFLOW_REF="$GITHUB_WORKFLOW_REF" GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+              MRK_PUSH_EVENT_AFTER="$MRK_PUSH_EVENT_AFTER" MRK_INSTALLED_SHELL_CASE="$MRK_INSTALLED_SHELL_CASE" \
+              MRK_UBUNTU_PUBLICATION_VERIFY="$MRK_UBUNTU_PUBLICATION_VERIFY" GITHUB_WORKSPACE="$GITHUB_WORKSPACE" RUNNER_TEMP="$RUNNER_TEMP" \
+              /usr/bin/timeout --signal=TERM --kill-after=2s 30s /usr/bin/python3.12 -I -S -B - <<'MRK_JVM_NAMESPACE'
+          # Fixed disposable JVM namespace constructor. No checkout code is imported.
+          import hashlib, json, os, re, select, signal, stat, subprocess, sys, time
+
+          PARENTS = ("/", "/usr", "/usr/bin", "/usr/lib", "/etc", "/etc/alternatives")
+          SOURCES = ((".github/workflows/desktop-ubuntu-publication.yml", 65536),
+                     ("desktop/tools/ci_ubuntu_publication.py", 1048576))
+          MISSING = (b"dpkg-query: no packages found matching openjdk-17-jdk-headless\n"
+                     b"dpkg-query: no packages found matching openjdk-17-jre-headless\n")
+          fds, directories, leaves = [], {}, []
+          report = {"schema": "fixed-disposable-shell-jvm-namespace-result-v1", "qualified": False,
+                    "sourceSha": None, "runId": None, "attempt": None, "root": None, "rootIdentity": None,
+                    "source": None, "sourceFiles": [], "namespaceBefore": None, "disposition": None,
+                    "stage": "envelope", "parents": {}, "original": None, "preservation": None,
+                    "preserved": None, "fresh": None, "query": None,
+                    "actions": {"preservationCreated": False, "renameReturned": False, "freshCreated": False},
+                    "originalFdsClosed": False, "completed": False, "failure": None}
+          deadline = time.monotonic() + 20
+          def need(value):
+              if not value:
+                  raise RuntimeError("fixed namespace prerequisite")
+          def canonical(value):
+              return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("ascii") + b"\n"
+          def same(left, right):
+              return canonical(left) == canonical(right)
+          def identity(s):
+              return [s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid, s.st_nlink, s.st_size, s.st_mtime_ns, s.st_ctime_ns]
+          def parts(path):
+              need(type(path) is str and path.startswith("/") and len(path) <= 4096 and path.isascii()
+                   and all(32 <= ord(c) < 127 for c in path))
+              result = path.split("/")[1:] if path != "/" else []
+              need(all(item not in ("", ".", "..") for item in result))
+              return result
+          def opened(fd):
+              fds.append(fd)
+              need(not os.get_inheritable(fd))
+              return fd
+          def directory(path):
+              if path in directories:
+                  return directories[path][0]
+              names = parts(path)
+              if not names:
+                  fd = opened(os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC))
+              else:
+                  parent = directory("/" + "/".join(names[:-1]) if len(names) > 1 else "/")
+                  before = os.stat(names[-1], dir_fd=parent, follow_symlinks=False)
+                  need(stat.S_ISDIR(before.st_mode))
+                  fd = opened(os.open(names[-1], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent))
+                  need(same(identity(before), identity(os.fstat(fd))))
+              directories[path] = (fd, identity(os.fstat(fd)))
+              return fd
+          def read_file(parent, name, limit):
+              before = os.stat(name, dir_fd=parent, follow_symlinks=False)
+              need(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and 0 <= before.st_size <= limit)
+              fd = opened(os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=parent))
+              original = identity(before)
+              need(same(original, identity(os.fstat(fd))))
+              chunks, left = [], before.st_size + 1
+              while left:
+                  part = os.read(fd, min(left, 65536))
+                  if not part:
+                      break
+                  chunks.append(part); left -= len(part)
+              raw = b"".join(chunks)
+              need(len(raw) == before.st_size and same(original, identity(os.fstat(fd)))
+                   and same(original, identity(os.stat(name, dir_fd=parent, follow_symlinks=False))))
+              leaves.append((parent, name, fd, original))
+              return raw, original
+          def check_originals():
+              need(time.monotonic() < deadline)
+              for path, (fd, original) in directories.items():
+                  current = identity(os.fstat(fd))
+                  need(same(current[:5], original[:5]))
+                  names = parts(path)
+                  named = os.stat(names[-1], dir_fd=directories["/" + "/".join(names[:-1]) if len(names) > 1 else "/"][0],
+                                  follow_symlinks=False) if names else os.stat("/", follow_symlinks=False)
+                  need(same(identity(named)[:5], original[:5]))
+              for parent, name, fd, original in leaves:
+                  need(same(identity(os.fstat(fd)), original)
+                       and same(identity(os.stat(name, dir_fd=parent, follow_symlinks=False)), original))
+          def public_program(name):
+              raw, original = read_file(directories["/usr/bin"][0], name, 16 << 20)
+              need(original[3:5] == [0, 0] and stat.S_ISREG(original[2]) and original[2] & 0o6022 == 0
+                   and original[2] & 0o111 == 0o111 and original[5] == 1 and len(raw) > 0)
+              return {"kind": "file", "identity": original, "path": name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+          def alias(path):
+              names = parts(path); parent = directories["/" + "/".join(names[:-1])][0]
+              try:
+                  before = os.stat(names[-1], dir_fd=parent, follow_symlinks=False)
+              except FileNotFoundError:
+                  return {"kind": "absent"}
+              need(stat.S_ISLNK(before.st_mode) and before.st_uid == before.st_gid == 0
+                   and before.st_nlink == 1 and 0 < before.st_size <= 4096)
+              target = os.readlink(names[-1], dir_fd=parent)
+              need(target.isascii() and all(32 <= ord(c) < 127 for c in target) and len(target) == before.st_size
+                   and same(identity(before), identity(os.stat(names[-1], dir_fd=parent, follow_symlinks=False))))
+              return {"kind": "symlink", "identity": identity(before), "target": target}
+          def absent(parent, name):
+              try:
+                  os.stat(name, dir_fd=parent, follow_symlinks=False)
+              except FileNotFoundError:
+                  return True
+              return False
+          def stopped(signum, frame):
+              raise RuntimeError("original constructor stopped")
+          signal.signal(signal.SIGTERM, stopped)
+          signal.signal(signal.SIGINT, stopped)
+
+          def absent_pair_query():
+              # One fixed ordinary query, bounded drains and ORIGINAL wait/pipe closes.
+              q = {"stdout": "", "stderr": "", "exitCode": None, "originalReturned": False,
+                   "stdoutEof": False, "stderrEof": False, "streamsClosed": False, "stopSent": False}
+              report["query"] = q
+              buffers, streams, pending, child = {"stdout": bytearray(), "stderr": bytearray()}, [], {}, None
+              failed = False
+              try:
+                  public_program("dpkg-query")
+                  check_originals()
+                  end = min(deadline, time.monotonic() + 10)
+                  child = subprocess.Popen(["/usr/bin/dpkg-query", "-W", "-f=${binary:Package}\t${db:Status-Status}\t${Version}\t${Architecture}\t${source:Package}\t${source:Version}\n",
+                                            "openjdk-17-jdk-headless", "openjdk-17-jre-headless"],
+                                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                           cwd="/", env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", "TZ": "UTC", "HOME": "/nonexistent"},
+                                           close_fds=True)
+                  streams = [child.stdout, child.stderr]
+                  for name, stream in zip(("stdout", "stderr"), streams):
+                      fd = stream.fileno(); os.set_blocking(fd, False); pending[fd] = name
+                  while pending:
+                      left = end - time.monotonic()
+                      need(left > 0)
+                      ready, _, _ = select.select(list(pending), [], [], left)
+                      need(ready)
+                      for fd in ready:
+                          name = pending[fd]
+                          try:
+                              part = os.read(fd, 4097 - len(buffers[name]))
+                          except BlockingIOError:
+                              continue
+                          if not part:
+                              q[name + "Eof"] = True; del pending[fd]
+                          else:
+                              buffers[name].extend(part)
+                              need(len(buffers[name]) <= 4096)
+                  q["exitCode"] = child.wait(timeout=max(0.001, end - time.monotonic()))
+                  q["originalReturned"] = True
+              except BaseException:
+                  failed = True
+                  if child is not None and not q["originalReturned"]:
+                      # Only this exact owned query may be stopped. No host process search.
+                      try:
+                          child.kill(); q["stopSent"] = True
+                      except ProcessLookupError:
+                          pass
+                      except BaseException:
+                          failed = True
+                      try:
+                          q["exitCode"] = child.wait(timeout=2)
+                          q["originalReturned"] = True
+                      except BaseException:
+                          failed = True
+              finally:
+                  closed = len(streams) == 2
+                  for stream in streams:
+                      try:
+                          stream.close()  # One consuming close; never retry an uncertain return.
+                      except BaseException:
+                          closed = False
+                  q["streamsClosed"] = closed
+                  for name in buffers:
+                      q[name] = bytes(buffers[name]).decode("ascii", errors="replace")
+              need(not failed and q["originalReturned"] and q["streamsClosed"] and not q["stopSent"]
+                   and q["stdoutEof"] and q["stderrEof"] and q["exitCode"] == 1
+                   and bytes(buffers["stdout"]) == b"" and bytes(buffers["stderr"]) == MISSING)
+              check_originals()
+
+          try:
+              need(sys.argv == ["-"] and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode
+                   and sys.platform == "linux" and sys.version_info[:2] == (3, 12) and os.uname().machine == "x86_64"
+                   and os.getuid() == os.geteuid() == os.getgid() == os.getegid() == 0 and os.getcwd() == "/")
+              env = os.environ
+              expected = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Linux",
+                          "RUNNER_ARCH": "X64", "ImageOS": "ubuntu24", "GITHUB_EVENT_NAME": "push",
+                          "GITHUB_REF": "refs/heads/verify/desktop-installed-shell", "GITHUB_JOB": "compile",
+                          "GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit", "MRK_INSTALLED_SHELL_CASE": "compile",
+                          "MRK_UBUNTU_PUBLICATION_VERIFY": "1"}
+              need(all(env.get(key) == value for key, value in expected.items()))
+              sha, run, attempt = (env.get(key, "") for key in ("GITHUB_SHA", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"))
+              need(re.fullmatch(r"[0-9a-f]{40}", sha) is not None and sha != "0" * 40
+                   and env.get("GITHUB_WORKFLOW_SHA") == env.get("MRK_PUSH_EVENT_AFTER") == sha
+                   and env.get("GITHUB_WORKFLOW_REF") == expected["GITHUB_REPOSITORY"] + "/.github/workflows/desktop-ubuntu-publication.yml@" + expected["GITHUB_REF"]
+                   and all(re.fullmatch(r"[1-9][0-9]{0,19}", value) is not None for value in (run, attempt))
+                   and re.fullmatch(r"[0-9]{8}\.[0-9]{1,3}\.[0-9]{1,3}", env.get("ImageVersion", "")) is not None)
+              source, temporary = env.get("GITHUB_WORKSPACE", ""), env.get("RUNNER_TEMP", "")
+              parts(source); parts(temporary)
+              root = temporary + "/mrk-desktop-tools-" + run + "-" + attempt
+              report.update(sourceSha=sha, runId=run, attempt=attempt, root=root, source=source)
+              os.umask(0o077)
+              report["stage"] = "original-observation"
+              root_fd = directory(root)
+              root_identity = identity(os.fstat(root_fd))
+              need(root_identity[2] == stat.S_IFDIR | 0o700 and root_identity[3] > 0 and root_identity[4] > 0)
+              report["rootIdentity"] = root_identity[:5]
+              raw, _ = read_file(root_fd, "namespace-before.json", 65536)
+              def unique(items):
+                  value = {}
+                  for key, item in items:
+                      need(key not in value); value[key] = item
+                  return value
+              original = json.loads(raw, object_pairs_hook=unique)
+              need(type(original) is dict and set(original) == {"schema", "qualified", "source", "sourceFiles", "snapshot"}
+                   and same(original, json.loads(canonical(original))) and canonical(original) == raw
+                   and original["schema"] == "fixed-disposable-shell-jvm-namespace-before-v1"
+                   and original["qualified"] is False and original["source"] == source)
+              snapshot = original["snapshot"]
+              need(type(snapshot) is dict and set(snapshot) == {"schema", "phase", "qualified", "sourceSha", "runId", "attempt",
+                   "rootIdentity", "originalStepExit", "nodes", "packageQuery"} and snapshot["schema"] == "fixed-disposable-shell-tools-inputs-v1"
+                   and snapshot["phase"] == "namespace-before" and snapshot["qualified"] is False and snapshot["originalStepExit"] is None
+                   and snapshot["sourceSha"] == sha and snapshot["runId"] == run and snapshot["attempt"] == attempt
+                   and same(snapshot["rootIdentity"], root_identity[:5]))
+              report["namespaceBefore"] = {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+              for path, limit in SOURCES:
+                  parent, name = (source + "/" + path).rsplit("/", 1)
+                  body, _ = read_file(directory(parent), name, limit)
+                  report["sourceFiles"].append({"path": path, "size": len(body), "sha256": hashlib.sha256(body).hexdigest()})
+              need(same(report["sourceFiles"], original["sourceFiles"]))
+              nodes = snapshot["nodes"]
+              node_names = set(PARENTS) | {"/usr/lib/jvm", "/usr/lib/jvm/java-17-openjdk-amd64",
+                  "/usr/lib/jvm/java-17-openjdk-amd64/bin", "/usr/bin/git", "/usr/bin/python3.12",
+                  "/usr/lib/jvm/java-17-openjdk-amd64/bin/java", "/usr/lib/jvm/java-17-openjdk-amd64/bin/javac",
+                  "/usr/bin/java", "/usr/bin/javac", "/etc/alternatives/java", "/etc/alternatives/javac"}
+              need(type(nodes) is dict and set(nodes) == node_names)
+              for path in PARENTS:
+                  current = identity(os.fstat(directory(path)))
+                  need(stat.S_ISDIR(current[2]) and current[2] & 0o022 == 0 and current[2] & 0o005 == 0o005
+                       and current[3:5] == [0, 0] and set(nodes[path]) == {"kind", "identity"}
+                       and nodes[path]["kind"] == "directory" and same(current[:5], nodes[path]["identity"][:5]))
+                  report["parents"][path] = current
+              for name in ("git", "python3.12"):
+                  need(same(public_program(name), nodes["/usr/bin/" + name]))
+              aliases = ("/usr/bin/java", "/usr/bin/javac", "/etc/alternatives/java", "/etc/alternatives/javac")
+              need(all(same(alias(path), nodes[path]) for path in aliases))
+              lib_fd = directories["/usr/lib"][0]
+              if absent(lib_fd, "jvm"):
+                  need(nodes["/usr/lib/jvm"] == {"kind": "absent"})
+                  report["disposition"] = "absent"
+                  old_fd = None
+              else:
+                  old_fd = opened(os.open("jvm", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=lib_fd))
+                  old = identity(os.fstat(old_fd)); report["original"] = old
+                  need(same(old, identity(os.stat("jvm", dir_fd=lib_fd, follow_symlinks=False))) and old[3:5] == [0, 0])
+                  protected = stat.S_ISDIR(old[2]) and old[2] & 0o022 == 0 and old[2] & 0o005 == 0o005
+                  report["disposition"] = "protected" if protected else "preserve-create"
+                  need(same(nodes["/usr/lib/jvm"], {"kind": "directory" if protected else "refused", "identity": old}))
+                  if not protected:
+                      need(old[2] == stat.S_IFDIR | 0o777)
+                      need(all(nodes[path] == {"kind": "parent-unavailable"} for path in node_names if path.startswith("/usr/lib/jvm/")))
+                      report["stage"] = "package-query"
+                      absent_pair_query()
+              check_originals()
+              need(all(same(alias(path), nodes[path]) for path in aliases))
+              if old_fd is None:
+                  need(absent(lib_fd, "jvm"))
+              else:
+                  need(same(identity(os.fstat(old_fd)), report["original"])
+                       and same(identity(os.stat("jvm", dir_fd=lib_fd, follow_symlinks=False)), report["original"]))
+              if report["disposition"] == "preserve-create":
+                  report["stage"] = "preservation-mkdir"
+                  preservation_name = "mrk-desktop-jvm-original-" + run + "-" + attempt
+                  os.mkdir(preservation_name, 0o700, dir_fd=lib_fd)  # Exclusive; never adopt a collision.
+                  report["actions"]["preservationCreated"] = True
+                  preserved_parent = opened(os.open(preservation_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=lib_fd))
+                  parent_id = identity(os.fstat(preserved_parent))
+                  report["preservation"] = {"path": "/usr/lib/" + preservation_name, "identity": parent_id}
+                  need(parent_id[2:5] == [stat.S_IFDIR | 0o700, 0, 0] and parent_id[0] == old[0] == report["parents"]["/usr/lib"][0]
+                       and parent_id[:2] != old[:2] and same(parent_id, identity(os.stat(preservation_name, dir_fd=lib_fd, follow_symlinks=False)))
+                       and absent(preserved_parent, "jvm"))
+                  check_originals()
+                  need(same(identity(os.fstat(old_fd)), old) and same(identity(os.stat("jvm", dir_fd=lib_fd, follow_symlinks=False)), old))
+                  report["stage"] = "preservation-rename"
+                  os.rename("jvm", "jvm", src_dir_fd=lib_fd, dst_dir_fd=preserved_parent)
+                  report["actions"]["renameReturned"] = True
+                  report["preserved"] = identity(os.stat("jvm", dir_fd=preserved_parent, follow_symlinks=False))
+                  need(same(report["preserved"][:5], old[:5]) and same(identity(os.fstat(old_fd))[:5], old[:5]) and absent(lib_fd, "jvm"))
+                  check_originals()
+                  report["stage"] = "fresh-mkdir"
+                  os.mkdir("jvm", 0o755, dir_fd=lib_fd)  # Only a returned exclusive creation may be chmodded.
+                  report["actions"]["freshCreated"] = True
+                  fresh_fd = opened(os.open("jvm", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=lib_fd))
+                  fresh = identity(os.fstat(fresh_fd)); report["fresh"] = fresh
+                  need(stat.S_ISDIR(fresh[2]) and fresh[3:5] == [0, 0] and fresh[0] == old[0]
+                       and len({tuple(old[:2]), tuple(parent_id[:2]), tuple(fresh[:2])}) == 3
+                       and same(fresh, identity(os.stat("jvm", dir_fd=lib_fd, follow_symlinks=False))))
+                  report["stage"] = "fresh-mode"
+                  os.fchmod(fresh_fd, 0o755)  # Newly created held inode ONLY; never the old or an adopted path.
+                  fresh = identity(os.fstat(fresh_fd)); report["fresh"] = fresh
+                  need(fresh[2:5] == [stat.S_IFDIR | 0o755, 0, 0]
+                       and same(fresh, identity(os.stat("jvm", dir_fd=lib_fd, follow_symlinks=False))))
+                  report["preservation"]["identity"] = identity(os.fstat(preserved_parent))
+                  report["preserved"] = identity(os.stat("jvm", dir_fd=preserved_parent, follow_symlinks=False))
+                  need(same(report["preservation"]["identity"][:5], parent_id[:5])
+                       and same(identity(os.stat(preservation_name, dir_fd=lib_fd, follow_symlinks=False))[:5], parent_id[:5])
+                       and same(report["preserved"][:5], old[:5]) and same(identity(os.fstat(old_fd))[:5], old[:5]))
+              report["stage"] = "final-bindings"
+              check_originals()
+              need(all(same(alias(path), nodes[path]) for path in aliases))
+              if report["disposition"] == "preserve-create":
+                  need(same(identity(os.fstat(fresh_fd))[:5], fresh[:5])
+                       and same(identity(os.stat("jvm", dir_fd=lib_fd, follow_symlinks=False))[:5], fresh[:5])
+                       and same(identity(os.fstat(preserved_parent))[:5], parent_id[:5])
+                       and same(identity(os.stat(preservation_name, dir_fd=lib_fd, follow_symlinks=False))[:5], parent_id[:5])
+                       and same(identity(os.stat("jvm", dir_fd=preserved_parent, follow_symlinks=False))[:5], old[:5]))
+              elif old_fd is None:
+                  need(absent(lib_fd, "jvm"))
+              else:
+                  need(same(identity(os.fstat(old_fd)), report["original"])
+                       and same(identity(os.stat("jvm", dir_fd=lib_fd, follow_symlinks=False)), report["original"]))
+          except BaseException:
+              report["failure"] = report["stage"]
+          finally:
+              # Retire each original FD before its sole close. Unknown close means failure.
+              close_ok = True
+              while fds:
+                  fd = fds.pop()
+                  try:
+                      os.close(fd)
+                  except BaseException:
+                      close_ok = False
+              report["originalFdsClosed"] = close_ok
+              if not close_ok:
+                  report["failure"] = report["failure"] or "original-fd-close"
+          if report["failure"] is None and time.monotonic() >= deadline:
+              report["failure"] = "original-deadline"
+          if report["failure"] is None:
+              report["completed"] = True; report["stage"] = "complete"
+          try:
+              output = canonical(report)
+              need(len(output) <= 16384 and os.write(1, output) == len(output))
+          except BaseException:
+              raise SystemExit(1)
+          raise SystemExit(0 if report["completed"] else 1)
+
+          MRK_JVM_NAMESPACE
+          ) > "$root/namespace.stdout" 2> "$root/namespace.stderr"
+          namespace_status=$?
+          set -e
+          printf '%s\n' "$namespace_status" > "$root/namespace.exit"
+          [[ "$namespace_status" == 0 ]]
+          /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed-shell-tools-namespace-check
           pair=$(/usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed-shell-tools-before)
           case "$pair" in
             absent)

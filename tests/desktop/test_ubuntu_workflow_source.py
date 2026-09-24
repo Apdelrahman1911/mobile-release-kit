@@ -152,5 +152,245 @@ class HostedWorkflowSource(unittest.TestCase):
         self.assertEqual(paths.count(PROVISIONER), 1)
 
 
+class JvmNamespaceWorkflowSource(unittest.TestCase):
+    def _program(self):
+        """Extract SOURCE only. This literal is never imported, compiled or run."""
+        workflow = WORKFLOW.read_text()
+        marker, end = "<<'MRK_JVM_NAMESPACE'\n", "          MRK_JVM_NAMESPACE\n"
+        self.assertEqual(workflow.count(marker), 1); self.assertEqual(workflow.count(end), 1)
+        before, rest = workflow.split(marker, 1); body, after = rest.split(end, 1)
+        self.assertTrue(all(not line or line.startswith("          ") for line in body.splitlines()))
+        return workflow, before, "\n".join(line[10:] for line in body.splitlines()) + "\n", after
+
+    def test_namespace_prephase_retains_original_status_and_gates_strict_before_and_apt(self):
+        workflow, _, _, after = self._program()
+        step = workflow.split("      - name: Prepare the fixed JDK17 pair only on this disposable shell runner\n", 1)[1].split("      - name:", 1)[0]
+        sequence = ("query_packages before", "installed-shell-tools-namespace-before", "exec /usr/bin/sudo -n",
+                    "namespace_status=$?", "printf '%s\\n' \"$namespace_status\" > \"$root/namespace.exit\"",
+                    '[[ "$namespace_status" == 0 ]]', "installed-shell-tools-namespace-check",
+                    "installed-shell-tools-before", 'case "$pair" in', "/usr/bin/apt-get", "/usr/bin/update-alternatives --set java",
+                    "/usr/bin/update-alternatives --set javac")
+        positions = [step.index(token) for token in sequence]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(step.count("query_packages before"), 1)
+        self.assertEqual(step.count("installed-shell-tools-namespace-before"), 1)
+        self.assertEqual(step.count("installed-shell-tools-namespace-check"), 1)
+        self.assertIn('          ) > "$root/namespace.stdout" 2> "$root/namespace.stderr"\n'
+                      '          namespace_status=$?\n          set -e\n'
+                      '          printf \'%s\\n\' "$namespace_status" > "$root/namespace.exit"\n'
+                      '          [[ "$namespace_status" == 0 ]]\n', after)
+        prefix = step.split("exec /usr/bin/sudo -n", 1)[0]
+        self.assertIn("installed-shell-tools-namespace-before\n          set +e\n          (\n            set -e\n", prefix)
+        self.assertIn("          trap finish_tools_inputs EXIT\n          query_packages before\n", prefix)
+        self.assertIn('if [[ "$original" != 0 ]]; then exit "$original"; fi', step)
+        self.assertIn('exit "$snapshot"', step)
+        for forbidden in ("continue-on-error", "|| true", "namespace_status=0", "trap restore", "--reinstall"):
+            self.assertNotIn(forbidden, step)
+
+    def test_literal_constructor_has_only_stdlib_and_the_closed_host_source_envelope(self):
+        _, before, program, _ = self._program()
+        tree = ast.parse(program)
+        imports = [node for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom))]
+        self.assertEqual(len(imports), 1); self.assertIsInstance(imports[0], ast.Import)
+        self.assertEqual([alias.name for alias in imports[0].names],
+                         ["hashlib", "json", "os", "re", "select", "signal", "stat", "subprocess", "sys", "time"])
+        self.assertTrue(all(alias.asname is None for alias in imports[0].names))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                self.assertNotIn(ast.unparse(node.func),
+                                 {"exec", "eval", "compile", "__import__", "importlib.import_module", "os.system", "os.execv", "subprocess.run"})
+        invocation = before.rsplit("exec /usr/bin/sudo -n /usr/bin/env -i ", 1)[1]
+        self.assertIn("/usr/bin/timeout --signal=TERM --kill-after=2s 30s /usr/bin/python3.12 -I -S -B - ", invocation)
+        environment = invocation.split("/usr/bin/timeout", 1)[0]
+        keys = re.findall(r"(?:^|\s)([A-Za-z_][A-Za-z0-9_]*)=", environment)
+        expected_keys = {"PATH", "LANG", "LC_ALL", "TZ", "HOME", "GITHUB_ACTIONS", "RUNNER_ENVIRONMENT",
+                         "RUNNER_OS", "RUNNER_ARCH", "ImageOS", "ImageVersion", "GITHUB_EVENT_NAME", "GITHUB_REF", "GITHUB_JOB",
+                         "GITHUB_REPOSITORY", "GITHUB_SHA", "GITHUB_WORKFLOW_SHA", "GITHUB_WORKFLOW_REF",
+                         "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "MRK_PUSH_EVENT_AFTER", "MRK_INSTALLED_SHELL_CASE",
+                         "MRK_UBUNTU_PUBLICATION_VERIFY", "GITHUB_WORKSPACE", "RUNNER_TEMP"}
+        self.assertEqual(set(keys), expected_keys); self.assertEqual(len(keys), len(expected_keys))
+        for key in expected_keys - {"PATH", "LANG", "LC_ALL", "TZ", "HOME"}:
+            self.assertIn(key + '="$' + key + '"', environment)
+        self.assertIn("PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent", environment)
+        self.assertNotIn("desktop/tools/", invocation)
+        expected = next(node for node in ast.walk(tree) if isinstance(node, ast.Assign)
+                        and any(isinstance(target, ast.Name) and target.id == "expected" for target in node.targets))
+        self.assertEqual(ast.literal_eval(expected.value),
+                         {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Linux", "RUNNER_ARCH": "X64",
+                          "ImageOS": "ubuntu24", "GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/verify/desktop-installed-shell",
+                          "GITHUB_JOB": "compile", "GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit",
+                          "MRK_INSTALLED_SHELL_CASE": "compile", "MRK_UBUNTU_PUBLICATION_VERIFY": "1"})
+        for token in ('sys.argv == ["-"]', "sys.flags.isolated", "sys.flags.no_site", "sys.dont_write_bytecode",
+                      'sys.platform == "linux"', "sys.version_info[:2] == (3, 12)", 'os.uname().machine == "x86_64"',
+                      'os.getuid() == os.geteuid() == os.getgid() == os.getegid() == 0', 'os.getcwd() == "/"',
+                      'env.get("GITHUB_WORKFLOW_SHA") == env.get("MRK_PUSH_EVENT_AFTER") == sha',
+                      'env.get("GITHUB_WORKFLOW_REF") == expected["GITHUB_REPOSITORY"]',
+                      're.fullmatch(r"[1-9][0-9]{0,19}", value)', 're.fullmatch(r"[0-9a-f]{40}", sha)',
+                      're.fullmatch(r"[0-9]{8}\\.[0-9]{1,3}\\.[0-9]{1,3}", env.get("ImageVersion", ""))',
+                      'all(item not in ("", ".", "..") for item in result)', 'same(report["sourceFiles"], original["sourceFiles"])'):
+            self.assertIn(token, program)
+        for forbidden in ("importlib", "exec_module", "runpy", "sys.path", "apt-get", "update-alternatives", "JAVA_HOME"):
+            self.assertNotIn(forbidden, program)
+
+    def test_one_fixed_package_query_has_bounded_original_wait_eofs_closes_and_failure_latch(self):
+        _, before, program, _ = self._program()
+        tree = ast.parse(program)
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+        popen = [node for node in calls if ast.unparse(node.func) == "subprocess.Popen"]
+        self.assertEqual(len(popen), 1); call = popen[0]
+        self.assertEqual(ast.literal_eval(call.args[0]),
+                         ["/usr/bin/dpkg-query", "-W", "-f=${binary:Package}\t${db:Status-Status}\t${Version}\t${Architecture}\t${source:Package}\t${source:Version}\n",
+                          "openjdk-17-jdk-headless", "openjdk-17-jre-headless"])
+        keywords = {item.arg: item.value for item in call.keywords}
+        self.assertEqual(set(keywords), {"stdin", "stdout", "stderr", "cwd", "env", "close_fds"})
+        for key, expected in (("stdin", "subprocess.DEVNULL"), ("stdout", "subprocess.PIPE"), ("stderr", "subprocess.PIPE")):
+            self.assertEqual(ast.unparse(keywords[key]), expected)
+        self.assertEqual(ast.literal_eval(keywords["cwd"]), "/"); self.assertIs(ast.literal_eval(keywords["close_fds"]), True)
+        self.assertEqual(ast.literal_eval(keywords["env"]), {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", "TZ": "UTC", "HOME": "/nonexistent"})
+        waits = [node for node in calls if ast.unparse(node.func) == "child.wait"]
+        self.assertEqual(len(waits), 2)
+        self.assertEqual(sum(isinstance(item.value, ast.Constant) and item.arg == "timeout" and item.value.value == 2
+                             for node in waits for item in node.keywords), 1)
+        self.assertEqual(sum(ast.unparse(node.func) == "child.kill" for node in calls), 1)
+        for forbidden in ("os.kill", "os.killpg", "signal.raise_signal", "subprocess.call", "subprocess.check_output"):
+            self.assertFalse(any(ast.unparse(node.func) == forbidden for node in calls))
+        query = program.split("def absent_pair_query():", 1)[1].split("\ntry:\n", 1)[0]
+        for token in ('public_program("dpkg-query")', "end = min(deadline, time.monotonic() + 10)",
+                      "os.set_blocking(fd, False)", "select.select(list(pending), [], [], left)",
+                      "os.read(fd, 4097 - len(buffers[name]))", "need(len(buffers[name]) <= 4096)",
+                      'q[name + "Eof"] = True', 'q["exitCode"] = child.wait(timeout=max(0.001, end - time.monotonic()))',
+                      'q["originalReturned"] = True', 'failed = True', 'child.kill(); q["stopSent"] = True',
+                      'q["exitCode"] = child.wait(timeout=2)', "stream.close()", 'q["streamsClosed"] = closed',
+                      'need(not failed and q["originalReturned"] and q["streamsClosed"] and not q["stopSent"]',
+                      'q["stdoutEof"] and q["stderrEof"] and q["exitCode"] == 1',
+                      'bytes(buffers["stdout"]) == b"" and bytes(buffers["stderr"]) == MISSING'):
+            self.assertIn(token, query)
+        self.assertLess(query.index("failed = True"), query.index("child.kill()"))
+        self.assertLess(query.index('q["exitCode"] = child.wait(timeout=2)'), query.index("stream.close()"))
+        self.assertEqual(program.count("absent_pair_query()"), 2)  # Definition and one reached fixed call.
+        self.assertIn("ulimit -v 262144; ulimit -t 15; ulimit -n 64; ulimit -c 0; ulimit -f 16", before)
+        self.assertEqual(program.count("deadline = time.monotonic() + 20"), 1)
+        self.assertIn("check_originals()\n    need(all(same(alias(path), nodes[path]) for path in aliases))", program)
+
+    def test_effects_are_one_exclusive_dirfd_rename_then_a_distinct_new_inode_only(self):
+        _, _, program, _ = self._program(); tree = ast.parse(program)
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+        effects = {name: [node for node in calls if ast.unparse(node.func) == "os." + name] for name in ("mkdir", "rename", "fchmod")}
+        self.assertEqual({name: len(nodes) for name, nodes in effects.items()}, {"mkdir": 2, "rename": 1, "fchmod": 1})
+        rename = effects["rename"][0]
+        self.assertEqual([ast.literal_eval(arg) for arg in rename.args], ["jvm", "jvm"])
+        self.assertEqual({item.arg: ast.unparse(item.value) for item in rename.keywords},
+                         {"src_dir_fd": "lib_fd", "dst_dir_fd": "preserved_parent"})
+        mkdirs = sorted(effects["mkdir"], key=lambda node: node.lineno)
+        self.assertEqual([ast.unparse(arg) for arg in mkdirs[0].args], ["preservation_name", "448"])
+        self.assertEqual(ast.literal_eval(mkdirs[1].args[0]), "jvm"); self.assertEqual(ast.literal_eval(mkdirs[1].args[1]), 0o755)
+        for node in mkdirs:
+            self.assertEqual({item.arg: ast.unparse(item.value) for item in node.keywords}, {"dir_fd": "lib_fd"})
+        chmod = effects["fchmod"][0]
+        self.assertEqual(ast.unparse(chmod.args[0]), "fresh_fd"); self.assertEqual(ast.literal_eval(chmod.args[1]), 0o755)
+        self.assertEqual(chmod.keywords, [])
+        guard = [node for node in ast.walk(tree) if isinstance(node, ast.If)
+                 and any(call is rename for call in ast.walk(node))]
+        self.assertEqual(len(guard), 1)
+        self.assertEqual(ast.unparse(guard[0].test), "report['disposition'] == 'preserve-create'")
+        self.assertTrue(all(any(child is call for child in ast.walk(guard[0])) for group in effects.values() for call in group))
+        forbidden = {"os.chmod", "os.chown", "os.fchown", "os.replace", "os.link", "os.symlink", "os.unlink", "os.remove", "os.rmdir",
+                     "os.listdir", "os.scandir", "os.walk", "shutil.copy", "shutil.copytree", "shutil.move", "shutil.rmtree"}
+        self.assertFalse(any(ast.unparse(node.func) in forbidden for node in calls))
+        order = ('os.mkdir(preservation_name, 0o700, dir_fd=lib_fd)', 'report["actions"]["preservationCreated"] = True',
+                 'preserved_parent = opened(os.open(preservation_name', 'absent(preserved_parent, "jvm")',
+                 'os.rename("jvm", "jvm", src_dir_fd=lib_fd, dst_dir_fd=preserved_parent)',
+                 'report["actions"]["renameReturned"] = True', 'report["preserved"] = identity(os.stat("jvm"',
+                 'os.mkdir("jvm", 0o755, dir_fd=lib_fd)', 'report["actions"]["freshCreated"] = True',
+                 'fresh_fd = opened(os.open("jvm"', 'len({tuple(old[:2]), tuple(parent_id[:2]), tuple(fresh[:2])}) == 3',
+                 'os.fchmod(fresh_fd, 0o755)')
+        positions = [program.index(token) for token in order]; self.assertEqual(positions, sorted(positions))
+        for token in ('need(old[2] == stat.S_IFDIR | 0o777)', 'old[3:5] == [0, 0]',
+                      'parent_id[2:5] == [stat.S_IFDIR | 0o700, 0, 0]',
+                      'fresh[2:5] == [stat.S_IFDIR | 0o755, 0, 0]',
+                      'same(report["preserved"][:5], old[:5])', 'same(identity(os.fstat(old_fd))[:5], old[:5])',
+                      'same(identity(os.stat("jvm", dir_fd=lib_fd, follow_symlinks=False))[:5], fresh[:5])',
+                      'same(identity(os.stat(preservation_name, dir_fd=lib_fd, follow_symlinks=False))[:5], parent_id[:5])'):
+            self.assertIn(token, program)
+        for forbidden_text in ("exist_ok", "FileExistsError", "except OSError", "copytree", "mount(", "umount", "restore", "retry"):
+            self.assertNotIn(forbidden_text, program.replace("never retry an uncertain return", ""))
+
+    def test_protected_and_absent_originals_are_noops_without_descendant_repair(self):
+        _, _, program, _ = self._program()
+        before_effect = program.split('if report["disposition"] == "preserve-create":', 1)[0]
+        self.assertIn('if absent(lib_fd, "jvm"):\n        need(nodes["/usr/lib/jvm"] == {"kind": "absent"})', before_effect)
+        self.assertIn('report["disposition"] = "absent"\n        old_fd = None', before_effect)
+        self.assertIn('protected = stat.S_ISDIR(old[2]) and old[2] & 0o022 == 0 and old[2] & 0o005 == 0o005', before_effect)
+        self.assertIn('report["disposition"] = "protected" if protected else "preserve-create"', before_effect)
+        self.assertIn('if not protected:\n            need(old[2] == stat.S_IFDIR | 0o777)', before_effect)
+        self.assertIn('need(all(nodes[path] == {"kind": "parent-unavailable"} for path in node_names if path.startswith("/usr/lib/jvm/")))', before_effect)
+        self.assertLess(before_effect.index("if not protected:"), before_effect.index("        absent_pair_query()"))
+        self.assertEqual(before_effect.count("        absent_pair_query()"), 1)
+        # Canonical absence/protection never silently becomes a newly chmodded original.
+        for token in ("os.mkdir(", "os.rename(", "os.fchmod("):
+            self.assertNotIn(token, before_effect)
+        self.assertIn('elif old_fd is None:\n        need(absent(lib_fd, "jvm"))', program)
+        self.assertIn('same(identity(os.fstat(old_fd)), report["original"])', program)
+        self.assertIn('same(identity(os.stat("jvm", dir_fd=lib_fd, follow_symlinks=False)), report["original"])', program)
+
+    def test_partial_effects_original_closes_and_output_failure_cannot_become_success(self):
+        _, _, program, _ = self._program(); tree = ast.parse(program)
+        report = next(node for node in tree.body if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == "report" for target in node.targets))
+        original = ast.literal_eval(report.value)
+        self.assertEqual(original["actions"], {"preservationCreated": False, "renameReturned": False, "freshCreated": False})
+        self.assertIs(original["completed"], False); self.assertIs(original["originalFdsClosed"], False); self.assertIs(original["qualified"], False)
+        for key in ("preservation", "preserved", "fresh", "query"):
+            self.assertIsNone(original[key])
+        self.assertIn('except BaseException:\n    report["failure"] = report["stage"]\nfinally:', program)
+        self.assertIn('while fds:\n        fd = fds.pop()\n        try:\n            os.close(fd)', program)
+        self.assertIn('except BaseException:\n            close_ok = False', program)
+        self.assertIn('report["failure"] = report["failure"] or "original-fd-close"', program)
+        self.assertIn('if report["failure"] is None and time.monotonic() >= deadline:', program)
+        self.assertIn('if report["failure"] is None:\n    report["completed"] = True; report["stage"] = "complete"', program)
+        self.assertIn('need(len(output) <= 16384 and os.write(1, output) == len(output))', program)
+        self.assertIn('except BaseException:\n    raise SystemExit(1)', program)
+        self.assertIn('raise SystemExit(0 if report["completed"] else 1)', program)
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+        self.assertEqual(sum(ast.unparse(node.func) == "os.close" for node in calls), 1)
+        self.assertEqual(sum(ast.unparse(node.func) == "os.write" for node in calls), 1)
+        self.assertEqual(program.count('report["completed"] = True'), 1)
+        # Every write/rename/collision failure keeps the reached stage and fails;
+        # no handler adopts, restores, deletes, retries, or issues an APT command.
+        handlers = [node for node in ast.walk(tree) if isinstance(node, ast.ExceptHandler)]
+        for handler in handlers:
+            for node in ast.walk(handler):
+                if isinstance(node, ast.Call):
+                    self.assertNotIn(ast.unparse(node.func),
+                                     {"os.mkdir", "os.rename", "os.replace", "os.chmod", "os.fchmod", "os.unlink", "os.rmdir", "subprocess.Popen"})
+
+    def test_namespace_reads_and_source_records_keep_the_original_fixed_bounds(self):
+        _, _, program, _ = self._program(); tree = ast.parse(program)
+        sources = next(node for node in tree.body if isinstance(node, ast.Assign)
+                       and any(isinstance(target, ast.Name) and target.id == "SOURCES" for target in node.targets))
+        self.assertEqual(ast.literal_eval(sources.value),
+                         ((".github/workflows/desktop-ubuntu-publication.yml", 65536), ("desktop/tools/ci_ubuntu_publication.py", 1048576)))
+        driver = ast.parse(DRIVER.read_text())
+        values = {target.id: node.value for node in driver.body if isinstance(node, ast.Assign)
+                  for target in node.targets if isinstance(target, ast.Name)}
+        for name, expected in (
+            ("SHELL_TOOLS_NAMESPACE_SOURCES", {".github/workflows/desktop-ubuntu-publication.yml": "64 << 10",
+                                              "desktop/tools/ci_ubuntu_publication.py": "1 << 20"}),
+            ("SHELL_TOOLS_NAMESPACE_FILES", {"namespace-before.json": "64 << 10", "namespace.stdout": "16 << 10",
+                                            "namespace.stderr": "4096", "namespace.exit": "4"}),
+        ):
+            value = values[name]
+            self.assertIsInstance(value, ast.Dict)
+            self.assertEqual({ast.literal_eval(key): ast.unparse(item) for key, item in zip(value.keys, value.values)}, expected)
+        self.assertLessEqual(len(WORKFLOW.read_bytes()), 64 << 10)
+        self.assertLessEqual(len(DRIVER.read_bytes()), 1 << 20)
+        for token in ('read_file(root_fd, "namespace-before.json", 65536)', "stat.S_ISREG(before.st_mode) and before.st_nlink == 1",
+                      "before.st_size <= limit", "os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC",
+                      "os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK", "not os.get_inheritable(fd)",
+                      'read_file(directories["/usr/bin"][0], name, 16 << 20)',
+                      "same(identity(os.fstat(fd)), original)", "same(identity(os.stat(name, dir_fd=parent, follow_symlinks=False)), original)"):
+            self.assertIn(token, program)
+
+
 if __name__ == "__main__":
     unittest.main()

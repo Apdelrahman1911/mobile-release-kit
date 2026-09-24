@@ -96,6 +96,15 @@ SHELL_TOOLS_LINKS = {"/usr/bin/java": "/etc/alternatives/java", "/usr/bin/javac"
 SHELL_TOOLS_DIRECTORIES = ("/", "/usr", "/usr/bin", "/usr/lib", "/usr/lib/jvm", SHELL_TOOLS_JDK_ROOT,
     SHELL_TOOLS_JDK_ROOT + "/bin", "/etc", "/etc/alternatives")
 SHELL_TOOLS_PACKAGES = ("git", "python3.12", "openjdk-17-jdk-headless", "openjdk-17-jre-headless")
+
+SHELL_TOOLS_NAMESPACE_PARENT = "/usr/lib/jvm"
+SHELL_TOOLS_NAMESPACE_PARENTS = ("/", "/usr", "/usr/bin", "/usr/lib", "/etc", "/etc/alternatives")
+SHELL_TOOLS_NAMESPACE_SOURCES = {".github/workflows/desktop-ubuntu-publication.yml": 64 << 10,
+                                 "desktop/tools/ci_ubuntu_publication.py": 1 << 20}
+SHELL_TOOLS_NAMESPACE_FILES = {"namespace-before.json": 64 << 10, "namespace.stdout": 16 << 10,
+                              "namespace.stderr": 4096, "namespace.exit": 4}
+SHELL_TOOLS_JDK_MISSING = (b"dpkg-query: no packages found matching openjdk-17-jdk-headless\n"
+                         b"dpkg-query: no packages found matching openjdk-17-jre-headless\n")
 # Independently accepted U35783044845/1: original lifecycle and finality.
 # Complete producer-bound roster; every downloaded member is checked before use.
 # This evidence qualifies neither the new installed candidate nor the product.
@@ -3618,7 +3627,7 @@ def _shell_tools_input_document(raw, phase, root):
            and data["runId"] == os.environ["GITHUB_RUN_ID"] and data["attempt"] == os.environ["GITHUB_RUN_ATTEMPT"]
            and type(data["rootIdentity"]) is list and all(type(n) is int for n in data["rootIdentity"])
            and data["rootIdentity"] == list(directory_identity(root)), "Original Tools preparation identity differs")
-    D.need(data["originalStepExit"] is None if phase == "before" else
+    D.need(data["originalStepExit"] is None if phase in ("before", "namespace-before") else
            type(data["originalStepExit"]) is int and 0 <= data["originalStepExit"] <= 255,
            "Tools original preparation return is not typed DATA")
     nodes = data["nodes"]
@@ -3663,6 +3672,172 @@ def _shell_tools_input_document(raw, phase, root):
     return data
 
 
+def _shell_tools_namespace_sources():
+    """Current source DATA only; never a privileged module/dispatcher import."""
+    return [{**D.file_record(SOURCE / path, limit), "path": path}
+            for path, limit in SHELL_TOOLS_NAMESPACE_SOURCES.items()]
+
+
+def _shell_tools_namespace_query(root):
+    return (D.read(root / "before-packages.tsv", 64 << 10),
+            D.read(root / "before-packages.stderr", 4096), D.read(root / "before-packages.exit", 4))
+
+
+def _shell_tools_namespace_identity(value):
+    D.need(type(value) is list and len(value) == 9
+           and all(type(n) is int and 0 <= n < 1 << 64 for n in value)
+           and value[0] > 0 and value[1] > 0 and value[5] > 0, "JVM namespace original identity differs")
+    return value
+
+
+def shell_tools_namespace_disposition(raw, root, query):
+    """Closed DATA decision only. Refused payloads are never repaired/admitted."""
+    data = D.decode(raw, 64 << 10)
+    D.need(type(data) is dict and set(data) == {"schema", "qualified", "source", "sourceFiles", "snapshot"}
+           and D.canonical(data) == raw and data["schema"] == "fixed-disposable-shell-jvm-namespace-before-v1"
+           and data["qualified"] is False and data["source"] == str(SOURCE), "JVM namespace source envelope differs")
+    sources = data["sourceFiles"]
+    D.need(type(sources) is list and len(sources) == len(SHELL_TOOLS_NAMESPACE_SOURCES), "JVM namespace source roster differs")
+    for row, (path, limit) in zip(sources, SHELL_TOOLS_NAMESPACE_SOURCES.items()):
+        D.need(type(row) is dict and set(row) == {"path", "size", "sha256"} and row["path"] == path
+               and type(row["size"]) is int and 0 < row["size"] <= limit
+               and type(row["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is not None,
+               "JVM namespace original source pin differs")
+    snapshot = _shell_tools_input_document(D.canonical(data["snapshot"]), "namespace-before", root)
+    D.need(type(query) is tuple and len(query) == 3, "JVM namespace package query DATA differs")
+    package_raw, stderr, exit_raw = query
+    D.need(type(stderr) is bytes and len(stderr) <= 4096 and type(exit_raw) is bytes
+           and re.fullmatch(rb"(?:0|[1-9][0-9]{0,2})\n", exit_raw) is not None and int(exit_raw) <= 255,
+           "JVM namespace original package return differs")
+    packages = shell_tools_package_data(package_raw)
+    D.need(snapshot["packageQuery"] == {"stdout": {"size": len(package_raw), "sha256": hashlib.sha256(package_raw).hexdigest()},
+                                      "stderr": {"size": len(stderr), "sha256": hashlib.sha256(stderr).hexdigest()},
+                                      "exitCode": int(exit_raw)}, "JVM namespace original package bytes changed")
+    absent = set(packages) == {"git", "python3.12"}
+    D.need(absent and stderr == SHELL_TOOLS_JDK_MISSING and exit_raw == b"1\n"
+           or set(packages) == set(SHELL_TOOLS_PACKAGES) and stderr == b"" and exit_raw == b"0\n",
+           "JVM namespace package pair is partial, unknown or ambiguously absent")
+    nodes = snapshot["nodes"]
+    D.need(all(nodes[path]["kind"] == "directory" for path in SHELL_TOOLS_NAMESPACE_PARENTS)
+           and all(nodes[path]["kind"] == "file" for path in SHELL_TOOLS_PROGRAMS[:2])
+           and all(nodes[path]["kind"] in ("symlink", "absent") for path in SHELL_TOOLS_LINKS),
+           "JVM namespace must not repair an unrelated refused input")
+    original = nodes[SHELL_TOOLS_NAMESPACE_PARENT]
+    if original["kind"] == "directory":
+        return data, "protected"
+    descendants = (SHELL_TOOLS_JDK_ROOT, SHELL_TOOLS_JDK_ROOT + "/bin", *SHELL_TOOLS_PROGRAMS[2:])
+    D.need(all(nodes[path] == {"kind": "parent-unavailable"} for path in descendants),
+           "Refused/absent JVM descendants are not admitted missing payloads")
+    if original["kind"] == "absent":
+        return data, "absent"
+    D.need(original["kind"] == "refused" and original["identity"][2:5] == [stat.S_IFDIR | 0o777, 0, 0]
+           and absent, "Only an original root-owned ordinary0777 JVM with a genuinely absent pair may be preserved")
+    return data, "preserve-create"
+
+
+def shell_tools_namespace_snapshot():
+    """Preserve the actual unsafe observation before any namespace constructor."""
+    root = shell_tools_input_root()
+    original_root = directory_identity(root)
+    raw, stderr, exit_raw = query = _shell_tools_namespace_query(root)
+    D.need(re.fullmatch(rb"(?:0|[1-9][0-9]{0,2})\n", exit_raw) is not None and int(exit_raw) <= 255,
+           "JVM namespace original package return is missing")
+    snapshot = {"schema": "fixed-disposable-shell-tools-inputs-v1", "phase": "namespace-before", "qualified": False,
+        "sourceSha": os.environ["GITHUB_SHA"], "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+        "rootIdentity": list(original_root), "originalStepExit": None, "nodes": shell_tools_input_nodes(),
+        "packageQuery": {"stdout": {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()},
+                         "stderr": {"size": len(stderr), "sha256": hashlib.sha256(stderr).hexdigest()}, "exitCode": int(exit_raw)}}
+    document = {"schema": "fixed-disposable-shell-jvm-namespace-before-v1", "qualified": False,
+                "source": str(SOURCE), "sourceFiles": _shell_tools_namespace_sources(), "snapshot": snapshot}
+    body = D.canonical(document)
+    D.need(len(body) <= 64 << 10, "JVM namespace original snapshot exceeds its bound")
+    D.write(root / "namespace-before.json", body)  # Failure DATA is retained before the disposition assertion.
+    D.need(directory_identity(root) == original_root, "JVM namespace original evidence root changed")
+    _, disposition = shell_tools_namespace_disposition(body, root, query)
+    print(disposition, flush=True)  # Informational only; never passed to root as effect authority.
+
+
+def _shell_tools_namespace_result(root, *, before=None):
+    """Require the original returned construction, never a success boolean alone."""
+    contents = {name: D.read(root / name, limit) for name, limit in SHELL_TOOLS_NAMESPACE_FILES.items()}
+    pins = {name: {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()} for name, raw in contents.items()}
+    original, disposition = shell_tools_namespace_disposition(contents["namespace-before.json"], root, _shell_tools_namespace_query(root))
+    snapshot = original["snapshot"]
+    D.need(contents["namespace.exit"] == b"0\n" and contents["namespace.stderr"] == b"",
+           "JVM namespace original constructor did not return cleanly")
+    result = D.decode(contents["namespace.stdout"], 16 << 10)
+    fields = {"schema", "qualified", "sourceSha", "runId", "attempt", "root", "rootIdentity", "source", "sourceFiles",
+              "namespaceBefore", "disposition", "stage", "parents", "original", "preservation", "preserved", "fresh",
+              "query", "actions", "originalFdsClosed", "completed", "failure"}
+    D.need(type(result) is dict and set(result) == fields and D.canonical(result) == contents["namespace.stdout"]
+           and result["schema"] == "fixed-disposable-shell-jvm-namespace-result-v1" and result["qualified"] is False
+           and result["sourceSha"] == snapshot["sourceSha"] and result["runId"] == snapshot["runId"] and result["attempt"] == snapshot["attempt"]
+           and result["root"] == str(root) and D.same(result["rootIdentity"], snapshot["rootIdentity"])
+           and result["source"] == original["source"] and D.same(result["sourceFiles"], original["sourceFiles"])
+           and D.same(result["sourceFiles"], _shell_tools_namespace_sources())
+           and D.same(result["namespaceBefore"], pins["namespace-before.json"])
+           and result["disposition"] == disposition and result["stage"] == "complete"
+           and result["originalFdsClosed"] is True and result["completed"] is True and result["failure"] is None,
+           "JVM namespace original source/run/root/result binding differs")
+    parents = result["parents"]
+    D.need(type(parents) is dict and set(parents) == set(SHELL_TOOLS_NAMESPACE_PARENTS), "JVM namespace protected parent roster differs")
+    for path in SHELL_TOOLS_NAMESPACE_PARENTS:
+        identity = _shell_tools_namespace_identity(parents[path])
+        D.need(identity[:5] == snapshot["nodes"][path]["identity"][:5], "JVM namespace protected parent changed")
+    actions = result["actions"]
+    D.need(type(actions) is dict and set(actions) == {"preservationCreated", "renameReturned", "freshCreated"}
+           and all(type(value) is bool for value in actions.values())
+           and all(value is (disposition == "preserve-create") for value in actions.values()),
+           "JVM namespace original effect returns differ")
+    old_node = snapshot["nodes"][SHELL_TOOLS_NAMESPACE_PARENT]
+    if disposition == "preserve-create":
+        old = _shell_tools_namespace_identity(result["original"])
+        preserved = _shell_tools_namespace_identity(result["preserved"])
+        fresh = _shell_tools_namespace_identity(result["fresh"])
+        container = result["preservation"]
+        D.need(type(container) is dict and set(container) == {"path", "identity"}
+               and container["path"] == "/usr/lib/mrk-desktop-jvm-original-" + snapshot["runId"] + "-" + snapshot["attempt"],
+               "JVM namespace preservation path differs")
+        parent = _shell_tools_namespace_identity(container["identity"])
+        D.need(old == old_node["identity"] and preserved[:5] == old[:5]
+               and fresh[2:5] == [stat.S_IFDIR | 0o755, 0, 0] and parent[2:5] == [stat.S_IFDIR | 0o700, 0, 0]
+               and old[0] == fresh[0] == parent[0] == parents["/usr/lib"][0]
+               and len({tuple(old[:2]), tuple(fresh[:2]), tuple(parent[:2])}) == 3,
+               "JVM namespace must preserve the old inode and construct a distinct protected one")
+        query = result["query"]
+        D.need(type(query) is dict and set(query) == {"stdout", "stderr", "exitCode", "originalReturned", "stdoutEof", "stderrEof", "streamsClosed", "stopSent"}
+               and query["stdout"] == "" and query["stderr"] == SHELL_TOOLS_JDK_MISSING.decode("ascii")
+               and type(query["exitCode"]) is int and query["exitCode"] == 1
+               and all(query[key] is True for key in ("originalReturned", "stdoutEof", "stderrEof", "streamsClosed"))
+               and query["stopSent"] is False, "JVM namespace original bounded root query is not absent-pair finality")
+        expected_node = {"kind": "directory", "identity": fresh}
+    else:
+        expected_original = old_node.get("identity")
+        D.need(D.same(result["original"], expected_original)
+               and all(result[key] is None for key in ("preservation", "preserved", "fresh", "query")),
+               "No-op JVM namespace must not claim relocation, creation or package query")
+        expected_node = old_node
+    if before is None:
+        nodes = shell_tools_input_nodes()
+    else:
+        D.need(before["phase"] == "before" and before["packageQuery"] == snapshot["packageQuery"],
+               "Strict pair-before is not the original pre-installation package query")
+        nodes = before["nodes"]
+    actual = nodes[SHELL_TOOLS_NAMESPACE_PARENT]
+    D.need(actual["kind"] == expected_node["kind"] and
+           (actual == expected_node if actual["kind"] == "absent" else actual["identity"][:5] == expected_node["identity"][:5]),
+           "Constructed JVM namespace is not the original strict-before namespace")
+    D.need(all(nodes[path] == snapshot["nodes"][path] for path in (*SHELL_TOOLS_PROGRAMS[:2], *SHELL_TOOLS_LINKS))
+           and all(nodes[path]["kind"] == "directory" and nodes[path]["identity"][:5] == snapshot["nodes"][path]["identity"][:5]
+                   for path in SHELL_TOOLS_NAMESPACE_PARENTS),
+           "JVM namespace construction changed an original unrelated input")
+    return pins
+
+
+def shell_tools_namespace_check():
+    _shell_tools_namespace_result(shell_tools_input_root())
+
+
 def shell_tools_input_snapshot(phase):
     """Snapshot even an actual failed preparation; no installation/launch here."""
     D.need(phase in ("before", "after"), "Different fixed Tools preparation phase")
@@ -3694,6 +3869,7 @@ def shell_tools_input_snapshot(phase):
            and all(row["kind"] in ("directory", "file", "symlink", "absent", "parent-unavailable") for row in nodes.values()),
            "Tools preparation must not repair a refused original Git/Python/JDK path")
     if phase == "before":
+        _shell_tools_namespace_result(root, before=document)
         print("present" if all(nodes[path].get("kind") == "file" for path in SHELL_TOOLS_PROGRAMS[2:]) else "absent", flush=True)
         return
     before_raw = D.read(root / "before.json", 64 << 10)
@@ -3758,6 +3934,7 @@ def shell_tools_inputs_for_observation():
     # is authority across native work; executable and alias rows remain exact.
     bound_nodes = {path: {**row, "identity": row["identity"][:5]} if row["kind"] == "directory" else row
                    for path, row in current.items()}
+    pins.update(_shell_tools_namespace_result(root, before=before))
     return {"schema": after["schema"], "qualified": False, "preparationFiles": pins, "nodes": bound_nodes, "packages": packages["after"]}
 
 
@@ -3900,6 +4077,10 @@ if __name__ == "__main__":
             verify_installed_shell_compile()
         elif sys.argv[1:] == ["installed-shell"]:
             verify_installed_shell()
+        elif sys.argv[1:] == ["installed-shell-tools-namespace-before"]:
+            shell_tools_namespace_snapshot()
+        elif sys.argv[1:] == ["installed-shell-tools-namespace-check"]:
+            shell_tools_namespace_check()
         elif sys.argv[1:] == ["installed-shell-tools-before"]:
             shell_tools_input_snapshot("before")
         elif sys.argv[1:] == ["installed-shell-tools-after"]:
