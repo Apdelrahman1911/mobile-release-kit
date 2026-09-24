@@ -15,6 +15,12 @@ fn need(condition: bool) -> Result<(), BridgeError> {
 }
 
 impl Supervisor {
+    #[cfg(all(debug_assertions, feature = "custom-protocol"))]
+    pub(crate) fn admit_installed_session_once(&self, identity: &Arc<()>) -> Result<(), BridgeError> {
+        let owners = lock(&self.inner.owners);
+        need(owners.is_empty() && self.inner.next.load(Ordering::SeqCst) == 1 && !self.stopping() && !self.disabled())?;
+        self.inner.runtime.admit_installed_session_once(identity)
+    }
     pub(crate) fn arm_initial_app_info_shutdown(&self) -> Result<(), BridgeError> {
         let owners = lock(&self.inner.owners);
         let mut case = lock(&self.inner.native_test.case);
@@ -99,3 +105,478 @@ impl HeldAppInfo {
         Ok(())
     }
 }
+
+// Same R1 caller/owner, with a scoped scheduling observation only. Task-local
+// scope does not spawn a task: it follows this actual assessor future when it
+// is polled, so a concurrent AssessCredentials request cannot steal the arm.
+#[cfg(all(debug_assertions, feature = "custom-protocol"))]
+mod session {
+    use super::*;
+    use std::{future::Future, sync::Weak};
+    use crate::asset_session::OriginalWork;
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum SessionQueryHold { Observe, Loss, Deadline }
+    struct Original {
+        asset: Weak<OriginalWork>, owner: Arc<Owner>, endpoint: Instant,
+        hold: SessionQueryHold, selected: bool, held: bool, asset_released: bool, attempted: bool,
+    }
+    #[derive(Default)]
+    pub(in crate::supervisor) struct SessionQueryBook {
+        armed: Option<(Weak<OriginalWork>, SessionQueryHold)>, originals: Vec<Original>,
+        failed: bool, taken: bool,
+    }
+    tokio::task_local! { static ORIGINAL_ASSET_QUERY: Weak<OriginalWork>; }
+    pub(crate) struct InstalledSessionQueries {
+        originals: Vec<Original>, inner: Arc<Inner>, valid: bool, retired: bool, report_attempted: bool,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum QueryError { None, Timeout, Cleanup, Shutdown, Protocol, Engine, Io, Busy, Unavailable, Other }
+    impl QueryError {
+        fn stored(error: Option<&BridgeError>) -> Self {
+            match error.map(|error| error.code.as_str()) {
+                None => Self::None, Some("query_timeout") => Self::Timeout, Some("cleanup_unknown") => Self::Cleanup,
+                Some("shutting_down") => Self::Shutdown, Some("protocol_error") => Self::Protocol,
+                Some("engine_failed") => Self::Engine, Some("io_error") => Self::Io, Some("busy") => Self::Busy,
+                Some("runtime_unavailable") => Self::Unavailable, Some(_) => Self::Other,
+            }
+        }
+        fn token(self) -> &'static [u8] {
+            match self {
+                Self::None => b"none", Self::Timeout => b"timeout", Self::Cleanup => b"cleanup", Self::Shutdown => b"shutdown",
+                Self::Protocol => b"protocol", Self::Engine => b"engine", Self::Io => b"io", Self::Busy => b"busy",
+                Self::Unavailable => b"unavailable", Self::Other => b"other",
+            }
+        }
+    }
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum QueryCause { None, SelectionProfile, SelectionCompile, SelectionMethod, Inspection, AcquisitionEntry,
+        AcquisitionCustody, AcquisitionLock, Capability, Preparation, FinalGate, FinalClaim,
+        SpawnProcessFd, SpawnSystemFd, SpawnMemory, SpawnResource, SpawnDenied, SpawnMissing, SpawnExec, SpawnOther, Response }
+    impl QueryCause {
+        fn stored(cause: Option<crate::error::LinuxPassiveCause>) -> Self {
+            use crate::error::{LinuxPassiveCause as C, LinuxSpawnFailure as S};
+            match cause {
+                None => Self::None, Some(C::SelectionProfileClosed) => Self::SelectionProfile,
+                Some(C::SelectionCompileBinding) => Self::SelectionCompile, Some(C::SelectionMethodOutsideProfile) => Self::SelectionMethod,
+                Some(C::Inspection(_)) => Self::Inspection, Some(C::AcquisitionEntryNotReleased) => Self::AcquisitionEntry,
+                Some(C::AcquisitionCustodyMissing) => Self::AcquisitionCustody, Some(C::AcquisitionLock) => Self::AcquisitionLock,
+                Some(C::Capability(_)) => Self::Capability, Some(C::Preparation(_)) => Self::Preparation,
+                Some(C::FinalClaimOwnerGate) => Self::FinalGate, Some(C::FinalClaim(_)) => Self::FinalClaim,
+                Some(C::ReturnedSpawn(S::ProcessFdLimit)) => Self::SpawnProcessFd,
+                Some(C::ReturnedSpawn(S::SystemFdLimit)) => Self::SpawnSystemFd,
+                Some(C::ReturnedSpawn(S::Memory)) => Self::SpawnMemory,
+                Some(C::ReturnedSpawn(S::ResourceUnavailable)) => Self::SpawnResource,
+                Some(C::ReturnedSpawn(S::PermissionDenied)) => Self::SpawnDenied,
+                Some(C::ReturnedSpawn(S::NotFound)) => Self::SpawnMissing,
+                Some(C::ReturnedSpawn(S::ExecFormat)) => Self::SpawnExec,
+                Some(C::ReturnedSpawn(S::Other)) => Self::SpawnOther, Some(C::EngineResponse) => Self::Response,
+            }
+        }
+        fn token(self) -> &'static [u8] {
+            match self {
+                Self::None => b"none", Self::SelectionProfile => b"sel-profile", Self::SelectionCompile => b"sel-compile",
+                Self::SelectionMethod => b"sel-method", Self::Inspection => b"inspection", Self::AcquisitionEntry => b"acq-entry",
+                Self::AcquisitionCustody => b"acq-custody", Self::AcquisitionLock => b"acq-lock", Self::Capability => b"capability",
+                Self::Preparation => b"prepare", Self::FinalGate => b"final-gate", Self::FinalClaim => b"final-claim",
+                Self::SpawnProcessFd => b"spawn-pfd", Self::SpawnSystemFd => b"spawn-sfd", Self::SpawnMemory => b"spawn-mem",
+                Self::SpawnResource => b"spawn-res", Self::SpawnDenied => b"spawn-deny", Self::SpawnMissing => b"spawn-miss",
+                Self::SpawnExec => b"spawn-exec", Self::SpawnOther => b"spawn-other", Self::Response => b"response",
+            }
+        }
+    }
+    fn management_token(receipt: ManagementJoin) -> u8 {
+        match receipt {
+            ManagementJoin::Pending => b'p', ManagementJoin::Returned => b'r', ManagementJoin::Missing => b'm',
+            ManagementJoin::Cancelled => b'c', ManagementJoin::Panicked => b'x', ManagementJoin::Failed => b'f',
+            ManagementJoin::InvalidReturn => b'i',
+        }
+    }
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum QueryProjection { NotApplicable, Unregistered, Unavailable,
+        Recorded { error: QueryError, cause: QueryCause, driver: ManagementJoin, watchdog: ManagementJoin } }
+    impl QueryProjection {
+        fn stored(state: &OwnerState) -> Self {
+            Self::Recorded { error: QueryError::stored(state.error.as_ref()),
+                cause: QueryCause::stored(state.error.as_ref().and_then(BridgeError::linux_passive_cause)),
+                driver: state.driver_join, watchdog: state.watchdog_join }
+        }
+    }
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum WorkerStage { Inspect, Acquire, Observe, Write, Stdout, Stderr, Settle }
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum WorkerJoin { Cancelled, Panicked, Failed }
+    impl WorkerJoin {
+        fn returned(receipt: ManagementJoin) -> Option<Self> {
+            match receipt {
+                ManagementJoin::Cancelled => Some(Self::Cancelled), ManagementJoin::Panicked => Some(Self::Panicked),
+                ManagementJoin::Failed => Some(Self::Failed), _ => None,
+            }
+        }
+        fn token(self, cancelled: &'static [u8], panicked: &'static [u8], failed: &'static [u8]) -> &'static [u8] {
+            match self { Self::Cancelled => cancelled, Self::Panicked => panicked, Self::Failed => failed }
+        }
+    }
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum WorkerProjection { NotApplicable, Unavailable, NoneRecorded, Observation(installed_native_fixture::ObservationFailure),
+        Join(WorkerStage, WorkerJoin), SettlementUnknown }
+    impl WorkerProjection {
+        fn stored(resources: &Resources) -> Self {
+            // Fixed lifecycle order only, NOT temporal/causal first failure.
+            for (stage, receipt) in [(WorkerStage::Inspect, resources.inspection_return),
+                (WorkerStage::Acquire, resources.acquisition_return), (WorkerStage::Observe, resources.native_observation_return)] {
+                if let Some(failed) = receipt.and_then(WorkerJoin::returned) { return Self::Join(stage, failed); }
+            }
+            if let Some(failure) = resources.native_observation_failure { return Self::Observation(failure); }
+            // Existing IO books retain a failed original handle, not the
+            // erased JoinError category. Do not repoll it or invent c/x DATA.
+            for (stage, failed) in [(WorkerStage::Write, resources.failed_writer.is_some()),
+                (WorkerStage::Stdout, resources.failed_stdout.is_some()), (WorkerStage::Stderr, resources.failed_stderr.is_some())] {
+                if failed { return Self::Join(stage, WorkerJoin::Failed); }
+            }
+            match resources.native_return.as_ref() {
+                Some(Ok(CloseOutcome::Unknown)) => Self::SettlementUnknown,
+                Some(Err(error)) => Self::Join(WorkerStage::Settle, WorkerJoin::returned(ManagementJoin::error(error)).unwrap_or(WorkerJoin::Failed)),
+                _ => Self::NoneRecorded,
+            }
+        }
+        fn token(self) -> &'static [u8] {
+            match self {
+                Self::NotApplicable => b"na", Self::Unavailable => b"unavailable", Self::NoneRecorded => b"none-recorded",
+                Self::Observation(failure) => failure.token(), Self::SettlementUnknown => b"settle-unknown",
+                Self::Join(stage, join) => match stage {
+                    WorkerStage::Inspect => join.token(b"inspect-c", b"inspect-x", b"inspect-f"),
+                    WorkerStage::Acquire => join.token(b"acquire-c", b"acquire-x", b"acquire-f"),
+                    WorkerStage::Observe => join.token(b"observe-c", b"observe-x", b"observe-f"),
+                    WorkerStage::Write => join.token(b"write-c", b"write-x", b"write-f"),
+                    WorkerStage::Stdout => join.token(b"stdout-c", b"stdout-x", b"stdout-f"),
+                    WorkerStage::Stderr => join.token(b"stderr-c", b"stderr-x", b"stderr-f"),
+                    WorkerStage::Settle => join.token(b"settle-c", b"settle-x", b"settle-f"),
+                },
+            }
+        }
+    }
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct InstalledSessionQueryDiagnostic { query: QueryProjection, worker: WorkerProjection }
+    impl InstalledSessionQueryDiagnostic {
+        pub(crate) const fn not_applicable() -> Self { Self { query: QueryProjection::NotApplicable, worker: WorkerProjection::NotApplicable } }
+        fn unavailable() -> Self { Self { query: QueryProjection::Unavailable, worker: WorkerProjection::Unavailable } }
+        pub(crate) fn query_token(self) -> ([u8; 26], usize) {
+            let mut bytes = [0; 26];
+            let literal: &[u8] = match self.query {
+                QueryProjection::NotApplicable => b"na", QueryProjection::Unregistered => b"unregistered", QueryProjection::Unavailable => b"unavailable",
+                QueryProjection::Recorded { error, cause, driver, watchdog } => {
+                    let (error, cause) = (error.token(), cause.token());
+                    let end = error.len() + 1 + cause.len();
+                    bytes[..error.len()].copy_from_slice(error); bytes[error.len()] = b'.';
+                    bytes[error.len() + 1..end].copy_from_slice(cause); bytes[end] = b'.';
+                    bytes[end + 1] = management_token(driver); bytes[end + 2] = management_token(watchdog);
+                    return (bytes, end + 3);
+                },
+            };
+            bytes[..literal.len()].copy_from_slice(literal); (bytes, literal.len())
+        }
+        pub(crate) fn worker_token(self) -> &'static [u8] { self.worker.token() }
+        pub(crate) fn contract_sample() -> Self {
+            Self { query: QueryProjection::Recorded { error: QueryError::Unavailable, cause: QueryCause::SpawnOther,
+                driver: ManagementJoin::Panicked, watchdog: ManagementJoin::Failed }, worker: WorkerProjection::SettlementUnknown }
+        }
+    }
+    fn session_query_diagnostic(originals: &Mutex<SessionQueryBook>, asset: &Weak<OriginalWork>) -> InstalledSessionQueryDiagnostic {
+        let Ok(book) = originals.try_lock() else { return InstalledSessionQueryDiagnostic::unavailable(); };
+        if book.failed || book.taken || book.originals.len() > 16 { return InstalledSessionQueryDiagnostic::unavailable(); }
+        let mut matching = book.originals.iter().filter(|row| Weak::ptr_eq(&row.asset, asset));
+        let Some(row) = matching.next() else {
+            return InstalledSessionQueryDiagnostic { query: QueryProjection::Unregistered, worker: WorkerProjection::NotApplicable };
+        };
+        if matching.next().is_some() || !matches!(row.owner.profile, Profile::Passive(Method::AssessCredentials)) {
+            return InstalledSessionQueryDiagnostic::unavailable();
+        }
+        // One nonblocking projection of the exact retained R1, with no owner
+        // registry/ID/current-slot lookup, poll, join, clock, error relatch or
+        // native/output read. Q and K are independently unavailable if their
+        // own book cannot be sampled; none-recorded never means settled.
+        let query = row.owner.state.try_lock().ok().filter(|state| state.endpoint == row.endpoint)
+            .map_or(QueryProjection::Unavailable, |state| QueryProjection::stored(&state));
+        let worker = row.owner.resources.try_lock().ok().map_or(WorkerProjection::Unavailable, |resources| WorkerProjection::stored(&resources));
+        InstalledSessionQueryDiagnostic { query, worker }
+    }
+
+    pub(crate) fn assert_installed_session_query_diagnostic_contract(asset: &Arc<OriginalWork>, other: &Arc<OriginalWork>) -> InstalledSessionQueryDiagnostic {
+        // Existing explicit-call DATA contract only: synthetic empty books,
+        // no Supervisor/runtime, original task, process, reader or native join.
+        fn query(value: InstalledSessionQueryDiagnostic) -> Vec<u8> {
+            let (bytes, length) = value.query_token(); bytes[..length].to_vec()
+        }
+        fn owner(profile: Profile, endpoint: Instant) -> Arc<Owner> {
+            let (stop, _) = watch::channel(false);
+            Arc::new(Owner { key: 0, id: String::new(), profile, github_receipt: None,
+                state: Mutex::new(OwnerState::new(endpoint, None)), resources: AsyncMutex::new(Resources::default()),
+                stop, changed: Notify::new(), permit: Mutex::new(None), driver: AsyncMutex::new(None),
+                watchdog: AsyncMutex::new(None), observer: AsyncMutex::new(None) })
+        }
+        fn row(asset: &Arc<OriginalWork>, owner: &Arc<Owner>, endpoint: Instant) -> Original {
+            Original { asset: Arc::downgrade(asset), owner: owner.clone(), endpoint, hold: SessionQueryHold::Observe,
+                selected: false, held: false, asset_released: false, attempted: false }
+        }
+        let association = Arc::downgrade(asset);
+        let book = Mutex::new(SessionQueryBook::default());
+        let absent = session_query_diagnostic(&book, &association);
+        assert!(query(absent) == b"unregistered" && absent.worker_token() == b"na");
+        let guard = book.try_lock().unwrap();
+        let contended = session_query_diagnostic(&book, &association);
+        assert!(query(contended) == b"unavailable" && contended.worker_token() == b"unavailable");
+        drop(guard);
+        let endpoint = Instant::now();
+        let original = owner(Profile::Passive(Method::AssessCredentials), endpoint);
+        book.try_lock().unwrap().originals.push(row(asset, &original, endpoint));
+        let sampled = session_query_diagnostic(&book, &association);
+        assert!(query(sampled) == b"none.none.pp" && sampled.worker_token() == b"none-recorded");
+        // Equal public operation IDs are not weak identity or R1 association.
+        assert!(asset.id == other.id && !Arc::ptr_eq(asset, other));
+        assert!(query(session_query_diagnostic(&book, &Arc::downgrade(other))) == b"unregistered");
+        let held_state = original.state.try_lock().unwrap();
+        let sampled = session_query_diagnostic(&book, &association);
+        assert!(query(sampled) == b"unavailable" && sampled.worker_token() == b"none-recorded");
+        drop(held_state);
+        let held_resources = original.resources.try_lock().unwrap();
+        let sampled = session_query_diagnostic(&book, &association);
+        assert!(query(sampled) == b"none.none.pp" && sampled.worker_token() == b"unavailable");
+        drop(held_resources);
+        book.try_lock().unwrap().originals.push(row(asset, &original, endpoint));
+        assert!(session_query_diagnostic(&book, &association) == InstalledSessionQueryDiagnostic::unavailable());
+        book.try_lock().unwrap().originals.pop();
+        book.try_lock().unwrap().taken = true;
+        assert!(session_query_diagnostic(&book, &association) == InstalledSessionQueryDiagnostic::unavailable());
+        { let mut book = book.try_lock().unwrap(); book.taken = false; book.failed = true; }
+        assert!(session_query_diagnostic(&book, &association) == InstalledSessionQueryDiagnostic::unavailable());
+        { let mut book = book.try_lock().unwrap(); book.failed = false;
+            book.originals[0].owner = owner(Profile::Passive(Method::Capabilities), endpoint); }
+        assert!(session_query_diagnostic(&book, &association) == InstalledSessionQueryDiagnostic::unavailable());
+
+        assert!(QueryError::stored(None).token() == b"none" && QueryCause::stored(None).token() == b"none");
+        for (code, token) in [("query_timeout", b"timeout".as_slice()), ("cleanup_unknown", b"cleanup"), ("shutting_down", b"shutdown"),
+            ("protocol_error", b"protocol"), ("engine_failed", b"engine"), ("io_error", b"io"), ("busy", b"busy"),
+            ("runtime_unavailable", b"unavailable"), ("unlisted\nprivate", b"other")] {
+            assert!(QueryError::stored(Some(&BridgeError::new(code, "not exported"))).token() == token);
+            assert!(token.len() <= 11);
+        }
+        use crate::{error::{LinuxPassiveCause as C, LinuxSpawnFailure as S}, installed_runtime::AdmissionFailure as A};
+        for (cause, token) in [(C::SelectionProfileClosed, b"sel-profile".as_slice()), (C::SelectionCompileBinding, b"sel-compile"),
+            (C::SelectionMethodOutsideProfile, b"sel-method"), (C::Inspection(Some(A::Bounds)), b"inspection"),
+            (C::AcquisitionEntryNotReleased, b"acq-entry"), (C::AcquisitionCustodyMissing, b"acq-custody"), (C::AcquisitionLock, b"acq-lock"),
+            (C::Capability(A::Bounds), b"capability"), (C::Preparation(A::Bounds), b"prepare"),
+            (C::FinalClaimOwnerGate, b"final-gate"), (C::FinalClaim(A::Bounds), b"final-claim"),
+            (C::ReturnedSpawn(S::ProcessFdLimit), b"spawn-pfd"), (C::ReturnedSpawn(S::SystemFdLimit), b"spawn-sfd"),
+            (C::ReturnedSpawn(S::Memory), b"spawn-mem"), (C::ReturnedSpawn(S::ResourceUnavailable), b"spawn-res"),
+            (C::ReturnedSpawn(S::PermissionDenied), b"spawn-deny"), (C::ReturnedSpawn(S::NotFound), b"spawn-miss"),
+            (C::ReturnedSpawn(S::ExecFormat), b"spawn-exec"), (C::ReturnedSpawn(S::Other), b"spawn-other"), (C::EngineResponse, b"response")] {
+            let error = BridgeError::unavailable("not exported").with_linux_passive_cause(Some(cause));
+            let mut state = original.state.try_lock().unwrap(); state.error = Some(error);
+            let projected = QueryProjection::stored(&state);
+            assert!(matches!(projected, QueryProjection::Recorded { error: QueryError::Unavailable, cause: value, .. } if value.token() == token));
+            assert!(state.error.as_ref().and_then(BridgeError::linux_passive_cause) == Some(cause) && token.len() <= 11);
+        }
+        assert!(QueryCause::stored(Some(C::Inspection(None))).token() == b"inspection");
+        for (receipt, token) in [(ManagementJoin::Pending,b'p'), (ManagementJoin::Returned,b'r'), (ManagementJoin::Missing,b'm'),
+            (ManagementJoin::Cancelled,b'c'), (ManagementJoin::Panicked,b'x'), (ManagementJoin::Failed,b'f'), (ManagementJoin::InvalidReturn,b'i')] {
+            assert!(management_token(receipt) == token);
+            assert!(WorkerJoin::returned(receipt).is_some() == matches!(token, b'c' | b'x' | b'f'));
+        }
+        use installed_native_fixture::ObservationFailure as F;
+        use installed_native_fixture::{MapRefusal as R, MapMetadataRefusal as M, MapRole};
+        installed_native_fixture::assert_mappings_diagnostic_contract();
+        let mut resources = Resources::default();
+        for (failure, token) in [(F::ChildId,b"child-id".as_slice()), (F::Entry,b"observe-entry"), (F::MapsRead,b"maps-read"),
+            (F::MapsCheck(R::Newline),b"map-p-nl"), (F::MapsCheck(R::Metadata(MapRole::Crypto, M::Owner)),b"map-m-owner-cr"),
+            (F::MapsCheck(R::ExecutableHistoricalPayload(crate::installed_runtime::HistoricalPayloadRole::Python)),b"map-x-hist-py"),
+            (F::EnvironmentRead,b"env-read"), (F::EnvironmentCheck,b"env-check"), (F::HoldRefused,b"hold-refused")] {
+            resources.native_observation_failure = Some(failure);
+            assert!(WorkerProjection::stored(&resources).token() == token && token.len() <= 14);
+        }
+        resources.acquisition_return = Some(ManagementJoin::Panicked);
+        assert!(WorkerProjection::stored(&resources).token() == b"acquire-x");
+        resources.inspection_return = Some(ManagementJoin::Cancelled);
+        assert!(WorkerProjection::stored(&resources).token() == b"inspect-c");
+        resources.inspection_return = Some(ManagementJoin::Returned); resources.acquisition_return = Some(ManagementJoin::Returned);
+        resources.native_observation_return = Some(ManagementJoin::Failed);
+        assert!(WorkerProjection::stored(&resources).token() == b"observe-f");
+        resources.native_observation_return = Some(ManagementJoin::Returned); resources.native_observation_failure = None;
+        resources.native_return = Some(Ok(CloseOutcome::Unknown));
+        assert!(WorkerProjection::stored(&resources).token() == b"settle-unknown");
+        resources.native_return = Some(Ok(CloseOutcome::Settled));
+        assert!(WorkerProjection::stored(&resources).token() == b"none-recorded");
+        assert!(query(InstalledSessionQueryDiagnostic::contract_sample()) == b"unavailable.spawn-other.xf");
+        assert!(InstalledSessionQueryDiagnostic::contract_sample().query_token().1 == 26);
+        contended
+    }
+
+    impl Supervisor {
+        pub(crate) fn installed_session_query_diagnostic(&self, asset: &Weak<OriginalWork>) -> InstalledSessionQueryDiagnostic {
+            session_query_diagnostic(&self.inner.native_test.session, asset)
+        }
+        pub(crate) fn arm_installed_session_query(&self, asset: &Arc<OriginalWork>, hold: SessionQueryHold) -> Result<(), BridgeError> {
+            let mut book = lock(&self.inner.native_test.session);
+            need(self.passive_method_available("credentials.assess") && !self.stopping() && !self.disabled()
+                && !book.failed && !book.taken && book.armed.is_none() && book.originals.len() < 16
+                && book.originals.iter().all(|row| row.asset.as_ptr() != Arc::as_ptr(asset))
+                && *lock(&self.inner.native_test.case) == installed_native_fixture::Case::None)?;
+            book.originals.try_reserve(1).map_err(|_| BridgeError::cleanup_unknown())?;
+            book.armed = Some((Arc::downgrade(asset), hold)); Ok(())
+        }
+        pub(crate) async fn observe_installed_session_query<F: Future>(&self, asset: &Arc<OriginalWork>, assessor: F) -> F::Output {
+            let armed = {
+                let book = lock(&self.inner.native_test.session);
+                !book.failed && !book.taken && book.armed.as_ref().is_some_and(|(original,_)|
+                    original.as_ptr() == Arc::as_ptr(asset))
+            };
+            // Unrelated/direct assessments in the same test compilation do not
+            // participate. Only this already-armed asset's actual future scopes
+            // registration; no method-global selector can capture another R1.
+            if armed { ORIGINAL_ASSET_QUERY.scope(Arc::downgrade(asset), assessor).await }
+            else { assessor.await }
+        }
+        pub(crate) fn installed_session_query_held(&self, asset_id: u32) -> bool {
+            let book = lock(&self.inner.native_test.session);
+            !book.failed && book.originals.iter().any(|row| row.held && !row.asset_released
+                && row.asset.upgrade().is_some_and(|asset| asset.id == asset_id && !asset.stopped())
+                && Instant::now() < row.endpoint && !lock(&row.owner.state).terminal)
+        }
+        pub(crate) fn take_installed_session_queries(&self) -> Result<InstalledSessionQueries, BridgeError> {
+            let mut book = lock(&self.inner.native_test.session);
+            need(!book.taken)?; book.taken = true;
+            Ok(InstalledSessionQueries { originals: std::mem::take(&mut book.originals), inner: self.inner.clone(),
+                valid: !book.failed && book.armed.is_none(), retired: false, report_attempted: false })
+        }
+    }
+    pub(in crate::supervisor) fn register_session_query(inner: &Arc<Inner>, owner: &Arc<Owner>) {
+        let Ok(asset) = ORIGINAL_ASSET_QUERY.try_with(Weak::clone) else { return; };
+        let mut book = lock(&inner.native_test.session);
+        let valid = matches!(owner.profile, Profile::Passive(Method::AssessCredentials))
+            && book.armed.as_ref().is_some_and(|(expected, _)| Weak::ptr_eq(expected, &asset) && asset.strong_count() > 0)
+            && !book.failed && !book.taken && book.originals.len() < 16;
+        if !valid { book.failed = true; owner.fail(BridgeError::protocol()); return; }
+        let (_, hold) = book.armed.take().expect("matched original arm");
+        book.originals.push(Original { asset, owner: owner.clone(), endpoint: owner.endpoint(), hold,
+            selected: false, held: false, asset_released: false, attempted: false });
+    }
+    pub(in crate::supervisor) fn session_child_case(hooks: &installed_native_fixture::Hooks, owner: &Arc<Owner>) -> Option<installed_native_fixture::Case> {
+        let mut book = lock(&hooks.session);
+        let row = book.originals.iter_mut().find(|row| Arc::ptr_eq(&row.owner, owner))?;
+        if row.selected { book.failed = true; return None; }
+        row.selected = true;
+        Some(match row.hold { SessionQueryHold::Observe => installed_native_fixture::Case::SessionObserve,
+            SessionQueryHold::Loss => installed_native_fixture::Case::SessionLoss,
+            SessionQueryHold::Deadline => installed_native_fixture::Case::SessionDeadline })
+    }
+    pub(in crate::supervisor) fn hold_session_query(inner: &Inner, key: u64, end: Instant, stop: &watch::Receiver<bool>,
+        case: installed_native_fixture::Case) -> Result<(), ()> {
+        let (asset, loss, delay) = {
+            let mut book = lock(&inner.native_test.session);
+            let row = book.originals.iter_mut().find(|row| row.owner.key == key).ok_or(())?;
+            if !row.selected || row.held || row.endpoint != end || row.asset.strong_count() == 0 { return Err(()); }
+            let loss = row.hold == SessionQueryHold::Loss;
+            let expected = match row.hold { SessionQueryHold::Observe => installed_native_fixture::Case::SessionObserve,
+                SessionQueryHold::Loss => installed_native_fixture::Case::SessionLoss,
+                SessionQueryHold::Deadline => installed_native_fixture::Case::SessionDeadline };
+            if case != expected { return Err(()); }
+            row.held = true; (row.asset.clone(), loss, row.hold != SessionQueryHold::Observe)
+        };
+        while delay && Instant::now() < end && !*stop.borrow() && stop.has_changed().is_ok() {
+            // Real asset STOP releases only the loss hold. Deadline uses the
+            // unchanged query endpoint/STOP; neither waits for publication.
+            if loss {
+                let original = asset.upgrade().ok_or(())?;
+                if original.stopped() {
+                    let mut book = lock(&inner.native_test.session);
+                    let row = book.originals.iter_mut().find(|row| row.owner.key == key).ok_or(())?;
+                    row.asset_released = true; break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        Ok(())
+    }
+    impl InstalledSessionQueries {
+        pub(crate) fn count(&self) -> usize { self.originals.len() }
+        pub(crate) async fn observe_retired(&mut self, observation_end: Instant) -> bool {
+            if !self.valid || self.retired || Instant::now() >= observation_end || self.originals.is_empty() { return false; }
+            for row in &mut self.originals {
+                if row.attempted || !row.selected || !row.held { return false; }
+                row.attempted = true;
+                // Await only the SAME original management tail AFTER retirement.
+                // A successful query's work clock may already be past at final
+                // app Exit; that cannot undo its recorded on-time settlement.
+                // This uses the existing observation bound, never grants more
+                // query/cleanup time, and retains a pending/failed original.
+                if !lock(&row.owner.state).terminal { return false; }
+                let Ok(mut original) = row.owner.observer.try_lock() else { return false; };
+                let Some(handle) = original.as_mut() else { return false; };
+                let returned = tokio::select! {
+                    result = handle => result,
+                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(observation_end)) => return false,
+                };
+                if returned.is_err() { return false; }
+                original.take(); drop(original);
+                let Ok(resources) = row.owner.resources.try_lock() else { return false; };
+                let state = lock(&row.owner.state);
+                if state.endpoint != row.endpoint || !state.terminal || state.unknown || state.reply.is_some()
+                    || state.driver_end.is_some() || state.driver_join != ManagementJoin::Returned || state.watchdog_join != ManagementJoin::Returned
+                    || !matches!(state.watchdog_end, Some(WatchdogEnd::DriverObserved(ManagementJoin::Returned)))
+                    || (if row.hold == SessionQueryHold::Deadline {
+                        state.error.as_ref().map(|e| e.code.as_str()) != Some("query_timeout")
+                            || state.cleanup_endpoint != Some(row.endpoint + CLEANUP_TIME)
+                    } else { state.error.is_some() || state.cleanup_endpoint.is_some() })
+                    || row.hold == SessionQueryHold::Loss && !row.asset_released { return false; }
+                drop(state);
+                if resources.inspection_return != Some(ManagementJoin::Returned) || resources.acquisition_return != Some(ManagementJoin::Returned)
+                    || resources.inspection.is_some() || resources.inspection_error.is_some() || resources.acquisition.is_some() || resources.acquisition_error.is_some()
+                    || resources.child.is_some() || resources.waited.is_none() || resources.writer.is_some() || resources.stdout.is_some() || resources.stderr.is_some()
+                    || resources.failed_writer.is_some() || resources.failed_stdout.is_some() || resources.failed_stderr.is_some()
+                    || resources.write_end.is_none() || resources.out_end.is_some() || resources.err_end.is_some()
+                    || !resources.native_started || resources.native_settlement.is_some()
+                    || !matches!(resources.native_return.as_ref(), Some(Ok(CloseOutcome::Settled)))
+                    || resources.native_observation.is_some() || resources.native_observation_return != Some(ManagementJoin::Returned)
+                    || resources.native_snapshots.len() != 1 || !resources.native_snapshots[0].environment_clear() { return false; }
+                if row.hold == SessionQueryHold::Deadline {
+                    if !resources.kill_attempted { return false; }
+                } else if resources.kill_attempted || !resources.waited.as_ref().is_some_and(|status| status.success())
+                    || !resources.write_end.is_some_and(|end| end.complete) { return false; }
+                let Some(slots) = resources.passive.as_ref() else { return false; };
+                let slots = lock(slots);
+                let Some(observation) = slots.fixture_observation() else { return false; };
+                if !slots.settled() || slots.claimed_observation().is_none() || slots.no_child_effect()
+                    || observation.phase() != "settled" || observation.records() == 0
+                    || observation.positive_closes() != observation.records() || observation.live_originals() != 0
+                    || observation.pending_acquisitions() != 0 || observation.uncertain_closes() != 0 { return false; }
+                if !row.owner.driver.try_lock().is_ok_and(|slot| slot.is_none())
+                    || !row.owner.watchdog.try_lock().is_ok_and(|slot| slot.is_none()) || lock(&row.owner.permit).is_some() { return false; }
+            }
+            if self.inner.disabled.load(Ordering::SeqCst) || !self.inner.stopping.load(Ordering::SeqCst)
+                || !lock(&self.inner.owners).is_empty() || self.inner.permits.available_permits() != ACTIVE_LIMIT
+                || Instant::now() >= observation_end { return false; }
+            // Keep the actual checked maps in their original resource books.
+            // finish must complete the whole Exit conjunction before main may
+            // emit CONTRACTS, these maps, the session receipt and success.
+            self.retired = true;
+            true
+        }
+        pub(crate) fn report_retired(&mut self) -> bool {
+            if !self.valid || !self.retired || self.report_attempted { return false; }
+            self.report_attempted = true;
+            // Reporting is one-use DATA observation, not retirement or a new
+            // query/cleanup owner. A partial write/lock failure cannot produce
+            // a session receipt or success, nor authorize replay.
+            for row in &self.originals {
+                let Ok(resources) = row.owner.resources.try_lock() else { return false; };
+                installed_native_fixture::report(&resources.native_snapshots);
+            }
+            true
+        }
+    }
+}
+#[cfg(all(debug_assertions, feature = "custom-protocol"))]
+pub(crate) use session::{InstalledSessionQueries, InstalledSessionQueryDiagnostic, SessionQueryHold, assert_installed_session_query_diagnostic_contract};
+#[cfg(all(debug_assertions, feature = "custom-protocol"))]
+pub(super) use session::{SessionQueryBook, register_session_query, session_child_case, hold_session_query};

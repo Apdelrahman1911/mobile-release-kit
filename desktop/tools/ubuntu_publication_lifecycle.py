@@ -44,8 +44,10 @@ INSTALLED_TESTS = {key: "supervisor::tests::installed_candidate_a_" + suffix for
     ("overlap", "child_spans_f1_publication"))}
 CHILD_MARKER = "MRK_INSTALLED_NATIVE_CHILD="
 EMFILE_MARKER = "MRK_INSTALLED_NATIVE_EMFILE_RETAINED_UNKNOWN"
-SHELL_CASES = ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply", "metadata-save")
+SHELL_SESSION_CASES = ("session-inputs", "session-refusals", "session-loss", "session-deadline")
+SHELL_CASES = ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply", *SHELL_SESSION_CASES, "metadata-save")
 SHELL_FAILURE_LABEL_LIMIT = 512
+SHELL_PATH_FAILURE_FRAME_BOUND = 256
 # Literal observer labels only; never a prefix parser or raw-output escape.
 SHELL_FAILURE_STEPS = (
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=Bootstrap\n",
@@ -155,6 +157,29 @@ SHELL_FAILURE_STEPS = (
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadResult\n",
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowSettings\n",
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadDraft\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionNavigate\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionOpen\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionContext\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionConfigure\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionChoose\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionSetFile\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionActivateFile\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionCapture\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionFields\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionPrepare\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionReview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionKeep\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionAssign\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionRecord\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionRemove\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionStaleAction\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionDiscard\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionReload\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionLoss\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionDeadline\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionQuitCancel\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionQuitPreserved\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionFinality\n",
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataNavigate\n",
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataLoad\n",
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadLoaded\n",
@@ -199,6 +224,186 @@ SHELL_BOOTSTRAP_PROGRESS = (
     b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n",
     b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=app-info-returned-before-hold\n",
 )
+# Only public observer categories; these do not establish native state/finality.
+SHELL_PATH_REJECTIONS = (
+    b"not-recorded", b"gtk-thread", b"gtk-dialog-book", b"gtk-dialog-original", b"gtk-owner-binding",
+    b"gtk-owner-interrupted", b"gtk-owner-facts", b"gtk-dialog-properties", b"gtk-initial-folder", b"gtk-target",
+    b"gtk-selection-setter", b"gtk-response-widget", b"gtk-action-widget", b"gtk-observer-endpoint", b"gtk-dialog-record",
+    b"gtk-selection-state", b"gtk-activation-state", b"gtk-filename-state", b"gtk-filename-absent", b"gtk-filename-different",
+    b"gtk-fixture-transition", b"gtk-response-state", b"gtk-response-contract", b"gtk-return-state", b"gtk-dispatch",
+    b"gtk-destroy-state", b"gtk-release-state",
+)
+SHELL_SESSION_REJECTIONS = (
+    b"not-recorded", b"unknown-native-snapshot", b"native-readiness-invariant", b"evaluation-budget",
+    b"unavailable-projection-script", b"evaluation-dispatch", b"step-pending-invariant",
+    b"gtk-thread", b"gtk-dialog-book", b"gtk-dialog-original", b"gtk-owner-binding", b"gtk-owner-interrupted", b"gtk-owner-facts",
+    b"gtk-dialog-properties", b"gtk-selection-setter", b"gtk-response-widget", b"gtk-action-widget", b"gtk-dialog-record",
+    b"gtk-observer-endpoint", b"gtk-selection-state", b"gtk-activation-state", b"gtk-filename-state", b"gtk-filename-absent",
+    b"gtk-filename-different", b"gtk-response-state", b"gtk-response-contract", b"gtk-return-role", b"gtk-return-state",
+    b"gtk-destroy-state", b"gtk-release-state",
+    b"lost-native-snapshot",
+    b"unbound-native-snapshot",
+    b"request-counter-underflow",
+    b"request-counter-surplus",
+    b"stale-reply-contract",
+    b"capability-cleanup-unknown",
+    b"capability-shutdown",
+    b"capability-document-lost",
+    b"capability-unsupported-platform",
+    b"capability-unqualified",
+    b"capability-closed",
+    b"capability-unavailable",
+    b"reply-asset-invalid-request",
+    b"reply-asset-closed",
+    b"reply-asset-unqualified",
+    b"reply-asset-unsupported-platform",
+    b"reply-asset-unsupported-fs",
+    b"reply-asset-unsupported-format",
+    b"reply-asset-busy",
+    b"reply-asset-source-refused",
+    b"reply-asset-source-changed",
+    b"reply-asset-material-limit",
+    b"reply-asset-parser-limit",
+    b"reply-asset-project-overlap",
+    b"reply-asset-excl-unconfirmed",
+    b"reply-asset-capacity",
+    b"reply-assessment-context-stale",
+    b"reply-asset-user-cancelled",
+    b"reply-asset-review-expired",
+    b"reply-asset-deadline",
+    b"reply-asset-document-lost",
+    b"reply-asset-shutdown",
+    b"reply-asset-cleanup-unknown",
+    b"reply-assessment-invalid-request",
+    b"reply-assessment-limit",
+    b"reply-assessment-version",
+    b"reply-assessment-policy-stale",
+    b"reply-assessment-context-invalid",
+    b"reply-assessment-unavailable",
+    b"reply-busy",
+    b"reply-shutting-down",
+    b"reply-query-timeout",
+    b"reply-cleanup-unknown",
+    b"reply-code-unavailable",
+)
+SHELL_SESSION_WAITS = (
+    b"not-sampled", b"request-not-yet-seen", b"native-reply-pending", b"original-owner-unsettled",
+    b"native-phase-not-ready", b"rendered-display-mismatch", b"rendered-control-mismatch",
+    b"gtk-dialog-absent", b"gtk-action-insensitive",
+)
+# v2 first document transition, plus a single later cached original R1 sample.
+# Neither association nor none-recorded establishes causation or settlement.
+SHELL_SESSION_ORIGINS = (
+    b"not-recorded", b"op-cleanup", b"registry", b"coord-lock", b"coord-join", b"supervisor-disabled",
+    b"staged-collision", b"install-retire", b"retain-retire", b"drain-retire", b"staged-refusal", b"gate-poisoned", b"exhausted",
+)
+SHELL_SESSION_DETAILS = (
+    b"none", b"deadline", b"review-expired", b"context-stale", b"cleanup-unknown", b"user-cancelled", b"shutdown",
+    b"document-lost", b"other", b"new", b"pending", b"returned", b"failed", b"unavailable",
+)
+SHELL_SESSION_ASSOCIATIONS = (b"bound", b"unassociated")
+SHELL_SESSION_QUERY_ERRORS = (b"none", b"timeout", b"cleanup", b"shutdown", b"protocol", b"engine", b"io", b"busy", b"unavailable", b"other")
+SHELL_SESSION_QUERY_CAUSES = (
+    b"none", b"sel-profile", b"sel-compile", b"sel-method", b"inspection", b"acq-entry", b"acq-custody", b"acq-lock",
+    b"capability", b"prepare", b"final-gate", b"final-claim", b"spawn-pfd", b"spawn-sfd", b"spawn-mem", b"spawn-res",
+    b"spawn-deny", b"spawn-miss", b"spawn-exec", b"spawn-other", b"response",
+)
+SHELL_SESSION_MANAGEMENT_JOINS = b"prmcxfi"
+# Exact refused public-spelling IDs only; not a prefix/grammar or object/cause claim.
+# Canonical roster body SHA-256: bf18de45262438226bbc80a1cc8a3c078821b4a1dc88ec16a00961c05c990710
+SHELL_SESSION_PUBLIC_MAP_WORKERS = (
+    b"map-x-aa", b"map-x-ab", b"map-x-ac", b"map-x-ad", b"map-x-ae", b"map-x-af", b"map-x-ag", b"map-x-ah", b"map-x-ai",
+    b"map-x-aj", b"map-x-ak", b"map-x-al", b"map-x-am", b"map-x-an", b"map-x-ao", b"map-x-ap", b"map-x-aq", b"map-x-ar",
+    b"map-x-as", b"map-x-at", b"map-x-au", b"map-x-av", b"map-x-aw", b"map-x-ax", b"map-x-ay", b"map-x-az", b"map-x-ba",
+    b"map-x-bb", b"map-x-bc", b"map-x-bd", b"map-x-be", b"map-x-bf", b"map-x-bg", b"map-x-bh", b"map-x-bi", b"map-x-bj",
+    b"map-x-bk", b"map-x-bl", b"map-x-bm", b"map-x-bn", b"map-x-bo", b"map-x-bp", b"map-x-bq", b"map-x-br", b"map-x-bs",
+    b"map-x-bt", b"map-x-bu", b"map-x-bv", b"map-x-bw", b"map-x-bx", b"map-x-by", b"map-x-bz", b"map-x-ca", b"map-x-cb",
+    b"map-x-cc", b"map-x-cd", b"map-x-ce", b"map-x-cf", b"map-x-cg", b"map-x-ch", b"map-x-ci", b"map-x-cj", b"map-x-ck",
+    b"map-x-cl", b"map-x-cm", b"map-x-cn", b"map-x-co", b"map-x-cp", b"map-x-cq", b"map-x-cr", b"map-x-cs", b"map-x-ct",
+    b"map-x-cu", b"map-x-cv", b"map-x-cw", b"map-x-cx", b"map-x-cy", b"map-x-cz", b"map-x-da", b"map-x-db", b"map-x-dc",
+    b"map-x-dd", b"map-x-de", b"map-x-df", b"map-x-dg", b"map-x-dh", b"map-x-di", b"map-x-dj", b"map-x-dk", b"map-x-dl",
+    b"map-x-dm", b"map-x-dn", b"map-x-do", b"map-x-dp", b"map-x-dq", b"map-x-dr", b"map-x-ds", b"map-x-dt", b"map-x-du",
+    b"map-x-dv", b"map-x-dw", b"map-x-dx", b"map-x-dy", b"map-x-dz", b"map-x-ea", b"map-x-eb", b"map-x-ec", b"map-x-ed",
+    b"map-x-ee", b"map-x-ef", b"map-x-eg", b"map-x-eh", b"map-x-ei", b"map-x-ej", b"map-x-ek", b"map-x-el", b"map-x-em",
+    b"map-x-en", b"map-x-eo", b"map-x-ep", b"map-x-eq", b"map-x-er", b"map-x-es", b"map-x-et", b"map-x-eu", b"map-x-ev",
+    b"map-x-ew", b"map-x-ex", b"map-x-ey", b"map-x-ez", b"map-x-fa", b"map-x-fb", b"map-x-fc", b"map-x-fd", b"map-x-fe",
+    b"map-x-ff", b"map-x-fg", b"map-x-fh", b"map-x-fi", b"map-x-fj", b"map-x-fk", b"map-x-fl", b"map-x-fm", b"map-x-fn",
+    b"map-x-fo", b"map-x-fp", b"map-x-fq", b"map-x-fr", b"map-x-fs", b"map-x-ft", b"map-x-fu", b"map-x-fv", b"map-x-fw",
+    b"map-x-fx", b"map-x-fy", b"map-x-fz", b"map-x-ga", b"map-x-gb", b"map-x-gc", b"map-x-gd", b"map-x-ge", b"map-x-gf",
+    b"map-x-gg", b"map-x-gh", b"map-x-gi", b"map-x-gj", b"map-x-gk", b"map-x-gl", b"map-x-gm", b"map-x-gn", b"map-x-go",
+    b"map-x-gp", b"map-x-gq", b"map-x-gr", b"map-x-gs", b"map-x-gt", b"map-x-gu", b"map-x-gv", b"map-x-gw", b"map-x-gx",
+    b"map-x-gy", b"map-x-gz", b"map-x-ha", b"map-x-hb", b"map-x-hc", b"map-x-hd", b"map-x-he", b"map-x-hf", b"map-x-hg",
+    b"map-x-hh", b"map-x-hi", b"map-x-hj", b"map-x-hk", b"map-x-hl", b"map-x-hm", b"map-x-hn", b"map-x-ho", b"map-x-hp",
+    b"map-x-hq", b"map-x-hr", b"map-x-hs", b"map-x-ht", b"map-x-hu", b"map-x-hv", b"map-x-hw", b"map-x-hx", b"map-x-hy",
+    b"map-x-hz", b"map-x-ia", b"map-x-ib", b"map-x-ic", b"map-x-id", b"map-x-ie", b"map-x-if", b"map-x-ig", b"map-x-ih",
+    b"map-x-ii", b"map-x-ij", b"map-x-ik", b"map-x-il", b"map-x-im", b"map-x-in", b"map-x-io", b"map-x-ip", b"map-x-iq",
+    b"map-x-ir", b"map-x-is", b"map-x-it", b"map-x-iu", b"map-x-iv", b"map-x-iw", b"map-x-ix", b"map-x-iy", b"map-x-iz",
+    b"map-x-ja", b"map-x-jb", b"map-x-jc", b"map-x-jd", b"map-x-je", b"map-x-jf", b"map-x-jg", b"map-x-jh", b"map-x-ji",
+    b"map-x-jj", b"map-x-jk", b"map-x-jl", b"map-x-jm", b"map-x-jn", b"map-x-jo", b"map-x-jp", b"map-x-jq", b"map-x-jr",
+    b"map-x-js", b"map-x-jt", b"map-x-ju", b"map-x-jv", b"map-x-jw", b"map-x-jx", b"map-x-jy", b"map-x-jz", b"map-x-ka",
+    b"map-x-kb", b"map-x-kc", b"map-x-kd", b"map-x-ke", b"map-x-kf", b"map-x-kg", b"map-x-kh", b"map-x-ki", b"map-x-kj",
+    b"map-x-kk", b"map-x-kl", b"map-x-km", b"map-x-kn", b"map-x-ko", b"map-x-kp", b"map-x-kq", b"map-x-kr", b"map-x-ks",
+    b"map-x-kt", b"map-x-ku", b"map-x-kv", b"map-x-kw", b"map-x-kx", b"map-x-ky", b"map-x-kz", b"map-x-la", b"map-x-lb",
+    b"map-x-lc", b"map-x-ld", b"map-x-le", b"map-x-lf", b"map-x-lg", b"map-x-lh", b"map-x-li", b"map-x-lj", b"map-x-lk",
+    b"map-x-ll", b"map-x-lm", b"map-x-ln", b"map-x-lo", b"map-x-lp", b"map-x-lq", b"map-x-lr", b"map-x-ls", b"map-x-lt",
+    b"map-x-lu", b"map-x-lv", b"map-x-lw", b"map-x-lx", b"map-x-ly", b"map-x-lz", b"map-x-ma", b"map-x-mb", b"map-x-mc",
+    b"map-x-md", b"map-x-me", b"map-x-mf", b"map-x-mg", b"map-x-mh", b"map-x-mi", b"map-x-mj", b"map-x-mk", b"map-x-ml",
+    b"map-x-mm", b"map-x-mn", b"map-x-mo", b"map-x-mp", b"map-x-mq", b"map-x-mr", b"map-x-ms", b"map-x-mt", b"map-x-mu",
+    b"map-x-mv", b"map-x-mw", b"map-x-mx", b"map-x-my", b"map-x-mz", b"map-x-na", b"map-x-nb", b"map-x-nc", b"map-x-nd",
+    b"map-x-ne", b"map-x-nf", b"map-x-ng", b"map-x-nh", b"map-x-ni", b"map-x-nj", b"map-x-nk", b"map-x-nl", b"map-x-nm",
+    b"map-x-nn", b"map-x-no", b"map-x-np", b"map-x-nq", b"map-x-nr", b"map-x-ns", b"map-x-nt", b"map-x-nu", b"map-x-nv",
+    b"map-x-nw", b"map-x-nx", b"map-x-ny", b"map-x-nz", b"map-x-oa", b"map-x-ob", b"map-x-oc", b"map-x-od", b"map-x-oe",
+    b"map-x-of", b"map-x-og", b"map-x-oh", b"map-x-oi", b"map-x-oj", b"map-x-ok", b"map-x-ol", b"map-x-om", b"map-x-on",
+    b"map-x-oo", b"map-x-op", b"map-x-oq", b"map-x-or", b"map-x-os", b"map-x-ot", b"map-x-ou", b"map-x-ov", b"map-x-ow",
+    b"map-x-ox", b"map-x-oy", b"map-x-oz", b"map-x-pa", b"map-x-pb", b"map-x-pc", b"map-x-pd", b"map-x-pe", b"map-x-pf",
+    b"map-x-pg", b"map-x-ph", b"map-x-pi", b"map-x-pj", b"map-x-pk", b"map-x-pl", b"map-x-pm", b"map-x-pn", b"map-x-po",
+    b"map-x-pp", b"map-x-pq", b"map-x-pr", b"map-x-ps", b"map-x-pt", b"map-x-pu", b"map-x-pv", b"map-x-pw", b"map-x-px",
+    b"map-x-py", b"map-x-pz", b"map-x-qa", b"map-x-qb", b"map-x-qc", b"map-x-qd", b"map-x-qe", b"map-x-qf", b"map-x-qg",
+    b"map-x-qh", b"map-x-qi", b"map-x-qj", b"map-x-qk", b"map-x-ql", b"map-x-qm", b"map-x-qn", b"map-x-qo", b"map-x-qp",
+    b"map-x-qq", b"map-x-qr", b"map-x-qs", b"map-x-qt", b"map-x-qu", b"map-x-qv", b"map-x-qw", b"map-x-qx", b"map-x-qy",
+    b"map-x-qz", b"map-x-ra", b"map-x-rb", b"map-x-rc", b"map-x-rd", b"map-x-re", b"map-x-rf", b"map-x-rg", b"map-x-rh",
+    b"map-x-ri", b"map-x-rj", b"map-x-rk", b"map-x-rl", b"map-x-rm", b"map-x-rn", b"map-x-ro", b"map-x-rp", b"map-x-rq",
+    b"map-x-rr", b"map-x-rs", b"map-x-rt", b"map-x-ru", b"map-x-rv", b"map-x-rw", b"map-x-rx", b"map-x-ry", b"map-x-rz",
+    b"map-x-sa", b"map-x-sb", b"map-x-sc", b"map-x-sd", b"map-x-se", b"map-x-sf", b"map-x-sg", b"map-x-sh", b"map-x-si",
+    b"map-x-sj", b"map-x-sk", b"map-x-sl", b"map-x-sm", b"map-x-sn", b"map-x-so", b"map-x-sp", b"map-x-sq", b"map-x-sr",
+    b"map-x-ss", b"map-x-st", b"map-x-su", b"map-x-sv", b"map-x-sw", b"map-x-sx", b"map-x-sy", b"map-x-sz", b"map-x-ta",
+    b"map-x-tb", b"map-x-tc", b"map-x-td", b"map-x-te", b"map-x-tf", b"map-x-tg", b"map-x-th", b"map-x-ti", b"map-x-tj",
+    b"map-x-tk", b"map-x-tl", b"map-x-tm", b"map-x-tn", b"map-x-to", b"map-x-tp", b"map-x-tq", b"map-x-tr", b"map-x-ts",
+    b"map-x-tt", b"map-x-tu", b"map-x-tv", b"map-x-tw", b"map-x-tx", b"map-x-ty", b"map-x-tz", b"map-x-ua", b"map-x-ub",
+    b"map-x-uc", b"map-x-ud", b"map-x-ue", b"map-x-uf", b"map-x-ug", b"map-x-uh", b"map-x-ui", b"map-x-uj", b"map-x-uk",
+    b"map-x-ul", b"map-x-um", b"map-x-un", b"map-x-uo", b"map-x-up", b"map-x-uq", b"map-x-ur", b"map-x-us", b"map-x-ut",
+    b"map-x-uu", b"map-x-uv", b"map-x-uw", b"map-x-ux", b"map-x-uy", b"map-x-uz", b"map-x-va", b"map-x-vb", b"map-x-vc",
+    b"map-x-vd", b"map-x-ve", b"map-x-vf", b"map-x-vg", b"map-x-vh", b"map-x-vi", b"map-x-vj", b"map-x-vk", b"map-x-vl",
+    b"map-x-vm", b"map-x-vn", b"map-x-vo", b"map-x-vp", b"map-x-vq", b"map-x-vr", b"map-x-vs", b"map-x-vt", b"map-x-vu",
+    b"map-x-vv", b"map-x-vw", b"map-x-vx", b"map-x-vy", b"map-x-vz", b"map-x-wa", b"map-x-wb", b"map-x-wc", b"map-x-wd",
+    b"map-x-we", b"map-x-wf", b"map-x-wg", b"map-x-wh", b"map-x-wi", b"map-x-wj", b"map-x-wk", b"map-x-wl", b"map-x-wm",
+    b"map-x-wn", b"map-x-wo", b"map-x-wp", b"map-x-wq", b"map-x-wr", b"map-x-ws", b"map-x-wt", b"map-x-wu", b"map-x-wv",
+    b"map-x-ww", b"map-x-wx", b"map-x-wy", b"map-x-wz", b"map-x-xa", b"map-x-xb", b"map-x-xc", b"map-x-xd", b"map-x-xe",
+    b"map-x-xf", b"map-x-xg", b"map-x-xh", b"map-x-xi", b"map-x-xj", b"map-x-xk", b"map-x-xl", b"map-x-xm", b"map-x-xn",
+    b"map-x-xo", b"map-x-xp", b"map-x-xq", b"map-x-xr", b"map-x-xs", b"map-x-xt", b"map-x-xu", b"map-x-xv", b"map-x-xw",
+    b"map-x-xx", b"map-x-xy", b"map-x-xz", b"map-x-ya", b"map-x-yb", b"map-x-yc", b"map-x-yd", b"map-x-ye", b"map-x-yf",
+    b"map-x-yg", b"map-x-yh", b"map-x-yi", b"map-x-yj", b"map-x-yk", b"map-x-yl", b"map-x-ym", b"map-x-yn", b"map-x-yo",
+    b"map-x-yp", b"map-x-yq", b"map-x-yr", b"map-x-ys", b"map-x-yt", b"map-x-yu", b"map-x-yv", b"map-x-yw", b"map-x-yx",
+)
+SHELL_SESSION_WORKERS = (
+    b"na", b"unavailable", b"none-recorded", b"child-id", b"observe-entry", b"maps-read", b"maps-check", b"env-read", b"env-check",
+    b"hold-refused", b"settle-unknown",
+    # Same-read refusal categories, not raw values or an inferred root cause.
+    # Historical maps-check above remains generic and distinguishable.
+    b"map-p-utf", b"map-p-nl", b"map-p-row", b"map-p-cols", b"map-p-addr", b"map-p-order", b"map-p-perm", b"map-p-offset", b"map-p-dev", b"map-p-inode",
+    b"map-x-anon", b"map-x-pseudo", b"map-x-file",
+    # Same refused row matches a historical admission tuple, NOT live content.
+    b"map-x-hist-py", b"map-x-hist-ss", b"map-x-hist-cr",
+    b"map-m-stat-py", b"map-m-type-py", b"map-m-owner-py", b"map-m-links-py", b"map-m-mode-py", b"map-m-inode-py", b"map-m-dev-py", b"map-dup-py",
+    b"map-m-stat-ss", b"map-m-type-ss", b"map-m-owner-ss", b"map-m-links-ss", b"map-m-mode-ss", b"map-m-inode-ss", b"map-m-dev-ss", b"map-dup-ss",
+    b"map-m-stat-cr", b"map-m-type-cr", b"map-m-owner-cr", b"map-m-links-cr", b"map-m-mode-cr", b"map-m-inode-cr", b"map-m-dev-cr", b"map-dup-cr",
+    b"map-m-stat-ld", b"map-m-type-ld", b"map-m-owner-ld", b"map-m-links-ld", b"map-m-mode-ld", b"map-m-inode-ld", b"map-m-dev-ld", b"map-dup-ld",
+    b"map-m-stat-lc", b"map-m-type-lc", b"map-m-owner-lc", b"map-m-links-lc", b"map-m-mode-lc", b"map-m-inode-lc", b"map-m-dev-lc", b"map-dup-lc",
+    b"map-m-stat-lm", b"map-m-type-lm", b"map-m-owner-lm", b"map-m-links-lm", b"map-m-mode-lm", b"map-m-inode-lm", b"map-m-dev-lm", b"map-dup-lm",
+    *SHELL_SESSION_PUBLIC_MAP_WORKERS,
+)
+SHELL_SESSION_WORKER_STAGES = (b"inspect", b"acquire", b"observe", b"write", b"stdout", b"stderr", b"settle")
+SHELL_SESSION_WORKER_JOINS = b"cxf"
 SHELL_PATH_MARKER = b"MRK_INSTALLED_SHELL_PROJECT_PATHS="
 SHELL_PATH_RECEIPT = {'assetAuthorityCreated': False,
  'cancel': [{'field': 'version.source', 'operation': 3}, {'field': 'metadata.root', 'operation': 7}],
@@ -271,6 +476,60 @@ SHELL_WORKFLOW_RECEIPT = {
                   "runtimeLedgerSettled": 4, "runtimeSettlementJoined": 4},
     "quit": {"operation": 3, "pendingReview": True, "gtkSettled": True, "originalsSettled": True, "relayJoined": True, "exit": True},
 }
+# Private, entirely fictional DATA for the existing installed observer. These
+# headers establish format recognition only, never usable signing keys. Scalar
+# input stays in the original write-only controls, not in fixture files.
+SHELL_SESSION_JKS = b"\xfe\xed\xfe\xed\0\0\0\2\0\0\0\0"
+SHELL_SESSION_REPLACEMENT_JKS = b"\xfe\xed\xfe\xed\0\0\0\1\0\0\0\0"
+SHELL_SESSION_FIREBASE = b'{"client":[{"client_info":{"android_client_info":{"package_name":"org.assessment.fixture"}}}]}\n'
+SHELL_SESSION_FIREBASE_MISMATCH = b'{"client":[{"client_info":{"android_client_info":{"package_name":"org.assessment.other"}}}]}\n'
+SHELL_SESSION_CONFIG = b'''{
+  "android": {"applicationId": "org.assessment.fixture", "enabled": true, "identityStatus": "unverified"},
+  "ios": {"enabled": false},
+  "metadata": {"androidLocales": ["en-US"], "iosLocales": [], "root": "release/store"},
+  "projectChecks": {"androidArtifact": [], "iosArtifact": [], "preflight": []},
+  "schemaVersion": 1,
+  "services": {"androidFirebase": "required", "iosFirebase": "disabled"},
+  "source": {"candidateBranch": "main", "productionBranch": "main", "projectReadTokenRequired": true},
+  "version": {"buildKey": "BUILD_NUMBER", "nameKey": "VERSION_NAME", "source": "version.properties"}
+}
+'''
+SHELL_SESSION_ABSENT = ("project/.gitignore", "project/.mobile-release", "project/.mobile-release-init-prepare",
+    "project/.mobile-release-init", "project/.mobile-release-init-cleanup", "project/release/store")
+SHELL_SESSION_MARKER = b"MRK_INSTALLED_SHELL_SESSION_INPUTS="
+SHELL_SESSION_INVENTORY_LIMIT = 8192
+SHELL_SESSION_RECEIPT_LIMIT = 4096
+SHELL_SESSION_R1_LIMIT = 16
+SHELL_SESSION_RECEIPTS = {case: {
+    "schemaVersion": 1, "case": case, "profile": "installed-linux-session-inputs",
+    "methods": "thirteen-passive-including-supplied-input-assessment",
+    "project": {"cancelSettled": True, "selectedSettled": True, "snapshotMatched": True},
+    "safety": {"persistentStorage": False, "storeContacted": False, "signingVerified": False, "releaseReady": False},
+    "originals": {"assetJoined": True, "sourceClosed": True, "r1Joined": True, "guiSettled": True, "relayJoined": True, "exit": True},
+    "behavior": behavior,
+} for case, behavior in (
+    ("session-inputs", {
+        "kinds": ["android-keystore", "android-firebase", "google-wif", "project-read-token"],
+        "assessments": 7, "fileChoosers": 3, "capturedFiles": 3, "kept": 5, "assigned": 6,
+        "reassessedWithoutRecapture": True, "contextRevoked": True, "replacementSameIdNextRevision": True,
+        "removed": 1, "quitCancelPreserved": True,
+    }),
+    ("session-refusals", {
+        "assessments": 6, "fileChoosers": 9, "capturesClosed": 8,
+        "sourceRefusals": ["project-overlap", "source-refused", "source-refused", "source-changed"],
+        "missingCompanionRefused": True, "firebaseMismatchRefused": True, "staleKeepRefused": True,
+        "staleAssignRefused": True, "cancelledReplacementPreservedBytes": True,
+        "cancelledReplacementRevokedAssignment": True, "discardReopenEmpty": True,
+    }),
+    ("session-loss", {
+        "assessments": 1, "fileChoosers": 1, "navigationDenied": True, "lostStatusRedacted": True,
+        "oldCallbacksRefused": True, "noRebind": True, "noLateSuccess": True, "lossHoldReleasedByOriginalStop": True,
+    }),
+    ("session-deadline", {
+        "assessments": 1, "fileChoosers": 1, "originalDeadline": True, "firstCleanupPreserved": True,
+        "noPreview": True, "queryResult": "query_timeout", "assetReason": "deadline",
+    }),
+)}
 SHELL_METADATA_MARKER = b"MRK_INSTALLED_SHELL_METADATA_SAVE="
 SHELL_METADATA_RECEIPT = {
     "schemaVersion": 1, "fixture": "android-metadata-save-v1", "gate": "installed-metadata-profile",
@@ -1494,25 +1753,31 @@ def _capacity(value):
                 + (value["installed"]["candidate"]["size"] if "installed" in value else 0)
                 + (sum(row["size"] for row in value["shell"]["binaries"].values()) if "shell" in value else 0)
                 + 2 * capacity["runtimeBytes"] + 1 + 2 * max(capacity["installedBytes"].values()) + TOTAL_LIMIT + JSON_LIMIT)
-    # The six original Xvfb logs share the GUI per-file ceiling. Account for
+    # The original Xvfb logs share the GUI per-file ceiling. Account for
     # those private files in addition to retained output. This free-space check
     # is not a reservation, aggregate quota or a bound on every GUI cache/memfd.
     if "shell" in value:
-        # Five additional write-only failure leaves. The512-byte emitter/read
+        # One write-only failure leaf per observer. The512-byte emitter/read
         # bound is not a filesystem quota; retain the unchanged64MiB ceiling.
         required += (len(SHELL_CASES) + len(SHELL_CASES[1:])) * SHELL_WORK_FILE_LIMIT
         required += sum(map(len, SHELL_WORKFLOW_CALLERS.values())) + len(SHELL_WORKFLOW_IGNORE) + len(SHELL_WORKFLOW_SIBLING) \
             + len(SHELL_PROJECT_SOURCE) + len(SHELL_PROJECT_VERSION)
         required += sum(len(data) for _, mode, _, data in _shell_metadata_roster(value, True) if stat.S_ISREG(mode)) \
             + len(SHELL_METADATA_SHORT_BEFORE)
+        session_nodes = [row for case in SHELL_SESSION_CASES for row in _shell_session_roster(value, case)]
+        required += sum(len(row[3]) for row in session_nodes if not stat.S_ISDIR(row[1]))
+        # Each added existing GUI route creates eight directories, auth and
+        # bus-config files, its log, and a bus socket. The original128 output
+        # slots and TOTAL_LIMIT still cover the public before/after captures.
+        session_environment_nodes = 12 * len(SHELL_SESSION_CASES)
     inodes = 2 * max(capacity["installedEntries"].values()) + 2 * 8192 + 128
     if "shell" in value:
-        inodes += len(SHELL_CASES[1:]) + 1 + 12 + 14  # Namespace, workflow and final metadata fixture.
+        inodes += len(SHELL_CASES[1:]) + 1 + 12 + 14 + len(session_nodes) + session_environment_nodes
     need(len({Path(name).stat().st_dev for name in ("/", "/var", "/var/lib", "/usr")}) == 1,
          "Capacity DATA does not cover the same root package/publication filesystem")
     space = os.statvfs("/var/lib")
     if "shell" in value:
-        required += 27 * space.f_frsize  # Namespace, twelve workflow and fourteen metadata nodes; not a quota.
+        required += (27 + len(session_nodes) + session_environment_nodes) * space.f_frsize  # Finite nodes, not a quota.
     need(space.f_bavail * space.f_frsize >= required and space.f_favail >= inodes, "Insufficient original host capacity; do not clear caches")
 
 
@@ -2170,6 +2435,7 @@ def public_files(value):
                         "shell-metadata-save-before.json", "shell-metadata-save-after.json",
                         "published-before-upgrade.txt", "mutation-denials.txt"} \
             | {"shell-" + case + "-xvfb.stderr" for case in SHELL_CASES} \
+            | {"shell-" + case + "-" + phase + ".json" for case in SHELL_SESSION_CASES for phase in ("before", "after")} \
             | {"shell-root-data-" + str(index) + ".json" for index in range(len(SHELL_DATA_ROOTS))}
     installed = value.get("installed")
     if installed is not None:
@@ -3328,18 +3594,98 @@ def _shell_labels_prepare(value, case):
         raise
 
 
+def _shell_session_first_origin(origin, detail, association, query, worker):
+    """Closed DATA only; no lookup or inference from the public step/current owner."""
+    if origin not in SHELL_SESSION_ORIGINS or detail not in SHELL_SESSION_DETAILS or association not in SHELL_SESSION_ASSOCIATIONS:
+        return None
+    details = {
+        b"op-cleanup": (b"deadline", b"review-expired", b"context-stale", b"cleanup-unknown", b"user-cancelled", b"shutdown", b"document-lost", b"other"),
+        b"coord-join": (b"failed",),
+        b"staged-refusal": (b"new", b"pending", b"returned", b"failed", b"unavailable"),
+    }.get(origin, (b"none",))
+    if detail not in details:
+        return None
+    if query not in (b"na", b"unregistered", b"unavailable"):
+        parts = query.split(b".")
+        if (len(parts) != 3 or parts[0] not in SHELL_SESSION_QUERY_ERRORS or parts[1] not in SHELL_SESSION_QUERY_CAUSES
+                or len(parts[2]) != 2 or any(join not in SHELL_SESSION_MANAGEMENT_JOINS for join in parts[2])
+                or parts[0] == b"none" and parts[1] != b"none"):
+            return None
+    if worker not in SHELL_SESSION_WORKERS:
+        parts = worker.rsplit(b"-", 1)
+        if (len(parts) != 2 or parts[0] not in SHELL_SESSION_WORKER_STAGES
+                or len(parts[1]) != 1 or parts[1][0] not in SHELL_SESSION_WORKER_JOINS):
+            return None
+    if (association == b"unassociated" and (query, worker) != (b"na", b"na")
+            or association == b"bound" and query == b"na"
+            or query == b"unregistered" and worker != b"na"
+            or origin == b"not-recorded" and (detail, association, query, worker) != (b"none", b"unassociated", b"na", b"na")):
+        return None
+    return {"origin": origin.decode("ascii"), "detail": detail.decode("ascii"), "association": association.decode("ascii"),
+            "query": query.decode("ascii"), "worker": worker.decode("ascii")}
+
+
 def _shell_label_pair(raw):
     if type(raw) is not bytes or not 0 < len(raw) <= SHELL_FAILURE_LABEL_LIMIT:
         return None
     lines = raw.splitlines(keepends=True)
-    # Current executions require the whole closed diagnostic. Historical
-    # two-line evidence is retained as historical, not completed by inference.
-    if (len(lines) != 3 or lines[0] not in SHELL_FAILURE_STEPS or lines[1] not in SHELL_FAILURE_BOUNDARIES
+    path_detail = None
+    if lines[0].startswith(b"MRK_INSTALLED_SHELL_PATH_FAILURE="):
+        # Prefix first, so no proper prefix of this new frame can masquerade
+        # as an old three-line Path result with the detail silently lost.
+        if len(lines) != 4 or len(raw) > SHELL_PATH_FAILURE_FRAME_BOUND:
+            return None
+        path_detail, lines = lines[0], lines[1:]
+    # Session traces require their complete fourth record. Historical v1 keeps
+    # its prior shape, distinguishable by absent firstOrigin metadata; never
+    # invent provenance for it or accept a truncated v2 as a historical frame.
+    if (len(lines) not in (3, 4) or lines[0] not in SHELL_FAILURE_STEPS or lines[1] not in SHELL_FAILURE_BOUNDARIES
             or lines[2] not in SHELL_BOOTSTRAP_PROGRESS):
         return None
-    return {"step": lines[0][len(b"MRK_INSTALLED_SHELL_FAILURE_STEP="):-1].decode("ascii"),
-            "boundary": lines[1][len(b"MRK_INSTALLED_SHELL_FAILURE_PHASE="):-1].decode("ascii"),
-            "bootstrapProgress": lines[2][len(b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS="):-1].decode("ascii")}
+    result = {"step": lines[0][len(b"MRK_INSTALLED_SHELL_FAILURE_STEP="):-1].decode("ascii"),
+              "boundary": lines[1][len(b"MRK_INSTALLED_SHELL_FAILURE_PHASE="):-1].decode("ascii"),
+              "bootstrapProgress": lines[2][len(b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS="):-1].decode("ascii")}
+    session = result["step"].startswith("Session")  # Membership was checked above, not prefix admission.
+    if len(lines) != (4 if session else 3):
+        return None
+    if path_detail is not None:
+        match = re.fullmatch(rb"MRK_INSTALLED_SHELL_PATH_FAILURE=v1;index=(none|0|[1-9]|10);reject=([a-z-]{1,22})\n", path_detail)
+        if match is None:
+            return None
+        index_raw, rejection = match.groups()
+        index = None if index_raw == b"none" else int(index_raw)
+        indexed = {"PathBrowse", "PathSet", "PathActivate", "PathSettlement", "PathField"}
+        unindexed = {"PathDraft", "PathPreview", "PathNavigation"}
+        if (rejection not in SHELL_PATH_REJECTIONS or result["step"] not in indexed | unindexed
+                or result["step"] in indexed and index is None or result["step"] in unindexed and index is not None):
+            return None
+        result["path"] = {"recipeIndex": index, "rejection": rejection.decode("ascii")}
+    if session:
+        historical = lines[3].startswith(b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;")
+        version = b"v1" if historical else b"v2"
+        suffix = (rb"\n" if historical else rb";o=([a-z-]{1,19});d=([a-z-]{1,15});a=([a-z-]{1,12});q=([a-z.-]{1,26});w=([a-z-]{1,14})\n")
+        match = re.fullmatch(rb"MRK_INSTALLED_SHELL_SESSION_FAILURE=" + version + rb";index=(none|0|[1-9][0-9]?);"
+                             rb"evaluations=(0|[1-9][0-9]{0,2});reject=([a-z-]{1,32});wait=([a-z-]{1,32})" + suffix, lines[3])
+        if match is None:
+            return None
+        index_raw, evaluations_raw, rejection, wait = match.groups()[:4]
+        index = None if index_raw == b"none" else int(index_raw)
+        evaluations = int(evaluations_raw)
+        unindexed = {"SessionNavigate", "SessionReload", "SessionLoss", "SessionDeadline", "SessionQuitPreserved"}
+        mixed = {"SessionQuitCancel", "SessionFinality"}
+        if (index is not None and index >= 64 or evaluations > 128 or rejection not in SHELL_SESSION_REJECTIONS
+                or wait not in SHELL_SESSION_WAITS or rejection == b"evaluation-budget" and evaluations != 128
+                or result["step"] in unindexed and index is not None
+                or result["step"] not in unindexed | mixed and index is None):
+            return None
+        result["session"] = {"recipeIndex": index, "evaluations": evaluations,
+                             "rejection": rejection.decode("ascii"), "lastWait": wait.decode("ascii")}
+        if not historical:
+            first_origin = _shell_session_first_origin(*match.groups()[4:])
+            if first_origin is None:
+                return None
+            result["session"]["firstOrigin"] = first_origin
+    return result
 
 
 def _shell_labels_read(original):
@@ -3401,7 +3747,181 @@ def _shell_log_capture(value, case, original, result):
     return raw
 
 
-SHELL_FIXTURE_CHILDREN = ("candidate-evidence", "metadata-project", "path-outside", "path-project", "positive-project", "workflow-project")
+SHELL_FIXTURE_CHILDREN = ("candidate-evidence", "metadata-project", "path-outside", "path-project", "positive-project",
+    "session-deadline", "session-inputs", "session-loss", "session-refusals", "workflow-project")
+
+
+def _shell_session_roster(value, case, changed=False):
+    """Finite fictional DATA, not a supplied file plan or source selector."""
+    need(case in SHELL_SESSION_CASES and type(changed) is bool
+         and (not changed or case == "session-refusals"), "Different fixed session fixture or phase")
+    owners = value["runnerUid"], value["runnerGid"]
+    files = {
+        "project/release/mobile-release.json": (0o600, SHELL_SESSION_CONFIG),
+        "project/version.properties": (0o600, SHELL_PROJECT_VERSION),
+        "sources/input.jks": (0o600, SHELL_SESSION_JKS),
+        "sources/replacement.jks": (0o600, SHELL_SESSION_REPLACEMENT_JKS),
+        "sources/firebase.json": (0o600, SHELL_SESSION_FIREBASE),
+    }
+    if case == "session-refusals":
+        files.update({
+            "project/overlap.jks": (0o600, SHELL_SESSION_JKS),
+            "sources/changed.jks": (0o600, SHELL_SESSION_REPLACEMENT_JKS if changed else SHELL_SESSION_JKS),
+            "sources/public.jks": (0o644, SHELL_SESSION_JKS),
+            "sources/firebase-mismatch.json": (0o600, SHELL_SESSION_FIREBASE_MISMATCH),
+        })
+        if not changed:
+            files["sources/changed-next.jks"] = (0o600, SHELL_SESSION_REPLACEMENT_JKS)
+    leaves = sorted([*files, *(["sources/link.jks"] if case == "session-refusals" else [])])
+    directories = (".", "project", "project/release", "sources")
+    nodes = [*directories[1:], *leaves]
+    rows = [(name, stat.S_IFDIR | 0o700, owners,
+             sorted(Path(child).name for child in nodes if str(Path(child).parent) == name)) for name in directories]
+    rows += [(name, stat.S_IFREG | files[name][0], owners, files[name][1]) for name in sorted(files)]
+    if case == "session-refusals":
+        rows.append(("sources/link.jks", stat.S_IFLNK | 0o777, owners, "input.jks"))
+    return tuple(rows)
+
+
+def _shell_session_absent(case, changed):
+    # These finite names are checked only before launch or after actual Exit.
+    return [*SHELL_SESSION_ABSENT, *(["sources/changed-next.jks"] if changed else [])]
+
+
+def _shell_session_fixtures_prepare(value, root):
+    """Create once beneath the fresh unpublished namespace; never adopt/repair."""
+    need(_ROOT == root_path(value) and root == shell_fixture_root(value), "Different fresh session fixture route")
+    for case in SHELL_SESSION_CASES:
+        base = root / case
+        for relative, mode, owners, expected in _shell_session_roster(value, case):
+            path = base if relative == "." else base / relative
+            if stat.S_ISDIR(mode):
+                path.mkdir(mode=0o700)
+            elif stat.S_ISLNK(mode):
+                os.symlink(expected, path)
+            else:
+                _D.write(path, expected, stat.S_IMODE(mode))
+            os.chown(path, *owners, follow_symlinks=False)
+            if not stat.S_ISLNK(mode):
+                _xattrs(path, stat.S_ISDIR(mode))
+
+
+def _shell_session_inventory(value, namespace, case, *, changed=False):
+    """Exact private fixtures, only pre-launch or after original Exit/finality.
+
+    First admit every directory's complete child roster. No unknown subtree,
+    symlink target, private user input or failed/possibly-live case is read.
+    """
+    need(_ROOT == root_path(value), "Different original session service root")
+    roster = _shell_session_roster(value, case, changed)
+    binding = namespace
+    namespace = _shell_namespace_check(value, binding)
+    root = shell_fixture_root(value) / case
+    rows, originals = [], []
+    for relative, mode, owners, expected in roster:
+        path = root if relative == "." else root / relative
+        before = path.lstat()
+        need(before.st_mode == mode and (before.st_uid, before.st_gid) == owners,
+             "Session fixture ownership or mode differs")
+        if not stat.S_ISLNK(mode):
+            _xattrs(path, stat.S_ISDIR(mode))
+        if stat.S_ISDIR(mode):
+            directory(path)
+            children = []
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    need(len(children) < len(expected) and entry.name in expected, "Unexpected session fixture entry")
+                    children.append(entry.name)
+            need(sorted(children) == expected, "Session fixture child roster differs")
+            row = {"path": relative, "kind": "directory", "identity": list(identity(before)), "children": expected}
+        elif stat.S_ISLNK(mode):
+            need(before.st_nlink == 1 and before.st_size == len(expected) and os.readlink(path) == expected,
+                 "Session refusal symlink differs")
+            row = {"path": relative, "kind": "symlink", "identity": list(identity(before)), "target": expected}
+        else:
+            observed = record(path, len(expected))
+            need(observed["size"] == len(expected) and observed["sha256"] == hashlib.sha256(expected).hexdigest(),
+                 "Session fixture bytes differ")
+            row = {**observed, "path": relative, "kind": "file", "identity": list(identity(before))}
+        need(identity(path.lstat()) == identity(before), "Session fixture changed during inventory")
+        rows.append(row)
+        originals.append((path, identity(before)))
+    absent = _shell_session_absent(case, changed)
+    for relative in absent:
+        _absent(root / relative)
+    need(len({tuple(row["identity"][:2]) for row in rows}) == len(roster)
+         and all(row["identity"][0] == namespace["identity"][0] for row in rows)
+         and all(identity(path.lstat()) == original for path, original in originals),
+         "Session fixture aliases, device or original identity differs")
+    _shell_namespace_check(value, binding)
+    document = {"schemaVersion": 1, "fixture": "four-kind-session-v1", "case": case, "root": str(root),
+                "changed": changed, "entries": rows, "absent": absent, "namespace": namespace}
+    need(len(canonical(document)) <= SHELL_SESSION_INVENTORY_LIMIT, "Session inventory exceeds its fixed bound")
+    return document
+
+
+def shell_session_fixture(value, case, before_raw, after_raw):
+    """Closed original DATA correspondence; never authority to scan live work."""
+    inventories, namespaces = [], []
+    for raw, changed in ((before_raw, False), (after_raw, case == "session-refusals")):
+        document = decode(raw, SHELL_SESSION_INVENTORY_LIMIT)
+        need(type(document) is dict and set(document) == {"schemaVersion", "fixture", "case", "root", "changed", "entries", "absent", "namespace"}
+             and canonical(document) == raw and type(document["schemaVersion"]) is int and document["schemaVersion"] == 1
+             and document["fixture"] == "four-kind-session-v1" and document["case"] == case and document["changed"] is changed
+             and document["root"] == str(shell_fixture_root(value) / case)
+             and document["absent"] == _shell_session_absent(case, changed), "Session fixture inventory shape or phase differs")
+        namespace = _shell_namespace_data(value, document["namespace"])
+        namespaces.append(namespace)
+        roster, rows = _shell_session_roster(value, case, changed), document["entries"]
+        need(type(rows) is list and len(rows) == len(roster), "Session fixture node roster differs")
+        observed = {}
+        for row, (relative, mode, owners, expected) in zip(rows, roster):
+            kind = "directory" if stat.S_ISDIR(mode) else "symlink" if stat.S_ISLNK(mode) else "file"
+            fields = {"children"} if kind == "directory" else {"target"} if kind == "symlink" else {"size", "sha256"}
+            need(type(row) is dict and set(row) == {"path", "kind", "identity"} | fields
+                 and row["path"] == relative and row["kind"] == kind, "Session fixture node kind or path differs")
+            original = row["identity"]
+            need(type(original) is list and len(original) == 9 and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+                 and original[0] > 0 and original[1] > 0 and original[2] == mode and tuple(original[3:5]) == owners
+                 and 0 < original[5] <= 16 and original[6] <= 1 << 20, "Session fixture original identity differs")
+            if kind == "directory":
+                need(row["children"] == expected, "Session fixture has unexpected or pending state")
+            elif kind == "symlink":
+                need(original[5] == 1 and original[6] == len(expected) and row["target"] == expected,
+                     "Session refusal symlink target differs")
+            else:
+                need(original[5] == 1 and original[6] == len(expected) and type(row["size"]) is int
+                     and row["size"] == len(expected) and row["sha256"] == hashlib.sha256(expected).hexdigest(),
+                     "Session fixture is not the exact fictional source DATA")
+            observed[relative] = row
+        reserved = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
+        need(all(row["identity"][0] == namespace["identity"][0] and tuple(row["identity"][:2]) not in reserved for row in rows)
+             and len({tuple(row["identity"][:2]) for row in rows}) == len(rows), "Session fixture nodes alias or cross devices")
+        inventories.append(observed)
+    first, last = inventories
+    need(namespaces[0] == namespaces[1], "Session fixture original namespace changed")
+    changed = case == "session-refusals"
+    if changed:
+        need(set(first) - set(last) == {"sources/changed-next.jks"} and not set(last) - set(first),
+             "Session mutation did not consume exactly its fixed source name")
+        for name, row in last.items():
+            if name == "sources":
+                need(first[name]["identity"][:6] == row["identity"][:6], "Session source directory was replaced or chmodded")
+            elif name == "sources/changed.jks":
+                old = first["sources/changed-next.jks"]
+                # Rename can change ctime, not the original byte/mode/mtime or
+                # dev/inode. Native evidence owns the displaced open original.
+                need(old["identity"][:8] == row["identity"][:8] and old["size"] == row["size"]
+                     and old["sha256"] == row["sha256"], "Session changed leaf is not its original prepared replacement")
+            else:
+                need(first[name] == row, "Session mutation changed an unrelated original")
+    else:
+        need(first == last and before_raw == after_raw, "Read-only session changed its original fixture")
+    return {"fixture": "four-kind-session-v1", "case": case, "rootRetained": True, "originalsAccounted": True,
+            "projectUnchanged": True, "sourcesOutsideProject": True, "noUnexpectedEntries": True, "noPendingState": True,
+            "beforeCount": len(first), "afterCount": len(last), "mutations": ["changed-leaf-rename"] if changed else [],
+            "before": {"size": len(before_raw), "sha256": hashlib.sha256(before_raw).hexdigest()},
+            "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
 
 
 def _shell_fixture_ancestry(value):
@@ -3481,7 +4001,7 @@ def _shell_namespace_check(value, binding):
 
 
 def _shell_fixtures_prepare(value):
-    """Create the six fixed DATA trees once, retained on every failure.
+    """Create the ten fixed DATA trees once, retained on every failure.
 
     The sibling follows the existing disposable-runner retention policy; there
     is no deletion, cleanup scan, retry or permission repair of an old object.
@@ -3548,6 +4068,7 @@ def _shell_fixtures_prepare(value):
             os.chmod(path, stat.S_IMODE(mode))
             os.chown(path, *owners)
         _xattrs(path, stat.S_ISDIR(mode))
+    _shell_session_fixtures_prepare(value, root)
     _shell_namespace_roster(root)
     for name, kind in (("positive-project", True), ("positive-project/app", True),
                        ("positive-project/app/build.gradle.kts", False), ("positive-project/version.properties", False),
@@ -4055,6 +4576,14 @@ def shell_metadata_receipt(raw):
     return receipt
 
 
+def shell_session_receipt(raw, case):
+    need(type(case) is str and case in SHELL_SESSION_CASES, "Different fixed session receipt case")
+    receipt = decode(raw, SHELL_SESSION_RECEIPT_LIMIT)
+    need(raw == canonical(receipt) == canonical(SHELL_SESSION_RECEIPTS[case]),
+         "Session receipt is missing, malformed, premature or for another method profile")
+    return receipt
+
+
 def _shell_path_roster(changed):
     return tuple((SHELL_PATH_MOVES.get(name, name) if changed else name, kind) for name, kind in SHELL_PATH_NODES) + (
         (("path-project/inputs/link-input", "symlink"),) if changed else ())
@@ -4212,9 +4741,47 @@ def _shell_prepare(value, case, namespace):
         _retain("shell-project-paths-before.json", canonical(_shell_paths_inventory(value, namespace)))
     if case == "workflow-apply":
         _retain("shell-workflow-apply-before.json", canonical(_shell_workflow_inventory(value, namespace)))
+    if case in SHELL_SESSION_CASES:
+        _retain("shell-" + case + "-before.json", canonical(_shell_session_inventory(value, namespace, case)))
     if case == "metadata-save":
         _retain("shell-metadata-save-before.json", canonical(_shell_metadata_inventory(value, namespace)))
     return environment, log_binding
+
+
+def _shell_fixtures_final(value, namespace):
+    """Compare retained fixtures only after every original case has returned."""
+    # Every original case, with metadata last, has returned through the
+    # same shell_result gate. Check every earlier original family and the
+    # saved metadata together, never by following a failed/possibly-live case.
+    need(canonical(_shell_project_inventory(value, namespace, saved=True))
+         == read(_ROOT / "public/shell-positive-project-after.json", 8192)
+         and canonical(_shell_candidate_inventory(value, namespace))
+         == read(_ROOT / "public/shell-positive-candidate-after.json", 8192)
+         and canonical(_shell_paths_inventory(value, namespace, changed=True))
+         == read(_ROOT / "public/shell-project-paths-after.json", 8192)
+         and canonical(_shell_workflow_inventory(value, namespace, installed=True))
+         == read(_ROOT / "public/shell-workflow-apply-after.json", 8192)
+         and canonical(_shell_metadata_inventory(value, namespace, saved=True))
+         == read(_ROOT / "public/shell-metadata-save-after.json", 8192),
+         "Shell observations changed another original fixture family")
+    for case in SHELL_SESSION_CASES:
+        need(canonical(_shell_session_inventory(value, namespace, case, changed=case == "session-refusals"))
+             == read(_ROOT / "public" / ("shell-" + case + "-after.json"), SHELL_SESSION_INVENTORY_LIMIT),
+             "Later shell observations changed an earlier original session fixture")
+
+
+def _shell_original_child_map(raw, expected):
+    """One actual original-child map, matched to the admitted loader identities."""
+    need(type(expected) is dict and len(expected) == 6, "Original shell admitted mapping set differs")
+    rows = decode(raw, 8192)
+    need(type(rows) is list and len(rows) == 6 and all(type(row) is dict for row in rows)
+         and [row.get("role") for row in rows] == sorted(expected), "Original shell child roles differ")
+    for row in rows:
+        need(set(row) == {"role", "path", "deviceMajor", "deviceMinor", "inode"}
+             and row["path"] in expected[row["role"]]["paths"]
+             and all(type(row[key]) is int and row[key] == expected[row["role"]][key]
+                     for key in ("deviceMajor", "deviceMinor", "inode")), "Original shell child mapping differs")
+    return rows
 
 
 def shell_result(stdout, stderr, case, code, expected):
@@ -4257,6 +4824,23 @@ def shell_result(stdout, stderr, case, code, expected):
         receipt = receipt_reader(output[3][len(receipt_marker):])
         return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True, "maps": [],
                 field: receipt}
+    if case in SHELL_SESSION_CASES:
+        output = [line for line in stdout.splitlines(keepends=True) if line.startswith(b"MRK_")]
+        diagnostics = [line for line in stderr.splitlines() if line.startswith(b"MRK_")]
+        need(6 <= len(output) <= SHELL_SESSION_R1_LIMIT + 5
+             and output[:3] == [b"MRK_DESKTOP_CAPABILITIES=available\n", b"MRK_DESKTOP_CATALOGUE=returned\n", contracts + b"\n"]
+             and output[-2].startswith(SHELL_SESSION_MARKER) and output[-2].endswith(b"\n")
+             and output[-1] == marker + b"\n" and diagnostics == [],
+             "Original session bootstrap/contract/maps/receipt/completion order differs")
+        receipt = shell_session_receipt(output[-2][len(SHELL_SESSION_MARKER):], case)
+        maps = output[3:-2]
+        need(len(maps) == receipt["behavior"]["assessments"]
+             and all(line.startswith(CHILD_MARKER.encode("ascii")) and line.endswith(b"\n") and b"\r" not in line
+                     and len(line) <= 8192 + len(CHILD_MARKER) for line in maps),
+             "Session assessments lack their bounded original child-map captures")
+        rows = [_shell_original_child_map(line[len(CHILD_MARKER):], expected) for line in maps]
+        return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
+                "maps": rows, "sessionInputs": receipt}
     if case == "normal":
         wanted = [b"MRK_DESKTOP_CAPABILITIES=available", b"MRK_DESKTOP_CATALOGUE=returned"]
         need(sorted(lines) == sorted(wanted), "Actual normal capabilities/catalogue or observer completion missing")
@@ -4269,14 +4853,7 @@ def shell_result(stdout, stderr, case, code, expected):
     need(sorted(remaining) in (sorted([contracts, marker]), sorted([contracts, marker, b"MRK_DESKTOP_CAPABILITIES=unavailable"]))
          and len(maps) == 1 and len(maps[0]) <= 8192 + len(CHILD_MARKER)
          and type(expected) is dict and len(expected) == 6, "Outstanding original/GUI completion differs")
-    rows = decode(maps[0][len(CHILD_MARKER):], 8192)
-    need(type(rows) is list and len(rows) == 6 and all(type(row) is dict for row in rows)
-         and [row.get("role") for row in rows] == sorted(expected), "Outstanding original child roles differ")
-    for row in rows:
-        need(set(row) == {"role", "path", "deviceMajor", "deviceMinor", "inode"}
-             and row["path"] in expected[row["role"]]["paths"]
-             and all(type(row[key]) is int and row[key] == expected[row["role"]][key]
-                     for key in ("deviceMajor", "deviceMinor", "inode")), "Outstanding original child mapping differs")
+    rows = _shell_original_child_map(maps[0][len(CHILD_MARKER):], expected)
     return {"case": case, "exitCode": 0, "bootstrapReturned": False, "domAndGtkObserved": True, "maps": [rows]}
 
 
@@ -4386,6 +4963,52 @@ def _shell_normal_markers(stdout, stderr):
                      "protocol_error", "engine_failed", "io_error", "output_limit", "other")
     stages += tuple("capabilities-" + origin + "-" + code
                     for origin in ("admission", "query-wait") for code in failure_codes)
+    # Linux-only first-error cause DATA, counted only as complete fixed records.
+    native_failures = (
+        'unsupported-platform',
+        'missing-compile-anchor',
+        'stopped',
+        'deadline',
+        'native-unavailable',
+        'native-denied',
+        'namespace',
+        'mount',
+        'ownership',
+        'extended-attributes',
+        'identity-changed',
+        'manifest',
+        'inventory',
+        'bounds',
+        'already-used',
+        'interrupted',
+        'close-uncertain',
+        'ledger-invariant',
+        'transfer-unavailable',
+        'destination-occupied',
+    )
+    local_causes = (
+        'selection-profile-closed',
+        'selection-compile-binding',
+        'selection-method-outside-profile',
+        'inspection-unavailable',
+        'acquisition-entry-not-released',
+        'acquisition-custody-missing',
+        'acquisition-lock',
+        'final-claim-owner-gate',
+        'returned-spawn-process-fd-limit',
+        'returned-spawn-system-fd-limit',
+        'returned-spawn-memory',
+        'returned-spawn-resource-unavailable',
+        'returned-spawn-permission-denied',
+        'returned-spawn-not-found',
+        'returned-spawn-exec-format',
+        'returned-spawn-other',
+        'engine-response',
+        'unavailable',
+    )
+    stages += tuple("capabilities-cause-" + origin + "-" + reason
+                    for origin in ("inspection", "capability", "preparation", "final-claim") for reason in native_failures)
+    stages += tuple("capabilities-cause-" + label for label in local_causes)
     prefix = b"MRKDBG_DESKTOP_BOOTSTRAP="
     stage_lines = {prefix + stage.encode("ascii") + b"\n": stage for stage in stages}
     result = {}
@@ -5002,22 +5625,17 @@ def unit_start():
                          and canonical(_shell_paths_inventory(value, namespace, changed=True))
                          == read(_ROOT / "public/shell-project-paths-after.json", 8192),
                          "Workflow case changed another original fixture family")
+                if case in SHELL_SESSION_CASES:
+                    session_after = canonical(_shell_session_inventory(value, namespace, case, changed=case == "session-refusals"))
+                    _retain("shell-" + case + "-after.json", session_after)
+                    shell_session_fixture(value, case,
+                        read(_ROOT / "public" / ("shell-" + case + "-before.json"), SHELL_SESSION_INVENTORY_LIMIT), session_after)
                 if case == "metadata-save":
                     metadata_after = canonical(_shell_metadata_inventory(value, namespace, saved=True))
                     _retain("shell-metadata-save-after.json", metadata_after)
                     shell_metadata_fixture(value, read(_ROOT / "public/shell-metadata-save-before.json", 8192), metadata_after)
-                    # Only after the actual metadata original has returned:
-                    # Save cannot change any earlier case's preserved fixture.
-                    need(canonical(_shell_project_inventory(value, namespace, saved=True))
-                         == read(_ROOT / "public/shell-positive-project-after.json", 8192)
-                         and canonical(_shell_candidate_inventory(value, namespace))
-                         == read(_ROOT / "public/shell-positive-candidate-after.json", 8192)
-                         and canonical(_shell_paths_inventory(value, namespace, changed=True))
-                         == read(_ROOT / "public/shell-project-paths-after.json", 8192)
-                         and canonical(_shell_workflow_inventory(value, namespace, installed=True))
-                         == read(_ROOT / "public/shell-workflow-apply-after.json", 8192),
-                         "Metadata case changed another original fixture family")
             _shell_namespace_check(value, namespace)
+        _shell_fixtures_final(value, namespace)
         need(_tree(PREFIX / M, M, published=True) == original, "Published A changed during shell observations")
         state("shell-finished", "install ok installed", "P0")
         _finish_body(value, request_sha, start, states, observations, traces, cases, loader)
@@ -5282,16 +5900,19 @@ def shell_closed_result(value, outcome, raw_files):
         need(all(type(raw) is bytes for raw in streams) and sum(map(len, streams)) <= LIMIT,
              "Closed original shell combined output differs")
         result = shell_result(raw_files[phase + ".stdout"], raw_files[phase + ".stderr"], case, commands[phase]["exitCode"], expected)
-        need(canonical(result) == canonical(cases[case]) if case in ("positive", "project-paths", "workflow-apply", "metadata-save") else result == cases[case],
+        need(canonical(result) == canonical(cases[case]),
              "Closed original shell capture differs")
     fixture = shell_project_fixture(value, raw_files["shell-positive-project-before.json"], raw_files["shell-positive-project-after.json"])
     candidate = shell_candidate_fixture(value, raw_files["shell-positive-candidate-before.json"], raw_files["shell-positive-candidate-after.json"])
     paths = shell_paths_fixture(value, raw_files["shell-project-paths-before.json"], raw_files["shell-project-paths-after.json"])
     workflow = shell_workflow_fixture(value, raw_files["shell-workflow-apply-before.json"], raw_files["shell-workflow-apply-after.json"])
     metadata = shell_metadata_fixture(value, raw_files["shell-metadata-save-before.json"], raw_files["shell-metadata-save-after.json"])
+    sessions = {case: {"native": cases[case]["sessionInputs"],
+        "fixture": shell_session_fixture(value, case, raw_files["shell-" + case + "-before.json"], raw_files["shell-" + case + "-after.json"])}
+        for case in SHELL_SESSION_CASES}
     namespaces = [decode(raw_files[name], 8192)["namespace"] for name in
-                  ("shell-positive-project-before.json", "shell-positive-candidate-before.json", "shell-project-paths-before.json",
-                   "shell-workflow-apply-before.json", "shell-metadata-save-before.json")]
+                  ("shell-positive-project-before.json", "shell-positive-candidate-before.json", "shell-project-paths-before.json", "shell-workflow-apply-before.json",
+                   *("shell-" + case + "-before.json" for case in SHELL_SESSION_CASES), "shell-metadata-save-before.json")]
     need(all(namespace == namespaces[0] for namespace in namespaces), "Closed shell fixture families have different original namespaces")
     control = decode(raw_files["shell-normal-control.json"])
     need(control.get("joined") is True and control.get("inputs") == 2 and control.get("workerGuardState") == "RESTORED"
@@ -5312,6 +5933,7 @@ def shell_closed_result(value, outcome, raw_files):
             "candidateDocuments": {"native": cases["positive"]["candidateDocuments"], "fixture": candidate},
             "projectPaths": {"native": cases["project-paths"]["projectPaths"], "fixture": paths},
             "workflowApply": {"native": cases["workflow-apply"]["workflowApply"], "fixture": workflow},
+            "sessionInputs": sessions,
             "metadataSave": {"native": cases["metadata-save"]["metadataSave"], "fixture": metadata},
             "packageLifecycleQualified": False, "shellPackageBuilt": False}
 

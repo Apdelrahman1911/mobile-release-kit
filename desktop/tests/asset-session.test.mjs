@@ -386,24 +386,43 @@ test('a failed mutation is not retried by status, event, or view teardown', asyn
   assert.equal(h.unsubscribed(), true);
 });
 
-test('a status read started before a command failure cannot clear the newer uncertainty', async () => {
+for (const code of ['unknown', 'asset_deadline']) test(`a status read started before a command failure cannot clear the newer uncertainty (${code})`, async () => {
   const h = harness();
+  const terminal = (revision) => status(revision, code === 'asset_deadline' ? {
+    operation: operation({ phase: 'idle', reason: 'deadline', settlement: 'known', assessment: null, preview: null }),
+  } : {});
   try {
     await ready(h);
     h.controller.prepareScalar('google-wif', { ...fields });
     const oldRead = deferred(); h.api.assetStatus = () => oldRead.promise;
     const reading = h.controller.checkStatus(); await settle();
-    h.latest('prepare').reject({ code: 'unknown', message: 'inert-private-detail' }); await settle();
+    h.latest('prepare').reject({ code, message: 'inert-private-detail' }); await settle();
     assert.equal(h.controller.getSnapshot().observationFailed, true);
-    oldRead.resolve(status(2)); await reading;
+    assert.equal(JSON.stringify(h.controller.getSnapshot()).includes('inert-private-detail'), false);
+    // Native context can survive the known deadline. Neither its event nor the
+    // already-started read can erase the original Prepare reply's uncertainty.
+    h.emit(terminal(2));
+    assert.deepEqual(h.controller.getSnapshot().status.context, context);
     assert.equal(h.controller.getSnapshot().observationFailed, true);
     assert.equal(h.controller.getSnapshot().contextCurrent, false);
+    oldRead.resolve(terminal(2)); await reading;
+    assert.equal(h.controller.getSnapshot().observationFailed, true);
+    assert.equal(h.controller.getSnapshot().contextCurrent, false);
+    assert.equal(h.controller.getSnapshot().reviewReady, false);
+    assert.equal(h.controller.getSnapshot().status.operation?.preview ?? null, null);
+    if (code === 'asset_deadline') assert.equal(h.controller.getSnapshot().status.operation.reason, 'deadline');
     assert.equal(h.controller.prepareScalar('google-wif', fields), false);
-    h.api.assetStatus = async () => status(3);
+    assert.equal(h.controller.confirmPreview(A, 'save'), false);
+    h.api.assetStatus = async () => terminal(3);
     await h.controller.checkStatus();
     assert.equal(h.controller.getSnapshot().observationFailed, false);
     assert.equal(h.controller.getSnapshot().contextCurrent, true);
+    assert.equal(h.controller.getSnapshot().error, null);
+    assert.equal(h.controller.getSnapshot().reviewReady, false);
+    assert.equal(h.controller.getSnapshot().status.operation?.preview ?? null, null);
+    assert.equal(h.controller.confirmPreview(A, 'save'), false);
     assert.equal(h.calls.filter((call) => call.command === 'prepare').length, 1);
+    assert.equal(h.calls.filter((call) => call.command === 'commit' || call.command === 'bind').length, 0);
   } finally { h.controller.dispose(); }
 });
 

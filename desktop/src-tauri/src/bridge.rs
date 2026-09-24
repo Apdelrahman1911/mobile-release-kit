@@ -1,6 +1,6 @@
 //! Fixed application services. Project roots enter the registry only through
 //! the Rust-side native picker, never through a renderer-supplied path.
-use std::{collections::BTreeMap, path::PathBuf, sync::{Mutex, atomic::{AtomicU32, Ordering}}};
+use std::{collections::BTreeMap, path::PathBuf, sync::{Arc, Mutex, atomic::{AtomicU32, Ordering}}};
 #[cfg(any(feature = "desktop-shell", all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
 use std::sync::atomic::AtomicU64;
 #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos"))))]
@@ -91,6 +91,114 @@ fn capabilities_failure_line(origin: CapabilitiesFailureOrigin, error: &BridgeEr
     }
 }
 
+#[cfg(all(any(feature = "desktop-shell", test), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn capabilities_cause_line(error: &BridgeError) -> &'static [u8] {
+    // Only a returned first-error fact, never a custody/finality assertion.
+    // Do not derive a label from the public code/message or format native errors.
+    use crate::error::{LinuxPassiveCause::*, LinuxSpawnFailure as Spawn};
+    use crate::installed_runtime::AdmissionFailure as Failure;
+    match error.linux_passive_cause() {
+        Some(SelectionProfileClosed) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-selection-profile-closed\n",
+        Some(SelectionCompileBinding) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-selection-compile-binding\n",
+        Some(SelectionMethodOutsideProfile) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-selection-method-outside-profile\n",
+        Some(Inspection(None)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-unavailable\n",
+        Some(AcquisitionEntryNotReleased) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-acquisition-entry-not-released\n",
+        Some(AcquisitionCustodyMissing) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-acquisition-custody-missing\n",
+        Some(AcquisitionLock) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-acquisition-lock\n",
+        Some(FinalClaimOwnerGate) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-owner-gate\n",
+        Some(Inspection(Some(Failure::UnsupportedPlatform))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-unsupported-platform\n",
+        Some(Inspection(Some(Failure::MissingCompileAnchor))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-missing-compile-anchor\n",
+        Some(Inspection(Some(Failure::Stopped))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-stopped\n",
+        Some(Inspection(Some(Failure::Deadline))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-deadline\n",
+        Some(Inspection(Some(Failure::NativeUnavailable))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-native-unavailable\n",
+        Some(Inspection(Some(Failure::NativeDenied))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-native-denied\n",
+        Some(Inspection(Some(Failure::Namespace))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-namespace\n",
+        Some(Inspection(Some(Failure::Mount))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-mount\n",
+        Some(Inspection(Some(Failure::Ownership))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-ownership\n",
+        Some(Inspection(Some(Failure::ExtendedAttributes))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-extended-attributes\n",
+        Some(Inspection(Some(Failure::IdentityChanged))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-identity-changed\n",
+        Some(Inspection(Some(Failure::Manifest))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-manifest\n",
+        Some(Inspection(Some(Failure::Inventory))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-inventory\n",
+        Some(Inspection(Some(Failure::Bounds))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-bounds\n",
+        Some(Inspection(Some(Failure::AlreadyUsed))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-already-used\n",
+        Some(Inspection(Some(Failure::Interrupted))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-interrupted\n",
+        Some(Inspection(Some(Failure::CloseUncertain))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-close-uncertain\n",
+        Some(Inspection(Some(Failure::LedgerInvariant))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-ledger-invariant\n",
+        Some(Inspection(Some(Failure::TransferUnavailable))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-transfer-unavailable\n",
+        Some(Inspection(Some(Failure::DestinationOccupied))) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-destination-occupied\n",
+        Some(Capability(Failure::UnsupportedPlatform)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-unsupported-platform\n",
+        Some(Capability(Failure::MissingCompileAnchor)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-missing-compile-anchor\n",
+        Some(Capability(Failure::Stopped)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-stopped\n",
+        Some(Capability(Failure::Deadline)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-deadline\n",
+        Some(Capability(Failure::NativeUnavailable)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-native-unavailable\n",
+        Some(Capability(Failure::NativeDenied)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-native-denied\n",
+        Some(Capability(Failure::Namespace)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-namespace\n",
+        Some(Capability(Failure::Mount)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-mount\n",
+        Some(Capability(Failure::Ownership)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-ownership\n",
+        Some(Capability(Failure::ExtendedAttributes)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-extended-attributes\n",
+        Some(Capability(Failure::IdentityChanged)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-identity-changed\n",
+        Some(Capability(Failure::Manifest)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-manifest\n",
+        Some(Capability(Failure::Inventory)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-inventory\n",
+        Some(Capability(Failure::Bounds)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-bounds\n",
+        Some(Capability(Failure::AlreadyUsed)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-already-used\n",
+        Some(Capability(Failure::Interrupted)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-interrupted\n",
+        Some(Capability(Failure::CloseUncertain)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-close-uncertain\n",
+        Some(Capability(Failure::LedgerInvariant)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-ledger-invariant\n",
+        Some(Capability(Failure::TransferUnavailable)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-transfer-unavailable\n",
+        Some(Capability(Failure::DestinationOccupied)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-capability-destination-occupied\n",
+        Some(Preparation(Failure::UnsupportedPlatform)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-unsupported-platform\n",
+        Some(Preparation(Failure::MissingCompileAnchor)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-missing-compile-anchor\n",
+        Some(Preparation(Failure::Stopped)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-stopped\n",
+        Some(Preparation(Failure::Deadline)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-deadline\n",
+        Some(Preparation(Failure::NativeUnavailable)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-native-unavailable\n",
+        Some(Preparation(Failure::NativeDenied)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-native-denied\n",
+        Some(Preparation(Failure::Namespace)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-namespace\n",
+        Some(Preparation(Failure::Mount)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-mount\n",
+        Some(Preparation(Failure::Ownership)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-ownership\n",
+        Some(Preparation(Failure::ExtendedAttributes)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-extended-attributes\n",
+        Some(Preparation(Failure::IdentityChanged)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-identity-changed\n",
+        Some(Preparation(Failure::Manifest)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-manifest\n",
+        Some(Preparation(Failure::Inventory)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-inventory\n",
+        Some(Preparation(Failure::Bounds)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-bounds\n",
+        Some(Preparation(Failure::AlreadyUsed)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-already-used\n",
+        Some(Preparation(Failure::Interrupted)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-interrupted\n",
+        Some(Preparation(Failure::CloseUncertain)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-close-uncertain\n",
+        Some(Preparation(Failure::LedgerInvariant)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-ledger-invariant\n",
+        Some(Preparation(Failure::TransferUnavailable)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-transfer-unavailable\n",
+        Some(Preparation(Failure::DestinationOccupied)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-preparation-destination-occupied\n",
+        Some(FinalClaim(Failure::UnsupportedPlatform)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-unsupported-platform\n",
+        Some(FinalClaim(Failure::MissingCompileAnchor)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-missing-compile-anchor\n",
+        Some(FinalClaim(Failure::Stopped)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-stopped\n",
+        Some(FinalClaim(Failure::Deadline)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-deadline\n",
+        Some(FinalClaim(Failure::NativeUnavailable)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-native-unavailable\n",
+        Some(FinalClaim(Failure::NativeDenied)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-native-denied\n",
+        Some(FinalClaim(Failure::Namespace)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-namespace\n",
+        Some(FinalClaim(Failure::Mount)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-mount\n",
+        Some(FinalClaim(Failure::Ownership)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-ownership\n",
+        Some(FinalClaim(Failure::ExtendedAttributes)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-extended-attributes\n",
+        Some(FinalClaim(Failure::IdentityChanged)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-identity-changed\n",
+        Some(FinalClaim(Failure::Manifest)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-manifest\n",
+        Some(FinalClaim(Failure::Inventory)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-inventory\n",
+        Some(FinalClaim(Failure::Bounds)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-bounds\n",
+        Some(FinalClaim(Failure::AlreadyUsed)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-already-used\n",
+        Some(FinalClaim(Failure::Interrupted)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-interrupted\n",
+        Some(FinalClaim(Failure::CloseUncertain)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-close-uncertain\n",
+        Some(FinalClaim(Failure::LedgerInvariant)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-ledger-invariant\n",
+        Some(FinalClaim(Failure::TransferUnavailable)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-transfer-unavailable\n",
+        Some(FinalClaim(Failure::DestinationOccupied)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-final-claim-destination-occupied\n",
+        Some(ReturnedSpawn(Spawn::ProcessFdLimit)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-returned-spawn-process-fd-limit\n",
+        Some(ReturnedSpawn(Spawn::SystemFdLimit)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-returned-spawn-system-fd-limit\n",
+        Some(ReturnedSpawn(Spawn::Memory)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-returned-spawn-memory\n",
+        Some(ReturnedSpawn(Spawn::ResourceUnavailable)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-returned-spawn-resource-unavailable\n",
+        Some(ReturnedSpawn(Spawn::PermissionDenied)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-returned-spawn-permission-denied\n",
+        Some(ReturnedSpawn(Spawn::NotFound)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-returned-spawn-not-found\n",
+        Some(ReturnedSpawn(Spawn::ExecFormat)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-returned-spawn-exec-format\n",
+        Some(ReturnedSpawn(Spawn::Other)) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-returned-spawn-other\n",
+        Some(EngineResponse) => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-engine-response\n",
+        None => b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-unavailable\n",
+    }
+}
+
 struct RegisteredProject { view: Project, root: PathBuf, identity: Option<crate::asset_source::DirectoryIdentity> }
 pub(crate) struct ProjectRoster { pub(crate) generation: u32, pub(crate) roots: Vec<crate::asset_source::RegisteredRoot> }
 
@@ -132,6 +240,7 @@ impl DesktopBridge {
     pub(crate) fn installed_project_selection_available(&self) -> bool { self.installed_project_selection_available }
     pub(crate) fn installed_project_path_selection_available(&self) -> bool { self.installed_project_path_selection_available }
     pub(crate) fn installed_evidence_selection_available(&self) -> bool { self.installed_evidence_selection_available }
+    pub(crate) fn installed_session_available(&self, document: &Arc<()>) -> bool { self.supervisor.installed_session_available(document) }
     pub(crate) async fn app_info(&self, document: &crate::asset_session::DocumentBinding) -> AppInfo {
         let result = match document.passive_query(self, Method::Capabilities, json!({})) {
             Ok(query) => {
@@ -139,6 +248,8 @@ impl DesktopBridge {
                 #[cfg(feature = "desktop-shell")]
                 if let Err(error) = &result {
                     crate::shell::diagnostic(capabilities_failure_line(CapabilitiesFailureOrigin::QueryWait, error));
+                    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    crate::shell::diagnostic(capabilities_cause_line(error));
                 }
                 result
             },
@@ -477,6 +588,73 @@ mod capability_tests {
             }
         }
         assert_eq!(records.len(), 30);
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn passive_causes_are_complete_private_literals_without_result_changes() {
+        use crate::error::{LinuxPassiveCause as Cause, LinuxSpawnFailure as Spawn};
+        use crate::installed_runtime::AdmissionFailure as Failure;
+        fn check(cause: Option<Cause>, label: &str, records: &mut std::collections::BTreeSet<&'static [u8]>) {
+            let error = BridgeError::new("PRIVATE_CODE\n\u{1b}[31m", "PRIVATE_MESSAGE must never enter cause DATA")
+                .with_linux_passive_cause(cause);
+            let original = error.clone();
+            let line = capabilities_cause_line(&error);
+            assert_eq!(line, format!("MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-{label}\n").as_bytes());
+            assert!(line.len() <= 96 && line.is_ascii() && records.insert(line));
+            assert!(!line.windows(7).any(|window| window == b"PRIVATE"));
+            assert_eq!(error, original);
+            assert_eq!(error.linux_passive_cause(), original.linux_passive_cause());
+        }
+        let failures = [
+            (Failure::UnsupportedPlatform, "unsupported-platform"),
+            (Failure::MissingCompileAnchor, "missing-compile-anchor"),
+            (Failure::Stopped, "stopped"),
+            (Failure::Deadline, "deadline"),
+            (Failure::NativeUnavailable, "native-unavailable"),
+            (Failure::NativeDenied, "native-denied"),
+            (Failure::Namespace, "namespace"),
+            (Failure::Mount, "mount"),
+            (Failure::Ownership, "ownership"),
+            (Failure::ExtendedAttributes, "extended-attributes"),
+            (Failure::IdentityChanged, "identity-changed"),
+            (Failure::Manifest, "manifest"),
+            (Failure::Inventory, "inventory"),
+            (Failure::Bounds, "bounds"),
+            (Failure::AlreadyUsed, "already-used"),
+            (Failure::Interrupted, "interrupted"),
+            (Failure::CloseUncertain, "close-uncertain"),
+            (Failure::LedgerInvariant, "ledger-invariant"),
+            (Failure::TransferUnavailable, "transfer-unavailable"),
+            (Failure::DestinationOccupied, "destination-occupied"),
+        ];
+        let origins: [(fn(Failure) -> Cause, &str); 4] = [
+            (|failure| Cause::Inspection(Some(failure)), "inspection"),
+            (Cause::Capability, "capability"), (Cause::Preparation, "preparation"), (Cause::FinalClaim, "final-claim"),
+        ];
+        let mut records = std::collections::BTreeSet::new();
+        for (origin, stage) in origins {
+            for (failure, reason) in failures { check(Some(origin(failure)), &format!("{stage}-{reason}"), &mut records); }
+        }
+        for (cause, label) in [
+            (Some(Cause::SelectionProfileClosed), "selection-profile-closed"),
+            (Some(Cause::SelectionCompileBinding), "selection-compile-binding"),
+            (Some(Cause::SelectionMethodOutsideProfile), "selection-method-outside-profile"),
+            (Some(Cause::Inspection(None)), "inspection-unavailable"),
+            (Some(Cause::AcquisitionEntryNotReleased), "acquisition-entry-not-released"),
+            (Some(Cause::AcquisitionCustodyMissing), "acquisition-custody-missing"),
+            (Some(Cause::AcquisitionLock), "acquisition-lock"),
+            (Some(Cause::FinalClaimOwnerGate), "final-claim-owner-gate"),
+            (Some(Cause::ReturnedSpawn(Spawn::ProcessFdLimit)), "returned-spawn-process-fd-limit"),
+            (Some(Cause::ReturnedSpawn(Spawn::SystemFdLimit)), "returned-spawn-system-fd-limit"),
+            (Some(Cause::ReturnedSpawn(Spawn::Memory)), "returned-spawn-memory"),
+            (Some(Cause::ReturnedSpawn(Spawn::ResourceUnavailable)), "returned-spawn-resource-unavailable"),
+            (Some(Cause::ReturnedSpawn(Spawn::PermissionDenied)), "returned-spawn-permission-denied"),
+            (Some(Cause::ReturnedSpawn(Spawn::NotFound)), "returned-spawn-not-found"),
+            (Some(Cause::ReturnedSpawn(Spawn::ExecFormat)), "returned-spawn-exec-format"),
+            (Some(Cause::ReturnedSpawn(Spawn::Other)), "returned-spawn-other"),
+            (Some(Cause::EngineResponse), "engine-response"), (None, "unavailable"),
+        ] { check(cause, label, &mut records); }
+        assert_eq!(records.len(), 98);
     }
     #[test]
     fn project_path_availability_is_separate_bounded_display_data() { assert_project_path_availability_contract(); }

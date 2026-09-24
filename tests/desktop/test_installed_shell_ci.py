@@ -185,7 +185,7 @@ def transport_data(work, change=None):
                 "nativeInputs": native, "compilerInputs": {"metadataSha256": hashlib.sha256(S.D.canonical(metadata())).hexdigest()}}
     result = {**identity, "compilations": ["normal", "observer"], "cargoBuilds": 1, "frontendBuilds": 1,
               "shellExecuted": False, "observerExecuted": False, "supplierRebuilt": False, "packageBuilt": False,
-              "helper11Rerun": False, "qualified": False,
+              "helper11Rerun": False, "qualified": False, "compilerCleanup": deepcopy(S.SHELL_CLEANUP_SUCCESS),
               "commands": [{"phase": "shell-compile", "ordinaryOwnerReturned": True, "exitCode": 0,
                             "argv": S.shell_compile_argv("/tools/cargo", source, target)}]}
     if change is not None:
@@ -357,6 +357,187 @@ class ShellPackageOwnershipContracts(unittest.TestCase):
 
 
 class InstalledShellCompilerContracts(unittest.TestCase):
+    def test_same_job_shell_routes_have_distinct_original_roots_and_preparations(self):
+        # Inert private directory/clock fixtures only. The actual hosted-platform
+        # admission is mocked; no compiler, native service or process is launched.
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            source, temp, output = directory / "source", directory / "tmp", directory / "output"
+            source.mkdir(); temp.mkdir(); output.write_bytes(b"")
+            env = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Linux",
+                   "RUNNER_ARCH": "X64", "GITHUB_EVENT_NAME": "push", "GITHUB_REF": S.SHELL_REF,
+                   "GITHUB_JOB": "compile", "MRK_UBUNTU_PUBLICATION_VERIFY": "1", "GITHUB_SHA": "a" * 40,
+                   "MRK_PUSH_EVENT_AFTER": "a" * 40, "GITHUB_RUN_ID": "10", "GITHUB_RUN_ATTEMPT": "1",
+                   "GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit", "GITHUB_WORKSPACE": str(source),
+                   "RUNNER_TEMP": str(temp), "GITHUB_OUTPUT": str(output)}
+            roots, endpoints = [], []
+            previous_umask = S.os.umask(0o077)
+            try:
+                for index, case in enumerate(("compile", "observe")):
+                    environment = {**env, "MRK_INSTALLED_SHELL_CASE": case}
+                    with patch.dict(S.os.environ, environment, clear=True), patch.object(S, "SOURCE", source), \
+                         patch.object(S.C, "conventional_host"), patch.object(S.os, "getresuid", return_value=(1001,) * 3), \
+                         patch.object(S.os, "getresgid", return_value=(1001,) * 3), \
+                         patch.object(S.time, "monotonic", return_value=100.0 + index * 25):
+                        self.assertEqual(S.route(S.os.environ), "a" * 40)
+                        S.prepare()
+                        _, _, _, root = S.hosted_paths()
+                        raw = (root / "preparation.json").read_bytes()
+                        record = S.D.decode(raw)
+                        self.assertEqual(root.name, "mrk-desktop-ubuntu-publisher-10-1-" + case)
+                        self.assertEqual((record["shellCase"], record["job"]), (case, "compile"))
+                        self.assertEqual(float(record["deadline"]), 1300.0 + index * 25)
+                        pins = {"MRK_UBUNTU_PUBLICATION_ROOT": str(root),
+                                "MRK_UBUNTU_PUBLICATION_PREPARATION_SHA256": hashlib.sha256(raw).hexdigest(),
+                                "MRK_UBUNTU_PUBLICATION_DEADLINE": record["deadline"]}
+                        with patch.dict(S.os.environ, pins):
+                            self.assertEqual(S.resumed_preparation()[-2:], (root, float(record["deadline"])))
+                            with patch.object(S.time, "monotonic", return_value=float(record["deadline"])), \
+                                 self.assertRaisesRegex(S.D.Refused, "endpoint expired"):
+                                S.resumed_preparation()
+                            with patch.dict(S.os.environ, {"MRK_INSTALLED_SHELL_CASE": "observe" if case == "compile" else "compile"}), \
+                                 self.assertRaisesRegex(S.D.Refused, "Original private root differs"):
+                                S.resumed_preparation()
+                            changed = {**record, "shellCase": "observe" if case == "compile" else "compile"}
+                            changed_raw = S.D.canonical(changed)
+                            (root / "preparation.json").write_bytes(changed_raw)
+                            with patch.dict(S.os.environ, {"MRK_UBUNTU_PUBLICATION_PREPARATION_SHA256": hashlib.sha256(changed_raw).hexdigest()}), \
+                                 self.assertRaisesRegex(S.D.Refused, "binding changed"):
+                                S.resumed_preparation()
+                            (root / "preparation.json").write_bytes(raw)
+                        with self.assertRaises(FileExistsError):
+                            S.prepare()
+                        self.assertEqual((root / "preparation.json").read_bytes(), raw)
+                        roots.append(root); endpoints.append(record["deadline"])
+                self.assertNotEqual(roots[0], roots[1])
+                self.assertNotEqual(endpoints[0], endpoints[1])
+                for change in ({"GITHUB_JOB": "native"}, {"GITHUB_JOB": ""},
+                               {"MRK_INSTALLED_CASE": "positive"}, {"MRK_INSTALLED_SHELL_CASE": "host-metadata-only"}):
+                    with self.subTest(change=change), self.assertRaises(S.D.Refused):
+                        S.route({**env, "MRK_INSTALLED_SHELL_CASE": "compile", **change})
+            finally:
+                S.os.umask(previous_umask)
+
+    def test_cleanup_removes_only_owned_roots_and_never_follows_link_targets(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            root = parent / "owned"
+            (root / "nested").mkdir(parents=True, mode=0o700)
+            sentinel = parent / "retained"
+            sentinel.write_bytes(b"unrelated retained DATA")
+            (root / "nested/readonly").write_bytes(b"disposable DATA")
+            (root / "nested/readonly").chmod(0o400)
+            (root / "alias").symlink_to(sentinel)
+            expected = S.shell_directory_identity(root)
+            parents = {parent: S.shell_directory_identity(parent)}
+            original_close = S.os.close
+            with patch.object(S.time, "monotonic", return_value=1.0), \
+                 patch.object(S.os, "close", wraps=original_close) as close:
+                S.shell_remove_owned_directory(root, expected, parents, 2.0)
+            self.assertEqual(close.call_count, 3)  # Original pair plus rmtree's nested directory.
+            self.assertFalse(root.exists())
+            self.assertEqual(sentinel.read_bytes(), b"unrelated retained DATA")
+
+    def test_cleanup_refuses_replacements_or_expired_endpoint_before_removing_data(self):
+        for refusal in ("target", "parent", "expired", "unavailable"):
+            with self.subTest(refusal=refusal), tempfile.TemporaryDirectory() as temporary:
+                parent = Path(temporary) / "parent"
+                root = parent / "owned"
+                root.mkdir(parents=True, mode=0o700)
+                member = root / "data"
+                member.write_bytes(b"original DATA")
+                expected = S.shell_directory_identity(root)
+                parents = {parent: S.shell_directory_identity(parent)}
+                if refusal == "target":
+                    root.rename(parent / "original")
+                    root.mkdir(mode=0o700); member.write_bytes(b"replacement DATA")
+                elif refusal == "parent":
+                    parent.rename(parent.with_name("original-parent"))
+                    root.mkdir(parents=True, mode=0o700); member.write_bytes(b"replacement DATA")
+                with patch.object(S.time, "monotonic", return_value=2.0 if refusal == "expired" else 1.0), \
+                     patch.object(S.shutil.rmtree, "avoids_symlink_attacks", refusal != "unavailable"), \
+                     self.assertRaises(S.D.Refused):
+                    S.shell_remove_owned_directory(root, expected, parents, 2.0)
+                self.assertEqual(member.read_bytes(), b"replacement DATA" if refusal in {"target", "parent"} else b"original DATA")
+
+    def test_cleanup_preserves_first_failure_and_closes_each_original_once(self):
+        for removal_failure in (False, True):
+            with self.subTest(removal_failure=removal_failure), tempfile.TemporaryDirectory() as temporary:
+                parent = Path(temporary)
+                root = parent / "owned"
+                root.mkdir(mode=0o700)
+                if removal_failure:
+                    (root / "nested").mkdir(mode=0o700)
+                    (root / "nested/data").write_bytes(b"disposable DATA")
+                else:
+                    (root / "data").write_bytes(b"disposable DATA")
+                expected = S.shell_directory_identity(root)
+                parents = {parent: S.shell_directory_identity(parent)}
+                closed, original_close, original_rmtree = [], S.os.close, S.shutil.rmtree
+                def close(fd):
+                    original_close(fd)
+                    closed.append(fd)
+                    if len(closed) == 1:
+                        raise OSError("injected original close failure")
+                def remove(name, *, dir_fd):
+                    if removal_failure:
+                        raise OSError("injected original removal failure")
+                    original_rmtree(name, dir_fd=dir_fd)
+                remove.avoids_symlink_attacks = True
+                with patch.object(S.time, "monotonic", return_value=1.0), \
+                     patch.object(S.shutil, "rmtree", remove), patch.object(S.os, "close", side_effect=close), \
+                     self.assertRaisesRegex(OSError, "original removal failure" if removal_failure else "original close failure"):
+                    S.shell_remove_owned_directory(root, expected, parents, 2.0)
+                # Both original cleanup descriptors are consumed once, even
+                # when the first consuming close fails after a prior refusal.
+                self.assertEqual(len(closed), len(set(closed)))
+                self.assertEqual(len(closed), 2)
+                if removal_failure:
+                    self.assertEqual((root / "nested/data").read_bytes(), b"disposable DATA")
+                else:
+                    self.assertFalse(root.exists())
+
+    def test_same_vm_workflow_requires_original_compile_upload_and_cleanup_handoff(self):
+        workflow = (SOURCE / S.WORKFLOW).read_text()
+        self.assertEqual(workflow.count("uses: actions/checkout@"), 1)
+        self.assertNotIn("\n  native:\n", workflow)
+        self.assertNotIn("needs.compile", workflow)
+        native = workflow.split("      - name: Require the fixed disposable native route", 1)[1]
+        self.assertNotIn("apt-get", native)
+        self.assertNotIn("prepare_hosted_ubuntu_data.py", native)
+        for step in native.split("      - name:"):
+            self.assertIn("if:", step)
+            if "if: always()" not in step:
+                self.assertIn("steps.compile.outcome == 'success' && steps.upload.outcome == 'success'", step)
+        self.assertIn("artifact-ids: ${{ steps.upload.outputs.artifact-id }}", native)
+        self.assertIn("path: ${{ steps.prepare_native.outputs.root }}/work/admitted-shell", native)
+        self.assertIn("MRK_INSTALLED_SHELL_CASE: observe", native)
+        # These ordering checks supplement the actual cleanup/transport controls
+        # above; the real owner/native path still requires hosted verification.
+        source = (SOURCE / "desktop/tools/ci_ubuntu_publication.py").read_text()
+        compile_body = source.split("def verify_installed_shell_compile():", 1)[1].split("\ndef verify(", 1)[0]
+        milestones = [compile_body.index(text) for text in (
+            'check.phase = "shell-generated-cleanup"', 'source_check("clean")',
+            'shell_remove_owned_directory(work,', 'D.write(public / "result.json"',
+            'D.write(public / "shell-roster.json"', 'output.write("shell_roster_sha256=')]
+        self.assertEqual(milestones, sorted(milestones))
+        self.assertIn('all(row["ordinaryOwnerReturned"] is True for row in check.commands)', compile_body)
+        self.assertIn('shell_source_status(status.stdout, generated)', compile_body)
+
+    def test_paired_shell_source_manifest_binds_the_changed_session_modules(self):
+        # Source-only correspondence: no Cargo, native imports or source run.
+        tree = ast.parse((SOURCE / "desktop/tools/ci_ubuntu_publication.py").read_text())
+        manifest = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "shell_source_manifest")
+        paths = next(node.value for node in manifest.body if isinstance(node, ast.Assign)
+                     and any(isinstance(target, ast.Name) and target.id == "paths" for target in node.targets))
+        names = ast.literal_eval(paths)
+        self.assertEqual(len(names), len(set(names)))
+        self.assertTrue({"desktop/src-tauri/src/" + name + ".rs" for name in (
+            "runtime", "bridge", "asset_session", "asset_source", "shell", "installed_shell_observation",
+            "supervisor", "installed_shell_shutdown_observation", "error", "protocol", "installed_runtime",
+            "passive_management_tests", "credential_assessment")} <= set(names))
+        self.assertTrue({"desktop/src-tauri/src/main.rs", "desktop/src-tauri/tests/installed_shell_observation.rs"} <= set(names))
+
     def test_one_build_exact_production_features_and_two_selected_targets(self):
         argv = S.shell_compile_argv("/tools/cargo", Path("/source"), Path("/target"))
         self.assertEqual(argv[:2], ["/tools/cargo", "build"])
@@ -821,6 +1002,11 @@ class InstalledShellCompilerContracts(unittest.TestCase):
             lambda compiler, result, native, rows: result.update(observerExecuted=True),
             lambda compiler, result, native, rows: result.update(packageBuilt=True),
             lambda compiler, result, native, rows: result.update(cargoBuilds=True),
+            lambda compiler, result, native, rows: result.pop("compilerCleanup"),
+            lambda compiler, result, native, rows: result["compilerCleanup"].update(workRemoved=False),
+            lambda compiler, result, native, rows: result["compilerCleanup"].update(sourceClean=1),
+            lambda compiler, result, native, rows: result["compilerCleanup"]["generatedRootsRemoved"].pop(),
+            lambda compiler, result, native, rows: result["compilerCleanup"].update(exportsRetained=False),
             lambda compiler, result, native, rows: result["commands"][0].update(ordinaryOwnerReturned=False),
             lambda compiler, result, native, rows: compiler["exportedArtifacts"]["normal"].update(identity=compiler["originalArtifacts"]["normal"]["identity"]),
             lambda compiler, result, native, rows: compiler["originalArtifacts"]["observer"].update(path="/other/observer"),
@@ -974,7 +1160,7 @@ def closed_project_draft_data(lifecycle):
                   for name, raw in (("title.txt", b"Public title"), ("short_description.txt", b"Public summary"),
                                     ("keep.txt", b"untouched\n"), ("full_description.txt", b"Public description"))],
         "before": {"size": 4600, "sha256": "1" * 64}, "after": {"size": 4800, "sha256": "2" * 64}}
-    return {"state": "normal-shell-installed-runtime-connection-observed", "productQualified": False,
+    observed = {"state": "normal-shell-installed-runtime-connection-observed", "productQualified": False,
             "packageLifecycleQualified": False, "shellPackageBuilt": False,
             "cases": {
                 "normal": {"case": "normal", "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": False, "maps": []},
@@ -1003,6 +1189,26 @@ def closed_project_draft_data(lifecycle):
                          for phase in ("before", "after")]
                       + [{"path": "lifecycle-shell-metadata-save-" + phase + ".json", **metadata_fixture[phase]}
                          for phase in ("before", "after")]}
+    sessions = {}
+    maps = [{"role": role, "path": "/inert/" + role, "deviceMajor": 8, "deviceMinor": 2, "inode": index + 1}
+            for index, role in enumerate(sorted(lifecycle.PRIVATE_SONAMES | {"python", "ld-linux-x86-64.so.2", "libc.so.6", "libm.so.6"}))]
+    for case in lifecycle.SHELL_SESSION_CASES:
+        receipt = deepcopy(lifecycle.SHELL_SESSION_RECEIPTS[case])
+        changed = case == "session-refusals"
+        fixture = {"fixture": "four-kind-session-v1", "case": case, "rootRetained": True, "originalsAccounted": True,
+            "projectUnchanged": True, "sourcesOutsideProject": True, "noUnexpectedEntries": True, "noPendingState": True,
+            "beforeCount": 15 if changed else 9, "afterCount": 14 if changed else 9,
+            "mutations": ["changed-leaf-rename"] if changed else [],
+            "before": {"size": 4096 if changed else 3072, "sha256": "7" * 64},
+            "after": {"size": 3900 if changed else 3072, "sha256": ("8" if changed else "7") * 64}}
+        observed["cases"][case] = {"case": case, "exitCode": 0, "bootstrapReturned": True,
+                                  "domAndGtkObserved": True,
+                                  "maps": [deepcopy(maps) for _ in range(receipt["behavior"]["assessments"])], "sessionInputs": receipt}
+        sessions[case] = {"native": deepcopy(receipt), "fixture": fixture}
+        observed["files"].extend({"path": "lifecycle-shell-" + case + "-" + phase + ".json", **fixture[phase]}
+                                 for phase in ("before", "after"))
+    observed["sessionInputs"] = sessions
+    return observed
 
 
 class InstalledProjectDraftReceiptContracts(unittest.TestCase):
@@ -1051,7 +1257,8 @@ class InstalledProjectDraftReceiptContracts(unittest.TestCase):
         self.assertEqual(result["fixture"]["entryCount"], 7)
         self.assertEqual(result["fixture"]["sourceBytes"], 149)
         self.assertNotEqual(result["fixture"]["before"], result["fixture"]["after"])
-        self.assertEqual(set(observed["cases"]), {"normal", "positive", "quit-outstanding", "project-paths", "workflow-apply", "metadata-save"})
+        self.assertEqual(set(observed["cases"]), {"normal", "positive", "quit-outstanding", "project-paths", "workflow-apply",
+                                                "session-inputs", "session-refusals", "session-loss", "session-deadline", "metadata-save"})
 
     def test_rejects_legacy_partial_mistyped_or_relabelled_positive_receipts(self):
         lifecycle = S.local("ubuntu_publication_lifecycle")
@@ -1182,12 +1389,20 @@ class InstalledCandidateDocumentsReceiptContracts(unittest.TestCase):
         fixture = candidate["fixture"]
         self.assertEqual((fixture["entryCount"], fixture["documentBytes"], fixture["directoryMode"], fixture["fileMode"]), (5, 11366, 0o700, 0o600))
         self.assertEqual(fixture["before"], fixture["after"])
-        self.assertEqual(len(observed["files"]), 8)
+        expected_exports = ["lifecycle-shell-" + family + "-" + phase + ".json"
+                            for family in ("positive-project", "positive-candidate", "project-paths",
+                                           "workflow-apply", "metadata-save", "session-inputs",
+                                           "session-refusals", "session-loss", "session-deadline")
+                            for phase in ("before", "after")]
+        self.assertCountEqual([item["path"] for item in observed["files"]], expected_exports)
         # The original exporter allows at most 128 root files plus the same
         # original client's two captures; adding fixtures cannot raise it.
-        observed["files"].extend({"path": "inert-" + str(index), "size": 0, "sha256": "0" * 64} for index in range(122))
+        observed["files"].extend({"path": "inert-" + str(index), "size": 0, "sha256": "0" * 64}
+                                 for index in range(130 - len(observed["files"])))
+        self.assertEqual(len(observed["files"]), 130)
         S.shell_project_draft_observation(observed, lifecycle)
         observed["files"].append({"path": "over-cap", "size": 0, "sha256": "0" * 64})
+        self.assertEqual(len(observed["files"]), 131)
         with self.assertRaises(S.D.Refused):
             S.shell_project_draft_observation(observed, lifecycle)
 
@@ -1303,7 +1518,7 @@ class HostBindingDiagnosticContracts(unittest.TestCase):
 
 
 class InstalledProjectPathReceiptContracts(unittest.TestCase):
-    def test_requires_all_five_cases_and_both_typed_inventory_export_pins(self):
+    def test_requires_closed_case_roster_and_both_typed_inventory_export_pins(self):
         lifecycle = S.local("ubuntu_publication_lifecycle")
         observed = closed_project_draft_data(lifecycle)
         self.assertEqual(S.shell_project_draft_observation(observed, lifecycle), observed["projectDraft"])
@@ -1489,7 +1704,7 @@ class InstalledWorkflowApplyReceiptContracts(unittest.TestCase):
 
 
 class InstalledMetadataSaveReceiptContracts(unittest.TestCase):
-    def test_sixth_receipt_requires_two_original_reviews_one_apply_and_ordered_completion(self):
+    def test_metadata_receipt_requires_two_original_reviews_one_apply_and_ordered_completion(self):
         lifecycle = S.local("ubuntu_publication_lifecycle")
         expected = lifecycle.SHELL_METADATA_RECEIPT
         raw = lifecycle.canonical(expected)
@@ -1562,6 +1777,7 @@ class InstalledMetadataSaveReceiptContracts(unittest.TestCase):
             lambda v: v["cases"]["metadata-save"].update(exitCode=True),
             lambda v: v["cases"]["metadata-save"].update(domAndGtkObserved=1),
             lambda v: v["cases"]["metadata-save"].update(workflowApply=v["workflowApply"]["native"]),
+            lambda v: v["metadataSave"].update(native=deepcopy(v["sessionInputs"]["session-inputs"]["native"])),
             lambda v: v["cases"]["normal"].update(metadataSave=v["metadataSave"]["native"]),
             lambda v: v["cases"]["workflow-apply"].update(metadataSave=v["metadataSave"]["native"]),
             lambda v: v["metadataSave"]["fixture"].update(preservedOriginals=False),
@@ -1586,6 +1802,62 @@ class InstalledMetadataSaveReceiptContracts(unittest.TestCase):
             changed = closed_project_draft_data(lifecycle); mutate(changed)
             with self.subTest(mutate=mutate), self.assertRaises((S.D.Refused, ValueError, KeyError)):
                 S.shell_project_draft_observation(changed, lifecycle)
+
+
+class InstalledSessionReceiptContracts(unittest.TestCase):
+    def test_all_four_session_receipts_remain_distinct_from_ordinary_twelve_methods(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        observed = closed_project_draft_data(lifecycle)
+        result = S.shell_project_draft_observation(observed, lifecycle)
+        self.assertEqual(result["native"]["methods"], "twelve-passive")
+        for name in lifecycle.SHELL_SESSION_CASES:
+            receipt = observed["sessionInputs"][name]["native"]
+            self.assertEqual(receipt["case"], name)
+            self.assertEqual(receipt["methods"], "thirteen-passive-including-supplied-input-assessment")
+            self.assertEqual(receipt["profile"], "installed-linux-session-inputs")
+            self.assertEqual(len(observed["cases"][name]["maps"]), receipt["behavior"]["assessments"])
+            self.assertTrue(all(len(rows) == 6 for rows in observed["cases"][name]["maps"]))
+            self.assertEqual(receipt["safety"], {"persistentStorage": False, "storeContacted": False, "signingVerified": False, "releaseReady": False})
+            self.assertTrue(all(value is True for value in receipt["originals"].values()))
+
+    def test_missing_originals_mixed_cases_and_unbound_private_fixture_pins_refuse(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        case = "session-inputs"
+        mutations = (
+            lambda doc: doc.pop("sessionInputs"), lambda doc: doc["cases"].pop(case),
+            lambda doc: doc["cases"].update(unexpected=deepcopy(doc["cases"][case])),
+            lambda doc: doc["cases"][case].update(metadataSave=doc["metadataSave"]["native"]),
+            lambda doc: doc["cases"]["metadata-save"].update(sessionInputs=doc["cases"][case]["sessionInputs"]),
+            lambda doc: doc["sessionInputs"][case].update(native=deepcopy(doc["metadataSave"]["native"])),
+            lambda doc: doc["sessionInputs"].pop("session-deadline"),
+            lambda doc: doc["cases"][case].update(exitCode=True),
+            lambda doc: doc["cases"][case].update(bootstrapReturned=1),
+            lambda doc: doc["cases"][case].update(maps=[]),
+            lambda doc: doc["cases"][case]["maps"].pop(),
+            lambda doc: doc["cases"][case]["maps"].append(deepcopy(doc["cases"][case]["maps"][0])),
+            lambda doc: doc["cases"][case]["maps"][0].pop(),
+            lambda doc: doc["cases"][case]["maps"][0][0].update(inode=True),
+            lambda doc: doc["cases"][case]["maps"][0][0].update(role="not-an-admitted-role"),
+            lambda doc: doc["cases"][case]["maps"][0][0].update(privateInput="not-a-map-field"),
+            lambda doc: doc["cases"][case]["sessionInputs"].update(methods="twelve-passive"),
+            lambda doc: doc["sessionInputs"][case]["native"]["originals"].update(sourceClosed=False),
+            lambda doc: doc["sessionInputs"][case].update(native=deepcopy(doc["sessionInputs"]["session-loss"]["native"])),
+            lambda doc: doc["cases"]["normal"].update(sessionInputs=doc["cases"][case]["sessionInputs"]),
+            lambda doc: doc["sessionInputs"][case]["fixture"].update(projectUnchanged=1),
+            lambda doc: doc["sessionInputs"][case]["fixture"].update(noPendingState=False),
+            lambda doc: doc["sessionInputs"][case]["fixture"].update(sourcesOutsideProject=False),
+            lambda doc: doc["sessionInputs"][case]["fixture"].update(mutations=["changed-leaf-rename"]),
+            lambda doc: doc["sessionInputs"]["session-refusals"]["fixture"].update(mutations=[]),
+            lambda doc: doc["sessionInputs"][case]["fixture"]["before"].update(size=8193),
+            lambda doc: doc["sessionInputs"][case]["fixture"]["after"].update(sha256="0" * 64),
+            lambda doc: doc["files"].pop(10), lambda doc: doc["files"].append(deepcopy(doc["files"][10])),
+            lambda doc: doc["files"][10].update(size=True),
+            lambda doc: doc["files"][11].update(path="lifecycle-shell-session-loss-after.json"),
+        )
+        for mutate in mutations:
+            observed = closed_project_draft_data(lifecycle); mutate(observed)
+            with self.subTest(mutate=mutate), self.assertRaises((S.D.Refused, ValueError, KeyError)):
+                S.shell_project_draft_observation(observed, lifecycle)
 
 
 class InstalledFailureLabelSourceContracts(unittest.TestCase):
@@ -1619,17 +1891,26 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         lifecycle = S.local("ubuntu_publication_lifecycle")
         source = (SOURCE / "desktop/src-tauri/src/bridge.rs").read_text()
         shell = (SOURCE / "desktop/src-tauri/src/shell.rs").read_text()
-        classifier = source.split("fn capabilities_failure_line(", 1)[1].split("\nstruct RegisteredProject", 1)[0]
+        classifier = source.split("fn capabilities_failure_line(", 1)[1].split("fn capabilities_cause_line(", 1)[0]
+        cause_classifier = source.split("fn capabilities_cause_line(", 1)[1].split("\nstruct RegisteredProject", 1)[0]
         literal_rows = re.findall(r'b"(MRKDBG_DESKTOP_BOOTSTRAP=capabilities-[a-z_-]+)\\n"', classifier)
+        cause_rows = re.findall(r'b"(MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-[a-z-]+)\\n"', cause_classifier)
         self.assertEqual(len(literal_rows), 30)
         self.assertEqual(len(set(literal_rows)), 30)
+        self.assertEqual(len(cause_rows), 98)
+        self.assertEqual(len(set(cause_rows)), 98)
         prefix = "MRKDBG_DESKTOP_BOOTSTRAP="
         consumer = lifecycle._shell_normal_markers(b"", b"")["stdout"]["stages"]
         self.assertEqual({line[len(prefix):] for line in literal_rows},
-                         {stage for stage in consumer if stage.startswith("capabilities-")})
+                         {stage for stage in consumer if stage.startswith("capabilities-") and not stage.startswith("capabilities-cause-")})
+        self.assertEqual({line[len(prefix):] for line in cause_rows},
+                         {stage for stage in consumer if stage.startswith("capabilities-cause-")})
         self.assertLessEqual(max(len(line.encode("ascii")) + 1 for line in literal_rows), 78)
-        self.assertNotIn("error.message", classifier); self.assertNotIn("format!", classifier)
-        self.assertNotIn(".to_string()", classifier); self.assertNotIn("std::io", classifier)
+        self.assertLessEqual(max(len(line.encode("ascii")) + 1 for line in cause_rows), 96)
+        for block in (classifier, cause_classifier):
+            self.assertNotIn("error.message", block); self.assertNotIn("format!", block)
+            self.assertNotIn(".to_string()", block); self.assertNotIn("std::io", block)
+        self.assertNotIn("error.code", cause_classifier)
         app_info = source.split("    pub(crate) async fn app_info(", 1)[1].split("    pub(crate) async fn catalog(", 1)[0]
         self.assertEqual(app_info.count("document.passive_query(self, Method::Capabilities, json!({}))"), 1)
         self.assertEqual(app_info.count("query.wait().await"), 1)
@@ -1637,12 +1918,74 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertIn("if let Err(error) = &result", app_info)
         self.assertIn("capabilities_failure_line(CapabilitiesFailureOrigin::QueryWait, error)", app_info)
         self.assertIn("capabilities_failure_line(CapabilitiesFailureOrigin::Admission, &error)", app_info)
+        cause_emit = "crate::shell::diagnostic(capabilities_cause_line(error));"
+        self.assertEqual(app_info.count(cause_emit), 1)
+        self.assertLess(app_info.index("query.wait().await"), app_info.index(cause_emit))
+        self.assertLess(app_info.index("if let Err(error) = &result"), app_info.index(cause_emit))
+        self.assertIn('#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]', app_info)
         self.assertIn("pub(crate) fn diagnostic(line: &'static [u8])", shell)
         self.assertIn("let _ = std::io::stderr().write_all(line);", shell)
         # Source correspondence does not execute the Rust classifier, a query,
         # or a window and cannot count as native capabilities acceptance.
 
+    def test_closed_causes_preserve_first_error_and_actual_return_boundaries(self):
+        supervisor = (SOURCE / "desktop/src-tauri/src/supervisor.rs").read_text()
+        installed = (SOURCE / "desktop/src-tauri/src/installed_runtime.rs").read_text()
+        runtime = (SOURCE / "desktop/src-tauri/src/runtime.rs").read_text()
+        protocol = (SOURCE / "desktop/src-tauri/src/protocol.rs").read_text()
+        error = (SOURCE / "desktop/src-tauri/src/error.rs").read_text()
+        fail_at = supervisor.split("    fn fail_at(", 1)[1].split("    fn management_ready(", 1)[0]
+        self.assertEqual(fail_at, '''&mut self, error: BridgeError, now: Instant) {
+        if self.terminal { return; }
+        if self.error.is_none() { self.error = Some(error); }
+        if self.cleanup_endpoint.is_none() { self.cleanup_endpoint = Some(now.min(self.endpoint) + CLEANUP_TIME); }
+    }
+''')
+        state = supervisor.split("struct OwnerState {", 1)[1].split("\n}", 1)[0]
+        self.assertNotIn("cause", state)  # No additional latch/fill/freeze storage.
+        unknown = supervisor.split("    fn unknown(&self", 1)[1].split("    fn advance_clock(", 1)[0]
+        self.assertEqual(unknown.count("state.error.as_ref().and_then(BridgeError::linux_passive_cause)"), 1)
+        self.assertIn("error.with_linux_passive_cause(cause)", unknown)
+        retirement = supervisor.split("    fn retirement_result(", 1)[1].split("// The SAME acquisition", 1)[0]
+        self.assertIn("self.error.as_ref().and_then(BridgeError::linux_passive_cause)", retirement)
+        self.assertNotIn("with_linux_passive_cause", fail_at)
+        equality = error.split("impl PartialEq for BridgeError {", 1)[1].split("impl Eq for BridgeError", 1)[0]
+        self.assertIn("self.code == other.code && self.message == other.message && self.retryable == other.retryable", equality)
+        self.assertNotIn("linux_passive_cause", equality)
+        self.assertIn("#[serde(skip)]\n    linux_passive_cause: Option<LinuxPassiveCause>", error)
+        self.assertIn("InspectionOutcome::Refused(failure) => Err(passive_inspection_refusal(failure))", installed)
+        self.assertIn("InspectionOutcome::Unknown => Err(passive_inspection_unknown(original.observation().failure()))", installed)
+        for label in ("SelectionProfileClosed", "SelectionCompileBinding", "SelectionMethodOutsideProfile"):
+            self.assertIn("LinuxPassiveCause::" + label, runtime)
+        acquisition = supervisor.split("fn acquire_passive_original(", 1)[1].split("async fn settle_passive(", 1)[0]
+        self.assertIn("slots.capability().map_err(AcquisitionError::capability)?", acquisition)
+        self.assertIn("LinuxPassiveCause::FinalClaimOwnerGate", acquisition)
+        after_claim = acquisition.split("prepared.runtime.claim_once().map_err(AcquisitionError::final_claim)?;", 1)[1]
+        self.assertEqual(after_claim.split("let result = spawn_passive_original(prepared);", 1)[0],
+                         "\n        drop(state); drop(owners);\n        ")
+        spawn = supervisor.split("fn spawn_passive_original(")
+        self.assertEqual(len(spawn), 3)
+        stub, actual = (body.split("\n}", 1)[0] for body in spawn[1:])
+        self.assertIn("record_closed_spawn_gate()", stub)
+        self.assertNotIn("returned_spawn", stub)
+        self.assertIn("prepared.command.spawn().map_err(AcquisitionError::returned_spawn)", actual)
+        driver = supervisor.split("async fn drive(", 1)[1].split("// Finite hosted fixtures", 1)[0]
+        self.assertLess(driver.index("let acquired = join_slot(&mut resources.acquisition).await"),
+                        driver.index("failure.into_bridge_error()"))
+        self.assertIn(".map_err(AcquisitionError::preparation)?", supervisor)
+        decoder = protocol.split("pub fn decode_response(", 1)[1].split("#[cfg(test)]", 1)[0]
+        self.assertLess(decoder.rindex("return Err(BridgeError::protocol())"), decoder.index("LinuxPassiveCause::EngineResponse"))
+        for block in (fail_at, unknown, retirement, acquisition, stub, actual, decoder):
+            self.assertNotIn("shell::diagnostic", block)
+        # Text correspondence only; no native operation, returned spawn or
+        # management/custody finality is established by these source assertions.
+
     def test_literal_allowlists_correspond_to_bounded_rust_step_boundary_encoder(self):
+        workflow = (SOURCE / ".github/workflows/desktop-ubuntu-publication.yml").read_text()
+        entry = (SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_bytes()
+        self.assertEqual(workflow.count("MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256:"), 2)
+        self.assertEqual(re.findall(r"MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '([0-9a-f]{64})'", workflow),
+                         [hashlib.sha256(entry).hexdigest()] * 2)
         lifecycle = S.local("ubuntu_publication_lifecycle")
         source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
         steps = {line.encode("ascii") + b"\n" for line in re.findall(
@@ -1657,15 +2000,173 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertEqual(len(lifecycle.SHELL_FAILURE_BOUNDARIES), 8)
         self.assertEqual(set(lifecycle.SHELL_BOOTSTRAP_PROGRESS), progress)
         self.assertEqual(len(lifecycle.SHELL_BOOTSTRAP_PROGRESS), len(progress))
+        path_rejections = source.split("impl PathRejection {", 1)[1].split("struct PathDiagnostic", 1)[0]
+        path_tokens = tuple(value.encode("ascii") for value in re.findall(r'=> b"([a-z-]+)"', path_rejections))
+        self.assertEqual(path_tokens, lifecycle.SHELL_PATH_REJECTIONS)
+        self.assertEqual((len(path_tokens), len(set(path_tokens))), (27, 27))
+        self.assertTrue(all(re.fullmatch(rb"[a-z-]{1,22}", token) for token in path_tokens))
+        path_recipe = source.split("impl PathStep {", 1)[1].split("fn failure_line", 1)[0]
+        self.assertEqual(set(re.findall(r"Self::([A-Za-z]+)\(index\)", path_recipe)),
+                         {"Browse", "Set", "Activate", "Settled", "ReadField"})
+        self.assertIn("=> Some(index)", path_recipe); self.assertIn("_ => None", path_recipe)
+        self.assertIn("const PATH_CASES: [PathCase; 11]", source)
+        path_bound = (max(map(len, steps)) + max(map(len, boundaries)) + max(map(len, progress))
+                      + len(b"MRK_INSTALLED_SHELL_PATH_FAILURE=v1;index=none;reject=\n") + max(map(len, path_tokens)))
+        self.assertEqual(path_bound, 251)
+        self.assertLessEqual(path_bound, lifecycle.SHELL_PATH_FAILURE_FRAME_BOUND)
+        self.assertEqual(lifecycle.SHELL_PATH_FAILURE_FRAME_BOUND, 256)
+        self.assertIn("const PATH_FAILURE_FRAME_BOUND: usize = 256;", source)
+        encoder = source.split("fn failure_pair(", 1)[1].split("fn assert_failure_pair_contract", 1)[0]
+        self.assertLess(encoder.index('b"MRK_INSTALLED_SHELL_PATH_FAILURE=v1;index="'), encoder.index("trace.0.failure_line()"))
+        self.assertIn("diagnostic.step == step && session.is_none()", encoder)
+        self.assertIn("step.recipe_index().is_some_and(|index| index > 10)", encoder)
+        self.assertIn("(Step::Paths(_), _) | (_, Some(_)) => return None", encoder)
+        self.assertIn("if path.is_some() && length > PATH_FAILURE_FRAME_BOUND { return None; }", encoder)
+        rejections = source.split("impl SessionRejection {", 1)[1].split("enum SessionWait", 1)[0]
+        waits = source.split("impl SessionWait {", 1)[1].split("struct SessionDiagnostic", 1)[0]
+        for block, expected in ((rejections, lifecycle.SHELL_SESSION_REJECTIONS), (waits, lifecycle.SHELL_SESSION_WAITS)):
+            tokens = tuple(value.encode("ascii") for value in re.findall(r'=> b"([a-z-]+)"', block))
+            self.assertEqual(tokens, expected)
+            self.assertEqual(len(tokens), len(set(tokens)))
+            self.assertTrue(all(re.fullmatch(rb"[a-z-]{1,32}", token) for token in tokens))
+        token_by_variant = dict(re.findall(r'Self::([A-Za-z]+) => b"([a-z-]+)"', rejections))
+        reply = source.split("fn session_reply_rejection(", 1)[1].split("fn session_capability_rejection(", 1)[0]
+        capability = source.split("fn session_capability_rejection(", 1)[1].split("fn session_file_wait_pending(", 1)[0]
+        asset = (SOURCE / "desktop/src-tauri/src/asset_commands.rs").read_text()
+        assessment = (SOURCE / "desktop/src-tauri/src/credential_assessment.rs").read_text()
+        asset = asset.split("impl AssetError {", 1)[1].split("pub(crate) fn invalid(", 1)[0]
+        assessment = assessment.split("impl AssessmentError {", 1)[1].split("fn invalid(", 1)[0]
+        asset_codes = set(re.findall(r'=> "([a-z_]+)"', asset))
+        assessment_codes = set(re.findall(r'=> \("([a-z_]+)",', assessment))
+        self.assertEqual((len(asset_codes), len(assessment_codes)), (21, 11))
+        self.assertEqual(asset_codes & assessment_codes, {"assessment_context_stale"})
+        mapped = re.findall(r'"([a-z_]+)" => SessionRejection::([A-Za-z]+)', reply)
+        self.assertEqual(len(mapped), 31)
+        self.assertEqual({code for code, _ in mapped}, asset_codes | assessment_codes)
+        self.assertEqual(len({variant for _, variant in mapped}), 31)
+        shortened = {"asset_unsupported_filesystem": "reply-asset-unsupported-fs",
+                     "asset_exclusion_unconfirmed": "reply-asset-excl-unconfirmed"}
+        for code, variant in mapped:
+            self.assertEqual(token_by_variant[variant], shortened.get(code, "reply-" + code.replace("_", "-")))
+        self.assertEqual(reply.count("_ => SessionRejection::ReplyCodeUnavailable"), 1)
+        self.assertEqual(token_by_variant["ReplyCodeUnavailable"], "reply-code-unavailable")
+        reasons = re.findall(r'Some\("([a-z-]+)"\) => SessionRejection::([A-Za-z]+)', capability)
+        self.assertEqual(len(reasons), 6)
+        self.assertEqual({reason for reason, _ in reasons},
+                         {"cleanup-unknown", "shutdown", "document-lost", "unsupported-platform", "unqualified", "closed"})
+        for reason, variant in reasons:
+            self.assertEqual(token_by_variant[variant], "capability-" + reason)
+        self.assertEqual(capability.count("_ => SessionRejection::CapabilityUnavailable"), 1)
+        self.assertEqual(token_by_variant["CapabilityUnavailable"], "capability-unavailable")
+        session = (SOURCE / "desktop/src-tauri/src/asset_session.rs").read_text()
+        query_source = (SOURCE / "desktop/src-tauri/src/installed_shell_shutdown_observation.rs").read_text()
+        supervisor = (SOURCE / "desktop/src-tauri/src/supervisor.rs").read_text()
+        origins = session.split("impl UnknownOrigin {", 1)[1].split("pub(super) struct FirstOrigin", 1)[0]
+        details = session.split("impl OriginDetail {", 1)[1].split("impl UnknownOrigin", 1)[0]
+        errors = query_source.split("impl QueryError {", 1)[1].split("enum QueryCause", 1)[0]
+        causes = query_source.split("impl QueryCause {", 1)[1].split("fn management_token", 1)[0]
+        for block, expected, maximum in ((origins, lifecycle.SHELL_SESSION_ORIGINS, 19), (details, lifecycle.SHELL_SESSION_DETAILS, 15),
+                                         (errors, lifecycle.SHELL_SESSION_QUERY_ERRORS, 11), (causes, lifecycle.SHELL_SESSION_QUERY_CAUSES, 11)):
+            tokens = tuple(value.encode("ascii") for value in re.findall(r'=> b"([a-z-]+)"', block))
+            self.assertEqual(tokens, expected)
+            self.assertEqual(len(tokens), len(set(tokens)))
+            self.assertLessEqual(max(map(len, tokens)), maximum)
+        joins = query_source.split("fn management_token", 1)[1].split("enum QueryProjection", 1)[0]
+        self.assertEqual("".join(re.findall(r"=> b'([a-z])'", joins)).encode("ascii"), lifecycle.SHELL_SESSION_MANAGEMENT_JOINS)
+        workers = query_source.split("impl WorkerProjection {", 1)[1].split("pub(crate) struct InstalledSessionQueryDiagnostic", 1)[0]
+        native = supervisor.split("impl ObservationFailure {", 1)[1].split("impl ChildObservation", 1)[0]
+        literals = {value.encode("ascii") for value in re.findall(r'=> b"([a-z-]+)"', workers + native)}
+        maps = supervisor.split("impl MapRole {", 1)[1].split("impl ObservationFailure {", 1)[0]
+        map_tokens = tuple(value.encode("ascii") for value in re.findall(r'b"(map-[a-z-]+)"', maps))
+        self.assertEqual((len(map_tokens), len(set(map_tokens))), (64, 64))
+        self.assertTrue(all(re.fullmatch(rb"[a-z-]{1,14}", token) for token in map_tokens))
+        public_table = supervisor.split("    static PUBLIC_MAP_PATH_CANDIDATES: [(&str, &[u8]); 648] = [\n", 1)[1].split("    ];\n", 1)[0]
+        public_rows = re.findall(r'^        \("([^"]+)", b"(map-x-[a-z]{2})"\),$', public_table, re.MULTILINE)
+        self.assertEqual(public_table.splitlines(), [f'        ("{path}", b"{token}"),' for path, token in public_rows])
+        public_paths = [path for path, _ in public_rows]
+        public_tokens = tuple(token.encode("ascii") for _, token in public_rows)
+        self.assertEqual((len(public_rows), len(set(public_tokens))), (648, 648))
+        self.assertEqual(public_paths, sorted(set(public_paths)))
+        self.assertTrue(all(path.isascii() and path.isprintable() and
+                            (path == "/bin/sh" or path.startswith(("/usr/bin/", "/usr/lib/"))) for path in public_paths))
+        self.assertEqual((max(map(len, public_paths)), sum(map(len, public_paths))), (87, 29840))
+        self.assertEqual(public_tokens, tuple(b"map-x-" + bytes([97 + index // 26, 97 + index % 26]) for index in range(648)))
+        canonical = b"".join(token + b"\t" + path.encode("ascii") + b"\n" for path, token in zip(public_paths, public_tokens))
+        self.assertEqual(hashlib.sha256(canonical).hexdigest(), "bf18de45262438226bbc80a1cc8a3c078821b4a1dc88ec16a00961c05c990710")
+        self.assertEqual(public_tokens, lifecycle.SHELL_SESSION_PUBLIC_MAP_WORKERS)
+        self.assertTrue(set(public_tokens).isdisjoint(map_tokens))
+        version = "/var/lib/mobile-release-kit/versions/x86_64-unknown-linux-gnu/e3375ff140d69df54b2445f756711e0245d397ba6ded76e8559732ec2e4e3801"
+        accepted = {version + suffix for suffix in ("/python/bin/python3", "/python/lib/libssl.so.3", "/python/lib/libcrypto.so.3")}
+        accepted.update(prefix + name for prefix in ("/usr/lib/x86_64-linux-gnu/", "/lib/x86_64-linux-gnu/")
+                        for name in ("ld-linux-x86-64.so.2", "libc.so.6", "libm.so.6"))
+        accepted.add("/lib64/ld-linux-x86-64.so.2")
+        self.assertTrue(set(public_paths).isdisjoint(accepted))
+        role = supervisor.split("    fn role(path: &str) -> Option<MapRole> {", 1)[1].split("    #[derive(Clone, Copy)]", 1)[0]
+        self.assertEqual(hashlib.sha256(role.encode()).hexdigest(), "aa4101e33f69e2bff0480a304a86c1a7923f82a0592f49de4b329b927b1c18dc")
+        parser = supervisor.split("    fn mappings(raw: &[u8], historical: Option<HistoricalPayloadSnapshot>) -> Result<Option<Vec<Mapping>>, MapRefusal> {", 1)[1].split(
+            '    #[cfg(all(debug_assertions, any(all(feature = "desktop-shell", feature = "custom-protocol"),\n'
+            '        all(not(feature = "desktop-shell"), not(feature = "custom-protocol")))))]', 1)[0]
+        refusal = "need(!executable).map_err(|_| historical_executable_file_refusal(executable_file_refusal(path), historical, major, minor, inode))?"
+        self.assertEqual(parser.count(refusal), 1)
+        self.assertEqual(hashlib.sha256(parser.replace(refusal, "need(!executable).map_err(|_| MapRefusal::ExecutableFile)?").encode()).hexdigest(),
+                         "6b884ac9df8f44c52c96a34f926445e11f18564946f4f126e600afbab94d24fe")
+        lookup = supervisor.split("    fn executable_file_refusal(path: &str) -> MapRefusal {", 1)[1].split("    fn role(", 1)[0]
+        self.assertIn(".position(|(candidate, _)| path == *candidate)", lookup)
+        for forbidden in ("fs::", "original_bytes", "/proc/", "read_link", "canonicalize", "trim", "format!", "to_owned", ".await", "Instant::now"):
+            self.assertNotIn(forbidden, lookup)
+        self.assertEqual(literals | set(map_tokens) | set(public_tokens) | {b"maps-check"}, set(lifecycle.SHELL_SESSION_WORKERS))
+        self.assertEqual(len(lifecycle.SHELL_SESSION_WORKERS), len(set(lifecycle.SHELL_SESSION_WORKERS)))
+        self.assertIn("installed_native_fixture::assert_mappings_diagnostic_contract();", query_source)
+        stages = re.findall(r'WorkerStage::[A-Za-z]+ => join.token\(b"([a-z]+)-c", b"\1-x", b"\1-f"\)', workers)
+        self.assertEqual(tuple(stage.encode("ascii") for stage in stages), lifecycle.SHELL_SESSION_WORKER_STAGES)
+        self.assertEqual(lifecycle.SHELL_SESSION_WORKER_JOINS, b"cxf")
+        associations = session.split("pub(crate) fn association_token", 1)[1].split("pub(crate) fn query_token", 1)[0]
+        self.assertEqual(tuple(value.encode("ascii") for value in re.findall(r'b"([a-z-]+)"', associations)), lifecycle.SHELL_SESSION_ASSOCIATIONS)
+        projection = query_source.split("fn session_query_diagnostic(", 1)[1].split("pub(crate) fn assert_installed_session_query_diagnostic_contract", 1)[0]
+        self.assertIn("Weak::ptr_eq(&row.asset, asset)", projection)
+        self.assertIn("Profile::Passive(Method::AssessCredentials)", projection)
+        self.assertEqual(projection.count(".try_lock()"), 3)
+        for forbidden in (".lock(", ".await", ".poll(", ".join(", "Instant::now", "row.owner.key", "asset.id", "state.slot"):
+            self.assertNotIn(forbidden, projection)
+        restore = session.split("fn restore_failed_install_retirement(", 1)[1].split("impl DocumentBinding", 1)[0]
+        self.assertLess(restore.index("first_unknown_origin!(state, UnknownOrigin::InstallRetirement, Some(_owner))"), restore.index("state.slot ="))
+        snapshot = session.split("fn snapshot(&self, state: &DocumentState)", 1)[1].split("let operation =", 1)[0]
+        owner_reason = session.split("fn session_owner_reason(", 1)[1].split("fn observe_session_owner_reason(", 1)[0]
+        self.assertEqual(set(re.findall(r"Reason::([A-Za-z]+)", snapshot)),
+                         {"CleanupUnknown", "Shutdown", "DocumentLost", "UnsupportedPlatform", "Unqualified", "Closed", "None"})
+        self.assertEqual(set(re.findall(r"Reason::([A-Za-z]+)", owner_reason)), {"CleanupUnknown", "Shutdown"})
+        for helper in (reply, capability):
+            self.assertIn("-> SessionRejection", helper)
+            for forbidden in ("format!", "to_owned", "to_string", "BridgeError", "linux_passive_cause", "diagnostic", "snapshot", "self."):
+                self.assertNotIn(forbidden, helper)
         for boundary in boundaries:
             for context in progress:
                 self.assertEqual(lifecycle._shell_label_pair(b"MRK_INSTALLED_SHELL_FAILURE_STEP=SelectProject\n" + boundary + context),
                                  {"step": "SelectProject", "boundary": boundary.decode("ascii").strip().split("=", 1)[1],
                                   "bootstrapProgress": context.decode("ascii").strip().split("=", 1)[1]})
         self.assertLessEqual(max(map(len, steps)) + max(map(len, boundaries)) + max(map(len, progress)), 512)
+        longest_session = (len(b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v2;index=none;evaluations=128;reject=;wait=\n")
+                           + max(map(len, lifecycle.SHELL_SESSION_REJECTIONS)) + max(map(len, lifecycle.SHELL_SESSION_WAITS)))
+        prior_bound = max(map(len, steps)) + max(map(len, boundaries)) + max(map(len, progress)) + longest_session
+        self.assertEqual(prior_bound, 311)
+        query_bound = max(len(b"unregistered"), len(b"unavailable"), max(map(len, lifecycle.SHELL_SESSION_QUERY_ERRORS))
+                          + 1 + max(map(len, lifecycle.SHELL_SESSION_QUERY_CAUSES)) + 1 + 2)
+        worker_bound = max(max(map(len, lifecycle.SHELL_SESSION_WORKERS)), max(map(len, lifecycle.SHELL_SESSION_WORKER_STAGES)) + 2)
+        complete_bound = (prior_bound + 5 * 3 + max(map(len, lifecycle.SHELL_SESSION_ORIGINS)) + max(map(len, lifecycle.SHELL_SESSION_DETAILS))
+                          + max(map(len, lifecycle.SHELL_SESSION_ASSOCIATIONS)) + query_bound + worker_bound)
+        self.assertEqual((query_bound, worker_bound, complete_bound), (26, 14, 412))
+        self.assertLessEqual(complete_bound, 512)
         self.assertIn("const FAILURE_PAIR_LIMIT: usize = 512;", source)
+        self.assertIn("const SESSION_FAILURE_FRAME_BOUND: usize = 412;", source)
         self.assertIn("fn assert_failure_pair_contract()", source)
         self.assertIn("    assert_failure_pair_contract();", source)
+        self.assertLess(source.index("    assert_failure_pair_contract();"), source.index("let returned = super::run_builder("))
+        pure = source.split("fn assert_failure_pair_contract()", 1)[1].split("// Original destruction facts", 1)[0]
+        self.assertIn("SessionStep::ActivateFile(3),evaluations:16", pure)
+        self.assertIn("session_file_wait_pending(actual,pending,3,!activating)", pure)
+        self.assertIn("retained == Some(if deadline_first { same } else { gtk })", pure)
+        # These inert contracts execute before GTK in the reviewed native route;
+        # their source presence here is not executed Rust or native evidence.
         self.assertIn("let end = Instant::now() + Duration::from_secs(45);", source)
         self.assertEqual(lifecycle.SHELL_WORK_FILE_LIMIT, 64 << 20)
         for case in lifecycle.SHELL_CASES[1:]:
@@ -1754,13 +2255,22 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         deadline = tick.split("        if Instant::now() >= self.end {", 1)[1].split(
             "        if std::thread::current().id() == self.main", 1)[0]
         self.assertIn("if let Some(mut r) = self.record() {", deadline)
-        self.assertIn("if !self.failed.swap(true, Ordering::SeqCst) { r.trace = (r.step, Boundary::Deadline); }", deadline)
+        winner = "if latch_failure(&self.failed, trace, bootstrap, (*step, Boundary::Deadline), progress) {"
+        self.assertIn(winner, deadline)
+        self.assertLess(deadline.index("SessionDiagnostic::sample(r.step,r.evaluations,r.session.diagnostic)"), deadline.index(winner))
+        self.assertLess(deadline.index("PathDiagnostic::sample(r.step)"), deadline.index(winner))
+        self.assertIn(winner + "\n                    r.session.diagnostic = diagnostic;\n                    r.paths.diagnostic = path_diagnostic;\n                }", deadline)
+        latch = source.split("fn latch_failure(", 1)[1].split("fn latch_session_diagnostic(", 1)[0]
+        self.assertEqual(latch.count("failed.swap(true, Ordering::SeqCst)"), 1)
+        self.assertIn("if !failed.swap(true, Ordering::SeqCst) { *trace = next_trace; *progress = next_progress; true } else { false }", latch)
         self.assertEqual(deadline.count("Boundary::Deadline"), 1)
         self.assertIn("\n            }\n            self.report_failure(); return;\n        }", deadline)
         self.assertIn("if self.failed.load(Ordering::SeqCst) { self.report_failure(); return; }", tick)
         self.assertIn("if std::thread::current().id() == self.main { self.fail(); self.report_failure(); return; }", tick)
         self.assertNotIn("self.end ||", tick)
-        self.assertIn("if !self.failed.load(Ordering::SeqCst) { r.trace = (r.step, boundary); }", source)
+        cache = source.split("fn record_at(&self", 1)[1].split("fn session_wait(", 1)[0]
+        self.assertIn("if !self.failed.load(Ordering::SeqCst) {\n            r.trace = (r.step, boundary);", cache)
+        self.assertIn("r.paths.diagnostic = PathDiagnostic::sample(r.step);\n        }", cache)
 
     def test_test_only_original_fd_sink_has_one_attempt_before_existing_stderr(self):
         source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()

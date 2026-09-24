@@ -9,13 +9,13 @@ import os
 from pathlib import Path
 import re
 import stat
-import textwrap
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 
 WORKFLOW = Path(__file__).resolve().parents[2] / ".github/workflows/desktop-ubuntu-publication.yml"
+PROVISIONER = WORKFLOW.parents[2] / "desktop/tools/prepare_hosted_ubuntu_data.py"
 BYOBU_ICON = "/usr/share/byobu/pixmaps/byobu.svg"
 PREPARE = (
     "/usr/share", "/etc/gtk-3.0", "/etc/fonts", "/etc/fonts/conf.d",
@@ -72,7 +72,7 @@ def access_acl(mode=0o755, *, users=((0x11223344, 7),), groups=(), group_permiss
 
 
 PREPARER_MARKER = ("          sudo /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent "
-                   "/usr/bin/python3.12 -I -S -B - <<'PY'\n")
+                   "/usr/bin/python3.12 -I -S -B desktop/tools/prepare_hosted_ubuntu_data.py </dev/null\n")
 
 
 class DirectoryMetadataOS:
@@ -305,10 +305,12 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
         raw = WORKFLOW.read_bytes()
         if len(raw) > 128 << 10:
             raise AssertionError("Workflow source exceeds this DATA read bound")
-        blocks = [textwrap.dedent(part.split("          PY\n", 1)[0]) for part in raw.decode("utf-8").split(PREPARER_MARKER)[1:]]
-        if len(blocks) != 2 or blocks[0] != blocks[1]:
-            raise AssertionError("Compiler/native directory-preparation bodies must be identical")
-        cls.inline = blocks[0]
+        if raw.decode("utf-8").count(PREPARER_MARKER) != 1:
+            raise AssertionError("The shared compiler/native job must invoke the fixed DATA script once")
+        shared = PROVISIONER.read_bytes()
+        if not 0 < len(shared) <= 64 << 10:
+            raise AssertionError("Shared preparation source exceeds this DATA read bound")
+        cls.inline = shared.decode("utf-8")
 
     def run_inline(self, filesystem):
         def forbidden(*_args, **_kwargs):
@@ -321,9 +323,9 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
         replacements.update(getresuid=lambda: filesystem.uids, getresgid=lambda: filesystem.gids)
         with patch.multiple(os, **replacements), patch.object(builtins, "open", filesystem.open_mounts), redirect_stdout(output):
             try:
-                # Execute the actual inline imports and top-level entry, not
+                # Execute the actual shared imports and top-level entry, not
                 # selected AST functions with a fabricated dependency namespace.
-                exec(compile(self.inline, str(WORKFLOW) + ":directory-preparation", "exec"), namespace)
+                exec(compile(self.inline, str(PROVISIONER), "exec"), namespace)
             except BaseException as caught:
                 error = caught
         self.assertEqual(filesystem.live, {})
@@ -1555,37 +1557,60 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
         full, metadata = "refs/heads/verify/desktop-installed-shell", "refs/heads/verify/desktop-shell-host-metadata"
         self.assertIn("branches: [verify/desktop-installed-shell, verify/desktop-shell-host-metadata]\n", source)
         self.assertNotIn("workflow_dispatch:", source)
-        compile_job, native_job = source.split("  native:\n", 1)
+        compile_job = source.split("\njobs:\n", 1)[1]
+        self.assertEqual(re.findall(r"^  ([a-z][a-z0-9_-]*):$", compile_job, re.MULTILINE), ["compile"])
+        self.assertNotIn("needs: compile", compile_job)
+        self.assertNotIn("needs.compile", compile_job)
         self.assertIn("case \"$GITHUB_REF:$MRK_INSTALLED_SHELL_CASE\" in\n"
                       "            " + full + ":compile|" + metadata + ":host-metadata-only) ;;\n"
                       "            *) exit 70 ;;\n          esac", compile_job)
         self.assertIn('[[ "$HOSTING" == github-hosted && "$GITHUB_EVENT_NAME" == push ]]', compile_job)
         self.assertIn('[[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_PUSH_EVENT_AFTER" == "$GITHUB_SHA" ]]', compile_job)
         self.assertIn("MRK_INSTALLED_SHELL_CASE: ${{ github.ref == '" + metadata + "' && 'host-metadata-only' || 'compile' }}", compile_job)
-        self.assertIn("timeout-minutes: ${{ github.ref == '" + metadata + "' && 10 || 25 }}", compile_job)
+        self.assertIn("timeout-minutes: ${{ github.ref == '" + metadata + "' && 10 || 50 }}", compile_job)
         steps = re.split(r"^      - name: ", compile_job, flags=re.MULTILINE)[1:]
-        expected = {"Require one exact disposable preparation route", "Check out exact reviewed source without credentials",
-                    "Select the fixed frontend compiler", "Prepare shared Ubuntu shell inputs only on this disposable runner",
-                    "Prepare only fixed disposable Ubuntu DATA modes", "Prepare a fresh bounded compiler owner",
-                    "Download the exact accepted A runtime as DATA", "Compile the normal shell and separate observer once without executing either",
-                    "Retain original compiler evidence and shell outputs"}
-        self.assertEqual({step.splitlines()[0] for step in steps}, expected)
-        self.assertEqual(len(steps), len(expected))
-        unguarded = {"Require one exact disposable preparation route", "Check out exact reviewed source without credentials",
-                     "Prepare shared Ubuntu shell inputs only on this disposable runner", "Prepare only fixed disposable Ubuntu DATA modes"}
-        for step in steps:
-            name = step.splitlines()[0]
-            if name in unguarded:
-                self.assertNotRegex(step, r"(?m)^        if:")
-            elif name.startswith("Retain "):
-                self.assertIn("        if: always() && github.ref == '" + full + "' && steps.prepare.outputs.root != ''\n", step)
-            else:
-                self.assertIn("        if: github.ref == '" + full + "'\n", step)
-        self.assertIn("    if: github.ref == '" + full + "'\n    needs: compile\n", native_job)
-        self.assertIn("    timeout-minutes: 25\n", native_job)
-        self.assertEqual(source.count("        timeout-minutes: 8\n"), 2)
-        self.assertEqual(source.count("        timeout-minutes: 1\n"), 2)
-        self.assertEqual(source.count(PREPARER_MARKER), 2)
+        full_gate = "github.ref == '" + full + "'"
+        native_gate = full_gate + " && steps.compile.outcome == 'success' && steps.upload.outcome == 'success'"
+        # Ordered roles, not a set: the two Python observations have the same
+        # display name but different authority, guards and places in the job.
+        expected = [
+            ("Require one exact disposable preparation route", None),
+            ("Check out exact reviewed source without credentials", None),
+            ("Select the fixed frontend compiler", full_gate),
+            ("Prepare shared Ubuntu shell inputs only on this disposable runner", None),
+            ("Establish only the reviewed forward glibc tuple set", full_gate),
+            ("Retain original glibc prerequisite DATA including failures", "always() && steps.glibc.outputs.root != ''"),
+            ("Prepare only fixed disposable Ubuntu DATA modes", None),
+            ("Observe only the hosted Python body as public DATA", None),
+            ("Prepare a fresh bounded compiler owner", full_gate),
+            ("Download the exact accepted A runtime as DATA", full_gate),
+            ("Compile the normal shell and separate observer once without executing either", full_gate),
+            ("Retain original compiler evidence and shell outputs", "always() && " + full_gate + " && steps.prepare.outputs.root != ''"),
+            ("Require the fixed disposable native route", native_gate),
+            ("Observe only the hosted Python body as public DATA", native_gate),
+            ("Prepare a fresh bounded native owner", native_gate),
+            ("Download this run's exact original compiled shell outputs", native_gate),
+            ("Download independently accepted U packages and original evidence", native_gate),
+            ("Observe only the fixed installed shell route with original finality", native_gate),
+            ("Retain only original public evidence for this shell observation", "always() && " + full_gate + " && steps.prepare_native.outputs.root != ''"),
+        ]
+        self.assertEqual([step.splitlines()[0] for step in steps], [name for name, _ in expected])
+        limits = {
+            "Prepare shared Ubuntu shell inputs only on this disposable runner": 8,
+            "Establish only the reviewed forward glibc tuple set": 8,
+            "Prepare only fixed disposable Ubuntu DATA modes": 1,
+            "Observe only the hosted Python body as public DATA": 1,
+        }
+        for step, (name, guard) in zip(steps, expected):
+            with self.subTest(role=name):
+                self.assertEqual(re.findall(r"^        if: (.+)$", step, re.MULTILINE), [] if guard is None else [guard])
+                self.assertEqual(re.findall(r"^        timeout-minutes: (.+)$", step, re.MULTILINE),
+                                 [str(limits[name])] if name in limits else [])
+        self.assertNotIn("MRK_INSTALLED_SHELL_CASE: observe", steps[7])
+        self.assertIn("          MRK_INSTALLED_SHELL_CASE: observe\n", steps[13])
+        self.assertEqual(source.count(PREPARER_MARKER), 1)
+        self.assertIn("permissions:\n  contents: read\n  actions: read\n", source)
+        self.assertIn("concurrency:\n  group: desktop-installed-shell-${{ github.ref }}\n  cancel-in-progress: false\n", source)
         self.assertIn("          persist-credentials: false\n", compile_job)
 
     def test_actual_inline_imports_exact_rosters_and_allowed_modes(self):

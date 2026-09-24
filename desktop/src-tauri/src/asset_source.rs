@@ -97,6 +97,33 @@ impl ProjectProbe {
 pub(crate) struct ProjectPathProbe { relative_path: String }
 impl ProjectPathProbe { pub(crate) fn into_relative_path(self) -> String { self.relative_path } }
 
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+    not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[derive(Default)]
+pub(crate) struct InstalledCaptureCheckpoint {
+    reached: std::sync::atomic::AtomicBool, released: std::sync::atomic::AtomicBool,
+}
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+    not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl InstalledCaptureCheckpoint {
+    pub(crate) fn reached(&self) -> bool { self.reached.load(std::sync::atomic::Ordering::SeqCst) }
+    pub(crate) fn release(&self) -> bool { !self.released.swap(true, std::sync::atomic::Ordering::SeqCst) }
+    fn wait(&self, stop: &mut dyn FnMut() -> bool) {
+        self.reached.store(true, std::sync::atomic::Ordering::SeqCst);
+        while !self.released.load(std::sync::atomic::Ordering::SeqCst) && !stop() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+}
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+    not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct InstalledSourceFacts {
+    pub(crate) begun: bool, pub(crate) originals: usize, pub(crate) closes: usize, pub(crate) no_handle: usize,
+    pub(crate) reads: u32, pub(crate) eof: bool, pub(crate) bytes: usize,
+    pub(crate) terminal_checked: bool, pub(crate) terminal_matched: bool, pub(crate) settled: bool,
+}
+
 pub(crate) fn material_limit(kind: FileKind) -> usize {
     match kind { FileKind::AndroidKeystore => 32 * 1024 * 1024, FileKind::AndroidFirebase => 4 * 1024 * 1024 }
 }
@@ -146,12 +173,34 @@ mod linux {
         slots: Vec<Descriptor>, probes: Vec<LeafProbe>, begun: bool, terminal: bool,
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime"))]
         trace: FixtureTrace,
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        installed: InstalledSourceFacts,
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        installed_checkpoint: Option<Arc<InstalledCaptureCheckpoint>>,
     }
     impl SourceBook {
         pub(crate) fn new() -> Self { Self { slots: Vec::new(), probes: Vec::new(), begun: false, terminal: false,
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime"))]
             trace: FixtureTrace::default(),
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+            installed: InstalledSourceFacts::default(),
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+            installed_checkpoint: None,
         } }
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        pub(crate) fn installed_checkpoint(&mut self, checkpoint: Arc<InstalledCaptureCheckpoint>) -> bool {
+            if self.begun || self.installed_checkpoint.is_some() { return false; }
+            self.installed_checkpoint = Some(checkpoint); true
+        }
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        pub(crate) fn installed_facts(&self) -> InstalledSourceFacts {
+            // Closed states are written only by the one consuming close. A
+            // failed/no-handle acquisition is distinct, never counted a close.
+            InstalledSourceFacts { begun: self.begun, originals: self.slots.len(),
+                closes: self.slots.iter().filter(|slot| slot.state == OriginalState::Closed && slot.fd.is_none()).count(),
+                no_handle: self.slots.iter().filter(|slot| slot.state == OriginalState::NoHandle && slot.fd.is_none()).count(),
+                settled: self.not_started() || self.settled(), ..self.installed }
+        }
         pub(crate) fn settled(&self) -> bool {
             self.terminal && self.slots.iter().all(|slot| matches!(slot.state, OriginalState::Closed | OriginalState::NoHandle) && slot.fd.is_none())
         }
@@ -305,7 +354,12 @@ mod linux {
             known && self.settled()
         }
         fn finish<T>(&mut self, result: Result<T, Reason>, stop: &mut dyn FnMut() -> bool) -> Result<T, Reason> {
-            let result = result.and_then(|value| { self.terminal_check(stop)?; Ok(value) });
+            let result = result.and_then(|value| {
+                let terminal = self.terminal_check(stop);
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+                { self.installed.terminal_checked = true; self.installed.terminal_matched = terminal.is_ok(); }
+                terminal?; Ok(value)
+            });
             // Independent original closes run despite another close's failure.
             if !self.close_all() { return Err(Reason::CleanupUnknown); }
             checkpoint(stop)?; result
@@ -419,6 +473,11 @@ mod linux {
                 checkpoint(stop)?;
                 let end = capacity.min(used.saturating_add(1024 * 1024));
                 let read = unistd::read(book.fd(leaf)?, &mut bytes[used..end]).map_err(|_| Reason::SourceRefused)?;
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+                {
+                    book.installed.reads = book.installed.reads.checked_add(1).ok_or(Reason::Capacity)?;
+                    if read == 0 { book.installed.eof = true; book.installed.bytes = used; }
+                }
                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime"))]
                 {
                     let reads = book.trace.reads.get().checked_add(1).filter(|n| *n <= 4096);
@@ -434,6 +493,12 @@ mod linux {
                 if used > size { return Err(Reason::SourceChanged); }
             }
             bytes.truncate(size); // Capacity still charges size+1; no whole-file clone.
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+            if let Some(checkpoint) = &book.installed_checkpoint {
+                // After this ORIGINAL EOF, before its terminal identity check.
+                // Receipt/relay loss cannot prevent STOP releasing the borrower.
+                checkpoint.wait(stop);
+            }
             Ok(CapturedSource { bytes, origin: Arc::new(OriginWitness { path: path.clone(), ancestry, leaf: file }) })
         })();
         book.finish(result, stop)

@@ -717,12 +717,15 @@ class LifecycleData(unittest.TestCase):
         # A finite original failure in an omitted middle is counted from the
         # SAME validated capture, not recovered by opening another log.
         failed_capability = b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-query_timeout\n"
-        middle = subprocess.CompletedProcess(argv, 0, b"h" * 1024 + b"\n" + failed_capability + b"t" * 2048, b"")
+        failed_cause = b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-cause-inspection-namespace\n"
+        middle = subprocess.CompletedProcess(argv, 0, b"h" * 1024 + b"\n" + failed_capability + failed_cause + b"t" * 2048, b"")
         counted_middle = observe(dict(holder, result=middle), display_log=b"")
         self.assertEqual(counted_middle["bootstrap"]["stdout"]["stages"]["capabilities-query-wait-query_timeout"], 1)
+        self.assertEqual(counted_middle["bootstrap"]["stdout"]["stages"]["capabilities-cause-inspection-namespace"], 1)
         summary = counted_middle["capture"]["stdout"]
         self.assertTrue(summary["truncated"])
         self.assertNotIn("capabilities-query-wait-query_timeout", summary["head"] + summary["tail"])
+        self.assertNotIn("capabilities-cause-inspection-namespace", summary["head"] + summary["tail"])
         self.assertEqual(observed["resources"], resource_observation())
         self.assertLess(len(L.canonical(observed["resources"])), 1024)
         unavailable = observe(resources=resource_observation(unavailable=True))
@@ -757,6 +760,18 @@ class LifecycleData(unittest.TestCase):
         for name in ("stdout", "stderr"):
             self.assertEqual(observed["controller"]["lastCompleted"]["capture"][name]["sha256"],
                              hashlib.sha256(getattr(query, name)).hexdigest())
+        # Expanded cause counts survive the SAME <=32768-byte fallback;
+        # neither another capture nor a larger report limit is permitted.
+        tagged = subprocess.CompletedProcess(argv, 127, original.stdout + b"\n" + failed_cause,
+                                             original.stderr + b"\n" + failed_cause)
+        trimmed = observe(dict(holder, result=tagged), controller=controller)
+        for name in ("stdout", "stderr"):
+            self.assertEqual(trimmed["bootstrap"][name]["stages"]["capabilities-cause-inspection-namespace"], 1)
+            self.assertNotIn("head", trimmed["capture"][name])
+            self.assertNotIn("tail", trimmed["capture"][name])
+            self.assertEqual(trimmed["capture"][name]["sha256"], hashlib.sha256(getattr(tagged, name)).hexdigest())
+        self.assertFalse(trimmed["qualified"])
+        self.assertFalse(trimmed["cleanupEstablished"])
         # A returned object is not a valid capture, and mistyped scalar facts
         # must not be presented as known observations.
         altered = deepcopy(controller)
@@ -859,7 +874,54 @@ class LifecycleData(unittest.TestCase):
                             "protocol_error", "engine_failed", "io_error", "output_limit", "other")
         capability_stages = tuple("capabilities-" + origin + "-" + code
                                   for origin in ("admission", "query-wait") for code in capability_codes)
-        stages += capability_stages
+        native_failures = (
+            'unsupported-platform',
+            'missing-compile-anchor',
+            'stopped',
+            'deadline',
+            'native-unavailable',
+            'native-denied',
+            'namespace',
+            'mount',
+            'ownership',
+            'extended-attributes',
+            'identity-changed',
+            'manifest',
+            'inventory',
+            'bounds',
+            'already-used',
+            'interrupted',
+            'close-uncertain',
+            'ledger-invariant',
+            'transfer-unavailable',
+            'destination-occupied',
+        )
+        local_causes = (
+            'selection-profile-closed',
+            'selection-compile-binding',
+            'selection-method-outside-profile',
+            'inspection-unavailable',
+            'acquisition-entry-not-released',
+            'acquisition-custody-missing',
+            'acquisition-lock',
+            'final-claim-owner-gate',
+            'returned-spawn-process-fd-limit',
+            'returned-spawn-system-fd-limit',
+            'returned-spawn-memory',
+            'returned-spawn-resource-unavailable',
+            'returned-spawn-permission-denied',
+            'returned-spawn-not-found',
+            'returned-spawn-exec-format',
+            'returned-spawn-other',
+            'engine-response',
+            'unavailable',
+        )
+        cause_stages = tuple("capabilities-cause-" + origin + "-" + reason
+                             for origin in ("inspection", "capability", "preparation", "final-claim") for reason in native_failures)
+        cause_stages += tuple("capabilities-cause-" + label for label in local_causes)
+        self.assertEqual(len(cause_stages), 98)
+        self.assertEqual(len(set(cause_stages)), 98)
+        stages += capability_stages + cause_stages
         prefix = b"MRKDBG_DESKTOP_BOOTSTRAP="
         stdout = (b"ordinary wrapper text\n" + b"".join(markers) + markers[0]
                   + b"".join(prefix + stage.encode("ascii") + b"\n" for stage in stages)
@@ -877,7 +939,7 @@ class LifecycleData(unittest.TestCase):
             "unexpectedMrk": 1, "stages": {stage: int(stage == "catalog-enter") for stage in stages}, "unexpectedBootstrap": 0})
         self.assertNotIn(b"private", L.canonical(counted))
         for reason in ("content-reason-crashed", "content-reason-exceeded-memory-limit",
-                       "content-reason-terminated-by-api", "content-reason-unknown", *capability_stages):
+                       "content-reason-terminated-by-api", "content-reason-unknown", *capability_stages, *cause_stages):
             line = prefix + reason.encode("ascii")
             for malformed in (line, line + b"\r\n", line + b" extra\n"):
                 row = L._shell_normal_markers(malformed, b"")["stdout"]
@@ -885,19 +947,28 @@ class LifecycleData(unittest.TestCase):
                 self.assertEqual(row["unexpectedBootstrap"], 1)
         for line in (prefix + b"capabilities-admission-PRIVATE_CODE\n",
                      prefix + b"capabilities-PRIVATE_ORIGIN-query_timeout\n",
-                     prefix + b"capabilities-query-wait-protocol_error\x1b[31mPRIVATE\n"):
+                     prefix + b"capabilities-query-wait-protocol_error\x1b[31mPRIVATE\n",
+                     prefix + b"capabilities-cause-inspection-PRIVATE_REASON\n",
+                     prefix + b"capabilities-cause-PRIVATE_ORIGIN-namespace\n",
+                     prefix + b"capabilities-cause-returned-spawn-13\n",
+                     prefix + b"capabilities-cause-engine-response\x1b[31mPRIVATE\n"):
             row = L._shell_normal_markers(line, b"")["stdout"]
-            self.assertTrue(all(row["stages"][stage] == 0 for stage in capability_stages))
+            self.assertTrue(all(row["stages"][stage] == 0 for stage in capability_stages + cause_stages))
             self.assertEqual(row["unexpectedBootstrap"], 1)
             self.assertNotIn(b"PRIVATE", L.canonical(row))
         duplicate = prefix + b"capabilities-admission-busy\n"
         row = L._shell_normal_markers(duplicate * 2, b"")["stdout"]
         self.assertEqual(row["stages"]["capabilities-admission-busy"], 2)
         self.assertEqual(row["unexpectedBootstrap"], 0)
-        # Counts are diagnostic-only; a completed or empty stage sequence
-        # cannot manufacture normal bootstrap success.
-        with self.assertRaises(ValueError):
-            L.shell_result(prefix + b"setup-enter\n", b"", "normal", 0, map_data())
+        cause = prefix + b"capabilities-cause-inspection-namespace\n"
+        row = L._shell_normal_markers(cause * 2, b"")["stdout"]
+        self.assertEqual(row["stages"]["capabilities-cause-inspection-namespace"], 2)
+        self.assertEqual(row["unexpectedBootstrap"], 0)
+        # Counts are diagnostic-only; neither all causes nor a stage can
+        # manufacture normal capabilities/catalogue or observer success.
+        for raw in (prefix + b"setup-enter\n", b"".join(prefix + stage.encode("ascii") + b"\n" for stage in cause_stages)):
+            with self.assertRaises(ValueError):
+                L.shell_result(raw, b"", "normal", 0, map_data())
 
 
     def test_normal_resource_diagnostic_is_original_bounded_and_failure_only(self):
@@ -1048,11 +1119,14 @@ class LifecycleData(unittest.TestCase):
             baseline = (sum(row["size"] for row in candidate["packages"].values()) + candidate["library"]["size"]
                         + (12 if profile == "installed" else 68 if profile == "shell" else 0)
                         + 2 * 1024 + 1 + 2 * 2048 + (32 << 20) + (1 << 20))
-            # Six original logs plus five failure leaves retain the 64 MiB
-            # ceiling. Include final metadata bytes plus its replaced 11-byte
-            # original, and one block per namespace/workflow/metadata node.
-            required = baseline + ((704 << 20) + 7235 + 1095 + 11 + 27 if profile == "shell" else 0)
-            inodes = 2 * 16 + 2 * 8192 + 128 + (32 if profile == "shell" else 0)
+            # Ten original logs plus nine failure leaves retain the64MiB
+            # ceiling. Four session fixtures add42 nodes and their environments
+            # add48; metadata adds14 final nodes, saved bytes and the replaced
+            # 11-byte original. Public capture limits do not grow.
+            session_bytes = sum(len(data) for case in L.SHELL_SESSION_CASES
+                for _, mode, _, data in L._shell_session_roster(value, case) if not stat.S_ISDIR(mode))
+            required = baseline + ((1216 << 20) + 7235 + session_bytes + 1095 + 11 + 117 if profile == "shell" else 0)
+            inodes = 2 * 16 + 2 * 8192 + 128 + (126 if profile == "shell" else 0)
             for available in (required - 1, required):
                 with self.subTest(profile=profile, available=available), \
                      patch.object(Path, "stat", return_value=SimpleNamespace(st_dev=1)), \
@@ -2193,11 +2267,35 @@ def positive_capture(receipt=None, candidate=None):
 def fixture_namespace_data(value):
     suffix = value["runId"] + "-" + value["attempt"]
     return {"root": "/var/lib/mrk-ubuntu-shell-fixtures-" + suffix,
-            "identity": [1, 5, stat.S_IFDIR | 0o755, 0, 0, 8, 4096, 11, 11],
-            "children": ["candidate-evidence", "metadata-project", "path-outside", "path-project", "positive-project", "workflow-project"],
+            "identity": [1, 5, stat.S_IFDIR | 0o755, 0, 0, 12, 4096, 11, 11],
+            "children": ["candidate-evidence", "metadata-project", "path-outside", "path-project", "positive-project",
+                         "session-deadline", "session-inputs", "session-loss", "session-refusals", "workflow-project"],
             "control": {"path": "/var/lib/mrk-ubuntu-native-" + suffix, "identity": [1, 4, stat.S_IFDIR | 0o711, 0, 0]},
             "ancestors": [{"path": path, "identity": [1, i + 1, stat.S_IFDIR | 0o755, 0, 0]}
                           for i, path in enumerate(("/", "/var", "/var/lib"))]}
+
+
+def session_fixture_data(value, case, *, changed=False):
+    """In-memory fixture correspondence only; no native inputs are created."""
+    namespace = fixture_namespace_data(value)
+    roster = L._shell_session_roster(value, case, changed)
+    original_names = [name for name, _, _, _ in L._shell_session_roster(value, case)]
+    offset = 600 + 100 * L.SHELL_SESSION_CASES.index(case)
+    rows = []
+    for name, mode, owners, expected in roster:
+        original_name = "sources/changed-next.jks" if changed and name == "sources/changed.jks" else name
+        stamp = 22 if changed and name in ("sources", "sources/changed.jks") else 11
+        kind = "directory" if stat.S_ISDIR(mode) else "symlink" if stat.S_ISLNK(mode) else "file"
+        original = [1, offset + original_names.index(original_name), mode, *owners,
+                    2 if kind == "directory" else 1, 4096 if kind == "directory" else len(expected),
+                    22 if changed and name == "sources" else 11, stamp]
+        row = {"path": name, "kind": kind, "identity": original}
+        row.update({"children": expected} if kind == "directory" else {"target": expected} if kind == "symlink"
+                   else {"size": len(expected), "sha256": hashlib.sha256(expected).hexdigest()})
+        rows.append(row)
+    return {"schemaVersion": 1, "fixture": "four-kind-session-v1", "case": case,
+            "root": namespace["root"] + "/" + case, "changed": changed, "entries": rows,
+            "absent": L._shell_session_absent(case, changed), "namespace": namespace}
 
 
 def project_fixture_data(value, *, saved=False):
@@ -2297,6 +2395,19 @@ def workflow_capture():
             + b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
             + L.SHELL_WORKFLOW_MARKER + L.canonical(L.SHELL_WORKFLOW_RECEIPT)
             + b"MRK_INSTALLED_SHELL_OBSERVATION=workflow-apply-verified\n", b"")
+
+
+def session_capture(case, receipt=None, *, expected=None, maps=None):
+    observed = deepcopy(L.SHELL_SESSION_RECEIPTS[case]) if receipt is None else receipt
+    expected = map_data() if expected is None else expected
+    rows = [{"role": role, "path": row["paths"][0], **{key: row[key] for key in ("deviceMajor", "deviceMinor", "inode")}}
+            for role, row in sorted(expected.items())]
+    maps = [rows] * L.SHELL_SESSION_RECEIPTS[case]["behavior"]["assessments"] if maps is None else maps
+    return (b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n"
+            b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
+            + b"".join(L.CHILD_MARKER.encode("ascii") + L.canonical(rows) for rows in maps)
+            + L.SHELL_SESSION_MARKER + L.canonical(observed)
+            + b"MRK_INSTALLED_SHELL_OBSERVATION=" + case.encode("ascii") + b"-verified\n", b"")
 
 
 def workflow_fixture_data(value, *, installed=False):
@@ -2408,7 +2519,8 @@ def closed_shell_data():
                 "positive": positive_capture(),
                 "quit-outstanding": (b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
                     + L.CHILD_MARKER.encode() + L.canonical(maps) + b"MRK_INSTALLED_SHELL_OBSERVATION=quit-outstanding-verified\n", b""),
-                "project-paths": path_capture(), "workflow-apply": workflow_capture(), "metadata-save": metadata_capture()}
+                "project-paths": path_capture(), "workflow-apply": workflow_capture(),
+                **{case: session_capture(case, expected=expected) for case in L.SHELL_SESSION_CASES}, "metadata-save": metadata_capture()}
     cases, files, commands = {}, {}, []
     for case, (stdout, stderr) in captures.items():
         cases[case] = L.shell_result(stdout, stderr, case, 0, expected)
@@ -2422,6 +2534,9 @@ def closed_shell_data():
         files["shell-positive-candidate-" + phase + ".json"] = L.canonical(candidate_fixture_data(value))
         files["shell-project-paths-" + phase + ".json"] = L.canonical(path_fixture_data(value, changed=phase == "after"))
         files["shell-workflow-apply-" + phase + ".json"] = L.canonical(workflow_fixture_data(value, installed=phase == "after"))
+        for case in L.SHELL_SESSION_CASES:
+            files["shell-" + case + "-" + phase + ".json"] = L.canonical(
+                session_fixture_data(value, case, changed=phase == "after" and case == "session-refusals"))
         files["shell-metadata-save-" + phase + ".json"] = L.canonical(metadata_fixture_data(value, saved=phase == "after"))
     keys = [{"phase": "key", "exitCode": 0, "stdout": "", "stderr": "",
              "argv": L._drop(value, ["/usr/bin/xdotool", "key", "--clearmodifiers", key])} for key in ("ctrl+q", "alt+o")]
@@ -2523,7 +2638,7 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
                  patch.object(Path, "lstat", autospec=True, side_effect=metadata) as reading, \
                  patch.object(L, "_D", SimpleNamespace(write=writer)), patch.object(L.os, "chown") as ownership, \
                  patch.object(L.os, "chmod", side_effect=chmod) as modes, patch.object(L, "_xattrs", side_effect=attrs), \
-                 patch.object(L.os, "scandir", side_effect=scan) as scans:
+                 patch.object(L.os, "scandir", side_effect=scan) as scans, patch.object(L.os, "symlink") as links:
                 if fault is None:
                     binding = L._shell_fixtures_prepare(value)
                     self.assertIs(type(binding), bytes); self.assertEqual(L.decode(binding), namespace)
@@ -2533,7 +2648,8 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
                         root / "workflow-project", root / "workflow-project/app", root / "workflow-project/.github",
                         root / "workflow-project/.github/workflows", root / "metadata-project", root / "metadata-project/app",
                         root / "metadata-project/release", root / "metadata-project/release/store",
-                        root / "metadata-project/release/store/android", root / "metadata-project/release/store/android/en-US"])
+                        root / "metadata-project/release/store/android", root / "metadata-project/release/store/android/en-US",
+                        *(root / case / name for case in L.SHELL_SESSION_CASES for name in (".", "project", "project/release", "sources"))])
                     self.assertEqual([call.args for call in writer.call_args_list], [
                         (root / "positive-project/app/build.gradle.kts", L.SHELL_PROJECT_SOURCE, 0o444),
                         (root / "positive-project/version.properties", L.SHELL_PROJECT_VERSION, 0o600),
@@ -2550,7 +2666,9 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
                         (root / "metadata-project/release/mobile-release.json", L.SHELL_PROJECT_CONFIG, 0o600),
                         (root / "metadata-project/release/store/android/en-US/title.txt", b"Public title", 0o600),
                         (root / "metadata-project/release/store/android/en-US/short_description.txt", b"Old summary", 0o600),
-                        (root / "metadata-project/release/store/android/en-US/keep.txt", b"untouched\n", 0o600)])
+                        (root / "metadata-project/release/store/android/en-US/keep.txt", b"untouched\n", 0o600),
+                        *((root / case / name, data, stat.S_IMODE(mode)) for case in L.SHELL_SESSION_CASES
+                          for name, mode, _, data in L._shell_session_roster(value, case) if stat.S_ISREG(mode))])
                     self.assertEqual([call.args for call in ownership.call_args_list], [
                         (path, value["runnerUid"], value["runnerGid"]) for path in
                         (root / "positive-project/version.properties", root / "positive-project",
@@ -2566,7 +2684,11 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
                           ("version.properties", ".gitignore", "release/mobile-release.json", "release/store/android/en-US/title.txt",
                            "release/store/android/en-US/short_description.txt", "release/store/android/en-US/keep.txt",
                            "release/store/android/en-US", "release/store/android", "release/store", "release")),
-                        (root / "metadata-project/app", 0, 0), (root / "metadata-project", value["runnerUid"], value["runnerGid"])])
+                        (root / "metadata-project/app", 0, 0), (root / "metadata-project", value["runnerUid"], value["runnerGid"]),
+                        *((root / case / name, *owners) for case in L.SHELL_SESSION_CASES
+                          for name, _, owners, _ in L._shell_session_roster(value, case))])
+                    links.assert_called_once_with("input.jks", root / "session-refusals/sources/link.jks")
+                    self.assertTrue(all(call.kwargs == {"follow_symlinks": False} for call in ownership.call_args_list[-42:]))
                     self.assertEqual([call.args for call in modes.call_args_list], [(root / "positive-project/app", 0o555),
                         (root / "workflow-project/.github/workflows", 0o700), (root / "workflow-project/.github", 0o700),
                         (root / "workflow-project/app", 0o555), (root / "workflow-project", 0o700),
@@ -2628,7 +2750,9 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
             with self.subTest(mutate=mutate), self.assertRaises(ValueError): L._shell_namespace_data(value, altered)
         families = ((L.shell_project_fixture, "shell-positive-project"), (L.shell_candidate_fixture, "shell-positive-candidate"),
                     (L.shell_paths_fixture, "shell-project-paths"), (L.shell_workflow_fixture, "shell-workflow-apply"),
-                    (L.shell_metadata_fixture, "shell-metadata-save"))
+                    (L.shell_metadata_fixture, "shell-metadata-save"),
+                    *((lambda value, before, after, case=case: L.shell_session_fixture(value, case, before, after),
+                       "shell-" + case) for case in L.SHELL_SESSION_CASES))
         for validate, prefix in families:
             for change in ("missing", "old-schema", "old-root", "binding-drift"):
                 before, after = (L.decode(files[prefix + "-" + phase + ".json"]) for phase in ("before", "after"))
@@ -2638,8 +2762,7 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
                 else: after["namespace"]["identity"][1] = 50
                 with self.subTest(family=prefix, change=change), self.assertRaises(ValueError):
                     validate(value, L.canonical(before), L.canonical(after))
-        for validate, prefix in ((L.shell_candidate_fixture, "shell-positive-candidate"), (L.shell_workflow_fixture, "shell-workflow-apply"),
-                                 (L.shell_metadata_fixture, "shell-metadata-save")):
+        for validate, prefix in families[1:]:
             altered = dict(files)
             for phase in ("before", "after"):
                 name = prefix + "-" + phase + ".json"; document = L.decode(altered[name])
@@ -2674,6 +2797,8 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
         self.assertEqual(ast.unparse(branch.body[1]), "expected = _installed_payload(value, loader, original)")
         self.assertEqual(ast.unparse(branch.body[2]), "namespace = _shell_fixtures_prepare(value)")
         self.assertIs(branch.body[3], loop)
+        self.assertEqual(ast.unparse(branch.body[4]), "_shell_fixtures_final(value, namespace)")
+        self.assertEqual(L.SHELL_CASES[-1], "metadata-save")
         self.assertEqual(ast.unparse(loop.body[0]), "environment, log_binding = _shell_prepare(value, case, namespace)")
         self.assertIsInstance(loop.body[1], ast.If)
         self.assertEqual(ast.unparse(loop.body[1].body[0]), "cases[case] = _shell_normal(value, environment, expected, log_binding)")
@@ -2722,7 +2847,8 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
 
     def test_shell_fixture_roster_fits_the_unchanged_root_evidence_cap(self):
         value, _, _, _ = closed_shell_data()
-        self.assertEqual(L.SHELL_CASES, ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply", "metadata-save"))
+        self.assertEqual(L.SHELL_CASES, ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply",
+                                       "session-inputs", "session-refusals", "session-loss", "session-deadline", "metadata-save"))
         roster = L.public_files(value)
         self.assertEqual({name for name in roster if name.startswith("shell-positive-project-")},
                          {"shell-positive-project-before.json", "shell-positive-project-after.json"})
@@ -2734,9 +2860,11 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                          {"shell-workflow-apply-before.json", "shell-workflow-apply-after.json"})
         self.assertEqual({name for name in roster if name.startswith("shell-metadata-save-") and name.endswith(".json")},
                          {"shell-metadata-save-before.json", "shell-metadata-save-after.json"})
-        self.assertEqual(len(roster), 94)
-        self.assertEqual(len(roster) + 2, 96)
-        self.assertEqual(len(L.root_phases(value)), 20)
+        self.assertEqual({name for name in roster if name.startswith("shell-session-") and name.endswith(".json")},
+                         {"shell-" + case + "-" + phase + ".json" for case in L.SHELL_SESSION_CASES for phase in ("before", "after")})
+        self.assertEqual(len(roster), 114)
+        self.assertEqual(len(roster) + 2, 116)
+        self.assertEqual(len(L.root_phases(value)), 24)
         self.assertLessEqual(len(roster), 128)
         for case in ("positive", "refuse-writable", "refuse-pth"):
             self.assertFalse(any(name.startswith("shell-positive-project-") for name in L.public_files(installed_handoff(case))))
@@ -2985,7 +3113,8 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                  patch.object(L, "_shell_candidate_inventory", return_value=candidate_fixture_data(value)) as candidate_inventory, \
                  patch.object(L, "_shell_paths_inventory", return_value=path_fixture_data(value)) as path_inventory, \
                  patch.object(L, "_shell_workflow_inventory", return_value=workflow_fixture_data(value)) as workflow_inventory, \
-                 patch.object(L, "_shell_metadata_inventory", return_value=metadata_fixture_data(value)) as metadata_inventory:
+                 patch.object(L, "_shell_metadata_inventory", return_value=metadata_fixture_data(value)) as metadata_inventory, \
+                 patch.object(L, "_shell_session_inventory", return_value={"inert": "session-fixture"}) as session_inventory:
                 self.assertEqual(L._shell_prepare(value, case, binding), (L.shell_environment(value, case), "original-log-binding"))
                 namespace_check.assert_called_once_with(value, binding)
                 prepare.assert_not_called(); chmod.assert_not_called()
@@ -3018,10 +3147,18 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                     workflow_inventory.assert_not_called()
                     metadata_inventory.assert_called_once_with(value, binding)
                     retain.assert_called_once_with("shell-metadata-save-before.json", L.canonical(metadata_fixture_data(value)))
+                elif case in L.SHELL_SESSION_CASES:
+                    inventory.assert_not_called(); candidate_inventory.assert_not_called(); path_inventory.assert_not_called()
+                    workflow_inventory.assert_not_called()
+                    session_inventory.assert_called_once_with(value, binding, case)
+                    retain.assert_called_once_with("shell-" + case + "-before.json", L.canonical({"inert": "session-fixture"}))
                 else:
                     inventory.assert_not_called(); candidate_inventory.assert_not_called(); path_inventory.assert_not_called()
-                    workflow_inventory.assert_not_called(); metadata_inventory.assert_not_called()
-                    retain.assert_not_called(); chmod.assert_not_called()
+                    workflow_inventory.assert_not_called(); retain.assert_not_called(); chmod.assert_not_called()
+                if case not in L.SHELL_SESSION_CASES:
+                    session_inventory.assert_not_called()
+                if case != "metadata-save":
+                    metadata_inventory.assert_not_called()
         with patch.object(L, "_shell_namespace_check", side_effect=L.Refused("original namespace changed")), \
              patch.object(L, "_shell_log_prepare") as logs, patch.object(Path, "mkdir") as mkdir:
             with self.assertRaises(ValueError): L._shell_prepare(value, "normal", binding)
@@ -3293,8 +3430,9 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         self.assertEqual((fixture["createdCount"], fixture["replacedCount"]), (1, 1))
         self.assertTrue(fixture["preservedOriginals"] and fixture["configurationUnchanged"] and fixture["noPendingState"])
         self.assertNotEqual(fixture["before"], fixture["after"])
-        for change in ("missing-before", "missing-after", "missing-display", "display-type", "old-five-cases", "partial-closed",
-                       "foreign-closed", "partial-native", "foreign-native", "unchanged-after", "journal", "short-in-place",
+        for change in ("missing-before", "missing-after", "missing-display", "display-type", "missing-metadata-case", "partial-closed",
+                       "foreign-closed", "session-closed", "extra-case", "missing-session-case", "mixed-session-case",
+                       "partial-native", "foreign-native", "session-native", "unchanged-after", "journal", "short-in-place",
                        "missing-command", "wrong-exit", "wrong-argv"):
             altered, current = dict(files), deepcopy(outcome)
             if change in ("missing-before", "missing-after"):
@@ -3303,10 +3441,15 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                 altered.pop("shell-metadata-save-xvfb.stderr")
             elif change == "display-type":
                 altered["shell-metadata-save-xvfb.stderr"] = "not captured bytes"
-            elif change in ("old-five-cases", "partial-closed", "foreign-closed"):
+            elif change in ("missing-metadata-case", "partial-closed", "foreign-closed", "session-closed",
+                             "extra-case", "missing-session-case", "mixed-session-case"):
                 cases = L.decode(altered["shell-cases.json"])
-                if change == "old-five-cases": cases.pop("metadata-save")
+                if change == "missing-metadata-case": cases.pop("metadata-save")
                 elif change == "partial-closed": cases["metadata-save"]["metadataSave"].pop("readback")
+                elif change == "session-closed": cases["metadata-save"]["metadataSave"] = L.SHELL_SESSION_RECEIPTS["session-inputs"]
+                elif change == "extra-case": cases["unexpected"] = deepcopy(cases["normal"])
+                elif change == "missing-session-case": cases.pop("session-inputs")
+                elif change == "mixed-session-case": cases["session-inputs"]["metadataSave"] = L.SHELL_METADATA_RECEIPT
                 else: cases["metadata-save"]["metadataSave"] = L.SHELL_WORKFLOW_RECEIPT
                 altered["shell-cases.json"] = L.canonical(cases)
             elif change == "partial-native":
@@ -3314,6 +3457,8 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                 altered["shell-metadata-save.stdout"] = metadata_capture(receipt)[0]
             elif change == "foreign-native":
                 altered["shell-metadata-save.stdout"] = workflow_capture()[0]
+            elif change == "session-native":
+                altered["shell-metadata-save.stdout"] = session_capture("session-inputs")[0]
             elif change == "unchanged-after":
                 altered["shell-metadata-save-after.json"] = altered["shell-metadata-save-before.json"]
             elif change in ("journal", "short-in-place"):
@@ -3349,18 +3494,29 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         self.assertEqual(ast.unparse(branch.orelse[1]),
                          "cases[case] = shell_result(result.stdout, result.stderr, case, result.returncode, expected)")
         metadata = next(node for node in branch.orelse[2:] if isinstance(node, ast.If) and ast.unparse(node.test) == "case == 'metadata-save'")
-        self.assertEqual(len(metadata.body), 4)
+        self.assertEqual(len(metadata.body), 3)
         self.assertEqual([ast.unparse(node) for node in metadata.body[:3]], [
             "metadata_after = canonical(_shell_metadata_inventory(value, namespace, saved=True))",
             "_retain('shell-metadata-save-after.json', metadata_after)",
             "shell_metadata_fixture(value, read(_ROOT / 'public/shell-metadata-save-before.json', 8192), metadata_after)"])
-        recheck = metadata.body[3].value
+        final = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_shell_fixtures_final")
+        self.assertEqual(len(final.body), 3)  # Docstring, common comparisons and the four-session loop.
+        recheck = final.body[1].value
         self.assertEqual(ast.unparse(recheck.func), "need")
         self.assertEqual([ast.unparse(node) for node in recheck.args[0].values], [
             "canonical(_shell_project_inventory(value, namespace, saved=True)) == read(_ROOT / 'public/shell-positive-project-after.json', 8192)",
             "canonical(_shell_candidate_inventory(value, namespace)) == read(_ROOT / 'public/shell-positive-candidate-after.json', 8192)",
             "canonical(_shell_paths_inventory(value, namespace, changed=True)) == read(_ROOT / 'public/shell-project-paths-after.json', 8192)",
-            "canonical(_shell_workflow_inventory(value, namespace, installed=True)) == read(_ROOT / 'public/shell-workflow-apply-after.json', 8192)"])
+            "canonical(_shell_workflow_inventory(value, namespace, installed=True)) == read(_ROOT / 'public/shell-workflow-apply-after.json', 8192)",
+            "canonical(_shell_metadata_inventory(value, namespace, saved=True)) == read(_ROOT / 'public/shell-metadata-save-after.json', 8192)"])
+        session_loop = final.body[2]
+        self.assertEqual(ast.unparse(session_loop.iter), "SHELL_SESSION_CASES")
+        self.assertEqual(ast.unparse(session_loop.body[0].value.args[0]),
+            "canonical(_shell_session_inventory(value, namespace, case, changed=case == 'session-refusals')) == read(_ROOT / 'public' / ('shell-' + case + '-after.json'), SHELL_SESSION_INVENTORY_LIMIT)")
+        shell = next(node for node in unit.body if isinstance(node, ast.If) and ast.unparse(node.test) == "'shell' in value")
+        self.assertIs(shell.body[3], loop)
+        self.assertEqual(ast.unparse(shell.body[4]), "_shell_fixtures_final(value, namespace)")
+        self.assertFalse(any(isinstance(node, (ast.Try, ast.While)) for node in ast.walk(final)))
         calls = [node for node in ast.walk(unit) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                  and node.func.id == "_shell_metadata_inventory"]
         self.assertEqual(len(calls), 1)
@@ -3619,7 +3775,7 @@ class CandidateDocumentsLifecycleContracts(unittest.TestCase):
         calls = [(node.func.id, node.lineno) for node in ast.walk(body) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)]
         gated = [line for name, line in calls if name == "shell_result"]
         inventories = sorted(line for name, line in calls if name == "_shell_candidate_inventory")
-        self.assertEqual((len(gated), len(inventories)), (1, 3))
+        self.assertEqual((len(gated), len(inventories)), (1, 2))
         self.assertLess(gated[0], inventories[0])
         loop = next(node for node in ast.walk(body) if isinstance(node, ast.For)
                     and isinstance(node.iter, ast.Name) and node.iter.id == "SHELL_CASES")
@@ -3630,11 +3786,11 @@ class CandidateDocumentsLifecycleContracts(unittest.TestCase):
         self.assertIsInstance(positive, ast.If)
         self.assertEqual(ast.unparse(positive.test), "case == 'positive'")
         # The original post-exit capture remains a direct positive-branch
-        # assignment. Only the two later successful cases may recheck it.
+        # assignment. The fifth-case and final ten-case checks reuse this
+        # original fixture only after their completed case gates.
         self.assertTrue(any(isinstance(node, ast.Assign) and node.lineno <= inventories[0] <= node.end_lineno for node in positive.body))
         names = ["_shell_project_inventory", "_shell_candidate_inventory", "_shell_paths_inventory"]
-        for index, (case, expected_calls) in enumerate((("workflow-apply", names),
-                ("metadata-save", [*names, "_shell_workflow_inventory"])), 1):
+        for index, (case, expected_calls) in enumerate((("workflow-apply", names),), 1):
             later = next(node for node in branch.orelse[gate + 1:]
                          if isinstance(node, ast.If) and ast.unparse(node.test) == "case == '" + case + "'")
             rechecks = [node for node in later.body if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
@@ -3808,10 +3964,413 @@ class ProjectPathLifecycleContracts(unittest.TestCase):
                           and isinstance(n.func, ast.Name) and n.func.id == "_shell_metadata_inventory"]
         self.assertEqual(len(metadata_calls), 1)
         self.assertEqual([(arg.arg, ast.literal_eval(arg.value)) for arg in metadata_calls[0].keywords], [("saved", True)])
-        self.assertEqual(set(L.SHELL_CASES), {"normal", "positive", "quit-outstanding", "project-paths", "workflow-apply", "metadata-save"})
+        self.assertEqual(L.SHELL_CASES, ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply",
+                                       "session-inputs", "session-refusals", "session-loss", "session-deadline", "metadata-save"))
+
+
+
+class SessionFixtureContracts(unittest.TestCase):
+    def test_private_fixture_config_is_valid_shared_policy_without_build_commands(self):
+        from mobile_release.config import validate_config_data
+        draft = json.loads(L.SHELL_SESSION_CONFIG)
+        validate_config_data(draft)
+        self.assertEqual(draft["android"], {"applicationId": "org.assessment.fixture", "enabled": True, "identityStatus": "unverified"})
+        self.assertEqual(draft["ios"], {"enabled": False})
+        self.assertEqual(draft["projectChecks"], {"androidArtifact": [], "iosArtifact": [], "preflight": []})
+        self.assertEqual(draft["services"], {"androidFirebase": "required", "iosFirebase": "disabled"})
+        self.assertIs(draft["source"]["projectReadTokenRequired"], True)
+        self.assertEqual(draft["version"]["source"], "version.properties")
+
+    def test_original_session_receipt_framing_profile_finality_and_redaction_are_closed(self):
+        for case in L.SHELL_SESSION_CASES:
+            mappings = map_data()
+            stdout, stderr = session_capture(case)
+            expected = deepcopy(L.SHELL_SESSION_RECEIPTS[case])
+            with self.subTest(case=case):
+                result = L.shell_result(stdout, stderr, case, 0, mappings)
+                self.assertEqual(result["sessionInputs"], expected)
+                self.assertEqual(len(result["maps"]), expected["behavior"]["assessments"])
+                self.assertTrue(all(len(rows) == 6 for rows in result["maps"]))
+                self.assertLessEqual(len(L.canonical(expected)), 4096)
+            mutations = [
+                lambda doc: doc.update(schemaVersion=True), lambda doc: doc.update(case="positive"),
+                lambda doc: doc.update(methods="twelve-passive"), lambda doc: doc.update(profile="development-runtime"),
+                lambda doc: doc["project"].update(snapshotMatched=1), lambda doc: doc.pop("behavior"),
+                lambda doc: doc.update(privateInput="fictional-private-input-must-not-be-exported"),
+                lambda doc: doc["safety"].update(signingVerified=True),
+                lambda doc: doc["behavior"].update(assessments=True),
+                lambda doc: doc["behavior"].update(assessments=17),
+            ]
+            for original in ("assetJoined", "sourceClosed", "r1Joined", "guiSettled", "relayJoined", "exit"):
+                altered = deepcopy(expected); altered["originals"][original] = False
+                with self.subTest(case=case, original=original), self.assertRaises(ValueError):
+                    L.shell_session_receipt(L.canonical(altered), case)
+            for mutate in mutations:
+                altered = deepcopy(expected); mutate(altered)
+                with self.subTest(case=case, mutate=mutate), self.assertRaises(ValueError):
+                    L.shell_result(*session_capture(case, altered), case, 0, mappings)
+            lines = stdout.splitlines(keepends=True)
+            for altered in (b"".join(lines[1:]), b"".join(reversed(lines)), stdout + lines[3], stdout.replace(b"\n", b"\r\n"),
+                            stdout.replace(case.encode() + b"-verified", b"positive-verified")):
+                with self.subTest(case=case, framing=altered[:48]), self.assertRaises(ValueError):
+                    L.shell_result(altered, b"", case, 0, mappings)
+            with self.assertRaises(ValueError): L.shell_result(stdout, stdout, case, 0, mappings)
+            with self.assertRaises(ValueError): L.shell_result(stdout, stderr, case, True, mappings)
+            with self.assertRaises(ValueError): L.shell_session_receipt(L.canonical(expected) + b" " * 4096, case)
+
+    def test_each_assessment_requires_its_original_six_loader_bound_roles(self):
+        mappings = map_data()
+        case = "session-inputs"
+        maps = L.shell_result(*session_capture(case), case, 0, mappings)["maps"]
+        mutations = (
+            lambda rows: rows.clear(), lambda rows: rows.pop(), lambda rows: rows.append(deepcopy(rows[0])),
+            lambda rows: rows[0].pop(), lambda rows: rows[0].reverse(),
+            lambda rows: rows[0][0].update(role="different"), lambda rows: rows[0][0].update(path="/unadmitted/object"),
+            lambda rows: rows[0][0].update(inode=9999), lambda rows: rows[0][0].update(deviceMajor=True),
+            lambda rows: rows[0][0].update(extra="not-a-map-field"),
+        )
+        for mutate in mutations:
+            changed = deepcopy(maps); mutate(changed)
+            with self.subTest(mutate=mutate), self.assertRaises(ValueError):
+                L.shell_result(*session_capture(case, maps=changed), case, 0, mappings)
+        with self.assertRaises(ValueError):
+            L.shell_result(*session_capture(case, maps=[deepcopy(maps[0]) for _ in range(17)]), case, 0, mappings)
+        stdout, _ = session_capture(case)
+        lines = stdout.splitlines(keepends=True)
+        for altered in (b"".join(lines[:3] + lines[4:]), b"".join(lines[:3] + [lines[3].rstrip(b"\n")] + lines[4:]),
+                        b"".join(lines[:3] + [lines[3].replace(b"\n", b"\r\n")] + lines[4:])):
+            with self.assertRaises(ValueError): L.shell_result(altered, b"", case, 0, mappings)
+        with self.assertRaises(ValueError): L.shell_result(stdout, b"", case, 0, {})
+
+    def test_closed_four_case_fixtures_and_only_original_leaf_rename_are_accounted(self):
+        value = installed_handoff(); value.update(runId="9" * 20, attempt="9" * 20)
+        self.assertEqual(L.SHELL_SESSION_CASES, ("session-inputs", "session-refusals", "session-loss", "session-deadline"))
+        self.assertEqual(sum(len(L._shell_session_roster(value, case)) for case in L.SHELL_SESSION_CASES), 42)
+        self.assertEqual(L.SHELL_SESSION_JKS, bytes.fromhex("feedfeed0000000200000000"))
+        self.assertEqual(L.SHELL_SESSION_REPLACEMENT_JKS, bytes.fromhex("feedfeed0000000100000000"))
+        for case in L.SHELL_SESSION_CASES:
+            before = L.canonical(session_fixture_data(value, case))
+            after = L.canonical(session_fixture_data(value, case, changed=case == "session-refusals"))
+            with self.subTest(case=case):
+                result = L.shell_session_fixture(value, case, before, after)
+                self.assertEqual((result["beforeCount"], result["afterCount"]), (15, 14) if case == "session-refusals" else (9, 9))
+                self.assertEqual(result["mutations"], ["changed-leaf-rename"] if case == "session-refusals" else [])
+                self.assertTrue(result["projectUnchanged"] and result["sourcesOutsideProject"] and result["originalsAccounted"])
+                self.assertEqual(result["before"] == result["after"], case != "session-refusals")
+                self.assertLessEqual(max(len(before), len(after)), 8192)
+                self.assertLess(len(L.canonical(session_fixture_data(value, case)["namespace"])), 1024)
+
+    def test_refuses_changed_private_originals_aliases_and_unaccounted_replacement(self):
+        value = installed_handoff()
+        for case in L.SHELL_SESSION_CASES:
+            before = session_fixture_data(value, case)
+            after = session_fixture_data(value, case, changed=case == "session-refusals")
+            mutations = [
+                lambda doc: doc.update(case="positive"), lambda doc: doc.update(changed=1),
+                lambda doc: doc.update(root=doc["root"] + "/project"), lambda doc: doc.update(schemaVersion=True),
+                lambda doc: doc["entries"].pop(), lambda doc: doc["entries"].reverse(),
+                lambda doc: doc["namespace"]["identity"].__setitem__(1, 90),
+                lambda doc: doc["entries"][0]["children"].append("unrelated"),
+                lambda doc: doc["entries"][1]["identity"].__setitem__(2, stat.S_IFDIR | 0o755),
+                lambda doc: doc["entries"][1]["identity"].__setitem__(1, doc["entries"][0]["identity"][1]),
+                lambda doc: next(row for row in doc["entries"] if row["path"] == "sources/input.jks").update(size=True),
+                lambda doc: next(row for row in doc["entries"] if row["path"] == "sources/input.jks")["identity"].__setitem__(2, stat.S_IFREG | 0o644),
+                lambda doc: next(row for row in doc["entries"] if row["path"] == "project/release/mobile-release.json").update(sha256="0" * 64),
+            ]
+            if case == "session-refusals":
+                mutations += [
+                    lambda doc: doc["absent"].remove("sources/changed-next.jks"),
+                    lambda doc: next(row for row in doc["entries"] if row["path"] == "sources/changed.jks")["identity"].__setitem__(1, 999),
+                    lambda doc: next(row for row in doc["entries"] if row["path"] == "sources/changed.jks")["identity"].__setitem__(7, 22),
+                    lambda doc: next(row for row in doc["entries"] if row["path"] == "sources/link.jks").update(target="../project/overlap.jks"),
+                ]
+            for mutate in mutations:
+                altered = deepcopy(after); mutate(altered)
+                with self.subTest(case=case, mutate=mutate), self.assertRaises((ValueError, KeyError)):
+                    L.shell_session_fixture(value, case, L.canonical(before), L.canonical(altered))
+        # A coherent replacement DATA document is still not the old opened
+        # original. Reusing its own before/after inventory cannot hide a rename.
+        original = session_fixture_data(value, "session-refusals")
+        with self.assertRaises(ValueError):
+            L.shell_session_fixture(value, "session-refusals", L.canonical(original), L.canonical(original))
+
+    def test_inventory_admits_all_directory_names_before_source_reads_and_does_not_follow_links(self):
+        value = installed_handoff(); case = "session-refusals"
+        namespace = fixture_namespace_data(value); binding = L.canonical(namespace)
+        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        for changed in (False, True):
+            document = session_fixture_data(value, case, changed=changed)
+            base = Path(document["root"])
+            nodes = {base if row["path"] == "." else base / row["path"]: row for row in document["entries"]}
+            def metadata(path):
+                return SimpleNamespace(**dict(zip(fields, nodes[path]["identity"])))
+            def scan(path):
+                context = Mock()
+                context.__enter__ = Mock(return_value=iter(SimpleNamespace(name=name) for name in nodes[path]["children"]))
+                context.__exit__ = Mock(return_value=False)
+                return context
+            def file_record(path, limit):
+                row = nodes[path]
+                self.assertEqual(row["kind"], "file")
+                self.assertEqual(limit, row["size"])
+                return {"path": str(path), "size": row["size"], "sha256": row["sha256"]}
+            with self.subTest(changed=changed), patch.object(L, "_ROOT", L.root_path(value)), \
+                 patch.object(L, "_shell_namespace_check", return_value=namespace), patch.object(L, "directory"), \
+                 patch.object(Path, "lstat", metadata), patch.object(L.os, "scandir", side_effect=scan), \
+                 patch.object(L, "record", side_effect=file_record) as reading, patch.object(L, "_xattrs"), \
+                 patch.object(L.os, "readlink", return_value="input.jks") as linking, patch.object(L, "_absent") as absent:
+                self.assertEqual(L._shell_session_inventory(value, binding, case, changed=changed), document)
+                self.assertEqual(reading.call_count, 9 if changed else 10)
+                linking.assert_called_once_with(base / "sources/link.jks")
+                self.assertEqual([call.args[0] for call in absent.call_args_list], [base / name for name in document["absent"]])
+                reading.reset_mock(); linking.reset_mock()
+                nodes[base / "sources"]["children"].append("unreviewed-output")
+                with self.assertRaises(ValueError):
+                    L._shell_session_inventory(value, binding, case, changed=changed)
+                reading.assert_not_called(); linking.assert_not_called()
+
+    def test_final_metadata_cannot_replace_a_prior_session_inventory_or_its_own_saved_original(self):
+        # In-memory failure injection after the metadata-last return. Reuse the
+        # actual final comparison, never unit_start, a process or a live tree.
+        value, _, files, _ = closed_shell_data()
+        namespace = L.canonical(fixture_namespace_data(value))
+        sessions = {case: session_fixture_data(value, case, changed=case == "session-refusals") for case in L.SHELL_SESSION_CASES}
+        for changed in (None, *L.SHELL_SESSION_CASES, "metadata-save"):
+            current = deepcopy(sessions)
+            metadata = metadata_fixture_data(value, saved=True)
+            if changed == "metadata-save":
+                metadata["entries"][0]["identity"][1] += 1000
+            elif changed is not None:
+                # Identical fictional bytes can still belong to a different
+                # directory original. The already-retained capture must win.
+                current[changed]["entries"][0]["identity"][1] += 1000
+            def session_inventory(actual_value, actual_namespace, case, *, changed=False):
+                self.assertIs(actual_value, value); self.assertEqual(actual_namespace, namespace)
+                self.assertEqual(changed, case == "session-refusals")
+                return current[case]
+            def retained(path, limit):
+                self.assertEqual(path.parent, L.root_path(value) / "public")
+                raw = files[path.name]; self.assertLessEqual(len(raw), limit); return raw
+            with self.subTest(changed=changed), patch.object(L, "_ROOT", L.root_path(value)), \
+                 patch.object(L, "_shell_project_inventory", return_value=project_fixture_data(value, saved=True)), \
+                 patch.object(L, "_shell_candidate_inventory", return_value=candidate_fixture_data(value)), \
+                 patch.object(L, "_shell_paths_inventory", return_value=path_fixture_data(value, changed=True)), \
+                 patch.object(L, "_shell_workflow_inventory", return_value=workflow_fixture_data(value, installed=True)), \
+                 patch.object(L, "_shell_metadata_inventory", return_value=metadata), \
+                 patch.object(L, "_shell_session_inventory", side_effect=session_inventory) as checking, \
+                 patch.object(L, "read", side_effect=retained), patch.object(L, "_retain") as replacement:
+                if changed is None:
+                    self.assertIsNone(L._shell_fixtures_final(value, namespace))
+                    self.assertEqual([call.args[2] for call in checking.call_args_list], list(L.SHELL_SESSION_CASES))
+                else:
+                    reason = "another original fixture family" if changed == "metadata-save" else "earlier original session fixture"
+                    with self.assertRaisesRegex(ValueError, reason):
+                        L._shell_fixtures_final(value, namespace)
+                replacement.assert_not_called()
+
+    def test_session_after_inventory_requires_original_case_gate_without_new_owner_or_deadline(self):
+        tree = ast.parse((SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_text())
+        unit = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "unit_start")
+        loop = next(node for node in ast.walk(unit) if isinstance(node, ast.For)
+                    and isinstance(node.iter, ast.Name) and node.iter.id == "SHELL_CASES")
+        branch = next(node for node in loop.body if isinstance(node, ast.If))
+        gate = next(node for node in branch.orelse if isinstance(node, ast.Assign)
+                    and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name) and node.value.func.id == "shell_result")
+        session = next(node for node in branch.orelse if isinstance(node, ast.If) and ast.unparse(node.test) == "case in SHELL_SESSION_CASES")
+        self.assertLess(gate.end_lineno, session.lineno)
+        calls = [node for node in ast.walk(session) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)]
+        self.assertEqual([node.func.id for node in calls].count("_shell_session_inventory"), 1)
+        self.assertEqual([node.func.id for node in calls].count("shell_session_fixture"), 1)
+        command = next(node for node in ast.walk(branch) if isinstance(node, ast.Call)
+                       and isinstance(node.func, ast.Name) and node.func.id == "command")
+        self.assertIn(("maximum", 60), [(arg.arg, ast.literal_eval(arg.value)) for arg in command.keywords if arg.arg == "maximum"])
+        self.assertFalse(any(isinstance(node, (ast.Try, ast.While)) for node in ast.walk(session)))
 
 
 class FailureLabelSinkContracts(unittest.TestCase):
+    def test_path_prefix_requires_complete_frame_closed_reason_and_recipe_shape(self):
+        def frame(step=b"PathActivate", index=b"0", rejection=b"gtk-initial-folder"):
+            return (b"MRK_INSTALLED_SHELL_PATH_FAILURE=v1;index=" + index + b";reject=" + rejection + b"\n"
+                    b"MRK_INSTALLED_SHELL_FAILURE_STEP=" + step + b"\nMRK_INSTALLED_SHELL_FAILURE_PHASE=gtk\n"
+                    b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n")
+        good = frame()
+        self.assertEqual(L._shell_label_pair(good), {"step": "PathActivate", "boundary": "gtk", "bootstrapProgress": "advanced",
+            "path": {"recipeIndex": 0, "rejection": "gtk-initial-folder"}})
+        indexed = (b"PathBrowse", b"PathSet", b"PathActivate", b"PathSettlement", b"PathField")
+        unindexed = (b"PathDraft", b"PathPreview", b"PathNavigation")
+        for step in indexed:
+            for index in range(11):
+                self.assertEqual(L._shell_label_pair(frame(step, str(index).encode("ascii")))["path"]["recipeIndex"], index)
+            self.assertIsNone(L._shell_label_pair(frame(step, b"none")))
+        for step in unindexed:
+            self.assertEqual(L._shell_label_pair(frame(step, b"none"))["path"], {"recipeIndex": None, "rejection": "gtk-initial-folder"})
+            # Preview round0..2 never masquerades as a recipe identifier.
+            for index in (b"0", b"1", b"2"):
+                self.assertIsNone(L._shell_label_pair(frame(step, index)))
+        for rejection in L.SHELL_PATH_REJECTIONS:
+            self.assertEqual(L._shell_label_pair(frame(rejection=rejection))["path"]["rejection"], rejection.decode("ascii"))
+        longest = frame(b"PathNavigation", b"none", b"gtk-fixture-transition").replace(
+            b"=gtk\n", b"=settlement\n").replace(b"=advanced\n", b"=app-info-returned-before-hold\n")
+        self.assertIsNotNone(L._shell_label_pair(longest))
+        self.assertLessEqual(len(longest), L.SHELL_PATH_FAILURE_FRAME_BOUND)
+        self.assertEqual(L.SHELL_FAILURE_LABEL_LIMIT, 512)
+        # Including cuts exactly at line boundaries: the leading version record
+        # prevents a short new write from impersonating an old three-line frame.
+        for end in range(len(good)):
+            with self.subTest(prefix_bytes=end):
+                self.assertIsNone(L._shell_label_pair(good[:end]))
+        prefix, legacy = good.split(b"\n", 1)
+        prefix += b"\n"
+        for step in indexed + unindexed:
+            old = legacy.replace(b"PathActivate", step)
+            self.assertEqual(L._shell_label_pair(old), {"step": step.decode("ascii"), "boundary": "gtk", "bootstrapProgress": "advanced"})
+        bad = [good.replace(b"=v1;", b"=v2;"), good.replace(b"=v1;", b"=V1;"),
+               frame(index=b"11"), frame(index=b"255"), frame(index=b"00"), frame(index=b"01"),
+               frame(index=b"-1"), frame(index=b"+1"), frame(index=b"NONE"), frame(index=b"0 "),
+               frame(step=b"SessionActivateFile"), frame(step=b"PrepareSave"), frame(step=b"PathUnknown"),
+               frame(rejection=b"gtk-future"), frame(rejection=b"gtk_initial_folder"), frame(rejection=b"GTK-thread"),
+               frame(rejection=b"x" * 23), frame(rejection=b"gtk-thread;extra=1"), frame(rejection=b"gtk-thread\n/private/inert"),
+               good.replace(b";reject=", b";index=0;reject="), good.replace(b";reject=", b";extra=1;reject="),
+               good.replace(b"index=0;reject=gtk-initial-folder", b"reject=gtk-initial-folder;index=0"),
+               good.replace(b"\n", b"\r\n"), prefix + legacy + legacy, prefix + prefix + legacy, legacy + prefix,
+               good + b"\n", good + b"x" * 512, good.decode("ascii"), bytearray(good),
+               prefix + legacy.replace(b"PathActivate", b"SessionReview") +
+               b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=0;evaluations=1;reject=not-recorded;wait=not-sampled\n"]
+        for raw in bad:
+            with self.subTest(kind=type(raw).__name__, length=len(raw)):
+                self.assertIsNone(L._shell_label_pair(raw))
+
+    def test_session_record_requires_exact_index_bounds_categories_and_complete_frame(self):
+        header = (b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionReview\n"
+                  b"MRK_INSTALLED_SHELL_FAILURE_PHASE=settlement\n"
+                  b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n")
+        detail = (b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=63;evaluations=128;"
+                  b"reject=evaluation-budget;wait=rendered-display-mismatch\n")
+        good = header + detail
+        self.assertEqual(L._shell_label_pair(good), {"step": "SessionReview", "boundary": "settlement", "bootstrapProgress": "advanced",
+            "session": {"recipeIndex": 63, "evaluations": 128, "rejection": "evaluation-budget", "lastWait": "rendered-display-mismatch"}})
+        gtk = (b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionActivateFile\n"
+               b"MRK_INSTALLED_SHELL_FAILURE_PHASE=gtk\nMRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n"
+               b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=3;evaluations=16;"
+               b"reject=gtk-observer-endpoint;wait=gtk-action-insensitive\n")
+        self.assertEqual(L._shell_label_pair(gtk), {"step": "SessionActivateFile", "boundary": "gtk", "bootstrapProgress": "advanced",
+            "session": {"recipeIndex": 3, "evaluations": 16, "rejection": "gtk-observer-endpoint", "lastWait": "gtk-action-insensitive"}})
+        historical = header + (b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=29;evaluations=73;"
+                               b"reject=native-readiness-invariant;wait=native-reply-pending\n")
+        self.assertEqual(L._shell_label_pair(historical)["session"], {"recipeIndex": 29, "evaluations": 73,
+            "rejection": "native-readiness-invariant", "lastWait": "native-reply-pending"})
+        unavailable = [L._shell_label_pair(good.replace(b"evaluation-budget", token))["session"]["rejection"]
+                       for token in (b"reply-code-unavailable", b"reply-assessment-unavailable", b"capability-unavailable")]
+        self.assertEqual(unavailable, ["reply-code-unavailable", "reply-assessment-unavailable", "capability-unavailable"])
+        for rejection in L.SHELL_SESSION_REJECTIONS:
+            for wait in L.SHELL_SESSION_WAITS:
+                raw = header + b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=0;evaluations=128;reject=" + rejection + b";wait=" + wait + b"\n"
+                value = L._shell_label_pair(raw)
+                self.assertEqual(value["session"], {"recipeIndex": 0, "evaluations": 128,
+                    "rejection": rejection.decode("ascii"), "lastWait": wait.decode("ascii")})
+                self.assertLessEqual(len(raw), 512)
+        for number in (b"0", b"9", b"10", b"99", b"100", b"128"):
+            raw = good.replace(b"evaluations=128", b"evaluations=" + number).replace(b"evaluation-budget", b"not-recorded")
+            self.assertEqual(L._shell_label_pair(raw)["session"]["evaluations"], int(number))
+        for name in (b"SessionNavigate", b"SessionReload", b"SessionLoss", b"SessionDeadline", b"SessionQuitPreserved"):
+            raw = good.replace(b"SessionReview", name).replace(b"index=63", b"index=none")
+            self.assertIsNone(L._shell_label_pair(good.replace(b"SessionReview", name)))
+            self.assertIsNone(L._shell_label_pair(raw)["session"]["recipeIndex"])
+        for name in (b"SessionQuitCancel", b"SessionFinality"):
+            self.assertIsNotNone(L._shell_label_pair(good.replace(b"SessionReview", name)))
+            self.assertIsNotNone(L._shell_label_pair(good.replace(b"SessionReview", name).replace(b"index=63", b"index=none")))
+        bad = [header, header + detail[:-1], header + detail + detail, detail + header,
+            good.replace(b"SessionReview", b"PrepareSave"), good.replace(b"index=63", b"index=none"),
+            good.replace(b"index=63", b"index=64"), good.replace(b"index=63", b"index=063"),
+            good.replace(b"index=63", b"index=-1"), good.replace(b"evaluations=128", b"evaluations=129"),
+            good.replace(b"evaluations=128", b"evaluations=0128"), good.replace(b"evaluations=128", b"evaluations=127"),
+            good.replace(b"evaluation-budget", b"not-an-allowed-condition"), good.replace(b"rendered-display-mismatch", b"unknown"),
+            good.replace(b"evaluation-budget", b"asset_deadline"), good.replace(b"evaluation-budget", b"reply-future-code"),
+            good.replace(b"evaluation-budget", b"x" * 33),
+            good.replace(b"evaluation-budget", b"reply-code-unavailable;code=asset_deadline"),
+            good.replace(b"evaluation-budget", b"reply-code-unavailable\n/private/inert"),
+            good.replace(b"v1;", b"v2;"), good.replace(b";wait=", b";extra=1;wait="),
+            good.replace(b";reject=", b";index=63;reject="), good.replace(b"\n", b"\r\n"),
+            good + b"/private/inert\n", good + b"x" * 512]
+        for raw in bad:
+            with self.subTest(raw=raw[:80]): self.assertIsNone(L._shell_label_pair(raw))
+
+        # v1 stays distinguishable as lacking origin metadata. v2 never accepts
+        # an omitted field, guessed association or arbitrary original error.
+        self.assertNotIn("firstOrigin", L._shell_label_pair(historical)["session"])
+        def frame(origin=b"not-recorded", origin_detail=b"none", association=b"unassociated", query=b"na", worker=b"na"):
+            return (good[:-1].replace(b"=v1;", b"=v2;") + b";o=" + origin + b";d=" + origin_detail
+                    + b";a=" + association + b";q=" + query + b";w=" + worker + b"\n")
+        v2 = frame()
+        expected = deepcopy(L._shell_label_pair(good))
+        expected["session"]["firstOrigin"] = {"origin": "not-recorded", "detail": "none", "association": "unassociated", "query": "na", "worker": "na"}
+        self.assertEqual(L._shell_label_pair(v2), expected)
+        bound = frame(b"supervisor-disabled", b"none", b"bound", b"unavailable.spawn-other.xf", b"settle-unknown")
+        expected["session"]["firstOrigin"] = {"origin": "supervisor-disabled", "detail": "none", "association": "bound",
+                                               "query": "unavailable.spawn-other.xf", "worker": "settle-unknown"}
+        self.assertEqual(L._shell_label_pair(bound), expected)
+        self.assertLessEqual(len(bound), 412)
+        self.assertEqual(bound.count(b"\n"), 4)
+        self.assertTrue(bound.isascii())
+        for origin in L.SHELL_SESSION_ORIGINS:
+            origin_detail = b"other" if origin == b"op-cleanup" else b"failed" if origin == b"coord-join" else b"unavailable" if origin == b"staged-refusal" else b"none"
+            self.assertEqual(L._shell_label_pair(frame(origin, origin_detail))["session"]["firstOrigin"]["origin"], origin.decode("ascii"))
+        for origin, details in ((b"op-cleanup", (b"deadline", b"review-expired", b"context-stale", b"cleanup-unknown", b"user-cancelled", b"shutdown", b"document-lost", b"other")),
+                                (b"staged-refusal", (b"new", b"pending", b"returned", b"failed", b"unavailable"))):
+            for origin_detail in details:
+                self.assertEqual(L._shell_label_pair(frame(origin, origin_detail, b"bound", b"unregistered"))["session"]["firstOrigin"]["detail"], origin_detail.decode("ascii"))
+        for error in L.SHELL_SESSION_QUERY_ERRORS:
+            value = error + b".none.pr"
+            self.assertEqual(L._shell_label_pair(frame(b"registry", b"none", b"bound", value, b"none-recorded"))["session"]["firstOrigin"]["query"], value.decode("ascii"))
+        for cause in L.SHELL_SESSION_QUERY_CAUSES:
+            value = b"cleanup." + cause + b".cf"
+            self.assertEqual(L._shell_label_pair(frame(b"coord-join", b"failed", b"bound", value, b"acquire-f"))["session"]["firstOrigin"]["query"], value.decode("ascii"))
+        for join in L.SHELL_SESSION_MANAGEMENT_JOINS:
+            value = b"timeout.none." + bytes([join, join])
+            self.assertIsNotNone(L._shell_label_pair(frame(b"registry", b"none", b"bound", value, b"unavailable")))
+        for worker in L.SHELL_SESSION_WORKERS:
+            value = b"unregistered" if worker == b"na" else b"unavailable"
+            self.assertEqual(L._shell_label_pair(frame(b"registry", b"none", b"bound", value, worker))["session"]["firstOrigin"]["worker"], worker.decode("ascii"))
+        self.assertEqual((len(L.SHELL_SESSION_PUBLIC_MAP_WORKERS), L.SHELL_SESSION_PUBLIC_MAP_WORKERS[0], L.SHELL_SESSION_PUBLIC_MAP_WORKERS[-1]),
+                         (648, b"map-x-aa", b"map-x-yx"))
+        for worker in (b"maps-check", b"map-p-nl", b"map-p-order", b"map-x-file", b"map-m-owner-cr", b"map-dup-py",
+                       b"map-x-hist-py", b"map-x-hist-ss", b"map-x-hist-cr",
+                       *L.SHELL_SESSION_PUBLIC_MAP_WORKERS):
+            raw = frame(b"supervisor-disabled", b"none", b"bound", b"cleanup.none.pp", worker)
+            self.assertEqual(L._shell_label_pair(raw)["session"]["firstOrigin"], {
+                "origin": "supervisor-disabled", "detail": "none", "association": "bound", "query": "cleanup.none.pp", "worker": worker.decode("ascii")})
+            self.assertLessEqual(len(raw), 412)
+            self.assertIsNone(L._shell_label_pair(raw.replace(b";a=bound", b";a=unassociated")))
+            self.assertIsNone(L._shell_label_pair(raw.replace(b";q=cleanup.none.pp", b";q=unregistered")))
+        for stage in L.SHELL_SESSION_WORKER_STAGES:
+            self.assertIsNotNone(L._shell_label_pair(frame(b"registry", b"none", b"bound", b"cleanup.none.pp", stage + b"-c")))
+        for suffix in L.SHELL_SESSION_WORKER_JOINS:
+            self.assertIsNotNone(L._shell_label_pair(frame(b"registry", b"none", b"bound", b"cleanup.none.pp", b"observe-" + bytes([suffix]))))
+        bad_v2 = [v2[:-1], v2 + b"\n", v2 + detail, bound.replace(b"=v2;", b"=v1;"), bound.replace(b"=v2;", b"=v3;"),
+            bound.replace(b";o=supervisor-disabled", b""), bound.replace(b";d=none", b""), bound.replace(b";a=bound", b""),
+            bound.replace(b";q=unavailable.spawn-other.xf", b""), bound.replace(b";w=settle-unknown", b""),
+            bound.replace(b";d=none", b";d=none;d=none"), bound.replace(b";a=bound", b";a=bound;a=unassociated"),
+            bound.replace(b";o=supervisor-disabled;d=none", b";d=none;o=supervisor-disabled"),
+            bound.replace(b";w=settle-unknown", b";w=settle-unknown;extra=1"), bound.replace(b"\n", b"\r\n"),
+            bound.replace(b"supervisor-disabled", b"supervisor-future"), bound.replace(b";d=none", b";d=failed"),
+            bound.replace(b";a=bound", b";a=unknown"), bound.replace(b";a=bound", b";a=unassociated"),
+            frame(b"not-recorded", b"none", b"bound", b"unavailable", b"unavailable"),
+            frame(b"op-cleanup", b"none"), frame(b"coord-join", b"none"), frame(b"staged-refusal", b"deadline"),
+            frame(b"registry", b"none", b"bound"), frame(b"registry", b"none", b"unassociated", b"unregistered"),
+            frame(b"registry", b"none", b"bound", b"unregistered", b"none-recorded"),
+            *(frame(b"registry", b"none", b"bound", query, b"unavailable") for query in (
+                b"none.spawn-other.pp", b"future.none.pp", b"cleanup.future.pp", b"cleanup.none.p", b"cleanup.none.ppp",
+                b"cleanup.none.pz", b"cleanup.none.pr.extra", b"cleanup..pr", b"cleanup_none_pr", b"cleanup.none.PR")),
+            *(frame(b"registry", b"none", b"bound", b"cleanup.none.pp", worker) for worker in (
+                b"inspect-r", b"inspect-c-extra", b"future-c", b"maps-future", b"settle-unknownx", b"\xff",
+                b"map-p-future", b"map-m-time-py", b"map-m-owner-zz", b"map-m-owner-pyx", b"map-x-file\n/private/inert",
+                b"map-x-yy", b"map-x-zz", b"map-x-a", b"map-x-aaa", b"map-x-AA", b"map-x-aa ",
+                 b"map-x-aa;extra=1", b"map-x-aa/path", b"map-x-aa\n/private/inert",
+                 b"map-x-hist-zz", b"map-x-hist-pyx", b"map-x-hist-ss ", b"map-x-hist-cr;extra=1",
+                 b"map-x-hist-py\n/private/inert"))]
+        for raw in bad_v2:
+            with self.subTest(version="v2", raw=raw[:80]): self.assertIsNone(L._shell_label_pair(raw))
+
     def test_finite_pair_refuses_partial_reordered_duplicate_or_injected_data(self):
         step = b"MRK_INSTALLED_SHELL_FAILURE_STEP=PrepareSave\n"
         boundary = b"MRK_INSTALLED_SHELL_FAILURE_PHASE=request\n"
@@ -3963,8 +4522,8 @@ class FailureLabelSinkContracts(unittest.TestCase):
         self.assertNotIn("runtime.reason", outstanding)
         self.assertNotIn("r.held", outstanding)
         report = source.split("fn report_failure(&self)", 1)[1].split("pub(super) fn attach", 1)[0]
-        self.assertIn("Ok(r) => (r.trace, r.bootstrap)", report)
-        self.assertIn("failure_pair(trace, progress)", report)
+        self.assertIn("Ok(r) => (r.trace, r.bootstrap, r.session.diagnostic, r.paths.diagnostic)", report)
+        self.assertIn("failure_pair(trace, progress, session, path)", report)
         self.assertEqual(report.count("rustix::io::write"), 1)
         self.assertNotIn("retain_held_app_info", report)
         tick = source.split("pub(super) fn tick(", 1)[1].split("pub(super) fn", 1)[0]
@@ -3972,6 +4531,222 @@ class FailureLabelSinkContracts(unittest.TestCase):
         self.assertIn("(*step, Boundary::Deadline), progress", tick)
         self.assertIn("Duration::from_secs(45)", source)
         self.assertIn("assert_failure_pair_contract();", source)
+
+    def test_path_first_rejection_preserves_borrows_guard_order_and_first_winner(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        shell = (SOURCE / "desktop/src-tauri/src/shell.rs").read_text()
+        def body(text, name):
+            return text.split("fn " + name + "(", 1)[1].split("\n    }", 1)[0]
+        diagnostic = source.split("struct PathDiagnostic", 1)[1].split("#[derive(Clone, Copy)]", 1)[0]
+        self.assertIn("{ step: PathStep, rejection: PathRejection }", diagnostic)
+        self.assertIn("Some(Self { step, rejection: PathRejection::NotRecorded })", diagnostic)
+        for forbidden in ("PathBuf", "String", "filename", "Instant", "snapshot"):
+            self.assertNotIn(forbidden, diagnostic)
+        cache = body(source, "record_at")
+        self.assertIn("r.paths.diagnostic = PathDiagnostic::sample(r.step);", cache)
+        self.assertLess(cache.index("if !self.failed.load(Ordering::SeqCst)"), cache.index("r.paths.diagnostic ="))
+        latch = source.split("fn latch_path_diagnostic(", 1)[1].split("const PROJECT_SOURCE", 1)[0]
+        self.assertIn("if !failed.swap(true, Ordering::SeqCst) { *diagnostic = Some(next); }", latch)
+        helper = body(source, "path_fail")
+        self.assertIn("PathDiagnostic::sample(r.trace.0)", helper)
+        self.assertIn("latch_path_diagnostic(&self.failed,&mut r.paths.diagnostic,diagnostic)", helper)
+        self.assertNotIn("self.record", helper)
+        pure = source.split("fn assert_failure_pair_contract()", 1)[1].split("// Original destruction facts", 1)[0]
+        self.assertIn("for order in [[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]]", pure)
+        self.assertIn("0 => failed.store(true,Ordering::SeqCst)", pure)
+        self.assertIn("retained == Some(if order[0] == 1 { path_gtk } else { path_plain })", pure)
+        self.assertIn("step:PathStep::Activate(4),rejection:PathRejection::GtkReturnState", pure)
+
+        admitting = body(shell, "observed_path_dialog")
+        borrowed = admitting.split("let original = DIALOG.with(|book| {", 1)[1].split("        });", 1)[0]
+        self.assertIn("map_err(|_| R::GtkDialogBook)", borrowed)
+        self.assertIn("Err(R::GtkDialogOriginal)", borrowed)
+        self.assertNotIn("q.", borrowed); self.assertNotIn(".facts()", borrowed)
+        self.assertLess(admitting.index("        });"), admitting.index("Err(reason) => { q.path_failed(reason); return Err(()); }"))
+        guards = ["gtk::is_initialized_main_thread()", "DIALOG.with", "context.upgrade()", "call.upgrade()", "call.owner()",
+                  "owner.id != id", "owner.interrupted()", "let original_facts = call.facts()", "if !original_facts",
+                  "q.path_dialog(id,index)?", "app.get_webview_window(MAIN_WINDOW)", "dialog.title()", "if initial {", "dialog.current_folder()"]
+        self.assertEqual([admitting.index(guard) for guard in guards], sorted(admitting.index(guard) for guard in guards))
+        facts = admitting.split("let original_facts =", 1)[1].split("if !original_facts", 1)[0]
+        self.assertTrue(facts.rstrip().endswith("f.refusal.is_none());")); self.assertNotIn("q.", facts)
+        self.assertEqual(admitting.count("dialog.current_folder()"), 1)
+        self.assertIn("let Some(folder) = dialog.current_folder() else { return Ok(None); };", admitting)
+        self.assertIn("if Some(folder.as_path()) != q.project_path() { q.path_failed(R::GtkInitialFolder); return Err(()); }", admitting)
+        selecting = body(shell, "select_observed_path"); activating = body(shell, "activate_observed_path")
+        self.assertEqual(selecting.count("dialog.set_filename(path)"), 1)
+        self.assertLess(selecting.index("q.path_selection(id,index)?"), selecting.index("dialog.set_filename(path)"))
+        self.assertIn("if !dialog.set_filename(path) { q.path_failed(R::GtkSelectionSetter); return Err(()); }", selecting)
+        self.assertLess(activating.index("if !button.is_sensitive() { return Ok(false); }"), activating.index("q.path_activation(id,index)?"))
+        self.assertLess(activating.index("q.path_activation(id,index)?"), activating.index("button.emit_clicked()"))
+        self.assertEqual(activating.count("button.emit_clicked()"), 1)
+        for forbidden in (".filename(", ".response(", ".begin_response(", "set_current_folder", "Instant::", "sleep"):
+            self.assertNotIn(forbidden, admitting + selecting + activating)
+        self.assertNotIn("set_filename", activating)
+        self.assertEqual(shell.count("dialog.filename()"), 1)
+        for name in ("path_failed", "path_dialog", "path_selection", "path_activation", "path_filename", "path_response", "path_gtk_returned"):
+            callback = body(source, name)
+            self.assertEqual(callback.count("self.record_at(Boundary::Gtk)"), 1)
+            self.assertIn("self.path_fail(&mut r,", callback)
+            self.assertNotIn("self.path_failed(", callback); self.assertNotIn("self.record()", callback)
+        for name, guards in (("path_dialog", ("PATH_CASES.get", "self.failed.load", "Instant::now()", "self.case !=")),
+                             ("path_selection", ("self.case !=", "Instant::now()", "self.failed.load", "id !=")),
+                             ("path_activation", ("PATH_CASES.get", "self.case !=", "Instant::now()", "self.failed.load", "id !="))):
+            callback = body(source, name)
+            self.assertEqual([callback.index(guard) for guard in guards], sorted(callback.index(guard) for guard in guards))
+            self.assertEqual(callback.count("Instant::now()"), 1)
+            self.assertIn("PathRejection::GtkObserverEndpoint", callback)
+        filename = body(source, "path_filename")
+        guards = ["id.checked_sub", "self.case !=", "self.failed.load", "Instant::now()", "PATH_CASES[index].field != field",
+                  "path.is_none()", "path != self.path_target", "!r.paths.operations[index].picker.activated", "fixture.transition(id)"]
+        self.assertEqual([filename.index(guard) for guard in guards], sorted(filename.index(guard) for guard in guards))
+        self.assertEqual(filename.count("fixture.transition(id)"), 1); self.assertEqual(filename.count("Instant::now()"), 2)
+        self.assertNotIn(".filename(", filename)
+        self.assertLess(filename.index("PathRejection::GtkFilenameAbsent"), filename.index("PathRejection::GtkFilenameDifferent"))
+        self.assertLess(filename.index("PathRejection::GtkFixtureTransition"), filename.rindex("PathRejection::GtkObserverEndpoint"))
+        self.assertLess(filename.rindex("PathRejection::GtkObserverEndpoint"), filename.index("picker.filename = true"))
+        returned = body(source, "path_gtk_returned")
+        self.assertIn("r.pending.take() != Some(Pending::Path(path)) || r.step != Step::Paths(path)", returned)
+        self.assertEqual(returned.count(".activation_returned(result)"), 1)
+        self.assertNotIn(".responded", returned); self.assertNotIn("self.failed.load", returned)
+        self.assertIn("self.path_fail(&mut r,PathRejection::GtkReturnState)", returned)
+        self.assertIn("if let Some(mut r) = self.record() { self.path_fail(&mut r,PathRejection::GtkDispatch); } else { self.fail(); }", body(source, "tick"))
+        for name, reason in (("native_destroyed", "GtkDestroyState"), ("native_released", "GtkReleaseState")):
+            path_branch = body(source, name).split("if self.case == Case::ProjectPaths", 1)[1].split("if self.case == Case::Positive", 1)[0]
+            self.assertIn("self.path_fail(&mut r,PathRejection::" + reason + ")", path_branch)
+        # Source contracts and the inert Rust checks are not native receipts.
+
+    def test_session_diagnostics_are_cached_same_step_and_first_failure_only(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        sample = source.split("impl SessionDiagnostic {", 1)[1].split("use SessionAction", 1)[0]
+        self.assertIn("old.step == step", sample)
+        self.assertIn("SessionWait::NotSampled", sample)
+        cache = source.split("fn record_at(&self", 1)[1].split("fn report_failure(&self)", 1)[0]
+        self.assertIn("if !self.failed.load(Ordering::SeqCst)", cache)
+        self.assertIn("SessionDiagnostic::sample(r.step,r.evaluations,r.session.diagnostic)", cache)
+        latch = source.split("fn latch_session_diagnostic(", 1)[1].split("const PROJECT_SOURCE", 1)[0]
+        self.assertIn("if !failed.swap(true, Ordering::SeqCst)", latch)
+        report = source.split("fn report_failure(&self)", 1)[1].split("pub(super) fn attach", 1)[0]
+        self.assertNotIn("installed_session_snapshot", report)
+        self.assertNotIn("session_wait", report)
+        self.assertNotIn("session_fail", report)
+        self.assertNotIn("session_reply_rejection", report)
+        self.assertNotIn("session_capability_rejection", report)
+        encoder = source.split("fn failure_pair(", 1)[1].split("fn assert_failure_pair_contract", 1)[0]
+        self.assertIn("diagnostic.step == step", encoder)
+        self.assertIn("diagnostic.evaluations > 128", encoder)
+        self.assertIn("index >= 64", encoder)
+        self.assertIn("bytes.get_mut(*length..end)?", encoder)
+        self.assertNotIn("format!", encoder)
+        tick = source.split("fn session_tick(", 1)[1].split("fn session_dom(", 1)[0]
+        self.assertIn("if r.evaluations>=128", tick)
+        self.assertIn("SessionRejection::EvaluationBudget", tick)
+        self.assertIn("Ok(Some(wait))=>{self.session_wait(&mut r,wait);return;}", tick)
+        self.assertIn("match self.session_native_ready(&r,action,&snapshot)", tick)
+        self.assertIn("Err(rejection)=>{self.session_fail(&mut r,rejection);return;}", tick)
+        self.assertIn("r.evaluations+=1", tick)
+        # Exact source correspondence preserves priority, not executed Rust/native evidence.
+        ready = source.split("fn session_native_ready(", 1)[1].split("fn session_accept_action(", 1)[0]
+        self.assertEqual(ready.strip(), '''&self, r: &Record, action: SA, snapshot: &InstalledSessionSnapshot) -> Result<Option<SessionWait>,SessionRejection> {
+        let s = &r.session;
+        if snapshot.unknown { return Err(SessionRejection::UnknownNativeSnapshot); }
+        if snapshot.lost { return Err(SessionRejection::LostNativeSnapshot); }
+        if !snapshot.bound { return Err(SessionRejection::UnboundNativeSnapshot); }
+        if snapshot.status["capability"]["available"] != true {
+            return Err(session_capability_rejection(snapshot.status["capability"]["reason"].as_str()));
+        }
+        for index in 1..10 {
+            let extra_context = action == SA::Open && index == SessionCommand::Context.index();
+            let expected = session_action_command(action).is_some_and(|command| command.index() == index) || extra_context;
+            let stale = matches!(action,SA::Stale("save")) && index == SessionCommand::Commit.index()
+                || matches!(action,SA::Stale("bind")) && index == SessionCommand::Bind.index();
+            let delta = s.requests[index].checked_sub(s.base_requests[index]).ok_or(SessionRejection::RequestCounterUnderflow)?;
+            if delta > u8::from(expected || stale) { return Err(SessionRejection::RequestCounterSurplus); }
+            if expected && delta == 0 { return Ok(Some(SessionWait::RequestNotSeen)); }
+            if s.returns[index] < s.requests[index] { return Ok(Some(SessionWait::ReplyPending)); }
+            if expected {
+                if let Some(code) = s.replies[index].error.as_deref() { return Err(session_reply_rejection(code)); }
+            }
+            if stale && delta != 0 && !matches!(s.replies[index].error.as_deref(),Some("asset_invalid_request"|"assessment_context_stale")) { return Err(SessionRejection::StaleReplyContract); }
+        }
+        if !snapshot.settled { return Ok(Some(SessionWait::OwnerUnsettled)); }
+        let op = &snapshot.status["operation"];
+        let stable = match action {
+            SA::Prepare(_,"save") | SA::Reassess(..) | SA::Keep | SA::ReviewRemoval(_) => op["phase"] == "preview" && op["settlement"] == "known",
+            SA::Prepare(_,"missing" | "mismatch") => op["phase"] == "selected" && op["settlement"] == "known",
+            SA::Choose(_,_,None) => op["phase"] == "selected" && op["settlement"] == "known",
+            SA::Choose(_,_,Some(_)) | SA::Assign | SA::Remove | SA::CancelOperation | SA::ConfirmDiscard | SA::Platform(_) | SA::Open => op["phase"] == "idle" && op["settlement"] == "known",
+            _ => true,
+        };
+        Ok((!stable).then_some(SessionWait::PhaseNotReady))
+    }''')
+
+    def test_session_gtk_first_rejection_waits_and_callbacks_preserve_original_custody(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        shell = (SOURCE / "desktop/src-tauri/src/shell.rs").read_text()
+        def body(text, name):
+            return text.split("fn " + name + "(", 1)[1].split("\n    }", 1)[0]
+        admitting = source.split("fn session_file_wait_pending(", 1)[1].split("\n}", 1)[0]
+        self.assertIn("if activating { SessionStep::ActivateFile(index) } else { SessionStep::SetFile(index) }", admitting)
+        self.assertIn("actual == expected && pending == Some(Pending::Dom(expected))", admitting)
+        waiting = body(source, "session_file_wait")
+        self.assertIn("self.record()", waiting); self.assertNotIn("record_at", waiting)
+        gate = "if !session_file_wait_pending(r.step,r.pending,index,activating) || self.failed.load(Ordering::SeqCst) { return; }"
+        self.assertLess(waiting.index(gate), waiting.index("r.trace=(r.step,Boundary::Gtk)"))
+        self.assertLess(waiting.index(gate), waiting.index("self.session_wait(&mut r,wait)"))
+        helper = body(shell, "observed_session_file")
+        borrowed = helper.split("let original = DIALOG.with(|book| {", 1)[1].split("        });", 1)[0]
+        self.assertIn("map_err(|_| R::GtkDialogBook)", borrowed)
+        self.assertIn("Err(R::GtkDialogOriginal)", borrowed)
+        self.assertNotIn("q.", borrowed); self.assertNotIn(".facts()", borrowed)
+        self.assertLess(helper.index("        });"), helper.index("Err(reason) => { q.session_file_failed(reason); return Err(()); }"))
+        self.assertIn("q.session_file_wait(index, activating, W::GtkDialogAbsent); return Ok(None);", helper)
+        guards = ["gtk::is_initialized_main_thread()", "DIALOG.with", "context.upgrade()", "call.upgrade()",
+                  "call.owner()", "owner.id != id", "owner.interrupted()", "let original_facts = call.facts()",
+                  "if !original_facts", "q.session_file_dialog(id, index)?", "app.get_webview_window(MAIN_WINDOW)", "dialog.title()"]
+        self.assertEqual([helper.index(guard) for guard in guards], sorted(helper.index(guard) for guard in guards))
+        facts = helper.split("let original_facts =", 1)[1].split("if !original_facts", 1)[0]
+        self.assertTrue(facts.rstrip().endswith("facts.refusal.is_none());"))
+        self.assertNotIn("q.", facts)
+        selecting = body(shell, "select_observed_session_file")
+        activating = body(shell, "activate_observed_session_file")
+        self.assertIn("observed_session_file(app, q, index, false)?", selecting)
+        self.assertIn("observed_session_file(app, q, index, true)?", activating)
+        self.assertEqual(selecting.count("dialog.set_filename(&path)"), 1)
+        self.assertLess(selecting.index("q.session_file_selection(id, index)?"), selecting.index("dialog.set_filename(&path)"))
+        self.assertIn("if !dialog.set_filename(&path) { q.session_file_failed(R::GtkSelectionSetter); return Err(()); }", selecting)
+        insensitive = "if !button.is_sensitive() { q.session_file_wait(index, true, W::GtkActionInsensitive); return Ok(false); }"
+        self.assertLess(activating.index(insensitive), activating.index("q.session_file_activation(id, index)?"))
+        self.assertLess(activating.index("q.session_file_activation(id, index)?"), activating.index("button.emit_clicked()"))
+        self.assertEqual(activating.count("button.emit_clicked()"), 1)
+        self.assertNotIn(".set_filename(", activating)
+        self.assertNotIn(".filename(", selecting + activating)
+        self.assertNotIn(".response(", selecting + activating); self.assertNotIn(".begin_response(", selecting + activating)
+        self.assertEqual(shell.count("dialog.filename()"), 1)
+        response = shell.split("entry.response = Some(dialog.connect_response(move |dialog, response| {", 1)[1].split("}));", 1)[0]
+        self.assertEqual(response.count("let path = native_path(dialog, &call);"), 1)
+        self.assertIn("q.session_file_filename(observed_id,path.as_ref().ok().map(PathBuf::as_path))", response)
+        self.assertLess(response.index("let path = native_path(dialog, &call);"), response.index("q.session_file_filename("))
+        self.assertLess(response.index("q.session_file_filename("), response.index("call.selected_path(path)"))
+        for name in ("session_file_failed", "session_file_dialog", "session_file_selection", "session_file_activation",
+                     "session_file_filename", "session_file_response", "session_file_returned", "native_destroyed", "native_released"):
+            callback = body(source, name)
+            self.assertEqual(callback.count("self.record_at(Boundary::Gtk)"), 1)
+            self.assertIn("self.session_fail(&mut r,", callback)
+            self.assertNotIn("self.session_file_failed(", callback); self.assertNotIn("self.record()", callback)
+        for name in ("session_file_dialog", "session_file_selection", "session_file_activation"):
+            callback = body(source, name)
+            self.assertLess(callback.index("self.failed.load(Ordering::SeqCst)"), callback.index("Instant::now()>=self.end"))
+            self.assertIn("if Instant::now()>=self.end { self.session_fail(&mut r,SessionRejection::GtkObserverEndpoint); return Err(()); }", callback)
+        filename = body(source, "session_file_filename")
+        reasons = ["GtkFilenameState", "GtkFilenameAbsent", "GtkFilenameDifferent", "file.picker.filename=true"]
+        self.assertEqual([filename.index(reason) for reason in reasons], sorted(filename.index(reason) for reason in reasons))
+        returned = body(source, "session_file_returned")
+        self.assertIn("r.pending.take()!=Some(Pending::Dom(Step::Session(step))) || r.step!=Step::Session(step)", returned)
+        self.assertEqual(returned.count(".activation_returned(result)"), 1)
+        self.assertNotIn("self.failed.load", returned)
+        self.assertNotIn(".responded", returned)
+        self.assertLess(returned.index("r.pending.take()"), returned.index(".activation_returned(result)"))
+        # Source ordering and parser contracts are not executed GTK/native finality.
 
     def test_diagnostic_and_close_failures_cannot_replace_an_active_owner_exception(self):
         class ProcessError(RuntimeError):

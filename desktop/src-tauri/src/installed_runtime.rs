@@ -206,6 +206,103 @@ struct FdRecord {
     charged: bool,
 }
 
+// Native-fixture diagnostics only. These closed-record tuples are historical
+// DATA, never a live payload pin, current-content proof or execution capability.
+#[cfg(all(test, not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+mod historical_payload {
+    use super::{Acquisition, CloseReceipt, FdRecord, Phase, Purpose, SlotId};
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Role { Python, Ssl, Crypto }
+    #[derive(Clone, Copy)]
+    pub(crate) struct Snapshot { tuples: [(u64, u64, u64); 3] }
+    impl Snapshot {
+        pub(crate) fn matching_role(self, major: u64, minor: u64, inode: u64) -> Option<Role> {
+            if inode == 0 { return None; }
+            let mut found = None;
+            for (tuple, role) in self.tuples.into_iter().zip([Role::Python, Role::Ssl, Role::Crypto]) {
+                if tuple == (major, minor, inode) {
+                    if found.is_some() { return None; }
+                    found = Some(role);
+                }
+            }
+            found
+        }
+        #[cfg(all(debug_assertions, any(all(feature = "desktop-shell", feature = "custom-protocol"),
+            all(not(feature = "desktop-shell"), not(feature = "custom-protocol")))))]
+        pub(crate) fn for_contract(tuples: [(u64, u64, u64); 3]) -> Self { Self { tuples } }
+    }
+    pub(super) fn slot_index(relative: &str) -> Option<usize> {
+        match relative {
+            "python/bin/python3" => Some(0), "python/lib/libssl.so.3" => Some(1),
+            "python/lib/libcrypto.so.3" => Some(2), _ => None,
+        }
+    }
+    pub(super) fn claim_ready(phase: Phase, transferred: bool, originals_ready: bool, claimed: bool, refused: bool) -> bool {
+        phase == Phase::PassivePrepared && transferred && originals_ready && claimed && !refused
+    }
+    pub(super) fn from_records(records: &[FdRecord], slots: [Option<SlotId>; 3]) -> Option<Snapshot> {
+        let slots = [slots[0]?, slots[1]?, slots[2]?];
+        let mut tuples = [(0, 0, 0); 3];
+        for (index, slot) in slots.iter().copied().enumerate() {
+            if slots[..index].contains(&slot) { return None; }
+            let record = records.get(slot.0)?;
+            if record.sequence != slot || record.purpose != Purpose::Payload || record.acquisition != Acquisition::Original
+                || record.original.is_some() || record.close != CloseReceipt::Positive { return None; }
+            let identity = record.identity?;
+            tuples[index] = (nix::sys::stat::major(identity.device), nix::sys::stat::minor(identity.device), identity.inode);
+        }
+        Some(Snapshot { tuples })
+    }
+
+    pub(crate) fn assert_contract() {
+        // Inert tombstone DATA only: no OwnedFd, registered positive runtime,
+        // actual close, native observation or capability is manufactured here.
+        fn records() -> [FdRecord; 3] {
+            std::array::from_fn(|index| FdRecord {
+                sequence: SlotId(index), purpose: Purpose::Payload, acquisition: Acquisition::Original,
+                original: None, identity: Some(super::Identity { device: 1, inode: 11 + index as u64,
+                    mode: 0o100644, uid: 0, gid: 0, links: 1, size: 10, mtime: 1, mtime_nsec: 0, ctime: 1, ctime_nsec: 0 }),
+                close: CloseReceipt::Positive, parent: None, digest: None, charged: false,
+            })
+        }
+        let selected = [Some(SlotId(0)), Some(SlotId(1)), Some(SlotId(2))];
+        for (relative, index, role) in [("python/bin/python3", 0, Role::Python),
+            ("python/lib/libssl.so.3", 1, Role::Ssl), ("python/lib/libcrypto.so.3", 2, Role::Crypto)] {
+            assert_eq!(slot_index(relative), Some(index));
+            assert_eq!(from_records(&records(), selected).unwrap().matching_role(0, 1, 11 + index as u64), Some(role));
+        }
+        for path in ["/python/bin/python3", "python/bin/python3 ", "prefix/python/bin/python3", "python/lib/libssl.so.3.extra"] {
+            assert_eq!(slot_index(path), None);
+        }
+        for missing in [None, Some(SlotId(1)), Some(SlotId(3))] {
+            assert!(from_records(&records(), [missing, selected[1], selected[2]]).is_none());
+        }
+        for close in [CloseReceipt::Unattempted, CloseReceipt::Attempted, CloseReceipt::Unknown] {
+            let mut rows = records(); rows[0].close = close; assert!(from_records(&rows, selected).is_none());
+        }
+        for change in 0..4 {
+            let mut rows = records();
+            match change { 0 => rows[0].sequence = SlotId(1), 1 => rows[0].purpose = Purpose::Manifest,
+                2 => rows[0].acquisition = Acquisition::NoHandle, _ => rows[0].identity = None }
+            assert!(from_records(&rows, selected).is_none());
+        }
+        for phase in [Phase::New, Phase::InspectedOnly, Phase::PassivePreparing, Phase::PassivePrepared,
+            Phase::Refused, Phase::Settling, Phase::Settled, Phase::Unknown] {
+            assert_eq!(claim_ready(phase, true, true, true, false), phase == Phase::PassivePrepared);
+        }
+        for (transferred, originals, claimed, refused) in [(false, true, true, false), (true, false, true, false),
+            (true, true, false, false), (true, true, true, true)] {
+            assert!(!claim_ready(Phase::PassivePrepared, transferred, originals, claimed, refused));
+        }
+        let empty = super::PassiveRuntimeSlots::new();
+        assert!(empty.historical_payload_snapshot().is_none() && empty.never_started());
+    }
+}
+#[cfg(all(test, not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+pub(crate) use historical_payload::{Role as HistoricalPayloadRole, Snapshot as HistoricalPayloadSnapshot,
+    assert_contract as assert_historical_payload_diagnostic_contract};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Credentials { uid: u32, gid: u32, pid: u32, tid: u32 }
 
@@ -259,6 +356,8 @@ struct RuntimeWork {
     files_verified: usize,
     directories_verified: usize,
     saw_manifest: bool,
+    #[cfg(all(test, not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    historical_payload_slots: [Option<SlotId>; 3],
 }
 
 /// Keep this same object registered through actual worker/child/IO joins and
@@ -525,6 +624,8 @@ impl InstalledRuntimeCustody {
                 walk: Vec::with_capacity(TREE_DEPTH + 1), inventory: None,
                 actual_names: BTreeSet::new(), actual_folded: BTreeSet::new(), tree_entries: 0,
                 files_verified: 0, directories_verified: 0, saw_manifest: false,
+                #[cfg(all(test, not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+                historical_payload_slots: [None; 3],
             } }
     }
     pub(crate) fn observation(&self) -> CustodyObservation { self.book.observation() }
@@ -729,8 +830,8 @@ impl PassiveRuntimeSlots {
                 Ok(crate::runtime::VerifiedRuntime { python: data.python.clone(), bootstrap: data.bootstrap.clone(),
                     core: data.core.clone(), cwd: data.cwd.clone() }) // DATA only; originals never leave these slots.
             }
-            InspectionOutcome::Refused(_) => Err(BridgeError::unavailable("The passive installed runtime failed original-custody inspection.")),
-            InspectionOutcome::Unknown => Err(BridgeError::cleanup_unknown()),
+            InspectionOutcome::Refused(failure) => Err(passive_inspection_refusal(failure)),
+            InspectionOutcome::Unknown => Err(passive_inspection_unknown(original.observation().failure())),
         }
     }
     pub(crate) fn transfer_once(&mut self) -> AdmissionResult<()> {
@@ -755,6 +856,16 @@ impl PassiveRuntimeSlots {
     pub(crate) fn capability(&mut self) -> AdmissionResult<&mut PassiveInstalledRuntime> {
         if self.settlement_started { return Err(AdmissionFailure::TransferUnavailable); }
         self.acquisition.as_mut().ok_or(AdmissionFailure::TransferUnavailable)
+    }
+    /// Optional diagnostic DATA from this already-claimed original. No live-file
+    /// lookup, state change, new admission failure or native authority is created.
+    #[cfg(all(test, not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    pub(crate) fn historical_payload_snapshot(&self) -> Option<HistoricalPayloadSnapshot> {
+        if self.settlement_started || self.inspection.is_some() { return None; }
+        let runtime = self.acquisition.as_ref()?;
+        if !historical_payload::claim_ready(runtime.original.book.phase, runtime.original.transferred,
+            runtime.original.retained_originals_ready(), runtime.claimed, runtime.refused_before_effect) { return None; }
+        historical_payload::from_records(&runtime.original.book.records, runtime.original.work.historical_payload_slots)
     }
     pub(crate) fn no_child_effect(&self) -> bool {
         match (&self.inspection, &self.acquisition) {
@@ -801,6 +912,18 @@ impl PassiveRuntimeSlots {
             _ => None,
         }
     }
+}
+
+fn passive_inspection_refusal(failure: AdmissionFailure) -> crate::error::BridgeError {
+    crate::error::BridgeError::unavailable("The passive installed runtime failed original-custody inspection.")
+        .with_linux_passive_cause(Some(crate::error::LinuxPassiveCause::Inspection(Some(failure))))
+}
+
+fn passive_inspection_unknown(failure: Option<AdmissionFailure>) -> crate::error::BridgeError {
+    // Only the same original's already-recorded DATA after its inspect return.
+    // A known refusal reason is not a positive settlement/close receipt.
+    crate::error::BridgeError::cleanup_unknown()
+        .with_linux_passive_cause(Some(crate::error::LinuxPassiveCause::Inspection(failure)))
 }
 
 // Shared mechanics are private and closed to exactly three sealed edit profiles.
@@ -1621,6 +1744,10 @@ impl InstalledRuntimeCustody {
                     return Err(AdmissionFailure::Manifest);
                 }
                 self.book.inspect_protected(slot, FileType::RegularFile, Some(expected_size), end, stop)?;
+                #[cfg(all(test, not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+                if let Some(index) = historical_payload::slot_index(&relative) {
+                    self.work.historical_payload_slots[index] = Some(slot);
+                }
                 if self.retain_android { self.book.records[slot.0].digest = Some(expected_hash); }
                 else { self.book.close_finished(slot)?; }
                 self.work.files_verified += 1;
@@ -2171,6 +2298,49 @@ mod pure_tests {
     // native descriptor, proc read, runtime, process, fixture installer or
     // executable capability is used or fabricated. Empty/pending books below
     // cannot make a syscall even when testing original-settlement refusal.
+    #[cfg(all(not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    #[test]
+    fn historical_payload_projection_is_only_closed_record_data() { assert_historical_payload_diagnostic_contract(); }
+
+    #[test]
+    fn passive_inspection_maps_every_returned_reason_without_promoting_unknown() {
+        let failures = [
+            AdmissionFailure::UnsupportedPlatform,
+            AdmissionFailure::MissingCompileAnchor,
+            AdmissionFailure::Stopped,
+            AdmissionFailure::Deadline,
+            AdmissionFailure::NativeUnavailable,
+            AdmissionFailure::NativeDenied,
+            AdmissionFailure::Namespace,
+            AdmissionFailure::Mount,
+            AdmissionFailure::Ownership,
+            AdmissionFailure::ExtendedAttributes,
+            AdmissionFailure::IdentityChanged,
+            AdmissionFailure::Manifest,
+            AdmissionFailure::Inventory,
+            AdmissionFailure::Bounds,
+            AdmissionFailure::AlreadyUsed,
+            AdmissionFailure::Interrupted,
+            AdmissionFailure::CloseUncertain,
+            AdmissionFailure::LedgerInvariant,
+            AdmissionFailure::TransferUnavailable,
+            AdmissionFailure::DestinationOccupied,
+        ];
+        for failure in failures {
+            let refused = passive_inspection_refusal(failure);
+            let unknown = passive_inspection_unknown(Some(failure));
+            assert_eq!(refused.code, "runtime_unavailable");
+            assert_eq!(unknown.code, "cleanup_unknown");
+            let cause = Some(crate::error::LinuxPassiveCause::Inspection(Some(failure)));
+            assert_eq!(refused.linux_passive_cause(), cause);
+            assert_eq!(unknown.linux_passive_cause(), cause);
+            assert!(!refused.retryable && !unknown.retryable);
+        }
+        let unknown = passive_inspection_unknown(None);
+        assert_eq!(unknown.code, "cleanup_unknown");
+        assert_eq!(unknown.linux_passive_cause(), Some(crate::error::LinuxPassiveCause::Inspection(None)));
+    }
+
     #[test]
     fn digest_and_component_policy_are_exact() {
         assert!(sha(&"a".repeat(64)));
