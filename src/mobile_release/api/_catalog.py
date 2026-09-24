@@ -49,12 +49,12 @@ def requirement_descriptors(data: dict[str, Any]) -> list[RequirementDescriptor]
 # and stage/platform selection above come exclusively from the shared core.
 _CREDENTIAL_GUIDES = {
     "ANDROID_KEYSTORE_BASE64": (
-        "Android candidate signing.", "Your existing upload-key keystore; use the future native asset importer.",
+        "Android candidate signing.", "Your existing upload-key keystore; see Credentials & Signing for current availability and scope. Use its native selection only when available.",
         "A supported keystore containing the intended private upload key; path/base64 are core alternatives, not proof of validity.",
     ),
     "ANDROID_KEYSTORE_PASSWORD": (
         "Android candidate signing.", "The password chosen when creating the upload keystore.",
-        "A nonempty private keystore password, entered only through the future secure credential flow.",
+        "A nonempty private keystore password; use only the private controls, when available, in Credentials & Signing. Never enter it in this checklist, project configuration or command arguments.",
     ),
     "ANDROID_KEY_ALIAS": (
         "Android candidate signing.", "The private-key entry alias in your upload keystore.",
@@ -67,7 +67,7 @@ _CREDENTIAL_GUIDES = {
     "ANDROID_GOOGLE_SERVICES_JSON_BASE64": (
         "Android candidate builds when services.androidFirebase is required.",
         "Download google-services.json for this Android application from Firebase Project Settings.",
-        "The original Firebase client JSON; later checks must bind its application identity. Import is not yet implemented.",
+        "The original Firebase client JSON; later checks must bind its application identity. See Credentials & Signing for current availability and scope; use its native selection only when available.",
     ),
     "GOOGLE_WIF_PROVIDER": (
         "Each selected Android Store stage.", "The administrator-created Google workload identity provider bound to the protected GitHub workflow.",
