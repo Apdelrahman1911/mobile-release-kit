@@ -338,7 +338,7 @@ mod tests {
                 assert!(native.contains(r#"const OVERRIDE_KEYS: &[(&str, bool)] = &[
     ("SOFTWARE\\Policies\\Microsoft\\Edge\\WebView2", false),
     ("SOFTWARE\\Microsoft\\Edge\\WebView2", false),
-    ("SOFTWARE\\Microsoft\\EdgeUpdate", true),
+    ("SOFTWARE\\Microsoft\\EdgeUpdate\\Clients", true),
     ("SOFTWARE\\Microsoft\\EdgeWebView", true),
 ];"#));
                 let audit = native.split("fn absent(&mut self, root:").nth(1).unwrap().split("fn settled(&self)").next().unwrap();

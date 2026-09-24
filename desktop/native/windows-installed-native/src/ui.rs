@@ -861,12 +861,12 @@ fn object_name(handle: F::HANDLE) -> UiResult<String> {
 
 // The default/null-folder loader has documented environment and policy lookup
 // surfaces. Refuse the complete WebView2 namespaces rather than guessing app-ID
-// precedence or accepting unknown per-app values. An ordinary per-user EdgeUpdate
-// registration is also unsupported; this slice admits system Evergreen only.
+// precedence or accepting unknown per-app values. This system-Evergreen-only slice
+// refuses the full per-user EdgeUpdate Clients container, not updater-root presence.
 const OVERRIDE_KEYS: &[(&str, bool)] = &[
     ("SOFTWARE\\Policies\\Microsoft\\Edge\\WebView2", false),
     ("SOFTWARE\\Microsoft\\Edge\\WebView2", false),
-    ("SOFTWARE\\Microsoft\\EdgeUpdate", true),
+    ("SOFTWARE\\Microsoft\\EdgeUpdate\\Clients", true),
     ("SOFTWARE\\Microsoft\\EdgeWebView", true),
 ];
 struct RegistryOriginal {
