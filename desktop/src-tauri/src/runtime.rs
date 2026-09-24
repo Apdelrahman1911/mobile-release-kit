@@ -251,6 +251,40 @@ impl MetadataTextInstalledProfile {
     }
 }
 
+// Fixed A selection DATA, not another owner's execution permission. The two
+// command owners keep their independent, initially closed qualification gates.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) struct EnvironmentDiagnosticsInstalledProfile { _private: () }
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl EnvironmentDiagnosticsInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) { return Err(unavailable()); }
+        let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions")
+            .join(PassiveInstalledProfile::TARGET).join(PassiveInstalledProfile::MANIFEST);
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("environment_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+    pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
+        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) struct OfflinePreflightInstalledProfile { _private: () }
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl OfflinePreflightInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) { return Err(unavailable()); }
+        let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions")
+            .join(PassiveInstalledProfile::TARGET).join(PassiveInstalledProfile::MANIFEST);
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("offline_preflight_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+    pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
+        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+    }
+}
+
 // Separate configuration-only selection DATA. A passive candidate/profile is
 // not edit authority, and the feature-off native passive fixture cannot mint
 // this value. The original EditOwner still owes custody and a one-use claim.
@@ -718,6 +752,46 @@ impl RuntimeConfig {
             Err(BridgeError::unavailable("Packaged configuration editing is disabled until its runtime custody and native owner are qualified."))
         }
     }
+    // Selection availability is shared by the original owner's admission and
+    // inspection; it does not open its separate native/runtime qualification.
+    pub(crate) fn environment_diagnostics_installed_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        { self.environment_diagnostics_installed_profile().is_ok() }
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        { false }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn environment_diagnostics_installed_profile(&self) -> Result<EnvironmentDiagnosticsInstalledProfile, BridgeError> {
+        #[cfg(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        if PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
+            return Ok(EnvironmentDiagnosticsInstalledProfile { _private: () });
+        }
+        Err(BridgeError::unavailable("The build-tool diagnostics installed-runtime selection is unavailable."))
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn resolve_environment_diagnostics_installed(&self, originals: &mut crate::installed_runtime::EnvironmentDiagnosticsRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        originals.inspect_once(self.environment_diagnostics_installed_profile()?, end, stop)
+    }
+    pub(crate) fn offline_preflight_installed_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        { self.offline_preflight_installed_profile().is_ok() }
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        { false }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn offline_preflight_installed_profile(&self) -> Result<OfflinePreflightInstalledProfile, BridgeError> {
+        #[cfg(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        if PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
+            return Ok(OfflinePreflightInstalledProfile { _private: () });
+        }
+        Err(BridgeError::unavailable("The saved offline-preflight installed-runtime selection is unavailable."))
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn resolve_offline_preflight_installed(&self, originals: &mut crate::installed_runtime::OfflinePreflightRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        originals.inspect_once(self.offline_preflight_installed_profile()?, end, stop)
+    }
     /// Fixed diagnostics bootstrap, never the passive engine or edit protocol.
     /// These source/metadata checks do not qualify the neutral cwd, installed
     /// runtime custody, external tool policy or actual native document owner.
@@ -1107,6 +1181,54 @@ mod tests {
         let error = runtime.resolve_github_readonly(Instant::now()).unwrap_err();
         assert_eq!(error.code, "runtime_unavailable");
         assert_eq!(error.message, "The GitHub read-only runtime and TLS profile are not qualified.");
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"))))]
+    #[test]
+    fn installed_tools_and_offline_selectors_are_closed_outside_the_normal_linux_shell() {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-command-path-must-not-be-opened"));
+        assert!(!runtime.environment_diagnostics_installed_profile_available());
+        assert!(!runtime.offline_preflight_installed_profile_available());
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        {
+            let mut tools = crate::installed_runtime::EnvironmentDiagnosticsRuntimeSlots::new();
+            let mut offline = crate::installed_runtime::OfflinePreflightRuntimeSlots::new();
+            let (_sender, stop) = tokio::sync::watch::channel(false);
+            assert!(runtime.resolve_environment_diagnostics_installed(&mut tools, Instant::now(), &stop).is_err());
+            assert!(runtime.resolve_offline_preflight_installed(&mut offline, Instant::now(), &stop).is_err());
+            assert!(tools.never_started() && !tools.settled() && tools.capability().is_err());
+            assert!(offline.never_started() && !offline.settled() && offline.capability().is_err());
+        }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn installed_tools_and_offline_profiles_are_fixed_selection_data_only() {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-command-data-only"));
+        let expected = cfg!(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))
+            && PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR);
+        let tools = runtime.environment_diagnostics_installed_profile(); let offline = runtime.offline_preflight_installed_profile();
+        assert_eq!(runtime.environment_diagnostics_installed_profile_available(), expected);
+        assert_eq!(runtime.offline_preflight_installed_profile_available(), expected);
+        assert_eq!((tools.is_ok(), offline.is_ok()), (expected, expected));
+        // No native inspection here, even for an exactly bound installed build.
+        let root = PathBuf::from("/var/lib/mobile-release-kit/versions")
+            .join(PassiveInstalledProfile::TARGET).join(PassiveInstalledProfile::MANIFEST);
+        if let Ok(profile) = tools {
+            let data = profile.selection().unwrap();
+            assert_eq!(data.bootstrap, root.join("environment_bootstrap.py"));
+            assert_eq!(data.python, root.join("python/bin/python3")); assert_eq!(data.core, root.join("core.zip")); assert_eq!(data.cwd, root);
+            assert!(profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure"));
+            assert!(!profile.accepts_platform(b"Linux", b"aarch64", b"6.17.0-1022-azure"));
+            assert!(!profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure-custom"));
+        }
+        if let Ok(profile) = offline {
+            let data = profile.selection().unwrap();
+            assert_eq!(data.bootstrap, root.join("offline_preflight_bootstrap.py"));
+            assert_eq!(data.python, root.join("python/bin/python3")); assert_eq!(data.core, root.join("core.zip")); assert_eq!(data.cwd, root);
+            assert!(profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure"));
+            assert!(!profile.accepts_platform(b"FreeBSD", b"x86_64", b"6.17.0-1022-azure"));
+            assert!(!profile.accepts_platform(b"Linux", b"x86_64", b"6.8.0-91-generic"));
+        }
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
         not(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))))]

@@ -155,21 +155,23 @@ def projection_value(platform: str, case: str) -> dict:
 
 def original_resources(case: str) -> dict:
     absent, negative = case in {"L1", "L2"}, case == "L7"
+    late = case in {"L5", "L6a", "L6b", "L6c"}
     native = {"startup": {"attempted": not absent, "returned": not absent, "failed": False},
         "inspection": {"joined": case != "L1", "failed": False, "retained": False},
         "acquisition": {"joined": not absent, "failed": False, "retained": False},
         "child": {"present": not absent, "waited": not absent, "code": None if absent else 0, "waitFailed": False},
         **{role: {"close": "new" if absent else "settled", "retained": False} for role in ("input", "output", "error")},
         "writer": {"joined": True, "failed": False, "end": {"sent": not absent, "closed": not absent, "failed": False}},
-        "outputBytes": 0 if absent else 4096, "resourceUnknown": negative, "activeRetained": negative,
-        "disabled": negative or case in {"L5", "L6a", "L6b", "L6c"}, "canExit": not negative}
+        "outputBytes": 0 if absent else 4096, "resourceUnknown": negative or late, "activeRetained": negative or late,
+        "disabled": negative or late, "canExit": not (negative or late)}
     for role in ("stdout", "stderr"):
         native[role] = {"joined": True, "failed": False, "end": {"frames": 2 if role == "stdout" and not absent else 0,
                         "eof": not absent, "closed": not absent, "failed": False}}
     for role in ("driver", "manager", "observer", "watchdog"):
-        receipt = "panic" if negative and role == "driver" else "ok-false" if negative and role in {"observer", "watchdog"} else (
+        receipt = "panic" if negative and role == "driver" else "ok-false" if (
+            negative and role in {"observer", "watchdog"} or late and role == "watchdog") else (
             "ok-true" if role in {"observer", "watchdog"} else "ok-unit")
-        native[role] = {"receipt": receipt, "retained": negative and role != "manager"}
+        native[role] = {"receipt": receipt, "retained": negative and role != "manager" or late and role in {"observer", "watchdog"}}
     return native
 
 
@@ -617,6 +619,12 @@ class EnvironmentNativeCIContracts(unittest.TestCase):
             (("cases", index["L4"], "ordinary", 1, "capture", "stdout"), 8193),
             (("cases", index["L4"], "ordinary", 1, "stopBeforeWorkNs"), 10**9),
             (("cases", index["L5"], "timing", "unknownMs"), 1),
+            (("cases", index["L5"], "native", "activeRetained"), False),
+            (("cases", index["L6a"], "native", "observer", "retained"), False),
+            (("cases", index["L6b"], "native", "resourceUnknown"), False),
+            (("cases", index["L6c"], "native", "watchdog", "receipt"), "ok-true"),
+            (("cases", index["L6c"], "native", "watchdog", "retained"), False),
+            (("cases", index["L6c"], "native", "canExit"), True),
             (("cases", index["L6c"], "native", "watchdog", "receipt"), "not-joined"),
             (("cases", index["L7"], "native", "driver", "receipt"), "ok-unit"),
             (("cases", index["L7"], "native", "driver", "retained"), False),

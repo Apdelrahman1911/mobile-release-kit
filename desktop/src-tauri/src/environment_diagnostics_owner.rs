@@ -7,10 +7,13 @@ use std::{future::{pending, Future}, path::PathBuf, pin::Pin, process::ExitStatu
 use serde_json::Value;
 use tokio::{io::{AsyncRead, AsyncReadExt, AsyncWriteExt}, process::{Child, ChildStdin, ChildStdout, ChildStderr},
     sync::{Mutex as AsyncMutex, Notify, mpsc, oneshot, watch}, task::JoinHandle};
-#[cfg(all(unix, debug_assertions, feature = "development-runtime"))]
+#[cfg(any(all(unix, debug_assertions, feature = "development-runtime"),
+    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
 use {std::process::Stdio, tokio::process::Command};
 use crate::{environment_diagnostics_protocol::{self as wire, Availability, Capability, Context, Finality, Frame,
     Outcome, Phase, Profile, Projection, Reason, Start, Status}, error::BridgeError, runtime::{RuntimeConfig, VerifiedRuntime}};
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+use crate::installed_runtime::{CloseOutcome, EnvironmentDiagnosticsRuntimeSlots};
 
 // Separate native/document and interpreter/core/neutral-cwd qualifications.
 // Host name, development-runtime, metadata inspection and a renderer checkbox
@@ -80,7 +83,16 @@ impl<T> Default for Pipe<T> { fn default() -> Self { Self { io: None, close: Clo
 #[derive(Default)]
 struct Resources {
     inspection: Option<JoinHandle<Result<VerifiedRuntime, BridgeError>>>, inspection_joined: bool, inspection_failed: bool,
+    inspection_started: bool, inspection_error: Option<tokio::task::JoinError>,
     acquisition: Option<JoinHandle<()>>, acquisition_joined: bool, acquisition_failed: bool,
+    acquisition_started: bool, acquisition_error: Option<tokio::task::JoinError>,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    installed: Option<Arc<Mutex<EnvironmentDiagnosticsRuntimeSlots>>>,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    installed_settlement: Option<JoinHandle<CloseOutcome>>,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    installed_return: Option<Result<CloseOutcome, tokio::task::JoinError>>,
+    installed_started: bool, installed_joined: bool, installed_failed: bool,
     child: Option<Child>, waited: Option<ExitStatus>, wait_failed: bool,
     writer: Option<JoinHandle<WriteEnd>>, stdout: Option<JoinHandle<ReadEnd>>, stderr: Option<JoinHandle<ReadEnd>>,
     write_end: Option<WriteEnd>, out_end: Option<ReadEnd>, err_end: Option<ReadEnd>,
@@ -88,6 +100,19 @@ struct Resources {
 }
 struct WriteEnd { sent: bool, closed: bool, failed: bool }
 struct ReadEnd { frames: usize, eof: bool, closed: bool, failed: bool }
+
+fn original_session(r: &Registry, owner: &Session) -> bool {
+    r.active.as_ref().is_some_and(|a| std::ptr::eq(Arc::as_ptr(&a.owner), owner)
+        && a.owner.id == owner.id && a.owner.generation == owner.generation && a.owner.context == owner.context
+        && a.owner.registration == owner.registration && a.owner.project == owner.project)
+}
+// A Ready return is distinct from permission to retire. STOP and ordinary
+// settled cancellation/shutdown are allowed; Unknown and H are absorbing.
+fn final_clock_clear(inner: &Inner, r: &Registry, owner: &Session, now: Instant) -> bool {
+    original_session(r, owner) && !r.disabled && !r.exhausted && !inner.poisoned.load(Ordering::SeqCst)
+        && !owner.resource_unknown.load(Ordering::SeqCst) && now < owner.clocks.finality
+        && r.active.as_ref().is_some_and(|a| !a.unknown)
+}
 
 /// Ticket contains only native identity, an executor and the original T. It is
 /// prepared before the real document lock; no IO/child/request task is started.
@@ -164,7 +189,10 @@ impl EnvironmentDiagnosticsOwner {
             output_bytes: AtomicUsize::new(0), resource_unknown: AtomicBool::new(false), driver_done: AtomicBool::new(false),
             driver_joined: AtomicBool::new(false), driver_failed: AtomicBool::new(false), watchdog_joined: AtomicBool::new(false),
             watchdog_failed: AtomicBool::new(false), manager_failed: AtomicBool::new(false), startup: Mutex::new(Startup::default()),
-            resources: AsyncMutex::new(Resources { frames: Some(receiver), ..Resources::default() }),
+            resources: AsyncMutex::new(Resources { frames: Some(receiver),
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                installed: self.inner.installed_selected().then(|| Arc::new(Mutex::new(EnvironmentDiagnosticsRuntimeSlots::new()))),
+                ..Resources::default() }),
             input: Arc::new(AsyncMutex::new(Pipe::default())), output: Arc::new(AsyncMutex::new(Pipe::default())), error: Arc::new(AsyncMutex::new(Pipe::default())),
             driver: AsyncMutex::new(None), watchdog: Mutex::new(None), manager: AsyncMutex::new(None), observer: AsyncMutex::new(None),
             driver_return: Mutex::new(None), manager_return: Mutex::new(None), observer_return: Mutex::new(None), watchdog_return: Mutex::new(None),
@@ -264,13 +292,18 @@ impl EnvironmentDiagnosticsOwner {
         owner.watchdog_joined.store(joined && recorded, Ordering::SeqCst);
         owner.watchdog_failed.store(!joined || !recorded, Ordering::SeqCst);
         if positive && recorded {
+                let now = Instant::now(); self.inner.advance_locked(&mut r, &owner, now);
+                if !final_clock_clear(&self.inner, &r, &owner, now) {
+                    // Preserve the original Ready value AND handle. This latch
+                    // prevents all subsequent status calls from re-polling it.
+                    owner.resource_unknown.store(true, Ordering::SeqCst);
+                    self.inner.unknown_locked(&mut r, &owner); return;
+                }
                 watchdog_slot.take();
                 // The actual last join, not a terminal's timestamp, retires.
-                self.inner.advance_locked(&mut r, &owner, Instant::now());
                 if let Some(mut active) = r.active.take() {
                     if !Arc::ptr_eq(&active.owner, &owner) { r.active = Some(active); return; }
-                    if active.unknown { active.projection.phase = Phase::RetainedUnknown; active.projection.finality = Finality::Unknown; }
-                    else { active.projection.phase = Phase::Settled; active.projection.finality = Finality::Settled; }
+                    active.projection.phase = Phase::Settled; active.projection.finality = Finality::Settled;
                     if active.projection.outcome.is_none() { set_failure_outcome(&mut active.projection); }
                     r.last = Some(active.projection); self.inner.bump(&mut r);
                 }
@@ -311,8 +344,11 @@ fn set_failure_outcome(p: &mut Projection) {
     });
 }
 impl Inner {
+    fn installed_selected(&self) -> bool {
+        NATIVE_QUALIFIED && RUNTIME_QUALIFIED && self.runtime.environment_diagnostics_installed_profile_available()
+    }
     fn qualified(&self) -> bool {
-        if NATIVE_QUALIFIED && RUNTIME_QUALIFIED { return true; }
+        if self.installed_selected() { return true; }
         #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
             any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
         if self.fixture.lock().ok().and_then(|p| p.as_ref().and_then(std::sync::Weak::upgrade)).is_some_and(|p| p.permits(self)) { return true; }
@@ -562,18 +598,19 @@ async fn watchdog(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard) -> b
     // Acyclic: watchdog -> final observer -> manager -> driver/original book.
     // Direct Ready waiting keeps both W/H and the original JoinHandle waker
     // alive even while the final observer itself is held before return.
-    let positive = {
-        let mut observer = owner.observer.lock().await;
-        if observer.is_none() { false } else {
-            let result = join_with_clock(&mut observer, &inner, &owner).await;
-            let positive = matches!(&result, Ok(true));
-            let recorded = record_join(&owner.observer_return, result);
-            if positive && recorded { observer.take(); }
-            positive && recorded
-        }
+    let mut observer = owner.observer.lock().await;
+    let observed = if observer.is_none() { false } else {
+        let result = join_with_clock(&mut observer, &inner, &owner).await;
+        let positive = matches!(&result, Ok(true));
+        let recorded = record_join(&owner.observer_return, result);
+        positive && recorded
     };
-    if !positive { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner); }
-    inner.endpoint(&owner); // Last synchronous clock veto, no new await/effect.
+    let mut r = inner.lock(); let now = Instant::now(); inner.advance_locked(&mut r, &owner, now);
+    let positive = observed && final_clock_clear(&inner, &r, &owner, now);
+    if positive { observer.take(); }
+    else { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown_locked(&mut r, &owner); }
+    // No await/effect between this last veto and the return. Reconcile still
+    // owes its independent veto at the actual watchdog Ready observation.
     guard.complete = true; positive
 }
 async fn join_slot<T>(slot: &mut Option<JoinHandle<T>>) -> Result<T, tokio::task::JoinError> {
@@ -583,6 +620,149 @@ async fn join_with_clock<T>(slot: &mut Option<JoinHandle<T>>, inner: &Inner, own
     loop {
         let wake = owner.wake.notified(); let end = inner.endpoint(owner);
         tokio::select! { result = join_slot(slot) => return result, _ = wake => {}, _ = clock_wait(end) => {} }
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn installed_worker_lost(book: &Resources) {
+    // Only after the actual original Ready JoinError; a deadline is not return.
+    if let Some(native) = &book.installed {
+        match native.lock() { Ok(mut slots) => slots.mark_interrupted(), Err(error) => error.into_inner().mark_interrupted() }
+    }
+}
+fn original_worker_returned(started: bool, joined: bool, failed: bool, handle: bool, error: bool) -> bool {
+    if !started { !joined && !failed && !handle && !error }
+    else if failed { !joined && handle && error }
+    else { joined && !handle && !error }
+}
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn installed_consumers_returned(book: &Resources, startup: &Startup, no_child_effect: bool) -> bool {
+    if !original_worker_returned(book.inspection_started, book.inspection_joined, book.inspection_failed,
+            book.inspection.is_some(), book.inspection_error.is_some())
+        || !original_worker_returned(book.acquisition_started, book.acquisition_joined, book.acquisition_failed,
+            book.acquisition.is_some(), book.acquisition_error.is_some()) { return false; }
+    let io_returned = book.writer.is_none() && book.stdout.is_none() && book.stderr.is_none()
+        && !book.write_failed && !book.out_failed && !book.err_failed
+        && book.write_end.is_some() && book.out_end.is_some() && book.err_end.is_some();
+    if !io_returned || startup.child.is_some() { return false; }
+    if !startup.attempted {
+        return no_child_effect && !startup.returned && !startup.failed && book.child.is_none() && book.waited.is_none() && !book.wait_failed;
+    }
+    startup.returned && !startup.failed && book.inspection_joined && !book.inspection_failed
+        && book.acquisition_joined && !book.acquisition_failed && book.child.is_some() && !book.wait_failed
+        && book.waited.as_ref().is_some_and(ExitStatus::success)
+        && book.write_end.as_ref().is_some_and(|e| e.sent && e.closed && !e.failed)
+        && book.out_end.as_ref().is_some_and(|e| e.eof && e.closed && !e.failed && e.frames == 2)
+        && book.err_end.as_ref().is_some_and(|e| e.eof && e.closed && !e.failed && e.frames == 0)
+}
+// C/A/W use this same runtime. Even direct engine0/EOF/joins cannot release a
+// claimed ledger without this same original's accepted, validated core lifetime.
+fn installed_closure_ready(r: &Registry, owner: &Session, claimed: bool, direct_returned: bool) -> bool {
+    direct_returned && original_session(r, owner) && (!claimed || r.active.as_ref().is_some_and(|a|
+        a.accepted && a.terminal && a.projection.result.as_ref().is_some_and(|t| t.lifetime.settled())))
+}
+fn installed_final(book: &Resources, inner: &Inner) -> bool {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    {
+        if !inner.installed_selected() {
+            return book.installed.is_none() && !book.installed_started && !book.installed_joined && !book.installed_failed
+                && book.installed_settlement.is_none() && book.installed_return.is_none();
+        }
+        book.installed_started && book.installed_joined && !book.installed_failed && book.installed_settlement.is_none()
+            && matches!(book.installed_return.as_ref(), Some(Ok(CloseOutcome::Settled)))
+            && book.installed.as_ref().is_some_and(|native| native.try_lock().is_ok_and(|slots| slots.settled()))
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    { !inner.installed_selected() && !book.installed_started && !book.installed_joined && !book.installed_failed }
+}
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn installed_claim_clear(inner: &Inner, r: &Registry, owner: &Session, now: Instant) -> bool {
+    inner.installed_selected() && final_clock_clear(inner, r, owner, now)
+        && !r.stopping && !r.document_lost && !*owner.stop.borrow() && now < owner.clocks.work
+        && Profile::current() == Some(owner.profile)
+}
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn transfer_installed(book: &Resources, inner: &Inner, owner: &Session) -> Result<(), BridgeError> {
+    if !book.inspection_started || !book.inspection_joined || book.inspection_failed || book.inspection.is_some()
+        || book.inspection_error.is_some() || book.acquisition_started || book.acquisition_joined || book.acquisition_failed
+        || book.acquisition.is_some() || book.acquisition_error.is_some() { return Err(BridgeError::cleanup_unknown()); }
+    let native = book.installed.as_ref().ok_or_else(BridgeError::cleanup_unknown)?;
+    let mut slots = native.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
+    let mut r = inner.lock(); let now = Instant::now(); inner.advance_locked(&mut r, owner, now);
+    if !installed_claim_clear(inner, &r, owner, now) { return Err(unavailable()); }
+    slots.transfer_once().map_err(|_| BridgeError::cleanup_unknown())
+}
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn acquire_installed(inner: &Inner, owner: &Session, native: &Arc<Mutex<EnvironmentDiagnosticsRuntimeSlots>>) {
+    if !inner.installed_selected() { inner.stop(owner, Reason::RuntimeUnavailable); return; }
+    let mut slots = match native.lock() { Ok(slots) => slots, Err(_) => { inner.unknown(owner); return; } };
+    let capability = match slots.capability() { Ok(capability) => capability, Err(_) => { inner.unknown(owner); return; } };
+    let stop = owner.stop.subscribe();
+    let selected = match capability.prepare_once(owner.clocks.work, &stop) {
+        Ok(selected) => selected, Err(_) => { inner.stop(owner, Reason::RuntimeUnavailable); return; }
+    };
+    let mut command = Command::new(&selected.python);
+    command.args(["-I", "-S", "-B"]).arg(&selected.bootstrap).arg(&selected.core)
+        .current_dir(&selected.cwd).env_clear().env("LANG", "C").env("LC_ALL", "C")
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
+    let mut startup = match owner.startup.lock() { Ok(startup) => startup, Err(_) => { inner.unknown(owner); return; } };
+    let mut r = inner.lock(); let now = Instant::now(); inner.advance_locked(&mut r, owner, now);
+    if !installed_claim_clear(inner, &r, owner, now) { return; }
+    if startup.attempted || startup.returned || startup.failed || startup.child.is_some() || capability.claim_once().is_err() {
+        owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown_locked(&mut r, owner); return;
+    }
+    startup.attempted = true;
+    drop(r);
+    match command.spawn() { // Sole effect, immediately after the serialized one-use claim.
+        Ok(child) => { startup.child = Some(child); startup.returned = true; },
+        Err(_) => { startup.failed = true; owner.resource_unknown.store(true, Ordering::SeqCst); drop(startup);
+            inner.stop(owner, Reason::RuntimeUnavailable); inner.unknown(owner); },
+    }
+}
+async fn settle_installed(book: &mut Resources, inner: &Arc<Inner>, owner: &Arc<Session>) {
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    { let _ = (book, inner, owner); }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    {
+        let Some(native) = book.installed.clone() else {
+            if inner.installed_selected() { inner.unknown(owner); }
+            return;
+        };
+        if !book.installed_started {
+            let returned = (|| {
+                let slots = match native.try_lock() {
+                    Ok(slots) => slots, Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                    Err(std::sync::TryLockError::WouldBlock) => return false,
+                };
+                let startup = match owner.startup.try_lock() {
+                    Ok(startup) => startup, Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                    Err(std::sync::TryLockError::WouldBlock) => return false,
+                };
+                let r = inner.lock();
+                installed_closure_ready(&r, owner, startup.attempted,
+                    installed_consumers_returned(book, &startup, slots.no_child_effect()))
+            })();
+            if !inner.installed_selected() || !returned { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner); return; }
+            let (release, enter) = oneshot::channel();
+            book.installed_started = true;
+            book.installed_settlement = Some(tokio::task::spawn_blocking(move || {
+                if enter.blocking_recv().is_err() { return CloseOutcome::Unknown; }
+                match native.lock() {
+                    Ok(mut slots) => slots.settle_originals(),
+                    Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals() },
+                }
+            }));
+            let _ = release.send(()); // The same original closer is registered before its first close.
+        }
+        if !book.installed_joined && !book.installed_failed {
+            if book.installed_settlement.is_none() { inner.unknown(owner); return; }
+            let result = join_with_clock(&mut book.installed_settlement, inner, owner).await;
+            let joined = result.is_ok();
+            if book.installed_return.is_some() { book.installed_failed = true; }
+            else { book.installed_return = Some(result); book.installed_joined = joined; book.installed_failed = !joined; }
+            if joined { book.installed_settlement.take(); } else { installed_worker_lost(book); }
+        }
+        if !installed_final(book, inner) { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner); }
     }
 }
 fn spawn_original(inner: &Inner, owner: &Session, runtime: VerifiedRuntime) {
@@ -632,13 +812,25 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     inner.endpoint(owner);
     if *owner.stop.borrow() || Instant::now() >= owner.clocks.work { return; }
     let runtime = inner.runtime.clone(); let end = owner.clocks.work;
+    let stop = owner.stop.subscribe();
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let installed = book.installed.clone();
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
         any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
     let inspection_owner = owner.clone();
     let (inspect_start, inspect_enter) = oneshot::channel();
+    book.inspection_started = true;
     book.inspection = Some(tokio::task::spawn_blocking(move || {
         inspect_enter.blocking_recv().map_err(|_| unavailable())?;
-        let result = runtime.resolve_environment_diagnostics(end);
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let result = if let Some(native) = installed {
+            match native.lock() {
+                Ok(mut slots) => runtime.resolve_environment_diagnostics_installed(&mut slots, end, &stop),
+                Err(_) => Err(BridgeError::cleanup_unknown()),
+            }
+        } else { runtime.resolve_environment_diagnostics(end) };
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        let result = { let _ = stop; runtime.resolve_environment_diagnostics(end) };
         #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
             any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
         if let Some(permit) = &inspection_owner.fixture { permit.inspection_return(&inspection_owner); }
@@ -649,7 +841,12 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
         Ok(result) => { book.inspection_joined = true; book.inspection.take(); match result {
             Ok(runtime) => runtime, Err(_) => { inner.stop(owner, Reason::RuntimeUnavailable); return; }
         } },
-        Err(_) => { book.inspection_failed = true; owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner); return; },
+        Err(error) => {
+            book.inspection_failed = true; book.inspection_error = Some(error);
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            installed_worker_lost(&book);
+            owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner); return;
+        },
     };
     inner.endpoint(owner);
     if *owner.stop.borrow() || Instant::now() >= owner.clocks.work { return; }
@@ -663,9 +860,23 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     };
     match bytes { Ok(bytes) => *owner.request.lock().await = Some(bytes), Err(_) => { inner.stop(owner, Reason::ProtocolError); return; } }
     let acquisition_owner = owner.clone(); let acquisition_inner = inner.clone();
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let installed = book.installed.clone();
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if installed.is_some() && transfer_installed(&book, inner, owner).is_err() {
+        inner.stop(owner, Reason::RuntimeUnavailable); return;
+    }
     let (acquire_start, acquire_enter) = oneshot::channel();
+    book.acquisition_started = true;
     book.acquisition = Some(tokio::task::spawn_blocking(move || {
-        if acquire_enter.blocking_recv().is_ok() { spawn_original(&acquisition_inner, &acquisition_owner, runtime); }
+        if acquire_enter.blocking_recv().is_ok() {
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            if let Some(native) = installed {
+                drop(runtime); // Selection DATA is never launch authority.
+                acquire_installed(&acquisition_inner, &acquisition_owner, &native); return;
+            }
+            spawn_original(&acquisition_inner, &acquisition_owner, runtime);
+        }
         else { acquisition_inner.stop(&acquisition_owner, Reason::Cancelled); }
     }));
     let _ = acquire_start.send(()); // The original blocking acquisition cannot precede custody.
@@ -716,13 +927,23 @@ async fn continue_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     if book.inspection.is_some() && !book.inspection_joined && !book.inspection_failed {
         match join_with_clock(&mut book.inspection, inner, owner).await {
             Ok(_) => { book.inspection_joined = true; book.inspection.take(); }, // Late runtime DATA never launches.
-            Err(_) => { book.inspection_failed = true; owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner); },
+            Err(error) => {
+                book.inspection_failed = true; book.inspection_error = Some(error);
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                installed_worker_lost(&book);
+                owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner);
+            },
         }
     }
     if book.acquisition.is_some() && !book.acquisition_joined && !book.acquisition_failed {
         match join_with_clock(&mut book.acquisition, inner, owner).await {
             Ok(()) => { book.acquisition_joined = true; book.acquisition.take(); },
-            Err(_) => { book.acquisition_failed = true; owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner); },
+            Err(error) => {
+                book.acquisition_failed = true; book.acquisition_error = Some(error);
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                installed_worker_lost(&book);
+                owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner);
+            },
         }
     }
     let expected = {
@@ -784,6 +1005,7 @@ async fn continue_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
         }
     }
     if expected { require_terminal(inner, owner); }
+    settle_installed(&mut book, inner, owner).await;
     // No broad signal or PID discovery. EOF is cooperative STOP; an unreturned
     // original child stays retained at H, even if its terminal was once positive.
 }
@@ -858,7 +1080,8 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
                 && book.err_end.as_ref().is_some_and(|r| r.frames == 0 && !r.failed)
                 && book.write_end.as_ref().is_some_and(|r| r.sent && !r.failed)
         } else { true };
-        manager_joined && startup_settled && io_joined && io && protocol && owner.driver_joined.load(Ordering::SeqCst)
+        manager_joined && startup_settled && io_joined && io && protocol && installed_final(&book, &inner)
+            && owner.driver_joined.load(Ordering::SeqCst)
             && !owner.resource_unknown.load(Ordering::SeqCst)
     };
     if !settled { inner.unknown(&owner); }
@@ -873,18 +1096,22 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
 
 #[cfg(test)]
 mod tests {
-    // Only state and immutable clock arithmetic. No async runtime/process/IO.
+    // State/clock DATA and actual finite in-memory task joins only. No runtime
+    // inspection, files, native processes, tool permission or close evidence.
     use super::*;
     fn projection() -> Projection { Projection { run_id: "a".repeat(32), owner_generation: "b".repeat(32),
         context: Context { project_id: "project-1".into(), draft_revision: 0, baseline_generation: 0,
             platform: wire::Platform::Android, operation: wire::Operation::Build }, phase: Phase::Starting,
         outcome: None, finality: Finality::Pending, reason: Reason::None, result: None } }
     pub(super) fn inert_active() -> (EnvironmentDiagnosticsOwner, Arc<Session>) {
+        inert_active_at(Instant::now())
+    }
+    fn inert_active_at(admitted: Instant) -> (EnvironmentDiagnosticsOwner, Arc<Session>) {
         let owner = EnvironmentDiagnosticsOwner::new(RuntimeConfig::packaged(PathBuf::from("/unopened")));
         let projection = projection(); let (stop, _) = watch::channel(false); let (pipes, _) = watch::channel(Pipes::Pending);
         let (frames, receiver) = mpsc::channel(2);
         let session = Arc::new(Session { id: projection.run_id.clone(), generation: projection.owner_generation.clone(), context: projection.context.clone(),
-            profile: Profile::LinuxX64, clocks: Clocks::new(Instant::now()), registration: 1, project: PathBuf::from("/unopened-project"),
+            profile: Profile::LinuxX64, clocks: Clocks::new(admitted), registration: 1, project: PathBuf::from("/unopened-project"),
             draft: Mutex::new(None), request: AsyncMutex::new(None), stop, pipes, frames, wake: Notify::new(), output_bytes: AtomicUsize::new(0),
             resource_unknown: AtomicBool::new(false), driver_done: AtomicBool::new(false), driver_joined: AtomicBool::new(false), driver_failed: AtomicBool::new(false),
             watchdog_joined: AtomicBool::new(false), watchdog_failed: AtomicBool::new(false), manager_failed: AtomicBool::new(false), startup: Mutex::new(Startup::default()),
@@ -899,6 +1126,141 @@ mod tests {
         owner.inner.lock().active = Some(Active { owner: session.clone(), projection, first_stop: None, work_expired: false,
             accepted: false, terminal: false, unknown: false, final_join_seen: false });
         (owner, session)
+    }
+    fn decoded_terminal(session: &Session, value: Value) -> Frame {
+        let mut bytes = serde_json::to_vec(&serde_json::json!({"protocol":wire::PROTOCOL,"runId":session.id,
+            "ownerGeneration":session.generation,"seq":1,"kind":"terminal","result":value})).unwrap();
+        bytes.push(b'\n');
+        wire::decode(&bytes, &session.id, &session.generation, &session.context, session.profile.host()).unwrap()
+    }
+    #[test]
+    fn final_retirement_requires_original_identity_and_h_but_not_an_unset_stop() {
+        let (owner, session) = inert_active(); let now = session.clocks.admitted;
+        let (_, foreign) = inert_active();
+        {
+            let mut r = owner.inner.lock();
+            assert!(final_clock_clear(&owner.inner, &r, &session, session.clocks.finality - Duration::from_nanos(1)));
+            assert!(!final_clock_clear(&owner.inner, &r, &session, session.clocks.finality));
+            assert!(!final_clock_clear(&owner.inner, &r, &foreign, now)); // Same IDs, different original Arc.
+            owner.inner.stop_locked(&mut r, &session, Reason::Cancelled, now);
+            r.stopping = true; r.document_lost = true;
+            assert!(*session.stop.borrow() && final_clock_clear(&owner.inner, &r, &session, now));
+        }
+        owner.inner.unknown(&session);
+        assert_eq!(owner.inner.endpoint(&session), Some(session.clocks.work)); // Early Unknown still has an endpoint.
+        assert!(!final_clock_clear(&owner.inner, &owner.inner.lock(), &session, now));
+        assert_eq!(session.clocks.finality, now + FINALITY);
+    }
+    #[tokio::test]
+    async fn positive_observer_ready_after_h_or_early_unknown_retains_original_returns() {
+        for expired in [false, true] {
+            let admitted = if expired { Instant::now() - FINALITY } else { Instant::now() };
+            let (application, owner) = inert_active_at(admitted);
+            if !expired { application.inner.unknown(&owner); }
+            // Arbitrary true memory DATA attacks the join envelope; it is NOT a
+            // positive native-finality receipt or qualification of this owner.
+            *owner.observer.lock().await = Some(tokio::spawn(async { true }));
+            let (sent, ready) = oneshot::channel();
+            let inner = application.inner.clone(); let original = owner.clone();
+            let guard = Guard::new(&inner, &original);
+            *owner.watchdog.lock().unwrap() = Some(tokio::spawn(async move {
+                let value = watchdog(inner, original, guard).await;
+                sent.send(()).unwrap(); value
+            }));
+            ready.await.unwrap(); // Current-thread task has returned; the original handle is not yet polled here.
+            assert!(owner.watchdog.lock().unwrap().as_ref().unwrap().is_finished());
+            application.reconcile(); application.reconcile();
+            assert!(matches!(&*owner.observer_return.lock().unwrap(), Some(Ok(true))));
+            assert!(matches!(&*owner.watchdog_return.lock().unwrap(), Some(Ok(false))));
+            assert!(owner.observer.lock().await.is_some() && owner.watchdog.lock().unwrap().is_some());
+            let r = application.inner.lock(); let active = r.active.as_ref().unwrap();
+            assert!(Arc::ptr_eq(&active.owner, &owner) && active.unknown && active.final_join_seen && r.disabled && r.last.is_none());
+            drop(r); assert!(!application.can_exit() && owner.resource_unknown.load(Ordering::SeqCst));
+        }
+    }
+    #[tokio::test]
+    async fn positive_watchdog_ready_first_reconciled_after_h_cannot_retire_or_be_repolled() {
+        let (application, owner) = inert_active_at(Instant::now() - FINALITY);
+        let (sent, ready) = oneshot::channel();
+        *owner.watchdog.lock().unwrap() = Some(tokio::spawn(async move { sent.send(()).unwrap(); true }));
+        ready.await.unwrap();
+        application.reconcile(); application.reconcile();
+        assert!(matches!(&*owner.watchdog_return.lock().unwrap(), Some(Ok(true))));
+        assert!(owner.watchdog.lock().unwrap().is_some() && owner.watchdog_joined.load(Ordering::SeqCst));
+        assert!(!owner.watchdog_failed.load(Ordering::SeqCst)); // Ready true was not rewritten as a JoinError.
+        let r = application.inner.lock(); let active = r.active.as_ref().unwrap();
+        assert!(Arc::ptr_eq(&active.owner, &owner) && active.unknown && active.final_join_seen && r.last.is_none());
+        assert_eq!(owner.clocks.finality, owner.clocks.admitted + FINALITY);
+        drop(r); assert!(!application.can_exit());
+    }
+    #[test]
+    fn installed_closer_requires_same_original_settled_core_not_engine_exit_data() {
+        for mode in ["missing", "unsettled", "negative", "cancelled"] {
+            let (application, owner) = inert_active(); let now = owner.clocks.admitted;
+            {
+                let r = application.inner.lock();
+                assert!(!installed_closure_ready(&r, &owner, true, true));
+                assert!(installed_closure_ready(&r, &owner, false, true)); // Known preclaim branch needs no terminal.
+                assert!(!installed_closure_ready(&r, &owner, false, false));
+            }
+            application.inner.accept_at(&owner, Frame::Accepted, now);
+            if mode != "missing" {
+                let mut value = wire::tests::terminal(&owner.context);
+                match mode {
+                    "unsettled" => { value["outcome"] = serde_json::json!("partial");
+                        value["lifetime"]["toolDescriptorsClosed"] = serde_json::json!(false); },
+                    "negative" => { value["checks"][0]["reason"] = serde_json::json!("nonzero-exit");
+                        value["checks"][0]["returnCode"] = serde_json::json!(1);
+                        value["checks"][0]["version"] = Value::Null;
+                        value["checks"][0]["assessment"] = serde_json::json!("not-assessed"); },
+                    "cancelled" => { value["outcome"] = serde_json::json!("cancelled");
+                        value["lifetime"]["stopObserved"] = serde_json::json!("cancelled"); },
+                    _ => unreachable!(),
+                }
+                application.inner.accept_at(&owner, decoded_terminal(&owner, value), now);
+            }
+            let (_, foreign) = inert_active(); let r = application.inner.lock();
+            // direct_returned=true is engine/IO-return DATA only: the actual
+            // production closer decision still requires original C/A/W proof.
+            assert_eq!(installed_closure_ready(&r, &owner, true, true), matches!(mode, "negative" | "cancelled"));
+            assert!(!installed_closure_ready(&r, &owner, true, false));
+            assert!(!installed_closure_ready(&r, &foreign, true, true));
+            if mode == "unsettled" { assert!(r.active.as_ref().unwrap().unknown); }
+        }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[tokio::test]
+    async fn preclaim_borrowers_need_actual_ready_and_opaque_spawn_failure_never_means_no_child() {
+        let (application, owner) = inert_active();
+        {
+            let mut book = owner.resources.lock().await;
+            book.inspection_started = true; book.acquisition_started = true;
+            book.inspection = Some(tokio::spawn(pending::<Result<VerifiedRuntime, BridgeError>>()));
+            book.acquisition = Some(tokio::spawn(pending::<()>()));
+            // Ordinary absent-pipe DATA: no file or native pipe is invented.
+            book.write_end = Some(WriteEnd { sent: false, closed: false, failed: false });
+            book.out_end = Some(ReadEnd { frames: 0, eof: false, closed: false, failed: false });
+            book.err_end = Some(ReadEnd { frames: 0, eof: false, closed: false, failed: false });
+            assert!(!installed_consumers_returned(&book, &owner.startup.lock().unwrap(), true));
+            book.inspection_failed = true; book.acquisition_failed = true;
+            assert!(!installed_consumers_returned(&book, &owner.startup.lock().unwrap(), true));
+            book.inspection_failed = false; book.acquisition_failed = false;
+            book.inspection.as_ref().unwrap().abort(); book.acquisition.as_ref().unwrap().abort();
+        }
+        continue_original(&application.inner, &owner).await;
+        continue_original(&application.inner, &owner).await; // Must not repoll failed Ready handles.
+        let mut book = owner.resources.lock().await;
+        assert!(book.inspection_error.as_ref().is_some_and(|e| e.is_cancelled())
+            && book.acquisition_error.as_ref().is_some_and(|e| e.is_cancelled()));
+        assert!(installed_consumers_returned(&book, &owner.startup.lock().unwrap(), true));
+        assert!(!installed_consumers_returned(&book, &owner.startup.lock().unwrap(), false));
+        let mut startup = owner.startup.lock().unwrap(); startup.attempted = true; startup.failed = true;
+        assert!(!installed_consumers_returned(&book, &startup, true));
+        // Unselected dev/headless path remains separate; a stray installed slot
+        // can never satisfy native finality without its original settlement.
+        assert!(installed_final(&book, &application.inner));
+        book.installed = Some(Arc::new(Mutex::new(EnvironmentDiagnosticsRuntimeSlots::new())));
+        assert!(!installed_final(&book, &application.inner) && !book.installed_started);
     }
     #[test]
     fn startup_and_hidden_failure_never_renew_finality_clock() {

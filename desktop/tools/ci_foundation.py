@@ -7236,11 +7236,12 @@ def environment_core_settled(projection: dict) -> None:
 
 
 def validate_environment_native_resources(value: object, case: str, projection: dict, *, exercised: bool = True) -> dict:
-    """Every actual acquired resource, and the deliberate last failed task."""
+    """Every actual resource, late-finality original, and last failed task."""
     native = closed_object(value, {"startup", "inspection", "acquisition", "child", "input", "output", "error",
         "writer", "stdout", "stderr", "driver", "manager", "observer", "watchdog", "outputBytes",
         "resourceUnknown", "activeRetained", "disabled", "canExit"}, "Environment original native resource fields differ")
     absent, negative = case in {"L1", "L2"}, case == "L7"
+    late = case in {"L5", "L6a", "L6b", "L6c"}
     startup = {"attempted": not absent, "returned": not absent, "failed": False}
     require(same_compile_json(native["startup"], startup), "Environment original acquisition did not return as expected")
     for role in ("inspection", "acquisition"):
@@ -7259,18 +7260,18 @@ def validate_environment_native_resources(value: object, case: str, projection: 
                 "Environment original reader EOF/close/join receipt differs")
     for role in ("driver", "manager", "observer", "watchdog"):
         receipt = "panic" if negative and role == "driver" else (
-            "ok-false" if negative and role in {"observer", "watchdog"} else "ok-true" if role in {"observer", "watchdog"} else "ok-unit")
-        retained = negative and role != "manager"
+            "ok-false" if negative and role in {"observer", "watchdog"} or late and role == "watchdog"
+            else "ok-true" if role in {"observer", "watchdog"} else "ok-unit")
+        retained = negative and role != "manager" or late and role in {"observer", "watchdog"}
         require(same_compile_json(native[role], {"receipt": receipt, "retained": retained}),
                 "Environment original task result, retention or final observer receipt differs")
     # An admitted L5 still holds its original decoded terminal across H when
     # the current Git prerequisite is refused. Its ordinary failure stimulus
     # remains unexecuted; do not erase the actual late native custody either.
-    late = case in {"L5", "L6a", "L6b", "L6c"}
     require(integer_between(native["outputBytes"], 0 if absent else 1, 64 * 1024)
             and (not absent or native["outputBytes"] == 0)
-            and native["resourceUnknown"] is negative and native["activeRetained"] is negative
-            and native["disabled"] is (late or negative) and native["canExit"] is (not negative),
+            and native["resourceUnknown"] is (late or negative) and native["activeRetained"] is (late or negative)
+            and native["disabled"] is (late or negative) and native["canExit"] is (not (late or negative)),
             "Environment original physical finality or retained Unknown facts differ")
     if not absent:
         environment_core_settled(projection)
