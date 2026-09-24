@@ -538,6 +538,27 @@ class InstalledShellCompilerContracts(unittest.TestCase):
             "passive_management_tests", "credential_assessment")} <= set(names))
         self.assertTrue({"desktop/src-tauri/src/main.rs", "desktop/src-tauri/tests/installed_shell_observation.rs"} <= set(names))
 
+    def test_observer_module_roster_matches_production_supported_platforms(self):
+        # The actual-main observer has its own crate root. Library compilation
+        # alone cannot detect a missing path-included module in that target.
+        root = SOURCE / "desktop/src-tauri"
+        library = (root / "src/lib.rs").read_text()
+        main = (root / "src/main.rs").read_text()
+        observer = (root / "tests/installed_shell_observation.rs").read_text()
+        production = set(re.findall(r"^(?:pub )?mod ([a-z0-9_]+);$", library, re.MULTILINE))
+        observed = set(re.findall(r'^#\[path = "\.\./src/[^"\n]+\.rs"\] mod ([a-z0-9_]+);$', observer, re.MULTILINE))
+        self.assertEqual(production - observed, {"installed_runtime_windows", "runtime_publication"})
+        self.assertEqual(observed - production, set())
+        guard = '#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]\n'
+        self.assertIn(guard + 'mod vault_keyring_linux;', library)
+        self.assertIn(guard + '#[path = "../src/vault_keyring_linux.rs"] mod vault_keyring_linux;', observer)
+        self.assertEqual(observer.count('mod vault_keyring_linux;'), 1)
+        self.assertIn('mobile_release_desktop::shell::run()', main)
+        self.assertIn('#![forbid(unsafe_code)]', observer)
+        self.assertIn('all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",', observer)
+        self.assertIn('not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")', observer)
+        self.assertIn('fn main() -> std::process::ExitCode { shell::installed_observation::main() }', observer)
+
     def test_shell_source_manifest_accepts_actual_version_qualified_hashing_profile(self):
         # Exercise the real admission against the checked-in inputs, not a
         # second synthetic manifest or a mocked shell_source_manifest result.
