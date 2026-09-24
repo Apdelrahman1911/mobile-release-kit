@@ -114,8 +114,8 @@ impl Startup {
         // The claim is spent before dispatch. A failed/late navigation never
         // retries, substitutes a cached Finished, or rearms DocumentLifetime.
         match tauri::Url::parse(PACKAGED) {
-            Ok(url) if webview.navigate(url).is_ok() => {},
-            _ => self.lost(),
+            Ok(url) => { if webview.navigate(url).is_err() { self.lost(); } },
+            Err(_) => self.lost(),
         }
     }
 }

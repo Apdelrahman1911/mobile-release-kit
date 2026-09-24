@@ -184,7 +184,7 @@ impl Profile {
             MaximumLength: (slot.name.len() * 2) as u16, Buffer: slot.name.as_ptr().cast_mut() };
         f.attributes = OBJECT_ATTRIBUTES { Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
             RootDirectory: self.native.handle(parent)?, ObjectName: &mut f.unicode,
-            Attributes: NS::OBJ_CASE_INSENSITIVE | NS::OBJ_DONT_REPARSE, SecurityDescriptor: null_mut(), SecurityQualityOfService: null_mut() };
+            Attributes: F::OBJ_CASE_INSENSITIVE | F::OBJ_DONT_REPARSE, SecurityDescriptor: null_mut(), SecurityQualityOfService: null_mut() };
         let output = slot.output.get();
         let index = f.original.index;
         self.absence.push(ManuallyDrop::new(frame)); // BEFORE sole native entry.

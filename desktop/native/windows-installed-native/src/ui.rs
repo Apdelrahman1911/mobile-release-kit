@@ -8,7 +8,7 @@ use super::*;
 use std::{cell::OnceCell, collections::BTreeSet, mem::size_of_val, path::{Path, PathBuf}, rc::Rc};
 use windows::{core::{Interface, PCWSTR, PWSTR}, Win32::{Foundation::HWND,
     System::Com::{CoGetApartmentType, APTTYPE, APTTYPEQUALIFIER, APTTYPE_MAINSTA, APTTYPE_STA}}};
-use windows_sys::Win32::{System::{Registry as R, StationsAndDesktops as D}, UI::WindowsAndMessaging as W};
+use windows_sys::Win32::{System::{Registry as R, RemoteDesktop as RD, StationsAndDesktops as D}, UI::WindowsAndMessaging as W};
 use webview2_com::Microsoft::Web::WebView2::Win32 as WV;
 
 #[path = "ui_profile.rs"]
@@ -221,7 +221,7 @@ impl Prerequisites {
         self.station = unsafe { D::GetProcessWindowStation() };
         self.desktop = unsafe { D::GetThreadDesktop(self.thread) };
         if self.station.is_null() || self.desktop.is_null()
-            || unsafe { T::ProcessIdToSessionId(T::GetCurrentProcessId(), &mut self.session) } == 0
+            || unsafe { RD::ProcessIdToSessionId(T::GetCurrentProcessId(), &mut self.session) } == 0
             || self.session == 0 { return Err(UiError::InteractiveDesktop); }
         // These are the intended account's actual originals, not the CI runner's
         // station. Do not change a DACL, switch a desktop, or assume lpDesktop.
@@ -255,7 +255,7 @@ impl Prerequisites {
             return Err(UiError::InteractiveDesktop);
         }
         let mut session = 0;
-        if unsafe { T::ProcessIdToSessionId(T::GetCurrentProcessId(), &mut session) } == 0 || session != self.session {
+        if unsafe { RD::ProcessIdToSessionId(T::GetCurrentProcessId(), &mut session) } == 0 || session != self.session {
             return Err(UiError::InteractiveDesktop);
         }
         let flags: D::USEROBJECTFLAGS = user_object(self.station, D::UOI_FLAGS)?;
