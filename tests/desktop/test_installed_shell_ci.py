@@ -1338,6 +1338,10 @@ def closed_project_draft_data(lifecycle):
                                    "maps": [], "toolsOffline": receipt}
         observed["toolsOffline"][case] = {"native": deepcopy(receipt), "fixture": fixture}
         observed["files"].extend({"path": "lifecycle-shell-" + case + "-" + phase + ".json", **fixture[phase]} for phase in ("before", "after"))
+    observed["cases"]["settled-failure"] = {"case": "settled-failure", "exitCode": 1, "bootstrapReturned": True,
+        "domAndGtkObserved": True, "maps": [], "qualified": False, "expectedFailureObserved": True,
+        "failureHandoff": "original-quit-relay-loop-returned"}
+    observed["settledFailure"] = deepcopy(observed["cases"]["settled-failure"])
     return observed
 
 
@@ -1390,7 +1394,7 @@ class InstalledProjectDraftReceiptContracts(unittest.TestCase):
         self.assertEqual(set(observed["cases"]), {"normal", "positive", "quit-outstanding", "project-paths", "workflow-apply",
                                                 "session-inputs", "session-refusals", "session-loss", "session-deadline", "metadata-save",
                                                 "tools-observed", "tools-cancel", "tools-settlement", "offline-pass", "offline-negative",
-                                                "offline-drift", "offline-cancel", "offline-settlement"})
+                                                "offline-drift", "offline-cancel", "offline-settlement", "settled-failure"})
 
     def test_rejects_legacy_partial_mistyped_or_relabelled_positive_receipts(self):
         lifecycle = S.local("ubuntu_publication_lifecycle")
@@ -1425,6 +1429,14 @@ class InstalledProjectDraftReceiptContracts(unittest.TestCase):
             lambda v: v["projectDraft"]["fixture"]["after"].update(sha256="unbound"),
             lambda v: v.update(productQualified=True), lambda v: v.update(packageLifecycleQualified=True),
             lambda v: v.update(shellPackageBuilt=True), lambda v: v.update(state="project-draft-qualified"),
+            lambda v: v.pop("settledFailure"), lambda v: v["cases"].pop("settled-failure"),
+            lambda v: v["cases"]["settled-failure"].update(exitCode=0),
+            lambda v: v["cases"]["settled-failure"].update(exitCode=True),
+            lambda v: v["cases"]["settled-failure"].update(qualified=True),
+            lambda v: v["cases"]["settled-failure"].update(expectedFailureObserved=1),
+            lambda v: v["cases"]["settled-failure"].update(failureHandoff="not-observed"),
+            lambda v: v["settledFailure"].update(domAndGtkObserved=False),
+            lambda v: v.update(settledFailure="diagnostic-only"),
         )
         for mutate in mutations:
             observed = closed_project_draft_data(lifecycle); mutate(observed)
@@ -2997,6 +3009,67 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertEqual(literals | set(map_tokens) | set(public_tokens) | {b"maps-check"}, set(lifecycle.SHELL_SESSION_WORKERS))
         self.assertEqual(len(lifecycle.SHELL_SESSION_WORKERS), len(set(lifecycle.SHELL_SESSION_WORKERS)))
         self.assertIn("installed_native_fixture::assert_mappings_diagnostic_contract();", query_source)
+
+        # The native exec checkpoint precedes maps, but never changes their parser
+        # or uses historical DATA as actual-current executable authority.
+        snapshot = supervisor.split("    fn child_snapshot(", 1)[1].split("    #[derive(Clone, Copy, Debug, Eq, PartialEq)]\n    struct ExecIdentity", 1)[0]
+        self.assertIn("phase: &mut ExecPhase", snapshot)
+        self.assertNotIn("ExecPhase::BeforeExec", snapshot)
+        self.assertEqual(snapshot.count("exec_checkpoint(id, end, stop, python, parent, phase)?"), 2)
+        self.assertLess(snapshot.index("match exec_checkpoint("), snapshot.index("let raw = original_bytes("))
+        pending = snapshot.split("Some(false)", 1)[1].split("Some(true)", 1)[0]
+        self.assertIn("continue;", pending); self.assertNotIn("original_bytes", pending)
+        self.assertEqual(snapshot.count("mappings(&raw, historical).map_err(ObservationFailure::MapsCheck)?"), 1)
+        self.assertIn("if !live(end, stop) { return Ok(None); }\n            let raw", snapshot)
+        self.assertIn("if !live(end, stop) { return Ok(None); }\n                let mut environment", snapshot)
+        self.assertLess(snapshot.index("need(clear).map_err(|_| ObservationFailure::EnvironmentCheck)?"),
+                        snapshot.rindex("exec_checkpoint("))
+        environment = snapshot.split("                let clear =", 1)[1].split("                if exec_checkpoint(", 1)[0]
+        self.assertEqual(hashlib.sha256(environment.encode()).hexdigest(), "2e1038fc893b8a7a08faa133da5f4c18a32b8d3afa9a9b669095c7273cec7695")
+        observer = supervisor.split("    pub(super) fn observe_original_child(", 1)[1].split("    pub(super) fn report(", 1)[0]
+        self.assertEqual(observer.count("let mut phase = ExecPhase::BeforeExec;"), 1)
+        self.assertEqual(observer.count("child_snapshot(id, end, &stop, historical, &python, &parent, &mut phase)"), 2)
+        self.assertEqual(observer.count("current_python_original(end, &stop)?"), 1)
+        self.assertEqual(observer.count('proc_exec_original(Path::new("/proc/self/exe"), end, &stop)?'), 1)
+        self.assertIn("let closed = parent.close();\n            closed.and(returned)", observer)
+        self.assertIn("let closed = python.close();\n        closed.and(observed)", observer)
+        checkpoint = supervisor.split("    fn exec_checkpoint(", 1)[1].split("    #[cfg(", 1)[0]
+        self.assertLess(checkpoint.index("if !live(end, stop)"), checkpoint.index("python.check_name()?"))
+        self.assertIn("parent.check_name()?", checkpoint)
+        self.assertIn('inspected_proc_exec(Path::new("/proc/self/exe"), &parent.file,', checkpoint)
+        self.assertIn('proc_exec_original(Path::new(&format!("/proc/{id}/exe")), end, stop)?', checkpoint)
+        self.assertLess(checkpoint.index("current.close()"), checkpoint.index("phase.observe("))
+        self.assertNotIn("historical", checkpoint)
+        for start, end in (("    fn current_python_original(", "    fn proc_exec_name("),
+                           ("    fn proc_exec_original(", "    fn exec_checkpoint(")):
+            opening = supervisor.split(start, 1)[1].split(end, 1)[0]
+            self.assertEqual(opening.count("if !live(end, stop) { return Ok(None); }"), 2)
+            self.assertLess(opening.rindex("if !live(end, stop)"), opening.index("let file ="))
+            self.assertIn("opened_exec_original(file, inspected).map(Some)", opening)
+        partial = supervisor.split("    fn opened_exec_original(", 1)[1].split("    fn current_python_original(", 1)[0]
+        self.assertIn("nix::unistd::close(file).is_ok()", partial)
+        self.assertIn("Err(if closed { failure } else { ObservationFailure::ExecRead })", partial)
+        images = supervisor.split("    struct ExecOriginal", 1)[1].split("    fn assert_exec_image_contract()", 1)[0]
+        self.assertIn("let closed = nix::unistd::close(self.file).is_ok()", images)
+        self.assertIn("if closed { checked } else { Err(ObservationFailure::ExecRead) }", images)
+        self.assertIn("before == held && after == held && last == held", images)
+        self.assertIn("name.as_os_str() == last_name.as_os_str()", images)
+        self.assertIn("filesystem.f_type as u64 == 0x9fa0 && link.file_type().is_symlink()", images)
+        self.assertEqual(images.count("flags() & !(rustix::fs::OFlags::NOFOLLOW.bits() as i32)"), 1)
+        self.assertIn('.custom_flags(flags()).open(&path)', images)
+        for forbidden in ("HistoricalPayloadSnapshot", "historical_payload_snapshot", ".atime(", "canonicalize", "and_then(Child::id)", "Command::"):
+            self.assertNotIn(forbidden, images)
+        contract = supervisor.split("    fn assert_exec_image_contract()", 1)[1].split("    fn run_number(", 1)[0]
+        for forbidden in ("fs::", ".open(", "original_bytes", "Instant::now", "watch::", "proc_exec_original("):
+            self.assertNotIn(forbidden, contract)
+        self.assertIn("for index in 0..11", contract)
+        self.assertIn("ExecPhase::RuntimeImage", contract)
+        diagnostics = supervisor.split("    pub(super) fn assert_mappings_diagnostic_contract()", 1)[1].split("    fn child_snapshot(", 1)[0]
+        self.assertIn("assert_exec_image_contract();", diagnostics)
+        driver = supervisor.split("    resources.child = child;\n", 1)[1].split('    #[cfg(all(test, debug_assertions, feature = "development-runtime"', 1)[0]
+        self.assertEqual(hashlib.sha256(driver.encode()).hexdigest(), "7afc83d174f1d94b57eb4d8e90b091a503c8658033bc776813bca1db620a002e")
+        self.assertEqual(tuple(value.encode("ascii") for value in re.findall(r'Self::Exec(?:Read|Check) => b"([a-z-]+)"', native)),
+                         (b"exec-read", b"exec-check"))
         stages = re.findall(r'WorkerStage::[A-Za-z]+ => join.token\(b"([a-z]+)-c", b"\1-x", b"\1-f"\)', workers)
         self.assertEqual(tuple(stage.encode("ascii") for stage in stages), lifecycle.SHELL_SESSION_WORKER_STAGES)
         self.assertEqual(lifecycle.SHELL_SESSION_WORKER_JOINS, b"cxf")
@@ -3033,7 +3106,7 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
                     b"reject=unknown-native-snapshot;wait=original-owner-unsettled;o=" + origin + b";d=" + detail
                     + b";a=" + association + b";q=" + query + b";w=" + worker + b"\n")
         # Exact membership, not prefix acceptance; old refusal tokens remain valid.
-        for token in map_tokens:
+        for token in map_tokens + (b"exec-read", b"exec-check"):
             result = lifecycle._shell_label_pair(session_frame(token))
             self.assertIsNotNone(result, token)
             self.assertEqual(result["session"]["firstOrigin"],
@@ -3042,12 +3115,14 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         for token in hosted_tokens:
             self.assertIsNone(lifecycle._shell_label_pair(session_frame(token + b"x")))
         for token in (b"map-xh", b"map-xh-", b"map-xh-s", b"map-xh-vz", b"map-xh-sb", b"map-xh-sz-extra",
-                      b"MAP-XH-SZ", b"map-xh-s0", b"arbitrary", b"map-xh-sz\x00"):
+                      b"MAP-XH-SZ", b"map-xh-s0", b"arbitrary", b"map-xh-sz\x00",
+                      b"exec", b"exec-ready", b"exec-readx", b"exec-check-extra", b"exec-check\x00"):
             self.assertIsNone(lifecycle._shell_label_pair(session_frame(token)))
+        for token in (hosted_tokens[0], b"exec-read", b"exec-check"):
+            for fields in ({"association": b"unassociated"}, {"query": b"na"}, {"query": b"unregistered"},
+                           {"origin": b"not-recorded"}, {"detail": b"failed"}):
+                self.assertIsNone(lifecycle._shell_label_pair(session_frame(token, **fields)))
         token = hosted_tokens[0]
-        for fields in ({"association": b"unassociated"}, {"query": b"na"}, {"query": b"unregistered"},
-                       {"origin": b"not-recorded"}, {"detail": b"failed"}):
-            self.assertIsNone(lifecycle._shell_label_pair(session_frame(token, **fields)))
         frame = session_frame(token)
         for malformed in (frame[:-1], frame[:-2], session_prefix, frame + b"\n", frame + frame,
                           frame.replace(b";w=", b";unexpected="), frame.replace(b"=v2;", b"=v3;"),
@@ -3084,11 +3159,13 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         parent_leaves = sink.split("    let leaf = match case {\n", 1)[1].split("\n    };", 1)[0]
         command_leaves = commands.split("    pub(super) fn failure_leaf(self) -> &'static str { match self {\n", 1)[1].split("\n    } }", 1)[0]
         self.assertEqual(parent_leaves.count("Case::Commands(case) => case.failure_leaf(),"), 1)
-        actual_leaves = re.findall(r'=> "([^"\n]*)"', parent_leaves + command_leaves)
+        actual_leaves = re.findall(r'=> "([^"\n]*)"',
+            parent_leaves.replace("Case::Commands(case) => case.failure_leaf(),", command_leaves))
         self.assertEqual(actual_leaves, ["shell-" + case + "-failure.labels" for case in lifecycle.SHELL_CASES[1:]])
         self.assertNotIn("shell-normal-failure.labels", source)
         self.assertNotIn("shell-normal-failure.labels", commands)
-        self.assertFalse(any(name.endswith("failure.labels") for name in lifecycle.public_files({"shell": {}})))
+        self.assertEqual({name for name in lifecycle.public_files({"shell": {}}) if name.endswith("failure.labels")},
+                         {"shell-settled-failure-failure.labels"})
 
     def test_assessment_failure_v3_closed_roundtrips_preserve_historical_frames(self):
         lifecycle = S.local("ubuntu_publication_lifecycle")
@@ -3576,6 +3653,38 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
     def test_failed_observer_handoff_reuses_original_quit_and_keeps_failure(self):
         source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
         shell = (SOURCE / "desktop/src-tauri/src/shell.rs").read_text()
+        document = (SOURCE / "desktop/src-tauri/src/asset_session.rs").read_text()
+        cancelled = document.split("pub(crate) fn installed_observation_cancelled(&self)", 1)[1].split(
+            "pub(crate) fn installed_observation_project(&self)", 1)[0]
+        for actual_fact in ("live_closed_document(&state, 1)", "settled_project_slot(slot, 1)", "completed_picker(slot, false)",
+                            "slot.reason == Reason::UserCancelled && slot.project.is_none()",
+                            "book.receipt == JoinReceipt::New && book.handle.is_none()", "book.not_started()",
+                            "roster.generation == 1 && roster.roots.is_empty()"):
+            self.assertIn(actual_fact, cancelled)
+        tick = source.split("    pub(super) fn tick(", 1)[1].split("    fn dom(", 1)[0]
+        settlement = tick.split("if step == Step::Cancelled {", 1)[1].split("            } else {", 1)[0]
+        self.assertLess(settlement.index("if !state.document.installed_observation_cancelled() { return; }"),
+                        settlement.index("if !r.cancel_returned || !r.pickers[0].settled(false) { return; }"))
+        self.assertTrue(settlement.rstrip().endswith("r.cancelled = true; r.step = Step::ReadCancelled;"))
+        dom = source.split("    fn dom(&self, step: Step, raw: &str)", 1)[1].split("    fn gtk_", 1)[0]
+        trigger = "if self.case == Case::SettledFailure && step == Step::ReadCancelled {"
+        self.assertEqual(source.count(trigger), 1)  # Only the main DOM callback, never another recipe's callback.
+        self.assertLess(dom.index("r.pending.take() != Some(Pending::Dom(step)) || r.step != step"), dom.index(trigger))
+        self.assertLess(dom.index('Some("wait") if object.len() == 1 => return'), dom.index(trigger))
+        self.assertIn('Step::ReadCancelled => object.len() == 3 && r.cancelled && value["unselected"].as_bool() == Some(true)'
+                      '\n                && value["chooseEnabled"].as_bool() == Some(true)', dom)
+        self.assertLess(dom.index("if !valid { self.fail(); return; }"), dom.index(trigger))
+        failed_recipe = dom.split(trigger, 1)[1].split("        r.step = match step {", 1)[0]
+        latch = "latch_failure(&self.failed, trace, bootstrap, (Step::SettledFailure, Boundary::Dom), progress);"
+        self.assertLess(failed_recipe.index("if Instant::now() >= self.end { self.fail(); return; }"), failed_recipe.index(latch))
+        self.assertIn("return; // The existing next failed tick alone requests real Close.", failed_recipe)
+        self.assertIn("Step::ReadCancelled => Step::ChooseSelect,", dom)  # Every success-requiring case keeps its original next intent.
+        for forbidden in ("r.step =", "r.originals_final =", "r.exit =", "r.relay_joined =", "window.close", "app.exit", "self.end ="):
+            self.assertNotIn(forbidden, failed_recipe)
+        self.assertIn("if !failed.swap(true, Ordering::SeqCst) { *trace = next_trace; *progress = next_progress; true } else { false }", source)
+        self.assertIn('cfg!(target_os = "linux") && value == OsStr::new("settled-failure") => Some(Case::SettledFailure)', source)
+        self.assertIn("Case::SettledFailure => return std::process::ExitCode::FAILURE,", source)
+        self.assertNotIn("MRK_INSTALLED_SHELL_OBSERVATION=settled-failure-verified", source)
         helper = source.split("impl FailureQuit {", 1)[1].split("fn assert_failure_quit_contract()", 1)[0]
         reserve = helper.split("fn reserve(", 1)[1].split("fn closed(", 1)[0]
         self.assertIn("if !failed || !self.armed || self.refused { return None; }", reserve)

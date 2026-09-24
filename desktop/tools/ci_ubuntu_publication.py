@@ -3290,7 +3290,7 @@ def shell_project_draft_observation(observed, lifecycle):
            and observed.get("productQualified") is False and observed.get("packageLifecycleQualified") is False
            and observed.get("shellPackageBuilt") is False, "Closed project/draft observation was relabelled as qualification")
     cases, combined, files = observed.get("cases"), observed.get("projectDraft"), observed.get("files")
-    # The eighteen-case root cap is160 (154 exact names); its exporter adds the original client's
+    # The nineteen-case root cap is160 (158 exact names); its exporter adds the original client's
     # stdout/stderr, not two more root evidence slots or another capture.
     D.need(type(cases) is dict and set(cases) == set(lifecycle.SHELL_CASES)
            and type(combined) is dict and set(combined) == {"native", "fixture"}
@@ -3303,6 +3303,15 @@ def shell_project_draft_observation(observed, lifecycle):
            "Closed positive original result is incomplete")
     D.need(all(type(cases[name]) is dict and set(cases[name]) == {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps"}
                for name in ("normal", "quit-outstanding")), "A nonpositive case advertised a document receipt")
+    negative = cases["settled-failure"]
+    D.need(type(negative) is dict and set(negative) == {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps",
+                                                     "qualified", "expectedFailureObserved", "failureHandoff"}
+           and negative["case"] == "settled-failure" and type(negative["exitCode"]) is int and negative["exitCode"] == 1
+           and negative["bootstrapReturned"] is True and negative["domAndGtkObserved"] is True and negative["maps"] == []
+           and negative["qualified"] is False and negative["expectedFailureObserved"] is True
+           and negative["failureHandoff"] == "original-quit-relay-loop-returned"
+           and D.canonical(observed.get("settledFailure")) == D.canonical(negative),
+           "Closed expected-negative original failure/handoff is missing or relabelled")
     receipt = lifecycle.shell_project_receipt(D.canonical(positive["projectDraft"]))
     D.need(D.canonical(combined["native"]) == D.canonical(receipt), "Closed positive native receipt correspondence differs")
     fixture = combined["fixture"]
@@ -4055,11 +4064,12 @@ def verify_installed_shell():
             "projectDraft": project_draft, "candidateDocuments": observed["candidateDocuments"], "projectPaths": observed["projectPaths"],
             "workflowApply": observed["workflowApply"], "sessionInputs": observed["sessionInputs"], "metadataSave": observed["metadataSave"],
             "toolsOffline": observed["toolsOffline"], "toolsOfflineQualificationOnly": True, "offlineFullWorkDeadlineExercised": False,
+            "settledFailure": observed["settledFailure"],
             "commands": check.commands, "cases": list(lifecycle.SHELL_CASES), "compilerRerun": False,
             "supplierRebuilt": False, "packageBuilt": False, "upgradeOrRefusalRerun": False,
             "scope": "normal-shell-to-accepted-installed-runtime-connection-only"}))
         D.need(time.monotonic() < deadline, "Original shell result close/readback was late")
-        print("Normal window and seventeen original observer cases retained with service finality; no product/package qualification.", flush=True)
+        print("Normal window, seventeen success-requiring observers and one raw-exit1 expected negative retained with service finality; no product/package qualification.", flush=True)
     except BaseException as error:
         retain_failure(root, phase if check is None else check.phase, [] if check is None else check.commands, error)
         raise

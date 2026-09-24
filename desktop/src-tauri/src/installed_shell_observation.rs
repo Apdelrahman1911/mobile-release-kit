@@ -13,7 +13,7 @@ use crate::{asset_session::{InstalledEvidenceWitness, InstalledProjectWitness, I
     edit_protocol::{self as edit, ConfigEditStatus, EditProjection}, error::BridgeError, supervisor::{HeldAppInfo, Supervisor}};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Case { Positive, Outstanding, ProjectPaths, WorkflowApply, Session(SessionCase), MetadataSave, Commands(commands::Case) }
+enum Case { Positive, Outstanding, ProjectPaths, WorkflowApply, Session(SessionCase), MetadataSave, Commands(commands::Case), SettledFailure }
 #[path = "installed_tools_observation.rs"]
 pub(crate) mod commands;
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -39,7 +39,7 @@ impl SessionAdmission {
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Step {
-    Bootstrap, Environment, ReadEnvironment, Dashboard, ChooseCancel, Cancel, Cancelled, ReadCancelled,
+    Bootstrap, Environment, ReadEnvironment, Dashboard, ChooseCancel, Cancel, Cancelled, ReadCancelled, SettledFailure,
     ChooseSelect, SetProject, SelectProject, Selected, ReadSnapshot, Settings, Suggest, ReadSuggestion, Adopt, ReadDraft,
     GuidanceEnvironment, LoadRequirements, ReadRequirements, GitHub, ReadGitHubEmpty, EnterRepository, EnterSha,
     ReadGitHubInputs, ProposeGitHub, ReadProposal, OpenWorkflows, ReadWorkflows, GuidanceSettings, ReadRetainedDraft,
@@ -62,6 +62,7 @@ impl Step {
             Self::Cancel => b"MRK_INSTALLED_SHELL_FAILURE_STEP=Cancel\n",
             Self::Cancelled => b"MRK_INSTALLED_SHELL_FAILURE_STEP=Cancelled\n",
             Self::ReadCancelled => b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadCancelled\n",
+            Self::SettledFailure => b"MRK_INSTALLED_SHELL_FAILURE_STEP=SettledFailure\n",
             Self::ChooseSelect => b"MRK_INSTALLED_SHELL_FAILURE_STEP=ChooseSelect\n",
             Self::SetProject => b"MRK_INSTALLED_SHELL_FAILURE_STEP=SetProject\n",
             Self::SelectProject => b"MRK_INSTALLED_SHELL_FAILURE_STEP=SelectProject\n",
@@ -1073,6 +1074,7 @@ fn failure_sink(case: Case) -> Option<rustix::fd::OwnedFd> {
         Case::Session(SessionCase::Deadline) => "shell-session-deadline-failure.labels",
         Case::MetadataSave => "shell-metadata-save-failure.labels",
         Case::Commands(case) => case.failure_leaf(),
+        Case::SettledFailure => "shell-settled-failure-failure.labels",
     };
     let fd = fs::openat(&parent, leaf, OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
         Mode::empty()).ok()?;
@@ -1177,7 +1179,7 @@ fn session_failure_frame_contract_is_inert() { assert_failure_pair_contract(); }
 fn assert_failure_pair_contract() {
     // Pure byte contracts only; no open, write, GTK or process work.
     for trace in [(Step::Bootstrap, Boundary::Bootstrap), (Step::PrepareSave, Boundary::Request),
-        (Step::SelectProject, Boundary::Deadline),
+        (Step::SelectProject, Boundary::Deadline), (Step::SettledFailure, Boundary::Dom),
         (Step::Exit, Boundary::Exit)] {
         for progress in [BootstrapProgress::NotSampled, BootstrapProgress::Attachment, BootstrapProgress::PageLoad,
             BootstrapProgress::OriginalRegistrySample, BootstrapProgress::AppInfoCatalog, BootstrapProgress::HeldAppInfo,
@@ -4540,6 +4542,17 @@ impl Observation {
             _ => object.len() == 1,
         };
         if !valid { self.fail(); return; }
+        if self.case == Case::SettledFailure && step == Step::ReadCancelled {
+            // The original Choose/Cancel operation and its GTK picker already
+            // settled in tick. Only the actual valid unselected DOM above may
+            // contradict this one recipe's deliberate "project selected" demand.
+            // Do not alter application state, owner facts, pending work or Quit.
+            if Instant::now() >= self.end { self.fail(); return; }
+            let Record { trace, bootstrap, .. } = &mut *r;
+            let progress = *bootstrap;
+            latch_failure(&self.failed, trace, bootstrap, (Step::SettledFailure, Boundary::Dom), progress);
+            return; // The existing next failed tick alone requests real Close.
+        }
         r.step = match step {
             Step::Environment => Step::ReadEnvironment,
             Step::ReadEnvironment => { r.environment = true; Step::Dashboard },
@@ -6841,6 +6854,7 @@ pub(crate) fn main() -> std::process::ExitCode {
         Some(value) if value == OsStr::new("session-loss") => Some(Case::Session(SessionCase::Loss)),
         Some(value) if value == OsStr::new("session-deadline") => Some(Case::Session(SessionCase::Deadline)),
         Some(value) if value == OsStr::new("metadata-save") => Some(Case::MetadataSave),
+        Some(value) if cfg!(target_os = "linux") && value == OsStr::new("settled-failure") => Some(Case::SettledFailure),
         Some(value) => commands::Case::parse(value).map(Case::Commands),
         _ => None,
     };
@@ -6921,6 +6935,8 @@ pub(crate) fn main() -> std::process::ExitCode {
         Case::Session(SessionCase::Deadline) => b"MRK_INSTALLED_SHELL_OBSERVATION=session-deadline-verified\n",
         Case::MetadataSave => b"MRK_INSTALLED_SHELL_OBSERVATION=metadata-save-verified\n",
         Case::Commands(case) => case.verified_line(),
+        // A missing deliberate rejection must never become a positive receipt.
+        Case::SettledFailure => return std::process::ExitCode::FAILURE,
     };
     let mut stdout = std::io::stdout().lock();
     if stdout.write_all(b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n")

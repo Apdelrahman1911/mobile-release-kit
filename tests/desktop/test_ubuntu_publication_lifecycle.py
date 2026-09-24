@@ -446,6 +446,42 @@ class LifecycleData(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     L.shell_result(stdout, stderr, case, True, expected)
 
+        stdout, stderr = settled_failure_capture()
+        labels = L.SHELL_SETTLED_FAILURE_LABELS
+        observed = L.shell_result(stdout, stderr, "settled-failure", 1, expected, failure_labels=labels)
+        self.assertEqual(observed, {"case": "settled-failure", "exitCode": 1, "bootstrapReturned": True,
+            "domAndGtkObserved": True, "maps": [], "qualified": False, "expectedFailureObserved": True,
+            "failureHandoff": "original-quit-relay-loop-returned"})
+        for code in (0, True, 2, -1):
+            with self.subTest(code=code), self.assertRaises(ValueError):
+                L.shell_result(stdout, stderr, "settled-failure", code, expected, failure_labels=labels)
+        for wrong in (None, b"", labels[:-1], labels.replace(b"=dom", b"=tick"),
+                      labels.replace(b"=SettledFailure", b"=ReadCancelled")):
+            with self.subTest(labels=wrong), self.assertRaises(ValueError):
+                L.shell_result(stdout, stderr, "settled-failure", 1, expected, failure_labels=wrong)
+        for wrong_case in ("normal", "positive", "offline-negative"):
+            with self.subTest(case=wrong_case), self.assertRaises(ValueError):
+                L.shell_result(stdout, stderr, wrong_case, 1, expected, failure_labels=labels)
+        for marker in (b"MRK_INSTALLED_SHELL_FAILURE_HANDOFF=original-quit-relay-loop-returned\n",
+                       b"MRK_INSTALLED_SHELL_OBSERVATION=failed\n"):
+            variants = ((stdout.replace(marker, b""), stderr), (stdout + marker, stderr),
+                        (stdout.replace(marker, b"prefixed " + marker), stderr),
+                        (stdout.replace(marker, marker.replace(b"\n", b"\r\n")), stderr),
+                        (stdout.replace(marker, b"") + marker[:-1], stderr),
+                        (stdout.replace(marker, b""), marker))
+            for changed in variants:
+                with self.subTest(marker=marker, changed=changed), self.assertRaises(ValueError):
+                    L.shell_result(*changed, "settled-failure", 1, expected, failure_labels=labels)
+        for changed in ((stdout.replace(b"=available", b"=unavailable"), stderr),
+                        (stdout.replace(b"=advanced", b"=pending"), stderr),
+                        (stdout + b"MRK_INSTALLED_SHELL_OBSERVATION=settled-failure-verified\n", stderr),
+                        (stdout + contracts, stderr), (stdout, b"MRK_EXTRA=contradiction\n"),
+                        (stdout + b"MRK_EXTRA=truncated", stderr)):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                L.shell_result(*changed, "settled-failure", 1, expected, failure_labels=labels)
+        with self.assertRaises(ValueError):
+            L.shell_result(*positive_capture(), "positive", 0, expected, failure_labels=labels)
+
     def test_normal_controller_joins_the_original_even_when_start_or_input_fails(self):
         value, expected = installed_handoff(), map_data()
         value.pop("installed")
@@ -1119,16 +1155,17 @@ class LifecycleData(unittest.TestCase):
             baseline = (sum(row["size"] for row in candidate["packages"].values()) + candidate["library"]["size"]
                         + (12 if profile == "installed" else 68 if profile == "shell" else 0)
                         + 2 * 1024 + 1 + 2 * 2048 + (32 << 20) + (1 << 20))
-            # Eighteen logs plus seventeen failure leaves retain the64MiB
+            # Nineteen logs plus eighteen failure leaves retain the64MiB
             # ceiling. The eight new fixtures add168 nodes and their existing
-            # GUI environments add96. Only the shell roster cap grows to160;
+            # GUI environments add96; settled-failure adds12 environment nodes.
+            # Only the shell roster cap is160;
             # the other profiles and32MiB aggregate evidence cap stay fixed.
             session_bytes = sum(len(data) for case in L.SHELL_SESSION_CASES
                 for _, mode, _, data in L._shell_session_roster(value, case) if not stat.S_ISDIR(mode))
             tools_bytes = sum(len(data) for case in L.SHELL_TOOLS_OFFLINE_CASES
                 for _, mode, _, data in L._shell_tools_offline_roster(value, case, True) if stat.S_ISREG(mode))
-            required = baseline + ((2240 << 20) + 7235 + session_bytes + tools_bytes + 1095 + 11 + 381 if profile == "shell" else 0)
-            inodes = 2 * 16 + 2 * 8192 + (160 + 398 if profile == "shell" else 128)
+            required = baseline + ((2368 << 20) + 7235 + session_bytes + tools_bytes + 1095 + 11 + 393 if profile == "shell" else 0)
+            inodes = 2 * 16 + 2 * 8192 + (160 + 411 if profile == "shell" else 128)
             for available in (required - 1, required):
                 with self.subTest(profile=profile, available=available), \
                      patch.object(Path, "stat", return_value=SimpleNamespace(st_dev=1)), \
@@ -1298,6 +1335,115 @@ class LifecycleData(unittest.TestCase):
                     self.assertEqual(diagnostic["labelsReason"], "unavailable" if missing else None)
                     self.assertIs(diagnostic["ownerCall"]["ownerReturned"], case != "finish-dispatch-error")
                     if case in ("clock-error", "finish-dispatch-error"): self.assertIsNone(diagnostic["ownerCall"]["endMonotonic"])
+                    self.assertFalse(diagnostic["qualified"]); self.assertFalse(diagnostic["cleanupEstablished"])
+
+        # The one expected-negative route uses these same command/FD owners.
+        # All capture, file, clock and owner operations below are inert doubles.
+        argv = L.shell_argv(value, "settled-failure")
+        original_classifier = L._shell_settled_failure_result
+        route_errors = {"wrong-route", "missing-route", "exit-override"}
+        for case in ("complete", "owner-error", "owner-interrupt", "bad-result", "wrong-route", "missing-route", "exit-override",
+                     "zero", "other-code", "capture-error", "log-error", "label-read-error", "label-grammar-error",
+                     "marker-error", "retention-error", "label-read-interrupt", "retention-interrupt", "close-error", "log-close-error", "expiry-before-label",
+                     "expiry-before-close", "expiry-after-close", "clock-after-close"):
+            events, now, retained = [], [100.0], {}
+            primary = KeyboardInterrupt("inert original interruption") if case.endswith("-interrupt") else OSError("inert original failure")
+            close_error = OSError("inert checked-close failure")
+            stdout, stderr = settled_failure_capture()
+            if case == "marker-error": stdout += b"MRK_INSTALLED_SHELL_OBSERVATION=settled-failure-verified\n"
+            result = subprocess.CompletedProcess(argv, 0 if case == "zero" else 2 if case == "other-code" else 1, stdout, stderr)
+            if case == "bad-result": result.args = ["/other/original"]
+            def run(*args, **options):
+                events.append("owner")
+                self.assertTrue(L._FAILED)
+                if case in ("owner-error", "owner-interrupt"): raise primary
+                return result
+            def clock():
+                if events and events[-1] == "close":
+                    events.append("post-close-clock")
+                    if case == "clock-after-close": raise primary
+                return now[0]
+            def capture(*args):
+                events.append("capture")
+                return original_capture(*args)
+            def retain(name, raw):
+                self.assertTrue(L._FAILED)
+                events.append("label-export" if name.endswith(".labels") else name.rsplit(".", 1)[1])
+                if case == "capture-error" or case in ("retention-error", "retention-interrupt") and name.endswith(".labels"): raise primary
+                retained[name] = raw
+                if case == "expiry-before-close" and name.endswith(".labels"): now[0] = 200.0
+            def log(*args):
+                self.assertEqual(events[-3:], ["capture", "stdout", "stderr"])
+                events.append("log")
+                if case in ("log-error", "log-close-error"): raise primary
+                if case == "expiry-before-label": now[0] = 200.0
+                return b"inert display output\n"
+            def labels(original, *, with_raw=False):
+                self.assertEqual(original, (41, "original-label-binding"))
+                events.append("labels")
+                if case in ("label-read-error", "label-read-interrupt"): raise primary
+                raw = L.SHELL_SETTLED_FAILURE_LABELS
+                if case == "label-grammar-error": raw = raw[:-1]
+                parsed = L._shell_label_pair(raw)
+                return (raw, parsed) if with_raw else parsed
+            def classify(*args):
+                self.assertEqual(events[-1], "labels")
+                events.append("classify")
+                return original_classifier(*args)
+            def close(fd):
+                self.assertEqual(fd, 41)
+                self.assertTrue(L._FAILED)
+                events.append("close")
+                if case in ("close-error", "log-close-error"): raise close_error
+                if case == "expiry-after-close": now[0] = 200.0
+            with self.subTest(negative=case), patch.multiple(L, _ROOT=L.root_path(value), _END=200.0, _FAILED=False,
+                    _PHASE="inert", _COMMANDS=[], _OWNER=SimpleNamespace(run_owned=run)), \
+                 patch.object(L, "_root_ids"), patch.object(L.time, "monotonic", side_effect=clock), \
+                 patch.object(L, "_command_capture", side_effect=capture), patch.object(L, "_retain", side_effect=retain), \
+                 patch.object(L, "_shell_log_capture", side_effect=log) as capturing_log, \
+                 patch.object(L, "_shell_labels_prepare", return_value=(41, "original-label-binding")) as prepare, \
+                 patch.object(L, "_shell_labels_read", side_effect=labels) as reading, \
+                 patch.object(L, "_shell_settled_failure_result", side_effect=classify) as classifier, \
+                 patch.object(L, "_shell_command_failure", wraps=L._shell_command_failure) as reporting, \
+                 patch.object(L, "_shell_owner_failure") as owner_diagnostic, \
+                 patch.object(L.os, "close", side_effect=close) as closing, \
+                 patch.object(L.sys, "stderr", new_callable=io.StringIO) as stream:
+                options = dict(maximum=60, env={}, shell_log=(value,
+                    "positive" if case == "wrong-route" else "settled-failure", "original-log-binding"))
+                if case == "missing-route": options.pop("shell_log")
+                if case == "exit-override": options["codes"] = (1,)
+                if case == "complete":
+                    self.assertIs(L.command("shell-settled-failure", argv, **options), result)
+                    self.assertFalse(L._FAILED)
+                    self.assertEqual(events, ["owner", "capture", "stdout", "stderr", "log", "labels", "classify",
+                                              "label-export", "close", "post-close-clock"])
+                    self.assertEqual(retained["shell-settled-failure-failure.labels"], L.SHELL_SETTLED_FAILURE_LABELS)
+                    reporting.assert_not_called()
+                else:
+                    with self.assertRaises((ValueError, OSError, KeyboardInterrupt)) as raised:
+                        L.command("shell-settled-failure", argv, **options)
+                    self.assertIs(L._FAILED, case not in route_errors)
+                    if case in ("owner-error", "owner-interrupt"): self.assertIs(raised.exception, primary)
+                    elif case not in route_errors | {"bad-result"}:
+                        self.assertEqual(str(raised.exception), "Original root command failed or completed late")
+                    if case in ("capture-error", "log-error", "log-close-error", "label-read-error", "retention-error", "clock-after-close",
+                                "label-read-interrupt", "retention-interrupt"):
+                        self.assertIs(raised.exception.__cause__, primary)
+                    if case == "close-error": self.assertIs(raised.exception.__cause__, close_error)
+                self.assertEqual(closing.call_args_list, [] if case in route_errors else [unittest.mock.call(41)])
+                self.assertEqual(prepare.call_count, int(case not in route_errors))
+                self.assertEqual(owner_diagnostic.call_count, int(case in ("owner-error", "owner-interrupt")))
+                self.assertEqual(capturing_log.call_count, int(case not in route_errors | {"owner-error", "owner-interrupt", "bad-result", "capture-error"}))
+                self.assertLessEqual(reading.call_count, 1)  # Even failed reads/classification/export never cause a retry.
+                attempted = case not in route_errors | {"owner-error", "owner-interrupt", "bad-result", "capture-error", "zero", "other-code",
+                                                       "log-error", "log-close-error", "expiry-before-label"}
+                if attempted: reading.assert_called_once_with((41, "original-label-binding"), with_raw=True)
+                self.assertEqual(classifier.call_count, int(attempted and case not in ("label-read-error", "label-read-interrupt")))
+                if L._COMMANDS:
+                    self.assertEqual(L._COMMANDS[-1]["phase"], "shell-settled-failure")
+                    self.assertEqual(L._COMMANDS[-1]["exitCode"], result.returncode)
+                if reporting.called:
+                    diagnostic = json.loads(stream.getvalue().split("=", 1)[1])
                     self.assertFalse(diagnostic["qualified"]); self.assertFalse(diagnostic["cleanupEstablished"])
 
     def test_version_store_prefixes_bind_exact_application_children(self):
@@ -2670,6 +2816,16 @@ def tools_offline_capture(case, receipt=None):
             + b"MRK_INSTALLED_SHELL_OBSERVATION=" + case.encode("ascii") + b"-verified\n", b"")
 
 
+def settled_failure_capture():
+    # Fixed synthetic parser DATA; never native execution/finality evidence.
+    return (b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n"
+            + b"MRK_INSTALLED_SHELL_FAILURE_STEP=SettledFailure\n"
+            + b"MRK_INSTALLED_SHELL_FAILURE_PHASE=dom\n"
+            + b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n"
+            + b"MRK_INSTALLED_SHELL_FAILURE_HANDOFF=original-quit-relay-loop-returned\n"
+            + b"MRK_INSTALLED_SHELL_OBSERVATION=failed\n", b"")
+
+
 def closed_shell_data():
     value, expected = installed_handoff(), map_data()
     value.pop("installed")
@@ -2683,13 +2839,17 @@ def closed_shell_data():
                     + L.CHILD_MARKER.encode() + L.canonical(maps) + b"MRK_INSTALLED_SHELL_OBSERVATION=quit-outstanding-verified\n", b""),
                 "project-paths": path_capture(), "workflow-apply": workflow_capture(),
                 **{case: session_capture(case, expected=expected) for case in L.SHELL_SESSION_CASES}, "metadata-save": metadata_capture(),
-                **{case: tools_offline_capture(case) for case in L.SHELL_TOOLS_OFFLINE_CASES}}
+                **{case: tools_offline_capture(case) for case in L.SHELL_TOOLS_OFFLINE_CASES},
+                "settled-failure": settled_failure_capture()}
     cases, files, commands = {}, {}, []
     for case, (stdout, stderr) in captures.items():
-        cases[case] = L.shell_result(stdout, stderr, case, 0, expected)
+        code = 1 if case == "settled-failure" else 0
+        cases[case] = L.shell_result(stdout, stderr, case, code, expected,
+                                    failure_labels=L.SHELL_SETTLED_FAILURE_LABELS if case == "settled-failure" else None)
         files["shell-" + case + ".stdout"], files["shell-" + case + ".stderr"] = stdout, stderr
         files["shell-" + case + "-xvfb.stderr"] = b"inert original display output\n"
-        commands.append({"phase": "shell-" + case, "argv": L.shell_argv(value, case), "exitCode": 0})
+        commands.append({"phase": "shell-" + case, "argv": L.shell_argv(value, case), "exitCode": code})
+    files["shell-settled-failure-failure.labels"] = L.SHELL_SETTLED_FAILURE_LABELS
     files["shell-cases.json"] = L.canonical(cases)
     files["shell-positive-project-before.json"] = L.canonical(project_fixture_data(value))
     files["shell-positive-project-after.json"] = L.canonical(project_fixture_data(value, saved=True))
@@ -2975,7 +3135,7 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
         self.assertIs(branch.body[3], loop)
         self.assertEqual(ast.unparse(branch.body[4]), "_shell_fixtures_final(value, namespace)")
         self.assertEqual(L.SHELL_CASES[9], "metadata-save")
-        self.assertEqual(L.SHELL_CASES[-1], "offline-settlement")
+        self.assertEqual(L.SHELL_CASES[-2:], ("offline-settlement", "settled-failure"))
         self.assertEqual(ast.unparse(loop.body[0]), "environment, log_binding = _shell_prepare(value, case, namespace)")
         self.assertIsInstance(loop.body[1], ast.If)
         self.assertEqual(ast.unparse(loop.body[1].body[0]), "cases[case] = _shell_normal(value, environment, expected, log_binding)")
@@ -3027,7 +3187,7 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         self.assertEqual(L.SHELL_CASES, ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply",
                                        "session-inputs", "session-refusals", "session-loss", "session-deadline", "metadata-save",
                                        "tools-observed", "tools-cancel", "tools-settlement", "offline-pass", "offline-negative",
-                                       "offline-drift", "offline-cancel", "offline-settlement"))
+                                       "offline-drift", "offline-cancel", "offline-settlement", "settled-failure"))
         roster = L.public_files(value)
         self.assertEqual({name for name in roster if name.startswith("shell-positive-project-")},
                          {"shell-positive-project-before.json", "shell-positive-project-after.json"})
@@ -3043,9 +3203,14 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                          {"shell-" + case + "-" + phase + ".json" for case in L.SHELL_SESSION_CASES for phase in ("before", "after")})
         self.assertEqual({name for name in roster if name.startswith(("shell-tools-", "shell-offline-")) and name.endswith(".json")},
                          {"shell-" + case + "-" + phase + ".json" for case in L.SHELL_TOOLS_OFFLINE_CASES for phase in ("before", "after")})
-        self.assertEqual(len(roster), 154)
-        self.assertEqual(len(roster) + 2, 156)
-        self.assertEqual(len(L.root_phases(value)), 32)
+        self.assertEqual({name for name in roster if name.startswith("shell-settled-failure")},
+                         {"shell-settled-failure.stdout", "shell-settled-failure.stderr",
+                          "shell-settled-failure-xvfb.stderr", "shell-settled-failure-failure.labels"})
+        self.assertEqual({name for name in roster if name.endswith("failure.labels")},
+                         {"shell-settled-failure-failure.labels"})
+        self.assertEqual(len(roster), 158)
+        self.assertEqual(len(roster) + 2, 160)
+        self.assertEqual(len(L.root_phases(value)), 33)
         self.assertEqual(L.SHELL_PUBLIC_FILE_LIMIT, 160)
         self.assertEqual(L.TOTAL_LIMIT, 32 << 20)
         self.assertLessEqual(len(roster), L.SHELL_PUBLIC_FILE_LIMIT)
@@ -3366,6 +3531,10 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         self.assertNotEqual(result["projectDraft"]["fixture"]["before"], result["projectDraft"]["fixture"]["after"])
         self.assertEqual(result["cases"]["normal"]["domAndGtkObserved"], False)
         self.assertEqual(len(result["cases"]["quit-outstanding"]["maps"]), 1)
+        self.assertEqual(result["settledFailure"], result["cases"]["settled-failure"])
+        self.assertEqual(result["settledFailure"]["exitCode"], 1)
+        self.assertIs(result["settledFailure"]["qualified"], False)
+        self.assertIs(result["settledFailure"]["expectedFailureObserved"], True)
         for change in ("missing-before", "missing-after", "different-after", "coerced-case", "missing-receipt",
                        "case-save-only", "stdout-save-only", "case-guidance-only", "stdout-guidance-only",
                        "case-saved-reads-only", "stdout-saved-reads-only", "case-no-saved-reads", "stdout-no-saved-reads", "wrong-argv",
@@ -3401,6 +3570,32 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
             else:
                 current["commands"][1]["argv"][-1] = "quit-outstanding"
             with self.subTest(change=change), patch.object(L, "shell_closed_loader", return_value=expected), self.assertRaises((ValueError, KeyError)):
+                L.shell_closed_result(value, current, changed)
+
+        for change in ("missing-label", "truncated-label", "wrong-label", "missing-handoff", "duplicate-handoff", "verified",
+                       "zero-exit", "bool-exit", "other-exit", "wrong-argv", "missing-case", "case-qualified", "case-exit", "case-coerced"):
+            changed, current = deepcopy(files), deepcopy(outcome)
+            name = "shell-settled-failure"
+            if change == "missing-label": changed.pop(name + "-failure.labels")
+            elif change == "truncated-label": changed[name + "-failure.labels"] = L.SHELL_SETTLED_FAILURE_LABELS[:-1]
+            elif change == "wrong-label": changed[name + "-failure.labels"] = L.SHELL_SETTLED_FAILURE_LABELS.replace(b"=dom", b"=tick")
+            elif change in ("missing-handoff", "duplicate-handoff"):
+                handoff = b"MRK_INSTALLED_SHELL_FAILURE_HANDOFF=original-quit-relay-loop-returned\n"
+                changed[name + ".stdout"] = changed[name + ".stdout"].replace(handoff, b"" if change == "missing-handoff" else handoff * 2)
+            elif change == "verified": changed[name + ".stdout"] += b"MRK_INSTALLED_SHELL_OBSERVATION=settled-failure-verified\n"
+            elif change in ("zero-exit", "bool-exit", "other-exit", "wrong-argv"):
+                command = next(row for row in current["commands"] if row["phase"] == name)
+                if change == "wrong-argv": command["argv"][-1] = "positive"
+                else: command["exitCode"] = {"zero-exit": 0, "bool-exit": True, "other-exit": 2}[change]
+            else:
+                cases = L.decode(changed["shell-cases.json"])
+                if change == "missing-case": cases.pop("settled-failure")
+                elif change == "case-qualified": cases["settled-failure"]["qualified"] = True
+                elif change == "case-exit": cases["settled-failure"]["exitCode"] = 0
+                else: cases["settled-failure"]["expectedFailureObserved"] = 1
+                changed["shell-cases.json"] = L.canonical(cases)
+            with self.subTest(negative=change), patch.object(L, "shell_closed_loader", return_value=expected), \
+                 self.assertRaises((ValueError, KeyError)):
                 L.shell_closed_result(value, current, changed)
 
     def test_metadata_receipt_requires_each_typed_original_finality_and_readback_leaf(self):
@@ -3685,8 +3880,10 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         self.assertEqual(ast.unparse(branch.orelse[0]),
                          "result = command('shell-' + case, shell_argv(value, case), maximum=60, env=environment, shell_log=(value, case, log_binding))")
         self.assertEqual(ast.unparse(branch.orelse[1]),
-                         "cases[case] = shell_result(result.stdout, result.stderr, case, result.returncode, expected)")
-        metadata = next(node for node in branch.orelse[2:] if isinstance(node, ast.If) and ast.unparse(node.test) == "case == 'metadata-save'")
+                         "failure_labels = read(_ROOT / 'public/shell-settled-failure-failure.labels', SHELL_FAILURE_LABEL_LIMIT) if case == 'settled-failure' else None")
+        self.assertEqual(ast.unparse(branch.orelse[2]),
+                         "cases[case] = shell_result(result.stdout, result.stderr, case, result.returncode, expected, failure_labels=failure_labels)")
+        metadata = next(node for node in branch.orelse[3:] if isinstance(node, ast.If) and ast.unparse(node.test) == "case == 'metadata-save'")
         self.assertEqual(len(metadata.body), 3)
         self.assertEqual([ast.unparse(node) for node in metadata.body[:3]], [
             "metadata_after = canonical(_shell_metadata_inventory(value, namespace, saved=True))",
@@ -4164,7 +4361,7 @@ class ProjectPathLifecycleContracts(unittest.TestCase):
         self.assertEqual(L.SHELL_CASES, ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply",
                                        "session-inputs", "session-refusals", "session-loss", "session-deadline", "metadata-save",
                                        "tools-observed", "tools-cancel", "tools-settlement", "offline-pass", "offline-negative",
-                                       "offline-drift", "offline-cancel", "offline-settlement"))
+                                       "offline-drift", "offline-cancel", "offline-settlement", "settled-failure"))
 
 
 
@@ -4882,6 +5079,16 @@ class FailureLabelSinkContracts(unittest.TestCase):
                 else:
                     reading.assert_called_once_with(41, 513)
                 opening.assert_not_called(); raw_read.assert_not_called(); seeking.assert_not_called()
+
+        # The classifier gets the same bounded original read, not a second
+        # read/reopen for its raw frame after the diagnostic parser consumes it.
+        with patch.object(L.os, "fstat", side_effect=[node, node]), patch.object(L.os, "listxattr", return_value=[]), \
+             patch.object(L.os, "read", return_value=raw) as reading, patch.object(L.os, "open") as opening, \
+             patch.object(L, "read") as raw_read, patch.object(L.os, "lseek") as seeking:
+            self.assertEqual(L._shell_labels_read(original, with_raw=True),
+                             (raw, {"step": "Bootstrap", "boundary": "bootstrap", "bootstrapProgress": "not-sampled"}))
+            reading.assert_called_once_with(41, 513)
+            opening.assert_not_called(); raw_read.assert_not_called(); seeking.assert_not_called()
 
     def test_returned_failure_requires_the_same_typed_bounded_result(self):
         class Subclass(subprocess.CompletedProcess): pass

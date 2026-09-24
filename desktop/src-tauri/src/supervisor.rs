@@ -2269,12 +2269,13 @@ mod installed_native_fixture {
             }
         }
     }
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    pub(super) enum ObservationFailure { ChildId, Entry, MapsRead, MapsCheck(MapRefusal), EnvironmentRead, EnvironmentCheck, HoldRefused }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) enum ObservationFailure { ChildId, Entry, ExecRead, ExecCheck, MapsRead, MapsCheck(MapRefusal), EnvironmentRead, EnvironmentCheck, HoldRefused }
     impl ObservationFailure {
         pub(super) fn token(self) -> &'static [u8] {
             match self {
-                Self::ChildId => b"child-id", Self::Entry => b"observe-entry", Self::MapsRead => b"maps-read",
+                Self::ChildId => b"child-id", Self::Entry => b"observe-entry",
+                Self::ExecRead => b"exec-read", Self::ExecCheck => b"exec-check", Self::MapsRead => b"maps-read",
                 Self::MapsCheck(reason) => reason.token(), Self::EnvironmentRead => b"env-read", Self::EnvironmentCheck => b"env-check",
                 Self::HoldRefused => b"hold-refused",
             }
@@ -2486,6 +2487,7 @@ mod installed_native_fixture {
         let hosted = |spelling, relation| R::ExecutableHostedFile { spelling, relation };
         let mappings = |raw: &[u8]| self::mappings(raw, None);
         crate::installed_runtime::assert_historical_payload_diagnostic_contract();
+        assert_exec_image_contract();
         let failures: &[(&[u8], R)] = &[
             (b"\xff", R::Utf8), (b"x", R::Newline), (b"\n", R::Row),
             (b"1-2 r--p 0 00:00\n", R::Columns), (b"x r--p 0 00:00 0\n", R::Address),
@@ -2824,11 +2826,19 @@ mod installed_native_fixture {
     fn historical_payload_mapping_diagnostic_is_only_data() {
         assert_mappings_diagnostic_contract();
     }
-    fn child_snapshot(id: u32, end: Instant, stop: &watch::Receiver<bool>, historical: Option<HistoricalPayloadSnapshot>) -> Result<Option<ChildObservation>, ObservationFailure> {
+    fn child_snapshot(id: u32, end: Instant, stop: &watch::Receiver<bool>, historical: Option<HistoricalPayloadSnapshot>,
+        python: &ExecOriginal, parent: &ExecOriginal, phase: &mut ExecPhase) -> Result<Option<ChildObservation>, ObservationFailure> {
         need(id > 0).map_err(|_| ObservationFailure::ChildId)?;
         while live(end, stop) {
+            match exec_checkpoint(id, end, stop, python, parent, phase)? {
+                None => return Ok(None),
+                Some(false) => { std::thread::sleep(Duration::from_millis(1)); continue; },
+                Some(true) => {},
+            }
+            if !live(end, stop) { return Ok(None); }
             let raw = original_bytes(Path::new(&format!("/proc/{id}/maps")), 1 << 20, false).map_err(|_| ObservationFailure::MapsRead)?;
             if let Some(maps) = mappings(&raw, historical).map_err(ObservationFailure::MapsCheck)? {
+                if !live(end, stop) { return Ok(None); }
                 let mut environment = original_bytes(Path::new(&format!("/proc/{id}/environ")), 8192, false)
                     .map_err(|_| ObservationFailure::EnvironmentRead)?;
                 let clear = environment.last() == Some(&0) && {
@@ -2837,11 +2847,211 @@ mod installed_native_fixture {
                 };
                 environment.fill(0); // No raw environment leaves this original reader.
                 need(clear).map_err(|_| ObservationFailure::EnvironmentCheck)?;
+                if exec_checkpoint(id, end, stop, python, parent, phase)? != Some(true) { return Ok(None); }
                 return Ok(if live(end, stop) { Some(ChildObservation { maps, environment_clear: true }) } else { None });
             }
             std::thread::sleep(Duration::from_millis(1));
         }
         Ok(None)
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct ExecIdentity {
+        device: u64, inode: u64, mode: u32, uid: u32, gid: u32, links: u64, size: u64,
+        mtime: (i64, i64), ctime: (i64, i64),
+    }
+    impl ExecIdentity {
+        fn of(st: &fs::Metadata) -> Self {
+            Self { device: st.dev(), inode: st.ino(), mode: st.mode(), uid: st.uid(), gid: st.gid(),
+                links: st.nlink(), size: st.len(), mtime: (st.mtime(), st.mtime_nsec()), ctime: (st.ctime(), st.ctime_nsec()) }
+        }
+        fn protected(self) -> bool {
+            self.mode & 0o170000 == 0o100000 && self.inode != 0 && self.uid == 0 && self.gid == 0
+                && self.links == 1 && self.size > 0 && self.mode & 0o7022 == 0 && self.mode & 0o111 != 0
+                && (0..1_000_000_000).contains(&self.mtime.1) && (0..1_000_000_000).contains(&self.ctime.1)
+        }
+    }
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct ExecImage { name: std::ffi::OsString, identity: ExecIdentity }
+    fn distinct_exec_images(python: &ExecImage, parent: &ExecImage) -> Result<(), ObservationFailure> {
+        need(python.identity.protected() && parent.identity.protected() && python.name != parent.name
+            && (python.identity.device, python.identity.inode) != (parent.identity.device, parent.identity.inode))
+            .map_err(|_| ObservationFailure::ExecCheck)
+    }
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum ExecPhase { BeforeExec, RuntimeImage }
+    impl ExecPhase {
+        fn observe(&mut self, python: &ExecImage, parent: &ExecImage,
+            current: Result<ExecImage, ObservationFailure>) -> Result<bool, ObservationFailure> {
+            let current = current?; // Inspection/close failure is never a pre-exec wait.
+            distinct_exec_images(python, parent)?;
+            if current == *python { *self = Self::RuntimeImage; return Ok(true); }
+            if *self == Self::BeforeExec && current == *parent { return Ok(false); }
+            Err(ObservationFailure::ExecCheck) // Third image, alias or any post-latch regression.
+        }
+    }
+    // Actual-current protected originals, not HistoricalPayloadSnapshot or a
+    // pathname/digest receipt. Both stay owned until the whole observer returns.
+    struct ExecOriginal { file: fs::File, image: ExecImage }
+    impl ExecOriginal {
+        fn check_name(&self) -> Result<(), ObservationFailure> {
+            need(checked_exec_identity(Path::new(&self.image.name), &self.file)? == self.image.identity)
+                .map_err(|_| ObservationFailure::ExecCheck)
+        }
+        fn close(self) -> Result<(), ObservationFailure> {
+            let checked = self.file.metadata().map_err(|_| ObservationFailure::ExecRead)
+                .and_then(|st| need(ExecIdentity::of(&st) == self.image.identity).map_err(|_| ObservationFailure::ExecCheck));
+            let closed = nix::unistd::close(self.file).is_ok(); // One consuming close even when metadata failed.
+            if closed { checked } else { Err(ObservationFailure::ExecRead) }
+        }
+    }
+    fn protected_exec_name(path: &Path) -> Result<(), ObservationFailure> {
+        use std::os::unix::ffi::OsStrExt;
+        let bytes = path.as_os_str().as_bytes();
+        need(bytes.first() == Some(&b'/') && bytes.len() <= 4096
+            && bytes[1..].split(|byte| *byte == b'/').all(|part| !part.is_empty() && part != b"." && part != b".."))
+            .map_err(|_| ObservationFailure::ExecCheck)?;
+        for ancestor in path.ancestors().skip(1) {
+            let st = fs::symlink_metadata(ancestor).map_err(|_| ObservationFailure::ExecRead)?;
+            need(st.is_dir() && st.uid() == 0 && st.gid() == 0 && st.mode() & 0o7022 == 0)
+                .map_err(|_| ObservationFailure::ExecCheck)?;
+        }
+        Ok(())
+    }
+    fn checked_exec_identity(path: &Path, original: &fs::File) -> Result<ExecIdentity, ObservationFailure> {
+        protected_exec_name(path)?;
+        let before = ExecIdentity::of(&fs::symlink_metadata(path).map_err(|_| ObservationFailure::ExecRead)?);
+        let held = ExecIdentity::of(&original.metadata().map_err(|_| ObservationFailure::ExecRead)?);
+        let after = ExecIdentity::of(&fs::symlink_metadata(path).map_err(|_| ObservationFailure::ExecRead)?);
+        let last = ExecIdentity::of(&original.metadata().map_err(|_| ObservationFailure::ExecRead)?);
+        need(held.protected() && before == held && after == held && last == held).map_err(|_| ObservationFailure::ExecCheck)?;
+        Ok(held)
+    }
+    fn opened_exec_original(file: fs::File, inspected: Result<ExecImage, ObservationFailure>) -> Result<ExecOriginal, ObservationFailure> {
+        match inspected {
+            Ok(image) => Ok(ExecOriginal { file, image }),
+            Err(failure) => {
+                let closed = nix::unistd::close(file).is_ok(); // Partial binding still consumes its original once.
+                Err(if closed { failure } else { ObservationFailure::ExecRead })
+            },
+        }
+    }
+    fn current_python_original(end: Instant, stop: &watch::Receiver<bool>) -> Result<Option<ExecOriginal>, ObservationFailure> {
+        if !live(end, stop) { return Ok(None); }
+        let path = Path::new(VERSION).join("python/bin/python3");
+        protected_exec_name(&path)?;
+        if !live(end, stop) { return Ok(None); }
+        let file = fs::OpenOptions::new().read(true).custom_flags(flags()).open(&path).map_err(|_| ObservationFailure::ExecRead)?;
+        let inspected = checked_exec_identity(&path, &file).map(|identity| ExecImage { name: path.into_os_string(), identity });
+        opened_exec_original(file, inspected).map(Some)
+    }
+    fn proc_exec_name(path: &Path) -> Result<PathBuf, ObservationFailure> {
+        // Callers supply only /proc/self/exe or /proc/<retained Child::id>/exe.
+        // The already-admitted initial PID namespace is unchanged; verify this
+        // fixed observation still addresses a genuine procfs magic link.
+        let filesystem = rustix::fs::statfs(path.parent().ok_or(ObservationFailure::ExecCheck)?)
+            .map_err(|_| ObservationFailure::ExecRead)?;
+        let link = fs::symlink_metadata(path).map_err(|_| ObservationFailure::ExecRead)?;
+        need(filesystem.f_type as u64 == 0x9fa0 && link.file_type().is_symlink()).map_err(|_| ObservationFailure::ExecCheck)?;
+        fs::read_link(path).map_err(|_| ObservationFailure::ExecRead)
+    }
+    fn inspected_proc_exec(path: &Path, file: &fs::File, name: PathBuf) -> Result<ExecImage, ObservationFailure> {
+        let before = ExecIdentity::of(&fs::metadata(path).map_err(|_| ObservationFailure::ExecRead)?);
+        let held = ExecIdentity::of(&file.metadata().map_err(|_| ObservationFailure::ExecRead)?);
+        let after = ExecIdentity::of(&fs::metadata(path).map_err(|_| ObservationFailure::ExecRead)?);
+        let last_name = proc_exec_name(path)?;
+        let last = ExecIdentity::of(&file.metadata().map_err(|_| ObservationFailure::ExecRead)?);
+        need(held.protected() && before == held && after == held && last == held
+            && name.as_os_str() == last_name.as_os_str()).map_err(|_| ObservationFailure::ExecCheck)?;
+        Ok(ExecImage { name: name.into_os_string(), identity: held })
+    }
+    fn proc_exec_original(path: &Path, end: Instant, stop: &watch::Receiver<bool>) -> Result<Option<ExecOriginal>, ObservationFailure> {
+        if !live(end, stop) { return Ok(None); }
+        let name = proc_exec_name(path)?;
+        if !live(end, stop) { return Ok(None); }
+        // ONLY these two genuine kernel exe links may be followed. Ordinary
+        // payload names retain NOFOLLOW; no caller-controlled path is opened.
+        let file = fs::OpenOptions::new().read(true)
+            .custom_flags(flags() & !(rustix::fs::OFlags::NOFOLLOW.bits() as i32)).open(path)
+            .map_err(|_| ObservationFailure::ExecRead)?;
+        let inspected = inspected_proc_exec(path, &file, name);
+        opened_exec_original(file, inspected).map(Some)
+    }
+    fn exec_checkpoint(id: u32, end: Instant, stop: &watch::Receiver<bool>, python: &ExecOriginal,
+        parent: &ExecOriginal, phase: &mut ExecPhase) -> Result<Option<bool>, ObservationFailure> {
+        if !live(end, stop) { return Ok(None); }
+        python.check_name()?;
+        parent.check_name()?;
+        let current_parent = inspected_proc_exec(Path::new("/proc/self/exe"), &parent.file, PathBuf::from(&parent.image.name))?;
+        need(current_parent == parent.image).map_err(|_| ObservationFailure::ExecCheck)?;
+        distinct_exec_images(&python.image, &parent.image)?;
+        let Some(current) = proc_exec_original(Path::new(&format!("/proc/{id}/exe")), end, stop)? else { return Ok(None); };
+        let image = current.image.clone();
+        let inspected = current.close().map(|()| image);
+        phase.observe(&python.image, &parent.image, inspected).map(Some)
+    }
+    #[cfg(all(debug_assertions, any(all(feature = "desktop-shell", feature = "custom-protocol"),
+        all(not(feature = "desktop-shell"), not(feature = "custom-protocol")))))]
+    fn assert_exec_image_contract() {
+        // Pure identities/phases only. Existing callers execute this without
+        // opening a descriptor, consulting /proc or creating another selector.
+        let identity = ExecIdentity { device: 1, inode: 2, mode: 0o100555, uid: 0, gid: 0,
+            links: 1, size: 128, mtime: (7, 8), ctime: (9, 10) };
+        let python = ExecImage { name: "/protected/python".into(), identity };
+        let parent = ExecImage { name: "/protected/parent".into(), identity: ExecIdentity { inode: 3, ..identity } };
+        let mut phase = ExecPhase::BeforeExec;
+        assert_eq!(phase.observe(&python, &parent, Ok(parent.clone())), Ok(false));
+        assert_eq!(phase.observe(&python, &parent, Ok(parent.clone())), Ok(false));
+        assert_eq!(phase.observe(&python, &parent, Ok(python.clone())), Ok(true));
+        assert_eq!(phase, ExecPhase::RuntimeImage);
+        // This same latch is borrowed by the initial AND Overlap snapshots.
+        assert_eq!(phase.observe(&python, &parent, Ok(python.clone())), Ok(true));
+        assert_eq!(phase.observe(&python, &parent, Ok(parent.clone())), Err(ObservationFailure::ExecCheck));
+        assert_eq!(phase, ExecPhase::RuntimeImage);
+        for expected in [&python, &parent] {
+            for index in 0..11 {
+                let mut changed = (*expected).clone();
+                match index {
+                    0 => changed.identity.device += 1, 1 => changed.identity.inode += 1,
+                    2 => changed.identity.mode ^= 0o100, 3 => changed.identity.uid += 1, 4 => changed.identity.gid += 1,
+                    5 => changed.identity.links += 1, 6 => changed.identity.size += 1,
+                    7 => changed.identity.mtime.0 += 1, 8 => changed.identity.mtime.1 += 1,
+                    9 => changed.identity.ctime.0 += 1, 10 => changed.identity.ctime.1 += 1, _ => unreachable!(),
+                }
+                for mut phase in [ExecPhase::BeforeExec, ExecPhase::RuntimeImage] {
+                    assert_eq!(phase.observe(&python, &parent, Ok(changed.clone())), Err(ObservationFailure::ExecCheck));
+                }
+            }
+        }
+        let third = ExecImage { name: "/third".into(), identity: ExecIdentity { inode: 4, ..identity } };
+        for mut phase in [ExecPhase::BeforeExec, ExecPhase::RuntimeImage] {
+            for changed in [third.clone(), ExecImage { name: "/alias".into(), ..python.clone() },
+                ExecImage { name: "/alias".into(), ..parent.clone() }] {
+                assert_eq!(phase.observe(&python, &parent, Ok(changed)), Err(ObservationFailure::ExecCheck));
+            }
+            for alias in [python.clone(), ExecImage { name: parent.name.clone(), ..python.clone() },
+                ExecImage { name: python.name.clone(), ..parent.clone() },
+                ExecImage { name: parent.name.clone(), identity: ExecIdentity { size: 129, ..identity } }] {
+                assert_eq!(phase.observe(&python, &alias, Ok(python.clone())), Err(ObservationFailure::ExecCheck));
+            }
+            for failure in [ObservationFailure::ChildId, ObservationFailure::Entry, ObservationFailure::ExecRead,
+                ObservationFailure::ExecCheck, ObservationFailure::MapsRead, ObservationFailure::MapsCheck(MapRefusal::Address),
+                ObservationFailure::EnvironmentRead, ObservationFailure::EnvironmentCheck, ObservationFailure::HoldRefused] {
+                let before = phase;
+                assert_eq!(phase.observe(&python, &parent, Err(failure)), Err(failure));
+                assert_eq!(phase, before);
+            }
+        }
+        for mode in [0o040555, 0o120555, 0o100755 | 0o020, 0o100555 | 0o4000, 0o100444] {
+            assert!(!(ExecIdentity { mode, ..identity }).protected());
+        }
+        for changed in [ExecIdentity { inode: 0, ..identity }, ExecIdentity { uid: 1, ..identity },
+            ExecIdentity { gid: 1, ..identity }, ExecIdentity { links: 0, ..identity }, ExecIdentity { links: 2, ..identity },
+            ExecIdentity { size: 0, ..identity }, ExecIdentity { mtime: (7, -1), ..identity },
+            ExecIdentity { mtime: (7, 1_000_000_000), ..identity }, ExecIdentity { ctime: (9, -1), ..identity },
+            ExecIdentity { ctime: (9, 1_000_000_000), ..identity }] {
+            assert!(!changed.protected());
+        }
     }
     fn run_number(name: &str) -> String {
         let value = std::env::var(name).expect("original hosted run binding");
@@ -2883,36 +3093,56 @@ mod installed_native_fixture {
     pub(super) fn observe_original_child(id: u32, _key: u64, end: Instant, stop: watch::Receiver<bool>, inner: &Inner, case: Case,
         historical: Option<HistoricalPayloadSnapshot>)
         -> Result<Vec<ChildObservation>, ObservationFailure> {
-        let mut snapshots = Vec::new();
-        let Some(first) = child_snapshot(id, end, &stop, historical)? else { return Ok(snapshots); };
-        snapshots.push(first);
-        match case {
-            #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
-            Case::SessionObserve | Case::SessionLoss | Case::SessionDeadline => {
-                // Same original child/IO checkpoint, no new owner or clock.
-                shell_shutdown_observation::hold_session_query(inner, _key, end, &stop, case).map_err(|_| ObservationFailure::HoldRefused)?;
-            },
-            Case::Shutdown => {
-                inner.native_test.held.store(true, Ordering::SeqCst);
-                inner.changed.notify_waiters();
-                while live(end, &stop) { std::thread::sleep(Duration::from_millis(1)); }
-            },
-            Case::Overlap => {
-                let release = ready(end).map_err(|_| ObservationFailure::HoldRefused)?;
-                while live(end, &stop) {
-                    let value = original_bytes(&release, 32, true).map_err(|_| ObservationFailure::HoldRefused)?;
-                    if value.as_slice() == b"release\n" {
-                        if let Some(second) = child_snapshot(id, end, &stop, historical)? { snapshots.push(second); }
-                        return Ok(snapshots);
-                    }
-                    need(value.as_slice() == b"pending\n").map_err(|_| ObservationFailure::HoldRefused)?;
-                    std::thread::sleep(Duration::from_millis(1));
+        need(id > 0).map_err(|_| ObservationFailure::ChildId)?;
+        let Some(python) = current_python_original(end, &stop)? else { return Ok(Vec::new()); };
+        let observed = (|| {
+            let Some(parent) = proc_exec_original(Path::new("/proc/self/exe"), end, &stop)? else { return Ok(Vec::new()); };
+            let returned = (|| {
+                if !live(end, &stop) { return Ok(Vec::new()); }
+                python.check_name()?;
+                parent.check_name()?;
+                distinct_exec_images(&python.image, &parent.image)?;
+                // One irreversible phase for this unreaped original Child,
+                // including both initial and Overlap snapshots below.
+                let mut phase = ExecPhase::BeforeExec;
+                let mut snapshots = Vec::new();
+                let Some(first) = child_snapshot(id, end, &stop, historical, &python, &parent, &mut phase)? else { return Ok(snapshots); };
+                snapshots.push(first);
+                match case {
+                    #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
+                    Case::SessionObserve | Case::SessionLoss | Case::SessionDeadline => {
+                        // Same original child/IO checkpoint, no new owner or clock.
+                        shell_shutdown_observation::hold_session_query(inner, _key, end, &stop, case).map_err(|_| ObservationFailure::HoldRefused)?;
+                    },
+                    Case::Shutdown => {
+                        inner.native_test.held.store(true, Ordering::SeqCst);
+                        inner.changed.notify_waiters();
+                        while live(end, &stop) { std::thread::sleep(Duration::from_millis(1)); }
+                    },
+                    Case::Overlap => {
+                        let release = ready(end).map_err(|_| ObservationFailure::HoldRefused)?;
+                        while live(end, &stop) {
+                            let value = original_bytes(&release, 32, true).map_err(|_| ObservationFailure::HoldRefused)?;
+                            if value.as_slice() == b"release\n" {
+                                if let Some(second) = child_snapshot(id, end, &stop, historical, &python, &parent, &mut phase)? { snapshots.push(second); }
+                                return Ok(snapshots);
+                            }
+                            need(value.as_slice() == b"pending\n").map_err(|_| ObservationFailure::HoldRefused)?;
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                    },
+                    Case::Observe => {},
+                    _ => return Err(ObservationFailure::Entry),
                 }
-            },
-            Case::Observe => {},
-            _ => return Err(ObservationFailure::Entry),
-        }
-        Ok(snapshots)
+                Ok(snapshots)
+            })();
+            // These closures keep all early returns/errors inside both checked
+            // closes. Lost close/identity never turns an observation into success.
+            let closed = parent.close();
+            closed.and(returned)
+        })();
+        let closed = python.close();
+        closed.and(observed)
     }
     pub(super) fn report(snapshots: &[ChildObservation]) {
         for snapshot in snapshots {

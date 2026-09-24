@@ -47,10 +47,10 @@ EMFILE_MARKER = "MRK_INSTALLED_NATIVE_EMFILE_RETAINED_UNKNOWN"
 SHELL_SESSION_CASES = ("session-inputs", "session-refusals", "session-loss", "session-deadline")
 SHELL_TOOLS_OFFLINE_CASES = ("tools-observed", "tools-cancel", "tools-settlement", "offline-pass", "offline-negative",
                            "offline-drift", "offline-cancel", "offline-settlement")
-# Preserve the original ten-case order; these eight are qualification-only.
+# Preserve all eighteen existing cases; the last case expects one exact raw failure.
 SHELL_CASES = ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply", *SHELL_SESSION_CASES, "metadata-save",
-               *SHELL_TOOLS_OFFLINE_CASES)
-SHELL_PUBLIC_FILE_LIMIT = 160  # Exact eighteen-case roster:154; non-shell remains128.
+               *SHELL_TOOLS_OFFLINE_CASES, "settled-failure")
+SHELL_PUBLIC_FILE_LIMIT = 160  # Exact nineteen-case roster:158; non-shell remains128.
 SHELL_FIXTURE_NAMESPACE_LIMIT = 2048
 SHELL_FAILURE_LABEL_LIMIT = 512
 SHELL_PATH_FAILURE_FRAME_BOUND = 256
@@ -67,6 +67,7 @@ SHELL_FAILURE_STEPS = (
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=Cancel\n",
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=Cancelled\n",
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadCancelled\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SettledFailure\n",
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=ChooseSelect\n",
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=SetProject\n",
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=SelectProject\n",
@@ -444,7 +445,7 @@ SHELL_SESSION_HOSTED_MAP_WORKERS = (
 )
 SHELL_SESSION_WORKERS = (
     b"na", b"unavailable", b"none-recorded", b"child-id", b"observe-entry", b"maps-read", b"maps-check", b"env-read", b"env-check",
-    b"hold-refused", b"settle-unknown",
+    b"hold-refused", b"settle-unknown", b"exec-read", b"exec-check",
     # Same-read refusal categories, not raw values or an inferred root cause.
     # Historical maps-check above remains generic and distinguishable.
     b"map-p-utf", b"map-p-nl", b"map-p-row", b"map-p-cols", b"map-p-addr", b"map-p-order", b"map-p-perm", b"map-p-offset", b"map-p-dev", b"map-p-inode",
@@ -2062,8 +2063,10 @@ def _capacity(value):
         required += sum(len(row[3]) for row in tools_offline_nodes if stat.S_ISREG(row[1]))
         # Each added existing GUI route creates eight directories, auth and
         # bus-config files, its log, and a bus socket. The shell-only160 output
-        # slots cover the154 originals; TOTAL_LIMIT is unchanged.
-        session_environment_nodes = 12 * (len(SHELL_SESSION_CASES) + len(SHELL_TOOLS_OFFLINE_CASES))
+        # slots cover the158 originals; TOTAL_LIMIT is unchanged. The last
+        # settled-failure route is outside both fixture groups but needs its
+        # own same twelve-node GUI environment in both block/inode accounting.
+        session_environment_nodes = 12 * (len(SHELL_SESSION_CASES) + len(SHELL_TOOLS_OFFLINE_CASES) + 1)
     inodes = 2 * max(capacity["installedEntries"].values()) + 2 * 8192 + (SHELL_PUBLIC_FILE_LIMIT if "shell" in value else 128)
     if "shell" in value:
         inodes += len(SHELL_CASES[1:]) + 1 + 12 + 14 + len(session_nodes) + len(tools_offline_nodes) + session_environment_nodes
@@ -2106,11 +2109,14 @@ def command(label, argv, *, maximum=120, codes=(0,), env=None, endpoint=None, sh
         need(type(shell_log) is tuple and len(shell_log) == 3
              and shell_log[1] in SHELL_CASES[1:] and label == "shell-" + shell_log[1]
              and argv == shell_argv(shell_log[0], shell_log[1]), "Different fixed shell log route")
+    settled_failure = label == "shell-settled-failure"
+    need(not settled_failure or shell_log is not None and codes == (0,),
+         "Settled-failure requires its original shell route, not an exit-code override")
     # The fixed overlap configure may only SHORTEN this original endpoint.
     need(endpoint is None or type(endpoint) in {int, float} and math.isfinite(endpoint), "Fixed finite command cap required")
     bound = _END if endpoint is None else min(_END, endpoint)
     _FAILED = True
-    failure_sink = None
+    failure_sink, result = None, None
     try:
         if shell_log is not None:
             failure_sink = _shell_labels_prepare(shell_log[0], shell_log[1])
@@ -2136,16 +2142,29 @@ def command(label, argv, *, maximum=120, codes=(0,), env=None, endpoint=None, sh
         _command_capture(label, argv, result, seconds)
         if endpoint is not None:
             _COMMANDS[-1].update(originalEndpoint=bound, startMonotonic=started)
-        accepted = result.returncode in codes and time.monotonic() < bound
+        accepted = not settled_failure and result.returncode in codes and time.monotonic() < bound
         display_log, log_error = None, None
         if shell_log is not None:
             try:
                 display_log = _shell_log_capture(*shell_log, result)
             except BaseException as error:
                 log_error = error
+            label_data = None
+            if settled_failure and result.returncode == 1 and log_error is None and time.monotonic() < bound:
+                # Mark this original read as attempted BEFORE entering it. Even
+                # a read/parse/export error must not let diagnostics read again.
+                label_data = (None, None)
+                try:
+                    label_data = _shell_labels_read(failure_sink, with_raw=True)
+                    _shell_settled_failure_result(result.stdout, result.stderr, shell_log[1], result.returncode, label_data[0])
+                    _retain("shell-settled-failure-failure.labels", label_data[0])
+                    accepted = True  # Still _FAILED until checked close and the final endpoint check below.
+                except BaseException as error:
+                    log_error = error
             if not accepted or log_error is not None:
                 try:
-                    _shell_command_failure(argv, result, shell_log[1], display_log, log_error, failure_sink, call)
+                    _shell_command_failure(argv, result, shell_log[1], display_log, log_error, failure_sink, call,
+                                           label_data=label_data)
                 except BaseException:
                     pass  # Diagnosis cannot replace the pending refusal/original log error.
             if not accepted:
@@ -2155,7 +2174,8 @@ def command(label, argv, *, maximum=120, codes=(0,), env=None, endpoint=None, sh
                 raise Refused("Original root command failed or completed late") from log_error
             if log_error is not None:
                 raise log_error
-            need(time.monotonic() < bound, "Original shell log captured after endpoint")
+            need(time.monotonic() < bound, "Original root command failed or completed late" if settled_failure
+                 else "Original shell log captured after endpoint")
         if not accepted and label in {"native-root", "native-user", "observe-unpacked", "observe-p0",
                                      "observe-upgrade", "observe-duplicate", "observe-remove", "observe-purge"}:
             # Only these fixed credential-free fixtures may expose bounded DATA
@@ -2166,14 +2186,29 @@ def command(label, argv, *, maximum=120, codes=(0,), env=None, endpoint=None, sh
                 "stderrPrefix": result.stderr[:1024].decode("utf-8", errors="backslashreplace")}
             sys.stderr.write("Fixture command failure DATA: " + canonical(diagnostic).decode("ascii"))
         need(accepted, "Original root command failed or completed late")
+    except BaseException as error:
+        if settled_failure and type(result) is subprocess.CompletedProcess and not isinstance(error, Refused):
+            # The returned expected-negative is not yet accepted. Retention,
+            # clock and classification errors cannot replace that failed outcome.
+            raise Refused("Original root command failed or completed late") from error
+        raise
     finally:
         if failure_sink is not None:
             active_failure = sys.exc_info()[0] is not None
             try:
                 os.close(failure_sink[0])  # This exact retained original, once; no reopen/unlink.
-            except BaseException:
+            except BaseException as error:
                 if not active_failure:
+                    if settled_failure:
+                        raise Refused("Original root command failed or completed late") from error
                     raise  # _FAILED remains True; a lost close cannot qualify.
+    if settled_failure:
+        try:
+            need(time.monotonic() < bound, "Original root command failed or completed late")
+        except BaseException as error:
+            if isinstance(error, Refused):
+                raise
+            raise Refused("Original root command failed or completed late") from error
     _FAILED = False
     return result
 
@@ -2735,7 +2770,7 @@ def public_files(value):
                         "shell-project-paths-before.json", "shell-project-paths-after.json",
                         "shell-workflow-apply-before.json", "shell-workflow-apply-after.json",
                         "shell-metadata-save-before.json", "shell-metadata-save-after.json",
-                        "published-before-upgrade.txt", "mutation-denials.txt"} \
+                        "published-before-upgrade.txt", "mutation-denials.txt", "shell-settled-failure-failure.labels"} \
             | {"shell-" + case + "-xvfb.stderr" for case in SHELL_CASES} \
             | {"shell-" + case + "-" + phase + ".json" for case in SHELL_SESSION_CASES for phase in ("before", "after")} \
             | {"shell-" + case + "-" + phase + ".json" for case in SHELL_TOOLS_OFFLINE_CASES for phase in ("before", "after")} \
@@ -4080,7 +4115,7 @@ def _shell_label_pair(raw):
     return result
 
 
-def _shell_labels_read(original):
+def _shell_labels_read(original, *, with_raw=False):
     """Only the exact original read FD, after this call's strict typed settlement gate."""
     fd, binding = original
     before = identity(os.fstat(fd))
@@ -4090,7 +4125,10 @@ def _shell_labels_read(original):
     raw = os.read(fd, SHELL_FAILURE_LABEL_LIMIT + 1)  # One attempt; no seek, reopen or suffix retry.
     need(type(raw) is bytes and len(raw) == before[6] and identity(os.fstat(fd)) == before,
          "Original shell label read was incomplete or changed")
-    return _shell_label_pair(raw)
+    parsed = _shell_label_pair(raw)
+    # The one fixed negative case needs this SAME original read for its public
+    # raw frame and diagnosis. Neither consumer may reopen/reread the source.
+    return (raw, parsed) if with_raw else parsed
 
 
 def _shell_log_prepare(value, case):
@@ -5479,8 +5517,35 @@ def _shell_original_child_map(raw, expected):
     return rows
 
 
-def shell_result(stdout, stderr, case, code, expected):
+SHELL_SETTLED_FAILURE_LABELS = (b"MRK_INSTALLED_SHELL_FAILURE_STEP=SettledFailure\n"
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=dom\nMRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n")
+
+
+def _shell_settled_failure_result(stdout, stderr, case, code, labels):
+    """One closed expected-negative observation, never general code1 acceptance."""
+    need(case == "settled-failure" and type(code) is int and code == 1
+         and type(stdout) is bytes and type(stderr) is bytes and len(stdout) + len(stderr) <= LIMIT
+         and type(labels) is bytes and labels == SHELL_SETTLED_FAILURE_LABELS
+         and _shell_label_pair(labels) == {"step": "SettledFailure", "boundary": "dom", "bootstrapProgress": "advanced"},
+         "Original settled-failure capture or first label differs")
+    def records(raw):
+        lines = raw.split(b"\n")  # Retain prefixed records and unterminated tails; CR is not LF.
+        return [line + b"\n" if index < len(lines) - 1 else line
+                for index, line in enumerate(lines) if b"MRK_" in line]
+    need(records(stdout) == [b"MRK_DESKTOP_CAPABILITIES=available\n", b"MRK_DESKTOP_CATALOGUE=returned\n",
+         *SHELL_SETTLED_FAILURE_LABELS.splitlines(keepends=True),
+         b"MRK_INSTALLED_SHELL_FAILURE_HANDOFF=original-quit-relay-loop-returned\n",
+         b"MRK_INSTALLED_SHELL_OBSERVATION=failed\n"] and records(stderr) == [],
+         "Original settled-failure bootstrap/label/handoff/failure order differs")
+    return {"case": case, "exitCode": 1, "bootstrapReturned": True, "domAndGtkObserved": True, "maps": [],
+            "qualified": False, "expectedFailureObserved": True, "failureHandoff": "original-quit-relay-loop-returned"}
+
+
+def shell_result(stdout, stderr, case, code, expected, *, failure_labels=None):
     """Original bounded captures, not wrapper zero or an observation delay."""
+    if case == "settled-failure":
+        return _shell_settled_failure_result(stdout, stderr, case, code, failure_labels)
+    need(failure_labels is None, "A success-requiring case supplied a failure-label export")
     need(case in SHELL_CASES and type(code) is int and code == 0
          and type(stdout) is bytes and type(stderr) is bytes and len(stdout) + len(stderr) <= LIMIT,
          "Original shell capture failed/incomplete")
@@ -5836,7 +5901,7 @@ def _shell_failure_output(marker, data):
         sys.stderr.flush()
 
 
-def _shell_command_failure(argv, result, case, display_log, log_error, original, call):
+def _shell_command_failure(argv, result, case, display_log, log_error, original, call, *, label_data=None):
     """Same actual owner return and original sidecar only; never a verdict."""
     try:
         capture = _shell_capture_summary(result, argv, display_log)
@@ -5845,7 +5910,7 @@ def _shell_command_failure(argv, result, case, display_log, log_error, original,
         if capture is not None:
             reason = "unavailable"
             try:
-                labels = _shell_labels_read(original)
+                labels = _shell_labels_read(original) if label_data is None else label_data[1]
             except BaseException:
                 pass
             if labels is not None:
@@ -6334,7 +6399,12 @@ def unit_start():
             else:
                 result = command("shell-" + case, shell_argv(value, case), maximum=60, env=environment,
                                  shell_log=(value, case, log_binding))
-                cases[case] = shell_result(result.stdout, result.stderr, case, result.returncode, expected)
+                # Only the immutable public copy is reread after command closed
+                # the single original label FD; never reopen the private leaf.
+                failure_labels = read(_ROOT / "public/shell-settled-failure-failure.labels", SHELL_FAILURE_LABEL_LIMIT) \
+                    if case == "settled-failure" else None
+                cases[case] = shell_result(result.stdout, result.stderr, case, result.returncode, expected,
+                                          failure_labels=failure_labels)
                 if case == "positive":
                     after = canonical(_shell_project_inventory(value, namespace, saved=True))
                     _retain("shell-positive-project-after.json", after)
@@ -6638,7 +6708,8 @@ def shell_closed_result(value, outcome, raw_files):
         streams = [raw_files[phase + suffix] for suffix in (".stdout", ".stderr", "-xvfb.stderr")]
         need(all(type(raw) is bytes for raw in streams) and sum(map(len, streams)) <= LIMIT,
              "Closed original shell combined output differs")
-        result = shell_result(raw_files[phase + ".stdout"], raw_files[phase + ".stderr"], case, commands[phase]["exitCode"], expected)
+        result = shell_result(raw_files[phase + ".stdout"], raw_files[phase + ".stderr"], case, commands[phase]["exitCode"], expected,
+            failure_labels=raw_files["shell-settled-failure-failure.labels"] if case == "settled-failure" else None)
         need(canonical(result) == canonical(cases[case]),
              "Closed original shell capture differs")
     fixture = shell_project_fixture(value, raw_files["shell-positive-project-before.json"], raw_files["shell-positive-project-after.json"])
@@ -6683,6 +6754,7 @@ def shell_closed_result(value, outcome, raw_files):
             "sessionInputs": sessions,
             "metadataSave": {"native": cases["metadata-save"]["metadataSave"], "fixture": metadata},
             "toolsOffline": tools_offline,
+            "settledFailure": cases["settled-failure"],
             "packageLifecycleQualified": False, "shellPackageBuilt": False}
 
 
@@ -6725,6 +6797,10 @@ def verify_service_result(handoff_path, handoff_sha256, entry_sha256, client_res
          and len(stop["commands"]) == 1 and stop["commands"][0]["phase"] == "stop-unit-show"
          and stop["commands"][0]["exitCode"] == 0, "Original lifecycle phase/result roster differs")
     for row in outcome["commands"]:
+        if row["phase"] == "shell-settled-failure":
+            need("shell" in value and type(row["exitCode"]) is int and row["exitCode"] == 1,
+                 "Original settled-failure phase must retain raw exit1")
+            continue  # Full raw capture/label classification follows only after unchanged finality and export checks.
         codes = (79,) if row["phase"] == "installed-emfile" else (0, 1) if row["phase"] in {"state-initial", "state-purge"} else ((1,) if row["phase"] in {"nonroot-helper", "duplicate"} else (0,))
         need(type(row["exitCode"]) is int and row["exitCode"] in codes, "Original lifecycle phase exit differs")
     verify_package_observations(outcome["commands"], root)

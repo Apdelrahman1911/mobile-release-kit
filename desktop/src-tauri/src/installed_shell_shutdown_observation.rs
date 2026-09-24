@@ -577,7 +577,8 @@ mod session {
         use installed_native_fixture::{MapRefusal as R, MapMetadataRefusal as M, MapRole};
         installed_native_fixture::assert_mappings_diagnostic_contract();
         let mut resources = Resources::default();
-        for (failure, token) in [(F::ChildId,b"child-id".as_slice()), (F::Entry,b"observe-entry"), (F::MapsRead,b"maps-read"),
+        for (failure, token) in [(F::ChildId,b"child-id".as_slice()), (F::Entry,b"observe-entry"),
+            (F::ExecRead,b"exec-read"), (F::ExecCheck,b"exec-check"), (F::MapsRead,b"maps-read"),
             (F::MapsCheck(R::Newline),b"map-p-nl"), (F::MapsCheck(R::Metadata(MapRole::Crypto, M::Owner)),b"map-m-owner-cr"),
             (F::MapsCheck(R::ExecutableHistoricalPayload(crate::installed_runtime::HistoricalPayloadRole::Python)),b"map-x-hist-py"),
             (F::EnvironmentRead,b"env-read"), (F::EnvironmentCheck,b"env-check"), (F::HoldRefused,b"hold-refused")] {
