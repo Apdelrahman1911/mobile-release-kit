@@ -16,12 +16,12 @@ jobs:
       run:
         shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
     env:
-      MRK_GNO_SOURCE_SHA256: 876b40514a88306402f7648c70abdb971bc6402c0902034d14a4571bff5e9bf5
+      MRK_GNO_SOURCE_SHA256: 1f6f047c22f9355ff7c7bb562c366c9dfa89cf9d633b39526b0954cd3bb4b99b
       MRK_GNO_PROGRAM: |-
-        """Two fixed Python target seeds and nine parent originals; DATA only.
+        """Three fixed targets and twelve parent originals; installed-version DATA only.
         
         Reuse the original provider bootstrap, private owner, foreground wait and return.
-        Only a bounded actual library chain, two body hashes and parent facts are public.
+        Only bounded library/parent facts, three body hashes and selected package fields are public.
         """
         import base64
         import errno
@@ -33,8 +33,8 @@ jobs:
         import stat
         import sys
         
-        POLICY_SHA256 = "02ab217343932e833906c457e266c7c8c929484b41ebb8e11dda714414df6eff"
-        RUNTIME_POLICY_JSON = r'''{"attempt":"1","bootstrapTrust":"provider-managed disposable runner/OS, workflow shell, env/timeout/initial isolated Python; post-use hashes are not retroactive admission","caps":{"frameBytes":65536,"linkTextBytes":512,"outputBytes":16384,"pathBytes":512,"streamBytes":65536},"event":"push","nonClaims":["not a C/A/W or native fixture run","no initial interpreter self-authentication","no actual loader/cache mapping or unknown config/provider closure","no sudo/PAM/policy/account bodies or account reservation proof","no continuity to H0, earlier observations or any later VM","no compiler-wide or service/runner/checkout/action/Node/Docker census","all future exact source/runtime/native/account/ownership gates remain required","host target measurements are not package provenance, G2 closure or consumer admission","no source-alias reread, supplier directory listing, resolver body, CA alias or proc read","only validated numeric library-alias texts and body hashes are public; no regular body export","resolver service ownership applies to one metadata-only parent, not root-trusted hostFiles"],"parents":[{"gid":0,"mode":493,"parent":null,"path":"/","role":"protected-parent","uid":0},{"gid":0,"mode":493,"parent":0,"path":"/usr","role":"protected-parent","uid":0},{"gid":0,"mode":493,"parent":1,"path":"/usr/lib","role":"protected-parent","uid":0},{"gid":0,"mode":493,"parent":2,"path":"/usr/lib/x86_64-linux-gnu","role":"protected-parent","uid":0},{"gid":0,"mode":493,"parent":0,"path":"/etc","role":"protected-parent","uid":0},{"gid":0,"mode":493,"parent":4,"path":"/etc/python3.12","role":"protected-parent","uid":0},{"gid":0,"mode":493,"parent":0,"path":"/run","role":"protected-parent","uid":0},{"gid":0,"mode":493,"parent":6,"path":"/run/systemd","role":"protected-parent","uid":0},{"gid":991,"mode":493,"parent":7,"path":"/run/systemd/resolve","role":"resolver-parent-metadata-only","uid":991}],"ref":"refs/heads/verify/desktop-gnome-host-observation","repository":"Apdelrahman1911/mobile-release-kit","targets":[{"maxBytes":16777216,"maxEdges":2,"parent":3,"path":"/usr/lib/x86_64-linux-gnu/libpython3.12.so.1"},{"maxBytes":16384,"maxEdges":0,"parent":5,"path":"/etc/python3.12/sitecustomize.py"}],"workflow":".github/workflows/desktop-gnome-host-observation.yml"}'''
+        POLICY_SHA256 = "a86c09d013f95300a3e96253a3902faf0b348333168b616d80d74893b4287133"
+        RUNTIME_POLICY_JSON = r'''{"attempt":"1","bootstrapTrust":"provider-managed disposable runner/OS, workflow shell, env/timeout/initial isolated Python; post-use hashes are not retroactive admission","caps":{"frameBytes":65536,"linkTextBytes":512,"outputBytes":16384,"pathBytes":512,"streamBytes":65536},"event":"push","nonClaims":["not a C/A/W or native fixture run","no initial interpreter self-authentication","no actual loader/cache mapping or unknown config/provider closure","no sudo/PAM/policy/account bodies or account reservation proof","no continuity to H0, earlier observations or any later VM","no compiler-wide or service/runner/checkout/action/Node/Docker census","all future exact source/runtime/native/account/ownership gates remain required","host target measurements are not package provenance, G2 closure or consumer admission","no source-alias reread, supplier directory listing, resolver body, CA alias or proc read","only validated numeric library-alias texts, body hashes and selected installed-package fields are public; no regular body export","resolver service ownership applies to one metadata-only parent, not root-trusted hostFiles","installed package status is not signed supplier authority, installation history, atomic package-manager state, loader closure or later-consumer continuity"],"packageStatus":{"architecture":"amd64","fieldNameBytes":64,"fieldValueBytes":192,"lineBytes":65536,"package":"libpython3.12t64","status":"install ok installed","targetIndex":2},"parents":[{"gid":0,"mode":493,"parent":null,"path":"/","role":"protected-parent","uid":0},{"gid":0,"mode":493,"parent":0,"path":"/usr","role":"protected-parent","uid":0},{"gid":0,"mode":493,"parent":1,"path":"/usr/lib","role":"protected-parent","uid":0},{"gid":0,"mode":493,"parent":2,"path":"/usr/lib/x86_64-linux-gnu","role":"protected-parent","uid":0},{"gid":0,"mode":493,"parent":0,"path":"/etc","role":"protected-parent","uid":0},{"gid":0,"mode":493,"parent":4,"path":"/etc/python3.12","role":"protected-parent","uid":0},{"gid":0,"mode":493,"parent":0,"path":"/run","role":"protected-parent","uid":0},{"gid":0,"mode":493,"parent":6,"path":"/run/systemd","role":"protected-parent","uid":0},{"gid":991,"mode":493,"parent":7,"path":"/run/systemd/resolve","role":"resolver-parent-metadata-only","uid":991},{"gid":0,"mode":493,"parent":0,"path":"/var","role":"protected-parent","uid":0},{"gid":0,"mode":493,"parent":9,"path":"/var/lib","role":"protected-parent","uid":0},{"gid":0,"mode":493,"parent":10,"path":"/var/lib/dpkg","role":"protected-parent","uid":0}],"ref":"refs/heads/verify/desktop-gnome-host-observation","repository":"Apdelrahman1911/mobile-release-kit","targets":[{"maxBytes":16777216,"maxEdges":2,"parent":3,"path":"/usr/lib/x86_64-linux-gnu/libpython3.12.so.1"},{"maxBytes":16384,"maxEdges":0,"parent":5,"path":"/etc/python3.12/sitecustomize.py"},{"maxBytes":16777216,"maxEdges":0,"mode":420,"parent":11,"path":"/var/lib/dpkg/status"}],"workflow":".github/workflows/desktop-gnome-host-observation.yml"}'''
         P = json.loads(RUNTIME_POLICY_JSON)
         D = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
         F = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
@@ -195,6 +195,91 @@ jobs:
             need(stat.S_ISREG(s.st_mode) and s.st_uid == s.st_gid == 0
                  and s.st_nlink == 1 and stat.S_IMODE(s.st_mode) in (0o644, 0o755)
                  and 0 < s.st_size <= spec["maxBytes"])
+            if spec["path"] == "/var/lib/dpkg/status":
+                need(stat.S_IMODE(s.st_mode) == 0o644 and spec["maxEdges"] == 0)
+
+
+        def debian_version(value):
+            """Bounded Debian Version spelling; preserved, never package/supplier authority."""
+            need(type(value) is str and value.isascii()
+                 and 0 < len(value) <= P["packageStatus"]["fieldValueBytes"])
+            body = value
+            if ":" in body:
+                epoch, body = body.split(":", 1)
+                need(re.fullmatch(r"[0-9]+", epoch) is not None)
+            upstream, dash, revision = body.rpartition("-")
+            if dash:
+                need(re.fullmatch(r"[A-Za-z0-9+.~]+", revision) is not None)
+            else:
+                upstream = body
+            need(re.fullmatch(r"[0-9][A-Za-z0-9.+:~\-]*", upstream) is not None)
+            return value
+
+
+        def public_package_status(value):
+            expected = P["packageStatus"]
+            need(type(value) is dict and set(value) ==
+                 {"package", "architecture", "status", "version", "targetIndex"})
+            need(all(type(value[k]) is str and value[k] == expected[k]
+                     for k in ("package", "architecture", "status"))
+                 and type(value["targetIndex"]) is int and value["targetIndex"] == expected["targetIndex"])
+            debian_version(value["version"])
+            return value
+
+
+        def package_status(raw):
+            """Read-only control paragraphs from the SAME bytes hashed by fixed_targets."""
+            spec = P["packageStatus"]
+            need(type(raw) is bytes and 0 < len(raw) <= P["targets"][spec["targetIndex"]]["maxBytes"]
+                 and b"\0" not in raw and b"\r" not in raw)
+            names = {b"package": b"Package", b"architecture": b"Architecture",
+                     b"status": b"Status", b"version": b"Version"}
+            fields, previous, found, offset = {}, None, None, 0
+            # Iterate bounded individual lines rather than materializing a database roster.
+            while offset <= len(raw):
+                end = raw.find(b"\n", offset)
+                if end < 0:
+                    end = len(raw)
+                need(end - offset <= spec["lineBytes"])
+                line, offset = raw[offset:end], end + 1
+                if not line:
+                    if fields.get(b"package") == spec["package"].encode("ascii"):
+                        need(found is None and set(fields) == set(names))
+                        found = public_package_status({
+                            "package": fields[b"package"].decode("ascii"),
+                            "architecture": fields[b"architecture"].decode("ascii"),
+                            "status": fields[b"status"].decode("ascii"),
+                            "version": fields[b"version"].decode("ascii"),
+                            "targetIndex": spec["targetIndex"],
+                        })
+                    fields, previous = {}, None
+                    continue
+                if line[:1] in (b" ", b"\t"):
+                    need(previous is not None and previous not in names)
+                    continue  # Unrelated description/asset text is neither decoded nor exported.
+                key, separator, value = line.partition(b":")
+                need(separator == b":" and 0 < len(key) <= spec["fieldNameBytes"]
+                     and re.fullmatch(rb"[A-Za-z0-9][A-Za-z0-9-]*", key) is not None)
+                previous = key.lower()
+                if previous in names:
+                    need(key == names[previous] and previous not in fields)
+                    value = value[1:] if value.startswith(b" ") else value
+                    need(0 < len(value) <= spec["fieldValueBytes"] and value.isascii()
+                         and not any(c < 32 or c == 127 for c in value)
+                         and value == value.strip(b" "))
+                    fields[previous] = value
+            # An unterminated final paragraph still needs the same single-target check.
+            if fields.get(b"package") == spec["package"].encode("ascii"):
+                need(found is None and set(fields) == set(names))
+                found = public_package_status({
+                    "package": fields[b"package"].decode("ascii"),
+                    "architecture": fields[b"architecture"].decode("ascii"),
+                    "status": fields[b"status"].decode("ascii"),
+                    "version": fields[b"version"].decode("ascii"),
+                    "targetIndex": spec["targetIndex"],
+                })
+            need(found is not None)
+            return found
         
         
         def public_alias_text(raw):
@@ -211,11 +296,12 @@ jobs:
         
         
         def fixed_targets():
-            """Two target seeds through one explicit nine-parent DAG, no directory census."""
+            """Three target seeds through one explicit twelve-parent DAG, no directory census."""
             specs = P["parents"]
             parent_fds, terminal_fds = [None] * len(specs), [None] * len(P["targets"])
             terminal_paths = [None] * len(P["targets"])
             parents, targets, closed = [], [], []
+            selected_status = None
             reads = {"symlinkTexts": 0, "symlinkBytes": 0, "regularBodies": 0, "regularBodyBytes": 0}
             original_error, close_failed = None, False
             try:
@@ -269,11 +355,14 @@ jobs:
                         fixed_regular_shape(named, spec)
                         need(ident(before) == ident(held) == ident(named) and not os.get_inheritable(fd))
                         digest, size = hashlib.sha256(), 0
+                        status_body = bytearray() if number == P["packageStatus"]["targetIndex"] else None
                         while size < before.st_size:
                             count = min(P["caps"]["streamBytes"], before.st_size - size)
                             chunk = os.read(fd, count)
                             need(type(chunk) is bytes and 0 < len(chunk) <= count)
                             digest.update(chunk)
+                            if status_body is not None:
+                                status_body.extend(chunk)
                             size += len(chunk)
                             reads["regularBodyBytes"] += len(chunk)
                         need(os.read(fd, 1) == b"")
@@ -285,6 +374,9 @@ jobs:
                              and not os.get_inheritable(fd))
                         nodes.append({"path": current, "kind": "regular", "before": ident(before),
                                       "after": ident(held), "bytes": size, "sha256": digest.hexdigest()})
+                        if status_body is not None:
+                            selected_status = package_status(bytes(status_body))
+                            status_body = None
                         reads["regularBodies"] += 1
                         targets.append({"seed": spec["path"], "parent": spec["parent"], "nodes": nodes})
                         break
@@ -339,8 +431,8 @@ jobs:
             if original_error is not None:
                 raise original_error
             expected = list(reversed(terminal_paths)) + [s["path"] for s in reversed(specs)]
-            need(not close_failed and closed == expected)
-            return targets, parents, {"order": closed, "allReturned": True}, reads
+            need(not close_failed and closed == expected and selected_status is not None)
+            return targets, parents, {"order": closed, "allReturned": True}, reads, selected_status
         
         
         def context():
@@ -441,11 +533,11 @@ jobs:
                      and s.st_uid == os.getuid() and stat.S_IMODE(s.st_mode) == 0o600
                      and s.st_nlink == 1 and s.st_size == 0)
                 captures[name] = ident(s)
-            targets, parents, closes, reads = fixed_targets()
-            value = {"schema": "mrk-gnome-python-target-parent-observation-1",
-                     "scope": "two-python-targets-nine-parents-only-no-admission",
+            targets, parents, closes, reads, selected_status = fixed_targets()
+            value = {"schema": "mrk-gnome-libpython-installed-version-observation-1",
+                     "scope": "three-targets-twelve-parents-installed-version-no-admission",
                      "binding": binding(e, event_digest), "targets": targets, "parents": parents,
-                     "originalCloses": closes, "supplierReads": reads,
+                     "originalCloses": closes, "supplierReads": reads, "packageStatus": selected_status,
                      "bootstrapTrust": P["bootstrapTrust"], "nonClaims": P["nonClaims"],
                      "hostQualified": False, "nativeQualified": False,
                      "original": {"directories": dirs, "captures": captures,
@@ -482,10 +574,10 @@ jobs:
         def public_observation(value, expected_binding):
             """Strict saved DATA only; no supplier I/O or package/native acceptance."""
             need(type(value) is dict and set(value) == {"schema", "scope", "binding", "targets", "parents",
-                 "originalCloses", "supplierReads", "bootstrapTrust", "nonClaims",
+                 "originalCloses", "supplierReads", "packageStatus", "bootstrapTrust", "nonClaims",
                  "hostQualified", "nativeQualified", "original"})
-            need(value["schema"] == "mrk-gnome-python-target-parent-observation-1"
-                 and value["scope"] == "two-python-targets-nine-parents-only-no-admission")
+            need(value["schema"] == "mrk-gnome-libpython-installed-version-observation-1"
+                 and value["scope"] == "three-targets-twelve-parents-installed-version-no-admission")
             need(value["binding"] == expected_binding
                  and value["hostQualified"] is False and value["nativeQualified"] is False)
             need(value["bootstrapTrust"] == P["bootstrapTrust"] and value["nonClaims"] == P["nonClaims"])
@@ -530,10 +622,17 @@ jobs:
                     else:
                         need(i == len(target["nodes"]) - 1 and s["mode"] in (0o644, 0o755)
                              and type(row["bytes"]) is int and 0 < row["bytes"] == s["bytes"] <= spec["maxBytes"])
+                        if spec["path"] == "/var/lib/dpkg/status":
+                            need(s["mode"] == 0o644 and spec["maxEdges"] == 0)
                         terminals.append(row["path"])
                         reads["regularBodies"] += 1
                         reads["regularBodyBytes"] += row["bytes"]
-            need(reads["regularBodies"] == 2 and reads["symlinkTexts"] <= 2
+            selected_status = public_package_status(value["packageStatus"])
+            status_target = value["targets"][selected_status["targetIndex"]]
+            need(status_target["seed"] == "/var/lib/dpkg/status" and len(status_target["nodes"]) == 1
+                 and status_target["nodes"][0]["path"] == status_target["seed"]
+                 and status_target["nodes"][0]["kind"] == "regular")
+            need(reads["regularBodies"] == 3 and reads["symlinkTexts"] <= 2
                  and reads["symlinkBytes"] <= 1024)
             closes = value["originalCloses"]
             need(type(closes) is dict and set(closes) == {"order", "allReturned"}
@@ -658,9 +757,9 @@ jobs:
           [[ ${GITHUB_EVENT_PATH-} == /home/runner/work/_temp/_github_workflow/event.json ]] || fail
           [[ ${ImageOS-} =~ ^[A-Za-z0-9_.-]{1,32}$ && ${ImageVersion-} =~ ^[0-9]{8}\.[0-9]{1,6}\.[0-9]{1,6}$ ]] || fail
           [[ $UID == "$EUID" && $EUID -gt 0 && -d /tmp && ! -L /tmp ]] || fail
-          [[ ${MRK_GNO_SOURCE_SHA256-} == 876b40514a88306402f7648c70abdb971bc6402c0902034d14a4571bff5e9bf5 && ${MRK_GNO_PROGRAM+x} == x ]] || fail
+          [[ ${MRK_GNO_SOURCE_SHA256-} == 1f6f047c22f9355ff7c7bb562c366c9dfa89cf9d633b39526b0954cd3bb4b99b && ${MRK_GNO_PROGRAM+x} == x ]] || fail
           readonly MRK_GNO_PROGRAM MRK_GNO_SOURCE_SHA256
-          [[ ${#MRK_GNO_PROGRAM} -eq 31597 ]] || fail
+          [[ ${#MRK_GNO_PROGRAM} -eq 37380 ]] || fail
           S="/tmp/mrk-gnome-host-observe-${GITHUB_RUN_ID}-1"
           readonly S
           # Bash non-POSIX ulimit -f is KiB; Python reapplies byte-exact limits.
@@ -719,9 +818,9 @@ jobs:
           [[ ${GITHUB_EVENT_PATH-} == /home/runner/work/_temp/_github_workflow/event.json ]] || fail
           [[ ${ImageOS-} =~ ^[A-Za-z0-9_.-]{1,32}$ && ${ImageVersion-} =~ ^[0-9]{8}\.[0-9]{1,6}\.[0-9]{1,6}$ ]] || fail
           [[ $UID == "$EUID" && $EUID -gt 0 && -d /tmp && ! -L /tmp ]] || fail
-          [[ ${MRK_GNO_SOURCE_SHA256-} == 876b40514a88306402f7648c70abdb971bc6402c0902034d14a4571bff5e9bf5 && ${MRK_GNO_PROGRAM+x} == x ]] || fail
+          [[ ${MRK_GNO_SOURCE_SHA256-} == 1f6f047c22f9355ff7c7bb562c366c9dfa89cf9d633b39526b0954cd3bb4b99b && ${MRK_GNO_PROGRAM+x} == x ]] || fail
           readonly MRK_GNO_PROGRAM MRK_GNO_SOURCE_SHA256
-          [[ ${#MRK_GNO_PROGRAM} -eq 31597 ]] || fail
+          [[ ${#MRK_GNO_PROGRAM} -eq 37380 ]] || fail
           S="/tmp/mrk-gnome-host-observe-${GITHUB_RUN_ID}-1"
           readonly S
           # Bash non-POSIX ulimit -f is KiB; Python reapplies byte-exact limits.
