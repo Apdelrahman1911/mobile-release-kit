@@ -62,6 +62,23 @@ fn owner_effect(start: Instant, latched: &mut bool, aggregate: &mut Option<Aggre
     let batch = match aggregate.as_mut() { Some(clock) => clock.sample(false).map(|_| ()), None => Ok(()) };
     local?; batch
 }
+fn owner_effect_traced(start: Instant, latched: &mut bool, aggregate: &mut Option<AggregateClock>, trace: &mut InputTrace) -> Result<()> {
+    let original = owner_effect(start, latched, aggregate);
+    trace.prerequisite_clock(*latched);
+    trace.prerequisite_result(PrerequisiteCheck::T01, original)
+}
+fn prerequisite_process_decision<T>(trace: &mut InputTrace, check: PrerequisiteCheck, original: Result<T>,
+    before: (bool, bool), facts: &ProcessFacts, native: Option<PrerequisiteNative>) -> Result<T> {
+    // State/bounds guards rejected before the native-answer classifier. They
+    // cannot borrow even an adjacent returned scalar as their cause.
+    if let Err(error) = &original {
+        let cause = if matches!(error, Error::State | Error::Bounds) { None } else { native };
+        trace.prerequisite_fault(check, *error, cause, None);
+    }
+    else if !before.1 && facts.unknown { trace.prerequisite_fault(check, Error::Unknown, native, None); }
+    else if !before.0 && facts.failed { trace.prerequisite_fault(check, Error::Unsafe, native, None); }
+    original
+}
 fn batch_return(facts: &mut ProcessFacts, aggregate: &mut Option<AggregateClock>) {
     if aggregate.as_mut().is_some_and(|clock| clock.sample(false).is_err()) { facts.failed = true; }
 }
@@ -162,7 +179,9 @@ fn local_account_sid(sid: &[u8]) -> bool {
 pub(super) struct AclImage { owner: Vec<u8>, group: Vec<u8>, control: u16, revision: u8, aces: Vec<Vec<u8>> }
 impl AclImage {
     pub(super) fn parse_traced(raw: &[u8], trace: &mut InputTrace) -> Result<Self> {
-        trace.observed(Self::parse(raw), InputCheck::AclLayout)
+        trace.prerequisite_scope(PrerequisiteCheck::G01, |trace| {
+            trace.observed(Self::parse(raw), InputCheck::AclLayout)
+        })
     }
     fn parse(raw: &[u8]) -> Result<Self> {
         need(raw.len() >= 20 && raw.len() <= BUFFER && raw[0] == 1 && raw[1] == 0)?;
@@ -198,33 +217,35 @@ impl AclImage {
         Ok(Self { owner, group, control, revision: head[0], aces })
     }
     pub(super) fn base(&self, parent: &[u8], account: &[u8], directory: bool, trace: &mut InputTrace) -> Result<()> {
-        trace.need([system_sid(), builtin(544), parent.to_vec()].contains(&self.owner)
-            && self.owner != account, InputCheck::AclOwner)?;
-        trace.need(self.group != account, InputCheck::AclGroup)?;
-        for ace in &self.aces {
-            let sid = &ace[8..];
-            trace.need(sid != account, InputCheck::AclAccount)?;
-            let mut mask = trace.observed(decode::u32_at(ace, 4), InputCheck::AclLayout)?;
-            for (generic, rights) in [(F::GENERIC_ALL, FS::FILE_ALL_ACCESS),
-                (F::GENERIC_READ, FS::FILE_GENERIC_READ), (F::GENERIC_WRITE, FS::FILE_GENERIC_WRITE),
-                (F::GENERIC_EXECUTE, FS::FILE_GENERIC_EXECUTE)] {
-                if mask & generic != 0 { mask = (mask & !generic) | rights; }
+        trace.prerequisite_scope(PrerequisiteCheck::G01, |trace| {
+            trace.need([system_sid(), builtin(544), parent.to_vec()].contains(&self.owner)
+                && self.owner != account, InputCheck::AclOwner)?;
+            trace.need(self.group != account, InputCheck::AclGroup)?;
+            for ace in &self.aces {
+                let sid = &ace[8..];
+                trace.need(sid != account, InputCheck::AclAccount)?;
+                let mut mask = trace.observed(decode::u32_at(ace, 4), InputCheck::AclLayout)?;
+                for (generic, rights) in [(F::GENERIC_ALL, FS::FILE_ALL_ACCESS),
+                    (F::GENERIC_READ, FS::FILE_GENERIC_READ), (F::GENERIC_WRITE, FS::FILE_GENERIC_WRITE),
+                    (F::GENERIC_EXECUTE, FS::FILE_GENERIC_EXECUTE)] {
+                    if mask & generic != 0 { mask = (mask & !generic) | rights; }
+                }
+                trace.need(mask & !FS::FILE_ALL_ACCESS == 0, InputCheck::AclMask)?;
+                // Exact OWNER RIGHTS (S-1-3-4) applies to the already qualified
+                // concrete owner above. Preserve the original ACE; no SID rewrite,
+                // CREATOR OWNER/prefix trust, new grant or production-policy change.
+                const OWNER_RIGHTS: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 3, 4, 0, 0, 0];
+                if ace[0] == 1 || ace[1] as u32 & S::INHERIT_ONLY_ACE != 0
+                    || sid == parent || sid == system_sid() || sid == builtin(544) || sid == OWNER_RIGHTS { continue; }
+                // Only the already task-owned tree is changed. Other principals may
+                // read/traverse, but may not mutate/replace these exact originals.
+                let mut mutation = FS::DELETE | FS::FILE_DELETE_CHILD | FS::WRITE_DAC | FS::WRITE_OWNER
+                    | FS::FILE_WRITE_DATA | FS::FILE_APPEND_DATA | FS::FILE_WRITE_EA | FS::FILE_WRITE_ATTRIBUTES;
+                if !directory { mutation |= FS::FILE_WRITE_DATA; }
+                trace.need(mask & mutation == 0, InputCheck::AclMutation)?;
             }
-            trace.need(mask & !FS::FILE_ALL_ACCESS == 0, InputCheck::AclMask)?;
-            // Exact OWNER RIGHTS (S-1-3-4) applies to the already qualified
-            // concrete owner above. Preserve the original ACE; no SID rewrite,
-            // CREATOR OWNER/prefix trust, new grant or production-policy change.
-            const OWNER_RIGHTS: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 3, 4, 0, 0, 0];
-            if ace[0] == 1 || ace[1] as u32 & S::INHERIT_ONLY_ACE != 0
-                || sid == parent || sid == system_sid() || sid == builtin(544) || sid == OWNER_RIGHTS { continue; }
-            // Only the already task-owned tree is changed. Other principals may
-            // read/traverse, but may not mutate/replace these exact originals.
-            let mut mutation = FS::DELETE | FS::FILE_DELETE_CHILD | FS::WRITE_DAC | FS::WRITE_OWNER
-                | FS::FILE_WRITE_DATA | FS::FILE_APPEND_DATA | FS::FILE_WRITE_EA | FS::FILE_WRITE_ATTRIBUTES;
-            if !directory { mutation |= FS::FILE_WRITE_DATA; }
-            trace.need(mask & mutation == 0, InputCheck::AclMutation)?;
-        }
-        Ok(())
+            Ok(())
+        })
     }
     pub(super) fn dacl_control(&self) -> (u16, u16) {
         // Only the original protection bit belongs in this absolute input.
@@ -232,77 +253,116 @@ impl AclImage {
         (S::SE_DACL_PROTECTED, self.control & S::SE_DACL_PROTECTED)
     }
     pub(super) fn add(&self, sid: &[u8], mask: u32, trace: &mut InputTrace) -> Result<(Self, Box<Aligned>)> {
-        let size = 8 + self.aces.iter().map(Vec::len).sum::<usize>() + 8 + sid.len();
-        trace.need(size <= BUFFER && size <= u16::MAX as usize && self.aces.len() < 1024, InputCheck::AclCapacity)?;
-        let mut expected = self.clone();
-        let mut ace = vec![0, 0];
-        ace.extend_from_slice(&((8 + sid.len()) as u16).to_le_bytes());
-        ace.extend_from_slice(&mask.to_le_bytes()); ace.extend_from_slice(sid);
-        // One explicit non-inheriting ACE; retain every original ACE byte/order.
-        let insertion = expected.aces.iter().position(|a| a[1] as u32 & S::INHERITED_ACE != 0).unwrap_or(expected.aces.len());
-        expected.aces.insert(insertion, ace);
-        let mut acl = Box::new(Aligned([0; BUFFER]));
-        acl.0[0] = expected.revision; acl.0[2..4].copy_from_slice(&(size as u16).to_le_bytes());
-        acl.0[4..6].copy_from_slice(&(expected.aces.len() as u16).to_le_bytes());
-        let mut at = 8;
-        for ace in &expected.aces { acl.0[at..at + ace.len()].copy_from_slice(ace); at += ace.len(); }
-        Ok((expected, acl))
+        trace.prerequisite_scope(PrerequisiteCheck::G01, |trace| {
+            let size = 8 + self.aces.iter().map(Vec::len).sum::<usize>() + 8 + sid.len();
+            trace.need(size <= BUFFER && size <= u16::MAX as usize && self.aces.len() < 1024, InputCheck::AclCapacity)?;
+            let mut expected = self.clone();
+            let mut ace = vec![0, 0];
+            ace.extend_from_slice(&((8 + sid.len()) as u16).to_le_bytes());
+            ace.extend_from_slice(&mask.to_le_bytes()); ace.extend_from_slice(sid);
+            // One explicit non-inheriting ACE; retain every original ACE byte/order.
+            let insertion = expected.aces.iter().position(|a| a[1] as u32 & S::INHERITED_ACE != 0).unwrap_or(expected.aces.len());
+            expected.aces.insert(insertion, ace);
+            let mut acl = Box::new(Aligned([0; BUFFER]));
+            acl.0[0] = expected.revision; acl.0[2..4].copy_from_slice(&(size as u16).to_le_bytes());
+            acl.0[4..6].copy_from_slice(&(expected.aces.len() as u16).to_le_bytes());
+            let mut at = 8;
+            for ace in &expected.aces { acl.0[at..at + ace.len()].copy_from_slice(ace); at += ace.len(); }
+            Ok((expected, acl))
+        })
     }
     pub(super) fn readback(&self, before: &Stamp, after: &Stamp, raw_before: &[u8], raw_after: &[u8],
         trace: &mut InputTrace) -> Result<()> {
-        trace.need(acl_stamp(before, after), InputCheck::AclStamp)?;
-        let actual = Self::parse_traced(raw_after, trace)?;
-        trace.control(self.control, actual.control)?;
-        trace.need(self.owner == actual.owner, InputCheck::AclOwnerEqual)?;
-        trace.need(self.group == actual.group, InputCheck::AclGroupEqual)?;
-        trace.need(self.revision == actual.revision, InputCheck::AclRevision)?;
-        trace.need(self.aces == actual.aces, InputCheck::AclAces)?;
-        trace.need(raw_before != raw_after, InputCheck::AclChanged)
+        trace.prerequisite_scope(PrerequisiteCheck::G01, |trace| {
+            trace.need(acl_stamp(before, after), InputCheck::AclStamp)?;
+            let actual = Self::parse_traced(raw_after, trace)?;
+            trace.control(self.control, actual.control)?;
+            trace.need(self.owner == actual.owner, InputCheck::AclOwnerEqual)?;
+            trace.need(self.group == actual.group, InputCheck::AclGroupEqual)?;
+            trace.need(self.revision == actual.revision, InputCheck::AclRevision)?;
+            trace.need(self.aces == actual.aces, InputCheck::AclAces)?;
+            trace.need(raw_before != raw_after, InputCheck::AclChanged)
+        })
     }
 }
 fn grant(file: &mut OriginalFile, role: &str, parent: &[u8], account: &[u8], mask: u32,
     start: Instant, deadline_latched: &mut bool, aggregate: &mut Option<AggregateClock>, trace: &mut InputTrace) -> Result<String> {
-    trace.observed(owner_effect(start, deadline_latched, aggregate), InputCheck::AclDeadline)?;
-    let before = file.stamp_traced(trace)?;
-    trace.observed(owner_effect(start, deadline_latched, aggregate), InputCheck::AclDeadline)?;
-    let raw_before = file.descriptor_traced(trace)?;
-    trace.observed(owner_effect(start, deadline_latched, aggregate), InputCheck::AclDeadline)?;
-    let image = AclImage::parse_traced(&raw_before, trace)?; image.base(parent, account, file.directory, trace)?;
-    let (expected, acl) = image.add(account, mask, trace)?;
-    let mut descriptor = Box::new(S::SECURITY_DESCRIPTOR::default());
-    // These existing Boolean observations do not query/fabricate last error.
-    trace.need(unsafe { S::InitializeSecurityDescriptor((&mut *descriptor as *mut S::SECURITY_DESCRIPTOR).cast(), 1) } != 0, InputCheck::AclInitialize)?;
-    trace.need(unsafe { S::SetSecurityDescriptorDacl((&mut *descriptor as *mut S::SECURITY_DESCRIPTOR).cast(),
-        1, acl.0.as_ptr().cast(), 0) } != 0, InputCheck::AclDacl)?;
-    // Mutate only owned descriptor DATA; the original object setter stays below.
-    let (control_interest, control_value) = image.dacl_control();
-    trace.need(unsafe { S::SetSecurityDescriptorControl(
-        (&mut *descriptor as *mut S::SECURITY_DESCRIPTOR).cast(), control_interest, control_value) } != 0, InputCheck::AclControlInput)?;
-    let b = file.body();
-    if b.state != SlotState::Owned || b.active { return trace.observed(Err(Error::State), InputCheck::AclSetState); }
-    trace.observed(owner_effect(start, deadline_latched, aggregate), InputCheck::AclDeadline)?;
-    b.active = true;
-    // Same original only. No SetNamedSecurityInfo/SetSecurityInfo propagation,
-    // recursion, owner/group/SACL replacement, inheritable ACE or broad trustee.
-    let ok = unsafe { S::SetKernelObjectSecurity(b.handle, S::DACL_SECURITY_INFORMATION,
-        (&mut *descriptor as *mut S::SECURITY_DESCRIPTOR).cast()) };
-    b.error = if ok != 0 { 0 } else { unsafe { F::GetLastError() } };
-    if ok == 0 { trace.record(InputCheck::AclSetReturned, Some(InputStatus::Win32(b.error))); }
-    b.active = ok == 0 && (b.error == 0 || b.error == F::ERROR_IO_PENDING);
-    if b.active {
-        b.state = SlotState::Unknown;
-        diagnostic_with_fault("original-acl-operation", None, true, trace.first);
-        loop { std::thread::park(); std::hint::black_box((&mut *b, &descriptor, &acl, &*trace)); }
-    }
-    need(ok != 0)?;
-    trace.observed(owner_effect(start, deadline_latched, aggregate), InputCheck::AclDeadline)?;
-    let after = file.stamp_traced(trace)?;
-    trace.observed(owner_effect(start, deadline_latched, aggregate), InputCheck::AclDeadline)?;
-    let raw_after = file.descriptor_traced(trace)?;
-    expected.readback(&before, &after, &raw_before, &raw_after, trace)?;
-    trace.observed(owner_effect(start, deadline_latched, aggregate), InputCheck::AclDeadline)?;
-    Ok(format!("{{\"role\":\"{role}\",\"mask\":{mask},\"before\":{},\"after\":{},\"securityBefore\":\"{}\",\"securityAfter\":\"{}\",\"singleExplicitNoninheritingAce\":true}}",
-        before.json(), after.json(), digest_traced(&raw_before, trace)?, digest_traced(&raw_after, trace)?))
+    trace.prerequisite_scope(PrerequisiteCheck::G02, |trace| {
+        let timely = owner_effect_traced(start, deadline_latched, aggregate, trace);
+        trace.observed(timely, InputCheck::AclDeadline)?;
+        let before = file.stamp_traced(trace)?;
+        let timely = owner_effect_traced(start, deadline_latched, aggregate, trace);
+        trace.observed(timely, InputCheck::AclDeadline)?;
+        let raw_before = file.descriptor_traced(trace)?;
+        let timely = owner_effect_traced(start, deadline_latched, aggregate, trace);
+        trace.observed(timely, InputCheck::AclDeadline)?;
+        let image = AclImage::parse_traced(&raw_before, trace)?; image.base(parent, account, file.directory, trace)?;
+        let (expected, acl) = image.add(account, mask, trace)?;
+        let mut descriptor = Box::new(S::SECURITY_DESCRIPTOR::default());
+        // These existing Boolean observations do not query/fabricate last error.
+        let initialized = unsafe { S::InitializeSecurityDescriptor((&mut *descriptor as *mut S::SECURITY_DESCRIPTOR).cast(), 1) };
+        if initialized == 0 {
+            trace.record(InputCheck::AclInitialize, None);
+            trace.prerequisite_fault(PrerequisiteCheck::G02, Error::Unsafe,
+                PrerequisiteNative::boolean(PrerequisiteApi::InitializeSecurityDescriptor, PrerequisiteSelector::None, initialized, None),
+                Some(PrerequisiteDetail::Input(InputCheck::AclInitialize)));
+        }
+        trace.need(initialized != 0, InputCheck::AclInitialize)?;
+        let dacl = unsafe { S::SetSecurityDescriptorDacl((&mut *descriptor as *mut S::SECURITY_DESCRIPTOR).cast(),
+            1, acl.0.as_ptr().cast(), 0) };
+        if dacl == 0 {
+            trace.record(InputCheck::AclDacl, None);
+            trace.prerequisite_fault(PrerequisiteCheck::G02, Error::Unsafe,
+                PrerequisiteNative::boolean(PrerequisiteApi::SetSecurityDescriptorDacl, PrerequisiteSelector::None, dacl, None),
+                Some(PrerequisiteDetail::Input(InputCheck::AclDacl)));
+        }
+        trace.need(dacl != 0, InputCheck::AclDacl)?;
+        // Mutate only owned descriptor DATA; the original object setter stays below.
+        let (control_interest, control_value) = image.dacl_control();
+        let control = unsafe { S::SetSecurityDescriptorControl(
+            (&mut *descriptor as *mut S::SECURITY_DESCRIPTOR).cast(), control_interest, control_value) };
+        if control == 0 {
+            trace.record(InputCheck::AclControlInput, None);
+            trace.prerequisite_fault(PrerequisiteCheck::G02, Error::Unsafe,
+                PrerequisiteNative::boolean(PrerequisiteApi::SetSecurityDescriptorControl, PrerequisiteSelector::None, control, None),
+                Some(PrerequisiteDetail::Input(InputCheck::AclControlInput)));
+        }
+        trace.need(control != 0, InputCheck::AclControlInput)?;
+        let b = file.body();
+        if b.state != SlotState::Owned || b.active { return trace.observed(Err(Error::State), InputCheck::AclSetState); }
+        let timely = owner_effect_traced(start, deadline_latched, aggregate, trace);
+        trace.observed(timely, InputCheck::AclDeadline)?;
+        b.active = true;
+        // Same original only. No SetNamedSecurityInfo/SetSecurityInfo propagation,
+        // recursion, owner/group/SACL replacement, inheritable ACE or broad trustee.
+        let ok = unsafe { S::SetKernelObjectSecurity(b.handle, S::DACL_SECURITY_INFORMATION,
+            (&mut *descriptor as *mut S::SECURITY_DESCRIPTOR).cast()) };
+        b.error = if ok != 0 { 0 } else { unsafe { F::GetLastError() } };
+        if ok == 0 { trace.record(InputCheck::AclSetReturned, Some(InputStatus::Win32(b.error))); }
+        b.active = ok == 0 && (b.error == 0 || b.error == F::ERROR_IO_PENDING);
+        if ok == 0 {
+            trace.prerequisite_fault(PrerequisiteCheck::G02, if b.active { Error::Unknown } else { Error::Unsafe },
+                PrerequisiteNative::boolean(PrerequisiteApi::SetKernelObjectSecurity, PrerequisiteSelector::None, ok, Some(b.error)),
+                Some(PrerequisiteDetail::Input(InputCheck::AclSetReturned)));
+        }
+        if b.active {
+            b.state = SlotState::Unknown;
+            diagnostic_with_fault("original-acl-operation", None, true, trace.first);
+            loop { std::thread::park(); std::hint::black_box((&mut *b, &descriptor, &acl, &*trace)); }
+        }
+        need(ok != 0)?;
+        let timely = owner_effect_traced(start, deadline_latched, aggregate, trace);
+        trace.observed(timely, InputCheck::AclDeadline)?;
+        let after = file.stamp_traced(trace)?;
+        let timely = owner_effect_traced(start, deadline_latched, aggregate, trace);
+        trace.observed(timely, InputCheck::AclDeadline)?;
+        let raw_after = file.descriptor_traced(trace)?;
+        expected.readback(&before, &after, &raw_before, &raw_after, trace)?;
+        let timely = owner_effect_traced(start, deadline_latched, aggregate, trace);
+        trace.observed(timely, InputCheck::AclDeadline)?;
+        Ok(format!("{{\"role\":\"{role}\",\"mask\":{mask},\"before\":{},\"after\":{},\"securityBefore\":\"{}\",\"securityAfter\":\"{}\",\"singleExplicitNoninheritingAce\":true}}",
+            before.json(), after.json(), digest_traced(&raw_before, trace)?, digest_traced(&raw_after, trace)?))
+    })
 }
 
 // NetAPI allocation outputs remain original objects until their explicit single
@@ -314,45 +374,68 @@ struct NetBuffer {
 impl NetBuffer {
     fn new() -> Self { Self { pointer: null_mut(), status: u32::MAX, bytes: 0, entries: 0, total: 0,
         release_attempted: false, released: false, release_status: u32::MAX } }
-    fn range(&self, pointer: *const u8, size: usize) -> Result<&[u8]> {
-        let start = self.pointer as usize; let selected = pointer as usize;
-        need(!self.pointer.is_null() && selected >= start && size <= self.bytes as usize
-            && selected.checked_add(size).is_some_and(|end| start.checked_add(self.bytes as usize).is_some_and(|limit| end <= limit)))?;
-        Ok(unsafe { std::slice::from_raw_parts(pointer, size) })
+    fn range(&self, pointer: *const u8, size: usize) -> Result<&[u8]> { self.range_traced(pointer, size, &mut InputTrace::default()) }
+    fn range_traced(&self, pointer: *const u8, size: usize, trace: &mut InputTrace) -> Result<&[u8]> {
+        trace.prerequisite_scope(PrerequisiteCheck::N01, |trace| {
+            let start = self.pointer as usize; let selected = pointer as usize;
+            need(!self.pointer.is_null() && selected >= start && size <= self.bytes as usize
+                && selected.checked_add(size).is_some_and(|end| start.checked_add(self.bytes as usize).is_some_and(|limit| end <= limit)))?;
+            Ok(unsafe { std::slice::from_raw_parts(pointer, size) })
+        })
     }
-    fn sized(&mut self) -> Result<()> {
-        if self.status != 0 || self.pointer.is_null() { return Err(Error::Unknown); }
-        let result = unsafe { NM::NetApiBufferSize(self.pointer.cast(), &mut self.bytes) };
-        if result != 0 || self.bytes == 0 || self.bytes as usize > BUFFER { return Err(Error::Unknown); }
-        Ok(())
+    fn sized(&mut self) -> Result<()> { self.sized_traced(&mut InputTrace::default()) }
+    fn sized_traced(&mut self, trace: &mut InputTrace) -> Result<()> {
+        trace.prerequisite_scope(PrerequisiteCheck::N01, |trace| {
+            if self.status != 0 || self.pointer.is_null() { return Err(Error::Unknown); }
+            let result = unsafe { NM::NetApiBufferSize(self.pointer.cast(), &mut self.bytes) };
+            if result != 0 || self.bytes == 0 || self.bytes as usize > BUFFER {
+                trace.prerequisite_fault(PrerequisiteCheck::N01, Error::Unknown,
+                    PrerequisiteNative::net(PrerequisiteApi::NetApiBufferSize, PrerequisiteSelector::None, result), None);
+                return Err(Error::Unknown);
+            }
+            Ok(())
+        })
     }
-    fn string(&self, pointer: *const u16, maximum: usize) -> Result<Vec<u16>> {
-        let mut value = Vec::new();
-        for i in 0..=maximum {
-            let raw = self.range((pointer as usize).checked_add(i * 2).ok_or(Error::Bounds)? as *const u8, 2)?;
-            let unit = u16::from_le_bytes([raw[0], raw[1]]);
-            if unit == 0 { return Ok(value); }
-            value.push(unit);
-        }
-        Err(Error::Bounds)
+    fn string(&self, pointer: *const u16, maximum: usize) -> Result<Vec<u16>> { self.string_traced(pointer, maximum, &mut InputTrace::default()) }
+    fn string_traced(&self, pointer: *const u16, maximum: usize, trace: &mut InputTrace) -> Result<Vec<u16>> {
+        trace.prerequisite_scope(PrerequisiteCheck::N01, |trace| {
+            let mut value = Vec::new();
+            for i in 0..=maximum {
+                let raw = self.range_traced((pointer as usize).checked_add(i * 2).ok_or(Error::Bounds)? as *const u8, 2, trace)?;
+                let unit = u16::from_le_bytes([raw[0], raw[1]]);
+                if unit == 0 { return Ok(value); }
+                value.push(unit);
+            }
+            Err(Error::Bounds)
+        })
     }
-    fn sid(&self, pointer: S::PSID) -> Result<Vec<u8>> {
-        let head = self.range(pointer.cast(), 8)?;
-        need(head[0] == 1 && head[1] <= 15)?;
-        let raw = self.range(pointer.cast(), 8 + head[1] as usize * 4)?;
-        Ok(security::sid_at(raw, 0, raw.len())?.bytes().to_vec())
+    fn sid(&self, pointer: S::PSID) -> Result<Vec<u8>> { self.sid_traced(pointer, &mut InputTrace::default()) }
+    fn sid_traced(&self, pointer: S::PSID, trace: &mut InputTrace) -> Result<Vec<u8>> {
+        trace.prerequisite_scope(PrerequisiteCheck::N01, |trace| {
+            let head = self.range_traced(pointer.cast(), 8, trace)?;
+            need(head[0] == 1 && head[1] <= 15)?;
+            let raw = self.range_traced(pointer.cast(), 8 + head[1] as usize * 4, trace)?;
+            Ok(security::sid_at(raw, 0, raw.len())?.bytes().to_vec())
+        })
     }
-    fn free(&mut self) -> Result<()> {
-        if self.release_attempted { return Err(Error::State); }
-        self.release_attempted = true;
-        if self.pointer.is_null() {
-            self.released = self.status == NM::NERR_UserNotFound || self.status == 0 && self.entries == 0;
-            return if self.released { Ok(()) } else { Err(Error::Unknown) };
-        }
-        if self.status != 0 { return Err(Error::Unknown); }
-        self.release_status = unsafe { NM::NetApiBufferFree(self.pointer.cast()) };
-        self.released = self.release_status == 0;
-        if self.released { Ok(()) } else { Err(Error::Unknown) }
+    fn free(&mut self) -> Result<()> { self.free_traced(&mut InputTrace::default()) }
+    fn free_traced(&mut self, trace: &mut InputTrace) -> Result<()> {
+        trace.prerequisite_scope(PrerequisiteCheck::N02, |trace| {
+            if self.release_attempted { return Err(Error::State); }
+            self.release_attempted = true;
+            if self.pointer.is_null() {
+                self.released = self.status == NM::NERR_UserNotFound || self.status == 0 && self.entries == 0;
+                return if self.released { Ok(()) } else { Err(Error::Unknown) };
+            }
+            if self.status != 0 { return Err(Error::Unknown); }
+            self.release_status = unsafe { NM::NetApiBufferFree(self.pointer.cast()) };
+            self.released = self.release_status == 0;
+            if !self.released {
+                trace.prerequisite_fault(PrerequisiteCheck::N02, Error::Unknown,
+                    PrerequisiteNative::net(PrerequisiteApi::NetApiBufferFree, PrerequisiteSelector::None, self.release_status), None);
+            }
+            if self.released { Ok(()) } else { Err(Error::Unknown) }
+        })
     }
 }
 struct Account {
@@ -362,135 +445,179 @@ struct Account {
     queries: Vec<Box<NetBuffer>>,
 }
 impl Account {
-    fn new() -> Result<Self> {
-        let mut sid = builtin(545); let mut name_buffer = [0u16; 256]; let mut domain = [0u16; 256];
-        let mut name_units = 256; let mut domain_units = 256; let mut usage = 0;
-        let ok = unsafe { S::LookupAccountSidW(null(), sid.as_mut_ptr().cast(), name_buffer.as_mut_ptr(),
-            &mut name_units, domain.as_mut_ptr(), &mut domain_units, &mut usage) };
-        need(ok != 0 && usage == S::SidTypeAlias && name_units > 0 && name_units < 256
-            && domain_units < 256 && String::from_utf16(&domain[..domain_units as usize]).map_err(|_| Error::Unsafe)? == "BUILTIN")?;
-        let users = name_buffer[..name_units as usize].iter().copied().chain(std::iter::once(0)).collect();
-        // Resolve the well-known Users alias BEFORE any password exists.
-        let mut random = [0u8; 68];
-        let random_status = unsafe { BC::BCryptGenRandom(null_mut(), random.as_mut_ptr(), random.len() as u32,
-            BC::BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
-        if random_status != 0 {
+    fn new() -> Result<Self> { Self::new_traced(&mut InputTrace::default()) }
+    fn new_traced(trace: &mut InputTrace) -> Result<Self> {
+        trace.prerequisite_scope(PrerequisiteCheck::N03, |trace| {
+            let mut sid = builtin(545); let mut name_buffer = [0u16; 256]; let mut domain = [0u16; 256];
+            let mut name_units = 256; let mut domain_units = 256; let mut usage = 0;
+            let ok = unsafe { S::LookupAccountSidW(null(), sid.as_mut_ptr().cast(), name_buffer.as_mut_ptr(),
+                &mut name_units, domain.as_mut_ptr(), &mut domain_units, &mut usage) };
+            let lookup_error = if ok == 0 && trace.prerequisite.is_some() { unsafe { F::GetLastError() } } else { 0 };
+            if ok == 0 {
+                trace.prerequisite_fault(PrerequisiteCheck::N03, Error::Unsafe,
+                    PrerequisiteNative::boolean(PrerequisiteApi::LookupAccountSidW, PrerequisiteSelector::None, ok, Some(lookup_error)), None);
+            }
+            need(ok != 0 && usage == S::SidTypeAlias && name_units > 0 && name_units < 256
+                && domain_units < 256 && String::from_utf16(&domain[..domain_units as usize]).map_err(|_| Error::Unsafe)? == "BUILTIN")?;
+            let users = name_buffer[..name_units as usize].iter().copied().chain(std::iter::once(0)).collect();
+            // Resolve the well-known Users alias BEFORE any password exists.
+            let mut random = [0u8; 68];
+            let random_status = unsafe { BC::BCryptGenRandom(null_mut(), random.as_mut_ptr(), random.len() as u32,
+                BC::BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
+            if random_status != 0 {
+                for byte in &mut random { unsafe { std::ptr::write_volatile(byte, 0); } }
+                std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+                trace.prerequisite_fault(PrerequisiteCheck::N03, Error::Unavailable,
+                    PrerequisiteNative::nt(PrerequisiteApi::BCryptGenRandom, PrerequisiteSelector::None, random_status), None);
+                return Err(Error::Unavailable);
+            }
+            let name = wide(&format!("mrk{}", hex(&random[..8])));
+            let mut password = Box::new([0u16; 65]);
+            password[..4].copy_from_slice(&[b'A' as u16, b'a' as u16, b'7' as u16, b'!' as u16]);
+            let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!_";
+            for (slot, byte) in password[4..64].iter_mut().zip(&random[8..]) { *slot = alphabet[(*byte & 63) as usize] as u16; }
             for byte in &mut random { unsafe { std::ptr::write_volatile(byte, 0); } }
             std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
-            return Err(Error::Unavailable);
-        }
-        let name = wide(&format!("mrk{}", hex(&random[..8])));
-        let mut password = Box::new([0u16; 65]);
-        password[..4].copy_from_slice(&[b'A' as u16, b'a' as u16, b'7' as u16, b'!' as u16]);
-        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!_";
-        for (slot, byte) in password[4..64].iter_mut().zip(&random[8..]) { *slot = alphabet[(*byte & 63) as usize] as u16; }
-        for byte in &mut random { unsafe { std::ptr::write_volatile(byte, 0); } }
-        std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
-        Ok(Self { name, password, users, sid: Vec::new(), absent: u32::MAX, absent_pointer_null: false,
-            add: u32::MAX, group_add: false, attempted: false, delete_attempted: false,
-            delete_status: u32::MAX, removed: false, queries: Vec::with_capacity(8) })
+            Ok(Self { name, password, users, sid: Vec::new(), absent: u32::MAX, absent_pointer_null: false,
+                add: u32::MAX, group_add: false, attempted: false, delete_attempted: false,
+                delete_status: u32::MAX, removed: false, queries: Vec::with_capacity(8) })
+        })
     }
     fn zero(&mut self) {
         for unit in self.password.iter_mut() { unsafe { std::ptr::write_volatile(unit, 0); } }
         std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
     }
-    fn query(&mut self) -> Result<Option<Vec<u8>>> {
-        need(self.queries.len() < 8)?;
-        let first_query = self.queries.is_empty();
-        self.queries.push(Box::new(NetBuffer::new()));
-        let q = self.queries.last_mut().ok_or(Error::State)?;
-        q.status = unsafe { NM::NetUserGetInfo(null(), self.name.as_ptr(), 23, &mut q.pointer) };
-        if q.status == NM::NERR_UserNotFound && q.pointer.is_null() {
-            if first_query { self.absent = q.status; self.absent_pointer_null = q.pointer.is_null(); }
-            q.free()?; return Ok(None);
-        }
-        let observed = (|| -> Result<Vec<u8>> {
-            q.sized()?;
-            q.range(q.pointer, size_of::<NM::USER_INFO_23>())?;
-            let info = unsafe { std::ptr::read_unaligned(q.pointer.cast::<NM::USER_INFO_23>()) };
-            need(q.string(info.usri23_name, 20)? == self.name[..self.name.len() - 1]
-                && info.usri23_flags == (NM::UF_SCRIPT | NM::UF_NORMAL_ACCOUNT))?;
-            q.sid(info.usri23_user_sid)
-        })();
-        let freed = q.free();
-        if freed.is_err() { return Err(Error::Unknown); }
-        observed.map(Some)
-    }
-    fn groups(&mut self) -> Result<Vec<Vec<u8>>> {
-        need(self.queries.len() < 8)?;
-        self.queries.push(Box::new(NetBuffer::new()));
-        let q = self.queries.last_mut().ok_or(Error::State)?;
-        q.status = unsafe { NM::NetUserGetLocalGroups(null(), self.name.as_ptr(), 0, NM::LG_INCLUDE_INDIRECT,
-            &mut q.pointer, BUFFER as u32, &mut q.entries, &mut q.total) };
-        let observed = (|| -> Result<Vec<Vec<u8>>> {
-            if q.status != 0 || q.entries != q.total { return Err(Error::Unknown); }
-            need(q.entries <= 1)?;
-            if q.entries == 0 {
-                if !q.pointer.is_null() { return Err(Error::Unknown); }
-                return Ok(Vec::new());
+    fn query(&mut self) -> Result<Option<Vec<u8>>> { self.query_traced(&mut InputTrace::default()) }
+    fn query_traced(&mut self, trace: &mut InputTrace) -> Result<Option<Vec<u8>>> {
+        trace.prerequisite_scope(PrerequisiteCheck::N04, |trace| {
+            need(self.queries.len() < 8)?;
+            let first_query = self.queries.is_empty();
+            self.queries.push(Box::new(NetBuffer::new()));
+            let q = self.queries.last_mut().ok_or(Error::State)?;
+            q.status = unsafe { NM::NetUserGetInfo(null(), self.name.as_ptr(), 23, &mut q.pointer) };
+            if q.status == NM::NERR_UserNotFound && q.pointer.is_null() {
+                if first_query { self.absent = q.status; self.absent_pointer_null = q.pointer.is_null(); }
+                q.free_traced(trace)?; return Ok(None);
             }
-            q.sized()?; q.range(q.pointer, size_of::<NM::LOCALGROUP_USERS_INFO_0>())?;
-            let info = unsafe { std::ptr::read_unaligned(q.pointer.cast::<NM::LOCALGROUP_USERS_INFO_0>()) };
-            need(q.string(info.lgrui0_name, 256)? == self.users[..self.users.len() - 1])?;
-            Ok(vec![builtin(545)])
-        })();
-        let freed = q.free();
-        if freed.is_err() { return Err(Error::Unknown); }
-        observed
+            if q.status != 0 {
+                trace.prerequisite_fault(PrerequisiteCheck::N04, Error::Unknown,
+                    PrerequisiteNative::net(PrerequisiteApi::NetUserGetInfo, PrerequisiteSelector::UserInfo23, q.status), None);
+            }
+            let observed = (|| -> Result<Vec<u8>> {
+                q.sized_traced(trace)?;
+                q.range_traced(q.pointer, size_of::<NM::USER_INFO_23>(), trace)?;
+                let info = unsafe { std::ptr::read_unaligned(q.pointer.cast::<NM::USER_INFO_23>()) };
+                need(q.string_traced(info.usri23_name, 20, trace)? == self.name[..self.name.len() - 1]
+                    && info.usri23_flags == (NM::UF_SCRIPT | NM::UF_NORMAL_ACCOUNT))?;
+                q.sid_traced(info.usri23_user_sid, trace)
+            })();
+            let observed = trace.prerequisite_result(PrerequisiteCheck::N04, observed);
+            let freed = q.free_traced(trace);
+            if freed.is_err() { return Err(Error::Unknown); }
+            observed.map(Some)
+        })
     }
-    fn create(&mut self, parent: &[u8], start: Instant, deadline_latched: &mut bool, aggregate: &mut Option<AggregateClock>) -> Result<()> {
-        if self.attempted { return Err(Error::State); }
-        owner_effect(start, deadline_latched, aggregate)?;
-        self.attempted = true; // Caller already registered durable private intent.
-        need(self.query()?.is_none())?;
-        owner_effect(start, deadline_latched, aggregate)?;
-        let mut information = NM::USER_INFO_1::default();
-        information.usri1_name = self.name.as_mut_ptr(); information.usri1_password = self.password.as_mut_ptr();
-        information.usri1_priv = NM::USER_PRIV_USER;
-        information.usri1_flags = NM::UF_SCRIPT | NM::UF_NORMAL_ACCOUNT;
-        let mut parameter = 0u32;
-        owner_effect(start, deadline_latched, aggregate)?;
-        self.add = unsafe { NM::NetUserAdd(null(), 1, (&information as *const NM::USER_INFO_1).cast(), &mut parameter) };
-        // Any creation error/ambiguity retains intent; never delete an account
-        // selected merely by this name, reuse a collision, or retry creation.
-        if self.add != 0 { return Err(Error::Unknown); }
-        owner_effect(start, deadline_latched, aggregate)?;
-        self.sid = self.query()?.ok_or(Error::Unknown)?;
-        owner_effect(start, deadline_latched, aggregate)?;
-        // A local creation cannot adopt an alias of the parent's identity or a
-        // foreign/malformed SID before changing membership or granting rights.
-        if !local_account_sid(&self.sid) || !local_account_sid(parent)
-            || self.sid[..24] != parent[..24] || self.sid == parent {
-            return Err(Error::Unknown);
-        }
-        if self.groups()?.is_empty() {
-            let member = NM::LOCALGROUP_MEMBERS_INFO_0 { lgrmi0_sid: self.sid.as_mut_ptr().cast() };
-            owner_effect(start, deadline_latched, aggregate)?;
-            self.group_add = true;
-            let status = unsafe { NM::NetLocalGroupAddMembers(null(), self.users.as_ptr(), 0,
-                (&member as *const NM::LOCALGROUP_MEMBERS_INFO_0).cast(), 1) };
-            if status != 0 { return Err(Error::Unknown); }
-            owner_effect(start, deadline_latched, aggregate)?;
-        }
-        let groups = self.groups()?;
-        owner_effect(start, deadline_latched, aggregate)?;
-        need(fresh_account(self.absent, self.absent_pointer_null, self.add, &self.sid, &groups))?;
-        owner_effect(start, deadline_latched, aggregate)
+    fn groups(&mut self) -> Result<Vec<Vec<u8>>> { self.groups_traced(&mut InputTrace::default()) }
+    fn groups_traced(&mut self, trace: &mut InputTrace) -> Result<Vec<Vec<u8>>> {
+        trace.prerequisite_scope(PrerequisiteCheck::N05, |trace| {
+            need(self.queries.len() < 8)?;
+            self.queries.push(Box::new(NetBuffer::new()));
+            let q = self.queries.last_mut().ok_or(Error::State)?;
+            q.status = unsafe { NM::NetUserGetLocalGroups(null(), self.name.as_ptr(), 0, NM::LG_INCLUDE_INDIRECT,
+                &mut q.pointer, BUFFER as u32, &mut q.entries, &mut q.total) };
+            let observed = (|| -> Result<Vec<Vec<u8>>> {
+                if q.status != 0 || q.entries != q.total {
+                    trace.prerequisite_fault(PrerequisiteCheck::N05, Error::Unknown,
+                        PrerequisiteNative::net(PrerequisiteApi::NetUserGetLocalGroups, PrerequisiteSelector::LocalGroups0, q.status), None);
+                    return Err(Error::Unknown);
+                }
+                need(q.entries <= 1)?;
+                if q.entries == 0 {
+                    if !q.pointer.is_null() { return Err(Error::Unknown); }
+                    return Ok(Vec::new());
+                }
+                q.sized_traced(trace)?; q.range_traced(q.pointer, size_of::<NM::LOCALGROUP_USERS_INFO_0>(), trace)?;
+                let info = unsafe { std::ptr::read_unaligned(q.pointer.cast::<NM::LOCALGROUP_USERS_INFO_0>()) };
+                need(q.string_traced(info.lgrui0_name, 256, trace)? == self.users[..self.users.len() - 1])?;
+                Ok(vec![builtin(545)])
+            })();
+            let observed = trace.prerequisite_result(PrerequisiteCheck::N05, observed);
+            let freed = q.free_traced(trace);
+            if freed.is_err() { return Err(Error::Unknown); }
+            observed
+        })
     }
-    fn retire(&mut self, start: Instant, deadline_latched: &mut bool, aggregate: &mut Option<AggregateClock>) -> Result<()> {
-        owner_effect(start, deadline_latched, aggregate)?;
-        need(self.attempted && self.add == 0 && !self.delete_attempted && !self.removed && !self.sid.is_empty()
-            && self.password.iter().all(|unit| *unit == 0))?;
-        // No name-only cleanup: immediately reobserve the actual returned SID.
-        need(self.query()?.as_deref() == Some(self.sid.as_slice()) && self.groups()? == [builtin(545)])?;
-        owner_effect(start, deadline_latched, aggregate)?;
-        self.delete_attempted = true; // Irreversible intent, not a success receipt.
-        self.delete_status = unsafe { NM::NetUserDel(null(), self.name.as_ptr()) };
-        if self.delete_status != 0 { return Err(Error::Unknown); }
-        owner_effect(start, deadline_latched, aggregate)?;
-        if self.query()?.is_some() { return Err(Error::Unknown); }
-        self.removed = true;
-        owner_effect(start, deadline_latched, aggregate)
+    fn create(&mut self, parent: &[u8], start: Instant, deadline_latched: &mut bool, aggregate: &mut Option<AggregateClock>) -> Result<()> { self.create_traced(parent, start, deadline_latched, aggregate, &mut InputTrace::default()) }
+    fn create_traced(&mut self, parent: &[u8], start: Instant, deadline_latched: &mut bool, aggregate: &mut Option<AggregateClock>, trace: &mut InputTrace) -> Result<()> {
+        trace.prerequisite_scope(PrerequisiteCheck::N06, |trace| {
+            if self.attempted { return Err(Error::State); }
+            owner_effect_traced(start, deadline_latched, aggregate, trace)?;
+            self.attempted = true; // Caller already registered durable private intent.
+            need(self.query_traced(trace)?.is_none())?;
+            owner_effect_traced(start, deadline_latched, aggregate, trace)?;
+            let mut information = NM::USER_INFO_1::default();
+            information.usri1_name = self.name.as_mut_ptr(); information.usri1_password = self.password.as_mut_ptr();
+            information.usri1_priv = NM::USER_PRIV_USER;
+            information.usri1_flags = NM::UF_SCRIPT | NM::UF_NORMAL_ACCOUNT;
+            let mut parameter = 0u32;
+            owner_effect_traced(start, deadline_latched, aggregate, trace)?;
+            self.add = unsafe { NM::NetUserAdd(null(), 1, (&information as *const NM::USER_INFO_1).cast(), &mut parameter) };
+            // Any creation error/ambiguity retains intent; never delete an account
+            // selected merely by this name, reuse a collision, or retry creation.
+            if self.add != 0 {
+                trace.prerequisite_fault(PrerequisiteCheck::N06, Error::Unknown,
+                    PrerequisiteNative::net(PrerequisiteApi::NetUserAdd, PrerequisiteSelector::UserAdd1, self.add), None);
+                return Err(Error::Unknown);
+            }
+            owner_effect_traced(start, deadline_latched, aggregate, trace)?;
+            self.sid = self.query_traced(trace)?.ok_or(Error::Unknown)?;
+            owner_effect_traced(start, deadline_latched, aggregate, trace)?;
+            // A local creation cannot adopt an alias of the parent's identity or a
+            // foreign/malformed SID before changing membership or granting rights.
+            if !local_account_sid(&self.sid) || !local_account_sid(parent)
+                || self.sid[..24] != parent[..24] || self.sid == parent {
+                return Err(Error::Unknown);
+            }
+            if self.groups_traced(trace)?.is_empty() {
+                let member = NM::LOCALGROUP_MEMBERS_INFO_0 { lgrmi0_sid: self.sid.as_mut_ptr().cast() };
+                owner_effect_traced(start, deadline_latched, aggregate, trace)?;
+                self.group_add = true;
+                let status = unsafe { NM::NetLocalGroupAddMembers(null(), self.users.as_ptr(), 0,
+                    (&member as *const NM::LOCALGROUP_MEMBERS_INFO_0).cast(), 1) };
+                if status != 0 {
+                    trace.prerequisite_fault(PrerequisiteCheck::N06, Error::Unknown,
+                        PrerequisiteNative::net(PrerequisiteApi::NetLocalGroupAddMembers, PrerequisiteSelector::GroupAdd0, status), None);
+                    return Err(Error::Unknown);
+                }
+                owner_effect_traced(start, deadline_latched, aggregate, trace)?;
+            }
+            let groups = self.groups_traced(trace)?;
+            owner_effect_traced(start, deadline_latched, aggregate, trace)?;
+            need(fresh_account(self.absent, self.absent_pointer_null, self.add, &self.sid, &groups))?;
+            owner_effect_traced(start, deadline_latched, aggregate, trace)
+        })
+    }
+    fn retire(&mut self, start: Instant, deadline_latched: &mut bool, aggregate: &mut Option<AggregateClock>) -> Result<()> { self.retire_traced(start, deadline_latched, aggregate, &mut InputTrace::default()) }
+    fn retire_traced(&mut self, start: Instant, deadline_latched: &mut bool, aggregate: &mut Option<AggregateClock>, trace: &mut InputTrace) -> Result<()> {
+        trace.prerequisite_scope(PrerequisiteCheck::N07, |trace| {
+            owner_effect_traced(start, deadline_latched, aggregate, trace)?;
+            need(self.attempted && self.add == 0 && !self.delete_attempted && !self.removed && !self.sid.is_empty()
+                && self.password.iter().all(|unit| *unit == 0))?;
+            // No name-only cleanup: immediately reobserve the actual returned SID.
+            need(self.query_traced(trace)?.as_deref() == Some(self.sid.as_slice()) && self.groups_traced(trace)? == [builtin(545)])?;
+            owner_effect_traced(start, deadline_latched, aggregate, trace)?;
+            self.delete_attempted = true; // Irreversible intent, not a success receipt.
+            self.delete_status = unsafe { NM::NetUserDel(null(), self.name.as_ptr()) };
+            if self.delete_status != 0 {
+                trace.prerequisite_fault(PrerequisiteCheck::N07, Error::Unknown,
+                    PrerequisiteNative::net(PrerequisiteApi::NetUserDel, PrerequisiteSelector::None, self.delete_status), None);
+                return Err(Error::Unknown);
+            }
+            owner_effect_traced(start, deadline_latched, aggregate, trace)?;
+            if self.query_traced(trace)?.is_some() { return Err(Error::Unknown); }
+            self.removed = true;
+            owner_effect_traced(start, deadline_latched, aggregate, trace)
+        })
     }
 }
 impl Drop for Account {
@@ -614,158 +741,213 @@ struct Launch {
 }
 impl Launch {
     fn new(variant: OwnerVariant, binding: &Binding, fullwalk_request: Option<&str>,
-        output: &Path, account: &Account, parent: &[u8]) -> Result<Pin<Box<Self>>> {
-        let output = output.to_str().ok_or(Error::Unsafe)?;
-        let system_root = std::env::var("SystemRoot").map_err(|_| Error::State)?;
-        fixed_path(&system_root)?;
-        let mut windows = [0u16; 32768];
-        let count = unsafe { SI::GetSystemWindowsDirectoryW(windows.as_mut_ptr(), windows.len() as u32) };
-        need(count > 0 && (count as usize) < windows.len()
-            && String::from_utf16(&windows[..count as usize]).map_err(|_| Error::Unsafe)? == system_root)?;
-        let mut environment = vec![
-            ("GITHUB_ACTIONS", "true".to_owned()), ("GITHUB_RUN_ATTEMPT", "1".to_owned()),
-            ("GITHUB_RUN_ID", binding.run.clone()), ("GITHUB_SHA", binding.source.clone()),
-            ("ImageOS", "win25-vs2026".to_owned()), ("MRK_DESKTOP_HOSTED_CHECKS", "windows-installed-native-v1".to_owned()),
-            ("MRK_WINDOWS_NATIVE_ARTIFACT_BYTES", binding.bytes.to_string()),
-            ("MRK_WINDOWS_NATIVE_ARTIFACT_SHA256", binding.sha.clone()),
-            ("MRK_WINDOWS_NATIVE_ARTIFACT_IDENTITY", binding.identity.clone()),
-            ("MRK_WINDOWS_NATIVE_COMMAND_SHA256", binding.command_sha.clone()),
-            ("MRK_WINDOWS_ORDINARY_OUTPUT", output.to_owned()), ("MRK_WINDOWS_ORDINARY_SID", hex(&account.sid)),
-            ("MRK_WINDOWS_PARENT_SID", hex(parent)), ("MRK_WINDOWS_SOURCE_TREE", binding.tree.clone()),
-            ("PATH", format!("{system_root}\\System32;{system_root}")), ("RUNNER_ARCH", "X64".to_owned()),
-            ("RUNNER_ENVIRONMENT", "github-hosted".to_owned()), ("RUNNER_OS", "Windows".to_owned()),
-            ("SystemRoot", system_root.clone()), ("TEMP", output.to_owned()), ("TMP", output.to_owned()),
-            ("WINDIR", system_root),
-        ];
-        match (variant, fullwalk_request) {
-            (OwnerVariant::Ordinary, None) => (), // Ordinary environment stays byte-for-byte unchanged.
-            (OwnerVariant::Fullwalk | OwnerVariant::Passive, Some(request)) => {
-                need(request.len() <= LIMIT && request.is_ascii())?;
-                environment.retain(|(name, _)| !matches!(*name,
-                    "MRK_WINDOWS_NATIVE_ARTIFACT_BYTES" | "MRK_WINDOWS_NATIVE_ARTIFACT_SHA256"
-                    | "MRK_WINDOWS_NATIVE_ARTIFACT_IDENTITY" | "MRK_WINDOWS_NATIVE_COMMAND_SHA256"
-                    | "MRK_WINDOWS_ORDINARY_OUTPUT"));
-                if variant == OwnerVariant::Passive {
-                    environment.extend([
-                        ("MRK_WINDOWS_PASSIVE_REQUEST", request.to_owned()),
-                        ("MRK_WINDOWS_PASSIVE_ARTIFACT_IDENTITY", binding.identity.clone()),
-                        ("MRK_WINDOWS_PASSIVE_OUTPUT", output.to_owned()),
-                        ("PYTHONHOME", output.to_owned()), ("PYTHONPATH", output.to_owned()),
-                        ("PYTHONSTARTUP", format!("{output}\\never-present.py")), ("HOME", output.to_owned()),
-                    ]);
-                    // Only this task-owned, fresh test process receives inert
-                    // wrong ambient values. No Windows directory/file changes.
-                    for (name, value) in &mut environment {
-                        if matches!(*name, "PATH" | "SystemRoot" | "WINDIR") { *value = output.to_owned(); }
+        output: &Path, account: &Account, parent: &[u8]) -> Result<Pin<Box<Self>>> { Self::new_traced(variant, binding, fullwalk_request, output, account, parent, &mut InputTrace::default()) }
+    fn new_traced(variant: OwnerVariant, binding: &Binding, fullwalk_request: Option<&str>,
+        output: &Path, account: &Account, parent: &[u8], trace: &mut InputTrace) -> Result<Pin<Box<Self>>> {
+        trace.prerequisite_scope(PrerequisiteCheck::D01, |trace| {
+            let output = output.to_str().ok_or(Error::Unsafe)?;
+            let system_root = std::env::var("SystemRoot").map_err(|_| Error::State)?;
+            fixed_path_traced(&system_root, trace)?;
+            let mut windows = [0u16; 32768];
+            let count = unsafe { SI::GetSystemWindowsDirectoryW(windows.as_mut_ptr(), windows.len() as u32) };
+            let windows_error = if count == 0 && trace.prerequisite.is_some() { unsafe { F::GetLastError() } } else { 0 };
+            if count == 0 {
+                trace.prerequisite_fault(PrerequisiteCheck::D01, Error::Unsafe,
+                    PrerequisiteNative::count(PrerequisiteApi::GetSystemWindowsDirectoryW, count, windows_error), None);
+            }
+            need(count > 0 && (count as usize) < windows.len()
+                && String::from_utf16(&windows[..count as usize]).map_err(|_| Error::Unsafe)? == system_root)?;
+            let mut environment = vec![
+                ("GITHUB_ACTIONS", "true".to_owned()), ("GITHUB_RUN_ATTEMPT", "1".to_owned()),
+                ("GITHUB_RUN_ID", binding.run.clone()), ("GITHUB_SHA", binding.source.clone()),
+                ("ImageOS", "win25-vs2026".to_owned()), ("MRK_DESKTOP_HOSTED_CHECKS", "windows-installed-native-v1".to_owned()),
+                ("MRK_WINDOWS_NATIVE_ARTIFACT_BYTES", binding.bytes.to_string()),
+                ("MRK_WINDOWS_NATIVE_ARTIFACT_SHA256", binding.sha.clone()),
+                ("MRK_WINDOWS_NATIVE_ARTIFACT_IDENTITY", binding.identity.clone()),
+                ("MRK_WINDOWS_NATIVE_COMMAND_SHA256", binding.command_sha.clone()),
+                ("MRK_WINDOWS_ORDINARY_OUTPUT", output.to_owned()), ("MRK_WINDOWS_ORDINARY_SID", hex(&account.sid)),
+                ("MRK_WINDOWS_PARENT_SID", hex(parent)), ("MRK_WINDOWS_SOURCE_TREE", binding.tree.clone()),
+                ("PATH", format!("{system_root}\\System32;{system_root}")), ("RUNNER_ARCH", "X64".to_owned()),
+                ("RUNNER_ENVIRONMENT", "github-hosted".to_owned()), ("RUNNER_OS", "Windows".to_owned()),
+                ("SystemRoot", system_root.clone()), ("TEMP", output.to_owned()), ("TMP", output.to_owned()),
+                ("WINDIR", system_root),
+            ];
+            match (variant, fullwalk_request) {
+                (OwnerVariant::Ordinary, None) => (), // Ordinary environment stays byte-for-byte unchanged.
+                (OwnerVariant::Fullwalk | OwnerVariant::Passive, Some(request)) => {
+                    need(request.len() <= LIMIT && request.is_ascii())?;
+                    environment.retain(|(name, _)| !matches!(*name,
+                        "MRK_WINDOWS_NATIVE_ARTIFACT_BYTES" | "MRK_WINDOWS_NATIVE_ARTIFACT_SHA256"
+                        | "MRK_WINDOWS_NATIVE_ARTIFACT_IDENTITY" | "MRK_WINDOWS_NATIVE_COMMAND_SHA256"
+                        | "MRK_WINDOWS_ORDINARY_OUTPUT"));
+                    if variant == OwnerVariant::Passive {
+                        environment.extend([
+                            ("MRK_WINDOWS_PASSIVE_REQUEST", request.to_owned()),
+                            ("MRK_WINDOWS_PASSIVE_ARTIFACT_IDENTITY", binding.identity.clone()),
+                            ("MRK_WINDOWS_PASSIVE_OUTPUT", output.to_owned()),
+                            ("PYTHONHOME", output.to_owned()), ("PYTHONPATH", output.to_owned()),
+                            ("PYTHONSTARTUP", format!("{output}\\never-present.py")), ("HOME", output.to_owned()),
+                        ]);
+                        // Only this task-owned, fresh test process receives inert
+                        // wrong ambient values. No Windows directory/file changes.
+                        for (name, value) in &mut environment {
+                            if matches!(*name, "PATH" | "SystemRoot" | "WINDIR") { *value = output.to_owned(); }
+                        }
+                    } else {
+                        environment.extend([
+                            ("MRK_WINDOWS_FULLWALK_REQUEST", request.to_owned()),
+                            ("MRK_WINDOWS_FULLWALK_ARTIFACT_IDENTITY", binding.identity.clone()),
+                            ("MRK_WINDOWS_FULLWALK_OUTPUT", output.to_owned()),
+                        ]);
                     }
-                } else {
-                    environment.extend([
-                        ("MRK_WINDOWS_FULLWALK_REQUEST", request.to_owned()),
-                        ("MRK_WINDOWS_FULLWALK_ARTIFACT_IDENTITY", binding.identity.clone()),
-                        ("MRK_WINDOWS_FULLWALK_OUTPUT", output.to_owned()),
-                    ]);
-                }
-            },
-            _ => return Err(Error::State),
-        }
-        environment.sort_by_key(|(name, _)| name.to_ascii_uppercase());
-        let environment: Vec<u16> = environment.iter().flat_map(|(name, value)| wide(&format!("{name}={value}")))
-            .chain(std::iter::once(0)).collect();
-        let command = variant.command(&binding.artifact);
-        need(environment.len() <= 8192 && command.encode_utf16().count() <= 1023)?;
-        let mut startup = T::STARTUPINFOW::default(); startup.cb = size_of::<T::STARTUPINFOW>() as u32;
-        // lpDesktop=null explicitly inherits the actual desktop/station. Their
-        // access is NOT precomputed, granted, or inferred from headlessness.
-        // All flags/std handles remain zero: no profile, shell or redirection.
-        Ok(Box::pin(Self { domain: [b'.' as u16, 0], application: wide(&binding.artifact), command: wide(&command), logon_flags: 0,
-            environment, directory: wide(output), startup, outputs: T::PROCESS_INFORMATION::default(),
-            return_recorded: false, returned: 0, error: 0, first_wait: u32::MAX,
-            settle_wait: u32::MAX, first_wait_error: 0, settle_wait_error: 0, exit_output: 0,
-            exit_return: 0, exit_error: 0, terminate_return: 0, terminate_error: 0,
-            process_close: 0, process_close_error: 0, thread_close: 0, thread_close_error: 0,
-            facts: ProcessFacts::new(), _pin: PhantomPinned }))
+                },
+                _ => return Err(Error::State),
+            }
+            environment.sort_by_key(|(name, _)| name.to_ascii_uppercase());
+            let environment: Vec<u16> = environment.iter().flat_map(|(name, value)| wide(&format!("{name}={value}")))
+                .chain(std::iter::once(0)).collect();
+            let command = variant.command(&binding.artifact);
+            need(environment.len() <= 8192 && command.encode_utf16().count() <= 1023)?;
+            let mut startup = T::STARTUPINFOW::default(); startup.cb = size_of::<T::STARTUPINFOW>() as u32;
+            // lpDesktop=null explicitly inherits the actual desktop/station. Their
+            // access is NOT precomputed, granted, or inferred from headlessness.
+            // All flags/std handles remain zero: no profile, shell or redirection.
+            Ok(Box::pin(Self { domain: [b'.' as u16, 0], application: wide(&binding.artifact), command: wide(&command), logon_flags: 0,
+                environment, directory: wide(output), startup, outputs: T::PROCESS_INFORMATION::default(),
+                return_recorded: false, returned: 0, error: 0, first_wait: u32::MAX,
+                settle_wait: u32::MAX, first_wait_error: 0, settle_wait_error: 0, exit_output: 0,
+                exit_return: 0, exit_error: 0, terminate_return: 0, terminate_error: 0,
+                process_close: 0, process_close_error: 0, thread_close: 0, thread_close_error: 0,
+                facts: ProcessFacts::new(), _pin: PhantomPinned }))
+        })
     }
-    fn enter(self: Pin<&mut Self>, account: &mut Account, start: Instant, deadline_latched: &mut bool, aggregate: &mut Option<AggregateClock>) -> Result<()> {
-        let this = unsafe { self.get_unchecked_mut() };
-        owner_effect(start, deadline_latched, aggregate)?;
-        if let Some(clock) = aggregate.as_mut() { clock.sample(true)?; }
-        this.facts.begin()?;
-        // Every UTF-16 input, full STARTUPINFO, complete initialized PI and
-        // return/error destinations are owned/stable BEFORE this sole entry.
-        this.returned = unsafe { T::CreateProcessWithLogonW(account.name.as_ptr(), this.domain.as_ptr(),
-            account.password.as_ptr(), this.logon_flags, this.application.as_ptr(), this.command.as_mut_ptr(),
-            T::CREATE_UNICODE_ENVIRONMENT, this.environment.as_ptr().cast(), this.directory.as_ptr(),
-            &this.startup, &mut this.outputs) };
-        this.error = if this.returned == 0 { unsafe { F::GetLastError() } } else { 0 };
-        this.return_recorded = true;
-        // No allocation, formatting, new call or ownership adoption intervened.
-        account.zero(); // Only now has its original plaintext borrower returned.
-        let creation = this.facts.creation(this.returned != 0, this.error,
-            (this.outputs.hProcess as usize, this.outputs.hThread as usize,
-                this.outputs.dwProcessId, this.outputs.dwThreadId),
-            start.elapsed() >= Duration::from_secs(NATIVE_SECONDS));
-        let timely = owner_effect(start, deadline_latched, aggregate);
-        if timely.is_err() { this.facts.failed = true; }
-        creation?; timely
+    fn enter(self: Pin<&mut Self>, account: &mut Account, start: Instant, deadline_latched: &mut bool, aggregate: &mut Option<AggregateClock>) -> Result<()> { self.enter_traced(account, start, deadline_latched, aggregate, &mut InputTrace::default()) }
+    fn enter_traced(self: Pin<&mut Self>, account: &mut Account, start: Instant, deadline_latched: &mut bool, aggregate: &mut Option<AggregateClock>, trace: &mut InputTrace) -> Result<()> {
+        trace.prerequisite_scope(PrerequisiteCheck::D03, |trace| {
+            let this = unsafe { self.get_unchecked_mut() };
+            owner_effect_traced(start, deadline_latched, aggregate, trace)?;
+            if let Some(clock) = aggregate.as_mut() { clock.sample(true)?; }
+            this.facts.begin()?;
+            // Every UTF-16 input, full STARTUPINFO, complete initialized PI and
+            // return/error destinations are owned/stable BEFORE this sole entry.
+            this.returned = unsafe { T::CreateProcessWithLogonW(account.name.as_ptr(), this.domain.as_ptr(),
+                account.password.as_ptr(), this.logon_flags, this.application.as_ptr(), this.command.as_mut_ptr(),
+                T::CREATE_UNICODE_ENVIRONMENT, this.environment.as_ptr().cast(), this.directory.as_ptr(),
+                &this.startup, &mut this.outputs) };
+            this.error = if this.returned == 0 { unsafe { F::GetLastError() } } else { 0 };
+            this.return_recorded = true;
+            // No allocation, formatting, new call or ownership adoption intervened.
+            account.zero(); // Only now has its original plaintext borrower returned.
+            let creation = this.facts.creation(this.returned != 0, this.error,
+                (this.outputs.hProcess as usize, this.outputs.hThread as usize,
+                    this.outputs.dwProcessId, this.outputs.dwThreadId),
+                start.elapsed() >= Duration::from_secs(NATIVE_SECONDS));
+            // The password-zeroing window above is untouched. Preserve this raw
+            // creation decision before the original clock can fail independently.
+            let creation = trace.prerequisite_native_result(PrerequisiteCheck::D03, creation,
+                PrerequisiteNative::boolean(PrerequisiteApi::CreateProcessWithLogonW, PrerequisiteSelector::None, this.returned, Some(this.error)), None);
+            let timely = owner_effect_traced(start, deadline_latched, aggregate, trace);
+            if timely.is_err() { this.facts.failed = true; }
+            creation?; timely
+        })
     }
-    fn finish(self: Pin<&mut Self>, start: Instant, aggregate: &mut Option<AggregateClock>) {
+    fn finish(self: Pin<&mut Self>, start: Instant, aggregate: &mut Option<AggregateClock>) { self.finish_traced(start, aggregate, &mut InputTrace::default()) }
+    fn finish_traced(self: Pin<&mut Self>, start: Instant, aggregate: &mut Option<AggregateClock>, trace: &mut InputTrace) {
         let this = unsafe { self.get_unchecked_mut() };
         if !this.return_recorded || !this.facts.created { return; }
         batch_return(&mut this.facts, aggregate);
         if !this.facts.failed {
             let remaining = Duration::from_secs(NATIVE_SECONDS).saturating_sub(start.elapsed());
-            if remaining.is_zero() { this.facts.failed = true; }
+            if remaining.is_zero() {
+                this.facts.failed = true;
+                trace.prerequisite_fault(PrerequisiteCheck::D04, Error::Unsafe, None, None);
+            }
             else {
                 this.first_wait = unsafe { T::WaitForSingleObject(this.outputs.hProcess,
                     remaining.as_millis().min(u128::from(u32::MAX - 1)) as u32) };
                 this.first_wait_error = if this.first_wait == F::WAIT_FAILED { unsafe { F::GetLastError() } } else { 0 };
-                let _ = this.facts.wait(this.first_wait, start.elapsed() >= Duration::from_secs(NATIVE_SECONDS));
+                let before = (this.facts.failed, this.facts.unknown);
+                let original = this.facts.wait(this.first_wait, start.elapsed() >= Duration::from_secs(NATIVE_SECONDS));
+                let _ = prerequisite_process_decision(trace, PrerequisiteCheck::D04, original, before, &this.facts,
+                    PrerequisiteNative::wait(PrerequisiteSelector::FirstWait, this.first_wait, this.first_wait_error));
                 batch_return(&mut this.facts, aggregate);
             }
         }
-        if !this.facts.signaled && this.facts.begin_terminate().is_ok() {
+        if !this.facts.signaled && {
+            let before = (this.facts.failed, this.facts.unknown);
+            let original = this.facts.begin_terminate();
+            prerequisite_process_decision(trace, PrerequisiteCheck::D04, original, before, &this.facts, None).is_ok()
+        } {
             this.terminate_return = unsafe { T::TerminateProcess(this.outputs.hProcess, 125) };
             this.terminate_error = if this.terminate_return == 0 { unsafe { F::GetLastError() } } else { 0 };
-            if this.terminate_return == 0 { this.facts.unknown = true; }
+            if this.terminate_return == 0 {
+                this.facts.unknown = true;
+                trace.prerequisite_fault(PrerequisiteCheck::D04, Error::Unknown,
+                    PrerequisiteNative::boolean(PrerequisiteApi::TerminateProcess, PrerequisiteSelector::None,
+                        this.terminate_return, Some(this.terminate_error)), None);
+            }
             batch_return(&mut this.facts, aggregate);
             // Termination is asynchronous. Even its success is not finality.
             this.settle_wait = unsafe { T::WaitForSingleObject(this.outputs.hProcess, SETTLE_MS) };
             this.settle_wait_error = if this.settle_wait == F::WAIT_FAILED { unsafe { F::GetLastError() } } else { 0 };
-            let _ = this.facts.wait(this.settle_wait, true);
+            let before = (this.facts.failed, this.facts.unknown);
+            let original = this.facts.wait(this.settle_wait, true);
+            let _ = prerequisite_process_decision(trace, PrerequisiteCheck::D04, original, before, &this.facts,
+                PrerequisiteNative::wait(PrerequisiteSelector::SettleWait, this.settle_wait, this.settle_wait_error));
             batch_return(&mut this.facts, aggregate);
         }
-        if !this.facts.signaled { this.facts.unknown = true; return; }
+        if !this.facts.signaled {
+            this.facts.unknown = true;
+            trace.prerequisite_fault(PrerequisiteCheck::D04, Error::Unknown, None, None);
+            return;
+        }
         this.exit_return = unsafe { T::GetExitCodeProcess(this.outputs.hProcess, &mut this.exit_output) };
         this.exit_error = if this.exit_return == 0 { unsafe { F::GetLastError() } } else { 0 };
-        let _ = this.facts.exited(this.exit_return != 0, this.exit_output);
+        let before = (this.facts.failed, this.facts.unknown);
+        let original = this.facts.exited(this.exit_return != 0, this.exit_output);
+        let native = if this.exit_return == 0 {
+            PrerequisiteNative::boolean(PrerequisiteApi::GetExitCodeProcess, PrerequisiteSelector::None, this.exit_return, Some(this.exit_error))
+        } else { PrerequisiteNative::exit(this.exit_output) };
+        let _ = prerequisite_process_decision(trace, PrerequisiteCheck::D05, original, before, &this.facts, native);
         batch_return(&mut this.facts, aggregate);
         // Every borrower has returned before either once-only original close.
-        if this.facts.begin_close(true).is_ok() {
+        if prerequisite_result!(trace, D05, this.facts.begin_close(true)).is_ok() {
             this.thread_close = unsafe { F::CloseHandle(this.outputs.hThread) };
             this.thread_close_error = if this.thread_close == 0 { unsafe { F::GetLastError() } } else { 0 };
-            let _ = this.facts.closed(true, this.thread_close != 0);
+            let before = (this.facts.failed, this.facts.unknown);
+            let original = this.facts.closed(true, this.thread_close != 0);
+            let _ = prerequisite_process_decision(trace, PrerequisiteCheck::D05, original, before, &this.facts,
+                PrerequisiteNative::boolean(PrerequisiteApi::CloseHandle, PrerequisiteSelector::ThreadClose,
+                    this.thread_close, Some(this.thread_close_error)));
             batch_return(&mut this.facts, aggregate);
         }
-        if this.facts.begin_close(false).is_ok() {
+        if prerequisite_result!(trace, D05, this.facts.begin_close(false)).is_ok() {
             this.process_close = unsafe { F::CloseHandle(this.outputs.hProcess) };
             this.process_close_error = if this.process_close == 0 { unsafe { F::GetLastError() } } else { 0 };
-            let _ = this.facts.closed(false, this.process_close != 0);
+            let before = (this.facts.failed, this.facts.unknown);
+            let original = this.facts.closed(false, this.process_close != 0);
+            let _ = prerequisite_process_decision(trace, PrerequisiteCheck::D05, original, before, &this.facts,
+                PrerequisiteNative::boolean(PrerequisiteApi::CloseHandle, PrerequisiteSelector::ProcessClose,
+                    this.process_close, Some(this.process_close_error)));
             batch_return(&mut this.facts, aggregate);
         }
     }
 }
 
-fn parent_user(book: &mut NativeBook) -> Result<Vec<u8>> {
-    let index = book.process_token.ok_or(Error::State)?;
-    let complete = book.token(index, S::TokenUser)?;
-    let raw = complete.bytes(complete.count()?)?;
-    need(raw.len() >= size_of::<S::TOKEN_USER>())?;
-    let pointer = decode::u64_at(raw, offset_of!(S::TOKEN_USER, User) + offset_of!(S::SID_AND_ATTRIBUTES, Sid))? as usize;
-    let offset = pointer.checked_sub(raw.as_ptr() as usize).ok_or(Error::Unsafe)?;
-    need(offset >= size_of::<S::TOKEN_USER>())?;
-    let sid = security::sid_at(raw, offset, raw.len())?.bytes().to_vec();
-    need(sid.len() == 28 && sid != system_sid() && sid != builtin(544))?;
-    Ok(sid)
+fn parent_user(book: &mut NativeBook) -> Result<Vec<u8>> { parent_user_traced(book, &mut InputTrace::default()) }
+fn parent_user_traced(book: &mut NativeBook, trace: &mut InputTrace) -> Result<Vec<u8>> {
+    trace.prerequisite_scope(PrerequisiteCheck::D06, |trace| {
+        let index = book.process_token.ok_or(Error::State)?;
+        let complete = book.prerequisite_observe(trace, PrerequisiteCheck::NB10, |book| book.token(index, S::TokenUser))?;
+        let raw = complete.bytes(complete.count()?)?;
+        need(raw.len() >= size_of::<S::TOKEN_USER>())?;
+        let pointer = decode::u64_at(raw, offset_of!(S::TOKEN_USER, User) + offset_of!(S::SID_AND_ATTRIBUTES, Sid))? as usize;
+        let offset = pointer.checked_sub(raw.as_ptr() as usize).ok_or(Error::Unsafe)?;
+        need(offset >= size_of::<S::TOKEN_USER>())?;
+        let sid = security::sid_at(raw, offset, raw.len())?.bytes().to_vec();
+        need(sid.len() == 28 && sid != system_sid() && sid != builtin(544))?;
+        Ok(sid)
+    })
 }
 fn diagnostic(stage: &'static str, launch: Option<&Launch>, unknown: bool) {
     diagnostic_with_fault(stage, launch, unknown, None);

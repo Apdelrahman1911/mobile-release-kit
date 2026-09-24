@@ -27,6 +27,11 @@ impl Clock {
         self.latched |= tick < self.entry_tick || tick >= self.endpoint_tick;
         owner_effect(self.start, &mut self.latched, &mut self.aggregate)
     }
+    fn effect_traced(&mut self, trace: &mut InputTrace) -> Result<()> {
+        let original = self.effect();
+        trace.prerequisite_clock(self.latched);
+        trace.prerequisite_result(PrerequisiteCheck::T01, original)
+    }
     fn remaining_ms(&mut self) -> Result<u32> {
         self.effect()?;
         let remaining = self.endpoint_tick.checked_sub(unsafe { SI::GetTickCount64() }).ok_or(Error::Unsafe)?;
@@ -37,35 +42,41 @@ impl Clock {
 impl Launch {
     fn ui(request: &UiRequest, identity: &str, raw_request: &str, output: &Path,
         account: &Account, parent: &[u8], endpoint: u64) -> Result<Pin<Box<Self>>> {
-        let binding = Binding { source: request.source.clone(), tree: request.tree.clone(), run: request.run.clone(),
-            artifact: request.app.path.clone(), bytes: request.app.bytes, sha: request.app.sha.clone(),
-            command_sha: request.app.command_sha.clone(), identity: identity.to_owned() };
-        // Reuse the existing checked, explicit Windows system environment and
-        // initialized original PI/STARTUPINFO. No ambient user values are added.
-        let mut value = Self::new(OwnerVariant::Ordinary, &binding, None, output, account, parent)?;
-        let current = unsafe { value.as_mut().get_unchecked_mut() };
-        let text = String::from_utf16(&current.environment[..current.environment.len() - 1]).map_err(|_| Error::Unsafe)?;
-        let mut pairs: Vec<(String, String)> = text.split('\0').filter(|entry| !entry.is_empty()).map(|entry| {
-            entry.split_once('=').map(|(name, value)| (name.to_owned(), value.to_owned())).ok_or(Error::Unsafe)
-        }).collect::<Result<_>>()?;
-        pairs.retain(|(name, _)| !name.starts_with("MRK_WINDOWS_NATIVE_") && name != "MRK_WINDOWS_ORDINARY_OUTPUT");
-        pairs.extend([
-            ("MRK_WINDOWS_NORMAL_UI_REQUEST".to_owned(), raw_request.to_owned()),
-            ("MRK_WINDOWS_NORMAL_UI_OUTPUT".to_owned(), output.to_str().ok_or(Error::Unsafe)?.to_owned()),
-            ("MRK_WINDOWS_NORMAL_UI_ARTIFACT_IDENTITY".to_owned(), identity.to_owned()),
-            ("MRK_WINDOWS_NORMAL_UI_END_TICK_MS".to_owned(), endpoint.to_string()),
-            ("MRK_DESKTOP_DISPATCH_SCOPE".to_owned(), "windows-normal-project-ui".to_owned()),
-            ("GITHUB_REF".to_owned(), "refs/heads/verify/desktop-windows-normal-project-ui".to_owned()),
-            ("GITHUB_EVENT_NAME".to_owned(), "workflow_dispatch".to_owned()),
-        ]);
-        pairs.sort_by_key(|(name, _)| name.to_ascii_uppercase());
-        need(pairs.windows(2).all(|pair| !pair[0].0.eq_ignore_ascii_case(&pair[1].0)))?;
-        current.environment = pairs.iter().flat_map(|(name, value)| wide(&format!("{name}={value}")))
-            .chain(std::iter::once(0)).collect();
-        current.command = wide(&request.role.command(&request.app.path, false));
-        current.logon_flags = T::LOGON_WITH_PROFILE;
-        need(current.environment.len() <= 8192 && current.command.len() <= 1024)?;
-        Ok(value)
+        Self::ui_traced(request, identity, raw_request, output, account, parent, endpoint, &mut InputTrace::default())
+    }
+    fn ui_traced(request: &UiRequest, identity: &str, raw_request: &str, output: &Path,
+        account: &Account, parent: &[u8], endpoint: u64, trace: &mut InputTrace) -> Result<Pin<Box<Self>>> {
+        trace.prerequisite_scope(PrerequisiteCheck::D02, |trace| {
+            let binding = Binding { source: request.source.clone(), tree: request.tree.clone(), run: request.run.clone(),
+                artifact: request.app.path.clone(), bytes: request.app.bytes, sha: request.app.sha.clone(),
+                command_sha: request.app.command_sha.clone(), identity: identity.to_owned() };
+            // Reuse the existing checked, explicit Windows system environment and
+            // initialized original PI/STARTUPINFO. No ambient user values are added.
+            let mut value = Self::new_traced(OwnerVariant::Ordinary, &binding, None, output, account, parent, trace)?;
+            let current = unsafe { value.as_mut().get_unchecked_mut() };
+            let text = String::from_utf16(&current.environment[..current.environment.len() - 1]).map_err(|_| Error::Unsafe)?;
+            let mut pairs: Vec<(String, String)> = text.split('\0').filter(|entry| !entry.is_empty()).map(|entry| {
+                entry.split_once('=').map(|(name, value)| (name.to_owned(), value.to_owned())).ok_or(Error::Unsafe)
+            }).collect::<Result<_>>()?;
+            pairs.retain(|(name, _)| !name.starts_with("MRK_WINDOWS_NATIVE_") && name != "MRK_WINDOWS_ORDINARY_OUTPUT");
+            pairs.extend([
+                ("MRK_WINDOWS_NORMAL_UI_REQUEST".to_owned(), raw_request.to_owned()),
+                ("MRK_WINDOWS_NORMAL_UI_OUTPUT".to_owned(), output.to_str().ok_or(Error::Unsafe)?.to_owned()),
+                ("MRK_WINDOWS_NORMAL_UI_ARTIFACT_IDENTITY".to_owned(), identity.to_owned()),
+                ("MRK_WINDOWS_NORMAL_UI_END_TICK_MS".to_owned(), endpoint.to_string()),
+                ("MRK_DESKTOP_DISPATCH_SCOPE".to_owned(), "windows-normal-project-ui".to_owned()),
+                ("GITHUB_REF".to_owned(), "refs/heads/verify/desktop-windows-normal-project-ui".to_owned()),
+                ("GITHUB_EVENT_NAME".to_owned(), "workflow_dispatch".to_owned()),
+            ]);
+            pairs.sort_by_key(|(name, _)| name.to_ascii_uppercase());
+            need(pairs.windows(2).all(|pair| !pair[0].0.eq_ignore_ascii_case(&pair[1].0)))?;
+            current.environment = pairs.iter().flat_map(|(name, value)| wide(&format!("{name}={value}")))
+                .chain(std::iter::once(0)).collect();
+            current.command = wide(&request.role.command(&request.app.path, false));
+            current.logon_flags = T::LOGON_WITH_PROFILE;
+            need(current.environment.len() <= 8192 && current.command.len() <= 1024)?;
+            Ok(value)
+        })
     }
 }
 
@@ -82,47 +93,73 @@ impl Key {
             status: u32::MAX, value_name: wide("ProfileImagePath"), value_kind: 0, value_size: 4096,
             value: Box::new([0; 4096]), active: false }
     }
-    fn open(&mut self, clock: &mut Clock) -> Result<bool> {
-        need(self.state == SlotState::Reserved)?; clock.effect()?;
-        self.state = SlotState::Acquiring; self.active = true;
-        self.status = unsafe { R::RegOpenKeyExW(self.root, self.name.as_ptr(), 0,
-            R::KEY_READ | R::KEY_WOW64_64KEY, &mut self.handle) };
-        if self.status == F::ERROR_SUCCESS && !self.handle.is_null() {
-            self.active = false; self.state = SlotState::Owned; clock.effect()?; return Ok(true);
-        }
-        if self.handle.is_null() && self.status != F::ERROR_SUCCESS && self.status != F::ERROR_IO_PENDING {
-            self.active = false; self.state = SlotState::NoHandle; clock.effect()?;
-            return if self.status == F::ERROR_FILE_NOT_FOUND { Ok(false) } else { Err(Error::Unavailable) };
-        }
-        self.state = SlotState::Unknown; Err(Error::Unknown)
+    fn open(&mut self, clock: &mut Clock) -> Result<bool> { self.open_traced(clock, &mut InputTrace::default()) }
+    fn open_traced(&mut self, clock: &mut Clock, trace: &mut InputTrace) -> Result<bool> {
+        trace.prerequisite_scope(PrerequisiteCheck::K01, |trace| {
+            need(self.state == SlotState::Reserved)?; clock.effect_traced(trace)?;
+            self.state = SlotState::Acquiring; self.active = true;
+            self.status = unsafe { R::RegOpenKeyExW(self.root, self.name.as_ptr(), 0,
+                R::KEY_READ | R::KEY_WOW64_64KEY, &mut self.handle) };
+            if self.status == F::ERROR_SUCCESS && !self.handle.is_null() {
+                self.active = false; self.state = SlotState::Owned; clock.effect_traced(trace)?; return Ok(true);
+            }
+            if self.handle.is_null() && self.status != F::ERROR_SUCCESS && self.status != F::ERROR_IO_PENDING {
+                self.active = false; self.state = SlotState::NoHandle;
+                if self.status != F::ERROR_FILE_NOT_FOUND {
+                    trace.prerequisite_fault(PrerequisiteCheck::K01, Error::Unavailable,
+                        PrerequisiteNative::registry(PrerequisiteApi::RegOpenKeyExW, PrerequisiteSelector::None, self.status), None);
+                }
+                clock.effect_traced(trace)?;
+                return if self.status == F::ERROR_FILE_NOT_FOUND { Ok(false) } else { Err(Error::Unavailable) };
+            }
+            self.state = SlotState::Unknown;
+            trace.prerequisite_fault(PrerequisiteCheck::K01, Error::Unknown,
+                PrerequisiteNative::registry(PrerequisiteApi::RegOpenKeyExW, PrerequisiteSelector::None, self.status), None);
+            Err(Error::Unknown)
+        })
     }
-    fn profile_path(&mut self, expected: &Path, clock: &mut Clock) -> Result<()> {
-        need(self.state == SlotState::Owned && !self.active)?; clock.effect()?;
-        self.value_kind = 0; self.value_size = self.value.len() as u32; self.value.fill(0);
-        self.active = true;
-        self.status = unsafe { R::RegQueryValueExW(self.handle, self.value_name.as_ptr(), null(),
-            &mut self.value_kind, self.value.as_mut_ptr(), &mut self.value_size) };
-        self.active = self.status == F::ERROR_IO_PENDING;
-        if self.active { self.state = SlotState::Unknown; return Err(Error::Unknown); }
-        clock.effect()?;
-        need(self.status == F::ERROR_SUCCESS && matches!(self.value_kind, R::REG_SZ | R::REG_EXPAND_SZ)
-            && self.value_size >= 4 && self.value_size as usize <= self.value.len() && self.value_size % 2 == 0)?;
-        let units: Vec<u16> = self.value[..self.value_size as usize].chunks_exact(2).map(|v| u16::from_le_bytes([v[0], v[1]])).collect();
-        need(units.last() == Some(&0) && !units[..units.len() - 1].contains(&0))?;
-        let text = String::from_utf16(&units[..units.len() - 1]).map_err(|_| Error::Unsafe)?;
-        // REG_EXPAND_SZ is accepted only if already the exact absolute path;
-        // no process/user environment expansion or redirected-profile fallback.
-        need(fixed_path(&text)? == expected)
+    fn profile_path(&mut self, expected: &Path, clock: &mut Clock) -> Result<()> { self.profile_path_traced(expected, clock, &mut InputTrace::default()) }
+    fn profile_path_traced(&mut self, expected: &Path, clock: &mut Clock, trace: &mut InputTrace) -> Result<()> {
+        trace.prerequisite_scope(PrerequisiteCheck::K02, |trace| {
+            need(self.state == SlotState::Owned && !self.active)?; clock.effect_traced(trace)?;
+            self.value_kind = 0; self.value_size = self.value.len() as u32; self.value.fill(0);
+            self.active = true;
+            self.status = unsafe { R::RegQueryValueExW(self.handle, self.value_name.as_ptr(), null(),
+                &mut self.value_kind, self.value.as_mut_ptr(), &mut self.value_size) };
+            self.active = self.status == F::ERROR_IO_PENDING;
+            if self.active {
+                self.state = SlotState::Unknown;
+                trace.prerequisite_fault(PrerequisiteCheck::K02, Error::Unknown,
+                    PrerequisiteNative::registry(PrerequisiteApi::RegQueryValueExW, PrerequisiteSelector::ProfileImagePath, self.status), None);
+                return Err(Error::Unknown);
+            }
+            clock.effect_traced(trace)?;
+            let original = need(self.status == F::ERROR_SUCCESS && matches!(self.value_kind, R::REG_SZ | R::REG_EXPAND_SZ)
+                && self.value_size >= 4 && self.value_size as usize <= self.value.len() && self.value_size % 2 == 0);
+            trace.prerequisite_native_result(PrerequisiteCheck::K02, original,
+                PrerequisiteNative::registry(PrerequisiteApi::RegQueryValueExW, PrerequisiteSelector::ProfileImagePath, self.status), None)?;
+            let units: Vec<u16> = self.value[..self.value_size as usize].chunks_exact(2).map(|v| u16::from_le_bytes([v[0], v[1]])).collect();
+            need(units.last() == Some(&0) && !units[..units.len() - 1].contains(&0))?;
+            let text = String::from_utf16(&units[..units.len() - 1]).map_err(|_| Error::Unsafe)?;
+            // REG_EXPAND_SZ is accepted only if already the exact absolute path;
+            // no process/user environment expansion or redirected-profile fallback.
+            need(fixed_path_traced(&text, trace)? == expected)
+        })
     }
-    fn close(&mut self) -> Result<()> {
-        match self.state {
-            SlotState::Reserved | SlotState::NoHandle | SlotState::Closed => return Ok(()),
-            SlotState::Owned if !self.active => (), _ => return Err(Error::Unknown),
-        }
-        self.state = SlotState::Closing;
-        self.status = unsafe { R::RegCloseKey(self.handle) };
-        self.state = if self.status == F::ERROR_SUCCESS { SlotState::Closed } else { SlotState::Unknown };
-        need(self.state == SlotState::Closed).map_err(|_| Error::Unknown)
+    fn close(&mut self) -> Result<()> { self.close_traced(&mut InputTrace::default()) }
+    fn close_traced(&mut self, trace: &mut InputTrace) -> Result<()> {
+        trace.prerequisite_scope(PrerequisiteCheck::K03, |trace| {
+            match self.state {
+                SlotState::Reserved | SlotState::NoHandle | SlotState::Closed => return Ok(()),
+                SlotState::Owned if !self.active => (), _ => return Err(Error::Unknown),
+            }
+            self.state = SlotState::Closing;
+            self.status = unsafe { R::RegCloseKey(self.handle) };
+            self.state = if self.status == F::ERROR_SUCCESS { SlotState::Closed } else { SlotState::Unknown };
+            let original = need(self.state == SlotState::Closed).map_err(|_| Error::Unknown);
+            trace.prerequisite_native_result(PrerequisiteCheck::K03, original,
+                PrerequisiteNative::registry(PrerequisiteApi::RegCloseKey, PrerequisiteSelector::None, self.status), None)
+        })
     }
 }
 
@@ -208,6 +245,13 @@ impl Absence {
         self.absent = self.returned as u32 == 0xc0000034;
         need(self.absent)
     }
+    fn observe_return_traced(&mut self, book: &NativeBook, other: &Absence, returned_observed: bool, trace: &mut InputTrace) -> Result<()> {
+        let observed = returned_observed && self.entered && !self.completed && self.state == SlotState::Acquiring;
+        let original = self.observe_return(book, other);
+        let selector = match self.epoch { AbsenceEpoch::BeforeLogon => PrerequisiteSelector::BeforeLogon, AbsenceEpoch::AfterDeletion => PrerequisiteSelector::AfterDeletion };
+        let native = if observed { PrerequisiteNative::nt(PrerequisiteApi::NtCreateFile, selector, self.returned) } else { None };
+        trace.prerequisite_native_result(PrerequisiteCheck::B02, original, native, None)
+    }
     fn exact_absence(&self) -> bool {
         self.claimed && self.entered && self.completed && self.absent && !self.close_entered
             && self.state == SlotState::NoHandle && self.returned as u32 == 0xc0000034
@@ -235,12 +279,19 @@ impl Absence {
         if self.close_return == 0 { return self.unknown(); }
         self.state = SlotState::Closed; Ok(())
     }
-    fn close_once(&mut self) -> Result<()> {
-        if self.begin_close()?.is_none() { return Ok(()); }
+    fn observe_close_traced(&mut self, returned_observed: bool, trace: &mut InputTrace) -> Result<()> {
+        let observed = returned_observed && self.close_entered && self.state == SlotState::Closing;
+        let original = self.observe_close();
+        let native = if observed { PrerequisiteNative::boolean(PrerequisiteApi::CloseHandle, PrerequisiteSelector::None, self.close_return, Some(self.close_error)) } else { None };
+        trace.prerequisite_native_result(PrerequisiteCheck::B03, original, native, None)
+    }
+    fn close_once(&mut self) -> Result<()> { self.close_once_traced(&mut InputTrace::default()) }
+    fn close_once_traced(&mut self, trace: &mut InputTrace) -> Result<()> {
+        if prerequisite_result!(trace, B03, self.begin_close())?.is_none() { return Ok(()); }
         // All return/error/input destinations were preregistered in this frame.
         self.close_return = unsafe { F::CloseHandle(self.close_handle) };
         self.close_error = if self.close_return != 0 { 0 } else { unsafe { F::GetLastError() } };
-        self.observe_close()
+        self.observe_close_traced(true, trace)
     }
     fn settled(&self) -> bool {
         !self.unresolved() && match self.state {
@@ -260,224 +311,287 @@ struct Profile {
     poststate: bool, unknown: bool, settled: bool,
 }
 impl Profile {
-    fn new(account: &Account) -> Result<Self> {
-        need(local_account_sid(&account.sid))?;
-        let sid = format!("S-1-5-21-{}-{}-{}-{}", decode::u32_at(&account.sid, 12)?,
-            decode::u32_at(&account.sid, 16)?, decode::u32_at(&account.sid, 20)?, decode::u32_at(&account.sid, 24)?);
-        let name = String::from_utf16(&account.name[..account.name.len() - 1]).map_err(|_| Error::Unsafe)?;
-        need(name.len() == 19 && name.starts_with("mrk") && is_hex(&name[3..], 16))?;
-        Ok(Self { native: NativeBook::new(), paths: Vec::with_capacity(16), absence: [None, None],
-            keys: Vec::with_capacity(64), directory: Box::new([0; 1024]), units: 1024,
-            getter_entered: false, getter_return: 0, getter_error: 0, sid: wide(&sid), name,
-            drive: String::new(), device: String::new(), expected: PathBuf::new(), profile: None,
-            mapping: None, root_key: None, prestate: false, exact: false, hives_unloaded: false,
-            delete_entered: false, delete_return: 0, delete_error: 0, poststate: false, unknown: false, settled: false })
+    fn new(account: &Account) -> Result<Self> { Self::new_traced(account, &mut InputTrace::default()) }
+    fn new_traced(account: &Account, trace: &mut InputTrace) -> Result<Self> {
+        trace.prerequisite_scope(PrerequisiteCheck::V01, |trace| {
+            need(local_account_sid(&account.sid))?;
+            let sid = format!("S-1-5-21-{}-{}-{}-{}", decode::u32_at(&account.sid, 12)?,
+                decode::u32_at(&account.sid, 16)?, decode::u32_at(&account.sid, 20)?, decode::u32_at(&account.sid, 24)?);
+            let name = String::from_utf16(&account.name[..account.name.len() - 1]).map_err(|_| Error::Unsafe)?;
+            need(name.len() == 19 && name.starts_with("mrk") && is_hex(&name[3..], 16))?;
+            let value = Self { native: NativeBook::new(), paths: Vec::with_capacity(16), absence: [None, None],
+                keys: Vec::with_capacity(64), directory: Box::new([0; 1024]), units: 1024,
+                getter_entered: false, getter_return: 0, getter_error: 0, sid: wide(&sid), name,
+                drive: String::new(), device: String::new(), expected: PathBuf::new(), profile: None,
+                mapping: None, root_key: None, prestate: false, exact: false, hives_unloaded: false,
+                delete_entered: false, delete_return: 0, delete_error: 0, poststate: false, unknown: false, settled: false };
+            value.native.prerequisite_enable_admission(trace);
+            Ok(value)
+        })
     }
-    fn key(&mut self, root: R::HKEY, name: &str, clock: &mut Clock) -> Result<(usize, bool)> {
-        need(self.keys.len() < 64)?;
-        let index = self.keys.len(); self.keys.push(Box::new(Key::new(root, name)));
-        let opened = self.keys[index].open(clock)?; Ok((index, opened))
+    fn key(&mut self, root: R::HKEY, name: &str, clock: &mut Clock) -> Result<(usize, bool)> { self.key_traced(root, name, clock, &mut InputTrace::default()) }
+    fn key_traced(&mut self, root: R::HKEY, name: &str, clock: &mut Clock, trace: &mut InputTrace) -> Result<(usize, bool)> {
+        trace.prerequisite_scope(PrerequisiteCheck::V01, |trace| {
+            need(self.keys.len() < 64)?;
+            let index = self.keys.len(); self.keys.push(Box::new(Key::new(root, name)));
+            let opened = self.keys[index].open_traced(clock, trace)?; Ok((index, opened))
+        })
     }
-    fn sid_name(&self) -> Result<String> { String::from_utf16(&self.sid[..self.sid.len() - 1]).map_err(|_| Error::Unsafe) }
-    fn hives_absent(&mut self, clock: &mut Clock) -> Result<bool> {
-        let sid = self.sid_name()?;
-        let mut absent = true;
-        for name in [sid.clone(), format!("{sid}_Classes")] {
-            let (index, present) = self.key(R::HKEY_USERS, &name, clock)?;
-            self.keys[index].close()?; absent &= !present;
-        }
-        Ok(absent)
+    fn sid_name(&self) -> Result<String> { self.sid_name_traced(&mut InputTrace::default()) }
+    fn sid_name_traced(&self, trace: &mut InputTrace) -> Result<String> {
+        trace.prerequisite_result(PrerequisiteCheck::V01, String::from_utf16(&self.sid[..self.sid.len() - 1]).map_err(|_| Error::Unsafe))
     }
-    fn absence(&self, epoch: AbsenceEpoch) -> Result<&Absence> {
-        self.absence[epoch.index()].as_ref().map(|frame| frame.as_ref().get_ref()).ok_or(Error::State)
+    fn hives_absent(&mut self, clock: &mut Clock) -> Result<bool> { self.hives_absent_traced(clock, &mut InputTrace::default()) }
+    fn hives_absent_traced(&mut self, clock: &mut Clock, trace: &mut InputTrace) -> Result<bool> {
+        trace.prerequisite_scope(PrerequisiteCheck::V02, |trace| {
+            let sid = self.sid_name_traced(trace)?;
+            let mut absent = true;
+            for name in [sid.clone(), format!("{sid}_Classes")] {
+                let (index, present) = self.key_traced(R::HKEY_USERS, &name, clock, trace)?;
+                self.keys[index].close_traced(trace)?; absent &= !present;
+            }
+            Ok(absent)
+        })
     }
-    fn absence_mut(&mut self, epoch: AbsenceEpoch) -> Result<&mut Absence> {
-        let frame = self.absence[epoch.index()].as_mut().ok_or(Error::State)?;
-        Ok(unsafe { frame.as_mut().get_unchecked_mut() })
+    fn absence(&self, epoch: AbsenceEpoch) -> Result<&Absence> { self.absence_traced(epoch, &mut InputTrace::default()) }
+    fn absence_traced(&self, epoch: AbsenceEpoch, trace: &mut InputTrace) -> Result<&Absence> {
+        trace.prerequisite_scope(PrerequisiteCheck::V03, |trace| {
+            self.absence[epoch.index()].as_ref().map(|frame| frame.as_ref().get_ref()).ok_or(Error::State)
+        })
     }
-    fn register_absence(&mut self) -> Result<()> {
-        self.native.clear()?;
-        need(!self.unknown && !self.settled && self.absence.iter().all(Option::is_none)
-            && !self.paths.is_empty() && self.paths.len() <= 14 && self.native.slots.len() == self.paths.len())?;
-        // Two fixed output originals plus the one future binding count against
-        // the SAME existing limits. At most14 parents+2 epochs+1 binding =17.
-        let records = self.native.slots.len().checked_add(3).ok_or(Error::Bounds)?;
-        if records > MAX_RECORDS || records > MAX_LIVE { return Err(Error::Bounds); }
-        let parent = self.paths.last().ok_or(Error::State)?.original.index;
-        let handle = self.native.handle(parent)?;
-        let before = Absence::new(AbsenceEpoch::BeforeLogon, parent, handle, &self.name)?;
-        let after = Absence::new(AbsenceEpoch::AfterDeletion, parent, handle, &self.name)?;
-        self.absence = [Some(ManuallyDrop::new(before)), Some(ManuallyDrop::new(after))];
-        Ok(()) // Both fixed frames are owned BEFORE either original call.
+    fn absence_mut(&mut self, epoch: AbsenceEpoch) -> Result<&mut Absence> { self.absence_mut_traced(epoch, &mut InputTrace::default()) }
+    fn absence_mut_traced(&mut self, epoch: AbsenceEpoch, trace: &mut InputTrace) -> Result<&mut Absence> {
+        let original = self.absence[epoch.index()].as_mut().map(|frame|
+            unsafe { frame.as_mut().get_unchecked_mut() }).ok_or(Error::State);
+        trace.prerequisite_result(PrerequisiteCheck::V03, original)
     }
-    fn absence_permitted(&self, epoch: AbsenceEpoch) -> Result<()> {
-        if self.unknown { return Err(Error::Unknown); }
-        self.native.clear()?; need(!self.settled && !self.poststate)?;
-        let parent = self.paths.last().ok_or(Error::State)?.original.index;
-        let handle = self.native.handle(parent)?; let name = wide(&self.name);
-        for expected in [AbsenceEpoch::BeforeLogon, AbsenceEpoch::AfterDeletion] {
-            let frame = self.absence(expected)?;
-            need(frame.epoch == expected && frame.parent == parent && frame.parent_handle == handle && frame.name == name)?;
-        }
-        need(self.absence(epoch)?.unstarted())?;
-        match epoch {
-            AbsenceEpoch::BeforeLogon => need(!self.prestate && !self.exact && self.profile.is_none()
-                && !self.delete_entered && self.absence(AbsenceEpoch::AfterDeletion)?.unstarted()),
-            AbsenceEpoch::AfterDeletion => need(self.prestate && self.exact && self.hives_unloaded
-                && self.absence(AbsenceEpoch::BeforeLogon)?.exact_absence()
-                && self.profile.as_ref().is_some_and(|path| self.native.state(&path.original) == Ok(SlotState::Closed))
-                && self.mapping.and_then(|index| self.keys.get(index)).is_some_and(|key| key.state == SlotState::Closed && !key.active)
-                && self.delete_entered && self.delete_return != 0),
-        }
+    fn register_absence(&mut self) -> Result<()> { self.register_absence_traced(&mut InputTrace::default()) }
+    fn register_absence_traced(&mut self, trace: &mut InputTrace) -> Result<()> {
+        trace.prerequisite_scope(PrerequisiteCheck::V02, |trace| {
+            prerequisite_result!(trace, NB01, self.native.clear())?;
+            need(!self.unknown && !self.settled && self.absence.iter().all(Option::is_none)
+                && !self.paths.is_empty() && self.paths.len() <= 14 && self.native.slots.len() == self.paths.len())?;
+            // Two fixed output originals plus the one future binding count against
+            // the SAME existing limits. At most14 parents+2 epochs+1 binding =17.
+            let records = self.native.slots.len().checked_add(3).ok_or(Error::Bounds)?;
+            if records > MAX_RECORDS || records > MAX_LIVE { return Err(Error::Bounds); }
+            let parent = self.paths.last().ok_or(Error::State)?.original.index;
+            let handle = prerequisite_result!(trace, NB01, self.native.handle(parent))?;
+            let before = prerequisite_result!(trace, B01, Absence::new(AbsenceEpoch::BeforeLogon, parent, handle, &self.name))?;
+            let after = prerequisite_result!(trace, B01, Absence::new(AbsenceEpoch::AfterDeletion, parent, handle, &self.name))?;
+            self.absence = [Some(ManuallyDrop::new(before)), Some(ManuallyDrop::new(after))];
+            Ok(()) // Both fixed frames are owned BEFORE either original call.
+        })
     }
-    fn binding_permitted(&self) -> Result<()> {
-        if self.unknown { return Err(Error::Unknown); }
-        self.native.clear()?;
-        need(self.prestate && !self.exact && self.profile.is_none() && !self.delete_entered && !self.settled
-            && self.absence(AbsenceEpoch::BeforeLogon)?.exact_absence() && self.absence(AbsenceEpoch::AfterDeletion)?.unstarted())
+    fn absence_permitted(&self, epoch: AbsenceEpoch) -> Result<()> { self.absence_permitted_traced(epoch, &mut InputTrace::default()) }
+    fn absence_permitted_traced(&self, epoch: AbsenceEpoch, trace: &mut InputTrace) -> Result<()> {
+        trace.prerequisite_scope(PrerequisiteCheck::V03, |trace| {
+            if self.unknown { return Err(Error::Unknown); }
+            prerequisite_result!(trace, NB01, self.native.clear())?; need(!self.settled && !self.poststate)?;
+            let parent = self.paths.last().ok_or(Error::State)?.original.index;
+            let handle = prerequisite_result!(trace, NB01, self.native.handle(parent))?; let name = wide(&self.name);
+            for expected in [AbsenceEpoch::BeforeLogon, AbsenceEpoch::AfterDeletion] {
+                let frame = self.absence_traced(expected, trace)?;
+                need(frame.epoch == expected && frame.parent == parent && frame.parent_handle == handle && frame.name == name)?;
+            }
+            need(self.absence_traced(epoch, trace)?.unstarted())?;
+            match epoch {
+                AbsenceEpoch::BeforeLogon => need(!self.prestate && !self.exact && self.profile.is_none()
+                    && !self.delete_entered && self.absence_traced(AbsenceEpoch::AfterDeletion, trace)?.unstarted()),
+                AbsenceEpoch::AfterDeletion => need(self.prestate && self.exact && self.hives_unloaded
+                    && self.absence_traced(AbsenceEpoch::BeforeLogon, trace)?.exact_absence()
+                    && self.profile.as_ref().is_some_and(|path| prerequisite_result!(trace, NB01, self.native.state(&path.original)) == Ok(SlotState::Closed))
+                    && self.mapping.and_then(|index| self.keys.get(index)).is_some_and(|key| key.state == SlotState::Closed && !key.active)
+                    && self.delete_entered && self.delete_return != 0),
+            }
+        })
+    }
+    fn binding_permitted(&self) -> Result<()> { self.binding_permitted_traced(&mut InputTrace::default()) }
+    fn binding_permitted_traced(&self, trace: &mut InputTrace) -> Result<()> {
+        trace.prerequisite_scope(PrerequisiteCheck::V03, |trace| {
+            if self.unknown { return Err(Error::Unknown); }
+            prerequisite_result!(trace, NB01, self.native.clear())?;
+            need(self.prestate && !self.exact && self.profile.is_none() && !self.delete_entered && !self.settled
+                && self.absence_traced(AbsenceEpoch::BeforeLogon, trace)?.exact_absence() && self.absence_traced(AbsenceEpoch::AfterDeletion, trace)?.unstarted())
+        })
     }
     fn absence_dependents_settled(&self) -> bool {
         self.absence.iter().flatten().all(|frame| frame.settled())
     }
-    fn profile_absent(&mut self, epoch: AbsenceEpoch, clock: &mut Clock) -> Result<()> {
-        let permission = self.absence_permitted(epoch);
-        if matches!(permission, Err(Error::Unknown)) { self.unknown = true; return permission; }
-        self.absence_mut(epoch)?.claim()?; // Even a pre-entry refusal spends this fixed epoch.
-        permission?; clock.effect()?;
-        let native = &self.native;
-        let [before, after] = &mut self.absence;
-        let (frame, other) = match epoch { AbsenceEpoch::BeforeLogon => (before, after), AbsenceEpoch::AfterDeletion => (after, before) };
-        let f = unsafe { frame.as_mut().ok_or(Error::State)?.as_mut().get_unchecked_mut() };
-        let other = other.as_ref().ok_or(Error::State)?.as_ref().get_ref();
-        f.begin()?;
-        f.returned = unsafe { N::NtCreateFile(f.output.get(), FS::FILE_READ_ATTRIBUTES | FS::SYNCHRONIZE,
-            &f.attributes, f.iosb.get(), null(), 0, FS::FILE_SHARE_READ | FS::FILE_SHARE_WRITE, N::FILE_OPEN,
-            N::FILE_DIRECTORY_FILE | N::FILE_OPEN_REPARSE_POINT | N::FILE_SYNCHRONOUS_IO_NONALERT, null(), 0) };
-        let result = f.observe_return(native, other);
-        self.unknown |= f.state == SlotState::Unknown;
-        result?; clock.effect()
+    fn profile_absent(&mut self, epoch: AbsenceEpoch, clock: &mut Clock) -> Result<()> { self.profile_absent_traced(epoch, clock, &mut InputTrace::default()) }
+    fn profile_absent_traced(&mut self, epoch: AbsenceEpoch, clock: &mut Clock, trace: &mut InputTrace) -> Result<()> {
+        trace.prerequisite_scope(PrerequisiteCheck::V04, |trace| {
+            let permission = self.absence_permitted_traced(epoch, trace);
+            if matches!(permission, Err(Error::Unknown)) { self.unknown = true; return permission; }
+            prerequisite_result!(trace, B01, self.absence_mut_traced(epoch, trace)?.claim())?; // Even a pre-entry refusal spends this fixed epoch.
+            permission?; clock.effect_traced(trace)?;
+            let native = &self.native;
+            let [before, after] = &mut self.absence;
+            let (frame, other) = match epoch { AbsenceEpoch::BeforeLogon => (before, after), AbsenceEpoch::AfterDeletion => (after, before) };
+            let f = unsafe { frame.as_mut().ok_or(Error::State)?.as_mut().get_unchecked_mut() };
+            let other = other.as_ref().ok_or(Error::State)?.as_ref().get_ref();
+            prerequisite_result!(trace, B01, f.begin())?;
+            f.returned = unsafe { N::NtCreateFile(f.output.get(), FS::FILE_READ_ATTRIBUTES | FS::SYNCHRONIZE,
+                &f.attributes, f.iosb.get(), null(), 0, FS::FILE_SHARE_READ | FS::FILE_SHARE_WRITE, N::FILE_OPEN,
+                N::FILE_DIRECTORY_FILE | N::FILE_OPEN_REPARSE_POINT | N::FILE_SYNCHRONOUS_IO_NONALERT, null(), 0) };
+            let result = f.observe_return_traced(native, other, true, trace);
+            self.unknown |= f.state == SlotState::Unknown;
+            result?; clock.effect_traced(trace)
+        })
     }
-    fn prepare(&mut self, clock: &mut Clock) -> Result<()> {
-        need(!self.getter_entered)?; clock.effect()?;
-        self.getter_entered = true;
-        self.getter_return = unsafe { SH::GetProfilesDirectoryW(self.directory.as_mut_ptr(), &mut self.units) };
-        self.getter_error = if self.getter_return != 0 { 0 } else { unsafe { F::GetLastError() } };
-        if self.getter_return == 0 && (self.getter_error == 0 || self.getter_error == F::ERROR_IO_PENDING) {
-            self.unknown = true; return Err(Error::Unknown);
-        }
-        clock.effect()?; need(self.getter_return != 0 && self.units > 1 && self.units as usize <= self.directory.len())?;
-        let count = self.directory.iter().position(|unit| *unit == 0).ok_or(Error::Unsafe)?;
-        let path = String::from_utf16(&self.directory[..count]).map_err(|_| Error::Unsafe)?;
-        let root = fixed_path(&path)?;
-        let (drive, parts) = decode::dos_location(&path)?;
-        need(!parts.is_empty() && parts.len() < 14)?;
-        self.drive = drive; self.device = self.native.mapping(&self.drive)?; clock.effect()?;
-        let name = format!("{}\\", self.device);
-        let original = self.native.reserve(Kind::Directory, None, &name, name.clone())?;
-        // NativeBook keeps the original output even if an error prevents the
-        // higher-level metadata record from being added to paths.
-        self.native.call(Call::Open(original.index), null_mut(), Vec::new())?;
-        clock.effect()?; self.native.noninherited(original.index)?; clock.effect()?;
-        let metadata = self.native.metadata(&original)?; clock.effect()?; self.native.local_ntfs(&original)?;
-        clock.effect()?; self.native.security(&original, AuthorityScope::AncestorOutsideVersion)?; clock.effect()?;
-        self.paths.push(ProfilePath { original, metadata });
-        for name in parts {
-            clock.effect()?;
-            let original = self.native.open_child(&self.paths.last().ok_or(Error::State)?.original, &name, FileKind::Directory)?;
-            clock.effect()?; let metadata = self.native.metadata(&original)?; clock.effect()?;
-            self.native.security(&original, AuthorityScope::AncestorOutsideVersion)?; clock.effect()?;
+    fn prepare(&mut self, clock: &mut Clock) -> Result<()> { self.prepare_traced(clock, &mut InputTrace::default()) }
+    fn prepare_traced(&mut self, clock: &mut Clock, trace: &mut InputTrace) -> Result<()> {
+        trace.prerequisite_scope(PrerequisiteCheck::V05, |trace| {
+            need(!self.getter_entered)?; clock.effect_traced(trace)?;
+            self.getter_entered = true;
+            self.getter_return = unsafe { SH::GetProfilesDirectoryW(self.directory.as_mut_ptr(), &mut self.units) };
+            self.getter_error = if self.getter_return != 0 { 0 } else { unsafe { F::GetLastError() } };
+            let native = PrerequisiteNative::boolean(PrerequisiteApi::GetProfilesDirectoryW, PrerequisiteSelector::None,
+                self.getter_return, Some(self.getter_error));
+            if self.getter_return == 0 && (self.getter_error == 0 || self.getter_error == F::ERROR_IO_PENDING) {
+                trace.prerequisite_fault(PrerequisiteCheck::V05, Error::Unknown, native, None);
+                self.unknown = true; return Err(Error::Unknown);
+            }
+            clock.effect_traced(trace)?;
+            trace.prerequisite_native_result(PrerequisiteCheck::V05,
+                need(self.getter_return != 0 && self.units > 1 && self.units as usize <= self.directory.len()), native, None)?;
+            let count = self.directory.iter().position(|unit| *unit == 0).ok_or(Error::Unsafe)?;
+            let path = String::from_utf16(&self.directory[..count]).map_err(|_| Error::Unsafe)?;
+            let root = fixed_path_traced(&path, trace)?;
+            let (drive, parts) = decode::dos_location(&path)?;
+            need(!parts.is_empty() && parts.len() < 14)?;
+            trace.prerequisite_check(PrerequisiteCheck::V06);
+            self.drive = drive; self.device = self.native.prerequisite_observe(trace, PrerequisiteCheck::NB05, |native| native.mapping(&self.drive))?; clock.effect_traced(trace)?;
+            let name = format!("{}\\", self.device);
+            let original = self.native.prerequisite_observe(trace, PrerequisiteCheck::NB01, |native| native.reserve(Kind::Directory, None, &name, name.clone()))?;
+            // NativeBook keeps the original output even if an error prevents the
+            // higher-level metadata record from being added to paths.
+            self.native.prerequisite_observe(trace, PrerequisiteCheck::NB02, |native| native.call(Call::Open(original.index), null_mut(), Vec::new()))?;
+            clock.effect_traced(trace)?; self.native.prerequisite_observe(trace, PrerequisiteCheck::NB03, |native| native.noninherited(original.index))?; clock.effect_traced(trace)?;
+            let metadata = self.native.prerequisite_observe(trace, PrerequisiteCheck::NB07, |native| native.metadata(&original))?; clock.effect_traced(trace)?; self.native.prerequisite_observe(trace, PrerequisiteCheck::NB06, |native| native.local_ntfs(&original))?;
+            clock.effect_traced(trace)?; self.native.prerequisite_observe(trace, PrerequisiteCheck::NB08, |native| native.security(&original, AuthorityScope::AncestorOutsideVersion))?; clock.effect_traced(trace)?;
             self.paths.push(ProfilePath { original, metadata });
-        }
-        self.expected = root.join(&self.name);
-        self.register_absence()?;
-        self.profile_absent(AbsenceEpoch::BeforeLogon, clock)?;
-        let (index, present) = self.key(R::HKEY_LOCAL_MACHINE, PROFILE_LIST, clock)?;
-        need(present)?; self.root_key = Some(index);
-        let handle = self.keys[index].handle;
-        let (sid_key, present) = self.key(handle, &self.sid_name()?, clock)?;
-        self.keys[sid_key].close()?; need(!present && self.hives_absent(clock)?)?;
-        self.prestate = true; clock.effect()
+            for name in parts {
+                clock.effect_traced(trace)?;
+                let original = self.native.prerequisite_observe(trace, PrerequisiteCheck::NB06, |native| native.open_child(&self.paths.last().ok_or(Error::State)?.original, &name, FileKind::Directory))?;
+                clock.effect_traced(trace)?; let metadata = self.native.prerequisite_observe(trace, PrerequisiteCheck::NB07, |native| native.metadata(&original))?; clock.effect_traced(trace)?;
+                self.native.prerequisite_observe(trace, PrerequisiteCheck::NB08, |native| native.security(&original, AuthorityScope::AncestorOutsideVersion))?; clock.effect_traced(trace)?;
+                self.paths.push(ProfilePath { original, metadata });
+            }
+            self.expected = root.join(&self.name);
+            self.register_absence_traced(trace)?;
+            self.profile_absent_traced(AbsenceEpoch::BeforeLogon, clock, trace)?;
+            let (index, present) = self.key_traced(R::HKEY_LOCAL_MACHINE, PROFILE_LIST, clock, trace)?;
+            need(present)?; self.root_key = Some(index);
+            let handle = self.keys[index].handle;
+            let (sid_key, present) = self.key_traced(handle, &self.sid_name_traced(trace)?, clock, trace)?;
+            self.keys[sid_key].close_traced(trace)?; need(!present && self.hives_absent_traced(clock, trace)?)?;
+            self.prestate = true; clock.effect_traced(trace)
+        })
     }
-    fn bind_after_logon(&mut self, clock: &mut Clock) -> Result<()> {
-        self.binding_permitted()?; clock.effect()?;
-        let root = &self.paths.last().ok_or(Error::State)?.original;
-        let original = self.native.open_child(root, &self.name, FileKind::Directory)?;
-        clock.effect()?; let metadata = self.native.metadata(&original)?; clock.effect()?;
-        self.native.local_ntfs(&original)?; clock.effect()?;
-        self.profile = Some(ProfilePath { original, metadata });
-        let handle = self.keys[self.root_key.ok_or(Error::State)?].handle;
-        let (index, present) = self.key(handle, &self.sid_name()?, clock)?;
-        need(present)?; self.mapping = Some(index);
-        self.keys[index].profile_path(&self.expected, clock)?;
-        self.recheck(clock)?; self.exact = true; Ok(())
+    fn bind_after_logon(&mut self, clock: &mut Clock) -> Result<()> { self.bind_after_logon_traced(clock, &mut InputTrace::default()) }
+    fn bind_after_logon_traced(&mut self, clock: &mut Clock, trace: &mut InputTrace) -> Result<()> {
+        trace.prerequisite_scope(PrerequisiteCheck::V07, |trace| {
+            self.binding_permitted_traced(trace)?; clock.effect_traced(trace)?;
+            let root = &self.paths.last().ok_or(Error::State)?.original;
+            let original = self.native.prerequisite_observe(trace, PrerequisiteCheck::NB06, |native| native.open_child(root, &self.name, FileKind::Directory))?;
+            clock.effect_traced(trace)?; let metadata = self.native.prerequisite_observe(trace, PrerequisiteCheck::NB07, |native| native.metadata(&original))?; clock.effect_traced(trace)?;
+            self.native.prerequisite_observe(trace, PrerequisiteCheck::NB06, |native| native.local_ntfs(&original))?; clock.effect_traced(trace)?;
+            self.profile = Some(ProfilePath { original, metadata });
+            let handle = self.keys[self.root_key.ok_or(Error::State)?].handle;
+            let (index, present) = self.key_traced(handle, &self.sid_name_traced(trace)?, clock, trace)?;
+            need(present)?; self.mapping = Some(index);
+            self.keys[index].profile_path_traced(&self.expected, clock, trace)?;
+            self.recheck_traced(clock, trace)?; self.exact = true; Ok(())
+        })
     }
-    fn recheck(&mut self, clock: &mut Clock) -> Result<()> {
-        clock.effect()?;
-        need(self.native.mapping(&self.drive)? == self.device)?;
-        for path in &self.paths {
-            clock.effect()?;
-            let after = self.native.metadata(&path.original)?;
-            clock.effect()?;
-            need(after.identity == path.metadata.identity && after.kind == FileKind::Directory)?;
-            self.native.security(&path.original, AuthorityScope::AncestorOutsideVersion)?; clock.effect()?;
-        }
-        if let Some(path) = &self.profile {
-            let after = self.native.metadata(&path.original)?;
-            clock.effect()?;
-            need(after.identity == path.metadata.identity && after.kind == FileKind::Directory)?;
-        }
-        if let Some(index) = self.mapping { self.keys[index].profile_path(&self.expected, clock)?; }
-        clock.effect()
+    fn recheck(&mut self, clock: &mut Clock) -> Result<()> { self.recheck_traced(clock, &mut InputTrace::default()) }
+    fn recheck_traced(&mut self, clock: &mut Clock, trace: &mut InputTrace) -> Result<()> {
+        trace.prerequisite_scope(PrerequisiteCheck::V08, |trace| {
+            clock.effect_traced(trace)?;
+            need(self.native.prerequisite_observe(trace, PrerequisiteCheck::NB05, |native| native.mapping(&self.drive))? == self.device)?;
+            for path in &self.paths {
+                clock.effect_traced(trace)?;
+                let after = self.native.prerequisite_observe(trace, PrerequisiteCheck::NB07, |native| native.metadata(&path.original))?;
+                clock.effect_traced(trace)?;
+                need(after.identity == path.metadata.identity && after.kind == FileKind::Directory)?;
+                self.native.prerequisite_observe(trace, PrerequisiteCheck::NB08, |native| native.security(&path.original, AuthorityScope::AncestorOutsideVersion))?; clock.effect_traced(trace)?;
+            }
+            if let Some(path) = &self.profile {
+                let after = self.native.prerequisite_observe(trace, PrerequisiteCheck::NB07, |native| native.metadata(&path.original))?;
+                clock.effect_traced(trace)?;
+                need(after.identity == path.metadata.identity && after.kind == FileKind::Directory)?;
+            }
+            if let Some(index) = self.mapping { self.keys[index].profile_path_traced(&self.expected, clock, trace)?; }
+            clock.effect_traced(trace)
+        })
     }
-    fn retire(&mut self, clock: &mut Clock) -> Result<()> {
-        need(self.prestate && self.exact && !self.unknown && !self.delete_entered && !self.settled)?;
-        // B's genuine application exit already joined its browser/user-data
-        // lifetime. LOGON_WITH_PROFILE owns automatic hive unload, not this test.
-        for _ in 0..20 {
-            if self.hives_absent(clock)? { self.hives_unloaded = true; break; }
-            clock.effect()?; std::thread::sleep(Duration::from_millis(250));
-        }
-        need(self.hives_unloaded)?; self.recheck(clock)?;
-        self.keys[self.mapping.ok_or(Error::State)?].close()?;
-        self.native.close_once(&self.profile.as_ref().ok_or(Error::State)?.original)?;
-        // Release the profile child only, not the original namespace parent.
-        // DeleteProfileW takes exact owned SID; no alternate path is supplied.
-        clock.effect()?; self.delete_entered = true;
-        self.delete_return = unsafe { SH::DeleteProfileW(self.sid.as_ptr(), null(), null()) };
-        self.delete_error = if self.delete_return != 0 { 0 } else { unsafe { F::GetLastError() } };
-        if self.delete_return == 0 { self.unknown = true; return Err(Error::Unknown); }
-        clock.effect()?;
-        self.profile_absent(AbsenceEpoch::AfterDeletion, clock)?;
-        let handle = self.keys[self.root_key.ok_or(Error::State)?].handle;
-        let (index, present) = self.key(handle, &self.sid_name()?, clock)?;
-        self.keys[index].close()?; need(!present && self.hives_absent(clock)?)?;
-        // Recheck surviving namespace originals without reusing the now-closed
-        // profile/mapping handles or adopting a replacement profile path.
-        need(self.native.mapping(&self.drive)? == self.device)?;
-        for path in &self.paths { clock.effect()?; need(self.native.metadata(&path.original)?.identity == path.metadata.identity)?; }
-        self.poststate = true; self.settle()?; clock.effect()
+    fn retire(&mut self, clock: &mut Clock) -> Result<()> { self.retire_traced(clock, &mut InputTrace::default()) }
+    fn retire_traced(&mut self, clock: &mut Clock, trace: &mut InputTrace) -> Result<()> {
+        trace.prerequisite_scope(PrerequisiteCheck::V09, |trace| {
+            need(self.prestate && self.exact && !self.unknown && !self.delete_entered && !self.settled)?;
+            // B's genuine application exit already joined its browser/user-data
+            // lifetime. LOGON_WITH_PROFILE owns automatic hive unload, not this test.
+            for _ in 0..20 {
+                if self.hives_absent_traced(clock, trace)? { self.hives_unloaded = true; break; }
+                clock.effect_traced(trace)?; std::thread::sleep(Duration::from_millis(250));
+            }
+            need(self.hives_unloaded)?; self.recheck_traced(clock, trace)?;
+            self.keys[self.mapping.ok_or(Error::State)?].close_traced(trace)?;
+            self.native.prerequisite_observe(trace, PrerequisiteCheck::NB03, |native| native.close_once(&self.profile.as_ref().ok_or(Error::State)?.original))?;
+            // Release the profile child only, not the original namespace parent.
+            // DeleteProfileW takes exact owned SID; no alternate path is supplied.
+            clock.effect_traced(trace)?; self.delete_entered = true;
+            self.delete_return = unsafe { SH::DeleteProfileW(self.sid.as_ptr(), null(), null()) };
+            self.delete_error = if self.delete_return != 0 { 0 } else { unsafe { F::GetLastError() } };
+            if self.delete_return == 0 {
+                self.unknown = true;
+                trace.prerequisite_fault(PrerequisiteCheck::V09, Error::Unknown,
+                    PrerequisiteNative::boolean(PrerequisiteApi::DeleteProfileW, PrerequisiteSelector::None,
+                        self.delete_return, Some(self.delete_error)), None);
+                return Err(Error::Unknown);
+            }
+            trace.prerequisite_check(PrerequisiteCheck::V10);
+            clock.effect_traced(trace)?;
+            self.profile_absent_traced(AbsenceEpoch::AfterDeletion, clock, trace)?;
+            let handle = self.keys[self.root_key.ok_or(Error::State)?].handle;
+            let (index, present) = self.key_traced(handle, &self.sid_name_traced(trace)?, clock, trace)?;
+            self.keys[index].close_traced(trace)?; need(!present && self.hives_absent_traced(clock, trace)?)?;
+            // Recheck surviving namespace originals without reusing the now-closed
+            // profile/mapping handles or adopting a replacement profile path.
+            need(self.native.prerequisite_observe(trace, PrerequisiteCheck::NB05, |native| native.mapping(&self.drive))? == self.device)?;
+            for path in &self.paths { clock.effect_traced(trace)?; need(self.native.prerequisite_observe(trace, PrerequisiteCheck::NB07, |native| native.metadata(&path.original))?.identity == path.metadata.identity)?; }
+            self.poststate = true; self.settle_traced(trace)?; clock.effect_traced(trace)
+        })
     }
-    fn settle(&mut self) -> Result<()> {
-        if self.settled { return Ok(()); }
-        if self.unknown || self.native.is_unknown() || self.absence.iter().flatten().any(|frame| frame.unresolved()) {
-            self.unknown = true; return Err(Error::Unknown);
-        }
-        // These fixed frames are dependents of the original namespace parent,
-        // outside the binding path book. Their one closes MUST precede it.
-        for frame in self.absence.iter_mut().flatten() {
-            let frame = unsafe { frame.as_mut().get_unchecked_mut() };
-            if frame.close_once().is_err() { self.unknown = true; return Err(Error::Unknown); }
-        }
-        if !self.absence_dependents_settled() { self.unknown = true; return Err(Error::Unknown); }
-        for key in self.keys.iter_mut().rev() {
-            if key.close().is_err() { self.unknown = true; return Err(Error::Unknown); }
-        }
-        self.settled = self.native.settle_once() == CloseOutcome::Settled && self.native.settled();
-        if !self.settled { self.unknown = true; return Err(Error::Unknown); }
-        // Original native frames have returned and every dependent original is
-        // closed before any frame storage is deallocated.
-        for frame in &mut self.absence { if let Some(frame) = frame.take() { drop(ManuallyDrop::into_inner(frame)); } }
-        Ok(())
+    fn settle(&mut self) -> Result<()> { self.settle_traced(&mut InputTrace::default()) }
+    fn settle_traced(&mut self, trace: &mut InputTrace) -> Result<()> {
+        trace.prerequisite_scope(PrerequisiteCheck::V11, |trace| {
+            if self.settled { return Ok(()); }
+            if self.unknown || self.native.is_unknown() || self.absence.iter().flatten().any(|frame| frame.unresolved()) {
+                self.unknown = true; return Err(Error::Unknown);
+            }
+            // These fixed frames are dependents of the original namespace parent,
+            // outside the binding path book. Their one closes MUST precede it.
+            for frame in self.absence.iter_mut().flatten() {
+                let frame = unsafe { frame.as_mut().get_unchecked_mut() };
+                if frame.close_once_traced(trace).is_err() { self.unknown = true; return Err(Error::Unknown); }
+            }
+            if !self.absence_dependents_settled() {
+                self.unknown = true;
+                trace.prerequisite_fault(PrerequisiteCheck::B03, Error::Unknown, None, None);
+                return Err(Error::Unknown);
+            }
+            for key in self.keys.iter_mut().rev() {
+                if key.close_traced(trace).is_err() { self.unknown = true; return Err(Error::Unknown); }
+            }
+            self.settled = self.native.prerequisite_settle(trace) == CloseOutcome::Settled && self.native.settled();
+            if !self.settled { self.unknown = true; return Err(Error::Unknown); }
+            // Original native frames have returned and every dependent original is
+            // closed before any frame storage is deallocated.
+            for frame in &mut self.absence { if let Some(frame) = frame.take() { drop(ManuallyDrop::into_inner(frame)); } }
+            Ok(())
+        })
     }
 }
 
@@ -490,44 +604,57 @@ struct Fixture {
 
 fn input(files: &mut Vec<OriginalFile>, path: &Path, directory: bool, access: u32,
     clock: &mut Clock, trace: &mut InputTrace) -> Result<usize> {
-    need(files.len() < 48)?; clock.effect()?;
-    let index = files.len(); files.push(OriginalFile::fixture_new(path, directory, clock.end)?);
-    files[index].open_traced(access, false, null(), trace)?;
-    files[index].named_traced(path, trace)?; files[index].stamp_traced(trace)?;
-    clock.effect()?; Ok(index)
+    trace.prerequisite_scope(PrerequisiteCheck::F01, |trace| {
+        need(files.len() < 48)?; clock.effect_traced(trace)?;
+        let index = files.len(); files.push(OriginalFile::fixture_new_traced(path, directory, clock.end, trace)?);
+        files[index].open_traced(access, false, null(), trace)?;
+        files[index].named_traced(path, trace)?; files[index].stamp_traced(trace)?;
+        clock.effect_traced(trace)?; Ok(index)
+    })
 }
 fn new_directory(creates: &mut Vec<Box<DirectoryCreate>>, files: &mut Vec<OriginalFile>, path: &Path,
     clock: &mut Clock, trace: &mut InputTrace) -> Result<usize> {
-    need(creates.len() < 4)?; clock.effect()?;
-    creates.push(Box::new(DirectoryCreate { name: wide(path.to_str().ok_or(Error::Unsafe)?),
-        entered: false, returned: 0, error: 0 }));
-    let call = creates.last_mut().ok_or(Error::State)?;
-    call.entered = true;
-    call.returned = unsafe { FS::CreateDirectoryW(call.name.as_ptr(), null()) };
-    call.error = if call.returned != 0 { 0 } else { unsafe { F::GetLastError() } };
-    if call.returned == 0 && (call.error == 0 || call.error == F::ERROR_IO_PENDING) { return Err(Error::Unknown); }
-    // Neither an existing path nor a failed creation is adopted or deleted.
-    need(call.returned != 0)?; clock.effect()?;
-    input(files, path, true, FS::FILE_READ_ATTRIBUTES | FS::READ_CONTROL | FS::WRITE_DAC, clock, trace)
+    trace.prerequisite_scope(PrerequisiteCheck::F01, |trace| {
+        need(creates.len() < 4)?; clock.effect_traced(trace)?;
+        creates.push(Box::new(DirectoryCreate { name: wide(path.to_str().ok_or(Error::Unsafe)?),
+            entered: false, returned: 0, error: 0 }));
+        let call = creates.last_mut().ok_or(Error::State)?;
+        call.entered = true;
+        call.returned = unsafe { FS::CreateDirectoryW(call.name.as_ptr(), null()) };
+        call.error = if call.returned != 0 { 0 } else { unsafe { F::GetLastError() } };
+        if call.returned == 0 {
+            trace.prerequisite_fault(PrerequisiteCheck::F01,
+                if call.error == 0 || call.error == F::ERROR_IO_PENDING { Error::Unknown } else { Error::Unsafe },
+                PrerequisiteNative::boolean(PrerequisiteApi::CreateDirectoryW, PrerequisiteSelector::None, call.returned, Some(call.error)), None);
+        }
+        if call.returned == 0 && (call.error == 0 || call.error == F::ERROR_IO_PENDING) { return Err(Error::Unknown); }
+        // Neither an existing path nor a failed creation is adopted or deleted.
+        need(call.returned != 0)?; clock.effect_traced(trace)?;
+        input(files, path, true, FS::FILE_READ_ATTRIBUTES | FS::READ_CONTROL | FS::WRITE_DAC, clock, trace)
+    })
 }
 fn read_hash(files: &mut [OriginalFile], index: usize, bytes: usize, sha: &str, app: bool,
     clock: &mut Clock, trace: &mut InputTrace) -> Result<Stamp> {
-    clock.effect()?; let before = files[index].stamp_traced(trace)?;
-    let raw = if app { files[index].read_app_traced(trace)? } else { files[index].read_traced(128 << 20, trace)? };
-    clock.effect()?; need(raw.len() == bytes)?;
-    let actual = if app { digest_app_traced(&raw, trace)? } else { digest_traced(&raw, trace)? };
-    clock.effect()?; need(actual == sha && files[index].stamp_traced(trace)? == before)?; Ok(before)
+    trace.prerequisite_scope(PrerequisiteCheck::F02, |trace| {
+        clock.effect_traced(trace)?; let before = files[index].stamp_traced(trace)?;
+        let raw = if app { files[index].read_app_traced(trace)? } else { files[index].read_traced(128 << 20, trace)? };
+        clock.effect_traced(trace)?; need(raw.len() == bytes)?;
+        let actual = if app { digest_app_traced(&raw, trace)? } else { digest_traced(&raw, trace)? };
+        clock.effect_traced(trace)?; need(actual == sha && files[index].stamp_traced(trace)? == before)?; Ok(before)
+    })
 }
 fn acl(files: &mut [OriginalFile], index: usize, label: &str, mask: u32, parent: &[u8], account: &[u8],
     clock: &mut Clock, trace: &mut InputTrace, transitions: &mut Vec<String>) -> Result<()> {
-    clock.effect()?;
-    transitions.push(grant(&mut files[index], label, parent, account, mask,
-        clock.start, &mut clock.latched, &mut clock.aggregate, trace)?);
-    clock.effect()
+    trace.prerequisite_scope(PrerequisiteCheck::F02, |trace| {
+        clock.effect_traced(trace)?;
+        transitions.push(grant(&mut files[index], label, parent, account, mask,
+            clock.start, &mut clock.latched, &mut clock.aggregate, trace)?);
+        clock.effect_traced(trace)
+    })
 }
 fn create_fixture_file(files: &mut Vec<OriginalFile>, path: &Path, bytes: &'static [u8], parent: &[u8], account: &[u8],
     clock: &mut Clock, trace: &mut InputTrace, transitions: &mut Vec<String>) -> Result<FixtureFile> {
-    need(files.len() < 48)?; clock.effect()?;
+    need(files.len() < 48)?; clock.effect_traced(trace)?;
     let writer = files.len(); files.push(OriginalFile::fixture_new(path, false, clock.end)?);
     files[writer].open(FS::FILE_GENERIC_WRITE, true, null())?;
     files[writer].named(path)?; files[writer].write_fixture_payload(bytes)?;
@@ -535,7 +662,7 @@ fn create_fixture_file(files: &mut Vec<OriginalFile>, path: &Path, bytes: &'stat
     // Do not retain a write-data handle while the ordinary core opens the same
     // immutable file share-read-only. Close it once and authenticate the new
     // read original against the actual CREATE_NEW identity under pinned parents.
-    files[writer].close()?; clock.effect()?;
+    files[writer].close()?; clock.effect_traced(trace)?;
     let index = input(files, path, false, FS::FILE_GENERIC_READ | FS::WRITE_DAC, clock, trace)?;
     let reopened = files[index].stamp()?;
     // Windows can publish the final write/change times only when the last
@@ -582,98 +709,105 @@ impl Fixture {
 fn output_poststate(native: &mut NativeBook, files: &mut Vec<OriginalFile>, fixture: &mut Option<Fixture>,
     role: UiRole, output: &Path, output_index: usize, result_index: Option<usize>, clock: &mut Clock,
     trace: &mut InputTrace) -> Result<()> {
-    let (drive, parts) = decode::dos_location(output.to_str().ok_or(Error::Unsafe)?)?;
-    need(parts.len() < 16)?; clock.effect()?;
-    let device = native.mapping(&drive)?; let name = format!("{device}\\");
-    let root = native.reserve(Kind::Directory, None, &name, name.clone())?;
-    native.call(Call::Open(root.index), null_mut(), Vec::new())?;
-    native.noninherited(root.index)?; native.local_ntfs(&root)?;
-    let root_metadata = native.metadata(&root)?;
-    let mut entries = vec![(root, root_metadata)];
-    for name in parts {
-        clock.effect()?;
-        let original = native.open_child(&entries.last().ok_or(Error::State)?.0, &name, FileKind::Directory)?;
-        let metadata = native.metadata(&original)?; entries.push((original, metadata));
-    }
-    let at = entries.len() - 1;
-    let output_stamp = files[output_index].stamp()?;
-    need(entries[at].1.identity.volume_serial == output_stamp.volume && entries[at].1.identity.file_id == output_stamp.id)?;
-    let mut directories = vec![(at, at - 1)];
-    let mut children: Vec<(usize, String, Stamp, FileKind)> = Vec::with_capacity(9);
-    if let Some(result) = result_index {
-        children.push((at, role.name("result.private.json"), files[result].stamp()?, FileKind::File));
-    }
-    if let Some(fixture) = fixture.as_mut() {
-        let project_path = output.join("project");
-        for (index, before) in [fixture.project, fixture.app, fixture.release].into_iter().zip(&fixture.directory_stamps) {
-            let after = files[index].stamp()?;
-            need(after.volume == before.volume && after.id == before.id && after.creation == before.creation
-                && after.attributes == before.attributes && after.links == before.links)?;
+    trace.prerequisite_scope(PrerequisiteCheck::O01, |trace| {
+        let (drive, parts) = decode::dos_location(output.to_str().ok_or(Error::Unsafe)?)?;
+        need(parts.len() < 16)?; clock.effect_traced(trace)?;
+        let device = native.prerequisite_observe(trace, PrerequisiteCheck::NB05, |native| native.mapping(&drive))?; let name = format!("{device}\\");
+        let root = native.prerequisite_observe(trace, PrerequisiteCheck::NB01, |native| native.reserve(Kind::Directory, None, &name, name.clone()))?;
+        native.prerequisite_observe(trace, PrerequisiteCheck::NB02, |native| native.call(Call::Open(root.index), null_mut(), Vec::new()))?;
+        native.prerequisite_observe(trace, PrerequisiteCheck::NB03, |native| native.noninherited(root.index))?; native.prerequisite_observe(trace, PrerequisiteCheck::NB06, |native| native.local_ntfs(&root))?;
+        let root_metadata = native.prerequisite_observe(trace, PrerequisiteCheck::NB07, |native| native.metadata(&root))?;
+        let mut entries = vec![(root, root_metadata)];
+        for name in parts {
+            clock.effect_traced(trace)?;
+            let original = native.prerequisite_observe(trace, PrerequisiteCheck::NB06, |native| native.open_child(&entries.last().ok_or(Error::State)?.0, &name, FileKind::Directory))?;
+            let metadata = native.prerequisite_observe(trace, PrerequisiteCheck::NB07, |native| native.metadata(&original))?; entries.push((original, metadata));
         }
-        let project = native.open_child(&entries[at].0, "project", FileKind::Directory)?;
-        let metadata = native.metadata(&project)?; let project_at = entries.len(); entries.push((project, metadata));
-        need(entries[project_at].1.identity.file_id == files[fixture.project].stamp()?.id)?;
-        directories.push((project_at, at));
-        children.push((at, "project".to_owned(), files[fixture.project].stamp()?, FileKind::Directory));
-        let mut branch = Vec::with_capacity(2);
-        for (name, index) in [("app", fixture.app), ("release", fixture.release)] {
-            let original = native.open_child(&entries[project_at].0, name, FileKind::Directory)?;
-            let metadata = native.metadata(&original)?; let n = entries.len(); entries.push((original, metadata));
-            need(entries[n].1.identity.file_id == files[index].stamp()?.id)?;
-            directories.push((n, project_at)); branch.push(n);
-            children.push((project_at, name.to_owned(), files[index].stamp()?, FileKind::Directory));
+        let at = entries.len() - 1;
+        trace.at(InputRole::Output, Some(output_index as u8));
+        let output_stamp = files[output_index].stamp_traced(trace)?;
+        need(entries[at].1.identity.volume_serial == output_stamp.volume && entries[at].1.identity.file_id == output_stamp.id)?;
+        let mut directories = vec![(at, at - 1)];
+        let mut children: Vec<(usize, String, Stamp, FileKind)> = Vec::with_capacity(9);
+        if let Some(result) = result_index {
+            trace.at(InputRole::Output, Some(result as u8));
+            children.push((at, role.name("result.private.json"), files[result].stamp_traced(trace)?, FileKind::File));
         }
-        for file in &fixture.original_files { need(files[file.index].stamp()? == file.stamp)?; }
-        for (position, parent, name) in [(0, branch[0], "build.gradle.kts"), (1, project_at, "version.properties"),
-            (2, project_at, "keep.txt")] {
-            let file = &fixture.original_files[position];
-            children.push((parent, name.to_owned(), file.stamp.clone(), FileKind::File));
-            // The retained share-read-only original protects immutable bytes;
-            // this fresh cursor adds full EOF readback, not replacement identity.
-            let original = native.open_child(&entries[parent].0, name, FileKind::File)?;
-            let metadata = native.metadata(&original)?;
-            clock.effect()?; native.no_alternate_streams(&original)?; clock.effect()?;
-            need(metadata.identity.volume_serial == file.stamp.volume && metadata.identity.file_id == file.stamp.id
-                && native.read_next(&original, LIMIT)? == file.bytes && native.read_next(&original, 1)?.is_empty())?;
-            entries.push((original, metadata));
-        }
-        let config = if fixture.initial_config {
-            let original = &fixture.original_files[3]; need(files[original.index].stamp()? == original.stamp)?; original.index
-        } else {
-            need(role == UiRole::ProjectDraft)?;
-            let index = input(files, &project_path.join("release/mobile-release.json"), false, FS::FILE_GENERIC_READ, clock, trace)?;
-            need(files[index].read(LIMIT)? == UI_FIXTURE_CONFIG_AFTER)?; index
-        };
-        let stamp = files[config].stamp()?;
-        children.push((branch[1], "mobile-release.json".to_owned(), stamp.clone(), FileKind::File));
-        let original = native.open_child(&entries[branch[1]].0, "mobile-release.json", FileKind::File)?;
-        let metadata = native.metadata(&original)?;
-        clock.effect()?; native.no_alternate_streams(&original)?; clock.effect()?;
-        need(metadata.identity.volume_serial == stamp.volume && metadata.identity.file_id == stamp.id
-            && native.read_next(&original, LIMIT)? == if fixture.initial_config { UI_FIXTURE_CONFIG } else { UI_FIXTURE_CONFIG_AFTER }
-            && native.read_next(&original, 1)?.is_empty())?;
-        entries.push((original, metadata));
-    } else { need(matches!(role, UiRole::Prerequisite | UiRole::NormalSmoke))?; }
-    for (index, parent) in directories {
-        let mut seen = std::collections::BTreeSet::new();
-        loop {
-            clock.effect()?; let Some(batch) = native.next_entries(&entries[index].0)? else { break; };
-            for entry in batch {
-                need(seen.insert(entry.name.clone()) && seen.len() <= 6)?;
-                if entry.name == "." { need(entry.file_id == entries[index].1.identity.file_id)?; continue; }
-                if entry.name == ".." { need(entry.file_id == entries[parent].1.identity.file_id)?; continue; }
-                let (_, _, expected, kind) = children.iter().find(|(p, name, _, _)| *p == index && *name == entry.name).ok_or(Error::Unsafe)?;
-                need(entry.file_id == expected.id && entry.kind == *kind && entries[index].1.identity.volume_serial == expected.volume)?;
+        if let Some(fixture) = fixture.as_mut() {
+            let project_path = output.join("project");
+            for (index, before) in [fixture.project, fixture.app, fixture.release].into_iter().zip(&fixture.directory_stamps) {
+                let after = files[index].stamp()?;
+                need(after.volume == before.volume && after.id == before.id && after.creation == before.creation
+                    && after.attributes == before.attributes && after.links == before.links)?;
             }
+            let project = native.open_child(&entries[at].0, "project", FileKind::Directory)?;
+            let metadata = native.metadata(&project)?; let project_at = entries.len(); entries.push((project, metadata));
+            need(entries[project_at].1.identity.file_id == files[fixture.project].stamp()?.id)?;
+            directories.push((project_at, at));
+            children.push((at, "project".to_owned(), files[fixture.project].stamp()?, FileKind::Directory));
+            let mut branch = Vec::with_capacity(2);
+            for (name, index) in [("app", fixture.app), ("release", fixture.release)] {
+                let original = native.open_child(&entries[project_at].0, name, FileKind::Directory)?;
+                let metadata = native.metadata(&original)?; let n = entries.len(); entries.push((original, metadata));
+                need(entries[n].1.identity.file_id == files[index].stamp()?.id)?;
+                directories.push((n, project_at)); branch.push(n);
+                children.push((project_at, name.to_owned(), files[index].stamp()?, FileKind::Directory));
+            }
+            for file in &fixture.original_files { need(files[file.index].stamp()? == file.stamp)?; }
+            for (position, parent, name) in [(0, branch[0], "build.gradle.kts"), (1, project_at, "version.properties"),
+                (2, project_at, "keep.txt")] {
+                let file = &fixture.original_files[position];
+                children.push((parent, name.to_owned(), file.stamp.clone(), FileKind::File));
+                // The retained share-read-only original protects immutable bytes;
+                // this fresh cursor adds full EOF readback, not replacement identity.
+                let original = native.open_child(&entries[parent].0, name, FileKind::File)?;
+                let metadata = native.metadata(&original)?;
+                clock.effect_traced(trace)?; native.no_alternate_streams(&original)?; clock.effect_traced(trace)?;
+                need(metadata.identity.volume_serial == file.stamp.volume && metadata.identity.file_id == file.stamp.id
+                    && native.read_next(&original, LIMIT)? == file.bytes && native.read_next(&original, 1)?.is_empty())?;
+                entries.push((original, metadata));
+            }
+            let config = if fixture.initial_config {
+                let original = &fixture.original_files[3]; need(files[original.index].stamp()? == original.stamp)?; original.index
+            } else {
+                need(role == UiRole::ProjectDraft)?;
+                let index = input(files, &project_path.join("release/mobile-release.json"), false, FS::FILE_GENERIC_READ, clock, trace)?;
+                need(files[index].read(LIMIT)? == UI_FIXTURE_CONFIG_AFTER)?; index
+            };
+            let stamp = files[config].stamp()?;
+            children.push((branch[1], "mobile-release.json".to_owned(), stamp.clone(), FileKind::File));
+            let original = native.open_child(&entries[branch[1]].0, "mobile-release.json", FileKind::File)?;
+            let metadata = native.metadata(&original)?;
+            clock.effect_traced(trace)?; native.no_alternate_streams(&original)?; clock.effect_traced(trace)?;
+            need(metadata.identity.volume_serial == stamp.volume && metadata.identity.file_id == stamp.id
+                && native.read_next(&original, LIMIT)? == if fixture.initial_config { UI_FIXTURE_CONFIG } else { UI_FIXTURE_CONFIG_AFTER }
+                && native.read_next(&original, 1)?.is_empty())?;
+            entries.push((original, metadata));
+        } else { need(matches!(role, UiRole::Prerequisite | UiRole::NormalSmoke))?; }
+        trace.prerequisite_check(PrerequisiteCheck::O02);
+        for (index, parent) in directories {
+            trace.prerequisite_check(PrerequisiteCheck::O02);
+            let mut seen = std::collections::BTreeSet::new();
+            loop {
+                clock.effect_traced(trace)?; let Some(batch) = native.prerequisite_observe(trace, PrerequisiteCheck::NB09, |native| native.next_entries(&entries[index].0))? else { break; };
+                for entry in batch {
+                    need(seen.insert(entry.name.clone()) && seen.len() <= 6)?;
+                    if entry.name == "." { need(entry.file_id == entries[index].1.identity.file_id)?; continue; }
+                    if entry.name == ".." { need(entry.file_id == entries[parent].1.identity.file_id)?; continue; }
+                    let (_, _, expected, kind) = children.iter().find(|(p, name, _, _)| *p == index && *name == entry.name).ok_or(Error::Unsafe)?;
+                    need(entry.file_id == expected.id && entry.kind == *kind && entries[index].1.identity.volume_serial == expected.volume)?;
+                }
+            }
+            trace.prerequisite_check(PrerequisiteCheck::O03);
+            let expected: std::collections::BTreeSet<_> = children.iter().filter(|(p, _, _, _)| *p == index)
+                .map(|(_, name, _, _)| name.clone()).chain([".".to_owned(), "..".to_owned()]).collect();
+            need(seen == expected)?;
         }
-        let expected: std::collections::BTreeSet<_> = children.iter().filter(|(p, _, _, _)| *p == index)
-            .map(|(_, name, _, _)| name.clone()).chain([".".to_owned(), "..".to_owned()]).collect();
-        need(seen == expected)?;
-    }
-    for (original, before) in &entries { clock.effect()?; need(native.metadata(original)? == *before)?; }
-    need(native.mapping(&drive)? == device)?; clock.effect()?;
-    if let Some(fixture) = fixture.as_mut() { fixture.verified = true; }
-    Ok(())
+        for (original, before) in &entries { clock.effect_traced(trace)?; need(native.prerequisite_observe(trace, PrerequisiteCheck::NB07, |native| native.metadata(original))? == *before)?; }
+        need(native.prerequisite_observe(trace, PrerequisiteCheck::NB05, |native| native.mapping(&drive))? == device)?; clock.effect_traced(trace)?;
+        if let Some(fixture) = fixture.as_mut() { fixture.verified = true; }
+        Ok(())
+    })
 }
 
 // Qualification-only, same-thread DATA. No caller text or native identity can
@@ -1578,24 +1712,160 @@ fn diagnostic_smoke(stage: &'static str, launch: Option<&Launch>, unknown: bool,
     diagnostic_with_fault(stage, launch, unknown, fault);
 }
 
+const PREREQUISITE_FAULT_PREFIX: &str = "MRK_WINDOWS_UI_PREREQUISITE_FAULT_V1=";
+const PREREQUISITE_FAULT_FRAME_MAX_BYTES: usize = 664;
+const PREREQUISITE_FAULT_BUFFER_BYTES: usize = 2048;
+const PREREQUISITE_OWNER: &str = "ordinary_owner::hosted_normal_ui_prerequisite_original_handle_contract";
+#[derive(Clone, Copy)]
+struct PrerequisiteBindings<'a> { source: &'a str, tree: &'a str, run: &'a str }
+impl<'a> PrerequisiteBindings<'a> {
+    fn source(value: &str) -> bool { is_hex(value, 40) && value.bytes().any(|byte| byte != b'0') }
+    fn new(source: Option<&'a str>, tree: Option<&'a str>, run: Option<&'a str>) -> Self {
+        Self { source: source.filter(|value| Self::source(value)).unwrap_or("unavailable"),
+            tree: tree.filter(|value| Self::source(value)).unwrap_or("unavailable"),
+            run: run.filter(|value| decimal(value)).unwrap_or("unavailable") }
+    }
+    fn valid(self) -> bool {
+        [self.source, self.tree].into_iter().all(|value| value == "unavailable" || Self::source(value))
+            && (self.run == "unavailable" || decimal(self.run))
+    }
+}
+struct PrerequisiteFrame<'a> { bytes: &'a mut [u8], used: usize }
+impl std::fmt::Write for PrerequisiteFrame<'_> {
+    fn write_str(&mut self, value: &str) -> std::fmt::Result {
+        let end = self.used.checked_add(value.len()).ok_or(std::fmt::Error)?;
+        if end > self.bytes.len() || !value.is_ascii() { return Err(std::fmt::Error); }
+        self.bytes[self.used..end].copy_from_slice(value.as_bytes()); self.used = end; Ok(())
+    }
+}
+fn prerequisite_error_label(error: Error) -> &'static str {
+    match error { Error::Unavailable => "Unavailable", Error::Unsafe => "Unsafe",
+        Error::Bounds => "Bounds", Error::State => "State", Error::Unknown => "Unknown" }
+}
+fn prerequisite_fault_frame(record: PrerequisiteRecord, returned: Error, binding: PrerequisiteBindings<'_>, output: &mut [u8]) -> Option<usize> {
+    use std::fmt::Write as _;
+    let first = record.first?;
+    if !binding.valid() || first.native.is_some_and(|value| !value.valid()) { return None; }
+    let unannotated = first.check == PrerequisiteCheck::U01;
+    if unannotated != (first.stage == PrerequisiteStage::Escape)
+        || unannotated && (first.native.is_some() || first.detail.is_some()) { return None; }
+    let (detail_prefix, detail) = first.detail.map(PrerequisiteDetail::labels).unwrap_or(("", "none"));
+    if detail_prefix.len() + detail.len() > 64 || !detail_prefix.is_ascii() || !detail.is_ascii() { return None; }
+    let native = first.native;
+    let mut frame = PrerequisiteFrame { bytes: output, used: 0 };
+    write!(&mut frame, "\n{PREREQUISITE_FAULT_PREFIX}source={};tree={};run={};attempt=1;owner={PREREQUISITE_OWNER};mode=prerequisite-only;stage={};check={};detail={detail_prefix}{detail};first={};returned={};api={};selector={};kind={};value=",
+        binding.source, binding.tree, binding.run, first.stage.label(), first.check.label(),
+        prerequisite_error_label(first.error), prerequisite_error_label(returned),
+        native.map(|value| value.api.label()).unwrap_or("none"),
+        native.map(|value| value.selector.label()).unwrap_or("none"),
+        native.map(|value| value.kind.label()).unwrap_or("none")).ok()?;
+    match native.and_then(|value| value.value) { Some(value) => write!(&mut frame, "{value}").ok()?, None => frame.write_str("none").ok()? }
+    write!(&mut frame, ";status={};code=", native.map(|value| value.status.label()).unwrap_or("none")).ok()?;
+    match native.and_then(|value| value.code) { Some(value) => write!(&mut frame, "{value}").ok()?, None => frame.write_str("none").ok()? }
+    write!(&mut frame, ";clock={};coverage={};end=1\n", record.clock.label(), if unannotated { "unannotated" } else { "mapped" }).ok()?;
+    (frame.used <= PREREQUISITE_FAULT_FRAME_MAX_BYTES).then_some(frame.used)
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrerequisiteWrite { Full, Short, Zero, Interrupted, Error, Overreported }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrerequisiteFlush { Ok, Interrupted, Error }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrerequisiteDelivery {
+    NotNeeded, EncodingFailed, Attempted { write: PrerequisiteWrite, flush: PrerequisiteFlush },
+}
+impl PrerequisiteDelivery {
+    fn locally_complete(self) -> bool {
+        match self {
+            Self::NotNeeded | Self::EncodingFailed => false,
+            Self::Attempted { write, flush } => {
+                let full = match write { PrerequisiteWrite::Full => true,
+                    PrerequisiteWrite::Short | PrerequisiteWrite::Zero | PrerequisiteWrite::Interrupted
+                    | PrerequisiteWrite::Error | PrerequisiteWrite::Overreported => false };
+                let flushed = match flush { PrerequisiteFlush::Ok => true,
+                    PrerequisiteFlush::Interrupted | PrerequisiteFlush::Error => false };
+                full && flushed
+            },
+        }
+    }
+}
+fn prerequisite_sink(output: &mut impl Write, frame: &[u8]) -> PrerequisiteDelivery {
+    let written = output.write(frame); // One attempt, never write_all/retry.
+    // A returned short/zero/error/Interrupted/overreported write still gets its
+    // one flush. This is finite work, NOT a bounded synchronous wall time.
+    let flushed = output.flush();
+    let write = match written {
+        Ok(count) if count == frame.len() => PrerequisiteWrite::Full,
+        Ok(0) => PrerequisiteWrite::Zero, Ok(count) if count < frame.len() => PrerequisiteWrite::Short,
+        Ok(_) => PrerequisiteWrite::Overreported,
+        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => PrerequisiteWrite::Interrupted,
+        Err(_) => PrerequisiteWrite::Error,
+    };
+    let flush = match flushed { Ok(()) => PrerequisiteFlush::Ok,
+        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => PrerequisiteFlush::Interrupted,
+        Err(_) => PrerequisiteFlush::Error };
+    PrerequisiteDelivery::Attempted { write, flush }
+}
+fn prerequisite_returned(role: UiRole, original: Result<()>, trace: &mut InputTrace,
+    binding: PrerequisiteBindings<'_>, output: &mut impl Write) -> (Result<()>, PrerequisiteDelivery) {
+    let error = match original {
+        Ok(()) => return (original, PrerequisiteDelivery::NotNeeded),
+        Err(error) if role == UiRole::Prerequisite => error,
+        Err(_) => return (original, PrerequisiteDelivery::NotNeeded),
+    };
+    // A genuine returned escape is visible as unannotated, never assigned a
+    // guessed stage/API from a last status. Earlier genuine first stays immutable.
+    trace.prerequisite_fault(PrerequisiteCheck::U01, error, None, None);
+    let mut bytes = [0u8; PREREQUISITE_FAULT_BUFFER_BYTES];
+    let length = trace.prerequisite.and_then(|record| prerequisite_fault_frame(record, error, binding, &mut bytes));
+    let delivery = match length { Some(length) => prerequisite_sink(output, &bytes[..length]),
+        None => PrerequisiteDelivery::EncodingFailed };
+    (original, delivery) // Delivery has no native Error/Unknown/park authority.
+}
 pub(super) fn run(role: UiRole, entry_tick: u64) -> Result<()> {
-    let mut clock = Clock::new(entry_tick)?;
+    // This optional fixed DATA record exists before the original first Clock.
+    let mut trace = InputTrace::prerequisite_only(role == UiRole::Prerequisite);
+    let original = run_prerequisite_traced(role, entry_tick, &mut trace);
+    if role != UiRole::Prerequisite || original.is_ok() { return original; }
+    // Standard Write facade for the already-owned harness stdout. No new file,
+    // HANDLE, alternate sink or close, and no additional owner-clock sample.
+    let mut output = std::io::stdout().lock();
+    let (original, delivery) = prerequisite_returned(role, original, &mut trace,
+        PrerequisiteBindings::new(option_env!("GITHUB_SHA"), option_env!("MRK_WINDOWS_SOURCE_TREE"), option_env!("GITHUB_RUN_ID")), &mut output);
+    let _local_delivery_complete = delivery.locally_complete();
+    original
+}
+
+fn run_prerequisite_traced(role: UiRole, entry_tick: u64, trace: &mut InputTrace) -> Result<()> {
+    let mut clock = prerequisite_result!(trace, E01, Clock::new(entry_tick))?;
+    trace.prerequisite_clock(clock.latched);
+    trace.prerequisite_check(PrerequisiteCheck::E02);
     // This closed route is not any historical Fullwalk/Passive admission.
-    let root = fixed_path(&std::env::var("MRK_DESKTOP_CI_ROOT").map_err(|_| Error::State)?)?;
-    let temp = fixed_path(&std::env::var("RUNNER_TEMP").map_err(|_| Error::State)?)?;
-    let run = std::env::var("GITHUB_RUN_ID").map_err(|_| Error::State)?;
-    need(decimal(&run) && root == temp.join(format!("mrk-windows-installed-native-{run}-1"))
-        && std::env::current_dir().map_err(|_| Error::Unavailable)? == root)?;
-    let image = std::env::current_exe().map_err(|_| Error::Unavailable)?;
-    role.process_args(&image, true)?;
+    let root = prerequisite_result!(trace, E02, fixed_path_traced(&prerequisite_result!(trace, E02, std::env::var("MRK_DESKTOP_CI_ROOT").map_err(|_| Error::State))?, trace))?;
+    let temp = prerequisite_result!(trace, E02, fixed_path_traced(&prerequisite_result!(trace, E02, std::env::var("RUNNER_TEMP").map_err(|_| Error::State))?, trace))?;
+    let run = prerequisite_result!(trace, E02, std::env::var("GITHUB_RUN_ID").map_err(|_| Error::State))?;
+    trace.prerequisite_check(PrerequisiteCheck::E03);
+    prerequisite_result!(trace, E03, need(decimal(&run) && root == temp.join(format!("mrk-windows-installed-native-{run}-1"))
+        && std::env::current_dir().map_err(|error| {
+            trace.prerequisite_fault(PrerequisiteCheck::E03, Error::Unavailable,
+                PrerequisiteNative::io(PrerequisiteApi::CurrentDir, &error), None);
+            Error::Unavailable
+        })? == root))?;
+    trace.prerequisite_check(PrerequisiteCheck::E04);
+    let image = std::env::current_exe().map_err(|error| {
+        trace.prerequisite_fault(PrerequisiteCheck::E04, Error::Unavailable,
+            PrerequisiteNative::io(PrerequisiteApi::CurrentExe, &error), None);
+        Error::Unavailable
+    })?;
+    prerequisite_result!(trace, E04, role.process_args_traced(&image, true, trace))?;
     let mut book = NativeBook::new(); let mut inventory = NativeBook::new();
+    inventory.prerequisite_enable_admission(trace);
     let mut parent_attempted = false; let mut parent_settled = false;
     let mut files: Vec<OriginalFile> = Vec::with_capacity(48);
     let mut creates: Vec<Box<DirectoryCreate>> = Vec::with_capacity(4);
     let mut profile: Option<Profile> = None; let mut fixture = None;
     let mut account: Option<Account> = None; let mut launch: Option<Pin<Box<Launch>>> = None;
     let mut smoke: Option<Smoke> = None;
-    let mut trace = InputTrace::default(); let mut transitions = Vec::with_capacity(14);
+    let mut transitions = Vec::with_capacity(14);
     let mut request: Option<UiRequest> = None;
     let mut input_stamps = Vec::with_capacity(8);
     let mut request_sha = String::new(); let mut account_sha = String::new();
@@ -1603,47 +1873,55 @@ pub(super) fn run(role: UiRole, entry_tick: u64) -> Result<()> {
     let output = root.join(role.name("output"));
     let mut output_index = None; let mut artifact_index = None; let mut artifact_after = None;
     let mut stage = "ui-parent-context";
-    let mut observation = (|| -> Result<()> {
-        clock.effect()?;
-        need(matches!(book.observe_user_once(), Err(Error::Unsafe)))?;
+    trace.prerequisite_at(PrerequisiteStage::ParentInput, PrerequisiteCheck::P01);
+    let observation = (|| -> Result<()> {
+        clock.effect_traced(trace)?;
+        let mut staged = trace.prerequisite_staged();
+        let original = book.prerequisite_observe(&mut staged, PrerequisiteCheck::NB10, |book| book.observe_user_once().map(|_| ()));
+        need(trace.prerequisite_expected(PrerequisiteCheck::P01, original, Error::Unsafe, staged))?;
         let token = book.process_token.ok_or(Error::State)?;
-        super::super::hosted_tests::actual_elevated_primary_refusal(&mut book, token)?;
-        let parent = parent_user(&mut book)?; clock.effect()?;
+        trace.prerequisite_check(PrerequisiteCheck::P02);
+        super::super::hosted_tests::actual_elevated_primary_refusal_traced(&mut book, token, trace)?;
+        let parent = parent_user_traced(&mut book, trace)?; clock.effect_traced(trace)?;
         stage = "ui-original-inputs";
+        trace.prerequisite_check(PrerequisiteCheck::P03);
         let mut ancestors: Vec<_> = root.ancestors().map(Path::to_path_buf).collect(); ancestors.reverse();
         need(ancestors.len() <= 16)?; let mut root_index = None;
         for path in &ancestors {
             trace.at(InputRole::Ancestor, Some(files.len() as u8));
             let index = input(&mut files, path, true, FS::FILE_READ_ATTRIBUTES | FS::READ_CONTROL
-                | if path == &root { FS::WRITE_DAC } else { 0 }, &mut clock, &mut trace)?;
+                | if path == &root { FS::WRITE_DAC } else { 0 }, &mut clock, trace)?;
             if path == &root { root_index = Some(index); }
         }
+        trace.prerequisite_check(PrerequisiteCheck::P04);
         trace.at(InputRole::Request, Some(files.len() as u8));
         let request_index = input(&mut files, &root.join(role.name("request.txt")), false,
-            FS::FILE_GENERIC_READ, &mut clock, &mut trace)?;
-        let request_before = files[request_index].stamp()?;
-        let raw = files[request_index].read(LIMIT)?; clock.effect()?;
-        let selected = UiRequest::parse(&raw)?; selected.compiled()?; selected.at_root(&root)?;
+            FS::FILE_GENERIC_READ, &mut clock, trace)?;
+        let request_before = files[request_index].stamp_traced(trace)?;
+        let raw = files[request_index].read_traced(LIMIT, trace)?; clock.effect_traced(trace)?;
+        let selected = UiRequest::parse_traced(&raw, trace)?; selected.compiled_traced(trace)?; selected.at_root_traced(&root, trace)?;
         need(selected.role == role && selected.run == run && image.to_str() == Some(selected.owner.path.as_str()))?;
-        need(files[request_index].stamp()? == request_before)?;
-        input_stamps.push((request_index, request_before)); request_sha = digest(&raw)?;
+        need(files[request_index].stamp_traced(trace)? == request_before)?;
+        input_stamps.push((request_index, request_before)); request_sha = digest_traced(&raw, trace)?;
+        trace.prerequisite_check(PrerequisiteCheck::P05);
         let mut directories = vec![(root_index.ok_or(Error::State)?, "root")];
         for (label, path) in fixed_directories(&root) {
             trace.at(InputRole::Directory, Some(files.len() as u8));
             let index = input(&mut files, &path, true, FS::FILE_READ_ATTRIBUTES | FS::READ_CONTROL | FS::WRITE_DAC,
-                &mut clock, &mut trace)?;
+                &mut clock, trace)?;
             directories.push((index, label));
         }
         trace.at(InputRole::Artifact, Some(files.len() as u8));
         let artifact = input(&mut files, Path::new(&selected.app.path), false, FS::FILE_GENERIC_READ | FS::WRITE_DAC,
-            &mut clock, &mut trace)?;
+            &mut clock, trace)?;
+        trace.prerequisite_check(PrerequisiteCheck::P06);
         let before = read_hash(&mut files, artifact, selected.app.bytes, &selected.app.sha,
-            role != UiRole::Prerequisite, &mut clock, &mut trace)?;
+            role != UiRole::Prerequisite, &mut clock, trace)?;
         need(selected.app.matches(&before))?; artifact_index = Some(artifact);
         if role != UiRole::Prerequisite {
             trace.at(InputRole::Artifact, Some(files.len() as u8));
-            let index = input(&mut files, &image, false, FS::FILE_GENERIC_READ, &mut clock, &mut trace)?;
-            let original = read_hash(&mut files, index, selected.owner.bytes, &selected.owner.sha, false, &mut clock, &mut trace)?;
+            let index = input(&mut files, &image, false, FS::FILE_GENERIC_READ, &mut clock, trace)?;
+            let original = read_hash(&mut files, index, selected.owner.bytes, &selected.owner.sha, false, &mut clock, trace)?;
             need(selected.owner.matches(&original) && (original.volume, original.id) != (before.volume, before.id))?;
             input_stamps.push((index, original));
         } else { need(selected.owner.matches(&before))?; }
@@ -1651,8 +1929,8 @@ pub(super) fn run(role: UiRole, entry_tick: u64) -> Result<()> {
             // Probe app/owner are the SAME compiler stream, retained once.
             if name == "compile-messages.jsonl" && role == UiRole::Prerequisite && input_stamps.len() == 2 { continue; }
             trace.at(InputRole::Binding, Some(files.len() as u8));
-            let index = input(&mut files, &root.join(name), false, FS::FILE_GENERIC_READ, &mut clock, &mut trace)?;
-            let before = read_hash(&mut files, index, binding.messages_bytes, &binding.messages_sha, false, &mut clock, &mut trace)?;
+            let index = input(&mut files, &root.join(name), false, FS::FILE_GENERIC_READ, &mut clock, trace)?;
+            let before = read_hash(&mut files, index, binding.messages_bytes, &binding.messages_sha, false, &mut clock, trace)?;
             input_stamps.push((index, before));
         }
         if let Some(runtime) = &selected.runtime {
@@ -1660,82 +1938,95 @@ pub(super) fn run(role: UiRole, entry_tick: u64) -> Result<()> {
             // acquires its own installed runtime and repeats native admission.
             trace.at(InputRole::Binding, Some(files.len() as u8));
             let index = input(&mut files, &root.join("normal-ui-publication.private.json"), false,
-                FS::FILE_GENERIC_READ, &mut clock, &mut trace)?;
+                FS::FILE_GENERIC_READ, &mut clock, trace)?;
             let before = read_hash(&mut files, index, runtime.publication_bytes, &runtime.publication_sha, false,
-                &mut clock, &mut trace)?; input_stamps.push((index, before));
+                &mut clock, trace)?; input_stamps.push((index, before));
         }
-        stage = "ui-fresh-account-intent"; clock.effect()?;
-        account = Some(Account::new()?); let current = account.as_mut().ok_or(Error::State)?;
+        trace.prerequisite_at(PrerequisiteStage::AccountProfile, PrerequisiteCheck::A01);
+        trace.at(InputRole::Parent, None);
+        stage = "ui-fresh-account-intent"; clock.effect_traced(trace)?;
+        account = Some(Account::new_traced(trace)?); let current = account.as_mut().ok_or(Error::State)?;
         let name = String::from_utf16(&current.name[..current.name.len() - 1]).map_err(|_| Error::Unsafe)?;
         let intent = format!("{{\"schemaVersion\":1,\"sourceSha\":\"{}\",\"sourceTree\":\"{}\",\"runId\":\"{}\",\"attempt\":1,\"role\":\"{}\",\"requestSha256\":\"{}\",\"accountName\":\"{name}\",\"freshAccountIntent\":true,\"fixedNormalUiChildOnly\":true}}\n",
             selected.source, selected.tree, selected.run, role.label(), request_sha);
-        write_fixture_record(&root.join(role.name("owner-intent.private.json")), intent.as_bytes(), LIMIT, clock.end)?;
-        clock.effect()?; stage = "ui-fresh-account";
-        current.create(&parent, clock.start, &mut clock.latched, &mut clock.aggregate)?; clock.effect()?;
-        account_sha = digest(&current.sid)?;
+        trace.at(InputRole::Output, None);
+        write_fixture_record_traced(&root.join(role.name("owner-intent.private.json")), intent.as_bytes(), LIMIT, clock.end, trace)?;
+        clock.effect_traced(trace)?; stage = "ui-fresh-account";
+        trace.at(InputRole::Parent, None);
+        current.create_traced(&parent, clock.start, &mut clock.latched, &mut clock.aggregate, trace)?; clock.effect_traced(trace)?;
+        account_sha = digest_traced(&current.sid, trace)?;
+        trace.prerequisite_check(PrerequisiteCheck::A02);
         stage = "ui-exact-acl"; trace.at(InputRole::Output, Some(files.len() as u8));
-        let out = new_directory(&mut creates, &mut files, &output, &mut clock, &mut trace)?; output_index = Some(out);
+        let out = new_directory(&mut creates, &mut files, &output, &mut clock, trace)?; output_index = Some(out);
         for (index, label) in directories {
             // New UI fixture readers inspect native parent IDs/ACLs. Grant
             // read/traverse ONLY on these five task-owned directories, never
             // RUNNER_TEMP, a Windows path, or an inherited general user tree.
             trace.at(InputRole::AclRoot, Some(index as u8));
             acl(&mut files, index, label, FS::FILE_GENERIC_READ | FS::FILE_TRAVERSE,
-                &parent, &current.sid, &mut clock, &mut trace, &mut transitions)?;
+                &parent, &current.sid, &mut clock, trace, &mut transitions)?;
         }
         trace.at(InputRole::AclArtifact, Some(artifact as u8));
         acl(&mut files, artifact, "artifact", FS::FILE_GENERIC_READ | FS::FILE_GENERIC_EXECUTE,
-            &parent, &current.sid, &mut clock, &mut trace, &mut transitions)?;
-        let after = files[artifact].stamp()?; selected.app_after(&after.wire())?; artifact_after = Some(after.clone());
+            &parent, &current.sid, &mut clock, trace, &mut transitions)?;
+        let after = files[artifact].stamp_traced(trace)?; selected.app_after_traced(&after.wire(), trace)?; artifact_after = Some(after.clone());
         trace.at(InputRole::AclOutput, Some(out as u8));
         acl(&mut files, out, "normal-ui-output", FS::FILE_GENERIC_READ | FS::FILE_TRAVERSE | FS::FILE_ADD_FILE | FS::FILE_ADD_SUBDIRECTORY,
-            &parent, &current.sid, &mut clock, &mut trace, &mut transitions)?;
+            &parent, &current.sid, &mut clock, trace, &mut transitions)?;
         if matches!(role, UiRole::ProjectDraft | UiRole::QuitPassive | UiRole::DocumentLoss) {
             stage = "ui-synthetic-project";
             fixture = Some(Fixture::create(role, &output, &mut creates, &mut files, &parent, &current.sid,
-                &mut clock, &mut trace, &mut transitions)?);
+                &mut clock, trace, &mut transitions)?);
         }
+        trace.prerequisite_check(PrerequisiteCheck::A03);
         stage = "ui-profile-prestate";
-        profile = Some(Profile::new(current)?); profile.as_mut().ok_or(Error::State)?.prepare(&mut clock)?;
-        clock.effect()?;
-        super::super::hosted_tests::actual_elevated_primary_refusal(&mut book, token)?;
-        need(parent_user(&mut book)? == parent)?;
-        parent_attempted = true; parent_settled = book.settle_once() == CloseOutcome::Settled && book.settled();
-        need(parent_settled)?; clock.effect()?;
+        profile = Some(Profile::new_traced(current, trace)?); profile.as_mut().ok_or(Error::State)?.prepare_traced(&mut clock, trace)?;
+        clock.effect_traced(trace)?;
+        super::super::hosted_tests::actual_elevated_primary_refusal_traced(&mut book, token, trace)?;
+        need(parent_user_traced(&mut book, trace)? == parent)?;
+        parent_attempted = true; parent_settled = book.prerequisite_settle(trace) == CloseOutcome::Settled && book.settled();
+        need(parent_settled)?; clock.effect_traced(trace)?;
+        trace.prerequisite_at(PrerequisiteStage::Launch, PrerequisiteCheck::L01);
         stage = "ui-original-create";
-        launch = Some(Launch::ui(&selected, &after.wire(), std::str::from_utf8(&raw).map_err(|_| Error::Unsafe)?,
-            &output, current, &parent, clock.endpoint_tick)?);
+        launch = Some(Launch::ui_traced(&selected, &after.wire(), std::str::from_utf8(&raw).map_err(|_| Error::Unsafe)?,
+            &output, current, &parent, clock.endpoint_tick, trace)?);
         request = Some(selected);
-        launch.as_mut().ok_or(Error::State)?.as_mut().enter(current, clock.start, &mut clock.latched, &mut clock.aggregate)?;
-        clock.effect()?; stage = "ui-profile-original-binding";
-        profile.as_mut().ok_or(Error::State)?.bind_after_logon(&mut clock)?;
+        launch.as_mut().ok_or(Error::State)?.as_mut().enter_traced(current, clock.start, &mut clock.latched, &mut clock.aggregate, trace)?;
+        clock.effect_traced(trace)?; stage = "ui-profile-original-binding";
+        profile.as_mut().ok_or(Error::State)?.bind_after_logon_traced(&mut clock, trace)?;
         if role == UiRole::NormalSmoke {
             stage = "ui-normal-smoke";
             smoke = Some(Smoke::new());
             smoke.as_mut().ok_or(Error::State)?.observe(launch.as_ref().ok_or(Error::State)?,
                 &request.as_ref().ok_or(Error::State)?.app_version, &mut clock)?;
         }
-        smoke_result(smoke.as_ref(), SmokePhase::ObserveClock, SmokeCheck::Clock, clock.effect())
+        trace.prerequisite_check(PrerequisiteCheck::L02);
+        smoke_result(smoke.as_ref(), SmokePhase::ObserveClock, SmokeCheck::Clock, clock.effect_traced(trace))
     })();
+    let mut observation = trace.prerequisite_current(observation);
     if let Some(current) = account.as_mut() { current.zero(); }
     // Settle the actual original driver before any original process close.
     // Only returned-NULL initial-main reads may wait for readiness above.
     // All later/effectful UIA timeouts still fail even if a provider later acts.
     let smoke_settled = smoke.as_mut().is_none_or(|value| value.settle().is_ok());
     if !smoke_settled || matches!(observation, Err(Error::Unknown)) {
+        trace.prerequisite_fault(PrerequisiteCheck::L04, Error::Unknown, None, None);
         diagnostic_smoke(stage, launch.as_deref(), true, trace.first, smoke.as_ref());
         loop { std::thread::park(); std::hint::black_box((&mut smoke, &mut launch, &mut profile, &mut account,
             &mut book, &mut inventory, &mut files, &mut creates, &request, &fixture)); }
     }
+    trace.prerequisite_at(PrerequisiteStage::Launch, PrerequisiteCheck::L03);
     if let Some(original) = launch.as_mut() {
         if observation.is_err() { unsafe { original.as_mut().get_unchecked_mut() }.facts.failed = true; }
-        original.as_mut().finish(clock.start, &mut clock.aggregate);
+        original.as_mut().finish_traced(clock.start, &mut clock.aggregate, trace);
         if !original.facts.passed() && observation.is_ok() {
-            observation = smoke_result(smoke.as_ref(), SmokePhase::OwnerFinality, SmokeCheck::OwnerResult, Err(Error::Unsafe));
+            observation = prerequisite_result!(trace, L03, smoke_result(smoke.as_ref(), SmokePhase::OwnerFinality, SmokeCheck::OwnerResult, Err(Error::Unsafe)));
         }
     }
-    if !parent_attempted { parent_settled = book.settle_once() == CloseOutcome::Settled && book.settled(); }
+    trace.prerequisite_check(PrerequisiteCheck::L04);
+    if !parent_attempted { parent_settled = book.prerequisite_settle(trace) == CloseOutcome::Settled && book.settled(); }
     if !parent_settled || launch.as_ref().is_some_and(|value| value.facts.unknown || value.facts.created && !value.facts.signaled) {
+        trace.prerequisite_fault(PrerequisiteCheck::L04, Error::Unknown, None, None);
         let _ = smoke_result::<()>(smoke.as_ref(), SmokePhase::OwnerFinality,
             if !parent_settled { SmokeCheck::ParentSettlement } else { SmokeCheck::OwnerFinality }, Err(Error::Unknown));
         diagnostic_smoke(stage, launch.as_deref(), true, trace.first, smoke.as_ref());
@@ -1743,8 +2034,9 @@ pub(super) fn run(role: UiRole, entry_tick: u64) -> Result<()> {
             &mut book, &mut inventory, &mut files, &mut creates, &request, &fixture)); }
     }
     if observation.is_ok() {
+        trace.prerequisite_at(PrerequisiteStage::ChildOutput, PrerequisiteCheck::C01);
         observation = (|| -> Result<()> {
-            smoke_result(smoke.as_ref(), SmokePhase::OwnerFinality, SmokeCheck::Clock, clock.effect())?;
+            smoke_result(smoke.as_ref(), SmokePhase::OwnerFinality, SmokeCheck::Clock, clock.effect_traced(trace))?;
             stage = "ui-original-exit-result";
             let selected = smoke_result(smoke.as_ref(), SmokePhase::OwnerFinality, SmokeCheck::RequestMissing,
                 request.as_ref().ok_or(Error::State))?;
@@ -1752,34 +2044,42 @@ pub(super) fn run(role: UiRole, entry_tick: u64) -> Result<()> {
                 smoke_result(smoke.as_ref(), SmokePhase::OwnerFinality, SmokeCheck::SmokeFinality,
                     need(smoke.as_ref().is_some_and(Smoke::passed)))?; None
             } else {
+                trace.at(InputRole::Output, Some(files.len() as u8));
                 let index = input(&mut files, &output.join(role.name("result.private.json")), false,
-                    FS::FILE_GENERIC_READ, &mut clock, &mut trace)?;
-                let raw = files[index].read(LIMIT)?;
-                let accepted = selected.accept_child(&raw, &request_sha, &account_sha)?;
+                    FS::FILE_GENERIC_READ, &mut clock, trace)?;
+                let raw = files[index].read_traced(LIMIT, trace)?;
+                let accepted = selected.accept_child_traced(&raw, &request_sha, &account_sha, trace)?;
                 if role == UiRole::Prerequisite { available = Some(accepted); } else { need(accepted)?; }
-                child_sha = Some(digest(&raw)?); Some(index)
+                child_sha = Some(digest_traced(&raw, trace)?); Some(index)
             };
+            trace.prerequisite_check(PrerequisiteCheck::C02);
             let index = smoke_result(smoke.as_ref(), SmokePhase::OutputPoststate, SmokeCheck::ArtifactIndex,
                 artifact_index.ok_or(Error::State))?;
-            let stamp = smoke_result(smoke.as_ref(), SmokePhase::OutputPoststate, SmokeCheck::ArtifactStamp, files[index].stamp())?;
+            trace.at(InputRole::Artifact, Some(index as u8));
+            let stamp = smoke_result(smoke.as_ref(), SmokePhase::OutputPoststate, SmokeCheck::ArtifactStamp, files[index].stamp_traced(trace))?;
             let expected = smoke_result(smoke.as_ref(), SmokePhase::OutputPoststate, SmokeCheck::ArtifactExpected,
                 artifact_after.as_ref().ok_or(Error::State))?;
             smoke_result(smoke.as_ref(), SmokePhase::OutputPoststate, SmokeCheck::ArtifactUnchanged, need(stamp == *expected))?;
             for (index, stamp) in &input_stamps {
-                smoke_result(smoke.as_ref(), SmokePhase::OutputPoststate, SmokeCheck::Clock, clock.effect())?;
-                let current = smoke_result(smoke.as_ref(), SmokePhase::OutputPoststate, SmokeCheck::InputStamp, files[*index].stamp())?;
+                trace.at(InputRole::Binding, Some(*index as u8));
+                smoke_result(smoke.as_ref(), SmokePhase::OutputPoststate, SmokeCheck::Clock, clock.effect_traced(trace))?;
+                let current = smoke_result(smoke.as_ref(), SmokePhase::OutputPoststate, SmokeCheck::InputStamp, files[*index].stamp_traced(trace))?;
                 smoke_result(smoke.as_ref(), SmokePhase::OutputPoststate, SmokeCheck::InputUnchanged, need(current == *stamp))?;
             }
+            trace.prerequisite_check(PrerequisiteCheck::C03);
             stage = "ui-output-poststate";
             smoke_result(smoke.as_ref(), SmokePhase::OutputPoststate, SmokeCheck::OutputInventory,
                 output_poststate(&mut inventory, &mut files, &mut fixture, role, &output,
                     smoke_result(smoke.as_ref(), SmokePhase::OutputPoststate, SmokeCheck::OutputIndex,
-                        output_index.ok_or(Error::State))?, result, &mut clock, &mut trace))?;
-            smoke_result(smoke.as_ref(), SmokePhase::OutputPoststate, SmokeCheck::Clock, clock.effect())
+                        output_index.ok_or(Error::State))?, result, &mut clock, trace))?;
+            smoke_result(smoke.as_ref(), SmokePhase::OutputPoststate, SmokeCheck::Clock, clock.effect_traced(trace))
         })();
+        observation = trace.prerequisite_current(observation);
     }
-    let inventory_settled = inventory.settle_once() == CloseOutcome::Settled && inventory.settled();
-    if !inventory_settled || matches!(observation, Err(Error::Unknown)) || !close_files(&mut files) {
+    trace.prerequisite_at(PrerequisiteStage::Settlement, PrerequisiteCheck::S01);
+    let inventory_settled = inventory.prerequisite_settle(trace) == CloseOutcome::Settled && inventory.settled();
+    if !inventory_settled || matches!(observation, Err(Error::Unknown)) || !close_files_traced(&mut files, trace) {
+        trace.prerequisite_fault(PrerequisiteCheck::S01, Error::Unknown, None, None);
         let _ = smoke_result::<()>(smoke.as_ref(), SmokePhase::OutputPoststate,
             if !inventory_settled { SmokeCheck::InventorySettlement }
             else if matches!(observation, Err(Error::Unknown)) { SmokeCheck::OwnerFinality } else { SmokeCheck::InputClose },
@@ -1788,43 +2088,52 @@ pub(super) fn run(role: UiRole, entry_tick: u64) -> Result<()> {
         loop { std::thread::park(); std::hint::black_box((&mut smoke, &mut launch, &mut profile, &mut account,
             &mut book, &mut inventory, &mut files, &mut creates, &request, &fixture)); }
     }
-    if smoke_result(smoke.as_ref(), SmokePhase::OwnerFinality, SmokeCheck::Clock, clock.effect()).is_err() {
+    trace.prerequisite_check(PrerequisiteCheck::S02);
+    if smoke_result(smoke.as_ref(), SmokePhase::OwnerFinality, SmokeCheck::Clock, clock.effect_traced(trace)).is_err() {
         observation = Err(Error::Unsafe);
     }
     if observation.is_err() {
         if profile.as_mut().is_some_and(|value| smoke_result(smoke.as_ref(), SmokePhase::Retirement,
-            SmokeCheck::ProfileSettlement, value.settle()).is_err()) {
+            SmokeCheck::ProfileSettlement, value.settle_traced(trace)).is_err()) {
             diagnostic_smoke("ui-profile-original-close", launch.as_deref(), true, trace.first, smoke.as_ref());
             loop { std::thread::park(); std::hint::black_box((&mut profile, &mut account, &mut launch, &mut files, &mut smoke)); }
         }
-        diagnostic_smoke(stage, launch.as_deref(), false, trace.first, smoke.as_ref());
+        if role != UiRole::Prerequisite { diagnostic_smoke(stage, launch.as_deref(), false, trace.first, smoke.as_ref()); }
         return observation; // Failed process/driver never permits profile/account deletion.
     }
+    trace.prerequisite_at(PrerequisiteStage::Retirement, PrerequisiteCheck::R01);
     stage = "ui-profile-retirement";
     let retirement = smoke_result(smoke.as_ref(), SmokePhase::Retirement, SmokeCheck::ProfileRetirement,
-        profile.as_mut().ok_or(Error::State)?.retire(&mut clock));
+        prerequisite_result!(trace, R01, profile.as_mut().ok_or(Error::State))?.retire_traced(&mut clock, trace));
+    let retirement = trace.prerequisite_result(PrerequisiteCheck::R01, retirement);
     if retirement.is_err() {
         if matches!(retirement, Err(Error::Unknown)) || profile.as_mut().is_some_and(|value| smoke_result(smoke.as_ref(),
-            SmokePhase::Retirement, SmokeCheck::ProfileSettlement, value.settle()).is_err()) {
+            SmokePhase::Retirement, SmokeCheck::ProfileSettlement, value.settle_traced(trace)).is_err()) {
             diagnostic_smoke(stage, launch.as_deref(), true, trace.first, smoke.as_ref());
             loop { std::thread::park(); std::hint::black_box((&mut profile, &mut account, &mut launch, &mut files, &mut smoke)); }
         }
         return retirement;
     }
-    let current = account.as_mut().ok_or(Error::State)?;
+    trace.prerequisite_check(PrerequisiteCheck::R02);
+    let current = prerequisite_result!(trace, R02, account.as_mut().ok_or(Error::State))?;
     let retirement = smoke_result(smoke.as_ref(), SmokePhase::Retirement, SmokeCheck::AccountRetirement,
-        current.retire(clock.start, &mut clock.latched, &mut clock.aggregate));
+        current.retire_traced(clock.start, &mut clock.latched, &mut clock.aggregate, trace));
+    let retirement = trace.prerequisite_result(PrerequisiteCheck::R02, retirement);
     if matches!(retirement, Err(Error::Unknown)) {
         diagnostic_smoke("ui-account-retirement", launch.as_deref(), true, trace.first, smoke.as_ref());
         loop { std::thread::park(); std::hint::black_box((&mut profile, &mut account, &mut launch, &mut files, &mut smoke)); }
     }
-    retirement?; clock.effect()?;
-    let current = account.as_ref().ok_or(Error::State)?; let profile = profile.as_ref().ok_or(Error::State)?;
-    let original = launch.as_ref().ok_or(Error::State)?; let selected = request.as_ref().ok_or(Error::State)?;
-    need(current.removed && original.facts.passed() && files.iter().all(OriginalFile::is_closed)
+    retirement?; clock.effect_traced(trace)?;
+    trace.prerequisite_at(PrerequisiteStage::Final, PrerequisiteCheck::Z01);
+    let current = prerequisite_result!(trace, Z01, account.as_ref().ok_or(Error::State))?;
+    let profile = prerequisite_result!(trace, Z01, profile.as_ref().ok_or(Error::State))?;
+    let original = prerequisite_result!(trace, Z01, launch.as_ref().ok_or(Error::State))?;
+    let selected = prerequisite_result!(trace, Z01, request.as_ref().ok_or(Error::State))?;
+    prerequisite_result!(trace, Z01, need(current.removed && original.facts.passed() && files.iter().all(OriginalFile::is_closed)
         && profile.prestate && profile.exact && profile.hives_unloaded && profile.delete_entered
         && profile.delete_return != 0 && profile.poststate && profile.settled && !profile.unknown
-        && fixture.as_ref().is_none_or(|value| value.verified))?;
+        && fixture.as_ref().is_none_or(|value| value.verified)))?;
+    trace.prerequisite_check(PrerequisiteCheck::Z02);
     let prerequisite = available.map(|value| value.to_string()).unwrap_or_else(|| "null".to_owned());
     let native_sha = child_sha.map(|value| format!("\"{value}\"")).unwrap_or_else(|| "null".to_owned());
     let smoke_json = match smoke.as_ref() { Some(smoke) => smoke.json()?, None => "null".to_owned() };
@@ -1839,11 +2148,12 @@ pub(super) fn run(role: UiRole, entry_tick: u64) -> Result<()> {
         role.owner(), role.entry(), original.returned, original.first_wait, original.exit_return, original.exit_output,
         original.process_close, original.thread_close, files.len(), files.len(), profile.delete_return,
         if role == UiRole::ProjectDraft { 6 } else { 0 }, transitions.join(","));
-    need(record.len() <= OWNER_LIMIT)?; clock.effect()?;
-    write_fixture_record(&root.join(role.name("owner-result.private.json")), record.as_bytes(), OWNER_LIMIT, clock.end)?;
+    prerequisite_result!(trace, Z02, need(record.len() <= OWNER_LIMIT))?; clock.effect_traced(trace)?;
+    trace.at(InputRole::Output, None);
+    write_fixture_record_traced(&root.join(role.name("owner-result.private.json")), record.as_bytes(), OWNER_LIMIT, clock.end, trace)?;
     // A pre-close record is never an owner-exit receipt; the separate finalizer
     // still requires this foreground libtest's original zero exit/step closure.
-    clock.effect()
+    clock.effect_traced(trace)
 }
 
 // Inert regressions. They exercise the actual ownership/result decisions above
@@ -1895,6 +2205,449 @@ mod contract_tests {
             if let Some(frame) = self.0.native.active.take() { drop(ManuallyDrop::into_inner(frame)); }
             for slot in self.0.native.slots.drain(..) { drop(ManuallyDrop::into_inner(slot)); }
         }
+    }
+
+    fn prerequisite_trace(stage: PrerequisiteStage, check: PrerequisiteCheck) -> InputTrace {
+        let mut trace = InputTrace::prerequisite_only(true);
+        trace.prerequisite_at(stage, check);
+        trace.at(InputRole::Parent, None);
+        trace
+    }
+    fn prerequisite_first(trace: &InputTrace) -> PrerequisiteFault {
+        trace.prerequisite.expect("enabled DATA").first.expect("actual rejecting decision")
+    }
+    fn prerequisite_bindings() -> PrerequisiteBindings<'static> {
+        PrerequisiteBindings::new(Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), Some("99999999999999999999"))
+    }
+    struct PrerequisiteOutput {
+        write: PrerequisiteWrite, flush: PrerequisiteFlush,
+        calls: Vec<&'static str>, bytes: Vec<u8>,
+    }
+    impl PrerequisiteOutput {
+        fn new(write: PrerequisiteWrite, flush: PrerequisiteFlush) -> Self {
+            Self { write, flush, calls: Vec::new(), bytes: Vec::new() }
+        }
+    }
+    impl Write for PrerequisiteOutput {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.calls.push("write"); self.bytes.extend_from_slice(bytes);
+            match self.write {
+                PrerequisiteWrite::Full => Ok(bytes.len()), PrerequisiteWrite::Short => Ok(bytes.len() - 1),
+                PrerequisiteWrite::Zero => Ok(0), PrerequisiteWrite::Overreported => Ok(bytes.len() + 1),
+                PrerequisiteWrite::Interrupted => Err(std::io::ErrorKind::Interrupted.into()),
+                PrerequisiteWrite::Error => Err(std::io::ErrorKind::BrokenPipe.into()),
+            }
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.calls.push("flush");
+            match self.flush {
+                PrerequisiteFlush::Ok => Ok(()),
+                PrerequisiteFlush::Interrupted => Err(std::io::ErrorKind::Interrupted.into()),
+                PrerequisiteFlush::Error => Err(std::io::ErrorKind::BrokenPipe.into()),
+            }
+        }
+    }
+    fn prerequisite_created_process() -> Result<ProcessFacts> {
+        let mut facts = ProcessFacts::new();
+        facts.begin()?; facts.creation(true, 0, (11, 12, 17, 18), false)?;
+        Ok(facts)
+    }
+
+    #[test]
+    fn prerequisite_first_fault_covers_return_routes_and_expected_negatives() -> Result<()> {
+        use PrerequisiteCheck as C; use PrerequisiteStage as G;
+        let mut disabled = InputTrace::default();
+        assert_eq!(disabled.prerequisite_result::<()>(C::E02, Err(Error::State)), Err(Error::State));
+        assert!(disabled.prerequisite.is_none());
+        // Exercise real rejecting helper Results across the finite owner families,
+        // not just check-enum enumeration. No helper below can enter an OS API.
+        let mut entry = prerequisite_trace(G::Entry, C::E02);
+        assert!(fixed_path_traced("not-an-absolute-path", &mut entry).is_err());
+        assert_eq!((prerequisite_first(&entry).stage, prerequisite_first(&entry).check), (G::Entry, C::F03));
+        let mut parent = prerequisite_trace(G::ParentInput, C::P04);
+        assert!(UiRequest::parse_traced(b"malformed\n", &mut parent).is_err());
+        assert_eq!((prerequisite_first(&parent).stage, prerequisite_first(&parent).check), (G::ParentInput, C::Q01));
+        let mut account = prerequisite_trace(G::AccountProfile, C::A02);
+        assert!(AclImage::parse_traced(&[], &mut account).is_err());
+        assert_eq!((prerequisite_first(&account).stage, prerequisite_first(&account).check), (G::AccountProfile, C::G01));
+        let mut launch = prerequisite_trace(G::Launch, C::L03);
+        let mut facts = ProcessFacts::new();
+        let original = facts.wait(F::WAIT_FAILED, false);
+        assert_eq!(prerequisite_process_decision(&mut launch, C::D04, original, (false, false), &facts, None), Err(Error::State));
+        assert_eq!((prerequisite_first(&launch).stage, prerequisite_first(&launch).check), (G::Launch, C::D04));
+        let request = request(); let digest = "a".repeat(64); let sid = "b".repeat(64);
+        let mut child = prerequisite_trace(G::ChildOutput, C::C01);
+        assert!(request.accept_child_traced(b"not-json", &digest, &sid, &mut child).is_err());
+        assert_eq!((prerequisite_first(&child).stage, prerequisite_first(&child).check), (G::ChildOutput, C::Q05));
+        let mut settlement = prerequisite_trace(G::Settlement, C::S01);
+        let mut key = Key::new(R::HKEY_LOCAL_MACHINE, "inert"); key.state = SlotState::Unknown;
+        assert_eq!(key.close_traced(&mut settlement), Err(Error::Unknown));
+        assert_eq!((prerequisite_first(&settlement).stage, prerequisite_first(&settlement).check), (G::Settlement, C::K03));
+        let fixture = InertProfile::new()?;
+        let mut retirement = prerequisite_trace(G::Retirement, C::R01);
+        assert_eq!(fixture.0.absence_permitted_traced(AbsenceEpoch::AfterDeletion, &mut retirement), Err(Error::Unsafe));
+        assert_eq!((prerequisite_first(&retirement).stage, prerequisite_first(&retirement).check), (G::Retirement, C::V03));
+        let mut finality = prerequisite_trace(G::Final, C::Z01);
+        assert_eq!(finality.prerequisite_result(C::Z01, need(facts.passed())), Err(Error::Unsafe));
+        assert_eq!((prerequisite_first(&finality).stage, prerequisite_first(&finality).check), (G::Final, C::Z01));
+        for trace in [&entry, &parent, &account, &launch, &child, &settlement, &retirement, &finality] {
+            assert!(prerequisite_first(trace).native.is_none());
+        }
+        let mut expected = prerequisite_trace(G::ParentInput, C::P01);
+        expected.record(InputCheck::ParentPrimary, Some(InputStatus::Win32(5)));
+        assert!(expected.prerequisite.expect("enabled").first.is_none()); // Nonzero alone is not failure.
+        for error in [Error::Unsafe, Error::State] {
+            let mut local = expected.prerequisite_staged();
+            let original = local.prerequisite_result::<()>(C::NB11, Err(error));
+            assert!(expected.prerequisite_expected(C::P01, original, error, local));
+            assert!(expected.prerequisite.expect("enabled").first.is_none());
+        }
+        let unavailable = request.probe_result(&digest, &sid, Some("interactive-desktop"), None, None)?;
+        assert_eq!(request.accept_child_traced(unavailable.as_bytes(), &digest, &sid, &mut expected), Ok(false));
+        assert!(expected.prerequisite.expect("enabled").first.is_none());
+        let mut local = expected.prerequisite_staged();
+        let native = PrerequisiteNative::boolean(PrerequisiteApi::OpenThreadToken, PrerequisiteSelector::None, 0, Some(5));
+        let original = local.prerequisite_native_result::<()>(C::NB02, Err(Error::Unavailable), native, None);
+        assert!(!expected.prerequisite_expected(C::P01, original, Error::Unsafe, local));
+        let first = prerequisite_first(&expected);
+        assert_eq!((first.error, first.native), (Error::Unavailable, native));
+        let mut local = expected.prerequisite_staged();
+        let original = local.prerequisite_result::<()>(C::HT01, Err(Error::State));
+        assert!(expected.prerequisite_expected(C::P02, original, Error::State, local));
+        assert_eq!(prerequisite_first(&expected), first); // Discarding local never clears parent.
+        let mut unexpected_ok = prerequisite_trace(G::ParentInput, C::P01);
+        let local = unexpected_ok.prerequisite_staged();
+        assert!(!unexpected_ok.prerequisite_expected(C::P01, Ok(()), Error::Unsafe, local));
+        assert_eq!(prerequisite_first(&unexpected_ok).error, Error::Unsafe);
+        assert!(prerequisite_first(&unexpected_ok).native.is_none());
+        let mut escape = InputTrace::prerequisite_only(true);
+        let mut output = PrerequisiteOutput::new(PrerequisiteWrite::Full, PrerequisiteFlush::Ok);
+        assert_eq!(prerequisite_returned(UiRole::Prerequisite, Err(Error::Bounds), &mut escape,
+            prerequisite_bindings(), &mut output).0, Err(Error::Bounds));
+        assert_eq!((prerequisite_first(&escape).stage, prerequisite_first(&escape).check), (G::Escape, C::U01));
+        Ok(())
+    }
+
+    #[test]
+    fn prerequisite_first_fault_survives_secondary_clock_and_status_reuse() -> Result<()> {
+        use PrerequisiteCheck as C; use PrerequisiteStage as G;
+        let mut key = Key::new(R::HKEY_LOCAL_MACHINE, "inert");
+        key.status = 5;
+        let mut file = OriginalFile::new(Path::new(r"C:\inert\file"), false)?;
+        file.body().error = 32;
+        let mut buffer = NetBuffer::new(); buffer.status = u32::MAX;
+        let rows = [
+            (C::K02, PrerequisiteNative::registry(PrerequisiteApi::RegQueryValueExW, PrerequisiteSelector::ProfileImagePath, key.status)),
+            (C::F05, PrerequisiteNative::boolean(PrerequisiteApi::ReadFile, PrerequisiteSelector::None, 0, Some(file.body().error))),
+            (C::N04, PrerequisiteNative::net(PrerequisiteApi::NetUserGetInfo, PrerequisiteSelector::UserInfo23, buffer.status)),
+        ];
+        for (check, native) in rows {
+            let mut trace = prerequisite_trace(G::AccountProfile, check);
+            assert_eq!(trace.prerequisite_native_result::<()>(check, Err(Error::Unavailable), native, None), Err(Error::Unavailable));
+            let first = prerequisite_first(&trace);
+            key.status = 0; file.body().error = 0; buffer.status = 0; buffer.release_status = 0;
+            trace.prerequisite_clock(true);
+            assert_eq!(trace.prerequisite_result::<()>(C::T01, Err(Error::Unsafe)), Err(Error::Unsafe));
+            assert_eq!(trace.prerequisite_native_result::<()>(C::N02, Err(Error::Unknown),
+                PrerequisiteNative::net(PrerequisiteApi::NetApiBufferFree, PrerequisiteSelector::None, 5), None), Err(Error::Unknown));
+            assert_eq!(prerequisite_first(&trace), first);
+            let mut out = [0u8; PREREQUISITE_FAULT_BUFFER_BYTES];
+            let n = prerequisite_fault_frame(trace.prerequisite.expect("enabled"), Error::Unsafe, prerequisite_bindings(), &mut out).expect("closed frame");
+            let text = std::str::from_utf8(&out[..n]).expect("ASCII");
+            assert!(text.contains(";first=Unavailable;returned=Unsafe;"));
+            assert!(text.contains(";clock=last-latched;"));
+        }
+        // The original short-circuit clock rejects before any query predicate:
+        // a later native-looking scalar must not become the primary.
+        let mut trace = prerequisite_trace(G::Launch, C::K02);
+        let right_hand = Cell::new(false);
+        let decision = (|| -> Result<()> {
+            trace.prerequisite_result(C::T01, need(false))?;
+            right_hand.set(true); need(false)
+        })();
+        assert_eq!(decision, Err(Error::Unsafe)); assert!(!right_hand.get());
+        let _ = trace.prerequisite_native_result::<()>(C::K02, Err(Error::Unsafe),
+            PrerequisiteNative::registry(PrerequisiteApi::RegQueryValueExW, PrerequisiteSelector::ProfileImagePath, 5), None);
+        assert_eq!(prerequisite_first(&trace).check, C::T01);
+        assert!(prerequisite_first(&trace).native.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn prerequisite_native_statuses_require_original_completed_observations() -> Result<()> {
+        use PrerequisiteCheck as C; use PrerequisiteStage as G;
+        // These pairs represent returned scalar DATA, never native invocations.
+        for (call, returned, api, selector) in [
+            (Call::ThreadToken(0), Returned::Boolean(0, 5), PrerequisiteApi::OpenThreadToken, PrerequisiteSelector::None),
+            (Call::Info(FS::FileIdInfo, 0), Returned::Boolean(0, u32::MAX), PrerequisiteApi::GetFileInformationByHandleEx, PrerequisiteSelector::FileIdInfo),
+            (Call::Mapping, Returned::Count(0, 5), PrerequisiteApi::QueryDosDeviceW, PrerequisiteSelector::None),
+            (Call::Open(0), Returned::Nt(i32::MIN), PrerequisiteApi::NtCreateFile, PrerequisiteSelector::None),
+            (Call::VolumeDevice, Returned::Nt(i32::MAX), PrerequisiteApi::NtQueryVolumeInformationFile, PrerequisiteSelector::FileFsDeviceInformation),
+            (Call::Token(S::TokenVirtualizationEnabled), Returned::Boolean(0, 5), PrerequisiteApi::GetTokenInformation, PrerequisiteSelector::TokenVirtualizationEnabled),
+        ] {
+            let native = prerequisite_native_pair(call, returned).expect("actual rejecting pair");
+            assert_eq!((native.api, native.selector), (api, selector)); assert!(native.valid());
+            let mut book = NativeBook::new();
+            let mut trace = prerequisite_trace(G::ParentInput, C::NB10);
+            let original = book.prerequisite_observe(&mut trace, C::NB10, |book| {
+                book.prerequisite_capture(call, returned); Err::<(), _>(Error::Unavailable)
+            });
+            assert_eq!(original, Err(Error::Unavailable)); assert_eq!(prerequisite_first(&trace).native, Some(native));
+        }
+        for (call, returned) in [
+            (Call::ThreadToken(0), Returned::Boolean(0, F::ERROR_NO_TOKEN)),
+            (Call::Entries, Returned::Boolean(0, F::ERROR_NO_MORE_FILES)),
+            (Call::Architecture, Returned::Boolean(-1, u32::MAX)),
+            (Call::Mapping, Returned::Count(12, u32::MAX)),
+            (Call::Open(0), Returned::Nt(0)),
+            (Call::Architecture, Returned::Nt(-1)), // Wrong pair, not merely a signed integer.
+            (Call::Open(0), Returned::Boolean(0, 5)),
+            (Call::Info(-1, 0), Returned::Boolean(0, 5)),
+            (Call::Token(-1), Returned::Boolean(0, 5)),
+            (Call::Folder, Returned::Hresult(i32::MIN)),
+        ] { assert!(prerequisite_native_pair(call, returned).is_none()); }
+        for (call, check, admission, operation) in [
+            (Call::DriveType, C::NB05, AdmissionCheck::DriveType, AdmissionOp::Mapping),
+            (Call::FileType, C::NB07, AdmissionCheck::FileType, AdmissionOp::Metadata),
+        ] {
+            let mut book = NativeBook::new();
+            let mut trace = prerequisite_trace(G::AccountProfile, check);
+            book.prerequisite_enable_admission(&trace);
+            let original = book.prerequisite_observe(&mut trace, check, |book| {
+                book.prerequisite_capture(call, Returned::Scalar(u32::MAX));
+                book.admission.at(operation).need(false, admission)
+            });
+            assert_eq!(original, Err(Error::Unsafe));
+            let first = prerequisite_first(&trace);
+            assert_eq!((first.check, first.native, first.detail), (check, None, Some(PrerequisiteDetail::Admission(admission))));
+        }
+        let mut book = NativeBook::new();
+        book.first_unavailable = Some((Call::Architecture, Returned::Boolean(0, 5)));
+        book.prerequisite_capture(Call::Architecture, Returned::Boolean(0, 5));
+        let mut trace = prerequisite_trace(G::ParentInput, C::NB01);
+        assert_eq!(book.prerequisite_observe(&mut trace, C::NB01, |_| Err::<(), _>(Error::State)), Err(Error::State));
+        assert!(book.prerequisite_returned.get().is_none()); assert!(book.first_unavailable.is_some());
+        assert!(prerequisite_first(&trace).native.is_none()); // Unentered guard cannot inherit earlier status.
+        let mut descriptor = PrerequisiteNative::boolean(PrerequisiteApi::InitializeSecurityDescriptor, PrerequisiteSelector::None, 0, None).expect("BOOL");
+        assert!(descriptor.valid()); descriptor.status = PrerequisiteStatus::Win32; descriptor.code = Some(5);
+        assert!(!descriptor.valid()); // These descriptor calls never read ambient LastError.
+        for value in [i32::MIN, i32::MAX] {
+            assert!(PrerequisiteNative::nt(PrerequisiteApi::BCryptGenRandom, PrerequisiteSelector::None, value).expect("NT").valid());
+            let error = std::io::Error::from_raw_os_error(value);
+            let fact = PrerequisiteNative::io(PrerequisiteApi::CurrentExe, &error).expect("returned io error");
+            assert_eq!(fact.code, Some(i64::from(value))); assert!(fact.valid());
+        }
+        let no_os = std::io::Error::from(std::io::ErrorKind::Other);
+        let fact = PrerequisiteNative::io(PrerequisiteApi::CurrentDir, &no_os).expect("returned io error");
+        assert_eq!((fact.status, fact.code), (PrerequisiteStatus::None, None)); assert!(fact.valid());
+        assert!(PrerequisiteNative::net(PrerequisiteApi::NetUserDel, PrerequisiteSelector::None, u32::MAX).expect("NetAPI").valid());
+        assert_eq!(PrerequisiteNative::wait(PrerequisiteSelector::FirstWait, F::WAIT_TIMEOUT, 5).expect("wait").code, None);
+        assert_eq!(PrerequisiteNative::wait(PrerequisiteSelector::SettleWait, F::WAIT_FAILED, 5).expect("wait").code, Some(5));
+        assert!(PrerequisiteNative::boolean(PrerequisiteApi::ReadFile, PrerequisiteSelector::None, 1, Some(5)).is_none());
+        assert!(PrerequisiteNative::exit(0).is_none());
+        // Absence's initial STATUS_PENDING and close-zero are not observed returns.
+        let mut fixture = InertProfile::new()?;
+        let native = &fixture.0.native;
+        let [before, after] = &mut fixture.0.absence;
+        let frame = unsafe { before.as_mut().ok_or(Error::State)?.as_mut().get_unchecked_mut() };
+        let other = after.as_ref().ok_or(Error::State)?.as_ref().get_ref();
+        let mut absent = prerequisite_trace(G::AccountProfile, C::V04);
+        assert_eq!(frame.observe_return_traced(native, other, false, &mut absent), Err(Error::State));
+        assert!(prerequisite_first(&absent).native.is_none());
+        let mut close = prerequisite_trace(G::Settlement, C::B03);
+        assert_eq!(frame.observe_close_traced(false, &mut close), Err(Error::State));
+        assert!(prerequisite_first(&close).native.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn prerequisite_frame_is_closed_bounded_and_binding_exact() {
+        use PrerequisiteCheck as C; use PrerequisiteStage as G;
+        let mut trace = prerequisite_trace(G::AccountProfile, C::N03);
+        let _ = trace.prerequisite_native_result::<()>(C::N03, Err(Error::Unavailable),
+            PrerequisiteNative::nt(PrerequisiteApi::BCryptGenRandom, PrerequisiteSelector::None, i32::MIN),
+            Some(PrerequisiteDetail::Admission(AdmissionCheck::ManifestReportedSize)));
+        let mut record = trace.prerequisite.expect("enabled");
+        let mut output = [0u8; PREREQUISITE_FAULT_BUFFER_BYTES];
+        for native in [
+            PrerequisiteNative::nt(PrerequisiteApi::BCryptGenRandom, PrerequisiteSelector::None, i32::MIN),
+            PrerequisiteNative::net(PrerequisiteApi::NetUserGetLocalGroups, PrerequisiteSelector::LocalGroups0, u32::MAX),
+            PrerequisiteNative::boolean(PrerequisiteApi::GetFileInformationByHandleEx, PrerequisiteSelector::FileIdExtdDirectoryInfo, 0, Some(u32::MAX)),
+            PrerequisiteNative::boolean(PrerequisiteApi::GetTokenInformation, PrerequisiteSelector::TokenVirtualizationEnabled, 0, Some(u32::MAX)),
+            PrerequisiteNative::wait(PrerequisiteSelector::SettleWait, F::WAIT_FAILED, u32::MAX),
+            PrerequisiteNative::exit(u32::MAX), None,
+        ] {
+            record.first.as_mut().expect("first").native = native;
+            let length = prerequisite_fault_frame(record, Error::Unavailable, prerequisite_bindings(), &mut output).expect("legal maxima");
+            assert!(length <= PREREQUISITE_FAULT_FRAME_MAX_BYTES && length <= 664);
+            let text = std::str::from_utf8(&output[..length]).expect("ASCII").to_owned();
+            assert!(text.starts_with("\nMRK_WINDOWS_UI_PREREQUISITE_FAULT_V1=source=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;"));
+            assert!(text.contains(";run=99999999999999999999;attempt=1;"));
+            assert!(text.ends_with(";coverage=mapped;end=1\n"));
+            let payload = text.trim_matches('\n').strip_prefix(PREREQUISITE_FAULT_PREFIX).expect("prefix");
+            assert_eq!(payload.split(';').map(|part| part.split_once('=').expect("pair").0).collect::<Vec<_>>(),
+                ["source", "tree", "run", "attempt", "owner", "mode", "stage", "check", "detail", "first", "returned",
+                 "api", "selector", "kind", "value", "status", "code", "clock", "coverage", "end"]);
+            for bound in [0, 1, length - 1] {
+                assert!(prerequisite_fault_frame(record, Error::Unavailable, prerequisite_bindings(), &mut output[..bound]).is_none());
+            }
+        }
+        let unavailable = PrerequisiteBindings::new(Some(r"C:\private-account"), Some("0000000000000000000000000000000000000000"), Some("01"));
+        let length = prerequisite_fault_frame(record, Error::Unsafe, unavailable, &mut output).expect("explicit unavailable");
+        let text = std::str::from_utf8(&output[..length]).expect("ASCII");
+        assert!(text.contains("source=unavailable;tree=unavailable;run=unavailable;"));
+        for private in ["private-account", "C:\\", "password", "handle=", "pid=", "accountName"] { assert!(!text.contains(private)); }
+        for bad in ["", "0", "01", "+1", "-1", "1\n", "100000000000000000000", "1;end=1"] {
+            assert_eq!(PrerequisiteBindings::new(None, None, Some(bad)).run, "unavailable");
+        }
+        let mut invalid = record;
+        invalid.first.as_mut().expect("first").native = Some(PrerequisiteNative {
+            api: PrerequisiteApi::GetExitCodeProcess, selector: PrerequisiteSelector::None,
+            kind: PrerequisiteKind::Exit, value: Some(i64::from(u32::MAX) + 1),
+            status: PrerequisiteStatus::None, code: None });
+        assert!(prerequisite_fault_frame(invalid, Error::Unsafe, prerequisite_bindings(), &mut output).is_none());
+        invalid = record; invalid.first.as_mut().expect("first").check = C::U01;
+        assert!(prerequisite_fault_frame(invalid, Error::Unsafe, prerequisite_bindings(), &mut output).is_none());
+        let forged = PrerequisiteBindings { source: "private", tree: "unavailable", run: "unavailable" };
+        assert!(prerequisite_fault_frame(record, Error::Unsafe, forged, &mut output).is_none());
+    }
+
+    #[test]
+    fn prerequisite_diagnostic_sink_checks_one_write_one_flush_without_outcome_change() {
+        for write in [PrerequisiteWrite::Full, PrerequisiteWrite::Short, PrerequisiteWrite::Zero,
+            PrerequisiteWrite::Interrupted, PrerequisiteWrite::Error, PrerequisiteWrite::Overreported] {
+            for flush in [PrerequisiteFlush::Ok, PrerequisiteFlush::Interrupted, PrerequisiteFlush::Error] {
+                let mut trace = prerequisite_trace(PrerequisiteStage::Entry, PrerequisiteCheck::E02);
+                let original = trace.prerequisite_result::<()>(PrerequisiteCheck::E02, Err(Error::State));
+                let first = prerequisite_first(&trace);
+                let mut output = PrerequisiteOutput::new(write, flush);
+                let (returned, delivery) = prerequisite_returned(UiRole::Prerequisite, original, &mut trace, prerequisite_bindings(), &mut output);
+                assert_eq!(returned, original); assert_eq!(prerequisite_first(&trace), first);
+                assert_eq!(delivery, PrerequisiteDelivery::Attempted { write, flush });
+                assert_eq!(delivery.locally_complete(), write == PrerequisiteWrite::Full && flush == PrerequisiteFlush::Ok);
+                assert_eq!(output.calls, ["write", "flush"]);
+                assert!(output.bytes.starts_with(b"\nMRK_WINDOWS_UI_PREREQUISITE_FAULT_V1="));
+                assert!(output.bytes.ends_with(b";end=1\n"));
+            }
+        }
+        let mut trace = prerequisite_trace(PrerequisiteStage::Entry, PrerequisiteCheck::E02);
+        let original = trace.prerequisite_result::<()>(PrerequisiteCheck::E02, Err(Error::State));
+        let mut output = PrerequisiteOutput::new(PrerequisiteWrite::Full, PrerequisiteFlush::Ok);
+        let invalid = PrerequisiteBindings { source: "not-a-binding", tree: "unavailable", run: "1" };
+        let (returned, delivery) = prerequisite_returned(UiRole::Prerequisite, original, &mut trace, invalid, &mut output);
+        assert_eq!(returned, original); assert_eq!(delivery, PrerequisiteDelivery::EncodingFailed);
+        assert!(output.calls.is_empty() && output.bytes.is_empty());
+    }
+
+    #[test]
+    fn prerequisite_return_guard_keeps_unknown_and_deadline_semantics() -> Result<()> {
+        for (role, original) in [(UiRole::Prerequisite, Ok(())), (UiRole::NormalSmoke, Err(Error::Unknown)),
+            (UiRole::ProjectDraft, Err(Error::Unavailable))] {
+            let mut trace = InputTrace::prerequisite_only(role == UiRole::Prerequisite);
+            let mut output = PrerequisiteOutput::new(PrerequisiteWrite::Full, PrerequisiteFlush::Ok);
+            let (returned, delivery) = prerequisite_returned(role, original, &mut trace, prerequisite_bindings(), &mut output);
+            assert_eq!(returned, original); assert_eq!(delivery, PrerequisiteDelivery::NotNeeded);
+            assert!(output.calls.is_empty() && output.bytes.is_empty());
+        }
+        for clock in [PrerequisiteClock::NotCreated, PrerequisiteClock::LastUnlatched, PrerequisiteClock::LastLatched] {
+            let mut trace = prerequisite_trace(PrerequisiteStage::Entry, PrerequisiteCheck::E03);
+            let mut latched = false;
+            if clock != PrerequisiteClock::NotCreated {
+                let elapsed = if clock == PrerequisiteClock::LastLatched { Duration::from_secs(NATIVE_SECONDS) } else { Duration::ZERO };
+                let _ = next_effect(elapsed, &mut latched); trace.prerequisite_clock(latched);
+                if latched { assert_eq!(next_effect(Duration::ZERO, &mut latched), Err(Error::Unsafe)); }
+            }
+            let error = std::io::Error::from_raw_os_error(5);
+            let original = trace.prerequisite_native_result::<()>(PrerequisiteCheck::E03, Err(Error::Unavailable),
+                PrerequisiteNative::io(PrerequisiteApi::CurrentDir, &error), None);
+            let mut output = PrerequisiteOutput::new(PrerequisiteWrite::Error, PrerequisiteFlush::Error);
+            let (returned, _) = prerequisite_returned(UiRole::Prerequisite, original, &mut trace, prerequisite_bindings(), &mut output);
+            assert_eq!(returned, original); assert_eq!(output.calls, ["write", "flush"]);
+            assert_eq!(trace.prerequisite.expect("enabled").clock, clock);
+            assert!(std::str::from_utf8(&output.bytes).expect("ASCII").contains(&format!(";clock={};", clock.label())));
+        }
+        // Pending ownership has no original body return to give the guard.
+        // Neither a prior first fault nor diagnostic DATA settles that original.
+        let mut fixture = InertProfile::new()?;
+        let native = &fixture.0.native; let [before, after] = &mut fixture.0.absence;
+        let frame = unsafe { before.as_mut().ok_or(Error::State)?.as_mut().get_unchecked_mut() };
+        let other = after.as_ref().ok_or(Error::State)?.as_ref().get_ref();
+        frame.claim()?; frame.begin()?;
+        let mut trace = prerequisite_trace(PrerequisiteStage::AccountProfile, PrerequisiteCheck::B02);
+        let mut output = PrerequisiteOutput::new(PrerequisiteWrite::Full, PrerequisiteFlush::Ok);
+        assert_eq!(frame.observe_return_traced(native, other, true, &mut trace), Err(Error::Unknown));
+        assert_eq!(frame.begin_close(), Err(Error::Unknown));
+        assert!(frame.unresolved() && !frame.settled());
+        assert!(output.calls.is_empty()); // No forced body return and no sink attempt.
+        // If and only if an outer body genuinely returned Unknown, the guard
+        // itself still cannot change it into another Error or native cleanup.
+        let (returned, _) = prerequisite_returned(UiRole::Prerequisite, Err(Error::Unknown), &mut trace, prerequisite_bindings(), &mut output);
+        assert_eq!(returned, Err(Error::Unknown)); assert!(frame.unresolved() && !frame.settled());
+        Ok(())
+    }
+
+    #[test]
+    fn prerequisite_helper_decisions_preserve_native_control_flow() -> Result<()> {
+        use PrerequisiteCheck as C; use PrerequisiteStage as G;
+        let mut facts = prerequisite_created_process()?;
+        let mut trace = prerequisite_trace(G::Launch, C::D04);
+        let before = (facts.failed, facts.unknown);
+        let original = facts.wait(F::WAIT_TIMEOUT, false);
+        assert_eq!(prerequisite_process_decision(&mut trace, C::D04, original, before, &facts,
+            PrerequisiteNative::wait(PrerequisiteSelector::FirstWait, F::WAIT_TIMEOUT, u32::MAX)), Err(Error::Unsafe));
+        assert!(facts.failed && !facts.unknown && !facts.signaled);
+        let first = prerequisite_first(&trace); facts.begin_terminate()?;
+        assert_eq!(facts.wait(F::WAIT_OBJECT_0, true), Ok(()));
+        assert_eq!(prerequisite_first(&trace), first); assert!(facts.terminated && !facts.passed());
+        let mut exited = prerequisite_created_process()?; exited.wait(F::WAIT_OBJECT_0, false)?;
+        let before = (exited.failed, exited.unknown);
+        let mut trace = prerequisite_trace(G::Launch, C::D05);
+        let original = exited.exited(true, 37);
+        assert_eq!(prerequisite_process_decision(&mut trace, C::D05, original, before, &exited, PrerequisiteNative::exit(37)), Ok(()));
+        assert!(exited.failed && !exited.unknown); assert_eq!(prerequisite_first(&trace).error, Error::Unsafe);
+        assert_eq!(prerequisite_first(&trace).native.expect("actual exit").kind, PrerequisiteKind::Exit);
+        let mut guarded = prerequisite_trace(G::Launch, C::D05);
+        let original = exited.exited(false, u32::MAX); // Repeat is State, not a failed query.
+        assert_eq!(prerequisite_process_decision(&mut guarded, C::D05, original, (true, false), &exited,
+            PrerequisiteNative::boolean(PrerequisiteApi::GetExitCodeProcess, PrerequisiteSelector::None, 0, Some(5))), Err(Error::State));
+        assert!(prerequisite_first(&guarded).native.is_none());
+        exited.begin_close(true)?;
+        let before = (exited.failed, exited.unknown); let original = exited.closed(true, false);
+        let _ = prerequisite_process_decision(&mut trace, C::D05, original, before, &exited,
+            PrerequisiteNative::boolean(PrerequisiteApi::CloseHandle, PrerequisiteSelector::ThreadClose, 0, Some(6)));
+        assert!(exited.unknown); assert_eq!(exited.thread, SlotState::Unknown);
+        assert_eq!(prerequisite_first(&trace).native.expect("first exit").value, Some(37));
+        let mut buffer = NetBuffer::new(); buffer.status = NM::NERR_UserNotFound;
+        let mut trace = prerequisite_trace(G::AccountProfile, C::N02);
+        assert_eq!(buffer.free_traced(&mut trace), Ok(())); // Precise absence: no native free.
+        assert!(buffer.released && buffer.release_attempted && trace.prerequisite.expect("enabled").first.is_none());
+        assert_eq!(buffer.free_traced(&mut trace), Err(Error::State));
+        assert!(prerequisite_first(&trace).native.is_none());
+        let mut range = prerequisite_trace(G::AccountProfile, C::N01);
+        assert!(buffer.range_traced(null(), 1, &mut range).is_err());
+        assert_eq!(prerequisite_first(&range).check, C::N01);
+        let mut file = OriginalFile::new(Path::new(r"C:\inert\file"), false)?;
+        let mut trace = prerequisite_trace(G::AccountProfile, C::F06);
+        assert_eq!(file.descriptor_traced(&mut trace), Err(Error::State)); // Reserved: before any call.
+        assert_eq!(prerequisite_first(&trace).detail, Some(PrerequisiteDetail::Input(InputCheck::DescriptorState)));
+        assert!(!file.body().active && file.body().handle.is_null());
+        assert!(prerequisite_first(&trace).native.is_none());
+        let mut fixture = InertProfile::new()?;
+        let mut permission = prerequisite_trace(G::Launch, C::V03);
+        assert_eq!(fixture.0.binding_permitted_traced(&mut permission), fixture.0.binding_permitted());
+        assert_eq!(prerequisite_first(&permission).check, C::V03);
+        let native = &fixture.0.native; let [before, after] = &mut fixture.0.absence;
+        let frame = unsafe { before.as_mut().ok_or(Error::State)?.as_mut().get_unchecked_mut() };
+        let other = after.as_ref().ok_or(Error::State)?.as_ref().get_ref();
+        frame.claim()?; frame.begin()?; frame.returned = 0xc0000034u32 as i32;
+        let mut absence = prerequisite_trace(G::AccountProfile, C::V04);
+        assert_eq!(frame.observe_return_traced(native, other, true, &mut absence), Ok(()));
+        assert!(frame.exact_absence() && frame.settled());
+        assert!(absence.prerequisite.expect("enabled").first.is_none()); // Error IOSB sentinels never read.
+        assert_eq!(frame.claim(), Err(Error::State)); assert_eq!(frame.begin_close(), Ok(None));
+        assert!(absence.prerequisite.expect("enabled").first.is_none());
+        Ok(())
     }
 
     #[test]

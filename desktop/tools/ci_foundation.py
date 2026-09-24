@@ -890,6 +890,12 @@ WINDOWS_FULLWALK_REQUEST_FIELDS = (
 # Additive UI lane: the cheap probe uses the production inspector, but starts no
 # WebView/runtime and carries no historical headless/publication authorization.
 WINDOWS_NORMAL_UI_PROFILE = "windows-normal-project-ui-v1"
+# Source-bound W15 prerequisite diagnostic branch, not a dispatch/input mode.
+# Reopening the setup/runtime/GUI tail requires a distinct focused source review.
+WINDOWS_NORMAL_UI_PREREQUISITE_ONLY = True
+WINDOWS_NORMAL_UI_PREREQUISITE_PHASES = (
+    "acquire", "compile", "windows-normal-ui-prerequisite", "windows-normal-ui-prerequisite-finalize", "retain",
+)
 WINDOWS_NORMAL_UI_DISPATCH = "windows-normal-project-ui"
 WINDOWS_NORMAL_UI_REF = "refs/heads/verify/desktop-windows-normal-project-ui"
 WINDOWS_NORMAL_UI_REQUEST_FIELDS = (*WINDOWS_FULLWALK_REQUEST_FIELDS, "appVersion")
@@ -940,6 +946,13 @@ WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS = (
     "ordinary_owner::normal_ui::contract_tests::profile_absence_epochs_do_not_consume_the_single_binding_path",
     "ordinary_owner::normal_ui::contract_tests::profile_absence_results_distinguish_missing_collision_and_unknown",
     "ordinary_owner::normal_ui::contract_tests::profile_absence_dependents_settle_before_namespace_parents",
+    "ordinary_owner::normal_ui::contract_tests::prerequisite_first_fault_covers_return_routes_and_expected_negatives",
+    "ordinary_owner::normal_ui::contract_tests::prerequisite_first_fault_survives_secondary_clock_and_status_reuse",
+    "ordinary_owner::normal_ui::contract_tests::prerequisite_native_statuses_require_original_completed_observations",
+    "ordinary_owner::normal_ui::contract_tests::prerequisite_frame_is_closed_bounded_and_binding_exact",
+    "ordinary_owner::normal_ui::contract_tests::prerequisite_diagnostic_sink_checks_one_write_one_flush_without_outcome_change",
+    "ordinary_owner::normal_ui::contract_tests::prerequisite_return_guard_keeps_unknown_and_deadline_semantics",
+    "ordinary_owner::normal_ui::contract_tests::prerequisite_helper_decisions_preserve_native_control_flow",
 )
 WINDOWS_NORMAL_UI_SCALAR_TESTS = (
     "asset_session::tests::human_quit_stop_has_one_clock_without_inventing_a_work_endpoint",
@@ -9256,7 +9269,11 @@ def windows_installed_prepared_profile(context: dict) -> bool:
 
 def windows_normal_ui_profile(context: dict) -> bool:
     windows_installed_prepared_profile(context)
-    return context.get("qualificationProfile") == WINDOWS_NORMAL_UI_PROFILE
+    selected = context.get("qualificationProfile") == WINDOWS_NORMAL_UI_PROFILE
+    if selected:
+        require(WINDOWS_NORMAL_UI_PREREQUISITE_ONLY is True and context.get("prerequisiteDiagnosticOnly") is True,
+                "Windows UI prerequisite diagnostic source binding differs")
+    return selected
 
 
 def windows_normal_ui_features(role: str) -> list[str]:
@@ -10991,6 +11008,7 @@ def windows_installed_binding() -> dict:
         binding["qualificationProfile"] = WINDOWS_INSTALLED_PASSIVE_PROFILE
     elif event == "workflow_dispatch" and dispatch == WINDOWS_NORMAL_UI_DISPATCH:
         binding["qualificationProfile"] = WINDOWS_NORMAL_UI_PROFILE
+        binding["prerequisiteDiagnosticOnly"] = True
     return binding
 
 
@@ -12488,7 +12506,8 @@ def windows_installed_phase_receipt(context: dict, phase: str, **facts) -> dict:
             "sourceSha": context["sourceSha"], "sourceTree": context["sourceTree"],
             "runId": context["runId"], "attempt": 1,
             **({"qualificationProfile": context["qualificationProfile"]}
-               if windows_installed_prepared_profile(context) or windows_normal_ui_profile(context) else {}), **facts}
+               if windows_installed_prepared_profile(context) or windows_normal_ui_profile(context) else {}), **facts,
+            **({"prerequisiteDiagnosticOnly": True} if windows_normal_ui_profile(context) else {})}
 
 
 def windows_installed_libtest(raw: bytes, names: tuple[str, ...], filtered: int, *, native: bool = False) -> dict | None:
@@ -12640,6 +12659,455 @@ def windows_normal_ui_version(value: object) -> bool:
 def windows_normal_ui_owner(role: str) -> str:
     require(type(role) is str and role in WINDOWS_NORMAL_UI_ROLES, "Windows normal UI role differs")
     return "ordinary_owner::hosted_normal_ui_" + WINDOWS_NORMAL_UI_ROLES[role][1] + "_original_handle_contract"
+
+
+# W15 closed returned-prerequisite wire. These parsers perform DATA work only;
+# the separately admitted collector must authenticate the original inputs.
+WINDOWS_NORMAL_UI_PREREQUISITE_FAULT_PREFIX = b"MRK_WINDOWS_UI_PREREQUISITE_FAULT_V1="
+WINDOWS_NORMAL_UI_PREREQUISITE_RETURN_PREFIX = b"MRK_WINDOWS_UI_PREREQUISITE_RETURN_V1="
+WINDOWS_NORMAL_UI_PREREQUISITE_FAULT_FIELDS = (
+    "source", "tree", "run", "attempt", "owner", "mode",
+    "stage", "check", "detail", "first", "returned", "api",
+    "selector", "kind", "value", "status", "code", "clock",
+    "coverage", "end",
+)
+WINDOWS_NORMAL_UI_PREREQUISITE_RETURN_FIELDS = (
+    "source", "tree", "run", "attempt", "owner", "exit",
+    "wait", "receipt", "end",
+)
+WINDOWS_NORMAL_UI_PREREQUISITE_STAGES = (
+    "entry", "parent-input", "account-profile", "launch", "child-output", "settlement",
+    "retirement", "final", "escape",
+)
+WINDOWS_NORMAL_UI_PREREQUISITE_CHECKS = (
+    "e01", "e02", "e03", "e04", "p01", "p02",
+    "p03", "p04", "p05", "p06", "a01", "a02",
+    "a03", "l01", "l02", "l03", "l04", "c01",
+    "c02", "c03", "s01", "s02", "r01", "r02",
+    "z01", "z02", "u01", "k01", "k02", "k03",
+    "b01", "b02", "b03", "v01", "v02", "v03",
+    "v04", "v05", "v06", "v07", "v08", "v09",
+    "v10", "v11", "f01", "f02", "f03", "f04",
+    "f05", "f06", "f07", "f08", "f09", "h01",
+    "q01", "q02", "q03", "q04", "q05", "g01",
+    "g02", "n01", "n02", "n03", "n04", "n05",
+    "n06", "n07", "d01", "d02", "d03", "d04",
+    "d05", "d06", "t01", "o01", "o02", "o03",
+    "nb01", "nb02", "nb03", "nb04", "nb05", "nb06",
+    "nb07", "nb08", "nb09", "nb10", "nb11", "ht01",
+)
+WINDOWS_NORMAL_UI_PREREQUISITE_ERRORS = (
+    "Unavailable", "Unsafe", "Bounds", "State", "Unknown",
+)
+WINDOWS_NORMAL_UI_PREREQUISITE_CLOCKS = (
+    "not-created", "last-unlatched", "last-latched",
+)
+WINDOWS_NORMAL_UI_PREREQUISITE_COVERAGE = (
+    "mapped", "unannotated",
+)
+WINDOWS_NORMAL_UI_PREREQUISITE_APIS = (
+    "none", "std-current-dir", "std-current-exe", "CreateFileW", "GetFileInformationByHandleEx", "GetFinalPathNameByHandleW",
+    "ReadFile", "WriteFile", "GetKernelObjectSecurity", "SetKernelObjectSecurity", "InitializeSecurityDescriptor", "SetSecurityDescriptorDacl",
+    "SetSecurityDescriptorControl", "BCryptHash", "BCryptGenRandom", "CreateDirectoryW", "LookupAccountSidW", "NetUserGetInfo",
+    "NetUserGetLocalGroups", "NetApiBufferSize", "NetApiBufferFree", "NetUserAdd", "NetLocalGroupAddMembers", "NetUserDel",
+    "RegOpenKeyExW", "RegQueryValueExW", "RegCloseKey", "NtCreateFile", "GetProfilesDirectoryW", "DeleteProfileW",
+    "CreateProcessWithLogonW", "WaitForSingleObject", "TerminateProcess", "GetExitCodeProcess", "CloseHandle", "GetSystemWindowsDirectoryW",
+    "IsWow64Process2", "OpenProcessToken", "OpenThreadToken", "GetHandleInformation", "GetTokenInformation", "LookupPrivilegeValueW",
+    "QueryDosDeviceW", "GetVolumeInformationByHandleW", "NtQueryVolumeInformationFile",
+)
+WINDOWS_NORMAL_UI_PREREQUISITE_SELECTORS = (
+    "none", "FileBasicInfo", "FileStandardInfo", "FileAttributeTagInfo", "FileIdInfo", "FileCaseSensitiveInfo",
+    "FileIdExtdDirectoryInfo", "FileFsDeviceInformation", "TokenStatistics", "TokenType", "TokenElevation", "TokenElevationType",
+    "TokenUIAccess", "TokenVirtualizationEnabled", "TokenUser", "TokenIntegrityLevel", "TokenGroups", "TokenPrivileges",
+    "lookup-1", "lookup-2", "lookup-3", "lookup-4", "lookup-5", "first-wait",
+    "settle-wait", "thread-close", "process-close", "before-logon", "after-deletion", "user-info-23",
+    "local-groups-0", "user-add-1", "group-add-0", "profile-image-path",
+)
+WINDOWS_NORMAL_UI_PREREQUISITE_KINDS = (
+    "none", "bool", "count", "lstatus", "ntstatus", "netapi",
+    "hresult", "wait", "exit",
+)
+WINDOWS_NORMAL_UI_PREREQUISITE_DOMAINS = (
+    "none", "win32", "ntstatus", "netapi", "hresult", "io-os",
+)
+WINDOWS_NORMAL_UI_PREREQUISITE_DETAILS = (
+    "none", "input.AncestorCount", "input.FileCount", "input.PathText", "input.PathUnits", "input.OpenState",
+    "input.OpenReturned", "input.InfoState", "input.InfoClass", "input.BasicInfoReturned", "input.StandardInfoReturned", "input.TagInfoReturned",
+    "input.IdInfoReturned", "input.StampDirectory", "input.StampDeletePending", "input.StampSize", "input.StampAllocation", "input.StampLinks",
+    "input.StampAttributes", "input.StampReparse", "input.StampIdentity", "input.NameText", "input.NameState", "input.NameReturned",
+    "input.NameCount", "input.NameUtf16", "input.NameExact", "input.ReadFileKind", "input.ReadSize", "input.ReadLimit",
+    "input.ReadReturned", "input.ReadCount", "input.ReadStable", "input.RequestEnvelope", "input.RequestUtf8", "input.RequestLines",
+    "input.RequestHeader", "input.RequestKey", "input.RequestValue", "input.RequestValues", "input.RequestArtifactPath", "input.RequestBytes",
+    "input.RequestBytesRange", "input.RequestIdentity", "input.BindingSourceAvailable", "input.BindingSource", "input.BindingTree", "input.BindingRun",
+    "input.BindingRuntimeRun", "input.BindingRuntimeTree", "input.BindingImage", "input.CommandUnits", "input.CommandDigest", "input.HashLimit",
+    "input.HashReturned", "input.ArtifactIdentity", "input.ArtifactBytes", "input.ArtifactDigest", "input.ArtifactStable", "input.OutputCreate",
+    "input.DescriptorState", "input.DescriptorReturned", "input.DescriptorLength", "input.AclLayout", "input.AclOwner", "input.AclGroup",
+    "input.AclAccount", "input.AclMask", "input.AclMutation", "input.AclCapacity", "input.AclInitialize", "input.AclDacl",
+    "input.AclControlInput", "input.AclSetState", "input.AclSetReturned", "input.AclStamp", "input.AclControl", "input.AclOwnerEqual",
+    "input.AclGroupEqual", "input.AclRevision", "input.AclAces", "input.AclChanged", "input.AclDeadline", "input.AclTransitions",
+    "input.ParentPrimary", "input.ParentUser", "input.ParentIdentity", "input.ParentSettlement", "admission.output-bytes", "admission.output-count",
+    "admission.text-count", "admission.span", "admission.utf16-width", "admission.utf16-encoding", "admission.terminator", "admission.text-length",
+    "admission.location-drive", "admission.location-components", "admission.mapping-size", "admission.mapping-frame", "admission.mapping-device", "admission.mapping-digits",
+    "admission.attributes", "admission.metadata-size", "admission.attribute-agreement", "admission.directory-boolean", "admission.delete-pending", "admission.object-kind",
+    "admission.directory-attribute", "admission.file-size", "admission.allocation-size", "admission.file-links", "admission.file-id", "admission.directory-offset",
+    "admission.directory-name-length", "admission.directory-next", "admission.directory-name", "admission.directory-dot", "admission.stream-missing", "admission.stream-frame",
+    "admission.stream-name", "admission.stream-size", "admission.stream-allocation", "admission.stream-padding", "admission.sid-revision", "admission.sid-count",
+    "admission.sid-extent", "admission.descriptor-size", "admission.descriptor-revision", "admission.descriptor-reserved", "admission.descriptor-control", "admission.descriptor-required",
+    "admission.descriptor-sacl", "admission.owner-offset", "admission.acl-offset", "admission.owner-trust", "admission.acl-revision", "admission.acl-reserved",
+    "admission.acl-size", "admission.acl-count", "admission.owner-acl-overlap", "admission.group-offset", "admission.group-overlap", "admission.ace-type",
+    "admission.ace-size", "admission.ace-sid-size", "admission.ace-flags", "admission.ace-inheritance", "admission.ace-mask", "admission.ace-dangerous-rights",
+    "admission.statistics-size", "admission.statistics-type", "admission.statistics-groups", "admission.statistics-privileges", "admission.inherited", "admission.drive-shape",
+    "admission.drive-type", "admission.mapping-count", "admission.location-changed", "admission.child-parent", "admission.child-name", "admission.volume-name",
+    "admission.volume-device-size", "admission.volume-device-type", "admission.volume-remote", "admission.file-type", "admission.case-sensitive", "admission.canonical-name",
+    "admission.ancestor-name", "admission.read-count", "admission.thread-absent", "admission.order-fresh", "admission.installer-fresh", "admission.architecture-process",
+    "admission.architecture-native", "admission.primary-open", "admission.scalar-width", "admission.scalar-completion", "admission.scalar-canonical", "admission.token-primary",
+    "admission.elevated", "admission.ui-access", "admission.virtualization", "admission.restricted", "admission.app-container", "admission.user-buffer",
+    "admission.integrity-buffer", "admission.pointer-value", "admission.pointer-offset", "admission.pointer-minimum", "admission.pointer-alignment", "admission.user-attributes",
+    "admission.integrity-attributes", "admission.system-integrity", "admission.system-elevation", "admission.account-shape", "admission.account-integrity", "admission.account-elevation",
+    "admission.group-count", "admission.group-size", "admission.group-count-match", "admission.group-flags", "admission.group-deny-enabled", "admission.group-duplicate",
+    "admission.admin-owner", "admission.privileges-count", "admission.privileges-size", "admission.privileges-count-match", "admission.privilege-luid", "admission.privilege-duplicate",
+    "admission.privilege-flags", "admission.statistics-changed", "admission.location-owner", "admission.location-ordinary-user", "admission.location-started", "admission.mapping-changed",
+    "admission.volume-serial", "admission.links", "admission.creation-time", "admission.write-time", "admission.change-time", "admission.metadata-changed",
+    "admission.directory-changed", "admission.volume-changed", "admission.identity-alias", "admission.component", "admission.directory-kind", "admission.selected-case",
+    "admission.selected-duplicate", "admission.dot-kind", "admission.dot-identity", "admission.entry-duplicate", "admission.entry-kind", "admission.entry-identity",
+    "admission.entry-attributes", "admission.source-entry", "admission.source-kind", "admission.roster-name", "admission.roster-kind", "admission.roster-missing",
+    "admission.manifest-size", "admission.manifest-limit", "admission.manifest-reported-size", "admission.manifest-final-size", "admission.manifest-final-facts", "admission.mutation-data",
+    "admission.mutation-descriptor",
+)
+
+def _windows_normal_ui_prerequisite_fields(raw: bytes, prefix: bytes, fields: tuple[str, ...], limit: int) -> dict:
+    require(type(raw) is bytes and 2 <= len(raw) <= limit and raw.startswith(b"\n" + prefix) and raw.endswith(b"\n"),
+            "Windows prerequisite frame boundary differs")
+    payload = raw[1:-1]
+    require(payload.isascii() and not any(value < 32 or value > 126 for value in payload),
+            "Windows prerequisite frame contains non-wire bytes")
+    parts = payload[len(prefix):].decode("ascii").split(";")
+    require(len(parts) == len(fields) and all(part.count("=") == 1 for part in parts),
+            "Windows prerequisite frame field count differs")
+    pairs = [part.split("=", 1) for part in parts]
+    require(tuple(key for key, _ in pairs) == fields, "Windows prerequisite frame order/key differs")
+    row = dict(pairs)
+    require(row["attempt"] == "1", "Windows prerequisite attempt differs")
+    require(row["owner"] == windows_normal_ui_owner("prerequisite") and row["end"] == "1",
+            "Windows prerequisite owner/terminator differs")
+    for key in ("source", "tree"):
+        require(row[key] == "unavailable" or re.fullmatch(r"[0-9a-f]{40}", row[key]) is not None and row[key] != "0" * 40,
+                "Windows prerequisite source/tree is not a closed binding")
+    require(row["run"] == "unavailable" or re.fullmatch(r"[1-9][0-9]{0,19}", row["run"]) is not None,
+            "Windows prerequisite run is not a closed binding")
+    row["attempt"], row["end"] = 1, 1
+    return row
+
+
+def _windows_normal_ui_prerequisite_integer(value: str, *, signed: bool) -> int:
+    require(type(value) is str and len(value) <= 11 and re.fullmatch(r"(?:0|[1-9][0-9]*|-[1-9][0-9]*)", value) is not None,
+            "Windows prerequisite integer spelling differs")
+    number = int(value)
+    require(-(2**31) <= number <= 2**31 - 1 if signed else 0 <= number <= 2**32 - 1,
+            "Windows prerequisite integer domain differs")
+    return number
+
+
+def windows_normal_ui_prerequisite_fault_frame(raw: bytes) -> dict:
+    """One exact complete frame, not log substring salvage or native finality."""
+    row = _windows_normal_ui_prerequisite_fields(raw, WINDOWS_NORMAL_UI_PREREQUISITE_FAULT_PREFIX,
+                                                WINDOWS_NORMAL_UI_PREREQUISITE_FAULT_FIELDS, 2048)
+    require(row["mode"] == "prerequisite-only" and row["stage"] in WINDOWS_NORMAL_UI_PREREQUISITE_STAGES
+            and row["check"] in WINDOWS_NORMAL_UI_PREREQUISITE_CHECKS
+            and row["detail"] in WINDOWS_NORMAL_UI_PREREQUISITE_DETAILS and len(row["detail"]) <= 64
+            and row["first"] in WINDOWS_NORMAL_UI_PREREQUISITE_ERRORS and row["returned"] in WINDOWS_NORMAL_UI_PREREQUISITE_ERRORS
+            and row["clock"] in WINDOWS_NORMAL_UI_PREREQUISITE_CLOCKS and row["coverage"] in WINDOWS_NORMAL_UI_PREREQUISITE_COVERAGE,
+            "Windows prerequisite closed fault labels differ")
+    unannotated = row["check"] == "u01"
+    require(unannotated == (row["stage"] == "escape") == (row["coverage"] == "unannotated")
+            and (not unannotated or row["detail"] == "none" and row["api"] == "none"),
+            "Windows prerequisite coverage claim differs")
+    require(row["api"] in WINDOWS_NORMAL_UI_PREREQUISITE_APIS and row["selector"] in WINDOWS_NORMAL_UI_PREREQUISITE_SELECTORS
+            and row["kind"] in WINDOWS_NORMAL_UI_PREREQUISITE_KINDS and row["status"] in WINDOWS_NORMAL_UI_PREREQUISITE_DOMAINS,
+            "Windows prerequisite native labels differ")
+    api, selector, kind, domain = (row[key] for key in ("api", "selector", "kind", "status"))
+    value = None if row["value"] == "none" else _windows_normal_ui_prerequisite_integer(row["value"], signed=kind in {"bool", "ntstatus", "hresult"})
+    code = None if row["code"] == "none" else _windows_normal_ui_prerequisite_integer(row["code"], signed=domain in {"ntstatus", "hresult", "io-os"})
+    if api == "none":
+        require(selector == kind == domain == "none" and value is None and code is None,
+                "Windows prerequisite pure predicate borrows native provenance")
+    else:
+        selectors = {
+            "GetFileInformationByHandleEx": {"FileBasicInfo", "FileStandardInfo", "FileAttributeTagInfo", "FileIdInfo",
+                                           "FileCaseSensitiveInfo", "FileIdExtdDirectoryInfo"},
+            "NtQueryVolumeInformationFile": {"FileFsDeviceInformation"},
+            "GetTokenInformation": {"TokenStatistics", "TokenType", "TokenElevation", "TokenElevationType", "TokenUIAccess",
+                                   "TokenVirtualizationEnabled", "TokenUser", "TokenIntegrityLevel", "TokenGroups", "TokenPrivileges"},
+            "LookupPrivilegeValueW": {"lookup-1", "lookup-2", "lookup-3", "lookup-4", "lookup-5"},
+            "WaitForSingleObject": {"first-wait", "settle-wait"}, "CloseHandle": {"none", "thread-close", "process-close"},
+            "NtCreateFile": {"none", "before-logon", "after-deletion"}, "NetUserGetInfo": {"user-info-23"},
+            "NetUserGetLocalGroups": {"local-groups-0"}, "NetUserAdd": {"user-add-1"},
+            "NetLocalGroupAddMembers": {"group-add-0"}, "RegQueryValueExW": {"profile-image-path"},
+        }
+        require(selector in selectors.get(api, {"none"}), "Windows prerequisite native selector/API pairing differs")
+        bool_apis = {"GetFileInformationByHandleEx", "ReadFile", "WriteFile", "GetKernelObjectSecurity", "SetKernelObjectSecurity",
+                     "CreateDirectoryW", "LookupAccountSidW", "GetProfilesDirectoryW", "DeleteProfileW", "CreateProcessWithLogonW",
+                     "TerminateProcess", "GetExitCodeProcess", "CloseHandle", "IsWow64Process2",
+                     "OpenProcessToken", "OpenThreadToken", "GetHandleInformation", "GetTokenInformation",
+                     "LookupPrivilegeValueW", "GetVolumeInformationByHandleW"}
+        descriptor_apis = {"InitializeSecurityDescriptor", "SetSecurityDescriptorDacl", "SetSecurityDescriptorControl"}
+        valid = False
+        if kind == "none":
+            valid = value is None and (api in {"std-current-dir", "std-current-exe"} and
+                    (domain == "none" and code is None or domain == "io-os" and code is not None)
+                    or api == "CreateFileW" and domain == "win32" and code is not None)
+        elif kind == "bool":
+            valid = value == 0 and (api in bool_apis and domain == "win32" and code is not None
+                    or api in descriptor_apis and domain == "none" and code is None)
+        elif kind == "count":
+            valid = api in {"GetFinalPathNameByHandleW", "GetSystemWindowsDirectoryW", "QueryDosDeviceW"} \
+                    and value == 0 and domain == "win32" and code is not None
+        elif kind == "lstatus":
+            valid = api in {"RegOpenKeyExW", "RegQueryValueExW", "RegCloseKey"} and value not in (None, 0) and domain == "win32" and code == value
+        elif kind == "ntstatus":
+            valid = api in {"BCryptHash", "BCryptGenRandom", "NtCreateFile", "NtQueryVolumeInformationFile"} \
+                    and value not in (None, 0) and domain == "ntstatus" and code == value
+        elif kind == "netapi":
+            valid = api in {"NetUserGetInfo", "NetUserGetLocalGroups", "NetApiBufferSize", "NetApiBufferFree",
+                           "NetUserAdd", "NetLocalGroupAddMembers", "NetUserDel"} \
+                    and value not in (None, 0) and domain == "netapi" and code == value
+        elif kind == "wait":
+            valid = api == "WaitForSingleObject" and value not in (None, 0) and (
+                    value == 2**32 - 1 and domain == "win32" and code is not None
+                    or value != 2**32 - 1 and domain == "none" and code is None)
+        elif kind == "exit":
+            valid = api == "GetExitCodeProcess" and value not in (None, 0) and domain == "none" and code is None
+        # No prerequisite-path API supplies an HRESULT; Scalar policy answers
+        # are deliberately not a native kind/API on this protocol.
+        require(valid, "Windows prerequisite native return/status/API pairing differs")
+    row["value"], row["code"] = value, code
+    return row
+
+
+def windows_normal_ui_prerequisite_return_frame(raw: bytes) -> dict:
+    """Actual foreground original return after the existing private receipt closed."""
+    row = _windows_normal_ui_prerequisite_fields(raw, WINDOWS_NORMAL_UI_PREREQUISITE_RETURN_PREFIX,
+                                                WINDOWS_NORMAL_UI_PREREQUISITE_RETURN_FIELDS, 512)
+    require(row["wait"] == "returned" and row["receipt"] == "write-flush-dispose-returned",
+            "Windows prerequisite return closure differs")
+    row["exit"] = _windows_normal_ui_prerequisite_integer(row["exit"], signed=True)
+    return row
+
+
+def _windows_normal_ui_prerequisite_utc(value: object) -> tuple[int, ...]:
+    require(type(value) is str, "Windows prerequisite original UTC metadata is absent")
+    match = re.fullmatch(r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{7}))?Z", value)
+    require(match is not None, "Windows prerequisite original UTC spelling differs")
+    year, month, day, hour, minute, second = (int(item) for item in match.groups()[:6])
+    leap = year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+    require(1 <= year <= 9999 and 1 <= month <= 12 and 0 <= hour <= 23 and 0 <= minute <= 59 and 0 <= second <= 59,
+            "Windows prerequisite original UTC range differs")
+    require(1 <= day <= (31, 29 if leap else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)[month - 1],
+            "Windows prerequisite original UTC day differs")
+    return year, month, day, hour, minute, second, int(match.group(7) or "0")
+
+
+def windows_normal_ui_prerequisite_log_data(raw: bytes, *, binding: dict, run: dict, jobs: dict, closure: dict | None) -> dict:
+    """Pure bounded DATA join of independently authenticated originals, never I/O.
+
+    The later root-owned collector must authenticate source/dispatch binding,
+    complete run/jobs metadata and the independently closed original job-log
+    transfer. This function neither obtains them nor authorizes private reads.
+    """
+    summary = {"schemaVersion": 1, "prerequisiteDiagnosticOnly": True, "frameState": "missing", "joinState": "unavailable",
+               "rawOriginalExit": None, "fault": None, "returnFrameReceived": False, "independentLogClosed": False,
+               "originalSelectedFailure": False, "senderDelivery": "unobservable",
+               "combinedPassed": False, "guiCasesExecuted": 0, "verifiedMethods": 0, "nativeQualified": False}
+    if type(raw) is not bytes or len(raw) > 16 << 20 or raw.count(b"\n") + int(bool(raw) and not raw.endswith(b"\n")) > 100000:
+        return {**summary, "frameState": "oversized"}
+    # Split ONLY on LF; no Unicode/control/ANSI normalization is admitted.
+    physical = raw.split(b"\n")
+    if physical and physical[-1] == b"": physical.pop()
+    if any(len(line) + 1 > 64 << 10 for line in physical):
+        return {**summary, "frameState": "oversized"}
+    lines = []
+    for index, line in enumerate(physical):
+        ended = index < len(physical) - 1 or raw.endswith(b"\n")
+        if index == 0 and line.startswith(b"\xef\xbb\xbf"): line = line[3:]
+        if ended and line.endswith(b"\r"): line = line[:-1]
+        timestamp = None
+        prefix = re.match(rb"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{7}Z ", line)
+        if prefix is not None:
+            try:
+                timestamp = _windows_normal_ui_prerequisite_utc(line[:prefix.end() - 1].decode("ascii"))
+            except (CheckFailure, ValueError, TypeError):
+                timestamp = None
+            else:
+                line = line[prefix.end():]
+        lines.append((line, ended, timestamp))
+    metadata_ok = False
+    mismatch = False
+    selected_step = None
+    try:
+        expected_keys = {"sourceSha", "sourceTree", "runId", "attempt", "jobId", "owner", "ref", "event", "dispatchScope",
+                         "expectedSha", "workflowPath", "workflowSha"}
+        closed_object(binding, expected_keys, "Windows prerequisite collector binding fields differ")
+        require(all(type(binding[key]) is str and re.fullmatch(r"[0-9a-f]{40}", binding[key]) is not None
+                    and binding[key] != "0" * 40 for key in ("sourceSha", "sourceTree", "expectedSha", "workflowSha"))
+                and binding["expectedSha"] == binding["workflowSha"] == binding["sourceSha"]
+                and type(binding["runId"]) is str and re.fullmatch(r"[1-9][0-9]{0,19}", binding["runId"]) is not None
+                and type(binding["attempt"]) is int and binding["attempt"] == 1
+                and type(binding["jobId"]) is int and 1 <= binding["jobId"] < 10**20
+                and binding["owner"] == windows_normal_ui_owner("prerequisite") and binding["ref"] == WINDOWS_NORMAL_UI_REF
+                and binding["event"] == "workflow_dispatch" and binding["dispatchScope"] == WINDOWS_NORMAL_UI_DISPATCH
+                and binding["workflowPath"] == ".github/workflows/desktop-foundation.yml",
+                "Windows prerequisite collector source/dispatch binding differs")
+        require(type(run) is dict and type(run.get("id")) is int and str(run["id"]) == binding["runId"]
+                and type(run.get("run_attempt")) is int and run["run_attempt"] == 1
+                and run.get("head_sha") == binding["sourceSha"] and run.get("event") == binding["event"]
+                and run.get("head_branch") == binding["ref"].removeprefix("refs/heads/")
+                and run.get("path") == binding["workflowPath"] and run.get("status") == "completed",
+                "Windows prerequisite original run metadata differs")
+        require(type(jobs) is dict and type(jobs.get("jobs")) is list and len(jobs["jobs"]) <= 100
+                and type(jobs.get("total_count")) is int and jobs["total_count"] == len(jobs["jobs"])
+                and all(type(item) is dict and type(item.get("id")) is int and item["id"] > 0 for item in jobs["jobs"])
+                and len({item["id"] for item in jobs["jobs"]}) == len(jobs["jobs"]),
+                "Windows prerequisite original jobs metadata is partial")
+        selected = [job for job in jobs["jobs"] if type(job) is dict and job.get("name") == "windows-installed-native"]
+        require(len(selected) == 1, "Windows prerequisite original job is absent/duplicated")
+        job = selected[0]
+        require(type(job.get("id")) is int and job["id"] == binding["jobId"]
+                and type(job.get("run_id")) is int and str(job["run_id"]) == binding["runId"]
+                and type(job.get("run_attempt")) is int and job["run_attempt"] == binding["attempt"]
+                and job.get("head_sha") == binding["sourceSha"] and job.get("status") == "completed"
+                and type(job.get("steps")) is list and len(job["steps"]) <= 1000
+                and all(type(step) is dict and type(step.get("number")) is int and step["number"] > 0 for step in job["steps"])
+                and len({step["number"] for step in job["steps"]}) == len(job["steps"]),
+                "Windows prerequisite original job binding differs")
+        steps = [step for step in job["steps"] if type(step) is dict
+                 and step.get("name") == "Observe prerequisites under the one original fresh ordinary account owner"]
+        require(len(steps) == 1 and steps[0].get("status") == "completed", "Windows prerequisite original owner step is not closed")
+        selected_step = steps[0]
+        lower = _windows_normal_ui_prerequisite_utc(selected_step.get("started_at"))
+        upper = _windows_normal_ui_prerequisite_utc(selected_step.get("completed_at"))
+        if "." not in selected_step["completed_at"]: upper = (*upper[:6], 9999999)
+        require(lower <= upper, "Windows prerequisite original owner timestamps reverse")
+        metadata_ok = True
+    except (CheckFailure, ValueError, TypeError, KeyError):
+        mismatch = True
+    if metadata_ok and closure is not None:
+        try:
+            closed_object(closure, {"schema", "sourceSha", "sourceTree", "runId", "attempt", "jobId", "bytes", "sha256",
+                                   "transferReturned", "streamClosed", "originalJobCompleted"},
+                          "Windows prerequisite log close fields differ")
+            require(closure["schema"] == "windows-normal-ui-prerequisite-original-log-close-v1"
+                    and all(type(closure[key]) is type(binding[key]) and closure[key] == binding[key]
+                            for key in ("sourceSha", "sourceTree", "runId", "attempt", "jobId"))
+                    and type(closure["bytes"]) is int and closure["bytes"] == len(raw)
+                    and closure["sha256"] == hashlib.sha256(raw).hexdigest()
+                    and closure["transferReturned"] is True and closure["streamClosed"] is True
+                    and closure["originalJobCompleted"] is True,
+                    "Windows prerequisite original log transfer is not independently closed")
+            summary["independentLogClosed"] = True
+        except (CheckFailure, ValueError, TypeError, KeyError):
+            mismatch = True
+    faults, returns, counts = [], [], [0, 0]
+    partial = invalid = oversized = False
+    for index, (line, ended, timestamp) in enumerate(lines):
+        recognized = False
+        for kind, prefix, parser, limit in (
+            (0, WINDOWS_NORMAL_UI_PREREQUISITE_FAULT_PREFIX, windows_normal_ui_prerequisite_fault_frame, 2048),
+            (1, WINDOWS_NORMAL_UI_PREREQUISITE_RETURN_PREFIX, windows_normal_ui_prerequisite_return_frame, 512),
+        ):
+            if not line.startswith(prefix): continue
+            recognized = True
+            counts[kind] += 1
+            if len(line) + 2 > limit:
+                oversized = True
+            elif not ended:
+                partial = True
+            else:
+                try:
+                    frame = parser(b"\n" + line + b"\n")
+                    (faults if kind == 0 else returns).append((index, timestamp, frame))
+                except (CheckFailure, ValueError, TypeError, UnicodeError):
+                    invalid = True
+        if not recognized and len(line) >= len(b"MRK_WINDOWS_UI_") and (
+                WINDOWS_NORMAL_UI_PREREQUISITE_FAULT_PREFIX.startswith(line)
+                or WINDOWS_NORMAL_UI_PREREQUISITE_RETURN_PREFIX.startswith(line)):
+            partial = True
+    if max(counts) > 1:
+        summary["frameState"] = "duplicate"
+    elif oversized:
+        summary["frameState"] = "oversized"
+    elif invalid:
+        summary["frameState"] = "invalid"
+    elif partial:
+        summary["frameState"] = "partial"
+    elif faults:
+        summary["frameState"] = "received"
+        summary["fault"] = faults[0][2]
+    def bound(item):
+        _, timestamp, frame = item
+        return metadata_ok and timestamp is not None and lower <= timestamp <= upper and all(
+            frame[key] == binding[expected] for key, expected in
+            (("source", "sourceSha"), ("tree", "sourceTree"), ("run", "runId"), ("attempt", "attempt"), ("owner", "owner")))
+    fault_bound = len(faults) == 1 and counts[0] == 1 and bound(faults[0])
+    return_bound = len(returns) == 1 and counts[1] == 1 and bound(returns[0])
+    if (faults and not fault_bound) or (returns and not return_bound): mismatch = True
+    if return_bound:
+        summary["rawOriginalExit"] = returns[0][2]["exit"]
+        summary["returnFrameReceived"] = True
+    owner = windows_normal_ui_owner("prerequisite").encode("ascii")
+    spans = []
+    if metadata_ok:
+        start = None
+        opened = False
+        completions = []
+        bad_span = False
+        for index, (line, ended, timestamp) in enumerate(lines):
+            if not ended or timestamp is None or not lower <= timestamp <= upper: continue
+            if line == b"running 1 test":
+                if start is not None or spans: mismatch = True
+                start, opened, completions, bad_span = index, False, [], False
+            elif line.startswith(b"running ") and re.fullmatch(rb"running [0-9]+ tests?", line) is not None:
+                mismatch = True
+            elif start is not None:
+                # --nocapture may finish one whole selected-test line, or the
+                # sender's leading LF may split its exact opening from FAILED.
+                # No substring, foreign name, duplicate completion or ANSI salvage.
+                if line == b"test " + owner + b" ... ":
+                    if opened or completions: bad_span = True
+                    opened = True
+                elif line in (b"test " + owner + b" ... FAILED", b"test " + owner + b" ... ok"):
+                    if opened or completions: bad_span = True
+                    completions.append("failed" if line.endswith(b"FAILED") else "ok")
+                elif line in (b"FAILED", b"ok"):
+                    if not opened or completions: bad_span = True
+                    completions.append("failed" if line == b"FAILED" else "ok")
+                    opened = False
+                elif line.startswith(b"test result:"):
+                    failed = re.fullmatch(rb"test result: FAILED\. 0 passed; 1 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+\.[0-9]+s", line) is not None
+                    passed = re.fullmatch(rb"test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+\.[0-9]+s", line) is not None
+                    exact = not bad_span and not opened
+                    spans.append((start, index, exact and failed and completions == ["failed"],
+                                  exact and passed and completions == ["ok"]))
+                    if not (spans[-1][2] or spans[-1][3]): mismatch = True
+                    start = None
+                elif line.startswith(b"test "):
+                    bad_span = True
+            elif line.startswith(b"test ") or line in (b"FAILED", b"ok"):
+                mismatch = True
+        if start is not None: mismatch = True
+    selected_failure = len(spans) == 1 and spans[0][2] and selected_step is not None and selected_step.get("conclusion") == "failure"
+    summary["originalSelectedFailure"] = selected_failure
+    if fault_bound and len(spans) == 1 and not (spans[0][0] < faults[0][0] < spans[0][1]): mismatch = True
+    if return_bound and len(spans) == 1 and not (spans[0][1] < returns[0][0]): mismatch = True
+    if return_bound and summary["rawOriginalExit"] == 0:
+        if counts[0] or partial: mismatch = True
+        elif summary["frameState"] == "missing": summary["frameState"] = "not-required"
+    if mismatch or invalid or max(counts) > 1 or oversized:
+        summary["joinState"] = "mismatch"
+    elif (summary["frameState"] == "received" and fault_bound and return_bound
+          and summary["rawOriginalExit"] != 0 and selected_failure and summary["independentLogClosed"]):
+        summary["joinState"] = "verified"
+    require(len(canonical_json(summary)) <= 32 << 10, "Windows prerequisite redacted summary exceeds its bound")
+    return summary
 
 
 def windows_normal_ui_request_data(raw: bytes, *, root: str) -> dict:
@@ -14105,7 +14573,8 @@ def windows_normal_ui_setup_inputs(context: dict, probe: dict) -> dict:
     """Separate fixed setup admission; never alter the original UI context."""
     root = Path(context["root"])
     value = closed_object(read_bounded_json(root / "normal-ui-setup-inputs.private.json", 64 << 10),
-        {"scope", "phase", "status", "sourceSha", "sourceTree", "runId", "attempt", "qualificationProfile", "retainedProbe", "inputs"},
+        {"scope", "phase", "status", "sourceSha", "sourceTree", "runId", "attempt", "qualificationProfile",
+         "prerequisiteDiagnosticOnly", "retainedProbe", "inputs"},
         "Windows UI setup original input admission fields differ")
     inputs = closed_object(value["inputs"], {"pins", "curl"}, "Windows UI setup supplier fields differ")
     system_root = os.environ.get("SystemRoot", "")
@@ -14791,7 +15260,7 @@ def windows_normal_ui_auxiliary(context: dict, *, recheck_original: bool, create
     if not create:
         saved = closed_object(read_bounded_json(receipt, 64 << 10),
             {"scope", "phase", "status", "qualificationProfile", "sourceSha", "sourceTree", "runId", "attempt",
-             "role", "messages", "invocationSha256", "original", "launchAuthority"}, "Windows GUI auxiliary receipt fields differ")
+             "prerequisiteDiagnosticOnly", "role", "messages", "invocationSha256", "original", "launchAuthority"}, "Windows GUI auxiliary receipt fields differ")
         if not recheck_original:
             original = saved["original"]
     if original is not None:
@@ -15091,6 +15560,7 @@ def windows_normal_ui_case_finalize(context: dict, role: str) -> None:
 
 def windows_normal_ui_retain(context: dict) -> None:
     """Bounded public projection after success/failure; no repair or process action."""
+    require(windows_normal_ui_profile(context), "Windows UI prerequisite diagnostic retention binding differs")
     root = Path(context["root"])
     result = {"status": "unavailable", "facts": None}
     if os.environ.get("MRK_WINDOWS_UI_PREREQUISITE_FINALIZE_STEP_OUTCOME") == "success":
@@ -15106,40 +15576,17 @@ def windows_normal_ui_retain(context: dict) -> None:
         compile_raw = windows_installed_bytes(root / "compile-messages.jsonl", 16 << 20)
     except (OSError, ValueError, CheckFailure):
         compile_raw = None
+    # No downstream original is read or counted, even if its step outcome is
+    # forged as success. This source is not full Windows UI qualification.
     setup = {"status": "unavailable", "facts": None}
-    for through in ("publication", "publish", "stage"):
-        if os.environ.get("MRK_WINDOWS_UI_SETUP_" + through.upper() + "_FINALIZE_STEP_OUTCOME") == "success":
-            try:
-                facts, _, _ = windows_normal_ui_setup_evidence(context, through, finalized=True)
-                setup = {"status": "observed", "facts": facts}
-            except (OSError, ValueError, CheckFailure, KeyError, TypeError):
-                setup = {"status": "invalid", "facts": None}
-            break  # A bad later original is never downgraded into an earlier success.
     gui, cases = {"status": "unavailable", "facts": None}, []
-    for role in reversed(WINDOWS_NORMAL_UI_GUI_ROLES):
-        if os.environ.get("MRK_WINDOWS_UI_" + role.upper().replace("-", "_") + "_FINALIZE_STEP_OUTCOME") == "success":
-            try:
-                compiled, verified, _ = windows_normal_ui_case_chain(context, role, finalized=True)
-                cases = [{key: item[key] for key in ("role", "verifiedMethods", "observation", "evidence", "originalOwner")}
-                         for item in verified]
-                gui = {"status": "observed", "facts": {"originalCompile": compiled["receipt"],
-                    "normalArtifact": {key: compiled["normalApp"][key] for key in ("size", "sha256", "messages")},
-                    "observerArtifact": {key: compiled["observer"][key] for key in ("size", "sha256", "messages")},
-                    "compilerObservations": compiled["compilerObservations"], "normalFeatures": compiled["normalFeatures"],
-                    "observerFeatures": compiled["observerFeatures"], "compileOrder": compiled["compileOrder"]}}
-            except (OSError, ValueError, CheckFailure, KeyError, TypeError):
-                gui = {"status": "invalid", "facts": None}
-            break  # A failed later original is not relabeled as an earlier success.
-    complete = len(cases) == len(WINDOWS_NORMAL_UI_GUI_ROLES)
-    verified_names = dict(zip(WINDOWS_NORMAL_UI_GUI_ROLES, WINDOWS_NORMAL_UI_NOT_VERIFIED[:4], strict=True))
-    completed = {verified_names[item["role"]] for item in cases}
     summary = {"schemaVersion": 1, "scope": WINDOWS_NORMAL_UI_PROFILE,
         **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt", "imageOS", "imageVersion")},
         "rust": RUST, "target": TARGETS["windows"], "nativeFeatures": ["desktop-ui"], "prerequisite": result,
-        "combinedPassed": complete, "verifiedMethods": sum(item["verifiedMethods"] for item in cases),
-        "guiCasesExecuted": len(cases), "runtimeSetup": setup, "guiCompilation": gui, "guiCases": cases,
+        "prerequisiteDiagnosticOnly": True, "combinedPassed": False, "verifiedMethods": 0,
+        "guiCasesExecuted": 0, "runtimeSetup": setup, "guiCompilation": gui, "guiCases": cases,
         "compileDiagnostic": windows_installed_compile_failure_data(compile_raw, context, "standalone"),
-        "notVerified": [name for name in WINDOWS_NORMAL_UI_NOT_VERIFIED if name not in completed]}
+        "notVerified": list(WINDOWS_NORMAL_UI_NOT_VERIFIED)}
     # Never publish raw native accounts/SIDs/paths/ACLs, compiler text, or a
     # pre-close child/owner file. Existing public-bindings contains source DATA.
     windows_fullwalk_write(root / "public/windows-normal-project-ui.json", canonical_json(summary), 64 << 10)
@@ -15149,6 +15596,8 @@ def windows_normal_ui_phase(name: str, context: dict, deadline: float) -> None:
     """Explicit UI stages. The historical raw app path is never a fallback."""
     require(windows_normal_ui_profile(context) and name in ("acquire", "compile", "windows-normal-ui-prerequisite",
         *WINDOWS_NORMAL_UI_DATA_PHASES, *WINDOWS_NORMAL_UI_SETUP_BUILD_PHASES, *WINDOWS_NORMAL_UI_GUI_BUILD_PHASES, "retain"), "Windows normal UI phase is unavailable in this profile")
+    require(WINDOWS_NORMAL_UI_PREREQUISITE_ONLY is True and name in WINDOWS_NORMAL_UI_PREREQUISITE_PHASES,
+            "Windows UI prerequisite-only source forbids runtime/setup/GUI phases")
     root, source = Path(context["root"]), Path(context["source"])
     if name in WINDOWS_NORMAL_UI_GUI_BUILD_PHASES:
         windows_normal_ui_gui_build(name, context, deadline)

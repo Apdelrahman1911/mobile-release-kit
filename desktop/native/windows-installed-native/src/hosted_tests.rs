@@ -2,6 +2,7 @@
 //! No production admission override, account preparation, file mutation or launcher.
 //! A returned Book settlement is not a production Resources/worker-join proof.
 use super::*;
+use super::qualification_result::{InputTrace, PrerequisiteCheck};
 
 // This module is cfg(test). The caller reaches this only after its one original
 // settlement gate. No native call, later GetLastError, or success receipt here.
@@ -97,32 +98,45 @@ pub(super) fn hosted_source() -> Result<&'static str> {
     }
     Ok(source)
 }
-fn scalar(book: &mut NativeBook, index: usize, class: S::TOKEN_INFORMATION_CLASS) -> Result<u32> {
-    let completed = book.token(index, class)?;
-    require_fact(completed.count()? == 4)?;
-    decode::u32_at(completed.bytes(4)?, 0)
+fn scalar(book: &mut NativeBook, index: usize, class: S::TOKEN_INFORMATION_CLASS) -> Result<u32> { scalar_traced(book, index, class, &mut InputTrace::default()) }
+fn scalar_traced(book: &mut NativeBook, index: usize, class: S::TOKEN_INFORMATION_CLASS, trace: &mut InputTrace) -> Result<u32> {
+    trace.prerequisite_scope(PrerequisiteCheck::HT01, |trace| {
+        let completed = book.prerequisite_observe(trace, PrerequisiteCheck::NB10, |book| book.token(index, class))?;
+        require_fact(completed.count()? == 4)?;
+        decode::u32_at(completed.bytes(4)?, 0)
+    })
 }
-fn statistics(book: &mut NativeBook, index: usize) -> Result<TokenIdentity> {
-    let completed = book.token(index, S::TokenStatistics)?;
-    security::statistics(completed.bytes(completed.count()?)?)
+fn statistics(book: &mut NativeBook, index: usize) -> Result<TokenIdentity> { statistics_traced(book, index, &mut InputTrace::default()) }
+fn statistics_traced(book: &mut NativeBook, index: usize, trace: &mut InputTrace) -> Result<TokenIdentity> {
+    trace.prerequisite_scope(PrerequisiteCheck::HT01, |trace| {
+        let completed = book.prerequisite_observe(trace, PrerequisiteCheck::NB10, |book| book.token(index, S::TokenStatistics))?;
+        security::statistics(completed.bytes(completed.count()?)?)
+    })
 }
-pub(super) fn actual_elevated_primary_refusal(book: &mut NativeBook, index: usize) -> Result<()> {
-    // These are actual, bounded, completed observations of the SAME original
-    // opened by observe_user_once, not fixture values or another token handle.
-    book.absent_thread_token()?;
-    let before = statistics(book, index)?;
-    require_fact(scalar(book, index, S::TokenType)? == S::TokenPrimary as u32)?;
-    require_fact(scalar(book, index, S::TokenElevation)? == 1)?;
-    require_fact([S::TokenElevationTypeDefault as u32, S::TokenElevationTypeFull as u32]
-        .contains(&scalar(book, index, S::TokenElevationType)?))?;
-    // Elevated==1 is a specific production-policy refusal even when UAC is
-    // disabled (Default), not permission to accept an arbitrary native error.
-    require_fact(matches!(book.recheck_user(), Err(Error::Unsafe)))?;
-    require_fact(statistics(book, index)? == before)?;
-    book.absent_thread_token()?;
-    require_fact(book.process_token == Some(index) && book.user.is_none() && !book.is_unknown())?;
-    require_fact(matches!(book.known_locations_once(), Err(Error::State)) && !book.roots_started)?;
-    require_fact(book.slots.iter().all(|s| !matches!(s.kind, Kind::Directory | Kind::File)))
+pub(super) fn actual_elevated_primary_refusal(book: &mut NativeBook, index: usize) -> Result<()> { actual_elevated_primary_refusal_traced(book, index, &mut InputTrace::default()) }
+pub(super) fn actual_elevated_primary_refusal_traced(book: &mut NativeBook, index: usize, trace: &mut InputTrace) -> Result<()> {
+    trace.prerequisite_scope(PrerequisiteCheck::HT01, |trace| {
+        // These are actual, bounded, completed observations of the SAME original
+        // opened by observe_user_once, not fixture values or another token handle.
+        book.prerequisite_observe(trace, PrerequisiteCheck::NB10, |book| book.absent_thread_token())?;
+        let before = statistics_traced(book, index, trace)?;
+        require_fact(scalar_traced(book, index, S::TokenType, trace)? == S::TokenPrimary as u32)?;
+        require_fact(scalar_traced(book, index, S::TokenElevation, trace)? == 1)?;
+        require_fact([S::TokenElevationTypeDefault as u32, S::TokenElevationTypeFull as u32]
+            .contains(&scalar_traced(book, index, S::TokenElevationType, trace)?))?;
+        // Elevated==1 is a specific production-policy refusal even when UAC is
+        // disabled (Default), not permission to accept an arbitrary native error.
+        let mut staged = trace.prerequisite_staged();
+        let original = book.prerequisite_observe(&mut staged, PrerequisiteCheck::NB11, |book| book.recheck_user());
+        require_fact(trace.prerequisite_expected(PrerequisiteCheck::NB11, original, Error::Unsafe, staged))?;
+        require_fact(statistics_traced(book, index, trace)? == before)?;
+        book.prerequisite_observe(trace, PrerequisiteCheck::NB10, |book| book.absent_thread_token())?;
+        require_fact(book.process_token == Some(index) && book.user.is_none() && !book.is_unknown())?;
+        let mut staged = trace.prerequisite_staged();
+        let original = book.prerequisite_observe(&mut staged, PrerequisiteCheck::NB11, |book| book.known_locations_once());
+        require_fact(trace.prerequisite_expected(PrerequisiteCheck::NB11, original, Error::State, staged) && !book.roots_started)?;
+        require_fact(book.slots.iter().all(|s| !matches!(s.kind, Kind::Directory | Kind::File)))
+    })
 }
 fn admitted_root_facts(book: &mut NativeBook, index: usize, token: TokenIdentity) -> Result<()> {
     book.recheck_user()?;

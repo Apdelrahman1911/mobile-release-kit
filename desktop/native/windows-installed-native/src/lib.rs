@@ -427,6 +427,8 @@ pub struct NativeBook {
     roots_started: bool,
     #[cfg(test)]
     first_unavailable: Option<(Call, Returned)>,
+    #[cfg(test)]
+    prerequisite_returned: Cell<Option<(Call, Returned)>>,
 }
 // SAFETY: actual Windows file/token handles are process-wide. Only ownership of
 // the serialized book moves; no reference to its UnsafeCell outputs escapes.
@@ -441,7 +443,9 @@ impl NativeBook {
             retiring: false, entries: 0, bytes_read: 0, process_token: None,
             user: None, roots_started: false,
             #[cfg(test)]
-            first_unavailable: None }
+            first_unavailable: None,
+            #[cfg(test)]
+            prerequisite_returned: Cell::new(None) }
     }
     #[cfg(test)]
     fn remember_unavailable(&mut self, call: Call, returned: Returned) {
@@ -563,6 +567,8 @@ impl NativeBook {
         // callback or deadline check divides return from scalar capture.
         let returned = unsafe { invoke(frame) };
         frame.returned.set(Some(returned));
+        #[cfg(test)]
+        self.prerequisite_capture(call, returned);
         frame.phase.set(Phase::Returned);
         self.finish(call, returned)
     }
@@ -731,6 +737,111 @@ impl NativeBook {
             && self.slots.iter().all(|s| matches!(s.state, SlotState::NoHandle | SlotState::Closed))
     }
 }
+// The prerequisite gets one resettable per-helper DATA slot, not a handle/index
+// accessor. It preserves first_unavailable and every original admission record.
+// Expected EOF/no-token and semantic scalar outputs never become native errors.
+#[cfg(test)]
+fn prerequisite_native_pair(call: Call, returned: Returned) -> Option<qualification_result::PrerequisiteNative> {
+    use qualification_result::{PrerequisiteApi as A, PrerequisiteNative as N, PrerequisiteSelector as Q};
+    let (api, selector) = match call {
+        Call::Architecture => (A::IsWow64Process2, Q::None),
+        Call::Mapping => (A::QueryDosDeviceW, Q::None),
+        Call::Open(_) => (A::NtCreateFile, Q::None),
+        Call::ProcessToken(_) => (A::OpenProcessToken, Q::None),
+        Call::ThreadToken(_) => {
+            if matches!(returned, Returned::Boolean(0, F::ERROR_NO_TOKEN)) { return None; }
+            (A::OpenThreadToken, Q::None)
+        },
+        Call::Close(_) => (A::CloseHandle, Q::None),
+        Call::Info(class, _) => (A::GetFileInformationByHandleEx, match class {
+            FS::FileBasicInfo => Q::FileBasicInfo, FS::FileStandardInfo => Q::FileStandardInfo,
+            FS::FileAttributeTagInfo => Q::FileAttributeTagInfo, FS::FileIdInfo => Q::FileIdInfo,
+            FS::FileCaseSensitiveInfo => Q::FileCaseSensitiveInfo, FS::FileIdExtdDirectoryInfo => Q::FileIdExtdDirectoryInfo,
+            _ => return None,
+        }),
+        Call::HandleInfo => (A::GetHandleInformation, Q::None),
+        Call::FinalName => (A::GetFinalPathNameByHandleW, Q::None),
+        Call::VolumeName => (A::GetVolumeInformationByHandleW, Q::None),
+        Call::VolumeDevice => (A::NtQueryVolumeInformationFile, Q::FileFsDeviceInformation),
+        Call::Security => (A::GetKernelObjectSecurity, Q::None),
+        Call::Token(class) => (A::GetTokenInformation, match class {
+            S::TokenStatistics => Q::TokenStatistics, S::TokenType => Q::TokenType,
+            S::TokenElevation => Q::TokenElevation, S::TokenElevationType => Q::TokenElevationType,
+            S::TokenUIAccess => Q::TokenUIAccess, S::TokenVirtualizationEnabled => Q::TokenVirtualizationEnabled,
+            S::TokenUser => Q::TokenUser, S::TokenIntegrityLevel => Q::TokenIntegrityLevel,
+            S::TokenGroups => Q::TokenGroups, S::TokenPrivileges => Q::TokenPrivileges,
+            _ => return None,
+        }),
+        Call::Privilege(name) => (A::LookupPrivilegeValueW, match name {
+            PrivilegeName::ChangeNotify => Q::Lookup1, PrivilegeName::Shutdown => Q::Lookup2,
+            PrivilegeName::Undock => Q::Lookup3, PrivilegeName::IncreaseWorkingSet => Q::Lookup4,
+            PrivilegeName::TimeZone => Q::Lookup5,
+        }),
+        Call::Read(_) => (A::ReadFile, Q::None),
+        Call::Entries => {
+            if matches!(returned, Returned::Boolean(0, F::ERROR_NO_MORE_FILES)) { return None; }
+            (A::GetFileInformationByHandleEx, Q::FileIdExtdDirectoryInfo)
+        },
+        // DriveType/FileType are successful scalar policy observations, not
+        // failed native error statuses. The existing admission detail names them.
+        Call::DriveType | Call::FileType | Call::Folder | Call::WindowsDirectory | Call::SystemDirectory
+        | Call::Streams | Call::QualificationSourceToken(_) | Call::QualificationRestrictedToken(_) => return None,
+    };
+    let native = match returned {
+        Returned::Boolean(value, error) => N::boolean(api, selector, value, Some(error)),
+        Returned::Count(value, error) => N::count(api, value, error),
+        Returned::Nt(value) => N::nt(api, selector, value),
+        Returned::Hresult(_) | Returned::Scalar(_) => None,
+    };
+    native.filter(|value| value.valid())
+}
+#[cfg(test)]
+impl NativeBook {
+    fn prerequisite_capture(&self, call: Call, returned: Returned) {
+        // After the original return/capture only. Preserve the first actual
+        // rejecting native return through independent original settlement closes.
+        if self.prerequisite_returned.get().and_then(|(call, value)| prerequisite_native_pair(call, value)).is_none() {
+            self.prerequisite_returned.set(Some((call, returned)));
+        }
+    }
+    fn prerequisite_enable_admission(&self, trace: &qualification_result::InputTrace) {
+        if trace.prerequisite.is_some() && !self.started && self.admission.first.get().is_none() {
+            self.admission.active.set(true);
+        }
+    }
+    fn prerequisite_observe<T>(&mut self, trace: &mut qualification_result::InputTrace,
+        check: qualification_result::PrerequisiteCheck, observation: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        self.prerequisite_returned.set(None);
+        let admission_before = self.admission.first.get();
+        let original = observation(self);
+        let detail = if admission_before.is_none() {
+            self.admission.first.get().map(|value| qualification_result::PrerequisiteDetail::Admission(value.check))
+        } else { None };
+        self.prerequisite_result(trace, check, original, detail)
+    }
+    fn prerequisite_result<T>(&self, trace: &mut qualification_result::InputTrace,
+        check: qualification_result::PrerequisiteCheck, original: Result<T>,
+        detail: Option<qualification_result::PrerequisiteDetail>) -> Result<T> {
+        use qualification_result::PrerequisiteCheck as C;
+        let staged = self.prerequisite_returned.get().and_then(|(call, value)| prerequisite_native_pair(call, value));
+        // Reuse the original first_unavailable only when it is the same actual
+        // scoped native fact; never borrow an earlier unrelated failed status.
+        let existing = self.first_unavailable.and_then(|(call, value)| prerequisite_native_pair(call, value));
+        let native = if matches!(original, Err(Error::State | Error::Bounds)) { None }
+            else if matches!(original, Err(Error::Unavailable)) && staged.is_some() && existing == staged { existing } else { staged };
+        let detail = if matches!(original, Err(Error::Unsafe)) { detail } else { None };
+        trace.prerequisite_native_result(if native.is_some() { C::NB02 } else { check }, original, native, detail)
+    }
+    fn prerequisite_settle(&mut self, trace: &mut qualification_result::InputTrace) -> CloseOutcome {
+        self.prerequisite_returned.set(None);
+        let original = self.settle_once();
+        if original != CloseOutcome::Settled {
+            let _ = self.prerequisite_result::<()>(trace, qualification_result::PrerequisiteCheck::NB04, Err(Error::Unknown), None);
+        }
+        original
+    }
+}
+
 impl Drop for NativeBook {
     fn drop(&mut self) {
         // No CloseHandle in Drop, ever. Unknown entered arena may reference any
