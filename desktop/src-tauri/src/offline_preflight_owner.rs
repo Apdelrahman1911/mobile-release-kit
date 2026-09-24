@@ -99,3 +99,13 @@ mod tests {
 #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
     any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
 pub(crate) use crate::saved_command_owner::offline_tests::hosted::RegistrationPermit as OfflineRegistrationPermit;
+
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl OfflinePreflightOwner {
+    pub(crate) fn admit_installed_observation(&self, token: crate::shell::installed_observation::commands::OfflineAdmission) -> Result<(), BridgeError> {
+        self.saved.admit_installed_observation(token)
+    }
+    pub(crate) fn installed_observation_snapshot(&self) -> Option<crate::shell::installed_observation::commands::Snapshot> {
+        self.saved.installed_observation_snapshot()
+    }
+}

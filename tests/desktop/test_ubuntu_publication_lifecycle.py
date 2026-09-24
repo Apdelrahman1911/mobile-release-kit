@@ -1119,14 +1119,16 @@ class LifecycleData(unittest.TestCase):
             baseline = (sum(row["size"] for row in candidate["packages"].values()) + candidate["library"]["size"]
                         + (12 if profile == "installed" else 68 if profile == "shell" else 0)
                         + 2 * 1024 + 1 + 2 * 2048 + (32 << 20) + (1 << 20))
-            # Ten original logs plus nine failure leaves retain the64MiB
-            # ceiling. Four session fixtures add42 nodes and their environments
-            # add48; metadata adds14 final nodes, saved bytes and the replaced
-            # 11-byte original. Public capture limits do not grow.
+            # Eighteen logs plus seventeen failure leaves retain the64MiB
+            # ceiling. The eight new fixtures add168 nodes and their existing
+            # GUI environments add96. Only the shell roster cap grows to160;
+            # the other profiles and32MiB aggregate evidence cap stay fixed.
             session_bytes = sum(len(data) for case in L.SHELL_SESSION_CASES
                 for _, mode, _, data in L._shell_session_roster(value, case) if not stat.S_ISDIR(mode))
-            required = baseline + ((1216 << 20) + 7235 + session_bytes + 1095 + 11 + 117 if profile == "shell" else 0)
-            inodes = 2 * 16 + 2 * 8192 + 128 + (126 if profile == "shell" else 0)
+            tools_bytes = sum(len(data) for case in L.SHELL_TOOLS_OFFLINE_CASES
+                for _, mode, _, data in L._shell_tools_offline_roster(value, case, True) if stat.S_ISREG(mode))
+            required = baseline + ((2240 << 20) + 7235 + session_bytes + tools_bytes + 1095 + 11 + 381 if profile == "shell" else 0)
+            inodes = 2 * 16 + 2 * 8192 + (160 + 398 if profile == "shell" else 128)
             for available in (required - 1, required):
                 with self.subTest(profile=profile, available=available), \
                      patch.object(Path, "stat", return_value=SimpleNamespace(st_dev=1)), \
@@ -2267,9 +2269,11 @@ def positive_capture(receipt=None, candidate=None):
 def fixture_namespace_data(value):
     suffix = value["runId"] + "-" + value["attempt"]
     return {"root": "/var/lib/mrk-ubuntu-shell-fixtures-" + suffix,
-            "identity": [1, 5, stat.S_IFDIR | 0o755, 0, 0, 12, 4096, 11, 11],
-            "children": ["candidate-evidence", "metadata-project", "path-outside", "path-project", "positive-project",
-                         "session-deadline", "session-inputs", "session-loss", "session-refusals", "workflow-project"],
+            "identity": [1, 5, stat.S_IFDIR | 0o755, 0, 0, 20, 4096, 11, 11],
+            "children": ["candidate-evidence", "metadata-project", "offline-cancel", "offline-drift", "offline-negative",
+                         "offline-pass", "offline-settlement", "path-outside", "path-project", "positive-project",
+                         "session-deadline", "session-inputs", "session-loss", "session-refusals", "tools-cancel",
+                         "tools-observed", "tools-settlement", "workflow-project"],
             "control": {"path": "/var/lib/mrk-ubuntu-native-" + suffix, "identity": [1, 4, stat.S_IFDIR | 0o711, 0, 0]},
             "ancestors": [{"path": path, "identity": [1, i + 1, stat.S_IFDIR | 0o755, 0, 0]}
                           for i, path in enumerate(("/", "/var", "/var/lib"))]}
@@ -2508,6 +2512,88 @@ def metadata_fixture_data(value, *, saved=False):
             "saved": saved, "entries": rows, "absent": absent + ([] if saved else [locale + "/full_description.txt"]), "namespace": namespace}
 
 
+def tools_offline_receipt(case):
+    """Fictional closed protocol DATA; no host executable or owner is invoked."""
+    offline, cancel = case.startswith("offline-"), case in ("tools-cancel", "offline-cancel")
+    context = {"projectId": "inert_project", "draftRevision": 1, "baselineGeneration": 0,
+               "platform": "android", "operation": "offline-preflight" if offline else "build"}
+    if offline:
+        config = L.SHELL_TOOLS_OFFLINE_CONFIGS[case]
+        context["savedConfig"] = {"bytes": len(config), "sha256": hashlib.sha256(config).hexdigest()}
+    original = {key: True for key in ("inspectionJoined", "acquisitionJoined", "attempted", "childWaitedSuccess", "stdinClosed",
+        "stdoutEofClosed", "stderrEofClosed", "ioJoined", "coreLifetimeSettled", "runtimeLedgerSettled", "runtimeSettlementJoined",
+        "driverJoined", "managerJoined", "observerJoined", "watchdogJoined", "retiredBeforeCutoff")}
+    original.update(domain="offline" if offline else "tools", id="a" * 32, generation="b" * 32,
+                    noChild=False, activeRetained=False, resourceUnknown=False)
+    if case == "tools-cancel":
+        original.update({key: False for key in ("acquisitionJoined", "attempted", "childWaitedSuccess", "stdinClosed", "stdoutEofClosed",
+                                               "stderrEofClosed", "coreLifetimeSettled")})
+        original["noChild"] = True
+    outcome, reason = (("cancelled", "cancelled") if cancel else ("refused", "saved-config-changed") if case == "offline-drift"
+                       else ("complete", "none"))
+    terminal = {"ownerGeneration": "b" * 32, "context": context, "phase": "terminal" if offline else "settled",
+                "outcome": outcome, "reason": reason, "result": None}
+    terminal.update({"operationId": "a" * 32, "intentUsable": False} if offline else {"runId": "a" * 32, "finality": "settled"})
+    if outcome == "complete" and not offline:
+        checks = [{"id": role, "state": "completed", "reason": "observed", "version": "2.43.0" if role == "git" else "17.0.16",
+            "build": None, "returnCode": 0, "baseline": {"kind": "no-local-policy" if role == "git" else "workflow-reference",
+                "version": None if role == "git" else "21", "build": None}, "assessment": "no-local-policy", "help": "Fixed core explanation"}
+            for role in ("git", "java", "javac")]
+        terminal["result"] = {"schemaVersion": 1, "policyVersion": "environment-diagnostics-v1", "context": deepcopy(context),
+            "hostPlatform": "linux", "outcome": "complete", "checks": checks, "commandsAttempted": 3,
+            "lifetime": {"complete": True, "fatal": False, "contained": True, "commandDispatched": True, "commands": 3,
+                "inputClosed": True, "handlersRestored": True, "toolDescriptorsClosed": True, "stopObserved": "none"},
+            "assurance": {"basis": "local-tool-observation", "toolsAttempted": True, "projectCodeExecuted": False, "projectFilesRead": False,
+                "repositoryObserved": False, "sdkInspected": False, "credentialsRead": False, "storeContacted": False,
+                "dependencyCompleteness": "unknown", "releaseReadiness": "unknown", "toolCacheEffects": "possible"}}
+    elif outcome == "complete":
+        negative = case == "offline-negative"
+        counts = {status: 0 for status in ("PASS", "FAIL", "MISSING", "BLOCKED", "INVALID", "SKIP", "MANUAL", "CONFIGURED", "NOT_APPLICABLE")}
+        counts.update(PASS=1 if negative else 2, FAIL=1 if negative else 0)
+        terminal["result"] = {"schemaVersion": 1, "scope": "saved-offline-android-no-core-build", "usedConfig": deepcopy(context["savedConfig"]),
+            "findings": [{"ordinal": 0, "check": "version-source", "status": "PASS", "message": "version-source", "projectCheckIndex": None},
+                         {"ordinal": 1, "check": "configured-project-check", "status": "FAIL" if negative else "PASS",
+                          "message": "configured-project-check", "projectCheckIndex": 0}],
+            "summary": {"total": 2, "shown": 2, "omitted": 0, "counts": counts},
+            "limitations": ["saved-inputs-not-atomic", "project-code-effects-possible", "not-network-isolated", "core-builds-disabled",
+                "artifact-validation-not-requested", "toolkit-signing-credentials-store-not-requested", "release-readiness-not-assessed"]}
+    boundary = "inspection" if case == "tools-cancel" else "settlement" if case in ("tools-settlement", "offline-settlement") else "none"
+    trace = "pass\n" if case in ("offline-pass", "offline-settlement") else "exit-7\n" if case == "offline-negative" else "active\n" if case == "offline-cancel" else ""
+    return {"schema": "installed-tools-offline-v1", "case": case, "qualificationOnly": True, "builder": "normal", "projectPicker": True,
+        "savedObservation": True, "requests": {"toolsStart": 0 if offline else 1, "toolsCancel": 1 if case == "tools-cancel" else 0,
+            "offlinePrepare": 1 if offline else 0, "offlineStart": 1 if offline else 0, "offlineCancel": 1 if case == "offline-cancel" else 0},
+        "initial": {"toolsAvailable": True, "offlineAvailable": True}, "ui": {"start": True, "consent": offline, "terminal": True, "cancel": cancel},
+        "reciprocalBusy": case in ("tools-settlement", "offline-cancel", "offline-settlement"),
+        "hold": {"boundary": boundary, "entered": boundary != "none", "released": boundary != "none"},
+        "original": original, "terminal": terminal, "fixture": {"scriptTrace": trace, "laterTrace": "", "savedConfigChanged": case == "offline-drift"}}
+
+
+def tools_offline_fixture_data(value, case, *, after=False):
+    namespace = fixture_namespace_data(value)
+    roster = L._shell_tools_offline_roster(value, case, after)
+    offset = 1000 + 100 * L.SHELL_TOOLS_OFFLINE_CASES.index(case)
+    rows = []
+    for index, (name, mode, owners, expected) in enumerate(roster):
+        directory = stat.S_ISDIR(mode)
+        changed = after and (name == "project/release/mobile-release.json" and case == "offline-drift"
+                             or name == "project/script.trace" and bool(L.SHELL_TOOLS_OFFLINE_TRACES[case]))
+        size = 4096 if directory else len(expected)
+        links = 2 + sum(stat.S_ISDIR(m) and n != "." and str(Path(n).parent) == name for n, m, _, _ in roster) if directory else 1
+        row = {"path": name, "kind": "directory" if directory else "file",
+               "identity": [1, offset + index, mode, *owners, links, size, 22 if changed else 11, 22 if changed else 11]}
+        row.update({"children": expected} if directory else {"size": size, "sha256": hashlib.sha256(expected).hexdigest()})
+        rows.append(row)
+    return {"schemaVersion": 1, "fixture": "installed-tools-offline-fixture-v1", "case": case, "root": namespace["root"] + "/" + case,
+            "changed": after and case.startswith("offline-"), "entries": rows, "absent": list(L.SHELL_TOOLS_OFFLINE_ABSENT), "namespace": namespace}
+
+
+def tools_offline_capture(case, receipt=None):
+    return (b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n"
+            + b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
+            + b"MRK_INSTALLED_SHELL_TOOLS_OFFLINE=" + L.canonical(tools_offline_receipt(case) if receipt is None else receipt)
+            + b"MRK_INSTALLED_SHELL_OBSERVATION=" + case.encode("ascii") + b"-verified\n", b"")
+
+
 def closed_shell_data():
     value, expected = installed_handoff(), map_data()
     value.pop("installed")
@@ -2520,7 +2606,8 @@ def closed_shell_data():
                 "quit-outstanding": (b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
                     + L.CHILD_MARKER.encode() + L.canonical(maps) + b"MRK_INSTALLED_SHELL_OBSERVATION=quit-outstanding-verified\n", b""),
                 "project-paths": path_capture(), "workflow-apply": workflow_capture(),
-                **{case: session_capture(case, expected=expected) for case in L.SHELL_SESSION_CASES}, "metadata-save": metadata_capture()}
+                **{case: session_capture(case, expected=expected) for case in L.SHELL_SESSION_CASES}, "metadata-save": metadata_capture(),
+                **{case: tools_offline_capture(case) for case in L.SHELL_TOOLS_OFFLINE_CASES}}
     cases, files, commands = {}, {}, []
     for case, (stdout, stderr) in captures.items():
         cases[case] = L.shell_result(stdout, stderr, case, 0, expected)
@@ -2538,6 +2625,8 @@ def closed_shell_data():
             files["shell-" + case + "-" + phase + ".json"] = L.canonical(
                 session_fixture_data(value, case, changed=phase == "after" and case == "session-refusals"))
         files["shell-metadata-save-" + phase + ".json"] = L.canonical(metadata_fixture_data(value, saved=phase == "after"))
+        for case in L.SHELL_TOOLS_OFFLINE_CASES:
+            files["shell-" + case + "-" + phase + ".json"] = L.canonical(tools_offline_fixture_data(value, case, after=phase == "after"))
     keys = [{"phase": "key", "exitCode": 0, "stdout": "", "stderr": "",
              "argv": L._drop(value, ["/usr/bin/xdotool", "key", "--clearmodifiers", key])} for key in ("ctrl+q", "alt+o")]
     files["shell-normal-control.json"] = L.canonical({"joined": True, "inputs": 2, "workerGuardState": "RESTORED",
@@ -2649,7 +2738,9 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
                         root / "workflow-project/.github/workflows", root / "metadata-project", root / "metadata-project/app",
                         root / "metadata-project/release", root / "metadata-project/release/store",
                         root / "metadata-project/release/store/android", root / "metadata-project/release/store/android/en-US",
-                        *(root / case / name for case in L.SHELL_SESSION_CASES for name in (".", "project", "project/release", "sources"))])
+                        *(root / case / name for case in L.SHELL_SESSION_CASES for name in (".", "project", "project/release", "sources")),
+                        *(root / case / name for case in L.SHELL_TOOLS_OFFLINE_CASES
+                          for name, mode, _, _ in L._shell_tools_offline_roster(value, case) if stat.S_ISDIR(mode))])
                     self.assertEqual([call.args for call in writer.call_args_list], [
                         (root / "positive-project/app/build.gradle.kts", L.SHELL_PROJECT_SOURCE, 0o444),
                         (root / "positive-project/version.properties", L.SHELL_PROJECT_VERSION, 0o600),
@@ -2668,7 +2759,9 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
                         (root / "metadata-project/release/store/android/en-US/short_description.txt", b"Old summary", 0o600),
                         (root / "metadata-project/release/store/android/en-US/keep.txt", b"untouched\n", 0o600),
                         *((root / case / name, data, stat.S_IMODE(mode)) for case in L.SHELL_SESSION_CASES
-                          for name, mode, _, data in L._shell_session_roster(value, case) if stat.S_ISREG(mode))])
+                          for name, mode, _, data in L._shell_session_roster(value, case) if stat.S_ISREG(mode)),
+                        *((root / case / name, data, 0o600) for case in L.SHELL_TOOLS_OFFLINE_CASES
+                          for name, mode, _, data in L._shell_tools_offline_roster(value, case) if stat.S_ISREG(mode))])
                     self.assertEqual([call.args for call in ownership.call_args_list], [
                         (path, value["runnerUid"], value["runnerGid"]) for path in
                         (root / "positive-project/version.properties", root / "positive-project",
@@ -2686,9 +2779,11 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
                            "release/store/android/en-US", "release/store/android", "release/store", "release")),
                         (root / "metadata-project/app", 0, 0), (root / "metadata-project", value["runnerUid"], value["runnerGid"]),
                         *((root / case / name, *owners) for case in L.SHELL_SESSION_CASES
-                          for name, _, owners, _ in L._shell_session_roster(value, case))])
+                          for name, _, owners, _ in L._shell_session_roster(value, case)),
+                        *((root / case / name, *owners) for case in L.SHELL_TOOLS_OFFLINE_CASES
+                          for name, _, owners, _ in L._shell_tools_offline_roster(value, case))])
                     links.assert_called_once_with("input.jks", root / "session-refusals/sources/link.jks")
-                    self.assertTrue(all(call.kwargs == {"follow_symlinks": False} for call in ownership.call_args_list[-42:]))
+                    self.assertTrue(all(call.kwargs == {"follow_symlinks": False} for call in ownership.call_args_list[-210:]))
                     self.assertEqual([call.args for call in modes.call_args_list], [(root / "positive-project/app", 0o555),
                         (root / "workflow-project/.github/workflows", 0o700), (root / "workflow-project/.github", 0o700),
                         (root / "workflow-project/app", 0o555), (root / "workflow-project", 0o700),
@@ -2731,7 +2826,7 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
                     with self.assertRaises(ValueError): L._shell_namespace_check(value, binding)
                 if type(fault) is int or fault == "ancestry": self.assertEqual(scans_seen, [])
         with patch.object(L, "_shell_fixture_ancestry", side_effect=AssertionError("Malformed DATA cannot authorize filesystem observation")):
-            for raw in (bytearray(binding), binding.decode(), binding + b" ", b"{}", b"x" * 1025):
+            for raw in (bytearray(binding), binding.decode(), binding + b" ", b"{}", b"x" * 2049):
                 with self.subTest(kind=type(raw)), self.assertRaises(ValueError): L._shell_namespace_check(value, raw)
 
     def test_closed_namespaces_reject_old_shapes_wrong_authority_and_cross_family_mismatch(self):
@@ -2752,7 +2847,9 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
                     (L.shell_paths_fixture, "shell-project-paths"), (L.shell_workflow_fixture, "shell-workflow-apply"),
                     (L.shell_metadata_fixture, "shell-metadata-save"),
                     *((lambda value, before, after, case=case: L.shell_session_fixture(value, case, before, after),
-                       "shell-" + case) for case in L.SHELL_SESSION_CASES))
+                       "shell-" + case) for case in L.SHELL_SESSION_CASES),
+                    *((lambda value, before, after, case=case: L.shell_tools_offline_fixture(value, case, before, after),
+                       "shell-" + case) for case in L.SHELL_TOOLS_OFFLINE_CASES))
         for validate, prefix in families:
             for change in ("missing", "old-schema", "old-root", "binding-drift"):
                 before, after = (L.decode(files[prefix + "-" + phase + ".json"]) for phase in ("before", "after"))
@@ -2777,12 +2874,15 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
         value = installed_handoff(); value.update(runId="9" * 20, attempt="9" * 20)
         namespace = fixture_namespace_data(value)
         self.assertEqual(str(L.shell_fixture_root(value)), namespace["root"])
-        self.assertLess(len(L.canonical(namespace)), 1024)
+        self.assertLess(len(L.canonical(namespace)), 2048)
         for document in (project_fixture_data(value), project_fixture_data(value, saved=True), candidate_fixture_data(value),
                          path_fixture_data(value), path_fixture_data(value, changed=True),
                          workflow_fixture_data(value), workflow_fixture_data(value, installed=True),
                          metadata_fixture_data(value), metadata_fixture_data(value, saved=True)):
             self.assertLessEqual(len(L.canonical(document)), 8192)
+        for case in L.SHELL_TOOLS_OFFLINE_CASES:
+            for after in (False, True):
+                self.assertLessEqual(len(L.canonical(tools_offline_fixture_data(value, case, after=after))), 16 << 10)
         for field in ("runId", "attempt"):
             for bad in ("", "0", "01", "1-2", "9" * 21, 10, True):
                 altered = dict(value); altered[field] = bad
@@ -2798,7 +2898,8 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
         self.assertEqual(ast.unparse(branch.body[2]), "namespace = _shell_fixtures_prepare(value)")
         self.assertIs(branch.body[3], loop)
         self.assertEqual(ast.unparse(branch.body[4]), "_shell_fixtures_final(value, namespace)")
-        self.assertEqual(L.SHELL_CASES[-1], "metadata-save")
+        self.assertEqual(L.SHELL_CASES[9], "metadata-save")
+        self.assertEqual(L.SHELL_CASES[-1], "offline-settlement")
         self.assertEqual(ast.unparse(loop.body[0]), "environment, log_binding = _shell_prepare(value, case, namespace)")
         self.assertIsInstance(loop.body[1], ast.If)
         self.assertEqual(ast.unparse(loop.body[1].body[0]), "cases[case] = _shell_normal(value, environment, expected, log_binding)")
@@ -2845,10 +2946,12 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         self.assertEqual(len(additions), 7)
         self.assertEqual(prepare_edit_ignore(ignored), (ignored, ()))
 
-    def test_shell_fixture_roster_fits_the_unchanged_root_evidence_cap(self):
+    def test_shell_fixture_roster_fits_shell_only_cap_without_changing_aggregate_or_other_profiles(self):
         value, _, _, _ = closed_shell_data()
         self.assertEqual(L.SHELL_CASES, ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply",
-                                       "session-inputs", "session-refusals", "session-loss", "session-deadline", "metadata-save"))
+                                       "session-inputs", "session-refusals", "session-loss", "session-deadline", "metadata-save",
+                                       "tools-observed", "tools-cancel", "tools-settlement", "offline-pass", "offline-negative",
+                                       "offline-drift", "offline-cancel", "offline-settlement"))
         roster = L.public_files(value)
         self.assertEqual({name for name in roster if name.startswith("shell-positive-project-")},
                          {"shell-positive-project-before.json", "shell-positive-project-after.json"})
@@ -2862,15 +2965,21 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                          {"shell-metadata-save-before.json", "shell-metadata-save-after.json"})
         self.assertEqual({name for name in roster if name.startswith("shell-session-") and name.endswith(".json")},
                          {"shell-" + case + "-" + phase + ".json" for case in L.SHELL_SESSION_CASES for phase in ("before", "after")})
-        self.assertEqual(len(roster), 114)
-        self.assertEqual(len(roster) + 2, 116)
-        self.assertEqual(len(L.root_phases(value)), 24)
-        self.assertLessEqual(len(roster), 128)
+        self.assertEqual({name for name in roster if name.startswith(("shell-tools-", "shell-offline-")) and name.endswith(".json")},
+                         {"shell-" + case + "-" + phase + ".json" for case in L.SHELL_TOOLS_OFFLINE_CASES for phase in ("before", "after")})
+        self.assertEqual(len(roster), 154)
+        self.assertEqual(len(roster) + 2, 156)
+        self.assertEqual(len(L.root_phases(value)), 32)
+        self.assertEqual(L.SHELL_PUBLIC_FILE_LIMIT, 160)
+        self.assertEqual(L.TOTAL_LIMIT, 32 << 20)
+        self.assertLessEqual(len(roster), L.SHELL_PUBLIC_FILE_LIMIT)
         for case in ("positive", "refuse-writable", "refuse-pth"):
             self.assertFalse(any(name.startswith("shell-positive-project-") for name in L.public_files(installed_handoff(case))))
             self.assertFalse(any(name.startswith("shell-positive-candidate-") for name in L.public_files(installed_handoff(case))))
             self.assertFalse(any(name.startswith("shell-workflow-apply-") for name in L.public_files(installed_handoff(case))))
             self.assertFalse(any(name.startswith("shell-metadata-save-") for name in L.public_files(installed_handoff(case))))
+            self.assertFalse(any(name.startswith(("shell-tools-", "shell-offline-")) for name in L.public_files(installed_handoff(case))))
+            self.assertLessEqual(len(L.public_files(installed_handoff(case))), 128)
 
     def test_positive_typed_schema_rejects_each_missing_or_changed_leaf(self):
         expected = project_draft_receipt()
@@ -3112,9 +3221,10 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                  patch.object(L, "_shell_project_inventory", return_value=project_fixture_data(value)) as inventory, \
                  patch.object(L, "_shell_candidate_inventory", return_value=candidate_fixture_data(value)) as candidate_inventory, \
                  patch.object(L, "_shell_paths_inventory", return_value=path_fixture_data(value)) as path_inventory, \
-                 patch.object(L, "_shell_workflow_inventory", return_value=workflow_fixture_data(value)) as workflow_inventory, \
-                 patch.object(L, "_shell_metadata_inventory", return_value=metadata_fixture_data(value)) as metadata_inventory, \
-                 patch.object(L, "_shell_session_inventory", return_value={"inert": "session-fixture"}) as session_inventory:
+                  patch.object(L, "_shell_workflow_inventory", return_value=workflow_fixture_data(value)) as workflow_inventory, \
+                  patch.object(L, "_shell_metadata_inventory", return_value=metadata_fixture_data(value)) as metadata_inventory, \
+                  patch.object(L, "_shell_session_inventory", return_value={"inert": "session-fixture"}) as session_inventory, \
+                  patch.object(L, "_shell_tools_offline_inventory", return_value={"inert": "tools-offline-fixture"}) as tools_inventory:
                 self.assertEqual(L._shell_prepare(value, case, binding), (L.shell_environment(value, case), "original-log-binding"))
                 namespace_check.assert_called_once_with(value, binding)
                 prepare.assert_not_called(); chmod.assert_not_called()
@@ -3152,6 +3262,11 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                     workflow_inventory.assert_not_called()
                     session_inventory.assert_called_once_with(value, binding, case)
                     retain.assert_called_once_with("shell-" + case + "-before.json", L.canonical({"inert": "session-fixture"}))
+                elif case in L.SHELL_TOOLS_OFFLINE_CASES:
+                    inventory.assert_not_called(); candidate_inventory.assert_not_called(); path_inventory.assert_not_called()
+                    workflow_inventory.assert_not_called()
+                    tools_inventory.assert_called_once_with(value, binding, case)
+                    retain.assert_called_once_with("shell-" + case + "-before.json", L.canonical({"inert": "tools-offline-fixture"}))
                 else:
                     inventory.assert_not_called(); candidate_inventory.assert_not_called(); path_inventory.assert_not_called()
                     workflow_inventory.assert_not_called(); retain.assert_not_called(); chmod.assert_not_called()
@@ -3159,6 +3274,8 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                     session_inventory.assert_not_called()
                 if case != "metadata-save":
                     metadata_inventory.assert_not_called()
+                if case not in L.SHELL_TOOLS_OFFLINE_CASES:
+                    tools_inventory.assert_not_called()
         with patch.object(L, "_shell_namespace_check", side_effect=L.Refused("original namespace changed")), \
              patch.object(L, "_shell_log_prepare") as logs, patch.object(Path, "mkdir") as mkdir:
             with self.assertRaises(ValueError): L._shell_prepare(value, "normal", binding)
@@ -3500,7 +3617,7 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
             "_retain('shell-metadata-save-after.json', metadata_after)",
             "shell_metadata_fixture(value, read(_ROOT / 'public/shell-metadata-save-before.json', 8192), metadata_after)"])
         final = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_shell_fixtures_final")
-        self.assertEqual(len(final.body), 3)  # Docstring, common comparisons and the four-session loop.
+        self.assertEqual(len(final.body), 4)  # Docstring, common comparisons, session loop and Tools/Offline loop.
         recheck = final.body[1].value
         self.assertEqual(ast.unparse(recheck.func), "need")
         self.assertEqual([ast.unparse(node) for node in recheck.args[0].values], [
@@ -3513,6 +3630,10 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         self.assertEqual(ast.unparse(session_loop.iter), "SHELL_SESSION_CASES")
         self.assertEqual(ast.unparse(session_loop.body[0].value.args[0]),
             "canonical(_shell_session_inventory(value, namespace, case, changed=case == 'session-refusals')) == read(_ROOT / 'public' / ('shell-' + case + '-after.json'), SHELL_SESSION_INVENTORY_LIMIT)")
+        tools_loop = final.body[3]
+        self.assertEqual(ast.unparse(tools_loop.iter), "SHELL_TOOLS_OFFLINE_CASES")
+        self.assertEqual(ast.unparse(tools_loop.body[0].value.args[0]),
+            "canonical(_shell_tools_offline_inventory(value, namespace, case, after=True)) == read(_ROOT / 'public' / ('shell-' + case + '-after.json'), SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT)")
         shell = next(node for node in unit.body if isinstance(node, ast.If) and ast.unparse(node.test) == "'shell' in value")
         self.assertIs(shell.body[3], loop)
         self.assertEqual(ast.unparse(shell.body[4]), "_shell_fixtures_final(value, namespace)")
@@ -3965,8 +4086,223 @@ class ProjectPathLifecycleContracts(unittest.TestCase):
         self.assertEqual(len(metadata_calls), 1)
         self.assertEqual([(arg.arg, ast.literal_eval(arg.value)) for arg in metadata_calls[0].keywords], [("saved", True)])
         self.assertEqual(L.SHELL_CASES, ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply",
-                                       "session-inputs", "session-refusals", "session-loss", "session-deadline", "metadata-save"))
+                                       "session-inputs", "session-refusals", "session-loss", "session-deadline", "metadata-save",
+                                       "tools-observed", "tools-cancel", "tools-settlement", "offline-pass", "offline-negative",
+                                       "offline-drift", "offline-cancel", "offline-settlement"))
 
+
+
+class ToolsOfflineLifecycleContracts(unittest.TestCase):
+    def test_fixed_synthetic_roster_configs_and_existing_project_script_are_pinned(self):
+        # Shape/correspondence DATA only. Actual core configuration validation
+        # belongs to the separately admitted native Offline cases, not this test.
+        rust = (SOURCE / "desktop/src-tauri/src/offline_preflight_owner_tests.rs").read_text()
+        script = rust.split('const SCRIPT: &str = r#"', 1)[1].split('"#;', 1)[0].encode("ascii")
+        self.assertEqual(script, L.SHELL_TOOLS_OFFLINE_SCRIPT)
+        self.assertEqual((len(script), hashlib.sha256(script).hexdigest()),
+                         (829, "4ff4b3b59ea27f0761881c9ab56d9478c0ce1e6f74554105917d8fcd8ea0d9e1"))
+        pins = {"pass": (1045, "5e9bbc6ceb2d3a08ac8a78a393138ea74aa996954d744ac9f2fbdc28db6ef84d"),
+                "nonzero": (1174, "4081ee76f52e0c4f50c788a53856bd80c69b2462e2d5349318b32a4603737419"),
+                "active": (1173, "e59ce7cab9b7959e217bde3054bf87ac1576f1bd1a5fe2ef880963356e2509ec")}
+        value = installed_handoff()
+        for case in L.SHELL_TOOLS_OFFLINE_CASES:
+            with self.subTest(case=case):
+                roster = L._shell_tools_offline_roster(value, case)
+                self.assertEqual(len(roster), 21)
+                self.assertEqual(sum(stat.S_ISDIR(mode) for _, mode, _, _ in roster), 9)
+                self.assertEqual(sum(stat.S_ISREG(mode) for _, mode, _, _ in roster), 12)
+                self.assertTrue(all(owners == (value["runnerUid"], value["runnerGid"]) and stat.S_IMODE(mode) in (0o600, 0o700)
+                                    for _, mode, owners, _ in roster))
+                files = {name: data for name, mode, _, data in roster if stat.S_ISREG(mode)}
+                self.assertEqual(files["project/script.trace"], files["project/later.trace"])
+                self.assertEqual(files["project/script.trace"], b"")
+                self.assertEqual(files["project/gradlew"], b"#!/bin/sh\nexit 93\n")
+                config = files["project/release/mobile-release.json"]
+                document = json.loads(config)
+                mode = "nonzero" if case == "offline-negative" else "active" if case == "offline-cancel" else "pass"
+                self.assertEqual((len(config), hashlib.sha256(config).hexdigest()), pins[mode])
+                prefix = ["/usr/bin/python3.12", "-I", "-S", "-B", "check.py"]
+                self.assertEqual(document["projectChecks"], {"androidArtifact": [], "iosArtifact": [],
+                    "preflight": [prefix + [mode]] + ([prefix + ["later"]] if mode != "pass" else [])})
+        self.assertEqual(L.SHELL_TOOLS_OFFLINE_RECEIPT_LIMIT, 64 << 10)
+        self.assertEqual(L.SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT, 16 << 10)
+
+    def test_eight_receipts_require_original_transport_and_do_not_invent_child_maps(self):
+        for case in L.SHELL_TOOLS_OFFLINE_CASES:
+            receipt = tools_offline_receipt(case)
+            raw = L.canonical(receipt); self.assertLess(len(raw), 32 << 10)
+            self.assertEqual(L.shell_tools_offline_receipt(raw, case), receipt)
+            stdout, stderr = tools_offline_capture(case)
+            result = L.shell_result(stdout, stderr, case, 0, map_data())
+            self.assertEqual(result, {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
+                                      "maps": [], "toolsOffline": receipt})
+            lines = stdout.splitlines(keepends=True)
+            for bad_stdout, bad_stderr, code in ((b"".join(lines[:3] + lines[4:]), b"", 0),
+                    (b"".join(lines[:3] + [lines[3], lines[3]] + lines[4:]), b"", 0),
+                    (b"".join(lines[:2] + [lines[3], lines[2], lines[4]]), b"", 0),
+                    (stdout + b"MRK_INSTALLED_NATIVE_CHILD=[]\n", b"", 0), (stdout, b"MRK_PRIVATE=unknown\n", 0),
+                    (stdout, stderr, 1), (stdout, stderr, True), (stdout.rstrip(b"\n"), stderr, 0)):
+                with self.subTest(case=case, code=code, stdout=bad_stdout[:30]), self.assertRaises(ValueError):
+                    L.shell_result(bad_stdout, bad_stderr, case, code, map_data())
+            for bad in (raw + b" ", raw.rstrip(b"\n"), raw.replace(b'"case":', b'"case":"duplicate","case":', 1),
+                        b"x" * ((64 << 10) + 1), bytearray(raw)):
+                with self.subTest(case=case, framing=type(bad)), self.assertRaises(ValueError):
+                    L.shell_tools_offline_receipt(bad, case)
+
+    def test_receipts_reject_missing_fields_false_joins_and_forged_route_consent(self):
+        for case in L.SHELL_TOOLS_OFFLINE_CASES:
+            receipt = tools_offline_receipt(case)
+            mutations = [lambda d, key=key: d.pop(key) for key in receipt]
+            mutations += [lambda d, key=key: d["original"].__setitem__(key, not d["original"][key])
+                          for key, value in receipt["original"].items() if type(value) is bool]
+            mutations += [lambda d, key=key: d["requests"].__setitem__(key, bool(d["requests"][key])) for key in receipt["requests"]]
+            mutations += [lambda d: d.update(qualificationOnly=False), lambda d: d.update(builder="observer-only"),
+                lambda d: d["ui"].update(terminal=False), lambda d: d["ui"].update(consent=not d["ui"]["consent"]),
+                lambda d: d["initial"].update(toolsAvailable=False), lambda d: d["initial"].update(offlineAvailable=False),
+                lambda d: d["hold"].update(boundary="watchdog"), lambda d: d["hold"].update(released=not d["hold"]["released"]),
+                lambda d: d["original"].update(id="c" * 32), lambda d: d["original"].update(generation="c" * 32),
+                lambda d: d["terminal"]["context"].update(draftRevision=True), lambda d: d["terminal"]["context"].update(baselineGeneration=2 ** 32 - 1),
+                lambda d: d["terminal"]["context"].update(projectId="/private/path"), lambda d: d["fixture"].update(laterTrace="later\n"),
+                lambda d: d["fixture"].update(savedConfigChanged=not d["fixture"]["savedConfigChanged"])]
+            for mutate in mutations:
+                altered = deepcopy(receipt); mutate(altered)
+                with self.subTest(case=case, mutate=mutate), self.assertRaises(ValueError):
+                    L.shell_tools_offline_receipt(L.canonical(altered), case)
+
+    def test_tools_honest_lookup_refusal_is_not_positive_jdk_or_partial_readiness(self):
+        for attempted in (0, 1):
+            receipt = tools_offline_receipt("tools-observed")
+            core = receipt["terminal"]["result"]
+            for row in core["checks"][attempted:]:
+                row.update(state="not-run", reason="unsupported-installation", version=None, returnCode=None, assessment="not-assessed")
+            outcome = "complete" if attempted else "unavailable"
+            receipt["terminal"]["outcome"] = core["outcome"] = outcome
+            core["commandsAttempted"] = core["lifetime"]["commands"] = attempted
+            core["lifetime"]["commandDispatched"] = core["assurance"]["toolsAttempted"] = bool(attempted)
+            self.assertEqual(L.shell_tools_offline_receipt(L.canonical(receipt), "tools-observed"), receipt)
+        original = tools_offline_receipt("tools-observed")
+        for mutate in (lambda d: d["terminal"].update(finality="pending"), lambda d: d["terminal"].update(outcome="partial"),
+                       lambda d: d["terminal"]["result"].update(outcome="failed"),
+                       lambda d: d["terminal"]["result"].update(commandsAttempted=True),
+                       lambda d: d["terminal"]["result"]["lifetime"].update(complete=False),
+                       lambda d: d["terminal"]["result"]["assurance"].update(releaseReadiness="ready"),
+                       lambda d: d["terminal"]["result"]["assurance"].update(projectCodeExecuted=True),
+                       lambda d: d["terminal"]["result"]["checks"][1].update(assessment="match"),
+                       lambda d: d["terminal"]["result"]["checks"][1].update(help="raw\noutput"),
+                       lambda d: d["terminal"]["result"]["checks"][1].update(returnCode=True),
+                       lambda d: d["terminal"]["result"]["checks"].reverse()):
+            altered = deepcopy(original); mutate(altered)
+            with self.subTest(mutate=mutate), self.assertRaises(ValueError):
+                L.shell_tools_offline_receipt(L.canonical(altered), "tools-observed")
+
+    def test_offline_negative_drift_and_cancel_cannot_be_relabelled_pass_or_no_child(self):
+        for case in ("offline-pass", "offline-negative", "offline-drift", "offline-cancel", "offline-settlement"):
+            original = tools_offline_receipt(case)
+            mutations = [lambda d: d["terminal"].update(intentUsable=True), lambda d: d["original"].update(noChild=True),
+                         lambda d: d["terminal"]["context"]["savedConfig"].update(sha256="0" * 64),
+                         lambda d: d["terminal"].update(reason="none" if case in ("offline-drift", "offline-cancel") else "cancelled")]
+            if original["terminal"]["result"] is not None:
+                mutations += [lambda d: d["terminal"]["result"]["summary"].update(total=True),
+                    lambda d: d["terminal"]["result"]["findings"][1].update(projectCheckIndex=1),
+                    lambda d: d["terminal"]["result"]["findings"][1].update(status="PASS" if case == "offline-negative" else "FAIL"),
+                    lambda d: d["terminal"]["result"].update(limitations=[]), lambda d: d["terminal"]["result"].update(scope="release-ready")]
+            else:
+                mutations += [lambda d: d["terminal"].update(result={}), lambda d: d["terminal"].update(outcome="complete")]
+            for mutate in mutations:
+                altered = deepcopy(original); mutate(altered)
+                with self.subTest(case=case, mutate=mutate), self.assertRaises(ValueError):
+                    L.shell_tools_offline_receipt(L.canonical(altered), case)
+
+    def test_fixture_changes_are_exact_in_place_mutations_of_the_same_originals(self):
+        value = installed_handoff()
+        for case in L.SHELL_TOOLS_OFFLINE_CASES:
+            before, after = (tools_offline_fixture_data(value, case, after=phase) for phase in (False, True))
+            observed = L.shell_tools_offline_fixture(value, case, L.canonical(before), L.canonical(after))
+            self.assertEqual(observed["beforeCount"], observed["afterCount"])
+            self.assertEqual(observed["beforeCount"], 21)
+            self.assertEqual({key: observed[key] for key in ("scriptTrace", "laterTrace", "savedConfigChanged")},
+                             tools_offline_receipt(case)["fixture"])
+            for mutate in (lambda d: d["entries"][0]["identity"].__setitem__(1, 9000),
+                           lambda d: d["entries"][-1]["identity"].__setitem__(5, 2),
+                           lambda d: d["entries"][-1]["identity"].__setitem__(3, 0),
+                           lambda d: d["entries"][-1].update(kind="symlink"),
+                           lambda d: d["entries"][-1].update(size=True), lambda d: d["entries"][-1].update(sha256="0" * 64),
+                           lambda d: d["entries"][1]["children"].append(".mobile-release"),
+                           lambda d: d["entries"].append(deepcopy(d["entries"][-1])),
+                           lambda d: d["namespace"]["identity"].__setitem__(1, 9999), lambda d: d.update(changed=not d["changed"]),
+                           lambda d: d.update(absent=[])):
+                altered = deepcopy(after); mutate(altered)
+                with self.subTest(case=case, mutate=mutate), self.assertRaises(ValueError):
+                    L.shell_tools_offline_fixture(value, case, L.canonical(before), L.canonical(altered))
+            for name in observed["mutations"]:
+                altered = deepcopy(after)
+                row = next(row for row in altered["entries"] if row["path"] == name); row["identity"][1] += 5000
+                with self.subTest(case=case, replaced=name), self.assertRaisesRegex(ValueError, "replaced or chmodded"):
+                    L.shell_tools_offline_fixture(value, case, L.canonical(before), L.canonical(altered))
+
+    def test_inventory_admits_complete_parent_rosters_before_any_leaf_bytes(self):
+        value = installed_handoff(); namespace = fixture_namespace_data(value); binding = L.canonical(namespace)
+        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        for case in L.SHELL_TOOLS_OFFLINE_CASES:
+            for after in (False, True):
+                document = tools_offline_fixture_data(value, case, after=after); base = Path(document["root"])
+                nodes = {base / row["path"]: row for row in document["entries"]}
+                def metadata(path): return SimpleNamespace(**dict(zip(fields, nodes[path]["identity"])))
+                def scan(path):
+                    context = Mock(); context.__enter__ = Mock(return_value=iter(SimpleNamespace(name=n) for n in nodes[path]["children"]))
+                    context.__exit__ = Mock(return_value=False); return context
+                def record(path, limit):
+                    row = nodes[path]; self.assertEqual(limit, row["size"])
+                    return {"path": str(path), "size": row["size"], "sha256": row["sha256"]}
+                with self.subTest(case=case, after=after), patch.object(L, "_ROOT", L.root_path(value)), \
+                     patch.object(L, "_shell_namespace_check", return_value=namespace) as checking, patch.object(L, "directory"), \
+                     patch.object(Path, "lstat", metadata), patch.object(L.os, "scandir", side_effect=scan), \
+                     patch.object(L, "record", side_effect=record) as reading, patch.object(L, "_xattrs"), patch.object(L, "_absent") as absent, \
+                     patch.object(L.os, "readlink", side_effect=AssertionError("No aliases in a Tools/Offline fixture")):
+                    self.assertEqual(L._shell_tools_offline_inventory(value, binding, case, after=after), document)
+                    self.assertEqual(reading.call_count, 12)
+                    self.assertEqual([call.args for call in checking.call_args_list], [(value, binding)] * 2)
+                    self.assertEqual([call.args[0] for call in absent.call_args_list], [base / name for name in document["absent"]])
+                    reading.reset_mock()
+                    nodes[base / "project/release/store/android/en-US/changelogs"]["children"].append("unreviewed")
+                    with self.assertRaises(ValueError): L._shell_tools_offline_inventory(value, binding, case, after=after)
+                    reading.assert_not_called()
+
+    def test_new_postexit_capture_stays_after_the_existing_success_gate(self):
+        tree = ast.parse((SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_text())
+        unit = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "unit_start")
+        loop = next(node for node in ast.walk(unit) if isinstance(node, ast.For) and ast.unparse(node.iter) == "SHELL_CASES")
+        branch = next(node for node in loop.body if isinstance(node, ast.If))
+        gate = next(i for i, node in enumerate(branch.orelse) if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
+                    and isinstance(node.value.func, ast.Name) and node.value.func.id == "shell_result")
+        added = next(node for node in branch.orelse[gate + 1:] if isinstance(node, ast.If) and ast.unparse(node.test) == "case in SHELL_TOOLS_OFFLINE_CASES")
+        inventories = [node for node in ast.walk(added) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                       and node.func.id == "_shell_tools_offline_inventory"]
+        self.assertEqual(len(inventories), 1)
+        self.assertEqual([(kw.arg, ast.literal_eval(kw.value)) for kw in inventories[0].keywords], [("after", True)])
+        self.assertFalse(any(isinstance(node, (ast.Try, ast.While)) for node in ast.walk(added)))
+        self.assertEqual([node.func.id for node in ast.walk(unit) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                          and node.func.id == "_shell_fixtures_prepare"], ["_shell_fixtures_prepare"])
+
+    def test_closed_result_rebinds_every_new_native_receipt_and_inventory(self):
+        value, outcome, files, expected = closed_shell_data()
+        with patch.object(L, "shell_closed_loader", return_value=expected):
+            observed = L.shell_closed_result(value, outcome, files)
+            self.assertEqual(set(observed["toolsOffline"]), set(L.SHELL_TOOLS_OFFLINE_CASES))
+            for case in L.SHELL_TOOLS_OFFLINE_CASES:
+                self.assertEqual(observed["toolsOffline"][case]["native"], tools_offline_receipt(case))
+                for fault in ("receipt", "inventory", "command"):
+                    altered, result = dict(files), deepcopy(outcome)
+                    if fault == "receipt":
+                        cases = L.decode(altered["shell-cases.json"]); cases[case]["toolsOffline"]["original"]["driverJoined"] = False
+                        altered["shell-cases.json"] = L.canonical(cases)
+                    elif fault == "inventory":
+                        name = "shell-" + case + "-after.json"; document = L.decode(altered[name])
+                        document["entries"][-1]["sha256"] = "0" * 64; altered[name] = L.canonical(document)
+                    else:
+                        next(row for row in result["commands"] if row["phase"] == "shell-" + case)["exitCode"] = 1
+                    with self.subTest(case=case, fault=fault), self.assertRaises(ValueError):
+                        L.shell_closed_result(value, result, altered)
 
 
 class SessionFixtureContracts(unittest.TestCase):
@@ -4130,16 +4466,20 @@ class SessionFixtureContracts(unittest.TestCase):
                 reading.assert_not_called(); linking.assert_not_called()
 
     def test_final_metadata_cannot_replace_a_prior_session_inventory_or_its_own_saved_original(self):
-        # In-memory failure injection after the metadata-last return. Reuse the
+        # In-memory failure injection after the last Tools/Offline return. Reuse the
         # actual final comparison, never unit_start, a process or a live tree.
         value, _, files, _ = closed_shell_data()
         namespace = L.canonical(fixture_namespace_data(value))
         sessions = {case: session_fixture_data(value, case, changed=case == "session-refusals") for case in L.SHELL_SESSION_CASES}
-        for changed in (None, *L.SHELL_SESSION_CASES, "metadata-save"):
+        tools = {case: tools_offline_fixture_data(value, case, after=True) for case in L.SHELL_TOOLS_OFFLINE_CASES}
+        for changed in (None, *L.SHELL_SESSION_CASES, "metadata-save", *L.SHELL_TOOLS_OFFLINE_CASES):
             current = deepcopy(sessions)
+            current_tools = deepcopy(tools)
             metadata = metadata_fixture_data(value, saved=True)
             if changed == "metadata-save":
                 metadata["entries"][0]["identity"][1] += 1000
+            elif changed in L.SHELL_TOOLS_OFFLINE_CASES:
+                current_tools[changed]["entries"][0]["identity"][1] += 1000
             elif changed is not None:
                 # Identical fictional bytes can still belong to a different
                 # directory original. The already-retained capture must win.
@@ -4148,6 +4488,10 @@ class SessionFixtureContracts(unittest.TestCase):
                 self.assertIs(actual_value, value); self.assertEqual(actual_namespace, namespace)
                 self.assertEqual(changed, case == "session-refusals")
                 return current[case]
+            def tools_inventory(actual_value, actual_namespace, case, *, after=False):
+                self.assertIs(actual_value, value); self.assertEqual(actual_namespace, namespace)
+                self.assertIs(after, True)
+                return current_tools[case]
             def retained(path, limit):
                 self.assertEqual(path.parent, L.root_path(value) / "public")
                 raw = files[path.name]; self.assertLessEqual(len(raw), limit); return raw
@@ -4156,14 +4500,17 @@ class SessionFixtureContracts(unittest.TestCase):
                  patch.object(L, "_shell_candidate_inventory", return_value=candidate_fixture_data(value)), \
                  patch.object(L, "_shell_paths_inventory", return_value=path_fixture_data(value, changed=True)), \
                  patch.object(L, "_shell_workflow_inventory", return_value=workflow_fixture_data(value, installed=True)), \
-                 patch.object(L, "_shell_metadata_inventory", return_value=metadata), \
-                 patch.object(L, "_shell_session_inventory", side_effect=session_inventory) as checking, \
+                  patch.object(L, "_shell_metadata_inventory", return_value=metadata), \
+                  patch.object(L, "_shell_session_inventory", side_effect=session_inventory) as checking, \
+                  patch.object(L, "_shell_tools_offline_inventory", side_effect=tools_inventory) as checking_tools, \
                  patch.object(L, "read", side_effect=retained), patch.object(L, "_retain") as replacement:
                 if changed is None:
                     self.assertIsNone(L._shell_fixtures_final(value, namespace))
                     self.assertEqual([call.args[2] for call in checking.call_args_list], list(L.SHELL_SESSION_CASES))
+                    self.assertEqual([call.args[2] for call in checking_tools.call_args_list], list(L.SHELL_TOOLS_OFFLINE_CASES))
                 else:
-                    reason = "another original fixture family" if changed == "metadata-save" else "earlier original session fixture"
+                    reason = ("another original fixture family" if changed == "metadata-save" else
+                              "earlier original Tools/Offline fixture" if changed in L.SHELL_TOOLS_OFFLINE_CASES else "earlier original session fixture")
                     with self.assertRaisesRegex(ValueError, reason):
                         L._shell_fixtures_final(value, namespace)
                 replacement.assert_not_called()
@@ -4333,9 +4680,12 @@ class FailureLabelSinkContracts(unittest.TestCase):
             self.assertEqual(L._shell_label_pair(frame(b"registry", b"none", b"bound", value, worker))["session"]["firstOrigin"]["worker"], worker.decode("ascii"))
         self.assertEqual((len(L.SHELL_SESSION_PUBLIC_MAP_WORKERS), L.SHELL_SESSION_PUBLIC_MAP_WORKERS[0], L.SHELL_SESSION_PUBLIC_MAP_WORKERS[-1]),
                          (648, b"map-x-aa", b"map-x-yx"))
+        self.assertEqual(L.SHELL_SESSION_GENERIC_MAP_WORKERS, tuple(b"map-x-" + group + b"-" + tail
+                         for group in (b"v", b"l", b"c", b"h", b"m", b"o") for tail in (b"na", b"np", b"da", b"dp")))
+        self.assertEqual(len(set(L.SHELL_SESSION_GENERIC_MAP_WORKERS)), 24)
         for worker in (b"maps-check", b"map-p-nl", b"map-p-order", b"map-x-file", b"map-m-owner-cr", b"map-dup-py",
                        b"map-x-hist-py", b"map-x-hist-ss", b"map-x-hist-cr",
-                       *L.SHELL_SESSION_PUBLIC_MAP_WORKERS):
+                       *L.SHELL_SESSION_GENERIC_MAP_WORKERS, *L.SHELL_SESSION_PUBLIC_MAP_WORKERS):
             raw = frame(b"supervisor-disabled", b"none", b"bound", b"cleanup.none.pp", worker)
             self.assertEqual(L._shell_label_pair(raw)["session"]["firstOrigin"], {
                 "origin": "supervisor-disabled", "detail": "none", "association": "bound", "query": "cleanup.none.pp", "worker": worker.decode("ascii")})
@@ -4367,7 +4717,8 @@ class FailureLabelSinkContracts(unittest.TestCase):
                 b"map-x-yy", b"map-x-zz", b"map-x-a", b"map-x-aaa", b"map-x-AA", b"map-x-aa ",
                  b"map-x-aa;extra=1", b"map-x-aa/path", b"map-x-aa\n/private/inert",
                  b"map-x-hist-zz", b"map-x-hist-pyx", b"map-x-hist-ss ", b"map-x-hist-cr;extra=1",
-                 b"map-x-hist-py\n/private/inert"))]
+                 b"map-x-hist-py\n/private/inert", b"map-x-v-n", b"map-x-v-nax", b"map-x-z-na", b"map-x-l-aa",
+                 b"map-x-c-NP", b"map-x-h-na ", b"map-x-m-da;extra=1", b"map-x-o-dp/path", b"map-x-o-na\n/private/inert"))]
         for raw in bad_v2:
             with self.subTest(version="v2", raw=raw[:80]): self.assertIsNone(L._shell_label_pair(raw))
 

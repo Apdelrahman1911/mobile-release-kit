@@ -58,6 +58,10 @@ export function EnvironmentDiagnostics({ state, controller, compact = false, loa
     {unknown && <div className="notice notice-warning" role="alert"><Icon name="shield" /><div><strong>Original finality or status integrity is unknown</strong><p>Keep the application open. The native owner and any original resources remain retained. Conflicting work and normal exit cannot be enabled by a UI timer, reconnect, context change or late cleanup. A later resource settlement does not turn this run into success.</p></div></div>}
     {state.observationIssue && <p className="review-caution">Native status is not current. Earlier rows are historical; use Read native status, not another Check build tools request. A missing event listener requires an explicit connection reload.</p>}
     {state.error && <ErrorNotice error={state.error} title="Diagnostics status needs attention" />}
+    {!compact && !active && attempt?.projection?.finality === 'settled' && attempt.projection.result === null && <>
+      <StateBadges row={attempt.projection} />
+      <p className="save-note">The original check ended without a tool report. Native reason: {attempt.projection.reason}. No tool or release-readiness result is implied.</p>
+    </>}
     {!compact && observation && result && <>
       <SectionHeading title={observation.stale ? 'Earlier / stale tool observations' : 'Tool observations from this run'}
         description={`${result.context.platform === 'ios' ? 'iOS' : 'Android'} / build · draft ${result.context.draftRevision} · baseline ${result.context.baselineGeneration} · core host ${result.hostPlatform}`} />

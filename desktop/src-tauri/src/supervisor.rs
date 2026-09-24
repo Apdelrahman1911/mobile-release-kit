@@ -2137,10 +2137,13 @@ mod installed_native_fixture {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(super) enum MapMetadataRefusal { Stat, Type, Owner, Links, Mode, Inode, Device }
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) enum GenericMapPath { Version, Library, Command, Hosted, Memfd, Other }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(super) enum MapRefusal {
         Utf8, Newline, Row, Columns, Address, Order, Permissions, Offset, Device, Inode,
         ExecutableAnonymous, ExecutablePseudo, ExecutableFile, ExecutablePublicPath(u16),
         ExecutableHistoricalPayload(HistoricalPayloadRole),
+        ExecutableGenericFile { class: GenericMapPath, deleted: bool, historical_present: bool },
         Metadata(MapRole, MapMetadataRefusal), Duplicate(MapRole),
     }
     impl MapRefusal {
@@ -2156,6 +2159,18 @@ mod installed_native_fixture {
                 Self::ExecutableHistoricalPayload(role) => match role {
                     HistoricalPayloadRole::Python => b"map-x-hist-py", HistoricalPayloadRole::Ssl => b"map-x-hist-ss",
                     HistoricalPayloadRole::Crypto => b"map-x-hist-cr",
+                },
+                Self::ExecutableGenericFile { class, deleted, historical_present } => {
+                    // Fixed spelling/history labels only, never observed text.
+                    let tokens: [&[u8]; 4] = match class {
+                        GenericMapPath::Version => [b"map-x-v-na", b"map-x-v-np", b"map-x-v-da", b"map-x-v-dp"],
+                        GenericMapPath::Library => [b"map-x-l-na", b"map-x-l-np", b"map-x-l-da", b"map-x-l-dp"],
+                        GenericMapPath::Command => [b"map-x-c-na", b"map-x-c-np", b"map-x-c-da", b"map-x-c-dp"],
+                        GenericMapPath::Hosted => [b"map-x-h-na", b"map-x-h-np", b"map-x-h-da", b"map-x-h-dp"],
+                        GenericMapPath::Memfd => [b"map-x-m-na", b"map-x-m-np", b"map-x-m-da", b"map-x-m-dp"],
+                        GenericMapPath::Other => [b"map-x-o-na", b"map-x-o-np", b"map-x-o-da", b"map-x-o-dp"],
+                    };
+                    tokens[usize::from(deleted) * 2 + usize::from(historical_present)]
                 },
                 Self::Metadata(role, reason) => role.diagnostic_tokens()[match reason {
                     MapMetadataRefusal::Stat => 0, MapMetadataRefusal::Type => 1, MapMetadataRefusal::Owner => 2,
@@ -2219,6 +2234,35 @@ mod installed_native_fixture {
         if refusal != MapRefusal::ExecutableFile { return refusal; }
         historical.and_then(|data| data.matching_role(major, minor, inode))
             .map_or(refusal, MapRefusal::ExecutableHistoricalPayload)
+    }
+    fn generic_executable_file_refusal(refusal: MapRefusal, path: &str, historical_present: bool) -> MapRefusal {
+        // Only the SAME refused row, after exact public and unique historical
+        // decisions. None of these lexical labels grants mapping admission.
+        if refusal != MapRefusal::ExecutableFile { return refusal; }
+        let (path, deleted) = path.strip_suffix(" (deleted)").map_or((path, false), |path| (path, true));
+        let below = |prefix: &str| path.strip_prefix(prefix).is_some_and(|tail| !tail.is_empty());
+        let hosted = |prefix: &str| {
+            let Some(tail) = path.strip_prefix(prefix) else { return false; };
+            let Some((ids, tail)) = tail.split_once('/') else { return false; };
+            let Some((run, attempt)) = ids.split_once('-') else { return false; };
+            let number = |value: &str| !value.is_empty() && value.len() <= 20 && !value.starts_with('0')
+                && value.bytes().all(|byte| byte.is_ascii_digit());
+            !tail.is_empty() && number(run) && number(attempt)
+        };
+        // No resolution, dot-component handling, trimming, escape decoding or
+        // current-run lookup. The suffix was removed for this diagnostic ONLY.
+        let class = if path.strip_prefix(VERSION).and_then(|tail| tail.strip_prefix('/')).is_some_and(|tail| !tail.is_empty()) {
+            GenericMapPath::Version
+        } else if ["/usr/lib/", "/usr/lib64/", "/lib/", "/lib64/"].into_iter().any(below) {
+            GenericMapPath::Library
+        } else if ["/usr/bin/", "/usr/sbin/", "/bin/", "/sbin/"].into_iter().any(below) {
+            GenericMapPath::Command
+        } else if ["/var/lib/mrk-ubuntu-native-", "/var/lib/mrk-ubuntu-shell-fixtures-"].into_iter().any(hosted) {
+            GenericMapPath::Hosted
+        } else if path.starts_with("/memfd:") { GenericMapPath::Memfd } else { GenericMapPath::Other };
+        // Some means only a captured Option with NO unique tuple match; it
+        // includes mismatch, ambiguity and inode zero, not a runtime verdict.
+        MapRefusal::ExecutableGenericFile { class, deleted, historical_present }
     }
     fn role(path: &str) -> Option<MapRole> {
         for (role, suffix) in [(MapRole::Python, "/python/bin/python3"), (MapRole::Ssl, "/python/lib/libssl.so.3"),
@@ -2285,7 +2329,7 @@ mod installed_native_fixture {
                     if path.is_empty() { MapRefusal::ExecutableAnonymous } else { MapRefusal::ExecutablePseudo })?;
                 continue;
             }
-            let Some(role) = role(path) else { need(!executable).map_err(|_| historical_executable_file_refusal(executable_file_refusal(path), historical, major, minor, inode))?; continue; };
+            let Some(role) = role(path) else { need(!executable).map_err(|_| generic_executable_file_refusal(historical_executable_file_refusal(executable_file_refusal(path), historical, major, minor, inode), path, historical.is_some()))?; continue; };
             let st = fs::metadata(path).map_err(|_| MapRefusal::Metadata(role, MapMetadataRefusal::Stat))?;
             check_map_metadata(MapMetadata { regular: st.is_file(), uid: st.uid(), gid: st.gid(), links: st.nlink(), mode: st.mode(),
                 inode: st.ino(), major: nix::sys::stat::major(st.dev()), minor: nix::sys::stat::minor(st.dev()) }, inode, major, minor)
@@ -2301,6 +2345,8 @@ mod installed_native_fixture {
         // Explicit-call DATA only. These parser inputs have no recognized file
         // paths, so no filesystem, /proc reader or native worker is invoked.
         use MapRefusal as R;
+        use GenericMapPath as G;
+        let generic = |class, deleted, historical_present| R::ExecutableGenericFile { class, deleted, historical_present };
         let mappings = |raw: &[u8]| self::mappings(raw, None);
         crate::installed_runtime::assert_historical_payload_diagnostic_contract();
         let failures: &[(&[u8], R)] = &[
@@ -2312,7 +2358,7 @@ mod installed_native_fixture {
             (b"1-2 r--p 0 00:00 18446744073709551616\n", R::Inode),
             (b"1-2 r-xp 0 00:00 0\n", R::ExecutableAnonymous),
             (b"1-2 r-xp 0 00:00 0 [heap]\n", R::ExecutablePseudo),
-            (b"1-2 r-xp 0 00:00 0 /unrecognized\n", R::ExecutableFile),
+            (b"1-2 r-xp 0 00:00 0 /unrecognized\n", generic(G::Other, false, false)),
         ];
         for &(bytes, expected) in failures { assert_eq!(mappings(bytes), Err(expected)); }
         for bytes in [b"".as_slice(), b"1-2 r--p 0 00:00 0\n", b"1-2 r--p 0 00:00 0 /unrecognized\n",
@@ -2377,10 +2423,15 @@ mod installed_native_fixture {
         for role in [HistoricalPayloadRole::Python, HistoricalPayloadRole::Ssl, HistoricalPayloadRole::Crypto] {
             tokens.push(R::ExecutableHistoricalPayload(role).token());
         }
-        assert_eq!(tokens.len(), 64);
+        for class in [G::Version, G::Library, G::Command, G::Hosted, G::Memfd, G::Other] {
+            for deleted in [false, true] {
+                for present in [false, true] { tokens.push(generic(class, deleted, present).token()); }
+            }
+        }
+        assert_eq!(tokens.len(), 88);
         assert!(tokens.iter().all(|token| !token.is_empty() && token.len() <= 14
             && token.iter().all(|byte| byte.is_ascii_lowercase() || *byte == b'-')));
-        tokens.sort(); tokens.dedup(); assert_eq!(tokens.len(), 64);
+        tokens.sort(); tokens.dedup(); assert_eq!(tokens.len(), 88);
 
         // Every new parser row is role(None): no existing metadata or /proc read.
         assert_eq!(PUBLIC_MAP_PATH_CANDIDATES.len(), 648);
@@ -2418,12 +2469,15 @@ mod installed_native_fixture {
         let mut invalid_utf8 = vec![0xff]; invalid_utf8.extend_from_slice(first.as_bytes());
         assert_eq!(mappings(&invalid_utf8), Err(R::Utf8));
         assert_eq!(mappings(&first.as_bytes()[..first.len() - 1]), Err(R::Newline));
-        for path in ["/unrecognized", "/bin/sh (deleted)", "/bin/sh ", "/bin/sh\t", "/bin/sh private tail",
-            "/bin/sh.extra", "/prefix/bin/sh", "//bin/sh", "/BIN/SH"] {
+        for (path, class, deleted) in [("/unrecognized", G::Other, false), ("/bin/sh (deleted)", G::Command, true),
+            ("/bin/sh ", G::Command, false), ("/bin/sh\t", G::Command, false), ("/bin/sh private tail", G::Command, false),
+            ("/bin/sh.extra", G::Command, false), ("/prefix/bin/sh", G::Other, false), ("//bin/sh", G::Other, false),
+            ("/BIN/SH", G::Other, false), ("/bin/sh (deleted) ", G::Command, false),
+            ("/bin/sh (deleted) tail", G::Command, false), ("/bin/sh (deleted) (deleted)", G::Command, true)] {
             assert!(PUBLIC_MAP_PATH_CANDIDATES.iter().all(|(candidate, _)| *candidate != path));
             assert_eq!(role(path), None);
             assert_eq!(executable_file_refusal(path), R::ExecutableFile);
-            assert_eq!(mappings(format!("1-2 r-xp 0 00:00 0 {path}\n").as_bytes()), Err(R::ExecutableFile));
+            assert_eq!(mappings(format!("1-2 r-xp 0 00:00 0 {path}\n").as_bytes()), Err(generic(class, deleted, false)));
         }
         // Complete synthetic historical DATA; these unrecognized spellings
         // never reach metadata lookup and no path/tuple is exported by a token.
@@ -2434,14 +2488,14 @@ mod installed_native_fixture {
         }
         for row in ["1-2 r-xp 0 09:01 11 /unrecognized\n", "1-2 r-xp 0 08:02 11 /unrecognized\n",
             "1-2 r-xp 0 08:01 12 /unrecognized\n", "1-2 r-xp 0 08:01 0 /unrecognized\n"] {
-            assert_eq!(self::mappings(row.as_bytes(), history), Err(R::ExecutableFile));
+            assert_eq!(self::mappings(row.as_bytes(), history), Err(generic(G::Other, false, true)));
         }
         let same_row = b"1-2 r-xp 0 08:01 11 /unrecognized\n";
-        assert_eq!(self::mappings(same_row, None), Err(R::ExecutableFile));
+        assert_eq!(self::mappings(same_row, None), Err(generic(G::Other, false, false)));
         let ambiguous = Some(HistoricalPayloadSnapshot::for_contract([(8, 1, 11), (8, 1, 11), (8, 1, 33)]));
-        assert_eq!(self::mappings(same_row, ambiguous), Err(R::ExecutableFile));
+        assert_eq!(self::mappings(same_row, ambiguous), Err(generic(G::Other, false, true)));
         let zero = Some(HistoricalPayloadSnapshot::for_contract([(8, 1, 0), (8, 1, 22), (8, 1, 33)]));
-        assert_eq!(self::mappings(b"1-2 r-xp 0 08:01 0 /unrecognized\n", zero), Err(R::ExecutableFile));
+        assert_eq!(self::mappings(b"1-2 r-xp 0 08:01 0 /unrecognized\n", zero), Err(generic(G::Other, false, true)));
         assert_eq!(self::mappings(b"1-2 r--p 0 08:01 11 /unrecognized\n", history), Ok(None));
         assert_eq!(self::mappings(b"1-2 r-xp 0 08:01 11\n", history), Err(R::ExecutableAnonymous));
         assert_eq!(self::mappings(b"1-2 r-xp 0 08:01 11 [heap]\n", history), Err(R::ExecutablePseudo));
@@ -2452,7 +2506,63 @@ mod installed_native_fixture {
         let mut later = same_row.to_vec(); later.extend_from_slice(b"x r-xp 0 08:01 11 /unrecognized\n");
         assert_eq!(self::mappings(&later, history), Err(R::ExecutableHistoricalPayload(HistoricalPayloadRole::Python)));
         let mut first_generic = b"1-2 r-xp 0 08:01 99 /unrecognized\n".to_vec(); first_generic.extend_from_slice(same_row);
-        assert_eq!(self::mappings(&first_generic, history), Err(R::ExecutableFile));
+        assert_eq!(self::mappings(&first_generic, history), Err(generic(G::Other, false, true)));
+
+        // All 24 static outcomes from first, role-unrecognized rows only.
+        let version_other = format!("{VERSION}/unlisted-fixture");
+        for (path, class, letter) in [(version_other.as_str(), G::Version, b'v'),
+            ("/usr/lib/unlisted-fixture", G::Library, b'l'), ("/usr/bin/unlisted-fixture", G::Command, b'c'),
+            ("/var/lib/mrk-ubuntu-native-1-2/unlisted-fixture", G::Hosted, b'h'),
+            ("/memfd:unlisted-fixture", G::Memfd, b'm'), ("/unrecognized", G::Other, b'o')] {
+            for deleted in [false, true] {
+                let path = format!("{path}{}", if deleted { " (deleted)" } else { "" });
+                assert_eq!(role(&path), None);
+                assert_eq!(executable_file_refusal(&path), R::ExecutableFile);
+                for present in [false, true] {
+                    let historical = if present { history } else { None };
+                    let refusal = generic(class, deleted, present);
+                    assert_eq!(self::mappings(format!("1-2 r-xp 0 00:00 0 {path}\n").as_bytes(), historical), Err(refusal));
+                    assert_eq!(self::mappings(format!("1-2 r--p 0 00:00 0 {path}\n").as_bytes(), historical), Ok(None));
+                    let token = [b'm', b'a', b'p', b'-', b'x', b'-', letter, b'-',
+                        if deleted { b'd' } else { b'n' }, if present { b'p' } else { b'a' }];
+                    assert_eq!(refusal.token(), token.as_slice());
+                }
+            }
+        }
+        let check = |path: &str, class| {
+            assert_eq!(role(path), None);
+            assert_eq!(executable_file_refusal(path), R::ExecutableFile);
+            assert_eq!(mappings(format!("1-2 r-xp 0 00:00 0 {path}\n").as_bytes()), Err(generic(class, false, false)));
+        };
+        for (prefix, class) in [("/usr/lib/", G::Library), ("/usr/lib64/", G::Library), ("/lib/", G::Library), ("/lib64/", G::Library),
+            ("/usr/bin/", G::Command), ("/usr/sbin/", G::Command), ("/bin/", G::Command), ("/sbin/", G::Command)] {
+            check(&format!("{prefix}unlisted-fixture"), class);
+            check(prefix, G::Other); // Nonempty component required.
+        }
+        for prefix in ["/var/lib/mrk-ubuntu-native-", "/var/lib/mrk-ubuntu-shell-fixtures-"] {
+            for suffix in ["1-2/file", "99999999999999999999-99999999999999999999/file"] {
+                check(&format!("{prefix}{suffix}"), G::Hosted);
+            }
+            for suffix in ["0-1/file", "01-1/file", "1-0/file", "1-01/file", "-1/file", "1-/file", "1-1", "1-1/",
+                "1-1-2/file", "1-+2/file", "1-２/file", "111111111111111111111-1/file", "1-111111111111111111111/file",
+                "1x-2/file", "1-2x/file"] { check(&format!("{prefix}{suffix}"), G::Other); }
+        }
+        for path in [VERSION.to_owned(), format!("{VERSION}/"), format!("{VERSION}-sibling/file"), format!("{VERSION}x/file")] {
+            check(&path, G::Other);
+        }
+        for path in ["/usr/libevil/file", "/usr/lib64evil/file", "/usr/local/lib/file", "/usr/local/bin/file",
+            "/USR/LIB/file", "/memfdish", "/var/lib/mrk-ubuntu-nativeevil-1-2/file"] { check(path, G::Other); }
+        check("/memfd:", G::Memfd); // Literal prefix, not a filesystem claim.
+        check(&format!("{VERSION}/../file"), G::Version);
+        check("/usr/lib/../file", G::Library); // Lexical only; never normalize for admission.
+        let generic_first = b"1-2 r-xp 0 00:00 0 /unrecognized\n";
+        let mut bad_first = b"x r-xp 0 00:00 0 /unrecognized\n".to_vec(); bad_first.extend_from_slice(generic_first);
+        assert_eq!(mappings(&bad_first), Err(R::Address));
+        let mut bad_later = generic_first.to_vec(); bad_later.extend_from_slice(b"x r-xp 0 00:00 0 /unrecognized\n");
+        assert_eq!(mappings(&bad_later), Err(generic(G::Other, false, false)));
+        let mut bad_utf8 = vec![0xff]; bad_utf8.extend_from_slice(generic_first);
+        assert_eq!(mappings(&bad_utf8), Err(R::Utf8));
+        assert_eq!(mappings(&generic_first[..generic_first.len() - 1]), Err(R::Newline));
     }
     #[cfg(all(debug_assertions, not(feature = "desktop-shell"), not(feature = "custom-protocol")))]
     #[test]

@@ -35,6 +35,8 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/asset_commands.rs"] mod asset_commands;
 #[path = "../src/asset_source.rs"] mod asset_source;
 #[path = "../src/asset_session.rs"] mod asset_session;
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[path = "../src/vault_keyring_linux.rs"] mod vault_keyring_linux;
 #[path = "../src/edit_protocol.rs"] mod edit_protocol;
 #[path = "../src/github_workflow_edit_protocol.rs"] mod github_workflow_edit_protocol;
 #[path = "../src/metadata_text_edit_protocol.rs"] mod metadata_text_edit_protocol;

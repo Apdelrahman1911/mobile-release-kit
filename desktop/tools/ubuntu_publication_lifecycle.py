@@ -45,7 +45,13 @@ INSTALLED_TESTS = {key: "supervisor::tests::installed_candidate_a_" + suffix for
 CHILD_MARKER = "MRK_INSTALLED_NATIVE_CHILD="
 EMFILE_MARKER = "MRK_INSTALLED_NATIVE_EMFILE_RETAINED_UNKNOWN"
 SHELL_SESSION_CASES = ("session-inputs", "session-refusals", "session-loss", "session-deadline")
-SHELL_CASES = ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply", *SHELL_SESSION_CASES, "metadata-save")
+SHELL_TOOLS_OFFLINE_CASES = ("tools-observed", "tools-cancel", "tools-settlement", "offline-pass", "offline-negative",
+                           "offline-drift", "offline-cancel", "offline-settlement")
+# Preserve the original ten-case order; these eight are qualification-only.
+SHELL_CASES = ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply", *SHELL_SESSION_CASES, "metadata-save",
+               *SHELL_TOOLS_OFFLINE_CASES)
+SHELL_PUBLIC_FILE_LIMIT = 160  # Exact eighteen-case roster:154; non-shell remains128.
+SHELL_FIXTURE_NAMESPACE_LIMIT = 2048
 SHELL_FAILURE_LABEL_LIMIT = 512
 SHELL_PATH_FAILURE_FRAME_BOUND = 256
 # Literal observer labels only; never a prefix parser or raw-output escape.
@@ -203,6 +209,7 @@ SHELL_FAILURE_STEPS = (
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadSaved\n",
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataRefresh\n",
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadReadback\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ToolsOffline\n",
 )
 SHELL_FAILURE_BOUNDARIES = (
     b"MRK_INSTALLED_SHELL_FAILURE_PHASE=bootstrap\n",
@@ -385,6 +392,16 @@ SHELL_SESSION_PUBLIC_MAP_WORKERS = (
     b"map-x-yg", b"map-x-yh", b"map-x-yi", b"map-x-yj", b"map-x-yk", b"map-x-yl", b"map-x-ym", b"map-x-yn", b"map-x-yo",
     b"map-x-yp", b"map-x-yq", b"map-x-yr", b"map-x-ys", b"map-x-yt", b"map-x-yu", b"map-x-yv", b"map-x-yw", b"map-x-yx",
 )
+# K's accepted fail-only spelling/history partition. These static labels do not
+# admit a mapping, identify a path or change the14/412/512-byte failure bounds.
+SHELL_SESSION_GENERIC_MAP_WORKERS = (
+    b"map-x-v-na", b"map-x-v-np", b"map-x-v-da", b"map-x-v-dp",
+    b"map-x-l-na", b"map-x-l-np", b"map-x-l-da", b"map-x-l-dp",
+    b"map-x-c-na", b"map-x-c-np", b"map-x-c-da", b"map-x-c-dp",
+    b"map-x-h-na", b"map-x-h-np", b"map-x-h-da", b"map-x-h-dp",
+    b"map-x-m-na", b"map-x-m-np", b"map-x-m-da", b"map-x-m-dp",
+    b"map-x-o-na", b"map-x-o-np", b"map-x-o-da", b"map-x-o-dp",
+)
 SHELL_SESSION_WORKERS = (
     b"na", b"unavailable", b"none-recorded", b"child-id", b"observe-entry", b"maps-read", b"maps-check", b"env-read", b"env-check",
     b"hold-refused", b"settle-unknown",
@@ -400,7 +417,7 @@ SHELL_SESSION_WORKERS = (
     b"map-m-stat-ld", b"map-m-type-ld", b"map-m-owner-ld", b"map-m-links-ld", b"map-m-mode-ld", b"map-m-inode-ld", b"map-m-dev-ld", b"map-dup-ld",
     b"map-m-stat-lc", b"map-m-type-lc", b"map-m-owner-lc", b"map-m-links-lc", b"map-m-mode-lc", b"map-m-inode-lc", b"map-m-dev-lc", b"map-dup-lc",
     b"map-m-stat-lm", b"map-m-type-lm", b"map-m-owner-lm", b"map-m-links-lm", b"map-m-mode-lm", b"map-m-inode-lm", b"map-m-dev-lm", b"map-dup-lm",
-    *SHELL_SESSION_PUBLIC_MAP_WORKERS,
+    *SHELL_SESSION_GENERIC_MAP_WORKERS, *SHELL_SESSION_PUBLIC_MAP_WORKERS,
 )
 SHELL_SESSION_WORKER_STAGES = (b"inspect", b"acquire", b"observe", b"write", b"stdout", b"stderr", b"settle")
 SHELL_SESSION_WORKER_JOINS = b"cxf"
@@ -530,6 +547,241 @@ SHELL_SESSION_RECEIPTS = {case: {
         "noPreview": True, "queryResult": "query_timeout", "assetReason": "deadline",
     }),
 )}
+# Closed synthetic project DATA from the PF01/PF02/PF06 fixture recipes.
+# The configured interpreter is already an original lifecycle TOOLS input.
+# check.py is trusted project code, not a bootstrap, Gradle shim or isolation.
+SHELL_TOOLS_OFFLINE_MARKER = b"MRK_INSTALLED_SHELL_TOOLS_OFFLINE="
+SHELL_TOOLS_OFFLINE_RECEIPT_LIMIT = 64 << 10
+SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT = 16 << 10
+SHELL_TOOLS_OFFLINE_SCRIPT = br'''import os
+import sys
+import time
+
+# Fixed configured project DATA, not an alternate bootstrap or process owner.
+mode = sys.argv[1]
+if mode not in ('pass', 'nonzero', 'active', 'later'):
+    raise SystemExit(91)
+path = 'later.trace' if mode == 'later' else 'script.trace'
+fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC)
+try:
+    marker = {'pass': b'pass\n', 'nonzero': b'exit-7\n', 'active': b'active\n', 'later': b'forbidden-later\n'}[mode]
+    if os.write(fd, marker) != len(marker):
+        raise SystemExit(92)
+finally:
+    os.close(fd)
+print('OFFLINE_FIXTURE_PRIVATE_OUTPUT ' + os.getcwd(), flush=True)
+print('OFFLINE_FIXTURE_PRIVATE_ERROR ' + os.getcwd(), file=sys.stderr, flush=True)
+if mode == 'active':
+    while True:
+        time.sleep(0.05)
+raise SystemExit(7 if mode == 'nonzero' else 0)
+'''
+SHELL_TOOLS_OFFLINE_CONFIG_PASS = b'''{
+  "android": {
+    "applicationId": "com.example.reader",
+    "enabled": true,
+    "externalTrack": {
+      "kind": "closed",
+      "name": "closed-testing"
+    },
+    "identityStatus": "approved",
+    "module": ":app",
+    "uploadCertificateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "variant": "release"
+  },
+  "ios": {
+    "enabled": false
+  },
+  "metadata": {
+    "androidLocales": [
+      "en-US"
+    ],
+    "iosLocales": [],
+    "root": "release/store"
+  },
+  "projectChecks": {
+    "androidArtifact": [],
+    "iosArtifact": [],
+    "preflight": [
+      [
+        "/usr/bin/python3.12",
+        "-I",
+        "-S",
+        "-B",
+        "check.py",
+        "pass"
+      ]
+    ]
+  },
+  "schemaVersion": 1,
+  "services": {
+    "androidFirebase": "disabled",
+    "iosFirebase": "disabled"
+  },
+  "source": {
+    "candidateBranch": "main",
+    "productionBranch": "main"
+  },
+  "version": {
+    "buildKey": "BUILD_NUMBER",
+    "nameKey": "VERSION_NAME",
+    "source": "release/version.properties"
+  }
+}
+'''
+SHELL_TOOLS_OFFLINE_CONFIG_NEGATIVE = b'''{
+  "android": {
+    "applicationId": "com.example.reader",
+    "enabled": true,
+    "externalTrack": {
+      "kind": "closed",
+      "name": "closed-testing"
+    },
+    "identityStatus": "approved",
+    "module": ":app",
+    "uploadCertificateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "variant": "release"
+  },
+  "ios": {
+    "enabled": false
+  },
+  "metadata": {
+    "androidLocales": [
+      "en-US"
+    ],
+    "iosLocales": [],
+    "root": "release/store"
+  },
+  "projectChecks": {
+    "androidArtifact": [],
+    "iosArtifact": [],
+    "preflight": [
+      [
+        "/usr/bin/python3.12",
+        "-I",
+        "-S",
+        "-B",
+        "check.py",
+        "nonzero"
+      ],
+      [
+        "/usr/bin/python3.12",
+        "-I",
+        "-S",
+        "-B",
+        "check.py",
+        "later"
+      ]
+    ]
+  },
+  "schemaVersion": 1,
+  "services": {
+    "androidFirebase": "disabled",
+    "iosFirebase": "disabled"
+  },
+  "source": {
+    "candidateBranch": "main",
+    "productionBranch": "main"
+  },
+  "version": {
+    "buildKey": "BUILD_NUMBER",
+    "nameKey": "VERSION_NAME",
+    "source": "release/version.properties"
+  }
+}
+'''
+SHELL_TOOLS_OFFLINE_CONFIG_CANCEL = b'''{
+  "android": {
+    "applicationId": "com.example.reader",
+    "enabled": true,
+    "externalTrack": {
+      "kind": "closed",
+      "name": "closed-testing"
+    },
+    "identityStatus": "approved",
+    "module": ":app",
+    "uploadCertificateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "variant": "release"
+  },
+  "ios": {
+    "enabled": false
+  },
+  "metadata": {
+    "androidLocales": [
+      "en-US"
+    ],
+    "iosLocales": [],
+    "root": "release/store"
+  },
+  "projectChecks": {
+    "androidArtifact": [],
+    "iosArtifact": [],
+    "preflight": [
+      [
+        "/usr/bin/python3.12",
+        "-I",
+        "-S",
+        "-B",
+        "check.py",
+        "active"
+      ],
+      [
+        "/usr/bin/python3.12",
+        "-I",
+        "-S",
+        "-B",
+        "check.py",
+        "later"
+      ]
+    ]
+  },
+  "schemaVersion": 1,
+  "services": {
+    "androidFirebase": "disabled",
+    "iosFirebase": "disabled"
+  },
+  "source": {
+    "candidateBranch": "main",
+    "productionBranch": "main"
+  },
+  "version": {
+    "buildKey": "BUILD_NUMBER",
+    "nameKey": "VERSION_NAME",
+    "source": "release/version.properties"
+  }
+}
+'''
+SHELL_TOOLS_OFFLINE_CONFIGS = {case: (
+    SHELL_TOOLS_OFFLINE_CONFIG_NEGATIVE if case == "offline-negative" else
+    SHELL_TOOLS_OFFLINE_CONFIG_CANCEL if case == "offline-cancel" else SHELL_TOOLS_OFFLINE_CONFIG_PASS)
+    for case in SHELL_TOOLS_OFFLINE_CASES}
+SHELL_TOOLS_OFFLINE_TRACES = {case: (
+    b"pass\n" if case in ("offline-pass", "offline-settlement") else b"exit-7\n" if case == "offline-negative"
+    else b"active\n" if case == "offline-cancel" else b"") for case in SHELL_TOOLS_OFFLINE_CASES}
+SHELL_TOOLS_OFFLINE_FILES = {
+    "project/.gitignore": b"/.mobile-release/\n",
+    "project/release/version.properties": b"VERSION_NAME=1.2.3\nBUILD_NUMBER=42\n",
+    "project/app/build.gradle.kts": (b'plugins { id("com.android.application") }\n'
+        b'android { namespace = "com.example.reader"; defaultConfig { applicationId = "com.example.reader" }; '
+        b'buildTypes { debug { applicationIdSuffix = ".debug" } } }\n'),
+    "project/gradlew": b"#!/bin/sh\nexit 93\n",  # Presence sentinel only; MUST NOT execute.
+    "project/release/store/android/en-US/title.txt": b"Reader\n",
+    "project/release/store/android/en-US/short_description.txt": b"Read safely on every device.\n",
+    "project/release/store/android/en-US/full_description.txt": b"A real application description.\n",
+    "project/release/store/android/en-US/changelogs/default.txt": b"Reliability improvements.\n",
+    "project/check.py": SHELL_TOOLS_OFFLINE_SCRIPT,
+}
+SHELL_TOOLS_OFFLINE_ABSENT = ("project/.mobile-release", "project/.mobile-release-init-prepare",
+    "project/.mobile-release-init", "project/.mobile-release-init-cleanup", "project/.mobile-release-metadata-text-prepare",
+    "project/.mobile-release-metadata-text", "project/.mobile-release-metadata-text-cleanup")
+SHELL_TOOLS_OFFLINE_STATUSES = ("PASS", "FAIL", "MISSING", "BLOCKED", "INVALID", "SKIP", "MANUAL", "CONFIGURED", "NOT_APPLICABLE")
+SHELL_TOOLS_OFFLINE_CHECKS = ("version-source", "platform-selection", "android-module", "android-gradle-wrapper",
+    "android-debug-identity", "workspace-private-output", "android-artifact", "preflight-early-exit", "configuration-policy",
+    "metadata-policy", "configured-project-check", "core-lifecycle", "other-core-finding")
+SHELL_TOOLS_OFFLINE_LIMITATIONS = ["saved-inputs-not-atomic", "project-code-effects-possible", "not-network-isolated",
+    "core-builds-disabled", "artifact-validation-not-requested", "toolkit-signing-credentials-store-not-requested",
+    "release-readiness-not-assessed"]
+
 SHELL_METADATA_MARKER = b"MRK_INSTALLED_SHELL_METADATA_SAVE="
 SHELL_METADATA_RECEIPT = {
     "schemaVersion": 1, "fixture": "android-metadata-save-v1", "gate": "installed-metadata-profile",
@@ -1766,18 +2018,20 @@ def _capacity(value):
             + len(SHELL_METADATA_SHORT_BEFORE)
         session_nodes = [row for case in SHELL_SESSION_CASES for row in _shell_session_roster(value, case)]
         required += sum(len(row[3]) for row in session_nodes if not stat.S_ISDIR(row[1]))
+        tools_offline_nodes = [row for case in SHELL_TOOLS_OFFLINE_CASES for row in _shell_tools_offline_roster(value, case, True)]
+        required += sum(len(row[3]) for row in tools_offline_nodes if stat.S_ISREG(row[1]))
         # Each added existing GUI route creates eight directories, auth and
-        # bus-config files, its log, and a bus socket. The original128 output
-        # slots and TOTAL_LIMIT still cover the public before/after captures.
-        session_environment_nodes = 12 * len(SHELL_SESSION_CASES)
-    inodes = 2 * max(capacity["installedEntries"].values()) + 2 * 8192 + 128
+        # bus-config files, its log, and a bus socket. The shell-only160 output
+        # slots cover the154 originals; TOTAL_LIMIT is unchanged.
+        session_environment_nodes = 12 * (len(SHELL_SESSION_CASES) + len(SHELL_TOOLS_OFFLINE_CASES))
+    inodes = 2 * max(capacity["installedEntries"].values()) + 2 * 8192 + (SHELL_PUBLIC_FILE_LIMIT if "shell" in value else 128)
     if "shell" in value:
-        inodes += len(SHELL_CASES[1:]) + 1 + 12 + 14 + len(session_nodes) + session_environment_nodes
+        inodes += len(SHELL_CASES[1:]) + 1 + 12 + 14 + len(session_nodes) + len(tools_offline_nodes) + session_environment_nodes
     need(len({Path(name).stat().st_dev for name in ("/", "/var", "/var/lib", "/usr")}) == 1,
          "Capacity DATA does not cover the same root package/publication filesystem")
     space = os.statvfs("/var/lib")
     if "shell" in value:
-        required += (27 + len(session_nodes) + session_environment_nodes) * space.f_frsize  # Finite nodes, not a quota.
+        required += (27 + len(session_nodes) + len(tools_offline_nodes) + session_environment_nodes) * space.f_frsize  # Finite nodes, not a quota.
     need(space.f_bavail * space.f_frsize >= required and space.f_favail >= inodes, "Insufficient original host capacity; do not clear caches")
 
 
@@ -2436,6 +2690,7 @@ def public_files(value):
                         "published-before-upgrade.txt", "mutation-denials.txt"} \
             | {"shell-" + case + "-xvfb.stderr" for case in SHELL_CASES} \
             | {"shell-" + case + "-" + phase + ".json" for case in SHELL_SESSION_CASES for phase in ("before", "after")} \
+            | {"shell-" + case + "-" + phase + ".json" for case in SHELL_TOOLS_OFFLINE_CASES for phase in ("before", "after")} \
             | {"shell-root-data-" + str(index) + ".json" for index in range(len(SHELL_DATA_ROOTS))}
     installed = value.get("installed")
     if installed is not None:
@@ -3747,8 +4002,9 @@ def _shell_log_capture(value, case, original, result):
     return raw
 
 
-SHELL_FIXTURE_CHILDREN = ("candidate-evidence", "metadata-project", "path-outside", "path-project", "positive-project",
-    "session-deadline", "session-inputs", "session-loss", "session-refusals", "workflow-project")
+SHELL_FIXTURE_CHILDREN = ("candidate-evidence", "metadata-project", "offline-cancel", "offline-drift", "offline-negative",
+    "offline-pass", "offline-settlement", "path-outside", "path-project", "positive-project", "session-deadline", "session-inputs",
+    "session-loss", "session-refusals", "tools-cancel", "tools-observed", "tools-settlement", "workflow-project")
 
 
 def _shell_session_roster(value, case, changed=False):
@@ -3924,6 +4180,144 @@ def shell_session_fixture(value, case, before_raw, after_raw):
             "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
 
 
+def _shell_tools_offline_roster(value, case, after=False):
+    """Twenty-one fixed, ordinary nodes per case; no supplied path or command."""
+    need(type(case) is str and case in SHELL_TOOLS_OFFLINE_CASES and type(after) is bool,
+         "Different fixed Tools/Offline fixture or phase")
+    owners = value["runnerUid"], value["runnerGid"]
+    files = {**SHELL_TOOLS_OFFLINE_FILES,
+        "project/release/mobile-release.json": SHELL_TOOLS_OFFLINE_CONFIGS[case] + (b"\n" if after and case == "offline-drift" else b""),
+        "project/script.trace": SHELL_TOOLS_OFFLINE_TRACES[case] if after else b"",
+        "project/later.trace": b""}
+    directories = (".", "project", "project/.git", "project/app", "project/release", "project/release/store",
+        "project/release/store/android", "project/release/store/android/en-US", "project/release/store/android/en-US/changelogs")
+    nodes = [*directories[1:], *files]
+    rows = [(name, stat.S_IFDIR | 0o700, owners,
+             sorted(Path(child).name for child in nodes if str(Path(child).parent) == name)) for name in directories]
+    return tuple(rows + [(name, stat.S_IFREG | 0o600, owners, files[name]) for name in sorted(files)])
+
+
+def _shell_tools_offline_fixtures_prepare(value, root):
+    """Create only fresh synthetic fixtures, before namespace publication."""
+    need(_ROOT == root_path(value) and root == shell_fixture_root(value), "Different fresh Tools/Offline fixture route")
+    for case in SHELL_TOOLS_OFFLINE_CASES:
+        base = root / case
+        for relative, mode, owners, expected in _shell_tools_offline_roster(value, case):
+            path = base if relative == "." else base / relative
+            if stat.S_ISDIR(mode):
+                path.mkdir(mode=0o700)
+            else:
+                _D.write(path, expected, 0o600)
+            os.chown(path, *owners, follow_symlinks=False)
+            _xattrs(path, stat.S_ISDIR(mode))
+
+
+def _shell_tools_offline_inventory(value, namespace, case, *, after=False):
+    """Pre-launch or actual ordinary Exit only; never inspect failed/live work."""
+    need(_ROOT == root_path(value), "Different original Tools/Offline service root")
+    roster = _shell_tools_offline_roster(value, case, after)
+    binding = namespace
+    namespace = _shell_namespace_check(value, binding)
+    root = shell_fixture_root(value) / case
+    rows, originals = [], []
+    # Parent rosters are admitted completely before any descendant is read.
+    for relative, mode, owners, expected in roster:
+        path = root if relative == "." else root / relative
+        before = path.lstat()
+        need(before.st_mode == mode and (before.st_uid, before.st_gid) == owners,
+             "Tools/Offline fixture ownership or mode differs")
+        _xattrs(path, stat.S_ISDIR(mode))
+        if stat.S_ISDIR(mode):
+            directory(path)
+            children = []
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    need(len(children) < len(expected) and entry.name in expected, "Unexpected Tools/Offline fixture entry")
+                    children.append(entry.name)
+            need(sorted(children) == expected, "Tools/Offline fixture child roster differs")
+            row = {"path": relative, "kind": "directory", "identity": list(identity(before)), "children": expected}
+        else:
+            observed = record(path, len(expected))
+            need(observed["size"] == len(expected) and observed["sha256"] == hashlib.sha256(expected).hexdigest(),
+                 "Tools/Offline fixture bytes differ")
+            row = {**observed, "path": relative, "kind": "file", "identity": list(identity(before))}
+        need(identity(path.lstat()) == identity(before), "Tools/Offline fixture changed during inventory")
+        rows.append(row)
+        originals.append((path, identity(before)))
+    for relative in SHELL_TOOLS_OFFLINE_ABSENT:
+        _absent(root / relative)
+    need(len({tuple(row["identity"][:2]) for row in rows}) == len(roster)
+         and all(row["identity"][0] == namespace["identity"][0] for row in rows)
+         and all(identity(path.lstat()) == original for path, original in originals),
+         "Tools/Offline fixture aliases, device or original identity differs")
+    _shell_namespace_check(value, binding)
+    document = {"schemaVersion": 1, "fixture": "installed-tools-offline-fixture-v1", "case": case, "root": str(root),
+                "changed": after and case.startswith("offline-"), "entries": rows,
+                "absent": list(SHELL_TOOLS_OFFLINE_ABSENT), "namespace": namespace}
+    need(len(canonical(document)) <= SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT, "Tools/Offline inventory exceeds its fixed bound")
+    return document
+
+
+def shell_tools_offline_fixture(value, case, before_raw, after_raw):
+    """Bind exact synthetic DATA and in-place changes to the same originals."""
+    inventories, namespaces = [], []
+    for raw, after in ((before_raw, False), (after_raw, True)):
+        roster = _shell_tools_offline_roster(value, case, after)
+        document = decode(raw, SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT)
+        need(type(document) is dict and set(document) == {"schemaVersion", "fixture", "case", "root", "changed", "entries", "absent", "namespace"}
+             and canonical(document) == raw and type(document["schemaVersion"]) is int and document["schemaVersion"] == 1
+             and document["fixture"] == "installed-tools-offline-fixture-v1" and document["case"] == case
+             and document["changed"] is (after and case.startswith("offline-"))
+             and document["root"] == str(shell_fixture_root(value) / case)
+             and document["absent"] == list(SHELL_TOOLS_OFFLINE_ABSENT), "Tools/Offline inventory shape or phase differs")
+        namespace = _shell_namespace_data(value, document["namespace"])
+        namespaces.append(namespace)
+        rows = document["entries"]
+        need(type(rows) is list and len(rows) == len(roster) == 21, "Tools/Offline fixture node roster differs")
+        observed = {}
+        for row, (relative, mode, owners, expected) in zip(rows, roster):
+            kind = "directory" if stat.S_ISDIR(mode) else "file"
+            fields = {"children"} if kind == "directory" else {"size", "sha256"}
+            need(type(row) is dict and set(row) == {"path", "kind", "identity"} | fields
+                 and row["path"] == relative and row["kind"] == kind, "Tools/Offline fixture node kind or path differs")
+            original = row["identity"]
+            need(row["path"] not in observed and type(original) is list and len(original) == 9
+                 and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+                 and original[0] > 0 and original[1] > 0 and original[2] == mode and tuple(original[3:5]) == owners
+                 and 0 < original[5] <= 16 and original[6] <= 1 << 20, "Tools/Offline fixture original identity differs")
+            if kind == "directory":
+                need(row["children"] == expected, "Tools/Offline fixture has unexpected or pending state")
+            else:
+                need(original[5] == 1 and original[6] == len(expected) and type(row["size"]) is int
+                     and row["size"] == len(expected) and row["sha256"] == hashlib.sha256(expected).hexdigest(),
+                     "Tools/Offline fixture is not the exact synthetic source DATA")
+            observed[relative] = row
+        reserved = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
+        need(all(row["identity"][0] == namespace["identity"][0] and tuple(row["identity"][:2]) not in reserved for row in rows)
+             and len({tuple(row["identity"][:2]) for row in rows}) == len(rows), "Tools/Offline nodes alias or cross devices")
+        inventories.append(observed)
+    first, last = inventories
+    need(namespaces[0] == namespaces[1] and set(first) == set(last), "Tools/Offline original namespace or roster changed")
+    mutations = (["project/release/mobile-release.json"] if case == "offline-drift" else
+                 ["project/script.trace"] if SHELL_TOOLS_OFFLINE_TRACES[case] else [])
+    for name, row in last.items():
+        if name in mutations:
+            need(first[name]["identity"][:6] == row["identity"][:6], "Tools/Offline changed leaf was replaced or chmodded")
+        else:
+            need(first[name] == row, "Tools/Offline changed an unrelated original")
+    if not mutations:
+        need(before_raw == after_raw, "Read-only Tools case changed its original fixture")
+    config = SHELL_TOOLS_OFFLINE_CONFIGS[case]
+    return {"fixture": "installed-tools-offline-fixture-v1", "case": case, "rootRetained": True, "originalsAccounted": True,
+            "noUnexpectedEntries": True, "noPendingState": True, "beforeCount": 21, "afterCount": 21, "mutations": mutations,
+            "scriptTrace": SHELL_TOOLS_OFFLINE_TRACES[case].decode("ascii"), "laterTrace": "", "savedConfigChanged": case == "offline-drift",
+            "savedConfigBefore": {"bytes": len(config), "sha256": hashlib.sha256(config).hexdigest()},
+            "savedConfigAfter": {"bytes": len(config) + (case == "offline-drift"),
+                                 "sha256": hashlib.sha256(config + (b"\n" if case == "offline-drift" else b"")).hexdigest()},
+            "before": {"size": len(before_raw), "sha256": hashlib.sha256(before_raw).hexdigest()},
+            "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
+
+
 def _shell_fixture_ancestry(value):
     """Metadata only; the search-only control root and private contents stay put."""
     need("shell" in value and "installed" not in value and _ROOT == root_path(value), "Different original shell fixture route")
@@ -3969,9 +4363,11 @@ def _shell_namespace_data(value, namespace):
              and (original[2] == mode if mode is not None else original[2] & 0o005 == 0o005),
              "Shell fixture namespace identity/mode differs")
         if length == 9:
-            need(0 < original[5] <= 16 and original[6] <= 1 << 20, "Shell fixture namespace directory bound differs")
+            need(0 < original[5] <= len(SHELL_FIXTURE_CHILDREN) + 2 and original[6] <= 1 << 20,
+                 "Shell fixture namespace directory bound differs")
         identities.append(tuple(original[:2]))
-    need(len(set(identities)) == 5 and len({pair[0] for pair in identities}) == 1 and len(canonical(namespace)) < 1024,
+    need(len(set(identities)) == 5 and len({pair[0] for pair in identities}) == 1
+         and len(canonical(namespace)) < SHELL_FIXTURE_NAMESPACE_LIMIT,
          "Shell fixture namespace aliases, device or DATA bound differs")
     return namespace
 
@@ -3987,7 +4383,7 @@ def _shell_namespace_roster(root):
 
 def _shell_namespace_check(value, binding):
     # Immutable original bytes, never a new snapshot substituted as authority.
-    namespace = _shell_namespace_data(value, decode(binding, 1024))
+    namespace = _shell_namespace_data(value, decode(binding, SHELL_FIXTURE_NAMESPACE_LIMIT))
     need(canonical(namespace) == binding, "Original shell namespace binding is not canonical")
     ancestry = {key: namespace[key] for key in ("control", "ancestors")}
     need(_shell_fixture_ancestry(value) == ancestry, "Original shell fixture ancestry changed")
@@ -4001,7 +4397,7 @@ def _shell_namespace_check(value, binding):
 
 
 def _shell_fixtures_prepare(value):
-    """Create the ten fixed DATA trees once, retained on every failure.
+    """Create the eighteen fixed DATA trees once, retained on every failure.
 
     The sibling follows the existing disposable-runner retention policy; there
     is no deletion, cleanup scan, retry or permission repair of an old object.
@@ -4069,6 +4465,7 @@ def _shell_fixtures_prepare(value):
             os.chown(path, *owners)
         _xattrs(path, stat.S_ISDIR(mode))
     _shell_session_fixtures_prepare(value, root)
+    _shell_tools_offline_fixtures_prepare(value, root)
     _shell_namespace_roster(root)
     for name, kind in (("positive-project", True), ("positive-project/app", True),
                        ("positive-project/app/build.gradle.kts", False), ("positive-project/version.properties", False),
@@ -4584,6 +4981,161 @@ def shell_session_receipt(raw, case):
     return receipt
 
 
+def _shell_tools_offline_object(value, fields, message):
+    need(type(value) is dict and set(value) == set(fields), message)
+    return value
+
+
+def _shell_tools_offline_context(context, case):
+    offline = case.startswith("offline-")
+    _shell_tools_offline_object(context, {"projectId", "draftRevision", "baselineGeneration", "platform", "operation"}
+        | ({"savedConfig"} if offline else set()), "Tools/Offline original context shape differs")
+    need(type(context["projectId"]) is str and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", context["projectId"]) is not None
+         and all(type(context[key]) is int and 0 <= context[key] < (1 << 32) - 1 for key in ("draftRevision", "baselineGeneration"))
+         and context["platform"] == "android" and context["operation"] == ("offline-preflight" if offline else "build"),
+         "Tools/Offline original context differs")
+    if offline:
+        config = SHELL_TOOLS_OFFLINE_CONFIGS[case]
+        need(canonical(context["savedConfig"]) == canonical({"bytes": len(config), "sha256": hashlib.sha256(config).hexdigest()}),
+             "Offline intent is not bound to the exact predeclared saved bytes")
+
+
+def _shell_tools_terminal(projection, case):
+    need(projection["phase"] == "settled" and projection["finality"] == "settled", "Tools public finality is still pending/unknown")
+    if case == "tools-cancel":
+        need(projection["outcome"] == "cancelled" and projection["reason"] == "cancelled" and projection["result"] is None,
+             "Preclaim Tools cancellation advertised a core result")
+        return
+    core = _shell_tools_offline_object(projection["result"], {"schemaVersion", "policyVersion", "context", "hostPlatform",
+        "outcome", "checks", "commandsAttempted", "lifetime", "assurance"}, "Tools actual core terminal is missing")
+    need(type(core["schemaVersion"]) is int and core["schemaVersion"] == 1 and core["policyVersion"] == "environment-diagnostics-v1"
+         and core["hostPlatform"] == "linux" and canonical(core["context"]) == canonical(projection["context"])
+         and core["outcome"] in ("complete", "unavailable") and projection["outcome"] == core["outcome"]
+         and projection["reason"] == "none", "Tools core/owner terminal differs or is partial")
+    checks = core["checks"]
+    need(type(checks) is list and len(checks) == 3, "Tools fixed Linux Android check roster differs")
+    attempts = 0
+    for row, role in zip(checks, ("git", "java", "javac")):
+        _shell_tools_offline_object(row, {"id", "state", "reason", "version", "build", "returnCode", "baseline", "assessment", "help"},
+                                   "Tools check is not closed Linux DATA")
+        need(row["id"] == role and row["state"] in ("not-run", "completed") and row["build"] is None
+             and type(row["help"]) is str and 0 < len(row["help"].encode("utf-8")) <= 1024 and row["help"].strip()
+             and all(ord(char) > 31 and ord(char) != 127 for char in row["help"]), "Tools fixed check or bounded help differs")
+        baseline = _shell_tools_offline_object(row["baseline"], {"kind", "version", "build"}, "Tools core baseline shape differs")
+        need(baseline["build"] is None and (baseline == {"kind": "no-local-policy", "version": None, "build": None} if role == "git" else
+             baseline["kind"] == "workflow-reference" and type(baseline["version"]) is str
+             and re.fullmatch(r"[0-9][A-Za-z0-9._+\-]{0,63}", baseline["version"]) is not None),
+             "Tools core-supplied baseline differs")
+        if row["state"] == "not-run":
+            need(row["reason"] in ("missing-in-supported-lookup", "unsupported-installation", "unselected-installation")
+                 and row["returnCode"] is None and row["version"] is None and row["assessment"] == "not-assessed",
+                 "Tools not-run row is not an honest fixed-lookup refusal")
+            continue
+        attempts += 1
+        need(type(row["returnCode"]) is int and -(1 << 31) <= row["returnCode"] < 1 << 31
+             and row["reason"] in ("observed", "nonzero-exit", "version-unrecognized")
+             and (row["reason"] == "nonzero-exit") == (row["returnCode"] != 0), "Tools completed original return differs")
+        if row["reason"] == "observed":
+            pattern = (r"[0-9]{1,3}\.[0-9]{1,3}(?:\.[0-9]{1,3})?(?:[.\-][A-Za-z0-9][A-Za-z0-9.+\-]{0,40})?" if role == "git" else
+                       r"[0-9]{1,3}(?:[._][0-9]{1,6}){0,3}(?:[+\-][A-Za-z0-9][A-Za-z0-9.+_\-]{0,32})?")
+            need(type(row["version"]) is str and len(row["version"]) <= 64 and re.fullmatch(pattern, row["version"]) is not None
+                 and row["assessment"] == "no-local-policy", "Tools observed version or non-readiness assessment differs")
+        else:
+            need(row["version"] is None and row["assessment"] == "not-assessed", "Unobserved tool advertised a version")
+    need(type(core["commandsAttempted"]) is int and core["commandsAttempted"] == attempts
+         and (core["outcome"] == "unavailable") == (attempts == 0), "Tools command/observation count differs")
+    need(canonical(core["lifetime"]) == canonical({"complete": True, "fatal": False, "contained": True,
+         "commandDispatched": attempts > 0, "commands": attempts, "inputClosed": True, "handlersRestored": True,
+         "toolDescriptorsClosed": True, "stopObserved": "none"}), "Tools actual core lifetime did not settle")
+    need(canonical(core["assurance"]) == canonical({"basis": "local-tool-observation", "toolsAttempted": attempts > 0,
+         "projectCodeExecuted": False, "projectFilesRead": False, "repositoryObserved": False, "sdkInspected": False,
+         "credentialsRead": False, "storeContacted": False, "dependencyCompleteness": "unknown", "releaseReadiness": "unknown",
+         "toolCacheEffects": "possible"}), "Tools observation was relabelled as readiness or project execution")
+
+
+def _shell_offline_terminal(projection, case):
+    outcome, reason = (("refused", "saved-config-changed") if case == "offline-drift" else
+                       ("cancelled", "cancelled") if case == "offline-cancel" else ("complete", "none"))
+    need(projection["phase"] == "terminal" and projection["intentUsable"] is False
+         and projection["outcome"] == outcome and projection["reason"] == reason, "Offline actual outcome or consumed intent differs")
+    if outcome != "complete":
+        need(projection["result"] is None, "Refused/cancelled Offline case advertised a report")
+        return
+    report = _shell_tools_offline_object(projection["result"], {"schemaVersion", "scope", "usedConfig", "findings", "summary", "limitations"},
+                                       "Offline actual complete report is missing")
+    need(type(report["schemaVersion"]) is int and report["schemaVersion"] == 1 and report["scope"] == "saved-offline-android-no-core-build"
+         and canonical(report["usedConfig"]) == canonical(projection["context"]["savedConfig"])
+         and report["limitations"] == SHELL_TOOLS_OFFLINE_LIMITATIONS, "Offline report scope, saved bytes or limitations differ")
+    summary = _shell_tools_offline_object(report["summary"], {"total", "shown", "omitted", "counts"}, "Offline summary fields differ")
+    counts = _shell_tools_offline_object(summary["counts"], SHELL_TOOLS_OFFLINE_STATUSES, "Offline summary status roster differs")
+    need(all(type(summary[key]) is int and 0 <= summary[key] <= 4096 for key in ("total", "shown", "omitted"))
+         and summary["shown"] == min(summary["total"], 128) and summary["omitted"] == summary["total"] - summary["shown"]
+         and all(type(count) is int and 0 <= count <= 4096 for count in counts.values()) and sum(counts.values()) == summary["total"],
+         "Offline summary counts differ")
+    rows = report["findings"]
+    need(type(rows) is list and len(rows) == summary["shown"], "Offline bounded findings count differs")
+    seen, configured = {status: 0 for status in SHELL_TOOLS_OFFLINE_STATUSES}, []
+    for index, row in enumerate(rows):
+        _shell_tools_offline_object(row, {"ordinal", "check", "status", "message", "projectCheckIndex"}, "Offline finding fields differ")
+        need(type(row["ordinal"]) is int and row["ordinal"] == index and row["check"] in SHELL_TOOLS_OFFLINE_CHECKS
+             and row["message"] == row["check"] and row["status"] in SHELL_TOOLS_OFFLINE_STATUSES
+             and (row["projectCheckIndex"] is None or row["check"] == "configured-project-check"
+                  and type(row["projectCheckIndex"]) is int and 0 <= row["projectCheckIndex"] <= 31), "Offline finding is not redacted fixed DATA")
+        seen[row["status"]] += 1
+        if row["check"] == "configured-project-check":
+            configured.append(row)
+    need(all(seen[status] <= counts[status] for status in seen) and len(configured) == 1
+         and type(configured[0]["projectCheckIndex"]) is int and configured[0]["projectCheckIndex"] == 0
+         and configured[0]["status"] == ("FAIL" if case == "offline-negative" else "PASS")
+         and all(counts[status] == 0 for status in ("MISSING", "BLOCKED", "INVALID"))
+         and (counts["FAIL"] > 0 if case == "offline-negative" else counts["FAIL"] == 0),
+         "Offline fixed project check is missing or complete-negative was relabelled PASS")
+
+
+def shell_tools_offline_receipt(raw, case):
+    """Closed observer engineering DATA, never a shipping qualification token."""
+    need(type(case) is str and case in SHELL_TOOLS_OFFLINE_CASES, "Different fixed Tools/Offline receipt case")
+    receipt = decode(raw, SHELL_TOOLS_OFFLINE_RECEIPT_LIMIT)
+    fields = {"schema", "case", "qualificationOnly", "builder", "projectPicker", "savedObservation", "requests", "initial", "ui",
+              "reciprocalBusy", "hold", "original", "terminal", "fixture"}
+    _shell_tools_offline_object(receipt, fields, "Tools/Offline receipt fields differ")
+    need(raw == canonical(receipt), "Tools/Offline receipt is not original canonical LF DATA")
+    offline, cancelled = case.startswith("offline-"), case in ("tools-cancel", "offline-cancel")
+    boundary = "inspection" if case == "tools-cancel" else "settlement" if case in ("tools-settlement", "offline-settlement") else "none"
+    fixed = {"schema": "installed-tools-offline-v1", "case": case, "qualificationOnly": True, "builder": "normal",
+        "projectPicker": True, "savedObservation": True,
+        "requests": {"toolsStart": 0 if offline else 1, "toolsCancel": 1 if case == "tools-cancel" else 0,
+                     "offlinePrepare": 1 if offline else 0, "offlineStart": 1 if offline else 0, "offlineCancel": 1 if case == "offline-cancel" else 0},
+        "initial": {"toolsAvailable": True, "offlineAvailable": True},
+        "ui": {"start": True, "consent": offline, "terminal": True, "cancel": cancelled},
+        "reciprocalBusy": case in ("tools-settlement", "offline-cancel", "offline-settlement"),
+        "hold": {"boundary": boundary, "entered": boundary != "none", "released": boundary != "none"},
+        "fixture": {"scriptTrace": SHELL_TOOLS_OFFLINE_TRACES[case].decode("ascii"), "laterTrace": "", "savedConfigChanged": case == "offline-drift"}}
+    need(canonical({key: receipt[key] for key in fixed}) == canonical(fixed),
+         "Tools/Offline route, consent, reciprocal gate, hold release or fixed trace differs")
+    original = receipt["original"]
+    flags = {key: True for key in ("inspectionJoined", "acquisitionJoined", "attempted", "childWaitedSuccess", "stdinClosed",
+        "stdoutEofClosed", "stderrEofClosed", "ioJoined", "coreLifetimeSettled", "runtimeLedgerSettled", "runtimeSettlementJoined",
+        "driverJoined", "managerJoined", "observerJoined", "watchdogJoined", "retiredBeforeCutoff")}
+    flags.update(noChild=False, activeRetained=False, resourceUnknown=False)
+    if case == "tools-cancel":
+        flags.update({key: False for key in ("acquisitionJoined", "attempted", "childWaitedSuccess", "stdinClosed", "stdoutEofClosed",
+                                            "stderrEofClosed", "coreLifetimeSettled")})
+        flags["noChild"] = True
+    _shell_tools_offline_object(original, {"domain", "id", "generation", *flags}, "Tools/Offline original resource fields differ")
+    need(original["domain"] == ("offline" if offline else "tools")
+         and all(type(original[key]) is str and re.fullmatch(r"[0-9a-f]{32}", original[key]) is not None for key in ("id", "generation"))
+         and canonical({key: original[key] for key in flags}) == canonical(flags),
+         "Tools/Offline same-original inspection, claim, IO, ledger or actual joins are missing")
+    projection = _shell_tools_offline_object(receipt["terminal"], {"ownerGeneration", "context", "phase", "outcome", "reason", "result"}
+        | ({"operationId", "intentUsable"} if offline else {"runId", "finality"}), "Tools/Offline actual typed projection differs")
+    need(projection["operationId" if offline else "runId"] == original["id"] and projection["ownerGeneration"] == original["generation"],
+         "Tools/Offline terminal belongs to a different original")
+    _shell_tools_offline_context(projection["context"], case)
+    (_shell_offline_terminal if offline else _shell_tools_terminal)(projection, case)
+    return receipt
+
+
 def _shell_path_roster(changed):
     return tuple((SHELL_PATH_MOVES.get(name, name) if changed else name, kind) for name, kind in SHELL_PATH_NODES) + (
         (("path-project/inputs/link-input", "symlink"),) if changed else ())
@@ -4745,12 +5297,14 @@ def _shell_prepare(value, case, namespace):
         _retain("shell-" + case + "-before.json", canonical(_shell_session_inventory(value, namespace, case)))
     if case == "metadata-save":
         _retain("shell-metadata-save-before.json", canonical(_shell_metadata_inventory(value, namespace)))
+    if case in SHELL_TOOLS_OFFLINE_CASES:
+        _retain("shell-" + case + "-before.json", canonical(_shell_tools_offline_inventory(value, namespace, case)))
     return environment, log_binding
 
 
 def _shell_fixtures_final(value, namespace):
     """Compare retained fixtures only after every original case has returned."""
-    # Every original case, with metadata last, has returned through the
+    # Every original case, including the eight Tools/Offline cases, returned through the
     # same shell_result gate. Check every earlier original family and the
     # saved metadata together, never by following a failed/possibly-live case.
     need(canonical(_shell_project_inventory(value, namespace, saved=True))
@@ -4768,6 +5322,10 @@ def _shell_fixtures_final(value, namespace):
         need(canonical(_shell_session_inventory(value, namespace, case, changed=case == "session-refusals"))
              == read(_ROOT / "public" / ("shell-" + case + "-after.json"), SHELL_SESSION_INVENTORY_LIMIT),
              "Later shell observations changed an earlier original session fixture")
+    for case in SHELL_TOOLS_OFFLINE_CASES:
+        need(canonical(_shell_tools_offline_inventory(value, namespace, case, after=True))
+             == read(_ROOT / "public" / ("shell-" + case + "-after.json"), SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT),
+             "Later shell observations changed an earlier original Tools/Offline fixture")
 
 
 def _shell_original_child_map(raw, expected):
@@ -4824,6 +5382,17 @@ def shell_result(stdout, stderr, case, code, expected):
         receipt = receipt_reader(output[3][len(receipt_marker):])
         return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True, "maps": [],
                 field: receipt}
+    if case in SHELL_TOOLS_OFFLINE_CASES:
+        output = [line for line in stdout.splitlines(keepends=True) if line.startswith(b"MRK_")]
+        diagnostics = [line for line in stderr.splitlines() if line.startswith(b"MRK_")]
+        need(len(output) == 5 and output[:3] == [b"MRK_DESKTOP_CAPABILITIES=available\n",
+             b"MRK_DESKTOP_CATALOGUE=returned\n", contracts + b"\n"]
+             and output[3].startswith(SHELL_TOOLS_OFFLINE_MARKER) and output[3].endswith(b"\n")
+             and output[4] == marker + b"\n" and diagnostics == [],
+             "Tools/Offline original bootstrap/contract/receipt/completion order differs")
+        receipt = shell_tools_offline_receipt(output[3][len(SHELL_TOOLS_OFFLINE_MARKER):], case)
+        return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
+                "maps": [], "toolsOffline": receipt}
     if case in SHELL_SESSION_CASES:
         output = [line for line in stdout.splitlines(keepends=True) if line.startswith(b"MRK_")]
         diagnostics = [line for line in stderr.splitlines() if line.startswith(b"MRK_")]
@@ -5634,6 +6203,11 @@ def unit_start():
                     metadata_after = canonical(_shell_metadata_inventory(value, namespace, saved=True))
                     _retain("shell-metadata-save-after.json", metadata_after)
                     shell_metadata_fixture(value, read(_ROOT / "public/shell-metadata-save-before.json", 8192), metadata_after)
+                if case in SHELL_TOOLS_OFFLINE_CASES:
+                    tools_offline_after = canonical(_shell_tools_offline_inventory(value, namespace, case, after=True))
+                    _retain("shell-" + case + "-after.json", tools_offline_after)
+                    shell_tools_offline_fixture(value, case,
+                        read(_ROOT / "public" / ("shell-" + case + "-before.json"), SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT), tools_offline_after)
             _shell_namespace_check(value, namespace)
         _shell_fixtures_final(value, namespace)
         need(_tree(PREFIX / M, M, published=True) == original, "Published A changed during shell observations")
@@ -5910,9 +6484,17 @@ def shell_closed_result(value, outcome, raw_files):
     sessions = {case: {"native": cases[case]["sessionInputs"],
         "fixture": shell_session_fixture(value, case, raw_files["shell-" + case + "-before.json"], raw_files["shell-" + case + "-after.json"])}
         for case in SHELL_SESSION_CASES}
+    tools_offline = {case: {"native": cases[case]["toolsOffline"],
+        "fixture": shell_tools_offline_fixture(value, case, raw_files["shell-" + case + "-before.json"], raw_files["shell-" + case + "-after.json"])}
+        for case in SHELL_TOOLS_OFFLINE_CASES}
+    need(all(canonical(pair["native"]["fixture"]) == canonical({key: pair["fixture"][key]
+             for key in ("scriptTrace", "laterTrace", "savedConfigChanged")}) for pair in tools_offline.values()),
+         "Tools/Offline original native fixture observations differ from the outer inventories")
     namespaces = [decode(raw_files[name], 8192)["namespace"] for name in
                   ("shell-positive-project-before.json", "shell-positive-candidate-before.json", "shell-project-paths-before.json", "shell-workflow-apply-before.json",
                    *("shell-" + case + "-before.json" for case in SHELL_SESSION_CASES), "shell-metadata-save-before.json")]
+    namespaces.extend(decode(raw_files["shell-" + case + "-before.json"], SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT)["namespace"]
+                      for case in SHELL_TOOLS_OFFLINE_CASES)
     need(all(namespace == namespaces[0] for namespace in namespaces), "Closed shell fixture families have different original namespaces")
     control = decode(raw_files["shell-normal-control.json"])
     need(control.get("joined") is True and control.get("inputs") == 2 and control.get("workerGuardState") == "RESTORED"
@@ -5935,6 +6517,7 @@ def shell_closed_result(value, outcome, raw_files):
             "workflowApply": {"native": cases["workflow-apply"]["workflowApply"], "fixture": workflow},
             "sessionInputs": sessions,
             "metadataSave": {"native": cases["metadata-save"]["metadataSave"], "fixture": metadata},
+            "toolsOffline": tools_offline,
             "packageLifecycleQualified": False, "shellPackageBuilt": False}
 
 
@@ -5985,7 +6568,7 @@ def verify_service_result(handoff_path, handoff_sha256, entry_sha256, client_res
         pin = record(root / "public" / name, JSON_LIMIT)
         rows.append({**pin, "path": name})
     fixed = public_files(value)
-    need(len(rows) <= 128 and len({row["path"] for row in rows}) == len(rows)
+    need(len(rows) <= (SHELL_PUBLIC_FILE_LIMIT if "shell" in value else 128) and len({row["path"] for row in rows}) == len(rows)
          and {path.name for path in (root / "public").iterdir()} == {row["path"] for row in rows} == fixed,
          "Original fixed public evidence roster differs")
     total, raw_files = 0, {}

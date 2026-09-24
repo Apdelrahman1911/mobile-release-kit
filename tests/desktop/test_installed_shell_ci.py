@@ -3,13 +3,16 @@ from copy import deepcopy
 import ast
 import hashlib
 import importlib.util
+import io
 import json
 import re
 from pathlib import Path
+import stat
 import struct
 import tempfile
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 SOURCE = Path(__file__).resolve().parents[2]
@@ -535,8 +538,31 @@ class InstalledShellCompilerContracts(unittest.TestCase):
         self.assertTrue({"desktop/src-tauri/src/" + name + ".rs" for name in (
             "runtime", "bridge", "asset_session", "asset_source", "shell", "installed_shell_observation",
             "supervisor", "installed_shell_shutdown_observation", "error", "protocol", "installed_runtime",
-            "passive_management_tests", "credential_assessment")} <= set(names))
+            "passive_management_tests", "credential_assessment", "installed_tools_observation", "environment_diagnostics_owner",
+            "environment_diagnostics_protocol", "saved_command_owner", "offline_preflight_owner", "offline_preflight_protocol")} <= set(names))
         self.assertTrue({"desktop/src-tauri/src/main.rs", "desktop/src-tauri/tests/installed_shell_observation.rs"} <= set(names))
+        self.assertTrue({"desktop/src/components/EnvironmentDiagnostics.tsx", "desktop/tests/environment-diagnostics.test.mjs"} <= set(names))
+
+    def test_observer_module_roster_matches_production_supported_platforms(self):
+        # The actual-main observer has its own crate root. Library compilation
+        # alone cannot detect a missing path-included module in that target.
+        root = SOURCE / "desktop/src-tauri"
+        library = (root / "src/lib.rs").read_text()
+        main = (root / "src/main.rs").read_text()
+        observer = (root / "tests/installed_shell_observation.rs").read_text()
+        production = set(re.findall(r"^(?:pub )?mod ([a-z0-9_]+);$", library, re.MULTILINE))
+        observed = set(re.findall(r'^#\[path = "\.\./src/[^"\n]+\.rs"\] mod ([a-z0-9_]+);$', observer, re.MULTILINE))
+        self.assertEqual(production - observed, {"installed_runtime_windows", "runtime_publication"})
+        self.assertEqual(observed - production, set())
+        guard = '#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]\n'
+        self.assertIn(guard + 'mod vault_keyring_linux;', library)
+        self.assertIn(guard + '#[path = "../src/vault_keyring_linux.rs"] mod vault_keyring_linux;', observer)
+        self.assertEqual(observer.count('mod vault_keyring_linux;'), 1)
+        self.assertIn('mobile_release_desktop::shell::run()', main)
+        self.assertIn('#![forbid(unsafe_code)]', observer)
+        self.assertIn('all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",', observer)
+        self.assertIn('not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")', observer)
+        self.assertIn('fn main() -> std::process::ExitCode { shell::installed_observation::main() }', observer)
 
     def test_shell_source_manifest_accepts_actual_version_qualified_hashing_profile(self):
         # Exercise the real admission against the checked-in inputs, not a
@@ -1162,6 +1188,65 @@ class InstalledShellCompilerContracts(unittest.TestCase):
                              for node in ast.walk(installed)))
 
 
+def closed_tools_offline_data(lifecycle, case):
+    """Fictional protocol and export DATA, never execution/qualification evidence."""
+    offline, cancel = case.startswith("offline-"), case in ("tools-cancel", "offline-cancel")
+    drift = case == "offline-drift"
+    config = lifecycle.SHELL_TOOLS_OFFLINE_CONFIGS[case]
+    config_pin = {"bytes": len(config), "sha256": hashlib.sha256(config).hexdigest()}
+    context = {"projectId": "inert_project", "draftRevision": 1, "baselineGeneration": 0,
+               "platform": "android", "operation": "offline-preflight" if offline else "build"}
+    if offline: context["savedConfig"] = deepcopy(config_pin)
+    flags = {key: True for key in ("inspectionJoined", "acquisitionJoined", "attempted", "childWaitedSuccess", "stdinClosed",
+        "stdoutEofClosed", "stderrEofClosed", "ioJoined", "coreLifetimeSettled", "runtimeLedgerSettled", "runtimeSettlementJoined",
+        "driverJoined", "managerJoined", "observerJoined", "watchdogJoined", "retiredBeforeCutoff")}
+    flags.update(noChild=False, activeRetained=False, resourceUnknown=False)
+    if case == "tools-cancel":
+        flags.update({key: False for key in ("acquisitionJoined", "attempted", "childWaitedSuccess", "stdinClosed", "stdoutEofClosed",
+                                             "stderrEofClosed", "coreLifetimeSettled")})
+        flags["noChild"] = True
+    outcome, reason = (("cancelled", "cancelled") if cancel else ("refused", "saved-config-changed") if drift else
+                       ("complete", "none") if offline else ("unavailable", "none"))
+    terminal = {"ownerGeneration": "b" * 32, "context": context, "phase": "terminal" if offline else "settled",
+                "outcome": outcome, "reason": reason, "result": None}
+    terminal.update({"operationId": "a" * 32, "intentUsable": False} if offline else {"runId": "a" * 32, "finality": "settled"})
+    if outcome == "unavailable":
+        terminal["result"] = {"schemaVersion": 1, "policyVersion": "environment-diagnostics-v1", "context": deepcopy(context),
+            "hostPlatform": "linux", "outcome": "unavailable", "commandsAttempted": 0,
+            "checks": [{"id": role, "state": "not-run", "reason": "missing-in-supported-lookup", "version": None, "build": None,
+                "returnCode": None, "baseline": {"kind": "no-local-policy" if role == "git" else "workflow-reference",
+                    "version": None if role == "git" else "21", "build": None}, "assessment": "not-assessed", "help": "Fixed core explanation"}
+                for role in ("git", "java", "javac")],
+            "lifetime": {"complete": True, "fatal": False, "contained": True, "commandDispatched": False, "commands": 0,
+                "inputClosed": True, "handlersRestored": True, "toolDescriptorsClosed": True, "stopObserved": "none"},
+            "assurance": {"basis": "local-tool-observation", "toolsAttempted": False, "projectCodeExecuted": False, "projectFilesRead": False,
+                "repositoryObserved": False, "sdkInspected": False, "credentialsRead": False, "storeContacted": False,
+                "dependencyCompleteness": "unknown", "releaseReadiness": "unknown", "toolCacheEffects": "possible"}}
+    elif outcome == "complete":
+        status = "FAIL" if case == "offline-negative" else "PASS"
+        counts = dict.fromkeys(lifecycle.SHELL_TOOLS_OFFLINE_STATUSES, 0); counts[status] = 1
+        terminal["result"] = {"schemaVersion": 1, "scope": "saved-offline-android-no-core-build", "usedConfig": deepcopy(config_pin),
+            "findings": [{"ordinal": 0, "check": "configured-project-check", "status": status, "message": "configured-project-check", "projectCheckIndex": 0}],
+            "summary": {"total": 1, "shown": 1, "omitted": 0, "counts": counts}, "limitations": list(lifecycle.SHELL_TOOLS_OFFLINE_LIMITATIONS)}
+    boundary = "inspection" if case == "tools-cancel" else "settlement" if case in ("tools-settlement", "offline-settlement") else "none"
+    traces = {"scriptTrace": lifecycle.SHELL_TOOLS_OFFLINE_TRACES[case].decode("ascii"), "laterTrace": "", "savedConfigChanged": drift}
+    receipt = {"schema": "installed-tools-offline-v1", "case": case, "qualificationOnly": True, "builder": "normal", "projectPicker": True,
+        "savedObservation": True, "requests": {"toolsStart": 0 if offline else 1, "toolsCancel": 1 if case == "tools-cancel" else 0,
+            "offlinePrepare": 1 if offline else 0, "offlineStart": 1 if offline else 0, "offlineCancel": 1 if case == "offline-cancel" else 0},
+        "initial": {"toolsAvailable": True, "offlineAvailable": True}, "ui": {"start": True, "consent": offline, "terminal": True, "cancel": cancel},
+        "reciprocalBusy": case in ("tools-settlement", "offline-cancel", "offline-settlement"),
+        "hold": {"boundary": boundary, "entered": boundary != "none", "released": boundary != "none"},
+        "original": {"domain": "offline" if offline else "tools", "id": "a" * 32, "generation": "b" * 32, **flags},
+        "terminal": terminal, "fixture": traces}
+    fixture = {"fixture": "installed-tools-offline-fixture-v1", "case": case, "rootRetained": True, "originalsAccounted": True,
+        "noUnexpectedEntries": True, "noPendingState": True, "beforeCount": 21, "afterCount": 21,
+        "mutations": ["project/release/mobile-release.json"] if drift else ["project/script.trace"] if traces["scriptTrace"] else [],
+        **traces, "savedConfigBefore": config_pin,
+        "savedConfigAfter": {"bytes": len(config) + drift, "sha256": hashlib.sha256(config + (b"\n" if drift else b"")).hexdigest()},
+        "before": {"size": 7000, "sha256": "3" * 64}, "after": {"size": 7010 if offline else 7000, "sha256": ("4" if offline else "3") * 64}}
+    return receipt, fixture
+
+
 def closed_project_draft_data(lifecycle):
     """Synthetic closed-result schema DATA only; no native/finality claim."""
     receipt = deepcopy(lifecycle.SHELL_PROJECT_RECEIPT)
@@ -1246,6 +1331,13 @@ def closed_project_draft_data(lifecycle):
         observed["files"].extend({"path": "lifecycle-shell-" + case + "-" + phase + ".json", **fixture[phase]}
                                  for phase in ("before", "after"))
     observed["sessionInputs"] = sessions
+    observed["toolsOffline"] = {}
+    for case in lifecycle.SHELL_TOOLS_OFFLINE_CASES:
+        receipt, fixture = closed_tools_offline_data(lifecycle, case)
+        observed["cases"][case] = {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
+                                   "maps": [], "toolsOffline": receipt}
+        observed["toolsOffline"][case] = {"native": deepcopy(receipt), "fixture": fixture}
+        observed["files"].extend({"path": "lifecycle-shell-" + case + "-" + phase + ".json", **fixture[phase]} for phase in ("before", "after"))
     return observed
 
 
@@ -1296,7 +1388,9 @@ class InstalledProjectDraftReceiptContracts(unittest.TestCase):
         self.assertEqual(result["fixture"]["sourceBytes"], 149)
         self.assertNotEqual(result["fixture"]["before"], result["fixture"]["after"])
         self.assertEqual(set(observed["cases"]), {"normal", "positive", "quit-outstanding", "project-paths", "workflow-apply",
-                                                "session-inputs", "session-refusals", "session-loss", "session-deadline", "metadata-save"})
+                                                "session-inputs", "session-refusals", "session-loss", "session-deadline", "metadata-save",
+                                                "tools-observed", "tools-cancel", "tools-settlement", "offline-pass", "offline-negative",
+                                                "offline-drift", "offline-cancel", "offline-settlement"})
 
     def test_rejects_legacy_partial_mistyped_or_relabelled_positive_receipts(self):
         lifecycle = S.local("ubuntu_publication_lifecycle")
@@ -1430,17 +1524,17 @@ class InstalledCandidateDocumentsReceiptContracts(unittest.TestCase):
         expected_exports = ["lifecycle-shell-" + family + "-" + phase + ".json"
                             for family in ("positive-project", "positive-candidate", "project-paths",
                                            "workflow-apply", "metadata-save", "session-inputs",
-                                           "session-refusals", "session-loss", "session-deadline")
+                                           "session-refusals", "session-loss", "session-deadline", *lifecycle.SHELL_TOOLS_OFFLINE_CASES)
                             for phase in ("before", "after")]
         self.assertCountEqual([item["path"] for item in observed["files"]], expected_exports)
-        # The original exporter allows at most 128 root files plus the same
-        # original client's two captures; adding fixtures cannot raise it.
+        # Only this shell profile allows160 originals plus the same client's
+        # two captures. The non-shell128 and aggregate32MiB caps do not change.
         observed["files"].extend({"path": "inert-" + str(index), "size": 0, "sha256": "0" * 64}
-                                 for index in range(130 - len(observed["files"])))
-        self.assertEqual(len(observed["files"]), 130)
+                                 for index in range(162 - len(observed["files"])))
+        self.assertEqual(len(observed["files"]), 162)
         S.shell_project_draft_observation(observed, lifecycle)
         observed["files"].append({"path": "over-cap", "size": 0, "sha256": "0" * 64})
-        self.assertEqual(len(observed["files"]), 131)
+        self.assertEqual(len(observed["files"]), 163)
         with self.assertRaises(S.D.Refused):
             S.shell_project_draft_observation(observed, lifecycle)
 
@@ -1898,6 +1992,247 @@ class InstalledSessionReceiptContracts(unittest.TestCase):
                 S.shell_project_draft_observation(observed, lifecycle)
 
 
+class InstalledToolsOfflineReceiptContracts(unittest.TestCase):
+    def test_eight_closed_engineering_cases_preserve_negative_refused_and_no_child_facts(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle"); observed = closed_project_draft_data(lifecycle)
+        self.assertEqual(S.shell_project_draft_observation(observed, lifecycle), observed["projectDraft"])
+        self.assertEqual(len(observed["cases"]), 18)
+        self.assertEqual(set(observed["toolsOffline"]), set(lifecycle.SHELL_TOOLS_OFFLINE_CASES))
+        for case, pair in observed["toolsOffline"].items():
+            receipt = pair["native"]
+            self.assertIs(receipt["qualificationOnly"], True)
+            self.assertEqual(observed["cases"][case]["maps"], [])
+            self.assertIs(receipt["original"]["noChild"], case == "tools-cancel")
+            self.assertEqual(receipt["fixture"]["laterTrace"], "")
+            if case in ("tools-observed", "tools-settlement"):
+                self.assertEqual(receipt["terminal"]["outcome"], "unavailable")  # Honest refusal is not JDK coverage.
+            elif case == "offline-negative":
+                self.assertEqual(receipt["terminal"]["outcome"], "complete")
+                self.assertEqual(receipt["terminal"]["result"]["summary"]["counts"]["FAIL"], 1)
+            elif case == "offline-drift":
+                self.assertEqual(receipt["terminal"]["reason"], "saved-config-changed")
+                self.assertIs(receipt["original"]["attempted"], True)
+                self.assertIsNone(receipt["terminal"]["result"])
+
+    def test_missing_case_changed_finality_forged_fixture_or_original_export_refuses(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        for case in lifecycle.SHELL_TOOLS_OFFLINE_CASES:
+            for fault in ("missing-case", "missing-pair", "extra-pair", "missing-receipt", "maps", "wait", "join", "qualification",
+                          "same-copy-forgery", "changed-copy", "fixture-count", "later-check", "saved-bytes", "replaced-pin", "missing-export", "duplicate-export"):
+                observed = closed_project_draft_data(lifecycle)
+                result, pair = observed["cases"][case], observed["toolsOffline"][case]
+                if fault == "missing-case": observed["cases"].pop(case)
+                elif fault == "missing-pair": observed["toolsOffline"].pop(case)
+                elif fault == "extra-pair": pair["recovered"] = True
+                elif fault == "missing-receipt": result.pop("toolsOffline")
+                elif fault == "maps": result["maps"] = [[{"invented": True}]]
+                elif fault == "wait": result["exitCode"] = True
+                elif fault == "join": result["toolsOffline"]["original"]["managerJoined"] = False
+                elif fault == "qualification": result["toolsOffline"]["qualificationOnly"] = False
+                elif fault == "same-copy-forgery":
+                    result["toolsOffline"]["original"]["runtimeSettlementJoined"] = False
+                    pair["native"] = deepcopy(result["toolsOffline"])
+                elif fault == "changed-copy": pair["native"]["original"]["watchdogJoined"] = False
+                elif fault == "fixture-count": pair["fixture"]["afterCount"] = 22
+                elif fault == "later-check": pair["fixture"]["laterTrace"] = "later\n"
+                elif fault == "saved-bytes": pair["fixture"]["savedConfigBefore"]["sha256"] = "0" * 64
+                elif fault == "replaced-pin": pair["fixture"]["before"]["sha256"] = "0" * 64
+                else:
+                    path = "lifecycle-shell-" + case + "-after.json"
+                    if fault == "missing-export": observed["files"] = [row for row in observed["files"] if row["path"] != path]
+                    else: observed["files"].append(deepcopy(next(row for row in observed["files"] if row["path"] == path)))
+                with self.subTest(case=case, fault=fault), self.assertRaises((S.D.Refused, ValueError)):
+                    S.shell_project_draft_observation(observed, lifecycle)
+
+    def test_source_consumes_tools_before_and_after_the_same_single_lifecycle(self):
+        source = (SOURCE / "desktop/tools/ci_ubuntu_publication.py").read_text()
+        tree = ast.parse(source)
+        entry = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "verify_installed_shell")
+        calls = [node for node in ast.walk(entry) if isinstance(node, ast.Call)]
+        binds = sorted(node.lineno for node in calls if isinstance(node.func, ast.Name) and node.func.id == "shell_tools_inputs_for_observation")
+        endpoint = [node.lineno for node in calls if isinstance(node.func, ast.Attribute) and node.func.attr == "verify_service_result"]
+        self.assertEqual(len(binds), 2); self.assertEqual(len(endpoint), 1)
+        self.assertLess(binds[0], endpoint[0]); self.assertLess(endpoint[0], binds[1])
+        text = ast.get_source_segment(source, entry)
+        for token in ('"toolsOfflineQualificationOnly": True', '"offlineFullWorkDeadlineExercised": False', '"qualified": False',
+                      '"compilerRerun": False', '"supplierRebuilt": False', '"packageBuilt": False', '"upgradeOrRefusalRerun": False'):
+            self.assertIn(token, text)
+        for forbidden in ("apt-get", "update-alternatives", "shell_tools_input_snapshot(", "offline_preflight_owner_tests"):
+            self.assertNotIn(forbidden, text)
+
+
+def tools_preparation_data():
+    """Finite public supplier metadata fiction; never reads the actual host."""
+    env = {"GITHUB_REF": S.SHELL_REF, "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted",
+           "GITHUB_RUN_ID": "7", "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": "a" * 40, "RUNNER_TEMP": "/tmp",
+           "MRK_SHELL_TOOLS_PREPARATION_EXIT": "0"}
+    root = Path("/tmp/mrk-desktop-tools-7-1")
+    root_identity = (1, 2, stat.S_IFDIR | 0o700, 1001, 1001)
+    nodes = {name: {"kind": "directory", "identity": [1, 100 + index, stat.S_IFDIR | 0o755, 0, 0, 2, 4096, 11, 11]}
+             for index, name in enumerate(S.SHELL_TOOLS_DIRECTORIES)}
+    nodes.update({name: {"kind": "file", "identity": [1, 200 + index, stat.S_IFREG | 0o755, 0, 0, 1, 64 + index, 11, 11],
+                        "path": Path(name).name, "size": 64 + index, "sha256": "d" * 64}
+                  for index, name in enumerate(S.SHELL_TOOLS_PROGRAMS)})
+    nodes.update({name: {"kind": "symlink", "identity": [1, 300 + index, stat.S_IFLNK | 0o777, 0, 0, 1, len(target), 11, 11], "target": target}
+                  for index, (name, target) in enumerate(S.SHELL_TOOLS_LINKS.items())})
+    raw = b"".join((name + "\tinstalled\t1.2.3-1\tamd64\t" + ("openjdk-17" if name.startswith("openjdk-") else name)
+                    + "\t1.2.3-1\n").encode("ascii") for name in S.SHELL_TOOLS_PACKAGES)
+    files = {}
+    for phase in ("before", "after"):
+        document = {"schema": "fixed-disposable-shell-tools-inputs-v1", "phase": phase, "qualified": False, "sourceSha": env["GITHUB_SHA"],
+            "runId": "7", "attempt": "1", "rootIdentity": list(root_identity), "originalStepExit": None if phase == "before" else 0,
+            "nodes": deepcopy(nodes), "packageQuery": {"stdout": {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()},
+                "stderr": {"size": 0, "sha256": hashlib.sha256(b"").hexdigest()}, "exitCode": 0}}
+        files[phase + ".json"] = S.D.canonical(document)
+        files[phase + "-packages.tsv"] = raw; files[phase + "-packages.stderr"] = b""; files[phase + "-packages.exit"] = b"0\n"
+    return env, root, root_identity, nodes, files
+
+
+class InstalledToolsPreparationContracts(unittest.TestCase):
+    def test_only_nonroot_fixed_hosted_branch_and_original_fresh_root_are_addressed(self):
+        env, root, identity, _, _ = tools_preparation_data()
+        for key, replacement in ((None, None), ("GITHUB_REF", S.INSTALLED_REF), ("GITHUB_ACTIONS", "false"),
+                                 ("RUNNER_ENVIRONMENT", "self-hosted"), ("GITHUB_RUN_ID", "01"), ("GITHUB_RUN_ATTEMPT", "0"),
+                                 ("RUNNER_TEMP", "relative"), ("RUNNER_TEMP", "/tmp/../other")):
+            altered = dict(env)
+            if key is not None: altered[key] = replacement
+            with self.subTest(key=key), patch.dict(S.os.environ, altered, clear=True), patch.object(S.os, "geteuid", return_value=1001), \
+                 patch.object(S.C, "conventional_host") as host, patch.object(S, "directory_identity", return_value=identity) as directory:
+                if key is None:
+                    self.assertEqual(S.shell_tools_input_root(), root); directory.assert_called_once_with(root); host.assert_called_once_with(S.D)
+                else:
+                    with self.assertRaises(S.D.Refused): S.shell_tools_input_root()
+        with patch.dict(S.os.environ, env, clear=True), patch.object(S.os, "geteuid", return_value=0), \
+             patch.object(S.C, "conventional_host") as host, patch.object(S, "directory_identity") as directory:
+            with self.assertRaises(S.D.Refused): S.shell_tools_input_root()
+            host.assert_not_called(); directory.assert_not_called()
+
+    def test_package_query_is_bounded_original_printable_installed_amd64_data(self):
+        _, _, _, _, files = tools_preparation_data(); raw = files["before-packages.tsv"]
+        self.assertEqual(set(S.shell_tools_package_data(raw)), set(S.SHELL_TOOLS_PACKAGES))
+        without_jdk = b"".join(raw.splitlines(keepends=True)[:2])
+        self.assertEqual(set(S.shell_tools_package_data(without_jdk)), {"git", "python3.12"})
+        for bad in (raw[:-1], b"", b"x" * ((64 << 10) + 1), raw + raw, bytearray(raw), raw.replace(b"amd64", b"arm64", 1),
+                    raw.replace(b"installed", b"unpacked", 1), raw.replace(b"git\t", b"other\t", 1),
+                    raw.replace(b"\n", b"\r\n"), raw.replace(b"1.2.3-1", b"", 1), raw.replace(b"1.2.3-1", b"x\x00y", 1),
+                    b"".join(raw.splitlines(keepends=True)[1:])):
+            with self.subTest(raw=bad[:30]), self.assertRaises((S.D.Refused, ValueError)): S.shell_tools_package_data(bad)
+
+    def test_fixed_public_nodes_are_nofollow_parent_guarded_and_stable(self):
+        _, _, _, originals, _ = tools_preparation_data()
+        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        for fault in (None, "ancestor-alias", "hardlink", "drift", "appeared"):
+            nodes, calls = deepcopy(originals), {}
+            if fault == "ancestor-alias": nodes["/usr/lib/jvm"]["identity"][2] = stat.S_IFLNK | 0o777
+            if fault == "hardlink": nodes["/usr/bin/git"]["identity"][5] = 2
+            def metadata(path):
+                name = str(path); calls[name] = calls.get(name, 0) + 1
+                if fault == "appeared" and name == S.SHELL_TOOLS_PROGRAMS[2] and calls[name] == 1: raise FileNotFoundError(name)
+                values = list(nodes[name]["identity"])
+                if fault == "drift" and name == "/usr/bin/git" and calls[name] > 1: values[1] += 1
+                return SimpleNamespace(**dict(zip(fields, values)))
+            def record(path, limit):
+                self.assertEqual(limit, 16 << 20)
+                return {key: nodes[str(path)][key] for key in ("path", "size", "sha256")}
+            with self.subTest(fault=fault), patch.object(Path, "lstat", metadata), patch.object(S.D, "file_record", side_effect=record) as reading, \
+                 patch.object(S.os, "readlink", side_effect=lambda path: nodes[str(path)]["target"]) as linking:
+                if fault in ("drift", "appeared"):
+                    with self.assertRaises(S.D.Refused): S.shell_tools_input_nodes()
+                else:
+                    result = S.shell_tools_input_nodes()
+                    if fault is None:
+                        self.assertEqual(result, originals)
+                        self.assertEqual([str(call.args[0]) for call in reading.call_args_list], list(S.SHELL_TOOLS_PROGRAMS))
+                    elif fault == "ancestor-alias":
+                        self.assertEqual(result["/usr/lib/jvm"]["kind"], "refused")
+                        self.assertEqual(result[S.SHELL_TOOLS_PROGRAMS[2]]["kind"], "parent-unavailable")
+                        self.assertNotIn(S.SHELL_TOOLS_PROGRAMS[2], calls)
+                    else:
+                        self.assertEqual(result["/usr/bin/git"]["kind"], "refused")
+                        self.assertNotIn("/usr/bin/git", [str(call.args[0]) for call in reading.call_args_list])
+                self.assertTrue(all(str(call.args[0]) in S.SHELL_TOOLS_LINKS for call in linking.call_args_list))
+
+    def test_actual_snapshot_is_retained_before_failed_pair_or_original_status_assertions(self):
+        for phase, fault in (("before", None), ("before", "absent"), ("before", "query"), ("before", "refused"),
+                             ("after", None), ("after", "step"), ("after", "pair"), ("after", "git")):
+            env, root, identity, nodes, files = tools_preparation_data()
+            if fault == "absent":
+                for name in S.SHELL_TOOLS_PROGRAMS[2:]: nodes[name] = {"kind": "absent"}
+            if fault == "query": files[phase + "-packages.tsv"] = b"unexpected\n"
+            if fault == "refused": nodes["/usr/bin/git"] = {"kind": "refused", "identity": nodes["/usr/bin/git"]["identity"]}
+            if fault == "step": env["MRK_SHELL_TOOLS_PREPARATION_EXIT"] = "7"
+            if fault == "pair": nodes[S.SHELL_TOOLS_PROGRAMS[2]] = {"kind": "absent"}
+            if fault == "git": nodes["/usr/bin/git"]["sha256"] = "0" * 64
+            with self.subTest(phase=phase, fault=fault), patch.dict(S.os.environ, env, clear=True), \
+                 patch.object(S, "shell_tools_input_root", return_value=root), patch.object(S, "directory_identity", return_value=identity), \
+                 patch.object(S, "shell_tools_input_nodes", return_value=nodes), patch.object(S.D, "read", side_effect=lambda path, limit: files[path.name]), \
+                 patch.object(S.D, "write") as writing, patch.object(S.sys, "stdout", new_callable=io.StringIO) as stdout:
+                if fault in (None, "absent"):
+                    self.assertIsNone(S.shell_tools_input_snapshot(phase))
+                    self.assertEqual(stdout.getvalue(), ("absent\n" if fault == "absent" else "present\n") if phase == "before" else "")
+                else:
+                    with self.assertRaises(S.D.Refused): S.shell_tools_input_snapshot(phase)
+                writing.assert_called_once()
+                self.assertEqual(writing.call_args.args[0], root / (phase + ".json"))
+                saved = S.D.decode(writing.call_args.args[1]); self.assertEqual(saved["nodes"], nodes)
+                self.assertIs(saved["qualified"], False)
+                self.assertEqual(saved["originalStepExit"], None if phase == "before" else int(env["MRK_SHELL_TOOLS_PREPARATION_EXIT"]))
+
+    def test_observation_rebinds_original_packages_aliases_bytes_and_only_stable_parent_identity(self):
+        for fault in (None, "directory-time", "git", "python", "jdk", "alias", "ancestor", "before-git", "step", "query", "qualified", "boolean"):
+            env, root, identity, nodes, files = tools_preparation_data()
+            if fault == "directory-time":
+                for path in S.SHELL_TOOLS_DIRECTORIES: nodes[path]["identity"][6:] = [8192, 22, 22]
+            if fault in ("git", "python", "jdk"):
+                nodes[S.SHELL_TOOLS_PROGRAMS[("git", "python", "jdk").index(fault)]]["sha256"] = "0" * 64
+            if fault == "alias": nodes["/usr/bin/java"]["target"] = "/unreviewed/java"
+            if fault == "ancestor": nodes["/usr"]["identity"][1] += 1000
+            if fault in ("before-git", "step", "query", "qualified", "boolean"):
+                phase = "before" if fault == "before-git" else "after"
+                document = S.D.decode(files[phase + ".json"])
+                if fault == "before-git": document["nodes"]["/usr/bin/git"]["sha256"] = "0" * 64
+                elif fault == "step": document["originalStepExit"] = 1
+                elif fault == "query": document["packageQuery"]["exitCode"] = 1; files[phase + "-packages.exit"] = b"1\n"
+                elif fault == "qualified": document["qualified"] = True
+                else: document["nodes"]["/usr/bin/git"]["identity"][5] = True
+                files[phase + ".json"] = S.D.canonical(document)
+            with self.subTest(fault=fault), patch.dict(S.os.environ, env, clear=True), patch.object(S, "shell_tools_input_root", return_value=root), \
+                 patch.object(S, "directory_identity", return_value=identity), patch.object(S, "shell_tools_input_nodes", return_value=nodes), \
+                 patch.object(S.D, "read", side_effect=lambda path, limit: files[path.name]):
+                if fault in (None, "directory-time"):
+                    observed = S.shell_tools_inputs_for_observation(); self.assertIs(observed["qualified"], False)
+                    self.assertEqual(len(observed["preparationFiles"]), 8)
+                    self.assertEqual(set(observed["packages"]), set(S.SHELL_TOOLS_PACKAGES))
+                    self.assertEqual(observed["nodes"]["/usr"]["identity"], nodes["/usr"]["identity"][:5])
+                    self.assertEqual(observed["nodes"]["/usr/bin/git"], nodes["/usr/bin/git"])
+                else:
+                    with self.assertRaises(S.D.Refused): S.shell_tools_inputs_for_observation()
+
+    def test_typed_snapshots_reject_extra_fields_wrong_root_noncanonical_and_bad_pins(self):
+        env, root, identity, _, files = tools_preparation_data(); original = S.D.decode(files["before.json"])
+        for mutate in (lambda d: d.update(extra=True), lambda d: d.update(phase="after"), lambda d: d.update(sourceSha="b" * 40),
+                       lambda d: d["rootIdentity"].__setitem__(0, True), lambda d: d.update(originalStepExit=0),
+                       lambda d: d["nodes"].pop("/usr/bin/git"), lambda d: d["nodes"]["/usr/bin/git"].update(size=True),
+                       lambda d: d["nodes"]["/usr/bin/git"].update(sha256="z" * 64),
+                       lambda d: d["packageQuery"]["stdout"].update(size=True), lambda d: d["packageQuery"].update(exitCode=True)):
+            document = deepcopy(original); mutate(document)
+            with self.subTest(mutate=mutate), patch.dict(S.os.environ, env, clear=True), patch.object(S, "directory_identity", return_value=identity), \
+                 self.assertRaises(S.D.Refused): S._shell_tools_input_document(S.D.canonical(document), "before", root)
+        with patch.dict(S.os.environ, env, clear=True), patch.object(S, "directory_identity", return_value=identity):
+            for raw in (files["before.json"] + b" ", files["before.json"][:-1], b"x" * ((64 << 10) + 1)):
+                with self.assertRaises(S.D.Refused): S._shell_tools_input_document(raw, "before", root)
+
+    def test_preparation_helpers_own_no_process_runner_or_package_commands(self):
+        tree = ast.parse((SOURCE / "desktop/tools/ci_ubuntu_publication.py").read_text())
+        helpers = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name.startswith(("shell_tools_input", "_shell_tools_input", "shell_tools_package"))]
+        self.assertEqual(len(helpers), 6)
+        for helper in helpers:
+            forbidden = [node for node in ast.walk(helper) if isinstance(node, (ast.Import, ast.ImportFrom)) or isinstance(node, ast.Call)
+                         and (isinstance(node.func, ast.Name) and node.func.id in ("Check", "run_owned", "command")
+                              or isinstance(node.func, ast.Attribute) and node.func.attr in ("run", "Popen", "command", "system", "execv"))]
+            self.assertEqual(forbidden, [], helper.name)
+
+
 class InstalledFailureLabelSourceContracts(unittest.TestCase):
     def test_fixture_parent_is_readable_but_diagnostic_parent_stays_control_bound(self):
         source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
@@ -2116,7 +2451,13 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         literals = {value.encode("ascii") for value in re.findall(r'=> b"([a-z-]+)"', workers + native)}
         maps = supervisor.split("impl MapRole {", 1)[1].split("impl ObservationFailure {", 1)[0]
         map_tokens = tuple(value.encode("ascii") for value in re.findall(r'b"(map-[a-z-]+)"', maps))
-        self.assertEqual((len(map_tokens), len(set(map_tokens))), (64, 64))
+        self.assertEqual((len(map_tokens), len(set(map_tokens))), (88, 88))
+        generic = tuple(b"map-x-" + group + b"-" + deleted + history
+                        for group in (b"v", b"l", b"c", b"h", b"m", b"o")
+                        for deleted, history in ((b"n", b"a"), (b"n", b"p"), (b"d", b"a"), (b"d", b"p")))
+        self.assertEqual(lifecycle.SHELL_SESSION_GENERIC_MAP_WORKERS, generic)
+        self.assertEqual(len(generic), 24)
+        self.assertTrue(set(generic) <= set(map_tokens))
         self.assertTrue(all(re.fullmatch(rb"[a-z-]{1,14}", token) for token in map_tokens))
         public_table = supervisor.split("    static PUBLIC_MAP_PATH_CANDIDATES: [(&str, &[u8]); 648] = [\n", 1)[1].split("    ];\n", 1)[0]
         public_rows = re.findall(r'^        \("([^"]+)", b"(map-x-[a-z]{2})"\),$', public_table, re.MULTILINE)
@@ -2144,11 +2485,12 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         parser = supervisor.split("    fn mappings(raw: &[u8], historical: Option<HistoricalPayloadSnapshot>) -> Result<Option<Vec<Mapping>>, MapRefusal> {", 1)[1].split(
             '    #[cfg(all(debug_assertions, any(all(feature = "desktop-shell", feature = "custom-protocol"),\n'
             '        all(not(feature = "desktop-shell"), not(feature = "custom-protocol")))))]', 1)[0]
-        refusal = "need(!executable).map_err(|_| historical_executable_file_refusal(executable_file_refusal(path), historical, major, minor, inode))?"
+        refusal = ("need(!executable).map_err(|_| generic_executable_file_refusal("
+                   "historical_executable_file_refusal(executable_file_refusal(path), historical, major, minor, inode), path, historical.is_some()))?")
         self.assertEqual(parser.count(refusal), 1)
         self.assertEqual(hashlib.sha256(parser.replace(refusal, "need(!executable).map_err(|_| MapRefusal::ExecutableFile)?").encode()).hexdigest(),
                          "6b884ac9df8f44c52c96a34f926445e11f18564946f4f126e600afbab94d24fe")
-        lookup = supervisor.split("    fn executable_file_refusal(path: &str) -> MapRefusal {", 1)[1].split("    fn role(", 1)[0]
+        lookup = supervisor.split("    fn executable_file_refusal(path: &str) -> MapRefusal {", 1)[1].split("\n    }\n", 1)[0]
         self.assertIn(".position(|(candidate, _)| path == *candidate)", lookup)
         for forbidden in ("fs::", "original_bytes", "/proc/", "read_link", "canonicalize", "trim", "format!", "to_owned", ".await", "Instant::now"):
             self.assertNotIn(forbidden, lookup)
@@ -2207,9 +2549,17 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         # their source presence here is not executed Rust or native evidence.
         self.assertIn("let end = Instant::now() + Duration::from_secs(45);", source)
         self.assertEqual(lifecycle.SHELL_WORK_FILE_LIMIT, 64 << 20)
-        for case in lifecycle.SHELL_CASES[1:]:
-            self.assertIn('"shell-' + case + '-failure.labels"', source)
+        commands = (SOURCE / "desktop/src-tauri/src/installed_tools_observation.rs").read_text()
+        self.assertTrue('#[path = "installed_tools_observation.rs"]\npub(crate) mod commands;' in source,
+                        "The parent must bind the reviewed Tools/Offline module")
+        sink = source.split("fn failure_sink(case: Case)", 1)[1].split("\n}\n", 1)[0]
+        parent_leaves = sink.split("    let leaf = match case {\n", 1)[1].split("\n    };", 1)[0]
+        command_leaves = commands.split("    pub(super) fn failure_leaf(self) -> &'static str { match self {\n", 1)[1].split("\n    } }", 1)[0]
+        self.assertEqual(parent_leaves.count("Case::Commands(case) => case.failure_leaf(),"), 1)
+        actual_leaves = re.findall(r'=> "([^"\n]*)"', parent_leaves + command_leaves)
+        self.assertEqual(actual_leaves, ["shell-" + case + "-failure.labels" for case in lifecycle.SHELL_CASES[1:]])
         self.assertNotIn("shell-normal-failure.labels", source)
+        self.assertNotIn("shell-normal-failure.labels", commands)
         self.assertFalse(any(name.endswith("failure.labels") for name in lifecycle.public_files({"shell": {}})))
 
     def test_folder_selection_waits_for_the_exact_current_folder_before_one_activation(self):

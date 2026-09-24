@@ -1389,6 +1389,17 @@ impl DocumentBinding {
         if observation.is_some() { return Err(BridgeError::invalid()); }
         *observation = Some(installed_session_observation::Book::new(case)); Ok(())
     }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn admit_installed_commands(&self, tools: crate::shell::installed_observation::commands::ToolsAdmission,
+        offline: crate::shell::installed_observation::commands::OfflineAdmission) -> Result<(), BridgeError> {
+        let state = self.lock();
+        if state.next_operation != 0 || state.next_context != 0 || state.session || state.slot.is_some() || state.context.is_some()
+            || state.quit.is_some() || state.lost_observed || state.stopping || state.unknown || self.live_session_owner_reason().is_some() {
+            return Err(BridgeError::invalid());
+        }
+        self.inner.bridge.diagnostics.admit_installed_observation(tools)?;
+        self.inner.bridge.preflight.admit_installed_observation(offline)
+    }
     fn project_selection_qualified(&self) -> bool {
         if self.inner.bridge.installed_project_selection_available() { return true; }
         // Preserve SG1's existing, separately consumed development permission.

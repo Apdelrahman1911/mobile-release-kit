@@ -398,6 +398,8 @@ test('source integration keeps explicit native controls, truthful budgets, core 
     'Complete means the finite check roster finished', 'Core result received; native settlement is still pending', '<p>{row.help}</p>',
     'Workflow reference · not a local compatibility rule', 'does not mean globally absent']) assert.ok(panel.includes(text));
   assert.equal(panel.includes('writesPerformed'), false);
+  assert.ok(panel.includes("!compact && !active && attempt?.projection?.finality === 'settled' && attempt.projection.result === null"));
+  assert.ok(panel.includes('The original check ended without a tool report. Native reason: {attempt.projection.reason}'));
   const github = source('pages/GitHub.tsx'), credentials = source('pages/Credentials.tsx');
   assert.ok(github.includes('credentialHelp?.find((entry) => entry.name === requirement.name)'));
   assert.ok(github.includes('HelpButton content={{ ...help, label: help.name }}'));

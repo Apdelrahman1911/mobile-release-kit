@@ -12,14 +12,19 @@ use crate::{asset_session::{InstalledEvidenceWitness, InstalledProjectWitness, I
     edit_protocol::{self as edit, ConfigEditStatus, EditProjection}, error::BridgeError, supervisor::{HeldAppInfo, Supervisor}};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Case { Positive, Outstanding, ProjectPaths, WorkflowApply, Session(SessionCase), MetadataSave }
+enum Case { Positive, Outstanding, ProjectPaths, WorkflowApply, Session(SessionCase), MetadataSave, Commands(commands::Case) }
+#[path = "installed_tools_observation.rs"]
+pub(crate) mod commands;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SessionCase { Inputs, Refusals, Loss, Deadline }
 impl SessionCase {
     fn name(self) -> &'static str { match self { Self::Inputs => "session-inputs", Self::Refusals => "session-refusals", Self::Loss => "session-loss", Self::Deadline => "session-deadline" } }
     fn assessments(self) -> usize { match self { Self::Inputs => 7, Self::Refusals => 6, _ => 1 } }
 }
-impl Case { fn session(self) -> Option<SessionCase> { match self { Self::Session(case) => Some(case), _ => None } } }
+impl Case {
+    fn session(self) -> Option<SessionCase> { match self { Self::Session(case) => Some(case), _ => None } }
+    fn commands(self) -> Option<commands::Case> { match self { Self::Commands(case) => Some(case), _ => None } }
+}
 // A moved, private, one-use setup token, never renderer/environment authority.
 pub(crate) struct SessionAdmission { original: std::sync::Weak<Observation>, case: SessionCase }
 impl SessionAdmission {
@@ -43,7 +48,7 @@ enum Step {
     EnterTitle, EnterShortDescription, EnterFullDescription, ReadMetadataInputs, ValidateMetadata, ReadMetadataValidation,
     SavedSettings, ReadSavedDraft, Artifacts, ReadEvidenceEmpty, ChooseEvidenceCancel, CancelEvidence, EvidenceCancelled, ReadEvidenceCancelled,
     ChooseEvidenceSelect, SetEvidence, SelectEvidence, EvidenceSelected, ReadEvidenceSelected, InspectEvidence, EvidenceObserved, ReadEvidenceObserved,
-    CandidateSettings, ReadCandidateDraft, PrepareNoop, ReadNoopReview, Close, Quit, Exit, Paths(PathStep), Workflow(WorkflowStep), Session(SessionStep), MetadataSave(MetadataStep),
+    CandidateSettings, ReadCandidateDraft, PrepareNoop, ReadNoopReview, Close, Quit, Exit, Paths(PathStep), Workflow(WorkflowStep), Session(SessionStep), MetadataSave(MetadataStep), Commands(commands::Step),
 }
 impl Step {
     fn failure_line(self) -> &'static [u8] {
@@ -133,6 +138,7 @@ impl Step {
             Self::Workflow(step) => step.failure_line(),
             Self::Session(step) => step.failure_line(),
             Self::MetadataSave(step) => step.failure_line(),
+            Self::Commands(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=ToolsOffline\n",
         }
     }
 }
@@ -772,6 +778,7 @@ fn failure_sink(case: Case) -> Option<rustix::fd::OwnedFd> {
         Case::Session(SessionCase::Loss) => "shell-session-loss-failure.labels",
         Case::Session(SessionCase::Deadline) => "shell-session-deadline-failure.labels",
         Case::MetadataSave => "shell-metadata-save-failure.labels",
+        Case::Commands(case) => case.failure_leaf(),
     };
     let fd = fs::openat(&parent, leaf, OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
         Mode::empty()).ok()?;
@@ -2331,7 +2338,7 @@ fn saved_read_context(r: &Record) -> bool {
 }
 pub(super) struct Observation {
     case: Case, main: ThreadId, end: Instant, project_path: Option<PathBuf>, evidence_path: Option<PathBuf>, failed: AtomicBool,
-    failure_reported: AtomicBool, failure_sink: rustix::fd::OwnedFd, record: Mutex<Record>,
+    failure_reported: AtomicBool, failure_sink: rustix::fd::OwnedFd, record: Mutex<Record>, commands: Option<Arc<commands::Control>>,
 }
 impl Observation {
     fn new(case: Case, failure_sink: rustix::fd::OwnedFd) -> Self {
@@ -2340,13 +2347,14 @@ impl Observation {
             match case { Case::ProjectPaths => path.with_file_name("path-project"),
                 Case::WorkflowApply => path.with_file_name("workflow-project"),
                 Case::Session(case) => path.with_file_name(case.name()).join("project"),
+                Case::Commands(case) => path.with_file_name(case.name()).join("project"),
                 Case::MetadataSave => path.with_file_name("metadata-project"), _ => path });
         let paths = Paths::new((case == Case::ProjectPaths).then_some(project_path.as_deref()).flatten());
         let evidence_path = project_path.as_ref().and_then(|path| path.parent()).map(|root| root.join("candidate-evidence"));
         Self { case, main: std::thread::current().id(), end,
             failed: AtomicBool::new(case != Case::Outstanding && (project_path.is_none() || evidence_path.is_none())
                 || case == Case::ProjectPaths && paths.fixture.is_none()), project_path, evidence_path,
-            failure_reported: AtomicBool::new(false), failure_sink, record: Mutex::new(Record {
+            failure_reported: AtomicBool::new(false), failure_sink, commands: case.commands().map(commands::Control::new), record: Mutex::new(Record {
                 attached: false, started: false, loaded: false, info: false, methods: 0, catalog: false, environment: false,
                 step: Step::Bootstrap, pending: None, evaluations: 0, trace: (Step::Bootstrap, Boundary::Bootstrap),
                 bootstrap: BootstrapProgress::NotSampled,
@@ -2430,6 +2438,15 @@ impl Observation {
         r.session.admission_issued = true; drop(r);
         document.admit_installed_session(SessionAdmission { original: Arc::downgrade(self), case })
     }
+    pub(super) fn attach_commands(self: &Arc<Self>, document: &crate::asset_session::DocumentBinding) -> Result<(), BridgeError> {
+        if let Some(commands) = &self.commands { commands.attach(self, document)?; } Ok(())
+    }
+    pub(super) fn commands_request(&self, command: commands::Command, value: &Value) {
+        if let Some(commands) = &self.commands { commands.request(command, value); }
+    }
+    pub(super) fn commands_result<T: serde::Serialize>(&self, command: commands::Command, result: &Result<T, BridgeError>) {
+        if let Some(commands) = &self.commands { commands.returned(command, result); }
+    }
     pub(super) fn page_load(&self, trusted: bool, finished: bool) {
         let Some(mut r) = self.record_at(Boundary::Bootstrap) else { return; };
         if !trusted || !r.attached || if finished { !r.started || r.loaded } else { r.started } { self.fail(); return; }
@@ -2495,7 +2512,7 @@ impl Observation {
             Ok(Some(project)) if r.step == Step::Selected && r.cancelled && r.project.is_none() && r.pickers[1].responded && r.pickers[1].returned
                 && self.project_path().is_some_and(|path| Path::new(&project.path) == path)
                 && project.name == (match self.case { Case::ProjectPaths => "path-project", Case::WorkflowApply => "workflow-project",
-                    Case::Session(_) => "project", Case::MetadataSave => "metadata-project", _ => "positive-project" })
+                    Case::Session(_) | Case::Commands(_) => "project", Case::MetadataSave => "metadata-project", _ => "positive-project" })
                 && crate::protocol::valid_id(&project.id) => r.project = Some(project.clone()),
             _ => self.fail(),
         }
@@ -2512,6 +2529,7 @@ impl Observation {
         r.snapshot_requests += 1;
     }
     pub(super) fn snapshot(&self, project_id: &str, result: &Result<Value, BridgeError>) {
+        if let Some(commands) = &self.commands { commands.snapshot(project_id, result); return; }
         if self.case.session().is_some() { self.session_snapshot_result(project_id,result); return; }
         let Some(mut r) = self.record_at(Boundary::Result) else { return; };
         let saved = r.snapshot_requests == 2;
@@ -3767,7 +3785,7 @@ impl Observation {
             }
             if r.step == Step::Bootstrap && self.case != Case::Outstanding {
                 if !r.info || !r.catalog { r.bootstrap = BootstrapProgress::AppInfoCatalog; return; }
-                r.step = if self.case.session().is_some() { Step::Dashboard } else { Step::Environment }; r.bootstrap = BootstrapProgress::Advanced;
+                r.step = if self.case.session().is_some() || self.commands.is_some() { Step::Dashboard } else { Step::Environment }; r.bootstrap = BootstrapProgress::Advanced;
             }
             if r.step == Step::Bootstrap { r.bootstrap = BootstrapProgress::HeldAppInfo; }
             // Wait for already-requested native replies without spending DOM
@@ -3889,6 +3907,10 @@ impl Observation {
         }
         if step == Step::Exit { return; }
         if let Step::Session(step) = step { self.session_tick(app,step); return; }
+        if let Step::Commands(step) = step {
+            let Some(commands) = &self.commands else { self.fail(); return; };
+            if !commands.tick(app, step) { return; }
+        }
         {
             let Some(mut r) = self.record_at(Boundary::Settlement) else { return; };
             r.pending = Some(match step {
@@ -3909,6 +3931,8 @@ impl Observation {
                     }
                     if self.case == Case::MetadataSave && (!r.metadata.complete() || r.requests != [0;4]
                         || !r.sessions.is_empty() || r.workflow.requests != [0;4]) { self.fail(); return; }
+                    if self.commands.as_ref().is_some_and(|c| !c.complete() || r.requests != [0;4] || !r.sessions.is_empty()
+                        || r.workflow.requests != [0;4]) { self.fail(); return; }
                     r.step = Step::Quit; Pending::Close
                 },
                 Step::Quit => { if !r.close_prevented { self.fail(); return; } Pending::Gtk },
@@ -3969,6 +3993,9 @@ impl Observation {
     fn dom(&self, step: Step, raw: &str) {
         if raw.len() > 262144 || Instant::now() >= self.end { self.fail(); return; }
         let Ok(value) = crate::protocol::strict_json(raw.as_bytes()) else { self.fail(); return; };
+        if let Step::Commands(step) = step {
+            if let Some(commands) = &self.commands { commands.dom(step, &value); } else { self.fail(); } return;
+        }
         if let Step::Session(session) = step { self.session_dom(session,&value); return; }
         if let Step::Paths(path) = step { self.path_dom(path,&value); return; }
         if let Step::Workflow(workflow) = step { self.workflow_dom(workflow, &value); return; }
@@ -4003,7 +4030,7 @@ impl Observation {
             },
             Step::ReadCancelled => object.len() == 3 && r.cancelled && value["unselected"].as_bool() == Some(true)
                 && value["chooseEnabled"].as_bool() == Some(true),
-            Step::ReadSnapshot if self.case.session().is_some() => object.len() == 4 && r.selected && r.snapshot
+            Step::ReadSnapshot if self.case.session().is_some() || self.commands.is_some() => object.len() == 4 && r.selected && r.snapshot
                 && value["configuration"].as_str() == Some("Format-valid only") && value["name"].as_str() == Some("project")
                 && value["sourceFiles"].as_str().is_some_and(|text| text.ends_with(" recognized files")),
             Step::ReadSnapshot => object.len() == 4 && r.selected && r.snapshot
@@ -4093,7 +4120,8 @@ impl Observation {
             Step::ReadCancelled => Step::ChooseSelect,
             Step::ChooseSelect => Step::SetProject,
             Step::ReadSnapshot => { r.snapshot_visible = true;
-                if self.case.session().is_some() { Step::Session(SessionStep::Navigate) }
+                if self.commands.is_some() { Step::Commands(commands::Step::Navigate) }
+                else if self.case.session().is_some() { Step::Session(SessionStep::Navigate) }
                 else if self.case == Case::MetadataSave { Step::MetadataSave(MetadataStep::Navigate) } else { Step::Settings } },
             Step::Settings => if self.case == Case::ProjectPaths { Step::Paths(PathStep::Start) } else { Step::Suggest },
             Step::Suggest => Step::ReadSuggestion,
@@ -4290,7 +4318,7 @@ impl Observation {
             r.session.quit_cancel_id=Some(id); r.session.quit_cancel.created=true; return;
         }
         if !quit || id == 0 || self.case == Case::Positive && id != 6 || self.case == Case::ProjectPaths && id != 14
-            || matches!(self.case,Case::WorkflowApply | Case::MetadataSave) && id != 3
+            || matches!(self.case,Case::WorkflowApply | Case::MetadataSave | Case::Commands(_)) && id != 3
             || !r.close_prevented || r.step != Step::Quit || r.native_id.is_some() { self.fail(); return; }
         r.native_id = Some(id);
     }
@@ -4409,7 +4437,8 @@ impl Observation {
         let originals_final = if self.case == Case::Outstanding { true } else {
             let Some(r) = self.record_at(Boundary::Exit) else { return; };
             if self.case == Case::ProjectPaths { r.paths.complete() && r.project_witness.as_ref().is_some_and(|project| document.installed_observation_paths_final(project)) }
-            else if matches!(self.case,Case::WorkflowApply | Case::MetadataSave) { r.project_witness.is_some() && document.installed_observation_final() }
+            else if matches!(self.case,Case::WorkflowApply | Case::MetadataSave | Case::Commands(_)) { r.project_witness.is_some()
+                && self.commands.as_ref().is_none_or(|c| c.complete()) && document.installed_observation_final() }
             else if let Some(case) = self.case.session() { self.session_behavior_complete(&r)
                 && r.project_witness.as_ref().is_some_and(|project| document.installed_session_final(project,case == SessionCase::Loss)) }
             else { r.candidate.complete() && r.project_witness.as_ref().is_some_and(|project| document.installed_observation_candidate_final(project)) }
@@ -4442,7 +4471,7 @@ impl Observation {
             r.session.queries = Some(queries); r.session.r1_final = retired; retired
         } else { self.case.session().is_none() };
         let retired = match (self.case, held) {
-            (Case::Positive | Case::ProjectPaths | Case::WorkflowApply | Case::Session(_) | Case::MetadataSave, None) => true,
+            (Case::Positive | Case::ProjectPaths | Case::WorkflowApply | Case::Session(_) | Case::MetadataSave | Case::Commands(_), None) => true,
             (Case::Outstanding, Some(mut held)) => {
                 // Borrow/join the same original after the NORMAL event loop
                 // exits. No additional task, shutdown call, or replacement
@@ -4481,7 +4510,12 @@ impl Observation {
                 && r.cancelled && r.pickers[0].settled(false) && r.selected && r.pickers[1].settled(true)
                 && r.snapshot && r.snapshot_visible && r.snapshot_requests == 1 && r.project_witness.is_some()
                 && r.requests == [0;4] && r.sessions.is_empty() && !r.open_pending && r.prepare_pending.is_none()
-                && self.session_behavior_complete(&r) && r.originals_final && r.session.r1_final)
+                && self.session_behavior_complete(&r) && r.originals_final && r.session.r1_final
+                || self.commands.as_ref().is_some_and(|c| c.complete()) && r.info && r.catalog && !r.environment
+                && r.cancelled && r.pickers[0].settled(false) && r.selected && r.pickers[1].settled(true)
+                && r.snapshot && r.snapshot_visible && r.snapshot_requests == 1 && r.project_witness.is_some()
+                && r.requests == [0;4] && r.sessions.is_empty() && !r.open_pending && r.prepare_pending.is_none()
+                && r.workflow.requests == [0;4] && r.workflow.sessions.is_empty() && r.originals_final)
     }
     fn metadata_report(&self) -> Option<Vec<u8>> {
         let r = self.record()?;
@@ -5795,10 +5829,11 @@ fn workflow_script(step: WorkflowStep) -> Option<String> {
 }
 
 fn script(step: Step, case: Case) -> Option<String> {
+    if let Step::Commands(step) = step { return commands::script(step, case.commands()?); }
     if let Step::Paths(path) = step { return path_script(path); }
     if let Step::Workflow(workflow) = step { return workflow_script(workflow); }
     if let Step::MetadataSave(metadata) = step { return metadata_script(metadata); }
-    let project_name = match case { Case::WorkflowApply => "workflow-project", Case::Session(_) => "project", Case::MetadataSave => "metadata-project", _ => "positive-project" };
+    let project_name = match case { Case::WorkflowApply => "workflow-project", Case::Session(_) | Case::Commands(_) => "project", Case::MetadataSave => "metadata-project", _ => "positive-project" };
     let body = match step {
         Step::Environment | Step::GuidanceEnvironment => r#"
             const b = document.querySelector('nav[aria-label="Workspace navigation"] button[aria-label="Environment"]');
@@ -6343,6 +6378,7 @@ pub(crate) fn main() -> std::process::ExitCode {
         Some(value) if value == OsStr::new("session-loss") => Some(Case::Session(SessionCase::Loss)),
         Some(value) if value == OsStr::new("session-deadline") => Some(Case::Session(SessionCase::Deadline)),
         Some(value) if value == OsStr::new("metadata-save") => Some(Case::MetadataSave),
+        Some(value) => commands::Case::parse(value).map(Case::Commands),
         _ => None,
     };
     let Some(case) = case.filter(|_| args.next().is_none() && route()) else {
@@ -6398,6 +6434,7 @@ pub(crate) fn main() -> std::process::ExitCode {
         crate::edit_owner::assert_installed_metadata_owner_contract();
         assert_metadata_open_race_contract();
     }
+    if case.commands().is_some() { commands::assert_contracts(); }
     // Routing DATA is not native admission. The ordinary builder constructs
     // DesktopBridge::new / RuntimeConfig::packaged and owes every real check.
     let returned = super::run_builder(super::builder().manage(q.clone()));
@@ -6416,10 +6453,16 @@ pub(crate) fn main() -> std::process::ExitCode {
         Case::Session(SessionCase::Loss) => b"MRK_INSTALLED_SHELL_OBSERVATION=session-loss-verified\n",
         Case::Session(SessionCase::Deadline) => b"MRK_INSTALLED_SHELL_OBSERVATION=session-deadline-verified\n",
         Case::MetadataSave => b"MRK_INSTALLED_SHELL_OBSERVATION=metadata-save-verified\n",
+        Case::Commands(case) => case.verified_line(),
     };
     let mut stdout = std::io::stdout().lock();
     if stdout.write_all(b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n")
         .and_then(|_| {
+            if let Some(commands) = &q.commands {
+                let report = commands.report().ok_or_else(|| std::io::Error::other("tools/offline receipt unavailable"))?;
+                stdout.write_all(b"MRK_INSTALLED_SHELL_TOOLS_OFFLINE=")?;
+                stdout.write_all(&report)?; return stdout.write_all(b"\n");
+            }
             if case == Case::MetadataSave {
                 let report = q.metadata_report().ok_or_else(||std::io::Error::other("metadata receipt unavailable"))?;
                 stdout.write_all(b"MRK_INSTALLED_SHELL_METADATA_SAVE=")?;
@@ -6463,9 +6506,10 @@ pub(crate) fn main() -> std::process::ExitCode {
 // Metadata and finite directory rosters only. The outside publication owner
 // hashes the fictional bytes; SourceBook alone owns any open source original.
 // This object never opens a file body, repairs a fixture, or grants cleanup.
-const SESSION_FIXTURE_NAMESPACE: [&str; 10] = [
-    "candidate-evidence", "metadata-project", "path-outside", "path-project", "positive-project",
-    "session-deadline", "session-inputs", "session-loss", "session-refusals", "workflow-project",
+const SESSION_FIXTURE_NAMESPACE: [&str; 18] = [
+    "candidate-evidence", "metadata-project", "offline-cancel", "offline-drift", "offline-negative", "offline-pass", "offline-settlement",
+    "path-outside", "path-project", "positive-project", "session-deadline", "session-inputs", "session-loss", "session-refusals",
+    "tools-cancel", "tools-observed", "tools-settlement", "workflow-project",
 ];
 const SESSION_FIXTURE_COMMON: [(&str, u64, u64); 9] = [
     (".", 0o040700, 0), ("project", 0o040700, 0),
@@ -6571,7 +6615,7 @@ impl SessionFixture {
             if id[0] == 0 || id[1] == 0 || id[2] & 0o170000 != 0o040000
                 || id[2] & 0o022 != 0 || id[3..5] != [0, 0]
                 || (if path == namespace {
-                    id[2] != 0o040755 || id[5] == 0 || id[5] > 16 || id[6] > 1 << 20
+                    id[2] != 0o040755 || id[5] == 0 || id[5] > 20 || id[6] > 1 << 20
                 } else { id[2] & 0o005 != 0o005 })
                 || ancestors.iter().any(|(_, old)| old[0] != id[0] || old[..2] == id[..2]) { return Err(()); }
             ancestors.push((path.to_path_buf(), id));

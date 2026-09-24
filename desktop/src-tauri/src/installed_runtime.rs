@@ -1179,6 +1179,12 @@ impl EnvironmentDiagnosticsRuntimeSlots {
         self.inner.require_domain(InstalledEditDomain::EnvironmentDiagnostics)?; self.inner.capability()
     }
     pub(crate) fn no_child_effect(&self) -> bool { self.inner.require_domain(InstalledEditDomain::EnvironmentDiagnostics).is_ok() && self.inner.no_child_effect() }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn inspected_untransferred(&self) -> bool {
+        self.inner.require_domain(InstalledEditDomain::EnvironmentDiagnostics).is_ok() && self.inner.inspection_started
+            && self.inner.acquisition.is_none() && self.inner.inspection.as_ref().is_some_and(|original|
+                self.inner.original_domain(original) && !original.transferred)
+    }
     pub(crate) fn mark_interrupted(&mut self) { self.inner.mark_interrupted(); }
     pub(crate) fn settle_originals(&mut self) -> CloseOutcome {
         if self.inner.require_domain(InstalledEditDomain::EnvironmentDiagnostics).is_err() { self.inner.mark_interrupted(); return CloseOutcome::Unknown; }

@@ -89,6 +89,13 @@ SHELL_MODULE_ROOTS = tuple(SHELL_LIBRARY_ROOT + suffix for suffix in (
     *("/gtk-3.0/" + prefix + leaf for prefix in ("3.0.0/linux/", "3.0.0/", "linux/", "")
       for leaf in ("immodules", "modules"))))
 SHELL_MAX_LIBRARIES = 256  # Historical DATA already requires >214 names; fail closed beyond this fixed cap.
+SHELL_TOOLS_JDK_ROOT = "/usr/lib/jvm/java-17-openjdk-amd64"
+SHELL_TOOLS_PROGRAMS = ("/usr/bin/git", "/usr/bin/python3.12", SHELL_TOOLS_JDK_ROOT + "/bin/java", SHELL_TOOLS_JDK_ROOT + "/bin/javac")
+SHELL_TOOLS_LINKS = {"/usr/bin/java": "/etc/alternatives/java", "/usr/bin/javac": "/etc/alternatives/javac",
+    "/etc/alternatives/java": SHELL_TOOLS_JDK_ROOT + "/bin/java", "/etc/alternatives/javac": SHELL_TOOLS_JDK_ROOT + "/bin/javac"}
+SHELL_TOOLS_DIRECTORIES = ("/", "/usr", "/usr/bin", "/usr/lib", "/usr/lib/jvm", SHELL_TOOLS_JDK_ROOT,
+    SHELL_TOOLS_JDK_ROOT + "/bin", "/etc", "/etc/alternatives")
+SHELL_TOOLS_PACKAGES = ("git", "python3.12", "openjdk-17-jdk-headless", "openjdk-17-jre-headless")
 # Independently accepted U35783044845/1: original lifecycle and finality.
 # Complete producer-bound roster; every downloaded member is checked before use.
 # This evidence qualifies neither the new installed candidate nor the product.
@@ -1944,8 +1951,12 @@ def shell_source_manifest(source):
              "desktop/src-tauri/src/runtime.rs", "desktop/src-tauri/src/bridge.rs", "desktop/src-tauri/src/asset_session.rs",
              "desktop/src-tauri/src/asset_source.rs", "desktop/src-tauri/src/shell.rs", "desktop/src-tauri/src/installed_shell_observation.rs",
              "desktop/src-tauri/src/supervisor.rs", "desktop/src-tauri/src/installed_shell_shutdown_observation.rs",
+             "desktop/src-tauri/src/installed_tools_observation.rs", "desktop/src-tauri/src/environment_diagnostics_owner.rs",
+             "desktop/src-tauri/src/environment_diagnostics_protocol.rs", "desktop/src-tauri/src/saved_command_owner.rs",
+             "desktop/src-tauri/src/offline_preflight_owner.rs", "desktop/src-tauri/src/offline_preflight_protocol.rs",
              "desktop/src-tauri/tauri.conf.json", "desktop/package.json", "desktop/package-lock.json",
              "desktop/vite.config.mjs", "desktop/tsconfig.json", "desktop/src/App.tsx",
+             "desktop/src/components/EnvironmentDiagnostics.tsx", "desktop/tests/environment-diagnostics.test.mjs",
              "desktop/tools/ci_ubuntu_publication.py", "desktop/tools/ubuntu_publication_lifecycle.py",
              "desktop/tools/prepare_hosted_ubuntu_data.py")
     return [{**D.file_record(source / path, 2 << 20), "path": path} for path in sorted(paths)]
@@ -3270,11 +3281,12 @@ def shell_project_draft_observation(observed, lifecycle):
            and observed.get("productQualified") is False and observed.get("packageLifecycleQualified") is False
            and observed.get("shellPackageBuilt") is False, "Closed project/draft observation was relabelled as qualification")
     cases, combined, files = observed.get("cases"), observed.get("projectDraft"), observed.get("files")
-    # The unchanged root cap is 128; its exporter adds the original client's
+    # The eighteen-case root cap is160 (154 exact names); its exporter adds the original client's
     # stdout/stderr, not two more root evidence slots or another capture.
     D.need(type(cases) is dict and set(cases) == set(lifecycle.SHELL_CASES)
            and type(combined) is dict and set(combined) == {"native", "fixture"}
-           and type(files) is list and len(files) <= 130, "Closed project/draft receipt or exported original roster is missing")
+           and type(files) is list and len(files) <= lifecycle.SHELL_PUBLIC_FILE_LIMIT + 2,
+           "Closed project/draft receipt or exported original roster is missing")
     positive = cases["positive"]
     D.need(type(positive) is dict and set(positive) == {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps", "projectDraft", "candidateDocuments"}
            and positive["case"] == "positive" and type(positive["exitCode"]) is int and positive["exitCode"] == 0
@@ -3323,6 +3335,7 @@ def shell_project_draft_observation(observed, lifecycle):
     _shell_workflow_apply_observation(cases["workflow-apply"], observed.get("workflowApply"), files, lifecycle)
     _shell_session_inputs_observation(cases, observed.get("sessionInputs"), files, lifecycle)
     _shell_metadata_save_observation(cases["metadata-save"], observed.get("metadataSave"), files, lifecycle)
+    _shell_tools_offline_observation(cases, observed.get("toolsOffline"), files, lifecycle)
     return {"native": receipt, "fixture": fixture}
 
 
@@ -3518,6 +3531,283 @@ def _shell_metadata_save_observation(case, combined, files, lifecycle):
     D.need(fixture["before"]["sha256"] != fixture["after"]["sha256"], "Metadata inventory incorrectly claims no saved text")
 
 
+def shell_tools_input_root():
+    """Only the fixed disposable job; this DATA helper owns no process runner."""
+    D.need(os.environ.get("GITHUB_REF") == SHELL_REF and os.environ.get("GITHUB_ACTIONS") == "true"
+           and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted" and os.geteuid() != 0,
+           "Tools input preparation is restricted to the nonroot disposable hosted job")
+    C.conventional_host(D)
+    run, attempt = os.environ.get("GITHUB_RUN_ID", ""), os.environ.get("GITHUB_RUN_ATTEMPT", "")
+    D.need(all(re.fullmatch(r"[1-9][0-9]{0,19}", value) is not None for value in (run, attempt)), "Tools input original run identity differs")
+    parent = Path(os.environ.get("RUNNER_TEMP", ""))
+    D.need(parent.is_absolute() and ".." not in parent.parts, "Tools input original parent differs")
+    root = parent / ("mrk-desktop-tools-" + run + "-" + attempt)
+    directory_identity(root)
+    return root
+
+
+def shell_tools_input_nodes():
+    """Bound literal public metadata/bytes only; never follow an unknown alias."""
+    nodes, originals = {}, []
+    for name in (*SHELL_TOOLS_DIRECTORIES, *SHELL_TOOLS_PROGRAMS, *SHELL_TOOLS_LINKS):
+        path = Path(name)
+        if name != "/" and nodes.get(str(path.parent), {}).get("kind") != "directory":
+            nodes[name] = {"kind": "parent-unavailable"}
+            continue
+        try:
+            before = path.lstat()
+        except FileNotFoundError:
+            nodes[name] = {"kind": "absent"}
+            originals.append((path, None))
+            continue
+        original = [before.st_dev, before.st_ino, before.st_mode, before.st_uid, before.st_gid,
+                    before.st_nlink, before.st_size, before.st_mtime_ns, before.st_ctime_ns]
+        row = {"kind": "refused", "identity": original}
+        protected = before.st_uid == before.st_gid == 0 and before.st_mode & 0o022 == 0
+        if name in SHELL_TOOLS_DIRECTORIES and protected and stat.S_ISDIR(before.st_mode) and before.st_mode & 0o005 == 0o005:
+            row["kind"] = "directory"
+        elif name in SHELL_TOOLS_PROGRAMS and protected and stat.S_ISREG(before.st_mode) and before.st_nlink == 1 \
+                and before.st_mode & 0o6000 == 0 and before.st_mode & 0o111 == 0o111 and 0 < before.st_size <= 16 << 20:
+            row.update(kind="file", **D.file_record(path, 16 << 20))
+        elif name in SHELL_TOOLS_LINKS and before.st_uid == before.st_gid == 0 and stat.S_ISLNK(before.st_mode) \
+                and before.st_nlink == 1 and 0 < before.st_size <= 4096:
+            target = os.readlink(path)
+            D.need(target.isascii() and all(32 <= ord(char) < 127 for char in target) and len(target) == before.st_size,
+                   "Tools public alias DATA exceeds its fixed shape")
+            row.update(kind="symlink", target=target)
+        nodes[name] = row
+        originals.append((path, original))
+    for path, original in originals:
+        if original is None:
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                continue
+            D.need(False, "Absent Tools input appeared during its original snapshot")
+        after = path.lstat()
+        D.need(original == [after.st_dev, after.st_ino, after.st_mode, after.st_uid, after.st_gid,
+                           after.st_nlink, after.st_size, after.st_mtime_ns, after.st_ctime_ns], "Tools input changed during its original snapshot")
+    return nodes
+
+
+def shell_tools_package_data(raw):
+    D.need(type(raw) is bytes and len(raw) <= 64 << 10 and raw.endswith(b"\n"), "Tools package query DATA is incomplete")
+    rows = {}
+    for line in raw.decode("ascii").split("\n")[:-1]:
+        fields = line.split("\t")
+        D.need(len(fields) == 6 and all(0 < len(field) <= 256 and all(32 <= ord(char) < 127 for char in field) for field in fields),
+               "Tools package query fields differ")
+        name = fields[0].removesuffix(":amd64")
+        D.need(name in SHELL_TOOLS_PACKAGES and name not in rows and fields[0] in (name, name + ":amd64"),
+               "Tools package query roster differs")
+        rows[name] = fields
+    D.need({"git", "python3.12"} <= set(rows), "Tools original Git/Python package query is missing")
+    for name, fields in rows.items():
+        D.need(fields[1] == "installed" and fields[3] == "amd64" and all(fields[index] for index in (2, 4, 5)),
+               "Tools original package is not an installed amd64 supplier")
+    return rows
+
+
+def _shell_tools_input_document(raw, phase, root):
+    """Closed preparation DATA, not an alternate executable-admission policy."""
+    data = D.decode(raw, 64 << 10)
+    D.need(type(data) is dict and set(data) == {"schema", "phase", "qualified", "sourceSha", "runId", "attempt", "rootIdentity",
+                                               "originalStepExit", "nodes", "packageQuery"}
+           and D.canonical(data) == raw and data["schema"] == "fixed-disposable-shell-tools-inputs-v1" and data["phase"] == phase
+           and data["qualified"] is False and data["sourceSha"] == os.environ["GITHUB_SHA"]
+           and data["runId"] == os.environ["GITHUB_RUN_ID"] and data["attempt"] == os.environ["GITHUB_RUN_ATTEMPT"]
+           and type(data["rootIdentity"]) is list and all(type(n) is int for n in data["rootIdentity"])
+           and data["rootIdentity"] == list(directory_identity(root)), "Original Tools preparation identity differs")
+    D.need(data["originalStepExit"] is None if phase == "before" else
+           type(data["originalStepExit"]) is int and 0 <= data["originalStepExit"] <= 255,
+           "Tools original preparation return is not typed DATA")
+    nodes = data["nodes"]
+    D.need(type(nodes) is dict and set(nodes) == set((*SHELL_TOOLS_DIRECTORIES, *SHELL_TOOLS_PROGRAMS, *SHELL_TOOLS_LINKS)),
+           "Tools original public node roster differs")
+    for name, row in nodes.items():
+        D.need(type(row) is dict and row.get("kind") in ("absent", "parent-unavailable", "refused", "directory", "file", "symlink"),
+               "Tools original node kind differs")
+        kind = row["kind"]
+        fields = {"kind"} if kind in ("absent", "parent-unavailable") else {"kind", "identity"}
+        fields |= {"path", "size", "sha256"} if kind == "file" else {"target"} if kind == "symlink" else set()
+        D.need(set(row) == fields, "Tools original node fields differ")
+        if "identity" not in row:
+            continue
+        identity = row["identity"]
+        D.need(type(identity) is list and len(identity) == 9 and all(type(n) is int and 0 <= n < 1 << 64 for n in identity)
+               and identity[0] > 0 and identity[1] > 0 and identity[5] > 0, "Tools original node identity differs")
+        if kind == "refused":
+            continue  # Retained failure DATA can never establish a successful pair.
+        D.need(identity[3:5] == [0, 0], "Tools original public supplier is not root-owned")
+        if kind == "directory":
+            D.need(name in SHELL_TOOLS_DIRECTORIES and stat.S_ISDIR(identity[2]) and identity[2] & 0o022 == 0
+                   and identity[2] & 0o005 == 0o005, "Tools original protected directory differs")
+        elif kind == "file":
+            D.need(name in SHELL_TOOLS_PROGRAMS and stat.S_ISREG(identity[2]) and identity[2] & 0o6022 == 0
+                   and identity[2] & 0o111 == 0o111 and identity[5] == 1 and 0 < identity[6] <= 16 << 20
+                   and row["path"] == Path(name).name and type(row["size"]) is int and row["size"] == identity[6]
+                   and type(row["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is not None,
+                   "Tools original public executable DATA differs")
+        else:
+            D.need(name in SHELL_TOOLS_LINKS and stat.S_ISLNK(identity[2]) and identity[5] == 1
+                   and type(row["target"]) is str and row["target"].isascii() and 0 < len(row["target"]) == identity[6] <= 4096
+                   and all(32 <= ord(char) < 127 for char in row["target"]), "Tools original literal alias DATA differs")
+    query = data["packageQuery"]
+    D.need(type(query) is dict and set(query) == {"stdout", "stderr", "exitCode"}
+           and type(query["exitCode"]) is int and 0 <= query["exitCode"] <= 255, "Tools original package query return differs")
+    for key, limit in (("stdout", 64 << 10), ("stderr", 4096)):
+        pin = query[key]
+        D.need(type(pin) is dict and set(pin) == {"size", "sha256"} and type(pin["size"]) is int and 0 <= pin["size"] <= limit
+               and type(pin["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", pin["sha256"]) is not None,
+               "Tools original package query pin differs")
+    return data
+
+
+def shell_tools_input_snapshot(phase):
+    """Snapshot even an actual failed preparation; no installation/launch here."""
+    D.need(phase in ("before", "after"), "Different fixed Tools preparation phase")
+    root = shell_tools_input_root()
+    original_root = directory_identity(root)
+    raw = D.read(root / (phase + "-packages.tsv"), 64 << 10)
+    stderr = D.read(root / (phase + "-packages.stderr"), 4096)
+    exit_raw = D.read(root / (phase + "-packages.exit"), 4)
+    D.need(re.fullmatch(rb"(?:0|[1-9][0-9]{0,2})\n", exit_raw) is not None and int(exit_raw) <= 255,
+           "Tools package original return DATA differs")
+    step = os.environ.get("MRK_SHELL_TOOLS_PREPARATION_EXIT", "") if phase == "after" else None
+    D.need(phase == "before" or re.fullmatch(r"0|[1-9][0-9]{0,2}", step) is not None and int(step) <= 255,
+           "Tools original preparation return is missing")
+    nodes = shell_tools_input_nodes()
+    source_sha = os.environ.get("GITHUB_SHA", "")
+    D.need(re.fullmatch(r"[0-9a-f]{40}", source_sha) is not None, "Tools original source identity differs")
+    document = {"schema": "fixed-disposable-shell-tools-inputs-v1", "phase": phase, "qualified": False,
+        "sourceSha": source_sha, "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+        "rootIdentity": list(original_root), "originalStepExit": int(step) if step is not None else None, "nodes": nodes,
+        "packageQuery": {"stdout": {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()},
+                         "stderr": {"size": len(stderr), "sha256": hashlib.sha256(stderr).hexdigest()}, "exitCode": int(exit_raw)}}
+    # Preserve the actual snapshot before any successful-pair assertion. A
+    # missing/failed after snapshot remains failure, never cleanup evidence.
+    D.write(root / (phase + ".json"), D.canonical(document))
+    D.need(directory_identity(root) == original_root and int(exit_raw) in ((0, 1) if phase == "before" else (0,)),
+           "Tools original directory or package query failed")
+    packages = shell_tools_package_data(raw)
+    D.need(all(nodes[path].get("kind") == "file" for path in SHELL_TOOLS_PROGRAMS[:2])
+           and all(row["kind"] in ("directory", "file", "symlink", "absent", "parent-unavailable") for row in nodes.values()),
+           "Tools preparation must not repair a refused original Git/Python/JDK path")
+    if phase == "before":
+        print("present" if all(nodes[path].get("kind") == "file" for path in SHELL_TOOLS_PROGRAMS[2:]) else "absent", flush=True)
+        return
+    before_raw = D.read(root / "before.json", 64 << 10)
+    before = _shell_tools_input_document(before_raw, "before", root)
+    old_packages_raw = D.read(root / "before-packages.tsv", 64 << 10)
+    D.need(before["packageQuery"]["stdout"] == {"size": len(old_packages_raw), "sha256": hashlib.sha256(old_packages_raw).hexdigest()},
+           "Tools original before package bytes changed")
+    old_packages = shell_tools_package_data(old_packages_raw)
+    D.need(step == "0" and stderr == b"" and set(packages) == set(SHELL_TOOLS_PACKAGES)
+           and all(nodes[path].get("kind") == "file" for path in SHELL_TOOLS_PROGRAMS)
+           and all(nodes[path].get("kind") == "symlink" and nodes[path].get("target") == target for path, target in SHELL_TOOLS_LINKS.items())
+           and all(nodes[path].get("kind") == "directory" for path in SHELL_TOOLS_DIRECTORIES),
+           "Original disposable Tools preparation did not establish the fixed pair")
+    D.need(all(nodes[path] == before["nodes"][path] for path in SHELL_TOOLS_PROGRAMS[:2])
+           and all(packages[name] == old_packages[name] for name in ("git", "python3.12")),
+           "JDK preparation changed the original Git/Python input")
+    D.need(all(before["nodes"][path].get("kind") != "directory" or before["nodes"][path]["identity"][:5] == nodes[path]["identity"][:5]
+               for path in SHELL_TOOLS_DIRECTORIES), "JDK preparation replaced an original protected ancestor")
+
+
+def shell_tools_inputs_for_observation():
+    """Rebind the actual prepared pair, Git and Python before/after native work."""
+    root = shell_tools_input_root()
+    snapshots, packages, pins = {}, {}, {}
+    for phase in ("before", "after"):
+        raw = D.read(root / (phase + ".json"), 64 << 10)
+        data = _shell_tools_input_document(raw, phase, root)
+        pins[phase + ".json"] = {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+        for suffix, key, limit in ((".tsv", "stdout", 64 << 10), (".stderr", "stderr", 4096), (".exit", None, 4)):
+            name = phase + "-packages" + suffix
+            content = D.read(root / name, limit)
+            pin = {"size": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+            if key is not None:
+                D.need(data["packageQuery"][key] == pin, "Tools original package query bytes changed")
+            else:
+                D.need(content == (str(data["packageQuery"]["exitCode"]) + "\n").encode("ascii"), "Tools original package query return changed")
+            pins[name] = pin
+            if key == "stdout":
+                packages[phase] = shell_tools_package_data(content)
+        snapshots[phase] = data
+    before, after = snapshots["before"], snapshots["after"]
+    D.need(before["originalStepExit"] is None and type(after["originalStepExit"]) is int and after["originalStepExit"] == 0
+           and before["packageQuery"]["exitCode"] in (0, 1)
+           and type(after["packageQuery"]["exitCode"]) is int and after["packageQuery"]["exitCode"] == 0
+           and after["packageQuery"]["stderr"]["size"] == 0 and set(packages["after"]) == set(SHELL_TOOLS_PACKAGES)
+           and all(packages["before"][name] == packages["after"][name] for name in ("git", "python3.12")),
+           "Tools original preparation failed or changed Git/Python packages")
+    current = shell_tools_input_nodes()
+    D.need(set(after["nodes"]) == set(before["nodes"]) == set(current)
+           and all(current[path].get("kind") == "file" and current[path] == after["nodes"][path] for path in SHELL_TOOLS_PROGRAMS)
+           and all(current[path] == after["nodes"][path] and current[path].get("kind") == "symlink"
+                   and current[path].get("target") == target for path, target in SHELL_TOOLS_LINKS.items())
+           and all(current[path].get("kind") == "directory" and current[path]["identity"][:5] == after["nodes"][path]["identity"][:5]
+                    for path in SHELL_TOOLS_DIRECTORIES)
+           and all(before["nodes"][path].get("kind") != "directory" or before["nodes"][path]["identity"][:5] == current[path]["identity"][:5]
+                   for path in SHELL_TOOLS_DIRECTORIES)
+           and all(row["kind"] != "refused" for row in before["nodes"].values())
+           and all(before["nodes"][path] == current[path] for path in SHELL_TOOLS_PROGRAMS[:2]),
+           "Actual Git/Python/JDK pair drifted from the original disposable preparation")
+    # Ordinary P0 publication can change directory timestamps/size. Preserve
+    # those original snapshot facts, but only stable protected parent identity
+    # is authority across native work; executable and alias rows remain exact.
+    bound_nodes = {path: {**row, "identity": row["identity"][:5]} if row["kind"] == "directory" else row
+                   for path, row in current.items()}
+    return {"schema": after["schema"], "qualified": False, "preparationFiles": pins, "nodes": bound_nodes, "packages": packages["after"]}
+
+
+def _shell_tools_offline_observation(cases, combined, files, lifecycle):
+    """Eight original engineering cases, including negative/refused outcomes.
+
+    This never activates ordinary Tools/Offline or claims the full1800s expiry.
+    Native booleans alone cannot replace the retained exact fixture inventories.
+    """
+    D.need(type(cases) is dict and set(lifecycle.SHELL_TOOLS_OFFLINE_CASES) <= set(cases)
+           and type(combined) is dict and set(combined) == set(lifecycle.SHELL_TOOLS_OFFLINE_CASES),
+           "Closed eight-case Tools/Offline observation is missing")
+    for name in lifecycle.SHELL_TOOLS_OFFLINE_CASES:
+        case, pair = cases[name], combined[name]
+        D.need(type(case) is dict and set(case) == {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps", "toolsOffline"}
+               and case["case"] == name and type(case["exitCode"]) is int and case["exitCode"] == 0
+               and case["bootstrapReturned"] is True and case["domAndGtkObserved"] is True and case["maps"] == [],
+               "Closed Tools/Offline original result is incomplete")
+        D.need(type(pair) is dict and set(pair) == {"native", "fixture"}, "Closed Tools/Offline receipt or fixture is missing")
+        receipt = lifecycle.shell_tools_offline_receipt(D.canonical(case["toolsOffline"]), name)
+        D.need(D.canonical(pair["native"]) == D.canonical(receipt), "Closed Tools/Offline native receipt correspondence differs")
+        config = lifecycle.SHELL_TOOLS_OFFLINE_CONFIGS[name]
+        drift = name == "offline-drift"
+        mutations = (["project/release/mobile-release.json"] if drift else
+                     ["project/script.trace"] if lifecycle.SHELL_TOOLS_OFFLINE_TRACES[name] else [])
+        expected = {"fixture": "installed-tools-offline-fixture-v1", "case": name, "rootRetained": True, "originalsAccounted": True,
+            "noUnexpectedEntries": True, "noPendingState": True, "beforeCount": 21, "afterCount": 21, "mutations": mutations,
+            "scriptTrace": lifecycle.SHELL_TOOLS_OFFLINE_TRACES[name].decode("ascii"), "laterTrace": "", "savedConfigChanged": drift,
+            "savedConfigBefore": {"bytes": len(config), "sha256": hashlib.sha256(config).hexdigest()},
+            "savedConfigAfter": {"bytes": len(config) + drift, "sha256": hashlib.sha256(config + (b"\n" if drift else b"")).hexdigest()}}
+        fixture = pair["fixture"]
+        D.need(type(fixture) is dict and set(fixture) == set(expected) | {"before", "after"}
+               and D.canonical({key: fixture[key] for key in expected}) == D.canonical(expected)
+               and D.canonical(receipt["fixture"]) == D.canonical({key: fixture[key]
+                   for key in ("scriptTrace", "laterTrace", "savedConfigChanged")}),
+               "Closed Tools/Offline synthetic fixture or same-original changes differ")
+        for phase in ("before", "after"):
+            pin = fixture[phase]
+            D.need(type(pin) is dict and set(pin) == {"size", "sha256"} and type(pin["size"]) is int
+                   and 0 < pin["size"] <= lifecycle.SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT
+                   and type(pin["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", pin["sha256"]) is not None,
+                   "Closed Tools/Offline original inventory pin differs")
+            matches = [row for row in files if type(row) is dict and row.get("path") == "lifecycle-shell-" + name + "-" + phase + ".json"]
+            D.need(len(matches) == 1 and set(matches[0]) == {"path", "size", "sha256"}
+                   and type(matches[0]["size"]) is int and matches[0]["size"] == pin["size"] and matches[0]["sha256"] == pin["sha256"],
+                   "Original Tools/Offline before/after export pin differs")
+        D.need(fixture["before"]["sha256"] != fixture["after"]["sha256"] if mutations else fixture["before"] == fixture["after"],
+               "Closed Tools/Offline inventory changed outside its fixed in-place mutation")
+
+
 def verify_installed_shell():
     """One installed connection gate; reuse U, not its entire lifecycle again."""
     D.need(os.environ.get("MRK_INSTALLED_SHELL_CASE") == "observe", "Only the fixed shell observation job is accepted")
@@ -3548,6 +3838,7 @@ def verify_installed_shell():
                    "Shell source is not the exact original clean checkout")
 
         source_check("before")
+        tools_inputs = shell_tools_inputs_for_observation()
         policy = installed_shell_os_inputs(check, work, native, compiler, old_compiler)
         check.phase = "shell-handoff"
         lifecycle = local("ubuntu_publication_lifecycle")
@@ -3564,7 +3855,8 @@ def verify_installed_shell():
             "attempt": os.environ["GITHUB_RUN_ATTEMPT"], "features": SHELL_FEATURES, "acceptedU": accepted,
             "shellRosterSha256": roster_sha, "shellProducerAttempt": producer_attempt, "shellArtifactId": artifact_id,
             "platformLibrarySourceSha": old_compiler["sourceSha"], "imageOS": os.environ["ImageOS"],
-            "imageVersion": os.environ["ImageVersion"], "originalDeadline": repr(deadline), "qualified": False}
+            "imageVersion": os.environ["ImageVersion"], "originalDeadline": repr(deadline), "qualified": False,
+            "toolsInputPreparation": tools_inputs}
         D.write(public / "source.json", D.canonical(source_record))
         request = {"sourceSha": sha, "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
             "deadline": deadline, "runnerUid": os.getuid(), "runnerGid": os.getgid(), "source": str(source), "taskRoot": str(root),
@@ -3579,15 +3871,18 @@ def verify_installed_shell():
         observed = lifecycle.verify_service_result(path, pin["sha256"], entry_sha, client, public)
         project_draft = shell_project_draft_observation(observed, lifecycle)
         source_check("after")
+        D.need(D.canonical(shell_tools_inputs_for_observation()) == D.canonical(tools_inputs),
+               "Original Tools input preparation or live Git/Python/JDK nodes changed during shell observations")
         D.need(time.monotonic() < deadline, "Original shell result endpoint expired")
         D.write(public / "result.json", D.canonical({**source_record, "lifecycle": observed,
             "projectDraft": project_draft, "candidateDocuments": observed["candidateDocuments"], "projectPaths": observed["projectPaths"],
             "workflowApply": observed["workflowApply"], "sessionInputs": observed["sessionInputs"], "metadataSave": observed["metadataSave"],
+            "toolsOffline": observed["toolsOffline"], "toolsOfflineQualificationOnly": True, "offlineFullWorkDeadlineExercised": False,
             "commands": check.commands, "cases": list(lifecycle.SHELL_CASES), "compilerRerun": False,
             "supplierRebuilt": False, "packageBuilt": False, "upgradeOrRefusalRerun": False,
             "scope": "normal-shell-to-accepted-installed-runtime-connection-only"}))
         D.need(time.monotonic() < deadline, "Original shell result close/readback was late")
-        print("Normal window and nine original observer cases retained with service finality; no product/package qualification.", flush=True)
+        print("Normal window and seventeen original observer cases retained with service finality; no product/package qualification.", flush=True)
     except BaseException as error:
         retain_failure(root, phase if check is None else check.phase, [] if check is None else check.commands, error)
         raise
@@ -3605,6 +3900,10 @@ if __name__ == "__main__":
             verify_installed_shell_compile()
         elif sys.argv[1:] == ["installed-shell"]:
             verify_installed_shell()
+        elif sys.argv[1:] == ["installed-shell-tools-before"]:
+            shell_tools_input_snapshot("before")
+        elif sys.argv[1:] == ["installed-shell-tools-after"]:
+            shell_tools_input_snapshot("after")
         else:
             D.need(len(sys.argv) == 1, "Expected a fixed preparation/compiler/installed entry or no-argument lifecycle entry")
             verify()

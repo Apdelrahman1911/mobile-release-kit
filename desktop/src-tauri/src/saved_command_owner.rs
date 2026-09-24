@@ -241,7 +241,11 @@ impl Clocks {
 }
 #[derive(Clone)]
 pub(crate) struct SavedCommandOwner { inner: Arc<Inner> }
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+struct InstalledObservation { control: Arc<crate::shell::installed_observation::commands::Control>, original: Option<Arc<Session>>, retired: bool, core_settled: bool }
 struct Inner {
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    observation: Mutex<Option<InstalledObservation>>,
     domain: SavedCommandDomain, runtime: RuntimeConfig, toolchain: Option<AndroidToolchainProfile>, registry: Mutex<Registry>, changes: watch::Sender<u32>, changed: Notify, poisoned: AtomicBool,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
         any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
@@ -546,7 +550,10 @@ impl SavedCommandOwner {
     fn new(runtime: RuntimeConfig, domain: SavedCommandDomain) -> Self { Self::new_selected(runtime, domain, None) }
     fn new_selected(runtime: RuntimeConfig, domain: SavedCommandDomain, toolchain: Option<AndroidToolchainProfile>) -> Self {
         let (changes, _) = watch::channel(0);
-        Self { inner: Arc::new(Inner { domain, runtime, toolchain, registry: Mutex::new(Registry { revision: 0, exhausted: false,
+        Self { inner: Arc::new(Inner {
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            observation: Mutex::new(None),
+            domain, runtime, toolchain, registry: Mutex::new(Registry { revision: 0, exhausted: false,
             disabled: false, stopping: false, document_lost: false, capability: Availability::RuntimeUnqualified,
             prepared: None, active: None, last: None }), changes, changed: Notify::new(), poisoned: AtomicBool::new(false),
             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
@@ -576,6 +583,10 @@ impl SavedCommandOwner {
         self.reconcile(); let mut r = self.inner.lock();
         let reason = self.inner.availability(&r, gate);
         if reason != Availability::Available { return Err(prepare_refusal(self.inner.domain, reason)); }
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(observation) = self.inner.observation.lock().map_err(|_| BridgeError::cleanup_unknown())?.as_ref() {
+            observation.control.claim(crate::shell::installed_observation::commands::Domain::Offline)?;
+        }
         let id = nonce(self.inner.domain)?; let generation = nonce(self.inner.domain)?;
         if r.last.as_ref().is_some_and(|last| last.operation_id == id || last.owner_generation == generation) { return Err(self.inner.domain.unavailable()); }
         let projection = RunProjection { operation_id: id, owner_generation: generation, context,
@@ -650,6 +661,11 @@ impl SavedCommandOwner {
         if let Some(permit) = &owner.fixture {
             if owner.domain != SavedCommandDomain::OfflinePreflight { return Err(self.inner.domain.unavailable()); }
             permit.bind(&owner)?;
+        }
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(observation) = self.inner.observation.lock().map_err(|_| BridgeError::cleanup_unknown())?.as_mut() {
+            if observation.original.is_some() { return Err(self.inner.domain.unavailable()); }
+            observation.original = Some(owner.clone());
         }
         let (release, enter) = oneshot::channel();
         // Every new roster slot precedes publication/spawn. No hosted-fixture
@@ -750,6 +766,13 @@ impl SavedCommandOwner {
                 if !Arc::ptr_eq(&active.owner, &owner) { r.active = Some(active); return; }
                 active.projection.phase = if active.unknown { Phase::Unknown } else { Phase::Terminal };
                 if active.projection.outcome.is_none() { set_failure_outcome(&mut active.projection); }
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                if let Ok(mut observation) = self.inner.observation.lock() {
+                    if let Some(observation) = observation.as_mut().filter(|o| o.original.as_ref().is_some_and(|s| Arc::ptr_eq(s, &owner))) {
+                        observation.retired = true;
+                        observation.core_settled = active.accepted && active.terminal && active.projection.result.as_ref().is_some_and(Terminal::settled);
+                    }
+                }
                 r.last = Some(active.projection.public()); self.inner.bump(&mut r);
             }
         } else {
@@ -786,8 +809,10 @@ fn set_failure_outcome(p: &mut RunProjection) {
 }
 impl Inner {
     fn offline_installed_selected(&self) -> bool {
-        self.domain == SavedCommandDomain::OfflinePreflight && OFFLINE_NATIVE_QUALIFIED && OFFLINE_RUNTIME_QUALIFIED
-            && self.runtime.offline_preflight_installed_profile_available()
+        let qualified = OFFLINE_NATIVE_QUALIFIED && OFFLINE_RUNTIME_QUALIFIED;
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let qualified = qualified || self.observation.lock().is_ok_and(|o| o.is_some());
+        self.domain == SavedCommandDomain::OfflinePreflight && qualified && self.runtime.offline_preflight_installed_profile_available()
     }
     fn qualified(&self) -> bool {
         #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
@@ -1277,10 +1302,23 @@ async fn settle_offline_installed(book: &mut Resources, inner: &Arc<Inner>, owne
                     offline_consumers_returned(book, &startup, slots.no_child_effect()))
             })();
             if !book.offline_selected || !returned { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner); return; }
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            let hold = inner.observation.lock().ok().and_then(|o| o.as_ref().map(|o| o.control.clone()))
+                .filter(|c| c.case == crate::shell::installed_observation::commands::Case::OfflineSettlement);
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            let hold = hold.filter(|control| match installed_observation_facts(inner, owner, book, false, false) {
+                Some(facts) => control.prepare_hold(facts), None => { control.unavailable_witness(); false },
+            }); // Observer failure cannot prevent the original physical closes.
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            let hold_end = {
+                let r = inner.lock(); owner.clocks.settlement(r.active.as_ref().filter(|a| Arc::ptr_eq(&a.owner, owner)).and_then(|a| a.first_stop))
+            };
             let (release, enter) = oneshot::channel();
             book.offline_started = true;
             book.offline_settlement = Some(tokio::task::spawn_blocking(move || {
                 if enter.blocking_recv().is_err() { return CloseOutcome::Unknown; }
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                if let Some(control) = hold { let _ = control.hold_settlement(hold_end); }
                 match native.lock() {
                     Ok(mut slots) => slots.settle_originals(),
                     Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals() },
@@ -1744,3 +1782,63 @@ pub(crate) mod offline_tests;
 #[cfg(test)]
 #[path = "saved_command_owner_tests.rs"]
 mod tests;
+
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl SavedCommandOwner {
+    pub(crate) fn admit_installed_observation(&self, token: crate::shell::installed_observation::commands::OfflineAdmission) -> Result<(), BridgeError> {
+        let r = self.inner.lock();
+        if self.inner.domain != SavedCommandDomain::OfflinePreflight || r.revision != 0 || r.active.is_some() || r.prepared.is_some() || r.last.is_some()
+            || r.disabled || r.stopping || r.document_lost || r.exhausted || self.inner.poisoned.load(Ordering::SeqCst)
+            || !self.inner.runtime.offline_preflight_installed_profile_available() { return Err(self.inner.domain.unavailable()); }
+        let mut slot = self.inner.observation.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+        if slot.is_some() { return Err(self.inner.domain.unavailable()); }
+        *slot = Some(InstalledObservation { control: token.consume()?, original: None, retired: false, core_settled: false }); Ok(())
+    }
+    pub(crate) fn installed_observation_snapshot(&self) -> Option<crate::shell::installed_observation::commands::Snapshot> {
+        let (owner, retired, core_settled) = {
+            let book = self.inner.observation.lock().ok()?; let book = book.as_ref()?;
+            (book.original.as_ref()?.clone(), book.retired, book.core_settled)
+        };
+        let book = owner.resources.try_lock().ok()?;
+        let facts = installed_observation_facts(&self.inner, &owner, &book, retired, core_settled)?;
+        let r = self.inner.lock();
+        let projection = r.active.as_ref().filter(|a| Arc::ptr_eq(&a.owner, &owner)).map(|a| &a.projection)
+            .or_else(|| r.last.as_ref().filter(|p| p.operation_id == owner.id && p.owner_generation == owner.generation))?;
+        Some(crate::shell::installed_observation::commands::Snapshot { facts, terminal: serde_json::to_value(projection.public().offline().ok()?).ok()? })
+    }
+}
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn installed_observation_facts(inner: &Inner, owner: &Session, book: &Resources, retired: bool, final_core: bool)
+    -> Option<crate::shell::installed_observation::commands::OriginalFacts> {
+    use crate::shell::installed_observation::commands::OriginalFacts;
+    if owner.domain != SavedCommandDomain::OfflinePreflight { return None; }
+    let startup = owner.startup.try_lock().ok()?;
+    let native = book.offline_installed.as_ref()?.try_lock().ok()?;
+    let r = inner.lock();
+    let active = r.active.as_ref().filter(|a| std::ptr::eq(Arc::as_ptr(&a.owner), owner));
+    let no_child = !startup.attempted && !startup.returned && !startup.failed && startup.child.is_none()
+        && !book.acquisition_started && book.acquisition.is_none() && book.child.is_none() && native.no_child_effect();
+    Some(OriginalFacts {
+        domain: "offline", id: owner.id.clone(), generation: owner.generation.clone(),
+        inspection_joined: book.inspection_started && book.inspection_joined && !book.inspection_failed && book.inspection.is_none() && book.inspection_error.is_none(),
+        acquisition_joined: book.acquisition_started && book.acquisition_joined && !book.acquisition_failed && book.acquisition.is_none() && book.acquisition_error.is_none(),
+        attempted: startup.attempted, no_child,
+        child_waited_success: startup.returned && !startup.failed && book.child.is_some() && !book.wait_failed && book.waited.as_ref().is_some_and(ExitStatus::success),
+        stdin_closed: book.write_end.as_ref().is_some_and(|v| v.sent && v.closed && !v.failed),
+        stdout_eof_closed: book.out_end.as_ref().is_some_and(|v| v.frames == 2 && v.eof && v.closed && !v.failed),
+        stderr_eof_closed: book.err_end.as_ref().is_some_and(|v| v.frames == 0 && v.eof && v.closed && !v.failed),
+        io_joined: book.writer.is_none() && book.stdout.is_none() && book.stderr.is_none() && !book.write_failed && !book.out_failed && !book.err_failed
+            && book.write_end.is_some() && book.out_end.is_some() && book.err_end.is_some(),
+        core_lifetime_settled: if retired { final_core } else { active.is_some_and(|a| a.accepted && a.terminal && a.projection.result.as_ref().is_some_and(Terminal::settled)) },
+        runtime_ledger_settled: native.settled(),
+        runtime_settlement_joined: book.offline_selected && book.offline_started && book.offline_joined && !book.offline_failed && book.offline_settlement.is_none()
+            && matches!(book.offline_return.as_ref(), Some(Ok(CloseOutcome::Settled))),
+        driver_joined: owner.driver_joined.load(Ordering::SeqCst) && matches!(owner.driver_return.try_lock().ok()?.as_ref(), Some(Ok(()))),
+        manager_joined: !owner.manager_failed.load(Ordering::SeqCst) && matches!(owner.manager_return.try_lock().ok()?.as_ref(), Some(Ok(()))),
+        observer_joined: matches!(owner.observer_return.try_lock().ok()?.as_ref(), Some(Ok(true))),
+        watchdog_joined: owner.watchdog_joined.load(Ordering::SeqCst) && !owner.watchdog_failed.load(Ordering::SeqCst)
+            && matches!(owner.watchdog_return.try_lock().ok()?.as_ref(), Some(Ok(true))),
+        retired_before_cutoff: retired, active_retained: active.is_some(),
+        resource_unknown: owner.resource_unknown.load(Ordering::SeqCst) || active.is_some_and(|a| a.unknown) || inner.poisoned.load(Ordering::SeqCst),
+    })
+}

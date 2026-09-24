@@ -1,6 +1,7 @@
 """Pure source contracts: never import or execute hosted DATA provisioning."""
 
 import ast
+import hashlib
 from pathlib import Path
 import re
 import unittest
@@ -13,6 +14,49 @@ PROVISIONER = "desktop/tools/prepare_hosted_ubuntu_data.py"
 
 
 class HostedWorkflowSource(unittest.TestCase):
+    def test_fixed_jdk_preparation_is_conditional_paired_and_retains_original_failure_data(self):
+        workflow = WORKFLOW.read_text()
+        sections = re.split(r"^      - name: ", workflow, flags=re.MULTILINE)[1:]
+        heading = "Prepare the fixed JDK17 pair only on this disposable shell runner"
+        selected = [section for section in sections if section.splitlines()[0] == heading]
+        self.assertEqual(len(selected), 1); step = selected[0]
+        self.assertIn("        if: github.ref == 'refs/heads/verify/desktop-installed-shell'\n", step)
+        self.assertIn("        timeout-minutes: 8\n", step)
+        self.assertIn('[[ "$RUNNER_ENVIRONMENT" == github-hosted && "$GITHUB_REF" == refs/heads/verify/desktop-installed-shell ]]', step)
+        self.assertIn('root="$RUNNER_TEMP/mrk-desktop-tools-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"', step)
+        self.assertIn('mkdir -m 700 -- "$root"', step)
+        self.assertIn("          umask 077\n", step)
+        self.assertLess(step.index("trap finish_tools_inputs EXIT"), step.index("query_packages before"))
+        self.assertIn('pair=$(/usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed-shell-tools-before)', step)
+        install = step.split('case "$pair" in\n', 1)[1].split('          esac\n', 1)[0]
+        self.assertEqual(install.count("/usr/bin/apt-get"), 1)
+        self.assertIn("            absent)\n", install)
+        self.assertIn("            present) ;;\n            *) exit 1 ;;\n", install)
+        self.assertIn("--no-install-recommends --no-remove", install)
+        self.assertIn('install openjdk-17-jdk-headless > "$root/install.stdout" 2> "$root/install.stderr"', install)
+        for name in ("java", "javac"):
+            self.assertIn('sudo /usr/bin/update-alternatives --set ' + name + ' /usr/lib/jvm/java-17-openjdk-amd64/bin/' + name
+                          + ' > "$root/' + name + '.stdout" 2> "$root/' + name + '.stderr"', step)
+        finish = step.split("finish_tools_inputs() {\n", 1)[1].split("          }\n", 1)[0]
+        self.assertLess(finish.index("original=$?"), finish.index("set +e"))
+        self.assertIn("trap - EXIT", finish)
+        self.assertLess(finish.index("query_packages after"), finish.index("installed-shell-tools-after"))
+        self.assertIn('MRK_SHELL_TOOLS_PREPARATION_EXIT="$original" /usr/bin/python3.12 -I -S -B', finish)
+        self.assertIn('snapshot=$?\n            if [[ "$original" != 0 ]]; then exit "$original"; fi\n            exit "$snapshot"', finish)
+        for forbidden in ("apt-get update", "apt-get upgrade", "dist-upgrade", "--reinstall", "continue-on-error", "rm -", "pkill", "systemd-run", "java -version"):
+            self.assertNotIn(forbidden, step)
+        self.assertIn('git python3.12 openjdk-17-jdk-headless openjdk-17-jre-headless > "$root/$1-packages.tsv"', step)
+        upload = next(section for section in sections if section.startswith("Retain original Tools prerequisite DATA including failures\n"))
+        self.assertIn("        if: always() && steps.tools_inputs.outputs.root != ''\n", upload)
+        self.assertIn("          path: ${{ steps.tools_inputs.outputs.root }}\n", upload)
+        self.assertIn("          if-no-files-found: error\n", upload)
+        self.assertLess(workflow.index("Prepare shared Ubuntu shell inputs"), workflow.index(heading))
+        self.assertLess(workflow.index(heading), workflow.index("Establish only the reviewed forward glibc tuple set"))
+        self.assertLess(workflow.index(heading), workflow.index("Prepare a fresh bounded compiler owner"))
+        lifecycle = (SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_bytes()
+        self.assertEqual(re.findall(r"MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '([0-9a-f]{64})'", workflow),
+                         [hashlib.sha256(lifecycle).hexdigest()] * 2)
+
     def test_workflow_fits_its_actual_original_source_record_bound(self):
         module = ast.parse(DRIVER.read_text())
         for name, kib in (("verify_installed_shell_compile", 128), ("verify", 64)):

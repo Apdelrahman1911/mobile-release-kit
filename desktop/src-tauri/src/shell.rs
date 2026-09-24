@@ -21,6 +21,20 @@ pub(crate) mod qualification;
 #[cfg_attr(target_os = "linux", path = "installed_shell_observation.rs")]
 #[cfg_attr(target_os = "macos", path = "installed_shell_observation_macos.rs")]
 pub(crate) mod installed_observation;
+// Only the installed Linux observer sees these calls. Ordinary builds retain
+// the same typed IPC and original document owners, with no qualification token.
+macro_rules! installed_command_request {
+    ($state:expr, $kind:ident, $value:expr) => {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(q) = &$state.observation { q.commands_request(installed_observation::commands::Command::$kind, $value); }
+    };
+}
+macro_rules! installed_command_result {
+    ($state:expr, $kind:ident, $value:expr) => {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(q) = &$state.observation { q.commands_result(installed_observation::commands::Command::$kind, $value); }
+    };
+}
 macro_rules! fixture_command {
     ($state:expr, $kind:ident, $observed:ident, $error:expr) => {
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -134,8 +148,12 @@ async fn environment_requirements(webview: Webview, request: tauri::ipc::Request
 async fn start_environment_diagnostics(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::environment_diagnostics_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview)?;
-    let args = crate::environment_diagnostics_protocol::start(request_body(&request)?)?;
-    state.document.start_environment_diagnostics(args)
+    let value = request_body(&request)?;
+    let args = crate::environment_diagnostics_protocol::start(value)?;
+    installed_command_request!(state, ToolsStart, value);
+    let result = state.document.start_environment_diagnostics(args);
+    installed_command_result!(state, ToolsStart, &result);
+    result
 }
 #[tauri::command]
 async fn environment_diagnostics_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::environment_diagnostics_protocol::Status, BridgeError> {
@@ -149,22 +167,34 @@ async fn environment_diagnostics_status(webview: Webview, request: tauri::ipc::R
 async fn cancel_environment_diagnostics(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::environment_diagnostics_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview)?;
-    let args = crate::environment_diagnostics_protocol::cancel(request_body(&request)?)?;
-    state.document.cancel_environment_diagnostics(args)
+    let value = request_body(&request)?;
+    let args = crate::environment_diagnostics_protocol::cancel(value)?;
+    installed_command_request!(state, ToolsCancel, value);
+    let result = state.document.cancel_environment_diagnostics(args);
+    installed_command_result!(state, ToolsCancel, &result);
+    result
 }
 #[tauri::command]
 async fn prepare_offline_preflight(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::offline_preflight_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview).map_err(|_| crate::offline_preflight_protocol::invalid())?;
     let value = preflight_request_body(request.body())?;
-    state.document.prepare_offline_preflight(crate::offline_preflight_protocol::prepare(&value)?)
+    let args = crate::offline_preflight_protocol::prepare(&value)?;
+    installed_command_request!(state, OfflinePrepare, &value);
+    let result = state.document.prepare_offline_preflight(args);
+    installed_command_result!(state, OfflinePrepare, &result);
+    result
 }
 #[tauri::command]
 async fn start_offline_preflight(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::offline_preflight_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview).map_err(|_| crate::offline_preflight_protocol::invalid())?;
     let value = preflight_request_body(request.body())?;
-    state.document.start_offline_preflight(crate::offline_preflight_protocol::start(&value)?)
+    let args = crate::offline_preflight_protocol::start(&value)?;
+    installed_command_request!(state, OfflineStart, &value);
+    let result = state.document.start_offline_preflight(args);
+    installed_command_result!(state, OfflineStart, &result);
+    result
 }
 #[tauri::command]
 async fn offline_preflight_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::offline_preflight_protocol::Status, BridgeError> {
@@ -179,7 +209,11 @@ async fn cancel_offline_preflight(webview: Webview, request: tauri::ipc::Request
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview).map_err(|_| crate::offline_preflight_protocol::invalid())?;
     let value = preflight_request_body(request.body())?;
-    state.document.cancel_offline_preflight(crate::offline_preflight_protocol::cancel(&value)?)
+    let args = crate::offline_preflight_protocol::cancel(&value)?;
+    installed_command_request!(state, OfflineCancel, &value);
+    let result = state.document.cancel_offline_preflight(args);
+    installed_command_result!(state, OfflineCancel, &result);
+    result
 }
 #[tauri::command]
 async fn prepare_android_build(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::android_build_protocol::Status, BridgeError> {
@@ -1884,7 +1918,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             #[cfg(not(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
             let document = DocumentBinding::new(bridge.clone());
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-            if let Some(q) = &observation { q.attach_session(&document)?; }
+            if let Some(q) = &observation { q.attach_session(&document)?; q.attach_commands(&document)?; }
             let (relay_stop, stop_receiver) = watch::channel(false);
             app.manage(ShellState {
                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
