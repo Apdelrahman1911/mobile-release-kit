@@ -602,7 +602,7 @@ class AquaDataTests(unittest.TestCase):
                           workerJoined=state == "joined", rechecksSettled=True if state == "joined" else None, barrierRetired=False,
                           expired=True, timely=False, custodyKnown=False if state == "unknown" else True if state == "joined" else None,
                           attempted=None, pressReturned=None, triggered=None, initialOriginalProof=None, originalProof=None,
-                          promptChecks={"initial": None, "final": None}, promptButton=None, site=None, error=None)
+                          promptChecks={"initial": None, "final": None}, promptButton=None, rowSelection=None, selectedTarget=None, site=None, error=None)
             self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), value)
             self.assertFalse(M._accessibility_succeeded(sample))
             value["snapshotSource"] = "prearm-open-progress"
@@ -640,7 +640,8 @@ class AquaDataTests(unittest.TestCase):
                          ("mechanism", "accessibility-press-original-default-frame-v1"),
                          ("mechanism", "accessibility-press-original-semantic-element-v1"),
                          ("mechanism", "accessibility-press-original-prompt-button-v1"),
-                         ("mechanism", "accessibility-press-original-direct-sheet-button-v2"), ("id", True), ("id", 1),
+                         ("mechanism", "accessibility-press-original-direct-sheet-button-v2"),
+                         ("mechanism", "accessibility-press-original-control-container-button-v3"), ("id", True), ("id", 1),
                          ("bodyReturned", False), ("nativeEntered", False), ("receiptJoined", False),
                          ("workerRegistered", False), ("workerJoined", False), ("rechecksSettled", False),
                          ("custodyKnown", False), ("pressReturned", False), ("triggered", None), ("prepared", False),
@@ -700,7 +701,7 @@ class AquaDataTests(unittest.TestCase):
             self.assertEqual(M.parse_result(captured(good), b"", BINDING, case), good)
             if case == "picker-loss": continue
             sample = good["native"]["projectOpenInput"]
-            self.assertEqual(sample["mechanism"], "accessibility-press-original-control-container-button-v3")
+            self.assertEqual(sample["mechanism"], "accessibility-select-original-row-and-press-v4")
             for key, bad in (("expired", True), ("timely", False), ("barrierRetired", False), ("receiptJoined", False),
                              ("workerRegistered", False), ("workerJoined", False), ("rechecksSettled", False),
                              ("custodyKnown", False), ("bodyReturned", False), ("triggered", False), ("attempted", False),
@@ -724,6 +725,79 @@ class AquaDataTests(unittest.TestCase):
                     lastRole="Button", lastDepth=depth, cfSlots=256, cfSlotsRetired=256)
                 self.assertEqual(M.parse_result(captured(value), b"", BINDING, case), value)
 
+    def test_real_selection_setter_and_selected_url_are_separate_closed_facts(self):
+        good = accessibility_context_data()
+        self.assertEqual(M.failure_context(b"", context_row(good), "first-save"), good)
+        for field, bad in (("attempted", False), ("returned", False), ("setterSucceeded", False),
+                           ("setterSucceeded", None), ("nodesExamined", True), ("nodesExamined", 1), ("nodesExamined", 17),
+                           ("url", "PRIVATE"), ("attempts", 2)):
+            value = deepcopy(good); value["accessibility"]["rowSelection"][field] = bad
+            expected = deepcopy(value); expected["accessibility"] = None
+            self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), expected, field)
+        for key in M.ACCESSIBILITY_SELECTION_CHECKS:
+            value = deepcopy(good); value["accessibility"]["rowSelection"]["checks"][key] = False
+            expected = deepcopy(value); expected["accessibility"] = None
+            self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), expected, key)
+        for selected, error in (("not-ready", "ineligible"), ("different", "changed"),
+                                ("malformed", "malformed"), ("multiple", "ambiguous"),
+                                ("entered-not-returned", "custody")):
+            value = deepcopy(good); sample = value["accessibility"]
+            sample.update(attempted=False, pressReturned=False, triggered=None, site="original-proof",
+                          error=error, selectedTarget=selected)
+            if selected == "entered-not-returned":
+                sample.update(state="unknown", custodyKnown=False, receiptJoined=False, barrierRetired=False)
+                sample["promptButton"].update(cleanupReturned=False, cfSlotsRetired=0)
+            self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), value, selected)
+            self.assertFalse(M._accessibility_succeeded(sample))
+            result = M.expected_result(BINDING, "first-save"); result["native"]["projectOpenInput"] = deepcopy(sample)
+            with self.assertRaises(M.Refused): M.parse_result(captured(result), b"", BINDING, "first-save")
+            for key in ("attempted", "pressReturned", "triggered"):
+                bad = deepcopy(value); bad["accessibility"][key] = True
+                expected = deepcopy(bad); expected["accessibility"] = None
+                self.assertEqual(M.failure_context(b"", context_row(bad), "first-save"), expected, (selected, key))
+        # Row discovery/write failure precedes both button passes. Its own
+        # bounded counter never stands in for either button pass's progress.
+        for error, attempted, returned, status in (("unsupported", False, False, None),
+                ("changed", False, False, None), ("malformed", False, False, None),
+                ("ambiguous", False, False, None), ("limit", False, False, None),
+                ("cannot-complete", True, True, False), ("objc-exception", True, False, None),
+                ("deadline", True, True, True)):
+            value = deepcopy(good); sample = value["accessibility"]
+            sample.update(attempted=False, pressReturned=False, triggered=None,
+                site="selection-write" if attempted else "selection", error=error, originalProof=None,
+                selectedTarget=None, promptChecks={"initial": True, "final": None})
+            sample["promptButton"].update(initialNodesExamined=0, recheckNodesExamined=0, lastRole="not-read", lastDepth=0,
+                checks={key: index < 2 for index, key in enumerate(M.ACCESSIBILITY_BUTTON_CHECKS)},
+                axError=-25204 if error == "cannot-complete" else 0)
+            sample["rowSelection"].update(attempted=attempted, returned=returned, setterSucceeded=status,
+                checks=dict.fromkeys(M.ACCESSIBILITY_SELECTION_CHECKS, attempted), nodesExamined=4 if error == "ambiguous" else 2)
+            if error == "objc-exception":
+                sample.update(state="unknown", custodyKnown=False, receiptJoined=False, barrierRetired=False)
+                sample["promptButton"].update(cleanupReturned=False, cfSlotsRetired=0)
+            if error == "deadline": sample.update(expired=True, timely=False)
+            self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), value, error)
+            self.assertFalse(M._accessibility_succeeded(sample))
+            if error == "objc-exception":
+                # The actual worker may join, but an unreturned selector can
+                # never supply known CF, receipt or barrier retirement.
+                self.assertTrue(sample["workerJoined"])
+                for fields, button_fields in (({"error": "unsupported"}, {}), ({"site": "cleanup"}, {}),
+                        ({}, {"axError": -25204}), ({}, {"cfSlotsRetired": 1}),
+                        ({}, {"cleanupReturned": True, "cfSlotsRetired": sample["promptButton"]["cfSlots"]}),
+                        ({"state": "retired", "error": "unsupported", "custodyKnown": True, "receiptJoined": True, "barrierRetired": True},
+                         {"cleanupReturned": True, "cfSlotsRetired": sample["promptButton"]["cfSlots"]})):
+                    bad = deepcopy(value); bad["accessibility"].update(fields)
+                    bad["accessibility"]["promptButton"].update(button_fields)
+                    expected = deepcopy(bad); expected["accessibility"] = None
+                    self.assertEqual(M.failure_context(b"", context_row(bad), "first-save"), expected, (fields, button_fields))
+            bad = deepcopy(value); bad["accessibility"].update(attempted=True, selectedTarget="match")
+            expected = deepcopy(bad); expected["accessibility"] = None
+            self.assertEqual(M.failure_context(b"", context_row(bad), "first-save"), expected, error)
+        for selected in (None, "not-ready", "different", "multiple", True, "PRIVATE"):
+            value = deepcopy(good); value["accessibility"]["selectedTarget"] = selected
+            expected = deepcopy(value); expected["accessibility"] = None
+            self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), expected, selected)
+
     def test_original_prompt_refusal_keeps_original_proof_and_never_invents_action(self):
         # Preparing can fail before an input worker exists. Retain that exact
         # entry diagnostic rather than dropping the closed failure subframe.
@@ -733,7 +807,7 @@ class AquaDataTests(unittest.TestCase):
             workerRegistered=False, workerJoined=False, rechecksSettled=None, barrierRetired=False,
             timely=None, custodyKnown=None, attempted=False, pressReturned=False, triggered=None,
             initialOriginalProof=None, originalProof=None, promptChecks={"initial": None, "final": None},
-            promptButton=None, site="entry", error="ineligible")
+            promptButton=None, rowSelection=None, selectedTarget=None, site="entry", error="ineligible")
         for error in ("ineligible", "changed", "custody", "malformed"):
             sample["error"] = error
             self.assertEqual(M.failure_context(b"", context_row(preparing), "first-save"), preparing)
@@ -752,7 +826,7 @@ class AquaDataTests(unittest.TestCase):
         self.assertEqual(M.failure_context(b"", context_row(invalid), "first-save"), expected)
         initial = accessibility_context_data(); sample = initial["accessibility"]
         sample.update(attempted=False, pressReturned=False, triggered=None, site="initial-original-proof", error="ineligible",
-                      originalProof=None, promptChecks={"initial": None, "final": None}, promptButton=None)
+                      originalProof=None, promptChecks={"initial": None, "final": None}, promptButton=None, rowSelection=None, selectedTarget=None)
         sample["initialOriginalProof"].update(parent=None, panel=None, children=None, originals=None,
             checks={key: False if key == "eligible" else None for key in M.ACCESSIBILITY_PROOF_CHECKS}, site="objects", error="ineligible")
         self.assertEqual(M.failure_context(b"", context_row(initial), "first-save"), initial)
@@ -763,7 +837,7 @@ class AquaDataTests(unittest.TestCase):
         def refused_frame(error, site, completed, initial, recheck=0, role="Button", depth=1):
             value = accessibility_context_data(); sample = value["accessibility"]
             sample.update(attempted=False, pressReturned=False, triggered=None, site=site, error=error,
-                          originalProof=None, promptChecks={"initial": True, "final": None})
+                          originalProof=None, selectedTarget=None, promptChecks={"initial": True, "final": None})
             sample["promptButton"].update(initialNodesExamined=initial, recheckNodesExamined=recheck, lastRole=role, lastDepth=depth)
             sample["promptButton"]["checks"] = {key: index < completed for index, key in enumerate(M.ACCESSIBILITY_BUTTON_CHECKS)}
             value["accessibilityBinding"] = binding_context_data()["accessibilityBinding"]
@@ -856,7 +930,7 @@ class AquaDataTests(unittest.TestCase):
                     expected = deepcopy(bad); expected["accessibility"] = None
                     self.assertEqual(M.failure_context(b"", context_row(bad), "first-save"), expected, (site, completed, path))
         final = accessibility_context_data(); sample = final["accessibility"]
-        sample.update(attempted=False, pressReturned=False, triggered=None, site="original-proof", error="changed")
+        sample.update(attempted=False, pressReturned=False, triggered=None, site="original-proof", error="changed", selectedTarget=None)
         sample["promptChecks"]["final"] = False
         self.assertEqual(M.failure_context(b"", context_row(final), "first-save"), final)
         self.assertFalse(M._accessibility_succeeded(sample))
@@ -872,7 +946,7 @@ class AquaDataTests(unittest.TestCase):
     def test_one_original_late_no_entry_can_settle_failure_but_not_succeed(self):
         value = accessibility_context_data(); sample = value["accessibility"]
         sample.update(nativeEntered=False, attempted=False, pressReturned=False, triggered=None,
-                      initialOriginalProof=None, originalProof=None, promptChecks={"initial": None, "final": None}, promptButton=None,
+                      initialOriginalProof=None, originalProof=None, promptChecks={"initial": None, "final": None}, promptButton=None, rowSelection=None, selectedTarget=None,
                       expired=True, timely=False, site="admission", error="deadline")
         self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), value)
         self.assertFalse(M._accessibility_succeeded(sample))
@@ -958,6 +1032,9 @@ class AquaDataTests(unittest.TestCase):
         largest["accessibility"]["promptButton"].update(calls=512, initialNodesExamined=16, recheckNodesExamined=16,
             lastRole="ScrollArea", lastDepth=8, cfSlots=256, cfSlotsRetired=256, cleanupReturned=False, axError=-25214)
         largest["accessibility"]["promptButton"]["checks"] = dict.fromkeys(M.ACCESSIBILITY_BUTTON_CHECKS, False)
+        largest["accessibility"]["rowSelection"].update(checks=dict.fromkeys(M.ACCESSIBILITY_SELECTION_CHECKS, False),
+            nodesExamined=16, attempted=False, returned=False, setterSucceeded=False)
+        largest["accessibility"]["selectedTarget"] = "entered-not-returned"
         largest["accessibility"].update(site=max(M.ACCESSIBILITY_SITES, key=lambda site: (len(site), site)),
                                         error="cleanup-unknown", state="requested")
         largest["accessibilityBinding"]["start"]["result"] = "permission-denied"
@@ -1318,7 +1395,7 @@ class AquaDataTests(unittest.TestCase):
         action = native.split("int mrk_panel_observe_action(", 1)[1].split("#undef MRK_ACTION_RETURN", 1)[0]
         calls = ("pthread_main_np()", "mrk_observation_attached(s)",
                  "[NSString stringWithUTF8String:directory]", "[NSURL fileURLWithPath:text isDirectory:YES]",
-                 "setDirectoryURL:url]", "[s->alert buttons]", "[buttons count]", "[buttons objectAtIndex:",
+                 "setDirectoryURL:browse]", "[s->alert buttons]", "[buttons count]", "[buttons objectAtIndex:",
                  "[button window]", "[button isEnabled]", "[button isHidden]", "cancel:nil]", "[button performClick:nil]")
         for call in calls:
             self.assertEqual(action.count(call), 1, call)
@@ -1519,13 +1596,13 @@ class AquaDataTests(unittest.TestCase):
         control_sites = ["control-title-limit", "control-child-count-limit", "control-child-copy-limit", "control-node-limit", "control-depth-limit"]
         self.assertEqual(sites[:14], "entry application windows parent-identifier sheet topology control-projection button "
                          "control-recheck initial-original-proof original-proof admission press cleanup".split())
-        self.assertEqual(sites[14:], control_sites)
+        self.assertEqual(sites[14:], control_sites + ["selection", "selection-write"])
         self.assertEqual(set(control_sites), M.ACCESSIBILITY_CONTROL_LIMIT_SITES)
         self.assertEqual(set(sites), M.ACCESSIBILITY_SITES)
         enum = native.split("enum { MRK_OPEN_ENTRY = 1u,", 1)[1].split("};", 1)[0]
-        self.assertEqual(M.re.findall(r"MRK_OPEN_[A-Z_]+", enum)[-6:], ["MRK_OPEN_CLEANUP", "MRK_OPEN_CONTROL_TITLE_LIMIT",
+        self.assertEqual(M.re.findall(r"MRK_OPEN_[A-Z_]+", enum)[-8:], ["MRK_OPEN_CLEANUP", "MRK_OPEN_CONTROL_TITLE_LIMIT",
                          "MRK_OPEN_CONTROL_CHILD_COUNT_LIMIT", "MRK_OPEN_CONTROL_CHILD_COPY_LIMIT",
-                         "MRK_OPEN_CONTROL_NODE_LIMIT", "MRK_OPEN_CONTROL_DEPTH_LIMIT"])
+                         "MRK_OPEN_CONTROL_NODE_LIMIT", "MRK_OPEN_CONTROL_DEPTH_LIMIT", "MRK_OPEN_SELECTION", "MRK_OPEN_SELECTION_WRITE"])
         helper = native.split("static BOOL mrk_ax_control_limit(", 1)[1].split("static uint32_t mrk_ax_role(", 1)[0]
         self.assertIn("s->result.site == MRK_OPEN_CONTROL_PROJECTION || s->result.site == MRK_OPEN_CONTROL_RECHECK", helper)
         self.assertIn("&& !s->result.error) s->result.site = site;", helper)
@@ -1544,8 +1621,8 @@ class AquaDataTests(unittest.TestCase):
                            ("Browser", "BROWSER"), ("Table", "TABLE"), ("Outline", "OUTLINE"), ("ScrollArea", "SCROLL_AREA")):
             self.assertIn(f"if (CFEqual(role, kAX{role}Role)) return MRK_ROLE_{code};", roles)
         self.assertIn("return MRK_ROLE_OPAQUE;", roles)
-        self.assertTrue("sizeof(MRKOpenResult) == 48" in native, "native result wire must remain48B")
-        self.assertTrue("std::mem::size_of::<OpenWire>() != 48" in rust, "Rust result wire check must remain48B")
+        self.assertTrue("sizeof(MRKOpenResult) == 60" in native, "native selection/press result wire must be60B")
+        self.assertTrue("std::mem::size_of::<OpenWire>() != 60" in rust, "Rust selection/press result wire check must be60B")
         self.assertIn("w.checks & (w.checks + 1) != 0", wire)
         self.assertIn("w.calls > 512 || w.initial_nodes_examined > 16 || w.recheck_nodes_examined > 16", wire)
         self.assertIn("w.checks < 63 && w.recheck_nodes_examined != 0", wire)
@@ -1559,6 +1636,75 @@ class AquaDataTests(unittest.TestCase):
             self.assertIn(phase, wire)
         self.assertIn("button.cleanup_returned && w.released != w.owned", wire)
         self.assertIn("r.triggered == Some(false) && w.ax_error == 0", wire)
+
+    def test_real_selection_source_binds_root_row_and_one_selected_urls_gate(self):
+        desktop = PATH.parents[1]
+        native = (desktop / "native/macos-installed-native/src/native.m").read_text(encoding="utf-8")
+        rust = (desktop / "native/macos-installed-native/src/lib.rs").read_text(encoding="utf-8")
+        adapter = (desktop / "src-tauri/src/shell_macos_dialog.rs").read_text(encoding="utf-8")
+        observer = (desktop / "src-tauri/src/installed_shell_observation_macos.rs").read_text(encoding="utf-8")
+        action = native.split("int mrk_panel_observe_action(", 1)[1].split("#undef MRK_ACTION_RETURN", 1)[0]
+        self.assertEqual(action.count("setDirectoryURL:browse]"), 1)
+        self.assertIn("[url URLByDeletingLastPathComponent]", action)
+        self.assertLess(action.index("memcpy(s->observationTarget, directory, length + 1)"), action.index("setDirectoryURL:browse]"))
+        self.assertIn("memcpy(s->observationDirectory, parentPath, strlen(parentPath) + 1)", action)
+        self.assertIn("PanelAction::ProjectDirectory(&self.project_path)", observer)
+        self.assertIn("prepare_open_input(id, &self.project_path, binding_return)", observer)
+        prepared = adapter.split("pub(crate) fn prepare_open_input(", 1)[1].split("pub(crate) fn open_release_data_check(", 1)[0]
+        self.assertLess(prepared.index("identity.targets(target)"), prepared.index("OpenRelease::new()"))
+        self.assertIn("target: [u8; 4097]", rust)
+        self.assertIn("bytes[end..].iter().all(|b| *b == 0)", rust)
+        self.assertIn("identity.target.as_ptr(), identity.target.len()", rust)
+        selected = native.split("static BOOL mrk_ax_row_target(", 1)[1].split("static void mrk_ax_open(", 1)[0]
+        for fact in ("kAXURLAttribute", "CFURLGetTypeID()", "CFURLCopyScheme", 'CFSTR("file")',
+                     "CFURLGetFileSystemRepresentation", "strcmp((const char *)path, target)",
+                     "kAXRowsAttribute", "MRK_ROLE_TABLE", "MRK_ROLE_OUTLINE", "MRK_ROLE_SCROLL_AREA",
+                     "kAXRowRole", "MRK_CONTROL_NODES - queued", "pass->depths[at] == MRK_CONTROL_DEPTH",
+                     "pass->nodes[other]", "kAXParentAttribute", "selection_nodes_examined++"):
+            self.assertIn(fact, selected)
+        for forbidden in ("kAXTitleAttribute", "kAXSelectedAttribute", "kAXBrowserRole", "last_role =", "last_depth =",
+                          "initial_nodes_examined", "recheck_nodes_examined", "CFRetain", "CFRelease"):
+            self.assertNotIn(forbidden, selected)
+        roster = selected.split("static BOOL mrk_ax_selection_roster(", 1)[1].split("static BOOL mrk_ax_select_row(", 1)[0]
+        self.assertIn("if (matches != 1) return mrk_ax_fail(s, matches ? MRK_OPEN_AMBIGUOUS : MRK_OPEN_UNSUPPORTED)", roster)
+        self.assertNotIn("return YES", roster.split("if (matches != 1)", 1)[0])
+        self.assertLess(roster.index("if (matches != 1)"), roster.index("selection_checks |= 1u"))
+        self.assertEqual(native.count("AXUIElementIsAttributeSettable("), 1)
+        self.assertEqual(native.count("AXUIElementSetAttributeValue("), 1)
+        write = selected.split("static BOOL mrk_ax_select_row(", 1)[1]
+        self.assertIn("s->result.selection_flags || s->result.selection_checks != 1u", write)
+        self.assertLess(write.index("mrk_ax_row_target("), write.index("AXUIElementIsAttributeSettable"))
+        self.assertLess(write.index("AXUIElementIsAttributeSettable"), write.index("if (!settable)"))
+        self.assertLess(write.index("MRKPromptOwned *selected = mrk_ax_slot(s)"), write.index("CFArrayCreate"))
+        self.assertIn("const void *rows[] = { row };", write)
+        self.assertLess(write.index("mrk_ax_before(s, container)", write.index("CFArrayCreate")), write.index("selection_flags |= 1u"))
+        self.assertLess(write.index("selection_flags |= 1u"), write.index("AXUIElementSetAttributeValue"))
+        self.assertLess(write.index("AXUIElementSetAttributeValue"), write.index("selection_flags |= 2u"))
+        self.assertIn("status == kAXErrorSuccess", write)
+        opened = native.split("static void mrk_ax_open(", 1)[1].split("void mrk_observation_prompt_press(", 1)[0]
+        self.assertLess(opened.index("mrk_ax_original(s, 1)"), opened.index("mrk_ax_selection_roster"))
+        self.assertLess(opened.index("mrk_ax_selection_roster"), opened.index("mrk_ax_select_row"))
+        self.assertLess(opened.index("mrk_ax_select_row"), opened.index("mrk_ax_control_roster"))
+        self.assertIn("if (!mrk_ax_selection_roster(s, sheet, target, &selection) || !mrk_ax_select_row(s, parent, &selection, target)) return;", opened)
+        self.assertLess(opened.index("mrk_ax_original(s, 2)"), opened.index("AXUIElementPerformAction"))
+        self.assertEqual(native.count("AXUIElementPerformAction(button, kAXPressAction)"), 1)
+        recheck = native.split("void mrk_panel_observe_open_recheck(", 1)[1].split("enum { MRK_PROMPT_CALLS", 1)[0]
+        self.assertIn("memcmp(target, s->observationTarget, target_capacity)", recheck)
+        self.assertIn("s->observationRechecks = stage;", recheck)
+        self.assertLess(recheck.index("if (!r.error && stage == 2)"), recheck.index("[(NSOpenPanel *)s->window URLs]"))
+        self.assertLess(recheck.index("r.selected_target = MRK_TARGET_ENTERED"), recheck.index("[(NSOpenPanel *)s->window URLs]"))
+        self.assertEqual(native.count("[(NSOpenPanel *)s->window URLs]"), 1)
+        self.assertIn("else if (count != 1) r.selected_target = MRK_TARGET_MULTIPLE", recheck)
+        self.assertIn("strcmp(path, s->observationTarget) == 0 ? MRK_TARGET_MATCH : MRK_TARGET_DIFFERENT", recheck)
+        self.assertLess(recheck.index("[(NSOpenPanel *)s->window URLs]"), recheck.rindex("mrk_original_eligible(s)"))
+        for forbidden in ("setDirectoryURL:", "setNameFieldStringValue:", "while (", "sleep(", "s->selected =", "memcpy(s->selected"):
+            self.assertNotIn(forbidden, recheck)
+        self.assertEqual(native.count("memcpy(s->selected, path, strlen(path) + 1)"), 1)
+        self.assertIn("NSURL *url = [(NSOpenPanel *)s->window URL];", native)
+        self.assertIn('self.selection.matched() && self.selected_target == Some("match")', rust)
+        self.assertIn('matches!((self.stage, self.selected_target), (1, None) | (2, Some("match")))', rust)
+        self.assertIn("sizeof(MRKOpenRecheck) == 52", native)
+        self.assertIn("std::mem::size_of::<RecheckWire>() != 52", rust)
 
     def test_semantic_timeout_uses_independent_relay_and_retains_original_receiver(self):
         desktop = PATH.parents[1]

@@ -124,8 +124,10 @@ ACCESSIBILITY_CONTROL_LIMIT_SITES = frozenset((
 ).split())
 ACCESSIBILITY_SITES = frozenset((
     "entry application windows parent-identifier sheet topology control-projection button control-recheck "
-    "initial-original-proof original-proof admission press cleanup"
+    "initial-original-proof original-proof admission press cleanup selection selection-write"
 ).split()) | ACCESSIBILITY_CONTROL_LIMIT_SITES
+ACCESSIBILITY_SELECTION_CHECKS = ("targetRowBound", "sameTargetRechecked", "selectedRowsSettable")
+ACCESSIBILITY_SELECTED_TARGETS = frozenset(("entered-not-returned", "not-ready", "match", "different", "malformed", "multiple"))
 ACCESSIBILITY_CONTROL_ROLES = ("not-read", "Sheet", "Group", "SplitGroup", "Button",
                                "Browser", "Table", "Outline", "ScrollArea", "opaque")
 ACCESSIBILITY_ERRORS = frozenset((
@@ -251,6 +253,12 @@ def _expected_prompt_button():
             "cfSlots": 32, "cfSlotsRetired": 32, "cleanupReturned": True, "axError": 0}
 
 
+def _expected_row_selection():
+    # Inert parser fixture only, not an observed setter or selection effect.
+    return {"checks": dict.fromkeys(ACCESSIBILITY_SELECTION_CHECKS, True), "nodesExamined": 2,
+            "attempted": True, "returned": True, "setterSucceeded": True}
+
+
 def expected_result(binding, case):
     binding.checked()
     need(case in CASES, "case-binding")
@@ -288,7 +296,7 @@ def expected_result(binding, case):
             "controlReturns": [first, case != "picker-loss", case != "picker-loss", first, True],
             "accessibilityTrustedWithoutPrompt": True,
             "projectOpenInput": None if case == "picker-loss" else {
-                "mechanism": "accessibility-press-original-control-container-button-v3", "step": "OpenProject", "id": 2 if first else 1,
+                "mechanism": "accessibility-select-original-row-and-press-v4", "step": "OpenProject", "id": 2 if first else 1,
                 "prepared": True, "requested": True, "dispatchAttempted": True, "state": "retired",
                 "bodyEntered": True, "nativeEntered": True, "bodyReturned": True, "receiptJoined": True,
                 "workerRegistered": True, "workerJoined": True, "rechecksSettled": True,
@@ -296,7 +304,8 @@ def expected_result(binding, case):
                 "attempted": True, "pressReturned": True, "triggered": True,
                 "initialOriginalProof": _expected_identity_proof(), "originalProof": _expected_identity_proof(),
                 "promptChecks": {"initial": True, "final": True},
-                "promptButton": _expected_prompt_button(), "site": "press", "error": "none"},
+                "promptButton": _expected_prompt_button(), "rowSelection": _expected_row_selection(),
+                "selectedTarget": "match", "site": "press", "error": "none"},
             "projectOpenBinding": None if case == "picker-loss" else {
                 "mechanism": "public-original-sheet-v1", "case": case, "id": 2 if first else 1, "kind": "project",
                 "start": {"returned": True, "result": "ok"},
@@ -514,6 +523,29 @@ def _accessibility_prompt_button(value):
     return value
 
 
+def _accessibility_row_selection(value):
+    label = "accessibility-row-selection"
+    need(type(value) is dict and set(value) == {"checks", "nodesExamined", "attempted", "returned", "setterSucceeded"}, label)
+    checks = value["checks"]
+    need(type(checks) is dict and set(checks) == set(ACCESSIBILITY_SELECTION_CHECKS)
+         and all(type(v) is bool for v in checks.values()), label)
+    ordered = tuple(checks[k] for k in ACCESSIBILITY_SELECTION_CHECKS)
+    need(all(not flag or all(ordered[:index]) for index, flag in enumerate(ordered)), label)
+    need(type(value["nodesExamined"]) is int and 0 <= value["nodesExamined"] <= 16
+         and (not any(ordered) or value["nodesExamined"] >= 2), label)
+    need(type(value["attempted"]) is bool and type(value["returned"]) is bool
+         and (value["setterSucceeded"] is None or type(value["setterSucceeded"]) is bool), label)
+    need(not value["returned"] or value["attempted"], label)
+    need((value["setterSucceeded"] is not None) == value["returned"], label)
+    need(not value["attempted"] or all(ordered), label)
+    return value
+
+
+def _row_selection_succeeded(value):
+    return (value is not None and all(value["checks"].values()) and 2 <= value["nodesExamined"] <= 16
+            and value["attempted"] is True and value["returned"] is True and value["setterSucceeded"] is True)
+
+
 def _accessibility_succeeded(value):
     # A matching receipt alone never means that its input thread has joined.
     return (all(value[key] is True for key in ("prepared", "requested", "dispatchAttempted", "bodyEntered", "nativeEntered",
@@ -522,6 +554,7 @@ def _accessibility_succeeded(value):
             and value["expired"] is False and value["state"] == "retired" and value["site"] == "press" and value["error"] == "none"
             and all(value[key] is not None and value[key]["error"] == "none" for key in ("initialOriginalProof", "originalProof"))
             and all(value["promptChecks"][key] is True for key in ("initial", "final"))
+            and _row_selection_succeeded(value["rowSelection"]) and value["selectedTarget"] == "match"
             and value["promptButton"] is not None and all(value["promptButton"]["checks"].values())
             and value["promptButton"]["cleanupReturned"] is True and value["promptButton"]["axError"] == 0
             and value["promptButton"]["cfSlotsRetired"] == value["promptButton"]["cfSlots"])
@@ -536,8 +569,8 @@ def _accessibility_context(value, native, panel, *, expected_id=None):
                  "workerRegistered", "workerJoined")
         observed = ("bodyEntered", "nativeEntered", "attempted", "pressReturned", "triggered", "timely", "custodyKnown", "rechecksSettled")
         need(type(value) is dict and set(value) == {"mechanism", "step", "id", "state", "site", "error",
-             "initialOriginalProof", "originalProof", "promptChecks", "promptButton", *flags, *observed}, label)
-        need(value["mechanism"] == "accessibility-press-original-control-container-button-v3" and value["step"] == "OpenProject"
+             "initialOriginalProof", "originalProof", "promptChecks", "promptButton", "rowSelection", "selectedTarget", *flags, *observed}, label)
+        need(value["mechanism"] == "accessibility-select-original-row-and-press-v4" and value["step"] == "OpenProject"
              and type(value["id"]) is int and value["id"] in (1, 2), label)
         if expected_id is not None:
             need(value["id"] == expected_id, label)
@@ -600,6 +633,9 @@ def _accessibility_context(value, native, panel, *, expected_id=None):
             if prompt[name] is not None:
                 need(proof is not None and proof["error"] == "none", label)
         button = value["promptButton"]
+        selection, selected = value["rowSelection"], value["selectedTarget"]
+        need((selection is None) == (button is None), label)
+        need(selected is None or type(selected) is str and selected in ACCESSIBILITY_SELECTED_TARGETS, label)
         if button is not None:
             need(value["bodyReturned"] and value["nativeEntered"] is True, label)
             _accessibility_prompt_button(button)
@@ -607,21 +643,46 @@ def _accessibility_context(value, native, panel, *, expected_id=None):
                  and proofs[0]["error"] == "none" and prompt["initial"] is True, label)
             need(button["cleanupReturned"] or value["custodyKnown"] is not True
                  and not value["receiptJoined"] and not value["barrierRetired"], label)
+            _accessibility_row_selection(selection)
+            need(selection["nodesExamined"] == 0 or button["checks"]["parentBound"] and button["checks"]["sheetBound"]
+                 and button["calls"] > 0 and button["cfSlots"] > 0, label)
+            need(selection["setterSucceeded"] is not False or button["axError"] != 0, label)
+            if selection["attempted"] and not selection["returned"]:
+                need(site == "selection-write" and error == "objc-exception" and button["axError"] == 0
+                     and button["cleanupReturned"] is False and button["cfSlotsRetired"] == 0
+                     and value["custodyKnown"] is False and not value["receiptJoined"] and not value["barrierRetired"], label)
+            need(button["initialNodesExamined"] == 0 and not any(tuple(button["checks"][k] for k in ACCESSIBILITY_BUTTON_CHECKS)[2:])
+                 or _row_selection_succeeded(selection), label)
+            need(not selection["attempted"] or _row_selection_succeeded(selection) or site in ("selection-write", "cleanup"), label)
         need(proofs[1] is None or button is not None and all(button["checks"].values()), label)
+        if site in ("original-proof", "admission", "press") and button is not None:
+            need(_row_selection_succeeded(selection), label)
+        if selected is not None:
+            need(_row_selection_succeeded(selection) and proofs[1] is not None and proofs[1]["error"] == "none"
+                 and prompt["final"] is True, label)
+            if selected != "match":
+                expected = {"entered-not-returned": "objc-exception", "not-ready": "ineligible", "different": "changed",
+                            "malformed": "malformed", "multiple": "ambiguous"}[selected]
+                need(error in (expected, "custody") and value["attempted"] is False, label)
+                if selected == "entered-not-returned":
+                    need(value["custodyKnown"] is False, label)
         ready = (all(p is not None and p["error"] == "none" for p in proofs)
-                 and prompt == {"initial": True, "final": True} and button is not None and all(button["checks"].values()))
+                 and prompt == {"initial": True, "final": True} and button is not None and all(button["checks"].values())
+                 and _row_selection_succeeded(selection) and selected == "match")
         need(value["attempted"] is not True or ready and site in ("press", "cleanup"), label)
         if value["nativeEntered"] is False:
             need(all(p is None for p in proofs) and all(p is None for p in prompt.values()) and button is None
+                 and selection is None and selected is None
                  and value["attempted"] is False and value["pressReturned"] is False and value["triggered"] is None, label)
         elif value["nativeEntered"] is None:
             need(all(p is None for p in proofs) and all(p is None for p in prompt.values()) and button is None
+                 and selection is None and selected is None
                  and value["attempted"] is None and value["pressReturned"] is None and value["triggered"] is None, label)
         else:
             need(value["bodyReturned"], label)
         if not value["bodyReturned"]:
             need(all(p is None for p in proofs) and all(p is None for p in prompt.values()) and button is None
-                 and value["triggered"] is None, label)
+                 and selection is None and selected is None and value["triggered"] is None, label)
         if value["triggered"] is False:
             need(button is not None and button["axError"] != 0 and error not in (None, "none"), label)
         elif value["triggered"] is True:
@@ -634,7 +695,7 @@ def _accessibility_context(value, native, panel, *, expected_id=None):
         if error == "invalid-element":
             need(button is not None and button["axError"] == -25202, label)
         if site in ("control-projection", "button", "control-recheck"):
-            need(button is not None, label)
+            need(button is not None and _row_selection_succeeded(selection), label)
             completed = sum(button["checks"].values())
             need((site == "control-projection" and completed in (2, 3) and button["recheckNodesExamined"] == 0)
                  or (site == "button" and completed in (4, 5, 6) and button["recheckNodesExamined"] == 0)
@@ -644,6 +705,7 @@ def _accessibility_context(value, native, panel, *, expected_id=None):
             # Preserve both actual counters and current role/depth even through
             # late/Unknown cleanup; no local diagnostic can supply proof.
             need(error == "limit" and button is not None and button["axError"] == 0
+                 and _row_selection_succeeded(selection)
                  and button["calls"] > 0 and button["cfSlots"] > 0
                  and proofs[0] is not None and proofs[0]["error"] == "none" and proofs[1] is None
                  and prompt == {"initial": True, "final": None} and value["attempted"] is False
@@ -661,6 +723,13 @@ def _accessibility_context(value, native, panel, *, expected_id=None):
                      and (container or role == "Sheet" and depth == 0 and examined == 0))
                  or (site == "control-node-limit" and container and depth < 8)
                  or (site == "control-depth-limit" and container and depth == 8), label)
+        if site in ("selection", "selection-write"):
+            need(button is not None and tuple(button["checks"][k] for k in ACCESSIBILITY_BUTTON_CHECKS)
+                 == (True, True, False, False, False, False, False)
+                 and button["initialNodesExamined"] == button["recheckNodesExamined"] == button["lastDepth"] == 0
+                 and proofs[1] is None and selected is None and prompt["final"] is None
+                 and value["attempted"] is False and value["pressReturned"] is False and value["triggered"] is None, label)
+            need(selection["attempted"] == (site == "selection-write"), label)
         for name, proof in (("initial-original-proof", proofs[0]), ("original-proof", proofs[1])):
             if site == name and proof is not None and proof["error"] != "none":
                 need(proof["error"] == error, label)
@@ -830,7 +899,7 @@ def failure_context(stdout, stderr, case=None):
                  and sample is not None and sample["prepared"] and sample["requested"]
                  and sample["expired"] and sample["timely"] is False
                  and all(sample[key] is None for key in ("nativeEntered", "attempted", "pressReturned", "triggered",
-                     "initialOriginalProof", "originalProof", "promptButton", "site", "error"))
+                     "initialOriginalProof", "originalProof", "promptButton", "rowSelection", "selectedTarget", "site", "error"))
                  and sample["promptChecks"] == {"initial": None, "final": None}, "failure-context")
         if "accessibilityBinding" in value:
             # Early start failure legitimately has no nativeHandler/lastPanel

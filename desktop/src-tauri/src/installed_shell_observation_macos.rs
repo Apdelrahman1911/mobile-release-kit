@@ -240,6 +240,10 @@ fn prompt_button_value(p: mrk_macos_installed_native::ControlContainerButtonProo
         "lastRole":p.last_role,"lastDepth":p.last_depth,
         "cfSlots":p.cf_slots,"cfSlotsRetired":p.cf_slots_retired,"cleanupReturned":p.cleanup_returned,"axError":p.ax_error})
 }
+fn row_selection_value(p: mrk_macos_installed_native::RowSelectionProof) -> Value {
+    json!({"checks":{"targetRowBound":p.checks[0],"sameTargetRechecked":p.checks[1],"selectedRowsSettable":p.checks[2]},
+        "nodesExamined":p.nodes_examined,"attempted":p.attempted,"returned":p.returned,"setterSucceeded":p.setter_succeeded})
+}
 struct OpenActionReceipt { token: OpenAction, body: OpenActionBody, returned_at: Instant }
 struct OpenRecheckReceipt { token: OpenAction, stage: u32, body: OpenRecheckBody, returned_at: Instant }
 struct OpenRecheckSlot {
@@ -327,7 +331,7 @@ impl OpenInputSample {
             && self.report.is_some_and(|r| r.succeeded() && self.diagnostic == Some(r.diagnostic))
     }
     fn value(self) -> Value {
-        json!({"mechanism":"accessibility-press-original-control-container-button-v3","step":"OpenProject","id":self.id,
+        json!({"mechanism":"accessibility-select-original-row-and-press-v4","step":"OpenProject","id":self.id,
             "prepared":self.prepared,"requested":self.requested,"dispatchAttempted":self.dispatch_attempted,"state":self.state,
             "bodyEntered":self.entered,"nativeEntered":self.native_entered,"bodyReturned":self.returned,
             "receiptJoined":self.joined,"workerRegistered":self.worker_registered,"workerJoined":self.worker_joined,
@@ -337,7 +341,9 @@ impl OpenInputSample {
             "initialOriginalProof":self.report.and_then(|r| r.initial_proof).map(native_proof_value),
             "originalProof":self.report.and_then(|r| r.proof).map(native_proof_value),
             "promptChecks":{"initial":self.report.and_then(|r| r.prompt[0]),"final":self.report.and_then(|r| r.prompt[1])},
-            "promptButton":self.report.map(|r| prompt_button_value(r.button))})
+            "promptButton":self.report.map(|r| prompt_button_value(r.button)),
+            "rowSelection":self.report.map(|r| row_selection_value(r.selection)),
+            "selectedTarget":self.report.and_then(|r| r.selected_target)})
     }
 }
 #[derive(Clone, Copy)]
@@ -1851,7 +1857,7 @@ impl Observation {
                 }
             }
             let mut sample = OpenInputSample::preparing(id);
-            let prepared = prepare_open_input(id, binding_return).map_err(|error| {
+            let prepared = prepare_open_input(id, &self.project_path, binding_return).map_err(|error| {
                 sample.diagnostic = error.binding_diagnostic(); error.reason()
             });
             sample.prepared = prepared.is_ok(); *open_sample = Some(sample);
@@ -2614,7 +2620,7 @@ fn route() -> Option<(PathBuf,u32)> {
 // Pure regression checks in the already-required instrumented native entry.
 // These do not call AppKit, acquire files, dispatch actions, or supply receipts.
 fn native_recheck_data_check() -> bool {
-    use mrk_macos_installed_native::{ControlContainerButtonProof, IdentityBinding, OpenDiagnostic, OpenReport};
+    use mrk_macos_installed_native::{ControlContainerButtonProof, IdentityBinding, OpenDiagnostic, OpenReport, RowSelectionProof};
     let proof = IdentityBinding { attempted: true, parent: Some("match"), panel: Some("match"), checks: [Some(true); 12],
         children: Some(1), originals: Some("one"), site: "complete", error: "none" };
     let button = ControlContainerButtonProof { checks: [true; 7], calls: 101, initial_nodes_examined: 4, recheck_nodes_examined: 4,
@@ -2622,7 +2628,8 @@ fn native_recheck_data_check() -> bool {
         cf_slots: 60, cf_slots_retired: 60, cleanup_returned: true, ax_error: 0 };
     let report = OpenReport { diagnostic: OpenDiagnostic { site: "press", error: "none" }, attempted: true,
         press_returned: true, triggered: Some(true), custody_known: true, initial_proof: Some(proof), proof: Some(proof),
-        prompt: [Some(true); 2], button };
+        prompt: [Some(true); 2], button, selected_target: Some("match"),
+        selection: RowSelectionProof { checks: [true; 3], nodes_examined: 4, attempted: true, returned: true, setter_succeeded: Some(true) } };
     let full = OpenInputSample { id: 2, prepared: true, requested: true, dispatch_attempted: true, state: "retired",
         entered: Some(true), native_entered: Some(true), returned: true, joined: true, retired: true, expired: false,
         timely: Some(true), custody_known: Some(true), attempted: Some(true), press_returned: Some(true), triggered: Some(true),
@@ -2630,7 +2637,8 @@ fn native_recheck_data_check() -> bool {
         diagnostic: Some(report.diagnostic), report: Some(report) };
     let value = full.value();
     if !full.succeeded() || value.get("confirmReturned").is_some()
-        || value["mechanism"] != "accessibility-press-original-control-container-button-v3"
+        || value["mechanism"] != "accessibility-select-original-row-and-press-v4"
+        || value["rowSelection"]["setterSucceeded"] != true || value["selectedTarget"] != "match"
         || value["promptButton"]["initialNodesExamined"] != 4 || value["promptButton"]["recheckNodesExamined"] != 4
         || value["promptButton"]["lastRole"] != "Button" || value["promptButton"]["lastDepth"] != 2
         || value["promptButton"].get("directChildrenExamined").is_some()
@@ -2648,6 +2656,10 @@ fn native_recheck_data_check() -> bool {
     for report in [OpenReport { triggered: Some(false), ..report }, OpenReport { press_returned: false, ..report },
         OpenReport { custody_known: false, ..report }, OpenReport { proof: None, ..report },
         OpenReport { initial_proof: None, ..report }, OpenReport { prompt: [Some(true), Some(false)], ..report },
+        OpenReport { selected_target: None, ..report }, OpenReport { selected_target: Some("not-ready"), ..report },
+        OpenReport { selected_target: Some("different"), ..report },
+        OpenReport { selection: RowSelectionProof { returned: false, ..report.selection }, ..report },
+        OpenReport { selection: RowSelectionProof { setter_succeeded: Some(false), ..report.selection }, ..report },
         OpenReport { button: ControlContainerButtonProof { cleanup_returned: false, ..button }, ..report },
         OpenReport { button: ControlContainerButtonProof { initial_nodes_examined: 0, ..button }, ..report },
         OpenReport { button: ControlContainerButtonProof { recheck_nodes_examined: 17, ..button }, ..report },
