@@ -263,6 +263,126 @@ CONVENTIONAL_PREPARE_INPUTS: dict | None = {
         "sourceSha": "37079ce7874bedc804f434f8f8851c3adf5333ac"
     }
 }
+# Current payload authority, separate from the unchanged H supplier admission above.
+# VN eee6e1a2af35c1925a824d5afd063cc6e2f76942: 106 core leaves, six fixed
+# bootstraps, CA and unchanged preparer. Never replace this closed roster with
+# a discovered checkout inventory or H's historical core-source-files.json.
+CONVENTIONAL_CURRENT_SOURCE_FILES: list[dict] | None = [
+    {"path":"/work/inputs/core-source/desktop/android_build_bootstrap.py","size":1051,"sha256":"2cc8b02d24458f3e3e0b90a661765d8e2f97c884030bbeed2a37f587379975a7"},
+    {"path":"/work/inputs/core-source/desktop/config_edit_bootstrap.py","size":1163,"sha256":"927e52dc4e2bb77ce07b4fccdf29807f4fc51f750e53bc1e139719f419cef86f"},
+    {"path":"/work/inputs/core-source/desktop/engine_bootstrap.py","size":1187,"sha256":"fe90aa7f12192d7b94067a7774a7151b4f235a339b94881897e9120b0fe25c7c"},
+    {"path":"/work/inputs/core-source/desktop/environment_bootstrap.py","size":1077,"sha256":"e737c9bf570358025e17d4413f1a567d41b9132142855226572e8a06cd141965"},
+    {"path":"/work/inputs/core-source/desktop/github-ca.pem","size":240216,"sha256":"9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f"},
+    {"path":"/work/inputs/core-source/desktop/github_connection_bootstrap.py","size":1227,"sha256":"f484aa139d5e33dd1d27ccee790d2a4e1c90046064956de3699c6b2b89a7df79"},
+    {"path":"/work/inputs/core-source/desktop/offline_preflight_bootstrap.py","size":1081,"sha256":"0864d0d24de1d5be64781b7cb5378ebeb77c528352927f31609786fb12be8750"},
+    {"path":"/work/inputs/core-source/desktop/tools/prepare_runtime.py","size":11035,"sha256":"6cffd74a97d02cff9037098c43b7df4dd72fabf7bdb5f888a6edf13f61b3cc98"},
+    {"path":"/work/inputs/core-source/src/mobile_release/__init__.py","size":144,"sha256":"557bcb0cdcf7f7ef329f04f82cf388c746bb73eba34857b97782a8bcf2e596b2"},
+    {"path":"/work/inputs/core-source/src/mobile_release/__main__.py","size":115,"sha256":"50fd328dfe5b5339a9958444940e9ce45b9764dbb7b130cc25f3a966ccb706a8"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_command_process.py","size":169926,"sha256":"075fa6e9838017feb6a1716ab3a75074e3a65dffe8b217613aff7e87c0201f68"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_build_control.py","size":2363,"sha256":"45e1e84b7d8809963b914836d019f59553e2ba805e43a96d3c1bc9954594eae4"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_build_engine.py","size":509,"sha256":"acb8af725b5b77cdaaacbeabe193351498b5b9e1f828e6c7405dca67e0951c4a"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_build_files.py","size":53883,"sha256":"e71e867a8cc956227dcf5cf37962b8d4b891bd13c29867d5d36c98b015a0bf12"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_build_protocol.py","size":33376,"sha256":"a8053b6845677ddf6fb1ea7d3e4af90745c1b169c8f3cbcd03cbd9133459aca6"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_build_selection.py","size":6190,"sha256":"f1e4248d21a56d1dd1e72d85cba206b3958d800dc0d2b36cde930cc461155b08"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_edit_control.py","size":7712,"sha256":"a300db0df65418ac110399225312c117b0e1f1a43608f3259ea6044ab33341e7"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_edit_engine.py","size":17411,"sha256":"392d6e0e183c3127361ec1b7faeda9b14fc73173934899c109788eda017275e2"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_edit_protocol.py","size":11994,"sha256":"96751f97c443d7a3e31305f5d83183c27f4a2883e0a88df83bc5125bebe3303e"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_engine.py","size":9436,"sha256":"860d1cee0072730a487ac8e632206c69e3ba676cab849b144a61755c4b84e41e"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_environment_control.py","size":5794,"sha256":"b4d8fbe47b575faa8de2fc06854bb6863cd3e68fdb60473c8f5488ce70142771"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_environment_engine.py","size":6574,"sha256":"0f99c422928fd7aa955e5c6d63682ef29c0e226e09ce51d25141bee98d44e6bc"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_environment_protocol.py","size":19517,"sha256":"1316e980200e63741340c2545a2a6d93adf9cf4a8e2f37f379768f33d445f39b"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_github_engine.py","size":14149,"sha256":"a468ce5b3ccf18606a0968817299bebeaee63299268430f9a52a1de7bf02483c"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_preflight_budget.py","size":16253,"sha256":"391ef71136be104523e09b4c2da0967d04271fbbedf7ea04663649eeb82e02d4"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_preflight_control.py","size":938,"sha256":"7d867dfba27acd98333f3bb8477f1693e4ad93738a0273be4a4fa44108c438d9"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_preflight_engine.py","size":1199,"sha256":"ebd6e6e40b024724cb4659f51d200ec255f67fb2b97bd20ab41df8956038f444"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_preflight_protocol.py","size":13301,"sha256":"094b9259bf99b790d237b0e99c81401eb3839da5360985910b4a86182f542537"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_saved_command_control.py","size":9835,"sha256":"b12e9b8b8432de38c53aace533faa7993b987d50f6d86be963246ed95c7e5cc0"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_saved_command_engine.py","size":12814,"sha256":"063d8bfcc97f43862ace6adffac14c82db9146ae5927c123aae14d4749943b00"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_github_connection_transport.py","size":40759,"sha256":"f5e0b3e750b4ed0ff7753d2f8e9de9ba940e9db7eecbf314a1b9fe7ae8990e0a"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_lifetime_evidence.py","size":18536,"sha256":"d64948f26984ed692030834221f0cfd93b85117da89b4860f8b69a6f7919e1b3"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_native_process.py","size":62175,"sha256":"70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_profile_callers.py","size":8197,"sha256":"4c1374b6a738f027a3cdbbd4a778346a5ec5df889da9781f8d26b3f7ac688c75"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_profile_process.py","size":131940,"sha256":"be6442d5d2f5e777ed48e61a0151c50c4e9878c7c40fec8573af524511780613"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_store_lane_contract.py","size":9500,"sha256":"8726cf9bdb053b3d7f30eb9c8307c18239dc518476b2f895ef1610efa65e040e"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_store_lane_evidence.py","size":17638,"sha256":"bcea0084032ffbd43c15f5682f456965aff812e5007d3211a5afe605fc4d5872"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_store_lane_files.py","size":35156,"sha256":"880eb0cfa37c0c70eb089c6adbe333450af139f1d85c901e861c756057c7aac5"},
+    {"path":"/work/inputs/core-source/src/mobile_release/android.py","size":31112,"sha256":"18ae142af1ee48f9167f05d64403f3f0bcf8f0424ab8de14bf8ca5e770289543"},
+    {"path":"/work/inputs/core-source/src/mobile_release/android_build_operation.py","size":20200,"sha256":"8769dbb6796cd50346996d36750902ecc56ef1ea0538e47b043bb1c8f08da00e"},
+    {"path":"/work/inputs/core-source/src/mobile_release/android_build_tools.py","size":46054,"sha256":"9ff9e5e27ff47fc038bf4bd61ed5a51f9010b9d37e8f9f6c5675868ca72e9d54"},
+    {"path":"/work/inputs/core-source/src/mobile_release/android_manifest.py","size":9267,"sha256":"7fe056f442e239a8668a62d699f0b4c7f077de9b959d32fc4a2f8f770460bdd7"},
+    {"path":"/work/inputs/core-source/src/mobile_release/android_upload_validation.py","size":6295,"sha256":"5be3d74272ade8a30938d48e25ffe42a661ff3e142872c17b014dee1641cfd72"},
+    {"path":"/work/inputs/core-source/src/mobile_release/android_zip.py","size":15103,"sha256":"34391d082553f2b5168af71c275c743c00bd7982b719933183874ad8258ee15a"},
+    {"path":"/work/inputs/core-source/src/mobile_release/android_zip_integrity.py","size":15169,"sha256":"80bae3a6142f044643f7a1077b671f3ad105123fe1db55ac674d1b4eb0b1467f"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/__init__.py","size":8609,"sha256":"1dea492ac81248d7e44cc937a8bed518078f82db449cb63acd1c87f0ceffc0ae"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_candidate_evidence.py","size":16373,"sha256":"7918786377fdffdc7b0ce07ffcbb99fc75b9297d4ab1cdde40979ee0ee684f90"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_catalog.py","size":15530,"sha256":"aca452cce8d8e8e7f5ffca951f23c8d931678cb39ffcf7c05e213ce1c96ebf25"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_credential_assessment.py","size":19158,"sha256":"834e6a88a64cf491504e03e8e7026b70c693b37196c489bf3d6ebabdcb9bac92"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_credential_guide.py","size":7905,"sha256":"bd713a2150eb6b03ea2896ea98db27647146fd536f7a2d412a7f8ada7e98a3fb"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_environment.py","size":14236,"sha256":"4115d50e6ff1b2acb991b259a7f06443f234a07d4820167bc444aed916f5b0d4"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_github_connection.py","size":16515,"sha256":"a68974f2bf477cd5d3d4349398a3c7616ac3f47b8fd704a0fa356e3784d29a7b"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_github_setup.py","size":12630,"sha256":"87fa322b2fcd02e399eff4b49eb15ebc84864f1fdcd25b3f958944ea21f9f825"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_json.py","size":2851,"sha256":"84c90334c94b12877cc3dbcd9324bd80d78a2de9f54d64e30c771af06f719815"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_metadata_text.py","size":10878,"sha256":"759c3124d807fd768883c50b15e05b0040e114414ef5f92045a536d2aba4d8a7"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_preview.py","size":10213,"sha256":"ed5ea4c2777ea36b34816ec66603cf2453aeab22bf98764b82ea0db07ab6beae"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_release_version.py","size":8391,"sha256":"54706d38280f898d80418e9402038712e7f66610c6d64930286a8405e0e3370c"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_snapshot.py","size":33432,"sha256":"ebfce3ee8672f13d78785bec2f5e59a201d29f8151bf327497f0793463a1e7fe"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_snapshot_windows.py","size":19049,"sha256":"c96e29786f986811f211ec8679336fc665a06fcb918c056260fa77ea2b0696a0"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_snapshot_windows_native.py","size":26733,"sha256":"a4b1303e6cdc73053a1c22dc109f9925d5babf612ec4041453dad876a5db4d17"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/contracts.py","size":27721,"sha256":"0594cbd14f91fb85a6d8d9769f294bc9f75b692e9cb2ff7fe363d4fb51efd5aa"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/data/credential-guide-v1.json","size":39128,"sha256":"7f9828720684a1b6d071df2a34d415feb8ff4552c89d8d6d42b19970d838d478"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/data/field-help.json","size":28837,"sha256":"890d9d1c22a4984bb60b0b503cf1106fe5b5f03ddf50614b5d00350ee510bb16"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/data/github-connection-v1.json","size":9225,"sha256":"75a635de5747c8e0773ec1ee996fff594f38e2a7f28d90099db86f56b4319714"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/data/github-setup-v1.json","size":16582,"sha256":"4d486fc24ebf24271dbb5227174df7c8f28a530a97011e004da643fdad7fe17c"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/data/metadata-text-help-v1.json","size":10495,"sha256":"08c4efac78ee2aabc75f6ece7f93010f34193bcb8c8304a742b9e0c7e940ccfb"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/data/project.schema.json","size":12407,"sha256":"2c59a6a3d0c90188db5800898db2c42612960616f30d84aecf25a4611ec5fbd7"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/data/release-version-help-v1.json","size":5157,"sha256":"d4ee75cba9accb83ce0982de1fbe4359e9744b38c40856831dea111c1739ff09"},
+    {"path":"/work/inputs/core-source/src/mobile_release/build_inputs.py","size":137984,"sha256":"f8fd2a9e90ac2e1d43b6664243e0250b982527de9283bf36d1832ff24f71221f"},
+    {"path":"/work/inputs/core-source/src/mobile_release/cancellation.py","size":29094,"sha256":"1840232213e877e26c4cebd1434b3b851f9fa4c6961baa26eeaae9fa1442db78"},
+    {"path":"/work/inputs/core-source/src/mobile_release/checked_files.py","size":22382,"sha256":"803b9a0767231426243c0be423a6eb94bcc512ada3bbc132f0798b76a0baedc3"},
+    {"path":"/work/inputs/core-source/src/mobile_release/cli.py","size":64644,"sha256":"9f1967be7552446ad2f4e5fd6b6f88666573eeb1e6077320deb13d1570e16de2"},
+    {"path":"/work/inputs/core-source/src/mobile_release/config.py","size":39869,"sha256":"1e7c192fb46d49bee34a316eb4714079b38aa68a1188462e612d815d8117e1ed"},
+    {"path":"/work/inputs/core-source/src/mobile_release/config_edit.py","size":24493,"sha256":"23ddff685ee6179f0a5b9c35d7b5706683f965c27438fd7b16539754d7779b83"},
+    {"path":"/work/inputs/core-source/src/mobile_release/config_payloads.py","size":4803,"sha256":"b7b9ca12f5c09595430b07bfcf8aed2b1b93f60230888721d1ab78199bc910c2"},
+    {"path":"/work/inputs/core-source/src/mobile_release/credential_policy.py","size":4714,"sha256":"384375dc92348ba2f25159241ae1c9e9711b5ff7c7d72c2fa230146846590805"},
+    {"path":"/work/inputs/core-source/src/mobile_release/credential_requirements.py","size":9503,"sha256":"2ee398a6b17a067977d4081b111ac72ef49d6876d8cddfa75bbaca60545e301f"},
+    {"path":"/work/inputs/core-source/src/mobile_release/credentials.py","size":103948,"sha256":"35031d83a550171faace632deb0bbe55ad87a988d62076db9be788bac22e4d56"},
+    {"path":"/work/inputs/core-source/src/mobile_release/data/apple-profile-roots.pem","size":4539,"sha256":"c704ce9bc7d65280e2893c2235c2434dba8cbce00f659787492714ca441b1e93"},
+    {"path":"/work/inputs/core-source/src/mobile_release/desktop_android_build.py","size":12767,"sha256":"4fd76c42b2297153ca408d6f2e6dc060c60352b60d8a58cde3b7c3d82e4d8eb3"},
+    {"path":"/work/inputs/core-source/src/mobile_release/desktop_preflight.py","size":8915,"sha256":"2f1b3fc4aae8c55e80954ff578cf97116bba246c759cf183bd13578fafc13581"},
+    {"path":"/work/inputs/core-source/src/mobile_release/discovery.py","size":27885,"sha256":"6802bd28bccf0c807ca67299c0cb94d2eab0158b44383aed167a42465b2608bd"},
+    {"path":"/work/inputs/core-source/src/mobile_release/environment_diagnostics.py","size":12025,"sha256":"db34c792e7097df8d9e0e52980486df450b1e6f9064027202987d99847ec67a1"},
+    {"path":"/work/inputs/core-source/src/mobile_release/environment_diagnostics_tools.py","size":24700,"sha256":"a45822d5d237c224164dcec35ff7a91703a49f032f3b4993d9bcdf9b90454da0"},
+    {"path":"/work/inputs/core-source/src/mobile_release/errors.py","size":749,"sha256":"26427cedbd05945c1a869af20228f9a04fe1e30d950a2dc246dd0795708a0853"},
+    {"path":"/work/inputs/core-source/src/mobile_release/github_workflow_edit.py","size":21086,"sha256":"cd059224ec5174ece0f0ddb5d74464a9df4497ac991bc3f86fa160f932d0dcaf"},
+    {"path":"/work/inputs/core-source/src/mobile_release/init_transaction.py","size":88826,"sha256":"b19ee28073fd59a6903414ee7429a64e0b9dcf17864d0428009be646e93dda9c"},
+    {"path":"/work/inputs/core-source/src/mobile_release/init_workspace_custody.py","size":33409,"sha256":"3a1ff617db9ecf54209e2b99daa5547b414b146a46bf8c655d0e5cdbb8b5296c"},
+    {"path":"/work/inputs/core-source/src/mobile_release/inspection.py","size":930,"sha256":"663d6d82261815cf044ecc96f19eb7252b54d224edbecd4641679b2a32fc920a"},
+    {"path":"/work/inputs/core-source/src/mobile_release/ios.py","size":59585,"sha256":"cb4665594bee73605f78acb57b1253ae088b987b51a752a970b7c65011108bbb"},
+    {"path":"/work/inputs/core-source/src/mobile_release/ios_artifacts.py","size":74171,"sha256":"102f6c444853958ca2c17698d7d67b56c0b321311bcccd2a999c52a1ca61c54a"},
+    {"path":"/work/inputs/core-source/src/mobile_release/ios_der.py","size":5132,"sha256":"9ad85b4f36c65d5dc1895fae45ffc3959f0e190e7b183615aa6c0714d8b38ab5"},
+    {"path":"/work/inputs/core-source/src/mobile_release/ios_entitlements.py","size":23224,"sha256":"3278efadeecbcc09187cc859c03e1e011a8bf2d8f22355f92c03ade140c4951f"},
+    {"path":"/work/inputs/core-source/src/mobile_release/ios_plist_binary.py","size":8499,"sha256":"1601d3e15467a95348bde537ec6da633c2b4b46e0f7803eb619622b3cab69b2b"},
+    {"path":"/work/inputs/core-source/src/mobile_release/ios_profile_auth.py","size":7972,"sha256":"143897fba6fcd6e8a6d3d8063425a3274643eca934da334ada795865c840014c"},
+    {"path":"/work/inputs/core-source/src/mobile_release/ios_profile_trust.py","size":9102,"sha256":"e813efc8e4218048bae71f04de942493e93e5880f095e5ae68f051d6cf176edf"},
+    {"path":"/work/inputs/core-source/src/mobile_release/ios_profiles.py","size":36397,"sha256":"ee19ada826cdd49da7ad8a4ad2b7a2f6bc82eedf9334507980c6c4b87853bb1f"},
+    {"path":"/work/inputs/core-source/src/mobile_release/ios_upload_validation.py","size":7171,"sha256":"2b914576fd795123bd6088711f19d1072801415736f266ebaf39c5d6d4446589"},
+    {"path":"/work/inputs/core-source/src/mobile_release/local_signing.py","size":97622,"sha256":"66d8eb8ae0873f852cdd6a9080aa837c3de3fcda307451cb14be92e81c0237f6"},
+    {"path":"/work/inputs/core-source/src/mobile_release/macho.py","size":23183,"sha256":"8fb561c41ca958ba9d1fc507b7aecae6a011aa2bb903ec472a80201a6b926d5d"},
+    {"path":"/work/inputs/core-source/src/mobile_release/metadata.py","size":27910,"sha256":"1aadff63995e2e705c21d5b5e30d8b4ba9f7c69035f32de39afada6d05c8dc2b"},
+    {"path":"/work/inputs/core-source/src/mobile_release/metadata_text.py","size":8246,"sha256":"207cde915a41c7ae026d2640d97464220bd7284c2de20ff3f366fb9fb0f4cb70"},
+    {"path":"/work/inputs/core-source/src/mobile_release/metadata_text_edit.py","size":16301,"sha256":"e6f76867b3605f72816f66e37a413d9ab1bc001790b8a0d8eff252d485280815"},
+    {"path":"/work/inputs/core-source/src/mobile_release/owned_process.py","size":7631,"sha256":"430a596c5069b7acf248334d1f60fdd12ad8212cf9c2e9dfef717c9ba2179c02"},
+    {"path":"/work/inputs/core-source/src/mobile_release/preflight.py","size":60891,"sha256":"d49e71ec66f149bab82ef4dcabf22db96fed61864a5540d48ae309183e25c173"},
+    {"path":"/work/inputs/core-source/src/mobile_release/provenance.py","size":202867,"sha256":"50933fa89350e46e267854750bbd45ae3afc4efb0546013366d881f63cc94830"},
+    {"path":"/work/inputs/core-source/src/mobile_release/release_version_edit.py","size":15399,"sha256":"2ba0d9f3cf99ebe77a06a1690d6f93755ce48af55ca20da9989fed5cd2eed167"},
+    {"path":"/work/inputs/core-source/src/mobile_release/reporting.py","size":7628,"sha256":"4bbed825e6f1098dd4a89d864002641a2c7ec13f183ac0e85d5de3cc38aab900"},
+    {"path":"/work/inputs/core-source/src/mobile_release/stores.py","size":51125,"sha256":"287135d7177200ada0ba0b64b71fa7ce5c533cb8d8b32af6ccfaaa3e2db28c53"},
+    {"path":"/work/inputs/core-source/src/mobile_release/toolchain_policy.py","size":517,"sha256":"1b48e5c7e08864ff8ee63bcb3a91bf6782259fbe91f413ba707510bc631f2f61"},
+    {"path":"/work/inputs/core-source/src/mobile_release/tooling.py","size":7495,"sha256":"3bc69d9522c563fa1cb7403976f1cf6c1c2b5ad3e042a4a88dfbc7db06932c4d"},
+    {"path":"/work/inputs/core-source/src/mobile_release/version_text.py","size":10275,"sha256":"408c9fbc1ba4b101230ff271050ef75ef2b34f2e7656869f88006f8101687eb1"},
+    {"path":"/work/inputs/core-source/src/mobile_release/workflow.py","size":129517,"sha256":"47cd5e408b42f67fe9ad43bb0c11f04c9b2a4b542304f55206bbfce4494f74eb"},
+    {"path":"/work/inputs/core-source/src/mobile_release/workflow_payloads.py","size":3228,"sha256":"5dbc513b408c0e5735ed67c00db1e3e92499461f307abd53307d493f0895201b"},
+]
 CONVENTIONAL_SMOKE_INPUTS: dict | None = {
     "manifestSha256": "e3375ff140d69df54b2445f756711e0245d397ba6ded76e8559732ec2e4e3801",
     "preparedArtifact": {
@@ -9048,8 +9168,9 @@ def conventional_admission(scope: str) -> tuple:
     require(scope in CONVENTIONAL_SCOPES, "Unknown conventional route")
     value = CONVENTIONAL_PREPARE_INPUTS if scope == CONVENTIONAL_PREPARE_SCOPE else CONVENTIONAL_SMOKE_INPUTS
     # Before artifact/output paths, imports of the copier/probe, tools or writes.
-    require(type(value) is dict and type(CONVENTIONAL_HOSTED_PYTHON) is dict,
-            "Conventional route closed: accepted artifacts and actual hosted DATA TCB missing")
+    require(type(value) is dict and type(CONVENTIONAL_HOSTED_PYTHON) is dict
+            and type(CONVENTIONAL_PREPARE_INPUTS) is dict and type(CONVENTIONAL_CURRENT_SOURCE_FILES) is list,
+            "Conventional route closed: supplier, current source, accepted artifacts or hosted DATA TCB missing")
     data = conventional_module("conventional_runtime_data")
     wanted = ({"sourceArtifact", "reviewFiles", "outputInventorySha256"} if scope == CONVENTIONAL_PREPARE_SCOPE
               else {"preparedArtifact", "manifestSha256", "protocolSha256"})
@@ -9188,30 +9309,51 @@ def conventional_files(data, path: Path, files: list[dict]) -> dict:
     return rows
 
 
-def conventional_core(data, source: Path, raw: bytes, *, retained_source: Path | None = None) -> list[dict]:
-    """Join existing H core-source-files DATA across producer/consumer commits."""
+def conventional_historical_core(data, source: Path, raw: bytes, retained_source: Path) -> None:
+    """Authenticate H's own retained core, never use it as the current payload."""
+    expected = data.decode(data.read(source / "desktop/cpython-source-inputs/core-source-files.json"))
     rows = data.decode(raw)
+    require(data.same(rows, expected), "Original H core source mapping differs from the retained supplier admission")
     originals = data.records(rows, absolute=True)
     prefix = "/work/inputs/core-source/"
+    require(all(name.startswith(prefix) for name in originals), "Original H core source path differs")
+    preparer = conventional_module("prepare_runtime")
+    require({path.relative_to(retained_source).as_posix() for path in preparer.files(retained_source)}
+            == {name.removeprefix(prefix) for name in originals}, "Retained H complete source roster differs")
+    for name, row in originals.items():
+        data.bound(retained_source / name.removeprefix(prefix), row)
+
+
+def conventional_core(data, source: Path, raw: bytes, *, staged_source: Path | None = None) -> list[dict]:
+    """Bind the closed current payload independently of H and the consumer commit."""
+    rows = data.decode(raw)
+    originals = data.records(rows, absolute=True)
+    require(type(CONVENTIONAL_CURRENT_SOURCE_FILES) is list
+            and data.same(rows, CONVENTIONAL_CURRENT_SOURCE_FILES), "Current payload source binding differs from the closed admission")
+    prefix = "/work/inputs/core-source/"
+    require(all(name.startswith(prefix) for name in originals), "Current payload source path differs")
+    expected = {name.removeprefix(prefix) for name in originals}
     preparer = conventional_module("prepare_runtime")
     fixed = {"desktop/" + name for name in (*preparer.BOOTSTRAPS, preparer.GITHUB_CA_NAME)}
     fixed.add("desktop/tools/prepare_runtime.py")
-    expected = fixed | {"src/mobile_release/" + path.relative_to(source / "src/mobile_release").as_posix()
-                        for path in preparer.files(source / "src/mobile_release")}
-    require(set(originals) == {prefix + name for name in expected}, "Original complete core/handoff roster differs")
+    core = {name for name in expected if name.startswith("src/mobile_release/")}
+    require(bool(core) and expected == fixed | core, "Current payload input roles differ")
+    # Discovery checks completeness against the admitted rows; it does not
+    # create authority for an added, removed or differently sourced member.
+    require({"src/mobile_release/" + path.relative_to(source / "src/mobile_release").as_posix()
+             for path in preparer.files(source / "src/mobile_release")} == core,
+            "Current complete core roster differs")
+    if staged_source is not None:
+        require({path.relative_to(staged_source).as_posix() for path in preparer.files(staged_source)} == expected,
+                "Staged current payload source roster differs")
     for name, row in originals.items():
         relative = name.removeprefix(prefix)
-        # H's fixed prepare maps this one logical resource from the committed
+        # The fixed prepare maps this one logical resource from the committed
         # controls path. Do not add a shadow/untracked desktop/github-ca.pem.
         checkout_name = "desktop/cpython-source-inputs/github-ca.pem" if relative == "desktop/github-ca.pem" else relative
         data.bound(source / checkout_name, row)
-        if retained_source is not None:
-            data.bound(retained_source / relative, row)
-    if retained_source is not None:
-        require({"src/mobile_release/" + path.relative_to(retained_source / "src/mobile_release").as_posix()
-                 for path in preparer.files(retained_source / "src/mobile_release")}
-                == {name for name in expected if name.startswith("src/mobile_release/")},
-                "Retained H complete core roster differs")
+        if staged_source is not None:
+            data.bound(staged_source / relative, row)
     return rows
 
 
@@ -9246,9 +9388,20 @@ def conventional_prepare(context: dict, data, admission: dict) -> None:
     data.unpack(h_artifact / "hosted-evidence.tar", h_rows["hosted-evidence.tar"], root / "h", retained=retained["files"])
     retained_rows = {row["path"]: row for row in retained["files"]}
     h_root = root / "h"
-    core_raw = data.read(h_root / "controls/core-source-files.json")
-    core_source = h_root / "inputs/core-source"
-    conventional_core(data, source, core_raw, retained_source=core_source)
+    historical_core_raw = data.read(h_root / "controls/core-source-files.json")
+    historical_core_source = h_root / "inputs/core-source"
+    conventional_historical_core(data, source, historical_core_raw, historical_core_source)
+    core_raw = data.canonical(CONVENTIONAL_CURRENT_SOURCE_FILES)
+    current_rows = conventional_core(data, source, core_raw)
+    core_source = root / "current-core-source"
+    core_source.mkdir(mode=0o700)
+    for row in current_rows:
+        relative = row["path"].removeprefix("/work/inputs/core-source/")
+        checkout_name = "desktop/cpython-source-inputs/github-ca.pem" if relative == "desktop/github-ca.pem" else relative
+        target = core_source / relative
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        data.copy(source / checkout_name, target, row)
+    conventional_core(data, source, core_raw, staged_source=core_source)
     evidence = root / "evidence"
     evidence.mkdir(mode=0o700)
     for name, row in retained_rows.items():
@@ -9278,7 +9431,8 @@ def conventional_prepare(context: dict, data, admission: dict) -> None:
     require({path.relative_to(root / "runtime").as_posix() for path in preparer.files(root / "runtime")}
             == {row["path"] for row in files}, "Prepared runtime has unlisted files")
     conventional_recheck(context, data)
-    conventional_core(data, source, core_raw, retained_source=core_source)
+    conventional_historical_core(data, source, historical_core_raw, historical_core_source)
+    conventional_core(data, source, core_raw, staged_source=core_source)
     conventional_files(data, h_artifact, admission["sourceArtifact"]["files"])
     conventional_files(data, kit, admission["reviewFiles"])
     public = root / "public"
@@ -9293,7 +9447,8 @@ def conventional_prepare(context: dict, data, admission: dict) -> None:
     data.copy(root / "copy-report.json", public / "copy-report.json", data.file_record(root / "copy-report.json", 8 << 20))
     require(data.file_record(public / "copy-report.json")["sha256"] == copied["reportSha256"], "Original COPY report differs")
     data.write(public / "copy-result.json", data.canonical(copied))
-    data.write(public / "source-bindings.json", core_raw)  # Unchanged existing H core DATA, not a new schema.
+    # Current payload mapping; H's historical mapping remains in its unchanged source kit.
+    data.write(public / "source-bindings.json", core_raw)
     conventional_recheck(context, data)
     data.write(public / "preparation.json", data.canonical({**prepared, "scope": CONVENTIONAL_PREPARE_SCOPE,
         "producer": conventional_producer(context), "archive": archive,
@@ -9308,10 +9463,17 @@ def conventional_prepared(context: dict, data, admission: dict, *, unpack: bool 
     rows = conventional_files(data, artifact, admission["preparedArtifact"]["files"])
     prepared = data.decode(data.read(artifact / "preparation.json", 64 << 10))
     producer = {key: admission["preparedArtifact"][key] for key in ("repository", "sourceSha", "runId", "attempt")}
+    require(type(CONVENTIONAL_PREPARE_INPUTS) is dict
+            and type(CONVENTIONAL_PREPARE_INPUTS.get("sourceArtifact")) is dict, "Original H supplier admission missing")
+    supplier = CONVENTIONAL_PREPARE_INPUTS["sourceArtifact"]
+    require(set(supplier) == {"repository", "sourceSha", "runId", "attempt", "artifactId", "files"}
+            and data.records(supplier["files"]).keys() == set(CONVENTIONAL_SOURCE_KIT), "Original H supplier admission differs")
     require(type(prepared) is dict and set(prepared) == {"manifestSha256", "protocolSha256", "qualification", "scope",
         "producer", "archive", "sourceArtifact", "helperFiles", "copyResult", "sourceKit", "notVerified"}
         and prepared["scope"] == CONVENTIONAL_PREPARE_SCOPE and prepared["qualification"] == "prepared-not-native-verified"
         and data.same(prepared["producer"], producer) and data.same(prepared["archive"], rows["prepared-runtime.tar"])
+        and data.same(prepared["sourceArtifact"], {key: supplier[key] for key in ("repository", "sourceSha", "runId", "attempt", "artifactId")})
+        and data.same(prepared["sourceKit"], supplier["files"])
         and data.same(prepared["sourceKit"], [{**rows["source-kit/" + name], "path": name} for name in CONVENTIONAL_SOURCE_KIT])
         and data.same(prepared["helperFiles"], fixed_file_inventory(source, CONVENTIONAL_SHARED_HELPERS))
         and all(prepared[key] == admission[key] for key in ("manifestSha256", "protocolSha256"))
