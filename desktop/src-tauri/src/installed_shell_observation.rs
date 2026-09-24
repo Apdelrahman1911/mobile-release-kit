@@ -694,6 +694,281 @@ fn latch_path_diagnostic(failed: &AtomicBool, diagnostic: &mut Option<PathDiagno
     if !failed.swap(true, Ordering::SeqCst) { *diagnostic = Some(next); }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FailureQuitAction { Close, Activate }
+// DATA for one handoff to normal quit, never an owner or exit/finality permit.
+// Claims are monotone, including after an unsuccessful external dispatch. This
+// state cannot clear the failed recipe, renew a clock, or start shutdown itself.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct FailureQuit {
+    armed: bool, refused: bool, close_requested: bool, close_prevented: bool,
+    id: Option<u32>, selects_ok: bool, pending: bool, activated: bool,
+    responded: bool, disposal: bool, destroyed: bool, released: bool, returned: bool,
+    relay_observed: Option<bool>, loop_exit_observed: Option<bool>,
+}
+impl FailureQuit {
+    fn begin(&mut self, original: Option<Self>) {
+        if self.armed { return; }
+        *self = original.unwrap_or(Self { selects_ok: true, ..Self::default() });
+        self.armed = true;
+    }
+    fn refuse(&mut self) { self.refused = true; }
+    fn reserve(&mut self, failed: bool, before_end: bool) -> Option<FailureQuitAction> {
+        if !failed || !self.armed || self.refused { return None; }
+        if !before_end { self.refuse(); return None; }
+        if !self.close_requested {
+            self.close_requested = true; return Some(FailureQuitAction::Close);
+        }
+        if self.close_prevented && self.id.is_some() && !self.pending && !self.activated
+            && !self.responded && !self.returned && !self.destroyed && !self.released {
+            self.pending = true; return Some(FailureQuitAction::Activate);
+        }
+        None
+    }
+    fn closed(&mut self) {
+        if !self.armed || self.refused || self.close_prevented || self.id.is_some() { self.refuse(); return; }
+        // A genuine CloseRequested may precede the relay's first failed tick.
+        // That existing request must not be replaced by another window.close().
+        self.close_requested = true; self.close_prevented = true;
+    }
+    fn created(&mut self, id: u32, quit: bool) {
+        if !self.armed || self.refused || !self.close_prevented || !quit || id == 0 || self.id.is_some() {
+            self.refuse(); return;
+        }
+        self.id = Some(id);
+    }
+    fn eligible(&self, id: u32) -> bool {
+        self.armed && !self.refused && self.close_requested && self.close_prevented && self.id == Some(id)
+            && self.pending && !self.activated && !self.responded && !self.returned && !self.destroyed && !self.released
+    }
+    fn choice(&self, id: u32) -> Result<bool, ()> {
+        if self.eligible(id) { Ok(self.selects_ok) } else { Err(()) }
+    }
+    fn activate(&mut self, id: u32, before_end: bool) -> Result<(), ()> {
+        if !before_end || !self.eligible(id) { self.refuse(); return Err(()); }
+        self.activated = true; Ok(())
+    }
+    fn response(&mut self, id: u32, accepted: bool, declined: bool, disposal: bool) {
+        if self.refused || self.id != Some(id) || !self.activated || self.destroyed || self.released {
+            self.refuse(); return;
+        }
+        if !self.responded && !disposal && accepted == self.selects_ok && declined != self.selects_ok {
+            self.responded = true;
+        } else if self.responded && self.returned && disposal && !accepted && !declined && !self.disposal {
+            self.disposal = true;
+        } else { self.refuse(); }
+    }
+    fn activation_returned(&mut self, result: Result<bool, ()>) {
+        if self.refused || !self.pending || !self.activated || self.returned || result != Ok(true) { self.refuse(); return; }
+        // Return is not consent: the original GTK response can arrive later.
+        self.returned = true;
+    }
+    fn destroyed(&mut self, id: u32, seen: bool) {
+        if self.refused || self.id != Some(id) || !seen || !self.responded || self.destroyed || self.released { self.refuse(); return; }
+        self.destroyed = true;
+    }
+    fn released(&mut self, id: u32, seen: bool) {
+        if self.refused || self.id != Some(id) || !seen || !self.destroyed || self.released { self.refuse(); return; }
+        self.released = true;
+    }
+    fn native_handoff_complete(&self) -> bool {
+        // pending is the consumed one-shot activation claim, not an owner join.
+        // The optional disposal response is not consent; the actual OK is.
+        self.armed && !self.refused && self.close_requested && self.close_prevented
+            && self.id.is_some_and(|id| id != 0) && self.selects_ok && self.pending
+            && self.activated && self.responded && self.returned && self.destroyed && self.released
+    }
+    fn observe_relay(&mut self, joined: bool) {
+        // DATA from the existing original await only. No claim/refusal changes.
+        self.relay_observed = Some(self.relay_observed.is_none() && joined && self.native_handoff_complete());
+    }
+    fn observe_loop_exit(&mut self, ready: bool) {
+        self.loop_exit_observed = Some(self.loop_exit_observed.is_none() && ready
+            && self.relay_observed == Some(true) && self.native_handoff_complete());
+    }
+    fn returned_handoff(&self, normal_return: bool) -> bool {
+        normal_return && self.native_handoff_complete()
+            && self.relay_observed == Some(true) && self.loop_exit_observed == Some(true)
+    }
+}
+
+fn failure_handoff_line(failed: bool, normal_return: bool, snapshot: Option<FailureQuit>) -> Option<&'static [u8]> {
+    if failed && snapshot.is_some_and(|quit| quit.returned_handoff(normal_return)) {
+        Some(b"MRK_INSTALLED_SHELL_FAILURE_HANDOFF=original-quit-relay-loop-returned\n")
+    } else { None }
+}
+
+fn assert_failure_quit_contract() {
+    // The actual tick/callback helper, with inert original-event DATA only.
+    // These assertions do not click GTK, run cleanup, or prove native finality.
+    let id = 73;
+    let step = SessionStep::Read(6, SA::Prepare("android-keystore", "missing"));
+    let mut trace = (Step::Session(step), Boundary::Settlement);
+    let mut progress = BootstrapProgress::Advanced;
+    let failed = AtomicBool::new(false);
+    let first = SessionDiagnostic { step, evaluations: 25, rejection: SessionRejection::ReplyAssessmentUnavailable,
+        wait: SessionWait::ReplyPending, first_failure: InstalledSessionFailure::not_recorded(), assessment: InstalledAssessmentFailure::none() };
+    let mut diagnostic = None;
+    latch_session_diagnostic(&failed, &mut diagnostic, first);
+    let frame = failure_pair(trace, progress, diagnostic, None);
+    assert!(frame.is_some());
+    let mut quit = FailureQuit::default(); quit.begin(None);
+    let unclaimed = quit;
+    assert!(quit.reserve(false, true).is_none() && quit == unclaimed);
+    assert!(quit.reserve(failed.load(Ordering::SeqCst), true) == Some(FailureQuitAction::Close));
+    assert!(quit.reserve(true, true).is_none());
+    quit.closed();
+    assert!(quit.reserve(true, true).is_none()); // Original question not created yet.
+    quit.created(id, true);
+    assert!(quit.reserve(true, true) == Some(FailureQuitAction::Activate));
+    assert!(quit.reserve(true, true).is_none() && quit.choice(id) == Ok(true));
+    assert!(quit.activate(id, true).is_ok());
+    quit.activation_returned(Ok(true));
+    assert!(quit.returned && !quit.responded && !quit.released); // Return is not consent.
+    quit.response(id, true, false, false);
+    quit.response(id, false, false, true);
+    quit.destroyed(id, true); quit.released(id, true);
+    assert!(!quit.refused && quit.released && quit.reserve(true, true).is_none());
+    // The actual terminal observation methods never change native claims or
+    // manufacture positive recipe/cleanup receipts. Disposal is optional.
+    let native = FailureQuit { disposal: false, ..quit };
+    assert!(native.native_handoff_complete() && !native.returned_handoff(true));
+    let mut observed = native; observed.observe_relay(true);
+    assert!(!observed.returned_handoff(true));
+    observed.observe_loop_exit(true);
+    assert!(observed.returned_handoff(true) && !observed.returned_handoff(false));
+    assert!(failure_handoff_line(true, true, Some(observed)).is_some_and(|line|
+        line == b"MRK_INSTALLED_SHELL_FAILURE_HANDOFF=original-quit-relay-loop-returned\n"));
+    // Missing snapshot includes unavailable/poisoned Record; false normal_return
+    // covers both pre-loop initialization error and an actual nonzero loop return.
+    assert!(failure_handoff_line(true, true, None).is_none());
+    assert!(failure_handoff_line(false, true, Some(observed)).is_none());
+    assert!(failure_handoff_line(true, false, Some(observed)).is_none());
+    assert!(FailureQuit { relay_observed: None, loop_exit_observed: None, ..observed } == native);
+    for mut missing in [
+        FailureQuit { armed: false, ..native }, FailureQuit { refused: true, ..native },
+        FailureQuit { close_requested: false, ..native }, FailureQuit { close_prevented: false, ..native },
+        FailureQuit { id: None, ..native }, FailureQuit { id: Some(0), ..native },
+        FailureQuit { selects_ok: false, ..native }, FailureQuit { pending: false, ..native },
+        FailureQuit { activated: false, ..native }, FailureQuit { responded: false, ..native },
+        FailureQuit { returned: false, ..native }, FailureQuit { destroyed: false, ..native },
+        FailureQuit { released: false, ..native },
+    ] {
+        let before = missing; missing.observe_relay(true); missing.observe_loop_exit(true);
+        assert!(missing.relay_observed == Some(false) && missing.loop_exit_observed == Some(false));
+        assert!(failure_handoff_line(true, true, Some(missing)).is_none());
+        assert!(FailureQuit { relay_observed: None, loop_exit_observed: None, ..missing } == before);
+    }
+    let mut false_relay = native; false_relay.observe_relay(false); false_relay.observe_relay(true);
+    false_relay.observe_loop_exit(true);
+    assert!(false_relay.relay_observed == Some(false) && !false_relay.returned_handoff(true));
+    let mut repeated_relay = native; repeated_relay.observe_relay(true); repeated_relay.observe_relay(true);
+    repeated_relay.observe_loop_exit(true);
+    assert!(repeated_relay.relay_observed == Some(false) && !repeated_relay.returned_handoff(true));
+    let mut false_exit = native; false_exit.observe_relay(true); false_exit.observe_loop_exit(false);
+    false_exit.observe_loop_exit(true);
+    assert!(false_exit.loop_exit_observed == Some(false) && !false_exit.returned_handoff(true));
+    let mut repeated_exit = observed; repeated_exit.observe_loop_exit(true);
+    assert!(repeated_exit.loop_exit_observed == Some(false) && !repeated_exit.returned_handoff(true));
+    let mut reversed = native; reversed.observe_loop_exit(true); reversed.observe_relay(true);
+    reversed.observe_loop_exit(true);
+    assert!(reversed.loop_exit_observed == Some(false) && !reversed.returned_handoff(true));
+    latch_session_diagnostic(&failed, &mut diagnostic, SessionDiagnostic { rejection: SessionRejection::GtkReturnState, ..first });
+    assert!(!latch_failure(&failed, &mut trace, &mut progress, (Step::Exit, Boundary::Deadline), BootstrapProgress::NotSampled));
+    assert!(failed.load(Ordering::SeqCst) && diagnostic == Some(first));
+    assert!(failure_pair(trace, progress, diagnostic, None) == frame);
+
+    // A previously reserved Close is adopted, never sent a second time.
+    let mut closing = FailureQuit::default();
+    closing.begin(Some(FailureQuit { close_requested: true, selects_ok: true, ..FailureQuit::default() }));
+    assert!(closing.reserve(true, true).is_none());
+    closing.closed(); closing.created(id, true);
+    assert!(closing.reserve(true, true) == Some(FailureQuitAction::Activate));
+    // Conversely a genuine CloseRequested before the first failed tick already
+    // owns that request, even when the failed recipe had unrelated pending work.
+    let mut external_close = FailureQuit::default(); external_close.begin(None); external_close.closed();
+    assert!(external_close.close_requested && external_close.reserve(true, true).is_none());
+
+    for selects_ok in [false, true] {
+        let original = FailureQuit { close_requested: true, close_prevented: true, id: Some(id), selects_ok,
+            ..FailureQuit::default() };
+        let mut created = FailureQuit::default(); created.begin(Some(original));
+        assert!(created.reserve(true, true) == Some(FailureQuitAction::Activate));
+        assert!(created.choice(id) == Ok(selects_ok)); // Existing QuitCancel stays Cancel.
+        for response_first in [false, true] {
+            let mut pending = FailureQuit::default();
+            pending.begin(Some(FailureQuit { pending: true, ..original }));
+            assert!(pending.reserve(true, true).is_none()); // Adopt the queued original callback.
+            assert!(pending.choice(id) == Ok(selects_ok) && pending.activate(id, true).is_ok());
+            if response_first { pending.response(id, selects_ok, !selects_ok, false); }
+            pending.activation_returned(Ok(true));
+            if !response_first { pending.response(id, selects_ok, !selects_ok, false); }
+            pending.destroyed(id, true); pending.released(id, true);
+            assert!(!pending.refused && pending.returned && pending.responded && pending.released);
+            let retained = pending; pending.begin(None);
+            assert!(pending == retained && pending.reserve(true, true).is_none());
+        }
+        for responded in [false, true] {
+            let mut activated = FailureQuit::default();
+            activated.begin(Some(FailureQuit { pending: true, activated: true, responded, ..original }));
+            assert!(activated.reserve(true, true).is_none() && activated.choice(id).is_err());
+            activated.activation_returned(Ok(true));
+            if !responded { activated.response(id, selects_ok, !selects_ok, false); }
+            assert!(!activated.refused && activated.returned && activated.reserve(true, true).is_none());
+        }
+        let mut returned = FailureQuit::default();
+        returned.begin(Some(FailureQuit { pending: true, activated: true, responded: true, returned: true, ..original }));
+        assert!(returned.reserve(true, true).is_none() && returned.choice(id).is_err());
+    }
+
+    let awaiting = || {
+        let mut q = FailureQuit::default(); q.begin(None);
+        assert!(q.reserve(true, true) == Some(FailureQuitAction::Close));
+        q.closed(); q.created(id, true);
+        assert!(q.reserve(true, true) == Some(FailureQuitAction::Activate)); q
+    };
+    for result in [Ok(false), Err(())] {
+        let mut q = awaiting(); q.activation_returned(result);
+        assert!(q.refused && q.pending && q.reserve(true, true).is_none());
+    }
+    let mut wrong = awaiting(); assert!(wrong.choice(id + 1).is_err());
+    assert!(wrong.activate(id + 1, true).is_err() && wrong.refused && wrong.reserve(true, true).is_none());
+    let mut late = awaiting(); assert!(late.activate(id, false).is_err());
+    assert!(late.refused && !late.activated && late.reserve(true, true).is_none());
+    let mut duplicate = awaiting(); assert!(duplicate.activate(id, true).is_ok());
+    assert!(duplicate.activate(id, true).is_err() && duplicate.reserve(true, true).is_none());
+    let mut declined = awaiting(); assert!(declined.activate(id, true).is_ok());
+    declined.response(id, false, true, false);
+    assert!(declined.refused && !declined.responded && declined.reserve(true, true).is_none());
+    let mut returned = awaiting(); assert!(returned.activate(id, true).is_ok());
+    returned.activation_returned(Ok(true)); returned.activation_returned(Ok(true));
+    assert!(returned.refused && returned.reserve(true, true).is_none());
+    let mut destruction = awaiting(); destruction.destroyed(id, true);
+    assert!(destruction.refused && !destruction.destroyed && destruction.reserve(true, true).is_none());
+    let mut release = awaiting(); release.released(id, true);
+    assert!(release.refused && !release.released && release.reserve(true, true).is_none());
+    for (native_id, is_quit) in [(0, true), (id, false)] {
+        let mut q = FailureQuit::default(); q.begin(None); q.closed(); q.created(native_id, is_quit);
+        assert!(q.refused && q.id.is_none() && q.reserve(true, true).is_none());
+    }
+    let mut repeated = awaiting(); repeated.created(id, true);
+    assert!(repeated.refused && repeated.reserve(true, true).is_none());
+    // Missing/blocked native dialog, refused dispatch, and the original end can
+    // never release a claim. No later tick recreates an owner or renews a budget.
+    let mut blocked = FailureQuit::default(); blocked.begin(None);
+    assert!(blocked.reserve(true, true) == Some(FailureQuitAction::Close)); blocked.closed();
+    for _ in 0..3 { assert!(blocked.reserve(true, true).is_none()); }
+    assert!(blocked.reserve(true, false).is_none() && blocked.refused);
+    assert!(blocked.reserve(true, true).is_none());
+    for mut q in [unclaimed, closing, awaiting()] {
+        q.refuse(); let retained = q; q.begin(None);
+        assert!(q == retained && q.reserve(true, true).is_none());
+    }
+    let mut due = FailureQuit::default(); due.begin(None);
+    assert!(due.reserve(true, false).is_none() && !due.close_requested);
+    assert!(due.reserve(true, true).is_none());
+}
+
 const PROJECT_SOURCE: &str = "plugins { id(\"com.android.application\") }\nandroid { defaultConfig { applicationId = \"org.example.mrk.observed\" } }\n";
 const APP_ID: &str = "org.example.mrk.observed";
 const FIELD: &str = "version.source";
@@ -813,9 +1088,9 @@ fn failure_sink(case: Case) -> Option<rustix::fd::OwnedFd> {
 }
 
 const FAILURE_PAIR_LIMIT: usize = 512;
-// Existing conservative v3 466B plus the 4B admission prefix and 22B maximum.
+// Existing conservative v4 492B plus the 3B Unknown prefix and 14B maximum.
 // Never omit/truncate a field to fit the unchanged 512B sink.
-const SESSION_FAILURE_FRAME_BOUND: usize = 492;
+const SESSION_FAILURE_FRAME_BOUND: usize = 509;
 // At most 174B of existing lines plus a 77B closed prefix, within the same sink.
 const PATH_FAILURE_FRAME_BOUND: usize = 256;
 fn failure_pair(trace: (Step, Boundary), progress: BootstrapProgress, session: Option<SessionDiagnostic>,
@@ -855,7 +1130,7 @@ fn failure_pair(trace: (Step, Boundary), progress: BootstrapProgress, session: O
         (Step::Session(step), Some(diagnostic)) if diagnostic.step == step => {
             if diagnostic.evaluations > 128 || step.recipe_index().is_some_and(|index| index >= 64)
                 || diagnostic.rejection == SessionRejection::EvaluationBudget && diagnostic.evaluations != 128 { return None; }
-            append(&mut bytes, &mut length, b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v4;index=")?;
+            append(&mut bytes, &mut length, b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v5;index=")?;
             if let Some(index) = step.recipe_index() {
                 let (digits, begin) = decimal(u16::from(index))?; append(&mut bytes, &mut length, &digits[begin..])?;
             } else { append(&mut bytes, &mut length, b"none")?; }
@@ -885,6 +1160,8 @@ fn failure_pair(trace: (Step, Boundary), progress: BootstrapProgress, session: O
             append(&mut bytes, &mut length, cause)?;
             append(&mut bytes, &mut length, b";af=")?;
             append(&mut bytes, &mut length, admission)?;
+            append(&mut bytes, &mut length, b";u=")?;
+            append(&mut bytes, &mut length, diagnostic.first_failure.unknown_boundary_token())?;
             append(&mut bytes, &mut length, b"\n")?;
             if length > SESSION_FAILURE_FRAME_BOUND { return None; }
         },
@@ -933,29 +1210,29 @@ fn assert_failure_pair_contract() {
     let trace = (Step::Session(step),Boundary::Settlement);
     let first = SessionDiagnostic { step, evaluations:128, rejection:SessionRejection::EvaluationBudget, wait:SessionWait::DisplayMismatch, first_failure:InstalledSessionFailure::not_recorded(), assessment:InstalledAssessmentFailure::none() };
     let expected = [step.failure_line(), Boundary::Settlement.failure_line(), BootstrapProgress::Advanced.failure_line(),
-        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v4;index=63;evaluations=128;reject=evaluation-budget;wait=rendered-display-mismatch;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na\n"].concat();
+        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v5;index=63;evaluations=128;reject=evaluation-budget;wait=rendered-display-mismatch;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na;u=na\n"].concat();
     assert!(failure_pair(trace,BootstrapProgress::Advanced,Some(first),None).is_some_and(|(bytes,length)|
         length <= FAILURE_PAIR_LIMIT && bytes.get(..length) == Some(expected.as_slice())));
     let longest = SessionDiagnostic { step:SessionStep::QuitPreserved,evaluations:128,
         rejection:SessionRejection::UnavailableScript,wait:SessionWait::ControlsMismatch, first_failure:InstalledSessionFailure::not_recorded(), assessment:InstalledAssessmentFailure::none() };
     let expected = [longest.step.failure_line(),Boundary::Settlement.failure_line(),BootstrapProgress::AppInfoReturnedBeforeHold.failure_line(),
-        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v4;index=none;evaluations=128;reject=unavailable-projection-script;wait=rendered-control-mismatch;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na\n"].concat();
+        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v5;index=none;evaluations=128;reject=unavailable-projection-script;wait=rendered-control-mismatch;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na;u=na\n"].concat();
     assert!(failure_pair((Step::Session(longest.step),Boundary::Settlement),BootstrapProgress::AppInfoReturnedBeforeHold,Some(longest),None)
         .is_some_and(|(bytes,length)|length <= FAILURE_PAIR_LIMIT && bytes.get(..length) == Some(expected.as_slice())));
     let bound = SessionDiagnostic { first_failure:InstalledSessionFailure::contract_sample(), ..longest };
     let expected = [bound.step.failure_line(),Boundary::Settlement.failure_line(),BootstrapProgress::AppInfoReturnedBeforeHold.failure_line(),
-        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v4;index=none;evaluations=128;reject=unavailable-projection-script;wait=rendered-control-mismatch;o=supervisor-disabled;d=none;a=bound;q=unavailable.spawn-other.xf;w=settle-unknown;ao=none;ac=na;ax=none;af=na\n"].concat();
+        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v5;index=none;evaluations=128;reject=unavailable-projection-script;wait=rendered-control-mismatch;o=supervisor-disabled;d=none;a=bound;q=unavailable.spawn-other.xf;w=settle-unknown;ao=none;ac=na;ax=none;af=na;u=settlement\n"].concat();
     assert!(failure_pair((Step::Session(bound.step),Boundary::Settlement),BootstrapProgress::AppInfoReturnedBeforeHold,Some(bound),None)
         .is_some_and(|(bytes,length)|length <= SESSION_FAILURE_FRAME_BOUND && bytes.get(..length) == Some(expected.as_slice())
             && bytes[..length].is_ascii() && bytes[..length].iter().filter(|byte| **byte == b'\n').count() == 4));
     let (origin_bound, class_bound, cause_bound, admission_bound) = InstalledAssessmentFailure::token_bounds();
     assert!(origin_bound <= 7 && class_bound <= 24 && cause_bound <= 11 && admission_bound <= 22);
-    assert_eq!(311 + 5 * 3 + 19 + 15 + 12 + 26 + 14 + 3 * 4 + 7 + 24 + 11 + 4 + 22, SESSION_FAILURE_FRAME_BOUND);
-    assert_eq!(FAILURE_PAIR_LIMIT - SESSION_FAILURE_FRAME_BOUND, 20);
+    assert_eq!(311 + 5 * 3 + 19 + 15 + 12 + 26 + 14 + 3 * 4 + 7 + 24 + 11 + 4 + 22 + 3 + 14, SESSION_FAILURE_FRAME_BOUND);
+    assert_eq!(FAILURE_PAIR_LIMIT - SESSION_FAILURE_FRAME_BOUND, 3);
     for evaluations in [0,9,10,99,100,128] {
         for step in [SessionStep::Navigate,SessionStep::Read(0,SA::Prepare("android-keystore","save")),SessionStep::Read(63,SA::ReviewRemoval(1))] {
             let diagnostic = SessionDiagnostic { step,evaluations,rejection:SessionRejection::NotRecorded,wait:SessionWait::NotSampled, first_failure:InstalledSessionFailure::not_recorded(), assessment:InstalledAssessmentFailure::none() };
-            let expected = format!("MRK_INSTALLED_SHELL_SESSION_FAILURE=v4;index={};evaluations={evaluations};reject=not-recorded;wait=not-sampled;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na\n",
+            let expected = format!("MRK_INSTALLED_SHELL_SESSION_FAILURE=v5;index={};evaluations={evaluations};reject=not-recorded;wait=not-sampled;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na;u=na\n",
                 step.recipe_index().map_or_else(|| "none".to_owned(),|index|index.to_string()));
             assert!(failure_pair((Step::Session(step),Boundary::Settlement),BootstrapProgress::Advanced,Some(diagnostic),None)
                 .is_some_and(|(bytes,length)|bytes[..length].ends_with(expected.as_bytes())));
@@ -979,6 +1256,7 @@ fn assert_failure_pair_contract() {
     latch_session_diagnostic(&failed,&mut retained,SessionDiagnostic { step:other,wait:SessionWait::ReplyPending,
         first_failure:bound.first_failure,..first });
     assert!(retained == Some(first));
+    assert_eq!(retained.unwrap().first_failure.unknown_boundary_token(), b"na");
     let mut frozen_trace = trace; let mut progress = BootstrapProgress::Advanced;
     assert!(!latch_failure(&failed,&mut frozen_trace,&mut progress,(Step::Session(other),Boundary::Deadline),BootstrapProgress::NotSampled));
     assert!(retained == Some(first) && frozen_trace == trace && progress == BootstrapProgress::Advanced);
@@ -994,6 +1272,7 @@ fn assert_failure_pair_contract() {
     latch_session_diagnostic(&failed,&mut retained,bound);
     latch_session_diagnostic(&failed,&mut retained,first);
     assert!(retained == Some(bound));
+    assert_eq!(retained.unwrap().first_failure.unknown_boundary_token(), b"settlement");
     assert!(!latch_failure(&failed,&mut frozen_trace,&mut progress,(trace.0,Boundary::Deadline),BootstrapProgress::NotSampled));
     assert!(retained == Some(bound));
     assert!(SessionDiagnostic::sample(Step::Session(bound.step),128,Some(bound)).unwrap().first_failure
@@ -1003,7 +1282,7 @@ fn assert_failure_pair_contract() {
         rejection:SessionRejection::GtkObserverEndpoint,wait:SessionWait::GtkActionInsensitive, first_failure:InstalledSessionFailure::not_recorded(), assessment:InstalledAssessmentFailure::none() };
     let gtk_trace = (Step::Session(gtk.step),Boundary::Gtk);
     let expected = [gtk.step.failure_line(),Boundary::Gtk.failure_line(),BootstrapProgress::Advanced.failure_line(),
-        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v4;index=3;evaluations=16;reject=gtk-observer-endpoint;wait=gtk-action-insensitive;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na\n"].concat();
+        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v5;index=3;evaluations=16;reject=gtk-observer-endpoint;wait=gtk-action-insensitive;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na;u=na\n"].concat();
     assert!(failure_pair(gtk_trace,BootstrapProgress::Advanced,Some(gtk),None).is_some_and(|(bytes,length)|
         length <= FAILURE_PAIR_LIMIT && bytes.get(..length) == Some(expected.as_slice())));
     let same = SessionDiagnostic::sample(gtk_trace.0,16,Some(gtk)).unwrap();
@@ -1069,8 +1348,8 @@ fn assert_failure_pair_contract() {
         SessionRejection::ReplyCodeUnavailable,SessionRejection::CapabilityUnavailable] {
         let diagnostic = SessionDiagnostic { rejection,..sampled };
         let expected = [step.failure_line(),Boundary::Settlement.failure_line(),BootstrapProgress::Advanced.failure_line(),
-            b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v4;index=29;evaluations=73;reject=",rejection.token(),
-            b";wait=native-reply-pending;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na\n"].concat();
+            b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v5;index=29;evaluations=73;reject=",rejection.token(),
+            b";wait=native-reply-pending;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na;u=na\n"].concat();
         assert!(failure_pair(trace,BootstrapProgress::Advanced,Some(diagnostic),None).is_some_and(|(bytes,length)|
             length <= FAILURE_PAIR_LIMIT && bytes.get(..length) == Some(expected.as_slice())));
     }
@@ -1114,7 +1393,7 @@ fn assert_failure_pair_contract() {
         let sampled = SessionDiagnostic::sample(trace.0,13,Some(pending)).unwrap();
         let rejected = SessionDiagnostic { rejection:original.rejection,assessment:original.assessment,..sampled };
         let expected = [step.failure_line(),Boundary::Settlement.failure_line(),BootstrapProgress::Advanced.failure_line(),
-            b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v4;index=6;evaluations=13;reject=reply-assessment-unavailable;wait=native-reply-pending;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=bridge;ac=runtime-unavailable;ax=prepare;af=missing-compile-anchor\n"].concat();
+            b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v5;index=6;evaluations=13;reject=reply-assessment-unavailable;wait=native-reply-pending;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=bridge;ac=runtime-unavailable;ax=prepare;af=missing-compile-anchor;u=na\n"].concat();
         assert!(failure_pair(trace,BootstrapProgress::Advanced,Some(rejected),None).is_some_and(|(bytes,length)|
             length <= SESSION_FAILURE_FRAME_BOUND && bytes.get(..length) == Some(expected.as_slice())));
         assert!(SessionDiagnostic::sample(trace.0,13,Some(rejected)).unwrap().assessment == InstalledAssessmentFailure::none());
@@ -2410,7 +2689,27 @@ struct Record {
     step: Step, pending: Option<Pending>, evaluations: u16, trace: (Step, Boundary), bootstrap: BootstrapProgress,
     close_prevented: bool, native_id: Option<u32>, activated: bool,
     responded: bool, disposal_response: bool, destroyed: bool, released: bool, gtk_returned: bool,
-    relay_joined: bool, exit: bool, held: Option<HeldAppInfo>,
+    relay_joined: bool, exit: bool, held: Option<HeldAppInfo>, failure_quit: FailureQuit,
+}
+fn failure_quit(r: &mut Record) -> &mut FailureQuit {
+    if !r.failure_quit.armed {
+        // Adopt only already-observed original facts. Keep the recipe step,
+        // pending callback and success flags untouched, including QuitCancel.
+        let original = if matches!(r.step, Step::Session(SessionStep::QuitCancel | SessionStep::QuitPreserved)) {
+            let p = &r.session.quit_cancel;
+            Some(FailureQuit { close_requested: true, close_prevented: r.session.cancel_close_prevented,
+                id: r.session.quit_cancel_id, selects_ok: false, pending: r.pending == Some(Pending::Gtk) || p.activated || p.returned,
+                activated: p.activated, responded: p.responded, disposal: p.disposal,
+                destroyed: p.destroyed, released: p.released, returned: p.returned, ..FailureQuit::default() })
+        } else if matches!(r.step, Step::Quit | Step::Exit) || r.close_prevented || r.native_id.is_some() {
+            Some(FailureQuit { close_requested: true, close_prevented: r.close_prevented, id: r.native_id, selects_ok: true,
+                pending: r.pending == Some(Pending::Gtk) || r.activated || r.gtk_returned,
+                activated: r.activated, responded: r.responded, disposal: r.disposal_response,
+                destroyed: r.destroyed, released: r.released, returned: r.gtk_returned, ..FailureQuit::default() })
+        } else { None };
+        r.failure_quit.begin(original);
+    }
+    &mut r.failure_quit
 }
 fn saved_read_context(r: &Record) -> bool {
     // Inspect only the original already-retired Save. Passive reads do not
@@ -2453,6 +2752,7 @@ impl Observation {
                 readback: false, readback_visible: false, saved_reads: SavedReads::default(), saved_draft_retained: false, noop_outstanding: false, originals_final: false,
                 close_prevented: false, native_id: None, activated: false, responded: false, disposal_response: false,
                 destroyed: false, released: false, gtk_returned: false, relay_joined: false, exit: false, held: None,
+                failure_quit: FailureQuit::default(),
             }) }
     }
     fn fail(&self) { self.failed.store(true, Ordering::SeqCst); }
@@ -2510,6 +2810,41 @@ impl Observation {
         }
         super::diagnostic(trace.0.failure_line()); super::diagnostic(trace.1.failure_line());
         super::diagnostic(progress.failure_line());
+    }
+    fn report_failure_handoff(&self, normal_return: bool) {
+        // Copy DATA nonblockingly; the guard is gone before diagnostic output.
+        // Missing facts/channel are not a reason to retry or alter the verdict.
+        let snapshot = self.record.try_lock().ok().map(|r| r.failure_quit);
+        if let Some(line) = failure_handoff_line(self.failed.load(Ordering::SeqCst), normal_return, snapshot) {
+            super::diagnostic(line);
+        }
+    }
+    fn refuse_failure_quit(&self) {
+        if let Some(mut r) = self.record() { failure_quit(&mut r).refuse(); }
+    }
+    fn failure_tick(self: &Arc<Self>, app: &tauri::AppHandle) {
+        if !self.failed.load(Ordering::SeqCst) { return; }
+        self.report_failure();
+        let action = {
+            let Some(mut r) = self.record() else { return; };
+            if std::thread::current().id() == self.main || !r.attached { failure_quit(&mut r).refuse(); return; }
+            failure_quit(&mut r).reserve(self.failed.load(Ordering::SeqCst), Instant::now() < self.end)
+        };
+        // All claims precede external calls and every Record guard is gone.
+        // A refused/missing original stays refused; only the existing relay
+        // waits for an original native-created callback, never redispatches it.
+        let Some(action) = action else { return; };
+        let Some(window) = app.get_webview_window(super::MAIN_WINDOW) else { self.refuse_failure_quit(); return; };
+        match action {
+            FailureQuitAction::Close => { if window.close().is_err() { self.refuse_failure_quit(); } },
+            FailureQuitAction::Activate => {
+                let q = self.clone(); let app = app.clone();
+                if window.run_on_main_thread(move || {
+                    let result = super::owned_gtk::activate_observed_quit(&app, &q);
+                    q.gtk_returned(result);
+                }).is_err() { self.refuse_failure_quit(); }
+            },
+        }
     }
     pub(super) fn attach(&self, supervisor: &Supervisor) -> Result<(), BridgeError> {
         if std::thread::current().id() != self.main { self.fail(); return Err(BridgeError::invalid()); }
@@ -3833,7 +4168,7 @@ impl Observation {
         })).ok().filter(|raw| raw.len()+1 <= 2048)
     }
     pub(super) fn tick(self: &Arc<Self>, app: &tauri::AppHandle) {
-        if self.failed.load(Ordering::SeqCst) { self.report_failure(); return; }
+        if self.failed.load(Ordering::SeqCst) { self.failure_tick(app); return; }
         if Instant::now() >= self.end {
             // Preserve the first failure even if another callback failed while
             // this relay was acquiring the record. Report only after unlock.
@@ -3847,9 +4182,9 @@ impl Observation {
                     r.paths.diagnostic = path_diagnostic;
                 }
             }
-            self.report_failure(); return;
+            self.failure_tick(app); return;
         }
-        if std::thread::current().id() == self.main { self.fail(); self.report_failure(); return; }
+        if std::thread::current().id() == self.main { self.fail(); self.failure_tick(app); return; }
         let step = {
             let Some(mut r) = self.record_at(Boundary::Settlement) else { return; };
             if self.failed.load(Ordering::SeqCst) { return; }
@@ -4004,6 +4339,8 @@ impl Observation {
         }
         {
             let Some(mut r) = self.record_at(Boundary::Settlement) else { return; };
+            // A failed handoff cannot race a later recipe Close/GTK reservation.
+            if self.failed.load(Ordering::SeqCst) { return; }
             r.pending = Some(match step {
                 Step::Close => {
                     if self.case == Case::Positive {
@@ -4283,12 +4620,17 @@ impl Observation {
     }
     pub(super) fn close_prevented(&self) {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return; };
+        if self.failed.load(Ordering::SeqCst) { failure_quit(&mut r).closed(); return; }
         if r.step==Step::Session(SessionStep::QuitCancel) {
-            if r.pending.take()!=Some(Pending::Close) || r.session.cancel_close_prevented { self.fail(); return; }
-            r.session.cancel_close_prevented=true; return;
+            if r.pending!=Some(Pending::Close) || r.session.cancel_close_prevented {
+                self.fail(); failure_quit(&mut r).closed(); return;
+            }
+            r.pending = None; r.session.cancel_close_prevented=true; return;
         }
-        if r.pending.take() != Some(Pending::Close) || r.step != Step::Quit || r.close_prevented { self.fail(); return; }
-        r.close_prevented = true;
+        if r.pending != Some(Pending::Close) || r.step != Step::Quit || r.close_prevented {
+            self.fail(); failure_quit(&mut r).closed(); return;
+        }
+        r.pending = None; r.close_prevented = true;
     }
     pub(super) fn project_created(&self, id: u32) {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return; };
@@ -4404,6 +4746,7 @@ impl Observation {
     }
     pub(super) fn native_created(&self, id: u32, quit: bool) {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return; };
+        if self.failed.load(Ordering::SeqCst) { failure_quit(&mut r).created(id, quit); return; }
         if r.step==Step::Session(SessionStep::QuitCancel) {
             if !quit || id<=2 || !r.session.cancel_close_prevented || r.session.quit_cancel_id.is_some() { self.fail(); return; }
             r.session.quit_cancel_id=Some(id); r.session.quit_cancel.created=true; return;
@@ -4415,6 +4758,7 @@ impl Observation {
     }
     pub(super) fn native_activation(&self, id: u32) -> Result<(), ()> {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return Err(()); };
+        if self.failed.load(Ordering::SeqCst) { return failure_quit(&mut r).activate(id, Instant::now() < self.end); }
         if r.step==Step::Session(SessionStep::QuitCancel) {
             if self.failed.load(Ordering::SeqCst) || Instant::now()>=self.end || r.pending!=Some(Pending::Gtk)
                 || r.session.quit_cancel_id!=Some(id) || r.session.quit_cancel.activated { self.fail(); return Err(()); }
@@ -4426,6 +4770,7 @@ impl Observation {
     }
     pub(super) fn native_response(&self, id: u32, accepted: bool, declined: bool, disposal: bool) {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return; };
+        if self.failed.load(Ordering::SeqCst) { failure_quit(&mut r).response(id, accepted, declined, disposal); return; }
         if r.session.quit_cancel_id==Some(id) {
             let p=&mut r.session.quit_cancel;
             if !p.activated || p.destroyed || p.released { self.fail(); return; }
@@ -4444,20 +4789,25 @@ impl Observation {
     }
     fn gtk_returned(&self, result: Result<bool, ()>) {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return; };
-        if r.pending.take() != Some(Pending::Gtk) { self.fail(); return; }
+        if self.failed.load(Ordering::SeqCst) { failure_quit(&mut r).activation_returned(result); return; }
+        if r.pending != Some(Pending::Gtk) { self.fail(); failure_quit(&mut r).refuse(); return; }
         if r.step==Step::Session(SessionStep::QuitCancel) {
-            if result==Ok(false) && !r.session.quit_cancel.activated { return; }
-            if !r.session.quit_cancel.activation_returned(result) { self.fail(); return; }
-            r.step=Step::Session(SessionStep::QuitPreserved); return;
+            if result==Ok(false) && !r.session.quit_cancel.activated { r.pending = None; return; }
+            if !r.session.quit_cancel.activation_returned(result) { self.fail(); failure_quit(&mut r).refuse(); return; }
+            r.pending = None; r.step=Step::Session(SessionStep::QuitPreserved); return;
         }
         match result {
-            Ok(false) if !r.activated => {},
-            Ok(true) if r.activated && r.responded => { r.gtk_returned = true; r.step = Step::Exit; },
-            _ => self.fail(),
+            Ok(false) if !r.activated => { r.pending = None; },
+            Ok(true) if r.activated && r.responded => { r.pending = None; r.gtk_returned = true; r.step = Step::Exit; },
+            _ => { self.fail(); failure_quit(&mut r).refuse(); },
         }
     }
     pub(super) fn native_destroyed(&self, id: u32, seen: bool) {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return; };
+        if self.failed.load(Ordering::SeqCst) {
+            let quit = failure_quit(&mut r);
+            if quit.id == Some(id) { quit.destroyed(id, seen); return; }
+        }
         if self.case.session().is_some() && id>2 {
             let p=if r.session.quit_cancel_id==Some(id) { Some(&mut r.session.quit_cancel) }
                 else { r.session.files.iter_mut().find(|file| file.id==id).map(|file| &mut file.picker) };
@@ -4483,6 +4833,10 @@ impl Observation {
     }
     pub(super) fn native_released(&self, id: u32, seen: bool) {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return; };
+        if self.failed.load(Ordering::SeqCst) {
+            let quit = failure_quit(&mut r);
+            if quit.id == Some(id) { quit.released(id, seen); return; }
+        }
         if self.case.session().is_some() && id>2 {
             let p=if r.session.quit_cancel_id==Some(id) { Some(&mut r.session.quit_cancel) }
                 else { r.session.files.iter_mut().find(|file| file.id==id).map(|file| &mut file.picker) };
@@ -4508,6 +4862,7 @@ impl Observation {
     }
     pub(super) fn relay_joined(&self, joined: bool) {
         let Some(mut r) = self.record_at(Boundary::Settlement) else { return; };
+        if self.failed.load(Ordering::SeqCst) { r.failure_quit.observe_relay(joined); }
         if !joined || !r.released || !r.gtk_returned || r.relay_joined { self.fail(); return; }
         r.relay_joined = true;
     }
@@ -4535,6 +4890,7 @@ impl Observation {
             else { r.candidate.complete() && r.project_witness.as_ref().is_some_and(|project| document.installed_observation_candidate_final(project)) }
         };
         let Some(mut r) = self.record_at(Boundary::Exit) else { return; };
+        if self.failed.load(Ordering::SeqCst) { r.failure_quit.observe_loop_exit(ready); }
         if !ready || !originals_final || !r.relay_joined || !r.released || r.exit
             || self.case == Case::Positive && (r.sessions.len() != 2 || !r.sessions.iter().all(|session| session.finality.is_some()))
             || self.case == Case::WorkflowApply && !r.workflow.complete()
@@ -5138,6 +5494,7 @@ impl Observation {
             let index=match step { SessionStep::SetFile(i) | SessionStep::ActivateFile(i)=>i,_=>return };
             {
                 let Some(mut r)=self.record_at(Boundary::Settlement) else { return; };
+                if self.failed.load(Ordering::SeqCst) { return; }
                 if r.pending.is_some() { self.session_fail(&mut r,SessionRejection::StepPendingInvariant); return; } r.pending=Some(Pending::Dom(Step::Session(step)));
             }
             let q=self.clone(); let app=app.clone();
@@ -5150,6 +5507,7 @@ impl Observation {
         if step==SessionStep::QuitCancel {
             {
                 let Some(mut r)=self.record_at(Boundary::Settlement) else { return; };
+                if self.failed.load(Ordering::SeqCst) { return; }
                 if r.pending.is_some() { return; } r.pending=Some(Pending::Gtk);
             }
             let q=self.clone(); let app=app.clone();
@@ -5158,6 +5516,7 @@ impl Observation {
         }
         let script={
             let Some(mut r)=self.record_at(Boundary::Settlement) else { return; };
+            if self.failed.load(Ordering::SeqCst) { return; }
             if r.pending.is_some() { return; }
             let mut presentation=SessionPresentation::Native;
             match step {
@@ -5438,7 +5797,8 @@ impl Observation {
         }
     }
     pub(super) fn quit_selects_ok(&self, id: u32) -> Result<bool,()> {
-        let Some(r)=self.record_at(Boundary::Gtk) else { return Err(()); };
+        let Some(mut r)=self.record_at(Boundary::Gtk) else { return Err(()); };
+        if self.failed.load(Ordering::SeqCst) { return failure_quit(&mut r).choice(id); }
         if r.step==Step::Session(SessionStep::QuitCancel) && r.session.quit_cancel_id==Some(id) { Ok(false) }
         else if r.step==Step::Quit && r.native_id==Some(id) { Ok(true) } else { Err(()) }
     }
@@ -6500,6 +6860,7 @@ pub(crate) fn main() -> std::process::ExitCode {
     crate::runtime::assert_packaged_shell_allowlist_contract();
     assert_recent_files_suppression_contract();
     assert_failure_pair_contract();
+    assert_failure_quit_contract();
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     crate::credential_assessment::assert_installed_assessment_failure_contract();
     assert_file_destroyed_contract();
@@ -6545,6 +6906,7 @@ pub(crate) fn main() -> std::process::ExitCode {
     let returned = super::run_builder(super::builder().manage(q.clone()));
     if !matches!(returned, Ok(0)) || !q.finish() {
         q.fail(); q.report_failure();
+        q.report_failure_handoff(matches!(&returned, Ok(0)));
         super::diagnostic(b"MRK_INSTALLED_SHELL_OBSERVATION=failed\n");
         return std::process::ExitCode::FAILURE;
     }

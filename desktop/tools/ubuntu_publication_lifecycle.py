@@ -56,6 +56,7 @@ SHELL_FAILURE_LABEL_LIMIT = 512
 SHELL_PATH_FAILURE_FRAME_BOUND = 256
 SHELL_SESSION_FAILURE_FRAME_BOUND = 466  # v3 only; historical v1/v2 admission stays unchanged.
 SHELL_SESSION_FAILURE_V4_FRAME_BOUND = 492  # Same 512B sink; ;af= plus at most 22B.
+SHELL_SESSION_FAILURE_V5_FRAME_BOUND = 509  # v4 plus ;u= and at most 14B; no larger sink.
 # Literal observer labels only; never a prefix parser or raw-output escape.
 SHELL_FAILURE_STEPS = (
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=Bootstrap\n",
@@ -316,6 +317,12 @@ SHELL_SESSION_QUERY_CAUSES = (
     b"none", b"sel-profile", b"sel-compile", b"sel-method", b"inspection", b"acq-entry", b"acq-custody", b"acq-lock",
     b"capability", b"prepare", b"final-gate", b"final-claim", b"spawn-pfd", b"spawn-sfd", b"spawn-mem", b"spawn-res",
     b"spawn-deny", b"spawn-miss", b"spawn-exec", b"spawn-other", b"response",
+)
+# v5's immutable first Unknown edge, not a worker or document failure cause.
+SHELL_SESSION_UNKNOWN_BOUNDARIES = (
+    b"na", b"unavailable", b"not-recorded", b"unspecified", b"transfer", b"inspection", b"acquisition",
+    b"native-observe", b"settlement", b"management", b"observer-loss", b"reply-loss", b"clock",
+    b"retire-clock", b"child-missing", b"child-wait", b"io", b"restore-limit", b"dev-observe",
 )
 # v3 original Prepare error provenance, independent of firstOrigin/Q/K.
 SHELL_SESSION_ASSESSMENT_ORIGINS = (b"none", b"request", b"bridge", b"result")
@@ -2121,6 +2128,11 @@ def command(label, argv, *, maximum=120, codes=(0,), env=None, endpoint=None, sh
                 except BaseException:
                     pass
             raise  # Same original object; diagnosis supplies no continuation authority.
+        if shell_log is not None:
+            try:
+                _shell_call_finished(call, True)
+            except BaseException:
+                pass  # Return DATA is recorded before its optional diagnostic clock.
         _command_capture(label, argv, result, seconds)
         if endpoint is not None:
             _COMMANDS[-1].update(originalEndpoint=bound, startMonotonic=started)
@@ -2132,7 +2144,10 @@ def command(label, argv, *, maximum=120, codes=(0,), env=None, endpoint=None, sh
             except BaseException as error:
                 log_error = error
             if not accepted or log_error is not None:
-                _shell_command_failure(argv, result, shell_log[1], display_log, log_error)
+                try:
+                    _shell_command_failure(argv, result, shell_log[1], display_log, log_error, failure_sink, call)
+                except BaseException:
+                    pass  # Diagnosis cannot replace the pending refusal/original log error.
             if not accepted:
                 # The settled original command's failure remains primary. Preserve
                 # a later read/retention/interruption error as its explicit cause;
@@ -3913,6 +3928,25 @@ def _shell_session_first_origin(origin, detail, association, query, worker):
             "query": query.decode("ascii"), "worker": worker.decode("ascii")}
 
 
+def _shell_session_unknown_boundary(association, query, worker, boundary):
+    """v5-only consistency after legacy first-origin validation; no native lookup."""
+    if boundary not in SHELL_SESSION_UNKNOWN_BOUNDARIES:
+        return None
+    if association == b"unassociated":
+        valid = (query, worker, boundary) == (b"na", b"na", b"na")
+    elif association != b"bound":
+        return None
+    elif query == b"unregistered":
+        valid = (worker, boundary) == (b"na", b"na")
+    elif query == b"unavailable":
+        valid = (worker, boundary) == (b"unavailable", b"unavailable")
+    else:
+        # A successful state snapshot may still have no Resources guard. A
+        # retained known edge with unavailable worker is legitimate, not a cause.
+        valid = query != b"na" and worker != b"na" and boundary not in (b"na", b"unavailable")
+    return boundary.decode("ascii") if valid else None
+
+
 def _shell_session_assessment_failure(rejection, origin, classification, cause):
     """Closed original-return labels only, never current-owner or finality claims."""
     if origin not in SHELL_SESSION_ASSESSMENT_ORIGINS:
@@ -3954,7 +3988,7 @@ def _shell_label_pair(raw):
         path_detail, lines = lines[0], lines[1:]
     # Session traces require their complete fourth record. Historical v1/v2
     # keep their prior shape, with no invented assessmentFailure metadata.
-    # Never admit a proper prefix of v3/v4 as a complete historical frame.
+    # Never admit a proper prefix of v3/v4/v5 as a complete historical frame.
     if (len(lines) not in (3, 4) or lines[0] not in SHELL_FAILURE_STEPS or lines[1] not in SHELL_FAILURE_BOUNDARIES
             or lines[2] not in SHELL_BOOTSTRAP_PROGRESS):
         return None
@@ -3989,13 +4023,19 @@ def _shell_label_pair(raw):
             version = b"v4"
             if len(raw) > SHELL_SESSION_FAILURE_V4_FRAME_BOUND:
                 return None
+        elif lines[3].startswith(b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v5;"):
+            version = b"v5"
+            if len(raw) > SHELL_SESSION_FAILURE_V5_FRAME_BOUND:
+                return None
         else:
             return None
         suffix = b"" if version == b"v1" else rb";o=([a-z-]{1,19});d=([a-z-]{1,15});a=([a-z-]{1,12});q=([a-z.-]{1,26});w=([a-z-]{1,14})"
-        if version in (b"v3", b"v4"):
+        if version in (b"v3", b"v4", b"v5"):
             suffix += rb";ao=([a-z-]{1,7});ac=([a-z-]{1,24});ax=([a-z-]{1,11})"
-        if version == b"v4":
+        if version in (b"v4", b"v5"):
             suffix += rb";af=([a-z-]{1,22})"
+        if version == b"v5":
+            suffix += rb";u=([a-z-]{1,14})"
         suffix += rb"\n"
         match = re.fullmatch(rb"MRK_INSTALLED_SHELL_SESSION_FAILURE=" + version + rb";index=(none|0|[1-9][0-9]?);"
                              rb"evaluations=(0|[1-9][0-9]{0,2});reject=([a-z-]{1,32});wait=([a-z-]{1,32})" + suffix, lines[3])
@@ -4017,13 +4057,19 @@ def _shell_label_pair(raw):
             first_origin = _shell_session_first_origin(*match.groups()[4:9])
             if first_origin is None:
                 return None
+            if version == b"v5":
+                unknown_boundary = _shell_session_unknown_boundary(
+                    match.groups()[6], match.groups()[7], match.groups()[8], match.groups()[13])
+                if unknown_boundary is None:
+                    return None
+                first_origin["unknownBoundary"] = unknown_boundary
             result["session"]["firstOrigin"] = first_origin
-        if version in (b"v3", b"v4"):
+        if version in (b"v3", b"v4", b"v5"):
             origin, classification, cause = match.groups()[9:12]
             assessment_failure = _shell_session_assessment_failure(rejection, origin, classification, cause)
             if assessment_failure is None:
                 return None
-            if version == b"v4":
+            if version in (b"v4", b"v5"):
                 admission = match.groups()[12]
                 if (admission not in SHELL_SESSION_ASSESSMENT_ADMISSIONS
                         or admission != b"na" and not (origin == b"bridge" and cause in (b"inspection", b"capability", b"prepare", b"final-claim"))
@@ -5790,14 +5836,42 @@ def _shell_failure_output(marker, data):
         sys.stderr.flush()
 
 
-def _shell_command_failure(argv, result, case, display_log, log_error):
-    """Original returned synthetic observer DATA, not another read or verdict."""
+def _shell_command_failure(argv, result, case, display_log, log_error, original, call):
+    """Same actual owner return and original sidecar only; never a verdict."""
     try:
+        capture = _shell_capture_summary(result, argv, display_log)
+        labels, reason = None, "owner-finality-unavailable"
+        handoff = None
+        if capture is not None:
+            reason = "unavailable"
+            try:
+                labels = _shell_labels_read(original)
+            except BaseException:
+                pass
+            if labels is not None:
+                reason = None
+                if result.returncode == 1:
+                    # Closed DATA from the SAME joined capture, never Xvfb log
+                    # text, a second label read, or cleanup/continuation authority.
+                    wanted = b"MRK_INSTALLED_SHELL_FAILURE_HANDOFF=original-quit-relay-loop-returned\n"
+                    failed = b"MRK_INSTALLED_SHELL_OBSERVATION=failed\n"
+                    terminal = []
+                    for raw in (result.stdout, result.stderr):
+                        lines = raw.split(b"\n")  # Only LF delimits a record, never a bare CR.
+                        for index, line in enumerate(lines):
+                            if (b"MRK_INSTALLED_SHELL_FAILURE_HANDOFF" in line or b"MRK_INSTALLED_SHELL_OBSERVATION" in line
+                                    or line.startswith(b"MRK_") and b"-verified" in line):
+                                # Include malformed/prefixed records and the unterminated
+                                # tail so neither can disappear beside a genuine pair.
+                                terminal.append(line + b"\n" if index < len(lines) - 1 else line)
+                    if len(terminal) == 2 and terminal.count(wanted) == 1 and terminal.count(failed) == 1:
+                        handoff = "original-quit-relay-loop-returned"
         name = None if log_error is None else type(log_error).__name__
         data = {"schemaVersion": 1, "scope": "original-shell-command-failure-diagnostic-only",
                 "case": case, "qualified": False, "cleanupEstablished": False,
                 "logErrorType": name if name is None or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name) else "other",
-                "capture": _shell_capture_summary(result, argv, display_log)}
+                "capture": capture, "labels": labels, "labelsReason": reason, "failureHandoff": handoff,
+                "ownerCall": _shell_call_summary(call)}
         _shell_failure_output(b"MRK_INSTALLED_SHELL_COMMAND_FAILURE=", data)
     except BaseException:
         pass  # Never replace an original failure, including a log read failure.

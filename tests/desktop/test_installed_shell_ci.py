@@ -2925,7 +2925,7 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
             self.assertLessEqual(max(map(len, tokens)), maximum)
         joins = query_source.split("fn management_token", 1)[1].split("enum QueryProjection", 1)[0]
         self.assertEqual("".join(re.findall(r"=> b'([a-z])'", joins)).encode("ascii"), lifecycle.SHELL_SESSION_MANAGEMENT_JOINS)
-        workers = query_source.split("impl WorkerProjection {", 1)[1].split("pub(crate) struct InstalledSessionQueryDiagnostic", 1)[0]
+        workers = query_source.split("impl WorkerProjection {", 1)[1].split("\n    }\n", 1)[0]
         native = supervisor.split("impl ObservationFailure {", 1)[1].split("impl ChildObservation", 1)[0]
         literals = {value.encode("ascii") for value in re.findall(r'=> b"([a-z-]+)"', workers + native)}
         maps = supervisor.split("impl MapRole {", 1)[1].split("impl ObservationFailure {", 1)[0]
@@ -3065,7 +3065,7 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertEqual((query_bound, worker_bound, complete_bound), (26, 14, 412))
         self.assertLessEqual(complete_bound, 512)
         self.assertIn("const FAILURE_PAIR_LIMIT: usize = 512;", source)
-        self.assertIn("const SESSION_FAILURE_FRAME_BOUND: usize = 492;", source)
+        self.assertIn("const SESSION_FAILURE_FRAME_BOUND: usize = 509;", source)
         self.assertIn("fn assert_failure_pair_contract()", source)
         self.assertIn("    assert_failure_pair_contract();", source)
         self.assertLess(source.index("    assert_failure_pair_contract();"), source.index("let returned = super::run_builder("))
@@ -3136,7 +3136,7 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
                           b"reply-assessment-policy-stale", b"reply-assessment-context-invalid"):
             self.assertIsNotNone(lifecycle._shell_label_pair(known.replace(b"reply-assessment-invalid-request", rejection)))
         raw = frame(b"bridge", b"assessment-unavailable", b"sel-profile")
-        # v3 remains historical three-field DATA even after the v4 emitter.
+        # v3 remains historical three-field DATA even after the v5 emitter.
         bound = raw.replace(b"o=not-recorded;d=none;a=unassociated;q=na;w=na;",
                             b"o=supervisor-disabled;d=none;a=bound;q=cleanup.none.rr;w=settle-unknown;")
         self.assertEqual(lifecycle._shell_label_pair(bound)["session"]["assessmentFailure"],
@@ -3243,10 +3243,11 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
                     self.assertEqual(parsed["session"]["rejection"], rejections.get(classification, b"reply-assessment-unavailable").decode("ascii"))
                     self.assertLessEqual(len(raw), lifecycle.SHELL_SESSION_FAILURE_V4_FRAME_BOUND)
         raw = frame()
-        # Same inert original-Prepare frame as the shared pre-GTK Rust contract,
-        # not an installed admission or cleanup qualification receipt.
+        # Preserve the historical v4 parser fixture; the live shared pre-GTK
+        # Rust contract emits v5. Neither is an installed qualification receipt.
         rust = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
-        self.assertIn(raw[len(prefix):].decode("ascii").replace("\n", "\\n"), rust)
+        live = raw.replace(b"=v4;", b"=v5;")[:-1] + b";u=na\n"
+        self.assertIn(live[len(prefix):].decode("ascii").replace("\n", "\\n"), rust)
         self.assertIn('assert_eq!(packet.tokens().3, b"missing-compile-anchor");', rust)
         self.assertIn("latch_session_diagnostic(&failed,&mut retained,rejected);\n            assert!(retained == Some(first));", rust)
         bound = raw.replace(b"o=not-recorded;d=none;a=unassociated;q=na;w=na;",
@@ -3305,6 +3306,137 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
                           raw.replace(b"reject=reply-assessment-unavailable;", b"reject=reply-busy;"),
                           raw.replace(b";af=", b";af=\x00"), raw.replace(b"\n", b"\r\n")):
             self.assertIsNone(lifecycle._shell_label_pair(malformed))
+
+    def test_first_unknown_v5_retains_closed_boundaries_and_legacy_shapes(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        query = (SOURCE / "desktop/src-tauri/src/installed_shell_shutdown_observation.rs").read_text()
+        session = (SOURCE / "desktop/src-tauri/src/asset_session.rs").read_text()
+        observed = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        boundaries = (b"na", b"unavailable", b"not-recorded", b"unspecified", b"transfer", b"inspection", b"acquisition",
+                      b"native-observe", b"settlement", b"management", b"observer-loss", b"reply-loss", b"clock",
+                      b"retire-clock", b"child-missing", b"child-wait", b"io", b"restore-limit", b"dev-observe")
+        tokens = query.split("impl UnknownBoundary {", 1)[1].split("\n    }\n", 1)[0]
+        self.assertEqual(tuple(value.encode("ascii") for value in re.findall(r'=> b"([a-z-]+)"', tokens)), boundaries)
+        self.assertEqual(lifecycle.SHELL_SESSION_UNKNOWN_BOUNDARIES, boundaries)
+        self.assertEqual((len(boundaries), len(set(boundaries)), max(map(len, boundaries))), (19, 19, 14))
+        self.assertEqual(lifecycle.SHELL_SESSION_FAILURE_V5_FRAME_BOUND, 492 + 3 + 14)
+        self.assertEqual(lifecycle.SHELL_FAILURE_LABEL_LIMIT - lifecycle.SHELL_SESSION_FAILURE_V5_FRAME_BOUND, 3)
+        self.assertIn("fn unknown_boundary_token(self) -> &'static [u8] { self.boundary.token() }", query)
+        self.assertIn("fn unknown_boundary_token(self) -> &'static [u8] { self.query.unknown_boundary_token() }", session)
+        encoder = observed.split("fn failure_pair(", 1)[1].split("fn assert_failure_pair_contract", 1)[0]
+        self.assertIn('b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v5;index="', encoder)
+        self.assertIn('append(&mut bytes, &mut length, b";af=")?;\n'
+                      '            append(&mut bytes, &mut length, admission)?;\n'
+                      '            append(&mut bytes, &mut length, b";u=")?;\n'
+                      '            append(&mut bytes, &mut length, diagnostic.first_failure.unknown_boundary_token())?;', encoder)
+        self.assertIn('assert_eq!(retained.unwrap().first_failure.unknown_boundary_token(), b"na");', observed)
+        self.assertIn('assert_eq!(retained.unwrap().first_failure.unknown_boundary_token(), b"settlement");', observed)
+        prefix = (b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionReview\n"
+                  b"MRK_INSTALLED_SHELL_FAILURE_PHASE=settlement\n"
+                  b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n")
+        def frame(association=b"bound", query=b"cleanup.none.pp", worker=b"none-recorded", boundary=b"native-observe",
+                  origin=b"supervisor-disabled", detail=b"none"):
+            return (prefix + b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v5;index=6;evaluations=13;"
+                    b"reject=reply-assessment-unavailable;wait=native-reply-pending;o=" + origin + b";d=" + detail
+                    + b";a=" + association + b";q=" + query + b";w=" + worker
+                    + b";ao=bridge;ac=runtime-unavailable;ax=prepare;af=missing-compile-anchor;u=" + boundary + b"\n")
+        outcomes = [(b"bound", b"cleanup.none.pp", worker, boundary)
+                    for boundary in boundaries[3:] for worker in (b"none-recorded", b"unavailable")]
+        outcomes += [(b"unassociated", b"na", b"na", b"na"), (b"bound", b"unregistered", b"na", b"na"),
+                     (b"bound", b"unavailable", b"unavailable", b"unavailable"),
+                     (b"bound", b"none.none.pr", b"none-recorded", b"not-recorded"),
+                     (b"bound", b"cleanup.none.pp", b"unavailable", b"not-recorded"),
+                     (b"bound", b"unavailable.spawn-other.xf", b"settle-unknown", b"settlement")]
+        assessment = {"origin": "bridge", "class": "runtime-unavailable", "cause": "prepare", "admission": "missing-compile-anchor"}
+        for association, query, worker, boundary in outcomes:
+            raw = frame(association, query, worker, boundary)
+            parsed = lifecycle._shell_label_pair(raw)
+            self.assertIsNotNone(parsed, (association, query, worker, boundary))
+            self.assertEqual(parsed["session"]["firstOrigin"],
+                             {"origin": "supervisor-disabled", "detail": "none", "association": association.decode("ascii"),
+                              "query": query.decode("ascii"), "worker": worker.decode("ascii"), "unknownBoundary": boundary.decode("ascii")})
+            self.assertEqual(parsed["session"]["assessmentFailure"], assessment)
+            self.assertLessEqual(len(raw), lifecycle.SHELL_SESSION_FAILURE_V5_FRAME_BOUND)
+        # U is neither document-origin detail, worker cause nor original Prepare cause.
+        independent = lifecycle._shell_label_pair(frame(worker=b"settle-unknown", boundary=b"transfer", origin=b"op-cleanup", detail=b"deadline"))
+        self.assertEqual(independent["session"]["firstOrigin"]["unknownBoundary"], "transfer")
+        self.assertEqual(independent["session"]["firstOrigin"]["detail"], "deadline")
+        self.assertEqual(independent["session"]["assessmentFailure"], assessment)
+        absent = lifecycle._shell_label_pair(frame(b"unassociated", b"na", b"na", b"na", b"not-recorded"))
+        self.assertEqual(absent["session"]["firstOrigin"], {"origin": "not-recorded", "detail": "none", "association": "unassociated",
+                                                         "query": "na", "worker": "na", "unknownBoundary": "na"})
+        raw = frame()
+        v4 = raw.replace(b"=v5;", b"=v4;").replace(b";u=native-observe", b"")
+        v3 = v4.replace(b"=v4;", b"=v3;").replace(b";af=missing-compile-anchor", b"")
+        v2 = v3.replace(b"=v3;", b"=v2;").split(b";ao=", 1)[0] + b"\n"
+        v1 = v2.replace(b"=v2;", b"=v1;").split(b";o=", 1)[0] + b"\n"
+        base = {"recipeIndex": 6, "evaluations": 13, "rejection": "reply-assessment-unavailable", "lastWait": "native-reply-pending"}
+        first_origin = {"origin": "supervisor-disabled", "detail": "none", "association": "bound", "query": "cleanup.none.pp", "worker": "none-recorded"}
+        for legacy, extra in ((v1, {}), (v2, {"firstOrigin": first_origin}),
+                              (v3, {"firstOrigin": first_origin, "assessmentFailure": {key: value for key, value in assessment.items() if key != "admission"}}),
+                              (v4, {"firstOrigin": first_origin, "assessmentFailure": assessment})):
+            parsed = lifecycle._shell_label_pair(legacy)
+            self.assertEqual(parsed, {"step": "SessionReview", "boundary": "settlement", "bootstrapProgress": "advanced", "session": {**base, **extra}})
+        for legacy in (v2, v3, v4):
+            old_snapshot = legacy.replace(b";q=cleanup.none.pp;", b";q=unavailable;")
+            self.assertEqual(lifecycle._shell_label_pair(old_snapshot)["session"]["firstOrigin"], {**first_origin, "query": "unavailable"})
+        plain = prefix.replace(b"SessionReview", b"SelectProject")
+        self.assertEqual(lifecycle._shell_label_pair(plain), {"step": "SelectProject", "boundary": "settlement", "bootstrapProgress": "advanced"})
+        path = b"MRK_INSTALLED_SHELL_PATH_FAILURE=v1;index=0;reject=not-recorded\n" + plain.replace(b"SelectProject", b"PathActivate")
+        self.assertEqual(lifecycle._shell_label_pair(path), {"step": "PathActivate", "boundary": "settlement", "bootstrapProgress": "advanced",
+                                                           "path": {"recipeIndex": 0, "rejection": "not-recorded"}})
+        # Historical Q unavailable/K readable remains legacy DATA, not a valid v5 state sample.
+        self.assertIsNone(lifecycle._shell_label_pair(frame(query=b"unavailable", boundary=b"unavailable")))
+        with patch.object(lifecycle, "SHELL_SESSION_FAILURE_V5_FRAME_BOUND", len(raw) - 1):
+            self.assertIsNone(lifecycle._shell_label_pair(raw))
+            self.assertIsNotNone(lifecycle._shell_label_pair(v4))
+        with patch.object(lifecycle, "SHELL_SESSION_FAILURE_V4_FRAME_BOUND", len(v4) - 1):
+            self.assertIsNone(lifecycle._shell_label_pair(v4))
+            self.assertIsNotNone(lifecycle._shell_label_pair(raw))
+
+    def test_first_unknown_v5_refuses_prefixes_mixed_fields_and_impossible_sentinels(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        prefix = (b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionReview\n"
+                  b"MRK_INSTALLED_SHELL_FAILURE_PHASE=settlement\n"
+                  b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n"
+                  b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v5;index=6;evaluations=13;"
+                  b"reject=reply-assessment-unavailable;wait=native-reply-pending;o=supervisor-disabled;d=none;")
+        def frame(association=b"bound", query=b"cleanup.none.pp", worker=b"none-recorded", boundary=b"native-observe"):
+            return (prefix + b"a=" + association + b";q=" + query + b";w=" + worker
+                    + b";ao=bridge;ac=runtime-unavailable;ax=prepare;af=missing-compile-anchor;u=" + boundary + b"\n")
+        raw = frame()
+        for complete in (raw, frame(boundary=b"not-recorded"), frame(query=b"unavailable", worker=b"unavailable", boundary=b"unavailable"),
+                         frame(b"unassociated", b"na", b"na", b"na"), frame(query=b"unregistered", worker=b"na", boundary=b"na")):
+            self.assertIsNotNone(lifecycle._shell_label_pair(complete))
+            for end in range(len(complete)):
+                self.assertIsNone(lifecycle._shell_label_pair(complete[:end]), end)
+                if end < len(complete) - 1:
+                    self.assertIsNone(lifecycle._shell_label_pair(complete[:end] + b"\n"), end)
+        for fields in ((b"unassociated", b"na", b"na", b"not-recorded"), (b"unassociated", b"na", b"na", b"unavailable"),
+                       (b"unassociated", b"na", b"na", b"transfer"), (b"unassociated", b"cleanup.none.pp", b"none-recorded", b"not-recorded"),
+                       (b"bound", b"na", b"na", b"na"), (b"bound", b"unregistered", b"na", b"not-recorded"),
+                       (b"bound", b"unregistered", b"na", b"transfer"), (b"bound", b"unregistered", b"unavailable", b"na"),
+                       (b"bound", b"unavailable", b"none-recorded", b"unavailable"), (b"bound", b"unavailable", b"unavailable", b"na"),
+                       (b"bound", b"unavailable", b"unavailable", b"not-recorded"), (b"bound", b"unavailable", b"unavailable", b"native-observe"),
+                       (b"bound", b"cleanup.none.pp", b"na", b"native-observe"), (b"bound", b"cleanup.none.pp", b"none-recorded", b"na"),
+                       (b"bound", b"cleanup.none.pp", b"none-recorded", b"unavailable"), (b"bound", b"cleanup.none.pp", b"unavailable", b"na"),
+                       (b"bound", b"cleanup.none.pp", b"unavailable", b"unavailable")):
+            self.assertIsNone(lifecycle._shell_label_pair(frame(*fields)), fields)
+        for boundary in (b"", b"future", b"Native-observe", b"native_observe", b"native.observe", b"native-observe-extra", b"unavailable\x00", b"/private/input"):
+            self.assertIsNone(lifecycle._shell_label_pair(frame(boundary=boundary)), boundary)
+        for malformed in (raw + b"\n", raw + raw, raw[:-1] + b";extra=na\n",
+                          raw.replace(b";u=native-observe", b""), raw.replace(b";u=", b";u=na;u="), raw.replace(b";u=", b";unknown="),
+                          raw.replace(b";af=missing-compile-anchor;u=native-observe", b";u=native-observe;af=missing-compile-anchor"),
+                          raw.replace(b";af=", b";af=na;af="), raw.replace(b";af=missing-compile-anchor", b""),
+                          raw.replace(b";ao=bridge", b""), raw.replace(b";ax=prepare", b""),
+                          raw.replace(b";ac=runtime-unavailable", b";ac=busy"), raw.replace(b";af=missing-compile-anchor", b";af=na"),
+                          raw.replace(b";ao=bridge", b";ao=request"), raw.replace(b";u=", b";u=\x00"),
+                          raw.replace(b"reject=reply-assessment-unavailable;", b"reject=reply-busy;"),
+                          raw.replace(b"index=6;", b"index=06;"), raw.replace(b"evaluations=13;", b"evaluations=129;"),
+                          raw.replace(b";q=cleanup.none.pp;", b";q=none.prepare.pp;"), raw.replace(b"\n", b"\r\n")):
+            self.assertIsNone(lifecycle._shell_label_pair(malformed))
+        for version in (b"v1", b"v2", b"v3", b"v4", b"v6"):
+            self.assertIsNone(lifecycle._shell_label_pair(raw.replace(b"=v5;", b"=" + version + b";")))
 
     def test_assessment_failure_transport_keeps_the_same_guard_and_original_return(self):
         assessment = (SOURCE / "desktop/src-tauri/src/credential_assessment.rs").read_text()
@@ -3433,13 +3565,142 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertEqual(latch.count("failed.swap(true, Ordering::SeqCst)"), 1)
         self.assertIn("if !failed.swap(true, Ordering::SeqCst) { *trace = next_trace; *progress = next_progress; true } else { false }", latch)
         self.assertEqual(deadline.count("Boundary::Deadline"), 1)
-        self.assertIn("\n            }\n            self.report_failure(); return;\n        }", deadline)
-        self.assertIn("if self.failed.load(Ordering::SeqCst) { self.report_failure(); return; }", tick)
-        self.assertIn("if std::thread::current().id() == self.main { self.fail(); self.report_failure(); return; }", tick)
+        self.assertIn("\n            }\n            self.failure_tick(app); return;\n        }", deadline)
+        self.assertIn("if self.failed.load(Ordering::SeqCst) { self.failure_tick(app); return; }", tick)
+        self.assertIn("if std::thread::current().id() == self.main { self.fail(); self.failure_tick(app); return; }", tick)
         self.assertNotIn("self.end ||", tick)
         cache = source.split("fn record_at(&self", 1)[1].split("fn session_wait(", 1)[0]
         self.assertIn("if !self.failed.load(Ordering::SeqCst) {\n            r.trace = (r.step, boundary);", cache)
         self.assertIn("r.paths.diagnostic = PathDiagnostic::sample(r.step);\n        }", cache)
+
+    def test_failed_observer_handoff_reuses_original_quit_and_keeps_failure(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        shell = (SOURCE / "desktop/src-tauri/src/shell.rs").read_text()
+        helper = source.split("impl FailureQuit {", 1)[1].split("fn assert_failure_quit_contract()", 1)[0]
+        reserve = helper.split("fn reserve(", 1)[1].split("fn closed(", 1)[0]
+        self.assertIn("if !failed || !self.armed || self.refused { return None; }", reserve)
+        self.assertIn("if !before_end { self.refuse(); return None; }", reserve)
+        self.assertLess(reserve.index("self.close_requested = true"), reserve.index("Some(FailureQuitAction::Close)"))
+        self.assertLess(reserve.index("self.pending = true"), reserve.index("Some(FailureQuitAction::Activate)"))
+        self.assertIn("if self.armed { return; }", helper)
+        for reset in ("self.pending = false", "self.close_requested = false", "self.refused = false"):
+            self.assertNotIn(reset, helper)
+        self.assertIn("if !before_end || !self.eligible(id)", helper)
+        self.assertIn("self.id == Some(id)", helper)
+        self.assertIn("result != Ok(true)", helper)
+
+        adopt = source.split("fn failure_quit(r: &mut Record)", 1)[1].split("fn saved_read_context(", 1)[0]
+        self.assertIn("SessionStep::QuitCancel | SessionStep::QuitPreserved", adopt)
+        self.assertIn("id: r.session.quit_cancel_id, selects_ok: false", adopt)
+        self.assertIn("id: r.native_id, selects_ok: true", adopt)
+        self.assertIn("r.pending == Some(Pending::Gtk) || p.activated || p.returned", adopt)
+        self.assertIn("r.pending == Some(Pending::Gtk) || r.activated || r.gtk_returned", adopt)
+        self.assertIsNone(re.search(r"\br\.(?:step|pending|held)\s*=(?!=)", adopt))
+        self.assertNotIn(".take()", adopt)
+
+        lane = source.split("    fn failure_tick(", 1)[1].split("    pub(super) fn attach", 1)[0]
+        self.assertLess(lane.index("self.report_failure();"), lane.index("let action = {"))
+        self.assertIn("if std::thread::current().id() == self.main || !r.attached", lane)
+        self.assertIn("failure_quit(&mut r).reserve(self.failed.load(Ordering::SeqCst), Instant::now() < self.end)", lane)
+        self.assertIn("\n        };\n        // All claims precede external calls", lane)
+        self.assertLess(lane.index("let Some(action) = action"), lane.index("window.close()"))
+        self.assertEqual(lane.count("window.close()"), 1)
+        self.assertEqual(lane.count("super::owned_gtk::activate_observed_quit(&app, &q)"), 1)
+        self.assertIn("q.gtk_returned(result);", lane)
+        self.assertIn("}).is_err() { self.refuse_failure_quit(); }", lane)
+        for forbidden in ("spawn(", "sleep(", "app.exit(", "process::exit", "request_shutdown(",
+                          ".shutdown(", "exit_ready", "relay_stop", "self.end =", "Duration::"):
+            self.assertNotIn(forbidden, lane + helper + adopt)
+        self.assertIn("if self.failed.load(Ordering::SeqCst) { return; }\n            r.pending = Some(match step", source)
+        session = source.split("    fn session_tick(", 1)[1].split("    fn session_dom(", 1)[0]
+        for start in ("if matches!(step,SessionStep::SetFile(_) | SessionStep::ActivateFile(_)) {",
+                      "if step==SessionStep::QuitCancel {", "let script={"):
+            dispatch = session.split(start, 1)[1]
+            self.assertLess(dispatch.index("if self.failed.load(Ordering::SeqCst) { return; }"), dispatch.index("r.pending"))
+
+        for caller, successor, operation in (
+            ("close_prevented", "project_created", "failure_quit(&mut r).closed()"),
+            ("native_created", "native_activation", "failure_quit(&mut r).created(id, quit)"),
+            ("native_activation", "native_response", "failure_quit(&mut r).activate(id, Instant::now() < self.end)"),
+            ("native_response", "gtk_returned", "failure_quit(&mut r).response(id, accepted, declined, disposal)"),
+            ("gtk_returned", "native_destroyed", "failure_quit(&mut r).activation_returned(result)"),
+            ("native_destroyed", "native_released", "if quit.id == Some(id) { quit.destroyed(id, seen); return; }"),
+            ("native_released", "relay_joined", "if quit.id == Some(id) { quit.released(id, seen); return; }"),
+            ("quit_selects_ok", "session_script", "failure_quit(&mut r).choice(id)"),
+        ):
+            body = source.split("fn " + caller + "(", 1)[1].split("fn " + successor + "(", 1)[0]
+            self.assertIn("if self.failed.load(Ordering::SeqCst)", body)
+            self.assertIn(operation, body)
+        returned = source.split("    fn gtk_returned(", 1)[1].split("    pub(super) fn native_destroyed", 1)[0]
+        self.assertIn("self.fail(); failure_quit(&mut r).refuse();", returned)
+        self.assertNotIn("r.pending.take()", returned)
+        closed = source.split("    pub(super) fn close_prevented(", 1)[1].split("    pub(super) fn project_created", 1)[0]
+        self.assertIn("self.fail(); failure_quit(&mut r).closed(); return;", closed)
+        self.assertNotIn("r.pending.take()", closed)
+
+        gtk = shell.split("    pub(super) fn activate_observed_quit(", 1)[1].split("\n    #[cfg(", 1)[0]
+        for original in ("gtk::is_initialized_main_thread()", "Arc::ptr_eq(&actual, q)",
+                         "owner.id != id", "Arc::ptr_eq(&owner.gui, &call)", "owner.interrupted()",
+                         "dialog.transient_for().as_ref() != Some(&parent)", "q.quit_selects_ok(id)?",
+                         "q.native_activation(id)?;", "button.emit_clicked();"):
+            self.assertIn(original, gtk)
+        self.assertEqual(gtk.count("button.emit_clicked();"), 1)
+        self.assertIn("fn request_shutdown(app: &tauri::AppHandle) { app.state::<ShellState>().document.request_quit(app.clone()); }", shell)
+        exit_owner = shell.split("fn start_exit_observer(", 1)[1].split("fn request_shutdown(", 1)[0]
+        self.assertIn("if !settle_relay(&app).await || !document.can_exit() { return; }", exit_owner)
+        self.assertIn("retired && session_retired && !self.failed.load(Ordering::SeqCst)", source)
+        self.assertIn("if !matches!(returned, Ok(0)) || !q.finish()", source)
+
+        relay = source.split("    pub(super) fn relay_joined(", 1)[1].split("    pub(super) fn actual_exit(", 1)[0]
+        actual_exit = source.split("    pub(super) fn actual_exit(", 1)[1].split("    fn finish(", 1)[0]
+        relay_note = "if self.failed.load(Ordering::SeqCst) { r.failure_quit.observe_relay(joined); }"
+        exit_note = "if self.failed.load(Ordering::SeqCst) { r.failure_quit.observe_loop_exit(ready); }"
+        self.assertEqual(relay.count(relay_note), 1); self.assertEqual(actual_exit.count(exit_note), 1)
+        self.assertLess(relay.index(relay_note), relay.index("if !joined || !r.released || !r.gtk_returned || r.relay_joined"))
+        self.assertLess(actual_exit.index(exit_note), actual_exit.index("if !ready || !originals_final || !r.relay_joined || !r.released || r.exit"))
+        self.assertEqual(relay.count("self.record_at("), 1)
+        self.assertEqual(actual_exit.count("self.record_at("), 2)
+        self.assertNotIn("failure_quit(&mut r)", relay + actual_exit)
+        self.assertIn("r.relay_joined = true;", relay)
+        self.assertIn("r.originals_final = originals_final; r.exit = true;", actual_exit)
+        terminal = helper.split("    fn native_handoff_complete(", 1)[1]
+        self.assertEqual(re.findall(r"\bself\.([a-z_]+)\s*=(?!=)", terminal),
+                         ["relay_observed", "loop_exit_observed"])
+        for required in ("self.id.is_some_and(|id| id != 0)", "self.selects_ok && self.pending",
+                         "self.relay_observed.is_none() && joined", "self.loop_exit_observed.is_none() && ready",
+                         "self.relay_observed == Some(true)", "self.loop_exit_observed == Some(true)"):
+            self.assertIn(required, terminal)
+        self.assertNotIn("self.disposal", terminal)
+        reporter = source.split("    fn report_failure_handoff(", 1)[1].split("    fn refuse_failure_quit(", 1)[0]
+        self.assertIn("let snapshot = self.record.try_lock().ok().map(|r| r.failure_quit);", reporter)
+        self.assertLess(reporter.index("let snapshot ="), reporter.index("super::diagnostic(line)"))
+        self.assertNotIn("self.record()", reporter)
+        for forbidden in ("observe_retired", "failure_sink", "failure_reported", "write_all", "self.end"):
+            self.assertNotIn(forbidden, reporter)
+        main = source.split("let returned = super::run_builder(", 1)[1].split("    let line: &[u8]", 1)[0]
+        output = "q.report_failure_handoff(matches!(&returned, Ok(0)));"
+        self.assertEqual(source.count(output), 1)
+        self.assertLess(main.index("q.fail(); q.report_failure();"), main.index(output))
+        self.assertLess(main.index(output), main.index('super::diagnostic(b"MRK_INSTALLED_SHELL_OBSERVATION=failed\\n")'))
+        self.assertIn("return std::process::ExitCode::FAILURE;", main)
+
+        contract = source.split("fn assert_failure_quit_contract()", 1)[1].split("const PROJECT_SOURCE:", 1)[0]
+        for actual_helper in (".begin(", ".reserve(", ".closed(", ".created(", ".choice(", ".activate(",
+                              ".response(", ".activation_returned(", ".destroyed(", ".released(", ".refuse("):
+            self.assertIn(actual_helper, contract)
+        self.assertIn("SessionStep::Read(6, SA::Prepare", contract)
+        self.assertIn("failure_pair(trace, progress, diagnostic, None) == frame", contract)
+        self.assertIn("pending.choice(id) == Ok(selects_ok)", contract)
+        self.assertIn("late.activate(id, false)", contract)
+        for observed_method in (".native_handoff_complete()", ".observe_relay(", ".observe_loop_exit(", ".returned_handoff("):
+            self.assertIn(observed_method, contract)
+        self.assertIn("failure_handoff_line(true, true, None).is_none()", contract)
+        self.assertIn("failure_handoff_line(false, true, Some(observed)).is_none()", contract)
+        self.assertIn("failure_handoff_line(true, false, Some(observed)).is_none()", contract)
+        self.assertLess(source.index("    assert_failure_quit_contract();"), source.index("let returned = super::run_builder("))
+        # These are wiring checks, not execution of Rust/GTK/joins. The same
+        # helper's deterministic assertions run in the existing observer main;
+        # actual native failure-lifecycle coverage still requires its own result.
 
     def test_test_only_original_fd_sink_has_one_attempt_before_existing_stderr(self):
         source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()

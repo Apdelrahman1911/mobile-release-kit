@@ -3980,6 +3980,7 @@ mod installed_session_observation {
         pub(crate) fn association_token(self) -> &'static [u8] { if self.bound { b"bound" } else { b"unassociated" } }
         pub(crate) fn query_token(self) -> ([u8; 26], usize) { self.query.query_token() }
         pub(crate) fn worker_token(self) -> &'static [u8] { self.query.worker_token() }
+        pub(crate) fn unknown_boundary_token(self) -> &'static [u8] { self.query.unknown_boundary_token() }
         // Pure closed-value example for the existing frame contract, never a
         // native receipt. These types exist only in the installed test build.
         pub(crate) fn contract_sample() -> Self {
@@ -4064,7 +4065,8 @@ mod installed_session_observation {
         admission.unknown = true;
         let unassociated = Book::new(SessionCase::Inputs).first_failure(admission.first_origin.as_ref(), |_| panic!("pre-admission query lookup"));
         assert!(unassociated.origin_token() == b"registry" && unassociated.detail_token() == b"none"
-            && unassociated.association_token() == b"unassociated" && query(unassociated) == b"na" && unassociated.worker_token() == b"na");
+            && unassociated.association_token() == b"unassociated" && query(unassociated) == b"na" && unassociated.worker_token() == b"na"
+            && unassociated.unknown_boundary_token() == b"na");
         let mut unsupported = super::tests::empty_state(); unsupported.unknown = true;
         first_unknown_origin!(unsupported, UnknownOrigin::SupervisorDisabled, Some(&new));
         assert!(unsupported.first_origin.is_none());
@@ -4074,6 +4076,7 @@ mod installed_session_observation {
         let mut absent = Book::new(SessionCase::Inputs);
         let unavailable_origin = absent.first_failure(None, |_| panic!("absent-origin query lookup"));
         assert!(unavailable_origin == Failure::not_recorded());
+        assert!(unavailable_origin.unknown_boundary_token() == b"na");
         assert!(absent.first_failure(restored.first_origin.as_ref(), |_| panic!("late origin backfill")) == unavailable_origin);
 
         let unavailable_query = crate::supervisor::assert_installed_session_query_diagnostic_contract(&new, &same_id);
@@ -4081,8 +4084,13 @@ mod installed_session_observation {
         let failure = book.first_failure(restored.first_origin.as_ref(), |original| {
             assert!(Weak::ptr_eq(original, &Arc::downgrade(&new))); unavailable_query
         });
-        assert!(failure.association_token() == b"bound" && query(failure) == b"unavailable" && failure.worker_token() == b"unavailable");
+        assert!(failure.association_token() == b"bound" && query(failure) == b"unavailable" && failure.worker_token() == b"unavailable"
+            && failure.unknown_boundary_token() == b"unavailable");
         assert!(book.first_failure(taken.first_origin.as_ref(), |_| panic!("first failure was resampled")) == failure);
+        let mut known_book = Book::new(SessionCase::Inputs);
+        let known = known_book.first_failure(restored.first_origin.as_ref(), |_| InstalledSessionQueryDiagnostic::contract_sample());
+        assert!(known.unknown_boundary_token() == b"settlement" && Failure::contract_sample().unknown_boundary_token() == b"settlement");
+        assert!(known_book.first_failure(taken.first_origin.as_ref(), |_| panic!("known boundary was resampled")) == known);
 
         let mut expiry = super::tests::empty_state();
         expiry.slot = Some(Slot::new(new.clone(), Operation::Prepare, None, None, None));

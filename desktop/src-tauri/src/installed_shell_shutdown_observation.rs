@@ -257,11 +257,44 @@ mod session {
             }
         }
     }
+    // Closed edge DATA, not a worker cause or another failure classification.
+    // Visibility reaches only the original supervisor ancestor, not an API.
     #[derive(Clone, Copy, PartialEq, Eq)]
-    pub(crate) struct InstalledSessionQueryDiagnostic { query: QueryProjection, worker: WorkerProjection }
+    pub(in crate::supervisor) enum UnknownBoundary {
+        NotApplicable, Unavailable, NotRecorded, Unspecified, Transfer, Inspection, Acquisition,
+        NativeObserve, Settlement, Management, ObserverLoss, ReplyLoss, Clock, RetireClock,
+        ChildMissing, ChildWait, Io, RestoreLimit, DevObserve,
+    }
+    impl UnknownBoundary {
+        fn token(self) -> &'static [u8] {
+            match self {
+                Self::NotApplicable => b"na", Self::Unavailable => b"unavailable", Self::NotRecorded => b"not-recorded",
+                Self::Unspecified => b"unspecified", Self::Transfer => b"transfer", Self::Inspection => b"inspection",
+                Self::Acquisition => b"acquisition", Self::NativeObserve => b"native-observe", Self::Settlement => b"settlement",
+                Self::Management => b"management", Self::ObserverLoss => b"observer-loss", Self::ReplyLoss => b"reply-loss",
+                Self::Clock => b"clock", Self::RetireClock => b"retire-clock", Self::ChildMissing => b"child-missing",
+                Self::ChildWait => b"child-wait", Self::Io => b"io", Self::RestoreLimit => b"restore-limit", Self::DevObserve => b"dev-observe",
+            }
+        }
+    }
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(in crate::supervisor) struct FirstUnknown { worker: WorkerProjection, boundary: UnknownBoundary }
+    impl FirstUnknown {
+        pub(in crate::supervisor) fn capture(resources: Option<&Resources>, boundary: UnknownBoundary) -> Self {
+            // A missing caller guard is unavailable, never an empty refusal
+            // book. This scalar copy does not lock, own, wait or read natives.
+            Self { worker: resources.map_or(WorkerProjection::Unavailable, WorkerProjection::stored), boundary }
+        }
+    }
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct InstalledSessionQueryDiagnostic { query: QueryProjection, worker: WorkerProjection, boundary: UnknownBoundary }
     impl InstalledSessionQueryDiagnostic {
-        pub(crate) const fn not_applicable() -> Self { Self { query: QueryProjection::NotApplicable, worker: WorkerProjection::NotApplicable } }
-        fn unavailable() -> Self { Self { query: QueryProjection::Unavailable, worker: WorkerProjection::Unavailable } }
+        pub(crate) const fn not_applicable() -> Self {
+            Self { query: QueryProjection::NotApplicable, worker: WorkerProjection::NotApplicable, boundary: UnknownBoundary::NotApplicable }
+        }
+        fn unavailable() -> Self {
+            Self { query: QueryProjection::Unavailable, worker: WorkerProjection::Unavailable, boundary: UnknownBoundary::Unavailable }
+        }
         pub(crate) fn query_token(self) -> ([u8; 26], usize) {
             let mut bytes = [0; 26];
             let literal: &[u8] = match self.query {
@@ -278,9 +311,11 @@ mod session {
             bytes[..literal.len()].copy_from_slice(literal); (bytes, literal.len())
         }
         pub(crate) fn worker_token(self) -> &'static [u8] { self.worker.token() }
+        pub(crate) fn unknown_boundary_token(self) -> &'static [u8] { self.boundary.token() }
         pub(crate) fn contract_sample() -> Self {
             Self { query: QueryProjection::Recorded { error: QueryError::Unavailable, cause: QueryCause::SpawnOther,
-                driver: ManagementJoin::Panicked, watchdog: ManagementJoin::Failed }, worker: WorkerProjection::SettlementUnknown }
+                driver: ManagementJoin::Panicked, watchdog: ManagementJoin::Failed }, worker: WorkerProjection::SettlementUnknown,
+                boundary: UnknownBoundary::Settlement }
         }
     }
     fn session_query_diagnostic(originals: &Mutex<SessionQueryBook>, asset: &Weak<OriginalWork>) -> InstalledSessionQueryDiagnostic {
@@ -288,19 +323,28 @@ mod session {
         if book.failed || book.taken || book.originals.len() > 16 { return InstalledSessionQueryDiagnostic::unavailable(); }
         let mut matching = book.originals.iter().filter(|row| Weak::ptr_eq(&row.asset, asset));
         let Some(row) = matching.next() else {
-            return InstalledSessionQueryDiagnostic { query: QueryProjection::Unregistered, worker: WorkerProjection::NotApplicable };
+            return InstalledSessionQueryDiagnostic { query: QueryProjection::Unregistered, worker: WorkerProjection::NotApplicable,
+                boundary: UnknownBoundary::NotApplicable };
         };
         if matching.next().is_some() || !matches!(row.owner.profile, Profile::Passive(Method::AssessCredentials)) {
             return InstalledSessionQueryDiagnostic::unavailable();
         }
-        // One nonblocking projection of the exact retained R1, with no owner
-        // registry/ID/current-slot lookup, poll, join, clock, error relatch or
-        // native/output read. Q and K are independently unavailable if their
-        // own book cannot be sampled; none-recorded never means settled.
-        let query = row.owner.state.try_lock().ok().filter(|state| state.endpoint == row.endpoint)
-            .map_or(QueryProjection::Unavailable, |state| QueryProjection::stored(&state));
+        // One exact-endpoint state snapshot, then release its guard. A failed
+        // state sample cannot establish the absence of a first record. Never
+        // use a later Resources sample to enrich an already-Unknown original.
+        let (query, first, unknown) = {
+            let Ok(state) = row.owner.state.try_lock() else { return InstalledSessionQueryDiagnostic::unavailable(); };
+            if state.endpoint != row.endpoint { return InstalledSessionQueryDiagnostic::unavailable(); }
+            (QueryProjection::stored(&state), state.first_unknown, state.unknown)
+        };
+        if let Some(first) = first {
+            return InstalledSessionQueryDiagnostic { query, worker: first.worker, boundary: first.boundary };
+        }
+        if unknown { return InstalledSessionQueryDiagnostic::unavailable(); }
+        // Only an observed pre-Unknown state retains the existing nonblocking
+        // fallback. No registry/latest-slot lookup, clock, poll or native read.
         let worker = row.owner.resources.try_lock().ok().map_or(WorkerProjection::Unavailable, |resources| WorkerProjection::stored(&resources));
-        InstalledSessionQueryDiagnostic { query, worker }
+        InstalledSessionQueryDiagnostic { query, worker, boundary: UnknownBoundary::NotRecorded }
     }
 
     pub(crate) fn assert_installed_session_query_diagnostic_contract(asset: &Arc<OriginalWork>, other: &Arc<OriginalWork>) -> InstalledSessionQueryDiagnostic {
@@ -320,29 +364,36 @@ mod session {
             Original { asset: Arc::downgrade(asset), owner: owner.clone(), endpoint, hold: SessionQueryHold::Observe,
                 selected: false, held: false, asset_released: false, attempted: false }
         }
+        fn associated(asset: &Arc<OriginalWork>, endpoint: Instant) -> (Arc<Owner>, Mutex<SessionQueryBook>) {
+            let owner = owner(Profile::Passive(Method::AssessCredentials), endpoint);
+            let book = Mutex::new(SessionQueryBook { originals: vec![row(asset, &owner, endpoint)], ..SessionQueryBook::default() });
+            (owner, book)
+        }
         let association = Arc::downgrade(asset);
         let book = Mutex::new(SessionQueryBook::default());
         let absent = session_query_diagnostic(&book, &association);
-        assert!(query(absent) == b"unregistered" && absent.worker_token() == b"na");
+        assert!(query(absent) == b"unregistered" && absent.worker_token() == b"na" && absent.unknown_boundary_token() == b"na");
+        let unassociated = InstalledSessionQueryDiagnostic::not_applicable();
+        assert!(query(unassociated) == b"na" && unassociated.worker_token() == b"na" && unassociated.unknown_boundary_token() == b"na");
         let guard = book.try_lock().unwrap();
         let contended = session_query_diagnostic(&book, &association);
-        assert!(query(contended) == b"unavailable" && contended.worker_token() == b"unavailable");
+        assert!(query(contended) == b"unavailable" && contended.worker_token() == b"unavailable" && contended.unknown_boundary_token() == b"unavailable");
         drop(guard);
         let endpoint = Instant::now();
         let original = owner(Profile::Passive(Method::AssessCredentials), endpoint);
         book.try_lock().unwrap().originals.push(row(asset, &original, endpoint));
         let sampled = session_query_diagnostic(&book, &association);
-        assert!(query(sampled) == b"none.none.pp" && sampled.worker_token() == b"none-recorded");
+        assert!(query(sampled) == b"none.none.pp" && sampled.worker_token() == b"none-recorded" && sampled.unknown_boundary_token() == b"not-recorded");
         // Equal public operation IDs are not weak identity or R1 association.
         assert!(asset.id == other.id && !Arc::ptr_eq(asset, other));
         assert!(query(session_query_diagnostic(&book, &Arc::downgrade(other))) == b"unregistered");
         let held_state = original.state.try_lock().unwrap();
         let sampled = session_query_diagnostic(&book, &association);
-        assert!(query(sampled) == b"unavailable" && sampled.worker_token() == b"none-recorded");
+        assert!(sampled == InstalledSessionQueryDiagnostic::unavailable());
         drop(held_state);
         let held_resources = original.resources.try_lock().unwrap();
         let sampled = session_query_diagnostic(&book, &association);
-        assert!(query(sampled) == b"none.none.pp" && sampled.worker_token() == b"unavailable");
+        assert!(query(sampled) == b"none.none.pp" && sampled.worker_token() == b"unavailable" && sampled.unknown_boundary_token() == b"not-recorded");
         drop(held_resources);
         book.try_lock().unwrap().originals.push(row(asset, &original, endpoint));
         assert!(session_query_diagnostic(&book, &association) == InstalledSessionQueryDiagnostic::unavailable());
@@ -354,6 +405,145 @@ mod session {
         { let mut book = book.try_lock().unwrap(); book.failed = false;
             book.originals[0].owner = owner(Profile::Passive(Method::Capabilities), endpoint); }
         assert!(session_query_diagnostic(&book, &association) == InstalledSessionQueryDiagnostic::unavailable());
+        { let mut book = book.try_lock().unwrap(); book.originals.clear();
+            book.originals.push(row(asset, &original, endpoint));
+            for _ in 0..16 { book.originals.push(row(other, &original, endpoint)); } }
+        assert!(session_query_diagnostic(&book, &association) == InstalledSessionQueryDiagnostic::unavailable());
+
+        use UnknownBoundary as U;
+        use installed_native_fixture::ObservationFailure as F;
+        // Exercise the SAME state-latch helper used by the sole Unknown body,
+        // under the caller-held Resources/state guards. Policy flags below are
+        // synthetic fixture DATA, not a second owner or a native Unknown run.
+        let (observed, observed_book) = associated(asset, endpoint);
+        let mut held = observed.resources.try_lock().unwrap();
+        held.native_observation_failure = Some(F::MapsRead);
+        let first = {
+            let mut state = observed.state.try_lock().unwrap();
+            state.record_first_unknown(Some(&held), U::NativeObserve);
+            assert!(!state.unknown && !state.terminal && state.error.is_none() && state.cleanup_endpoint.is_none()
+                && state.endpoint == endpoint && !state.management_ready() && state.reply.is_none());
+            let first = state.first_unknown.unwrap();
+            assert!(first.worker.token() == b"maps-read" && first.boundary == U::NativeObserve);
+            state.unknown = true;
+            state.fail_at(BridgeError::cleanup_unknown(), endpoint);
+            first
+        };
+        let retained = session_query_diagnostic(&observed_book, &association);
+        assert!(query(retained) == b"cleanup.none.pp" && retained.worker_token() == b"maps-read"
+            && retained.unknown_boundary_token() == b"native-observe");
+        // A later different refusal cannot overwrite K/U or renew the original
+        // error/cleanup endpoint, even while the resource guard stays held.
+        held.native_observation_failure = Some(F::EnvironmentCheck);
+        {
+            let mut state = observed.state.try_lock().unwrap();
+            state.record_first_unknown(Some(&held), U::Inspection);
+            state.fail_at(BridgeError::protocol(), endpoint + Duration::from_secs(1));
+            assert!(state.first_unknown == Some(first) && state.unknown && !state.terminal
+                && state.error.as_ref().is_some_and(|error| error.code == "cleanup_unknown")
+                && state.endpoint == endpoint && state.cleanup_endpoint == Some(endpoint + CLEANUP_TIME)
+                && state.driver_join == ManagementJoin::Pending && state.watchdog_join == ManagementJoin::Pending);
+        }
+        assert!(session_query_diagnostic(&observed_book, &association) == retained);
+        drop(held);
+        assert!(session_query_diagnostic(&observed_book, &association) == retained);
+        let state_guard = observed.state.try_lock().unwrap();
+        assert!(session_query_diagnostic(&observed_book, &association) == InstalledSessionQueryDiagnostic::unavailable());
+        drop(state_guard);
+        observed_book.try_lock().unwrap().originals[0].endpoint = endpoint + Duration::from_secs(1);
+        assert!(session_query_diagnostic(&observed_book, &association) == InstalledSessionQueryDiagnostic::unavailable());
+        observed_book.try_lock().unwrap().originals[0].endpoint = endpoint;
+        assert!(session_query_diagnostic(&observed_book, &association) == retained);
+
+        let (unavailable_owner, unavailable_book) = associated(asset, endpoint);
+        let mut held = unavailable_owner.resources.try_lock().unwrap();
+        held.native_observation_failure = Some(F::ChildId);
+        let unavailable_first = {
+            let mut state = unavailable_owner.state.try_lock().unwrap();
+            state.record_first_unknown(None, U::Acquisition);
+            state.unknown = true; state.fail_at(BridgeError::cleanup_unknown(), endpoint);
+            state.first_unknown.unwrap()
+        };
+        let no_guard = session_query_diagnostic(&unavailable_book, &association);
+        assert!(query(no_guard) == b"cleanup.none.pp" && no_guard.worker_token() == b"unavailable"
+            && no_guard.unknown_boundary_token() == b"acquisition");
+        drop(held);
+        // Resources is now readable, with a known refusal. No late sample or
+        // first-record backfill is permitted after the no-guard edge won.
+        assert!(session_query_diagnostic(&unavailable_book, &association) == no_guard);
+        let held = unavailable_owner.resources.try_lock().unwrap();
+        assert!(WorkerProjection::stored(&held).token() == b"child-id");
+        {
+            let mut state = unavailable_owner.state.try_lock().unwrap();
+            state.record_first_unknown(Some(&held), U::NativeObserve);
+            assert!(state.first_unknown == Some(unavailable_first));
+        }
+        assert!(session_query_diagnostic(&unavailable_book, &association) == no_guard);
+        drop(held);
+
+        let (empty_owner, empty_book) = associated(asset, endpoint);
+        let held = empty_owner.resources.try_lock().unwrap();
+        {
+            let mut state = empty_owner.state.try_lock().unwrap();
+            state.record_first_unknown(Some(&held), U::Transfer);
+            state.unknown = true; state.fail_at(BridgeError::cleanup_unknown(), endpoint);
+        }
+        let sampled_empty = session_query_diagnostic(&empty_book, &association);
+        assert!(sampled_empty.worker_token() == b"none-recorded" && sampled_empty.unknown_boundary_token() == b"transfer");
+        drop(held);
+
+        let (synthetic, synthetic_book) = associated(asset, endpoint);
+        let mut held = synthetic.resources.try_lock().unwrap();
+        held.native_observation_failure = Some(F::Entry);
+        {
+            let mut state = synthetic.state.try_lock().unwrap(); state.unknown = true;
+            state.record_first_unknown(Some(&held), U::NativeObserve);
+            assert!(state.first_unknown.is_none());
+        }
+        drop(held);
+        assert!(session_query_diagnostic(&synthetic_book, &association) == InstalledSessionQueryDiagnostic::unavailable());
+
+        let mut terminal = OwnerState::new(endpoint, None); terminal.terminal = true;
+        terminal.record_first_unknown(None, U::Unspecified);
+        assert!(terminal.first_unknown.is_none() && !terminal.unknown && terminal.error.is_none()
+            && terminal.retirement_result(endpoint + CLEANUP_TIME, true).is_none());
+        let mut pending = OwnerState::new(endpoint, None);
+        pending.fail_at(BridgeError::protocol(), endpoint);
+        assert!(pending.retirement_result(endpoint + CLEANUP_TIME, false).is_none()
+            && pending.first_unknown.is_none() && !pending.unknown && pending.cleanup_endpoint == Some(endpoint + CLEANUP_TIME));
+        // The record itself is also immutable before any later flag write.
+        let mut unspecified = OwnerState::new(endpoint, None);
+        unspecified.record_first_unknown(None, U::Unspecified);
+        let default_first = unspecified.first_unknown;
+        unspecified.record_first_unknown(Some(&Resources::default()), U::Settlement);
+        assert!(unspecified.first_unknown == default_first
+            && default_first.is_some_and(|first| first.worker.token() == b"unavailable" && first.boundary == U::Unspecified));
+
+        let (retiring, retiring_book) = associated(asset, endpoint);
+        {
+            let mut state = retiring.state.try_lock().unwrap();
+            state.driver_join = ManagementJoin::Returned; state.watchdog_join = ManagementJoin::Returned;
+            state.driver_end = Some(DriverEnd::Ready(Ok(ReadOutcome::Passive(Value::Null))));
+            state.watchdog_end = Some(WatchdogEnd::DriverObserved(ManagementJoin::Returned));
+            state.fail_at(BridgeError::protocol(), endpoint);
+            let result = state.retirement_result(endpoint + CLEANUP_TIME, false);
+            assert!(matches!(result, Some(Err(error)) if error.code == "cleanup_unknown"));
+            assert!(state.unknown && !state.terminal && state.driver_end.is_none()
+                && state.error.as_ref().is_some_and(|error| error.code == "protocol_error")
+                && state.endpoint == endpoint && state.cleanup_endpoint == Some(endpoint + CLEANUP_TIME));
+        }
+        let retired_clock = session_query_diagnostic(&retiring_book, &association);
+        assert!(query(retired_clock) == b"protocol.none.rr" && retired_clock.worker_token() == b"unavailable"
+            && retired_clock.unknown_boundary_token() == b"retire-clock");
+        retiring.state.try_lock().unwrap().record_first_unknown(Some(&Resources::default()), U::Settlement);
+        assert!(session_query_diagnostic(&retiring_book, &association) == retired_clock);
+        for (boundary, token) in [(U::NotApplicable,b"na".as_slice()), (U::Unavailable,b"unavailable"), (U::NotRecorded,b"not-recorded"),
+            (U::Unspecified,b"unspecified"), (U::Transfer,b"transfer"), (U::Inspection,b"inspection"), (U::Acquisition,b"acquisition"),
+            (U::NativeObserve,b"native-observe"), (U::Settlement,b"settlement"), (U::Management,b"management"),
+            (U::ObserverLoss,b"observer-loss"), (U::ReplyLoss,b"reply-loss"), (U::Clock,b"clock"), (U::RetireClock,b"retire-clock"),
+            (U::ChildMissing,b"child-missing"), (U::ChildWait,b"child-wait"), (U::Io,b"io"), (U::RestoreLimit,b"restore-limit"), (U::DevObserve,b"dev-observe")] {
+            assert!(boundary.token() == token && token.len() <= 14 && token.is_ascii());
+        }
 
         assert!(QueryError::stored(None).token() == b"none" && QueryCause::stored(None).token() == b"none");
         for (code, token) in [("query_timeout", b"timeout".as_slice()), ("cleanup_unknown", b"cleanup"), ("shutting_down", b"shutdown"),
@@ -384,7 +574,6 @@ mod session {
             assert!(management_token(receipt) == token);
             assert!(WorkerJoin::returned(receipt).is_some() == matches!(token, b'c' | b'x' | b'f'));
         }
-        use installed_native_fixture::ObservationFailure as F;
         use installed_native_fixture::{MapRefusal as R, MapMetadataRefusal as M, MapRole};
         installed_native_fixture::assert_mappings_diagnostic_contract();
         let mut resources = Resources::default();
@@ -409,6 +598,7 @@ mod session {
         assert!(WorkerProjection::stored(&resources).token() == b"none-recorded");
         assert!(query(InstalledSessionQueryDiagnostic::contract_sample()) == b"unavailable.spawn-other.xf");
         assert!(InstalledSessionQueryDiagnostic::contract_sample().query_token().1 == 26);
+        assert!(InstalledSessionQueryDiagnostic::contract_sample().unknown_boundary_token() == b"settlement");
         contended
     }
 
@@ -579,4 +769,4 @@ mod session {
 #[cfg(all(debug_assertions, feature = "custom-protocol"))]
 pub(crate) use session::{InstalledSessionQueries, InstalledSessionQueryDiagnostic, SessionQueryHold, assert_installed_session_query_diagnostic_contract};
 #[cfg(all(debug_assertions, feature = "custom-protocol"))]
-pub(super) use session::{SessionQueryBook, register_session_query, session_child_case, hold_session_query};
+pub(super) use session::{FirstUnknown, UnknownBoundary, SessionQueryBook, register_session_query, session_child_case, hold_session_query};

@@ -1179,28 +1179,80 @@ class LifecycleData(unittest.TestCase):
     def test_shell_command_log_finality_and_primary_failure_are_preserved(self):
         value = installed_handoff(); value.pop("installed"); value["shell"] = {}
         argv = L.shell_argv(value, "positive")
-        for case in ("complete", "owner-error", "bad-result", "nonzero", "log-error", "nonzero-log-error", "diagnostic-error", "wrong-route"):
-            primary, events = OSError("inert original log failure"), []
-            result = subprocess.CompletedProcess(argv, 2 if case in ("nonzero", "nonzero-log-error", "diagnostic-error") else 0, b"", b"")
+        frame = (b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionReview\n"
+                 b"MRK_INSTALLED_SHELL_FAILURE_PHASE=settlement\n"
+                 b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n"
+                 b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v5;index=6;evaluations=13;"
+                 b"reject=reply-assessment-unavailable;wait=native-reply-pending;"
+                 b"o=supervisor-disabled;d=none;a=bound;q=cleanup.none.pp;w=none-recorded;"
+                 b"ao=bridge;ac=runtime-unavailable;ax=prepare;af=missing-compile-anchor;u=native-observe\n")
+        parsed = L._shell_label_pair(frame)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["session"]["firstOrigin"]["unknownBoundary"], "native-observe")
+        original_finish, original_capture = L._shell_call_finished, L._command_capture
+        nonzero = {"nonzero", "nonzero-log-error", "diagnostic-error", "missing-label", "malformed-label", "label-read-error",
+                   "clock-error", "finish-dispatch-error", "reporter-dispatch-error", "format-error", "nonzero-close-error", "nonzero-log-close-error"}
+        log_failure = {"log-error", "nonzero-log-error", "nonzero-log-close-error"}
+        for case in ("complete", "owner-error", "bad-result", "nonzero", "log-error", "nonzero-log-error", "diagnostic-error", "wrong-route",
+                     "late-return", "post-log-expiry", "missing-label", "malformed-label", "label-read-error", "clock-error",
+                     "finish-dispatch-error", "reporter-dispatch-error", "format-error", "nonzero-close-error", "nonzero-log-close-error"):
+            primary, events, clock, calls = OSError("inert original log failure"), [], [100.0], {}
+            result = subprocess.CompletedProcess(argv, 2 if case in nonzero else 0, b"", b"")
             if case == "bad-result": result.args = ["/other/original"]
             def run(*args, **options):
                 events.append("owner")
                 if case == "owner-error": raise primary
+                if case == "late-return": clock[0] = 1000.0
+                events.append("owner-return")
                 return result
-            def capture(*args):
-                self.assertEqual(events, ["owner", "stdout", "stderr"])
+            def diagnostic_time():
+                if "record" in calls:
+                    self.assertIs(calls["record"]["ownerReturned"], case != "owner-error")
+                    events.append("finish-clock")
+                    if case == "clock-error": raise OSError("inert finish clock failure")
+                return clock[0]
+            def finish(record, returned):
+                events.append("finish")
+                calls["record"] = record
+                if case == "finish-dispatch-error": raise OSError("inert finish dispatch failure")
+                original_finish(record, returned)
+            def capture_result(*args):
+                self.assertEqual(events[:3], ["owner", "owner-return", "finish"])
+                events.append("capture")
+                return original_capture(*args)
+            def capture_log(*args):
+                self.assertEqual(events[-3:], ["capture", "stdout", "stderr"])
                 events.append("log")
-                if case in ("log-error", "nonzero-log-error"): raise primary
+                if case in log_failure: raise primary
+                if case == "post-log-expiry": clock[0] = 1000.0
                 return b"inert display output\n"
-            with self.subTest(case=case), patch.multiple(L, _ROOT=L.root_path(value), _END=value["deadline"], _FAILED=False,
+            def read_labels(original):
+                self.assertEqual(original, (41, "original-label-binding"))
+                self.assertEqual(events[-1], "log")
+                events.append("labels")
+                if case == "label-read-error": raise InterruptedError("inert original sidecar read failure")
+                return None if case == "missing-label" else L._shell_label_pair(frame[:-1]) if case == "malformed-label" else parsed
+            def close(original):
+                self.assertEqual(original, 41)
+                events.append("close")
+                if case in ("nonzero-close-error", "nonzero-log-close-error"): raise OSError("inert original close failure")
+            with self.subTest(case=case), patch.multiple(L, _ROOT=L.root_path(value), _END=1000.0, _FAILED=False,
                     _COMMANDS=[], _OWNER=SimpleNamespace(run_owned=run)), patch.object(L, "_root_ids"), \
-                 patch.object(L.time, "monotonic", return_value=100.0), \
+                 patch.object(L.time, "monotonic", side_effect=lambda: clock[0]), \
+                 patch.object(L, "_shell_diagnostic_time", side_effect=diagnostic_time), \
+                 patch.object(L, "_shell_call_finished", side_effect=finish) as finishing, \
+                 patch.object(L, "_command_capture", side_effect=capture_result), \
                  patch.object(L, "_retain", side_effect=lambda name, raw: events.append(name.rsplit(".", 1)[1])), \
-                 patch.object(L, "_shell_log_capture", side_effect=capture) as log, \
+                 patch.object(L, "_shell_log_capture", side_effect=capture_log) as log, \
                  patch.object(L, "_shell_labels_prepare", return_value=(41, "original-label-binding")) as labels, \
-                 patch.object(L, "_shell_labels_read") as label_read, patch.object(L.os, "close") as closing, \
+                 patch.object(L, "_shell_labels_read", side_effect=read_labels) as label_read, \
+                 patch.object(L, "_shell_command_failure", wraps=L._shell_command_failure) as reporting, \
+                 patch.object(L, "canonical", wraps=L.canonical) as formatting, \
+                 patch.object(L.os, "close", side_effect=close) as closing, \
                  patch.object(L.sys, "stderr", new_callable=io.StringIO) as stream:
                 if case == "diagnostic-error": stream.write = Mock(side_effect=OSError("inert diagnostic error"))
+                if case == "reporter-dispatch-error": reporting.side_effect = OSError("inert reporter dispatch failure")
+                if case == "format-error": formatting.side_effect = OSError("inert diagnostic format failure")
                 arguments = dict(maximum=60, shell_log=(value, "normal" if case == "wrong-route" else "positive", "original-log-binding"))
                 if case == "complete":
                     self.assertIs(L.command("shell-positive", argv, **arguments), result)
@@ -1208,21 +1260,45 @@ class LifecycleData(unittest.TestCase):
                 else:
                     with self.assertRaises((ValueError, OSError)) as raised: L.command("shell-positive", argv, **arguments)
                     if case in ("owner-error", "log-error"): self.assertIs(raised.exception, primary)
-                    if case == "nonzero-log-error":
+                    if case in nonzero or case == "late-return":
                         self.assertEqual(str(raised.exception), "Original root command failed or completed late")
-                        self.assertIs(raised.exception.__cause__, primary)
+                        self.assertIs(raised.exception.__cause__, primary if case in log_failure else None)
+                    if case == "post-log-expiry": self.assertEqual(str(raised.exception), "Original shell log captured after endpoint")
                     if case != "wrong-route": self.assertTrue(L._FAILED)
+                reports = case in nonzero or case in ("log-error", "late-return")
+                reads = reports and case != "reporter-dispatch-error"
                 self.assertEqual(log.call_count, int(case not in ("owner-error", "bad-result", "wrong-route")))
                 self.assertEqual(labels.call_count, int(case != "wrong-route"))
+                self.assertEqual(finishing.call_count, int(case != "wrong-route"))
+                if case != "wrong-route": self.assertIs(finishing.call_args.args[1], case != "owner-error")
+                self.assertEqual(reporting.call_count, int(reports))
+                if reports:
+                    self.assertIs(reporting.call_args.args[1], result)
+                    self.assertEqual(reporting.call_args.args[5], (41, "original-label-binding"))
+                    self.assertIs(reporting.call_args.args[6], calls["record"])
+                self.assertEqual(label_read.call_count, int(reads))
                 self.assertEqual(closing.call_args_list, [] if case == "wrong-route" else [unittest.mock.call(41)])
-                label_read.assert_not_called()  # Generic owner error grants neither sidecar nor raw-log read.
-                if case == "nonzero":
+                expected = [] if case == "wrong-route" else ["owner"] + ([] if case == "owner-error" else ["owner-return"]) + ["finish"]
+                if case not in ("wrong-route", "finish-dispatch-error"): expected.append("finish-clock")
+                if case not in ("wrong-route", "owner-error"):
+                    expected.append("capture")
+                    if case != "bad-result": expected += ["stdout", "stderr", "log"]
+                if reads: expected.append("labels")
+                if case != "wrong-route": expected.append("close")
+                self.assertEqual(events, expected)
+                if reports and case not in ("diagnostic-error", "reporter-dispatch-error", "format-error"):
                     raw = stream.getvalue().encode("ascii")
                     self.assertLessEqual(len(raw), 32768)
                     diagnostic = json.loads(raw.split(b"=", 1)[1])
-                    self.assertEqual(diagnostic["capture"]["exitCode"], 2)
-                    self.assertEqual(diagnostic["capture"]["display"]["head"], "inert display output\n")
-                    self.assertFalse(diagnostic["qualified"])
+                    self.assertEqual(diagnostic["capture"]["exitCode"], result.returncode)
+                    if case not in log_failure: self.assertEqual(diagnostic["capture"]["display"]["head"], "inert display output\n")
+                    self.assertEqual(diagnostic["logErrorType"], "OSError" if case in log_failure else None)
+                    missing = case in ("missing-label", "malformed-label", "label-read-error")
+                    self.assertEqual(diagnostic["labels"], None if missing else parsed)
+                    self.assertEqual(diagnostic["labelsReason"], "unavailable" if missing else None)
+                    self.assertIs(diagnostic["ownerCall"]["ownerReturned"], case != "finish-dispatch-error")
+                    if case in ("clock-error", "finish-dispatch-error"): self.assertIsNone(diagnostic["ownerCall"]["endMonotonic"])
+                    self.assertFalse(diagnostic["qualified"]); self.assertFalse(diagnostic["cleanupEstablished"])
 
     def test_version_store_prefixes_bind_exact_application_children(self):
         app = Path("/var/lib/mobile-release-kit")
@@ -4807,6 +4883,108 @@ class FailureLabelSinkContracts(unittest.TestCase):
                     reading.assert_called_once_with(41, 513)
                 opening.assert_not_called(); raw_read.assert_not_called(); seeking.assert_not_called()
 
+    def test_returned_failure_requires_the_same_typed_bounded_result(self):
+        class Subclass(subprocess.CompletedProcess): pass
+        value = installed_handoff(); value.pop("installed"); value["shell"] = {}
+        argv = L.shell_argv(value, "positive")
+        original = (41, "original-label-binding")
+        handoff = b"MRK_INSTALLED_SHELL_FAILURE_HANDOFF=original-quit-relay-loop-returned\n"
+        failed = b"MRK_INSTALLED_SHELL_OBSERVATION=failed\n"
+        payload = handoff + failed
+        limit = len(payload) + 32
+        good = subprocess.CompletedProcess(argv, 1, payload, b"")
+        call = {"timeoutSeconds": 60, "ownerReturned": True, "startMonotonic": 100.0, "endMonotonic": 101.0}
+        broken = {"timeoutSeconds": True, "ownerReturned": False, "startMonotonic": float("nan"), "endMonotonic": "101"}
+        labels = L._shell_label_pair(b"MRK_INSTALLED_SHELL_FAILURE_STEP=Bootstrap\nMRK_INSTALLED_SHELL_FAILURE_PHASE=bootstrap\n"
+                                    b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=not-sampled\n")
+        candidates = [("original", good, call, True), ("missing-call", good, None, True), ("broken-call", good, broken, True),
+                      ("subclass", Subclass(argv, 1, payload, b""), call, False),
+                      ("lookalike", SimpleNamespace(args=argv, returncode=1, stdout=payload, stderr=b""), call, False),
+                      ("wrong-argv", subprocess.CompletedProcess(["/other/original"], 1, payload, b""), call, False),
+                      ("bool-code", subprocess.CompletedProcess(argv, True, payload, b""), call, False),
+                      ("stdout-text", subprocess.CompletedProcess(argv, 1, payload.decode("ascii"), b""), call, False),
+                      ("stderr-text", subprocess.CompletedProcess(argv, 1, payload, ""), call, False),
+                      ("mutable-stream", subprocess.CompletedProcess(argv, 1, bytearray(payload), b""), call, False),
+                      ("combined-bound", subprocess.CompletedProcess(argv, 1, payload, b"x" * 33), call, False)]
+        for name, result, observed_call, allowed in candidates:
+            with self.subTest(name=name), patch.object(L, "LIMIT", limit), \
+                 patch.object(L, "_shell_capture_summary", wraps=L._shell_capture_summary) as capture, \
+                 patch.object(L, "_shell_labels_read", return_value=labels) as reading, \
+                 patch.object(L, "_shell_call_finished") as finishing, patch.object(L, "_shell_diagnostic_time") as clock, \
+                 patch.object(L.os, "open") as opening, patch.object(L.os, "close") as closing, \
+                 patch.object(L.os, "lseek") as seeking, patch.object(L, "read") as raw_read, \
+                 patch.object(L.sys, "stderr", new_callable=io.StringIO) as stream:
+                L._shell_command_failure(argv, result, "positive", None, None, original, observed_call)
+                capture.assert_called_once_with(result, argv, None)
+                self.assertIs(capture.call_args.args[0], result)
+                self.assertEqual(reading.call_args_list, [unittest.mock.call(original)] if allowed else [])
+                raw = stream.getvalue().encode("ascii")
+                self.assertLessEqual(len(raw), 32768)
+                data = json.loads(raw.split(b"=", 1)[1])
+                self.assertEqual(data["scope"], "original-shell-command-failure-diagnostic-only")
+                self.assertEqual(data["labels"], labels if allowed else None)
+                self.assertEqual(data["labelsReason"], None if allowed else "owner-finality-unavailable")
+                self.assertEqual(data["capture"] is not None, allowed)
+                self.assertEqual(data["failureHandoff"], "original-quit-relay-loop-returned" if allowed else None)
+                self.assertFalse(data["qualified"]); self.assertFalse(data["cleanupEstablished"])
+                if observed_call is None: self.assertIsNone(data["ownerCall"])
+                elif observed_call is broken:
+                    self.assertFalse(data["ownerCall"]["ownerReturned"])
+                    for key in ("timeoutSeconds", "startMonotonic", "endMonotonic", "ownerElapsedSeconds"):
+                        self.assertIsNone(data["ownerCall"][key])
+                else: self.assertTrue(data["ownerCall"]["ownerReturned"])
+                finishing.assert_not_called(); clock.assert_not_called()
+                opening.assert_not_called(); closing.assert_not_called(); seeking.assert_not_called(); raw_read.assert_not_called()
+
+        # Only two complete closed records from the original returned streams
+        # can project the witness; display logs and label presence cannot invent it.
+        records = [
+            ("stderr", 1, b"inert\n", payload, labels, None, True),
+            ("split", 1, handoff, failed, labels, None, True),
+            ("missing-labels", 1, payload, b"", None, None, False),
+            ("label-read-error", 1, payload, b"", labels, None, False),
+            ("zero", 0, payload, b"", labels, None, False),
+            ("other-code", 2, payload, b"", labels, None, False),
+            ("signal", -15, payload, b"", labels, None, False),
+            ("log-only", 1, failed, b"", labels, handoff, False),
+            ("missing-failed", 1, handoff, b"", labels, None, False),
+            ("duplicate-handoff", 1, payload, handoff, labels, None, False),
+            ("duplicate-failed", 1, payload, failed, labels, None, False),
+            ("unterminated", 1, failed, handoff[:-1], labels, None, False),
+            ("crlf", 1, payload.replace(b"\n", b"\r\n"), b"", labels, None, False),
+            ("prefixed", 1, b"inert " + payload, b"", labels, None, False),
+            ("bare-cr-prefix", 1, b"inert\r" + payload, b"", labels, None, False),
+            ("bare-cr-separator", 1, handoff[:-1] + b"\r" + failed, b"", labels, None, False),
+            ("prefixed-extra", 1, payload, b"inert\r" + handoff, labels, None, False),
+            ("malformed", 1, failed, b"MRK_INSTALLED_SHELL_FAILURE_HANDOFF=other\n", labels, None, False),
+            ("partial-extra", 1, payload, b"MRK_INSTALLED_SHELL_FAILURE_HANDOFF", labels, None, False),
+            ("conflicting-verdict", 1, payload, b"MRK_INSTALLED_SHELL_OBSERVATION=route-refused\n", labels, None, False),
+            ("verified-verdict", 1, payload, b"MRK_INSTALLED_SHELL_OBSERVATION=positive-verified\n", labels, None, False),
+            ("verified-contract", 1, payload, b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n", labels, None, False),
+        ]
+        for name, code, stdout, stderr, first_labels, display, allowed in records:
+            result = subprocess.CompletedProcess(argv, code, stdout, stderr)
+            with self.subTest(records=name), \
+                 patch.object(L, "_shell_capture_summary", wraps=L._shell_capture_summary) as capture, \
+                 patch.object(L, "_shell_labels_read", return_value=first_labels) as reading, \
+                 patch.object(L, "_shell_call_finished") as finishing, patch.object(L, "_shell_diagnostic_time") as clock, \
+                 patch.object(L.os, "open") as opening, patch.object(L.os, "close") as closing, \
+                 patch.object(L.os, "lseek") as seeking, patch.object(L, "read") as raw_read, \
+                 patch.object(L.sys, "stderr", new_callable=io.StringIO) as stream:
+                if name == "label-read-error": reading.side_effect = OSError("inert label read failure")
+                L._shell_command_failure(argv, result, "positive", display, None, original, None)
+                capture.assert_called_once_with(result, argv, display)
+                reading.assert_called_once_with(original)
+                raw = stream.getvalue().encode("ascii")
+                self.assertLessEqual(len(raw), 32768)
+                data = json.loads(raw.split(b"=", 1)[1])
+                self.assertEqual(data["failureHandoff"], "original-quit-relay-loop-returned" if allowed else None)
+                self.assertEqual(data["labels"], None if name == "label-read-error" else first_labels)
+                self.assertFalse(data["qualified"]); self.assertFalse(data["cleanupEstablished"])
+                self.assertIsNone(data["ownerCall"])
+                finishing.assert_not_called(); clock.assert_not_called()
+                opening.assert_not_called(); closing.assert_not_called(); seeking.assert_not_called(); raw_read.assert_not_called()
+
     def test_owner_exception_requires_exact_stored_true_facts_and_same_original_is_reraised(self):
         class ProcessError(RuntimeError):
             def __init__(self, contained=True, cleanup=True):
@@ -5141,6 +5319,8 @@ class FailureLabelSinkContracts(unittest.TestCase):
                     _COMMANDS=[], _OWNER=SimpleNamespace(run_owned=Mock(return_value=result))), \
                  patch.object(L, "_root_ids"), patch.object(L, "_retain") as retained, \
                  patch.object(L.time, "monotonic", return_value=100.0), \
+                 patch.object(L, "_shell_call_finished", wraps=L._shell_call_finished) as finishing, \
+                 patch.object(L, "_shell_diagnostic_time", return_value=100.0) as clock, \
                  patch.object(L, "_shell_labels_prepare", return_value=(41, "original")) as preparation, \
                  patch.object(L, "_shell_labels_read") as reading, patch.object(L, "_shell_log_capture", return_value=b""), \
                  patch.object(L.os, "close") as closing, patch.object(L.sys, "stderr", new_callable=io.StringIO) as stream:
@@ -5154,6 +5334,8 @@ class FailureLabelSinkContracts(unittest.TestCase):
                     self.assertIs(L.command(label, argv, maximum=60, **options), result)
                     self.assertFalse(L._FAILED)
                 self.assertEqual(preparation.call_count, int(synthetic))
+                self.assertEqual(finishing.call_count, int(synthetic))
+                self.assertEqual(clock.call_count, 2 if synthetic else 0)
                 self.assertEqual(closing.call_count, int(synthetic)); reading.assert_not_called()
                 self.assertEqual([call.args[1] for call in retained.call_args_list], [b"unchanged stdout", b"unchanged stderr"])
                 self.assertEqual(stream.getvalue(), "")

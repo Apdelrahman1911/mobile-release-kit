@@ -52,6 +52,24 @@ pub(crate) use shell_shutdown_observation::HeldAppInfo;
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
 pub(crate) use shell_shutdown_observation::{InstalledSessionQueries, InstalledSessionQueryDiagnostic, SessionQueryHold,
     assert_installed_session_query_diagnostic_contract};
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+use shell_shutdown_observation::{FirstUnknown, UnknownBoundary};
+
+// Only the installed observer copies caller-held DATA. Ordinary builds erase
+// both diagnostic arguments, including any Resources borrow or boundary type.
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+macro_rules! owner_unknown {
+    ($owner:expr, $inner:expr, $resources:expr, $boundary:ident) => {
+        ($owner).unknown_policy($inner, $resources, UnknownBoundary::$boundary)
+    };
+}
+#[cfg(not(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"))))]
+macro_rules! owner_unknown {
+    ($owner:expr, $inner:expr, $resources:expr, $boundary:ident) => { ($owner).unknown($inner) };
+}
 
 fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
     // No user callback/serialization runs while these small bookkeeping locks
@@ -87,6 +105,9 @@ struct OwnerState {
     reply: Option<oneshot::Sender<Result<Value, BridgeError>>>,
     driver_join: ManagementJoin, watchdog_join: ManagementJoin,
     driver_end: Option<DriverEnd>, watchdog_end: Option<WatchdogEnd>,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    first_unknown: Option<FirstUnknown>,
 }
 
 // These are private original-return receipts, not task-body success flags.
@@ -177,7 +198,20 @@ impl OwnerState {
     fn new(endpoint: Instant, reply: Option<oneshot::Sender<Result<Value, BridgeError>>>) -> Self {
         Self { endpoint, cleanup_endpoint: None, error: None, terminal: false, unknown: false, reply,
             driver_join: ManagementJoin::Pending, watchdog_join: ManagementJoin::Pending,
-            driver_end: None, watchdog_end: None }
+            driver_end: None, watchdog_end: None,
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+            first_unknown: None,
+        }
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    fn record_first_unknown(&mut self, resources: Option<&Resources>, boundary: UnknownBoundary) {
+        // Called under the SAME original state lock, before its Unknown
+        // publication. Copy only the caller's guard; never acquire Resources.
+        if !self.terminal && !self.unknown && self.first_unknown.is_none() {
+            self.first_unknown = Some(FirstUnknown::capture(resources, boundary));
+        }
     }
     fn fail_at(&mut self, error: BridgeError, now: Instant) {
         if self.terminal { return; }
@@ -204,7 +238,12 @@ impl OwnerState {
         if self.terminal || !self.management_ready() { return None; }
         if stopping { self.fail_at(BridgeError::shutdown(), now); }
         if now >= self.endpoint { self.fail_at(BridgeError::timeout(), now); }
-        if self.cleanup_endpoint.is_some_and(|endpoint| now >= endpoint) { self.unknown = true; }
+        if self.cleanup_endpoint.is_some_and(|endpoint| now >= endpoint) {
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+            self.record_first_unknown(None, UnknownBoundary::RetireClock);
+            self.unknown = true;
+        }
         let Some(DriverEnd::Ready(result)) = self.driver_end.take() else { return None; };
         Some(if self.unknown {
             let error = BridgeError::cleanup_unknown();
@@ -345,8 +384,27 @@ impl Owner {
     fn failed(&self) -> bool { lock(&self.state).error.is_some() }
     fn endpoint(&self) -> Instant { lock(&self.state).endpoint }
     fn unknown(&self, inner: &Inner) {
+        // Keep the original entry for direct fixtures/unannotated callers.
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        self.unknown_policy(inner, None, UnknownBoundary::Unspecified);
+        #[cfg(not(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"))))]
+        self.unknown_policy(inner);
+    }
+    fn unknown_policy(&self, inner: &Inner,
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        resources: Option<&Resources>,
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        boundary: UnknownBoundary,
+    ) {
         let mut state = lock(&self.state);
         if state.terminal { return; }
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        state.record_first_unknown(resources, boundary);
         inner.disabled.store(true, Ordering::SeqCst);
         state.unknown = true;
         state.fail_at(BridgeError::cleanup_unknown(), Instant::now());
@@ -381,7 +439,7 @@ impl Owner {
         let newly_unknown = expired && !state.unknown;
         drop(state);
         if timed_out { self.stop.send_replace(true); self.changed.notify_waiters(); }
-        if newly_unknown { self.unknown(inner); }
+        if newly_unknown { owner_unknown!(self, inner, None, Clock); }
         if expired { None } else { Some(endpoint) }
     }
     fn retire(self: &Arc<Self>, inner: &Inner) -> bool {
@@ -448,7 +506,7 @@ impl FinalObserverGuard {
     }
 }
 impl Drop for FinalObserverGuard {
-    fn drop(&mut self) { if !self.retired { self.owner.unknown(&self.inner); } }
+    fn drop(&mut self) { if !self.retired { owner_unknown!(self.owner, &self.inner, None, ObserverLoss); } }
 }
 
 /// The SAME passive admission's original reply observer. This neither owns a
@@ -459,7 +517,7 @@ pub(crate) struct PassiveQuery {
 }
 impl PassiveQuery {
     pub(crate) async fn wait(self) -> Result<Value, BridgeError> {
-        self.receiver.await.unwrap_or_else(|_| { self.owner.unknown(&self.inner); Err(BridgeError::cleanup_unknown()) })
+        self.receiver.await.unwrap_or_else(|_| { owner_unknown!(self.owner, &self.inner, None, ReplyLoss); Err(BridgeError::cleanup_unknown()) })
     }
 }
 
@@ -665,7 +723,7 @@ async fn observe_management(inner: Arc<Inner>, owner: Arc<Owner>) {
         if driver.is_none() { state.driver_join = ManagementJoin::Missing; }
         if watchdog.is_none() { state.watchdog_join = ManagementJoin::Missing; }
     }
-    if driver.is_none() || watchdog.is_none() { owner.unknown(&inner); }
+    if driver.is_none() || watchdog.is_none() { owner_unknown!(owner, &inner, None, Management); }
     loop {
         let changed = owner.changed.notified();
         let deadline = owner.advance_clock(&inner, Instant::now());
@@ -675,7 +733,7 @@ async fn observe_management(inner: Arc<Inner>, owner: Arc<Owner>) {
         };
         if ready && owner.retire(&inner) { return; }
         if !driver_pending && !watchdog_pending {
-            owner.unknown(&inner);
+            owner_unknown!(owner, &inner, None, Management);
             // Failed originals and their books remain retained. No replacement
             // cleaner, no repoll of an already consumed join, no expired spin.
             pending::<()>().await;
@@ -701,7 +759,7 @@ async fn observe_management(inner: Arc<Inner>, owner: Arc<Owner>) {
                     }
                     Err(error) => {
                         lock(&owner.state).driver_join = ManagementJoin::error(&error);
-                        owner.unknown(&inner); // Keep the consumed failed handle, never await it again.
+                        owner_unknown!(owner, &inner, None, Management); // Keep the consumed failed handle, never await it again.
                     }
                 }
                 owner.changed.notify_waiters();
@@ -716,11 +774,11 @@ async fn observe_management(inner: Arc<Inner>, owner: Arc<Owner>) {
                         drop(state);
                         #[cfg(all(test, feature = "development-runtime"))]
                         { lock(&owner.observation).watchdog_joined = true; }
-                        if accepted { watchdog.take(); } else { owner.unknown(&inner); }
+                        if accepted { watchdog.take(); } else { owner_unknown!(owner, &inner, None, Management); }
                     }
                     Err(error) => {
                         lock(&owner.state).watchdog_join = ManagementJoin::error(&error);
-                        owner.unknown(&inner);
+                        owner_unknown!(owner, &inner, None, Management);
                     }
                 }
                 owner.changed.notify_waiters();
@@ -959,16 +1017,16 @@ async fn settle_passive(resources: &mut Resources, inner: &Inner, owner: &Arc<Ow
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     {
         #[cfg(all(target_os = "linux", test, not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
-        if resources.native_observation.is_some() { owner.unknown(inner); return false; }
+        if resources.native_observation.is_some() { owner_unknown!(owner, inner, Some(&*resources), Settlement); return false; }
         let Some(native) = resources.passive.clone() else {
-            if passive_selected(owner.profile) { owner.unknown(inner); return false; }
+            if passive_selected(owner.profile) { owner_unknown!(owner, inner, Some(&*resources), Settlement); return false; }
             return true; // Explicitly unselected domain/profile, never a missing required book.
         };
         let (inspection, acquisition) = passive_borrows(resources);
-        if !inspection.returned() || !acquisition.returned() { owner.unknown(inner); return false; }
+        if !inspection.returned() || !acquisition.returned() { owner_unknown!(owner, inner, Some(&*resources), Settlement); return false; }
         if !resources.native_started {
             let no_child = {
-                let slots = match native.try_lock() { Ok(slots) => slots, Err(_) => { owner.unknown(inner); return false; } };
+                let slots = match native.try_lock() { Ok(slots) => slots, Err(_) => { owner_unknown!(owner, inner, Some(&*resources), Settlement); return false; } };
                 // Closed profile, or STOP before any worker was created: actual
                 // original-return/no-worker records AND a never-started empty book.
                 if passive_never_started_clear(inspection, acquisition, slots.never_started()) {
@@ -982,7 +1040,7 @@ async fn settle_passive(resources: &mut Resources, inner: &Inner, owner: &Arc<Ow
                     && resources.write_end.is_some() && resources.out_end.as_ref().is_some_and(|end| end.eof)
                     && resources.err_end.as_ref().is_some_and(|end| end.eof)
             };
-            if !consumers_returned { owner.unknown(inner); return false; }
+            if !consumers_returned { owner_unknown!(owner, inner, Some(&*resources), Settlement); return false; }
             let closing = native.clone();
             let (release, enter) = oneshot::channel();
             resources.native_started = true;
@@ -1005,7 +1063,7 @@ async fn settle_passive(resources: &mut Resources, inner: &Inner, owner: &Arc<Ow
             resources.native_return.as_ref().is_some_and(Result::is_ok), resources.native_settlement.is_some(),
             matches!(resources.native_return.as_ref(), Some(Ok(CloseOutcome::Settled))),
             native.try_lock().is_ok_and(|slots| slots.settled()));
-        if !positive { owner.unknown(inner); }
+        if !positive { owner_unknown!(owner, inner, Some(&*resources), Settlement); }
         positive
     }
 }
@@ -1098,7 +1156,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
             resources.inspection_error = Some(error);
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             passive_worker_lost(&resources);
-            owner.unknown(&inner);
+            owner_unknown!(owner, &inner, Some(&resources), Inspection);
             let _ = settle_passive(&mut resources, &inner, &owner).await;
             return DriverEnd::RetainedUnknown;
         }
@@ -1109,7 +1167,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     }
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     if let Err(error) = transfer_passive(&resources, &inner, &owner) {
-        if error.code == "cleanup_unknown" { owner.unknown(&inner); }
+        if error.code == "cleanup_unknown" { owner_unknown!(owner, &inner, Some(&resources), Transfer); }
         owner.fail(error.clone());
         return ready_after_custody(&mut resources, &inner, &owner, Err(error)).await;
     }
@@ -1138,7 +1196,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         if passive_selected(acquiring_owner.profile) {
             let Some(native) = acquisition_native else {
-                acquiring_owner.unknown(&acquiring_inner);
+                owner_unknown!(acquiring_owner, &acquiring_inner, None, Acquisition);
                 let error = AcquisitionError::unsupported("original passive custody is missing");
                 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
                 let error = error.with_cause(crate::error::LinuxPassiveCause::AcquisitionCustodyMissing);
@@ -1165,7 +1223,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
             resources.acquisition_error = Some(error);
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             passive_worker_lost(&resources);
-            owner.unknown(&inner);
+            owner_unknown!(owner, &inner, Some(&resources), Acquisition);
             let _ = settle_passive(&mut resources, &inner, &owner).await;
             return DriverEnd::RetainedUnknown;
         }
@@ -1180,7 +1238,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         // offered to any wait/reaper. A lost read/close/join retains this slot.
         let Some(id) = resources.child.as_ref().and_then(Child::id) else {
             resources.native_observation_failure = Some(installed_native_fixture::ObservationFailure::ChildId);
-            owner.unknown(&inner); return DriverEnd::RetainedUnknown;
+            owner_unknown!(owner, &inner, Some(&resources), NativeObserve); return DriverEnd::RetainedUnknown;
         };
         let observing_inner = inner.clone();
         let observing_key = owner.key;
@@ -1207,9 +1265,9 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
                 // this SAME already-held resource guard. Original handle,
                 // Unknown policy and subsequent settlement gates are unchanged.
                 resources.native_observation_failure = Some(failure);
-                owner.unknown(&inner); return DriverEnd::RetainedUnknown;
+                owner_unknown!(owner, &inner, Some(&resources), NativeObserve); return DriverEnd::RetainedUnknown;
             },
-            Err(_) => { owner.unknown(&inner); return DriverEnd::RetainedUnknown; },
+            Err(_) => { owner_unknown!(owner, &inner, Some(&resources), NativeObserve); return DriverEnd::RetainedUnknown; },
         }
         if Instant::now() >= endpoint { owner.fail(BridgeError::timeout()); }
     }
@@ -1220,7 +1278,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         // The original blocking reader is in the same Resources, not a PID
         // search, new joiner, artificial owner gate or product environment hook.
         let Some(id) = resources.child.as_ref().and_then(Child::id) else {
-            owner.unknown(&inner); return DriverEnd::RetainedUnknown;
+            owner_unknown!(owner, &inner, Some(&resources), DevObserve); return DriverEnd::RetainedUnknown;
         };
         resources.github_environment = Some(tokio::task::spawn_blocking(move || hosted_tests::original_child_environment(id)));
         match join_slot(&mut resources.github_environment).await {
@@ -1228,12 +1286,12 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
                 lock(&owner.observation).github_initial_environment = value;
                 resources.github_environment.take();
             },
-            _ => { owner.unknown(&inner); return DriverEnd::RetainedUnknown; },
+            _ => { owner_unknown!(owner, &inner, Some(&resources), DevObserve); return DriverEnd::RetainedUnknown; },
         }
     }
     let (stdin, stdout, stderr) = match resources.child.as_mut() {
         Some(child) => (child.stdin.take(), child.stdout.take(), child.stderr.take()),
-        None => { owner.unknown(&inner); return DriverEnd::RetainedUnknown; }
+        None => { owner_unknown!(owner, &inner, Some(&resources), ChildMissing); return DriverEnd::RetainedUnknown; }
     };
     let (faults, mut fault_rx) = mpsc::channel(4);
     if let Some(stdin) = stdin { resources.writer = Some(tokio::spawn(write_request(stdin, bytes, owner.stop.subscribe(), faults.clone()))); }
@@ -1262,7 +1320,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
             resources.kill_attempted = true;
             // Only this exact retained, unreaped Child. No PID/group discovery,
             // external reaper, repeated signal, or kill-on-drop authority.
-            let child = match resources.child.as_mut() { Some(child) => child, None => { owner.unknown(&inner); return DriverEnd::RetainedUnknown; } };
+            let child = match resources.child.as_mut() { Some(child) => child, None => { owner_unknown!(owner, &inner, Some(&resources), ChildMissing); return DriverEnd::RetainedUnknown; } };
             match child.try_wait() {
                 Ok(Some(status)) => {
                     #[cfg(all(test, feature = "development-runtime"))]
@@ -1274,7 +1332,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
                     resources.waited = Some(status);
                 }
                 Ok(None) => { if child.start_kill().is_err() { owner.fail(BridgeError::cleanup_unknown()); } }
-                Err(_) => { owner.unknown(&inner); return DriverEnd::RetainedUnknown; }
+                Err(_) => { owner_unknown!(owner, &inner, Some(&resources), ChildWait); return DriverEnd::RetainedUnknown; }
             }
         }
         let wait_pending = resources.waited.is_none();
@@ -1304,7 +1362,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
                 if !status.success() { owner.fail(BridgeError::new("engine_failed", "The isolated core exited unsuccessfully.")); }
                 resources.waited = Some(status);
             }
-            Event::Wait(Err(_)) => { owner.unknown(&inner); return DriverEnd::RetainedUnknown; }
+            Event::Wait(Err(_)) => { owner_unknown!(owner, &inner, Some(&resources), ChildWait); return DriverEnd::RetainedUnknown; }
             Event::Write(Ok(end)) => {
                 #[cfg(all(test, feature = "development-runtime"))]
                 { let mut observed = lock(&owner.observation); observed.writer_joined = true; observed.writer_complete = end.complete; }
@@ -1339,10 +1397,10 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         }
     }
     if resources.failed_writer.is_some() || resources.failed_stdout.is_some() || resources.failed_stderr.is_some() {
-        owner.unknown(&inner); return DriverEnd::RetainedUnknown;
+        owner_unknown!(owner, &inner, Some(&resources), Io); return DriverEnd::RetainedUnknown;
     }
     let eofs = resources.out_end.as_ref().is_some_and(|end| end.eof) && resources.err_end.as_ref().is_some_and(|end| end.eof);
-    if !eofs { owner.unknown(&inner); return DriverEnd::RetainedUnknown; }
+    if !eofs { owner_unknown!(owner, &inner, Some(&resources), Io); return DriverEnd::RetainedUnknown; }
     if !resources.write_end.is_some_and(|end| end.complete) {
         owner.fail(BridgeError::new("io_error", "The original request writer did not complete."));
     }
@@ -1427,7 +1485,7 @@ mod installed_native_fixture {
             let returned = setrlimit(Resource::Nofile, Rlimit { current: self.original.current, maximum: self.original.maximum }).is_ok();
             let checked = same_limit(&getrlimit(Resource::Nofile), &self.original);
             { let mut observed = lock(&self.inner.native_test.limit); observed.restore_attempted = true; observed.restored = returned && checked; }
-            if !returned || !checked { self.owner.unknown(self.inner); }
+            if !returned || !checked { owner_unknown!(self.owner, self.inner, None, RestoreLimit); }
         }
     }
     impl Drop for NofileRestore<'_> { fn drop(&mut self) { self.restore(); } }
