@@ -853,12 +853,18 @@ done:
 }
 
 enum { MRK_PROMPT_CALLS = 512, MRK_PROMPT_CF = 256, MRK_CONTROL_NODES = 17, MRK_CONTROL_DEPTH = 8 };
+enum { MRK_SELECTION_NODES = 49, MRK_SELECTION_ROWS = 32 };
 typedef union { CFTypeRef value; CFArrayRef array; } MRKPromptOwned;
 typedef struct {
     AXUIElementRef nodes[MRK_CONTROL_NODES];
     unsigned parents[MRK_CONTROL_NODES], depths[MRK_CONTROL_NODES], roles[MRK_CONTROL_NODES];
     unsigned chain[MRK_CONTROL_DEPTH + 1], chain_count, candidate;
 } MRKControlPass;
+typedef struct {
+    AXUIElementRef nodes[MRK_SELECTION_NODES];
+    unsigned parents[MRK_SELECTION_NODES], depths[MRK_SELECTION_NODES], roles[MRK_SELECTION_NODES];
+    unsigned chain[MRK_CONTROL_DEPTH + 1], chain_count, candidate;
+} MRKSelectionPass; // Borrowed from the same original CF ledger, never a second owner.
 typedef struct {
     MRKOpenAdmission admit; MRKOpenRecheckCall recheck; void *context; MRKOpenResult result;
     CFTypeID elementType;
@@ -1148,9 +1154,10 @@ static BOOL mrk_ax_row_target(MRKPrompt *s, AXUIElementRef row, const char *targ
         || !mrk_target_path((const char *)path)) return mrk_ax_fail(s, MRK_OPEN_MALFORMED);
     *matches = strcmp((const char *)path, target) == 0; return YES;
 }
-static BOOL mrk_ax_selection_roster(MRKPrompt *s, AXUIElementRef sheet, const char *target, MRKControlPass *pass) {
-    // One fixed initial-view projection, with the SAME17-slot/8-depth bounds
-    // as each control pass. Browser/other layouts are not expanded or changed.
+static BOOL mrk_ax_selection_roster(MRKPrompt *s, AXUIElementRef sheet, const char *target, MRKSelectionPass *pass) {
+    // Selection has49 fixed slots and at most32 rows per Table/Outline; the
+    // control passes keep17 slots. Depth8, other child arrays16, and the common
+    // AX/CF/time budgets stay unchanged. Browser/other layouts are not expanded.
     pass->nodes[0] = sheet; unsigned queued = 1, matches = 0;
     for (unsigned at = 0; at < queued; ++at) {
         AXUIElementRef node = pass->nodes[at];
@@ -1173,13 +1180,13 @@ static BOOL mrk_ax_selection_roster(MRKPrompt *s, AXUIElementRef sheet, const ch
         }
         BOOL rows = kind == MRK_ROLE_TABLE || kind == MRK_ROLE_OUTLINE;
         if (at && !rows && kind != MRK_ROLE_GROUP && kind != MRK_ROLE_SPLIT_GROUP && kind != MRK_ROLE_SCROLL_AREA) continue;
-        CFArrayRef children = mrk_ax_array(s, node, rows ? kAXRowsAttribute : kAXChildrenAttribute, 16, at != 0,
+        CFArrayRef children = mrk_ax_array(s, node, rows ? kAXRowsAttribute : kAXChildrenAttribute, rows ? MRK_SELECTION_ROWS : 16, at != 0,
             kind, pass->depths[at], queued);
         if (!children) { if (s->result.error) return NO; continue; }
         CFIndex count = CFArrayGetCount(children);
         if (count && pass->depths[at] == MRK_CONTROL_DEPTH)
             return mrk_ax_selection_limit(s, MRK_OPEN_SELECTION_DEPTH_LIMIT, kind, pass->depths[at], queued, count);
-        if ((unsigned)count > MRK_CONTROL_NODES - queued)
+        if ((unsigned)count > MRK_SELECTION_NODES - queued)
             return mrk_ax_selection_limit(s, MRK_OPEN_SELECTION_NODE_LIMIT, kind, pass->depths[at], queued, count);
         for (CFIndex i = 0; i < count; ++i) {
             pass->nodes[queued] = (AXUIElementRef)CFArrayGetValueAtIndex(children, i);
@@ -1194,7 +1201,7 @@ static BOOL mrk_ax_selection_roster(MRKPrompt *s, AXUIElementRef sheet, const ch
     }
     s->result.selection_checks |= 1u; return YES;
 }
-static BOOL mrk_ax_select_row(MRKPrompt *s, AXUIElementRef parent, const MRKControlPass *pass, const char *target) {
+static BOOL mrk_ax_select_row(MRKPrompt *s, AXUIElementRef parent, const MRKSelectionPass *pass, const char *target) {
     if (s->result.selection_flags || s->result.selection_checks != 1u) return mrk_ax_fail(s, MRK_OPEN_INELIGIBLE);
     // Only this retained chain and URL may authorize the one selection write.
     for (unsigned i = 0; i < pass->chain_count; ++i) {
@@ -1245,7 +1252,7 @@ static void mrk_ax_open(MRKPrompt *s, const uint8_t *parent_tag, const uint8_t *
     AXUIElementRef parent = NULL, sheet = NULL;
     if (!mrk_ax_projection(s, (AXUIElementRef)application->value, parent_text->value, panel_text->value, &parent, &sheet)) return;
     s->result.site = MRK_OPEN_SELECTION;
-    MRKControlPass selection = {0};
+    MRKSelectionPass selection = {0};
     if (!mrk_ax_selection_roster(s, sheet, target, &selection) || !mrk_ax_select_row(s, parent, &selection, target)) return;
     s->result.site = MRK_OPEN_CONTROL_PROJECTION;
     MRKControlPass initial = {0}, rechecked = {0}; // Separate immutable first-chain backing; no scratch reuse.

@@ -534,7 +534,7 @@ def _accessibility_row_selection(value):
          and all(type(v) is bool for v in checks.values()), label)
     ordered = tuple(checks[k] for k in ACCESSIBILITY_SELECTION_CHECKS)
     need(all(not flag or all(ordered[:index]) for index, flag in enumerate(ordered)), label)
-    need(type(value["nodesExamined"]) is int and 0 <= value["nodesExamined"] <= 16
+    need(type(value["nodesExamined"]) is int and 0 <= value["nodesExamined"] <= 48
          and (not any(ordered) or value["nodesExamined"] >= 2), label)
     need(type(value["attempted"]) is bool and type(value["returned"]) is bool
          and (value["setterSucceeded"] is None or type(value["setterSucceeded"]) is bool), label)
@@ -547,7 +547,7 @@ def _accessibility_row_selection(value):
         need(type(limit["role"]) is str and limit["role"] in ("Sheet", "Group", "SplitGroup", "ScrollArea", "Table", "Outline"), label)
         need(type(limit["depth"]) is int and 0 <= limit["depth"] <= 8
              and type(limit["count"]) is int and -(1 << 63) <= limit["count"] < 1 << 63
-             and type(limit["queuedNodes"]) is int and 1 <= limit["queuedNodes"] <= 17, label)
+             and type(limit["queuedNodes"]) is int and 1 <= limit["queuedNodes"] <= 49, label)
         nodes, depth, queued = value["nodesExamined"], limit["depth"], limit["queuedNodes"]
         need(nodes + 1 <= queued, label)
         need((limit["role"] == "Sheet" and depth == nodes == 0 and queued == 1)
@@ -558,7 +558,7 @@ def _accessibility_row_selection(value):
 
 
 def _row_selection_succeeded(value):
-    return (value is not None and all(value["checks"].values()) and 2 <= value["nodesExamined"] <= 16
+    return (value is not None and all(value["checks"].values()) and 2 <= value["nodesExamined"] <= 48
             and value["attempted"] is True and value["returned"] is True and value["setterSucceeded"] is True
             and value["limit"] is None)
 
@@ -762,10 +762,11 @@ def _accessibility_context(value, native, panel, *, expected_id=None):
                  and value["attempted"] is False and value["pressReturned"] is False and value["triggered"] is None, label)
             limit = selection["limit"]
             count, depth, queued = limit["count"], limit["depth"], limit["queuedNodes"]
-            need((site == "selection-count-limit" and count > 16)
-                 or (site == "selection-copy-limit" and (count < 0 or count > 16))
-                 or (site == "selection-node-limit" and 1 <= count <= 16 and count > 17 - queued and 1 <= depth < 8)
-                 or (site == "selection-depth-limit" and 1 <= count <= 16 and depth == 8), label)
+            array_limit = 32 if limit["role"] in ("Table", "Outline") else 16
+            need((site == "selection-count-limit" and count > array_limit)
+                 or (site == "selection-copy-limit" and (count < 0 or count > array_limit))
+                 or (site == "selection-node-limit" and 1 <= count <= array_limit and count > 49 - queued and 1 <= depth < 8)
+                 or (site == "selection-depth-limit" and 1 <= count <= array_limit and depth == 8), label)
         for name, proof in (("initial-original-proof", proofs[0]), ("original-proof", proofs[1])):
             if site == name and proof is not None and proof["error"] != "none":
                 need(proof["error"] == error, label)

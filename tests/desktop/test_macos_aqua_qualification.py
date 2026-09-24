@@ -127,7 +127,7 @@ def accessibility_context_data():
 
 
 def selection_limit_context_data(site, role, depth, nodes, queued, count):
-    """Inert geometry, NOT the unobserved tuple from the prior native failure."""
+    """Inert successor-policy geometry, not reconstructed native evidence."""
     value = accessibility_context_data(); sample = value["accessibility"]
     sample.update(attempted=False, pressReturned=False, triggered=None, site=site, error="limit",
                   originalProof=None, selectedTarget=None, promptChecks={"initial": True, "final": None})
@@ -140,8 +140,8 @@ def selection_limit_context_data(site, role, depth, nodes, queued, count):
     return value
 
 
-# Same bounded role/geometry/count family as the Rust scalar DATA seam. Only
-# the 12-node/100-call/45-slot prefix resembles the prior stop; no tuple was read.
+# Same successor-policy family as the Rust DATA seam. The historical Outline20
+# refusal remains bound to the original source, never relabelled successful.
 SELECTION_LIMIT_SHAPES = (
     ("selection-count-limit", "Sheet", 0, 0, 1, 17),
     ("selection-count-limit", "Sheet", 0, 0, 1, (1 << 63) - 1),
@@ -149,7 +149,7 @@ SELECTION_LIMIT_SHAPES = (
     ("selection-count-limit", "SplitGroup", 8, 8, 9, (1 << 63) - 1),
     ("selection-count-limit", "ScrollArea", 3, 12, 17, 17),
     ("selection-count-limit", "Table", 1, 1, 2, (1 << 63) - 1),
-    ("selection-count-limit", "Outline", 8, 16, 17, 17),
+    ("selection-count-limit", "Outline", 8, 48, 49, 33),
     ("selection-copy-limit", "Sheet", 0, 0, 1, -(1 << 63)),
     ("selection-copy-limit", "Sheet", 0, 0, 1, -1),
     ("selection-copy-limit", "Sheet", 0, 0, 1, 17),
@@ -157,18 +157,18 @@ SELECTION_LIMIT_SHAPES = (
     ("selection-copy-limit", "Group", 1, 1, 2, -1),
     ("selection-copy-limit", "SplitGroup", 8, 8, 9, -(1 << 63)),
     ("selection-copy-limit", "ScrollArea", 3, 12, 17, (1 << 63) - 1),
-    ("selection-copy-limit", "Table", 1, 1, 2, 17),
-    ("selection-copy-limit", "Outline", 8, 16, 17, -(1 << 63)),
-    ("selection-node-limit", "Group", 1, 1, 2, 16),
-    ("selection-node-limit", "SplitGroup", 7, 7, 8, 10),
-    ("selection-node-limit", "ScrollArea", 3, 12, 17, 1),
-    ("selection-node-limit", "Table", 1, 1, 17, 16),
-    ("selection-node-limit", "Outline", 7, 16, 17, 1),
+    ("selection-copy-limit", "Table", 1, 1, 2, 33),
+    ("selection-copy-limit", "Outline", 8, 48, 49, -(1 << 63)),
+    ("selection-node-limit", "Group", 3, 12, 34, 16),
+    ("selection-node-limit", "SplitGroup", 7, 20, 40, 10),
+    ("selection-node-limit", "ScrollArea", 3, 12, 49, 1),
+    ("selection-node-limit", "Table", 3, 12, 18, 32),
+    ("selection-node-limit", "Outline", 7, 48, 49, 1),
     ("selection-depth-limit", "Group", 8, 8, 9, 1),
     ("selection-depth-limit", "SplitGroup", 8, 8, 9, 8),
     ("selection-depth-limit", "ScrollArea", 8, 12, 17, 16),
-    ("selection-depth-limit", "Table", 8, 8, 9, 9),  # Depth wins even if the queue also overflows.
-    ("selection-depth-limit", "Outline", 8, 16, 17, 16),
+    ("selection-depth-limit", "Table", 8, 8, 49, 32),  # Depth wins even if the queue also overflows.
+    ("selection-depth-limit", "Outline", 8, 48, 49, 32),
 )
 
 
@@ -775,7 +775,7 @@ class AquaDataTests(unittest.TestCase):
         good = accessibility_context_data()
         self.assertEqual(M.failure_context(b"", context_row(good), "first-save"), good)
         for field, bad in (("attempted", False), ("returned", False), ("setterSucceeded", False),
-                           ("setterSucceeded", None), ("nodesExamined", True), ("nodesExamined", 1), ("nodesExamined", 17),
+                           ("setterSucceeded", None), ("nodesExamined", True), ("nodesExamined", 1), ("nodesExamined", 49),
                            ("url", "PRIVATE"), ("attempts", 2)):
             value = deepcopy(good); value["accessibility"]["rowSelection"][field] = bad
             expected = deepcopy(value); expected["accessibility"] = None
@@ -816,7 +816,7 @@ class AquaDataTests(unittest.TestCase):
                 checks={key: index < 2 for index, key in enumerate(M.ACCESSIBILITY_BUTTON_CHECKS)},
                 axError=-25204 if error == "cannot-complete" else 0)
             sample["rowSelection"].update(attempted=attempted, returned=returned, setterSucceeded=status,
-                checks=dict.fromkeys(M.ACCESSIBILITY_SELECTION_CHECKS, attempted), nodesExamined=4 if error == "ambiguous" else 2)
+                checks=dict.fromkeys(M.ACCESSIBILITY_SELECTION_CHECKS, attempted), nodesExamined=36 if error == "ambiguous" else 2)
             if error == "objc-exception":
                 sample.update(state="unknown", custodyKnown=False, receiptJoined=False, barrierRetired=False)
                 sample["promptButton"].update(cleanupReturned=False, cfSlotsRetired=0)
@@ -843,6 +843,65 @@ class AquaDataTests(unittest.TestCase):
             value = deepcopy(good); value["accessibility"]["selectedTarget"] = selected
             expected = deepcopy(value); expected["accessibility"] = None
             self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), expected, selected)
+
+    def test_selection_capacity_preserves_wide_scalars_and_role_specific_geometry(self):
+        # Decoder DATA, not evidence of a native layout or a successful setter.
+        for nodes in (17, 36, 48):
+            result = M.expected_result(BINDING, "first-save")
+            result["native"]["projectOpenInput"]["rowSelection"]["nodesExamined"] = nodes
+            self.assertEqual(M.parse_result(captured(result), b"", BINDING, "first-save"), result)
+        for role in ("Table", "Outline"):
+            for count in (20, 32):
+                for site in ("selection-count-limit", "selection-copy-limit", "selection-node-limit"):
+                    #17+20 fits;17+32 exactly fills49. A local refusal cannot
+                    # claim either as an overflow under the successor policy.
+                    value = selection_limit_context_data(site, role, 3, 12, 17, count)
+                    expected = deepcopy(value); expected["accessibility"] = None
+                    self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), expected,
+                                     (role, count, site))
+            for site in ("selection-count-limit", "selection-copy-limit"):
+                value = selection_limit_context_data(site, role, 3, 12, 17, 33)
+                self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), value)
+            # Count/Copy's row bound wins before depth/queue capacity decisions.
+            value = selection_limit_context_data("selection-node-limit", role, 3, 12, 17, 33)
+            expected = deepcopy(value); expected["accessibility"] = None
+            self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), expected)
+        value = selection_limit_context_data("selection-count-limit", "Group", 3, 12, 17, 17)
+        self.assertEqual(M.failure_context(b"", context_row(value), "first-save"), value)
+
+    def test_post_selection_common_limit_preserves_effect_and_unknown_retirement(self):
+        value = accessibility_context_data(); sample = value["accessibility"]
+        sample.update(attempted=False, pressReturned=False, triggered=None, site="control-projection", error="limit",
+                      originalProof=None, selectedTarget=None, promptChecks={"initial": True, "final": None})
+        sample["rowSelection"]["nodesExamined"] = 36
+        sample["promptButton"].update(calls=512, cfSlots=256, cfSlotsRetired=256,
+            initialNodesExamined=3, recheckNodesExamined=0, lastRole="Group", lastDepth=2,
+            checks={key: index < 2 for index, key in enumerate(M.ACCESSIBILITY_BUTTON_CHECKS)})
+        for known in (True, False):
+            frame = deepcopy(value); failed = frame["accessibility"]
+            if not known:
+                failed.update(state="unknown", custodyKnown=False, receiptJoined=False, barrierRetired=False)
+                failed["promptButton"].update(cleanupReturned=False, cfSlotsRetired=16)
+            self.assertEqual(M.failure_context(b"", context_row(frame), "first-save"), frame)
+            self.assertTrue(M._row_selection_succeeded(failed["rowSelection"]))
+            self.assertFalse(M._accessibility_succeeded(failed))
+            self.assertTrue(failed["workerJoined"])  # Actual join does not repair uncertain CF retirement.
+            self.assertEqual(failed["rowSelection"], sample["rowSelection"])
+            result = M.expected_result(BINDING, "first-save"); result["native"]["projectOpenInput"] = deepcopy(failed)
+            with self.assertRaises(M.Refused): M.parse_result(captured(result), b"", BINDING, "first-save")
+            mutations = [("rowSelection.attempted", False), ("rowSelection.returned", False),
+                ("rowSelection.setterSucceeded", None), ("attempted", True), ("pressReturned", True),
+                ("triggered", True), ("error", "none"), ("promptButton.calls", 513),
+                ("promptButton.cfSlots", 257), ("promptButton.initialNodesExamined", 17)]
+            if not known:
+                mutations += [("custodyKnown", True), ("receiptJoined", True), ("barrierRetired", True),
+                              ("promptButton.cleanupReturned", True)]
+            for path, invalid in mutations:
+                bad = deepcopy(frame); target = bad["accessibility"]; parts = path.split(".")
+                for part in parts[:-1]: target = target[part]
+                target[parts[-1]] = invalid
+                expected = deepcopy(bad); expected["accessibility"] = None
+                self.assertEqual(M.failure_context(b"", context_row(bad), "first-save"), expected, (known, path))
 
     def test_selection_limit_tuple_and_cleanup_history_are_failure_only(self):
         self.assertEqual({shape[0] for shape in SELECTION_LIMIT_SHAPES}, M.ACCESSIBILITY_SELECTION_LIMIT_SITES)
@@ -880,7 +939,8 @@ class AquaDataTests(unittest.TestCase):
 
         for site, depth, count in (("selection-count-limit", 3, 17), ("selection-copy-limit", 3, -1),
                                   ("selection-node-limit", 3, 1), ("selection-depth-limit", 8, 1)):
-            value = selection_limit_context_data(site, "ScrollArea", depth, 12, 17, count)
+            value = selection_limit_context_data(site, "ScrollArea", depth, 12,
+                                                 49 if site == "selection-node-limit" else 17, count)
             for key in value["accessibility"]["rowSelection"]:
                 bad = deepcopy(value); del bad["accessibility"]["rowSelection"][key]
                 reject(bad, (site, "missing-row-field", key))
@@ -897,7 +957,7 @@ class AquaDataTests(unittest.TestCase):
                 ("count", True), ("count", False), ("count", 17.0), ("count", -1.0), ("count", "17"),
                 ("count", 1 << 63), ("count", -(1 << 63) - 1),
                 ("queuedNodes", True), ("queuedNodes", False), ("queuedNodes", 17.0), ("queuedNodes", -1),
-                ("queuedNodes", 0), ("queuedNodes", 1), ("queuedNodes", 12), ("queuedNodes", 18), ("queuedNodes", 1 << 32),
+                ("queuedNodes", 0), ("queuedNodes", 1), ("queuedNodes", 12), ("queuedNodes", 50), ("queuedNodes", 1 << 32),
                 ("role", True), ("role", None), ("role", "Row"), ("role", "Button"), ("role", "Browser"),
                 ("role", "opaque"), ("role", "not-read"), ("role", "Window"), ("role", "unknown")):
                 bad = deepcopy(value); bad["accessibility"]["rowSelection"]["limit"][key] = invalid
@@ -914,7 +974,7 @@ class AquaDataTests(unittest.TestCase):
                 selection["nodesExamined"] = nodes
                 selection["limit"].update(role=role, depth=local_depth, queuedNodes=queued)
                 reject(bad, (site, role, local_depth, nodes, queued))
-            for invalid in (True, 12.0, -1, 0, 17):
+            for invalid in (True, 12.0, -1, 0, 49):
                 bad = deepcopy(value); bad["accessibility"]["rowSelection"]["nodesExamined"] = invalid
                 reject(bad, (site, "nodes", invalid))
             for key in M.ACCESSIBILITY_SELECTION_CHECKS:
@@ -964,11 +1024,11 @@ class AquaDataTests(unittest.TestCase):
             self.assertFalse(M._row_selection_succeeded(success["accessibility"]["rowSelection"]))
             self.assertFalse(M._accessibility_succeeded(success["accessibility"]))
             reject(success, (site, "tuple-on-success"))
-        for shape in (("selection-node-limit", "Group", 1, 1, 2, 15),  # Exactly remaining capacity, no overflow.
+        for shape in (("selection-node-limit", "Group", 3, 12, 34, 15),  # Exactly remaining capacity, no overflow.
                       ("selection-node-limit", "Sheet", 0, 0, 1, 16),
                       ("selection-depth-limit", "Sheet", 0, 0, 1, 16),
-                      ("selection-node-limit", "Group", 8, 8, 17, 1),
-                      ("selection-depth-limit", "Group", 7, 7, 17, 1)):
+                      ("selection-node-limit", "Group", 8, 8, 49, 1),
+                      ("selection-depth-limit", "Group", 7, 7, 49, 1)):
             reject(selection_limit_context_data(*shape), shape)
 
     def test_selection_limit_context_and_result_envelopes_remain_bounded(self):
@@ -976,7 +1036,8 @@ class AquaDataTests(unittest.TestCase):
         sizes = []
         for site, depth, count in (("selection-count-limit", 3, (1 << 63) - 1), ("selection-copy-limit", 8, -(1 << 63)),
                                   ("selection-node-limit", 7, 16), ("selection-depth-limit", 8, 16)):
-            detail = selection_limit_context_data(site, "ScrollArea", depth, 12, 17, count)
+            detail = selection_limit_context_data(site, "ScrollArea", depth, 12,
+                                                  49 if site == "selection-node-limit" else 17, count)
             detail["accessibilityBinding"] = binding_context_data()["accessibilityBinding"]
             detail["originalWindow"] = deepcopy(M.expected_result(BINDING, "first-save")["native"]["originalWindow"])
             marker = (b"MRK_MACOS_AQUA_FAILURE_STEP=OpenProject\nMRK_MACOS_AQUA_FAILURE_REASON=native-default-input\n"
@@ -1880,7 +1941,7 @@ class AquaDataTests(unittest.TestCase):
         for fact in ("kAXURLAttribute", "CFURLGetTypeID()", "CFURLCopyScheme", 'CFSTR("file")',
                      "CFURLGetFileSystemRepresentation", "strcmp((const char *)path, target)",
                      "kAXRowsAttribute", "MRK_ROLE_TABLE", "MRK_ROLE_OUTLINE", "MRK_ROLE_SCROLL_AREA",
-                     "kAXRowRole", "MRK_CONTROL_NODES - queued", "pass->depths[at] == MRK_CONTROL_DEPTH",
+                     "kAXRowRole", "MRK_SELECTION_NODES - queued", "pass->depths[at] == MRK_CONTROL_DEPTH",
                      "pass->nodes[other]", "kAXParentAttribute", "selection_nodes_examined++"):
             self.assertIn(fact, selected)
         for forbidden in ("kAXTitleAttribute", "kAXSelectedAttribute", "kAXBrowserRole", "last_role =", "last_depth =",
@@ -1888,6 +1949,9 @@ class AquaDataTests(unittest.TestCase):
             self.assertNotIn(forbidden, selected)
         roster = selected.split("static BOOL mrk_ax_selection_roster(", 1)[1].split("static BOOL mrk_ax_select_row(", 1)[0]
         self.assertIn("if (matches != 1) return mrk_ax_fail(s, matches ? MRK_OPEN_AMBIGUOUS : MRK_OPEN_UNSUPPORTED)", roster)
+        self.assertIn("for (unsigned at = 0; at < queued; ++at)", roster)
+        self.assertIn("if (matched) { matches++; pass->candidate = at; }", roster)
+        self.assertNotIn("break;", roster.split("if (matches != 1)", 1)[0])
         self.assertNotIn("return YES", roster.split("if (matches != 1)", 1)[0])
         self.assertLess(roster.index("if (matches != 1)"), roster.index("selection_checks |= 1u"))
         self.assertEqual(native.count("AXUIElementIsAttributeSettable("), 1)
@@ -1933,6 +1997,16 @@ class AquaDataTests(unittest.TestCase):
         rust = (desktop / "native/macos-installed-native/src/lib.rs").read_text(encoding="utf-8")
         observer = (desktop / "src-tauri/src/installed_shell_observation_macos.rs").read_text(encoding="utf-8")
         qualification = PATH.read_text(encoding="utf-8")
+        for bound in ("MRK_SELECTION_NODES = 49", "MRK_SELECTION_ROWS = 32"):
+            self.assertIn(bound, native)
+        control_storage = native.split("} MRKControlPass;", 1)[0].rsplit("typedef struct {", 1)[1]
+        selection_storage = native.split("} MRKSelectionPass;", 1)[0].rsplit("typedef struct {", 1)[1]
+        for field in ("nodes", "parents", "depths", "roles"):
+            self.assertIn(f"{field}[MRK_CONTROL_NODES]", control_storage)
+            self.assertIn(f"{field}[MRK_SELECTION_NODES]", selection_storage)
+        self.assertIn("chain[MRK_CONTROL_DEPTH + 1]", selection_storage)
+        self.assertIn("const MRKSelectionPass *pass", native)
+        self.assertIn("MRKSelectionPass selection = {0};", native)
         helper = native.split("static BOOL mrk_ax_selection_limit(", 1)[1].split("static uint32_t mrk_ax_role(", 1)[0]
         gate = "if (s->result.site == MRK_OPEN_SELECTION && !s->result.error) {"
         for fact in ("s->result.site = site", "s->result.last_role = role", "s->result.last_depth = depth",
@@ -1961,11 +2035,11 @@ class AquaDataTests(unittest.TestCase):
                         "mrk_ax_array(s, node, kAXChildrenAttribute, 16, at != 0, 0, 0, 0)"):
             self.assertEqual(native.count(context), 1)
         roster = native.split("static BOOL mrk_ax_selection_roster(", 1)[1].split("static BOOL mrk_ax_select_row(", 1)[0]
-        self.assertIn("mrk_ax_array(s, node, rows ? kAXRowsAttribute : kAXChildrenAttribute, 16, at != 0,\n"
+        self.assertIn("mrk_ax_array(s, node, rows ? kAXRowsAttribute : kAXChildrenAttribute, rows ? MRK_SELECTION_ROWS : 16, at != 0,\n"
                       "            kind, pass->depths[at], queued)", roster)
         depth = ("if (count && pass->depths[at] == MRK_CONTROL_DEPTH)\n"
                  "            return mrk_ax_selection_limit(s, MRK_OPEN_SELECTION_DEPTH_LIMIT, kind, pass->depths[at], queued, count)")
-        nodes = ("if ((unsigned)count > MRK_CONTROL_NODES - queued)\n"
+        nodes = ("if ((unsigned)count > MRK_SELECTION_NODES - queued)\n"
                  "            return mrk_ax_selection_limit(s, MRK_OPEN_SELECTION_NODE_LIMIT, kind, pass->depths[at], queued, count)")
         self.assertLess(roster.index("CFIndex count = CFArrayGetCount(children)"), roster.index(depth))
         self.assertLess(roster.index(depth), roster.index(nodes))
@@ -1983,19 +2057,22 @@ class AquaDataTests(unittest.TestCase):
                      "w.initial_nodes_examined != 0", "w.recheck_nodes_examined != 0",
                      "w.selection_checks != 0", "w.selection_flags != 0", "w.calls == 0", "w.owned == 0",
                      "!rechecks[0].is_some_and(OpenRecheckReturn::matched)", "rechecks[1].is_some()",
-                     "!(1..=17).contains(&w.selection_limit_queued)", "w.selection_limit_queued < w.selection_nodes_examined + 1",
+                     "!(1..=49).contains(&w.selection_limit_queued)", "w.selection_limit_queued < w.selection_nodes_examined + 1",
                      "w.last_role == 1 && w.last_depth == 0 && w.selection_nodes_examined == 0",
                      "w.selection_limit_queued == 1", "matches!(w.last_role, 2 | 3 | 6 | 7 | 8)",
-                     "w.last_depth <= w.selection_nodes_examined", "22 => count > 16 && (root || container)",
-                     "23 => (count < 0 || count > 16) && (root || container)",
-                     "24 => (1..=16).contains(&count) && count > i64::from(17 - w.selection_limit_queued)",
-                     "&& container && w.last_depth < 8", "25 => (1..=16).contains(&count) && container && w.last_depth == 8",
+                     "w.last_depth <= w.selection_nodes_examined", "if matches!(w.last_role, 6 | 7) { 32 } else { 16 }",
+                     "22 => count > array_limit && (root || container)",
+                     "23 => (count < 0 || count > array_limit) && (root || container)",
+                     "24 => (1..=array_limit).contains(&count) && count > i64::from(49 - w.selection_limit_queued)",
+                     "&& container && w.last_depth < 8", "25 => (1..=array_limit).contains(&count) && container && w.last_depth == 8",
                      "if w.selection_limit_queued != 0 || w.selection_limit_count != 0 { return None; }"):
             self.assertIn(fact, local)
         self.assertIn(".get(if limit.is_some() { 0 } else { w.last_role as usize })?", wire)
         self.assertIn("last_depth: if limit.is_some() { 0 } else { w.last_depth }", wire)
         self.assertIn("|| limit.is_none() && w.last_depth > w.initial_nodes_examined.max(w.recheck_nodes_examined)", wire)
         selection = rust.split("impl RowSelectionProof {", 1)[1].split("pub struct ControlContainerButtonProof", 1)[0]
+        self.assertIn("(2..=48).contains(&self.nodes_examined)", selection)
+        self.assertIn("w.selection_nodes_examined > 48", wire)
         self.assertIn("&& self.limit.is_none()", selection)
         rendered = observer.split("fn row_selection_value(", 1)[1].split("struct OpenActionReceipt", 1)[0]
         self.assertIn('p.limit.map(|l| json!({"role":l.role,"depth":l.depth,"count":l.count,"queuedNodes":l.queued_nodes}))', rendered)

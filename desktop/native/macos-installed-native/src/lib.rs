@@ -590,7 +590,7 @@ mod observation {
     }
     impl RowSelectionProof {
         pub fn matched(self) -> bool {
-            self.checks == [true; 3] && (2..=16).contains(&self.nodes_examined)
+            self.checks == [true; 3] && (2..=48).contains(&self.nodes_examined)
                 && self.attempted && self.returned && self.setter_succeeded == Some(true)
                 && self.limit.is_none()
         }
@@ -639,7 +639,7 @@ mod observation {
             || w.last_depth > 8 || w.owned > 256 || w.released > w.owned
             || !(w.ax_error == 0 || (-25214..=-25200).contains(&w.ax_error))
             || !matches!(w.selection_checks, 0 | 1 | 3 | 7) || !matches!(w.selection_flags, 0 | 1 | 3 | 7)
-            || w.selection_nodes_examined > 16 { return None; }
+            || w.selection_nodes_examined > 48 { return None; }
         let limit = if matches!(w.site, 22..=25) {
             // Only these first local refusals may reuse the raw role/depth.
             // Validate them before excluding that geometry from button DATA.
@@ -647,19 +647,20 @@ mod observation {
                 || w.initial_nodes_examined != 0 || w.recheck_nodes_examined != 0
                 || w.selection_checks != 0 || w.selection_flags != 0 || w.calls == 0 || w.owned == 0
                 || !rechecks[0].is_some_and(OpenRecheckReturn::matched) || rechecks[1].is_some()
-                || !(1..=17).contains(&w.selection_limit_queued)
+                || !(1..=49).contains(&w.selection_limit_queued)
                 || w.selection_limit_queued < w.selection_nodes_examined + 1 { return None; }
             let root = w.last_role == 1 && w.last_depth == 0 && w.selection_nodes_examined == 0
                 && w.selection_limit_queued == 1;
             let container = matches!(w.last_role, 2 | 3 | 6 | 7 | 8)
                 && (1..=8).contains(&w.last_depth) && w.last_depth <= w.selection_nodes_examined;
             let count = w.selection_limit_count;
+            let array_limit = if matches!(w.last_role, 6 | 7) { 32 } else { 16 };
             let local_site = match w.site {
-                22 => count > 16 && (root || container),
-                23 => (count < 0 || count > 16) && (root || container),
-                24 => (1..=16).contains(&count) && count > i64::from(17 - w.selection_limit_queued)
+                22 => count > array_limit && (root || container),
+                23 => (count < 0 || count > array_limit) && (root || container),
+                24 => (1..=array_limit).contains(&count) && count > i64::from(49 - w.selection_limit_queued)
                     && container && w.last_depth < 8,
-                25 => (1..=16).contains(&count) && container && w.last_depth == 8,
+                25 => (1..=array_limit).contains(&count) && container && w.last_depth == 8,
                 _ => false,
             };
             if !local_site { return None; }
@@ -939,8 +940,13 @@ mod observation {
         target[100] = 1; if selection_target(&target) { return false; }
         for bad in [OpenWire { selection_checks: 3, ..full }, OpenWire { selection_flags: 3, ..full },
             OpenWire { selection_flags: 0, ..full }, OpenWire { selection_nodes_examined: 1, ..full },
-            OpenWire { selection_nodes_examined: 17, ..full }] {
+            OpenWire { selection_nodes_examined: 49, ..full }] {
             if open_return(bad, rechecks, true).is_some() { return false; }
+        }
+        // Widened selection DATA survives unchanged; control/global bounds do not widen.
+        for nodes in [17, 36, 48] {
+            if !open_return(OpenWire { selection_nodes_examined: nodes, ..full }, rechecks, true)
+                .is_some_and(|r| r.selection.nodes_examined == nodes && r.succeeded()) { return false; }
         }
         if recheck_return(rw, 2).is_some() || recheck_return(RecheckWire { selected_target: 3, ..rw }, 1).is_some()
             || open_return(full, [Some(recheck); 2], true).is_some() { return false; }
@@ -952,8 +958,8 @@ mod observation {
                 !r.attempted && r.selection.matched() && r.selected_target == refused.selected_target && !r.succeeded())
                 || open_return(full, [Some(recheck), Some(refused)], true).is_some() { return false; }
         }
-        for (selection_checks, selection_nodes_examined, error) in [(0, 2, 4), (0, 4, 5), (0, 2, 6),
-            (1, 2, 13), (3, 2, 4), (0, 16, 7)] {
+        for (selection_checks, selection_nodes_examined, error) in [(0, 2, 4), (0, 36, 5), (0, 2, 6),
+            (1, 2, 13), (3, 2, 4), (0, 48, 7)] {
             let wire = OpenWire { flags: 8, checks: 3, site: 20, error, selection_checks, selection_flags: 0,
                 selection_nodes_examined, initial_nodes_examined: 0, recheck_nodes_examined: 0,
                 last_role: 0, last_depth: 0, ..full };
@@ -978,6 +984,27 @@ mod observation {
                     }
                 }
             }
+        }
+        // SelectedRows precedes the control passes. A later common-budget refusal
+        // preserves its completed effect, never inventing Press or finality.
+        let budget_limited = OpenWire { flags: 8, site: 7, error: 7, checks: 3, calls: 512,
+            initial_nodes_examined: 3, recheck_nodes_examined: 0, owned: 256, released: 256,
+            last_role: 2, last_depth: 2, selection_nodes_examined: 36, ..full };
+        for (flags, released, known) in [(8, 256, true), (8, 256, false), (0, 16, false), (0, 16, true)] {
+            let Some(r) = open_return(OpenWire { flags, released, ..budget_limited }, [Some(recheck), None], known)
+                else { return false; };
+            if r.selection != (RowSelectionProof { nodes_examined: 36, ..success.selection })
+                || r.diagnostic != (OpenDiagnostic { site: "control-projection", error: "limit" })
+                || r.attempted || r.press_returned || r.triggered.is_some() || r.selected_target.is_some()
+                || r.proof.is_some() || r.succeeded() || r.custody_known != (known && flags & 8 != 0)
+                || r.button.calls != 512 || r.button.cf_slots != 256 || r.button.cf_slots_retired != released
+                || r.button.cleanup_returned != (flags & 8 != 0) { return false; }
+        }
+        for bad in [OpenWire { selection_flags: 0, ..budget_limited }, OpenWire { selection_checks: 0, ..budget_limited },
+            OpenWire { flags: 9, ..budget_limited }, OpenWire { error: 0, ..budget_limited },
+            OpenWire { calls: 513, ..budget_limited }, OpenWire { owned: 257, released: 257, ..budget_limited },
+            OpenWire { initial_nodes_examined: 17, ..budget_limited }, OpenWire { released: 16, ..budget_limited }] {
+            if open_return(bad, [Some(recheck), None], true).is_some() { return false; }
         }
         for (initial, recheck, depth) in [(1, 1, 1), (4, 6, 3), (16, 16, 8)] {
             if !open_return(OpenWire { initial_nodes_examined: initial, recheck_nodes_examined: recheck, last_depth: depth, ..full }, rechecks, true)
@@ -1044,9 +1071,8 @@ mod observation {
                     || open_return(OpenWire { site, ..full }, rechecks, true).is_some() { return false; }
             }
         }
-        // Synthetic local-refusal DATA, not an observed layout or array size.
-        // The 12-node/100-call/45-slot prefix does NOT assert what role, depth,
-        // count or queued occupancy the prior native failure actually had.
+        // Synthetic successor-policy DATA, not observed layouts. The historical
+        // Outline20 refusal remains bound to its original16/17 source policy.
         for (site, label, role, name, depth, nodes, queued, count) in [
             (22, "selection-count-limit", 1, "Sheet", 0, 0, 1, 17),
             (22, "selection-count-limit", 1, "Sheet", 0, 0, 1, i64::MAX),
@@ -1054,7 +1080,7 @@ mod observation {
             (22, "selection-count-limit", 3, "SplitGroup", 8, 8, 9, i64::MAX),
             (22, "selection-count-limit", 8, "ScrollArea", 3, 12, 17, 17),
             (22, "selection-count-limit", 6, "Table", 1, 1, 2, i64::MAX),
-            (22, "selection-count-limit", 7, "Outline", 8, 16, 17, 17),
+            (22, "selection-count-limit", 7, "Outline", 8, 48, 49, 33),
             (23, "selection-copy-limit", 1, "Sheet", 0, 0, 1, i64::MIN),
             (23, "selection-copy-limit", 1, "Sheet", 0, 0, 1, -1),
             (23, "selection-copy-limit", 1, "Sheet", 0, 0, 1, 17),
@@ -1062,18 +1088,18 @@ mod observation {
             (23, "selection-copy-limit", 2, "Group", 1, 1, 2, -1),
             (23, "selection-copy-limit", 3, "SplitGroup", 8, 8, 9, i64::MIN),
             (23, "selection-copy-limit", 8, "ScrollArea", 3, 12, 17, i64::MAX),
-            (23, "selection-copy-limit", 6, "Table", 1, 1, 2, 17),
-            (23, "selection-copy-limit", 7, "Outline", 8, 16, 17, i64::MIN),
-            (24, "selection-node-limit", 2, "Group", 1, 1, 2, 16),
-            (24, "selection-node-limit", 3, "SplitGroup", 7, 7, 8, 10),
-            (24, "selection-node-limit", 8, "ScrollArea", 3, 12, 17, 1),
-            (24, "selection-node-limit", 6, "Table", 1, 1, 17, 16),
-            (24, "selection-node-limit", 7, "Outline", 7, 16, 17, 1),
+            (23, "selection-copy-limit", 6, "Table", 1, 1, 2, 33),
+            (23, "selection-copy-limit", 7, "Outline", 8, 48, 49, i64::MIN),
+            (24, "selection-node-limit", 2, "Group", 3, 12, 34, 16),
+            (24, "selection-node-limit", 3, "SplitGroup", 7, 20, 40, 10),
+            (24, "selection-node-limit", 8, "ScrollArea", 3, 12, 49, 1),
+            (24, "selection-node-limit", 6, "Table", 3, 12, 18, 32),
+            (24, "selection-node-limit", 7, "Outline", 7, 48, 49, 1),
             (25, "selection-depth-limit", 2, "Group", 8, 8, 9, 1),
             (25, "selection-depth-limit", 3, "SplitGroup", 8, 8, 9, 8),
             (25, "selection-depth-limit", 8, "ScrollArea", 8, 12, 17, 16),
-            (25, "selection-depth-limit", 6, "Table", 8, 8, 9, 9),
-            (25, "selection-depth-limit", 7, "Outline", 8, 16, 17, 16)] {
+            (25, "selection-depth-limit", 6, "Table", 8, 8, 49, 32),
+            (25, "selection-depth-limit", 7, "Outline", 8, 48, 49, 32)] {
             let failed = OpenWire { flags: 8, site, error: 7, checks: 3, calls: 100, owned: 45, released: 45,
                 initial_nodes_examined: 0, recheck_nodes_examined: 0, last_role: role, last_depth: depth,
                 selection_checks: 0, selection_flags: 0, selection_nodes_examined: nodes,
@@ -1107,8 +1133,8 @@ mod observation {
                 OpenWire { selection_checks: 1, ..failed }, OpenWire { selection_checks: 3, ..failed },
                 OpenWire { selection_checks: 7, ..failed }, OpenWire { selection_flags: 1, ..failed },
                 OpenWire { selection_flags: 3, ..failed }, OpenWire { selection_flags: 7, ..failed },
-                OpenWire { selection_nodes_examined: 17, ..failed }, OpenWire { selection_limit_queued: 0, ..failed },
-                OpenWire { selection_limit_queued: 18, ..failed }, OpenWire { selection_limit_queued: nodes, ..failed },
+                OpenWire { selection_nodes_examined: 49, ..failed }, OpenWire { selection_limit_queued: 0, ..failed },
+                OpenWire { selection_limit_queued: 50, ..failed }, OpenWire { selection_limit_queued: nodes, ..failed },
                 OpenWire { last_role: 0, ..failed }, OpenWire { last_role: 4, ..failed }, OpenWire { last_role: 5, ..failed },
                 OpenWire { last_role: 9, ..failed }, OpenWire { last_role: 10, ..failed }, OpenWire { last_role: u32::MAX, ..failed },
                 OpenWire { last_depth: 9, ..failed }, OpenWire { last_role: 1, last_depth: 1, ..failed },
@@ -1118,8 +1144,10 @@ mod observation {
                 OpenWire { last_role: 1, last_depth: 0, selection_nodes_examined: 1, selection_limit_queued: 2, ..failed }] {
                 if open_return(bad, [Some(recheck), None], true).is_some() { return false; }
             }
+            let array_limit = if matches!(role, 6 | 7) { 32 } else { 16 };
             let invalid_counts: &[i64] = match site {
-                22 => &[i64::MIN, -1, 0, 1, 16], 23 => &[0, 1, 16], _ => &[i64::MIN, -1, 0, 17, i64::MAX],
+                22 => &[i64::MIN, -1, 0, 1, array_limit], 23 => &[0, 1, array_limit],
+                _ => &[i64::MIN, -1, 0, array_limit + 1, i64::MAX],
             };
             for &selection_limit_count in invalid_counts {
                 if open_return(OpenWire { selection_limit_count, ..failed }, [Some(recheck), None], true).is_some() { return false; }
@@ -1139,15 +1167,26 @@ mod observation {
                 selection_limit_queued: 0, selection_limit_count: 0, ..failed };
             if !open_return(generic, [Some(recheck), None], true).is_some_and(|r| r.selection.limit.is_none() && !r.succeeded()) { return false; }
         }
-        let geometry = OpenWire { flags: 8, site: 24, error: 7, checks: 3, last_role: 2, last_depth: 1,
+        let geometry = OpenWire { flags: 8, site: 24, error: 7, checks: 3, last_role: 2, last_depth: 3,
             initial_nodes_examined: 0, recheck_nodes_examined: 0, selection_checks: 0, selection_flags: 0,
-            selection_nodes_examined: 1, selection_limit_queued: 2, selection_limit_count: 16, ..full };
-        for bad in [OpenWire { selection_limit_count: 15, ..geometry }, // No node overflow at queue2.
+            selection_nodes_examined: 12, selection_limit_queued: 34, selection_limit_count: 16, ..full };
+        for bad in [OpenWire { selection_limit_count: 15, ..geometry }, // Exactly the remaining15 slots.
             OpenWire { last_role: 1, last_depth: 0, selection_nodes_examined: 0, selection_limit_queued: 1, ..geometry },
-            OpenWire { last_depth: 8, selection_nodes_examined: 8, selection_limit_queued: 17, selection_limit_count: 1, ..geometry },
-            OpenWire { site: 25, last_depth: 7, selection_nodes_examined: 7, selection_limit_queued: 17, selection_limit_count: 1, ..geometry },
+            OpenWire { last_depth: 8, selection_nodes_examined: 8, selection_limit_queued: 49, selection_limit_count: 1, ..geometry },
+            OpenWire { site: 25, last_depth: 7, selection_nodes_examined: 7, selection_limit_queued: 49, selection_limit_count: 1, ..geometry },
             OpenWire { selection_limit_queued: 1, ..full }, OpenWire { selection_limit_count: 17, ..full }] {
             if open_return(bad, [Some(recheck), None], true).is_some() || open_return(bad, rechecks, true).is_some() { return false; }
+        }
+        // At queue17, both observed20 and the32-row bound fit; neither is a
+        // count/copy/node refusal under the successor policy. No native claim.
+        for role in [6, 7] {
+            for count in [20, 32] {
+                for site in [22, 23, 24] {
+                    let fits = OpenWire { site, last_role: role, selection_limit_queued: 17,
+                        selection_limit_count: count, ..geometry };
+                    if open_return(fits, [Some(recheck), None], true).is_some() { return false; }
+                }
+            }
         }
         let changed = recheck_return(RecheckWire { prompt: 2, error: 13, ..rw }, 2);
         if !changed.is_some_and(|r| r.custody_known && !r.matched()) { return false; }
