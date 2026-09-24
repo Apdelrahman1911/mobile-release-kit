@@ -3040,7 +3040,21 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertIn('proc_exec_original(Path::new(&format!("/proc/{id}/exe")), end, stop)?', checkpoint)
         self.assertLess(checkpoint.index("current.close()"), checkpoint.index("phase.observe("))
         self.assertNotIn("historical", checkpoint)
-        for start, end in (("    fn current_python_original(", "    fn proc_exec_name("),
+        acquired = supervisor.split("    fn proc_exec_original(", 1)[1].split("    fn exec_checkpoint(", 1)[0]
+        self.assertLess(acquired.index("proc_exec_link(path)?"), acquired.index(".open(path)"))
+        self.assertEqual(acquired.count(".open(path)"), 1)
+        self.assertIn("let inspected = inspected_owned_proc_exec(&file);", acquired)
+        self.assertNotIn("proc_exec_name(", acquired)
+        self.assertNotIn("inspected_proc_exec(path", acquired)
+        owned = supervisor.split("    fn inspected_owned_proc_exec(file: &fs::File)", 1)[1].split("    fn proc_exec_original(", 1)[0]
+        self.assertIn('PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()))', owned)
+        self.assertIn("let name = proc_exec_name(&path)?;", owned)
+        self.assertIn("inspected_proc_exec(&path, file, name)", owned)
+        for forbidden in (".open(", "from_raw_fd", "into_raw_fd", "try_clone", "dup(", "read_dir", "unsafe"):
+            self.assertNotIn(forbidden, owned)
+        inspector = supervisor.split("    fn inspected_proc_exec(", 1)[1].split("    fn inspected_owned_proc_exec(", 1)[0]
+        self.assertIn("coherent_exec_observation(before, held, after, last, &name, &last_name)?;", inspector)
+        for start, end in (("    fn current_python_original(", "    fn proc_exec_link("),
                            ("    fn proc_exec_original(", "    fn exec_checkpoint(")):
             opening = supervisor.split(start, 1)[1].split(end, 1)[0]
             self.assertEqual(opening.count("if !live(end, stop) { return Ok(None); }"), 2)
@@ -3063,6 +3077,11 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         for forbidden in ("fs::", ".open(", "original_bytes", "Instant::now", "watch::", "proc_exec_original("):
             self.assertNotIn(forbidden, contract)
         self.assertIn("for index in 0..11", contract)
+        self.assertIn("for samples in [[changed.identity, id, id, id]", contract)
+        self.assertIn("coherent_exec_observation(samples[0], samples[1], samples[2], samples[3], name, name)", contract)
+        self.assertIn("observed.map(|()| expected.clone())", contract)
+        self.assertIn("inspected(&parent)", contract)
+        self.assertIn("inspected(&python)", contract)
         self.assertIn("ExecPhase::RuntimeImage", contract)
         diagnostics = supervisor.split("    pub(super) fn assert_mappings_diagnostic_contract()", 1)[1].split("    fn child_snapshot(", 1)[0]
         self.assertIn("assert_exec_image_contract();", diagnostics)

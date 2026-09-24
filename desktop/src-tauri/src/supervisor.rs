@@ -2945,15 +2945,24 @@ mod installed_native_fixture {
         let inspected = checked_exec_identity(&path, &file).map(|identity| ExecImage { name: path.into_os_string(), identity });
         opened_exec_original(file, inspected).map(Some)
     }
-    fn proc_exec_name(path: &Path) -> Result<PathBuf, ObservationFailure> {
-        // Callers supply only /proc/self/exe or /proc/<retained Child::id>/exe.
+    fn proc_exec_link(path: &Path) -> Result<(), ObservationFailure> {
+        // Only fixed original exe links or a borrowed original File's own FD
+        // link reach this observer. FD links are inspected, never opened.
         // The already-admitted initial PID namespace is unchanged; verify this
         // fixed observation still addresses a genuine procfs magic link.
         let filesystem = rustix::fs::statfs(path.parent().ok_or(ObservationFailure::ExecCheck)?)
             .map_err(|_| ObservationFailure::ExecRead)?;
         let link = fs::symlink_metadata(path).map_err(|_| ObservationFailure::ExecRead)?;
-        need(filesystem.f_type as u64 == 0x9fa0 && link.file_type().is_symlink()).map_err(|_| ObservationFailure::ExecCheck)?;
+        need(filesystem.f_type as u64 == 0x9fa0 && link.file_type().is_symlink()).map_err(|_| ObservationFailure::ExecCheck)
+    }
+    fn proc_exec_name(path: &Path) -> Result<PathBuf, ObservationFailure> {
+        proc_exec_link(path)?;
         fs::read_link(path).map_err(|_| ObservationFailure::ExecRead)
+    }
+    fn coherent_exec_observation(before: ExecIdentity, held: ExecIdentity, after: ExecIdentity, last: ExecIdentity,
+        name: &Path, last_name: &Path) -> Result<(), ObservationFailure> {
+        need(held.protected() && before == held && after == held && last == held
+            && name.as_os_str() == last_name.as_os_str()).map_err(|_| ObservationFailure::ExecCheck)
     }
     fn inspected_proc_exec(path: &Path, file: &fs::File, name: PathBuf) -> Result<ExecImage, ObservationFailure> {
         let before = ExecIdentity::of(&fs::metadata(path).map_err(|_| ObservationFailure::ExecRead)?);
@@ -2961,20 +2970,29 @@ mod installed_native_fixture {
         let after = ExecIdentity::of(&fs::metadata(path).map_err(|_| ObservationFailure::ExecRead)?);
         let last_name = proc_exec_name(path)?;
         let last = ExecIdentity::of(&file.metadata().map_err(|_| ObservationFailure::ExecRead)?);
-        need(held.protected() && before == held && after == held && last == held
-            && name.as_os_str() == last_name.as_os_str()).map_err(|_| ObservationFailure::ExecCheck)?;
+        coherent_exec_observation(before, held, after, last, &name, &last_name)?;
         Ok(ExecImage { name: name.into_os_string(), identity: held })
+    }
+    fn inspected_owned_proc_exec(file: &fs::File) -> Result<ExecImage, ObservationFailure> {
+        use std::os::fd::AsRawFd;
+        // The File stays borrowed throughout. Sample its acquired image, not
+        // the child's moving exe link across a legitimate parent -> Python exec.
+        let path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
+        let name = proc_exec_name(&path)?;
+        inspected_proc_exec(&path, file, name)
     }
     fn proc_exec_original(path: &Path, end: Instant, stop: &watch::Receiver<bool>) -> Result<Option<ExecOriginal>, ObservationFailure> {
         if !live(end, stop) { return Ok(None); }
-        let name = proc_exec_name(path)?;
+        proc_exec_link(path)?;
         if !live(end, stop) { return Ok(None); }
         // ONLY these two genuine kernel exe links may be followed. Ordinary
         // payload names retain NOFOLLOW; no caller-controlled path is opened.
         let file = fs::OpenOptions::new().read(true)
             .custom_flags(flags() & !(rustix::fs::OFlags::NOFOLLOW.bits() as i32)).open(path)
             .map_err(|_| ObservationFailure::ExecRead)?;
-        let inspected = inspected_proc_exec(path, &file, name);
+        // Every fallible post-acquisition check is inside this Result so the
+        // original is checked-closed on error, not silently dropped by an early ?.
+        let inspected = inspected_owned_proc_exec(&file);
         opened_exec_original(file, inspected).map(Some)
     }
     fn exec_checkpoint(id: u32, end: Instant, stop: &watch::Receiver<bool>, python: &ExecOriginal,
@@ -2999,16 +3017,25 @@ mod installed_native_fixture {
             links: 1, size: 128, mtime: (7, 8), ctime: (9, 10) };
         let python = ExecImage { name: "/protected/python".into(), identity };
         let parent = ExecImage { name: "/protected/parent".into(), identity: ExecIdentity { inode: 3, ..identity } };
+        let inspected = |image: &ExecImage| {
+            coherent_exec_observation(image.identity, image.identity, image.identity, image.identity,
+                Path::new(&image.name), Path::new(&image.name)).map(|()| image.clone())
+        };
         let mut phase = ExecPhase::BeforeExec;
-        assert_eq!(phase.observe(&python, &parent, Ok(parent.clone())), Ok(false));
-        assert_eq!(phase.observe(&python, &parent, Ok(parent.clone())), Ok(false));
-        assert_eq!(phase.observe(&python, &parent, Ok(python.clone())), Ok(true));
+        assert_eq!(phase.observe(&python, &parent, inspected(&parent)), Ok(false));
+        assert_eq!(phase.observe(&python, &parent, inspected(&parent)), Ok(false));
+        assert_eq!(phase.observe(&python, &parent, inspected(&python)), Ok(true));
         assert_eq!(phase, ExecPhase::RuntimeImage);
         // This same latch is borrowed by the initial AND Overlap snapshots.
-        assert_eq!(phase.observe(&python, &parent, Ok(python.clone())), Ok(true));
-        assert_eq!(phase.observe(&python, &parent, Ok(parent.clone())), Err(ObservationFailure::ExecCheck));
+        assert_eq!(phase.observe(&python, &parent, inspected(&python)), Ok(true));
+        assert_eq!(phase.observe(&python, &parent, inspected(&parent)), Err(ObservationFailure::ExecCheck));
         assert_eq!(phase, ExecPhase::RuntimeImage);
         for expected in [&python, &parent] {
+            let name = Path::new(&expected.name);
+            let id = expected.identity;
+            for (first, last) in [(Path::new("/changed"), name), (name, Path::new("/changed"))] {
+                assert_eq!(coherent_exec_observation(id, id, id, id, first, last), Err(ObservationFailure::ExecCheck));
+            }
             for index in 0..11 {
                 let mut changed = (*expected).clone();
                 match index {
@@ -3020,6 +3047,16 @@ mod installed_native_fixture {
                 }
                 for mut phase in [ExecPhase::BeforeExec, ExecPhase::RuntimeImage] {
                     assert_eq!(phase.observe(&python, &parent, Ok(changed.clone())), Err(ObservationFailure::ExecCheck));
+                }
+                for samples in [[changed.identity, id, id, id], [id, changed.identity, id, id],
+                    [id, id, changed.identity, id], [id, id, id, changed.identity]] {
+                    let observed = coherent_exec_observation(samples[0], samples[1], samples[2], samples[3], name, name);
+                    assert_eq!(observed, Err(ObservationFailure::ExecCheck));
+                    for mut phase in [ExecPhase::BeforeExec, ExecPhase::RuntimeImage] {
+                        let before = phase;
+                        assert_eq!(phase.observe(&python, &parent, observed.map(|()| expected.clone())), Err(ObservationFailure::ExecCheck));
+                        assert_eq!(phase, before);
+                    }
                 }
             }
         }
@@ -3043,7 +3080,10 @@ mod installed_native_fixture {
             }
         }
         for mode in [0o040555, 0o120555, 0o100755 | 0o020, 0o100555 | 0o4000, 0o100444] {
-            assert!(!(ExecIdentity { mode, ..identity }).protected());
+            let changed = ExecIdentity { mode, ..identity };
+            assert!(!changed.protected());
+            assert_eq!(coherent_exec_observation(changed, changed, changed, changed,
+                Path::new(&python.name), Path::new(&python.name)), Err(ObservationFailure::ExecCheck));
         }
         for changed in [ExecIdentity { inode: 0, ..identity }, ExecIdentity { uid: 1, ..identity },
             ExecIdentity { gid: 1, ..identity }, ExecIdentity { links: 0, ..identity }, ExecIdentity { links: 2, ..identity },
@@ -3051,6 +3091,8 @@ mod installed_native_fixture {
             ExecIdentity { mtime: (7, 1_000_000_000), ..identity }, ExecIdentity { ctime: (9, -1), ..identity },
             ExecIdentity { ctime: (9, 1_000_000_000), ..identity }] {
             assert!(!changed.protected());
+            assert_eq!(coherent_exec_observation(changed, changed, changed, changed,
+                Path::new(&python.name), Path::new(&python.name)), Err(ObservationFailure::ExecCheck));
         }
     }
     fn run_number(name: &str) -> String {
