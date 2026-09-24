@@ -1369,7 +1369,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
 mod installed_native_fixture {
     use super::*;
-    use crate::installed_runtime::{HistoricalPayloadRole, HistoricalPayloadSnapshot};
+    use crate::installed_runtime::{HistoricalPayloadRelation, HistoricalPayloadRole, HistoricalPayloadSnapshot};
     use std::{fs, io::{Read, Write}, os::unix::fs::{MetadataExt, OpenOptionsExt}, path::{Path, PathBuf}};
     use rustix::process::{getrlimit, setrlimit, Resource, Rlimit};
 
@@ -2135,6 +2135,29 @@ mod installed_native_fixture {
         }
     }
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) enum HostedMapSpelling { ShellObserver, ShellNormal, PlatformTests, InstalledTests,
+        NativePython, NativeSsl, NativeCrypto, FixturePython, FixtureSsl, FixtureCrypto, OtherNative, OtherFixture }
+    impl HostedMapSpelling {
+        fn diagnostic_tokens(self) -> [&'static [u8]; 8] {
+            // Twelve literal spelling classes by eight numeric relations.
+            // No observed text or coordinate is copied into the original frame.
+            match self {
+                Self::ShellObserver => [b"map-xh-sz", b"map-xh-sa", b"map-xh-sp", b"map-xh-ss", b"map-xh-sc", b"map-xh-sm", b"map-xh-sd", b"map-xh-sx"],
+                Self::ShellNormal => [b"map-xh-nz", b"map-xh-na", b"map-xh-np", b"map-xh-ns", b"map-xh-nc", b"map-xh-nm", b"map-xh-nd", b"map-xh-nx"],
+                Self::PlatformTests => [b"map-xh-tz", b"map-xh-ta", b"map-xh-tp", b"map-xh-ts", b"map-xh-tc", b"map-xh-tm", b"map-xh-td", b"map-xh-tx"],
+                Self::InstalledTests => [b"map-xh-iz", b"map-xh-ia", b"map-xh-ip", b"map-xh-is", b"map-xh-ic", b"map-xh-im", b"map-xh-id", b"map-xh-ix"],
+                Self::NativePython => [b"map-xh-pz", b"map-xh-pa", b"map-xh-pp", b"map-xh-ps", b"map-xh-pc", b"map-xh-pm", b"map-xh-pd", b"map-xh-px"],
+                Self::NativeSsl => [b"map-xh-lz", b"map-xh-la", b"map-xh-lp", b"map-xh-ls", b"map-xh-lc", b"map-xh-lm", b"map-xh-ld", b"map-xh-lx"],
+                Self::NativeCrypto => [b"map-xh-cz", b"map-xh-ca", b"map-xh-cp", b"map-xh-cs", b"map-xh-cc", b"map-xh-cm", b"map-xh-cd", b"map-xh-cx"],
+                Self::FixturePython => [b"map-xh-qz", b"map-xh-qa", b"map-xh-qp", b"map-xh-qs", b"map-xh-qc", b"map-xh-qm", b"map-xh-qd", b"map-xh-qx"],
+                Self::FixtureSsl => [b"map-xh-rz", b"map-xh-ra", b"map-xh-rp", b"map-xh-rs", b"map-xh-rc", b"map-xh-rm", b"map-xh-rd", b"map-xh-rx"],
+                Self::FixtureCrypto => [b"map-xh-gz", b"map-xh-ga", b"map-xh-gp", b"map-xh-gs", b"map-xh-gc", b"map-xh-gm", b"map-xh-gd", b"map-xh-gx"],
+                Self::OtherNative => [b"map-xh-uz", b"map-xh-ua", b"map-xh-up", b"map-xh-us", b"map-xh-uc", b"map-xh-um", b"map-xh-ud", b"map-xh-ux"],
+                Self::OtherFixture => [b"map-xh-fz", b"map-xh-fa", b"map-xh-fp", b"map-xh-fs", b"map-xh-fc", b"map-xh-fm", b"map-xh-fd", b"map-xh-fx"],
+            }
+        }
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(super) enum MapMetadataRefusal { Stat, Type, Owner, Links, Mode, Inode, Device }
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(super) enum GenericMapPath { Version, Library, Command, Hosted, Memfd, Other }
@@ -2144,6 +2167,7 @@ mod installed_native_fixture {
         ExecutableAnonymous, ExecutablePseudo, ExecutableFile, ExecutablePublicPath(u16),
         ExecutableHistoricalPayload(HistoricalPayloadRole),
         ExecutableGenericFile { class: GenericMapPath, deleted: bool, historical_present: bool },
+        ExecutableHostedFile { spelling: HostedMapSpelling, relation: HistoricalPayloadRelation },
         Metadata(MapRole, MapMetadataRefusal), Duplicate(MapRole),
     }
     impl MapRefusal {
@@ -2172,6 +2196,12 @@ mod installed_native_fixture {
                     };
                     tokens[usize::from(deleted) * 2 + usize::from(historical_present)]
                 },
+                Self::ExecutableHostedFile { spelling, relation } => spelling.diagnostic_tokens()[match relation {
+                    HistoricalPayloadRelation::Zero => 0, HistoricalPayloadRelation::Ambiguous => 1,
+                    HistoricalPayloadRelation::PythonInode => 2, HistoricalPayloadRelation::SslInode => 3,
+                    HistoricalPayloadRelation::CryptoInode => 4, HistoricalPayloadRelation::MultipleInodes => 5,
+                    HistoricalPayloadRelation::DeviceOnly => 6, HistoricalPayloadRelation::Other => 7,
+                }],
                 Self::Metadata(role, reason) => role.diagnostic_tokens()[match reason {
                     MapMetadataRefusal::Stat => 0, MapMetadataRefusal::Type => 1, MapMetadataRefusal::Owner => 2,
                     MapMetadataRefusal::Links => 3, MapMetadataRefusal::Mode => 4, MapMetadataRefusal::Inode => 5,
@@ -2264,6 +2294,52 @@ mod installed_native_fixture {
         // includes mismatch, ambiguity and inode zero, not a runtime verdict.
         MapRefusal::ExecutableGenericFile { class, deleted, historical_present }
     }
+    fn hosted_map_spelling(path: &str) -> Option<HostedMapSpelling> {
+        // Lexical DATA from the same rejected row; no current-run inference.
+        let (native, rest) = if let Some(rest) = path.strip_prefix("/var/lib/mrk-ubuntu-native-") {
+            (true, rest)
+        } else if let Some(rest) = path.strip_prefix("/var/lib/mrk-ubuntu-shell-fixtures-") {
+            (false, rest)
+        } else { return None; };
+        let (ids, tail) = rest.split_once('/')?;
+        let (run, attempt) = ids.split_once('-')?;
+        let number = |value: &str| !value.is_empty() && value.len() <= 20 && !value.starts_with('0')
+            && value.bytes().all(|byte| byte.is_ascii_digit());
+        if tail.is_empty() || !number(run) || !number(attempt) { return None; }
+        if native {
+            match tail {
+                "shell-observer" => return Some(HostedMapSpelling::ShellObserver),
+                "shell-normal" => return Some(HostedMapSpelling::ShellNormal),
+                "platform-tests" => return Some(HostedMapSpelling::PlatformTests),
+                "installed-tests" => return Some(HostedMapSpelling::InstalledTests),
+                _ => {},
+            }
+        }
+        if tail.split('/').all(|component| !component.is_empty() && component != "." && component != "..") {
+            for (suffix, native_spelling, fixture_spelling) in [
+                ("python/bin/python3", HostedMapSpelling::NativePython, HostedMapSpelling::FixturePython),
+                ("python/lib/libssl.so.3", HostedMapSpelling::NativeSsl, HostedMapSpelling::FixtureSsl),
+                ("python/lib/libcrypto.so.3", HostedMapSpelling::NativeCrypto, HostedMapSpelling::FixtureCrypto),
+            ] {
+                if tail == suffix || tail.strip_suffix(suffix).is_some_and(|head| head.ends_with('/')) {
+                    return Some(if native { native_spelling } else { fixture_spelling });
+                }
+            }
+        }
+        Some(if native { HostedMapSpelling::OtherNative } else { HostedMapSpelling::OtherFixture })
+    }
+    fn hosted_executable_file_refusal(refusal: MapRefusal, path: &str, historical: Option<HistoricalPayloadSnapshot>,
+        major: u64, minor: u64, inode: u64) -> MapRefusal {
+        // Refine only the original nondeleted Hosted/history-present refusal.
+        // Public/unique-historical precedence and all admission stay unchanged.
+        if !matches!(refusal, MapRefusal::ExecutableGenericFile {
+            class: GenericMapPath::Hosted, deleted: false, historical_present: true,
+        }) { return refusal; }
+        let Some(history) = historical else { return refusal; };
+        let Some(spelling) = hosted_map_spelling(path) else { return refusal; };
+        let Some(relation) = history.coordinate_relation(major, minor, inode) else { return refusal; };
+        MapRefusal::ExecutableHostedFile { spelling, relation }
+    }
     fn role(path: &str) -> Option<MapRole> {
         for (role, suffix) in [(MapRole::Python, "/python/bin/python3"), (MapRole::Ssl, "/python/lib/libssl.so.3"),
             (MapRole::Crypto, "/python/lib/libcrypto.so.3")] {
@@ -2329,7 +2405,7 @@ mod installed_native_fixture {
                     if path.is_empty() { MapRefusal::ExecutableAnonymous } else { MapRefusal::ExecutablePseudo })?;
                 continue;
             }
-            let Some(role) = role(path) else { need(!executable).map_err(|_| generic_executable_file_refusal(historical_executable_file_refusal(executable_file_refusal(path), historical, major, minor, inode), path, historical.is_some()))?; continue; };
+            let Some(role) = role(path) else { need(!executable).map_err(|_| hosted_executable_file_refusal(generic_executable_file_refusal(historical_executable_file_refusal(executable_file_refusal(path), historical, major, minor, inode), path, historical.is_some()), path, historical, major, minor, inode))?; continue; };
             let st = fs::metadata(path).map_err(|_| MapRefusal::Metadata(role, MapMetadataRefusal::Stat))?;
             check_map_metadata(MapMetadata { regular: st.is_file(), uid: st.uid(), gid: st.gid(), links: st.nlink(), mode: st.mode(),
                 inode: st.ino(), major: nix::sys::stat::major(st.dev()), minor: nix::sys::stat::minor(st.dev()) }, inode, major, minor)
@@ -2346,7 +2422,10 @@ mod installed_native_fixture {
         // paths, so no filesystem, /proc reader or native worker is invoked.
         use MapRefusal as R;
         use GenericMapPath as G;
+        use HostedMapSpelling as H;
+        use HistoricalPayloadRelation as C;
         let generic = |class, deleted, historical_present| R::ExecutableGenericFile { class, deleted, historical_present };
+        let hosted = |spelling, relation| R::ExecutableHostedFile { spelling, relation };
         let mappings = |raw: &[u8]| self::mappings(raw, None);
         crate::installed_runtime::assert_historical_payload_diagnostic_contract();
         let failures: &[(&[u8], R)] = &[
@@ -2432,6 +2511,50 @@ mod installed_native_fixture {
         assert!(tokens.iter().all(|token| !token.is_empty() && token.len() <= 14
             && token.iter().all(|byte| byte.is_ascii_lowercase() || *byte == b'-')));
         tokens.sort(); tokens.dedup(); assert_eq!(tokens.len(), 88);
+        let hosted_spellings = [
+            (H::ShellObserver, b's', "/var/lib/mrk-ubuntu-native-1-2/shell-observer"),
+            (H::ShellNormal, b'n', "/var/lib/mrk-ubuntu-native-1-2/shell-normal"),
+            (H::PlatformTests, b't', "/var/lib/mrk-ubuntu-native-1-2/platform-tests"),
+            (H::InstalledTests, b'i', "/var/lib/mrk-ubuntu-native-1-2/installed-tests"),
+            (H::NativePython, b'p', "/var/lib/mrk-ubuntu-native-1-2/python/bin/python3"),
+            (H::NativeSsl, b'l', "/var/lib/mrk-ubuntu-native-1-2/python/lib/libssl.so.3"),
+            (H::NativeCrypto, b'c', "/var/lib/mrk-ubuntu-native-1-2/python/lib/libcrypto.so.3"),
+            (H::FixturePython, b'q', "/var/lib/mrk-ubuntu-shell-fixtures-1-2/python/bin/python3"),
+            (H::FixtureSsl, b'r', "/var/lib/mrk-ubuntu-shell-fixtures-1-2/python/lib/libssl.so.3"),
+            (H::FixtureCrypto, b'g', "/var/lib/mrk-ubuntu-shell-fixtures-1-2/python/lib/libcrypto.so.3"),
+            (H::OtherNative, b'u', "/var/lib/mrk-ubuntu-native-1-2/unlisted-fixture"),
+            (H::OtherFixture, b'f', "/var/lib/mrk-ubuntu-shell-fixtures-1-2/unlisted-fixture"),
+        ];
+        let plain_history = [(8, 1, 11), (8, 1, 22), (8, 1, 33)];
+        let hosted_relations = [
+            (C::Zero, b'z', plain_history, (0, 0, 0)),
+            (C::Ambiguous, b'a', [(8, 1, 11), (8, 1, 11), (8, 1, 33)], (8, 1, 11)),
+            (C::PythonInode, b'p', plain_history, (9, 2, 11)),
+            (C::SslInode, b's', plain_history, (9, 2, 22)),
+            (C::CryptoInode, b'c', plain_history, (9, 2, 33)),
+            (C::MultipleInodes, b'm', [(8, 1, 11), (8, 2, 11), (8, 3, 33)], (9, 4, 11)),
+            (C::DeviceOnly, b'd', plain_history, (8, 1, 99)),
+            (C::Other, b'x', plain_history, (9, 2, 99)),
+        ];
+        for (spelling, spelling_code, path) in hosted_spellings {
+            assert_eq!(role(path), None);
+            assert_eq!(executable_file_refusal(path), R::ExecutableFile);
+            assert_eq!(hosted_map_spelling(path), Some(spelling));
+            for (relation, relation_code, tuples, (major, minor, inode)) in hosted_relations {
+                let historical = Some(HistoricalPayloadSnapshot::for_contract(tuples));
+                let expected = hosted(spelling, relation);
+                let token = [b'm', b'a', b'p', b'-', b'x', b'h', b'-', spelling_code, relation_code];
+                assert_eq!(expected.token(), token.as_slice());
+                assert_eq!(self::mappings(format!("1-2 r-xp 0 {major:x}:{minor:x} {inode} {path}\n").as_bytes(), historical), Err(expected));
+                tokens.push(expected.token());
+            }
+            assert_eq!(self::mappings(format!("1-2 r--p 0 00:00 0 {path}\n").as_bytes(),
+                Some(HistoricalPayloadSnapshot::for_contract(plain_history))), Ok(None));
+        }
+        assert_eq!(tokens.len(), 184);
+        tokens.sort(); tokens.dedup(); assert_eq!(tokens.len(), 184);
+        assert!(tokens.iter().all(|token| token.len() <= 14
+            && token.iter().all(|byte| byte.is_ascii_lowercase() || *byte == b'-')));
 
         // Every new parser row is role(None): no existing metadata or /proc read.
         assert_eq!(PUBLIC_MAP_PATH_CANDIDATES.len(), 648);
@@ -2521,7 +2644,9 @@ mod installed_native_fixture {
                 for present in [false, true] {
                     let historical = if present { history } else { None };
                     let refusal = generic(class, deleted, present);
-                    assert_eq!(self::mappings(format!("1-2 r-xp 0 00:00 0 {path}\n").as_bytes(), historical), Err(refusal));
+                    assert_eq!(generic_executable_file_refusal(R::ExecutableFile, &path, present), refusal);
+                    let parser_refusal = if class == G::Hosted && !deleted && present { hosted(H::OtherNative, C::Zero) } else { refusal };
+                    assert_eq!(self::mappings(format!("1-2 r-xp 0 00:00 0 {path}\n").as_bytes(), historical), Err(parser_refusal));
                     assert_eq!(self::mappings(format!("1-2 r--p 0 00:00 0 {path}\n").as_bytes(), historical), Ok(None));
                     let token = [b'm', b'a', b'p', b'-', b'x', b'-', letter, b'-',
                         if deleted { b'd' } else { b'n' }, if present { b'p' } else { b'a' }];
@@ -2563,6 +2688,78 @@ mod installed_native_fixture {
         let mut bad_utf8 = vec![0xff]; bad_utf8.extend_from_slice(generic_first);
         assert_eq!(mappings(&bad_utf8), Err(R::Utf8));
         assert_eq!(mappings(&generic_first[..generic_first.len() - 1]), Err(R::Newline));
+
+        let check_hosted = |path: &str, expected: Option<H>| {
+            assert_eq!(role(path), None);
+            assert_eq!(executable_file_refusal(path), R::ExecutableFile);
+            assert_eq!(hosted_map_spelling(path), expected);
+            let refusal = expected.map_or(generic(G::Other, false, true), |spelling| hosted(spelling, C::Other));
+            assert_eq!(self::mappings(format!("1-2 r-xp 0 09:02 99 {path}\n").as_bytes(), history), Err(refusal));
+        };
+        for (prefix, native) in [("/var/lib/mrk-ubuntu-native-", true), ("/var/lib/mrk-ubuntu-shell-fixtures-", false)] {
+            let other = if native { H::OtherNative } else { H::OtherFixture };
+            let python = if native { H::NativePython } else { H::FixturePython };
+            for ids in ["1-2", "99999999999999999999-99999999999999999999"] {
+                check_hosted(&format!("{prefix}{ids}/python/bin/python3"), Some(python));
+            }
+            for suffix in ["0-1/file", "01-1/file", "1-0/file", "1-01/file", "-1/file", "1-/file", "1-1", "1-1/",
+                "1-1-2/file", "1-+2/file", "1-２/file", "111111111111111111111-1/file", "1-111111111111111111111/file",
+                "1x-2/file", "1-2x/file"] {
+                check_hosted(&format!("{prefix}{suffix}"), None);
+            }
+            for (suffix, native_spelling, fixture_spelling) in [
+                ("python/bin/python3", H::NativePython, H::FixturePython),
+                ("python/lib/libssl.so.3", H::NativeSsl, H::FixtureSsl),
+                ("python/lib/libcrypto.so.3", H::NativeCrypto, H::FixtureCrypto),
+            ] {
+                let known = if native { native_spelling } else { fixture_spelling };
+                for tail in [suffix.to_owned(), format!("sub/{suffix}"), format!(".hidden/{suffix}")] {
+                    check_hosted(&format!("{prefix}1-2/{tail}"), Some(known));
+                }
+                for tail in [format!("not-{suffix}"), format!("{suffix}.extra"), format!("{suffix}/extra"),
+                    format!("/{suffix}"), format!("sub//{suffix}"), format!("./{suffix}"), format!("../{suffix}"),
+                    format!("sub/./{suffix}"), format!("sub/../{suffix}"), format!("{suffix}/"), format!("{suffix} "),
+                    format!("{suffix} (deleted) "), suffix.replacen('/', "//", 1), suffix.replacen('/', "/./", 1),
+                    format!(r"sub\057{suffix}")] {
+                    check_hosted(&format!("{prefix}1-2/{tail}"), Some(other));
+                }
+            }
+            for (tail, known) in [("shell-observer", H::ShellObserver), ("shell-normal", H::ShellNormal),
+                ("platform-tests", H::PlatformTests), ("installed-tests", H::InstalledTests)] {
+                check_hosted(&format!("{prefix}1-2/{tail}"), Some(if native { known } else { other }));
+                for tail in [format!("sub/{tail}"), format!("{tail}.extra"), format!("{tail}/"), format!("{tail} ")] {
+                    check_hosted(&format!("{prefix}1-2/{tail}"), Some(other));
+                }
+            }
+            let path = format!("{prefix}1-2/python/bin/python3");
+            assert_eq!(self::mappings(format!("1-2 r-xp 0 09:02 99 {path}\n").as_bytes(), None), Err(generic(G::Hosted, false, false)));
+            assert_eq!(self::mappings(format!("1-2 r-xp 0 09:02 99 {path} (deleted)\n").as_bytes(), history), Err(generic(G::Hosted, true, true)));
+            for (inode, role) in [(11, HistoricalPayloadRole::Python), (22, HistoricalPayloadRole::Ssl), (33, HistoricalPayloadRole::Crypto)] {
+                assert_eq!(self::mappings(format!("1-2 r-xp 0 08:01 {inode} {path}\n").as_bytes(), history),
+                    Err(R::ExecutableHistoricalPayload(role)));
+            }
+        }
+        let path = "/var/lib/mrk-ubuntu-native-1-2/shell-observer";
+        let original = generic(G::Hosted, false, true);
+        assert_eq!(hosted_executable_file_refusal(original, path, None, 9, 2, 99), original);
+        assert_eq!(hosted_executable_file_refusal(original, "/var/lib/mrk-ubuntu-native-01-2/file", history, 9, 2, 99), original);
+        assert_eq!(hosted_executable_file_refusal(original, path, history, 8, 1, 11), original);
+        for original in [R::ExecutablePublicPath(0), R::ExecutableHistoricalPayload(HistoricalPayloadRole::Python),
+            generic(G::Hosted, true, true), generic(G::Hosted, false, false), generic(G::Other, false, true)] {
+            assert_eq!(hosted_executable_file_refusal(original, path, history, 9, 2, 99), original);
+        }
+        let refined = format!("1-2 r-xp 0 09:02 99 {path}\n");
+        let refusal = hosted(H::ShellObserver, C::Other);
+        for &(bytes, expected) in failures {
+            if matches!(expected, R::Utf8 | R::Newline | R::ExecutableGenericFile { .. }) { continue; }
+            let mut earlier = bytes.to_vec(); earlier.extend_from_slice(refined.as_bytes());
+            assert_eq!(self::mappings(&earlier, history), Err(expected));
+            let mut later = refined.as_bytes().to_vec(); later.extend_from_slice(bytes);
+            assert_eq!(self::mappings(&later, history), Err(refusal));
+        }
+        let mut bad_after = refined.as_bytes().to_vec(); bad_after.extend_from_slice(b"\xff\n");
+        assert_eq!(self::mappings(&bad_after, history), Err(R::Utf8));
+        assert_eq!(self::mappings(&refined.as_bytes()[..refined.len() - 1], history), Err(R::Newline));
     }
     #[cfg(all(debug_assertions, not(feature = "desktop-shell"), not(feature = "custom-protocol")))]
     #[test]

@@ -2930,7 +2930,20 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         literals = {value.encode("ascii") for value in re.findall(r'=> b"([a-z-]+)"', workers + native)}
         maps = supervisor.split("impl MapRole {", 1)[1].split("impl ObservationFailure {", 1)[0]
         map_tokens = tuple(value.encode("ascii") for value in re.findall(r'b"(map-[a-z-]+)"', maps))
-        self.assertEqual((len(map_tokens), len(set(map_tokens))), (88, 88))
+        self.assertEqual((len(map_tokens), len(set(map_tokens))), (184, 184))
+        hosted_block = maps.split("impl HostedMapSpelling {", 1)[1].split("\n    }\n", 1)[0]
+        hosted_tokens = tuple(value.encode("ascii") for value in re.findall(r'b"(map-xh-[a-z]{2})"', hosted_block))
+        hosted_expected = tuple(b"map-xh-" + spelling + relation
+                                for spelling in (b"s", b"n", b"t", b"i", b"p", b"l", b"c", b"q", b"r", b"g", b"u", b"f")
+                                for relation in (b"z", b"a", b"p", b"s", b"c", b"m", b"d", b"x"))
+        self.assertEqual(hosted_tokens, hosted_expected)
+        self.assertEqual(lifecycle.SHELL_SESSION_HOSTED_MAP_WORKERS, hosted_expected)
+        self.assertEqual((len(hosted_tokens), len(set(hosted_tokens))), (96, 96))
+        self.assertTrue(all(len(token) == 9 for token in hosted_tokens))
+        old_map_tokens = tuple(token for token in map_tokens if token not in set(hosted_tokens))
+        self.assertEqual((len(old_map_tokens), len(set(old_map_tokens))), (88, 88))
+        self.assertTrue(set(old_map_tokens).isdisjoint(hosted_tokens))
+        self.assertEqual(set(map_tokens), set(old_map_tokens) | set(hosted_tokens))
         generic = tuple(b"map-x-" + group + b"-" + deleted + history
                         for group in (b"v", b"l", b"c", b"h", b"m", b"o")
                         for deleted, history in ((b"n", b"a"), (b"n", b"p"), (b"d", b"a"), (b"d", b"p")))
@@ -2964,8 +2977,9 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         parser = supervisor.split("    fn mappings(raw: &[u8], historical: Option<HistoricalPayloadSnapshot>) -> Result<Option<Vec<Mapping>>, MapRefusal> {", 1)[1].split(
             '    #[cfg(all(debug_assertions, any(all(feature = "desktop-shell", feature = "custom-protocol"),\n'
             '        all(not(feature = "desktop-shell"), not(feature = "custom-protocol")))))]', 1)[0]
-        refusal = ("need(!executable).map_err(|_| generic_executable_file_refusal("
-                   "historical_executable_file_refusal(executable_file_refusal(path), historical, major, minor, inode), path, historical.is_some()))?")
+        refusal = ("need(!executable).map_err(|_| hosted_executable_file_refusal(generic_executable_file_refusal("
+                   "historical_executable_file_refusal(executable_file_refusal(path), historical, major, minor, inode), path, historical.is_some()), "
+                   "path, historical, major, minor, inode))?")
         self.assertEqual(parser.count(refusal), 1)
         self.assertEqual(hashlib.sha256(parser.replace(refusal, "need(!executable).map_err(|_| MapRefusal::ExecutableFile)?").encode()).hexdigest(),
                          "6b884ac9df8f44c52c96a34f926445e11f18564946f4f126e600afbab94d24fe")
@@ -2973,6 +2987,13 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertIn(".position(|(candidate, _)| path == *candidate)", lookup)
         for forbidden in ("fs::", "original_bytes", "/proc/", "read_link", "canonicalize", "trim", "format!", "to_owned", ".await", "Instant::now"):
             self.assertNotIn(forbidden, lookup)
+        hosted_helpers = supervisor.split("    fn hosted_map_spelling(", 1)[1].split("    fn role(", 1)[0]
+        runtime = (SOURCE / "desktop/src-tauri/src/installed_runtime.rs").read_text()
+        coordinate_helper = runtime.split("        pub(crate) fn coordinate_relation(", 1)[1].split("        #[cfg(", 1)[0]
+        for helper in (hosted_helpers, coordinate_helper):
+            for forbidden in ("fs::", "original_bytes", "/proc/", "read_link", "canonicalize", "trim", "format!",
+                              "to_owned", ".await", "Instant::now", "Command::", ".metadata(", ".open("):
+                self.assertNotIn(forbidden, helper)
         self.assertEqual(literals | set(map_tokens) | set(public_tokens) | {b"maps-check"}, set(lifecycle.SHELL_SESSION_WORKERS))
         self.assertEqual(len(lifecycle.SHELL_SESSION_WORKERS), len(set(lifecycle.SHELL_SESSION_WORKERS)))
         self.assertIn("installed_native_fixture::assert_mappings_diagnostic_contract();", query_source)
@@ -3004,6 +3025,34 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
                                  {"step": "SelectProject", "boundary": boundary.decode("ascii").strip().split("=", 1)[1],
                                   "bootstrapProgress": context.decode("ascii").strip().split("=", 1)[1]})
         self.assertLessEqual(max(map(len, steps)) + max(map(len, boundaries)) + max(map(len, progress)), 512)
+        session_prefix = (b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionReview\n"
+                          b"MRK_INSTALLED_SHELL_FAILURE_PHASE=deadline\n"
+                          b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n")
+        def session_frame(worker, origin=b"supervisor-disabled", detail=b"none", association=b"bound", query=b"cleanup.none.rr"):
+            return (session_prefix + b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v2;index=3;evaluations=14;"
+                    b"reject=unknown-native-snapshot;wait=original-owner-unsettled;o=" + origin + b";d=" + detail
+                    + b";a=" + association + b";q=" + query + b";w=" + worker + b"\n")
+        # Exact membership, not prefix acceptance; old refusal tokens remain valid.
+        for token in map_tokens:
+            result = lifecycle._shell_label_pair(session_frame(token))
+            self.assertIsNotNone(result, token)
+            self.assertEqual(result["session"]["firstOrigin"],
+                             {"origin": "supervisor-disabled", "detail": "none", "association": "bound",
+                              "query": "cleanup.none.rr", "worker": token.decode("ascii")})
+        for token in hosted_tokens:
+            self.assertIsNone(lifecycle._shell_label_pair(session_frame(token + b"x")))
+        for token in (b"map-xh", b"map-xh-", b"map-xh-s", b"map-xh-vz", b"map-xh-sb", b"map-xh-sz-extra",
+                      b"MAP-XH-SZ", b"map-xh-s0", b"arbitrary", b"map-xh-sz\x00"):
+            self.assertIsNone(lifecycle._shell_label_pair(session_frame(token)))
+        token = hosted_tokens[0]
+        for fields in ({"association": b"unassociated"}, {"query": b"na"}, {"query": b"unregistered"},
+                       {"origin": b"not-recorded"}, {"detail": b"failed"}):
+            self.assertIsNone(lifecycle._shell_label_pair(session_frame(token, **fields)))
+        frame = session_frame(token)
+        for malformed in (frame[:-1], frame[:-2], session_prefix, frame + b"\n", frame + frame,
+                          frame.replace(b";w=", b";unexpected="), frame.replace(b"=v2;", b"=v3;"),
+                          frame.replace(b";w=", b";w=na;w=")):
+            self.assertIsNone(lifecycle._shell_label_pair(malformed))
         longest_session = (len(b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v2;index=none;evaluations=128;reject=;wait=\n")
                            + max(map(len, lifecycle.SHELL_SESSION_REJECTIONS)) + max(map(len, lifecycle.SHELL_SESSION_WAITS)))
         prior_bound = max(map(len, steps)) + max(map(len, boundaries)) + max(map(len, progress)) + longest_session

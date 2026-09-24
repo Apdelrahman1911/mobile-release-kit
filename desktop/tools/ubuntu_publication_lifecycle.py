@@ -402,6 +402,22 @@ SHELL_SESSION_GENERIC_MAP_WORKERS = (
     b"map-x-m-na", b"map-x-m-np", b"map-x-m-da", b"map-x-m-dp",
     b"map-x-o-na", b"map-x-o-np", b"map-x-o-da", b"map-x-o-dp",
 )
+# Same refused Hosted row only: twelve lexical spellings, eight numeric
+# relations. Neither field is identity/admission; the original bounds stay fixed.
+SHELL_SESSION_HOSTED_MAP_WORKERS = (
+    b"map-xh-sz", b"map-xh-sa", b"map-xh-sp", b"map-xh-ss", b"map-xh-sc", b"map-xh-sm", b"map-xh-sd", b"map-xh-sx",
+    b"map-xh-nz", b"map-xh-na", b"map-xh-np", b"map-xh-ns", b"map-xh-nc", b"map-xh-nm", b"map-xh-nd", b"map-xh-nx",
+    b"map-xh-tz", b"map-xh-ta", b"map-xh-tp", b"map-xh-ts", b"map-xh-tc", b"map-xh-tm", b"map-xh-td", b"map-xh-tx",
+    b"map-xh-iz", b"map-xh-ia", b"map-xh-ip", b"map-xh-is", b"map-xh-ic", b"map-xh-im", b"map-xh-id", b"map-xh-ix",
+    b"map-xh-pz", b"map-xh-pa", b"map-xh-pp", b"map-xh-ps", b"map-xh-pc", b"map-xh-pm", b"map-xh-pd", b"map-xh-px",
+    b"map-xh-lz", b"map-xh-la", b"map-xh-lp", b"map-xh-ls", b"map-xh-lc", b"map-xh-lm", b"map-xh-ld", b"map-xh-lx",
+    b"map-xh-cz", b"map-xh-ca", b"map-xh-cp", b"map-xh-cs", b"map-xh-cc", b"map-xh-cm", b"map-xh-cd", b"map-xh-cx",
+    b"map-xh-qz", b"map-xh-qa", b"map-xh-qp", b"map-xh-qs", b"map-xh-qc", b"map-xh-qm", b"map-xh-qd", b"map-xh-qx",
+    b"map-xh-rz", b"map-xh-ra", b"map-xh-rp", b"map-xh-rs", b"map-xh-rc", b"map-xh-rm", b"map-xh-rd", b"map-xh-rx",
+    b"map-xh-gz", b"map-xh-ga", b"map-xh-gp", b"map-xh-gs", b"map-xh-gc", b"map-xh-gm", b"map-xh-gd", b"map-xh-gx",
+    b"map-xh-uz", b"map-xh-ua", b"map-xh-up", b"map-xh-us", b"map-xh-uc", b"map-xh-um", b"map-xh-ud", b"map-xh-ux",
+    b"map-xh-fz", b"map-xh-fa", b"map-xh-fp", b"map-xh-fs", b"map-xh-fc", b"map-xh-fm", b"map-xh-fd", b"map-xh-fx",
+)
 SHELL_SESSION_WORKERS = (
     b"na", b"unavailable", b"none-recorded", b"child-id", b"observe-entry", b"maps-read", b"maps-check", b"env-read", b"env-check",
     b"hold-refused", b"settle-unknown",
@@ -417,7 +433,7 @@ SHELL_SESSION_WORKERS = (
     b"map-m-stat-ld", b"map-m-type-ld", b"map-m-owner-ld", b"map-m-links-ld", b"map-m-mode-ld", b"map-m-inode-ld", b"map-m-dev-ld", b"map-dup-ld",
     b"map-m-stat-lc", b"map-m-type-lc", b"map-m-owner-lc", b"map-m-links-lc", b"map-m-mode-lc", b"map-m-inode-lc", b"map-m-dev-lc", b"map-dup-lc",
     b"map-m-stat-lm", b"map-m-type-lm", b"map-m-owner-lm", b"map-m-links-lm", b"map-m-mode-lm", b"map-m-inode-lm", b"map-m-dev-lm", b"map-dup-lm",
-    *SHELL_SESSION_GENERIC_MAP_WORKERS, *SHELL_SESSION_PUBLIC_MAP_WORKERS,
+    *SHELL_SESSION_GENERIC_MAP_WORKERS, *SHELL_SESSION_PUBLIC_MAP_WORKERS, *SHELL_SESSION_HOSTED_MAP_WORKERS,
 )
 SHELL_SESSION_WORKER_STAGES = (b"inspect", b"acquire", b"observe", b"write", b"stdout", b"stderr", b"settle")
 SHELL_SESSION_WORKER_JOINS = b"cxf"

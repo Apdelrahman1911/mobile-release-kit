@@ -566,7 +566,7 @@ jobs:
           MRK_UBUNTU_PUBLICATION_PREPARATION_SHA256: ${{ steps.prepare.outputs.preparation_sha256 }}
           MRK_UBUNTU_PUBLICATION_DEADLINE: ${{ steps.prepare.outputs.deadline }}
           # Exact independently reviewed shell lifecycle; not product qualification.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '54abbe131bbff42b8b39cc17f273f297a586b226e46bce9c7adb3732aa59e8d9'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'a858d83c1ddf2341127b3ab3e62bb2685fc5a77a75813d8d6978cc946e8a769e'
         run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed-shell-compile
       - name: Retain original compiler evidence and shell outputs
         id: upload
@@ -663,7 +663,7 @@ jobs:
           MRK_INSTALLED_SHELL_ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
           MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT: ${{ steps.compile.outputs.shell_producer_attempt }}
           # Exact independently reviewed shell lifecycle; not product qualification.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '54abbe131bbff42b8b39cc17f273f297a586b226e46bce9c7adb3732aa59e8d9'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'a858d83c1ddf2341127b3ab3e62bb2685fc5a77a75813d8d6978cc946e8a769e'
           MRK_UBUNTU_LIFECYCLE_BOOTSTRAP: |
             import hashlib, os, re, stat, sys
             from pathlib import Path

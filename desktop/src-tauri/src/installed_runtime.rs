@@ -226,6 +226,8 @@ mod historical_payload {
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(crate) enum Role { Python, Ssl, Crypto }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Relation { Zero, Ambiguous, PythonInode, SslInode, CryptoInode, MultipleInodes, DeviceOnly, Other }
     #[derive(Clone, Copy)]
     pub(crate) struct Snapshot { tuples: [(u64, u64, u64); 3] }
     impl Snapshot {
@@ -239,6 +241,25 @@ mod historical_payload {
                 }
             }
             found
+        }
+        pub(crate) fn coordinate_relation(self, major: u64, minor: u64, inode: u64) -> Option<Relation> {
+            // Numeric resemblance of closed records only, never live identity.
+            // Unique exact correspondence keeps the older role diagnostic.
+            if inode == 0 { return Some(Relation::Zero); }
+            let exact = self.tuples.iter().filter(|tuple| **tuple == (major, minor, inode)).count();
+            if exact == 1 { return None; }
+            if exact > 1 { return Some(Relation::Ambiguous); }
+            Some(match self.tuples.map(|tuple| tuple.2 == inode) {
+                [true, false, false] => Relation::PythonInode,
+                [false, true, false] => Relation::SslInode,
+                [false, false, true] => Relation::CryptoInode,
+                [false, false, false] => {
+                    if self.tuples.into_iter().any(|(old_major, old_minor, _)| (old_major, old_minor) == (major, minor)) {
+                        Relation::DeviceOnly
+                    } else { Relation::Other }
+                },
+                _ => Relation::MultipleInodes,
+            })
         }
         #[cfg(all(debug_assertions, any(all(feature = "desktop-shell", feature = "custom-protocol"),
             all(not(feature = "desktop-shell"), not(feature = "custom-protocol")))))]
@@ -307,12 +328,38 @@ mod historical_payload {
             (true, true, false, false), (true, true, true, true)] {
             assert!(!claim_ready(Phase::PassivePrepared, transferred, originals, claimed, refused));
         }
+        let history = Snapshot { tuples: [(8, 1, 11), (8, 1, 22), (8, 1, 33)] };
+        for (inode, role, relation) in [(11, Role::Python, Relation::PythonInode),
+            (22, Role::Ssl, Relation::SslInode), (33, Role::Crypto, Relation::CryptoInode)] {
+            assert_eq!(history.matching_role(8, 1, inode), Some(role));
+            assert_eq!(history.coordinate_relation(8, 1, inode), None);
+            assert_eq!(history.coordinate_relation(9, 2, inode), Some(relation));
+        }
+        assert_eq!(history.coordinate_relation(8, 1, 0), Some(Relation::Zero));
+        assert_eq!(Snapshot { tuples: [(8, 1, 0); 3] }.coordinate_relation(8, 1, 0), Some(Relation::Zero));
+        for tuples in [[(8, 1, 11), (8, 1, 11), (8, 1, 33)], [(8, 1, 11); 3]] {
+            let snapshot = Snapshot { tuples };
+            assert_eq!(snapshot.matching_role(8, 1, 11), None);
+            assert_eq!(snapshot.coordinate_relation(8, 1, 11), Some(Relation::Ambiguous));
+        }
+        for tuples in [[(8, 1, 11), (8, 2, 11), (8, 3, 33)],
+            [(8, 1, 11), (8, 2, 22), (8, 3, 11)], [(8, 1, 22), (8, 2, 11), (8, 3, 11)],
+            [(8, 1, 11), (8, 2, 11), (8, 3, 11)]] {
+            assert_eq!(Snapshot { tuples }.coordinate_relation(9, 4, 11), Some(Relation::MultipleInodes));
+        }
+        let overlapping = Snapshot { tuples: [(8, 1, 11), (8, 2, 11), (8, 3, 11)] };
+        for (minor, role) in [(1, Role::Python), (2, Role::Ssl), (3, Role::Crypto)] {
+            assert_eq!(overlapping.matching_role(8, minor, 11), Some(role));
+            assert_eq!(overlapping.coordinate_relation(8, minor, 11), None);
+        }
+        assert_eq!(history.coordinate_relation(8, 1, 99), Some(Relation::DeviceOnly));
+        assert_eq!(history.coordinate_relation(9, 2, 99), Some(Relation::Other));
         let empty = super::PassiveRuntimeSlots::new();
         assert!(empty.historical_payload_snapshot().is_none() && empty.never_started());
     }
 }
 #[cfg(all(test, not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
-pub(crate) use historical_payload::{Role as HistoricalPayloadRole, Snapshot as HistoricalPayloadSnapshot,
+pub(crate) use historical_payload::{Role as HistoricalPayloadRole, Relation as HistoricalPayloadRelation, Snapshot as HistoricalPayloadSnapshot,
     assert_contract as assert_historical_payload_diagnostic_contract};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
