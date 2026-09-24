@@ -1921,8 +1921,10 @@ def shell_source_manifest(source):
     features = manifest.get("features", {})
     D.need(features.get("default") == [] and features.get("custom-protocol") == ["tauri/custom-protocol"]
            and features.get("development-runtime") == [], "Shell production feature forwarding differs")
-    D.need(manifest.get("profile", {}).get("dev", {}).get("package", {}).get("sha2") == {
-        "opt-level": 3, "debug-assertions": True, "overflow-checks": True},
+    # The maintained SDK also uses sha2 0.11.0. Bind the complete override map
+    # to the application's actual hashing version, without ambiguous names.
+    D.need(D.same(manifest.get("profile", {}).get("dev", {}).get("package", {}), {
+        "sha2:0.10.9": {"opt-level": 3, "debug-assertions": True, "overflow-checks": True}}),
         "Shell dev profile must preserve complete bounded runtime hashing")
     normal = [row for row in manifest.get("bin", []) if row.get("name") == SHELL_EXPORTS["normal"]]
     observer = [row for row in manifest.get("test", []) if row.get("name") == SHELL_EXPORTS["observer"]]

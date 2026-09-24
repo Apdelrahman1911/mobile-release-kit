@@ -538,6 +538,33 @@ class InstalledShellCompilerContracts(unittest.TestCase):
             "passive_management_tests", "credential_assessment")} <= set(names))
         self.assertTrue({"desktop/src-tauri/src/main.rs", "desktop/src-tauri/tests/installed_shell_observation.rs"} <= set(names))
 
+    def test_shell_source_manifest_accepts_actual_version_qualified_hashing_profile(self):
+        # Exercise the real admission against the checked-in inputs, not a
+        # second synthetic manifest or a mocked shell_source_manifest result.
+        rows = S.shell_source_manifest(SOURCE)
+        self.assertIn("desktop/src-tauri/Cargo.toml", {row["path"] for row in rows})
+
+    def test_shell_source_manifest_refuses_missing_wrong_or_extra_hashing_overrides(self):
+        original = S.tomllib.loads((SOURCE / "desktop/src-tauri/Cargo.toml").read_text(encoding="utf-8"))
+        settings = {"opt-level": 3, "debug-assertions": True, "overflow-checks": True}
+        overrides = [
+            ("missing", {}),
+            ("unqualified", {"sha2": settings}),
+            ("wrong-version", {"sha2:0.11.0": settings}),
+            ("extra-unqualified", {"sha2:0.10.9": settings, "sha2": settings}),
+            ("extra-version", {"sha2:0.10.9": settings, "sha2:0.11.0": settings}),
+        ]
+        for key, value in (("opt-level", 0), ("opt-level", "3"), ("opt-level", 3.0),
+                           ("debug-assertions", False), ("debug-assertions", 1),
+                           ("overflow-checks", False), ("overflow-checks", 1)):
+            overrides.append((f"{key}={value!r}", {"sha2:0.10.9": {**settings, key: value}}))
+        for label, package in overrides:
+            changed = deepcopy(original)
+            changed["profile"]["dev"]["package"] = package
+            with self.subTest(case=label), patch.object(S.tomllib, "loads", return_value=changed):
+                with self.assertRaisesRegex(S.D.Refused, "complete bounded runtime hashing"):
+                    S.shell_source_manifest(SOURCE)
+
     def test_one_build_exact_production_features_and_two_selected_targets(self):
         argv = S.shell_compile_argv("/tools/cargo", Path("/source"), Path("/target"))
         self.assertEqual(argv[:2], ["/tools/cargo", "build"])
@@ -791,9 +818,20 @@ class InstalledShellCompilerContracts(unittest.TestCase):
         self.assertEqual(sorted(S.D.canonical(row) for row in actual), sorted(S.D.canonical(row) for row in expected))
 
     def test_actual_sha2_optimized_profile_is_required_not_inferred(self):
-        _, packages, nodes = S.shell_cargo_metadata(S.D.canonical(metadata()), Path("/source"), Path("/target"))
-        _, units = S.shell_compiled_artifacts(messages(compiler_rows()), Path("/source"), Path("/target"))
+        value = metadata()
+        value["packages"].append({"id": "sha2-sdk", "name": "sha2", "version": "0.11.0",
+                                  "source": "registry+https://github.com/rust-lang/crates.io-index",
+                                  "manifest_path": "/private/cargo/registry/src/sha2-0.11.0/Cargo.toml"})
+        value["resolve"]["nodes"].append({"id": "sha2-sdk", "features": ["std"], "deps": []})
+        _, packages, nodes = S.shell_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/target"))
+        rows = compiler_rows()
+        newer = deepcopy(rows[0])
+        newer["package_id"] = "sha2-sdk"
+        rows.insert(-1, newer)
+        _, units = S.shell_compiled_artifacts(messages(rows), Path("/source"), Path("/target"))
         S.shell_compiler_units(units, packages, nodes)
+        # An optimized SDK SHA-2 unit cannot substitute for the application's
+        # missing or unoptimized 0.10.9 unit, even with both versions resolved.
         for key, value in (("opt_level", "0"), ("debug_assertions", False), ("overflow_checks", False)):
             changed = deepcopy(units)
             changed[0]["profile"][key] = value
