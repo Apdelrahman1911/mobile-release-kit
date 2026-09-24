@@ -249,6 +249,37 @@ enum ResultFailure { Value, Bound, Shape, Dto, Semantics }
 mod assessment_failure {
     use super::{BridgeError, ResultFailure};
     use crate::error::{LinuxPassiveCause as C, LinuxSpawnFailure as S};
+    use crate::installed_runtime::AdmissionFailure as A;
+
+    // The original Copy enum only; no second reason enum, lookup or raw text.
+    const ADMISSION_VALUES: [Option<A>; 21] = [
+        None, Some(A::UnsupportedPlatform), Some(A::MissingCompileAnchor), Some(A::Stopped), Some(A::Deadline),
+        Some(A::NativeUnavailable), Some(A::NativeDenied), Some(A::Namespace), Some(A::Mount), Some(A::Ownership),
+        Some(A::ExtendedAttributes), Some(A::IdentityChanged), Some(A::Manifest), Some(A::Inventory), Some(A::Bounds),
+        Some(A::AlreadyUsed), Some(A::Interrupted), Some(A::CloseUncertain), Some(A::LedgerInvariant),
+        Some(A::TransferUnavailable), Some(A::DestinationOccupied),
+    ];
+    fn original_admission(cause: Option<C>) -> Option<A> {
+        match cause {
+            Some(C::Inspection(reason)) => reason,
+            Some(C::Capability(reason) | C::Preparation(reason) | C::FinalClaim(reason)) => Some(reason),
+            _ => None,
+        }
+    }
+    fn admission_token(reason: Option<A>) -> &'static [u8] {
+        match reason {
+            None => b"na", Some(A::UnsupportedPlatform) => b"unsupported-platform",
+            Some(A::MissingCompileAnchor) => b"missing-compile-anchor", Some(A::Stopped) => b"stopped",
+            Some(A::Deadline) => b"deadline", Some(A::NativeUnavailable) => b"native-unavailable",
+            Some(A::NativeDenied) => b"native-denied", Some(A::Namespace) => b"namespace", Some(A::Mount) => b"mount",
+            Some(A::Ownership) => b"ownership", Some(A::ExtendedAttributes) => b"extended-attributes",
+            Some(A::IdentityChanged) => b"identity-changed", Some(A::Manifest) => b"manifest",
+            Some(A::Inventory) => b"inventory", Some(A::Bounds) => b"bounds", Some(A::AlreadyUsed) => b"already-used",
+            Some(A::Interrupted) => b"interrupted", Some(A::CloseUncertain) => b"close-uncertain",
+            Some(A::LedgerInvariant) => b"ledger-invariant", Some(A::TransferUnavailable) => b"transfer-unavailable",
+            Some(A::DestinationOccupied) => b"destination-occupied",
+        }
+    }
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Origin { None, Request, Bridge, Result }
@@ -329,29 +360,33 @@ mod assessment_failure {
     // No raw Value/error/String, reference, owner, allocation or public serializer.
     // Only constructors in this module can create the cross-field combinations.
     #[derive(Clone, Copy, PartialEq, Eq)]
-    pub(crate) struct Failure { origin: Origin, class: Class, cause: Cause }
+    pub(crate) struct Failure { origin: Origin, class: Class, cause: Cause, admission: Option<A> }
     impl Default for Failure { fn default() -> Self { Self::none() } }
     impl Failure {
-        pub(crate) const fn none() -> Self { Self { origin: Origin::None, class: Class::Na, cause: Cause::None } }
-        pub(super) fn request() -> Self { Self { origin: Origin::Request, class: Class::Serialize, cause: Cause::None } }
+        pub(crate) const fn none() -> Self { Self { origin: Origin::None, class: Class::Na, cause: Cause::None, admission: None } }
+        pub(super) fn request() -> Self { Self { origin: Origin::Request, class: Class::Serialize, cause: Cause::None, admission: None } }
         pub(super) fn bridge(error: &BridgeError) -> Self {
-            Self { origin: Origin::Bridge, class: Class::bridge(error), cause: Cause::original(error.linux_passive_cause()) }
+            let original = error.linux_passive_cause();
+            Self { origin: Origin::Bridge, class: Class::bridge(error), cause: Cause::original(original),
+                admission: original_admission(original) }
         }
         pub(super) fn result(stage: ResultFailure) -> Self {
             let class = match stage { ResultFailure::Value => Class::Value, ResultFailure::Bound => Class::Bound,
                 ResultFailure::Shape => Class::Shape, ResultFailure::Dto => Class::Dto, ResultFailure::Semantics => Class::Semantics };
-            Self { origin: Origin::Result, class, cause: Cause::None }
+            Self { origin: Origin::Result, class, cause: Cause::None, admission: None }
         }
-        pub(crate) fn tokens(self) -> (&'static [u8], &'static [u8], &'static [u8]) {
-            (self.origin.token(), self.class.token(), self.cause.token())
+        pub(crate) fn tokens(self) -> (&'static [u8], &'static [u8], &'static [u8], &'static [u8]) {
+            (self.origin.token(), self.class.token(), self.cause.token(), admission_token(self.admission))
         }
-        pub(crate) fn token_bounds() -> (usize, usize, usize) {
+        pub(crate) fn token_bounds() -> (usize, usize, usize, usize) {
             (Origin::ALL.iter().map(|v| v.token().len()).max().unwrap_or(0),
              Class::ALL.iter().map(|v| v.token().len()).max().unwrap_or(0),
-             Cause::ALL.iter().map(|v| v.token().len()).max().unwrap_or(0))
+             Cause::ALL.iter().map(|v| v.token().len()).max().unwrap_or(0),
+             ADMISSION_VALUES.iter().map(|v| admission_token(*v).len()).max().unwrap_or(0))
         }
         pub(crate) fn contract_sample() -> Self {
-            Self { origin: Origin::Bridge, class: Class::AssessmentUnavailable, cause: Cause::SelectionProfile }
+            Self { origin: Origin::Bridge, class: Class::Runtime, cause: Cause::Preparation,
+                admission: Some(A::MissingCompileAnchor) }
         }
         pub(crate) fn contract_result_sample() -> Self { Self::result(ResultFailure::Semantics) }
     }
@@ -1481,9 +1516,9 @@ mod tests {
                     let public = serde_json::to_value(&expected).unwrap();
                     assert_eq!(serde_json::to_value(&actual).unwrap(), public);
                     assert_eq!(public.as_object().unwrap().len(), 3);
-                    let (origin, got_class, cause) = actual.installed_failure().tokens();
+                    let (origin, got_class, cause, admission) = actual.installed_failure().tokens();
                     assert_eq!(origin, b"bridge"); assert_eq!(got_class, if retryable { b"retryable".as_slice() } else { class });
-                    assert_eq!(cause, b"sel-compile");
+                    assert_eq!(cause, b"sel-compile"); assert_eq!(admission, b"na");
                     let packet = actual.installed_failure();
                     let command: crate::asset_commands::CommandError = actual.into();
                     let waiter = command.clone();
@@ -1496,39 +1531,77 @@ mod tests {
         }
 
         fn assert_only_this_original_error_supplies_a_closed_passive_cause() {
-            let causes: &[(Option<C>, &[u8])] = &[
-                (None, b"none"), (Some(C::SelectionProfileClosed), b"sel-profile"),
-                (Some(C::SelectionCompileBinding), b"sel-compile"), (Some(C::SelectionMethodOutsideProfile), b"sel-method"),
-                (Some(C::Inspection(None)), b"inspection"), (Some(C::Inspection(Some(A::Namespace))), b"inspection"),
-                (Some(C::AcquisitionEntryNotReleased), b"acq-entry"), (Some(C::AcquisitionCustodyMissing), b"acq-custody"),
-                (Some(C::AcquisitionLock), b"acq-lock"), (Some(C::Capability(A::Namespace)), b"capability"),
-                (Some(C::Preparation(A::Namespace)), b"prepare"), (Some(C::FinalClaimOwnerGate), b"final-gate"),
-                (Some(C::FinalClaim(A::Namespace)), b"final-claim"),
-                (Some(C::ReturnedSpawn(S::ProcessFdLimit)), b"spawn-pfd"), (Some(C::ReturnedSpawn(S::SystemFdLimit)), b"spawn-sfd"),
-                (Some(C::ReturnedSpawn(S::Memory)), b"spawn-mem"), (Some(C::ReturnedSpawn(S::ResourceUnavailable)), b"spawn-res"),
-                (Some(C::ReturnedSpawn(S::PermissionDenied)), b"spawn-deny"), (Some(C::ReturnedSpawn(S::NotFound)), b"spawn-miss"),
-                (Some(C::ReturnedSpawn(S::ExecFormat)), b"spawn-exec"), (Some(C::ReturnedSpawn(S::Other)), b"spawn-other"),
-                (Some(C::EngineResponse), b"response"),
+            let causes: &[(Option<C>, &[u8], &[u8])] = &[
+                (None, b"none", b"na"), (Some(C::SelectionProfileClosed), b"sel-profile", b"na"),
+                (Some(C::SelectionCompileBinding), b"sel-compile", b"na"), (Some(C::SelectionMethodOutsideProfile), b"sel-method", b"na"),
+                (Some(C::Inspection(None)), b"inspection", b"na"), (Some(C::Inspection(Some(A::Namespace))), b"inspection", b"namespace"),
+                (Some(C::AcquisitionEntryNotReleased), b"acq-entry", b"na"), (Some(C::AcquisitionCustodyMissing), b"acq-custody", b"na"),
+                (Some(C::AcquisitionLock), b"acq-lock", b"na"), (Some(C::Capability(A::Namespace)), b"capability", b"namespace"),
+                (Some(C::Preparation(A::Namespace)), b"prepare", b"namespace"), (Some(C::FinalClaimOwnerGate), b"final-gate", b"na"),
+                (Some(C::FinalClaim(A::Namespace)), b"final-claim", b"namespace"),
+                (Some(C::ReturnedSpawn(S::ProcessFdLimit)), b"spawn-pfd", b"na"), (Some(C::ReturnedSpawn(S::SystemFdLimit)), b"spawn-sfd", b"na"),
+                (Some(C::ReturnedSpawn(S::Memory)), b"spawn-mem", b"na"), (Some(C::ReturnedSpawn(S::ResourceUnavailable)), b"spawn-res", b"na"),
+                (Some(C::ReturnedSpawn(S::PermissionDenied)), b"spawn-deny", b"na"), (Some(C::ReturnedSpawn(S::NotFound)), b"spawn-miss", b"na"),
+                (Some(C::ReturnedSpawn(S::ExecFormat)), b"spawn-exec", b"na"), (Some(C::ReturnedSpawn(S::Other)), b"spawn-other", b"na"),
+                (Some(C::EngineResponse), b"response", b"na"),
             ];
-            for &(cause, token) in causes {
+            for &(cause, token, admission) in causes {
                 let actual = sanitized_error(BridgeError::unavailable("fictional-private-passive-cause").with_linux_passive_cause(cause));
-                let (origin, class, got_cause) = actual.installed_failure().tokens();
+                let (origin, class, got_cause, got_admission) = actual.installed_failure().tokens();
                 assert_eq!(origin, b"bridge"); assert_eq!(class, b"runtime-unavailable"); assert_eq!(got_cause, token);
+                assert_eq!(got_admission, admission);
                 assert_eq!(serde_json::to_value(actual).unwrap(), serde_json::to_value(AssessmentError::unavailable()).unwrap());
+            }
+            let reasons: &[(A, &[u8])] = &[
+                (A::UnsupportedPlatform, b"unsupported-platform"), (A::MissingCompileAnchor, b"missing-compile-anchor"),
+                (A::Stopped, b"stopped"), (A::Deadline, b"deadline"), (A::NativeUnavailable, b"native-unavailable"),
+                (A::NativeDenied, b"native-denied"), (A::Namespace, b"namespace"), (A::Mount, b"mount"), (A::Ownership, b"ownership"),
+                (A::ExtendedAttributes, b"extended-attributes"), (A::IdentityChanged, b"identity-changed"), (A::Manifest, b"manifest"),
+                (A::Inventory, b"inventory"), (A::Bounds, b"bounds"), (A::AlreadyUsed, b"already-used"), (A::Interrupted, b"interrupted"),
+                (A::CloseUncertain, b"close-uncertain"), (A::LedgerInvariant, b"ledger-invariant"),
+                (A::TransferUnavailable, b"transfer-unavailable"), (A::DestinationOccupied, b"destination-occupied"),
+            ];
+            assert_eq!(reasons.len(), 20);
+            for &(reason, token) in reasons {
+                assert!(token.is_ascii() && token.len() <= 22);
+                let carriers: [(C, &[u8]); 4] = [(C::Inspection(Some(reason)), b"inspection"),
+                    (C::Capability(reason), b"capability"), (C::Preparation(reason), b"prepare"), (C::FinalClaim(reason), b"final-claim")];
+                for (cause, cause_token) in carriers {
+                    let plain = BridgeError::unavailable("fictional-private-passive-cause");
+                    let original = plain.clone().with_linux_passive_cause(Some(cause));
+                    assert_eq!(original, plain); // Private diagnostics cannot change public error equality.
+                    assert_eq!(serde_json::to_value(&original).unwrap(), serde_json::to_value(&plain).unwrap());
+                    let actual = sanitized_error(original);
+                    let (origin, class, got_cause, admission) = actual.installed_failure().tokens();
+                    assert_eq!(origin, b"bridge"); assert_eq!(class, b"runtime-unavailable");
+                    assert_eq!(got_cause, cause_token); assert_eq!(admission, token);
+                    let packet = actual.installed_failure();
+                    let public = serde_json::to_value(AssessmentError::unavailable()).unwrap();
+                    assert_eq!(serde_json::to_value(&actual).unwrap(), public);
+                    let command: crate::asset_commands::CommandError = actual.into();
+                    let waiter = command.clone();
+                    assert!(command.installed_assessment_failure() == packet && waiter.installed_assessment_failure() == packet);
+                    assert_eq!(serde_json::to_value(&command).unwrap(), public);
+                    assert_eq!(serde_json::to_value(&waiter).unwrap(), public);
+                }
             }
             let plain = sanitized_error(BridgeError::unavailable("fictional-private-without-cause"));
             assert_eq!(plain.installed_failure().tokens().2, b"none");
+            assert_eq!(plain.installed_failure().tokens().3, b"na");
+            assert!(InstalledAssessmentFailure::default() == InstalledAssessmentFailure::none());
+            assert_eq!(InstalledAssessmentFailure::none().tokens().3, b"na");
             for error in [AssessmentError::invalid(), AssessmentError::limit(), AssessmentError::context_stale(), AssessmentError::unavailable()] {
                 assert!(error.installed_failure() == InstalledAssessmentFailure::none());
             }
             let native: crate::asset_commands::CommandError = crate::asset_commands::AssetError::invalid().into();
             assert!(native.installed_assessment_failure() == InstalledAssessmentFailure::none());
             let request = AssessmentError::unavailable_request();
-            let (origin, class, cause) = request.installed_failure().tokens();
-            assert_eq!(origin, b"request"); assert_eq!(class, b"serialize"); assert_eq!(cause, b"none");
+            let (origin, class, cause, admission) = request.installed_failure().tokens();
+            assert_eq!(origin, b"request"); assert_eq!(class, b"serialize"); assert_eq!(cause, b"none"); assert_eq!(admission, b"na");
             assert_eq!(serde_json::to_value(request).unwrap(), serde_json::to_value(AssessmentError::unavailable()).unwrap());
-            assert_eq!(InstalledAssessmentFailure::token_bounds(), (7, 22, 11));
-            assert!(!std::mem::needs_drop::<InstalledAssessmentFailure>() && std::mem::size_of::<InstalledAssessmentFailure>() <= 3);
+            assert_eq!(InstalledAssessmentFailure::token_bounds(), (7, 22, 11, 22));
+            // Three existing one-byte discriminants plus the optional original reason.
+            assert!(!std::mem::needs_drop::<InstalledAssessmentFailure>() && std::mem::size_of::<InstalledAssessmentFailure>() <= 4);
         }
 
         fn assert_sanitizer_records_only_its_first_actual_rejecting_stage() {
@@ -1541,8 +1614,8 @@ mod tests {
             let cases: [(Value, &[u8]); 5] = [(value,b"value"), (bound,b"bound"), (shape,b"shape"), (dto,b"dto"), (semantics,b"semantics")];
             for (raw, stage) in cases {
                 let error = match sanitized_result(raw, &expected) { Err(error) => error, Ok(_) => panic!("inert malformed result admitted") };
-                let (origin, class, cause) = error.installed_failure().tokens();
-                assert_eq!(origin, b"result"); assert_eq!(class, stage); assert_eq!(cause, b"none");
+                let (origin, class, cause, admission) = error.installed_failure().tokens();
+                assert_eq!(origin, b"result"); assert_eq!(class, stage); assert_eq!(cause, b"none"); assert_eq!(admission, b"na");
                 assert_eq!(serde_json::to_value(&error).unwrap(), serde_json::to_value(AssessmentError::unavailable()).unwrap());
                 assert!(!serde_json::to_string(&error).unwrap().contains("fictional-private"));
             }

@@ -55,6 +55,7 @@ SHELL_FIXTURE_NAMESPACE_LIMIT = 2048
 SHELL_FAILURE_LABEL_LIMIT = 512
 SHELL_PATH_FAILURE_FRAME_BOUND = 256
 SHELL_SESSION_FAILURE_FRAME_BOUND = 466  # v3 only; historical v1/v2 admission stays unchanged.
+SHELL_SESSION_FAILURE_V4_FRAME_BOUND = 492  # Same 512B sink; ;af= plus at most 22B.
 # Literal observer labels only; never a prefix parser or raw-output escape.
 SHELL_FAILURE_STEPS = (
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=Bootstrap\n",
@@ -323,6 +324,14 @@ SHELL_SESSION_ASSESSMENT_BRIDGE_CLASSES = (
     b"known-assessment", b"busy", b"shutdown", b"timeout", b"cleanup", b"retryable", b"other",
 )
 SHELL_SESSION_ASSESSMENT_RESULT_CLASSES = (b"value", b"bound", b"shape", b"dto", b"semantics")
+# v4 preserves the same original AdmissionFailure, never infers native state.
+SHELL_SESSION_ASSESSMENT_ADMISSIONS = (
+    b"na", b"unsupported-platform", b"missing-compile-anchor", b"stopped", b"deadline",
+    b"native-unavailable", b"native-denied", b"namespace", b"mount", b"ownership",
+    b"extended-attributes", b"identity-changed", b"manifest", b"inventory", b"bounds",
+    b"already-used", b"interrupted", b"close-uncertain", b"ledger-invariant",
+    b"transfer-unavailable", b"destination-occupied",
+)
 SHELL_SESSION_MANAGEMENT_JOINS = b"prmcxfi"
 # Exact refused public-spelling IDs only; not a prefix/grammar or object/cause claim.
 # Canonical roster body SHA-256: bf18de45262438226bbc80a1cc8a3c078821b4a1dc88ec16a00961c05c990710
@@ -3945,7 +3954,7 @@ def _shell_label_pair(raw):
         path_detail, lines = lines[0], lines[1:]
     # Session traces require their complete fourth record. Historical v1/v2
     # keep their prior shape, with no invented assessmentFailure metadata.
-    # Never admit a proper prefix of v3 as a complete historical frame.
+    # Never admit a proper prefix of v3/v4 as a complete historical frame.
     if (len(lines) not in (3, 4) or lines[0] not in SHELL_FAILURE_STEPS or lines[1] not in SHELL_FAILURE_BOUNDARIES
             or lines[2] not in SHELL_BOOTSTRAP_PROGRESS):
         return None
@@ -3976,11 +3985,17 @@ def _shell_label_pair(raw):
             version = b"v3"
             if len(raw) > SHELL_SESSION_FAILURE_FRAME_BOUND:
                 return None
+        elif lines[3].startswith(b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v4;"):
+            version = b"v4"
+            if len(raw) > SHELL_SESSION_FAILURE_V4_FRAME_BOUND:
+                return None
         else:
             return None
         suffix = b"" if version == b"v1" else rb";o=([a-z-]{1,19});d=([a-z-]{1,15});a=([a-z-]{1,12});q=([a-z.-]{1,26});w=([a-z-]{1,14})"
-        if version == b"v3":
+        if version in (b"v3", b"v4"):
             suffix += rb";ao=([a-z-]{1,7});ac=([a-z-]{1,24});ax=([a-z-]{1,11})"
+        if version == b"v4":
+            suffix += rb";af=([a-z-]{1,22})"
         suffix += rb"\n"
         match = re.fullmatch(rb"MRK_INSTALLED_SHELL_SESSION_FAILURE=" + version + rb";index=(none|0|[1-9][0-9]?);"
                              rb"evaluations=(0|[1-9][0-9]{0,2});reject=([a-z-]{1,32});wait=([a-z-]{1,32})" + suffix, lines[3])
@@ -4003,10 +4018,18 @@ def _shell_label_pair(raw):
             if first_origin is None:
                 return None
             result["session"]["firstOrigin"] = first_origin
-        if version == b"v3":
-            assessment_failure = _shell_session_assessment_failure(rejection, *match.groups()[9:])
+        if version in (b"v3", b"v4"):
+            origin, classification, cause = match.groups()[9:12]
+            assessment_failure = _shell_session_assessment_failure(rejection, origin, classification, cause)
             if assessment_failure is None:
                 return None
+            if version == b"v4":
+                admission = match.groups()[12]
+                if (admission not in SHELL_SESSION_ASSESSMENT_ADMISSIONS
+                        or admission != b"na" and not (origin == b"bridge" and cause in (b"inspection", b"capability", b"prepare", b"final-claim"))
+                        or origin == b"bridge" and cause in (b"capability", b"prepare", b"final-claim") and admission == b"na"):
+                    return None
+                assessment_failure["admission"] = admission.decode("ascii")
             result["session"]["assessmentFailure"] = assessment_failure
     return result
 

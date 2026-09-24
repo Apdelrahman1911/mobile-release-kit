@@ -813,9 +813,9 @@ fn failure_sink(case: Case) -> Option<rustix::fd::OwnedFd> {
 }
 
 const FAILURE_PAIR_LIMIT: usize = 512;
-// Existing conservative v2 412B plus three 4B prefixes and closed maxima
-// 7/24/11. Never omit/truncate a field to fit the unchanged 512B sink.
-const SESSION_FAILURE_FRAME_BOUND: usize = 466;
+// Existing conservative v3 466B plus the 4B admission prefix and 22B maximum.
+// Never omit/truncate a field to fit the unchanged 512B sink.
+const SESSION_FAILURE_FRAME_BOUND: usize = 492;
 // At most 174B of existing lines plus a 77B closed prefix, within the same sink.
 const PATH_FAILURE_FRAME_BOUND: usize = 256;
 fn failure_pair(trace: (Step, Boundary), progress: BootstrapProgress, session: Option<SessionDiagnostic>,
@@ -855,7 +855,7 @@ fn failure_pair(trace: (Step, Boundary), progress: BootstrapProgress, session: O
         (Step::Session(step), Some(diagnostic)) if diagnostic.step == step => {
             if diagnostic.evaluations > 128 || step.recipe_index().is_some_and(|index| index >= 64)
                 || diagnostic.rejection == SessionRejection::EvaluationBudget && diagnostic.evaluations != 128 { return None; }
-            append(&mut bytes, &mut length, b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v3;index=")?;
+            append(&mut bytes, &mut length, b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v4;index=")?;
             if let Some(index) = step.recipe_index() {
                 let (digits, begin) = decimal(u16::from(index))?; append(&mut bytes, &mut length, &digits[begin..])?;
             } else { append(&mut bytes, &mut length, b"none")?; }
@@ -876,13 +876,15 @@ fn failure_pair(trace: (Step, Boundary), progress: BootstrapProgress, session: O
             append(&mut bytes, &mut length, &query[..size])?;
             append(&mut bytes, &mut length, b";w=")?;
             append(&mut bytes, &mut length, diagnostic.first_failure.worker_token())?;
-            let (origin, class, cause) = diagnostic.assessment.tokens();
+            let (origin, class, cause, admission) = diagnostic.assessment.tokens();
             append(&mut bytes, &mut length, b";ao=")?;
             append(&mut bytes, &mut length, origin)?;
             append(&mut bytes, &mut length, b";ac=")?;
             append(&mut bytes, &mut length, class)?;
             append(&mut bytes, &mut length, b";ax=")?;
             append(&mut bytes, &mut length, cause)?;
+            append(&mut bytes, &mut length, b";af=")?;
+            append(&mut bytes, &mut length, admission)?;
             append(&mut bytes, &mut length, b"\n")?;
             if length > SESSION_FAILURE_FRAME_BOUND { return None; }
         },
@@ -931,29 +933,29 @@ fn assert_failure_pair_contract() {
     let trace = (Step::Session(step),Boundary::Settlement);
     let first = SessionDiagnostic { step, evaluations:128, rejection:SessionRejection::EvaluationBudget, wait:SessionWait::DisplayMismatch, first_failure:InstalledSessionFailure::not_recorded(), assessment:InstalledAssessmentFailure::none() };
     let expected = [step.failure_line(), Boundary::Settlement.failure_line(), BootstrapProgress::Advanced.failure_line(),
-        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v3;index=63;evaluations=128;reject=evaluation-budget;wait=rendered-display-mismatch;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none\n"].concat();
+        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v4;index=63;evaluations=128;reject=evaluation-budget;wait=rendered-display-mismatch;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na\n"].concat();
     assert!(failure_pair(trace,BootstrapProgress::Advanced,Some(first),None).is_some_and(|(bytes,length)|
         length <= FAILURE_PAIR_LIMIT && bytes.get(..length) == Some(expected.as_slice())));
     let longest = SessionDiagnostic { step:SessionStep::QuitPreserved,evaluations:128,
         rejection:SessionRejection::UnavailableScript,wait:SessionWait::ControlsMismatch, first_failure:InstalledSessionFailure::not_recorded(), assessment:InstalledAssessmentFailure::none() };
     let expected = [longest.step.failure_line(),Boundary::Settlement.failure_line(),BootstrapProgress::AppInfoReturnedBeforeHold.failure_line(),
-        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v3;index=none;evaluations=128;reject=unavailable-projection-script;wait=rendered-control-mismatch;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none\n"].concat();
+        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v4;index=none;evaluations=128;reject=unavailable-projection-script;wait=rendered-control-mismatch;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na\n"].concat();
     assert!(failure_pair((Step::Session(longest.step),Boundary::Settlement),BootstrapProgress::AppInfoReturnedBeforeHold,Some(longest),None)
         .is_some_and(|(bytes,length)|length <= FAILURE_PAIR_LIMIT && bytes.get(..length) == Some(expected.as_slice())));
     let bound = SessionDiagnostic { first_failure:InstalledSessionFailure::contract_sample(), ..longest };
     let expected = [bound.step.failure_line(),Boundary::Settlement.failure_line(),BootstrapProgress::AppInfoReturnedBeforeHold.failure_line(),
-        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v3;index=none;evaluations=128;reject=unavailable-projection-script;wait=rendered-control-mismatch;o=supervisor-disabled;d=none;a=bound;q=unavailable.spawn-other.xf;w=settle-unknown;ao=none;ac=na;ax=none\n"].concat();
+        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v4;index=none;evaluations=128;reject=unavailable-projection-script;wait=rendered-control-mismatch;o=supervisor-disabled;d=none;a=bound;q=unavailable.spawn-other.xf;w=settle-unknown;ao=none;ac=na;ax=none;af=na\n"].concat();
     assert!(failure_pair((Step::Session(bound.step),Boundary::Settlement),BootstrapProgress::AppInfoReturnedBeforeHold,Some(bound),None)
         .is_some_and(|(bytes,length)|length <= SESSION_FAILURE_FRAME_BOUND && bytes.get(..length) == Some(expected.as_slice())
             && bytes[..length].is_ascii() && bytes[..length].iter().filter(|byte| **byte == b'\n').count() == 4));
-    let (origin_bound, class_bound, cause_bound) = InstalledAssessmentFailure::token_bounds();
-    assert!(origin_bound <= 7 && class_bound <= 24 && cause_bound <= 11);
-    assert_eq!(311 + 5 * 3 + 19 + 15 + 12 + 26 + 14 + 3 * 4 + 7 + 24 + 11, SESSION_FAILURE_FRAME_BOUND);
-    assert_eq!(FAILURE_PAIR_LIMIT - SESSION_FAILURE_FRAME_BOUND, 46);
+    let (origin_bound, class_bound, cause_bound, admission_bound) = InstalledAssessmentFailure::token_bounds();
+    assert!(origin_bound <= 7 && class_bound <= 24 && cause_bound <= 11 && admission_bound <= 22);
+    assert_eq!(311 + 5 * 3 + 19 + 15 + 12 + 26 + 14 + 3 * 4 + 7 + 24 + 11 + 4 + 22, SESSION_FAILURE_FRAME_BOUND);
+    assert_eq!(FAILURE_PAIR_LIMIT - SESSION_FAILURE_FRAME_BOUND, 20);
     for evaluations in [0,9,10,99,100,128] {
         for step in [SessionStep::Navigate,SessionStep::Read(0,SA::Prepare("android-keystore","save")),SessionStep::Read(63,SA::ReviewRemoval(1))] {
             let diagnostic = SessionDiagnostic { step,evaluations,rejection:SessionRejection::NotRecorded,wait:SessionWait::NotSampled, first_failure:InstalledSessionFailure::not_recorded(), assessment:InstalledAssessmentFailure::none() };
-            let expected = format!("MRK_INSTALLED_SHELL_SESSION_FAILURE=v3;index={};evaluations={evaluations};reject=not-recorded;wait=not-sampled;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none\n",
+            let expected = format!("MRK_INSTALLED_SHELL_SESSION_FAILURE=v4;index={};evaluations={evaluations};reject=not-recorded;wait=not-sampled;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na\n",
                 step.recipe_index().map_or_else(|| "none".to_owned(),|index|index.to_string()));
             assert!(failure_pair((Step::Session(step),Boundary::Settlement),BootstrapProgress::Advanced,Some(diagnostic),None)
                 .is_some_and(|(bytes,length)|bytes[..length].ends_with(expected.as_bytes())));
@@ -1001,7 +1003,7 @@ fn assert_failure_pair_contract() {
         rejection:SessionRejection::GtkObserverEndpoint,wait:SessionWait::GtkActionInsensitive, first_failure:InstalledSessionFailure::not_recorded(), assessment:InstalledAssessmentFailure::none() };
     let gtk_trace = (Step::Session(gtk.step),Boundary::Gtk);
     let expected = [gtk.step.failure_line(),Boundary::Gtk.failure_line(),BootstrapProgress::Advanced.failure_line(),
-        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v3;index=3;evaluations=16;reject=gtk-observer-endpoint;wait=gtk-action-insensitive;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none\n"].concat();
+        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v4;index=3;evaluations=16;reject=gtk-observer-endpoint;wait=gtk-action-insensitive;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na\n"].concat();
     assert!(failure_pair(gtk_trace,BootstrapProgress::Advanced,Some(gtk),None).is_some_and(|(bytes,length)|
         length <= FAILURE_PAIR_LIMIT && bytes.get(..length) == Some(expected.as_slice())));
     let same = SessionDiagnostic::sample(gtk_trace.0,16,Some(gtk)).unwrap();
@@ -1067,8 +1069,8 @@ fn assert_failure_pair_contract() {
         SessionRejection::ReplyCodeUnavailable,SessionRejection::CapabilityUnavailable] {
         let diagnostic = SessionDiagnostic { rejection,..sampled };
         let expected = [step.failure_line(),Boundary::Settlement.failure_line(),BootstrapProgress::Advanced.failure_line(),
-            b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v3;index=29;evaluations=73;reject=",rejection.token(),
-            b";wait=native-reply-pending;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none\n"].concat();
+            b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v4;index=29;evaluations=73;reject=",rejection.token(),
+            b";wait=native-reply-pending;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na\n"].concat();
         assert!(failure_pair(trace,BootstrapProgress::Advanced,Some(diagnostic),None).is_some_and(|(bytes,length)|
             length <= FAILURE_PAIR_LIMIT && bytes.get(..length) == Some(expected.as_slice())));
     }
@@ -1091,6 +1093,7 @@ fn assert_failure_pair_contract() {
     // A previous wait is not a returned outcome. Capture only this ordinal's
     // Prepare error, and latch rejection + packet together without sampling R1.
     let packet = InstalledAssessmentFailure::contract_sample();
+    assert_eq!(packet.tokens().3, b"missing-compile-anchor");
     let reply = SessionReply { error:Some("assessment_unavailable".to_owned()),ordinal:2,assessment:packet,..SessionReply::default() };
     let original = session_reply_refusal(SessionCommand::Prepare.index(),2,2,1,&reply).unwrap();
     assert!(original.rejection == SessionRejection::ReplyAssessmentUnavailable && original.assessment == packet);
@@ -1111,7 +1114,7 @@ fn assert_failure_pair_contract() {
         let sampled = SessionDiagnostic::sample(trace.0,13,Some(pending)).unwrap();
         let rejected = SessionDiagnostic { rejection:original.rejection,assessment:original.assessment,..sampled };
         let expected = [step.failure_line(),Boundary::Settlement.failure_line(),BootstrapProgress::Advanced.failure_line(),
-            b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v3;index=6;evaluations=13;reject=reply-assessment-unavailable;wait=native-reply-pending;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=bridge;ac=assessment-unavailable;ax=sel-profile\n"].concat();
+            b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v4;index=6;evaluations=13;reject=reply-assessment-unavailable;wait=native-reply-pending;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=bridge;ac=runtime-unavailable;ax=prepare;af=missing-compile-anchor\n"].concat();
         assert!(failure_pair(trace,BootstrapProgress::Advanced,Some(rejected),None).is_some_and(|(bytes,length)|
             length <= SESSION_FAILURE_FRAME_BOUND && bytes.get(..length) == Some(expected.as_slice())));
         assert!(SessionDiagnostic::sample(trace.0,13,Some(rejected)).unwrap().assessment == InstalledAssessmentFailure::none());
@@ -1121,6 +1124,9 @@ fn assert_failure_pair_contract() {
             latch_session_diagnostic(&failed,&mut retained,SessionDiagnostic { rejection:SessionRejection::LostNativeSnapshot,
                 first_failure:InstalledSessionFailure::contract_sample(),assessment:InstalledAssessmentFailure::contract_result_sample(),..rejected });
             assert!(retained == Some(first)); // An absent first packet cannot be filled later either.
+            // Nor may a later original admission fill/replace the first packet.
+            latch_session_diagnostic(&failed,&mut retained,rejected);
+            assert!(retained == Some(first));
         }
         for deadline_first in [false,true] {
             let failed = AtomicBool::new(false); let mut retained = Some(sampled);

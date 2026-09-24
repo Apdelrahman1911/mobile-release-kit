@@ -3065,7 +3065,7 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertEqual((query_bound, worker_bound, complete_bound), (26, 14, 412))
         self.assertLessEqual(complete_bound, 512)
         self.assertIn("const FAILURE_PAIR_LIMIT: usize = 512;", source)
-        self.assertIn("const SESSION_FAILURE_FRAME_BOUND: usize = 466;", source)
+        self.assertIn("const SESSION_FAILURE_FRAME_BOUND: usize = 492;", source)
         self.assertIn("fn assert_failure_pair_contract()", source)
         self.assertIn("    assert_failure_pair_contract();", source)
         self.assertLess(source.index("    assert_failure_pair_contract();"), source.index("let returned = super::run_builder("))
@@ -3136,10 +3136,7 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
                           b"reply-assessment-policy-stale", b"reply-assessment-context-invalid"):
             self.assertIsNotNone(lifecycle._shell_label_pair(known.replace(b"reply-assessment-invalid-request", rejection)))
         raw = frame(b"bridge", b"assessment-unavailable", b"sel-profile")
-        # Exact counterpart of Rust's inert original-Prepare reply frame, not a
-        # claim about a retained installed run or successful owner settlement.
-        rust = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
-        self.assertIn(raw[len(prefix):].decode("ascii").replace("\n", "\\n"), rust)
+        # v3 remains historical three-field DATA even after the v4 emitter.
         bound = raw.replace(b"o=not-recorded;d=none;a=unassociated;q=na;w=na;",
                             b"o=supervisor-disabled;d=none;a=bound;q=cleanup.none.rr;w=settle-unknown;")
         self.assertEqual(lifecycle._shell_label_pair(bound)["session"]["assessmentFailure"],
@@ -3188,6 +3185,125 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
                           raw.replace(b"index=6;", b"index=06;"), raw.replace(b"q=na;", b"q=timeout.none.rr;"),
                           raw.replace(b"reject=reply-assessment-unavailable;", b"reject=reply-busy;"),
                           raw.replace(b";ax=", b";ax=\x00")):
+            self.assertIsNone(lifecycle._shell_label_pair(malformed))
+
+    def test_assessment_failure_v4_retains_the_original_enum_and_closed_cross_fields(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        source = (SOURCE / "desktop/src-tauri/src/credential_assessment.rs").read_text()
+        packet = source.split("mod assessment_failure {", 1)[1].split("pub(crate) use assessment_failure::Failure", 1)[0]
+        runtime = (SOURCE / "desktop/src-tauri/src/installed_runtime.rs").read_text()
+        enum = runtime.split("pub(crate) enum AdmissionFailure {", 1)[1].split("}", 1)[0]
+        variants = tuple(re.findall(r"\b[A-Z][A-Za-z]+\b", enum))
+        mapper = packet.split("fn admission_token(reason: Option<A>)", 1)[1].split("\n    #[derive", 1)[0]
+        mapping = re.findall(r'Some\(A::([A-Za-z]+)\) => b"([a-z-]+)"', mapper)
+        values = packet.split("const ADMISSION_VALUES:", 1)[1].split("];", 1)[0]
+        self.assertEqual(tuple(name for name, _ in mapping), variants)
+        self.assertEqual(tuple(re.findall(r"Some\(A::([A-Za-z]+)\)", values)), variants)
+        admissions = (b"na",) + tuple(token.encode("ascii") for _, token in mapping)
+        self.assertIn('None => b"na"', mapper)
+        self.assertEqual(admissions, lifecycle.SHELL_SESSION_ASSESSMENT_ADMISSIONS)
+        self.assertEqual((len(variants), len(set(admissions)), max(map(len, admissions))), (20, 21, 22))
+        self.assertIn("use crate::installed_runtime::AdmissionFailure as A;", packet)
+        self.assertIn("cause: Cause, admission: Option<A> }", packet)
+        self.assertIn("let original = error.linux_passive_cause();", packet)
+        self.assertIn("cause: Cause::original(original)", packet)
+        self.assertIn("admission: original_admission(original)", packet)
+        for forbidden in ("format!", "Debug", "Display", ".to_string(", "serde", "Instant::now", ".await", ".try_lock("):
+            self.assertNotIn(forbidden, packet)
+        self.assertIn("std::mem::size_of::<InstalledAssessmentFailure>() <= 4", source)
+        self.assertIn("std::mem::needs_drop::<InstalledAssessmentFailure>()", source)
+        self.assertEqual(lifecycle.SHELL_SESSION_FAILURE_V4_FRAME_BOUND, 466 + 4 + 22)
+        self.assertEqual(lifecycle.SHELL_FAILURE_LABEL_LIMIT - lifecycle.SHELL_SESSION_FAILURE_V4_FRAME_BOUND, 20)
+        prefix = (b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionReview\n"
+                  b"MRK_INSTALLED_SHELL_FAILURE_PHASE=settlement\n"
+                  b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n")
+        rejections = {b"known-assessment": b"reply-assessment-invalid-request", b"busy": b"reply-busy",
+                      b"shutdown": b"reply-shutting-down", b"timeout": b"reply-query-timeout", b"cleanup": b"reply-cleanup-unknown"}
+        def frame(origin=b"bridge", classification=b"runtime-unavailable", cause=b"prepare", admission=b"missing-compile-anchor"):
+            rejection = rejections.get(classification, b"reply-assessment-unavailable")
+            return (prefix + b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v4;index=6;evaluations=13;reject=" + rejection
+                    + b";wait=native-reply-pending;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=" + origin
+                    + b";ac=" + classification + b";ax=" + cause + b";af=" + admission + b"\n")
+        combinations = [(b"none", b"na", b"none"), (b"request", b"serialize", b"none")]
+        combinations += [(b"bridge", classification, cause) for classification in lifecycle.SHELL_SESSION_ASSESSMENT_BRIDGE_CLASSES
+                         for cause in lifecycle.SHELL_SESSION_QUERY_CAUSES]
+        combinations += [(b"result", classification, b"none") for classification in lifecycle.SHELL_SESSION_ASSESSMENT_RESULT_CLASSES]
+        for origin, classification, cause in combinations:
+            for admission in admissions:
+                carries = origin == b"bridge" and cause in (b"inspection", b"capability", b"prepare", b"final-claim")
+                required = carries and cause != b"inspection"
+                allowed = not required if admission == b"na" else carries
+                raw = frame(origin, classification, cause, admission)
+                parsed = lifecycle._shell_label_pair(raw)
+                self.assertEqual(parsed is not None, allowed, (origin, classification, cause, admission))
+                if allowed:
+                    self.assertEqual(parsed["session"]["assessmentFailure"],
+                                     {"origin": origin.decode("ascii"), "class": classification.decode("ascii"),
+                                      "cause": cause.decode("ascii"), "admission": admission.decode("ascii")})
+                    self.assertEqual(parsed["session"]["rejection"], rejections.get(classification, b"reply-assessment-unavailable").decode("ascii"))
+                    self.assertLessEqual(len(raw), lifecycle.SHELL_SESSION_FAILURE_V4_FRAME_BOUND)
+        raw = frame()
+        # Same inert original-Prepare frame as the shared pre-GTK Rust contract,
+        # not an installed admission or cleanup qualification receipt.
+        rust = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        self.assertIn(raw[len(prefix):].decode("ascii").replace("\n", "\\n"), rust)
+        self.assertIn('assert_eq!(packet.tokens().3, b"missing-compile-anchor");', rust)
+        self.assertIn("latch_session_diagnostic(&failed,&mut retained,rejected);\n            assert!(retained == Some(first));", rust)
+        bound = raw.replace(b"o=not-recorded;d=none;a=unassociated;q=na;w=na;",
+                            b"o=supervisor-disabled;d=none;a=bound;q=cleanup.none.rr;w=settle-unknown;")
+        self.assertEqual(lifecycle._shell_label_pair(bound)["session"]["assessmentFailure"],
+                         lifecycle._shell_label_pair(raw)["session"]["assessmentFailure"])
+        historical = raw.replace(b"=v4;", b"=v3;").replace(b";af=missing-compile-anchor", b"")
+        self.assertEqual(lifecycle._shell_label_pair(historical)["session"]["assessmentFailure"],
+                         {"origin": "bridge", "class": "runtime-unavailable", "cause": "prepare"})
+        with patch.object(lifecycle, "SHELL_SESSION_FAILURE_V4_FRAME_BOUND", len(raw) - 1):
+            self.assertIsNone(lifecycle._shell_label_pair(raw))
+            self.assertIsNotNone(lifecycle._shell_label_pair(historical))
+        with patch.object(lifecycle, "SHELL_SESSION_FAILURE_FRAME_BOUND", len(historical) - 1):
+            self.assertIsNone(lifecycle._shell_label_pair(historical))
+            self.assertIsNotNone(lifecycle._shell_label_pair(raw))
+
+    def test_assessment_failure_v4_refuses_prefixes_incompatible_rejections_and_malformed_details(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        prefix = (b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionReview\n"
+                  b"MRK_INSTALLED_SHELL_FAILURE_PHASE=settlement\n"
+                  b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n"
+                  b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v4;index=6;evaluations=13;"
+                  b"reject=reply-assessment-unavailable;wait=native-reply-pending;"
+                  b"o=not-recorded;d=none;a=unassociated;q=na;w=na;")
+        def frame(origin=b"bridge", classification=b"runtime-unavailable", cause=b"prepare", admission=b"missing-compile-anchor"):
+            return prefix + b"ao=" + origin + b";ac=" + classification + b";ax=" + cause + b";af=" + admission + b"\n"
+        raw = frame()
+        for complete in (raw, frame(b"none", b"na", b"none", b"na"), frame(b"result", b"semantics", b"none", b"na")):
+            self.assertIsNotNone(lifecycle._shell_label_pair(complete))
+            for end in range(len(complete)):
+                self.assertIsNone(lifecycle._shell_label_pair(complete[:end]), end)
+                if end < len(complete) - 1:
+                    self.assertIsNone(lifecycle._shell_label_pair(complete[:end] + b"\n"), end)
+        for packet in ((b"none", b"serialize", b"none", b"na"), (b"none", b"na", b"response", b"na"),
+                       (b"request", b"na", b"none", b"na"), (b"request", b"serialize", b"prepare", b"namespace"),
+                       (b"result", b"retryable", b"none", b"na"), (b"result", b"shape", b"sel-profile", b"na"),
+                       (b"bridge", b"semantics", b"prepare", b"namespace"), (b"bridge", b"serialize", b"response", b"na"),
+                       (b"bridge", b"other", b"future", b"na"), (b"future", b"other", b"none", b"na"),
+                       (b"bridge", b"known-assessment", b"response", b"na")):
+            self.assertIsNone(lifecycle._shell_label_pair(frame(*packet)), packet)
+        for classification in (b"busy", b"shutdown", b"timeout", b"cleanup"):
+            self.assertIsNone(lifecycle._shell_label_pair(frame(classification=classification)))
+        for admission in (b"", b"na", b"unknown", b"Namespace", b"namespace\x00", b"/private/credential",
+                          b"unsupported_platform", b"native-denied-extra", b"missing-compile-anchorx"):
+            self.assertIsNone(lifecycle._shell_label_pair(frame(admission=admission)), admission)
+        for malformed in (raw + b"\n", raw + raw, raw[:-1] + b";extra=na\n",
+                          raw.replace(b"=v4;", b"=v3;"), raw.replace(b"=v4;", b"=v2;"),
+                          raw.replace(b"=v4;", b"=v1;"), raw.replace(b"=v4;", b"=v5;"),
+                          raw.replace(b";af=missing-compile-anchor", b""), raw.replace(b";af=", b";af=na;af="),
+                          raw.replace(b";ao=bridge", b""), raw.replace(b";ac=runtime-unavailable", b""), raw.replace(b";ax=prepare", b""),
+                          raw.replace(b";ax=prepare;af=missing-compile-anchor", b";af=missing-compile-anchor;ax=prepare"),
+                          raw.replace(b";ao=", b";ao=none;ao="), raw.replace(b";ac=", b";ac=other;ac="),
+                          raw.replace(b";ax=", b";ax=none;ax="), raw.replace(b"ao=bridge", b"ao=Bridge"),
+                          raw.replace(b"ac=runtime-unavailable", b"ac=runtime_unavailable"),
+                          raw.replace(b"index=6;", b"index=06;"), raw.replace(b"q=na;", b"q=timeout.none.rr;"),
+                          raw.replace(b"reject=reply-assessment-unavailable;", b"reject=reply-busy;"),
+                          raw.replace(b";af=", b";af=\x00"), raw.replace(b"\n", b"\r\n")):
             self.assertIsNone(lifecycle._shell_label_pair(malformed))
 
     def test_assessment_failure_transport_keeps_the_same_guard_and_original_return(self):
