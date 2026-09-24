@@ -32,6 +32,8 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/supervisor.rs"] mod supervisor;
 #[path = "../src/bridge.rs"] mod bridge;
 #[path = "../src/document_lifetime.rs"] mod document_lifetime;
+#[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+#[path = "../src/windows_startup.rs"] mod windows_startup;
 #[path = "../src/edit_commands.rs"] mod edit_commands;
 #[path = "../src/metadata_text_commands.rs"] mod metadata_text_commands;
 #[path = "../src/github_commands.rs"] mod github_commands;

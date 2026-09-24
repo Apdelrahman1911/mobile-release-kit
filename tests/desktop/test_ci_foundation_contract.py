@@ -12607,6 +12607,9 @@ class WindowsNormalUiInertRegressionTests(unittest.TestCase):
         self.assertIn("fn " + scalar_name.rsplit("::",1)[-1] + "()", (app / "asset_session.rs").read_text())
         self.assertIn('#[cfg(any(test, all(feature = "desktop-shell", target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]\nmod windows_startup;',
                       (app / "lib.rs").read_text())
+        self.assertIn('#[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]\n'
+                      '#[path = "../src/windows_startup.rs"] mod windows_startup;',
+                      (app.parent / "tests/installed_shell_observation.rs").read_text())
         startup_source = (app / "windows_startup.rs").read_text()
         self.assertIn("mod tests {", startup_source)
         self.assertIn("StartupOrder", (app / "shell_windows.rs").read_text())
