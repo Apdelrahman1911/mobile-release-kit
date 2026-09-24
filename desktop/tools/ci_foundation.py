@@ -11308,6 +11308,55 @@ def windows_normal_ui_native_artifact(context: dict) -> dict:
             "messages": windows_installed_record(messages, 16 << 20)}
 
 
+def windows_normal_ui_graph_refusal(reason: str, *, observer: bool, parent: dict, child: dict,
+                                    edge: dict, kind: dict, count: int = 0) -> None:
+    """Finite public labels only; callers first bind packages to the source lock."""
+    require(reason in ("library-target-missing", "library-target-ambiguous", "library-target-malformed",
+                       "rename-malformed", "declaration-missing", "declaration-ambiguous"),
+            "Windows GUI declaration-join diagnostic reason differs")
+
+    def label(value: object) -> str:
+        return value if type(value) is str and re.fullmatch(r"[A-Za-z0-9_+.\-]{1,64}", value) else "omitted"
+
+    role = "observer" if observer else "normal"
+    dependency_kind = kind.get("kind")
+    kind_label = "normal" if dependency_kind is None else dependency_kind if dependency_kind in ("dev", "build") else "omitted"
+    target_label = "none" if kind.get("target") is None else "specified"
+    count_label = str(count) if type(count) is int and 0 <= count <= 512 else "omitted"
+    # Each label is at most 64 ASCII bytes; no paths, IDs, target expressions,
+    # renames or exception text are included. Even maximum labels fit 768 bytes.
+    raise CheckFailure("Windows GUI resolved edge lacks one original declaration: " + reason
+        + f"; role={role}; parent={label(parent.get('name'))}@{label(parent.get('version'))}"
+        + f"; child={label(child.get('name'))}@{label(child.get('version'))}; edge={label(edge.get('name'))}"
+        + f"; kind={kind_label}; target={target_label}; count={count_label}")
+
+
+def windows_normal_ui_dependency_library_name(package: dict, *, observer: bool, parent: dict,
+                                              edge: dict, kind: dict) -> str:
+    """Select Cargo's one original library target, not its package/bin name."""
+    libraries = []
+    ordinary = {"lib", "rlib", "dylib", "cdylib", "staticlib"}
+    for target in package["targets"]:
+        kinds, crate_types = target["kind"], target["crate_types"]
+        if not (1 <= len(kinds) <= 6 and 1 <= len(crate_types) <= 6
+                and all(type(item) is str for item in kinds + crate_types)
+                and len(set(kinds)) == len(kinds) and len(set(crate_types)) == len(crate_types)):
+            windows_normal_ui_graph_refusal("library-target-malformed", observer=observer, parent=parent,
+                child=package, edge=edge, kind=kind)
+        kinds_set = set(kinds)
+        if not kinds_set & (ordinary | {"proc-macro"}):
+            continue  # In particular, an example's crate_types may itself be lib.
+        if (not (kinds_set <= ordinary or kinds_set == {"proc-macro"})
+                or kinds_set != set(crate_types) or not target["name"]):
+            windows_normal_ui_graph_refusal("library-target-malformed", observer=observer, parent=parent,
+                child=package, edge=edge, kind=kind)
+        libraries.append(target["name"])
+    if len(libraries) != 1:
+        windows_normal_ui_graph_refusal("library-target-missing" if not libraries else "library-target-ambiguous",
+            observer=observer, parent=parent, child=package, edge=edge, kind=kind, count=len(libraries))
+    return libraries[0]
+
+
 def windows_normal_ui_app_graph(value: object, lock: object, *, source: Path, root: Path, observer: bool) -> dict:
     """Source-locked GUI roles, separate from the historical headless graph.
 
@@ -11397,6 +11446,7 @@ def windows_normal_ui_app_graph(value: object, lock: object, *, source: Path, ro
         native_features.append("windows-installed-observation")
     require(nodes[app]["features"] == windows_normal_ui_features("observer" if observer else "app")
             and nodes[native]["features"] == native_features, "Windows GUI app/native selected features differ")
+    library_names = {}
     for key, node in nodes.items():
         edges = []
         for edge in node["deps"]:
@@ -11408,11 +11458,25 @@ def windows_normal_ui_app_graph(value: object, lock: object, *, source: Path, ro
                         and (kind["target"] is None or type(kind["target"]) is str), "Windows GUI dependency role differs")
                 declarations = packages[key].get("dependencies")
                 require(type(declarations) is list and len(declarations) <= 512, "Windows GUI dependency declarations differ")
-                matches = [dep for dep in declarations if type(dep) is dict
-                    and dep.get("name") == packages[edge["pkg"]]["name"] and dep.get("source") == packages[edge["pkg"]].get("source")
-                    and (dep.get("rename") or dep.get("name", "")).replace("-", "_") == edge["name"]
-                    and dep.get("kind") == kind["kind"] and dep.get("target") == kind["target"]]
-                require(len(matches) == 1, "Windows GUI resolved edge lacks one original declaration")
+                child = packages[edge["pkg"]]
+                if edge["pkg"] not in library_names:
+                    library_names[edge["pkg"]] = windows_normal_ui_dependency_library_name(child, observer=observer,
+                        parent=packages[key], edge=edge, kind=kind)
+                matches = []
+                for dep in declarations:
+                    if (type(dep) is not dict or dep.get("name") != child["name"] or dep.get("source") != child.get("source")
+                            or dep.get("kind") != kind["kind"] or dep.get("target") != kind["target"]):
+                        continue
+                    rename = dep.get("rename")
+                    if rename is not None and (type(rename) is not str or not rename):
+                        windows_normal_ui_graph_refusal("rename-malformed", observer=observer, parent=packages[key],
+                            child=child, edge=edge, kind=kind)
+                    name = library_names[edge["pkg"]] if rename is None else rename.replace("-", "_")
+                    if name == edge["name"]:
+                        matches.append(dep)
+                if len(matches) != 1:
+                    windows_normal_ui_graph_refusal("declaration-missing" if not matches else "declaration-ambiguous",
+                        observer=observer, parent=packages[key], child=child, edge=edge, kind=kind, count=len(matches))
             edges.append(edge["pkg"])
         require(all(type(item) is str for item in node["dependencies"]) and len(set(node["dependencies"])) == len(node["dependencies"])
                 and set(edges) == set(node["dependencies"]), "Windows GUI dependency edge tables differ")

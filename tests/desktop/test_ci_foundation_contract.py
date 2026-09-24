@@ -11906,6 +11906,32 @@ class WindowsNormalUiGuiTests(unittest.TestCase):
         return metadata, lock, source, root
 
     @classmethod
+    def custom_library_graph_fixture(cls, observer=False):
+        """Locked selectors -> debug_unreachable shape inside synthetic closure DATA."""
+        metadata, lock, source, root = cls.graph_fixture(observer)
+        registry = "registry+https://github.com/rust-lang/crates.io-index"
+        for name, version, library in (("selectors", "0.36.1", "selectors"),
+                                       ("new_debug_unreachable", "1.0.6", "debug_unreachable")):
+            manifest = root / "cargo/registry/src/index-fixed" / (name + "-" + version) / "Cargo.toml"
+            metadata["packages"].append({"id": name + "@" + version, "name": name, "version": version, "source": registry,
+                "manifest_path": str(manifest), "features": {}, "dependencies": [],
+                "targets": [{"name": library, "kind": ["lib"], "crate_types": ["lib"], "src_path": str(manifest.parent / "src/lib.rs")}]})
+            metadata["resolve"]["nodes"].append({"id": name + "@" + version, "features": [], "dependencies": [], "deps": []})
+        packages = {package["name"]: package for package in metadata["packages"]}
+        nodes = {node["id"]: node for node in metadata["resolve"]["nodes"]}
+        # The outer tauri closure is synthetic, as in graph_fixture. Only the
+        # inner unrenamed selectors -> new_debug_unreachable shape is the witness.
+        for parent, child, requirement, library in (("tauri", "selectors", "^0.36", "selectors"),
+                                                   ("selectors", "new_debug_unreachable", "^1", "debug_unreachable")):
+            packages[parent]["dependencies"].append({"name": child, "source": registry, "req": requirement,
+                "kind": None, "rename": None, "optional": False, "uses_default_features": True, "features": [],
+                "target": None, "registry": None})
+            node = nodes[packages[parent]["id"]]
+            node["dependencies"].append(packages[child]["id"])
+            node["deps"].append({"name": library, "pkg": packages[child]["id"], "dep_kinds": [{"kind": None, "target": None}]})
+        return metadata, lock, source, root
+
+    @classmethod
     def compiler_fixture(cls, observer=False):
         metadata, lock, source, root = cls.graph_fixture(observer)
         graph = helper.windows_normal_ui_app_graph(metadata, lock, source=source, root=root, observer=observer)
@@ -11952,6 +11978,168 @@ class WindowsNormalUiGuiTests(unittest.TestCase):
                 else: changed["resolve"]["nodes"][0]["dependencies"] = []; changed["resolve"]["nodes"][0]["deps"] = []
                 with self.subTest(observer=observer, change=change), self.assertRaises(helper.CheckFailure):
                     helper.windows_normal_ui_app_graph(changed, lock, source=source, root=root, observer=observer)
+
+    def test_gui_graph_custom_library_names_and_renames_are_exact(self):
+        for observer in (False, True):
+            metadata, lock, source, root = self.custom_library_graph_fixture(observer)
+            for spelling, rename, name in (("absent", None, "debug_unreachable"), ("null", None, "debug_unreachable"),
+                                           ("explicit", "debug-alias", "debug_alias")):
+                changed = deepcopy(metadata)
+                parent = next(package for package in changed["packages"] if package["name"] == "selectors")
+                node = next(node for node in changed["resolve"]["nodes"] if node["id"] == parent["id"])
+                if spelling == "absent": parent["dependencies"][0].pop("rename")
+                else: parent["dependencies"][0]["rename"] = rename
+                node["deps"][0]["name"] = name
+                with self.subTest(observer=observer, spelling=spelling):
+                    graph = helper.windows_normal_ui_app_graph(changed, lock, source=source, root=root, observer=observer)
+                    self.assertEqual(set(graph), {"packages", "nodes", "appId", "nativeId", "materialIds", "observer"})
+                    self.assertEqual(graph["observer"], observer)
+                    self.assertEqual(graph["packages"]["new_debug_unreachable@1.0.6"]["targets"][0]["name"], "debug_unreachable")
+            for rename, name in ((None, "new_debug_unreachable"), ("debug-alias", "debug_unreachable"),
+                                 ("debug-alias", "debug-alias"), ("debug-alias", "wrong_alias"),
+                                 ("", "debug_unreachable"), (False, "debug_unreachable"), (0, "debug_unreachable"),
+                                 ([], "debug_unreachable"), ({}, "debug_unreachable")):
+                changed = deepcopy(metadata)
+                parent = next(package for package in changed["packages"] if package["name"] == "selectors")
+                node = next(node for node in changed["resolve"]["nodes"] if node["id"] == parent["id"])
+                parent["dependencies"][0]["rename"] = rename
+                node["deps"][0]["name"] = name
+                with self.subTest(observer=observer, rename=rename, name=name), self.assertRaises(helper.CheckFailure):
+                    helper.windows_normal_ui_app_graph(changed, lock, source=source, root=root, observer=observer)
+
+    def test_gui_graph_library_target_roles_are_unique_and_source_bound(self):
+        for observer in (False, True):
+            metadata, lock, source, root = self.custom_library_graph_fixture(observer)
+            for kinds in (["lib"], ["rlib"], ["dylib"], ["cdylib"], ["staticlib"], ["rlib", "cdylib"], ["proc-macro"]):
+                changed = deepcopy(metadata)
+                child = next(package for package in changed["packages"] if package["name"] == "new_debug_unreachable")
+                library = {**child["targets"][0], "kind": kinds, "crate_types": list(reversed(kinds))}
+                decoys = [{"name": "debug_unreachable", "kind": [role], "crate_types": ["lib" if role == "example" else "bin"],
+                    "src_path": str(Path(child["manifest_path"]).parent / (role + ".rs"))}
+                    for role in ("bin", "example", "test", "bench", "custom-build")]
+                child["targets"] = decoys + [library]
+                with self.subTest(observer=observer, kinds=kinds):
+                    helper.windows_normal_ui_app_graph(changed, lock, source=source, root=root, observer=observer)
+            for rename in (None, "debug-alias"):
+                for change in ("bin", "example", "test", "bench", "custom-build", "duplicate", "ambiguous", "mixed-kind",
+                               "mixed-proc-macro", "wrong-crate-type", "duplicate-kind", "duplicate-crate-type", "empty-kind",
+                               "empty-crate-types", "malformed-kind", "empty-name", "foreign-source"):
+                    changed = deepcopy(metadata)
+                    parent = next(package for package in changed["packages"] if package["name"] == "selectors")
+                    node = next(node for node in changed["resolve"]["nodes"] if node["id"] == parent["id"])
+                    parent["dependencies"][0]["rename"] = rename
+                    node["deps"][0]["name"] = "debug_unreachable" if rename is None else "debug_alias"
+                    child = next(package for package in changed["packages"] if package["name"] == "new_debug_unreachable")
+                    target = child["targets"][0]
+                    if change in ("bin", "example", "test", "bench", "custom-build"):
+                        target["kind"] = [change]; target["crate_types"] = ["lib" if change == "example" else "bin"]
+                    elif change == "duplicate": child["targets"].append(deepcopy(target))
+                    elif change == "ambiguous": child["targets"].append({**target, "name": "other_library"})
+                    elif change == "mixed-kind": target["kind"] = ["lib", "bin"]; target["crate_types"] = ["lib", "bin"]
+                    elif change == "mixed-proc-macro": target["kind"] = ["lib", "proc-macro"]; target["crate_types"] = ["lib", "proc-macro"]
+                    elif change == "wrong-crate-type": target["crate_types"] = ["bin"]
+                    elif change == "duplicate-kind": target["kind"] = ["lib", "lib"]
+                    elif change == "duplicate-crate-type": target["crate_types"] = ["lib", "lib"]
+                    elif change == "empty-kind": target["kind"] = []
+                    elif change == "empty-crate-types": target["crate_types"] = []
+                    elif change == "malformed-kind": target["kind"] = [{}]
+                    elif change == "empty-name": target["name"] = ""
+                    else: target["src_path"] = str(root / "foreign/lib.rs")
+                    with self.subTest(observer=observer, rename=rename, change=change), self.assertRaises(helper.CheckFailure):
+                        helper.windows_normal_ui_app_graph(changed, lock, source=source, root=root, observer=observer)
+
+    def test_gui_graph_declaration_join_preserves_identity_and_cardinality(self):
+        for observer in (False, True):
+            metadata, lock, source, root = self.custom_library_graph_fixture(observer)
+            for dependency_kind, target in ((None, None), ("build", None), ("dev", "cfg(windows)"),
+                                            (None, 'cfg(all(windows, target_arch = "x86_64"))')):
+                changed = deepcopy(metadata)
+                parent = next(package for package in changed["packages"] if package["name"] == "selectors")
+                node = next(node for node in changed["resolve"]["nodes"] if node["id"] == parent["id"])
+                parent["dependencies"][0].update({"kind": dependency_kind, "target": target})
+                node["deps"][0]["dep_kinds"] = [{"kind": dependency_kind, "target": target}]
+                with self.subTest(observer=observer, kind=dependency_kind, target=target):
+                    helper.windows_normal_ui_app_graph(changed, lock, source=source, root=root, observer=observer)
+            for change in ("name", "source", "child", "kind", "target", "edge-kind", "edge-target", "missing", "duplicate",
+                           "alias-collision", "unrenamed-alias-collision", "missing-pkg", "edge-table"):
+                changed = deepcopy(metadata)
+                parent = next(package for package in changed["packages"] if package["name"] == "selectors")
+                node = next(node for node in changed["resolve"]["nodes"] if node["id"] == parent["id"])
+                declaration, edge = parent["dependencies"][0], node["deps"][0]
+                if change == "name": declaration["name"] = "other_dependency"
+                elif change == "source": declaration["source"] = "registry+https://foreign.invalid/index"
+                elif change == "child": edge["pkg"] = "serde@1.0.228"; node["dependencies"] = [edge["pkg"]]
+                elif change == "kind": declaration["kind"] = "build"
+                elif change == "target": declaration["target"] = "cfg(windows)"
+                elif change == "edge-kind": edge["dep_kinds"][0]["kind"] = "dev"
+                elif change == "edge-target": edge["dep_kinds"][0]["target"] = "cfg(windows)"
+                elif change == "missing": parent["dependencies"] = []
+                elif change == "duplicate": parent["dependencies"].append(deepcopy(declaration))
+                elif change == "alias-collision":
+                    declaration["rename"] = "debug-alias"; edge["name"] = "debug_alias"
+                    parent["dependencies"].append({**declaration, "rename": "debug_alias"})
+                elif change == "unrenamed-alias-collision": parent["dependencies"].append({**declaration, "rename": "debug_unreachable"})
+                elif change == "missing-pkg": edge["pkg"] = "missing@1.0.0"
+                else: node["dependencies"] = []
+                with self.subTest(observer=observer, change=change), self.assertRaises(helper.CheckFailure):
+                    helper.windows_normal_ui_app_graph(changed, lock, source=source, root=root, observer=observer)
+
+    def test_gui_graph_join_refusals_are_finite_and_sanitized(self):
+        for observer in (False, True):
+            metadata, lock, source, root = self.custom_library_graph_fixture(observer)
+            for reason in ("declaration-missing", "declaration-ambiguous", "library-target-missing", "library-target-ambiguous",
+                           "library-target-malformed", "rename-malformed"):
+                changed = deepcopy(metadata)
+                parent = next(package for package in changed["packages"] if package["name"] == "selectors")
+                node = next(node for node in changed["resolve"]["nodes"] if node["id"] == parent["id"])
+                child = next(package for package in changed["packages"] if package["name"] == "new_debug_unreachable")
+                if reason == "declaration-missing": node["deps"][0]["name"] = "wrong_alias"
+                elif reason == "declaration-ambiguous": parent["dependencies"].append(deepcopy(parent["dependencies"][0]))
+                elif reason == "library-target-missing": child["targets"][0].update({"kind": ["bin"], "crate_types": ["bin"]})
+                elif reason == "library-target-ambiguous": child["targets"].append(deepcopy(child["targets"][0]))
+                elif reason == "library-target-malformed": child["targets"][0]["kind"] = []
+                else: parent["dependencies"][0]["rename"] = False
+                with self.subTest(observer=observer, reason=reason), self.assertRaises(helper.CheckFailure) as caught:
+                    helper.windows_normal_ui_app_graph(changed, lock, source=source, root=root, observer=observer)
+                diagnostic = str(caught.exception)
+                self.assertIn(": " + reason + ";", diagnostic)
+                self.assertIn("; role=" + ("observer" if observer else "normal") + ";", diagnostic)
+                self.assertIn("; parent=selectors@0.36.1; child=new_debug_unreachable@1.0.6;", diagnostic)
+                self.assertIn("; kind=normal; target=none;", diagnostic)
+                self.assertNotIn(str(root), diagnostic)
+                self.assertNotIn("registry+", diagnostic)
+                self.assertLessEqual(len(diagnostic.encode("utf-8")), 768)
+                self.assertEqual(diagnostic.splitlines(), [diagnostic])
+            private_text = "C:\\private-ui-compiler\\account-secret\nregistry+https://private.invalid/\x00"
+            for field in ("edge", "rename", "target"):
+                changed = deepcopy(metadata)
+                parent = next(package for package in changed["packages"] if package["name"] == "selectors")
+                node = next(node for node in changed["resolve"]["nodes"] if node["id"] == parent["id"])
+                if field == "edge": node["deps"][0]["name"] = private_text
+                elif field == "rename": parent["dependencies"][0]["rename"] = private_text
+                else: node["deps"][0]["dep_kinds"][0]["target"] = private_text
+                with self.subTest(observer=observer, field=field), self.assertRaises(helper.CheckFailure) as caught:
+                    helper.windows_normal_ui_app_graph(changed, lock, source=source, root=root, observer=observer)
+                diagnostic = str(caught.exception)
+                self.assertNotIn("account-secret", diagnostic)
+                self.assertNotIn("private.invalid", diagnostic)
+                self.assertNotIn("\x00", diagnostic)
+                self.assertLessEqual(len(diagnostic.encode("utf-8")), 768)
+                self.assertEqual(diagnostic.splitlines(), [diagnostic])
+            # Formatter-only DATA, not a claim that hostile package coordinates
+            # passed the source-lock/provenance gates before this helper.
+            for value in (private_text, "x" * 65, "nonascii-\u2603", "x" * 64):
+                with self.subTest(observer=observer, label=value), self.assertRaises(helper.CheckFailure) as caught:
+                    helper.windows_normal_ui_graph_refusal("declaration-missing", observer=observer,
+                        parent={"name": value, "version": value}, child={"name": value, "version": value},
+                        edge={"name": value}, kind={"kind": "build", "target": private_text}, count=513)
+                diagnostic = str(caught.exception)
+                if value == "x" * 64: self.assertIn("; parent=" + value + "@" + value + ";", diagnostic)
+                else: self.assertIn("; parent=omitted@omitted; child=omitted@omitted; edge=omitted;", diagnostic)
+                self.assertIn("; kind=build; target=specified; count=omitted", diagnostic)
+                self.assertNotIn("account-secret", diagnostic)
+                self.assertLessEqual(len(diagnostic.encode("utf-8")), 768)
+                self.assertEqual(diagnostic.splitlines(), [diagnostic])
 
     def test_original_compiler_stream_binds_host_target_features_and_nonlaunch_auxiliary(self):
         encode = lambda rows: b"\n".join(helper.canonical_json(row) for row in rows)
