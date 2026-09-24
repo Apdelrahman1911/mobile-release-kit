@@ -613,6 +613,27 @@ METADATA_NATIVE_DIRECTORIES = ("home", "cargo", "rustup", "tmp", "target",
 METADATA_OWNER_TEST = "edit_owner::hosted_tests::hosted_metadata_text_edit_owner_original_resources"
 METADATA_TRANSACTION_EOF_TEST = "edit_owner::hosted_tests::hosted_metadata_text_transaction_eof_original_resources"
 METADATA_PARTITIONS = ("ordinary", "committed-fsync", "committed-close")
+VERSION_NATIVE_SCOPE = "release-version-apply-native-v1"
+VERSION_NATIVE_EVIDENCE_SCOPE = "desktop-release-version-apply-native-only-v1"
+VERSION_NATIVE_WORKFLOW = WORKFLOW_NATIVE_WORKFLOW
+VERSION_NATIVE_REF = "refs/heads/verify/desktop-release-version-apply-native"
+VERSION_NATIVE_PHASES = ("prepare", "acquire", "compile", "version-owner", "version-transaction-eof", "version-core", "clean")
+VERSION_NATIVE_CHECKS = {
+    "acquire": ("rust-toolchain-install", "rust-version-target", "version-locked-headless-metadata"),
+    "compile": ("rust-version-target", "headless-test-compile-only"),
+    "version-owner": ("rust-version-target", "version-owner-source-native-contract", "version-owner-source-receipt",
+                       "version-owner-zip-native-contract", "version-owner-zip-receipt"),
+    "version-transaction-eof": ("rust-version-target", "version-transaction-eof-native-contract", "version-eof-receipt"),
+    "version-core": ("version-core-ordinary", "version-core-ordinary-receipt",
+                      "version-core-committed-fsync", "version-core-committed-fsync-receipt",
+                      "version-core-committed-close", "version-core-committed-close-receipt"),
+}
+VERSION_NATIVE_DIRECTORIES = ("home", "cargo", "rustup", "tmp", "target",
+                               "version-owner-source", "version-owner-zip", "version-transaction-eof")
+VERSION_OWNER_TEST = "edit_owner::hosted_tests::hosted_release_version_edit_owner_original_resources"
+VERSION_TRANSACTION_EOF_TEST = "edit_owner::hosted_tests::hosted_release_version_transaction_eof_original_resources"
+VERSION_PARTITIONS = ("ordinary", "committed-fsync", "committed-close")
+
 ENVIRONMENT_NATIVE_SCOPE = "environment-diagnostics-native-v1"
 ENVIRONMENT_NATIVE_EVIDENCE_SCOPE = "desktop-environment-diagnostics-native-only-v1"
 ENVIRONMENT_NATIVE_WORKFLOW = ".github/workflows/desktop-environment-diagnostics-native.yml"
@@ -810,6 +831,7 @@ GTK_CORE_PATHS = (
     "mobile_release/api/data/github-setup-v1.json",
     "mobile_release/api/data/metadata-text-help-v1.json",
     "mobile_release/api/data/project.schema.json",
+    "mobile_release/api/data/release-version-help-v1.json",
     "mobile_release/build_inputs.py",
     "mobile_release/cancellation.py",
     "mobile_release/checked_files.py",
@@ -848,10 +870,12 @@ GTK_CORE_PATHS = (
     "mobile_release/owned_process.py",
     "mobile_release/preflight.py",
     "mobile_release/provenance.py",
+    "mobile_release/release_version_edit.py",
     "mobile_release/reporting.py",
     "mobile_release/stores.py",
     "mobile_release/toolchain_policy.py",
     "mobile_release/tooling.py",
+    "mobile_release/version_text.py",
     "mobile_release/workflow.py",
     "mobile_release/workflow_payloads.py",
 )
@@ -1351,7 +1375,10 @@ METADATA_CORE_SOURCES = {'apiContracts': 'src/mobile_release/api/contracts.py',
  'resource': 'src/mobile_release/api/data/metadata-text-help-v1.json',
  'rootCustody': 'src/mobile_release/init_workspace_custody.py',
  'snapshot': 'src/mobile_release/api/_snapshot.py',
- 'transaction': 'src/mobile_release/init_transaction.py'}
+ 'transaction': 'src/mobile_release/init_transaction.py',
+ 'versionEdit': 'src/mobile_release/release_version_edit.py',
+ 'versionResource': 'src/mobile_release/api/data/release-version-help-v1.json',
+ 'versionText': 'src/mobile_release/version_text.py'}
 METADATA_PAYLOAD_BINDINGS = {'configHashes': {'publicStore': '1b0b02e48d03cca36aaf36e5d8a8daf15f59924803bd4a5c0ec2e655828d3f94',
                   'releaseStore': 'caabad94b27c616e9deaf8570ded7edca9a41de86ca3e1982ab6e4a3f57073f1'},
  'ignoreSha256': 'e60087ecefac81e23666444e6aea9490b3fc42b2510f566cfd4aa5a36a35b7d4',
@@ -1466,6 +1493,12 @@ METADATA_OWNER_SOURCES = {
     'snapshot': 'src/mobile_release/api/_snapshot.py',
     'metadataResource': 'src/mobile_release/api/data/metadata-text-help-v1.json',
     'schemaResource': 'src/mobile_release/api/data/project.schema.json',
+    # Shared engine imports are current SOURCE bindings, not version-fixture authority.
+    'versionProtocol': 'desktop/src-tauri/src/release_version_edit_protocol.rs',
+    'versionCommands': 'desktop/src-tauri/src/release_version_edit_commands.rs',
+    'versionEdit': 'src/mobile_release/release_version_edit.py',
+    'versionText': 'src/mobile_release/version_text.py',
+    'versionResource': 'src/mobile_release/api/data/release-version-help-v1.json',
 }
 METADATA_TRANSACTION_EOF_SOURCES = {**METADATA_OWNER_SOURCES, "transactionEofShim": "tests/native_desktop_config_eof.py"}
 METADATA_OWNER_PAYLOAD_HASHES = {'configHashes': {'publicStore': '1b0b02e48d03cca36aaf36e5d8a8daf15f59924803bd4a5c0ec2e655828d3f94',
@@ -1493,6 +1526,364 @@ METADATA_NATIVE_SOURCES = tuple(sorted({
     METADATA_NATIVE_WORKFLOW,
 }))
 
+# Closed release-version DATA from the independent finite native contract; no core import.
+VERSION_CORE_SOURCES = {'apiContracts': 'src/mobile_release/api/contracts.py',
+ 'buildInputs': 'src/mobile_release/build_inputs.py',
+ 'cancellation': 'src/mobile_release/cancellation.py',
+ 'catalogue': 'src/mobile_release/api/_catalog.py',
+ 'configEdit': 'src/mobile_release/config_edit.py',
+ 'configPayloads': 'src/mobile_release/config_payloads.py',
+ 'configuration': 'src/mobile_release/config.py',
+ 'editControl': 'src/mobile_release/_desktop_edit_control.py',
+ 'editEngine': 'src/mobile_release/_desktop_edit_engine.py',
+ 'editProtocol': 'src/mobile_release/_desktop_edit_protocol.py',
+ 'errors': 'src/mobile_release/errors.py',
+ 'fixture': 'tests/native_desktop_config.py',
+ 'metadataEdit': 'src/mobile_release/metadata_text_edit.py',
+ 'metadataPolicy': 'src/mobile_release/metadata.py',
+ 'metadataText': 'src/mobile_release/metadata_text.py',
+ 'passiveEngine': 'src/mobile_release/_desktop_engine.py',
+ 'resource': 'src/mobile_release/api/data/release-version-help-v1.json',
+ 'rootCustody': 'src/mobile_release/init_workspace_custody.py',
+ 'snapshot': 'src/mobile_release/api/_snapshot.py',
+ 'transaction': 'src/mobile_release/init_transaction.py',
+ 'versionApi': 'src/mobile_release/api/_release_version.py',
+ 'versionEdit': 'src/mobile_release/release_version_edit.py',
+ 'versionText': 'src/mobile_release/version_text.py',
+ 'workflowEdit': 'src/mobile_release/github_workflow_edit.py',
+ 'workflowPayloads': 'src/mobile_release/workflow_payloads.py'}
+VERSION_PAYLOAD_BINDINGS = {'configHashes': {'nestedVersion': '8db69de9d4a3c83d312ee37e8952531f71b633f0f7f36b042b5d143cc2357de9',
+                  'publicVersion': '1dcd101a440da3c950903bca1b54f926aa63ce36ae5ed1eead5fb24f7813dfbd',
+                  'releaseVersion': '1b0b02e48d03cca36aaf36e5d8a8daf15f59924803bd4a5c0ec2e655828d3f94'},
+ 'ignoreSha256': 'cdf75f09188ea0e3712fcd26c9dbb42819dd467e9744676c6448b2a29a789c5b',
+ 'versionHashes': {'created': '3b8dbd6b58e9f42a0ed893e73020cf2f8ddde787e2b1a153da49d382b1e7a9d4',
+                   'edited': 'bc7f934bcf5f4fcf0b1b9c814613bd773ec4a9f579376f1dca01929d4e9e3732',
+                   'original': 'd8453785b2637e76d1b7456dd0e5ea0d343cfd5f7d409a06dc38ab791aa6334a'}}
+VERSION_CORE_ROWS = {'committed-close': (('version-committed-close-return-injection',
+                      'committed',
+                      'clean',
+                      'unknown',
+                      'cancelled',
+                      True,
+                      {'actualScopeCloseReturned': True,
+                       'afterUnknownProbes': 0,
+                       'cancelledAfterCommit': 1,
+                       'committedCarrier': True,
+                       'injections': 1,
+                       'scopesClosed': 3}),),
+ 'committed-fsync': (('version-committed-fsync-injection',
+                      'committed',
+                      'recovery_required',
+                      'settled',
+                      'filesystem_error',
+                      False,
+                      {'committedObserved': True,
+                       'dependenciesPreserved': True,
+                       'durabilityConfirmed': False,
+                       'injections': 1,
+                       'journalRetained': True,
+                       'rollbackCalls': 0,
+                       'scopesClosed': 3,
+                       'selectedPayloadInstalled': True}),),
+ 'ordinary': (('present-malformed-source-refused',
+               'not_started',
+               'not_created',
+               'settled',
+               'invalid_params',
+               False,
+               {'journalAbsent': True,
+                'presentSourcePreserved': True,
+                'revisionBound': True,
+                'scopesClosed': 1,
+                'snapshotUnchanged': True,
+                'targetDescriptorBound': True}),
+              ('present-nonregular-source-refused',
+               'not_started',
+               'not_created',
+               'settled',
+               'filesystem_error',
+               False,
+               {'journalAbsent': True,
+                'presentSourcePreserved': True,
+                'revisionBound': False,
+                'scopesClosed': 1,
+                'snapshotUnchanged': True,
+                'targetDescriptorBound': True}),
+              ('legacy-seven-ignore-rules-refused',
+               'not_started',
+               'not_created',
+               'settled',
+               'ignore_conflict',
+               False,
+               {'journalAbsent': True,
+                'revisionAbsent': True,
+                'scopesClosed': 1,
+                'snapshotUnchanged': True,
+                'targetDescriptorAbsent': True}),
+              ('config-retarget-before-prepare',
+               'not_started',
+               'not_created',
+               'settled',
+               'stale_revision',
+               False,
+               {'authorityRetired': True,
+                'changeObserved': True,
+                'journalAbsent': True,
+                'scopesClosed': 2,
+                'selectionNotRetargeted': True,
+                'snapshotUnchanged': True}),
+              ('ignore-bytes-before-apply',
+               'not_started',
+               'not_created',
+               'settled',
+               'stale_revision',
+               False,
+               {'authorityRetired': True,
+                'changeObserved': True,
+                'journalAbsent': True,
+                'scopesClosed': 3,
+                'selectionNotRetargeted': True,
+                'snapshotUnchanged': True}),
+              ('target-parent-inode-before-prepare',
+               'not_started',
+               'not_created',
+               'settled',
+               'stale_revision',
+               False,
+               {'authorityRetired': True,
+                'changeObserved': True,
+                'journalAbsent': True,
+                'scopesClosed': 2,
+                'selectionNotRetargeted': True,
+                'snapshotUnchanged': True}),
+              ('target-parent-mode-before-apply',
+               'not_started',
+               'not_created',
+               'settled',
+               'stale_revision',
+               False,
+               {'authorityRetired': True,
+                'changeObserved': True,
+                'journalAbsent': True,
+                'scopesClosed': 3,
+                'selectionNotRetargeted': True,
+                'snapshotUnchanged': True}),
+              ('missing-target-parent-appears-before-apply',
+               'not_started',
+               'not_created',
+               'settled',
+               'stale_revision',
+               False,
+               {'authorityRetired': True,
+                'changeObserved': True,
+                'journalAbsent': True,
+                'scopesClosed': 3,
+                'selectionNotRetargeted': True,
+                'snapshotUnchanged': True}),
+              ('noop-leaf-ctime-after-recheck',
+               'not_started',
+               'not_created',
+               'settled',
+               'stale_revision',
+               False,
+               {'changedOnlyDeclaredFacts': True,
+                'consumingTargetChecks': 1,
+                'injections': 1,
+                'journalAbsent': True,
+                'recheckReturns': 1,
+                'renameProbes': 0,
+                'scopesClosed': 3,
+                'snapshotUnchangedAfterInjection': True,
+                'unchangedMarked': False}),
+              ('noop-target-parent-mode-after-recheck',
+               'not_started',
+               'not_created',
+               'settled',
+               'stale_revision',
+               False,
+               {'changedOnlyDeclaredFacts': True,
+                'consumingTargetChecks': 1,
+                'injections': 1,
+                'journalAbsent': True,
+                'recheckReturns': 1,
+                'renameProbes': 0,
+                'scopesClosed': 3,
+                'snapshotUnchangedAfterInjection': True,
+                'unchangedMarked': False}),
+              ('unreadable-source-before-prepare',
+               'not_started',
+               'not_created',
+               'settled',
+               'filesystem_error',
+               False,
+               {'deniedOriginalReads': 1,
+                'journalAbsent': True,
+                'permissionErrorObserved': True,
+                'scopesClosed': 2,
+                'snapshotUnchanged': True}),
+              ('version-replacement-installed-rollback',
+               'rolled_back',
+               'clean',
+               'settled',
+               'filesystem_error',
+               False,
+               {'injections': 1,
+                'journalAbsent': True,
+                'originalBackupBound': True,
+                'recoveryAttempts': 1,
+                'rollbackReturned': True,
+                'scopesClosed': 3,
+                'secondApplyNoScope': True,
+                'secondApplyRefused': True,
+                'snapshotRestored': True,
+                'versionLeafInstalled': True}),
+              ('incomplete-version-preparing-retained',
+               'not_started',
+               'recovery_required',
+               'settled',
+               'filesystem_error',
+               False,
+               {'cleanupUnlinks': 0,
+                'completeProof': False,
+                'dependenciesPreserved': True,
+                'injections': 1,
+                'numberedSlotRetained': True,
+                'preparingRetained': True,
+                'recoverCalls': 0,
+                'scopesClosed': 3,
+                'targetPreserved': True}),
+              ('committed-version-backup-replaced-at-cleanup-entry',
+               'committed',
+               'recovery_required',
+               'settled',
+               'filesystem_error',
+               False,
+               {'cleanupUnlinks': 0,
+                'committedObserved': True,
+                'dependenciesPreserved': True,
+                'durabilityConfirmed': True,
+                'injections': 1,
+                'originalBackupRetained': True,
+                'proofRetained': True,
+                'sameBytesForeignInode': True,
+                'scopesClosed': 3,
+                'selectedPayloadInstalled': True}),
+              ('foreign-domains-refuse-version-prepare',
+               'not_started',
+               'not_created',
+               'settled',
+               'pending_state',
+               False,
+               {'allOwnersSettled': True,
+                'entrypoints': ['legacy', 'configuration', 'github_workflows', 'metadata_text'],
+                'legacyApplyRefused': True,
+                'legacyRecoverRefused': True,
+                'legacyWorkspaceClosed': True,
+                'originalOwners': 4,
+                'scopesClosed': 3,
+                'snapshotUnchanged': True,
+                'stateRetained': True,
+                'targetDescriptorsAbsent': True,
+                'typedRefusals': 3}),
+              ('foreign-domains-refuse-version-ready',
+               'not_started',
+               'not_created',
+               'settled',
+               'pending_state',
+               False,
+               {'allOwnersSettled': True,
+                'entrypoints': ['legacy', 'configuration', 'github_workflows', 'metadata_text'],
+                'legacyApplyRefused': True,
+                'legacyRecoverRefused': True,
+                'legacyWorkspaceClosed': True,
+                'originalOwners': 4,
+                'scopesClosed': 3,
+                'snapshotUnchanged': True,
+                'stateRetained': True,
+                'targetDescriptorsAbsent': True,
+                'typedRefusals': 3}),
+              ('foreign-domains-refuse-version-cleanup',
+               'not_started',
+               'not_created',
+               'settled',
+               'pending_state',
+               False,
+               {'allOwnersSettled': True,
+                'entrypoints': ['legacy', 'configuration', 'github_workflows', 'metadata_text'],
+                'legacyApplyRefused': True,
+                'legacyRecoverRefused': True,
+                'legacyWorkspaceClosed': True,
+                'originalOwners': 4,
+                'scopesClosed': 3,
+                'snapshotUnchanged': True,
+                'stateRetained': True,
+                'targetDescriptorsAbsent': True,
+                'typedRefusals': 3}),
+              ('version-refuses-foreign-ready',
+               'not_started',
+               'not_created',
+               'settled',
+               'pending_state',
+               False,
+               {'allOwnersSettled': True,
+                'bothRefused': True,
+                'foreignDomains': ['legacy', 'metadata_text'],
+                'foreignStateRetained': True,
+                'originalOwners': 2,
+                'scopesClosed': 2,
+                'snapshotUnchanged': True,
+                'targetDescriptorsAbsent': True,
+                'versionStateAbsent': True}),
+              ('dependency-drift-after-version-install',
+               'unknown',
+               'recovery_required',
+               'settled',
+               'stale_revision',
+               False,
+               {'afterUnknownProbes': 0,
+                'cleanupUnlinks': 0,
+                'conflictObservedInsideOriginal': True,
+                'dependencyChanged': True,
+                'injections': 1,
+                'laterInstallMoves': 0,
+                'originalBackupBound': True,
+                'recoverCalls': 0,
+                'retainedTreeInsideOriginal': True,
+                'scopesClosed': 3,
+                'versionLeafInstalled': True}))}
+VERSION_CORE_INJECTIONS = {'committed-close': 'postcommit-cancellation-and-positive-scope-close-return-loss',
+ 'committed-fsync': 'postdecision-pre-fsync',
+ 'ordinary': 'fixed-original-version-boundaries'}
+VERSION_OWNER_PAYLOAD_HASHES = {'configHashes': {'nestedVersion': '8db69de9d4a3c83d312ee37e8952531f71b633f0f7f36b042b5d143cc2357de9',
+                  'publicVersion': '1dcd101a440da3c950903bca1b54f926aa63ce36ae5ed1eead5fb24f7813dfbd',
+                  'releaseVersion': '1b0b02e48d03cca36aaf36e5d8a8daf15f59924803bd4a5c0ec2e655828d3f94'},
+ 'ignoreSha256': 'cdf75f09188ea0e3712fcd26c9dbb42819dd467e9744676c6448b2a29a789c5b',
+ 'versionHashes': {'created': '3b8dbd6b58e9f42a0ed893e73020cf2f8ddde787e2b1a153da49d382b1e7a9d4',
+                   'edited': 'bc7f934bcf5f4fcf0b1b9c814613bd773ec4a9f579376f1dca01929d4e9e3732',
+                   'original': 'd8453785b2637e76d1b7456dd0e5ea0d343cfd5f7d409a06dc38ab791aa6334a',
+                   'eofOriginal': '5d64d0003ef70a87ca42922bc20faf8c102a8d2dd1429c20c0a56904f53bfb3f',
+                   'eofEdited': '533c9829233f93176a5a29ac7202a5dabca359748931286e4385e21058a1dd43'},
+ 'unrelatedSha256': '0e4722e0ca13cfc08d5e8bd61c73d37c9880610e1723a8eb1c2363e92e2eebef',
+ 'umaskProbeSha256': '43d78b83e6fd6b81bba80df9e4c3657df4cfc3ef6c5acdc1ca055d45f9b46a4d'}
+
+VERSION_OWNER_CASES = ("explicit-absent-create", "observe-edit-two-spans-preserve", "observe-noop-original-leaf",
+    "stale-passive-baseline-refused", "four-domain-owner-and-token-isolation", "registration-changed-before-apply",
+    "version-terminal-held-after-stop", "version-document-loss-before-apply")
+VERSION_EOF_CASES = ("precommit-eof", "postcommit-eof", "precommit-conflict-eof")
+VERSION_NOT_VERIFIED = (
+    "production-runtime-custody", "production-version-save-enablement", "native-gui", "webview-callbacks-or-crash-hook",
+    "parent-death", "native-stuck-wait-close", "persisted-recovery", "macos-windows-version-writes",
+    "credentials", "remote-github", "stores", "mobile-builds", "installers",
+)
+# Shared SOURCE membership only, never metadata writer/receipt authority.
+VERSION_OWNER_SOURCES = {**METADATA_OWNER_SOURCES,
+    "versionObservation": "desktop/src-tauri/src/release_version_protocol.rs",
+    "versionObservationApi": "src/mobile_release/api/_release_version.py"}
+VERSION_TRANSACTION_EOF_SOURCES = {**VERSION_OWNER_SOURCES, "transactionEofShim": "tests/native_desktop_config_eof.py"}
+VERSION_NATIVE_SOURCES = tuple(sorted({
+    *GITHUB_TLS_SOURCES, *VERSION_TRANSACTION_EOF_SOURCES.values(), *VERSION_CORE_SOURCES.values(), VERSION_NATIVE_WORKFLOW,
+}))
+
 TOOL_CHECKS = frozenset({
     "source-head", "source-tree", "source-clean", "rust-toolchain-install",
     "cargo-selection", "rustc-selection", "rust-version-target", "locked-platform-metadata",
@@ -1511,6 +1902,9 @@ TOOL_CHECKS = frozenset({
     "metadata-locked-headless-metadata", "metadata-owner-source-native-contract", "metadata-owner-zip-native-contract",
     "metadata-transaction-eof-native-contract", "metadata-core-ordinary", "metadata-core-committed-fsync",
     "metadata-core-committed-close", "metadata-source-status",
+    "version-locked-headless-metadata", "version-owner-source-native-contract", "version-owner-zip-native-contract",
+    "version-transaction-eof-native-contract", "version-core-ordinary", "version-core-committed-fsync",
+    "version-core-committed-close", "version-source-status",
     "windows-snapshot-native-contract",
     "windows-installed-locked-metadata", "windows-installed-test-compile-only",
     "windows-installed-inert-contracts", "windows-installed-native-contract",
@@ -1534,13 +1928,15 @@ def require(condition: bool, message: str) -> None:
 
 def admit_phase(scope: str, phase: str) -> None:
     """Closed scope selection, before context, tools, or native dispatch."""
-    require(scope in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, *ENVIRONMENT_NATIVE_SCOPES, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES}, "Unknown desktop verification scope")
+    require(scope in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE, *ENVIRONMENT_NATIVE_SCOPES, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES}, "Unknown desktop verification scope")
     if scope in COMPILE_PROFILES:
         require(phase in COMPILE_PHASES, "Compiler-only scope cannot execute a native phase")
     elif scope == WORKFLOW_NATIVE_SCOPE:
         require(phase in WORKFLOW_NATIVE_PHASES, "Workflow-only scope cannot execute an unrelated native phase")
     elif scope == METADATA_NATIVE_SCOPE:
         require(phase in METADATA_NATIVE_PHASES, "Metadata-only scope cannot execute an unrelated native phase")
+    elif scope == VERSION_NATIVE_SCOPE:
+        require(phase in VERSION_NATIVE_PHASES, "Version-only scope cannot execute an unrelated native phase")
     elif scope in ENVIRONMENT_NATIVE_SCOPES:
         require(phase in environment_native_profile(scope)["phases"], "Environment-only scope cannot execute an unrelated phase")
     elif scope == WINDOWS_SNAPSHOT_SCOPE:
@@ -1558,6 +1954,7 @@ def admit_platform(scope: str, platform: str) -> None:
     require(scope != GTK_COMPILE_SCOPE or platform == "linux", "SG1 compilation requires Linux")
     require(scope != WORKFLOW_NATIVE_SCOPE or platform == "linux", "Workflow native verification requires Linux")
     require(scope != METADATA_NATIVE_SCOPE or platform == "linux", "Metadata native verification requires Linux")
+    require(scope != VERSION_NATIVE_SCOPE or platform == "linux", "Version native verification requires Linux")
     require(scope not in ENVIRONMENT_NATIVE_SCOPES or platform in {"linux", "macos"}, "Environment native verification requires its exact Linux or macOS host")
     require(scope != WINDOWS_SNAPSHOT_SCOPE or platform == "windows", "Windows snapshot verification requires Windows")
     require(scope != GITHUB_READONLY_SCOPE or platform == "linux", "G1 native verification requires Linux")
@@ -1635,6 +2032,32 @@ def metadata_native_binding(environment: dict[str, str]) -> dict[str, str]:
     return {"workflowPath": METADATA_NATIVE_WORKFLOW, "workflowSha": sha,
             "workflowRef": environment["GITHUB_WORKFLOW_REF"], "sourceSha": sha,
             "runId": run_id, "attempt": attempt, "repository": repository, "event": "push", "ref": METADATA_NATIVE_REF,
+            "pushEventAfter": sha}
+
+
+def version_native_binding(environment: dict[str, str]) -> dict[str, str]:
+    """Closed push-only version route; neither dispatch nor another lane can opt in."""
+    keys = ("GITHUB_SHA", "GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_REF",
+            "GITHUB_WORKFLOW_SHA", "GITHUB_WORKFLOW_REF", "GITHUB_EVENT_NAME", "MRK_PUSH_EVENT_AFTER",
+            "MRK_DESKTOP_HOSTED_CHECKS")
+    require(all(type(environment.get(key)) is str for key in keys), "Version native binding fields differ")
+    sha, repository = environment.get("GITHUB_SHA", ""), environment.get("GITHUB_REPOSITORY", "")
+    run_id, attempt = environment.get("GITHUB_RUN_ID", ""), environment.get("GITHUB_RUN_ATTEMPT", "")
+    require(re.fullmatch(r"[0-9a-f]{40}", sha) is not None and sha != "0" * 40
+            and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is not None,
+            "Version native source identity differs")
+    require(re.fullmatch(r"[1-9][0-9]{0,19}", run_id) is not None and attempt == "1",
+            "Version native original run identity differs")
+    require(environment.get("MRK_DESKTOP_HOSTED_CHECKS") == VERSION_NATIVE_SCOPE
+            and environment.get("GITHUB_REF") == VERSION_NATIVE_REF
+            and environment.get("GITHUB_WORKFLOW_SHA") == sha
+            and environment.get("GITHUB_WORKFLOW_REF") == f"{repository}/{VERSION_NATIVE_WORKFLOW}@{VERSION_NATIVE_REF}",
+            "Version native workflow/ref/scope binding differs")
+    require(environment.get("GITHUB_EVENT_NAME") == "push" and environment.get("MRK_PUSH_EVENT_AFTER") == sha,
+            "Version native push event/source differs")
+    return {"workflowPath": VERSION_NATIVE_WORKFLOW, "workflowSha": sha,
+            "workflowRef": environment["GITHUB_WORKFLOW_REF"], "sourceSha": sha,
+            "runId": run_id, "attempt": attempt, "repository": repository, "event": "push", "ref": VERSION_NATIVE_REF,
             "pushEventAfter": sha}
 
 
@@ -1783,9 +2206,9 @@ def run(argv: list[str], *, check: str, cwd: Path, env: dict[str, str], timeout:
 def admitted_host(*, retention_only: bool = False) -> str:
     require(os.environ.get("GITHUB_ACTIONS") == "true"
             and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
-            and os.environ.get("MRK_DESKTOP_HOSTED_CHECKS") in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, *ENVIRONMENT_NATIVE_SCOPES, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES},
+            and os.environ.get("MRK_DESKTOP_HOSTED_CHECKS") in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE, *ENVIRONMENT_NATIVE_SCOPES, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES},
             "This fixed check requires an explicitly admitted disposable hosted job")
-    require(not retention_only or os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {METADATA_NATIVE_SCOPE, *ENVIRONMENT_NATIVE_SCOPES},
+    require(not retention_only or os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE, *ENVIRONMENT_NATIVE_SCOPES},
             "DATA-only admission is restricted to fixed retention")
     platform = os.environ.get("MRK_DESKTOP_PLATFORM", "")
     require(platform in TARGETS and platform == {
@@ -1794,7 +2217,7 @@ def admitted_host(*, retention_only: bool = False) -> str:
     admit_platform(os.environ["MRK_DESKTOP_HOSTED_CHECKS"], platform)
     if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] == WINDOWS_SNAPSHOT_SCOPE:
         admitted_scope(platform)
-    if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE}:
+    if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE}:
         require(os.environ.get("RUNNER_OS") == "Linux" and os.environ.get("RUNNER_ARCH") == "X64"
                 and os.environ.get("ImageOS") == "ubuntu24" and (retention_only or os.uname().machine == "x86_64")
                 and os.geteuid() != 0, "Workflow native checks require the non-root Ubuntu 24 x86_64 runner")
@@ -2285,6 +2708,141 @@ def validate_metadata_owner_header(receipt: object, context: dict, mode: str, so
     return receipt["cases"]
 
 
+def version_context_binding(context: dict) -> dict:
+    """Recheck the closed original lane when constructing/consuming every phase."""
+    require(type(context) is dict and context.get("executionScope") == VERSION_NATIVE_SCOPE
+            and context.get("platform") == "linux", "Unexpected version native context scope")
+    binding = version_native_binding({
+        "MRK_DESKTOP_HOSTED_CHECKS": context["executionScope"],
+        "GITHUB_SHA": context.get("sourceSha"), "GITHUB_REPOSITORY": context.get("repository"),
+        "GITHUB_RUN_ID": context.get("runId"), "GITHUB_RUN_ATTEMPT": context.get("attempt"),
+        "GITHUB_WORKFLOW_SHA": context.get("workflowSha"), "GITHUB_WORKFLOW_REF": context.get("workflowRef"),
+        "GITHUB_REF": context.get("ref"), "GITHUB_EVENT_NAME": context.get("event"),
+        "MRK_PUSH_EVENT_AFTER": context.get("pushEventAfter"),
+    })
+    require(context.get("workflowPath") == VERSION_NATIVE_WORKFLOW
+            and type(context.get("sourceTree")) is str
+            and re.fullmatch(r"[0-9a-f]{40}", context["sourceTree"]) is not None
+            and context["sourceTree"] != "0" * 40 and sha256_value(context.get("workflowSha256")),
+            "Version native tree/workflow binding differs")
+    return {**binding, "sourceTree": context["sourceTree"], "workflowSha256": context["workflowSha256"],
+            "platform": "linux"}
+
+
+def version_source_files(source: Path) -> list[dict]:
+    files = []
+    for relative in VERSION_NATIVE_SOURCES:
+        path = source / relative
+        ordinary(path)
+        size = path.stat().st_size
+        require(0 < size <= 2 * 1024 * 1024, "Version native source exceeds its bound")
+        files.append({"path": relative, "size": size, "sha256": hash_file(path)})
+    return files
+
+
+def version_core_metadata(context: dict) -> dict:
+    version_context_binding(context)
+    return {**{key: context[key] for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt")},
+            "ref": VERSION_NATIVE_REF, "coreFiles": context["versionInputs"]["coreFiles"],
+            "coreZipSha256": context["versionInputs"]["coreZipSha256"]}
+
+
+def version_inputs_unchanged(context: dict) -> None:
+    """Bounded source/receipt DATA only, never a project probe or cleanup right."""
+    version_context_binding(context)
+    root, source = Path(context["root"]), Path(context["source"])
+    identities = {"root": workflow_directory_identity(root), "source": workflow_directory_identity(source),
+                  **{name: workflow_directory_identity(root / name) for name in VERSION_NATIVE_DIRECTORIES}}
+    require(same_compile_json(identities, context["originalDirectories"]), "Version original directory identity changed")
+    observed = {"sourceFiles": version_source_files(source), "coreFiles": workflow_core_inventory(source),
+                "coreZipSha256": hash_file(root / "core.zip"), "pythonSha256": hash_file(Path(context["python"]))}
+    require(same_compile_json(context["versionInputs"], observed), "Version original source/runtime inputs changed")
+    require(same_compile_json(read_bounded_json(root / "version.json", 128 * 1024), version_core_metadata(context)),
+            "Version source/ZIP metadata changed")
+
+
+def version_source_unchanged(context: dict) -> None:
+    source_unchanged(context)
+    require(run([context["git"], "status", "--porcelain=v1", "--untracked-files=all"], check="version-source-status",
+                cwd=Path(context["source"]), env=clean_environment(Path(context["root"])), timeout=15, capture=True) == "",
+            "Version source contains unreviewed or generated inputs")
+    version_inputs_unchanged(context)
+
+
+def validate_version_core_receipt(receipt: object, partition: str, *, source_sha: str,
+                                   source_hashes: dict[str, str], python_hash: str, host: dict) -> dict:
+    require(partition in VERSION_PARTITIONS and set(source_hashes) == set(VERSION_CORE_SOURCES),
+            "Unknown version core partition or source inventory")
+    validate_workflow_host(host)
+    rows = VERSION_CORE_ROWS[partition]
+    expected = {
+        "schemaVersion": 1, "suite": "desktop-release-version-native", "domain": "release_version",
+        "partition": partition, "status": "passed", "reason": "none", "failedAt": None,
+        "retained": True, "uncertaintyLatched": partition != "committed-fsync",
+        "injection": VERSION_CORE_INJECTIONS[partition], "host": host,
+        "bindings": {"sourceSha": source_sha, "sourceKind": "source", "sourceHashes": source_hashes,
+                     "pythonSha256": python_hash, **VERSION_PAYLOAD_BINDINGS},
+        "completed": [row[0] for row in rows],
+        "cases": [{"case": name, "outcome": {"effect": effect, "journal": journal, "resources": resources, "reason": reason},
+                   "owner": {"closed": True, "handlerRestored": True, "fatal": fatal}, "observed": observed}
+                  for name, effect, journal, resources, reason, fatal, observed in rows],
+    }
+    require(same_compile_json(receipt, expected),
+            "Version core original facts, source, retention or ordered case inventory differ")
+    return receipt
+
+
+def version_core_receipt(context: dict, partition: str) -> dict:
+    require(partition in VERSION_PARTITIONS, "Unknown version core partition")
+    return validate_version_core_receipt(read_bounded_json(Path(context["root"]) / f"version-{partition}.json", 32 * 1024), partition,
+        source_sha=context["sourceSha"], source_hashes=version_bound_source_hashes(context, VERSION_CORE_SOURCES),
+        python_hash=context["versionInputs"]["pythonSha256"], host=context["observedHost"])
+
+
+def version_bound_source_hashes(context: dict, sources: dict[str, str]) -> dict[str, str]:
+    """Original preparation DATA, reverified before native phases, never a post-last-close probe."""
+    version_context_binding(context)
+    rows = context["versionInputs"]["sourceFiles"]
+    require(type(rows) is list and len(rows) == len(VERSION_NATIVE_SOURCES), "Version bound source inventory differs")
+    hashes = {}
+    for row, path in zip(rows, VERSION_NATIVE_SOURCES, strict=True):
+        require(type(row) is dict and set(row) == {"path", "size", "sha256"} and row["path"] == path
+                and integer_between(row["size"], 1, 2 * 1024 * 1024) and sha256_value(row["sha256"]),
+                "Version bound original source entry differs")
+        hashes[path] = row["sha256"]
+    require(all(path in hashes for path in sources.values()), "Version receipt requires an unbound source")
+    return {name: hashes[path] for name, path in sources.items()}
+
+
+def version_owner_bindings(context: dict, mode: str, source_hashes: dict[str, str], *, eof: bool = False) -> dict:
+    version_context_binding(context)
+    require(mode in ("source", "zip") and (not eof or mode == "source")
+            and type(source_hashes) is dict
+            and set(source_hashes) == set(VERSION_TRANSACTION_EOF_SOURCES if eof else VERSION_OWNER_SOURCES)
+            and all(sha256_value(value) for value in source_hashes.values()),
+            "Version owner runtime choice or source inventory differs")
+    inputs = context["versionInputs"]
+    inventory = json.dumps(inputs["coreFiles"], sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    return {**{key: context[key] for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt")},
+            "ref": VERSION_NATIVE_REF, "domain": "release_version", "host": "linux", "target": TARGETS["linux"],
+            "runtimeMode": "trusted-development-only", "runtimeInput": mode, "pythonSha256": inputs["pythonSha256"],
+            "coreZipSha256": inputs["coreZipSha256"], "coreInventorySha256": hashlib.sha256(inventory).hexdigest(),
+            "sourceHashes": source_hashes, "payloadHashes": VERSION_OWNER_PAYLOAD_HASHES,
+            "versionResourceSha256": source_hashes["versionResource"], "schemaResourceSha256": source_hashes["schemaResource"],
+            "inheritedFileMaskObserved": True, "requestedCreateMode": 0o644, "observedCreateMode": 0o600, "newDirectoryMode": 0o755,
+            "documentEvidence": "controlled-original-lifetime-not-gui-callbacks"}
+
+
+def validate_version_owner_header(receipt: object, context: dict, mode: str, source_hashes: dict[str, str], *, eof: bool = False) -> list:
+    require(type(receipt) is dict and type(receipt.get("cases")) is list, "Unexpected version owner receipt")
+    expected = {"schemaVersion": 1, "scope": "release-version-transaction-eof-hosted-v1" if eof else "release-version-owner-hosted-v1",
+                "domain": "release_version", "status": "passed", "allOwnersSettled": not eof, "originalResourcesSettled": True,
+                "ownerDisabled": eof, "retainedEffectUnknown": eof, "failureCode": None, "cases": receipt["cases"],
+                "bindings": version_owner_bindings(context, mode, source_hashes, eof=eof), "notVerified": list(VERSION_NOT_VERIFIED)}
+    require(same_compile_json(receipt, expected), "Version owner source/runtime/retention or original resource header differs")
+    return receipt["cases"]
+
+
 def metadata_passive_values(values: object, methods: tuple[str, ...], previous: int, *, error: str | None = None) -> int:
     """Validate original observers in invocation order, not synthetic editor facts."""
     require(type(values) is list and len(values) == len(methods), "Metadata original passive roster differs")
@@ -2430,6 +2988,130 @@ def metadata_owner_receipt(context: dict, mode: str) -> dict:
 def metadata_transaction_eof_receipt(context: dict) -> dict:
     return validate_metadata_transaction_eof_receipt(read_bounded_json(Path(context["root"]) / "metadata-transaction-eof/receipt.json", 64 * 1024),
         context=context, source_hashes=metadata_bound_source_hashes(context, METADATA_TRANSACTION_EOF_SOURCES))
+
+
+def version_native_value(value: object, *, effect: str = "committed", journal: str = "clean", reason: tuple[str, ...] = ("none",),
+                          native_reason: str = "none", applying: bool = True, requests: int = 3, responses: int = 3, sequence: int = 2,
+                          checkout: bool = True, prepared: bool = True, domain: str = "release_version", unknown: bool = False, stderr: int = 0) -> dict:
+    require(type(value) is dict and integer_between(value.get("stdoutBytes"), 1, 12 * 1024 * 1024),
+            "Version original editor output accounting differs")
+    outcome = value.get("outcome")
+    require(type(outcome) is dict and type(outcome.get("reason")) is str and outcome["reason"] in reason,
+            "Version original core reason differs")
+    expected = {"domain": domain, "nativePhase": "unknown" if unknown else "final",
+                "nativeFinality": "unknown" if unknown else "settled", "nativeReason": native_reason,
+                "applySubmitted": applying, "lateSettled": unknown,
+                "outcome": {"effect": effect, "journal": journal, "resources": "settled", "reason": outcome["reason"]},
+                "terminalSeq": sequence, "requestFrames": requests, "responseFrames": responses,
+                "stdoutBytes": value["stdoutBytes"], "stderrBytes": stderr, "forceAttempted": False,
+                **dict.fromkeys(CONFIG_OWNER_FINALITY, True)}
+    if domain == "release_version":
+        expected.update(checkoutRetained=checkout, preparedRetained=prepared)
+    require(same_compile_json(value, expected), "Version original editor wait/streams/management/correlation differs")
+    return expected
+
+
+
+def validate_version_owner_receipt(receipt: object, mode: str, *, context: dict, source_hashes: dict[str, str]) -> dict:
+    cases = validate_version_owner_header(receipt, context, mode, source_hashes)
+    names = VERSION_OWNER_CASES if mode == "source" else (VERSION_OWNER_CASES[1],)
+    require(len(cases) == len(names), "Version source/ZIP case inventory differs")
+    previous = 0
+    for name, case in zip(names, cases, strict=True):
+        index = VERSION_OWNER_CASES.index(name)
+        require(type(case) is dict and type(case.get("observations")) is dict, f"Version owner {name} row differs")
+        source = "public/version-tree/version.properties" if index == 0 else "public/version.properties"
+        methods = ("release-version-observe",) * (1 if index in (0, 3, 5, 7) else 2)
+        previous = metadata_passive_values(case.get("passive"), methods, previous)
+        options = {}
+        if index == 3:
+            options = {"effect": "not_started", "journal": "not_created", "reason": ("stale_revision",),
+                       "applying": False, "requests": 2, "responses": 2, "sequence": 1, "prepared": False}
+            observations = {"olderPassiveBaselineRejected": True, "newerNativeCheckoutRetained": True, "noPlanOrRebase": True,
+                "externalChangeRetained": True, "treeUnchanged": True, "sourceProbesSettled": True, "passiveOriginalsSettled": True}
+        elif index in (5, 7):
+            options = {"effect": "not_started", "journal": "not_created", "reason": ("none", "cancelled"),
+                       "native_reason": "caller_lost" if index == 5 else "window_lost",
+                       "applying": False, "requests": 2, "responses": 3, "sequence": 1}
+            observations = {"preparedCorrelationRetained": True, "treeUnchanged": True, "staleCommandNotSent": True,
+                "newRegistrationPublishedUnderDocumentLock": index == 5, "controlledOriginalDocumentLoss": index == 7,
+                "replacementDocumentRefused": index == 7, "guiCallbacksNotClaimed": True,
+                "sourceProbesSettled": True, "passiveOriginalsSettled": True}
+        else:
+            noop = index == 2
+            options = {"effect": "unchanged" if noop else "committed", "journal": "not_created" if noop else "clean",
+                       "native_reason": "cancelled" if index == 6 else "none"}
+            domains = case["observations"].get("domains")
+            require(type(domains) is list and len(domains) == (3 if index == 4 else 0), "Version foreign-domain owner inventory differs")
+            for item, domain in zip(domains, ("configuration", "github_workflows", "metadata_text")):
+                version_native_value(item, effect="not_started", journal="not_created", reason=("none", "cancelled"),
+                    native_reason="discarded", applying=False, requests=1, responses=2, sequence=0, domain=domain)
+            spent_refusal = case["observations"].get("consumedPlanRefusal")
+            if index == 4:
+                version_native_value(spent_refusal, effect="not_started", journal="not_created", reason=("none", "cancelled"),
+                    native_reason="caller_lost", applying=False, requests=2, responses=3, sequence=1)
+            else:
+                require(spent_refusal is None, "Unexpected version consumed-token owner")
+            observations = {"action": "create" if index == 0 else "preserve" if noop else "replace",
+                "directoriesCreated": ["public", "public/version-tree"] if index == 0 else [],
+                "explicitAbsentCreate": index == 0, "completePreparedBytes": True, "passiveBaselineMatchedCheckout": index != 0,
+                "preparedCorrelationRetained": True, "capturePrepareRawFactsUnchanged": True,
+                "dependenciesAndUnrelatedPreserved": True, "existingModePreserved": True, "createModeMasked": True,
+                "directoryModesExact": True, "unicodeCommentsAndOnlyTwoSpansPreserved": index != 0,
+                "rawNoopUnchanged": noop, "duplicateApplyObservation": index == 0, "savedPairReadback": True,
+                "sharedStatusRevision": True, "sharedLastTerminalDomainCorrect": True, "fourDomainIsolation": index == 4,
+                "foreignOriginalTicketsRefused": index == 4, "consumedPlanRefused": index == 4,
+                "consumedPlanRefusal": spent_refusal, "domains": domains,
+                "heldBeforeAcceptance": index == 6, "realStopBeforeRelease": index == 6, "cancelledNotSaved": index == 6,
+                "sourceProbesSettled": True, "passiveOriginalsSettled": True}
+        native = version_native_value(case.get("native"), **options)
+        expected = {"name": name, "domain": "release_version", "source": source,
+                    "native": native, "passive": case["passive"], "observations": observations}
+        require(same_compile_json(case, expected), f"Version owner {name} original observations differ")
+    return receipt
+
+
+def validate_version_transaction_eof_receipt(receipt: object, *, context: dict, source_hashes: dict[str, str]) -> dict:
+    cases = validate_version_owner_header(receipt, context, "source", source_hashes, eof=True)
+    require(len(cases) == 3, "Version EOF case inventory differs")
+    previous = 0
+    for index, (name, case) in enumerate(zip(VERSION_EOF_CASES, cases, strict=True)):
+        require(type(case) is dict, f"Version EOF {name} row differs")
+        previous = metadata_passive_values(case.get("passive"), () if index == 2 else ("release-version-observe",), previous)
+        committed, unknown = index == 1, index == 2
+        boundary, checkpoint = ("after-durable-COMMITTED", "descriptor-close") if committed else ("before-COMMITTED", "publisher-entry")
+        terminal = "UNKNOWN" if unknown else "COMMITTED" if committed else "ROLLED_BACK"
+        records = (f"MRK_RELEASE_VERSION_EOF_V1 {name} boundary={boundary}\n"
+            f"MRK_RELEASE_VERSION_EOF_V1 {name} eof=1 nonempty=0 readErrors=0 checkpoint={checkpoint} "
+            f"applied=1 committed={int(committed)} rolledBack={int(not committed and not unknown)} terminal={terminal} "
+            f"durable={int(not unknown)} recovery=1 clean={int(not unknown)} settled=1 cancelled=1\n")
+        native = version_native_value(case.get("native"), effect="unknown" if unknown else "committed" if committed else "rolled_back",
+            journal="recovery_required" if unknown else "clean", reason=("cancelled",), native_reason="cancelled",
+            unknown=unknown, stderr=len(records.encode("ascii")))
+        observations = {"evidenceKind": "real-stdin-eof-at-controlled-transaction-boundary", "bootstrapMode": "instrumented-genuine-engine",
+            "boundary": boundary, "originalCheckpoint": checkpoint, "closeBeforeActiveDeadline": True, "controlRecords": 2,
+            "actualStdinEof": True, "eofReadCount": 1, "nonemptyReadCount": 0, "readErrorCount": 0, "preparedCorrelationRetained": True,
+            "versionProfileAndControlProof": True, "committedPublication": committed, "rolledBackPublication": not committed and not unknown,
+            "terminalDurable": not unknown, "fixedRecovery": True, "journalClean": not unknown, "journalAbsent": not unknown,
+            "originalTreeRestored": not committed and not unknown, "selectedPayloadsRemain": committed or unknown,
+            "unselectedAndDependenciesPreserved": True, "unrelatedIntroducedBeforeEof": unknown, "introducedOriginalPreserved": unknown,
+            "recoveryEvidenceRetained": unknown, "sharedBlockedProject": unknown, "allFourDomainsDisabled": unknown,
+            "noFurtherAdmission": unknown, "sourceProbesSettled": True, "passiveOriginalsSettled": True, "fixtureFilesSettled": True}
+        expected = {"name": name, "domain": "release_version", "source": "release/version.properties" if committed else "public/version.properties",
+                    "native": native, "passive": case["passive"], "observations": observations}
+        require(same_compile_json(case, expected), f"Version EOF {name} original observations differ")
+    return receipt
+
+
+def version_owner_receipt(context: dict, mode: str) -> dict:
+    require(mode in ("source", "zip"), "Unknown version owner runtime form")
+    return validate_version_owner_receipt(read_bounded_json(Path(context["root"]) / f"version-owner-{mode}/receipt.json", 64 * 1024), mode,
+        context=context, source_hashes=version_bound_source_hashes(context, VERSION_OWNER_SOURCES))
+
+
+def version_transaction_eof_receipt(context: dict) -> dict:
+    return validate_version_transaction_eof_receipt(read_bounded_json(Path(context["root"]) / "version-transaction-eof/receipt.json", 64 * 1024),
+        context=context, source_hashes=version_bound_source_hashes(context, VERSION_TRANSACTION_EOF_SOURCES))
 
 
 def canonical_json(value: object) -> bytes:
@@ -5500,6 +6182,11 @@ def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | No
                 "Metadata-only phase cannot produce compiler or product authority")
         value = metadata_phase_value(context, name, checks)
         validate_metadata_phase_receipt(value, context, name)
+    elif context.get("executionScope") == VERSION_NATIVE_SCOPE:
+        require(node is None and scope == "passive-development-foundation-only" and compiled is None,
+                "Version-only phase cannot produce compiler or product authority")
+        value = version_phase_value(context, name, checks)
+        validate_version_phase_receipt(value, context, name)
     elif context.get("executionScope") == GITHUB_READONLY_SCOPE:
         require(node is None and scope == "passive-development-foundation-only" and compiled is None,
                 "G1 phase cannot produce other native or product authority")
@@ -5559,6 +6246,28 @@ def metadata_public_bindings(context: dict) -> dict:
             "payloadBindings": METADATA_PAYLOAD_BINDINGS, "notVerified": list(METADATA_NOT_VERIFIED)}
 
 
+def prepare_version_native_context(context: dict, inventory: list[dict]) -> None:
+    root, source = Path(context["root"]), Path(context["source"])
+    context["versionInputs"] = {"sourceFiles": version_source_files(source), "coreFiles": inventory,
+                                 "coreZipSha256": hash_file(root / "core.zip"), "pythonSha256": hash_file(Path(context["python"]))}
+    context["originalDirectories"] = {"root": workflow_directory_identity(root), "source": workflow_directory_identity(source),
+                                      **{name: workflow_directory_identity(root / name) for name in VERSION_NATIVE_DIRECTORIES}}
+    context["observedHost"] = workflow_host(root)
+    context["versionInvocation"] = version_invocation()
+    # Bind the actual source/ZIP resource closure, not workflow template DATA or
+    # a renderer-supplied configuration/field roster.
+    write_json(root / "version.json", version_core_metadata(context))
+    version_source_unchanged(context)
+
+
+def version_public_bindings(context: dict) -> dict:
+    return {"schemaVersion": 1, "scope": VERSION_NATIVE_EVIDENCE_SCOPE,
+            **version_context_binding(context), "versionInputs": context["versionInputs"],
+            "python": PYTHON, "rust": {"release": RUST, "target": TARGETS["linux"]},
+            "features": ["development-runtime"], "testTarget": "lib", "host": context["observedHost"],
+            "payloadBindings": VERSION_PAYLOAD_BINDINGS, "notVerified": list(VERSION_NOT_VERIFIED)}
+
+
 def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     admit_phase(scope, "prepare")
     admit_platform(scope, platform)
@@ -5571,10 +6280,11 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     profile = compile_profile(scope) if scope in COMPILE_PROFILES else None
     native_workflow = scope == WORKFLOW_NATIVE_SCOPE
     native_metadata = scope == METADATA_NATIVE_SCOPE
-    native_edit = native_workflow or native_metadata
+    native_version = scope == VERSION_NATIVE_SCOPE
+    native_edit = native_workflow or native_metadata or native_version
     native_github = scope == GITHUB_READONLY_SCOPE
     native_tls = scope == GITHUB_TLS_SCOPE
-    binding = (metadata_native_binding(os.environ) if native_metadata else compile_workflow_binding(os.environ, scope) if profile else workflow_native_binding(os.environ)
+    binding = (version_native_binding(os.environ) if native_version else metadata_native_binding(os.environ) if native_metadata else compile_workflow_binding(os.environ, scope) if profile else workflow_native_binding(os.environ)
                if native_workflow else github_readonly_binding(os.environ) if native_github
                else github_tls_binding(os.environ) if native_tls else {})
     source = Path(os.environ["GITHUB_WORKSPACE"]).resolve(strict=True)
@@ -5591,13 +6301,13 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     if native_edit or native_github or native_tls:
         # One original root per actual job attempt. A second prepare must not
         # mint a fresh path to evade a failed/Unknown phase's retained claims.
-        label = "metadata" if native_metadata else "github-tls" if native_tls else "github" if native_github else "workflow"
+        label = "version" if native_version else "metadata" if native_metadata else "github-tls" if native_tls else "github" if native_github else "workflow"
         root = temp / f"mrk-desktop-foundation-{label}-{binding['runId']}-{binding['attempt']}"
         root.mkdir(mode=0o700)
     else:
         root = Path(tempfile.mkdtemp(prefix="mrk-desktop-foundation-", dir=temp))
     no_cargo_configuration((root,))
-    directories = METADATA_NATIVE_DIRECTORIES if native_metadata else GITHUB_TLS_DIRECTORIES if native_tls else GITHUB_READONLY_DIRECTORIES if native_github else WORKFLOW_NATIVE_DIRECTORIES if native_workflow else (
+    directories = VERSION_NATIVE_DIRECTORIES if native_version else METADATA_NATIVE_DIRECTORIES if native_metadata else GITHUB_TLS_DIRECTORIES if native_tls else GITHUB_READONLY_DIRECTORIES if native_github else WORKFLOW_NATIVE_DIRECTORIES if native_workflow else (
         "home", "cargo", "rustup", "tmp", "target", "windows-snapshot", "appdata", "localappdata") if windows else (
         "home", "cargo", "rustup", "tmp", "target", "native", "config-owner", "config-driver-loss", "config-watchdog-loss",
         "config-stop", "config-terminal-deadline", "config-startup-stop", "config-transaction-eof", "appdata", "localappdata", "npm-cache")
@@ -5652,7 +6362,9 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     if scope == GTK_COMPILE_SCOPE:
         validate_gtk_core_inventory(inventory)
         context["sg1"] = gtk_compile_binding(source)
-    if native_metadata:
+    if native_version:
+        prepare_version_native_context(context, inventory)
+    elif native_metadata:
         prepare_metadata_native_context(context, inventory)
     elif native_workflow:
         prepare_workflow_native_context(context, inventory)
@@ -5663,7 +6375,9 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     source_unchanged(context)
     if not windows:
         write_json(root / "context.json", context)
-    if native_metadata:
+    if native_version:
+        public = version_public_bindings(context)
+    elif native_metadata:
         public = metadata_public_bindings(context)
     elif native_workflow:
         public = workflow_public_bindings(context)
@@ -5716,12 +6430,23 @@ def metadata_invocation() -> dict:
     return values
 
 
+def version_invocation() -> dict:
+    # Exact original invocation strings are private context DATA. Reading them
+    # does not resolve/reopen source/runtime paths after lane-last uncertainty.
+    values = {key: os.environ[key] for key in ("GITHUB_WORKSPACE", "MRK_PYTHON", "RUNNER_TEMP")}
+    values["executable"] = sys.executable
+    require(all(type(value) is str and Path(value).is_absolute() for value in values.values()),
+            "Version invocation input is not absolute")
+    return values
+
+
 def load_context(platform: str, scope: str = BOUNDARY_SCOPE, *, retention_only: bool = False) -> dict:
     admit_platform(scope, platform)
     if scope in ENVIRONMENT_NATIVE_SCOPES:
         return load_environment_native_context(platform, retention_only=retention_only)
-    require(not retention_only or scope == METADATA_NATIVE_SCOPE, "Unexpected DATA-only context route")
+    require(not retention_only or scope in {METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE}, "Unexpected DATA-only context route")
     metadata_binding = metadata_native_binding(os.environ) if scope == METADATA_NATIVE_SCOPE else None
+    version_binding = version_native_binding(os.environ) if scope == VERSION_NATIVE_SCOPE else None
     if scope == WINDOWS_SNAPSHOT_SCOPE:
         require(admitted_scope(platform) == scope, "Windows context scope differs")
     root = Path(os.environ["MRK_DESKTOP_CI_ROOT"])
@@ -5729,7 +6454,7 @@ def load_context(platform: str, scope: str = BOUNDARY_SCOPE, *, retention_only: 
             and root.parent == (Path(os.environ["RUNNER_TEMP"]) if retention_only else Path(os.environ["RUNNER_TEMP"]).resolve(strict=True))
             and not root.is_symlink(), "Unrecognized task root")
     ordinary(root / "context.json")
-    context = (read_bounded_json(root / "context.json", 256 * 1024) if scope in {GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, METADATA_NATIVE_SCOPE}
+    context = (read_bounded_json(root / "context.json", 256 * 1024) if scope in {GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE}
                else workflow_json(root / "context.json") if scope == WORKFLOW_NATIVE_SCOPE
                else json.loads((root / "context.json").read_text(encoding="utf-8")))
     require(context["root"] == str(root) and context["platform"] == platform and context.get("executionScope") == scope
@@ -5781,6 +6506,23 @@ def load_context(platform: str, scope: str = BOUNDARY_SCOPE, *, retention_only: 
             metadata_bound_source_hashes(context, METADATA_TRANSACTION_EOF_SOURCES)
         require(same_compile_json(read_bounded_json(root / "public-bindings.json", 256 * 1024), metadata_public_bindings(context)),
                 "Metadata native public source binding changed")
+    elif scope == VERSION_NATIVE_SCOPE:
+        require(type(context) is dict and all(context.get(key) == value for key, value in version_binding.items())
+                and root.name == f"mrk-desktop-foundation-version-{version_binding['runId']}-{version_binding['attempt']}"
+                and same_compile_json(context.get("versionInvocation"), version_invocation()),
+                "Version native context/source binding changed")
+        version_context_binding(context)
+        validate_workflow_host(context.get("observedHost"))
+        if not retention_only:
+            require(context.get("source") == str(Path(os.environ["GITHUB_WORKSPACE"]).resolve(strict=True))
+                    and context.get("python") == str(Path(sys.executable).resolve(strict=True))
+                    and context.get("workflowSha256") == hash_file(Path(context["source"]) / VERSION_NATIVE_WORKFLOW),
+                    "Version original source/runtime binding changed")
+            version_inputs_unchanged(context)
+        else:
+            version_bound_source_hashes(context, VERSION_TRANSACTION_EOF_SOURCES)
+        require(same_compile_json(read_bounded_json(root / "public-bindings.json", 256 * 1024), version_public_bindings(context)),
+                "Version native public source binding changed")
     elif scope == GITHUB_READONLY_SCOPE:
         binding = github_readonly_binding(os.environ)
         require(type(context) is dict and all(context.get(key) == value for key, value in binding.items())
@@ -6149,6 +6891,159 @@ def phase_metadata_native(name: str, context: dict) -> None:
     phase_receipt(context, name, list(METADATA_NATIVE_CHECKS[name]))
 
 
+def version_phase_value(context: dict, name: str, checks: list[str]) -> dict:
+    require(name in VERSION_NATIVE_CHECKS, "Unexpected version-only phase receipt")
+    return {"schemaVersion": 1, "scope": VERSION_NATIVE_EVIDENCE_SCOPE, "phase": name, "status": "passed",
+            **version_context_binding(context), "versionInputs": context["versionInputs"],
+            "rust": {"release": RUST, "target": TARGETS["linux"]}, "python": PYTHON,
+            "features": ["development-runtime"], "testTarget": "lib",
+            "checks": [{"check": check, "exitCode": 0} for check in checks],
+            "notVerified": list(VERSION_NOT_VERIFIED)}
+
+
+def validate_version_phase_receipt(value: object, context: dict, name: str) -> dict:
+    require(name in VERSION_NATIVE_CHECKS, "Unknown version phase")
+    require(same_compile_json(value, version_phase_value(context, name, list(VERSION_NATIVE_CHECKS[name]))),
+            "Version phase receipt or original source/check inventory differs")
+    return value
+
+
+def version_phase_claim(context: dict, name: str) -> dict:
+    require(name in (*VERSION_NATIVE_CHECKS, "clean"), "Unknown version original phase claim")
+    return {"scope": VERSION_NATIVE_SCOPE, "phase": name, **version_context_binding(context)}
+
+
+def version_predecessors(context: dict, name: str) -> None:
+    """Original endpoints plus exact case/resource facts, never a reusable PASS file."""
+    version_context_binding(context)
+    require(name in (*VERSION_NATIVE_CHECKS, "clean"), "Unknown version successor")
+    phases, root = list(VERSION_NATIVE_CHECKS), Path(context["root"])
+    previous = phases if name == "clean" else phases[:phases.index(name)]
+    for prior in previous:
+        require(same_compile_json(read_bounded_json(root / f"{prior}-started.json", 4096), version_phase_claim(context, prior)),
+                "Version original phase claim differs")
+        validate_version_phase_receipt(read_bounded_json(root / f"{prior}-checks.json", 256 * 1024), context, prior)
+        if prior == "version-owner":
+            version_owner_receipt(context, "source")
+            version_owner_receipt(context, "zip")
+        elif prior == "version-transaction-eof":
+            version_transaction_eof_receipt(context)
+        elif prior == "version-core":
+            for partition in VERSION_PARTITIONS:
+                version_core_receipt(context, partition)
+    # Retention is one-use too. A new helper process or missing pass-shaped
+    # receipt cannot renew a spent invocation or authorize failed-root cleanup.
+    for later in (*phases[len(previous):], "clean"):
+        for suffix in ("started", "checks"):
+            require(not os.path.lexists(root / f"{later}-{suffix}.json"), "Version phase was already claimed; retain outputs")
+    require(not os.path.lexists(root / "retention-checks.json"), "Version retention was already recorded")
+
+
+def version_phase_start(context: dict, name: str) -> None:
+    version_predecessors(context, name)
+    write_json(Path(context["root"]) / f"{name}-started.json", version_phase_claim(context, name))
+
+
+def clean_version_native(context: dict) -> None:
+    """Lane-last resource Unknown licenses DATA retention, never another close."""
+    version_phase_start(context, "clean")
+    write_json(Path(context["root"]) / "retention-checks.json", {
+        "schemaVersion": 1, "scope": VERSION_NATIVE_EVIDENCE_SCOPE, "status": "retained",
+        **version_context_binding(context), "reason": "lane-last-committed-close-resources-unknown", "deleted": False,
+        "laterNativeWork": False, "projectProbes": False, "vmDisposalRequired": True,
+    })
+    print("Retained version roots and compiler/runtime outputs for hosted VM disposal; no Save or production qualification.")
+
+
+def phase_version_native(name: str, context: dict) -> None:
+    """Same finite headless runner; version never falls through to old native tests."""
+    version_context_binding(context)
+    admit_phase(VERSION_NATIVE_SCOPE, name)
+    require(name != "prepare", "Version preparation has a separate fixed entry")
+    if name == "clean":
+        clean_version_native(context)
+        return
+    version_phase_start(context, name)
+    version_source_unchanged(context)
+    root, source = Path(context["root"]), Path(context["source"])
+    no_cargo_configuration((root, *root.parents, source / "desktop/src-tauri", source / "desktop", source, *source.parents))
+    environment = clean_environment(root)
+    environment["GITHUB_SHA"] = context["sourceSha"]
+    manifest = source / "desktop/src-tauri/Cargo.toml"
+    if name == "acquire":
+        run([context["rustup"], "toolchain", "install", RUST, "--profile", "minimal", "--no-self-update"],
+            check="rust-toolchain-install", cwd=root, env=environment, timeout=600)
+        cargo, _ = tools(context, environment)
+        with (root / "cargo-metadata.json").open("x", encoding="utf-8") as output:
+            run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features",
+                 "--features", "development-runtime", "--filter-platform", TARGETS["linux"],
+                 "--manifest-path", str(manifest)], check="version-locked-headless-metadata", cwd=root,
+                env=environment, timeout=600, output=output)
+        ordinary(root / "cargo-metadata.json")
+        require(0 < (root / "cargo-metadata.json").stat().st_size <= 32 * 1024 * 1024, "Version compiler metadata exceeds its bound")
+    elif name == "version-core":
+        # V19's effect Unknown is invocation-last with distinct positive resource
+        # proof. V20 is resource-settled. V21 is the last native work of the lane.
+        environment.update(MRK_DESKTOP_RELEASE_VERSION_NATIVE="1", MRK_DESKTOP_RELEASE_VERSION_SOURCE_SHA=context["sourceSha"],
+                           GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted", RUNNER_OS="Linux", RUNNER_ARCH="X64",
+                           GITHUB_WORKSPACE=str(source), RUNNER_TEMP=str(Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)))
+        fixture = [context["python"], "-I", "-S", "-B", str(source / "tests/native_desktop_config.py"),
+                   "--task-root", str(root), "--domain", "release_version", "--case"]
+        with (root / "version-ordinary.json").open("x", encoding="utf-8") as output:
+            run([*fixture, "ordinary"], check="version-core-ordinary", cwd=root, env=environment, timeout=90, output=output)
+        version_core_receipt(context, "ordinary")
+        version_inputs_unchanged(context)
+        with (root / "version-committed-fsync.json").open("x", encoding="utf-8") as output:
+            run([*fixture, "committed-fsync"], check="version-core-committed-fsync", cwd=root, env=environment, timeout=45, output=output)
+        version_core_receipt(context, "committed-fsync")
+        version_source_unchanged(context)
+        with (root / "version-committed-close.json").open("x", encoding="utf-8") as output:
+            run([*fixture, "committed-close"], check="version-core-committed-close", cwd=root, env=environment, timeout=45, output=output)
+        version_core_receipt(context, "committed-close")
+        phase_receipt(context, name, list(VERSION_NATIVE_CHECKS[name]))
+        return
+    else:
+        cargo, _ = tools(context, environment)
+        common = ["--locked", "--offline", "--jobs", "1", "--no-default-features", "--target", TARGETS["linux"],
+                  "--manifest-path", str(manifest), "--target-dir", str(root / "target")]
+        if name == "compile":
+            run([cargo, "test", *common, "--lib", "--no-run", "--features", "development-runtime"],
+                check="headless-test-compile-only", cwd=root, env=environment, timeout=600)
+        else:
+            environment.update(MRK_DESKTOP_DEV_PYTHON=context["python"], MRK_DESKTOP_DEV_CORE=str(source / "src"),
+                               MRK_DESKTOP_RELEASE_VERSION_HOSTED_CHECKS="release-version-v1", MRK_DESKTOP_RELEASE_VERSION_INPUT="source",
+                               MRK_DESKTOP_RELEASE_VERSION_CORE_METADATA=str(root / "version.json"),
+                               MRK_DESKTOP_RELEASE_VERSION_CORE_ZIP=str(root / "core.zip"),
+                               MRK_DESKTOP_EDIT_SOURCE_SHA=context["sourceSha"], GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted",
+                               RUNNER_OS="Linux", RUNNER_ARCH="X64", GITHUB_RUN_ID=context["runId"], GITHUB_RUN_ATTEMPT=context["attempt"],
+                               GITHUB_REF=VERSION_NATIVE_REF, GITHUB_EVENT_NAME=context["event"], GITHUB_REPOSITORY=context["repository"],
+                               GITHUB_WORKFLOW_SHA=context["workflowSha"], GITHUB_WORKFLOW_REF=context["workflowRef"],
+                               MRK_PUSH_EVENT_AFTER=context["pushEventAfter"],
+                               RUNNER_TEMP=str(Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)))
+            if name == "version-owner":
+                environment["MRK_DESKTOP_EDIT_TEST_ROOT"] = str(root / "version-owner-source")
+                run([cargo, "test", *common, "--lib", "--features", "development-runtime", VERSION_OWNER_TEST,
+                     "--", "--exact", "--ignored", "--test-threads=1"], check="version-owner-source-native-contract",
+                    cwd=root, env=environment, timeout=180)
+                version_owner_receipt(context, "source")
+                version_inputs_unchanged(context)
+                environment.update(MRK_DESKTOP_EDIT_TEST_ROOT=str(root / "version-owner-zip"),
+                                   MRK_DESKTOP_DEV_CORE=str(root / "core.zip"), MRK_DESKTOP_RELEASE_VERSION_INPUT="zip")
+                run([cargo, "test", *common, "--lib", "--features", "development-runtime", VERSION_OWNER_TEST,
+                     "--", "--exact", "--ignored", "--test-threads=1"], check="version-owner-zip-native-contract",
+                    cwd=root, env=environment, timeout=60)
+                version_owner_receipt(context, "zip")
+            else:
+                require(name == "version-transaction-eof", "Unknown fixed version native phase")
+                environment["MRK_DESKTOP_EDIT_TEST_ROOT"] = str(root / "version-transaction-eof")
+                run([cargo, "test", *common, "--lib", "--features", "development-runtime", VERSION_TRANSACTION_EOF_TEST,
+                     "--", "--exact", "--ignored", "--test-threads=1"], check="version-transaction-eof-native-contract",
+                    cwd=root, env=environment, timeout=90)
+                version_transaction_eof_receipt(context)
+    version_source_unchanged(context)
+    phase_receipt(context, name, list(VERSION_NATIVE_CHECKS[name]))
+
+
 def clean_compile(context: dict) -> None:
     """Only positively completed compiler work; no fabricated native receipts."""
     profile = compile_profile(context.get("executionScope", ""))
@@ -6248,7 +7143,7 @@ def compile_gtk(context: dict, cargo: str, common: list[str], environment: dict[
 def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     admit_phase(scope, name)
     admit_platform(scope, platform)
-    context = (load_context(platform, scope, retention_only=True) if (scope == METADATA_NATIVE_SCOPE and name == "clean"
+    context = (load_context(platform, scope, retention_only=True) if (scope in {METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE} and name == "clean"
                or scope == ENVIRONMENT_NATIVE_SCOPE and name == "retain" or scope == OFFLINE_NATIVE_SCOPE)
                else load_context(platform, scope))
     if scope in ENVIRONMENT_NATIVE_SCOPES:
@@ -6256,6 +7151,9 @@ def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
         return
     if scope == METADATA_NATIVE_SCOPE:
         phase_metadata_native(name, context)
+        return
+    if scope == VERSION_NATIVE_SCOPE:
+        phase_version_native(name, context)
         return
     if scope == WORKFLOW_NATIVE_SCOPE:
         phase_workflow_native(name, context)
@@ -9483,6 +10381,7 @@ def windows_installed_phase(name: str, scope: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("phase", choices=(*BOUNDARY_PHASES, "workflow-owner", "workflow-transaction-eof", "workflow-core",
+                        "version-owner", "version-transaction-eof", "version-core",
                         "metadata-owner", "metadata-transaction-eof", "metadata-core", "windows-snapshot", "github-owner", "github-tls", "github-tls-deadline",
                          "environment-native", "offline-cli11", "retain", "windows-installed-native", "windows-installed-runtime-data", *CONVENTIONAL_PHASES))
     args = parser.parse_args()
@@ -9497,7 +10396,7 @@ def main() -> int:
             conventional_phase(args.phase, scope)
             return 0
         admit_phase(scope, args.phase)
-        platform = (admitted_host(retention_only=True) if (scope == METADATA_NATIVE_SCOPE and args.phase == "clean"
+        platform = (admitted_host(retention_only=True) if (scope in {METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE} and args.phase == "clean"
                     or scope == ENVIRONMENT_NATIVE_SCOPE and args.phase == "retain"
                     or scope == OFFLINE_NATIVE_SCOPE and args.phase != "prepare") else admitted_host())
         prepare(platform, scope) if args.phase == "prepare" else phase(args.phase, platform, scope)

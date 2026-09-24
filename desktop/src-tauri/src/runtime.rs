@@ -251,6 +251,31 @@ impl MetadataTextInstalledProfile {
     }
 }
 
+// This writer changed the core/bootstrap. Old A and another domain's positive
+// evidence MUST NOT select it. Populate this closed binding only after a new
+// source-bound core ZIP/manifest and distinct version-writer review.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) struct ReleaseVersionInstalledProfile { _private: () }
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl ReleaseVersionInstalledProfile {
+    const TARGET: &'static str = "x86_64-unknown-linux-gnu";
+    const SOURCE_BINDING: Option<(&'static str, &'static str)> = None;
+    fn bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
+        Self::SOURCE_BINDING.is_some_and(|(approved_manifest, approved_protocol)|
+            target == Self::TARGET && manifest == Some(approved_manifest) && protocol == Some(approved_protocol))
+    }
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !Self::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) { return Err(unavailable()); }
+        let (manifest, _) = Self::SOURCE_BINDING.ok_or_else(unavailable)?;
+        let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions").join(Self::TARGET).join(manifest);
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("config_edit_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+    pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
+        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+    }
+}
+
 // Fixed A selection DATA, not another owner's execution permission. The two
 // command owners keep their independent, initially closed qualification gates.
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -732,6 +757,29 @@ impl RuntimeConfig {
         // The registered original worker borrows its domain-bound slots. The
         // returned paths are DATA; they cannot carry the ledger or spawn.
         originals.inspect_once(self.metadata_text_installed_profile()?, end, stop)
+    }
+    /// SAME sealed version selector for capability and original-owner admission.
+    /// Neither another edit profile nor a feature-off native test can select it.
+    pub(crate) fn release_version_edit_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        { self.release_version_installed_profile().is_ok() }
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        { false }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn release_version_installed_profile(&self) -> Result<ReleaseVersionInstalledProfile, BridgeError> {
+        #[cfg(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        if ReleaseVersionInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
+            return Ok(ReleaseVersionInstalledProfile { _private: () });
+        }
+        Err(BridgeError::unavailable("The saved-version installed-runtime release and custody profile are not qualified."))
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn resolve_release_version_installed(&self, originals: &mut crate::installed_runtime::ReleaseVersionRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        // The registered original worker borrows its domain-bound slots. The
+        // returned paths are DATA; they cannot carry the ledger or spawn.
+        originals.inspect_once(self.release_version_installed_profile()?, end, stop)
     }
     /// Separate fixed entry point for the finite configuration owner. Never
     /// dispatch stateful work through the passive engine or its supervisor.
@@ -1339,6 +1387,29 @@ mod tests {
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     #[test]
     fn metadata_candidate_bindings_data_contract() { metadata_candidate_bindings_are_exactly_a_not_an_arbitrary_anchor(); }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn version_profile_refuses_old_a_and_every_binding_before_inspection() {
+        assert!(ReleaseVersionInstalledProfile::SOURCE_BINDING.is_none());
+        let (target,manifest,protocol) = (PassiveInstalledProfile::TARGET,PassiveInstalledProfile::MANIFEST,PassiveInstalledProfile::PROTOCOL);
+        let other = "0".repeat(64);
+        for (target,manifest,protocol) in [
+            (target,Some(manifest),Some(protocol)), (target,None,None),
+            (target,Some(other.as_str()),Some(protocol)), (target,Some(manifest),Some(other.as_str())),
+            ("aarch64-unknown-linux-gnu",Some(manifest),Some(protocol)),
+        ] { assert!(!ReleaseVersionInstalledProfile::bindings_match(target,manifest,protocol)); }
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-version-source-data-only"));
+        assert!(!runtime.release_version_edit_profile_available());
+        assert!(runtime.release_version_installed_profile().is_err());
+        let mut slots = crate::installed_runtime::ReleaseVersionRuntimeSlots::new();
+        let (_sender,stop) = tokio::sync::watch::channel(true);
+        // None binding refuses before slot inspection, uname, file IO or a child.
+        assert!(runtime.resolve_release_version_installed(&mut slots,Instant::now(),&stop).is_err());
+        assert!(slots.never_started() && slots.no_child_effect() && !slots.settled());
+        assert!(slots.capability().is_err());
+    }
+
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(super) fn metadata_candidate_bindings_are_exactly_a_not_an_arbitrary_anchor() {
         let (target, manifest, protocol) = (PassiveInstalledProfile::TARGET, PassiveInstalledProfile::MANIFEST, PassiveInstalledProfile::PROTOCOL);

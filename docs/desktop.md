@@ -202,6 +202,20 @@ budgets and explicit partial/error results. It does not infer an enclosing
 repository above the selected directory or read arbitrary file contents for the
 renderer.
 
+### Edit or create saved version values (separately gated)
+
+Dashboard has an app-managed **Open → edit name/build strings → review complete
+original/after bytes → confirm Save** implementation, with explicit **Create
+version file** only for a source observed absent. It does not apply unsaved
+Settings, rewrite unrelated bytes or perform an automatic version bump. This
+new writer's independent gate is false and its installed source binding is None;
+no native/platform/recovery/shipping qualification is claimed. Browser preview
+never fabricates a load or Save. A new source-bound runtime and distinct Linux
+original-owner verification are required, not another edit domain's old payload.
+See [saved-version VALUE editing](desktop-release-version-edit.md) for the
+ordinary UI flow, ten-rule ignore prerequisite, lifecycle and uncertainty rules.
+The existing Read action below stays a separate, unchanged read-only service.
+
 ### Read the saved release version
 
 Dashboard's **Read saved version** action displays the normalized marketing name

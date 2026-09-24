@@ -21,7 +21,8 @@ const TOK = {
 };
 const BASE = { schemaVersion: 1, android: { enabled: true, applicationId: 'com.example.inert' }, source: { candidateBranch: 'main' } };
 const IGNORE = ['.mobile-release/', '.mobile-release-init-prepare/', '.mobile-release-init/', '.mobile-release-init-cleanup/',
-  '.mobile-release-metadata-text-prepare/', '.mobile-release-metadata-text/', '.mobile-release-metadata-text-cleanup/'];
+  '.mobile-release-metadata-text-prepare/', '.mobile-release-metadata-text/', '.mobile-release-metadata-text-cleanup/',
+  '.mobile-release-version-prepare/', '.mobile-release-version/', '.mobile-release-version-cleanup/'];
 const assurance = {
   basis: 'schema-policy', projectCodeExecuted: false, toolsProbed: false,
   credentialsRead: false, gitObserved: false, storeContacted: false,

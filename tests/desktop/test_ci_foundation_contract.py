@@ -1397,9 +1397,9 @@ class WorkflowNativeHelperTests(unittest.TestCase):
             self.assertNotIn(forbidden, workflow)
         positions = [workflow.index(f"ci_foundation.py {phase}'") for phase in helper.WORKFLOW_NATIVE_PHASES]
         self.assertEqual(positions, sorted(positions))
-        self.assertEqual(workflow.count("ci_foundation.py "), len(helper.WORKFLOW_NATIVE_PHASES) + 3)
-        # The new push-only metadata selection shares this compile, not the old
-        # workflow-domain native sequence. Keep the original upload unchanged.
+        self.assertEqual(workflow.count("ci_foundation.py "), len(helper.WORKFLOW_NATIVE_PHASES) + 6)
+        # The push-only metadata and version selections share this compile, not
+        # the workflow-domain native sequence. Keep the original upload unchanged.
         workflow_upload = workflow.split("      - name: Retain only allowlisted synthetic receipts\n", 1)[1].split(
             "      - name: Retain only allowlisted synthetic metadata receipts\n", 1)[0]
         allowlist = [line.strip().split("${{ steps.prepare.outputs.root }}/", 1)[1]
@@ -1600,16 +1600,31 @@ class MetadataNativeHelperTests(unittest.TestCase):
         cases = [case for partition in ("ordinary", "committed-fsync", "committed-close") for case in metadata_core_report(partition)["cases"]]
         self.assertEqual(len(cases), 22)
         self.assertEqual(canonical(cases), "1adb3df36daed910279f776cf1683367b0b85c73cba13057fa1e7967b18b2601")
-        self.assertEqual(canonical(helper.METADATA_CORE_SOURCES), "d812ffa8c1a5e9a0798dd3736572ad16ba435dd62d9a5af07c8c74c9c66b9c2b")
+        # Keep the accepted historical source-map oracle unchanged. The new
+        # shared imports extend SOURCE closure only, never metadata fixture or
+        # version-writer permission, and the explicit additions are closed.
+        version_core_sources = {
+            "versionEdit": "src/mobile_release/release_version_edit.py",
+            "versionText": "src/mobile_release/version_text.py",
+            "versionResource": "src/mobile_release/api/data/release-version-help-v1.json",
+        }
+        version_owner_sources = {**version_core_sources,
+            "versionProtocol": "desktop/src-tauri/src/release_version_edit_protocol.rs",
+            "versionCommands": "desktop/src-tauri/src/release_version_edit_commands.rs"}
+        self.assertEqual({key: helper.METADATA_CORE_SOURCES[key] for key in version_core_sources}, version_core_sources)
+        historical_core = {key: value for key, value in helper.METADATA_CORE_SOURCES.items() if key not in version_core_sources}
+        self.assertEqual(canonical(historical_core), "d812ffa8c1a5e9a0798dd3736572ad16ba435dd62d9a5af07c8c74c9c66b9c2b")
         self.assertEqual(canonical(helper.METADATA_PAYLOAD_BINDINGS), "a0d9844865eed8a49f98ddbc640a9ebcb04c9c31e48774a83281dad5c45beb92")
         # Independent author oracle: literal seed bytes and the actual Rust
-        # SOURCES26/EXTRA23 map, not this helper's receipt constructor.
+        # historical SOURCES26/EXTRA23 map, not this helper's receipt constructor.
         self.assertEqual(canonical(helper.METADATA_OWNER_PAYLOAD_HASHES), "3ab3654346ac8bc3d740c77e51e6313bce70cc2dbb2dc1817a2f552c669f05aa")
-        self.assertEqual(canonical(helper.METADATA_OWNER_SOURCES), "0e18075b26b15a528a8f283ced045a0292252d5289ac60307d151a18502930e1")
+        self.assertEqual({key: helper.METADATA_OWNER_SOURCES[key] for key in version_owner_sources}, version_owner_sources)
+        historical_owner = {key: value for key, value in helper.METADATA_OWNER_SOURCES.items() if key not in version_owner_sources}
+        self.assertEqual(canonical(historical_owner), "0e18075b26b15a528a8f283ced045a0292252d5289ac60307d151a18502930e1")
         self.assertEqual(set(helper.METADATA_PAYLOAD_BINDINGS), {"configHashes", "ignoreSha256", "fieldHashes"})
-        self.assertEqual(len(helper.METADATA_CORE_SOURCES), 20)
-        self.assertEqual(len(helper.METADATA_OWNER_SOURCES), 49)
-        self.assertEqual(len(helper.METADATA_TRANSACTION_EOF_SOURCES), 50)
+        self.assertEqual(len(helper.METADATA_CORE_SOURCES), 23)
+        self.assertEqual(len(helper.METADATA_OWNER_SOURCES), 54)
+        self.assertEqual(len(helper.METADATA_TRANSACTION_EOF_SOURCES), 55)
         self.assertEqual(helper.METADATA_NATIVE_SOURCES, tuple(sorted(set(helper.METADATA_NATIVE_SOURCES))))
         for path in (*helper.METADATA_CORE_SOURCES.values(), *helper.METADATA_TRANSACTION_EOF_SOURCES.values(),
                      helper.METADATA_NATIVE_WORKFLOW, "desktop/tools/ci_foundation.py"):
@@ -2034,14 +2049,15 @@ class MetadataNativeHelperTests(unittest.TestCase):
 
     def test_workflow_selects_one_domain_before_checkout_and_compiles_only_once(self):
         workflow = (SOURCE / helper.METADATA_NATIVE_WORKFLOW).read_text(encoding="utf-8")
-        self.assertIn("branches: [verify/desktop-github-workflow-apply-native, verify/desktop-metadata-text-apply-native]", workflow)
+        self.assertIn("branches: [verify/desktop-github-workflow-apply-native, verify/desktop-metadata-text-apply-native, verify/desktop-release-version-apply-native]", workflow)
         self.assertNotIn("qualification_domain", workflow)
         guard = workflow.split("        run: |\n", 1)[1].split("      - name:", 1)[0]
         for pair in ("push:refs/heads/verify/desktop-github-workflow-apply-native)",
                      "workflow_dispatch:refs/heads/verify/desktop-github-workflow-apply-native)",
-                     "push:refs/heads/verify/desktop-metadata-text-apply-native)"):
+                     "push:refs/heads/verify/desktop-metadata-text-apply-native)",
+                     "push:refs/heads/verify/desktop-release-version-apply-native)"):
             self.assertIn(pair, guard)
-        self.assertEqual(guard.count("scope="), 4)  # Three assignments plus one fixed output line.
+        self.assertEqual(guard.count("scope="), 5)  # Four assignments plus one fixed output line.
         for exact in ('[[ "$GITHUB_RUN_ATTEMPT" == 1 && "$MRK_PUSH_EVENT_AFTER" == "$GITHUB_SHA" ]]',
                       '[[ "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" ]]', '*) exit 1 ;;',
                       '[[ "$GITHUB_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]',
@@ -2053,7 +2069,8 @@ class MetadataNativeHelperTests(unittest.TestCase):
             self.assertEqual(workflow.count(f"ci_foundation.py {phase}'"), 1)
         steps = workflow.split("      - name: ")
         for scope, phases in (("github-workflow-apply-native-v1", ("workflow-owner", "workflow-transaction-eof", "workflow-core")),
-                              ("metadata-text-apply-native-v1", ("metadata-owner", "metadata-transaction-eof", "metadata-core"))):
+                              ("metadata-text-apply-native-v1", ("metadata-owner", "metadata-transaction-eof", "metadata-core")),
+                              ("release-version-apply-native-v1", ("version-owner", "version-transaction-eof", "version-core"))):
             for phase in phases:
                 matching = [step for step in steps if f"ci_foundation.py {phase}'" in step]
                 self.assertEqual(len(matching), 1)
@@ -2061,7 +2078,7 @@ class MetadataNativeHelperTests(unittest.TestCase):
         self.assertEqual(workflow.count("runs-on:"), 1)
         for forbidden in ("strategy:", "matrix:", "continue-on-error", "secrets.", "workflow_dispatch:refs/heads/verify/desktop-metadata"):
             self.assertNotIn(forbidden, workflow)
-        upload = workflow.split("      - name: Retain only allowlisted synthetic metadata receipts\n", 1)[1]
+        upload = workflow.split("      - name: Retain only allowlisted synthetic metadata receipts\n", 1)[1].split("      - name: ", 1)[0]
         self.assertIn("if: always() && steps.prepare.outcome == 'success' && steps.lane.outputs.scope == 'metadata-text-apply-native-v1'", upload)
         files = [line.strip().split("${{ steps.prepare.outputs.root }}/", 1)[1]
                  for line in upload.splitlines() if line.strip().startswith("${{ steps.prepare.outputs.root }}/")]
@@ -2069,6 +2086,614 @@ class MetadataNativeHelperTests(unittest.TestCase):
             "metadata-owner-source/receipt.json", "metadata-owner-zip/receipt.json", "metadata-transaction-eof-checks.json",
             "metadata-transaction-eof/receipt.json", "metadata-core-checks.json", "metadata-ordinary.json",
             "metadata-committed-fsync.json", "metadata-committed-close.json", "retention-checks.json"])
+
+
+def version_environment() -> dict[str, str]:
+    """Inert route data, not GitHub admission or an executed job."""
+    return {"GITHUB_SHA": "1" * 40, "GITHUB_REPOSITORY": "Example/project", "GITHUB_RUN_ID": "123",
+            "GITHUB_RUN_ATTEMPT": "1", "GITHUB_EVENT_NAME": "push", "MRK_PUSH_EVENT_AFTER": "1" * 40,
+            "MRK_DESKTOP_HOSTED_CHECKS": "release-version-apply-native-v1",
+            "GITHUB_REF": "refs/heads/verify/desktop-release-version-apply-native", "GITHUB_WORKFLOW_SHA": "1" * 40,
+            "GITHUB_WORKFLOW_REF": "Example/project/.github/workflows/desktop-github-workflow-apply-native.yml@refs/heads/verify/desktop-release-version-apply-native"}
+
+
+def version_context() -> dict:
+    return {"root": "/never-opened/task", "source": "/never-opened/source", "sourceSha": "1" * 40, "sourceTree": "3" * 40,
+            "platform": "linux", "executionScope": "release-version-apply-native-v1", "workflowSha": "1" * 40,
+            "workflowPath": ".github/workflows/desktop-github-workflow-apply-native.yml", "workflowSha256": "4" * 64,
+            "workflowRef": version_environment()["GITHUB_WORKFLOW_REF"], "repository": "Example/project",
+            "runId": "123", "attempt": "1", "event": "push", "ref": "refs/heads/verify/desktop-release-version-apply-native",
+            "pushEventAfter": "1" * 40, "observedHost": workflow_host_report(),
+            "versionInputs": {"sourceFiles": [{"path": path, "size": 123, "sha256": "3" * 64} for path in helper.VERSION_NATIVE_SOURCES],
+                               "coreFiles": [{"path": "mobile_release/release_version_edit.py", "size": 10, "sha256": "6" * 64}],
+                               "coreZipSha256": "7" * 64, "pythonSha256": "2" * 64}}
+
+
+def version_core_report(partition: str) -> dict:
+    """Consumer test data only. The separately fixed oracle hash is checked below."""
+    rows = helper.VERSION_CORE_ROWS[partition]
+    return {"schemaVersion": 1, "suite": "desktop-release-version-native", "domain": "release_version",
+            "partition": partition, "status": "passed", "reason": "none", "failedAt": None,
+            "retained": True, "uncertaintyLatched": partition != "committed-fsync",
+            "injection": helper.VERSION_CORE_INJECTIONS[partition], "host": workflow_host_report(),
+            "bindings": {"sourceSha": "1" * 40, "sourceKind": "source", "sourceHashes": dict.fromkeys(helper.VERSION_CORE_SOURCES, "3" * 64),
+                         "pythonSha256": "2" * 64, **deepcopy(helper.VERSION_PAYLOAD_BINDINGS)},
+            "completed": [row[0] for row in rows],
+            "cases": [{"case": name, "outcome": {"effect": effect, "journal": journal, "resources": resources, "reason": reason},
+                       "owner": {"closed": True, "handlerRestored": True, "fatal": fatal}, "observed": deepcopy(observed)}
+                      for name, effect, journal, resources, reason, fatal, observed in rows]}
+
+
+def validate_version_core(report: object, partition: str) -> dict:
+    return helper.validate_version_core_receipt(report, partition, source_sha="1" * 40,
+        source_hashes=dict.fromkeys(helper.VERSION_CORE_SOURCES, "3" * 64), python_hash="2" * 64, host=workflow_host_report())
+
+
+def version_phase_report(name: str) -> dict:
+    context = version_context()
+    return {"schemaVersion": 1, "scope": "desktop-release-version-apply-native-only-v1", "phase": name, "status": "passed",
+            **{key: context[key] for key in ("sourceSha", "sourceTree", "platform", "workflowPath", "workflowSha", "workflowRef",
+                "workflowSha256", "repository", "runId", "attempt", "event", "ref", "pushEventAfter", "versionInputs")},
+            "rust": {"release": helper.RUST, "target": "x86_64-unknown-linux-gnu"}, "python": helper.PYTHON,
+            "features": ["development-runtime"], "testTarget": "lib",
+            "checks": [{"check": key, "exitCode": 0} for key in helper.VERSION_NATIVE_CHECKS[name]],
+            "notVerified": list(helper.VERSION_NOT_VERIFIED)}
+
+
+def version_native_facts(*, domain="release_version", effect="committed", journal="clean", reason="none", native_reason="none",
+                          applied=True, requests=3, responses=3, sequence=2, checkout=True, prepared=True, unknown=False, stderr=0):
+    """Independent inert wire DATA; never an original resource/native receipt."""
+    facts = {"originalWait": True, "stdoutEof": True, "stderrEof": True, "stdinClosed": True, "stdoutClosed": True,
+             "stderrClosed": True, "startupJoined": True, "ioJoined": True, "driverJoined": True, "watchdogJoined": True,
+             "managerJoined": True, "requestFrames": requests, "responseFrames": responses, "stdoutBytes": 100,
+             "stderrBytes": stderr, "forceAttempted": False, "domain": domain, "nativePhase": "unknown" if unknown else "final",
+             "nativeFinality": "unknown" if unknown else "settled", "nativeReason": native_reason, "applySubmitted": applied,
+             "lateSettled": unknown, "outcome": {"effect": effect, "journal": journal, "resources": "settled", "reason": reason},
+             "terminalSeq": sequence}
+    if domain == "release_version":
+        facts.update(checkoutRetained=checkout, preparedRetained=prepared)
+    return facts
+
+
+def version_owner_report(mode="source", *, eof=False):
+    """Handwritten consumer examples following the independently fixed Rust wire contract."""
+    context = version_context()
+    inputs = context["versionInputs"]
+    source_hashes = dict.fromkeys(helper.VERSION_TRANSACTION_EOF_SOURCES if eof else helper.VERSION_OWNER_SOURCES, "3" * 64)
+    bindings = {"sourceSha": "1" * 40, "sourceTree": "3" * 40, "workflowSha256": "4" * 64, "runId": "123", "attempt": "1",
+        "ref": "refs/heads/verify/desktop-release-version-apply-native", "coreZipSha256": "7" * 64,
+        "coreInventorySha256": hashlib.sha256(json.dumps(inputs["coreFiles"], sort_keys=True, separators=(",", ":")).encode("ascii")).hexdigest(),
+        "domain": "release_version", "host": "linux", "target": "x86_64-unknown-linux-gnu", "runtimeMode": "trusted-development-only",
+        "runtimeInput": mode, "pythonSha256": "2" * 64, "sourceHashes": source_hashes, "payloadHashes": deepcopy(helper.VERSION_OWNER_PAYLOAD_HASHES),
+        "versionResourceSha256": "3" * 64, "schemaResourceSha256": "3" * 64, "inheritedFileMaskObserved": True,
+        "requestedCreateMode": 420, "observedCreateMode": 384, "newDirectoryMode": 493,
+        "documentEvidence": "controlled-original-lifetime-not-gui-callbacks"}
+    report = {"schemaVersion": 1, "scope": "release-version-transaction-eof-hosted-v1" if eof else "release-version-owner-hosted-v1",
+        "domain": "release_version", "status": "passed", "allOwnersSettled": not eof, "originalResourcesSettled": True,
+        "ownerDisabled": eof, "retainedEffectUnknown": eof, "failureCode": None, "bindings": bindings, "cases": [],
+        "notVerified": ["production-runtime-custody", "production-version-save-enablement", "native-gui", "webview-callbacks-or-crash-hook",
+            "parent-death", "native-stuck-wait-close", "persisted-recovery", "macos-windows-version-writes", "credentials", "remote-github",
+            "stores", "mobile-builds", "installers"]}
+
+    names = ("explicit-absent-create", "observe-edit-two-spans-preserve", "observe-noop-original-leaf",
+             "stale-passive-baseline-refused", "four-domain-owner-and-token-isolation", "registration-changed-before-apply",
+             "version-terminal-held-after-stop", "version-document-loss-before-apply")
+    if eof:
+        names = ("precommit-eof", "postcommit-eof", "precommit-conflict-eof")
+    start = 1
+    for index, name in enumerate(names):
+        if mode == "zip" and index != 1:
+            continue
+        source = ("release/version.properties" if index == 1 else "public/version.properties") if eof else (
+            "public/version-tree/version.properties" if index == 0 else "public/version.properties")
+        count = (0 if index == 2 else 1) if eof else (1 if index in (0, 3, 5, 7) else 2)
+        passive = metadata_passive_facts(["release-version-observe"] * count, start)
+        start += count
+        common = {"sourceProbesSettled": True, "passiveOriginalsSettled": True}
+        if eof:
+            committed, unknown = index == 1, index == 2
+            boundary, checkpoint = ("after-durable-COMMITTED", "descriptor-close") if committed else ("before-COMMITTED", "publisher-entry")
+            # Inert exact two-record wire data; no child/process execution here.
+            records = [f"MRK_RELEASE_VERSION_EOF_V1 {name} boundary={boundary}\n",
+                f"MRK_RELEASE_VERSION_EOF_V1 {name} eof=1 nonempty=0 readErrors=0 checkpoint={checkpoint} applied=1 "
+                + ("committed=0 rolledBack=1 terminal=ROLLED_BACK durable=1 recovery=1 clean=1 settled=1 cancelled=1\n",
+                   "committed=1 rolledBack=0 terminal=COMMITTED durable=1 recovery=1 clean=1 settled=1 cancelled=1\n",
+                   "committed=0 rolledBack=0 terminal=UNKNOWN durable=0 recovery=1 clean=0 settled=1 cancelled=1\n")[index]]
+            native = version_native_facts(effect=("rolled_back", "committed", "unknown")[index],
+                journal="recovery_required" if unknown else "clean", reason="cancelled", native_reason="cancelled",
+                unknown=unknown, stderr=len("".join(records).encode("ascii")))
+            observed = {"evidenceKind": "real-stdin-eof-at-controlled-transaction-boundary", "bootstrapMode": "instrumented-genuine-engine",
+                "boundary": boundary, "originalCheckpoint": checkpoint, "closeBeforeActiveDeadline": True, "controlRecords": 2,
+                "actualStdinEof": True, "eofReadCount": 1, "nonemptyReadCount": 0, "readErrorCount": 0, "preparedCorrelationRetained": True,
+                "versionProfileAndControlProof": True, "committedPublication": committed, "rolledBackPublication": index == 0,
+                "terminalDurable": not unknown, "fixedRecovery": True, "journalClean": not unknown, "journalAbsent": not unknown,
+                "originalTreeRestored": index == 0, "selectedPayloadsRemain": index != 0, "unselectedAndDependenciesPreserved": True,
+                "unrelatedIntroducedBeforeEof": unknown, "introducedOriginalPreserved": unknown, "recoveryEvidenceRetained": unknown,
+                "sharedBlockedProject": unknown, "allFourDomainsDisabled": unknown, "noFurtherAdmission": unknown,
+                "fixtureFilesSettled": True, **common}
+        elif index == 3:
+            native = version_native_facts(effect="not_started", journal="not_created", reason="stale_revision", applied=False,
+                requests=2, responses=2, sequence=1, prepared=False)
+            observed = {"olderPassiveBaselineRejected": True, "newerNativeCheckoutRetained": True, "noPlanOrRebase": True,
+                        "externalChangeRetained": True, "treeUnchanged": True, **common}
+        elif index in (5, 7):
+            native = version_native_facts(effect="not_started", journal="not_created", reason="cancelled", applied=False,
+                native_reason="caller_lost" if index == 5 else "window_lost", requests=2, responses=3, sequence=1)
+            observed = {"preparedCorrelationRetained": True, "treeUnchanged": True, "staleCommandNotSent": True,
+                "newRegistrationPublishedUnderDocumentLock": index == 5, "controlledOriginalDocumentLoss": index == 7,
+                "replacementDocumentRefused": index == 7, "guiCallbacksNotClaimed": True, **common}
+        else:
+            noop = index == 2
+            native = version_native_facts(effect="unchanged" if noop else "committed", journal="not_created" if noop else "clean",
+                                          native_reason="cancelled" if index == 6 else "none")
+            domains = [version_native_facts(domain=domain, effect="not_started", journal="not_created", reason="cancelled",
+                native_reason="discarded", applied=False, requests=1, responses=2, sequence=0)
+                for domain in ("configuration", "github_workflows", "metadata_text")] if index == 4 else []
+            spent_refusal = version_native_facts(effect="not_started", journal="not_created", reason="cancelled",
+                native_reason="caller_lost", applied=False, requests=2, responses=3, sequence=1) if index == 4 else None
+            observed = {"action": "create" if index == 0 else "preserve" if noop else "replace",
+                "directoriesCreated": ["public", "public/version-tree"] if index == 0 else [],
+                "explicitAbsentCreate": index == 0, "completePreparedBytes": True, "passiveBaselineMatchedCheckout": index != 0,
+                "preparedCorrelationRetained": True, "capturePrepareRawFactsUnchanged": True, "dependenciesAndUnrelatedPreserved": True,
+                "existingModePreserved": True, "createModeMasked": True, "directoryModesExact": True,
+                "unicodeCommentsAndOnlyTwoSpansPreserved": index != 0, "rawNoopUnchanged": noop,
+                "duplicateApplyObservation": index == 0, "savedPairReadback": True, "sharedStatusRevision": True,
+                "sharedLastTerminalDomainCorrect": True, "fourDomainIsolation": index == 4, "foreignOriginalTicketsRefused": index == 4,
+                "consumedPlanRefused": index == 4, "consumedPlanRefusal": spent_refusal, "domains": domains, "heldBeforeAcceptance": index == 6,
+                "realStopBeforeRelease": index == 6, "cancelledNotSaved": index == 6, **common}
+        report["cases"].append({"name": name, "domain": "release_version", "source": source,
+                                "native": native, "passive": passive, "observations": observed})
+    return report
+
+
+def validate_version_owner(report, mode="source", *, eof=False):
+    sources = dict.fromkeys(helper.VERSION_TRANSACTION_EOF_SOURCES if eof else helper.VERSION_OWNER_SOURCES, "3" * 64)
+    if eof:
+        return helper.validate_version_transaction_eof_receipt(report, context=version_context(), source_hashes=sources)
+    return helper.validate_version_owner_receipt(report, mode, context=version_context(), source_hashes=sources)
+
+
+
+
+
+class VersionNativeHelperTests(unittest.TestCase):
+    """Version lane DATA consumers; these examples grant no execution/native authority."""
+
+    def test_core21_and_owner_source_maps_bind_the_fixed_cross_language_contract(self):
+        canonical = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")).hexdigest()
+        cases = [row for part in ("ordinary", "committed-fsync", "committed-close") for row in version_core_report(part)["cases"]]
+        self.assertEqual(len(cases), 21)
+        # Independent Python-author contract, frozen before these consumer tests.
+        self.assertEqual(canonical(cases), "b61f71e6958be58ea9d5aa2d88182a46c15d76fe281bcf693e5a5d0e2cbc9ef5")
+        self.assertEqual(canonical(helper.VERSION_CORE_SOURCES), "392b28ccf2f320147df73bb533ca2bb4d46da4e3456607fb33146d38434e5cda")
+        self.assertEqual(canonical(helper.VERSION_PAYLOAD_BINDINGS), "84d6b88ae14990611a537111cea2687791f1f92cb4a0b935f5fb3731c5ec65a8")
+        self.assertEqual(canonical(helper.VERSION_OWNER_PAYLOAD_HASHES), "6347bfd1a969f33491f12da2919375d55d2ed97e37dd842496c8bcd01020b9da")
+        self.assertEqual(helper.VERSION_OWNER_SOURCES, {**helper.METADATA_OWNER_SOURCES,
+            "versionObservation": "desktop/src-tauri/src/release_version_protocol.rs",
+            "versionObservationApi": "src/mobile_release/api/_release_version.py"})
+        self.assertEqual((len(helper.VERSION_CORE_SOURCES), len(helper.VERSION_OWNER_SOURCES), len(helper.VERSION_TRANSACTION_EOF_SOURCES)),
+                         (25, 56, 57))
+        self.assertEqual(set(helper.VERSION_PAYLOAD_BINDINGS), {"configHashes", "ignoreSha256", "versionHashes"})
+        self.assertEqual(helper.VERSION_NATIVE_SOURCES, tuple(sorted(set(helper.VERSION_NATIVE_SOURCES))))
+        for path in (*helper.VERSION_CORE_SOURCES.values(), *helper.VERSION_TRANSACTION_EOF_SOURCES.values(),
+                     helper.VERSION_NATIVE_WORKFLOW, "desktop/tools/ci_foundation.py"):
+            self.assertIn(path, helper.VERSION_NATIVE_SOURCES)
+        for path in ("desktop/package-lock.json", "desktop/src-tauri/src/shell.rs", "desktop/src-tauri/tests/session_gtk_qualification.rs"):
+            self.assertNotIn(path, helper.VERSION_NATIVE_SOURCES)
+        original = "# Café\r\n VERSION_NAME = '1.2.3' \nBUILD_NUMBER = \"7\"\r\nOTHER = keep"
+        edited = "# Café\r\n VERSION_NAME = '2.3.4' \nBUILD_NUMBER = \"8\"\r\nOTHER = keep"
+        created = "VERSION_NAME=2.3.4\nBUILD_NUMBER=8\n"
+        for key, text in (("original", original), ("edited", edited), ("created", created)):
+            self.assertEqual(hashlib.sha256(text.encode("utf-8")).hexdigest(), helper.VERSION_PAYLOAD_BINDINGS["versionHashes"][key])
+
+    def test_core_partitions_refuse_changed_native_boundaries_and_unknown_conflation(self):
+        for partition in ("ordinary", "committed-fsync", "committed-close"):
+            report = version_core_report(partition)
+            with patch.object(helper, "run", side_effect=AssertionError("no subprocess")), \
+                    patch.object(helper, "hash_file", side_effect=AssertionError("no subject probe")):
+                self.assertIs(validate_version_core(report, partition), report)
+            for change in ({"schemaVersion": True}, {"suite": "desktop-metadata-text-native"}, {"domain": "metadata_text"},
+                           {"status": "failed"}, {"retained": False}, {"completed": []}, {"cases": []}, {"extra": True}):
+                with self.subTest(partition=partition, change=change), self.assertRaises(helper.CheckFailure):
+                    validate_version_core({**report, **change}, partition)
+            for index, row in enumerate(report["cases"]):
+                changed = deepcopy(report)
+                changed["cases"][index]["owner"]["fatal"] = not row["owner"]["fatal"]
+                with self.subTest(partition=partition, case=index), self.assertRaises(helper.CheckFailure):
+                    validate_version_core(changed, partition)
+            for field in ("sourceSha", "sourceHashes", "pythonSha256", "configHashes", "ignoreSha256", "versionHashes"):
+                changed = deepcopy(report)
+                changed["bindings"][field] = None
+                with self.subTest(partition=partition, binding=field), self.assertRaises(helper.CheckFailure):
+                    validate_version_core(changed, partition)
+        ordinary = version_core_report("ordinary")
+        self.assertEqual(ordinary["completed"][-1], "dependency-drift-after-version-install")
+        self.assertEqual(ordinary["cases"][-1]["outcome"],
+            {"effect": "unknown", "journal": "recovery_required", "resources": "settled", "reason": "stale_revision"})
+        for rows in (ordinary["cases"][:-1], list(reversed(ordinary["cases"])), [*ordinary["cases"], ordinary["cases"][-1]]):
+            with self.assertRaises(helper.CheckFailure):
+                validate_version_core({**ordinary, "cases": rows}, "ordinary")
+        for index, field in ((8, "unchangedMarked"), (11, "rollbackReturned"), (12, "cleanupUnlinks"),
+                             (13, "sameBytesForeignInode"), (14, "typedRefusals"), (18, "afterUnknownProbes"),
+                             (18, "conflictObservedInsideOriginal")):
+            changed = deepcopy(ordinary)
+            changed["cases"][index]["observed"][field] = None
+            with self.subTest(case=index, field=field), self.assertRaises(helper.CheckFailure):
+                validate_version_core(changed, "ordinary")
+        last = version_core_report("committed-close")
+        self.assertEqual(last["cases"][0]["outcome"],
+            {"effect": "committed", "journal": "clean", "resources": "unknown", "reason": "cancelled"})
+        self.assertIs(last["cases"][0]["owner"]["fatal"], True)
+        for report, partition, index, resources in ((ordinary, "ordinary", -1, "unknown"), (last, "committed-close", 0, "settled")):
+            changed = deepcopy(report)
+            changed["cases"][index]["outcome"]["resources"] = resources
+            with self.assertRaises(helper.CheckFailure):
+                validate_version_core(changed, partition)
+
+    def test_source8_zip1_eof3_shapes_do_not_fabricate_an_absent_passive_baseline(self):
+        counts = []
+        for mode, eof, total, passive_count in (("source", False, 8, 12), ("zip", False, 1, 2), ("source", True, 3, 2)):
+            report = version_owner_report(mode, eof=eof)
+            with patch.object(helper, "run", side_effect=AssertionError("no process")), \
+                    patch.object(helper, "hash_file", side_effect=AssertionError("no source/runtime probe")):
+                self.assertIs(validate_version_owner(report, mode, eof=eof), report)
+            self.assertEqual(len(report["cases"]), total)
+            counts.append(total)
+            self.assertEqual(sum(len(row["passive"]) for row in report["cases"]), passive_count)
+            self.assertLess(len(json.dumps(report, separators=(",", ":")).encode("ascii")), 64 * 1024)
+        self.assertEqual(sum(counts) + 21, 33)
+        source = version_owner_report()
+        self.assertEqual(source["cases"][0]["source"], "public/version-tree/version.properties")
+        self.assertTrue(source["cases"][0]["observations"]["explicitAbsentCreate"])
+        self.assertFalse(source["cases"][0]["observations"]["passiveBaselineMatchedCheckout"])
+        self.assertEqual([len(row) for row in source["cases"][4]["observations"]["domains"]], [24, 24, 24])
+        self.assertEqual(version_owner_report("zip")["cases"][0]["name"], "observe-edit-two-spans-preserve")
+        self.assertEqual(source["cases"][2]["native"]["outcome"], {"effect": "unchanged", "journal": "not_created", "resources": "settled", "reason": "none"})
+        self.assertEqual([row["native"]["nativeReason"] for row in (source["cases"][5], source["cases"][7])], ["caller_lost", "window_lost"])
+
+    def test_version_receipts_cannot_borrow_metadata_authority_source_or_production_claims(self):
+        report = version_owner_report()
+        for key, value in (("schemaVersion", True), ("scope", "metadata-text-owner-hosted-v1"), ("domain", "metadata_text"),
+                           ("originalResourcesSettled", False), ("allOwnersSettled", False), ("ownerDisabled", True),
+                           ("retainedEffectUnknown", True), ("notVerified", [])):
+            with self.subTest(key=key), self.assertRaises(helper.CheckFailure):
+                validate_version_owner({**report, key: value})
+        for key, value in (("ref", helper.METADATA_NATIVE_REF), ("runtimeInput", "zip"), ("runtimeMode", "packaged"),
+                           ("sourceSha", "2" * 40), ("sourceTree", "2" * 40), ("workflowSha256", "0" * 64), ("attempt", "2"),
+                           ("sourceHashes", {}), ("payloadHashes", {}), ("pythonSha256", "0" * 64), ("coreZipSha256", "0" * 64),
+                           ("coreInventorySha256", "0" * 64), ("versionResourceSha256", "0" * 64),
+                           ("requestedCreateMode", 384), ("observedCreateMode", 420), ("newDirectoryMode", 448),
+                           ("inheritedFileMaskObserved", 1), ("documentEvidence", "native-gui")):
+            changed = deepcopy(report)
+            changed["bindings"][key] = value
+            with self.subTest(binding=key), self.assertRaises(helper.CheckFailure):
+                validate_version_owner(changed)
+        for rows in (report["cases"][:-1], list(reversed(report["cases"])), [*report["cases"], report["cases"][-1]]):
+            with self.assertRaises(helper.CheckFailure):
+                validate_version_owner({**report, "cases": rows})
+        with self.assertRaises(helper.CheckFailure):
+            validate_version_owner(metadata_owner_report())
+        with self.assertRaises(helper.CheckFailure):
+            validate_metadata_owner(report)
+        for mode in ("zip", "packaged", "other"):
+            with self.assertRaises(helper.CheckFailure):
+                validate_version_owner(report, mode)
+
+    def test_owner_lifecycle_correlations_and_original_passive_resources_are_required(self):
+        report = version_owner_report()
+        for index, field in ((0, "explicitAbsentCreate"), (0, "duplicateApplyObservation"),
+                             (1, "unicodeCommentsAndOnlyTwoSpansPreserved"), (2, "rawNoopUnchanged"),
+                             (3, "olderPassiveBaselineRejected"), (4, "foreignOriginalTicketsRefused"), (4, "consumedPlanRefused"),
+                             (5, "newRegistrationPublishedUnderDocumentLock"), (6, "heldBeforeAcceptance"),
+                             (6, "realStopBeforeRelease"), (6, "cancelledNotSaved"), (7, "replacementDocumentRefused")):
+            changed = deepcopy(report)
+            changed["cases"][index]["observations"][field] = False
+            with self.subTest(case=index, field=field), self.assertRaises(helper.CheckFailure):
+                validate_version_owner(changed)
+        for key in (*helper.CONFIG_OWNER_FINALITY, "checkoutRetained", "preparedRetained"):
+            changed = deepcopy(report)
+            changed["cases"][1]["native"][key] = False
+            with self.subTest(native_fact=key), self.assertRaises(helper.CheckFailure):
+                validate_version_owner(changed)
+        for key, value in (("nativeReason", "none"), ("applySubmitted", True), ("terminalSeq", 2)):
+            changed = deepcopy(report)
+            changed["cases"][5]["native"][key] = value
+            with self.subTest(loss_field=key), self.assertRaises(helper.CheckFailure):
+                validate_version_owner(changed)
+        changed = deepcopy(report)
+        changed["cases"][4]["observations"]["domains"][2]["domain"] = "release_version"
+        with self.assertRaises(helper.CheckFailure):
+            validate_version_owner(changed)
+        for key, value in (("nativeReason", "none"), ("applySubmitted", True), ("originalWait", False), ("preparedRetained", False)):
+            changed = deepcopy(report)
+            changed["cases"][4]["observations"]["consumedPlanRefusal"][key] = value
+            with self.subTest(consumed_token_fact=key), self.assertRaises(helper.CheckFailure):
+                validate_version_owner(changed)
+        for key, value in (("method", "observe"), ("key", "0"), ("observerJoin", "missing"),
+                           ("permitRetired", False), ("resourceBookRetired", False), ("error", "release_version_source")):
+            changed = deepcopy(report)
+            changed["cases"][0]["passive"][0][key] = value
+            with self.subTest(passive_field=key), self.assertRaises(helper.CheckFailure):
+                validate_version_owner(changed)
+        for key, value in (("stdout_bytes", 2 * 1024 * 1024 + 1), ("waited", False), ("watchdog_joined", False)):
+            changed = deepcopy(report)
+            changed["cases"][0]["passive"][0]["native"][key] = value
+            with self.subTest(passive_native=key), self.assertRaises(helper.CheckFailure):
+                validate_version_owner(changed)
+        changed = deepcopy(report)
+        changed["cases"][1]["passive"][0]["key"] = changed["cases"][0]["passive"][0]["key"]
+        with self.assertRaises(helper.CheckFailure):
+            validate_version_owner(changed)
+
+    def test_eof_effect_unknown_stays_last_disabled_with_separate_original_resource_proof(self):
+        report = version_owner_report(eof=True)
+        for key in ("allOwnersSettled", "originalResourcesSettled", "ownerDisabled", "retainedEffectUnknown"):
+            with self.subTest(key=key), self.assertRaises(helper.CheckFailure):
+                validate_version_owner({**report, key: not report[key]}, eof=True)
+        for index, row in enumerate(report["cases"]):
+            for key, original in row["observations"].items():
+                changed = deepcopy(report)
+                changed["cases"][index]["observations"][key] = int(original) if type(original) is bool else None
+                with self.subTest(case=index, field=key), self.assertRaises(helper.CheckFailure):
+                    validate_version_owner(changed, eof=True)
+            changed = deepcopy(report)
+            changed["cases"][index]["native"]["stderrBytes"] -= 1
+            with self.assertRaises(helper.CheckFailure):
+                validate_version_owner(changed, eof=True)
+        for key, value in (("nativePhase", "final"), ("nativeFinality", "settled"), ("lateSettled", False), ("managerJoined", False)):
+            changed = deepcopy(report)
+            changed["cases"][-1]["native"][key] = value
+            with self.subTest(key=key), self.assertRaises(helper.CheckFailure):
+                validate_version_owner(changed, eof=True)
+        changed = deepcopy(report)
+        changed["cases"][-1]["native"]["outcome"]["resources"] = "unknown"
+        with self.assertRaises(helper.CheckFailure):
+            validate_version_owner(changed, eof=True)
+        for rows in (report["cases"][:-1], list(reversed(report["cases"]))):
+            with self.assertRaises(helper.CheckFailure):
+                validate_version_owner({**report, "cases": rows}, eof=True)
+
+    def test_push_only_binding_rejects_rerun_dispatch_cross_domain_and_source_mismatch(self):
+        environment = version_environment()
+        expected = helper.version_native_binding(environment)
+        self.assertEqual((expected["ref"], expected["event"], expected["attempt"], expected["sourceSha"], expected["pushEventAfter"]),
+                         ("refs/heads/verify/desktop-release-version-apply-native", "push", "1", "1" * 40, "1" * 40))
+        for key, value in (("GITHUB_SHA", "0" * 40), ("GITHUB_SHA", "A" * 40), ("GITHUB_SHA", "1" * 39),
+                           ("GITHUB_WORKFLOW_SHA", "2" * 40), ("GITHUB_REF", helper.WORKFLOW_NATIVE_REF), ("GITHUB_REF", helper.METADATA_NATIVE_REF),
+                           ("MRK_DESKTOP_HOSTED_CHECKS", helper.WORKFLOW_NATIVE_SCOPE), ("MRK_DESKTOP_HOSTED_CHECKS", helper.METADATA_NATIVE_SCOPE), ("GITHUB_REF", "refs/heads/main"),
+                           ("GITHUB_WORKFLOW_REF", "other/workflow"), ("GITHUB_REPOSITORY", "other/project"),
+                           ("GITHUB_REPOSITORY", "invalid"), ("GITHUB_RUN_ID", "0"), ("GITHUB_RUN_ID", "1" * 21),
+                           ("GITHUB_RUN_ATTEMPT", "2"), ("GITHUB_RUN_ATTEMPT", "01"), ("GITHUB_EVENT_NAME", "pull_request"),
+                           ("MRK_PUSH_EVENT_AFTER", "2" * 40), ("MRK_PUSH_EVENT_AFTER", "0" * 40),
+                           ("GITHUB_EVENT_NAME", "workflow_dispatch")):
+            with self.subTest(key=key, value=value), self.assertRaises(helper.CheckFailure):
+                helper.version_native_binding({**environment, key: value, "MRK_EXPECTED_SHA": "1" * 40})
+        for key in environment:
+            for value in (None, True):
+                with self.subTest(key=key, value=value), self.assertRaises(helper.CheckFailure):
+                    helper.version_native_binding({**environment, key: value})
+        with self.assertRaises(helper.CheckFailure):
+            helper.workflow_native_binding(environment)
+        for scope in helper.COMPILE_PROFILES:
+            with self.assertRaises(helper.CheckFailure):
+                helper.compile_workflow_binding(environment, scope)
+
+    def test_version_scope_refuses_foreign_phases_platforms_and_compiler_profiles_before_io(self):
+        self.assertNotIn(helper.VERSION_NATIVE_SCOPE, helper.COMPILE_PROFILES)
+        with patch.object(helper, "load_context", side_effect=AssertionError("no context IO")), \
+                patch.object(helper, "tools", side_effect=AssertionError("no compiler selection")):
+            for name in ("native", "config-owner", "config-core", "workflow-owner", "workflow-transaction-eof", "workflow-core",
+                         "github-owner", "github-tls", "github-tls-deadline", "windows-snapshot", "unknown",
+                         "metadata-owner", "metadata-transaction-eof", "metadata-core"):
+                with self.subTest(phase=name), self.assertRaises(helper.CheckFailure):
+                    helper.phase(name, "linux", helper.VERSION_NATIVE_SCOPE)
+            for scope in (*helper.COMPILE_PROFILES, helper.BOUNDARY_SCOPE, helper.WORKFLOW_NATIVE_SCOPE,
+                          helper.WINDOWS_SNAPSHOT_SCOPE, helper.GITHUB_READONLY_SCOPE, helper.GITHUB_TLS_SCOPE, helper.METADATA_NATIVE_SCOPE):
+                for name in ("version-owner", "version-transaction-eof", "version-core"):
+                    with self.subTest(scope=scope, phase=name), self.assertRaises(helper.CheckFailure):
+                        helper.phase(name, "linux", scope)
+            for platform in ("macos", "windows", "unexpected"):
+                with self.subTest(platform=platform), self.assertRaises(helper.CheckFailure):
+                    helper.prepare(platform, helper.VERSION_NATIVE_SCOPE)
+        for name in ("prepare", "acquire", "compile", "version-owner", "version-transaction-eof", "version-core", "clean"):
+            helper.admit_phase(helper.VERSION_NATIVE_SCOPE, name)
+        with patch.object(helper.Path, "resolve", side_effect=AssertionError("bad route must refuse before IO")), \
+                patch.dict(helper.os.environ, {**version_environment(), "GITHUB_EVENT_NAME": "workflow_dispatch"}, clear=True):
+            with self.assertRaises(helper.CheckFailure):
+                helper.load_context("linux", helper.VERSION_NATIVE_SCOPE)
+
+    def test_phase_and_claim_repeat_original_event_source_and_scope_binding(self):
+        context = version_context()
+        for name in helper.VERSION_NATIVE_CHECKS:
+            report = version_phase_report(name)
+            self.assertIs(helper.validate_version_phase_receipt(report, context, name), report)
+            for key, value in (("scope", helper.WORKFLOW_NATIVE_EVIDENCE_SCOPE), ("schemaVersion", True), ("status", "failed"),
+                               ("sourceTree", "0" * 40), ("attempt", "2"), ("event", "workflow_dispatch"), ("ref", helper.WORKFLOW_NATIVE_REF),
+                               ("pushEventAfter", "2" * 40), ("versionInputs", {}), ("checks", []), ("extra", True)):
+                with self.subTest(phase=name, key=key), self.assertRaises(helper.CheckFailure):
+                    helper.validate_version_phase_receipt({**report, key: value}, context, name)
+            wrong_type = deepcopy(report)
+            wrong_type["checks"][0]["exitCode"] = False
+            with self.assertRaises(helper.CheckFailure):
+                helper.validate_version_phase_receipt(wrong_type, context, name)
+            for key, value in (("executionScope", helper.WORKFLOW_NATIVE_SCOPE), ("ref", helper.WORKFLOW_NATIVE_REF),
+                               ("event", "workflow_dispatch"), ("attempt", "2"), ("pushEventAfter", "2" * 40),
+                               ("workflowPath", helper.COMPILE_WORKFLOW), ("platform", "macos"), ("sourceTree", "0" * 40)):
+                with self.subTest(context_key=key), self.assertRaises(helper.CheckFailure):
+                    helper.validate_version_phase_receipt(report, {**context, key: value}, name)
+        claim = helper.version_phase_claim(context, "version-core")
+        for key in ("event", "ref", "pushEventAfter", "workflowSha256", "sourceTree", "sourceSha", "runId", "attempt"):
+            self.assertEqual(claim[key], context[key])
+        metadata = helper.version_core_metadata(context)
+        self.assertEqual(set(metadata), {"sourceSha", "sourceTree", "workflowSha256", "runId", "attempt", "ref", "coreFiles", "coreZipSha256"})
+        self.assertEqual(metadata["ref"], "refs/heads/verify/desktop-release-version-apply-native")
+        self.assertEqual(metadata["coreFiles"], context["versionInputs"]["coreFiles"])
+
+    def test_predecessors_require_original_source_zip_eof_before_core_and_refuse_replay(self):
+        context, observed = version_context(), []
+        def data(path, _limit):
+            if path.name.endswith("-started.json"):
+                return helper.version_phase_claim(context, path.name.removesuffix("-started.json"))
+            return version_phase_report(path.name.removesuffix("-checks.json"))
+        with patch.object(helper, "read_bounded_json", side_effect=data), patch.object(helper.os.path, "lexists", return_value=False), \
+                patch.object(helper, "version_owner_receipt", side_effect=lambda _, mode: observed.append(mode)), \
+                patch.object(helper, "version_transaction_eof_receipt", side_effect=lambda _: observed.append("eof")), \
+                patch.object(helper, "version_core_receipt", side_effect=AssertionError("core has not run")), \
+                patch.object(helper, "run", side_effect=AssertionError("no subprocess")):
+            helper.version_predecessors(context, "version-core")
+        self.assertEqual(observed, ["source", "zip", "eof"])
+        def wrong_claim(path, limit):
+            value = data(path, limit)
+            if path.name == "compile-started.json":
+                value["scope"] = helper.WORKFLOW_NATIVE_SCOPE
+            return value
+        with patch.object(helper, "read_bounded_json", side_effect=wrong_claim), \
+                patch.object(helper, "version_owner_receipt", side_effect=AssertionError("no owner after foreign claim")):
+            with self.assertRaises(helper.CheckFailure):
+                helper.version_predecessors(context, "version-core")
+        with patch.object(helper, "read_bounded_json", side_effect=data), \
+                patch.object(helper, "version_owner_receipt", side_effect=helper.CheckFailure("unsettled original")), \
+                patch.object(helper, "version_transaction_eof_receipt", side_effect=AssertionError("no EOF after unsettled owner")):
+            with self.assertRaises(helper.CheckFailure):
+                helper.version_predecessors(context, "version-core")
+        with patch.object(helper.os.path, "lexists", return_value=True), patch.object(helper, "write_json") as emit:
+            with self.assertRaises(helper.CheckFailure):
+                helper.version_phase_start(context, "acquire")
+        emit.assert_not_called()
+
+    def test_fixed_version_sequence_has_no_unrelated_native_invocation_or_new_clock(self):
+        source = HELPER.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        phase = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "phase_version_native")
+        calls = [node for node in ast.walk(phase) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "run"]
+        by_label = {next(keyword.value.value for keyword in call.keywords if keyword.arg == "check"): call for call in calls}
+        bounds = {"rust-toolchain-install": 600, "version-locked-headless-metadata": 600, "headless-test-compile-only": 600,
+                  "version-owner-source-native-contract": 180, "version-owner-zip-native-contract": 60,
+                  "version-transaction-eof-native-contract": 90, "version-core-ordinary": 90,
+                  "version-core-committed-fsync": 45, "version-core-committed-close": 45}
+        self.assertEqual(set(by_label), set(bounds))
+        self.assertEqual(len(calls), len(bounds))
+        for label, timeout in bounds.items():
+            self.assertEqual(next(keyword.value.value for keyword in by_label[label].keywords if keyword.arg == "timeout"), timeout)
+        text = ast.get_source_segment(source, phase)
+        for forbidden in ("npm", "vite", "desktop-shell", "WORKFLOW_OWNER_TEST", "CONFIG_OWNER_TEST", "GITHUB_TLS_TEST", "NATIVE_TEST",
+                          "MRK_DESKTOP_WORKFLOW_NATIVE", "MRK_DESKTOP_CONFIG_NATIVE", "MRK_DESKTOP_EDIT_HOSTED_CHECKS",
+                          "METADATA_OWNER_TEST", "MRK_DESKTOP_METADATA_TEXT_NATIVE", "MRK_DESKTOP_METADATA_TEXT_HOSTED_CHECKS"):
+            self.assertNotIn(forbidden, text)
+        self.assertIn('"--domain", "release_version", "--case"', text)
+        self.assertIn('"--locked", "--offline", "--jobs", "1", "--no-default-features"', text)
+        for label in ("version-owner-source-native-contract", "version-owner-zip-native-contract", "version-transaction-eof-native-contract"):
+            constants = [node.value for node in by_label[label].args[0].elts if isinstance(node, ast.Constant)]
+            self.assertEqual(constants, ["test", "--lib", "--features", "development-runtime", "--", "--exact", "--ignored", "--test-threads=1"])
+        core = text.split('elif name == "version-core":', 1)[1].split('    else:', 1)[0]
+        self.assertLess(core.index('check="version-core-ordinary"'), core.index('check="version-core-committed-fsync"'))
+        self.assertLess(core.index('check="version-core-committed-fsync"'), core.index('check="version-core-committed-close"'))
+        tail = core.split('check="version-core-committed-close"', 1)[1]
+        for forbidden in ("run(", "source_unchanged(", "version_inputs_unchanged(", "hash_file(", "tools(", "rmtree", "unlink"):
+            self.assertNotIn(forbidden, tail)
+        self.assertIn('version_core_receipt(context, "committed-close")', tail)
+
+    def test_retention_only_finish_never_probes_project_deletes_or_selects_tools(self):
+        context = version_context()
+        with patch.object(helper, "version_phase_start") as start, \
+                patch.object(helper, "version_inputs_unchanged", side_effect=AssertionError("no source/runtime probes")), \
+                patch.object(helper, "write_json") as emit, patch.object(helper, "run", side_effect=AssertionError("no subprocess")), \
+                patch.object(helper, "tools", side_effect=AssertionError("no tools")), \
+                patch.object(helper.shutil, "rmtree", side_effect=AssertionError("no deletion")), redirect_stdout(io.StringIO()):
+            helper.clean_version_native(context)
+        start.assert_called_once_with(context, "clean")
+        receipt = emit.call_args.args[1]
+        self.assertEqual(receipt["status"], "retained")
+        self.assertEqual(receipt["reason"], "lane-last-committed-close-resources-unknown")
+        for key in ("deleted", "laterNativeWork", "projectProbes"):
+            self.assertIs(receipt[key], False)
+        self.assertIs(receipt["vmDisposalRequired"], True)
+
+    def test_receipt_wrappers_use_previously_bound_data_without_rehashing_subjects(self):
+        context, reads = version_context(), []
+        reports = {"version-owner-source/receipt.json": version_owner_report(),
+                   "version-owner-zip/receipt.json": version_owner_report("zip"),
+                   "version-transaction-eof/receipt.json": version_owner_report(eof=True),
+                   **{f"version-{part}.json": version_core_report(part) for part in ("ordinary", "committed-fsync", "committed-close")}}
+        def read(path, maximum):
+            relative = path.relative_to(Path(context["root"])).as_posix()
+            self.assertEqual(maximum, 64 * 1024 if relative.endswith("/receipt.json") else 32 * 1024)
+            reads.append(relative)
+            return reports[relative]
+        with patch.object(helper, "read_bounded_json", side_effect=read), \
+                patch.object(helper, "hash_file", side_effect=AssertionError("no source/runtime rehash")), \
+                patch.object(helper, "version_inputs_unchanged", side_effect=AssertionError("no original input re-probe")), \
+                patch.object(helper, "run", side_effect=AssertionError("no process")):
+            helper.version_owner_receipt(context, "source")
+            helper.version_owner_receipt(context, "zip")
+            helper.version_transaction_eof_receipt(context)
+            for partition in ("ordinary", "committed-fsync", "committed-close"):
+                helper.version_core_receipt(context, partition)
+        self.assertEqual(set(reads), set(reports))
+        for rows in ([], context["versionInputs"]["sourceFiles"][:-1], list(reversed(context["versionInputs"]["sourceFiles"]))):
+            changed = deepcopy(context)
+            changed["versionInputs"]["sourceFiles"] = rows
+            with self.assertRaises(helper.CheckFailure):
+                helper.version_bound_source_hashes(changed, helper.VERSION_CORE_SOURCES)
+
+    def test_retention_entry_uses_original_invocation_and_receipt_data_not_source_or_tool_probes(self):
+        context = version_context()
+        context["root"] = "/never-opened/runner-temp/mrk-desktop-foundation-version-123-1"
+        environment = {**version_environment(), "GITHUB_WORKSPACE": "/never-opened/source", "MRK_PYTHON": "/never-opened/setup-python",
+            "RUNNER_TEMP": "/never-opened/runner-temp", "MRK_DESKTOP_CI_ROOT": context["root"], "GITHUB_ACTIONS": "true",
+            "RUNNER_ENVIRONMENT": "github-hosted", "MRK_DESKTOP_PLATFORM": "linux", "RUNNER_OS": "Linux", "RUNNER_ARCH": "X64", "ImageOS": "ubuntu24"}
+        context["versionInvocation"] = {key: environment[key] for key in ("GITHUB_WORKSPACE", "MRK_PYTHON", "RUNNER_TEMP")}
+        context["versionInvocation"]["executable"] = "/never-opened/python-executable"
+        public = helper.version_public_bindings(context)
+        reads = []
+        def read(path, maximum):
+            self.assertEqual(path.parent, Path(context["root"]))
+            self.assertEqual(maximum, 256 * 1024)
+            reads.append(path.name)
+            return context if path.name == "context.json" else public if path.name == "public-bindings.json" else self.fail("unexpected receipt")
+        with patch.dict(helper.os.environ, environment, clear=True), patch.object(helper.sys, "executable", "/never-opened/python-executable"), \
+                patch.object(helper.sys, "version", helper.PYTHON + " inert"), patch.object(helper.sys, "platform", "linux"), \
+                patch.object(helper.os, "geteuid", return_value=1000), patch.object(helper.os, "uname", side_effect=AssertionError("no new host probe")), \
+                patch.object(Path, "resolve", side_effect=AssertionError("no source/runtime resolution")), patch.object(Path, "is_symlink", return_value=False), \
+                patch.object(helper, "ordinary"), patch.object(helper, "read_bounded_json", side_effect=read), \
+                patch.object(helper, "version_inputs_unchanged", side_effect=AssertionError("no inputs re-probe")), \
+                patch.object(helper, "hash_file", side_effect=AssertionError("no rehash")), patch.object(helper, "run", side_effect=AssertionError("no tool")):
+            self.assertEqual(helper.admitted_host(retention_only=True), "linux")
+            self.assertIs(helper.load_context("linux", helper.VERSION_NATIVE_SCOPE, retention_only=True), context)
+            with patch.object(helper, "phase_version_native") as execute:
+                helper.phase("clean", "linux", helper.VERSION_NATIVE_SCOPE)
+                execute.assert_called_once_with("clean", context)
+            for key in ("GITHUB_WORKSPACE", "MRK_PYTHON", "RUNNER_TEMP"):
+                with patch.dict(helper.os.environ, {key: "/never-opened/changed"}), self.assertRaises(helper.CheckFailure):
+                    helper.load_context("linux", helper.VERSION_NATIVE_SCOPE, retention_only=True)
+            with self.assertRaises(helper.CheckFailure):
+                helper.load_context("linux", helper.WORKFLOW_NATIVE_SCOPE, retention_only=True)
+        self.assertEqual(reads[:4], ["context.json", "public-bindings.json", "context.json", "public-bindings.json"])
+
+
+    def test_version_workflow_has_one_push_only_route_and_an_exact_receipt_allowlist(self):
+        workflow = (SOURCE / helper.VERSION_NATIVE_WORKFLOW).read_text(encoding="utf-8")
+        guard = workflow.split("        run: |\n", 1)[1].split("      - name:", 1)[0]
+        route = guard.split("push:refs/heads/verify/desktop-release-version-apply-native)", 1)[1].split(";;", 1)[0]
+        self.assertIn('[[ "$GITHUB_RUN_ATTEMPT" == 1 && "$MRK_PUSH_EVENT_AFTER" == "$GITHUB_SHA" ]]', route)
+        self.assertIn("scope=release-version-apply-native-v1", route)
+        self.assertNotIn("workflow_dispatch:refs/heads/verify/desktop-release-version-apply-native", workflow)
+        positions = [workflow.index(f"ci_foundation.py {phase}'") for phase in helper.VERSION_NATIVE_PHASES]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(workflow.count("ci_foundation.py compile'"), 1)
+        self.assertEqual(workflow.count("runs-on:"), 1)
+        upload = workflow.split("      - name: Retain only allowlisted synthetic release-version receipts\n", 1)[1].split("      - name: ", 1)[0]
+        self.assertIn("if: always() && steps.prepare.outcome == 'success' && steps.lane.outputs.scope == 'release-version-apply-native-v1'", upload)
+        files = [line.strip().split("${{ steps.prepare.outputs.root }}/", 1)[1]
+                 for line in upload.splitlines() if line.strip().startswith("${{ steps.prepare.outputs.root }}/")]
+        self.assertEqual(files, ["public-bindings.json", "acquire-checks.json", "compile-checks.json", "version-owner-checks.json",
+            "version-owner-source/receipt.json", "version-owner-zip/receipt.json", "version-transaction-eof-checks.json",
+            "version-transaction-eof/receipt.json", "version-core-checks.json", "version-ordinary.json",
+            "version-committed-fsync.json", "version-committed-close.json", "retention-checks.json"])
+        for forbidden in ("matrix:", "continue-on-error", "secrets.", "*.json", "context.json", "core.zip"):
+            self.assertNotIn(forbidden, workflow)
+
+
 
 
 def windows_test_checks(name: str) -> dict:
@@ -5253,14 +5878,16 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                     "mobile_release/api/_environment.py", "mobile_release/toolchain_policy.py",
                     "mobile_release/_desktop_environment_protocol.py", "mobile_release/_desktop_environment_control.py",
                     "mobile_release/_desktop_environment_engine.py", "mobile_release/environment_diagnostics.py",
-                    "mobile_release/environment_diagnostics_tools.py"}
+                    "mobile_release/environment_diagnostics_tools.py",
+                    "mobile_release/release_version_edit.py", "mobile_release/version_text.py",
+                    "mobile_release/api/data/release-version-help-v1.json"}
         context, forbidden = self.context(), self.forbidden
         with patch.multiple(helper, github_tls_runtime=forbidden, github_tls_file=forbidden,
                 read_bounded_json=forbidden, write_json=forbidden, run=forbidden, tools=forbidden), \
                 patch.object(helper.subprocess, "run", side_effect=forbidden), \
                 patch.object(helper.subprocess, "Popen", side_effect=forbidden):
             inventory = helper.workflow_core_inventory(SOURCE)
-            self.assertEqual(len(inventory), 85)
+            self.assertEqual(len(inventory), 106)
             self.assertTrue(metadata <= {row["path"] for row in inventory})
             helper.validate_gtk_core_inventory(inventory)
             with patch.multiple(helper, Path=PurePosixPath, ordinary=forbidden, hash_file=forbidden,
@@ -5292,19 +5919,37 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                         "mobile_release/environment_diagnostics_tools.py"}
         release_version = {"mobile_release/api/_release_version.py"}
         candidate_evidence = {"mobile_release/api/_candidate_evidence.py"}
+        version_edit = {"mobile_release/release_version_edit.py", "mobile_release/version_text.py",
+                        "mobile_release/api/data/release-version-help-v1.json"}
+        saved_commands = {
+            "mobile_release/_command_process.py",
+            "mobile_release/_desktop_android_build_control.py", "mobile_release/_desktop_android_build_engine.py",
+            "mobile_release/_desktop_android_build_files.py", "mobile_release/_desktop_android_build_protocol.py",
+            "mobile_release/_desktop_android_build_selection.py", "mobile_release/_desktop_preflight_budget.py",
+            "mobile_release/_desktop_preflight_control.py", "mobile_release/_desktop_preflight_engine.py",
+            "mobile_release/_desktop_preflight_protocol.py", "mobile_release/_desktop_saved_command_control.py",
+            "mobile_release/_desktop_saved_command_engine.py", "mobile_release/android_build_operation.py",
+            "mobile_release/android_build_tools.py", "mobile_release/android_manifest.py",
+            "mobile_release/android_zip_integrity.py", "mobile_release/desktop_android_build.py",
+            "mobile_release/desktop_preflight.py",
+        }
         inventory = [{"path": name, "size": 1, "sha256": "4" * 64} for name in helper.GTK_CORE_PATHS]
         # Historical snapshots exclude every later addition; do not relabel
-        # their original72/76/78/83-file coverage as a new larger inventory.
-        stale = [row for row in inventory if row["path"] not in metadata | environment | diagnostics | release_version | candidate_evidence]
-        pre_environment = [row for row in inventory if row["path"] not in environment | diagnostics | release_version | candidate_evidence]
-        pre_diagnostics = [row for row in inventory if row["path"] not in diagnostics | release_version | candidate_evidence]
-        pre_version = [row for row in inventory if row["path"] not in release_version | candidate_evidence]
-        pre_candidate = [row for row in inventory if row["path"] not in candidate_evidence]
+        # their original72/76/78/83/84/85/103-file coverage as a new larger inventory.
+        stale = [row for row in inventory if row["path"] not in metadata | environment | diagnostics | release_version | candidate_evidence | version_edit | saved_commands]
+        pre_environment = [row for row in inventory if row["path"] not in environment | diagnostics | release_version | candidate_evidence | version_edit | saved_commands]
+        pre_diagnostics = [row for row in inventory if row["path"] not in diagnostics | release_version | candidate_evidence | version_edit | saved_commands]
+        pre_version = [row for row in inventory if row["path"] not in release_version | candidate_evidence | version_edit | saved_commands]
+        pre_candidate = [row for row in inventory if row["path"] not in candidate_evidence | version_edit | saved_commands]
+        pre_saved_commands = [row for row in inventory if row["path"] not in version_edit | saved_commands]
+        pre_version_edit = [row for row in inventory if row["path"] not in version_edit]
         self.assertEqual(len(stale), 72)
         self.assertEqual(len(pre_environment), 76)
         self.assertEqual(len(pre_diagnostics), 78)
         self.assertEqual(len(pre_version), 83)
         self.assertEqual(len(pre_candidate), 84)
+        self.assertEqual(len(pre_saved_commands), 85)
+        self.assertEqual(len(pre_version_edit), 103)
         extra = [*inventory, {"path": "mobile_release/unreviewed.py", "size": 1, "sha256": "4" * 64}]
         context, forbidden = self.context(), self.forbidden
         before = deepcopy(context)
@@ -5314,11 +5959,11 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                 run=forbidden, tools=forbidden), \
                 patch.object(helper.subprocess, "run", side_effect=forbidden), \
                 patch.object(helper.subprocess, "Popen", side_effect=forbidden):
-            for value, count in ((stale, 72), (pre_environment, 76), (pre_diagnostics, 78), (pre_version, 83), (pre_candidate, 84), (extra, 86)):
+            for value, count in ((stale, 72), (pre_environment, 76), (pre_diagnostics, 78), (pre_version, 83), (pre_candidate, 84), (pre_saved_commands, 85), (pre_version_edit, 103), (extra, 107)):
                 with self.subTest(count=count), self.assertRaises(helper.CheckFailure) as refused:
                     helper.prepare_github_tls_context(context, value)
                 self.assertEqual(str(refused.exception),
-                    f"Reviewed core inventory count differs: expected 85 files, observed {count}")
+                    f"Reviewed core inventory count differs: expected 106 files, observed {count}")
                 self.assertEqual(context, before)
 
     def test_tls_manifest_roles_source_ca_ssl_and_file_bounds_are_closed_data(self):

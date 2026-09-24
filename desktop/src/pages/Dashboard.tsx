@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { getValue, textValue } from '../catalog.ts';
 import { configurationStatus } from '../certainty.ts';
 import { isDirty } from '../drafts.ts';
@@ -46,8 +47,9 @@ function SavedVersionCard({ state, reason, onRead, onHelp }: {
   </section>;
 }
 
-export function Dashboard({ session, info, preview, chooseDisabled, chooseReason, refreshReason, releaseVersionState, releaseVersionReason, onReadVersion, onChoose, onRefresh, onNavigate, onHelp }: {
+export function Dashboard({ session, info, preview, chooseDisabled, chooseReason, refreshReason, releaseVersionState, releaseVersionReason, versionEditor, onReadVersion, onChoose, onRefresh, onNavigate, onHelp }: {
   session: ProjectSession | null; info: AppInfo | null; preview: boolean; chooseDisabled: boolean; chooseReason: string | null; refreshReason: string | null;
+  versionEditor: ReactNode;
   releaseVersionState: ReleaseVersionState; releaseVersionReason: string | null; onReadVersion: () => void;
   onChoose: () => void; onRefresh: () => void; onNavigate: (page: Page) => void; onHelp: (help: HelpContent) => void;
 }) {
@@ -76,6 +78,7 @@ export function Dashboard({ session, info, preview, chooseDisabled, chooseReason
       <div className="card summary-card"><div className="summary-label"><span>Configuration</span><Icon name="settings" size={18} /></div><strong className="summary-value compact-value">{status.label}</strong><p>{preview && session ? 'Inert example · not core validated' : config ? 'Policy and syntax are not release evidence' : 'No configuration facts assumed'}</p><div className="summary-foot"><Icon name="metadata" size={14} /><span>{configName}</span></div></div>
       <div className="card summary-card"><div className="summary-label"><span>Release readiness</span><Icon name="shield" size={18} /></div><strong className="summary-value compact-value">Not assessed</strong><p>Native tools and services not verified</p><div className="summary-foot"><span className="neutral-dot" /><span>No release operations are enabled</span></div></div>
     </div>
+    {versionEditor}
     <div className="dashboard-grid">
       <section className="card preparation-card"><SectionHeading title="Your preparation checklist" description="A clear next step, without pretending the checks are done."><Badge>Static foundation</Badge></SectionHeading>
         <div className="preparation-list">

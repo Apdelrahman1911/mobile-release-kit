@@ -82,9 +82,10 @@ const SOURCE: &[u8] = b"plugins { id(\"com.android.application\") }\nandroid { d
 const KEEP: &[u8] = b"MRK_MACOS_AQUA_KEEP\n";
 const IGNORE_PREFIX: &[u8] = b"# MRK Mac Aqua user ignore\nuser-output/\n";
 const STALE_MARKER: &[u8] = b"# MRK Mac Aqua stale base\n";
-const IGNORE_LINES: [&str; 7] = [".mobile-release/", ".mobile-release-init-prepare/", ".mobile-release-init/",
+const IGNORE_LINES: [&str; 10] = [".mobile-release/", ".mobile-release-init-prepare/", ".mobile-release-init/",
     ".mobile-release-init-cleanup/", ".mobile-release-metadata-text-prepare/", ".mobile-release-metadata-text/",
-    ".mobile-release-metadata-text-cleanup/"];
+    ".mobile-release-metadata-text-cleanup/",
+    ".mobile-release-version-prepare/", ".mobile-release-version/", ".mobile-release-version-cleanup/"];
 // Fixed synthetic DATA shared with staging. This is not a second serializer:
 // every real request/result is compared with these bytes, never manufactured.
 const CONFIG: &[u8] = br#"{

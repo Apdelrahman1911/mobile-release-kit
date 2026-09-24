@@ -396,3 +396,41 @@ test-build authorization after its fixed environment/source/root checks; it
 cannot enable production constructors. Core inert tests, three initial actual-
 owner cases, compilation, or a passing negative fault assertion alone cannot
 qualify saving, native document lifecycle, Windows custody or installed runtimes.
+
+
+## Separate saved-version VALUE profile (closed)
+
+The existing `EditOwner`, native document/root registration, lifecycle and
+installed-runtime slots carry a fourth fixed edit domain, `release_version`.
+Its closed renderer commands are `release_version_edit_open {projectId}`,
+`release_version_edit_prepare {sessionId, revision, expectedBaseline, intent,
+values, draftRevision, baselineGeneration}`, `release_version_edit_apply
+{sessionId, planToken}`, `release_version_edit_close {sessionId}` and
+`release_version_edit_status {}`. The event is `release-version-edit-status`;
+the private child uses `mrk-release-version/1` and the fixed `release_version`
+bootstrap argument. No generic passive API mutation or path/key/policy override
+is added; `release.version.observe` schema 2 is unchanged.
+
+Open captures the saved config-derived source through the original concrete
+lease-bound `VersionTargets`. Only that one source is writable; config and ignore
+are read-only dependencies. Prepare validates the two proposed strings through
+shared core policy and changes only admitted inner value spans. Explicit true
+absence alone permits two-line LF Create. Review contains full original/after
+text and native byte hashes, action/mode/ancestor/separator facts. The original
+lease/revision and one-use Prepare/Apply remain mandatory; no auto-rebase,
+serializer, CLI fallback or second transaction/cancellation engine is introduced.
+
+`NATIVE_RELEASE_VERSION_EDIT_QUALIFIED` is independently **false** and the new
+`ReleaseVersionInstalledProfile::SOURCE_BINDING` is **None**. Both must be
+separately reviewed; neither the old installed A payload, a metadata profile nor
+a configuration/workflow fixture permit can select this writer. A new core ZIP,
+exact source/member inventory and manifest/compiler binding are required before
+authorizing original-owner Linux filesystem/UI/process/finality observations.
+The thin version slots preserve the same ledger and finality rather than
+constructing replacement owners. Uncertain outcomes retain the original evidence
+and block retries, including after late settlement. Windows, macOS writes,
+persisted recovery and shipping remain unqualified.
+
+See the [ordinary UI and byte-preservation contract](../../docs/desktop-release-version-edit.md)
+for synchronous lifecycle retirement, explicit reload/discard, ten-rule version
+prerequisites and the unchanged positive seven-rule metadata proof.

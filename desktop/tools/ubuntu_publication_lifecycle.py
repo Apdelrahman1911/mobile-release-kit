@@ -457,7 +457,8 @@ SHELL_PATH_MOVES = {
 }
 SHELL_PATH_ABSENT = ("path-project/.gitignore", "path-project/release", "path-project/.mobile-release",
     "path-project/.mobile-release-init-prepare", "path-project/.mobile-release-init", "path-project/.mobile-release-init-cleanup",
-    "path-project/.mobile-release-metadata-text-prepare", "path-project/.mobile-release-metadata-text", "path-project/.mobile-release-metadata-text-cleanup")
+    "path-project/.mobile-release-metadata-text-prepare", "path-project/.mobile-release-metadata-text", "path-project/.mobile-release-metadata-text-cleanup",
+    "path-project/.mobile-release-version-prepare", "path-project/.mobile-release-version", "path-project/.mobile-release-version-cleanup")
 
 SHELL_WORKFLOW_MARKER = b"MRK_INSTALLED_SHELL_WORKFLOW_APPLY="
 SHELL_WORKFLOW_RECEIPT = {
@@ -770,7 +771,7 @@ SHELL_WORKFLOW_IGNORE = b"# workflow fixture sentinel; not a configuration save\
 SHELL_WORKFLOW_SIBLING = b"# unrelated caller sentinel; never part of this bundle\n"
 SHELL_WORKFLOW_ABSENT = ("release", ".mobile-release", ".mobile-release-init-prepare", ".mobile-release-init",
     ".mobile-release-init-cleanup", ".mobile-release-metadata-text-prepare", ".mobile-release-metadata-text",
-    ".mobile-release-metadata-text-cleanup")
+    ".mobile-release-metadata-text-cleanup", ".mobile-release-version-prepare", ".mobile-release-version", ".mobile-release-version-cleanup")
 
 SHELL_FEATURES = ["custom-protocol", "desktop-shell"]
 SHELL_PROJECT_SOURCE = (b'plugins { id("com.android.application") }\n'
@@ -819,7 +820,8 @@ SHELL_PROJECT_CONFIG = b'''{
 '''
 SHELL_PROJECT_IGNORE = (b".mobile-release/\n.mobile-release-init-prepare/\n.mobile-release-init/\n"
                         b".mobile-release-init-cleanup/\n.mobile-release-metadata-text-prepare/\n"
-                        b".mobile-release-metadata-text/\n.mobile-release-metadata-text-cleanup/\n")
+                        b".mobile-release-metadata-text/\n.mobile-release-metadata-text-cleanup/\n"
+    b".mobile-release-version-prepare/\n.mobile-release-version/\n.mobile-release-version-cleanup/\n")
 SHELL_METADATA_LOCALE = "release/store/android/en-US"
 # Public fixed DATA, not a serializer or an alternate metadata writer.
 SHELL_METADATA_TITLE = b"Public title"
@@ -829,7 +831,7 @@ SHELL_METADATA_FULL = b"Public description"
 SHELL_METADATA_KEEP = b"untouched\n"
 SHELL_METADATA_ABSENT = (".mobile-release", ".mobile-release-init-prepare", ".mobile-release-init",
     ".mobile-release-init-cleanup", ".mobile-release-metadata-text-prepare", ".mobile-release-metadata-text",
-    ".mobile-release-metadata-text-cleanup")
+    ".mobile-release-metadata-text-cleanup", ".mobile-release-version-prepare", ".mobile-release-version", ".mobile-release-version-cleanup")
 SHELL_PROJECT_MARKER = b"MRK_INSTALLED_SHELL_PROJECT_DRAFT="
 SHELL_PROJECT_RECEIPT = {
     "schemaVersion": 3, "fixture": "android-saved-readonly-v1", "projectGateContract": True,

@@ -434,6 +434,24 @@ impl DesktopBridge {
         document.metadata_text_edit_admit(|bridge| bridge.edits.metadata_text_project(window, session_id), |bridge, registration|
             bridge.edits.apply_metadata_text(window, session_id, plan_token, registration))
     }
+    pub(crate) fn open_release_version_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::release_version_edit_commands::Open) -> Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus, BridgeError> {
+        let ticket = self.edits.release_version_open_ticket(window)?;
+        let selected = args.project_id.clone();
+        document.release_version_edit_admit(|_| Ok(selected), |bridge, registration|
+            bridge.edits.open_release_version(window, args.project_id, registration, ticket))
+    }
+    pub(crate) fn prepare_release_version_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::release_version_edit_protocol::PrepareReleaseVersionEdit) -> Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus, BridgeError> {
+        let session_id = args.session_id.clone();
+        document.release_version_edit_admit(|bridge| bridge.edits.release_version_project(window, &session_id), |bridge, registration|
+            bridge.edits.prepare_release_version(window, args, registration))
+    }
+    pub(crate) fn apply_release_version_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        session_id: &str, plan_token: &str) -> Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus, BridgeError> {
+        document.release_version_edit_admit(|bridge| bridge.edits.release_version_project(window, session_id), |bridge, registration|
+            bridge.edits.apply_release_version(window, session_id, plan_token, registration))
+    }
     /// Only called while the real DocumentBinding admission lock is held. No
     /// project method calls back into that lock. These are private native hints.
     pub(crate) fn native_roster(&self) -> Result<ProjectRoster, crate::asset_commands::AssetError> {

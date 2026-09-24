@@ -6,8 +6,8 @@ There is no subprocess controller, credential input, recovery command or
 alternative transaction engine. Uncertainty ends native admission in this
 interpreter; the workflow disposes the retained synthetic case directory/VM.
 
-The separate github_workflows and metadata_text domains are source-only core
-qualification, not production permits. Their closed argv/env/receipt inventories
+The separate github_workflows, metadata_text and release_version domains are
+source-only core qualification, not production permits. Their closed argv/env/receipt inventories
 never accept a caller path roster, replacement policy or ZIP selector. Rust owns
 the ZIP parity cases and real bridge/owner/EOF fixtures; this file spawns no process.
 """
@@ -130,7 +130,10 @@ _METADATA_SOURCES = {'apiContracts': 'src/mobile_release/api/contracts.py',
  'resource': 'src/mobile_release/api/data/metadata-text-help-v1.json',
  'rootCustody': 'src/mobile_release/init_workspace_custody.py',
  'snapshot': 'src/mobile_release/api/_snapshot.py',
- 'transaction': 'src/mobile_release/init_transaction.py'}
+ 'transaction': 'src/mobile_release/init_transaction.py',
+ 'versionEdit': 'src/mobile_release/release_version_edit.py',
+ 'versionResource': 'src/mobile_release/api/data/release-version-help-v1.json',
+ 'versionText': 'src/mobile_release/version_text.py'}
 
 _METADATA_FILES = {'android': ('title.txt', 'short_description.txt', 'full_description.txt'),
  'ios': ('description.txt', 'keywords.txt', 'privacy_url.txt', 'support_url.txt', 'release_notes.txt')}
@@ -463,6 +466,393 @@ _METADATA_EXPECTED = {'configured-platform-disabled': {'case': 'configured-platf
                                                            'resources': 'unknown'},
                                                'owner': {'closed': True, 'fatal': True, 'handlerRestored': True}}}
 
+# Literal saved-version DATA from the frozen SOURCE coordination contract.
+# Expected rows assert actual observations; they never supply an outcome.
+_VERSION_CASES = {'committed-close': ('version-committed-close-return-injection',),
+ 'committed-fsync': ('version-committed-fsync-injection',),
+ 'ordinary': ('present-malformed-source-refused',
+              'present-nonregular-source-refused',
+              'legacy-seven-ignore-rules-refused',
+              'config-retarget-before-prepare',
+              'ignore-bytes-before-apply',
+              'target-parent-inode-before-prepare',
+              'target-parent-mode-before-apply',
+              'missing-target-parent-appears-before-apply',
+              'noop-leaf-ctime-after-recheck',
+              'noop-target-parent-mode-after-recheck',
+              'unreadable-source-before-prepare',
+              'version-replacement-installed-rollback',
+              'incomplete-version-preparing-retained',
+              'committed-version-backup-replaced-at-cleanup-entry',
+              'foreign-domains-refuse-version-prepare',
+              'foreign-domains-refuse-version-ready',
+              'foreign-domains-refuse-version-cleanup',
+              'version-refuses-foreign-ready',
+              'dependency-drift-after-version-install')}
+
+_VERSION_SOURCES = {'apiContracts': 'src/mobile_release/api/contracts.py',
+ 'buildInputs': 'src/mobile_release/build_inputs.py',
+ 'cancellation': 'src/mobile_release/cancellation.py',
+ 'catalogue': 'src/mobile_release/api/_catalog.py',
+ 'configEdit': 'src/mobile_release/config_edit.py',
+ 'configPayloads': 'src/mobile_release/config_payloads.py',
+ 'configuration': 'src/mobile_release/config.py',
+ 'editControl': 'src/mobile_release/_desktop_edit_control.py',
+ 'editEngine': 'src/mobile_release/_desktop_edit_engine.py',
+ 'editProtocol': 'src/mobile_release/_desktop_edit_protocol.py',
+ 'errors': 'src/mobile_release/errors.py',
+ 'fixture': 'tests/native_desktop_config.py',
+ 'metadataEdit': 'src/mobile_release/metadata_text_edit.py',
+ 'metadataPolicy': 'src/mobile_release/metadata.py',
+ 'metadataText': 'src/mobile_release/metadata_text.py',
+ 'passiveEngine': 'src/mobile_release/_desktop_engine.py',
+ 'resource': 'src/mobile_release/api/data/release-version-help-v1.json',
+ 'rootCustody': 'src/mobile_release/init_workspace_custody.py',
+ 'snapshot': 'src/mobile_release/api/_snapshot.py',
+ 'transaction': 'src/mobile_release/init_transaction.py',
+ 'versionApi': 'src/mobile_release/api/_release_version.py',
+ 'versionEdit': 'src/mobile_release/release_version_edit.py',
+ 'versionText': 'src/mobile_release/version_text.py',
+ 'workflowEdit': 'src/mobile_release/github_workflow_edit.py',
+ 'workflowPayloads': 'src/mobile_release/workflow_payloads.py'}
+
+_VERSION_CONFIG_TEXT = {'nestedVersion': '{"android":{"applicationId":"org.fixture.app","enabled":true,"identityStatus":"unverified"},"ios":{"bundleId":"org.fixture.app","enabled":true,"identityStatus":"unverified"},"metadata":{"androidLocales":["en-US","fr-FR"],"iosLocales":["en-US"],"root":"public/store"},"projectChecks":{"androidArtifact":[],"iosArtifact":[],"preflight":[]},"schemaVersion":1,"services":{"androidFirebase":"disabled","iosFirebase":"disabled"},"source":{"candidateBranch":"main","productionBranch":"production"},"version":{"buildKey":"BUILD_NUMBER","nameKey":"VERSION_NAME","source":"public/version-tree/version.properties"}}\n',
+ 'publicVersion': '{"android":{"applicationId":"org.fixture.app","enabled":true,"identityStatus":"unverified"},"ios":{"bundleId":"org.fixture.app","enabled":true,"identityStatus":"unverified"},"metadata":{"androidLocales":["en-US","fr-FR"],"iosLocales":["en-US"],"root":"public/store"},"projectChecks":{"androidArtifact":[],"iosArtifact":[],"preflight":[]},"schemaVersion":1,"services":{"androidFirebase":"disabled","iosFirebase":"disabled"},"source":{"candidateBranch":"main","productionBranch":"production"},"version":{"buildKey":"BUILD_NUMBER","nameKey":"VERSION_NAME","source":"public/version.properties"}}\n',
+ 'releaseVersion': '{"android":{"applicationId":"org.fixture.app","enabled":true,"identityStatus":"unverified"},"ios":{"bundleId":"org.fixture.app","enabled":true,"identityStatus":"unverified"},"metadata":{"androidLocales":["en-US","fr-FR"],"iosLocales":["en-US"],"root":"public/store"},"projectChecks":{"androidArtifact":[],"iosArtifact":[],"preflight":[]},"schemaVersion":1,"services":{"androidFirebase":"disabled","iosFirebase":"disabled"},"source":{"candidateBranch":"main","productionBranch":"production"},"version":{"buildKey":"BUILD_NUMBER","nameKey":"VERSION_NAME","source":"release/version.properties"}}\n'}
+
+_VERSION_CONFIG_HASHES = {'nestedVersion': '8db69de9d4a3c83d312ee37e8952531f71b633f0f7f36b042b5d143cc2357de9',
+ 'publicVersion': '1dcd101a440da3c950903bca1b54f926aa63ce36ae5ed1eead5fb24f7813dfbd',
+ 'releaseVersion': '1b0b02e48d03cca36aaf36e5d8a8daf15f59924803bd4a5c0ec2e655828d3f94'}
+
+_VERSION_PATHS = {'nestedVersion': 'public/version-tree/version.properties',
+ 'publicVersion': 'public/version.properties',
+ 'releaseVersion': 'release/version.properties'}
+
+_VERSION_IGNORE = (b'.mobile-release/\n.mobile-release-init-prepare/\n.mobile-release-init/\n.mobile-release-init-cleanup/\n.mobi'
+ b'le-release-metadata-text-prepare/\n.mobile-release-metadata-text/\n.mobile-release-metadata-text-cleanup/\n'
+ b'.mobile-release-version-prepare/\n.mobile-release-version/\n.mobile-release-version-cleanup/\n')
+
+_VERSION_IGNORE_SHA256 = 'cdf75f09188ea0e3712fcd26c9dbb42819dd467e9744676c6448b2a29a789c5b'
+
+_VERSION_TEXT = {'created': 'VERSION_NAME=2.3.4\nBUILD_NUMBER=8\n',
+ 'edited': '# Café\r\n VERSION_NAME = \'2.3.4\' \nBUILD_NUMBER = "8"\r\nOTHER = keep',
+ 'original': '# Café\r\n VERSION_NAME = \'1.2.3\' \nBUILD_NUMBER = "7"\r\nOTHER = keep'}
+
+_VERSION_HASHES = {'created': '3b8dbd6b58e9f42a0ed893e73020cf2f8ddde787e2b1a153da49d382b1e7a9d4',
+ 'edited': 'bc7f934bcf5f4fcf0b1b9c814613bd773ec4a9f579376f1dca01929d4e9e3732',
+ 'original': 'd8453785b2637e76d1b7456dd0e5ea0d343cfd5f7d409a06dc38ab791aa6334a'}
+
+_VERSION_VALUES = {'build': '8', 'name': '2.3.4'}
+
+_VERSION_EXPECTED = {'committed-version-backup-replaced-at-cleanup-entry': {'case': 'committed-version-backup-replaced-at-cleanup-entry',
+                                                        'observed': {'cleanupUnlinks': 0,
+                                                                     'committedObserved': True,
+                                                                     'dependenciesPreserved': True,
+                                                                     'durabilityConfirmed': True,
+                                                                     'injections': 1,
+                                                                     'originalBackupRetained': True,
+                                                                     'proofRetained': True,
+                                                                     'sameBytesForeignInode': True,
+                                                                     'scopesClosed': 3,
+                                                                     'selectedPayloadInstalled': True},
+                                                        'outcome': {'effect': 'committed',
+                                                                    'journal': 'recovery_required',
+                                                                    'reason': 'filesystem_error',
+                                                                    'resources': 'settled'},
+                                                        'owner': {'closed': True,
+                                                                  'fatal': False,
+                                                                  'handlerRestored': True}},
+ 'config-retarget-before-prepare': {'case': 'config-retarget-before-prepare',
+                                    'observed': {'authorityRetired': True,
+                                                 'changeObserved': True,
+                                                 'journalAbsent': True,
+                                                 'scopesClosed': 2,
+                                                 'selectionNotRetargeted': True,
+                                                 'snapshotUnchanged': True},
+                                    'outcome': {'effect': 'not_started',
+                                                'journal': 'not_created',
+                                                'reason': 'stale_revision',
+                                                'resources': 'settled'},
+                                    'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'dependency-drift-after-version-install': {'case': 'dependency-drift-after-version-install',
+                                            'observed': {'afterUnknownProbes': 0,
+                                                         'cleanupUnlinks': 0,
+                                                         'conflictObservedInsideOriginal': True,
+                                                         'dependencyChanged': True,
+                                                         'injections': 1,
+                                                         'laterInstallMoves': 0,
+                                                         'originalBackupBound': True,
+                                                         'recoverCalls': 0,
+                                                         'retainedTreeInsideOriginal': True,
+                                                         'scopesClosed': 3,
+                                                         'versionLeafInstalled': True},
+                                            'outcome': {'effect': 'unknown',
+                                                        'journal': 'recovery_required',
+                                                        'reason': 'stale_revision',
+                                                        'resources': 'settled'},
+                                            'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'foreign-domains-refuse-version-cleanup': {'case': 'foreign-domains-refuse-version-cleanup',
+                                            'observed': {'allOwnersSettled': True,
+                                                         'entrypoints': ['legacy',
+                                                                         'configuration',
+                                                                         'github_workflows',
+                                                                         'metadata_text'],
+                                                         'legacyApplyRefused': True,
+                                                         'legacyRecoverRefused': True,
+                                                         'legacyWorkspaceClosed': True,
+                                                         'originalOwners': 4,
+                                                         'scopesClosed': 3,
+                                                         'snapshotUnchanged': True,
+                                                         'stateRetained': True,
+                                                         'targetDescriptorsAbsent': True,
+                                                         'typedRefusals': 3},
+                                            'outcome': {'effect': 'not_started',
+                                                        'journal': 'not_created',
+                                                        'reason': 'pending_state',
+                                                        'resources': 'settled'},
+                                            'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'foreign-domains-refuse-version-prepare': {'case': 'foreign-domains-refuse-version-prepare',
+                                            'observed': {'allOwnersSettled': True,
+                                                         'entrypoints': ['legacy',
+                                                                         'configuration',
+                                                                         'github_workflows',
+                                                                         'metadata_text'],
+                                                         'legacyApplyRefused': True,
+                                                         'legacyRecoverRefused': True,
+                                                         'legacyWorkspaceClosed': True,
+                                                         'originalOwners': 4,
+                                                         'scopesClosed': 3,
+                                                         'snapshotUnchanged': True,
+                                                         'stateRetained': True,
+                                                         'targetDescriptorsAbsent': True,
+                                                         'typedRefusals': 3},
+                                            'outcome': {'effect': 'not_started',
+                                                        'journal': 'not_created',
+                                                        'reason': 'pending_state',
+                                                        'resources': 'settled'},
+                                            'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'foreign-domains-refuse-version-ready': {'case': 'foreign-domains-refuse-version-ready',
+                                          'observed': {'allOwnersSettled': True,
+                                                       'entrypoints': ['legacy',
+                                                                       'configuration',
+                                                                       'github_workflows',
+                                                                       'metadata_text'],
+                                                       'legacyApplyRefused': True,
+                                                       'legacyRecoverRefused': True,
+                                                       'legacyWorkspaceClosed': True,
+                                                       'originalOwners': 4,
+                                                       'scopesClosed': 3,
+                                                       'snapshotUnchanged': True,
+                                                       'stateRetained': True,
+                                                       'targetDescriptorsAbsent': True,
+                                                       'typedRefusals': 3},
+                                          'outcome': {'effect': 'not_started',
+                                                      'journal': 'not_created',
+                                                      'reason': 'pending_state',
+                                                      'resources': 'settled'},
+                                          'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'ignore-bytes-before-apply': {'case': 'ignore-bytes-before-apply',
+                               'observed': {'authorityRetired': True,
+                                            'changeObserved': True,
+                                            'journalAbsent': True,
+                                            'scopesClosed': 3,
+                                            'selectionNotRetargeted': True,
+                                            'snapshotUnchanged': True},
+                               'outcome': {'effect': 'not_started',
+                                           'journal': 'not_created',
+                                           'reason': 'stale_revision',
+                                           'resources': 'settled'},
+                               'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'incomplete-version-preparing-retained': {'case': 'incomplete-version-preparing-retained',
+                                           'observed': {'cleanupUnlinks': 0,
+                                                        'completeProof': False,
+                                                        'dependenciesPreserved': True,
+                                                        'injections': 1,
+                                                        'numberedSlotRetained': True,
+                                                        'preparingRetained': True,
+                                                        'recoverCalls': 0,
+                                                        'scopesClosed': 3,
+                                                        'targetPreserved': True},
+                                           'outcome': {'effect': 'not_started',
+                                                       'journal': 'recovery_required',
+                                                       'reason': 'filesystem_error',
+                                                       'resources': 'settled'},
+                                           'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'legacy-seven-ignore-rules-refused': {'case': 'legacy-seven-ignore-rules-refused',
+                                       'observed': {'journalAbsent': True,
+                                                    'revisionAbsent': True,
+                                                    'scopesClosed': 1,
+                                                    'snapshotUnchanged': True,
+                                                    'targetDescriptorAbsent': True},
+                                       'outcome': {'effect': 'not_started',
+                                                   'journal': 'not_created',
+                                                   'reason': 'ignore_conflict',
+                                                   'resources': 'settled'},
+                                       'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'missing-target-parent-appears-before-apply': {'case': 'missing-target-parent-appears-before-apply',
+                                                'observed': {'authorityRetired': True,
+                                                             'changeObserved': True,
+                                                             'journalAbsent': True,
+                                                             'scopesClosed': 3,
+                                                             'selectionNotRetargeted': True,
+                                                             'snapshotUnchanged': True},
+                                                'outcome': {'effect': 'not_started',
+                                                            'journal': 'not_created',
+                                                            'reason': 'stale_revision',
+                                                            'resources': 'settled'},
+                                                'owner': {'closed': True,
+                                                          'fatal': False,
+                                                          'handlerRestored': True}},
+ 'noop-leaf-ctime-after-recheck': {'case': 'noop-leaf-ctime-after-recheck',
+                                   'observed': {'changedOnlyDeclaredFacts': True,
+                                                'consumingTargetChecks': 1,
+                                                'injections': 1,
+                                                'journalAbsent': True,
+                                                'recheckReturns': 1,
+                                                'renameProbes': 0,
+                                                'scopesClosed': 3,
+                                                'snapshotUnchangedAfterInjection': True,
+                                                'unchangedMarked': False},
+                                   'outcome': {'effect': 'not_started',
+                                               'journal': 'not_created',
+                                               'reason': 'stale_revision',
+                                               'resources': 'settled'},
+                                   'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'noop-target-parent-mode-after-recheck': {'case': 'noop-target-parent-mode-after-recheck',
+                                           'observed': {'changedOnlyDeclaredFacts': True,
+                                                        'consumingTargetChecks': 1,
+                                                        'injections': 1,
+                                                        'journalAbsent': True,
+                                                        'recheckReturns': 1,
+                                                        'renameProbes': 0,
+                                                        'scopesClosed': 3,
+                                                        'snapshotUnchangedAfterInjection': True,
+                                                        'unchangedMarked': False},
+                                           'outcome': {'effect': 'not_started',
+                                                       'journal': 'not_created',
+                                                       'reason': 'stale_revision',
+                                                       'resources': 'settled'},
+                                           'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'present-malformed-source-refused': {'case': 'present-malformed-source-refused',
+                                      'observed': {'journalAbsent': True,
+                                                   'presentSourcePreserved': True,
+                                                   'revisionBound': True,
+                                                   'scopesClosed': 1,
+                                                   'snapshotUnchanged': True,
+                                                   'targetDescriptorBound': True},
+                                      'outcome': {'effect': 'not_started',
+                                                  'journal': 'not_created',
+                                                  'reason': 'invalid_params',
+                                                  'resources': 'settled'},
+                                      'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'present-nonregular-source-refused': {'case': 'present-nonregular-source-refused',
+                                       'observed': {'journalAbsent': True,
+                                                    'presentSourcePreserved': True,
+                                                    'revisionBound': False,
+                                                    'scopesClosed': 1,
+                                                    'snapshotUnchanged': True,
+                                                    'targetDescriptorBound': True},
+                                       'outcome': {'effect': 'not_started',
+                                                   'journal': 'not_created',
+                                                   'reason': 'filesystem_error',
+                                                   'resources': 'settled'},
+                                       'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'target-parent-inode-before-prepare': {'case': 'target-parent-inode-before-prepare',
+                                        'observed': {'authorityRetired': True,
+                                                     'changeObserved': True,
+                                                     'journalAbsent': True,
+                                                     'scopesClosed': 2,
+                                                     'selectionNotRetargeted': True,
+                                                     'snapshotUnchanged': True},
+                                        'outcome': {'effect': 'not_started',
+                                                    'journal': 'not_created',
+                                                    'reason': 'stale_revision',
+                                                    'resources': 'settled'},
+                                        'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'target-parent-mode-before-apply': {'case': 'target-parent-mode-before-apply',
+                                     'observed': {'authorityRetired': True,
+                                                  'changeObserved': True,
+                                                  'journalAbsent': True,
+                                                  'scopesClosed': 3,
+                                                  'selectionNotRetargeted': True,
+                                                  'snapshotUnchanged': True},
+                                     'outcome': {'effect': 'not_started',
+                                                 'journal': 'not_created',
+                                                 'reason': 'stale_revision',
+                                                 'resources': 'settled'},
+                                     'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'unreadable-source-before-prepare': {'case': 'unreadable-source-before-prepare',
+                                      'observed': {'deniedOriginalReads': 1,
+                                                   'journalAbsent': True,
+                                                   'permissionErrorObserved': True,
+                                                   'scopesClosed': 2,
+                                                   'snapshotUnchanged': True},
+                                      'outcome': {'effect': 'not_started',
+                                                  'journal': 'not_created',
+                                                  'reason': 'filesystem_error',
+                                                  'resources': 'settled'},
+                                      'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'version-committed-close-return-injection': {'case': 'version-committed-close-return-injection',
+                                              'observed': {'actualScopeCloseReturned': True,
+                                                           'afterUnknownProbes': 0,
+                                                           'cancelledAfterCommit': 1,
+                                                           'committedCarrier': True,
+                                                           'injections': 1,
+                                                           'scopesClosed': 3},
+                                              'outcome': {'effect': 'committed',
+                                                          'journal': 'clean',
+                                                          'reason': 'cancelled',
+                                                          'resources': 'unknown'},
+                                              'owner': {'closed': True,
+                                                        'fatal': True,
+                                                        'handlerRestored': True}},
+ 'version-committed-fsync-injection': {'case': 'version-committed-fsync-injection',
+                                       'observed': {'committedObserved': True,
+                                                    'dependenciesPreserved': True,
+                                                    'durabilityConfirmed': False,
+                                                    'injections': 1,
+                                                    'journalRetained': True,
+                                                    'rollbackCalls': 0,
+                                                    'scopesClosed': 3,
+                                                    'selectedPayloadInstalled': True},
+                                       'outcome': {'effect': 'committed',
+                                                   'journal': 'recovery_required',
+                                                   'reason': 'filesystem_error',
+                                                   'resources': 'settled'},
+                                       'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'version-refuses-foreign-ready': {'case': 'version-refuses-foreign-ready',
+                                   'observed': {'allOwnersSettled': True,
+                                                'bothRefused': True,
+                                                'foreignDomains': ['legacy', 'metadata_text'],
+                                                'foreignStateRetained': True,
+                                                'originalOwners': 2,
+                                                'scopesClosed': 2,
+                                                'snapshotUnchanged': True,
+                                                'targetDescriptorsAbsent': True,
+                                                'versionStateAbsent': True},
+                                   'outcome': {'effect': 'not_started',
+                                               'journal': 'not_created',
+                                               'reason': 'pending_state',
+                                               'resources': 'settled'},
+                                   'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'version-replacement-installed-rollback': {'case': 'version-replacement-installed-rollback',
+                                            'observed': {'injections': 1,
+                                                         'journalAbsent': True,
+                                                         'originalBackupBound': True,
+                                                         'recoveryAttempts': 1,
+                                                         'rollbackReturned': True,
+                                                         'scopesClosed': 3,
+                                                         'secondApplyNoScope': True,
+                                                         'secondApplyRefused': True,
+                                                         'snapshotRestored': True,
+                                                         'versionLeafInstalled': True},
+                                            'outcome': {'effect': 'rolled_back',
+                                                        'journal': 'clean',
+                                                        'reason': 'filesystem_error',
+                                                        'resources': 'settled'},
+                                            'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}}}
+
+
 class FixtureRefused(Exception):
     pass
 
@@ -505,6 +895,8 @@ class Runtime:
     workflow_bytes: tuple[bytes, ...] = ()
     metadata: Any = None
     metadata_text: Any = None
+    version: Any = None
+    version_text: Any = None
 
     @property
     def ignore_bytes(self) -> bytes:
@@ -565,7 +957,7 @@ def owned_lease(batch: Batch, root: Path, *, expected_unknown: bool = False,
         raise FixtureUnknown()
     runtime = batch.runtime
     selected_domain = runtime.domain if domain is None else domain
-    require(selected_domain in {"configuration", "github_workflows", "metadata_text"})
+    require(selected_domain in {"configuration", "github_workflows", "metadata_text", "release_version"})
     guard = runtime.cancellation.DefaultCancellation(runtime.errors.ValidationError, _GUARD_MESSAGE)
     if selected_domain == "configuration":
         require(registered_identity is None)
@@ -574,9 +966,11 @@ def owned_lease(batch: Batch, root: Path, *, expected_unknown: bool = False,
         # Only this fixed fixture observes registration facts. No renderer,
         # argv, environment or supplied digest can provide root authority.
         identity = workflow_root_identity(root) if registered_identity is None else registered_identity
+        profiles = {"github_workflows": runtime.transaction.TypedEditProfile.GITHUB_WORKFLOWS,
+                    "metadata_text": runtime.transaction.TypedEditProfile.METADATA_TEXT,
+                    "release_version": runtime.transaction.TypedEditProfile.RELEASE_VERSION}
         lease = runtime.custody.InitRootLease(root, cancellation=guard,
-            profile=(runtime.transaction.TypedEditProfile.GITHUB_WORKFLOWS if selected_domain == "github_workflows"
-                     else runtime.transaction.TypedEditProfile.METADATA_TEXT), registered_identity=identity)
+            profile=profiles[selected_domain], registered_identity=identity)
     owner = Owner(guard, lease, domain=selected_domain)
     batch.owners.append(owner)  # Retain even an incomplete/uncertain original.
     cleanup = runtime.cancellation.CleanupScope(
@@ -1071,7 +1465,7 @@ def workflow_document() -> dict[str, Any]:
 
 
 def workflow_root_identity(root: Path) -> dict[str, int]:
-    if type(_RETAINED_BATCH) is Batch and _RETAINED_BATCH.runtime.domain in {"github_workflows", "metadata_text"}:
+    if type(_RETAINED_BATCH) is Batch and _RETAINED_BATCH.runtime.domain in {"github_workflows", "metadata_text", "release_version"}:
         workflow_probe(_RETAINED_BATCH)
     value = root.stat(follow_symlinks=False)
     require(stat.S_ISDIR(value.st_mode))
@@ -1081,7 +1475,7 @@ def workflow_root_identity(root: Path) -> dict[str, int]:
 
 def workflow_read(path: Path, limit: int) -> bytes:
     """Bounded fixture DATA only; no symlink/special-file read or chmod retry."""
-    if type(_RETAINED_BATCH) is Batch and _RETAINED_BATCH.runtime.domain in {"github_workflows", "metadata_text"}:
+    if type(_RETAINED_BATCH) is Batch and _RETAINED_BATCH.runtime.domain in {"github_workflows", "metadata_text", "release_version"}:
         workflow_probe(_RETAINED_BATCH)
     before = path.stat(follow_symlinks=False)
     require(stat.S_ISREG(before.st_mode) and 0 <= before.st_size <= limit)
@@ -1227,8 +1621,9 @@ def workflow_finish(batch: Batch, owner: Owner, outcome: Any, expected: tuple[st
                                       "fatal": expected[2] == "unknown"}))
     uncertain = expected[0] == "unknown" or expected[2] == "unknown"
     require(batch.blocked is uncertain and (not uncertain or batch.retain))
-    require(batch.runtime.domain in {"github_workflows", "metadata_text"})
-    names = (_METADATA_CASES if batch.runtime.domain == "metadata_text" else _WORKFLOW_CASES)[batch.partition]
+    domains = {"github_workflows": _WORKFLOW_CASES, "metadata_text": _METADATA_CASES, "release_version": _VERSION_CASES}
+    require(batch.runtime.domain in domains)
+    names = domains[batch.runtime.domain][batch.partition]
     require(len(batch.workflow_rows) < len(names) and batch.current == names[len(batch.workflow_rows)])
     row = {"case": batch.current,
            "outcome": dict(zip(("effect", "journal", "resources", "reason"), actual)),
@@ -2813,6 +3208,872 @@ def metadata_committed_close_case(batch: Batch) -> None:
         "scopesClosed": metadata_scopes_closed(owner)})
 
 
+# Saved-version fixtures reuse only the donor's bounded DATA readers and
+# original Runtime/Owner/Batch. Metadata targets/plans never authorize version.
+def version_no_state(batch: Batch, root: Path, *, version_only: bool = False) -> bool:
+    names = (batch.runtime.transaction.VERSION_STATE_NAMES if version_only
+             else batch.runtime.transaction.ALL_STATE_NAMES)
+    return all(workflow_absent(batch, root / name) for name in names)
+
+
+def version_unselected_snapshot(batch: Batch, root: Path, seed_data: dict[str, Any], *,
+                                retained_backup: bool = False) -> tuple[Any, ...]:
+    # All transactional cases have existing parents. Exclude only the one
+    # selected leaf and finite original version state/fixture backup slots.
+    # Directory link counts can change when the original journal is retained;
+    # device/inode/full-mode/uid/gid and every unselected raw file fact cannot.
+    states = batch.runtime.transaction.VERSION_STATE_NAMES
+    rows = []
+    for row in metadata_snapshot(batch, root):
+        name, identity = row[:2]
+        if (name == seed_data["path"] or retained_backup and name == "fixture-original-old-0"
+                or any(name == state or name.startswith(state + "/") for state in states)):
+            continue
+        rows.append((name, identity[:5]) if stat.S_ISDIR(identity[2]) else row)
+    return tuple(rows)
+
+
+def version_seed(batch: Batch, root: Path, *, selection: str = "publicVersion", variant: str = "edit",
+                 ignore_kind: str = "current", writable_config: bool = False,
+                 writable_ignore: bool = False) -> dict[str, Any]:
+    """Finite private DATA seeds, never a supplied target roster or backend."""
+    workflow_probe(batch)
+    require(selection in _VERSION_PATHS and variant in {"edit", "noop", "missing-parent"}
+            and ignore_kind in {"current", "legacy"}
+            and (variant != "missing-parent" or selection == "nestedVersion"))
+    config = _VERSION_CONFIG_TEXT[selection].encode("utf-8")
+    ignored = _VERSION_IGNORE if ignore_kind == "current" else _METADATA_IGNORE
+    metadata_directory(batch, root, "release")
+    (root / "release/mobile-release.json").write_bytes(config)
+    (root / "release/mobile-release.json").chmod(0o640 if writable_config else 0o440)
+    (root / ".gitignore").write_bytes(ignored)
+    (root / ".gitignore").chmod(0o600 if writable_ignore else 0o400)
+    (root / "unrelated.txt").write_bytes(b"fixed version fixture public sibling\n")
+    (root / "release/unrelated.json").write_bytes(b'{"fixed":"unselected configuration sibling"}\n')
+    metadata_directory(batch, root, ".github/workflows")
+    (root / ".github/workflows/unrelated.yml").write_bytes(b"# fixed unselected workflow sibling\n")
+    sibling = metadata_directory(batch, root, "public/store/android/en-US")
+    (sibling / "title.txt").write_bytes(b"Fixed unselected metadata title\n")
+    path = _VERSION_PATHS[selection]
+    parts = path.split("/")
+    directories = tuple("/".join(parts[:n]) for n in range(1, len(parts)))
+    original = (None if variant == "missing-parent" else
+                _VERSION_TEXT["edited" if variant == "noop" else "original"].encode("utf-8"))
+    payload = _VERSION_TEXT["created" if original is None else "edited"].encode("utf-8")
+    missing = ("public/version-tree",) if variant == "missing-parent" else ()
+    if original is not None:
+        metadata_directory(batch, root, directories[-1])
+        (root / path).write_bytes(original)
+        (root / path).chmod(0o640)
+    else:
+        require(workflow_absent(batch, root / "public/version-tree"))
+    return {"path": path, "directories": directories, "missingDirectories": missing,
+            "config": config, "ignore": ignored, "original": original, "payload": payload,
+            "intent": "create" if original is None else "edit",
+            "originalValues": None if original is None else
+                dict(_VERSION_VALUES) if variant == "noop" else {"name": "1.2.3", "build": "7"},
+            "originalFacts": metadata_facts(batch, root / path)}
+
+
+def version_baseline(seed_data: dict[str, Any]) -> dict[str, Any]:
+    def digest(raw: bytes) -> dict[str, Any]:
+        return {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+    original = seed_data["original"]
+    return {"savedConfig": digest(seed_data["config"]), "savedVersion":
+            {"state": "absent"} if original is None else {"state": "present", **digest(original)}}
+
+
+def version_capture_binding(batch: Batch, owner: Owner, seed_data: dict[str, Any]) -> bool:
+    """Retained original capture identities, not a substitute active scope."""
+    runtime = batch.runtime
+    targets = owner.lease._version_targets
+    if type(targets) is not runtime.custody.VersionTargets:
+        return False
+    selection, workspace = targets.selection, targets._capture_workspace
+    return (type(owner.lease) is runtime.custody.InitRootLease and targets._identity is targets
+            and targets._lease is owner.lease and owner.lease.profile is runtime.transaction.TypedEditProfile.RELEASE_VERSION
+            and type(workspace) is runtime.transaction.InitWorkspace and workspace._version_targets is targets
+            and workspace._guard is owner.guard and type(workspace._scope) is runtime.custody.LockedInitScope
+            and len(owner.lease._scopes) >= 1 and workspace._scope is owner.lease._scopes[0]
+            and workspace._scope.workspace is workspace and workspace._scope.lease is owner.lease
+            and workspace._typed_profile is owner.lease.profile
+            and owner.lease._metadata_targets is None and workspace._metadata_targets is None
+            and type(selection) is runtime.version_text.VersionSelection
+            and selection.source == seed_data["path"] and selection.paths == (seed_data["path"],)
+            and selection.directories == seed_data["directories"]
+            and selection.name_key == "VERSION_NAME" and selection.build_key == "BUILD_NUMBER"
+            and selection.ios_enabled is True)
+
+
+def version_capture(batch: Batch, owner: Owner, seed_data: dict[str, Any]):
+    before = metadata_snapshot(batch, owner.lease.root)
+    checkout = batch.runtime.version.capture_release_version_edit(owner.lease)
+    revision, targets = owner.lease._revision, owner.lease._version_targets
+    require(type(checkout) is batch.runtime.version.VersionCheckout and checkout._identity is checkout
+            and checkout._lease is owner.lease and checkout._revision is revision
+            and type(revision) is batch.runtime.custody.RootedRevision and revision._lease is owner.lease
+            and revision._version_targets is targets and revision._metadata_targets is None
+            and revision.profile is owner.lease.profile and checkout.revision == revision.token
+            and checkout._selection is targets.selection is revision.version_selection
+            and version_capture_binding(batch, owner, seed_data)
+            and workflow_equal(checkout.baseline, version_baseline(seed_data))
+            and workflow_equal(checkout.values, seed_data["originalValues"])
+            and tuple((item.path, item.data) for item in checkout._files) == ((seed_data["path"], seed_data["original"]),)
+            and tuple((item.path, item.data) for item in checkout._dependencies) == (
+                ("release/mobile-release.json", seed_data["config"]), (".gitignore", seed_data["ignore"]))
+            and metadata_snapshot(batch, owner.lease.root) == before)
+    return checkout
+
+
+def version_prepare(batch: Batch, owner: Owner, seed_data: dict[str, Any], checkout=None):
+    if checkout is None:
+        checkout = version_capture(batch, owner, seed_data)
+    before = metadata_snapshot(batch, owner.lease.root)
+    plan = batch.runtime.version.prepare_release_version_edit(owner.lease, checkout, checkout.revision,
+        version_baseline(seed_data), seed_data["intent"], dict(_VERSION_VALUES))
+    require(type(plan) is batch.runtime.version.PreparedVersionEdit and plan._identity is plan
+            and plan._checkout is checkout and checkout._prepared is plan)
+    old, new, captured = seed_data["original"], seed_data["payload"], seed_data["originalFacts"]
+
+    def digest(raw: bytes) -> dict[str, Any]:
+        return {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+
+    expected = {"schemaVersion": 1, "source": seed_data["path"], "nameKey": "VERSION_NAME",
+        "buildKey": "BUILD_NUMBER", "iosEnabled": True, "intent": seed_data["intent"], "values": dict(_VERSION_VALUES),
+        "file": {"path": seed_data["path"], "action": "create" if old is None else "preserve" if old == new else "replace",
+                 "before": {"state": "absent"} if old is None else {"state": "present", "text": old.decode("utf-8"), **digest(old)},
+                 "after": {"text": new.decode("utf-8"), **digest(new)},
+                 "requestedMode": 0o644 if captured is None else stat.S_IMODE(captured[2]),
+                 "preserveMode": captured is not None},
+        "createDirectories": list(seed_data["missingDirectories"]),
+        "lineEndings": {"before": [] if old is None else ["crlf", "lf"],
+                        "after": ["lf"] if old is None else ["crlf", "lf"],
+                        "finalNewlineBefore": False, "finalNewlineAfter": old is None, "preserved": old is not None},
+        "validation": {"valid": True, "state": "format-valid", "issues": []}}
+    require(workflow_equal(plan.view, expected) and plan._payloads == (None if old == new else new,)
+            and version_capture_binding(batch, owner, seed_data)
+            and metadata_snapshot(batch, owner.lease.root) == before)
+    return checkout, plan
+
+
+def version_original(batch: Batch, owner: Owner, workspace: Any, *, typed: bool = True) -> None:
+    runtime = batch.runtime
+    scope = workspace._scope
+    require(runtime.domain == owner.domain == "release_version"
+            and type(workspace) is runtime.transaction.InitWorkspace
+            and type(owner.lease) is runtime.custody.InitRootLease
+            and type(scope) is runtime.custody.LockedInitScope and scope is owner.lease._active
+            and scope.lease is owner.lease and scope.workspace is workspace and scope.locked
+            and not scope.claimed and not scope.closed and workspace._guard is owner.guard
+            and owner.lease.guard is owner.guard and type(owner.guard) is runtime.cancellation.DefaultCancellation
+            and not owner.guard.lifetime_ledger.fatal
+            and workspace._typed_profile is owner.lease.profile is runtime.transaction.TypedEditProfile.RELEASE_VERSION
+            and workspace._state_names == runtime.transaction.VERSION_STATE_NAMES and workspace._typed_claimed is typed
+            and type(workspace._rooted_revision) is runtime.custody.RootedRevision
+            and workspace._rooted_revision is owner.lease._revision and workspace._rooted_revision._lease is owner.lease
+            and type(workspace._version_targets) is runtime.custody.VersionTargets
+            and workspace._version_targets is owner.lease._version_targets
+            and workspace._rooted_revision._version_targets is workspace._version_targets
+            and workspace._metadata_targets is None and owner.lease._metadata_targets is None
+            and workspace._rooted_revision._metadata_targets is None)
+    workspace._version_targets._check_workspace(workspace)  # Actual original identity admission, no stand-in.
+
+
+def version_finish(batch: Batch, owner: Owner, outcome: Any, observed: dict[str, Any]) -> None:
+    expected = _VERSION_EXPECTED[batch.current]
+    workflow_finish(batch, owner, outcome, tuple(expected["outcome"][key] for key in ("effect", "journal", "resources", "reason")),
+                    observed, expected["observed"])
+
+
+def version_installed(batch: Batch, root: Path, workspace: Any, seed_data: dict[str, Any]) -> bool:
+    workflow_probe(batch)
+    require(workspace is not None and workspace._workflow_complete and type(workspace._workflow_plan) is bytes
+            and type(workspace._workflow_header) is bytes)
+    header, manifest = json.loads(workspace._workflow_header), json.loads(workspace._workflow_plan)
+    require(header["domain"] == manifest["domain"] == "release_version"
+            and tuple(row["path"] for row in manifest["files"]) == (seed_data["path"],)
+            and tuple(row["path"] for row in manifest["directories"]) == seed_data["directories"])
+    row = manifest["files"][0]
+    prior, raw, captured = seed_data["original"], seed_data["payload"], seed_data["originalFacts"]
+    # These core transaction fault cases replace an existing mode-0640 source.
+    # Actual Create/umask effect proof belongs to the separate Rust owner case.
+    require(prior is not None and captured is not None and stat.S_IMODE(captured[2]) == 0o640)
+    before = {"device": captured[0], "inode": captured[1], "mode": stat.S_IMODE(captured[2]),
+              "size": len(prior), "sha256": hashlib.sha256(prior).hexdigest()}
+    after = row["after"]
+    if (not workflow_equal(row["before"], before) or type(after) is not dict
+            or after["mode"] != stat.S_IMODE(captured[2]) or after["size"] != len(raw)
+            or after["sha256"] != hashlib.sha256(raw).hexdigest()):
+        return False
+    leaf = root / seed_data["path"]
+    value = leaf.stat(follow_symlinks=False)
+    return (workflow_read(leaf, 64 * 1024) == raw
+            and (value.st_dev, value.st_ino, stat.S_IMODE(value.st_mode), value.st_size)
+                == (after["device"], after["inode"], after["mode"], len(raw))
+            and value.st_uid == os.geteuid() and value.st_gid == os.getegid() and value.st_nlink == 1)
+
+
+def version_original_backup(batch: Batch, root: Path, seed_data: dict[str, Any]) -> bool:
+    current = metadata_facts(batch, root / batch.runtime.transaction.VERSION_READY / "old-0")
+    original = seed_data["originalFacts"]
+    # A writer-owned rename changes ctime, not original bytes/mtime/mode/owner.
+    return current is not None and original is not None and current[:8] == original[:8] and current[9:] == original[9:]
+
+
+def version_selection_refusals(batch: Batch) -> None:
+    runtime = batch.runtime
+    for name in _VERSION_CASES["ordinary"][:3]:
+        root = batch.case_root(name)
+        seed_data = version_seed(batch, root, ignore_kind="legacy" if name == "legacy-seven-ignore-rules-refused" else "current")
+        leaf = root / seed_data["path"]
+        if name == "present-malformed-source-refused":
+            leaf.write_bytes(b"VERSION_NAME=1.2.3\nOTHER=keep\n")  # Present, missing its configured build key.
+        elif name == "present-nonregular-source-refused":
+            leaf.unlink()
+            os.mkfifo(leaf, 0o600)  # lstat-only fixture DATA; the real bounded native reader refuses it.
+        before = metadata_snapshot(batch, root)
+        with owned_lease(batch, root) as owner:
+            reason = _VERSION_EXPECTED[name]["outcome"]["reason"]
+            result = refusal(batch, owner, reason, lambda: runtime.version.capture_release_version_edit(owner.lease))
+        after = metadata_snapshot(batch, root)
+        observed = {"snapshotUnchanged": after == before, "journalAbsent": version_no_state(batch, root),
+                    "scopesClosed": metadata_scopes_closed(owner)}
+        if name == "legacy-seven-ignore-rules-refused":
+            observed.update(targetDescriptorAbsent=owner.lease._version_targets is None,
+                            revisionAbsent=owner.lease._revision is None)
+        else:
+            original_row = next((row for row in before if row[0] == seed_data["path"]), None)
+            current_row = next((row for row in after if row[0] == seed_data["path"]), None)
+            revision = owner.lease._revision
+            observed.update(presentSourcePreserved=original_row is not None and current_row == original_row,
+                targetDescriptorBound=version_capture_binding(batch, owner, seed_data),
+                revisionBound=type(revision) is runtime.custody.RootedRevision
+                    and revision._lease is owner.lease and revision.profile is owner.lease.profile
+                    and revision._version_targets is owner.lease._version_targets and revision._metadata_targets is None)
+        version_finish(batch, owner, result, observed)
+
+
+def version_stale_cases(batch: Batch) -> None:
+    runtime = batch.runtime
+    for name in _VERSION_CASES["ordinary"][3:8]:
+        root = batch.case_root(name)
+        seed_data = version_seed(batch, root,
+            selection="nestedVersion" if name in {"target-parent-inode-before-prepare", "missing-target-parent-appears-before-apply"}
+                else "publicVersion",
+            variant="missing-parent" if name == "missing-target-parent-appears-before-apply" else "edit",
+            writable_config=name == "config-retarget-before-prepare", writable_ignore=name == "ignore-bytes-before-apply")
+        before = metadata_snapshot(batch, root)
+        prepare_failure = name in {"config-retarget-before-prepare", "target-parent-inode-before-prepare"}
+        plan = None
+        with owned_lease(batch, root) as owner:
+            checkout = version_capture(batch, owner, seed_data)
+            targets = owner.lease._version_targets
+            if not prepare_failure:
+                _, plan = version_prepare(batch, owner, seed_data, checkout)
+            require(metadata_snapshot(batch, root) == before and version_no_state(batch, root))
+            if name == "config-retarget-before-prepare":
+                require(workflow_absent(batch, root / "release/version.properties"))
+                raw = _VERSION_CONFIG_TEXT["releaseVersion"].encode("utf-8")
+                (root / "release/mobile-release.json").write_bytes(raw)
+                change_observed = (workflow_read(root / "release/mobile-release.json", 512 * 1024) == raw != seed_data["config"]
+                                   and workflow_absent(batch, root / "release/version.properties"))
+            elif name == "ignore-bytes-before-apply":
+                raw = seed_data["ignore"] + b"# fixed external version ignore drift\n"
+                (root / ".gitignore").write_bytes(raw)
+                change_observed = workflow_read(root / ".gitignore", 1024 * 1024) == raw != seed_data["ignore"]
+            elif name == "target-parent-mode-before-apply":
+                parent = (root / seed_data["path"]).parent
+                old = parent.stat(follow_symlinks=False)
+                require(stat.S_IMODE(old.st_mode) == 0o750)
+                parent.chmod(0o700)
+                new = parent.stat(follow_symlinks=False)
+                change_observed = (new.st_dev == old.st_dev and new.st_ino == old.st_ino
+                    and stat.S_IMODE(new.st_mode) == 0o700 and new.st_uid == old.st_uid and new.st_gid == old.st_gid)
+            elif name == "target-parent-inode-before-prepare":
+                parent = (root / seed_data["path"]).parent
+                old = parent.stat(follow_symlinks=False)
+                retained = root / "fixture-original-target-parent"
+                parent.rename(retained)
+                parent.mkdir(mode=0o750)
+                parent.chmod(stat.S_IMODE(old.st_mode))
+                original = retained / "version.properties"
+                replacement = parent / "version.properties"
+                replacement.write_bytes(workflow_read(original, 64 * 1024))
+                replacement.chmod(stat.S_IMODE(original.stat(follow_symlinks=False).st_mode))
+                new = parent.stat(follow_symlinks=False)
+                change_observed = (new.st_dev == old.st_dev and new.st_ino != old.st_ino and new.st_mode == old.st_mode
+                    and new.st_uid == old.st_uid and new.st_gid == old.st_gid
+                    and retained.stat(follow_symlinks=False).st_ino == old.st_ino
+                    and workflow_read(replacement, 64 * 1024) == workflow_read(original, 64 * 1024))
+            else:
+                parent = (root / seed_data["path"]).parent
+                require(workflow_absent(batch, parent))
+                parent.mkdir(mode=0o700)
+                change_observed = (stat.S_ISDIR(parent.stat(follow_symlinks=False).st_mode)
+                                   and workflow_absent(batch, root / seed_data["path"]))
+            changed = metadata_snapshot(batch, root)
+            if prepare_failure:
+                result = refusal(batch, owner, "stale_revision", lambda: version_prepare(batch, owner, seed_data, checkout))
+            else:
+                result = batch.record(owner, runtime.version.apply_release_version_edit(owner.lease, plan))
+                count = len(owner.lease._scopes)
+                again = runtime.version.apply_release_version_edit(owner.lease, plan)
+                require((again.effect, again.journal, again.resources, again.reason) == (
+                    "not_started", "not_created", "settled", "invalid_params") and len(owner.lease._scopes) == count)
+            selection_retained = (owner.lease._version_targets is targets and checkout._selection is targets.selection
+                                  and targets.paths == (seed_data["path"],) and version_capture_binding(batch, owner, seed_data))
+            retired = checkout._state == runtime.edit._RETIRED and (plan is None or plan._state == runtime.edit._RETIRED)
+        version_finish(batch, owner, result, {"snapshotUnchanged": metadata_snapshot(batch, root) == changed,
+            "journalAbsent": version_no_state(batch, root), "selectionNotRetargeted": selection_retained,
+            "changeObserved": change_observed, "authorityRetired": retired, "scopesClosed": metadata_scopes_closed(owner)})
+
+
+def version_late_noop_cases(batch: Batch) -> None:
+    runtime = batch.runtime
+    for name in _VERSION_CASES["ordinary"][8:10]:
+        root = batch.case_root(name)
+        seed_data = version_seed(batch, root, variant="noop")
+        lease_type, workspace_type = runtime.custody.InitRootLease, runtime.transaction.InitWorkspace
+        recheck_original, current_original = lease_type._recheck, workspace_type._current
+        rename_original = runtime.transaction._rename_function
+        events = {"recheckReturns": 0, "injections": 0, "changedOnlyDeclaredFacts": False,
+                  "consumingTargetChecks": 0, "renameProbes": 0}
+        active_workspace = None
+        changed = None
+
+        def recheck(lease, workspace, revision):
+            nonlocal active_workspace, changed
+            value = recheck_original(lease, workspace, revision)
+            if lease is owner.lease and lease._rechecks == 2:
+                with workflow_witness(batch):
+                    version_original(batch, owner, workspace, typed=False)
+                    require(active_workspace is None and revision is checkout._revision)
+                    active_workspace = workspace
+                    events["recheckReturns"] += 1
+                    if name == "noop-leaf-ctime-after-recheck":
+                        leaf = root / seed_data["path"]
+                        old = metadata_facts(batch, leaf)
+                        leaf.chmod(stat.S_IMODE(old[2]))
+                        new = metadata_facts(batch, leaf)
+                        events["changedOnlyDeclaredFacts"] = old[:8] == new[:8] and old[9:] == new[9:] and old[8] != new[8]
+                    else:
+                        parent = (root / seed_data["path"]).parent
+                        old = parent.stat(follow_symlinks=False)
+                        parent.chmod(0o700)
+                        new = parent.stat(follow_symlinks=False)
+                        events["changedOnlyDeclaredFacts"] = (old.st_dev == new.st_dev and old.st_ino == new.st_ino
+                            and old.st_uid == new.st_uid and old.st_gid == new.st_gid
+                            and stat.S_IMODE(old.st_mode) == 0o750 and stat.S_IMODE(new.st_mode) == 0o700)
+                    require(events["changedOnlyDeclaredFacts"])  # Actual changed ctime/mode; no sleep, retry or forged clock.
+                    changed = metadata_snapshot(batch, root)
+                    events["injections"] += 1
+            return value
+
+        def current(workspace, path, *, directory=False):
+            if workspace is active_workspace and path == seed_data["path"] and not directory:
+                with workflow_witness(batch):
+                    version_original(batch, owner, workspace)
+                    events["consumingTargetChecks"] += 1
+            return current_original(workspace, path, directory=directory)
+
+        def rename():
+            events["renameProbes"] += 1
+            return rename_original()
+
+        before = metadata_snapshot(batch, root)
+        with owned_lease(batch, root) as owner:
+            checkout, plan = version_prepare(batch, owner, seed_data)
+            require(metadata_snapshot(batch, root) == before)
+            with patch.object(lease_type, "_recheck", recheck), patch.object(workspace_type, "_current", current), \
+                 patch.object(runtime.transaction, "_rename_function", rename):
+                result = batch.record(owner, runtime.version.apply_release_version_edit(owner.lease, plan))
+        version_finish(batch, owner, result, {**events,
+            "unchangedMarked": active_workspace is not None and active_workspace._unchanged,
+            "journalAbsent": version_no_state(batch, root),
+            "snapshotUnchangedAfterInjection": changed is not None and metadata_snapshot(batch, root) == changed,
+            "scopesClosed": metadata_scopes_closed(owner)})
+
+
+def version_unreadable_case(batch: Batch) -> None:
+    root = batch.case_root("unreadable-source-before-prepare")
+    seed_data = version_seed(batch, root)
+    runtime = batch.runtime
+    read_original = runtime.transaction.InitWorkspace._read
+    events = {"permissionErrorObserved": False, "deniedOriginalReads": 0}
+
+    def read(workspace, fd, name, limit=runtime.transaction.MAX_FILE_BYTES):
+        try:
+            return read_original(workspace, fd, name, limit)
+        except PermissionError:
+            if workspace._scope is not None and workspace._scope.lease is owner.lease and name == "version.properties":
+                with workflow_witness(batch):
+                    require(type(workspace._scope) is runtime.custody.LockedInitScope
+                            and workspace._typed_profile is owner.lease.profile is runtime.transaction.TypedEditProfile.RELEASE_VERSION
+                            and workspace._scope is owner.lease._active and workspace._scope.workspace is workspace
+                            and workspace._version_targets is owner.lease._version_targets
+                            and type(workspace._version_targets) is runtime.custody.VersionTargets
+                            and workspace._metadata_targets is None and os.geteuid() != 0)
+                    workspace._version_targets._check_workspace(workspace)
+                    events["permissionErrorObserved"] = True
+                    events["deniedOriginalReads"] += 1
+            raise  # The genuine original read exception is preserved, never replaced with an injected IO result.
+
+    with owned_lease(batch, root) as owner:
+        checkout = version_capture(batch, owner, seed_data)
+        (root / seed_data["path"]).chmod(0)
+        changed = metadata_snapshot(batch, root)  # lstat only for the unreadable leaf; no chmod-around-denial.
+        with patch.object(runtime.transaction.InitWorkspace, "_read", read):
+            result = refusal(batch, owner, "filesystem_error", lambda: version_prepare(batch, owner, seed_data, checkout))
+    version_finish(batch, owner, result, {**events, "snapshotUnchanged": metadata_snapshot(batch, root) == changed,
+        "journalAbsent": version_no_state(batch, root), "scopesClosed": metadata_scopes_closed(owner)})
+
+
+def version_partial_rollback_case(batch: Batch) -> None:
+    root = batch.case_root("version-replacement-installed-rollback")
+    seed_data = version_seed(batch, root)
+    before = workflow_snapshot(batch, root)  # A writer-owned rename/restore may change original file ctime.
+    dependencies = metadata_dependencies(batch, root)
+    runtime = batch.runtime
+    workspace_type = runtime.transaction.InitWorkspace
+    move_original, rollback_original = workspace_type._move, workspace_type._rollback
+    recovery_original = workspace_type._fixed_recovery
+    events = {"versionLeafInstalled": False, "originalBackupBound": False,
+              "rollbackReturned": False, "recoveryAttempts": 0, "injections": 0}
+
+    def move(workspace, source_fd, source, destination_fd, destination, expected, **kwargs):
+        value = move_original(workspace, source_fd, source, destination_fd, destination, expected, **kwargs)
+        if workspace._installing and source == "new-0" and events["injections"] == 0:
+            with workflow_witness(batch):
+                version_original(batch, owner, workspace)
+                require(workspace._workflow_complete and workspace._install_started and destination == "version.properties")
+                leaf = root / seed_data["path"]
+                installed = leaf.stat(follow_symlinks=False)
+                events["versionLeafInstalled"] = (workflow_read(leaf, 64 * 1024) == seed_data["payload"]
+                    and (installed.st_dev, installed.st_ino, stat.S_IMODE(installed.st_mode))
+                    == (expected["device"], expected["inode"], expected["mode"]))
+                events["originalBackupBound"] = version_original_backup(batch, root, seed_data)
+                require(events["versionLeafInstalled"] and events["originalBackupBound"])
+                events["injections"] += 1
+            raise OSError("fixed version replacement installed injection")
+        return value
+
+    def rollback(workspace, *args):
+        value = rollback_original(workspace, *args)
+        with workflow_witness(batch):
+            version_original(batch, owner, workspace)
+            events["rollbackReturned"] = workspace._terminal_seen == "ROLLED_BACK" and workspace._terminal_durable
+        return value
+
+    def recovery(workspace):
+        events["recoveryAttempts"] += 1
+        return recovery_original(workspace)
+
+    with owned_lease(batch, root) as owner:
+        _, plan = version_prepare(batch, owner, seed_data)
+        require(workflow_snapshot(batch, root) == before and metadata_dependencies(batch, root) == dependencies)
+        with patch.object(workspace_type, "_move", move), patch.object(workspace_type, "_rollback", rollback), \
+             patch.object(workspace_type, "_fixed_recovery", recovery):
+            result = batch.record(owner, runtime.version.apply_release_version_edit(owner.lease, plan))
+        scope_count = len(owner.lease._scopes)
+        again = runtime.version.apply_release_version_edit(owner.lease, plan)
+        second_refused = (again.effect, again.journal, again.resources, again.reason) == (
+            "not_started", "not_created", "settled", "invalid_params")
+        no_scope = len(owner.lease._scopes) == scope_count
+    restored = metadata_facts(batch, root / seed_data["path"])
+    original = seed_data["originalFacts"]
+    require(restored is not None and restored[:8] == original[:8] and restored[9:] == original[9:]
+            and metadata_dependencies(batch, root) == dependencies)
+    version_finish(batch, owner, result, {**events, "snapshotRestored": workflow_snapshot(batch, root) == before,
+        "journalAbsent": version_no_state(batch, root), "secondApplyRefused": second_refused,
+        "secondApplyNoScope": no_scope, "scopesClosed": metadata_scopes_closed(owner)})
+
+
+def version_incomplete_case(batch: Batch) -> None:
+    root = batch.case_root("incomplete-version-preparing-retained")
+    seed_data = version_seed(batch, root)
+    runtime = batch.runtime
+    workspace_type = runtime.transaction.InitWorkspace
+    write_original, recover_original, unlink_original = workspace_type._write, workspace_type.recover, workspace_type._unlink
+    dependencies = metadata_dependencies(batch, root)
+    original = metadata_facts(batch, root / seed_data["path"])
+    unselected = version_unselected_snapshot(batch, root, seed_data)
+    events = {"recoverCalls": 0, "cleanupUnlinks": 0, "injections": 0}
+    active_workspace = None
+
+    def write(workspace, fd, name, data, mode=0o600, **kwargs):
+        nonlocal active_workspace
+        value = write_original(workspace, fd, name, data, mode, **kwargs)
+        if name == "new-0" and events["injections"] == 0:
+            with workflow_witness(batch):
+                version_original(batch, owner, workspace)
+                require(not workspace._workflow_complete and workspace._workflow_header is None)
+                active_workspace = workspace
+                events["injections"] += 1
+            raise OSError("fixed incomplete version preparation injection")
+        return value
+
+    def recover(workspace):
+        events["recoverCalls"] += 1
+        return recover_original(workspace)
+
+    def unlink(workspace, *args, **kwargs):
+        if events["injections"]:
+            events["cleanupUnlinks"] += 1
+        return unlink_original(workspace, *args, **kwargs)
+
+    with owned_lease(batch, root) as owner:
+        _, plan = version_prepare(batch, owner, seed_data)
+        with patch.object(workspace_type, "_write", write), patch.object(workspace_type, "recover", recover), \
+             patch.object(workspace_type, "_unlink", unlink):
+            result = batch.record(owner, runtime.version.apply_release_version_edit(owner.lease, plan))
+    preparing = root / runtime.transaction.VERSION_PREPARING
+    require(all(workflow_absent(batch, root / name) for name in runtime.transaction.ALL_STATE_NAMES
+                if name != runtime.transaction.VERSION_PREPARING)
+            and version_unselected_snapshot(batch, root, seed_data) == unselected)
+    version_finish(batch, owner, result, {
+        "preparingRetained": stat.S_ISDIR(preparing.stat(follow_symlinks=False).st_mode),
+        "completeProof": active_workspace is not None and active_workspace._workflow_complete,
+        "numberedSlotRetained": workflow_read(preparing / "new-0", 64 * 1024) == seed_data["payload"],
+        "targetPreserved": metadata_facts(batch, root / seed_data["path"]) == original,
+        "dependenciesPreserved": metadata_dependencies(batch, root) == dependencies,
+        **events, "scopesClosed": metadata_scopes_closed(owner)})
+
+
+def version_cleanup_backup_case(batch: Batch) -> None:
+    root = batch.case_root("committed-version-backup-replaced-at-cleanup-entry")
+    seed_data = version_seed(batch, root)
+    runtime = batch.runtime
+    workspace_type = runtime.transaction.InitWorkspace
+    cleanup_original, unlink_original = workspace_type._cleanup, workspace_type._unlink
+    dependencies = metadata_dependencies(batch, root)
+    unselected = version_unselected_snapshot(batch, root, seed_data)
+    events = {"committedObserved": False, "durabilityConfirmed": False, "sameBytesForeignInode": False,
+              "originalBackupRetained": False, "cleanupUnlinks": 0, "injections": 0}
+    active_workspace = None
+    mutated = None
+    original_backup = None
+
+    def cleanup(workspace):
+        nonlocal active_workspace, mutated, original_backup
+        with workflow_witness(batch):
+            version_original(batch, owner, workspace)
+            require(active_workspace is None and workspace._workflow_complete and workspace._cleanup_mode
+                    and workspace._recovery_claimed and workspace._terminal_seen == "COMMITTED" and workspace._terminal_durable)
+            active_workspace = workspace
+            journal = root / runtime.transaction.VERSION_CLEANUP
+            require(stat.S_ISDIR(journal.stat(follow_symlinks=False).st_mode))
+            original = journal / "old-0"
+            raw = workflow_read(original, 64 * 1024)
+            before = original.stat(follow_symlinks=False)
+            original_backup = root / "fixture-original-old-0"
+            original.rename(original_backup)
+            with original.open("xb") as stream:
+                stream.write(raw)
+            original.chmod(stat.S_IMODE(before.st_mode))
+            after = original.stat(follow_symlinks=False)
+            events["committedObserved"] = workspace._terminal_seen == "COMMITTED"
+            events["durabilityConfirmed"] = workspace._terminal_durable
+            events["sameBytesForeignInode"] = (workflow_read(original, 64 * 1024) == raw
+                and after.st_dev == before.st_dev and after.st_ino != before.st_ino and after.st_mode == before.st_mode
+                and after.st_uid == before.st_uid and after.st_gid == before.st_gid and after.st_nlink == before.st_nlink == 1)
+            saved = metadata_facts(batch, original_backup)
+            captured = seed_data["originalFacts"]
+            events["originalBackupRetained"] = saved[:8] == captured[:8] and saved[9:] == captured[9:]
+            require(events["sameBytesForeignInode"] and events["originalBackupRetained"])
+            mutated = metadata_snapshot(batch, journal)
+            events["injections"] += 1
+        return cleanup_original(workspace)  # Original cleanup entry must refuse before any unlink.
+
+    def unlink(workspace, *args, **kwargs):
+        if workspace is active_workspace:
+            events["cleanupUnlinks"] += 1
+        return unlink_original(workspace, *args, **kwargs)
+
+    with owned_lease(batch, root) as owner:
+        _, plan = version_prepare(batch, owner, seed_data)
+        with patch.object(workspace_type, "_cleanup", cleanup), patch.object(workspace_type, "_unlink", unlink):
+            result = batch.record(owner, runtime.version.apply_release_version_edit(owner.lease, plan))
+    require(original_backup is not None and workflow_read(original_backup, 64 * 1024) == seed_data["original"]
+            and version_unselected_snapshot(batch, root, seed_data, retained_backup=True) == unselected)
+    version_finish(batch, owner, result, {**events,
+        "selectedPayloadInstalled": version_installed(batch, root, active_workspace, seed_data),
+        "proofRetained": mutated is not None and metadata_snapshot(batch, root / runtime.transaction.VERSION_CLEANUP) == mutated,
+        "dependenciesPreserved": metadata_dependencies(batch, root) == dependencies,
+        "scopesClosed": metadata_scopes_closed(owner)})
+
+
+def version_pending_cases(batch: Batch) -> None:
+    runtime = batch.runtime
+    for name, state in zip(_VERSION_CASES["ordinary"][14:17], runtime.transaction.VERSION_STATE_NAMES):
+        root = batch.case_root(name)
+        originals = []
+        entrypoints = []
+        unchanged = retained = True
+        legacy_apply = legacy_recover = legacy_closed = False
+        for domain in ("legacy", "configuration", "github_workflows", "metadata_text"):
+            child = root / domain
+            child.mkdir(mode=0o700)
+            version_seed(batch, child)
+            pending = child / state
+            pending.mkdir(mode=0o700)
+            # Empty PREPARING is already foreign authority. READY/CLEANUP have
+            # unparseable-as-control DATA; no foreign entrypoint may adopt it.
+            if state != runtime.transaction.VERSION_PREPARING:
+                (pending / "header.json").write_bytes(b'{"fixed":"foreign version state, must not be parsed"}\n')
+            before, state_before = metadata_snapshot(batch, child), metadata_snapshot(batch, pending)
+            with owned_lease(batch, child, domain="configuration" if domain == "legacy" else domain) as owner:
+                if domain == "legacy":
+                    # This idle original lease supplies only the real cancellation
+                    # cleanup ledger; the existing public InitWorkspace owns its
+                    # own legacy flock/fd and gets no typed or version authority.
+                    with actual_lock_holder(batch, child, owner.guard, "init") as legacy:
+                        observed = legacy.observe("release/mobile-release.json")
+                        require(observed.data is not None and legacy._scope is None and legacy._guard is None)
+                        try:
+                            legacy.apply([(observed, observed.data + b" \n")])
+                        except runtime.errors.ValidationError:
+                            legacy_apply = True
+                        require(legacy_apply)
+                        try:
+                            legacy.recover()
+                        except runtime.errors.ValidationError:
+                            legacy_recover = True
+                        require(legacy_recover)
+                    legacy_closed = legacy.fd == -1
+                    require(owner.outcome is None and not owner.lease._scopes)
+                    entrypoints.append("legacy")  # Actual two public calls above; no fabricated typed outcome.
+                else:
+                    if domain == "configuration":
+                        action = lambda: runtime.edit.capture_config_edit(owner.lease)
+                    elif domain == "github_workflows":
+                        action = lambda: runtime.workflow.capture_github_workflow_edit(owner.lease)
+                    else:
+                        action = lambda: runtime.metadata.capture_metadata_text_edit(owner.lease, "android", "en-US")
+                    result = refusal(batch, owner, "pending_state", action)
+                    entrypoints.append(owner.domain)
+            originals.append(owner)
+            unchanged = (metadata_snapshot(batch, child) == before) and unchanged
+            retained = (metadata_snapshot(batch, pending) == state_before) and retained
+        version_finish(batch, originals[-1], result, {"entrypoints": entrypoints, "originalOwners": len(originals),
+            "allOwnersSettled": all(owner.closed and owner.restored and not owner.fatal for owner in originals),
+            "legacyApplyRefused": legacy_apply, "legacyRecoverRefused": legacy_recover, "legacyWorkspaceClosed": legacy_closed,
+            "typedRefusals": sum(owner.outcome is not None and (owner.outcome.effect, owner.outcome.journal,
+                owner.outcome.resources, owner.outcome.reason) == ("not_started", "not_created", "settled", "pending_state")
+                for owner in originals),
+            "stateRetained": retained, "snapshotUnchanged": unchanged,
+            "targetDescriptorsAbsent": all(owner.lease._version_targets is None and owner.lease._metadata_targets is None
+                                            for owner in originals),
+            "scopesClosed": sum(metadata_scopes_closed(owner) for owner in originals)})
+
+    root = batch.case_root("version-refuses-foreign-ready")
+    originals = []
+    foreign_domains = []
+    unchanged = retained = absent = True
+    for domain, state in (("legacy", runtime.transaction.READY), ("metadata_text", runtime.transaction.METADATA_READY)):
+        child = root / domain
+        child.mkdir(mode=0o700)
+        seed_data = version_seed(batch, child)
+        pending = child / state
+        pending.mkdir(mode=0o700)
+        (pending / "header.json").write_bytes(b'{"fixed":"foreign READY, must not be parsed"}\n')
+        before, state_before = metadata_snapshot(batch, child), metadata_snapshot(batch, pending)
+        with owned_lease(batch, child) as owner:
+            result = refusal(batch, owner, "pending_state", lambda: version_capture(batch, owner, seed_data))
+        originals.append(owner)
+        foreign_domains.append(domain)
+        unchanged = (metadata_snapshot(batch, child) == before) and unchanged
+        retained = (metadata_snapshot(batch, pending) == state_before) and retained
+        absent = version_no_state(batch, child, version_only=True) and absent
+    version_finish(batch, originals[-1], result, {"foreignDomains": foreign_domains, "originalOwners": len(originals),
+        "allOwnersSettled": all(owner.closed and owner.restored and not owner.fatal for owner in originals),
+        "bothRefused": all((owner.outcome.effect, owner.outcome.journal, owner.outcome.resources, owner.outcome.reason)
+                           == ("not_started", "not_created", "settled", "pending_state") for owner in originals),
+        "foreignStateRetained": retained, "snapshotUnchanged": unchanged, "versionStateAbsent": absent,
+        "targetDescriptorsAbsent": all(owner.lease._version_targets is None and owner.lease._metadata_targets is None
+                                       for owner in originals),
+        "scopesClosed": sum(metadata_scopes_closed(owner) for owner in originals)})
+
+
+def version_dependency_drift_case(batch: Batch) -> None:
+    root = batch.case_root("dependency-drift-after-version-install")
+    seed_data = version_seed(batch, root, writable_config=True)
+    runtime = batch.runtime
+    workspace_type = runtime.transaction.InitWorkspace
+    move_original, locations_original = workspace_type._move, workspace_type._locations
+    recover_original, unlink_original = workspace_type.recover, workspace_type._unlink
+    events = {"versionLeafInstalled": False, "originalBackupBound": False, "dependencyChanged": False,
+              "conflictObservedInsideOriginal": False, "retainedTreeInsideOriginal": False,
+              "laterInstallMoves": 0, "recoverCalls": 0, "cleanupUnlinks": 0, "injections": 0}
+    active_workspace = None
+    changed = None
+
+    def move(workspace, source_fd, source, destination_fd, destination, expected, **kwargs):
+        nonlocal active_workspace, changed
+        already_injected = events["injections"] == 1
+        value = move_original(workspace, source_fd, source, destination_fd, destination, expected, **kwargs)
+        if already_injected and workspace._installing:
+            events["laterInstallMoves"] += 1  # Count only actual returned original effects.
+        if workspace._installing and source == "new-0" and events["injections"] == 0:
+            with workflow_witness(batch):
+                version_original(batch, owner, workspace)
+                require(active_workspace is None and workspace._workflow_complete and workspace._install_started
+                        and destination == "version.properties" and not workspace._recovery_claimed)
+                active_workspace = workspace
+                leaf = root / seed_data["path"]
+                installed = leaf.stat(follow_symlinks=False)
+                events["versionLeafInstalled"] = (workflow_read(leaf, 64 * 1024) == seed_data["payload"]
+                    and (installed.st_dev, installed.st_ino, stat.S_IMODE(installed.st_mode))
+                    == (expected["device"], expected["inode"], expected["mode"]))
+                events["originalBackupBound"] = version_original_backup(batch, root, seed_data)
+                raw = seed_data["config"] + b" \n"
+                (root / "release/mobile-release.json").write_bytes(raw)
+                events["dependencyChanged"] = workflow_read(root / "release/mobile-release.json", 512 * 1024) == raw != seed_data["config"]
+                require(events["versionLeafInstalled"] and events["originalBackupBound"] and events["dependencyChanged"])
+                changed = metadata_snapshot(batch, root)
+                events["injections"] += 1
+        return value
+
+    def locations(workspace, fd, manifest, *, final=None):
+        # A version edit has ONE leaf: there is no next installation _move.
+        # Observe the genuine final="new" dependency refusal inside the saved
+        # original _locations, before its actual outcome latches Unknown.
+        try:
+            return locations_original(workspace, fd, manifest, final=final)
+        except runtime.transaction.InitConflict:
+            if workspace is active_workspace and events["injections"] == 1 and final == "new":
+                with workflow_witness(batch):
+                    version_original(batch, owner, workspace)
+                    require(workspace._installing and workspace._install_started and not workspace._recovery_claimed
+                            and workspace._terminal_seen is None and not workspace._terminal_durable)
+                    events["conflictObservedInsideOriginal"] = True
+                    events["retainedTreeInsideOriginal"] = changed is not None and metadata_snapshot(batch, root) == changed
+                    require(events["retainedTreeInsideOriginal"])
+            raise  # Preserve the original exception; never inject a synthetic stale result.
+
+    def recover(workspace):
+        events["recoverCalls"] += 1
+        return recover_original(workspace)
+
+    def unlink(workspace, *args, **kwargs):
+        if events["injections"]:
+            events["cleanupUnlinks"] += 1
+        return unlink_original(workspace, *args, **kwargs)
+
+    with owned_lease(batch, root, expected_unknown=True) as owner:
+        _, plan = version_prepare(batch, owner, seed_data)
+        with patch.object(workspace_type, "_move", move), patch.object(workspace_type, "_locations", locations), \
+             patch.object(workspace_type, "recover", recover), patch.object(workspace_type, "_unlink", unlink):
+            result = batch.record(owner, runtime.version.apply_release_version_edit(owner.lease, plan), expected_unknown=True)
+        # Only original prearmed lease cleanup follows this effect-Unknown.
+        # No filesystem reads, new owner, recovery, or cleanup adoption follow.
+    version_finish(batch, owner, result, {**events, "afterUnknownProbes": batch.workflow_after_unknown_probes,
+        "scopesClosed": metadata_scopes_closed(owner)})
+
+
+def version_committed_fsync_case(batch: Batch) -> None:
+    root = batch.case_root("version-committed-fsync-injection")
+    seed_data = version_seed(batch, root, selection="releaseVersion")
+    runtime = batch.runtime
+    workspace_type = runtime.transaction.InitWorkspace
+    fsync_original, rollback_original = workspace_type._fsync, workspace_type._rollback
+    dependencies = metadata_dependencies(batch, root)
+    unselected = version_unselected_snapshot(batch, root, seed_data)
+    events = {"rollbackCalls": 0, "injections": 0}
+    active_workspace = None
+    retained = None
+
+    def fsync(workspace, fd):
+        nonlocal active_workspace, retained
+        if (workspace._publishing_terminal == "COMMITTED" and workspace._terminal_seen == "COMMITTED"
+                and not workspace._terminal_durable and events["injections"] == 0):
+            with workflow_witness(batch):
+                version_original(batch, owner, workspace)
+                require(workspace._workflow_complete and workspace._install_started)
+                active_workspace = workspace
+                retained = metadata_snapshot(batch, root / runtime.transaction.VERSION_READY)
+                events["injections"] += 1
+            raise OSError("fixed version postdecision pre-fsync injection")
+        return fsync_original(workspace, fd)
+
+    def rollback(workspace, *args):
+        events["rollbackCalls"] += 1
+        return rollback_original(workspace, *args)
+
+    with owned_lease(batch, root) as owner:
+        _, plan = version_prepare(batch, owner, seed_data)
+        with patch.object(workspace_type, "_fsync", fsync), patch.object(workspace_type, "_rollback", rollback):
+            result = batch.record(owner, runtime.version.apply_release_version_edit(owner.lease, plan))
+    marker = root / runtime.transaction.VERSION_READY / "COMMITTED"
+    require(retained is not None and metadata_snapshot(batch, marker.parent) == retained
+            and version_original_backup(batch, root, seed_data)
+            and version_unselected_snapshot(batch, root, seed_data) == unselected)
+    version_finish(batch, owner, result, {
+        "committedObserved": active_workspace is not None and active_workspace._terminal_seen == "COMMITTED",
+        "durabilityConfirmed": active_workspace is not None and active_workspace._terminal_durable,
+        "selectedPayloadInstalled": version_installed(batch, root, active_workspace, seed_data),
+        "journalRetained": stat.S_ISREG(marker.stat(follow_symlinks=False).st_mode),
+        "dependenciesPreserved": metadata_dependencies(batch, root) == dependencies,
+        **events, "scopesClosed": metadata_scopes_closed(owner)})
+
+
+def version_committed_close_case(batch: Batch) -> None:
+    root = batch.case_root("version-committed-close-return-injection")
+    seed_data = version_seed(batch, root)
+    runtime = batch.runtime
+    workspace_type = runtime.transaction.InitWorkspace
+    close_original = runtime.custody.LockedInitScope.close
+    publish_original, apply_original = workspace_type._publish_terminal, workspace_type.apply_version_typed
+    dependencies = metadata_dependencies(batch, root)
+    unselected = version_unselected_snapshot(batch, root, seed_data)
+    events = {"actualScopeCloseReturned": False, "cancelledAfterCommit": 0, "committedCarrier": False, "injections": 0}
+    with owned_lease(batch, root, expected_unknown=True) as owner:
+        _, plan = version_prepare(batch, owner, seed_data)
+
+        def publish(workspace, fd, manifest, state):
+            value = publish_original(workspace, fd, manifest, state)
+            if state == "COMMITTED":
+                with workflow_witness(batch):
+                    version_original(batch, owner, workspace)
+                    require(workspace._terminal_seen == "COMMITTED" and workspace._terminal_durable)
+                    events["cancelledAfterCommit"] += 1
+                    owner.guard.cancelled = True
+                raise KeyboardInterrupt  # Labelled fault injection, never stdin-EOF evidence.
+            return value
+
+        def apply(workspace, changes):
+            try:
+                return apply_original(workspace, changes)
+            except runtime.transaction.InitOperationFailure as error:
+                with workflow_witness(batch):
+                    version_original(batch, owner, workspace)
+                    events["committedCarrier"] = (error.outcome.effect == "committed"
+                        and error.outcome.journal == "clean" and error.outcome.reason == "cancelled")
+                    require(version_installed(batch, root, workspace, seed_data)
+                            and metadata_dependencies(batch, root) == dependencies
+                            and version_unselected_snapshot(batch, root, seed_data) == unselected
+                            and version_no_state(batch, root))
+                raise
+
+        def close(scope):
+            terminal = scope.workspace is not None and scope.workspace._terminal_seen == "COMMITTED"
+            if scope.lease is owner.lease and terminal and events["injections"] == 0:
+                close_original(scope)
+                with workflow_witness(batch):
+                    events["actualScopeCloseReturned"] = scope.closed is True
+                    events["injections"] += 1
+                raise OSError("fixed version positive scope-close return loss injection")
+            return close_original(scope)
+
+        with patch.object(workspace_type, "_publish_terminal", publish), \
+             patch.object(workspace_type, "apply_version_typed", apply), \
+             patch.object(runtime.custody.LockedInitScope, "close", close):
+            result = batch.record(owner, runtime.version.apply_release_version_edit(owner.lease, plan), expected_unknown=True)
+        # Lane-last resources Unknown: the original prearmed owner cleanup is
+        # the only further operation. No project/tool read, retry or reopen.
+    version_finish(batch, owner, result, {**events, "afterUnknownProbes": batch.workflow_after_unknown_probes,
+        "scopesClosed": metadata_scopes_closed(owner)})
+
+
 def hosted_parameters(argv: list[str]) -> tuple[Path, str]:
     if (not sys.flags.isolated or not sys.flags.no_site or not sys.dont_write_bytecode
             or os.environ.get("MRK_DESKTOP_CONFIG_NATIVE") != "1"
@@ -2858,13 +4119,25 @@ def metadata_selection(argv: list[str]) -> tuple[str, str] | None:
     return argv[1], argv[5]
 
 
+def version_selection(argv: list[str]) -> tuple[str, str] | None:
+    """Only the three fixed core partitions in the saved-version domain."""
+    if (type(argv) is not list or len(argv) != 6 or any(type(item) is not str for item in argv)
+            or argv[0] != "--task-root" or argv[2:5] != ["--domain", "release_version", "--case"]
+            or argv[5] not in _PARTITIONS):
+        return None
+    return argv[1], argv[5]
+
+
 def workflow_hosted_parameters(argv: list[str], *, domain: str = "github_workflows") -> tuple[Path, str, Path, str, dict[str, Any]]:
     # Reuse the same original hosted/root/host admission, not another native
     # launcher. The default workflow entry keeps its exact original contract.
-    if domain not in {"github_workflows", "metadata_text"}:
+    selections = {"github_workflows": (workflow_selection, "MRK_DESKTOP_WORKFLOW"),
+                  "metadata_text": (metadata_selection, "MRK_DESKTOP_METADATA_TEXT"),
+                  "release_version": (version_selection, "MRK_DESKTOP_RELEASE_VERSION")}
+    if domain not in selections:
         raise FixtureRefused()
-    selected = metadata_selection(argv) if domain == "metadata_text" else workflow_selection(argv)
-    prefix = "MRK_DESKTOP_METADATA_TEXT" if domain == "metadata_text" else "MRK_DESKTOP_WORKFLOW"
+    select_domain, prefix = selections[domain]
+    selected = select_domain(argv)
     source_sha = os.environ.get(prefix + "_SOURCE_SHA", "")
     if (selected is None or sys.version_info < (3, 11)
             or not sys.flags.isolated or not sys.flags.no_site or not sys.dont_write_bytecode
@@ -3016,7 +4289,7 @@ def metadata_runtime(repository: Path, source_sha: str) -> tuple[Runtime, dict[s
     require(workflow_equal(policy.REQUIRED_LOCALE_TEXT, _METADATA_FILES)
             and runtime.metadata_text.DEPENDENCY_PATHS == ("release/mobile-release.json", ".gitignore")
             and runtime.metadata_text.MAX_TEXT_BYTES == 32 * 1024
-            and ("\n".join(runtime.transaction.IGNORE_LINES) + "\n").encode("utf-8") == _METADATA_IGNORE)
+            and ("\n".join(runtime.transaction.METADATA_IGNORE_LINES) + "\n").encode("utf-8") == _METADATA_IGNORE)
     config_hashes = {key: hashlib.sha256(raw.encode("utf-8")).hexdigest() for key, raw in _METADATA_CONFIG_TEXT.items()}
     field_hashes = {platform: {identity: hashlib.sha256(_METADATA_TEXT[platform][identity].encode("utf-8")).hexdigest()
                               for identity in ids} for platform, ids in _METADATA_FILES.items()}
@@ -3029,6 +4302,124 @@ def metadata_runtime(repository: Path, source_sha: str) -> tuple[Runtime, dict[s
                 "pythonSha256": hashlib.sha256(workflow_read(python, 64 * 1024 * 1024)).hexdigest(),
                 "configHashes": config_hashes, "ignoreSha256": ignore_sha, "fieldHashes": field_hashes}
     return runtime, bindings
+
+
+def version_runtime(repository: Path, source_sha: str) -> tuple[Runtime, dict[str, Any]]:
+    source = repository / "src"
+    if not source.is_dir() or source.resolve(strict=True) != source:
+        raise FixtureRefused()
+    originals: dict[str, bytes] = {}
+    for identity, relative in _VERSION_SOURCES.items():
+        path = repository / relative
+        value = path.stat(follow_symlinks=False)
+        if (path.resolve(strict=True) != path or not stat.S_ISREG(value.st_mode)
+                or value.st_uid != os.geteuid() or value.st_mode & 0o022):
+            raise FixtureRefused()
+        originals[identity] = workflow_read(path, 1024 * 1024)
+    # Sole source import root. The helper separately binds the complete package
+    # closure; this closed 25-entry component map is not a replacement for it.
+    sys.path.insert(0, str(source))
+    runtime = Runtime(*(importlib.import_module("mobile_release." + name) for name in (
+        "config_edit", "init_transaction", "init_workspace_custody", "build_inputs",
+        "cancellation", "errors", "config_payloads")))
+    runtime.domain = "release_version"
+    runtime.version = importlib.import_module("mobile_release.release_version_edit")
+    runtime.version_text = importlib.import_module("mobile_release.version_text")
+    runtime.metadata = importlib.import_module("mobile_release.metadata_text_edit")  # Only foreign-state capture refusal.
+    runtime.metadata_text = importlib.import_module("mobile_release.metadata_text")
+    runtime.workflow = importlib.import_module("mobile_release.github_workflow_edit")  # Only foreign-state capture refusal.
+    modules = ((runtime.edit, "config_edit.py"), (runtime.transaction, "init_transaction.py"),
+               (runtime.custody, "init_workspace_custody.py"), (runtime.build, "build_inputs.py"),
+               (runtime.cancellation, "cancellation.py"), (runtime.errors, "errors.py"),
+               (runtime.payloads, "config_payloads.py"), (runtime.version, "release_version_edit.py"),
+               (runtime.version_text, "version_text.py"), (runtime.metadata, "metadata_text_edit.py"),
+               (runtime.metadata_text, "metadata_text.py"), (runtime.workflow, "github_workflow_edit.py"))
+    for module, relative in modules:
+        require(Path(module.__file__).resolve(strict=True) == source / "mobile_release" / relative)
+    require(len(originals) == 25 and runtime.version_text.DEPENDENCY_PATHS == ("release/mobile-release.json", ".gitignore")
+            and runtime.version_text.MAX_VERSION_BYTES == 64 * 1024
+            and ("\n".join(runtime.transaction.IGNORE_LINES) + "\n").encode("utf-8") == _VERSION_IGNORE
+            and ("\n".join(runtime.transaction.METADATA_IGNORE_LINES) + "\n").encode("utf-8") == _METADATA_IGNORE)
+    config_hashes = {key: hashlib.sha256(raw.encode("utf-8")).hexdigest() for key, raw in _VERSION_CONFIG_TEXT.items()}
+    version_hashes = {key: hashlib.sha256(raw.encode("utf-8")).hexdigest() for key, raw in _VERSION_TEXT.items()}
+    ignore_sha = hashlib.sha256(_VERSION_IGNORE).hexdigest()
+    require(workflow_equal(config_hashes, _VERSION_CONFIG_HASHES)
+            and workflow_equal(version_hashes, _VERSION_HASHES) and ignore_sha == _VERSION_IGNORE_SHA256)
+    python = Path(sys.executable).resolve(strict=True)
+    bindings = {"sourceSha": source_sha, "sourceKind": "source",
+                "sourceHashes": {identity: hashlib.sha256(raw).hexdigest() for identity, raw in originals.items()},
+                "pythonSha256": hashlib.sha256(workflow_read(python, 64 * 1024 * 1024)).hexdigest(),
+                "configHashes": config_hashes, "ignoreSha256": ignore_sha, "versionHashes": version_hashes}
+    return runtime, bindings
+
+
+def version_main(argv: list[str]) -> int:
+    global _RUN_CLAIMED, _RETAINED_BATCH
+    batch = None
+    bindings = host = None
+    partition = "unadmitted"
+    status, reason = "failed", "unexpected_failure"
+    try:
+        if _RUN_CLAIMED:
+            raise FixtureRefused()
+        _RUN_CLAIMED = True
+        task_root, partition, repository, source_sha, host = workflow_hosted_parameters(argv, domain="release_version")
+        runtime, bindings = version_runtime(repository, source_sha)
+        root = task_root / ("python-release-version-edit-" + partition)
+        root.mkdir(mode=0o700)
+        batch = Batch(runtime, root, partition)
+        batch.retain = True  # Every version partition retains the original synthetic tree for VM disposal.
+        _RETAINED_BATCH = batch
+        if partition == "ordinary":
+            for case in (version_selection_refusals, version_stale_cases, version_late_noop_cases,
+                         version_unreadable_case, version_partial_rollback_case, version_incomplete_case,
+                         version_cleanup_backup_case, version_pending_cases):
+                if batch.blocked:
+                    raise FixtureUnknown()
+                case(batch)
+            version_dependency_drift_case(batch)  # Invocation-last effect Unknown, never recovered by the fixture.
+        elif partition == "committed-fsync":
+            version_committed_fsync_case(batch)
+        else:
+            version_committed_close_case(batch)  # Entire native lane-last resources Unknown.
+        # Only retained scalar DATA follows either Unknown. No source/tool/file
+        # observation, child, fresh lease or cleanup operation may start here.
+        require(tuple(batch.completed) == _VERSION_CASES[partition]
+                and len(batch.workflow_rows) == len(batch.completed)
+                and not batch.workflow_fixture_failed and batch.retain
+                and batch.blocked is (partition != "committed-fsync")
+                and all(owner.closed and owner.restored for owner in batch.owners))
+        require(all(not owner.fatal for owner in batch.owners) if partition != "committed-close"
+                else len(batch.owners) == 1 and batch.owners[0].fatal)
+        status, reason = "passed", "none"
+    except FixtureRefused:
+        reason = "hosted_guard_refused"
+    except FixtureUnknown:
+        reason = "original_custody_unknown"
+    except AssertionError:
+        reason = "fixed_case_failed"
+    except BaseException:
+        pass  # No exception, native transcript, selected private bytes or project paths.
+    report = {
+        "schemaVersion": 1, "suite": "desktop-release-version-native", "domain": "release_version",
+        "partition": partition, "status": status, "reason": reason, "bindings": bindings, "host": host,
+        "completed": batch.completed if batch is not None else [],
+        "cases": batch.workflow_rows if batch is not None else [],
+        "failedAt": batch.current if batch is not None and status != "passed" else None,
+        "retained": batch is not None and (batch.retain or status != "passed"),
+        "uncertaintyLatched": batch.blocked if batch is not None else False,
+        "injection": {"ordinary": "fixed-original-version-boundaries", "committed-fsync": "postdecision-pre-fsync",
+                      "committed-close": "postcommit-cancellation-and-positive-scope-close-return-loss"}.get(partition),
+    }
+    encoded = json.dumps(report, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
+    if len(encoded.encode("utf-8")) > 32 * 1024:
+        report.update(status="failed", reason="fixed_case_failed", bindings=None, host=None,
+                      completed=[], cases=[], failedAt=batch.current if batch is not None else None,
+                      retained=batch is not None)
+        encoded = json.dumps(report, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
+        status = "failed"
+    print(encoded)
+    return 0 if status == "passed" else 1
 
 
 def metadata_main(argv: list[str]) -> int:
@@ -3175,6 +4566,8 @@ def workflow_main(argv: list[str]) -> int:
 def main(argv: list[str]) -> int:
     global _RUN_CLAIMED, _RETAINED_BATCH
     if type(argv) is list and "--domain" in argv:
+        if argv[2:4] == ["--domain", "release_version"]:
+            return version_main(argv)
         if argv[2:4] == ["--domain", "metadata_text"]:
             return metadata_main(argv)
         return workflow_main(argv)

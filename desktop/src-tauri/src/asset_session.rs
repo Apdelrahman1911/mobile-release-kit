@@ -1985,14 +1985,21 @@ impl DocumentBinding {
     ) -> Result<T, BridgeError> {
         self.registered_edit_admit(crate::edit_protocol::EditDomain::MetadataText, project_id, enqueue)
     }
-    // Only the two explicitly registered-root domains use this same mutex and
+    pub(crate) fn release_version_edit_admit<T>(
+        &self,
+        project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
+        enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot) -> Result<T, BridgeError>,
+    ) -> Result<T, BridgeError> {
+        self.registered_edit_admit(crate::edit_protocol::EditDomain::ReleaseVersion, project_id, enqueue)
+    }
+    // Only the three explicitly registered-root domains use this same mutex and
     // proof. A proof never qualifies a writer or changes configuration custody.
     fn registered_edit_admit<T>(
         &self, domain: crate::edit_protocol::EditDomain,
         project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
         enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot) -> Result<T, BridgeError>,
     ) -> Result<T, BridgeError> {
-        if !matches!(domain, crate::edit_protocol::EditDomain::GitHubWorkflows | crate::edit_protocol::EditDomain::MetadataText) {
+        if !matches!(domain, crate::edit_protocol::EditDomain::GitHubWorkflows | crate::edit_protocol::EditDomain::MetadataText | crate::edit_protocol::EditDomain::ReleaseVersion) {
             return Err(BridgeError::invalid());
         }
         let mut state = self.lock();
@@ -2042,6 +2049,10 @@ impl DocumentBinding {
         self.registered_fixture_publish(proof, generation, crate::edit_protocol::EditDomain::MetadataText)
     }
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn version_fixture_publish(&self, proof: crate::asset_source::ProjectProbe, generation: u32) -> Result<Project, AssetError> {
+        self.registered_fixture_publish(proof, generation, crate::edit_protocol::EditDomain::ReleaseVersion)
+    }
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fn registered_fixture_publish(&self, proof: crate::asset_source::ProjectProbe, generation: u32,
         domain: crate::edit_protocol::EditDomain) -> Result<Project, AssetError> {
         let mut state = self.lock();
@@ -2051,6 +2062,7 @@ impl DocumentBinding {
         let permitted = match domain {
             crate::edit_protocol::EditDomain::GitHubWorkflows => self.inner.bridge.edits.workflow_fixture_registration_permitted(proof.path()),
             crate::edit_protocol::EditDomain::MetadataText => self.inner.bridge.edits.metadata_fixture_registration_permitted(proof.path()),
+            crate::edit_protocol::EditDomain::ReleaseVersion => self.inner.bridge.edits.version_fixture_registration_permitted(proof.path()),
             crate::edit_protocol::EditDomain::Configuration => false,
         };
         if state.stopping || state.quit_pending || state.retiring || state.lock_pending || state.slot.is_some()

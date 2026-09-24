@@ -11,7 +11,7 @@ from ..credential_requirements import ENVIRONMENT_NAMES, requirements
 from ..metadata import (ALLOWED_SUFFIXES, ANDROID_NOTE_LIMIT, MAX_ARCHIVE_SIZE,
                         MAX_FILE_COUNT, MAX_FILE_SIZE, REQUIRED_LOCALE_TEXT, TEXT_LIMITS)
 from .contracts import (ApiError, CatalogResult, CredentialHelp, GitHubConnectionHelp,
-                        RequirementDescriptor, assurance)
+                        ReleaseVersionEditGuide, RequirementDescriptor, assurance)
 from ._credential_guide import credential_guide
 
 _RESOURCE_LIMIT = 256 * 1024
@@ -178,6 +178,46 @@ def _credential_catalog() -> list[CredentialHelp]:
     return list(grouped.values())
 
 
+def release_version_edit_help() -> ReleaseVersionEditGuide:
+    """Fixed package-only help DATA, not a passive version loader or writer."""
+    from ..errors import ConfigurationError
+    from ._json import bounded_json_text
+
+    def pairs(items):
+        value = {}
+        for key, item in items:
+            if key in value:
+                raise ValueError("duplicate guide key")
+            value[key] = item
+        return value
+
+    try:
+        with files("mobile_release.api").joinpath("data", "release-version-help-v1.json").open("rb") as source:
+            raw = source.read(32 * 1024 + 1)
+        if len(raw) > 32 * 1024:
+            raise ValueError("guide bound")
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=pairs)
+        bounded_json_text(value, max_bytes=32 * 1024, max_nodes=512, max_depth=8)
+        if (type(value) is not dict or set(value) != {"schemaVersion", "fields", "actions", "limits"}
+                or type(value["schemaVersion"]) is not int or value["schemaVersion"] != 1
+                or value["limits"] != {"maxNameBytes": 64, "maxBuildBytes": 10, "maxSourceBytes": 65536}
+                or type(value["limits"]) is not dict or any(type(n) is not int for n in value["limits"].values())):
+            raise ValueError("guide shape")
+        names = {"id", "label", "requiredness", "requiredWhen", "what", "why", "where", "format", "failure"}
+        for key, identities, required in (("fields", ("name", "build"), "required"),
+                                          ("actions", ("open", "review", "save", "reload", "discard"), "optional")):
+            rows = value[key]
+            if type(rows) is not list or len(rows) != len(identities):
+                raise ValueError("guide roster")
+            for row, identity in zip(rows, identities):
+                if (type(row) is not dict or set(row) != names or row["id"] != identity or row["requiredness"] != required
+                        or any(type(text) is not str or len(text.encode("utf-8")) > 4096 for text in row.values())):
+                    raise ValueError("guide row")
+        return cast(ReleaseVersionEditGuide, value)
+    except (OSError, ValueError, TypeError, KeyError, UnicodeError, RecursionError, ConfigurationError):
+        raise ApiError("resource_unavailable", "The saved-version value guide is unavailable; no alternate resource was used") from None
+
+
 def catalog() -> CatalogResult:
     # Local import avoids a catalogue/preview cycle. Help needs no valid draft,
     # pin or successful proposal, and remains fixed selected-package data.
@@ -210,6 +250,12 @@ def catalog() -> CatalogResult:
         if error.code != "resource_unavailable":
             raise
         text_guide = None
+    try:
+        version_guide = release_version_edit_help()
+    except ApiError as error:
+        if error.code != "resource_unavailable":
+            raise
+        version_guide = None
     return {
         "schemaVersion": 1, "schema": schema, "fields": fields,
         "credentials": _credential_catalog(),
@@ -217,6 +263,7 @@ def catalog() -> CatalogResult:
         "githubSetup": github_setup_help(),
         "githubConnection": connection_guide,
         "metadataText": text_guide,
+        "releaseVersionEdit": version_guide,
         "metadata": {
             "requiredLocaleText": {platform: list(names) for platform, names in REQUIRED_LOCALE_TEXT.items()},
             "textLimits": dict(TEXT_LIMITS), "androidReleaseNoteLimit": ANDROID_NOTE_LIMIT,

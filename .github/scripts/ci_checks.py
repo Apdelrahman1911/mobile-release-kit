@@ -281,6 +281,7 @@ IGNORE_LINES = (
     ".mobile-release-init-cleanup/",
     ".mobile-release-metadata-text-prepare/", ".mobile-release-metadata-text/",
     ".mobile-release-metadata-text-cleanup/",
+    ".mobile-release-version-prepare/", ".mobile-release-version/", ".mobile-release-version-cleanup/",
 )
 SKELETON_FILES = (
     "title.txt", "short_description.txt", "full_description.txt", "changelogs/default.txt",

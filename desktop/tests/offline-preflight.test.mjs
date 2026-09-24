@@ -521,7 +521,8 @@ test('passive/evidence admission uses reciprocal callback, while source integrat
   const retire = app.indexOf('offlinePreflightControllerRef.current?.beforeWorkspaceAction(action)');
   assert.ok(retire >= 0 && retire < app.indexOf('workspaceReducer(previous, action)') && retire < app.indexOf('if (next === previous) return'));
   assert.match(app, /new OfflinePreflightController/); assert.match(app, /useSyncExternalStore\(offlinePreflight.subscribe/);
-  assert.match(app, /savedCommandBusy = useCallback\(\(\) => preflightBusy\(\) \?\? androidBusy\(\)/);
+  assert.match(app, /savedCommandBusy = useCallback\(\(excludeVersion = false\) => preflightBusy\(\) \?\? androidBusy\(\)/);
+  assert.match(app, /!excludeVersion && versionEditControllerRef\.current \? versionOwnerReason\(/);
   assert.match(app, /otherOperationReason: \(\) => androidBusy\(\) \?\? savedCommandPrerequisiteReason\(\)/);
   assert.match(app, /page !== 'releases'.*OfflinePreflight/); assert.match(app, /onApply=.*config-save-intent/);
   assert.match(app, /new GitHubConnectionController\(savedCommandBusy\)/); assert.match(app, /new CandidateEvidenceController\(savedCommandBusy\)/);

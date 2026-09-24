@@ -33,7 +33,8 @@ from test_workflow_transaction_profile import (InertGuard, ROOT, binding, direct
 
 PROFILE = tx.TypedEditProfile.METADATA_TEXT
 REVISION, TOKEN = "a" * 32, "b" * 32
-COVERED = ("\n".join(tx.IGNORE_LINES) + "\n").encode()
+# Deliberately seven-only: adding version rules must not break metadata.
+COVERED = ("\n".join(tx.METADATA_IGNORE_LINES) + "\n").encode()
 _NATIVE = {"ctypes", "_ctypes", "fcntl", "subprocess", "socket"}
 _OWNERS = {"mobile_release.init_workspace_custody", "mobile_release.build_inputs", "mobile_release.cancellation",
            "mobile_release.owned_process", "mobile_release._native_process", "mobile_release._desktop_edit_engine",
@@ -158,7 +159,7 @@ class InertLease:
         assert self.active and owner is self.workspace and not self.targets_bound
         assert platform == self.platform and locale == "en-US"
         assert len(dependencies) == 2 and all(item is self.originals[path] for item, path in zip(dependencies, text.DEPENDENCY_PATHS))
-        if not sufficient_ignore_rules(dependencies[1].data):
+        if not sufficient_ignore_rules(dependencies[1].data, tx.METADATA_IGNORE_LINES):
             raise InertFailure(InertOutcome("not_started", "not_created", "settled", "ignore_conflict"))
         self.targets_bound = True
         return SimpleNamespace(paths=self.selection.paths)
@@ -193,7 +194,7 @@ def inert_adapter():
         stack.enter_context(no_io())
         actual = tx.InitWorkspace
         for name in ("__init__", "borrowed", "observe", "apply", "apply_typed", "apply_workflows_typed",
-                     "apply_metadata_text_typed", "recover", "_fixed_recovery"):
+                     "apply_metadata_text_typed", "apply_version_typed", "recover", "_fixed_recovery"):
             stack.enter_context(patch.object(actual, name, side_effect=forbidden))
         stack.enter_context(patch.object(tx, "_rename_function", side_effect=forbidden))
         stack.enter_context(patch.object(tx, "InitWorkspace", InertWorkspace))
@@ -504,14 +505,20 @@ class MetadataTargetAndStateTests(unittest.TestCase):
 
     def test_legacy_four_ignore_lines_and_negation_refuse_before_any_target_binding(self):
         self.assertEqual(tx.STATE_NAMES, (tx.PREPARING, tx.READY, tx.CLEANUP))
-        self.assertEqual(len(tx.IGNORE_LINES), 7)
-        self.assertEqual(tx.IGNORE_LINES[4:], tuple(name + "/" for name in tx.METADATA_STATE_NAMES))
+        self.assertEqual(len(tx.IGNORE_LINES), 10)
+        self.assertEqual(len(tx.METADATA_IGNORE_LINES), 7)
+        self.assertEqual(tx.METADATA_IGNORE_LINES[4:], tuple(name + "/" for name in tx.METADATA_STATE_NAMES))
         with inert_custody() as custody, patch.object(os, "fstat", return_value=stat_value()):
             for ignored in [None, b"", ("\n".join(tx.IGNORE_LINES[:4]) + "\n").encode(), COVERED + b"!user-intent\n"]:
                 with self.subTest(ignored=ignored is None), self.assertRaises(tx.InitOperationFailure) as caught:
                     captured_target_fixture(custody, ignore=ignored)
                 self.assertEqual(caught.exception.outcome.reason, "ignore_conflict")
-            self.assertTrue(sufficient_ignore_rules(b"!earlier-intent\n" + COVERED))
+            self.assertTrue(sufficient_ignore_rules(b"!earlier-intent\n" + COVERED, tx.METADATA_IGNORE_LINES))
+            # Exercise the actual binder, not just the inert facade seam.
+            with patch.object(custody.uuid, "uuid4", return_value=SimpleNamespace(hex=REVISION)):
+                _, _, targets, _, _, _ = captured_target_fixture(custody, ignore=COVERED)
+            self.assertIs(type(targets), custody.MetadataTargets)
+            self.assertFalse(sufficient_ignore_rules(COVERED))
 
     def test_recheck_uses_original_config_ignore_and_parent_facts_without_retargeting(self):
         with inert_custody() as custody, patch.object(os, "fstat", return_value=stat_value()), \
