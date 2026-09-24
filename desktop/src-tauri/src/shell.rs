@@ -1936,7 +1936,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             if window.label() != MAIN_WINDOW { return; }
             if let tauri::WindowEvent::Destroyed = event {
                 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
-                if let Some(startup) = window.try_state::<Arc<owned_windows::Startup>>() { startup.lost(); }
+                if let Some(startup) = window.try_state::<Arc<owned_windows::Startup>>() { startup.destroyed(); }
                 if let Some(state) = window.try_state::<ShellState>() {
                     state.document.lost();
                     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]

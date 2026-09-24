@@ -8,6 +8,8 @@ use mrk_windows_installed_native::ui as native;
 pub(super) use crate::windows_startup::{EventRoute, REQUEST_URI, SCHEME};
 use crate::windows_startup::{DOCUMENT_URI, PACKAGED_URI, ReplyKind, StartupOrder};
 use std::sync::OnceLock;
+use crate::windows_startup::diagnostic::{Event, NativeError, NativeMark, Stage, UrlClass};
+use mrk_windows_installed_native::ui_startup_data::{Loss, NativeMark as NativeSignal};
 
 type StartupBook = StartupOrder<tauri::WebviewWindow, tauri::UriSchemeResponder>;
 pub(super) struct Startup {
@@ -15,6 +17,7 @@ pub(super) struct Startup {
     order: Mutex<StartupBook>,
     user_data: OnceLock<PathBuf>,
     thread: std::thread::ThreadId,
+    publication: native::StartupPublication,
 }
 #[derive(Clone, Copy)]
 enum Entered { Callback, Reply(ReplyKind), Navigation, WindowRelease }
@@ -22,7 +25,16 @@ struct OriginalCall<'a> { startup: &'a Startup, kind: Entered, returned: bool }
 impl<'a> OriginalCall<'a> {
     fn new(startup: &'a Startup, kind: Entered) -> Self {
         if matches!(kind, Entered::Callback) { startup.with_order(|book| book.callback_entered()); }
-        Self { startup, kind, returned: false }
+        let call = Self { startup, kind, returned: false };
+        // Register the existing call guard before new diagnostic bookkeeping
+        // or USER32 effects. Window release has already retired the channel.
+        match kind {
+            Entered::Reply(kind) => startup.with_order(|book| book.note(Event::ReplyEnter, u8::from(kind == ReplyKind::Refused))),
+            Entered::Navigation => startup.with_order(|book| book.note(Event::NavigateEnter, 0)),
+            Entered::Callback | Entered::WindowRelease => {},
+        }
+        if matches!(kind, Entered::Reply(_) | Entered::Navigation) { startup.publish(); }
+        call
     }
     fn returned(mut self, succeeded: bool) {
         self.startup.with_order(|book| match self.kind {
@@ -31,18 +43,26 @@ impl<'a> OriginalCall<'a> {
             Entered::Navigation => book.navigation_returned(succeeded),
             Entered::WindowRelease => book.window_release_returned(),
         });
-        self.returned = true;
+        self.returned = true; self.startup.publish();
     }
 }
 impl Drop for OriginalCall<'_> {
-    fn drop(&mut self) { if !self.returned { self.startup.unknown(); } }
+    fn drop(&mut self) { if !self.returned {
+        let (event, detail) = match self.kind {
+            Entered::Callback => (Event::CallbackAbandoned, 0),
+            Entered::Reply(kind) => (Event::ReplyAbandoned, u8::from(kind == ReplyKind::Refused)),
+            Entered::Navigation => (Event::NavigateAbandoned, 0),
+            Entered::WindowRelease => (Event::WindowReleaseAbandoned, 0),
+        };
+        self.startup.refuse(event, detail, true);
+    } }
 }
 impl Startup {
     fn with_order<T>(&self, action: impl FnOnce(&mut StartupBook) -> T) -> T {
         let (value, lost) = {
             let mut book = match self.order.lock() {
                 Ok(book) => book,
-                Err(poisoned) => { let mut book = poisoned.into_inner(); book.unknown(); book }
+                Err(poisoned) => { let mut book = poisoned.into_inner(); book.refuse(Event::Poisoned, 0, true); book }
             };
             let value = action(&mut book);
             (value, book.is_lost())
@@ -51,36 +71,106 @@ impl Startup {
         if lost { if let Some(document) = self.document.get() { document.lost(); } }
         value
     }
-    pub(super) fn lost(&self) { self.with_order(|book| book.lost()); }
-    pub(super) fn unknown(&self) { self.with_order(|book| book.unknown()); }
-    fn on_thread(&self) -> bool {
+    // All book mutation/invalidation remains in with_order. There is deliberately
+    // NO automatic publication there: native error taps must be record-only
+    // until the existing fail/on_loss has invalidated the document.
+    fn diagnostic_end(&self) -> Option<Option<std::time::Instant>> {
+        if std::thread::current().id() != self.thread { return None; }
+        let end = self.document.get()?.exit_cleanup_end();
+        if end.is_some_and(|end| std::time::Instant::now() >= end) { self.publication.seal(); return None; }
+        Some(end)
+    }
+    fn publish(&self) {
+        if self.diagnostic_end().is_none() { return; }
+        match self.with_order(|book| book.diagnostic().encode()) {
+            // The borrowed checkpoint refreshes the ORIGINAL endpoint before
+            // each property effect; it creates no endpoint, owner or retry.
+            Some(word) => self.publication.publish(word, &|| self.diagnostic_end().is_some()),
+            None => self.publication.seal(),
+        }
+    }
+    fn bind_publication(&self, window: &tauri::WebviewWindow) {
+        if self.diagnostic_end().is_none() { self.publication.seal(); return; }
+        let Some(word) = self.with_order(|book| book.diagnostic().encode()) else { self.publication.seal(); return; };
+        // Same actual already-built main argument, not discovery by title.
+        if self.diagnostic_end().is_none() { self.publication.seal(); return; }
+        match window.hwnd() {
+            Ok(hwnd) => self.publication.bind(hwnd.0 as usize, word, &|| self.diagnostic_end().is_some()),
+            Err(_) => self.publication.seal(),
+        }
+    }
+    fn refuse(&self, event: Event, detail: u8, unknown: bool) {
+        self.with_order(|book| book.refuse(event, detail, unknown));
+        self.publish(); // Only AFTER original document invalidation, never a drive().
+    }
+    pub(super) fn lost(&self) { self.refuse(Event::ExternalLoss, 0, false); }
+    pub(super) fn unknown(&self) { self.refuse(Event::ExternalUnknown, 0, true); }
+    pub(super) fn destroyed(&self) {
+        self.publication.seal(); self.refuse(Event::Destroyed, 0, false);
+    }
+    // Boundary codes: bind1, pre-WebView2, install3, protocol4, navigation5,
+    // page6, drive7, accepted-Quit8, actual-hook9. These are fixed DATA only.
+    fn on_thread(&self, boundary: u8) -> bool {
         if std::thread::current().id() == self.thread { true }
-        else { self.unknown(); false }
+        else { self.refuse(Event::WrongThread, boundary, true); false }
+    }
+    fn native_mark(&self, mark: NativeSignal) {
+        // Same schema source, separately compiled nominal types. Transfer only
+        // checked fixed codes, never a native pointer or an error Display string.
+        let Some(stage) = Stage::from_code(mark.stage as u8) else { self.publication.seal(); return; };
+        let error = match mark.error {
+            None => None,
+            Some(error) => match NativeError::from_code(error as u8) {
+                Some(error) => Some(error), None => { self.publication.seal(); return; }
+            },
+        };
+        self.with_order(|book| book.native_mark(NativeMark { stage, part: mark.part, error }));
+        // Errors are record-only until fail/on_loss (or the glue's existing
+        // loss on early install Err). No native publication before adoption.
+        if mark.error.is_none() && stage as u8 >= Stage::Adopted as u8 { self.publish(); }
+    }
+    fn native_loss(&self, reason: Loss) {
+        let event = match reason {
+            Loss::Stop => { self.with_order(|book| book.close_notified()); self.publish(); return; },
+            Loss::Operation => Event::NativeLoss, Loss::ProcessFailed => Event::ProcessFailed,
+            Loss::BrowserExited => Event::BrowserExited, Loss::CallbackUnknown => Event::NativeCallbackUnknown,
+        };
+        self.refuse(event, 0, false);
     }
     pub(super) fn bind(self: &Arc<Self>, document: DocumentBinding) -> Result<(), native::UiError> {
-        if !self.on_thread() { document.lost(); return Err(native::UiError::State); }
-        if self.document.set(document).is_err() { self.unknown(); return Err(native::UiError::State); }
+        if !self.on_thread(1) { document.lost(); return Err(native::UiError::State); }
+        if self.document.set(document).is_err() { self.refuse(Event::ContextRefused, 1, true); return Err(native::UiError::State); }
         let path = SESSION.with(|slot| {
-            let mut slot = slot.try_borrow_mut().map_err(|_| native::UiError::State)?;
-            let session = slot.as_mut().ok_or(native::UiError::State)?;
-            if session.startup.is_some() { return Err(native::UiError::State); }
-            let path = session.user_data.clone().ok_or(native::UiError::State)?;
+            let mut slot = slot.try_borrow_mut().map_err(|_| {
+                self.with_order(|book| book.note(Event::SessionBorrowRefused, 1)); native::UiError::State
+            })?;
+            let session = slot.as_mut().ok_or_else(|| {
+                self.with_order(|book| book.note(Event::SessionRefused, 1)); native::UiError::State
+            })?;
+            if session.startup.is_some() {
+                self.with_order(|book| book.note(Event::SessionRefused, 17)); return Err(native::UiError::State);
+            }
+            let path = session.user_data.clone().ok_or_else(|| {
+                self.with_order(|book| book.note(Event::SessionRefused, 33)); native::UiError::State
+            })?;
             session.startup = Some(self.clone()); Ok(path)
         });
         let path = match path { Ok(path) => path, Err(error) => { self.unknown(); return Err(error); } };
-        if self.user_data.set(path).is_err() || !self.with_order(|book| book.bind_context()) {
-            self.unknown(); return Err(native::UiError::State);
-        }
+        if self.user_data.set(path).is_err() { self.refuse(Event::ContextRefused, 2, true); return Err(native::UiError::State); }
+        if !self.with_order(|book| book.bind_context()) { self.unknown(); return Err(native::UiError::State); }
         Ok(())
     }
     pub(super) fn user_data(&self) -> Result<&std::path::Path, native::UiError> {
         self.user_data.get().map(PathBuf::as_path).ok_or(native::UiError::State)
     }
     fn observe_stop(&self) -> bool {
-        let Some(document) = self.document.get() else { self.unknown(); return false; };
+        let Some(document) = self.document.get() else { self.refuse(Event::DocumentMissing, 0, true); return false; };
         if let Some(end) = document.exit_cleanup_end() {
+            if std::time::Instant::now() >= end { self.publication.seal(); }
             self.with_order(|book| book.stop());
-            if std::time::Instant::now() >= end { self.unknown(); return false; }
+            if std::time::Instant::now() >= end {
+                self.publication.seal(); self.refuse(Event::EndpointRefused, 0, true); return false;
+            }
         }
         true
     }
@@ -90,11 +180,14 @@ impl Startup {
         // will resume this same book after the native borrow has unwound.
         let present = SESSION.with(|slot| match slot.try_borrow_mut() {
             Err(_) => None,
-            Ok(slot) => Some(slot.as_ref().and_then(|session| session.startup.as_ref())
-                .is_some_and(|original| std::ptr::eq(original.as_ref(), self))),
+            Ok(slot) => {
+                let original = slot.as_ref().and_then(|session| session.startup.as_ref());
+                let present = original.is_some_and(|original| std::ptr::eq(original.as_ref(), self));
+                Some((present, if original.is_some() { 23 } else { 7 }))
+            },
         });
-        if present == Some(false) { self.unknown(); }
-        present == Some(true)
+        if let Some((false, detail)) = present { self.refuse(Event::SessionRefused, detail, true); }
+        present.is_some_and(|(present, _)| present)
     }
     fn response(kind: ReplyKind) -> tauri::http::Response<&'static [u8]> {
         use tauri::http::{header, HeaderValue, Response, StatusCode};
@@ -112,7 +205,7 @@ impl Startup {
         response
     }
     fn drive(&self) {
-        if !self.on_thread() || !self.native_available() { return; }
+        if !self.on_thread(7) || !self.native_available() { return; }
         loop {
             if !self.observe_stop() { return; }
             if let Some(reply) = self.with_order(|book| book.take_reply()) {
@@ -135,10 +228,13 @@ impl Startup {
     }
     pub(super) fn protocol(&self, label: &str, request: tauri::http::Request<Vec<u8>>, responder: tauri::UriSchemeResponder) {
         let call = OriginalCall::new(self, Entered::Callback);
-        let on_thread = self.on_thread();
-        let exact = on_thread && label == MAIN_WINDOW && request.method() == tauri::http::Method::GET
-            && request.uri().to_string() == REQUEST_URI && request.body().is_empty();
-        self.with_order(|book| book.request(exact, responder));
+        let detail = u8::from(std::thread::current().id() != self.thread)
+            | (u8::from(label != MAIN_WINDOW) << 1) | (u8::from(request.method() != tauri::http::Method::GET) << 2)
+            | (u8::from(request.uri().to_string() != REQUEST_URI) << 3) | (u8::from(!request.body().is_empty()) << 4);
+        self.with_order(|book| book.note(Event::Protocol, detail));
+        let on_thread = self.on_thread(4);
+        let exact = detail == 0;
+        self.with_order(|book| book.request_observed(exact, detail, responder));
         // A wrong-thread responder stays in the original Unknown book; never
         // use Wry's off-thread hidden dispatch as an invented owned endpoint.
         if on_thread { self.drive(); }
@@ -146,11 +242,14 @@ impl Startup {
     }
     pub(super) fn navigation(&self, url: &tauri::Url) -> EventRoute {
         let call = OriginalCall::new(self, Entered::Callback);
-        let mut route = if self.on_thread() && self.observe_stop() {
-            self.with_order(|book| book.navigation(url.as_str() == DOCUMENT_URI, trusted_document(url)))
+        let controlled = url.as_str() == DOCUMENT_URI; let packaged = trusted_document(url);
+        let class = UrlClass::of(controlled, packaged, url.as_str() == "about:blank");
+        self.with_order(|book| book.note(Event::Navigation, class as u8));
+        let mut route = if self.on_thread(5) && self.observe_stop() {
+            self.with_order(|book| book.navigation_observed(controlled, packaged, class))
         } else { EventRoute::Rejected };
         if route == EventRoute::Packaged && !self.document.get().is_some_and(|document| document.navigation(trusted_document(url))) {
-            self.lost(); route = EventRoute::Rejected;
+            self.refuse(Event::PackagedDocumentRefused, 0, false); route = EventRoute::Rejected;
         }
         self.drive();
         if self.with_order(|book| book.is_lost()) { route = EventRoute::Rejected; }
@@ -158,9 +257,12 @@ impl Startup {
     }
     pub(super) fn page(&self, payload: &tauri::webview::PageLoadPayload<'_>) -> EventRoute {
         let call = OriginalCall::new(self, Entered::Callback);
-        let mut route = if self.on_thread() && self.observe_stop() {
-            self.with_order(|book| book.page(payload.url().as_str() == DOCUMENT_URI, trusted_document(payload.url()),
-                matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)))
+        let controlled = payload.url().as_str() == DOCUMENT_URI; let packaged = trusted_document(payload.url());
+        let finished = matches!(payload.event(), tauri::webview::PageLoadEvent::Finished);
+        let class = UrlClass::of(controlled, packaged, payload.url().as_str() == "about:blank");
+        self.with_order(|book| book.note(if finished { Event::Finished } else { Event::Started }, class as u8));
+        let mut route = if self.on_thread(6) && self.observe_stop() {
+            self.with_order(|book| book.page_observed(controlled, packaged, finished, class))
         } else { EventRoute::Rejected };
         if route == EventRoute::Packaged {
             if let Some(document) = self.document.get() {
@@ -168,7 +270,7 @@ impl Startup {
                     tauri::webview::PageLoadEvent::Started => lifetime.started(trusted_document(payload.url())),
                     tauri::webview::PageLoadEvent::Finished => lifetime.finished(trusted_document(payload.url())),
                 });
-            } else { self.unknown(); }
+            } else { self.refuse(Event::DocumentMissing, 0, true); }
         }
         self.drive();
         if self.with_order(|book| book.is_lost()) { route = EventRoute::Rejected; }
@@ -177,12 +279,20 @@ impl Startup {
     pub(super) fn first_party_phase(&self) -> bool { self.with_order(|book| book.first_party_phase()) }
     fn finality(&self) -> bool { self.with_order(|book| book.finality()) }
     fn close_for_exit(&self, original_end: std::time::Instant) -> NativeReturn {
-        if !self.on_thread() || !self.document.get().is_some_and(|document| document.exit_cleanup_end() == Some(original_end))
-            || std::time::Instant::now() >= original_end {
-            self.unknown(); return Err(native::UiError::CleanupUnknown);
+        let admitted = std::thread::current().id() == self.thread
+            && self.document.get().is_some_and(|document| document.exit_cleanup_end() == Some(original_end))
+            && std::time::Instant::now() < original_end;
+        if !admitted {
+            // Seal BEFORE any refusal can reach publication, including an
+            // invalid supplied endpoint while the document's endpoint is live.
+            self.publication.seal();
+            let _ = self.on_thread(8); // Keep the original thread refusal, then original close refusal.
+            self.refuse(Event::EndpointRefused, 0, true);
+            return Err(native::UiError::CleanupUnknown);
         }
         self.with_order(|book| book.stop());
         self.drive();
+        self.publication.retire(&|| self.diagnostic_end() == Some(Some(original_end))); // At most once, before clone release.
         if let Some(window) = self.with_order(|book| book.take_window_for_close()) {
             let call = OriginalCall::new(self, Entered::WindowRelease);
             drop(window); // Break the original app-manager cycle on the same STA.
@@ -237,46 +347,60 @@ fn startup_refusal(error: native::UiError) {
 }
 pub(super) fn startup() -> Arc<Startup> {
     Arc::new(Startup { document: OnceLock::new(), order: Mutex::new(StartupBook::default()),
-        user_data: OnceLock::new(), thread: std::thread::current().id() })
+        user_data: OnceLock::new(), thread: std::thread::current().id(), publication: native::StartupPublication::default() })
 }
 pub(super) fn before_webview(startup: &Startup) -> Result<(), native::UiError> {
-    if !startup.on_thread() { return Err(native::UiError::State); }
+    if !startup.on_thread(2) { return Err(native::UiError::State); }
     SESSION.with(|slot| {
-        let mut slot = slot.try_borrow_mut().map_err(|_| native::UiError::State)?;
-        let session = slot.as_mut().ok_or(native::UiError::State)?;
+        let mut slot = slot.try_borrow_mut().map_err(|_| {
+            startup.with_order(|book| book.note(Event::SessionBorrowRefused, 2)); native::UiError::State
+        })?;
+        let session = slot.as_mut().ok_or_else(|| {
+            startup.with_order(|book| book.note(Event::SessionRefused, 2)); native::UiError::State
+        })?;
         if !session.startup.as_ref().is_some_and(|original| std::ptr::eq(original.as_ref(), startup)) {
-            return Err(native::UiError::State);
+            startup.with_order(|book| book.note(Event::SessionRefused, 18)); return Err(native::UiError::State);
         }
         session.original.before_webview()
     })?;
     if startup.with_order(|book| book.construction_started()) { Ok(()) } else { Err(native::UiError::State) }
 }
 pub(super) fn install(window: &tauri::WebviewWindow, startup: Arc<Startup>) {
-    if !startup.on_thread() { return; }
-    let registered = startup.with_order(|book| book.register_window(window.clone()));
+    if !startup.on_thread(3) { return; }
+    let registered = startup.with_order(|book| { book.note(Event::Window, 0); book.register_window(window.clone()) });
+    startup.bind_publication(window); // Also reports a first rejection BEFORE registration.
     if registered.is_err() { drop(registered); return; }
-    if !startup.with_order(|book| book.queue_hook()) { return; }
+    if !startup.with_order(|book| book.queue_hook()) { startup.publish(); return; }
+    startup.publish();
     let callback = startup.clone();
-    if window.with_webview(move |platform| {
+    let scheduled = window.with_webview(move |platform| {
         let call = OriginalCall::new(&callback, Entered::Callback);
-        if !callback.on_thread() || !callback.with_order(|book| book.enter_hook()) {
-            call.returned(true); return;
-        }
+        if !callback.on_thread(9) || !callback.with_order(|book| book.enter_hook()) { call.returned(true); return; }
+        callback.publish();
         let lost = callback.clone();
-        let installed = SESSION.with(|slot| slot.try_borrow_mut().map_err(|_| native::UiError::State)?
-            .as_mut().ok_or(native::UiError::State)?.original.install(platform.controller(), platform.environment(),
-                Box::new(move || lost.lost())));
+        let installed = SESSION.with(|slot| {
+            let mut slot = slot.try_borrow_mut().map_err(|_| {
+                callback.with_order(|book| book.note(Event::SessionBorrowRefused, 9)); native::UiError::State
+            })?;
+            let session = slot.as_mut().ok_or_else(|| {
+                callback.with_order(|book| book.note(Event::SessionRefused, 9)); native::UiError::State
+            })?;
+            session.original.install(platform.controller(), platform.environment(),
+                Box::new(move |reason| lost.native_loss(reason)), &|mark| callback.native_mark(mark))
+        });
+        if installed.is_ok() { callback.with_order(|book| book.note(Event::NativeReturn, 0)); }
         if installed.is_ok() && callback.with_order(|book| book.accepts_hook_return()) {
             if let Some(document) = callback.document.get() {
                 document.hook_installed();
-                if callback.with_order(|book| book.hook_installed()) {
-                    diagnostic(b"MRKDBG_DESKTOP_BOOTSTRAP=hook-installed\n");
-                }
-            } else { callback.unknown(); }
-        } else { callback.lost(); }
-        // SESSION's native install borrow has ended before an original reply.
-        callback.drive(); call.returned(true);
-    }).is_err() { startup.unknown(); }
+                if callback.with_order(|book| book.hook_installed()) { diagnostic(b"MRKDBG_DESKTOP_BOOTSTRAP=hook-installed\n"); }
+            } else { callback.refuse(Event::DocumentMissing, 0, true); }
+        } else { callback.refuse(Event::HookReturnRefused, 0, false); }
+        // SESSION has ended. All failure publication follows the SAME original
+        // on_loss/document invalidation (including early native install Err).
+        callback.publish(); callback.drive(); call.returned(true);
+    });
+    if scheduled.is_err() { startup.refuse(Event::HookDispatchRefused, 0, true); }
+    else { startup.with_order(|book| book.note(Event::HookDispatch, 0)); startup.publish(); }
 }
 pub(super) fn build_failed() {
     // Wry may have created a browser before a later build/with_webview failure.

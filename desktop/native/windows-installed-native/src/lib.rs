@@ -31,6 +31,8 @@ mod decode;
 mod security;
 mod loader;
 pub use loader::SystemImage;
+// Pure closed DATA is also used by the headless Windows startup scalar route.
+pub mod ui_startup_data;
 mod project;
 pub use project::{ProjectBook, project_path_hint};
 #[cfg(feature = "desktop-ui")]

@@ -10,6 +10,8 @@ use windows::{core::{Interface, PCWSTR, PWSTR}, Win32::{Foundation::HWND,
     System::Com::{CoGetApartmentType, APTTYPE, APTTYPEQUALIFIER, APTTYPE_MAINSTA, APTTYPE_STA}}};
 use windows_sys::Win32::{System::{Registry as R, RemoteDesktop as RD, StationsAndDesktops as D}, UI::WindowsAndMessaging as W};
 use webview2_com::Microsoft::Web::WebView2::Win32 as WV;
+use crate::ui_startup_data::{Loss, NativeError, NativeMark, PublicationOrder, Stage, Word};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
 #[path = "ui_profile.rs"]
 mod profile;
@@ -30,6 +32,12 @@ pub enum UiError {
     RuntimeOverrides, UserDataParent, NativeFailure, CleanupUnknown, State,
 }
 impl UiError {
+    fn diagnostic(self) -> NativeError { match self {
+        Self::OrdinaryContext => NativeError::Ordinary, Self::InteractiveDesktop => NativeError::Interactive,
+        Self::ManagedRuntimeUnavailable => NativeError::Runtime, Self::RuntimeOverrides => NativeError::Overrides,
+        Self::UserDataParent => NativeError::Data, Self::NativeFailure => NativeError::Native,
+        Self::CleanupUnknown => NativeError::Unknown, Self::State => NativeError::State,
+    } }
     pub fn label(self) -> &'static str { match self {
         Self::OrdinaryContext => "ordinary-context", Self::InteractiveDesktop => "interactive-desktop",
         Self::ManagedRuntimeUnavailable => "managed-webview2", Self::RuntimeOverrides => "webview2-overrides",
@@ -41,6 +49,85 @@ impl std::fmt::Display for UiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(self.label()) }
 }
 impl std::error::Error for UiError {}
+
+// One ordinary diagnostic name; no caller-selected name or handle payload.
+const STARTUP_PROPERTY: &[u16] = &[77,82,75,46,87,105,110,100,111,119,115,46,78,111,114,109,97,108,83,116,97,114,116,117,112,46,68,105,97,103,110,111,115,116,105,99,46,118,49,0];
+#[derive(Default)]
+pub struct StartupPublication {
+    order: PublicationOrder, hwnd: AtomicUsize, thread: AtomicU32, process: AtomicU32,
+    sealed: AtomicBool, removal: AtomicU8,
+}
+impl StartupPublication {
+    pub fn seal(&self) { self.sealed.store(true, Ordering::SeqCst); self.order.seal(); }
+    // Borrowed, synchronous checkpoint only; never stored/boxed. The caller
+    // rereads the SAME original document's current accepted-Quit endpoint on
+    // every boundary, including when Quit began after this publication entered.
+    // A once-captured None must not authorize later effects past a new STOP.
+    fn admitted(&self, permitted: &dyn Fn() -> bool) -> bool {
+        if self.sealed.load(Ordering::SeqCst) { return false; }
+        if !permitted() { self.seal(); return false; }
+        true
+    }
+    fn identity(&self, permitted: &dyn Fn() -> bool) -> bool {
+        if !self.admitted(permitted) { return false; }
+        if unsafe { T::GetCurrentThreadId() } != self.thread.load(Ordering::SeqCst) { return false; }
+        if !self.admitted(permitted) { return false; }
+        let mut process = 0;
+        let thread = unsafe { W::GetWindowThreadProcessId(self.hwnd.load(Ordering::SeqCst) as F::HWND, &mut process) };
+        thread == self.thread.load(Ordering::SeqCst) && process == self.process.load(Ordering::SeqCst) && self.admitted(permitted)
+    }
+    fn get(&self, permitted: &dyn Fn() -> bool) -> Option<u64> {
+        if !self.admitted(permitted) { return None; }
+        let raw = (unsafe { W::GetPropW(self.hwnd.load(Ordering::SeqCst) as F::HWND, STARTUP_PROPERTY.as_ptr()) }) as usize as u64;
+        self.admitted(permitted).then_some(raw)
+    }
+    fn set(&self, word: u64, permitted: &dyn Fn() -> bool) -> bool {
+        if !self.admitted(permitted) || !self.order.entered() { return false; }
+        let returned = unsafe { W::SetPropW(self.hwnd.load(Ordering::SeqCst) as F::HWND,
+            STARTUP_PROPERTY.as_ptr(), word as usize as F::HANDLE) } != 0;
+        returned && self.admitted(permitted) && self.get(permitted) == Some(word)
+    }
+    pub fn bind(&self, hwnd: usize, word: u64, permitted: &dyn Fn() -> bool) {
+        if !self.admitted(permitted) || !self.order.bind() { return; }
+        let success = (|| {
+            if hwnd == 0 || Word::decode(word).is_none() || !self.admitted(permitted) { return false; }
+            self.hwnd.store(hwnd, Ordering::SeqCst);
+            self.thread.store(unsafe { T::GetCurrentThreadId() }, Ordering::SeqCst);
+            if !self.admitted(permitted) { return false; }
+            self.process.store(unsafe { T::GetCurrentProcessId() }, Ordering::SeqCst);
+            self.identity(permitted) && self.get(permitted) == Some(0) && self.set(word, permitted)
+        })();
+        self.order.returned(word, success);
+    }
+    pub fn publish(&self, word: u64, permitted: &dyn Fn() -> bool) {
+        if !self.admitted(permitted) { return; }
+        let Some(previous) = self.order.begin(word) else { return; };
+        // Non-atomic hygiene only: no ownership/authentication claim against a
+        // concurrent writer. Any conflict/error disables all later attempts.
+        let success = self.identity(permitted) && self.get(permitted) == Some(previous) && self.set(word, permitted);
+        self.order.returned(word, success);
+    }
+    pub fn retire(&self, permitted: &dyn Fn() -> bool) {
+        let Some(previous) = self.order.retire() else { self.seal(); return; };
+        // Retire the lifecycle before entry. The caller's checkpoint additionally
+        // requires the exact supplied original endpoint at EVERY effect; a
+        // concurrent/recursive Destroyed seal stops all later native effects.
+        self.removal.store(1, Ordering::SeqCst);
+        if self.identity(permitted) && self.get(permitted) == Some(previous) && self.admitted(permitted) {
+            let returned = (unsafe { W::RemovePropW(self.hwnd.load(Ordering::SeqCst) as F::HWND, STARTUP_PROPERTY.as_ptr()) }) as usize as u64;
+            self.removal.store(if returned == previous && self.admitted(permitted) { 2 } else { 3 }, Ordering::SeqCst);
+        } else { self.removal.store(3, Ordering::SeqCst); }
+        // The integer is never freed/CloseHandle'd. No removal bit gates native
+        // finality and no missing property is claimed as cleanup success.
+        self.seal();
+    }
+}
+pub(crate) fn startup_property(hwnd: F::HWND) -> u64 {
+    // Caller is the existing exact-root owner, with its original Clock checks.
+    // NULL has no invented GetLastError/no-window meaning.
+    (unsafe { W::GetPropW(hwnd, STARTUP_PROPERTY.as_ptr()) }) as usize as u64
+}
+
 type UiResult<T> = std::result::Result<T, UiError>;
 fn mapped<T>(value: Result<T>, refusal: UiError) -> UiResult<T> {
     value.map_err(|error| if error == Error::Unknown { UiError::CleanupUnknown } else { refusal })
@@ -1003,20 +1090,21 @@ impl<T: Copy + Default> Drop for ComValue<T> {
 }
 struct WatchCallbacks {
     thread: u32, depth: Cell<usize>, lost: Cell<bool>, unknown: Cell<bool>,
-    browser: Cell<u32>, exited: Cell<bool>, on_loss: Box<dyn Fn()>,
+    browser: Cell<u32>, exited: Cell<bool>, on_loss: Box<dyn Fn(Loss)>,
     exit_args: OnceCell<ComOriginal<WV::ICoreWebView2BrowserProcessExitedEventArgs>>, exit_pid: ComValue<u32>,
 }
 impl WatchCallbacks {
-    fn lost(&self) {
+    fn lost(&self, reason: Loss) {
+        let reason = if self.unknown.get() { Loss::CallbackUnknown } else { reason };
         if !self.lost.replace(true)
-            && std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.on_loss)())).is_err() { self.unknown.set(true); }
+            && std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.on_loss)(reason))).is_err() { self.unknown.set(true); }
     }
     fn enter(&self) -> CallbackReturn<'_> {
         if unsafe { T::GetCurrentThreadId() } != self.thread { self.unknown.set(true); }
         self.depth.set(self.depth.get().saturating_add(1)); CallbackReturn(self)
     }
     fn browser_exited(&self, args: Option<WV::ICoreWebView2BrowserProcessExitedEventArgs>) {
-        if self.exit_args.get().is_some() { self.unknown.set(true); self.lost(); return; }
+        if self.exit_args.get().is_some() { self.unknown.set(true); self.lost(Loss::BrowserExited); return; }
         let observed = (|| {
             let args = args.ok_or(UiError::NativeFailure)?;
             // Retain this callback's actual args before its getter, including
@@ -1030,7 +1118,7 @@ impl WatchCallbacks {
             Ok(id) if id != 0 && id == self.browser.get() && !self.exited.replace(true) => {},
             _ => self.unknown.set(true),
         }
-        self.lost();
+        self.lost(Loss::BrowserExited);
     }
 }
 struct CallbackReturn<'a>(&'a WatchCallbacks);
@@ -1053,6 +1141,7 @@ struct DocumentWatch {
     parent_output: ComValue<HWND>, browser_output: ComValue<u32>,
     process: F::HANDLE,
     parent: HWND,
+    install_stage: Cell<(Stage, u8)>,
     begun: bool, installed: bool, close_entered: bool, controller_closed: bool,
     process_close_entered: bool, released: bool, unknown: bool,
 }
@@ -1063,18 +1152,28 @@ impl DocumentWatch {
         failed_handler: None, exited_handler: None, failed_token: HookToken::new(), exited_token: HookToken::new(), callbacks: None,
         version: NativeText::new(), user_data: NativeText::new(), parent_output: ComValue::new(), browser_output: ComValue::new(),
         process: null_mut(), parent: HWND::default(),
+        install_stage: Cell::new((Stage::None, 0)),
         begun: false, installed: false, close_entered: false, controller_closed: false,
         process_close_entered: false, released: false, unknown: false,
     } }
+    fn stage(&self, stage: Stage, record: &dyn Fn(NativeMark)) {
+        self.install_stage.set((stage, 0)); record(NativeMark { stage, part: 0, error: None });
+    }
+    fn substage(&self, part: u8, record: &dyn Fn(NativeMark)) {
+        let (stage, _) = self.install_stage.get();
+        self.install_stage.set((stage, part)); record(NativeMark { stage, part, error: None });
+    }
     fn callbacks(&self) -> UiResult<&WatchCallbacks> { self.callbacks.as_deref().ok_or(UiError::State) }
     fn fail<T>(&mut self, error: UiError) -> UiResult<T> {
         if error == UiError::CleanupUnknown { self.unknown = true; }
-        if let Some(callbacks) = &self.callbacks { callbacks.lost(); }
+        if let Some(callbacks) = &self.callbacks { callbacks.lost(Loss::Operation); }
         Err(error)
     }
     fn install(&mut self, controller: WV::ICoreWebView2Controller, environment: WV::ICoreWebView2Environment,
-        prerequisites: &mut Prerequisites, data: &Path, on_loss: Box<dyn Fn()>) -> UiResult<()> {
-        if self.begun { return Err(UiError::State); }
+        prerequisites: &mut Prerequisites, data: &Path, on_loss: Box<dyn Fn(Loss)>, record: &dyn Fn(NativeMark)) -> UiResult<()> {
+        // Before adoption these taps are record-only, never USER32 publication.
+        self.stage(Stage::Watch, record);
+        if self.begun { record(NativeMark { stage: Stage::Watch, part: 0, error: Some(NativeError::State) }); return Err(UiError::State); }
         self.begun = true;
         // Adoption precedes every post-dispatch/STOP/admission observation.
         self.controller = Some(ComOriginal::new(controller));
@@ -1082,77 +1181,153 @@ impl DocumentWatch {
         self.callbacks = Some(Rc::new(WatchCallbacks { thread: unsafe { T::GetCurrentThreadId() },
             depth: Cell::new(0), lost: Cell::new(false), unknown: Cell::new(false), browser: Cell::new(0),
             exited: Cell::new(false), on_loss, exit_args: OnceCell::new(), exit_pid: ComValue::new() }));
-        let result = self.install_inner(prerequisites, data);
-        match result { Ok(()) => { self.installed = true; Ok(()) }, Err(error) => self.fail(error) }
+        self.stage(Stage::Adopted, record);
+        let result = self.install_inner(prerequisites, data, record);
+        match result {
+            Ok(()) => { self.installed = true; self.stage(Stage::Complete, record); Ok(()) },
+            Err(error) => {
+                // Record the actual returned error BEFORE fail/on_loss. The
+                // borrowed error tap is record-only until that original loss.
+                let (stage, part) = self.install_stage.get();
+                record(NativeMark { stage, part, error: Some(error.diagnostic()) });
+                self.fail(error)
+            }
+        }
     }
-    fn install_inner(&mut self, prerequisites: &mut Prerequisites, data: &Path) -> UiResult<()> {
-        sta()?; prerequisites.recheck()?;
-        let controller = self.controller.as_ref().ok_or(UiError::State)?.get()?;
+    fn install_inner(&mut self, prerequisites: &mut Prerequisites, data: &Path, record: &dyn Fn(NativeMark)) -> UiResult<()> {
+        self.stage(Stage::Sta, record); sta()?;
+        self.stage(Stage::Prerequisites, record); prerequisites.recheck()?;
+        self.stage(Stage::Controller, record);
+        let controller = self.controller.as_ref().ok_or(UiError::State)?;
+        self.substage(1, record); let controller = controller.get()?;
+        self.stage(Stage::CoreOutput, record);
         let core_output = self.core_output.begin()?;
+        self.stage(Stage::Core, record);
         let core = unsafe { (controller.vtable().CoreWebView2)(controller.as_raw(), core_output) };
         self.core = Some(ComOriginal::new(self.core_output.complete(core)?));
+        self.stage(Stage::ParentOutput, record);
         let parent_output = self.parent_output.begin()?;
+        self.stage(Stage::Parent, record);
         self.parent = self.parent_output.complete(unsafe { controller.ParentWindow(parent_output) })?;
+        self.stage(Stage::ParentPresent, record);
         let mut process_id = 0;
-        if self.parent.0.is_null() || unsafe { W::GetWindowThreadProcessId(self.parent.0, &mut process_id) } != prerequisites.thread
-            || process_id != unsafe { T::GetCurrentProcessId() } { return Err(UiError::OrdinaryContext); }
-        let environment = self.environment.as_ref().ok_or(UiError::State)?.get()?;
+        if self.parent.0.is_null() { return Err(UiError::OrdinaryContext); }
+        self.stage(Stage::ParentIdentity, record);
+        if unsafe { W::GetWindowThreadProcessId(self.parent.0, &mut process_id) } != prerequisites.thread { return Err(UiError::OrdinaryContext); }
+        self.stage(Stage::ParentProcess, record);
+        if process_id != unsafe { T::GetCurrentProcessId() } { return Err(UiError::OrdinaryContext); }
+        self.stage(Stage::Environment, record);
+        let environment = self.environment.as_ref().ok_or(UiError::State)?;
+        self.substage(1, record); let environment = environment.get()?;
+        self.stage(Stage::Environment5Output, record);
         let environment5_output = self.environment5_output.begin()?;
+        self.stage(Stage::Environment5, record);
         let environment5 = unsafe { (environment.vtable().base__.QueryInterface)(environment.as_raw(),
             &WV::ICoreWebView2Environment5::IID, environment5_output) };
         self.environment5 = Some(ComOriginal::new(self.environment5_output.complete(environment5)?));
+        self.stage(Stage::Environment7Output, record);
         let environment7_output = self.environment7_output.begin()?;
+        self.stage(Stage::Environment7, record);
         let environment7 = unsafe { (environment.vtable().base__.QueryInterface)(environment.as_raw(),
             &WV::ICoreWebView2Environment7::IID, environment7_output) };
         self.environment7 = Some(ComOriginal::new(self.environment7_output.complete(environment7)?));
+        self.stage(Stage::Version, record);
         self.version.entered = true;
         let version = unsafe { environment.BrowserVersionString(&mut self.version.value) };
         self.version.complete(version)?;
-        if self.version.read(96)? != prerequisites.facts.as_ref().ok_or(UiError::State)?.runtime_version { return Err(UiError::ManagedRuntimeUnavailable); }
+        {
+            self.stage(Stage::VersionText, record); let version = self.version.read(96)?;
+            self.stage(Stage::VersionMatch, record);
+            if version != prerequisites.facts.as_ref().ok_or(UiError::State)?.runtime_version { return Err(UiError::ManagedRuntimeUnavailable); }
+        }
+        self.stage(Stage::FolderEnvironment, record);
         self.user_data.entered = true;
-        let folder = unsafe { self.environment7.as_ref().ok_or(UiError::State)?.get()?.UserDataFolder(&mut self.user_data.value) };
+        let environment7 = self.environment7.as_ref().ok_or(UiError::State)?;
+        self.substage(1, record); let environment7 = environment7.get()?;
+        self.stage(Stage::Folder, record);
+        let folder = unsafe { environment7.UserDataFolder(&mut self.user_data.value) };
         self.user_data.complete(folder)?;
-        if Path::new(&self.user_data.read(NAME_UNITS)?) != data { return Err(UiError::UserDataParent); }
+        {
+            self.stage(Stage::FolderText, record); let folder = self.user_data.read(NAME_UNITS)?;
+            self.stage(Stage::FolderMatch, record);
+            if Path::new(&folder) != data { return Err(UiError::UserDataParent); }
+        }
+        self.stage(Stage::FailedHandler, record);
         let callbacks = self.callbacks.as_ref().ok_or(UiError::State)?.clone();
         self.failed_handler = Some(ComOriginal::new(webview2_com::ProcessFailedEventHandler::create(Box::new(move |_, _| {
-            let _return = callbacks.enter(); callbacks.lost(); Ok(())
+            let _return = callbacks.enter(); callbacks.lost(Loss::ProcessFailed); Ok(())
         }))));
+        self.stage(Stage::ExitedHandler, record);
         let callbacks = self.callbacks.as_ref().ok_or(UiError::State)?.clone();
         self.exited_handler = Some(ComOriginal::new(webview2_com::BrowserProcessExitedEventHandler::create(Box::new(move |_, args| {
-            let _return = callbacks.enter();
-            callbacks.browser_exited(args); Ok(())
+            let _return = callbacks.enter(); callbacks.browser_exited(args); Ok(())
         }))));
+        self.stage(Stage::BrowserOutput, record);
         let browser_output = self.browser_output.begin()?;
-        let pid = self.browser_output.complete(unsafe {
-            self.core.as_ref().ok_or(UiError::State)?.get()?.BrowserProcessId(browser_output)
-        })?;
-        if pid == 0 || self.callbacks()?.lost.get() { return Err(UiError::NativeFailure); }
+        self.stage(Stage::BrowserCore, record);
+        let core = self.core.as_ref().ok_or(UiError::State)?;
+        self.substage(1, record); let core = core.get()?;
+        self.stage(Stage::BrowserPid, record);
+        let pid = self.browser_output.complete(unsafe { core.BrowserProcessId(browser_output) })?;
+        self.stage(Stage::BrowserPidCheck, record);
+        if pid == 0 { return Err(UiError::NativeFailure); }
+        self.stage(Stage::BrowserLost, record);
+        if self.callbacks()?.lost.get() { return Err(UiError::NativeFailure); }
+        self.stage(Stage::BrowserBind, record);
         self.callbacks()?.browser.set(pid);
+        self.stage(Stage::ProcessOpen, record);
         self.process = unsafe { T::OpenProcess(T::PROCESS_QUERY_LIMITED_INFORMATION | FS::SYNCHRONIZE, 0, pid) };
+        self.stage(Stage::ProcessHandle, record);
         if !valid_handle(self.process) { return Err(UiError::NativeFailure); }
-        if unsafe { T::GetProcessId(self.process) } != pid
-            || unsafe { T::WaitForSingleObject(self.process, 0) } != F::WAIT_TIMEOUT { return Err(UiError::NativeFailure); }
+        self.stage(Stage::ProcessIdentity, record);
+        if unsafe { T::GetProcessId(self.process) } != pid { return Err(UiError::NativeFailure); }
+        self.stage(Stage::InitialWait, record);
+        if unsafe { T::WaitForSingleObject(self.process, 0) } != F::WAIT_TIMEOUT { return Err(UiError::NativeFailure); }
+        self.stage(Stage::ImageQuery, record);
         let mut image = [0u16; NAME_UNITS]; let mut count = image.len() as u32;
-        if unsafe { T::QueryFullProcessImageNameW(self.process, 0, image.as_mut_ptr(), &mut count) } == 0
-            || count == 0 || count as usize >= image.len() { return Err(UiError::ManagedRuntimeUnavailable); }
+        if unsafe { T::QueryFullProcessImageNameW(self.process, 0, image.as_mut_ptr(), &mut count) } == 0 { return Err(UiError::ManagedRuntimeUnavailable); }
+        self.stage(Stage::ImageLength, record);
+        if count == 0 { return Err(UiError::ManagedRuntimeUnavailable); }
+        self.stage(Stage::ImageFit, record);
+        if count as usize >= image.len() { return Err(UiError::ManagedRuntimeUnavailable); }
+        self.stage(Stage::ImageText, record);
         let path = String::from_utf16(&image[..count as usize]).map_err(|_| UiError::ManagedRuntimeUnavailable)?;
+        self.stage(Stage::ImageMatch, record);
         if !path.eq_ignore_ascii_case(&prerequisites.image_dos) { return Err(UiError::ManagedRuntimeUnavailable); }
         // Correspondence with the SAME protected executable original, not just
         // a version string, a numeric PID, or a new pathname open after launch.
+        self.stage(Stage::ProtectedImage, record);
         let image = prerequisites.image.ok_or(UiError::State)?;
-        if mapped(prerequisites.paths[image].observe(&mut prerequisites.native), UiError::ManagedRuntimeUnavailable)?
-            != prerequisites.paths[image].metadata { return Err(UiError::ManagedRuntimeUnavailable); }
+        let observed = mapped(prerequisites.paths[image].observe(&mut prerequisites.native), UiError::ManagedRuntimeUnavailable)?;
+        self.stage(Stage::ProtectedMatch, record);
+        if observed != prerequisites.paths[image].metadata { return Err(UiError::ManagedRuntimeUnavailable); }
         // Expected browser identity is installed before either callback can run.
+        self.stage(Stage::FailedCore, record);
         self.failed_token.entered = true;
-        let registered = unsafe { self.core.as_ref().ok_or(UiError::State)?.get()?.add_ProcessFailed(
-            self.failed_handler.as_ref().ok_or(UiError::State)?.get()?, &mut self.failed_token.value) };
+        let core = self.core.as_ref().ok_or(UiError::State)?;
+        self.substage(1, record); let core = core.get()?;
+        self.stage(Stage::FailedHandlerSlot, record);
+        let handler = self.failed_handler.as_ref().ok_or(UiError::State)?;
+        self.substage(1, record); let handler = handler.get()?;
+        self.stage(Stage::FailedRegistration, record);
+        let registered = unsafe { core.add_ProcessFailed(handler, &mut self.failed_token.value) };
         self.failed_token.complete(registered)?;
+        self.stage(Stage::ExitedEnvironment, record);
         self.exited_token.entered = true;
-        let registered = unsafe { self.environment5.as_ref().ok_or(UiError::State)?.get()?.add_BrowserProcessExited(
-            self.exited_handler.as_ref().ok_or(UiError::State)?.get()?, &mut self.exited_token.value) };
+        let environment5 = self.environment5.as_ref().ok_or(UiError::State)?;
+        self.substage(1, record); let environment5 = environment5.get()?;
+        self.stage(Stage::ExitedHandlerSlot, record);
+        let handler = self.exited_handler.as_ref().ok_or(UiError::State)?;
+        self.substage(1, record); let handler = handler.get()?;
+        self.stage(Stage::ExitedRegistration, record);
+        let registered = unsafe { environment5.add_BrowserProcessExited(handler, &mut self.exited_token.value) };
         self.exited_token.complete(registered)?;
+        self.stage(Stage::FinalWait, record);
         if unsafe { T::WaitForSingleObject(self.process, 0) } != F::WAIT_TIMEOUT { return Err(UiError::NativeFailure); }
-        if self.callbacks()?.lost.get() || self.callbacks()?.unknown.get() { return Err(UiError::NativeFailure); }
+        self.stage(Stage::CallbackState, record);
+        if self.callbacks()?.lost.get() { return Err(UiError::NativeFailure); }
+        self.stage(Stage::CallbackUnknown, record);
+        if self.callbacks()?.unknown.get() { return Err(UiError::NativeFailure); }
         Ok(())
     }
     fn parent(&self, kind: DialogKind) -> UiResult<DialogParent> {
@@ -1168,7 +1343,7 @@ impl DocumentWatch {
         cleanup_checkpoint(end)?; sta()?;
         if self.unknown || self.callbacks()?.unknown.get() || self.callbacks()?.depth.get() != 0 { return Err(UiError::CleanupUnknown); }
         if self.close_entered { return if self.controller_closed { Ok(()) } else { Err(UiError::CleanupUnknown) }; }
-        self.close_entered = true; self.callbacks()?.lost();
+        self.close_entered = true; self.callbacks()?.lost(Loss::Stop);
         // Remove the core hook while the core is still open. Calling core event
         // methods after Controller.Close can fail with object-disconnected.
         if let Some(token) = self.failed_token.token()? {
@@ -1259,10 +1434,21 @@ impl ShellSession {
         self.construction_started = true; Ok(())
     }
     pub fn install(&mut self, controller: WV::ICoreWebView2Controller, environment: WV::ICoreWebView2Environment,
-        on_loss: Box<dyn Fn()>) -> UiResult<()> {
-        if !self.construction_started || self.unknown { return Err(UiError::State); }
-        let path = self.profile.path()?.to_path_buf();
-        self.watch.install(controller, environment, &mut self.prerequisites, &path, on_loss)
+        on_loss: Box<dyn Fn(Loss)>, record: &dyn Fn(NativeMark)) -> UiResult<()> {
+        record(NativeMark { stage: Stage::Session, part: 0, error: None });
+        if !self.construction_started {
+            record(NativeMark { stage: Stage::Session, part: 0, error: Some(NativeError::State) }); return Err(UiError::State);
+        }
+        record(NativeMark { stage: Stage::SessionState, part: 0, error: None });
+        if self.unknown {
+            record(NativeMark { stage: Stage::SessionState, part: 0, error: Some(NativeError::State) }); return Err(UiError::State);
+        }
+        record(NativeMark { stage: Stage::Profile, part: 0, error: None });
+        let path = match self.profile.path() {
+            Ok(path) => path.to_path_buf(),
+            Err(error) => { record(NativeMark { stage: Stage::Profile, part: 0, error: Some(error.diagnostic()) }); return Err(error); }
+        };
+        self.watch.install(controller, environment, &mut self.prerequisites, &path, on_loss, record)
     }
     pub fn dialog_parent(&self, kind: DialogKind) -> UiResult<DialogParent> { self.watch.parent(kind) }
     pub fn finish_failed_setup(&mut self, end: std::time::Instant) -> UiResult<bool> {
@@ -1305,7 +1491,7 @@ impl ShellSession {
         }
         self.finality = true; Ok(true)
     }
-    pub fn mark_unknown(&mut self) { self.unknown = true; if let Some(callbacks) = &self.watch.callbacks { callbacks.lost(); } }
+    pub fn mark_unknown(&mut self) { self.unknown = true; if let Some(callbacks) = &self.watch.callbacks { callbacks.lost(Loss::Operation); } }
     #[cfg(feature = "windows-installed-observation")]
     pub fn observed_finality(&self) -> UiResult<bool> {
         sta()?;
@@ -1555,11 +1741,11 @@ mod tests {
     fn callbacks_remain_absorbingly_lost_and_track_original_return() {
         let calls = Rc::new(Cell::new(0)); let observed = calls.clone();
         let state = WatchCallbacks { thread: 0, depth: Cell::new(0), lost: Cell::new(false), unknown: Cell::new(false),
-            browser: Cell::new(0), exited: Cell::new(false), on_loss: Box::new(move || observed.set(observed.get() + 1)),
+            browser: Cell::new(0), exited: Cell::new(false), on_loss: Box::new(move |_| observed.set(observed.get() + 1)),
             exit_args: OnceCell::new(), exit_pid: ComValue::new() };
         // Pure state branch: no Windows process/window/COM call in this test.
         state.depth.set(1); let returned = CallbackReturn(&state);
-        state.lost(); state.lost(); assert_eq!(calls.get(), 1); assert_eq!(state.depth.get(), 1);
+        state.lost(Loss::Operation); state.lost(Loss::Operation); assert_eq!(calls.get(), 1); assert_eq!(state.depth.get(), 1);
         drop(returned); assert_eq!(state.depth.get(), 0); assert!(state.lost.get());
     }
     #[test]

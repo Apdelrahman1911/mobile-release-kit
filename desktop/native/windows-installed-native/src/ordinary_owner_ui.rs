@@ -1,6 +1,7 @@
 //! Fixed normal-UI extension of the existing original Account/Launch owner.
 //! No general launcher, inherited user environment, shipping switch or fallback.
 use super::*;
+use crate::ui_startup_data::Word as StartupWord;
 use std::{cell::Cell, ffi::c_void, io::Write, marker::PhantomData, path::PathBuf};
 use windows_sys::Win32::System::{Com as CO, Ole as OLE, Registry as R};
 use windows_sys::Win32::UI::WindowsAndMessaging as W;
@@ -823,18 +824,58 @@ impl DashboardProgress {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SmokeStatus { Hresult(i32), Win32(u32) }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StartupAvailability { NotSampled, Missing, Invalid, Value }
+impl StartupAvailability {
+    fn label(self) -> &'static str { match self { Self::NotSampled => "not-sampled", Self::Missing => "missing",
+        Self::Invalid => "invalid", Self::Value => "value" } }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct StartupSample { availability: StartupAvailability, last: Option<(StartupWord, SmokePhase)> }
+impl StartupSample {
+    fn new() -> Self { Self { availability: StartupAvailability::NotSampled, last: None } }
+    fn observe(&mut self, raw: u64, phase: SmokePhase) {
+        self.availability = if raw == 0 { StartupAvailability::Missing }
+            else if let Some(word) = StartupWord::decode(raw) { self.last = Some((word, phase)); StartupAvailability::Value }
+            else { StartupAvailability::Invalid };
+    }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SmokeFault {
     phase: SmokePhase, check: SmokeCheck, error: Error, status: Option<SmokeStatus>, dashboard: Option<DashboardProgress>,
-    main_binding_timeouts: Option<u16>,
+    main_binding_timeouts: Option<u16>, startup: StartupSample,
 }
 struct SmokeTrace {
     phase: Cell<SmokePhase>, dashboard: Cell<Option<DashboardProgress>>, first: Cell<Option<SmokeFault>>, emitted: Cell<bool>,
-    main_binding_timeouts: Cell<u16>,
+    main_binding_timeouts: Cell<u16>, startup: Cell<StartupSample>,
 }
 impl SmokeTrace {
     fn new() -> Self {
         Self { phase: Cell::new(SmokePhase::Setup), dashboard: Cell::new(None), first: Cell::new(None), emitted: Cell::new(false),
-            main_binding_timeouts: Cell::new(0) }
+            main_binding_timeouts: Cell::new(0), startup: Cell::new(StartupSample::new()) }
+    }
+    // The real root() passes one USER32 read; scalar tests pass inert values.
+    // Only original in-budget completions can update the sample. This helper
+    // never decides root/readiness/finality and never probes after first fault.
+    fn sample_startup(&self, read: impl FnOnce() -> u64, mut checkpoint: impl FnMut() -> Result<()>) -> Result<()> {
+        if self.first.get().is_some() { return Ok(()); }
+        self.result(SmokeCheck::Clock, checkpoint(), None)?;
+        let raw = read();
+        self.result(SmokeCheck::Clock, checkpoint(), None)?;
+        if self.first.get().is_none() {
+            let mut sample = self.startup.get(); sample.observe(raw, self.phase.get()); self.startup.set(sample);
+        }
+        Ok(())
+    }
+    fn format_startup(output: &mut impl Write, sample: StartupSample) -> std::io::Result<()> {
+        write!(output, ",\"startup\":{{\"availability\":\"{}\",\"lastValid\":", sample.availability.label())?;
+        match sample.last {
+            None => write!(output, "null")?,
+            Some((word, phase)) => write!(output,
+                "{{\"previous\":{},\"samplePhase\":\"{}\",\"event\":\"{}\",\"detail\":{},\"nativeStage\":\"{}\",\"conditionMask\":{},\"firstRefusal\":{},\"liveMask\":{},\"seenMask\":{}}}",
+                sample.availability != StartupAvailability::Value, phase.label(), word.event.label(), word.detail,
+                word.stage.label(), word.conditions, word.first_refusal, word.live, word.seen)?,
+        }
+        write!(output, "}}")
     }
     fn dashboard_begin_pass(&self) {
         if self.phase.get() != SmokePhase::Dashboard { return; }
@@ -852,7 +893,7 @@ impl SmokeTrace {
                 let dashboard = if phase == SmokePhase::Dashboard { self.dashboard.get() } else { None };
                 let main_binding_timeouts = matches!(phase, SmokePhase::MainBinding | SmokePhase::Dashboard)
                     .then(|| self.main_binding_timeouts.get());
-                self.first.set(Some(SmokeFault { phase, check, error: *error, status, dashboard, main_binding_timeouts }));
+                self.first.set(Some(SmokeFault { phase, check, error: *error, status, dashboard, main_binding_timeouts, startup: self.startup.get() }));
             }
         }
         result
@@ -912,13 +953,16 @@ impl SmokeTrace {
             None => write!(output, "null")?,
         }
         if let Some(count) = fault.main_binding_timeouts { write!(output, ",\"mainBindingTimeouts\":{count}")?; }
+        Self::format_startup(&mut output, fault.startup)?;
         writeln!(output, "}}")?; Ok(output.position() as usize)
     }
     fn emit_to(&self, output: &mut impl Write) -> std::io::Result<Option<usize>> {
+        self.emit_with_buffer(output, &mut [0u8; 1024])
+    }
+    fn emit_with_buffer(&self, output: &mut impl Write, raw: &mut [u8]) -> std::io::Result<Option<usize>> {
         let Some(fault) = self.first.get() else { return Ok(None); };
         if self.emitted.replace(true) { return Ok(None); }
-        let mut raw = [0u8; 1024];
-        let bytes: &[u8] = match Self::format(fault, &mut raw) {
+        let bytes: &[u8] = match Self::format(fault, raw) {
             Ok(size) => &raw[..size],
             Err(_) => b"MRK_WINDOWS_NORMAL_UI_SMOKE_REFUSED={\"diagnosticOnly\":true,\"diagnosticIncomplete\":true}\n",
         };
@@ -1095,7 +1139,13 @@ impl WindowQuery {
     }
     fn root(&mut self, launch: &Launch, main: Option<F::HWND>, clock: &mut Clock, trace: &SmokeTrace) -> Result<Option<F::HWND>> {
         self.scan(launch, clock, trace)?;
-        self.select_root(main, trace)
+        let selected = self.select_root(main, trace)?;
+        if let Some(hwnd) = selected {
+            // Selection stays DATA-only; this is the exact already-checked
+            // original process/thread/root, not an enumerated auxiliary HWND.
+            trace.sample_startup(|| crate::ui::startup_property(hwnd), || clock.effect())?;
+        }
+        Ok(selected)
     }
     // DATA selection only, after the original live process/thread and complete
     // bounded scan have been checked. Framework event windows can be visible
@@ -2047,7 +2097,7 @@ mod contract_tests {
             let trace = SmokeTrace::new(); trace.phase.set(SmokePhase::MainWindow);
             assert_eq!(windows(rows).select_root(bound.map(|hwnd| hwnd as F::HWND), &trace), Err(error));
             assert_eq!(trace.first.get(), Some(SmokeFault { phase: SmokePhase::MainWindow, check, error, status,
-                dashboard: None, main_binding_timeouts: None }));
+                dashboard: None, main_binding_timeouts: None, startup: StartupSample::new() }));
         }
         let title = "Mobile Release Kit";
         accepts(vec![], None, None);
@@ -2298,9 +2348,47 @@ mod contract_tests {
         assert_eq!(trace.first.get(), Some(first));
     }
 
+    fn startup_diagnostic_contract() {
+        use crate::ui_startup_data::{Event, NativeError, NativeMark, Stage};
+        crate::ui_startup_data::scalar_contract();
+        let mut word = StartupWord::default();
+        word.native(3, NativeMark { stage: Stage::FolderMatch, part: 0, error: Some(NativeError::Data) });
+        let raw = word.encode().unwrap(); let trace = SmokeTrace::new(); trace.phase.set(SmokePhase::MainBinding);
+        let reads = Cell::new(0);
+        assert_eq!(trace.sample_startup(|| { reads.set(reads.get() + 1); raw }, || Ok(())), Ok(()));
+        let valid = trace.startup.get(); assert_eq!(valid.last, Some((word, SmokePhase::MainBinding)));
+        trace.phase.set(SmokePhase::Dashboard);
+        for (value, availability) in [(0, StartupAvailability::Missing), (1, StartupAvailability::Invalid)] {
+            assert_eq!(trace.sample_startup(|| value, || Ok(())), Ok(()));
+            assert_eq!(trace.startup.get().availability, availability); assert_eq!(trace.startup.get().last, valid.last);
+        }
+        let previous = trace.startup.get(); let checkpoints = Cell::new(0);
+        assert_eq!(trace.sample_startup(|| { reads.set(reads.get() + 1); raw }, || {
+            checkpoints.set(checkpoints.get() + 1); if checkpoints.get() == 2 { Err(Error::Unsafe) } else { Ok(()) }
+        }), Err(Error::Unsafe));
+        assert_eq!(reads.get(), 2); assert_eq!(trace.startup.get(), previous);
+        let fault = trace.first.get().unwrap(); assert_eq!(fault.startup, previous); assert_eq!(fault.check, SmokeCheck::Clock);
+        assert_eq!(trace.sample_startup(|| panic!("no read after refusal"), || panic!("no renewed budget")), Ok(()));
+        trace.startup.set(valid); assert_eq!(trace.first.get(), Some(fault));
+        let expired = SmokeTrace::new();
+        assert_eq!(expired.sample_startup(|| panic!("expired read"), || Err(Error::Unsafe)), Err(Error::Unsafe));
+        assert_eq!(expired.startup.get(), StartupSample::new());
+        let mut raw_text = [0u8; 1024]; let size = SmokeTrace::format(fault, &mut raw_text).unwrap();
+        let text = std::str::from_utf8(&raw_text[..size]).unwrap();
+        assert!(text.contains("\"availability\":\"invalid\"")); assert!(text.contains("\"previous\":true"));
+        assert!(text.contains("\"event\":\"native-refused\"")); assert!(text.contains("\"nativeStage\":\"folder-match\""));
+        assert_eq!(word.event, Event::NativeRefused);
+        // No native call is made for these fake-handle/finality DATA fixtures.
+        for value in [0, 1, raw, StartupWord::default().encode().unwrap()] {
+            let smoke = Smoke::new(); let before = smoke.passed();
+            assert_eq!(smoke.trace.sample_startup(|| value, || Ok(())), Ok(())); assert_eq!(smoke.passed(), before);
+        }
+    }
+
     #[test]
     fn native_smoke_never_credits_posting_or_partial_release_as_finality() {
         main_window_selection_contract(); initial_main_readiness_contract(); dashboard_name_observation_contract();
+        startup_diagnostic_contract();
         // Actual admission helper, inert Results/counters only: no native clock,
         // output reservation, HWND/COM call or cleanup is entered by these cases.
         for (unknown, settled, count, remaining, expected, check, expected_calls) in [
@@ -2435,7 +2523,11 @@ mod contract_tests {
         data.invoke_entered = true; data.invoke_return = 0; data.quit_confirmed = true;
         assert!(!data.passed());
         data.initialized = true; data.uninit_returned = true; data.settled = true;
-        assert!(data.passed()); data.unknown = true; assert!(!data.passed());
+        assert!(data.passed());
+        for raw in [0, 1, StartupWord::default().encode().unwrap()] {
+            assert_eq!(data.trace.sample_startup(|| raw, || Ok(())), Ok(())); assert!(data.passed());
+        }
+        data.unknown = true; assert!(!data.passed());
         data.unknown = false; data.dashboard_ready = false; assert!(!data.passed());
         // No native initialize/acquire happened. Never invoke settle on DATA.
 
@@ -2453,7 +2545,7 @@ mod contract_tests {
             let saved = Cell::new(i32::MIN);
             assert_eq!(trace.result::<u8>(SmokeCheck::CurrentName, Err(error), Some(SmokeStatus::Hresult(saved.get()))), Err(error));
             let first = SmokeFault { phase: SmokePhase::Dashboard, check: SmokeCheck::CurrentName,
-                error, status: Some(SmokeStatus::Hresult(i32::MIN)), dashboard: None, main_binding_timeouts: Some(0) };
+                error, status: Some(SmokeStatus::Hresult(i32::MIN)), dashboard: None, main_binding_timeouts: Some(0), startup: StartupSample::new() };
             saved.set(0); trace.phase.set(SmokePhase::DriverSettle);
             assert_eq!(trace.result(SmokeCheck::Clock, Ok(false), None), Ok(false));
             assert_eq!(trace.result::<()>(SmokeCheck::ArrayDestroy, Err(Error::Unknown), Some(SmokeStatus::Hresult(saved.get()))), Err(Error::Unknown));
@@ -2498,6 +2590,25 @@ mod contract_tests {
         assert_eq!(conversion.first.get().unwrap().error, Error::Unsafe);
         assert_eq!(conversion.first.get().unwrap().status, None);
 
+        use crate::ui_startup_data::{Event as StartupEvent, Stage as StartupStage};
+        // All finite v1 event/detail/stage combinations, including native slot
+        // part1 and multi-digit details. Other fields use simultaneous maxima.
+        // The selected widest VALID word is rendered by the production formatter.
+        let mut widest_word = StartupWord::default(); let mut widest_fields = 0;
+        for event in (0..64).filter_map(StartupEvent::from_code) {
+            for detail in 0..64 {
+                for stage in (0..64).filter_map(StartupStage::from_code) {
+                    let word = StartupWord { conditions: (1 << 26) - 1, event, detail, stage,
+                        first_refusal: event.refused(), live: 7, seen: 15 };
+                    if word.encode().is_some() {
+                        let fields = event.label().len() + stage.label().len() + 1 + usize::from(detail >= 10)
+                            + if event.refused() { 4 } else { 5 };
+                        if fields > widest_fields { widest_word = word; widest_fields = fields; }
+                    }
+                }
+            }
+        }
+        assert!(widest_fields != 0 && widest_word.encode().is_some());
         let longest_phase = *SmokePhase::ALL.iter().max_by_key(|value| value.label().len()).unwrap();
         let longest_check = *SmokeCheck::ALL.iter().max_by_key(|value| value.label().len()).unwrap();
         for label in SmokePhase::ALL.iter().map(|value| value.label()).chain(SmokeCheck::ALL.iter().map(|value| value.label()))
@@ -2520,7 +2631,8 @@ mod contract_tests {
             for status in [None, Some(SmokeStatus::Hresult(i32::MIN)), Some(SmokeStatus::Hresult(i32::MAX)),
                 Some(SmokeStatus::Win32(u32::MAX))] {
                 let fault = SmokeFault { phase: longest_phase, check: longest_check, error: Error::Unavailable, status, dashboard,
-                    main_binding_timeouts: Some(u16::MAX) };
+                    main_binding_timeouts: Some(u16::MAX), startup: StartupSample {
+                        availability: StartupAvailability::Missing, last: Some((widest_word, longest_phase)) } };
                 let mut raw = [0u8; 1024]; let size = SmokeTrace::format(fault, &mut raw).unwrap();
                 let text = std::str::from_utf8(&raw[..size]).unwrap();
                 assert!(size <= 1024 && text.is_ascii() && text.ends_with("}\n") && text.lines().count() == 1);
@@ -2561,10 +2673,20 @@ mod contract_tests {
             }
             fn flush(&mut self) -> std::io::Result<()> { panic!("diagnostic must not add a flush"); }
         }
+        // Exercise the SAME production latch/format/fallback/one-write path
+        // with an insufficient inert buffer; no native API or extra emission.
+        let trace = SmokeTrace::new();
+        let mut sink = Sink { calls: 0, fail: false, short: false, bytes: Vec::new() };
+        let _ = trace.result::<()>(SmokeCheck::Clock, Err(Error::Unsafe), None);
+        let fallback = b"MRK_WINDOWS_NORMAL_UI_SMOKE_REFUSED={\"diagnosticOnly\":true,\"diagnosticIncomplete\":true}\n";
+        assert_eq!(trace.emit_with_buffer(&mut sink, &mut [0u8; 8]).unwrap(), Some(fallback.len()));
+        assert_eq!(sink.bytes.as_slice(), fallback); assert_eq!(sink.calls, 1);
+        assert_eq!(trace.emit_to(&mut sink).unwrap(), None); assert_eq!(sink.calls, 1);
         for (fail, short) in [(false, false), (false, true), (true, false)] {
             let trace = SmokeTrace::new(); let mut sink = Sink { calls: 0, fail, short, bytes: Vec::new() };
             assert_eq!(trace.emit_to(&mut sink).unwrap(), None); assert_eq!(sink.calls, 0);
             trace.phase.set(SmokePhase::Dashboard); trace.dashboard.set(Some(widest_dashboard)); trace.main_binding_timeouts.set(u16::MAX);
+            trace.startup.set(StartupSample { availability: StartupAvailability::Missing, last: Some((widest_word, longest_phase)) });
             let result = trace.result::<()>(SmokeCheck::PostClose, Err(Error::Unsafe), Some(SmokeStatus::Win32(u32::MAX)));
             let written = trace.emit_to(&mut sink);
             assert_eq!(written.is_err(), fail); assert_eq!(result, Err(Error::Unsafe));
