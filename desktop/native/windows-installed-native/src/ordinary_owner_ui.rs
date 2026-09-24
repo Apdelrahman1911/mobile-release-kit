@@ -756,24 +756,53 @@ smoke_labels!(DashboardScanHistory { None => "none", LoadingOnly => "loading-onl
 // Ended scans are not continuous UI state. Masks are observed prefixes;
 // an unset button bit does not distinguish absence from a disabled button.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct DashboardScan { match_mask: u8, end: DashboardScanEnd }
+struct DashboardNames { returned: u16, empty: u16, text_mask: u8 }
+impl DashboardNames {
+    fn new() -> Self { Self { returned: 0, empty: 0, text_mask: 0 } }
+    fn observe(&mut self, name: &str) {
+        // Only the existing fully successful name() return reaches this DATA.
+        // No name/URL is retained. These finite text categories are not proof
+        // of DOM, navigation, control type, provider readiness or finality.
+        self.returned = self.returned.saturating_add(1);
+        if name.is_empty() { self.empty = self.empty.saturating_add(1); return; }
+        self.text_mask |= match name {
+            "Mobile Release Kit" => 1,
+            "about:blank" => 2,
+            "http://tauri.localhost/" => 4,
+            "Microsoft Edge WebView2" | "WebView2" => 8,
+            "THE KIT FOR A CAREFUL LAUNCH" | "Core-managed builds are disabled" => 16,
+            "DESKTOP Not loaded" => 32,
+            _ if name.contains("Loading desktop capabilities and the core field catalogue") => 64,
+            _ => 128,
+        };
+    }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DashboardScan { match_mask: u8, end: DashboardScanEnd, walk_visited: usize, names: DashboardNames }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct DashboardProgress {
     stage: DashboardStage, any_walk_completed: bool, current_walk_visited: Option<usize>, current_match_mask: Option<u8>,
-    last_scan: Option<DashboardScan>, scan_history: DashboardScanHistory,
+    current_names: Option<DashboardNames>, last_scan: Option<DashboardScan>, scan_history: DashboardScanHistory,
 }
 impl DashboardProgress {
     fn new() -> Self {
         Self { stage: DashboardStage::Bind, any_walk_completed: false, current_walk_visited: None,
-            current_match_mask: None, last_scan: None, scan_history: DashboardScanHistory::None }
+            current_match_mask: None, current_names: None, last_scan: None, scan_history: DashboardScanHistory::None }
     }
     fn begin_pass(&mut self) {
-        self.stage = DashboardStage::Bind; self.current_walk_visited = None; self.current_match_mask = None;
+        self.stage = DashboardStage::Bind; self.current_walk_visited = None; self.current_match_mask = None; self.current_names = None;
     }
     fn begin_walk(&mut self) { self.stage = DashboardStage::Walk; self.current_walk_visited = Some(0); }
     fn walk_visited(&mut self, visited: usize) { self.current_walk_visited = Some(visited); }
     fn walk_completed(&mut self) { self.any_walk_completed = true; }
-    fn begin_names(&mut self) { self.stage = DashboardStage::Names; self.current_match_mask = Some(0); }
+    fn begin_names(&mut self) {
+        self.stage = DashboardStage::Names; self.current_match_mask = Some(0); self.current_names = Some(DashboardNames::new());
+    }
+    fn name_returned(&mut self, name: &str) {
+        if self.stage == DashboardStage::Names {
+            if let Some(names) = &mut self.current_names { names.observe(name); }
+        }
+    }
     fn matches(&mut self, found: [bool; 5]) {
         // Cumulative observations only: the existing three headings, compiled
         // DESKTOP version, and Choose a project observed as an enabled button.
@@ -784,8 +813,9 @@ impl DashboardProgress {
         // A loading break already ended this scan before its found reset; the
         // after-loop exhaustion observation must not replace that original end.
         if self.stage != DashboardStage::Names { return; }
-        let Some(match_mask) = self.current_match_mask else { return; };
-        self.stage = DashboardStage::NamesEnded; self.last_scan = Some(DashboardScan { match_mask, end });
+        let (Some(match_mask), Some(walk_visited), Some(names)) =
+            (self.current_match_mask, self.current_walk_visited, self.current_names) else { return; };
+        self.stage = DashboardStage::NamesEnded; self.last_scan = Some(DashboardScan { match_mask, end, walk_visited, names });
         if end == DashboardScanEnd::Exhausted { self.scan_history = DashboardScanHistory::ExhaustedSeen; }
         else if self.scan_history == DashboardScanHistory::None { self.scan_history = DashboardScanHistory::LoadingOnly; }
     }
@@ -820,7 +850,8 @@ impl SmokeTrace {
             if self.first.get().is_none() {
                 let phase = self.phase.get();
                 let dashboard = if phase == SmokePhase::Dashboard { self.dashboard.get() } else { None };
-                let main_binding_timeouts = (phase == SmokePhase::MainBinding).then(|| self.main_binding_timeouts.get());
+                let main_binding_timeouts = matches!(phase, SmokePhase::MainBinding | SmokePhase::Dashboard)
+                    .then(|| self.main_binding_timeouts.get());
                 self.first.set(Some(SmokeFault { phase, check, error: *error, status, dashboard, main_binding_timeouts }));
             }
         }
@@ -836,6 +867,12 @@ impl SmokeTrace {
         self.need(SmokeCheck::ComReserveState, !unknown && !settled)?;
         self.need(SmokeCheck::ComReserveCapacity, originals < 2048)?;
         self.need(SmokeCheck::ComReserveBudget, self.result(SmokeCheck::Clock, remaining(), None)? > 1000)
+    }
+    fn format_names(output: &mut impl Write, names: Option<DashboardNames>) -> std::io::Result<()> {
+        match names {
+            Some(names) => write!(output, "{{\"returned\":{},\"empty\":{},\"textMask\":{}}}", names.returned, names.empty, names.text_mask),
+            None => write!(output, "null"),
+        }
     }
     fn format(fault: SmokeFault, raw: &mut [u8]) -> std::io::Result<usize> {
         let mut output = std::io::Cursor::new(raw);
@@ -858,9 +895,16 @@ impl SmokeTrace {
                 match progress.current_walk_visited { Some(count) => write!(output, "{count}")?, None => write!(output, "null")? }
                 write!(output, ",\"currentMatchMask\":")?;
                 match progress.current_match_mask { Some(mask) => write!(output, "{mask}")?, None => write!(output, "null")? }
+                write!(output, ",\"currentNames\":")?;
+                Self::format_names(&mut output, progress.current_names)?;
                 write!(output, ",\"lastScan\":")?;
                 match progress.last_scan {
-                    Some(scan) => write!(output, "{{\"matchMask\":{},\"end\":\"{}\"}}", scan.match_mask, scan.end.label())?,
+                    Some(scan) => {
+                        write!(output, "{{\"matchMask\":{},\"end\":\"{}\",\"walkVisited\":{},\"names\":",
+                            scan.match_mask, scan.end.label(), scan.walk_visited)?;
+                        Self::format_names(&mut output, Some(scan.names))?;
+                        write!(output, "}}")?;
+                    },
                     None => write!(output, "null")?,
                 }
                 write!(output, ",\"scanHistory\":\"{}\"}}", progress.scan_history.label())?;
@@ -873,7 +917,7 @@ impl SmokeTrace {
     fn emit_to(&self, output: &mut impl Write) -> std::io::Result<Option<usize>> {
         let Some(fault) = self.first.get() else { return Ok(None); };
         if self.emitted.replace(true) { return Ok(None); }
-        let mut raw = [0u8; 512];
+        let mut raw = [0u8; 1024];
         let bytes: &[u8] = match Self::format(fault, &mut raw) {
             Ok(size) => &raw[..size],
             Err(_) => b"MRK_WINDOWS_NORMAL_UI_SMOKE_REFUSED={\"diagnosticOnly\":true,\"diagnosticIncomplete\":true}\n",
@@ -1344,6 +1388,7 @@ impl Smoke {
             self.trace.dashboard_update(DashboardProgress::begin_names);
             for index in elements {
                 let name = self.name(index, clock)?;
+                self.trace.dashboard_update(|progress| progress.name_returned(&name));
                 found[0] |= name == "Good releases start here.";
                 found[1] |= name == "Workspace navigation";
                 found[2] |= name == "Your next release, organized.";
@@ -2193,9 +2238,69 @@ mod contract_tests {
         }
     }
 
+    fn dashboard_name_observation_contract() {
+        for (name, mask) in [
+            ("Mobile Release Kit", 1), ("about:blank", 2), ("http://tauri.localhost/", 4),
+            ("Microsoft Edge WebView2", 8), ("WebView2", 8),
+            ("THE KIT FOR A CAREFUL LAUNCH", 16), ("Core-managed builds are disabled", 16),
+            ("DESKTOP Not loaded", 32),
+            ("Loading desktop capabilities and the core field catalogue", 64),
+            ("Before Loading desktop capabilities and the core field catalogue After", 64),
+            ("Mobile Release Kit extra", 128), ("about:blank/extra", 128),
+            ("http://tauri.localhost/other", 128), ("webview2", 128), (" ", 128),
+            ("Fixture owner detail — not for diagnostics", 128),
+        ] {
+            let mut names = DashboardNames::new(); names.observe(name);
+            assert_eq!(names, DashboardNames { returned: 1, empty: 0, text_mask: mask });
+            let mut output = Vec::new(); SmokeTrace::format_names(&mut output, Some(names)).unwrap();
+            let text = std::str::from_utf8(&output).unwrap();
+            assert_eq!(text, format!("{{\"returned\":1,\"empty\":0,\"textMask\":{mask}}}"));
+            assert!(!text.contains(name));
+        }
+        let mut names = DashboardNames::new(); names.observe(""); names.observe("");
+        assert_eq!(names, DashboardNames { returned: 2, empty: 2, text_mask: 0 });
+        names.observe("about:blank"); names.observe("WebView2"); names.observe("unclassified fixture");
+        assert_eq!(names, DashboardNames { returned: 5, empty: 2, text_mask: 138 });
+        let mut saturated = DashboardNames { returned: u16::MAX, empty: u16::MAX, text_mask: 255 };
+        saturated.observe(""); saturated.observe("unclassified fixture");
+        assert_eq!(saturated, DashboardNames { returned: u16::MAX, empty: u16::MAX, text_mask: 255 });
+
+        // Diagnostic updates outside the existing successful Names phase do
+        // nothing. Current prefixes never replace an earlier ended scan.
+        let trace = SmokeTrace::new(); trace.phase.set(SmokePhase::Dashboard); trace.dashboard_begin_pass();
+        trace.dashboard_update(|progress| progress.name_returned("about:blank"));
+        assert_eq!(trace.dashboard.get().unwrap().current_names, None);
+        trace.dashboard_update(DashboardProgress::begin_walk);
+        trace.dashboard_update(|progress| { progress.walk_visited(3); progress.name_returned("about:blank"); });
+        assert_eq!(trace.dashboard.get().unwrap().current_names, None);
+        trace.dashboard_update(DashboardProgress::walk_completed); trace.dashboard_update(DashboardProgress::begin_names);
+        trace.dashboard_update(|progress| { progress.name_returned(""); progress.name_returned("about:blank"); });
+        trace.dashboard_update(|progress| progress.end_names(DashboardScanEnd::Loading));
+        let ended = trace.dashboard.get().unwrap();
+        assert_eq!(ended.last_scan.unwrap().names, DashboardNames { returned: 2, empty: 1, text_mask: 2 });
+        assert_eq!(ended.last_scan.unwrap().walk_visited, 3);
+        trace.dashboard_update(|progress| { progress.name_returned("WebView2"); progress.end_names(DashboardScanEnd::Exhausted); });
+        assert_eq!(trace.dashboard.get(), Some(ended));
+        trace.dashboard_begin_pass(); assert_eq!(trace.dashboard.get().unwrap().current_names, None);
+        trace.dashboard_update(DashboardProgress::begin_walk); trace.dashboard_update(|progress| progress.walk_visited(1));
+        trace.dashboard_update(DashboardProgress::walk_completed); trace.dashboard_update(DashboardProgress::begin_names);
+        trace.dashboard_update(|progress| progress.name_returned("WebView2"));
+        let prefix = trace.dashboard.get().unwrap();
+        assert_eq!(prefix.current_names, Some(DashboardNames { returned: 1, empty: 0, text_mask: 8 }));
+        assert_eq!(prefix.last_scan, ended.last_scan);
+        trace.main_binding_timeouts.set(7);
+        assert_eq!(trace.result::<()>(SmokeCheck::CurrentName, Err(Error::Unsafe), None), Err(Error::Unsafe));
+        let first = trace.first.get().unwrap();
+        assert_eq!(first.dashboard, Some(prefix)); assert_eq!(first.main_binding_timeouts, Some(7));
+        trace.dashboard_update(|progress| { progress.name_returned("later fixture"); progress.end_names(DashboardScanEnd::Exhausted); });
+        trace.main_binding_timeouts.set(8); trace.phase.set(SmokePhase::DriverSettle);
+        assert_eq!(trace.result::<()>(SmokeCheck::ComRelease, Err(Error::Unknown), None), Err(Error::Unknown));
+        assert_eq!(trace.first.get(), Some(first));
+    }
+
     #[test]
     fn native_smoke_never_credits_posting_or_partial_release_as_finality() {
-        main_window_selection_contract(); initial_main_readiness_contract();
+        main_window_selection_contract(); initial_main_readiness_contract(); dashboard_name_observation_contract();
         // Actual admission helper, inert Results/counters only: no native clock,
         // output reservation, HWND/COM call or cleanup is entered by these cases.
         for (unknown, settled, count, remaining, expected, check, expected_calls) in [
@@ -2232,7 +2337,7 @@ mod contract_tests {
         progress_trace.dashboard_begin_pass();
         let initial = progress_trace.dashboard.get().unwrap();
         assert_eq!(initial.stage, DashboardStage::Bind); assert!(!initial.any_walk_completed);
-        assert_eq!(initial.current_walk_visited, None); assert_eq!(initial.current_match_mask, None);
+        assert_eq!(initial.current_walk_visited, None); assert_eq!(initial.current_match_mask, None); assert_eq!(initial.current_names, None);
         assert_eq!(initial.last_scan, None); assert_eq!(initial.scan_history, DashboardScanHistory::None);
         progress_trace.dashboard_update(DashboardProgress::begin_walk);
         assert_eq!(progress_trace.dashboard.get().unwrap().current_walk_visited, Some(0));
@@ -2258,7 +2363,8 @@ mod contract_tests {
         found = [false; 5]; assert_eq!(found, [false; 5]); // Existing loading reset, after snapshot.
         let loading = progress_trace.dashboard.get().unwrap();
         assert_eq!(loading.stage, DashboardStage::NamesEnded); assert_eq!(loading.current_match_mask, Some(31));
-        assert_eq!(loading.last_scan, Some(DashboardScan { match_mask: 31, end: DashboardScanEnd::Loading }));
+        assert_eq!(loading.last_scan, Some(DashboardScan { match_mask: 31, end: DashboardScanEnd::Loading,
+            walk_visited: 17, names: DashboardNames::new() }));
         assert_eq!(loading.scan_history, DashboardScanHistory::LoadingOnly);
         progress_trace.dashboard_update(|progress| progress.end_names(DashboardScanEnd::Exhausted));
         assert_eq!(progress_trace.dashboard.get(), Some(loading)); // A loading end is not exhausted.
@@ -2270,7 +2376,7 @@ mod contract_tests {
             let previous = progress_trace.dashboard.get().unwrap(); progress_trace.dashboard_begin_pass();
             let reset = progress_trace.dashboard.get().unwrap();
             assert_eq!(reset.stage, DashboardStage::Bind); assert!(reset.any_walk_completed);
-            assert_eq!(reset.current_walk_visited, None); assert_eq!(reset.current_match_mask, None);
+            assert_eq!(reset.current_walk_visited, None); assert_eq!(reset.current_match_mask, None); assert_eq!(reset.current_names, None);
             assert_eq!(reset.last_scan, previous.last_scan); assert_eq!(reset.scan_history, previous.scan_history);
             progress_trace.dashboard_update(DashboardProgress::begin_walk);
             progress_trace.dashboard_update(|progress| progress.walk_visited(900));
@@ -2283,7 +2389,8 @@ mod contract_tests {
             assert_eq!(prefix.last_scan, previous.last_scan); assert_eq!(prefix.scan_history, previous.scan_history);
             progress_trace.dashboard_update(|progress| progress.end_names(end));
             let ended = progress_trace.dashboard.get().unwrap();
-            assert_eq!(ended.last_scan, Some(DashboardScan { match_mask: mask, end })); assert_eq!(ended.scan_history, history);
+            assert_eq!(ended.last_scan, Some(DashboardScan { match_mask: mask, end, walk_visited: 900, names: DashboardNames::new() }));
+            assert_eq!(ended.scan_history, history);
         }
         progress_trace.phase.set(SmokePhase::DriverSettle);
         assert_eq!(progress_trace.result::<()>(SmokeCheck::ComRelease, Err(Error::Unknown), None), Err(Error::Unknown));
@@ -2291,17 +2398,20 @@ mod contract_tests {
         let mut frozen_output = Vec::new(); progress_trace.emit_to(&mut frozen_output).unwrap();
         let frozen_text = std::str::from_utf8(&frozen_output).unwrap();
         assert!(frozen_text.contains("\"stage\":\"walk\",\"anyWalkCompleted\":false,\"currentWalkVisited\":17"));
-        assert!(frozen_text.contains("\"currentMatchMask\":null,\"lastScan\":null,\"scanHistory\":\"none\""));
+        assert!(frozen_text.contains("\"currentMatchMask\":null,\"currentNames\":null,\"lastScan\":null,\"scanHistory\":\"none\""));
+        assert!(frozen_text.contains("\"mainBindingTimeouts\":0"));
         // First four bits are retained before the existing possibly failing
         // enabled-button query. A later fifth-bit observation cannot backfill it.
         let prefix = SmokeTrace::new(); prefix.phase.set(SmokePhase::Dashboard); prefix.dashboard_begin_pass();
         prefix.dashboard_update(DashboardProgress::begin_walk); prefix.dashboard_update(|progress| progress.walk_visited(1));
         prefix.dashboard_update(DashboardProgress::walk_completed); prefix.dashboard_update(DashboardProgress::begin_names);
-        prefix.dashboard_update(|progress| progress.matches([true, true, true, true, false]));
+        prefix.dashboard_update(|progress| { progress.name_returned("Choose a project"); progress.matches([true, true, true, true, false]); });
         assert_eq!(prefix.result::<()>(SmokeCheck::IsEnabled, Err(Error::Unsafe), None), Err(Error::Unsafe));
         prefix.dashboard_update(|progress| progress.matches([true; 5]));
         assert_eq!(prefix.dashboard.get().unwrap().current_match_mask, Some(31));
         assert_eq!(prefix.first.get().unwrap().dashboard.unwrap().current_match_mask, Some(15));
+        assert_eq!(prefix.first.get().unwrap().dashboard.unwrap().current_names,
+            Some(DashboardNames { returned: 1, empty: 0, text_mask: 128 }));
         for phase in SmokePhase::ALL.iter().copied().filter(|phase| *phase != SmokePhase::Dashboard) {
             let trace = SmokeTrace::new(); trace.phase.set(SmokePhase::Dashboard); trace.dashboard_begin_pass();
             trace.dashboard_update(|progress| *progress = loading); trace.main_binding_timeouts.set(7); trace.phase.set(phase);
@@ -2343,7 +2453,7 @@ mod contract_tests {
             let saved = Cell::new(i32::MIN);
             assert_eq!(trace.result::<u8>(SmokeCheck::CurrentName, Err(error), Some(SmokeStatus::Hresult(saved.get()))), Err(error));
             let first = SmokeFault { phase: SmokePhase::Dashboard, check: SmokeCheck::CurrentName,
-                error, status: Some(SmokeStatus::Hresult(i32::MIN)), dashboard: None, main_binding_timeouts: None };
+                error, status: Some(SmokeStatus::Hresult(i32::MIN)), dashboard: None, main_binding_timeouts: Some(0) };
             saved.set(0); trace.phase.set(SmokePhase::DriverSettle);
             assert_eq!(trace.result(SmokeCheck::Clock, Ok(false), None), Ok(false));
             assert_eq!(trace.result::<()>(SmokeCheck::ArrayDestroy, Err(Error::Unknown), Some(SmokeStatus::Hresult(saved.get()))), Err(Error::Unknown));
@@ -2397,19 +2507,23 @@ mod contract_tests {
         }
         // Conservative combinations include nullable current fields and false
         // (longer than true), even when not jointly reachable in production.
+        let widest_names = DashboardNames { returned: u16::MAX, empty: u16::MAX, text_mask: u8::MAX };
         let widest_dashboard = DashboardProgress { stage: DashboardStage::NamesEnded, any_walk_completed: false,
-            current_walk_visited: Some(900), current_match_mask: Some(31),
-            last_scan: Some(DashboardScan { match_mask: 31, end: DashboardScanEnd::Exhausted }),
+            current_walk_visited: Some(usize::MAX), current_match_mask: Some(u8::MAX), current_names: Some(widest_names),
+            last_scan: Some(DashboardScan { match_mask: u8::MAX, end: DashboardScanEnd::Exhausted, walk_visited: usize::MAX, names: widest_names }),
             scan_history: DashboardScanHistory::ExhaustedSeen };
-        let nullable_dashboard = DashboardProgress { current_walk_visited: None, current_match_mask: None, ..widest_dashboard };
-        for dashboard in [None, Some(widest_dashboard), Some(nullable_dashboard)] {
+        let nullable_dashboard = DashboardProgress { current_walk_visited: None, current_match_mask: None, current_names: None, ..widest_dashboard };
+        // "null" is longer than the largest numeric u8 mask, while full
+        // counts/name statistics are longer than their nullable alternatives.
+        let null_mask_dashboard = DashboardProgress { current_match_mask: None, ..widest_dashboard };
+        for dashboard in [None, Some(widest_dashboard), Some(nullable_dashboard), Some(null_mask_dashboard)] {
             for status in [None, Some(SmokeStatus::Hresult(i32::MIN)), Some(SmokeStatus::Hresult(i32::MAX)),
                 Some(SmokeStatus::Win32(u32::MAX))] {
                 let fault = SmokeFault { phase: longest_phase, check: longest_check, error: Error::Unavailable, status, dashboard,
-                    main_binding_timeouts: None };
-                let mut raw = [0u8; 512]; let size = SmokeTrace::format(fault, &mut raw).unwrap();
+                    main_binding_timeouts: Some(u16::MAX) };
+                let mut raw = [0u8; 1024]; let size = SmokeTrace::format(fault, &mut raw).unwrap();
                 let text = std::str::from_utf8(&raw[..size]).unwrap();
-                assert!(size <= 512 && text.is_ascii() && text.ends_with("}\n") && text.lines().count() == 1);
+                assert!(size <= 1024 && text.is_ascii() && text.ends_with("}\n") && text.lines().count() == 1);
                 assert!(text.starts_with("MRK_WINDOWS_NORMAL_UI_SMOKE_REFUSED={\"diagnosticOnly\":true,"));
                 let expected_status = match status {
                     None => "\"nativeStatus\":null".to_owned(),
@@ -2420,12 +2534,17 @@ mod contract_tests {
                 match dashboard {
                     Some(progress) => {
                         assert!(text.contains("\"stage\":\"names-ended\",\"anyWalkCompleted\":false"));
-                        assert!(text.contains(if progress.current_walk_visited.is_some() { "\"currentWalkVisited\":900" } else { "\"currentWalkVisited\":null" }));
-                        assert!(text.contains(if progress.current_match_mask.is_some() { "\"currentMatchMask\":31" } else { "\"currentMatchMask\":null" }));
-                        assert!(text.contains("\"lastScan\":{\"matchMask\":31,\"end\":\"exhausted\"},\"scanHistory\":\"exhausted-seen\""));
+                        let expected_count = progress.current_walk_visited.map(|count| count.to_string()).unwrap_or_else(|| "null".to_owned());
+                        assert!(text.contains(&format!("\"currentWalkVisited\":{expected_count}")));
+                        assert!(text.contains(if progress.current_match_mask.is_some() { "\"currentMatchMask\":255" } else { "\"currentMatchMask\":null" }));
+                        assert!(text.contains(if progress.current_names.is_some() {
+                            "\"currentNames\":{\"returned\":65535,\"empty\":65535,\"textMask\":255}"
+                        } else { "\"currentNames\":null" }));
+                        assert!(text.contains(&format!("\"lastScan\":{{\"matchMask\":255,\"end\":\"exhausted\",\"walkVisited\":{},\"names\":{{\"returned\":65535,\"empty\":65535,\"textMask\":255}}}},\"scanHistory\":\"exhausted-seen\"", usize::MAX)));
                     }
                     None => assert!(text.contains("\"dashboard\":null")),
                 }
+                assert!(text.contains("\"mainBindingTimeouts\":65535"));
                 for forbidden in ["account", "Sid", "handle", "processId", "path", "title", "credential", "sourceSha"] {
                     assert!(!text.contains(&format!("\"{forbidden}\":")));
                 }
@@ -2445,13 +2564,14 @@ mod contract_tests {
         for (fail, short) in [(false, false), (false, true), (true, false)] {
             let trace = SmokeTrace::new(); let mut sink = Sink { calls: 0, fail, short, bytes: Vec::new() };
             assert_eq!(trace.emit_to(&mut sink).unwrap(), None); assert_eq!(sink.calls, 0);
+            trace.phase.set(SmokePhase::Dashboard); trace.dashboard.set(Some(widest_dashboard)); trace.main_binding_timeouts.set(u16::MAX);
             let result = trace.result::<()>(SmokeCheck::PostClose, Err(Error::Unsafe), Some(SmokeStatus::Win32(u32::MAX)));
             let written = trace.emit_to(&mut sink);
             assert_eq!(written.is_err(), fail); assert_eq!(result, Err(Error::Unsafe));
             assert_eq!(sink.calls, 1); assert!(trace.emitted.get());
             assert_eq!(trace.emit_to(&mut sink).unwrap(), None); assert_eq!(sink.calls, 1);
             if !fail { assert_eq!(sink.bytes.ends_with(b"\n"), !short); }
-            assert!(sink.bytes.len() <= 512);
+            assert!(sink.bytes.len() <= 1024);
         }
     }
 }
