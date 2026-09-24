@@ -696,11 +696,12 @@ smoke_labels!(SmokePhase {
 smoke_labels!(SmokeCheck {
     Clock => "original-clock", QueryState => "query-state", QueryBudget => "query-admission-budget",
     QueryPending => "query-pending", ArrayDestroyState => "array-destroy-state", ArrayDestroy => "array-destroy",
+    WindowOwnerRead => "window-owner-read", WindowTitleRead => "window-title-read",
     WindowTitleLength => "window-title-length", WindowTitleEncoding => "window-title-encoding",
     WindowQueryIdle => "window-query-idle", ProcessState => "original-process-state",
     ProcessIdentity => "original-process-identity", ProcessLive => "original-process-live",
     WindowEnumeration => "thread-window-enumeration", WindowOverflow => "thread-window-overflow",
-    WindowIdentity => "enumerated-window-identity", RootIdentity => "main-root-title-or-uniqueness",
+    WindowIdentity => "enumerated-window-identity", RootUniqueness => "main-root-uniqueness",
     RootContinuity => "main-root-continuity", ComReserve => "com-reservation",
     ComIndex => "com-original-index", ComState => "com-original-kind-or-state",
     ClientMissing => "client-original-missing", InitializeOnce => "apartment-initialize-once",
@@ -883,10 +884,21 @@ impl UiQuery {
 }
 struct WindowData {
     hwnd: F::HWND, owner: F::HWND, pid: u32, tid: u32, title: [u16; 256], length: i32,
+    owner_error: Option<u32>, title_error: Option<u32>,
 }
 impl WindowData {
-    fn new() -> Self { Self { hwnd: null_mut(), owner: null_mut(), pid: 0, tid: 0, title: [0; 256], length: 0 } }
+    fn new() -> Self {
+        Self { hwnd: null_mut(), owner: null_mut(), pid: 0, tid: 0, title: [0; 256], length: 0,
+            owner_error: None, title_error: None }
+    }
+    fn ownerless(&self, trace: &SmokeTrace) -> Result<bool> {
+        let error = trace.result(SmokeCheck::WindowOwnerRead, self.owner_error.ok_or(Error::State), None)?;
+        trace.result(SmokeCheck::WindowOwnerRead, need(error == 0), Some(SmokeStatus::Win32(error)))?;
+        Ok(self.owner.is_null())
+    }
     fn title(&self, trace: &SmokeTrace) -> Result<String> {
+        let error = trace.result(SmokeCheck::WindowTitleRead, self.title_error.ok_or(Error::State), None)?;
+        trace.result(SmokeCheck::WindowTitleRead, need(error == 0), Some(SmokeStatus::Win32(error)))?;
         trace.need(SmokeCheck::WindowTitleLength, self.length >= 0 && (self.length as usize) < self.title.len() - 1)?;
         trace.result(SmokeCheck::WindowTitleEncoding,
             String::from_utf16(&self.title[..self.length as usize]).map_err(|_| Error::Unsafe), None)
@@ -904,9 +916,16 @@ unsafe extern "system" fn thread_window(hwnd: F::HWND, raw: isize) -> i32 {
     if unsafe { W::IsWindowVisible(hwnd) } == 0 { return 1; }
     if query.count >= query.entries.len() { query.overflow = true; return 0; }
     let entry = &mut query.entries[query.count]; query.count += 1;
-    entry.hwnd = hwnd; entry.owner = unsafe { W::GetWindow(hwnd, W::GW_OWNER) };
+    entry.hwnd = hwnd;
+    // NULL/zero may be a successful no-owner/empty-title observation. Retain
+    // the error of this exact original call before another API can replace it.
+    unsafe { F::SetLastError(F::ERROR_SUCCESS) };
+    entry.owner = unsafe { W::GetWindow(hwnd, W::GW_OWNER) };
+    entry.owner_error = Some(if entry.owner.is_null() { unsafe { F::GetLastError() } } else { 0 });
     entry.tid = unsafe { W::GetWindowThreadProcessId(hwnd, &mut entry.pid) };
+    unsafe { F::SetLastError(F::ERROR_SUCCESS) };
     entry.length = unsafe { W::GetWindowTextW(hwnd, entry.title.as_mut_ptr(), entry.title.len() as i32) };
+    entry.title_error = Some(if entry.length == 0 { unsafe { F::GetLastError() } } else { 0 });
     1
 }
 impl WindowQuery {
@@ -942,10 +961,16 @@ impl WindowQuery {
     }
     fn root(&mut self, launch: &Launch, main: Option<F::HWND>, clock: &mut Clock, trace: &SmokeTrace) -> Result<Option<F::HWND>> {
         self.scan(launch, clock, trace)?;
+        self.select_root(main, trace)
+    }
+    // DATA selection only, after the original live process/thread and complete
+    // bounded scan have been checked. Framework event windows can be visible
+    // and ownerless without being main candidates; never choose the first match.
+    fn select_root(&self, main: Option<F::HWND>, trace: &SmokeTrace) -> Result<Option<F::HWND>> {
         let mut found = None;
         for entry in &self.entries[..self.count] {
-            if entry.owner.is_null() {
-                trace.need(SmokeCheck::RootIdentity, entry.title(trace)? == "Mobile Release Kit" && found.is_none())?;
+            if entry.ownerless(trace)? && entry.title(trace)? == "Mobile Release Kit" {
+                trace.need(SmokeCheck::RootUniqueness, found.is_none())?;
                 found = Some(entry.hwnd);
             }
         }
@@ -1789,8 +1814,98 @@ mod contract_tests {
         crate::ui::prerequisite_refusal_contract(&request);
     }
 
+    // Only scalar DATA enters the production selector. These borrowed-looking
+    // fixture HWNDs never go to a native API, COM, scan, or native cleanup.
+    fn main_window_selection_contract() {
+        fn row(hwnd: usize, owner: usize, title: &str) -> WindowData {
+            let mut value = WindowData::new();
+            value.hwnd = hwnd as F::HWND; value.owner = owner as F::HWND;
+            let units: Vec<u16> = title.encode_utf16().collect();
+            assert!(units.len() < value.title.len() - 1);
+            value.title[..units.len()].copy_from_slice(&units); value.length = units.len() as i32;
+            value.owner_error = Some(0); value.title_error = Some(0); value
+        }
+        fn windows(rows: Vec<WindowData>) -> WindowQuery {
+            let mut value = WindowQuery::new(); assert!(rows.len() <= value.entries.len());
+            value.count = rows.len();
+            for (to, from) in value.entries.iter_mut().zip(rows) { *to = from; }
+            value
+        }
+        fn accepts(rows: Vec<WindowData>, bound: Option<usize>, expected: Option<usize>) {
+            let trace = SmokeTrace::new();
+            assert_eq!(windows(rows).select_root(bound.map(|hwnd| hwnd as F::HWND), &trace),
+                Ok(expected.map(|hwnd| hwnd as F::HWND)));
+            assert!(trace.first.get().is_none());
+        }
+        fn refuses(rows: Vec<WindowData>, bound: Option<usize>, error: Error, check: SmokeCheck, status: Option<SmokeStatus>) {
+            let trace = SmokeTrace::new(); trace.phase.set(SmokePhase::MainWindow);
+            assert_eq!(windows(rows).select_root(bound.map(|hwnd| hwnd as F::HWND), &trace), Err(error));
+            assert_eq!(trace.first.get(), Some(SmokeFault { phase: SmokePhase::MainWindow, check, error, status }));
+        }
+        let title = "Mobile Release Kit";
+        accepts(vec![], None, None);
+        accepts(vec![row(2, 0, ""), row(3, 0, "Other"), row(4, 1, title)], None, None);
+        accepts(vec![row(2, 0, "mobile release kit")], None, None);
+        accepts(vec![row(2, 1, title), row(1, 0, title)], None, Some(1));
+        for first in [true, false] {
+            for bound in [None, Some(1)] {
+                let auxiliary = row(2, 0, ""); let main = row(1, 0, title);
+                accepts(if first { vec![auxiliary, main] } else { vec![main, auxiliary] }, bound, Some(1));
+            }
+            // A failed possible second candidate must not become an empty
+            // noncandidate, regardless of enumeration order or the other row.
+            let mut failed = row(2, 0, ""); failed.title_error = Some(5);
+            let main = row(1, 0, title);
+            refuses(if first { vec![failed, main] } else { vec![main, failed] }, None,
+                Error::Unsafe, SmokeCheck::WindowTitleRead, Some(SmokeStatus::Win32(5)));
+        }
+        for duplicate in [1, 2] {
+            for bound in [None, Some(1)] {
+                refuses(vec![row(1, 0, title), row(duplicate, 0, title)], bound,
+                    Error::Unsafe, SmokeCheck::RootUniqueness, None);
+            }
+        }
+        for rows in [vec![], vec![row(2, 0, "")], vec![row(1, 0, "Other")],
+            vec![row(1, 2, title)], vec![row(2, 0, title)]] {
+            refuses(rows, Some(1), Error::Unsafe, SmokeCheck::RootContinuity, None);
+        }
+        for text in ["", title] {
+            let mut failed = row(2, 0, text); failed.owner_error = Some(6);
+            // The owner fault belongs to this row and precedes even a different
+            // captured title error; neither is taken from the valid main row.
+            failed.title_error = Some(5);
+            refuses(vec![row(1, 0, title), failed], None,
+                Error::Unsafe, SmokeCheck::WindowOwnerRead, Some(SmokeStatus::Win32(6)));
+        }
+        let mut missing = row(2, 1, title); missing.owner_error = None;
+        refuses(vec![missing], None, Error::State, SmokeCheck::WindowOwnerRead, None);
+        let mut missing = row(2, 0, ""); missing.title_error = None;
+        refuses(vec![row(1, 0, title), missing], None, Error::State, SmokeCheck::WindowTitleRead, None);
+        for length in [-1, 255] {
+            let mut malformed = row(2, 0, "Other"); malformed.length = length;
+            refuses(vec![row(1, 0, title), malformed], None,
+                Error::Unsafe, SmokeCheck::WindowTitleLength, None);
+        }
+        let mut malformed = row(2, 0, ""); malformed.title[0] = 0xd800; malformed.length = 1;
+        refuses(vec![row(1, 0, title), malformed], None,
+            Error::Unsafe, SmokeCheck::WindowTitleEncoding, None);
+
+        let mut failed = row(2, 0, ""); failed.title_error = Some(5);
+        let mut query = windows(vec![row(1, 0, title), failed]);
+        let trace = SmokeTrace::new(); trace.phase.set(SmokePhase::MainWindow);
+        assert_eq!(query.select_root(None, &trace), Err(Error::Unsafe));
+        let first = trace.first.get().unwrap();
+        assert_eq!(first.check, SmokeCheck::WindowTitleRead); assert_eq!(first.status, Some(SmokeStatus::Win32(5)));
+        query.entries[1].title_error = Some(0);
+        assert_eq!(query.select_root(None, &trace), Ok(Some(1usize as F::HWND)));
+        query.entries[0].owner_error = Some(6);
+        assert_eq!(query.select_root(None, &trace), Err(Error::Unsafe));
+        assert_eq!(trace.first.get(), Some(first)); // Later status/success cannot rewrite the original fault.
+    }
+
     #[test]
     fn native_smoke_never_credits_posting_or_partial_release_as_finality() {
+        main_window_selection_contract();
         let mut data = Smoke::new(); assert!(!data.passed());
         data.dashboard_ready = true; data.main = Some((1usize as F::HWND, 0, vec![1, 2]));
         data.windows.post_entered = true; data.windows.post_return = 1;
