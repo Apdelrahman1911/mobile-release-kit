@@ -1912,7 +1912,8 @@ fn builder() -> tauri::Builder<tauri::Wry> {
                     return true;
                 }
             }
-            (tauri::generate_handler![
+            let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool =
+                tauri::generate_handler![
             app_info, choose_project, choose_project_path, project_snapshot, catalog, environment_requirements, release_version_observe,
             artifact_evidence_choose, artifact_evidence_status, artifact_evidence_observe, artifact_evidence_cancel,
             start_environment_diagnostics, environment_diagnostics_status, cancel_environment_diagnostics,
@@ -1928,7 +1929,8 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             github_connection_status, github_connection_connect_token, github_connection_refresh, github_connection_disconnect,
             vault_status, vault_open, asset_context, asset_choose, credential_prepare,
             vault_prepare_delete, vault_commit, vault_bind, vault_discard, vault_lock,
-            ])(invoke)
+            ];
+            handler(invoke)
         })
         .on_window_event(|window, event| {
             if window.label() != MAIN_WINDOW { return; }

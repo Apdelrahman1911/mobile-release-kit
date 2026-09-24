@@ -25,7 +25,7 @@ def section(text, start, end):
 class GitHubNativeWiringTests(unittest.TestCase):
     def test_closed_commands_match_handler_build_and_local_capability(self):
         shell = source("desktop/src-tauri/src/shell.rs")
-        handlers = section(shell, "(tauri::generate_handler![", "])(invoke)")
+        handlers = section(shell, "tauri::generate_handler![", "];")
         build = source("desktop/src-tauri/build.rs")
         capability = json.loads(source("desktop/src-tauri/capabilities/main.json"))
         self.assertTrue(capability["local"])
