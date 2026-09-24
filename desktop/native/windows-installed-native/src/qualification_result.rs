@@ -1124,28 +1124,37 @@ impl UiRequest {
         Ok(format!("{{\"runtimeBindingMatched\":true,\"verifiedMethods\":{},\"checks\":[{checks}],\"finality\":{{\"dialogsSettled\":true,\"sourcesSettled\":true,\"passiveOwnersSettled\":true,\"documentHooksSettled\":true,\"relayJoined\":true,\"exitReady\":true}}}}",
             if self.role == UiRole::ProjectDraft { 6 } else { 0 }))
     }
-    pub fn probe_result(&self, request_sha: &str, account_sha: &str, reason: Option<&str>, version: Option<&str>) -> Result<String> {
+    pub fn probe_result(&self, request_sha: &str, account_sha: &str, reason: Option<&str>, version: Option<&str>,
+        refusal: Option<&super::ui::ManagedRuntimeRefusal>) -> Result<String> {
         need(self.role == UiRole::Prerequisite)?;
         let available = reason.is_none();
+        need((reason == Some("managed-webview2")) == refusal.is_some())?;
+        let diagnostic = refusal.map(|value| value.json()).transpose()?.unwrap_or_else(|| "null".to_owned());
         let (reason, version) = match (reason, version) {
             (None, Some(version)) if ui_version(version) => ("null".to_owned(), format!("\"{version}\"")),
             (Some(reason), None) if UI_PROBE_REASONS.contains(&reason) => (format!("\"{reason}\""), "null".to_owned()),
             _ => return Err(Error::Unsafe),
         };
-        self.envelope(request_sha, account_sha, &format!("{{\"available\":{available},\"reason\":{reason},\"ordinaryAccountMatched\":true,\"ordinaryContext\":{available},\"interactiveDesktop\":{available},\"managedRuntime\":{available},\"overrideFree\":{available},\"privateParent\":{available},\"runtimeVersion\":{version},\"originalsSettled\":true,\"noWebviewCreated\":true}}"))
+        self.envelope(request_sha, account_sha, &format!("{{\"available\":{available},\"reason\":{reason},\"ordinaryAccountMatched\":true,\"ordinaryContext\":{available},\"interactiveDesktop\":{available},\"managedRuntime\":{available},\"overrideFree\":{available},\"privateParent\":{available},\"runtimeVersion\":{version},\"managedRuntimeRefusal\":{diagnostic},\"originalsSettled\":true,\"noWebviewCreated\":true}}"))
     }
     pub fn accept_child(&self, raw: &[u8], request_sha: &str, account_sha: &str) -> Result<bool> {
         need(raw.len() <= LIMIT && raw.is_ascii())?;
         if self.role != UiRole::Prerequisite {
             need(raw == self.envelope(request_sha, account_sha, &self.case_observation()?)?.as_bytes())?; return Ok(true);
         }
-        for reason in UI_PROBE_REASONS {
-            if raw == self.probe_result(request_sha, account_sha, Some(reason), None)?.as_bytes() { return Ok(false); }
-        }
         let text = std::str::from_utf8(raw).map_err(|_| Error::Unsafe)?;
+        let diagnostic = text.split_once(",\"managedRuntimeRefusal\":").and_then(|(_, tail)|
+            tail.split_once(",\"originalsSettled\":")).map(|(value, _)| value).ok_or(Error::Unsafe)?;
+        let refusal = if diagnostic == "null" { None } else {
+            Some(super::ui::ManagedRuntimeRefusal::parse(diagnostic).ok_or(Error::Unsafe)?)
+        };
+        for reason in UI_PROBE_REASONS {
+            if (reason == "managed-webview2") != refusal.is_some() { continue; }
+            if raw == self.probe_result(request_sha, account_sha, Some(reason), None, refusal.as_ref())?.as_bytes() { return Ok(false); }
+        }
         let version = text.split_once("\"runtimeVersion\":\"").and_then(|(_, tail)| tail.split_once('"'))
             .map(|(value, _)| value).ok_or(Error::Unsafe)?;
-        need(raw == self.probe_result(request_sha, account_sha, None, Some(version))?.as_bytes())?;
+        need(raw == self.probe_result(request_sha, account_sha, None, Some(version), refusal.as_ref())?.as_bytes())?;
         Ok(true)
     }
 }

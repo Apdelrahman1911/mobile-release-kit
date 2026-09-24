@@ -90,11 +90,16 @@ macro_rules! admission_labels {
         pub(crate) enum $name { $($variant),+ }
         impl $name {
             fn label(self) -> &'static str { match self { $(Self::$variant => $label),+ } }
+            #[allow(dead_code)]
+            pub(crate) fn from_label(value: &str) -> Option<Self> {
+                match value { $($label => Some(Self::$variant),)+ _ => None }
+            }
             #[cfg(test)]
             const ALL: &'static [Self] = &[$(Self::$variant),+];
         }
     };
 }
+pub(crate) use admission_labels;
 admission_labels!(AdmissionRole {
     Owner => "owner", Installer => "installer", Primary => "primary-token",
     ThreadBefore => "thread-before", ThreadAfter => "thread-after",

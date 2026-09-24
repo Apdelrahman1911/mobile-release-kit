@@ -1541,7 +1541,7 @@ mod contract_tests {
     #[test]
     fn unavailable_probe_is_completed_observation_not_gui_authorization() {
         let request = request(); let digest = "a".repeat(64); let account = "b".repeat(64);
-        let unavailable = request.probe_result(&digest, &account, Some("interactive-desktop"), None);
+        let unavailable = request.probe_result(&digest, &account, Some("interactive-desktop"), None, None);
         assert!(unavailable.is_ok());
         if let Ok(unavailable) = unavailable {
             assert_eq!(request.accept_child(unavailable.as_bytes(), &digest, &account), Ok(false));
@@ -1549,11 +1549,12 @@ mod contract_tests {
             assert!(request.accept_child(unavailable.replace("\"originalsSettled\":true", "\"originalsSettled\":false").as_bytes(), &digest, &account).is_err());
             assert!(request.accept_child(unavailable.as_bytes(), &digest, &"c".repeat(64)).is_err());
         }
-        assert!(request.probe_result(&digest, &account, Some("cleanup-unknown"), None).is_err());
-        assert!(request.probe_result(&digest, &account, None, None).is_err());
-        if let Ok(available) = request.probe_result(&digest, &account, None, Some("130.0.1.2")) {
+        assert!(request.probe_result(&digest, &account, Some("cleanup-unknown"), None, None).is_err());
+        assert!(request.probe_result(&digest, &account, None, None, None).is_err());
+        if let Ok(available) = request.probe_result(&digest, &account, None, Some("130.0.1.2"), None) {
             assert_eq!(request.accept_child(available.as_bytes(), &digest, &account), Ok(true));
         } else { panic!("valid finite observation must encode"); }
+        crate::ui::prerequisite_refusal_contract(&request);
     }
 
     #[test]

@@ -12658,6 +12658,101 @@ def windows_normal_ui_probe_request(context: dict, artifact: dict, identity: str
     return raw
 
 
+WINDOWS_NORMAL_UI_REFUSAL_STAGES = (
+    "version-getter", "version-text", "stable-version", "path-decode", "path-depth", "runtime-root-decode",
+    "runtime-ancestry", "mapping-before", "root-reserve", "root-open", "root-metadata", "child-open",
+    "child-metadata", "identity-alias", "local-ntfs", "alternate-streams", "runtime-security", "mapping-after",
+    "recheck-metadata", "recheck-identity", "recheck-security",
+)
+WINDOWS_NORMAL_UI_REFUSAL_OPERATIONS = {
+    "version-getter": {"webview-version"}, "mapping-before": {"dos-mapping"}, "mapping-after": {"dos-mapping"},
+    "root-open": {"open"}, "child-open": {"open", "handle-info"},
+    **dict.fromkeys(("root-metadata", "child-metadata", "recheck-metadata"), {
+        "metadata-basic", "metadata-standard", "metadata-tag", "metadata-id", "metadata-case", "final-name"}),
+    "local-ntfs": {"volume-name", "volume-device"}, "alternate-streams": {"streams"},
+    "runtime-security": {"security"}, "recheck-security": {"security"},
+}
+WINDOWS_NORMAL_UI_REFUSAL_ADMISSION = {
+    "mapping": {"output-bytes", "utf16-width", "utf16-encoding", "drive-shape", "drive-type", "mapping-count",
+                "mapping-size", "mapping-frame", "mapping-device", "mapping-digits"},
+    "directory": {"child-parent", "child-name"}, "handle-info": {"output-bytes", "span", "inherited"},
+    "metadata": {"output-bytes", "span", "text-count", "utf16-width", "utf16-encoding", "terminator", "text-length",
+        "attributes", "metadata-size", "attribute-agreement", "directory-boolean", "delete-pending", "object-kind",
+        "directory-attribute", "file-size", "allocation-size", "file-links", "file-id", "file-type", "case-sensitive", "canonical-name"},
+    "volume": {"output-bytes", "span", "utf16-width", "utf16-encoding", "terminator", "text-length", "volume-name",
+               "volume-device-size", "volume-device-type", "volume-remote"},
+    "streams": {"output-bytes", "span", "utf16-width", "utf16-encoding", "stream-missing", "stream-frame", "stream-name",
+                "stream-size", "stream-allocation", "stream-padding"},
+    **dict.fromkeys(("security-ancestor", "security-version"), {"output-bytes", "output-count", "span", "sid-revision",
+        "sid-count", "sid-extent", "descriptor-size", "descriptor-revision", "descriptor-reserved", "descriptor-control",
+        "descriptor-required", "descriptor-sacl", "owner-offset", "acl-offset", "owner-trust", "acl-revision", "acl-reserved",
+        "acl-size", "acl-count", "owner-acl-overlap", "group-offset", "group-overlap", "ace-type", "ace-size", "ace-sid-size",
+        "ace-flags", "ace-inheritance", "ace-mask", "ace-dangerous-rights"}),
+}
+
+
+def windows_normal_ui_managed_refusal(value: object) -> dict:
+    """Closed original-refusal DATA only; never runtime availability or finality."""
+    value = closed_object(value, {"schemaVersion", "stage", "pathIndex", "cause", "detail", "native", "admission"},
+                          "Windows UI managed refusal fields differ")
+    require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+            and len(canonical_json(value)) <= 768 and type(value["stage"]) is str
+            and value["stage"] in WINDOWS_NORMAL_UI_REFUSAL_STAGES
+            and type(value["cause"]) is str and value["cause"] in ("unavailable", "unsafe", "bounds", "state", "native-failure", "ui-policy")
+            and (value["detail"] is None or type(value["detail"]) is str), "Windows UI managed refusal shape differs")
+    stage, cause, detail = value["stage"], value["cause"], value["detail"]
+    bound = stage in ("local-ntfs", "alternate-streams", "runtime-security", "recheck-metadata", "recheck-identity", "recheck-security")
+    require(integer_between(value["pathIndex"], 0, 47) if bound else value["pathIndex"] is None,
+            "Windows UI managed refusal path original is not bound")
+    if stage == "version-getter":
+        compatible = cause == "native-failure" and detail is None and value["native"] is not None
+    elif stage == "version-text":
+        compatible = cause == "native-failure" and detail in ("text-state", "text-null", "text-empty", "text-utf16", "text-bound")
+    elif stage == "stable-version":
+        compatible = cause == "ui-policy" and detail in ("version-count", "version-empty", "version-width", "version-leading-zero",
+                                                         "version-digits", "version-range", "version-major")
+    elif stage in ("path-depth", "runtime-ancestry", "identity-alias"):
+        compatible = cause == "ui-policy" and detail is None
+    elif stage == "recheck-identity":
+        compatible = cause == "ui-policy" and detail in ("identity", "kind", "attributes", "creation", "file-metadata")
+    elif stage == "mapping-after" and cause == "ui-policy":
+        compatible = detail == "mapping-changed"
+    elif stage in ("path-decode", "runtime-root-decode"):
+        compatible = cause in ("unsafe", "bounds", "state") and detail is None
+    elif stage == "root-reserve":
+        compatible = cause in ("bounds", "state") and detail is None
+    else:
+        compatible = cause in ("unavailable", "unsafe", "bounds", "state") and detail is None
+    require(compatible, "Windows UI managed refusal stage/cause/detail conflict")
+    if value["native"] is not None:
+        native = closed_object(value["native"], {"operation", "domain", "code"}, "Windows UI original native refusal fields differ")
+        require((cause == "unavailable" or stage == "version-getter") and type(native["operation"]) is str
+                and native["operation"] in WINDOWS_NORMAL_UI_REFUSAL_OPERATIONS.get(stage, ()),
+                "Windows UI native refusal belongs to another operation")
+        operation, domain, code = native["operation"], native["domain"], native["code"]
+        if operation == "webview-version":
+            valid = domain == "hresult" and integer_between(code, -(2**31), -1) and code != -2147483638
+        elif operation in ("open", "volume-device", "streams"):
+            valid = domain == "ntstatus" and integer_between(code, -(2**31), 2**31 - 1) and ((code & 0xffffffff) >> 30) == 3
+        else:
+            valid = domain == "win32" and integer_between(code, 0, 2**32 - 1) and code != 997
+        require(valid, "Windows UI native refusal is not a definite original error")
+    if value["admission"] is not None:
+        admission = closed_object(value["admission"], {"operation", "check", "index"}, "Windows UI admission refusal fields differ")
+        allowed = {
+            "mapping-before": ("mapping",), "mapping-after": ("mapping",), "child-open": ("directory", "handle-info"),
+            "root-metadata": ("metadata",), "child-metadata": ("metadata",), "recheck-metadata": ("metadata",),
+            "local-ntfs": ("volume",), "alternate-streams": ("streams",),
+            "runtime-security": ("security-ancestor", "security-version"), "recheck-security": ("security-ancestor", "security-version"),
+        }
+        require(cause == "unsafe" and type(admission["operation"]) is str and admission["operation"] in allowed.get(stage, ())
+                and type(admission["check"]) is str and admission["check"] in WINDOWS_NORMAL_UI_REFUSAL_ADMISSION[admission["operation"]],
+                "Windows UI admission refusal belongs to another predicate")
+        require(admission["index"] is None or admission["operation"] in ("security-ancestor", "security-version")
+                and integer_between(admission["index"], 0, 2047), "Windows UI admission refusal index differs")
+    return dict(value)
+
+
 def windows_normal_ui_child_data(request_raw: bytes, child_raw: bytes, *, root: str, account_sid_sha256: str) -> dict:
     """A child pre-close record is DATA, never child/owner exit or profile finality."""
     request = windows_normal_ui_request_data(request_raw, root=root)
@@ -12673,9 +12768,16 @@ def windows_normal_ui_child_data(request_raw: bytes, child_raw: bytes, *, root: 
         require((available and reason is None and windows_normal_ui_version(version))
                 or (not available and reason in WINDOWS_NORMAL_UI_PROBE_REASONS and version is None),
                 "Windows UI prerequisite result/reason differs")
+        diagnostic = observation.get("managedRuntimeRefusal")
+        if reason == "managed-webview2":
+            diagnostic = windows_normal_ui_managed_refusal(diagnostic)
+            require(re.search(rb":\s*-0(?=\s*[,}])", child_raw) is None,
+                    "Windows UI refusal integer spelling is not canonical")
+        else:
+            require(diagnostic is None, "Windows UI refusal cannot accompany success or another reason")
         observed = {"available": available, "reason": reason, "ordinaryAccountMatched": True,
             **dict.fromkeys(("ordinaryContext", "interactiveDesktop", "managedRuntime", "overrideFree", "privateParent"), available),
-            "runtimeVersion": version, "originalsSettled": True, "noWebviewCreated": True}
+            "runtimeVersion": version, "managedRuntimeRefusal": diagnostic, "originalsSettled": True, "noWebviewCreated": True}
     else:
         observed = {"runtimeBindingMatched": True, "verifiedMethods": 6 if role == "project-draft" else 0,
             "checks": list(WINDOWS_NORMAL_UI_CASE_CHECKS[role]), "finality": dict.fromkeys((

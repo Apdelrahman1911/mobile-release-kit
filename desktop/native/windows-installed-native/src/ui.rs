@@ -63,6 +63,254 @@ fn sta() -> UiResult<()> {
     if kind == APTTYPE_STA || kind == APTTYPE_MAINSTA { Ok(()) } else { Err(UiError::OrdinaryContext) }
 }
 
+// Finite first-refusal DATA on the SAME inspector. None of these tags decides
+// admission, invokes an API, reads a native destination, or grants settlement.
+super::admission_labels!(ProbeStage {
+    Getter => "version-getter", Text => "version-text", Version => "stable-version",
+    Decode => "path-decode", Depth => "path-depth", RootDecode => "runtime-root-decode",
+    Ancestry => "runtime-ancestry", MappingBefore => "mapping-before", Reserve => "root-reserve",
+    RootOpen => "root-open", RootMetadata => "root-metadata", ChildOpen => "child-open",
+    ChildMetadata => "child-metadata", Alias => "identity-alias", Ntfs => "local-ntfs",
+    Streams => "alternate-streams", Security => "runtime-security", MappingAfter => "mapping-after",
+    RecheckMetadata => "recheck-metadata", RecheckIdentity => "recheck-identity", RecheckSecurity => "recheck-security"
+});
+super::admission_labels!(ProbeCause {
+    Unavailable => "unavailable", Unsafe => "unsafe", Bounds => "bounds", State => "state",
+    Native => "native-failure", Policy => "ui-policy"
+});
+super::admission_labels!(ProbeDetail {
+    TextState => "text-state", TextNull => "text-null", TextEmpty => "text-empty",
+    TextUtf16 => "text-utf16", TextBound => "text-bound",
+    VersionCount => "version-count", VersionEmpty => "version-empty", VersionWidth => "version-width",
+    VersionZero => "version-leading-zero", VersionDigits => "version-digits", VersionRange => "version-range",
+    VersionMajor => "version-major", MappingChanged => "mapping-changed",
+    Identity => "identity", Kind => "kind", Attributes => "attributes", Creation => "creation", File => "file-metadata"
+});
+super::admission_labels!(ProbeOperation {
+    Getter => "webview-version", Mapping => "dos-mapping", Open => "open", Handle => "handle-info",
+    Basic => "metadata-basic", Standard => "metadata-standard", Tag => "metadata-tag", Id => "metadata-id",
+    Case => "metadata-case", Name => "final-name", VolumeName => "volume-name",
+    VolumeDevice => "volume-device", Streams => "streams", Security => "security"
+});
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProbeStatus { Win32(u32), Nt(i32), Hresult(i32) }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProbeNative { operation: ProbeOperation, status: ProbeStatus }
+impl ProbeNative {
+    fn valid(self, stage: ProbeStage) -> bool {
+        use ProbeOperation as O;
+        use ProbeStage as P;
+        let operation = match stage {
+            P::Getter => self.operation == O::Getter,
+            P::MappingBefore | P::MappingAfter => self.operation == O::Mapping,
+            P::RootOpen => self.operation == O::Open,
+            P::ChildOpen => matches!(self.operation, O::Open | O::Handle),
+            P::RootMetadata | P::ChildMetadata | P::RecheckMetadata => matches!(self.operation,
+                O::Basic | O::Standard | O::Tag | O::Id | O::Case | O::Name),
+            P::Ntfs => matches!(self.operation, O::VolumeName | O::VolumeDevice),
+            P::Streams => self.operation == O::Streams,
+            P::Security | P::RecheckSecurity => self.operation == O::Security,
+            _ => false,
+        };
+        operation && match (self.operation, self.status) {
+            (O::Getter, ProbeStatus::Hresult(code)) => code < 0 && code != HRESULT_PENDING,
+            (O::Open | O::VolumeDevice | O::Streams, ProbeStatus::Nt(code)) => (code as u32 >> 30) == 3,
+            (O::Mapping | O::Handle | O::Basic | O::Standard | O::Tag | O::Id | O::Case | O::Name
+                | O::VolumeName | O::Security, ProbeStatus::Win32(code)) => code != F::ERROR_IO_PENDING,
+            _ => false,
+        }
+    }
+    #[cfg(test)]
+    fn original(call: Call, returned: Returned) -> Option<Self> {
+        use ProbeOperation as O;
+        let operation = match call {
+            Call::Mapping => O::Mapping, Call::Open(_) => O::Open, Call::HandleInfo => O::Handle,
+            Call::Info(class, size) => match class {
+                FS::FileBasicInfo if size == size_of::<FS::FILE_BASIC_INFO>() => O::Basic,
+                FS::FileStandardInfo if size == size_of::<FS::FILE_STANDARD_INFO>() => O::Standard,
+                FS::FileAttributeTagInfo if size == size_of::<FS::FILE_ATTRIBUTE_TAG_INFO>() => O::Tag,
+                FS::FileIdInfo if size == size_of::<FS::FILE_ID_INFO>() => O::Id,
+                FS::FileCaseSensitiveInfo if size == size_of::<FS::FILE_CASE_SENSITIVE_INFO>() => O::Case,
+                _ => return None,
+            },
+            Call::FinalName => O::Name, Call::VolumeName => O::VolumeName,
+            Call::VolumeDevice => O::VolumeDevice, Call::Streams => O::Streams, Call::Security => O::Security,
+            _ => return None,
+        };
+        let status = match (operation, returned) {
+            (O::Mapping | O::Name, Returned::Count(0, code)) if code != F::ERROR_IO_PENDING => ProbeStatus::Win32(code),
+            (O::Handle | O::Basic | O::Standard | O::Tag | O::Id | O::Case | O::VolumeName | O::Security,
+                Returned::Boolean(0, code)) if code != F::ERROR_IO_PENDING => ProbeStatus::Win32(code),
+            (O::Open | O::VolumeDevice | O::Streams, Returned::Nt(code)) if (code as u32 >> 30) == 3 => ProbeStatus::Nt(code),
+            _ => return None,
+        };
+        Some(Self { operation, status })
+    }
+}
+
+fn probe_admission_valid(stage: ProbeStage, value: PublicationAdmissionObservation) -> bool {
+    use AdmissionOp as O;
+    use ProbeStage as P;
+    let operation = match stage {
+        P::MappingBefore | P::MappingAfter => value.operation == O::Mapping,
+        P::ChildOpen => matches!(value.operation, O::Directory | O::HandleInfo),
+        P::RootMetadata | P::ChildMetadata | P::RecheckMetadata => value.operation == O::Metadata,
+        P::Ntfs => value.operation == O::Volume, P::Streams => value.operation == O::Streams,
+        P::Security | P::RecheckSecurity => matches!(value.operation, O::SecurityAncestor | O::SecurityVersion),
+        _ => false,
+    };
+    if !operation || value.role != AdmissionRole::RuntimeInput { return false; }
+    let security = matches!(value.operation, O::SecurityAncestor | O::SecurityVersion);
+    if value.index.is_some_and(|index| !security || index >= 2048) { return false; }
+    match value.operation {
+        O::Mapping => matches!(value.check, C::OutputBytes | C::Utf16Width | C::Utf16Encoding
+            | C::DriveShape | C::DriveType | C::MappingCount | C::MappingSize | C::MappingFrame | C::MappingDevice | C::MappingDigits),
+        O::Directory => matches!(value.check, C::ChildParent | C::ChildName),
+        O::HandleInfo => matches!(value.check, C::OutputBytes | C::Span | C::Inherited),
+        O::Metadata => matches!(value.check, C::OutputBytes | C::Span | C::TextCount | C::Utf16Width | C::Utf16Encoding
+            | C::Terminator | C::TextLength | C::Attributes | C::MetadataSize | C::AttributeAgreement
+            | C::DirectoryBoolean | C::DeletePending | C::ObjectKind | C::DirectoryAttribute | C::FileSize
+            | C::AllocationSize | C::FileLinks | C::FileId | C::FileType | C::CaseSensitive | C::CanonicalName),
+        O::Volume => matches!(value.check, C::OutputBytes | C::Span | C::Utf16Width | C::Utf16Encoding | C::Terminator
+            | C::TextLength | C::VolumeName | C::VolumeDeviceSize | C::VolumeDeviceType | C::VolumeRemote),
+        O::Streams => matches!(value.check, C::OutputBytes | C::Span | C::Utf16Width | C::Utf16Encoding | C::StreamMissing
+            | C::StreamFrame | C::StreamName | C::StreamSize | C::StreamAllocation | C::StreamPadding),
+        O::SecurityAncestor | O::SecurityVersion => matches!(value.check, C::OutputBytes | C::OutputCount | C::Span
+            | C::SidRevision | C::SidCount | C::SidExtent | C::DescriptorSize | C::DescriptorRevision | C::DescriptorReserved
+            | C::DescriptorControl | C::DescriptorRequired | C::DescriptorSacl | C::OwnerOffset | C::AclOffset | C::OwnerTrust
+            | C::AclRevision | C::AclReserved | C::AclSize | C::AclCount | C::OwnerAclOverlap | C::GroupOffset | C::GroupOverlap
+            | C::AceType | C::AceSize | C::AceSidSize | C::AceFlags | C::AceInheritance | C::AceMask | C::AceDangerousRights),
+        _ => false,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ManagedRuntimeRefusal {
+    stage: ProbeStage, path: Option<u8>, cause: ProbeCause, detail: Option<ProbeDetail>,
+    native: Option<ProbeNative>, admission: Option<PublicationAdmissionObservation>,
+}
+impl ManagedRuntimeRefusal {
+    fn valid(self) -> bool {
+        use ProbeCause as E;
+        use ProbeDetail as D;
+        use ProbeStage as P;
+        let bound = matches!(self.stage, P::Ntfs | P::Streams | P::Security | P::RecheckMetadata | P::RecheckIdentity | P::RecheckSecurity);
+        if self.path.is_some_and(|index| usize::from(index) >= MAX_ORIGINALS) || self.path.is_some() != bound { return false; }
+        let kind = match self.stage {
+            P::Getter => self.cause == E::Native && self.detail.is_none() && self.native.is_some(),
+            P::Text => self.cause == E::Native && matches!(self.detail,
+                Some(D::TextState | D::TextNull | D::TextEmpty | D::TextUtf16 | D::TextBound)),
+            P::Version => self.cause == E::Policy && matches!(self.detail, Some(D::VersionCount | D::VersionEmpty
+                | D::VersionWidth | D::VersionZero | D::VersionDigits | D::VersionRange | D::VersionMajor)),
+            P::Depth | P::Ancestry | P::Alias => self.cause == E::Policy && self.detail.is_none(),
+            P::RecheckIdentity => self.cause == E::Policy && matches!(self.detail,
+                Some(D::Identity | D::Kind | D::Attributes | D::Creation | D::File)),
+            P::MappingAfter if self.cause == E::Policy => self.detail == Some(D::MappingChanged),
+            P::Decode | P::RootDecode => matches!(self.cause, E::Unsafe | E::Bounds | E::State) && self.detail.is_none(),
+            P::Reserve => matches!(self.cause, E::Bounds | E::State) && self.detail.is_none(),
+            _ => matches!(self.cause, E::Unavailable | E::Unsafe | E::Bounds | E::State) && self.detail.is_none(),
+        };
+        kind && self.native.is_none_or(|value| (self.cause == E::Unavailable || self.stage == P::Getter) && value.valid(self.stage))
+            && self.admission.is_none_or(|value| self.cause == E::Unsafe && probe_admission_valid(self.stage, value))
+    }
+    pub(super) fn json(self) -> Result<String> {
+        if !self.valid() { return Err(Error::Unsafe); }
+        let optional = |value: Option<&str>| value.map_or_else(|| "null".to_owned(), |value| format!("\"{value}\""));
+        let native = self.native.map_or_else(|| "null".to_owned(), |value| {
+            let (domain, code) = match value.status {
+                ProbeStatus::Win32(code) => ("win32", i64::from(code)), ProbeStatus::Nt(code) => ("ntstatus", i64::from(code)),
+                ProbeStatus::Hresult(code) => ("hresult", i64::from(code)),
+            };
+            format!("{{\"operation\":\"{}\",\"domain\":\"{domain}\",\"code\":{code}}}", value.operation.label())
+        });
+        let admission = self.admission.map_or_else(|| "null".to_owned(), |value| format!(
+            "{{\"operation\":\"{}\",\"check\":\"{}\",\"index\":{}}}", value.operation.label(), value.check.label(),
+            value.index.map_or_else(|| "null".to_owned(), |index| index.to_string())));
+        let raw = format!("{{\"schemaVersion\":1,\"stage\":\"{}\",\"pathIndex\":{},\"cause\":\"{}\",\"detail\":{},\"native\":{native},\"admission\":{admission}}}",
+            self.stage.label(), self.path.map_or_else(|| "null".to_owned(), |index| index.to_string()),
+            self.cause.label(), optional(self.detail.map(ProbeDetail::label)));
+        if raw.len() > 768 { Err(Error::Bounds) } else { Ok(raw) }
+    }
+    pub(super) fn parse(raw: &str) -> Option<Self> {
+        // Only the closed canonical fragment is decoded; its entire envelope is
+        // still reconstructed and byte-compared by UiRequest::accept_child.
+        if raw.len() > 768 || !raw.is_ascii() { return None; }
+        let (stage, tail) = raw.strip_prefix("{\"schemaVersion\":1,\"stage\":\"")?.split_once("\",\"pathIndex\":")?;
+        let (path, tail) = tail.split_once(",\"cause\":\"")?;
+        let (cause, tail) = tail.split_once("\",\"detail\":")?;
+        let (detail, tail) = tail.split_once(",\"native\":")?;
+        let (native, admission) = tail.split_once(",\"admission\":")?;
+        let admission = admission.strip_suffix('}')?;
+        let value = Self {
+            stage: ProbeStage::from_label(stage)?, path: if path == "null" { None } else { Some(path.parse().ok()?) },
+            cause: ProbeCause::from_label(cause)?, detail: if detail == "null" { None }
+                else { Some(ProbeDetail::from_label(detail.strip_prefix('"')?.strip_suffix('"')?)?) },
+            native: if native == "null" { None } else {
+                let (operation, tail) = native.strip_prefix("{\"operation\":\"")?.split_once("\",\"domain\":\"")?;
+                let (domain, code) = tail.split_once("\",\"code\":")?;
+                let code = code.strip_suffix('}')?;
+                Some(ProbeNative { operation: ProbeOperation::from_label(operation)?, status: match domain {
+                    "win32" => ProbeStatus::Win32(code.parse().ok()?), "ntstatus" => ProbeStatus::Nt(code.parse().ok()?),
+                    "hresult" => ProbeStatus::Hresult(code.parse().ok()?), _ => return None,
+                } })
+            },
+            admission: if admission == "null" { None } else {
+                let (operation, tail) = admission.strip_prefix("{\"operation\":\"")?.split_once("\",\"check\":\"")?;
+                let (check, index) = tail.split_once("\",\"index\":")?;
+                let index = index.strip_suffix('}')?;
+                Some(PublicationAdmissionObservation { role: AdmissionRole::RuntimeInput,
+                    operation: AdmissionOp::from_label(operation)?, check: C::from_label(check)?,
+                    index: if index == "null" { None } else { Some(index.parse().ok()?) } })
+            },
+        };
+        (value.json().ok()?.as_str() == raw).then_some(value)
+    }
+}
+
+#[derive(Default)]
+struct ProbeTrace {
+    selected: Option<(ProbeStage, Option<u8>)>, before_admission: Option<PublicationAdmissionObservation>,
+    #[cfg(test)]
+    before_unavailable: bool,
+    first: Option<ManagedRuntimeRefusal>,
+}
+impl ProbeTrace {
+    fn at(&mut self, stage: ProbeStage, path: Option<usize>, managed: bool, native: &NativeBook) {
+        self.selected = managed.then_some((stage, path.and_then(|index| u8::try_from(index).ok())));
+        self.before_admission = native.admission.first.get();
+        #[cfg(test)] { self.before_unavailable = native.first_unavailable.is_some(); }
+    }
+    fn record(&mut self, cause: ProbeCause, detail: Option<ProbeDetail>, native: Option<ProbeNative>,
+        admission: Option<PublicationAdmissionObservation>) {
+        if self.first.is_none() {
+            if let Some((stage, path)) = self.selected {
+                self.first = Some(ManagedRuntimeRefusal { stage, path, cause, detail, native, admission });
+            }
+        }
+    }
+    fn policy(&mut self, detail: Option<ProbeDetail>) { self.record(ProbeCause::Policy, detail, None, None); }
+    fn mapped<T>(&mut self, value: Result<T>, native: &NativeBook, refusal: UiError) -> UiResult<T> {
+        if refusal == UiError::ManagedRuntimeUnavailable {
+            if let Err(error) = &value {
+                let cause = match error { Error::Unavailable => Some(ProbeCause::Unavailable), Error::Unsafe => Some(ProbeCause::Unsafe),
+                    Error::Bounds => Some(ProbeCause::Bounds), Error::State => Some(ProbeCause::State), Error::Unknown => None };
+                if let Some(cause) = cause {
+                    #[allow(unused_mut)]
+                    let mut observed = None;
+                    #[cfg(test)]
+                    if *error == Error::Unavailable && !self.before_unavailable {
+                        observed = native.first_unavailable.and_then(|(call, returned)| ProbeNative::original(call, returned));
+                    }
+                    let admission = if *error == Error::Unsafe && self.before_admission.is_none() {
+                        native.admission.first.get() } else { None };
+                    self.record(cause, None, observed, admission);
+                }
+            }
+        }
+        mapped(value, refusal)
+    }
+}
+
 /// Finite public DATA only. Actual token/SID/station/path/handles stay private.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PrerequisiteFacts {
@@ -77,7 +325,10 @@ struct PathOriginal { original: Original, metadata: Metadata, runtime_scope: Opt
 fn managed_runtime_scope(depth: usize, root_depth: usize) -> AuthorityScope {
     if depth >= root_depth { AuthorityScope::ImmutableVersion } else { AuthorityScope::AncestorOutsideVersion }
 }
-struct NativeTextState { value: PWSTR, entered: bool, returned: bool, released: bool, unknown: bool }
+struct NativeTextState {
+    value: PWSTR, entered: bool, returned: bool, released: bool, unknown: bool,
+    error_hresult: Option<i32>, read_refusal: Cell<Option<ProbeDetail>>,
+}
 struct NativeText { original: Held<NativeTextState> }
 impl std::ops::Deref for NativeText {
     type Target = NativeTextState;
@@ -88,8 +339,14 @@ impl std::ops::DerefMut for NativeText {
 }
 impl NativeText {
     fn new() -> Self { Self { original: ManuallyDrop::new(Box::pin(NativeTextState {
-        value: PWSTR::null(), entered: false, returned: false, released: false, unknown: false })) } }
+        value: PWSTR::null(), entered: false, returned: false, released: false, unknown: false,
+        error_hresult: None, read_refusal: Cell::new(None) })) } }
     fn complete(&mut self, result: windows::core::Result<()>) -> UiResult<()> {
+        // Copy only an actual first returning Err; Ok does not expose the
+        // original HRESULT through this documented wrapper. No output read.
+        if self.entered && !self.returned && !self.unknown && self.error_hresult.is_none() {
+            self.error_hresult = result.as_ref().err().map(|error| error.code().0);
+        }
         if !self.entered || self.returned || self.unknown
             || result.as_ref().is_err_and(|error| error.code().0 == HRESULT_PENDING) {
             self.unknown = true; return Err(UiError::CleanupUnknown);
@@ -100,17 +357,22 @@ impl NativeText {
     }
     fn read(&self, limit: usize) -> UiResult<String> {
         if self.unknown { return Err(UiError::CleanupUnknown); }
-        if !self.entered || !self.returned || self.released || self.value.is_null() { return Err(UiError::NativeFailure); }
+        if !self.entered || !self.returned || self.released { return Err(self.read_failed(ProbeDetail::TextState)); }
+        if self.value.is_null() { return Err(self.read_failed(ProbeDetail::TextNull)); }
         let mut units = Vec::with_capacity(limit.min(512));
         // A successful documented getter owns a NUL-terminated CoTaskMem UTF16
         // allocation. Bound copying; never lstrlenW/lossy path conversion.
         for index in 0..limit {
             let unit = unsafe { *self.value.0.add(index) };
-            if unit == 0 { return if units.is_empty() { Err(UiError::NativeFailure) }
-                else { String::from_utf16(&units).map_err(|_| UiError::NativeFailure) }; }
+            if unit == 0 { return if units.is_empty() { Err(self.read_failed(ProbeDetail::TextEmpty)) }
+                else { String::from_utf16(&units).map_err(|_| self.read_failed(ProbeDetail::TextUtf16)) }; }
             units.push(unit);
         }
-        Err(UiError::NativeFailure)
+        Err(self.read_failed(ProbeDetail::TextBound))
+    }
+    fn read_failed(&self, detail: ProbeDetail) -> UiError {
+        if self.read_refusal.get().is_none() { self.read_refusal.set(Some(detail)); }
+        UiError::NativeFailure
     }
     fn release(&mut self) -> UiResult<()> {
         if self.released { return Ok(()); }
@@ -168,6 +430,7 @@ impl Drop for HookToken {
 /// a user-data directory or a WebView. Its receipt is not a transferable permit.
 pub struct Prerequisites {
     native: NativeBook,
+    probe: ProbeTrace,
     paths: Vec<PathOriginal>,
     input_desktop: D::HDESK,
     station: D::HWINSTA, // borrowed, NEVER CloseWindowStation
@@ -190,7 +453,7 @@ pub struct Prerequisites {
 impl Default for Prerequisites { fn default() -> Self { Self::new() } }
 impl Prerequisites {
     pub fn new() -> Self {
-        Self { native: NativeBook::new(), paths: Vec::new(), input_desktop: null_mut(),
+        Self { native: NativeBook::new(), probe: ProbeTrace::default(), paths: Vec::new(), input_desktop: null_mut(),
             station: null_mut(), desktop: null_mut(), thread: 0, session: 0, logon: None,
             runtime_text: NativeText::new(), overrides: RegistryAudit::new(), program_files: String::new(), local_data: String::new(),
             parent: None, image: None, image_dos: String::new(), facts: None,
@@ -201,10 +464,18 @@ impl Prerequisites {
     pub(crate) fn observed_user_sid(&self) -> Option<&[u8]> {
         self.native.user.as_ref().map(|facts| facts.user.bytes())
     }
+    #[cfg(test)]
+    pub(super) fn managed_refusal(&self, observed: &UiResult<PrerequisiteFacts>) -> Option<ManagedRuntimeRefusal> {
+        if !self.settled() || !matches!(observed, Err(UiError::ManagedRuntimeUnavailable)) { return None; }
+        self.probe.first.filter(|value| value.valid())
+    }
     pub fn inspect(&mut self) -> UiResult<PrerequisiteFacts> {
         if self.begun || self.final_attempted || self.unknown { return Err(UiError::State); }
         self.begun = true;
+        self.native.admission.active.set(true);
+        self.native.admission.role.set(AdmissionRole::RuntimeInput);
         let result = self.inspect_inner();
+        self.native.admission.active.set(false); // Cleanup cannot overwrite the original first refusal.
         if result == Err(UiError::CleanupUnknown) { self.unknown = true; }
         result
     }
@@ -230,12 +501,25 @@ impl Prerequisites {
         if self.input_desktop.is_null() { return Err(UiError::InteractiveDesktop); }
         self.session_check()?;
         overrides_absent(&mut self.overrides)?;
+        self.probe.at(ProbeStage::Getter, None, true, &self.native);
         self.runtime_text.entered = true;
         let result = unsafe { WV::GetAvailableCoreWebView2BrowserVersionString(PCWSTR::null(), &mut self.runtime_text.value) };
-        self.runtime_text.complete(result).map_err(|error|
-            if error == UiError::CleanupUnknown { error } else { UiError::ManagedRuntimeUnavailable })?;
-        let version = self.runtime_text.read(96).map_err(|_| UiError::ManagedRuntimeUnavailable)?;
-        if !stable_version(&version) { return Err(UiError::ManagedRuntimeUnavailable); }
+        self.runtime_text.complete(result).map_err(|error| {
+            if error == UiError::CleanupUnknown { error } else {
+                self.probe.record(ProbeCause::Native, None, self.runtime_text.error_hresult.map(|code|
+                    ProbeNative { operation: ProbeOperation::Getter, status: ProbeStatus::Hresult(code) }), None);
+                UiError::ManagedRuntimeUnavailable
+            }
+        })?;
+        self.probe.at(ProbeStage::Text, None, true, &self.native);
+        let version = self.runtime_text.read(96).map_err(|_| {
+            self.probe.record(ProbeCause::Native, self.runtime_text.read_refusal.get(), None, None);
+            UiError::ManagedRuntimeUnavailable
+        })?;
+        self.probe.at(ProbeStage::Version, None, true, &self.native);
+        if let Some(detail) = version_refusal(&version) {
+            self.probe.policy(Some(detail)); return Err(UiError::ManagedRuntimeUnavailable);
+        }
         self.program_files = known_folder(SH::CSIDL_PROGRAM_FILESX86 as i32)?;
         self.local_data = known_folder(SH::CSIDL_LOCAL_APPDATA as i32).map_err(|_| UiError::UserDataParent)?;
         self.image_dos = format!("{}\\Microsoft\\EdgeWebView\\Application\\{}\\msedgewebview2.exe", self.program_files, version);
@@ -270,24 +554,40 @@ impl Prerequisites {
     }
     fn path(&mut self, path: &str, kind: FileKind, protected: bool) -> UiResult<usize> {
         let refusal = if protected { UiError::ManagedRuntimeUnavailable } else { UiError::UserDataParent };
-        let (drive, components) = mapped(decode::dos_location(path), refusal)?;
-        if components.len() > 20 { return Err(refusal); }
+        self.probe.at(ProbeStage::Decode, None, protected, &self.native);
+        let result = decode::dos_location(path);
+        let (drive, components) = self.probe.mapped(result, &self.native, refusal)?;
+        self.probe.at(ProbeStage::Depth, None, protected, &self.native);
+        if components.len() > 20 { self.probe.policy(None); return Err(refusal); }
         let runtime_depth = if protected {
             let root = format!("{}\\Microsoft\\EdgeWebView", self.program_files);
-            let (root_drive, root_components) = mapped(decode::dos_location(&root), refusal)?;
+            self.probe.at(ProbeStage::RootDecode, None, true, &self.native);
+            let result = decode::dos_location(&root);
+            let (root_drive, root_components) = self.probe.mapped(result, &self.native, refusal)?;
             // Exact decoded ancestry, never a string-prefix/suffix alias.
+            self.probe.at(ProbeStage::Ancestry, None, true, &self.native);
             if drive != root_drive || components.len() <= root_components.len()
-                || !components.starts_with(&root_components) { return Err(refusal); }
+                || !components.starts_with(&root_components) {
+                self.probe.policy(None); return Err(refusal);
+            }
             Some(root_components.len())
         } else { None };
-        let device = mapped(self.native.mapping(&drive), refusal)?;
+        self.probe.at(ProbeStage::MappingBefore, None, protected, &self.native);
+        let result = self.native.mapping(&drive);
+        let device = self.probe.mapped(result, &self.native, refusal)?;
         let root_name = format!("{device}\\");
         let mut index = if let Some(index) = self.paths.iter().position(|entry|
             self.native.slot(entry.original.index).is_ok_and(|slot| slot.canonical == root_name)) { index } else {
-            let original = mapped(self.native.reserve(Kind::Directory, None, &root_name, root_name.clone()), refusal)?;
-            // The book registers the root's result destination before native entry.
-            mapped(self.native.call(Call::Open(original.index), null_mut(), Vec::new()), refusal)?;
-            let metadata = mapped(self.native.metadata(&original), refusal)?;
+            // No pathIndex exists until its actual PathOriginal is bound below.
+            self.probe.at(ProbeStage::Reserve, None, protected, &self.native);
+            let result = self.native.reserve(Kind::Directory, None, &root_name, root_name.clone());
+            let original = self.probe.mapped(result, &self.native, refusal)?;
+            self.probe.at(ProbeStage::RootOpen, None, protected, &self.native);
+            let result = self.native.call(Call::Open(original.index), null_mut(), Vec::new());
+            self.probe.mapped(result, &self.native, refusal)?;
+            self.probe.at(ProbeStage::RootMetadata, None, protected, &self.native);
+            let result = self.native.metadata(&original);
+            let metadata = self.probe.mapped(result, &self.native, refusal)?;
             self.paths.push(PathOriginal { original, metadata, runtime_scope: None }); self.paths.len() - 1
         };
         self.admit_path(index, runtime_depth.map(|root| managed_runtime_scope(0, root)))?;
@@ -296,28 +596,45 @@ impl Prerequisites {
             let child_kind = if position + 1 == components.len() { kind } else { FileKind::Directory };
             index = if let Some(index) = self.paths.iter().position(|entry| self.native.slot(entry.original.index)
                 .is_ok_and(|slot| slot.parent == Some(parent_slot) && slot.name == wide(name))) { index } else {
-                let original = mapped(self.native.open_child(&self.paths[parent].original, name, child_kind), refusal)?;
-                let metadata = mapped(self.native.metadata(&original), refusal)?;
-                if self.paths.iter().any(|entry| entry.metadata.identity == metadata.identity) { return Err(refusal); }
+                self.probe.at(ProbeStage::ChildOpen, None, protected, &self.native);
+                let result = self.native.open_child(&self.paths[parent].original, name, child_kind);
+                let original = self.probe.mapped(result, &self.native, refusal)?;
+                self.probe.at(ProbeStage::ChildMetadata, None, protected, &self.native);
+                let result = self.native.metadata(&original);
+                let metadata = self.probe.mapped(result, &self.native, refusal)?;
+                self.probe.at(ProbeStage::Alias, None, protected, &self.native);
+                if self.paths.iter().any(|entry| entry.metadata.identity == metadata.identity) {
+                    self.probe.policy(None); return Err(refusal);
+                }
                 self.paths.push(PathOriginal { original, metadata, runtime_scope: None }); self.paths.len() - 1
             };
             self.admit_path(index, runtime_depth.map(|root| managed_runtime_scope(position + 1, root)))?;
         }
-        if mapped(self.native.mapping(&drive), refusal)? != device { return Err(refusal); }
+        self.probe.at(ProbeStage::MappingAfter, None, protected, &self.native);
+        let result = self.native.mapping(&drive);
+        if self.probe.mapped(result, &self.native, refusal)? != device {
+            self.probe.policy(Some(ProbeDetail::MappingChanged)); return Err(refusal);
+        }
         Ok(index)
     }
     fn admit_path(&mut self, index: usize, scope: Option<AuthorityScope>) -> UiResult<()> {
         let entry = self.paths.get_mut(index).ok_or(UiError::State)?;
         let refusal = if scope.is_some() { UiError::ManagedRuntimeUnavailable } else { UiError::UserDataParent };
-        mapped(self.native.local_ntfs(&entry.original), refusal)?;
-        mapped(self.native.no_alternate_streams(&entry.original), refusal)?;
+        self.probe.at(ProbeStage::Ntfs, Some(index), scope.is_some(), &self.native);
+        let result = self.native.local_ntfs(&entry.original);
+        self.probe.mapped(result, &self.native, refusal)?;
+        self.probe.at(ProbeStage::Streams, Some(index), scope.is_some(), &self.native);
+        let result = self.native.no_alternate_streams(&entry.original);
+        self.probe.mapped(result, &self.native, refusal)?;
         if let Some(scope) = scope {
             // Internal runtime directories must reject untrusted child creation,
             // not only writes to the final executable. Cached originals retain
             // their strongest admitted scope through all later rechecks.
             let scope = if entry.runtime_scope == Some(AuthorityScope::ImmutableVersion) {
                 AuthorityScope::ImmutableVersion } else { scope };
-            mapped(self.native.security(&entry.original, scope), UiError::ManagedRuntimeUnavailable)?;
+            self.probe.at(ProbeStage::Security, Some(index), true, &self.native);
+            let result = self.native.security(&entry.original, scope);
+            self.probe.mapped(result, &self.native, UiError::ManagedRuntimeUnavailable)?;
             entry.runtime_scope = Some(scope);
         } else {
             let user = self.native.user.as_ref().ok_or(UiError::State)?.user.clone();
@@ -332,16 +649,25 @@ impl Prerequisites {
         self.session_check()?; overrides_absent(&mut self.overrides)?;
         if known_folder(SH::CSIDL_PROGRAM_FILESX86 as i32)? != self.program_files
             || known_folder(SH::CSIDL_LOCAL_APPDATA as i32)? != self.local_data { return Err(UiError::UserDataParent); }
-        for entry in &self.paths {
-            let refusal = if entry.runtime_scope.is_some() { UiError::ManagedRuntimeUnavailable } else { UiError::UserDataParent };
-            let metadata = mapped(self.native.metadata(&entry.original), refusal)?;
-            // Directory timestamps may change for unrelated siblings. Original
-            // full identity/kind/attributes/canonical-name cannot change.
-            if metadata.identity != entry.metadata.identity || metadata.kind != entry.metadata.kind
-                || metadata.attributes != entry.metadata.attributes || metadata.creation != entry.metadata.creation
-                || metadata.kind == FileKind::File && metadata != entry.metadata { return Err(refusal); }
+        for (index, entry) in self.paths.iter().enumerate() {
+            let managed = entry.runtime_scope.is_some();
+            let refusal = if managed { UiError::ManagedRuntimeUnavailable } else { UiError::UserDataParent };
+            self.probe.at(ProbeStage::RecheckMetadata, Some(index), managed, &self.native);
+            let result = self.native.metadata(&entry.original);
+            let metadata = self.probe.mapped(result, &self.native, refusal)?;
+            // Same short-circuit equality order; retain only the rejecting tag.
+            self.probe.at(ProbeStage::RecheckIdentity, Some(index), managed, &self.native);
+            let detail = if metadata.identity != entry.metadata.identity { Some(ProbeDetail::Identity) }
+                else if metadata.kind != entry.metadata.kind { Some(ProbeDetail::Kind) }
+                else if metadata.attributes != entry.metadata.attributes { Some(ProbeDetail::Attributes) }
+                else if metadata.creation != entry.metadata.creation { Some(ProbeDetail::Creation) }
+                else if metadata.kind == FileKind::File && metadata != entry.metadata { Some(ProbeDetail::File) }
+                else { None };
+            if let Some(detail) = detail { self.probe.policy(Some(detail)); return Err(refusal); }
             if let Some(scope) = entry.runtime_scope {
-                mapped(self.native.security(&entry.original, scope), UiError::ManagedRuntimeUnavailable)?;
+                self.probe.at(ProbeStage::RecheckSecurity, Some(index), true, &self.native);
+                let result = self.native.security(&entry.original, scope);
+                self.probe.mapped(result, &self.native, UiError::ManagedRuntimeUnavailable)?;
             }
         }
         Ok(())
@@ -370,12 +696,20 @@ impl Prerequisites {
     }
 }
 
-fn stable_version(value: &str) -> bool {
+fn version_refusal(value: &str) -> Option<ProbeDetail> {
     let parts: Vec<_> = value.split('.').collect();
-    parts.len() == 4 && parts.iter().all(|part| !part.is_empty() && part.len() <= 5
-        && (part.len() == 1 || !part.starts_with('0')) && part.bytes().all(|byte| byte.is_ascii_digit())
-        && part.parse::<u16>().is_ok()) && parts[0].parse::<u16>().is_ok_and(|major| major >= 120)
+    if parts.len() != 4 { return Some(ProbeDetail::VersionCount); }
+    for part in &parts {
+        if part.is_empty() { return Some(ProbeDetail::VersionEmpty); }
+        if part.len() > 5 { return Some(ProbeDetail::VersionWidth); }
+        if part.len() != 1 && part.starts_with('0') { return Some(ProbeDetail::VersionZero); }
+        if !part.bytes().all(|byte| byte.is_ascii_digit()) { return Some(ProbeDetail::VersionDigits); }
+        if part.parse::<u16>().is_err() { return Some(ProbeDetail::VersionRange); }
+    }
+    if !parts[0].parse::<u16>().is_ok_and(|major| major >= 120) { return Some(ProbeDetail::VersionMajor); }
+    None
 }
+fn stable_version(value: &str) -> bool { version_refusal(value).is_none() }
 fn known_folder(folder: i32) -> UiResult<String> {
     let mut path = [0u16; F::MAX_PATH as usize];
     if unsafe { SH::SHGetFolderPathW(null_mut(), folder, null_mut(), SH::SHGFP_TYPE_CURRENT as u32, path.as_mut_ptr()) } != 0 {
@@ -940,6 +1274,148 @@ impl ShellSession {
             && self.watch.process.is_null() && self.watch.callbacks.as_ref().is_some_and(|callbacks|
                 callbacks.depth.get() == 0 && callbacks.exited.get() && !callbacks.unknown.get()))
     }
+}
+
+// Called by the existing selected unavailable-probe wrapper; no additional
+// native selector or harness. These are inert allocations/scalars only.
+#[cfg(test)]
+pub(super) fn prerequisite_refusal_contract(request: &super::qualification_result::UiRequest) {
+    use ProbeCause as E;
+    use ProbeDetail as D;
+    use ProbeStage as P;
+    let digest = "a".repeat(64); let account = "b".repeat(64);
+    let sample = |stage| {
+        let mut value = ManagedRuntimeRefusal { stage, path: None, cause: E::Unsafe, detail: None, native: None, admission: None };
+        match stage {
+            P::Getter => { value.cause = E::Native; value.native = Some(ProbeNative {
+                operation: ProbeOperation::Getter, status: ProbeStatus::Hresult(0x80070002u32 as i32) }); },
+            P::Text => { value.cause = E::Native; value.detail = Some(D::TextNull); },
+            P::Version => { value.cause = E::Policy; value.detail = Some(D::VersionMajor); },
+            P::Depth | P::Ancestry | P::Alias => value.cause = E::Policy,
+            P::Reserve => value.cause = E::State,
+            P::Ntfs | P::Streams | P::Security | P::RecheckMetadata | P::RecheckSecurity => value.path = Some(0),
+            P::RecheckIdentity => { value.path = Some(0); value.cause = E::Policy; value.detail = Some(D::Identity); },
+            _ => {},
+        }
+        value
+    };
+    for &stage in P::ALL {
+        let value = sample(stage); assert!(value.valid());
+        let raw = value.json().expect("closed diagnostic"); assert!(raw.len() <= 768);
+        assert_eq!(ManagedRuntimeRefusal::parse(&raw), Some(value));
+        let result = request.probe_result(&digest, &account, Some("managed-webview2"), None, Some(&value)).expect("closed child");
+        assert!(result.len() <= 4096);
+        assert_eq!(request.accept_child(result.as_bytes(), &digest, &account), Ok(false));
+        assert!(request.probe_result(&digest, &account, None, Some("130.0.1.2"), Some(&value)).is_err());
+        assert!(request.probe_result(&digest, &account, Some("interactive-desktop"), None, Some(&value)).is_err());
+        for altered in [raw.replace("\"schemaVersion\":1", "\"schemaVersion\":true"),
+            raw.replace("\"schemaVersion\":1", "\"schemaVersion\":1,\"extra\":0"),
+            raw.replace("\"stage\":", "\"stage\":\"version-getter\",\"stage\":"),
+            raw.replace(stage.label(), "unknown-stage")] {
+            assert!(ManagedRuntimeRefusal::parse(&altered).is_none());
+        }
+        // A pre-bind stage must not claim an index; bound stages cannot omit it.
+        let mut bad = value; bad.path = if value.path.is_none() { Some(0) } else { None }; assert!(!bad.valid());
+        bad.path = Some(48); assert!(!bad.valid());
+    }
+    assert!(request.probe_result(&digest, &account, Some("managed-webview2"), None, None).is_err());
+    let rich = ManagedRuntimeRefusal { path: Some(47), admission: Some(PublicationAdmissionObservation {
+        role: AdmissionRole::RuntimeInput, operation: AdmissionOp::SecurityAncestor, check: C::AceDangerousRights, index: Some(2047),
+    }), ..sample(P::RecheckSecurity) };
+    let raw = rich.json().expect("bounded rich original");
+    assert_eq!(ManagedRuntimeRefusal::parse(&raw), Some(rich));
+    for (from, to) in [("2047", "2048"), ("2047", "true"), ("2047", "02047"), ("47", "48"),
+        ("security-ancestor", "metadata"), ("ace-dangerous-rights", "token-primary"), ("unsafe", "unavailable")] {
+        assert!(ManagedRuntimeRefusal::parse(&raw.replace(from, to)).is_none());
+    }
+    let getter = sample(P::Getter); let raw = getter.json().expect("getter");
+    for code in ["0", "1", "-2147483638", "-2147483649", "4294967295", "true", "-02147483648"] {
+        assert!(ManagedRuntimeRefusal::parse(&raw.replace("-2147024894", code)).is_none());
+    }
+    for domain in ["win32", "ntstatus", "unknown"] {
+        assert!(ManagedRuntimeRefusal::parse(&raw.replace("hresult", domain)).is_none());
+    }
+    assert!(ManagedRuntimeRefusal::parse(&"x".repeat(769)).is_none());
+    let result = request.probe_result(&digest, &account, Some("managed-webview2"), None, Some(&rich)).expect("rich child");
+    for (from, to) in [("\"available\":false", "\"available\":true"), ("\"originalsSettled\":true", "\"originalsSettled\":false"),
+        ("managedRuntimeRefusal", "unrecognized"), ("\"noWebviewCreated\":true", "\"noWebviewCreated\":false")] {
+        assert!(request.accept_child(result.replace(from, to).as_bytes(), &digest, &account).is_err());
+    }
+    assert!(request.accept_child(result.as_bytes(), &"c".repeat(64), &account).is_err());
+    assert!(request.accept_child(result.as_bytes(), &digest, &"c".repeat(64)).is_err());
+
+    for (version, detail) in [("", D::VersionCount), ("130..1.2", D::VersionEmpty), ("130.123456.1.2", D::VersionWidth),
+        ("0130.0.1.2", D::VersionZero), ("130.0.1.a", D::VersionDigits), ("130.65536.1.2", D::VersionRange),
+        ("119.0.1.2", D::VersionMajor), ("130.0.1.2 beta", D::VersionWidth)] {
+        assert_eq!(version_refusal(version), Some(detail)); assert!(!stable_version(version));
+    }
+    for version in ["120.0.0.0", "130.0.1.2", "65535.65535.65535.65535"] { assert!(stable_version(version)); }
+    let mut text = NativeText::new();
+    assert_eq!(text.read(96), Err(UiError::NativeFailure)); assert_eq!(text.read_refusal.get(), Some(D::TextState));
+    text.entered = true; assert_eq!(text.complete(Ok(())), Ok(()));
+    assert_eq!(text.read(96), Err(UiError::NativeFailure)); assert_eq!(text.read_refusal.get(), Some(D::TextState));
+    text.released = true; // No native allocation exists; do not call CoTaskMemFree.
+    for (units, detail) in [(vec![0], D::TextEmpty), (vec![0xd800, 0], D::TextUtf16), (vec![65, 66], D::TextBound)] {
+        let mut text = NativeText::new(); let mut units = units;
+        text.entered = true; text.value = PWSTR(units.as_mut_ptr()); assert_eq!(text.complete(Ok(())), Ok(()));
+        assert_eq!(text.read(units.len()), Err(UiError::NativeFailure)); assert_eq!(text.read_refusal.get(), Some(detail));
+        text.value = PWSTR::null(); text.released = true; // Rust DATA buffer, never native allocated.
+    }
+    let mut contradictory = NativeText::new(); contradictory.entered = true; contradictory.value = PWSTR(1usize as *mut u16);
+    assert_eq!(contradictory.complete(windows::core::HRESULT(0x80004005u32 as i32).ok()), Err(UiError::CleanupUnknown));
+    assert_eq!(contradictory.read(96), Err(UiError::CleanupUnknown));
+    contradictory.value = PWSTR::null(); contradictory.released = true; // Inert sentinel, no native free.
+
+    struct InertProbe(Prerequisites);
+    impl Drop for InertProbe {
+        fn drop(&mut self) {
+            if let Some(frame) = self.0.native.active.take() { drop(ManuallyDrop::into_inner(frame)); }
+            for slot in self.0.native.slots.drain(..) { drop(ManuallyDrop::into_inner(slot)); }
+            self.0.runtime_text.released = true; // This fixture never entered the getter.
+        }
+    }
+    let refusal = UiError::ManagedRuntimeUnavailable;
+    let mut fixture = InertProbe(Prerequisites::new()); let p = &mut fixture.0;
+    p.probe.at(P::RootOpen, None, true, &p.native);
+    let original = p.native.reserve(Kind::Directory, None, "inert", "inert".to_owned()).expect("inert reserve");
+    super::tests::enter_inert(&mut p.native, Call::Open(original.index), null_mut()).expect("inert entry");
+    let returned = Returned::Nt(0xc0000022u32 as i32);
+    let frame = p.native.arena().expect("inert arena"); frame.returned.set(Some(returned)); frame.phase.set(Phase::Returned);
+    let value = p.native.finish(Call::Open(original.index), returned);
+    assert!(matches!(value, Err(Error::Unavailable)));
+    assert!(matches!(p.probe.mapped(value, &p.native, refusal), Err(UiError::ManagedRuntimeUnavailable)));
+    let first = p.probe.first.expect("original returning refusal"); assert!(first.valid());
+    assert_eq!(first.native, ProbeNative::original(Call::Open(original.index), returned));
+    assert!(p.managed_refusal(&Err(refusal)).is_none()); // No finality from a returning error.
+    p.probe.at(P::Version, None, true, &p.native); p.probe.policy(Some(D::VersionMajor));
+    assert_eq!(p.probe.first, Some(first));
+    // Model settled inert storage, not a native-close observation or receipt.
+    p.final_attempted = true; p.runtime_text.released = true; p.native.retiring = true;
+    assert_eq!(p.managed_refusal(&Err(refusal)), Some(first));
+    p.unknown = true; assert!(p.managed_refusal(&Err(refusal)).is_none());
+    assert!(p.managed_refusal(&Err(UiError::CleanupUnknown)).is_none());
+    let mut stale = ProbeTrace::default(); stale.at(P::MappingBefore, None, true, &p.native);
+    assert_eq!(stale.mapped::<()>(Err(Error::Unavailable), &p.native, refusal), Err(refusal));
+    assert!(stale.first.expect("stage without stale status").native.is_none());
+
+    let mut fixture = InertProbe(Prerequisites::new()); let p = &mut fixture.0;
+    p.native.admission.active.set(true); p.native.admission.role.set(AdmissionRole::RuntimeInput);
+    p.probe.at(P::RecheckSecurity, Some(0), true, &p.native);
+    let error = p.native.admission.at(AdmissionOp::SecurityVersion).unsafe_at(C::AceDangerousRights);
+    assert_eq!(p.probe.mapped::<()>(Err(error), &p.native, refusal), Err(refusal));
+    assert!(p.probe.first.expect("original predicate").valid());
+    let mut later = ProbeTrace::default(); later.at(P::MappingBefore, None, true, &p.native);
+    assert_eq!(later.mapped::<()>(Err(Error::Unsafe), &p.native, refusal), Err(refusal));
+    assert!(later.first.expect("stage without stale admission").admission.is_none());
+    for (call, returned) in [(Call::Open(0), Returned::Nt(F::STATUS_PENDING)), (Call::Open(0), Returned::Nt(0)),
+        (Call::Open(0), Returned::Nt(0x80000005u32 as i32)), (Call::Open(0), Returned::Boolean(0, 5)),
+        (Call::Security, Returned::Boolean(0, F::ERROR_IO_PENDING)), (Call::Security, Returned::Boolean(1, 5)),
+        (Call::Entries, Returned::Boolean(0, F::ERROR_NO_MORE_FILES))] {
+        assert!(ProbeNative::original(call, returned).is_none());
+    }
+    let mut unknown = ProbeTrace::default(); unknown.at(P::RootOpen, None, true, &p.native);
+    assert_eq!(unknown.mapped::<()>(Err(Error::Unknown), &p.native, refusal), Err(UiError::CleanupUnknown));
+    assert!(unknown.first.is_none());
 }
 
 #[cfg(test)]

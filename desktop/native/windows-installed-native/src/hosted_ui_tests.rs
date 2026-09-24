@@ -33,15 +33,16 @@ fn hosted_normal_ui_prerequisites_contract() -> Result<()> {
         loop { std::thread::park(); std::hint::black_box((&mut original, &request, &account, &observed)); }
     }
     need(account_matched && before_end && std::time::Instant::now() < end)?;
+    let refusal = original.managed_refusal(&observed); // Copied only after the ORIGINAL inspector settled.
     let request_sha = digest(raw.as_bytes())?;
     let account_sha = digest(&account)?;
     let value = match &observed {
         Ok(facts) => {
             need(facts.ordinary_context && facts.interactive_desktop && facts.managed_runtime
                 && facts.override_free && facts.private_parent)?;
-            request.probe_result(&request_sha, &account_sha, None, Some(&facts.runtime_version))?
+            request.probe_result(&request_sha, &account_sha, None, Some(&facts.runtime_version), None)?
         }
-        Err(error) => request.probe_result(&request_sha, &account_sha, Some(error.label()), None)?,
+        Err(error) => request.probe_result(&request_sha, &account_sha, Some(error.label()), None, refusal.as_ref())?,
     };
     need(std::time::Instant::now() < end)?;
     write_ui_child(&request, &value, end)?;

@@ -11258,6 +11258,20 @@ class WindowsNormalUiPrerequisiteTests(unittest.TestCase):
         return {**WindowsReaderGateTests.context(), "qualificationProfile": helper.WINDOWS_NORMAL_UI_PROFILE,
                 "root": r"C:\runner\_temp\mrk-windows-installed-native-123456-1"}
 
+    @staticmethod
+    def refusal_data(stage="version-getter"):
+        value = {"schemaVersion": 1, "stage": stage, "pathIndex": None, "cause": "unsafe", "detail": None,
+                 "native": None, "admission": None}
+        if stage == "version-getter":
+            value.update(cause="native-failure", native={"operation": "webview-version", "domain": "hresult", "code": -2147024894})
+        elif stage == "version-text": value.update(cause="native-failure", detail="text-null")
+        elif stage == "stable-version": value.update(cause="ui-policy", detail="version-major")
+        elif stage in ("path-depth", "runtime-ancestry", "identity-alias"): value["cause"] = "ui-policy"
+        elif stage == "root-reserve": value["cause"] = "state"
+        elif stage in ("local-ntfs", "alternate-streams", "runtime-security", "recheck-metadata", "recheck-security"): value["pathIndex"] = 0
+        elif stage == "recheck-identity": value.update(pathIndex=0, cause="ui-policy", detail="identity")
+        return value
+
     @classmethod
     def probe_data(cls, reason=None):
         context = cls.context()
@@ -11279,7 +11293,9 @@ class WindowsNormalUiPrerequisiteTests(unittest.TestCase):
         available = reason is None
         observation = {"available": available, "reason": reason, "ordinaryAccountMatched": True,
             **dict.fromkeys(("ordinaryContext", "interactiveDesktop", "managedRuntime", "overrideFree", "privateParent"), available),
-            "runtimeVersion": "141.0.1.2" if available else None, "originalsSettled": True, "noWebviewCreated": True}
+            "runtimeVersion": "141.0.1.2" if available else None,
+            "managedRuntimeRefusal": cls.refusal_data() if reason == "managed-webview2" else None,
+            "originalsSettled": True, "noWebviewCreated": True}
         child = {**common, "artifactBytes": artifact["size"], "artifactSha256": artifact["sha256"],
             "commandSha256": request["appCommandSha256"], "accountSidSha256": "8" * 64, "observation": observation,
             "resultFile": {"createNew": True, "writeCalls": 1, "closeGate": "original-child-exit-zero-required"}}
@@ -11415,6 +11431,98 @@ class WindowsNormalUiPrerequisiteTests(unittest.TestCase):
         raw = helper.canonical_json(positive).decode("ascii")
         for private in ("accountSidSha256", "accountName", "fileId", "C:\\\\runner", "securityBefore", "creation"):
             self.assertNotIn(private, raw)
+
+    def test_managed_refusal_full_stage_roster_stays_negative_after_original_finality(self):
+        expected = ("version-getter", "version-text", "stable-version", "path-decode", "path-depth", "runtime-root-decode",
+            "runtime-ancestry", "mapping-before", "root-reserve", "root-open", "root-metadata", "child-open", "child-metadata",
+            "identity-alias", "local-ntfs", "alternate-streams", "runtime-security", "mapping-after",
+            "recheck-metadata", "recheck-identity", "recheck-security")
+        self.assertEqual(helper.WINDOWS_NORMAL_UI_REFUSAL_STAGES, expected)
+        for stage in expected:
+            with self.subTest(stage=stage):
+                data = self.probe_data("managed-webview2")
+                diagnostic = self.refusal_data(stage)
+                data["child"]["observation"]["managedRuntimeRefusal"] = diagnostic
+                data["owner"]["nativeResultSha256"] = hashlib.sha256(helper.canonical_json(data["child"])).hexdigest()
+                result = self.accept(data)
+                self.assertEqual(result["prerequisite"]["managedRuntimeRefusal"], diagnostic)
+                self.assertTrue(result["observationCompleted"])
+                self.assertFalse(result["prerequisite"]["available"])
+                self.assertFalse(result["combinedPassed"]); self.assertFalse(result["guiInstanceAuthorized"])
+                self.assertEqual(result["verifiedMethods"], 0)
+                self.assertTrue(result["originalOwner"]["accountRemovedAfterProfileSettlement"])
+                self.assertLessEqual(len(helper.canonical_json(diagnostic)), 768)
+                self.assertLessEqual(len(helper.canonical_json(data["child"])), 4096)
+                changed = deepcopy(diagnostic)
+                changed["pathIndex"] = 0 if diagnostic["pathIndex"] is None else None
+                with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_managed_refusal(changed)
+        self.assertIsNone(self.accept(self.probe_data())["prerequisite"]["managedRuntimeRefusal"])
+
+    def test_managed_refusal_rejects_forged_shape_cause_status_and_diagnostic_role(self):
+        for key, value in (("schemaVersion", True), ("schemaVersion", 2), ("stage", "unknown"), ("stage", []),
+            ("pathIndex", 0), ("cause", "unavailable"), ("detail", "text-null"), ("native", None),
+            ("admission", {"operation": "security-version", "check": "owner-trust", "index": None}), ("extra", 0)):
+            with self.subTest(key=key, value=value):
+                changed = self.refusal_data(); changed[key] = value
+                with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_managed_refusal(changed)
+        for code in (True, 0, 1, -2147483638, -(2**31)-1, 2**31, "-2147024894", 1.5):
+            changed = self.refusal_data(); changed["native"]["code"] = code
+            with self.subTest(code=code), self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_managed_refusal(changed)
+        for key, value in (("domain", "ntstatus"), ("domain", "win32"), ("operation", "open"), ("extra", 0)):
+            changed = self.refusal_data(); changed["native"][key] = value
+            with self.subTest(native=key), self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_managed_refusal(changed)
+        for stage in ("version-text", "stable-version", "path-depth", "runtime-ancestry", "recheck-identity"):
+            changed = self.refusal_data(stage); changed["native"] = self.refusal_data()["native"]
+            with self.subTest(stage=stage), self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_managed_refusal(changed)
+        for reason in (None, "interactive-desktop", "managed-webview2"):
+            data = self.probe_data(reason)
+            if reason == "managed-webview2": del data["child"]["observation"]["managedRuntimeRefusal"]
+            else: data["child"]["observation"]["managedRuntimeRefusal"] = self.refusal_data()
+            data["owner"]["nativeResultSha256"] = hashlib.sha256(helper.canonical_json(data["child"])).hexdigest()
+            with self.subTest(reason=reason), self.assertRaises(helper.CheckFailure): self.accept(data)
+        data = self.probe_data("managed-webview2")
+        child = helper.canonical_json(data["child"])
+        for raw in (child.replace(b'"schemaVersion":1', b'"schemaVersion":1,"schemaVersion":1'),
+                    child.replace(b'"managedRuntimeRefusal":{', b'"managedRuntimeRefusal":null,"managedRuntimeRefusal":{')):
+            with self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_child_data(data["request"], raw, root=data["context"]["root"], account_sid_sha256="8"*64)
+        data["child"]["observation"]["managedRuntimeRefusal"] = self.refusal_data("runtime-security")
+        child = helper.canonical_json(data["child"]).replace(b'"pathIndex":0', b'"pathIndex":-0')
+        with self.assertRaises(helper.CheckFailure):
+            helper.windows_normal_ui_child_data(data["request"], child, root=data["context"]["root"], account_sid_sha256="8"*64)
+
+    def test_managed_refusal_native_and_admission_detail_are_exact_stage_bound_data(self):
+        for stage, operations in helper.WINDOWS_NORMAL_UI_REFUSAL_OPERATIONS.items():
+            for operation in operations:
+                value = self.refusal_data(stage)
+                value.update(cause="native-failure" if stage == "version-getter" else "unavailable", detail=None)
+                domain, code = (("hresult", -(2**31)) if operation == "webview-version" else
+                    ("ntstatus", -1073741790) if operation in ("open", "volume-device", "streams") else ("win32", 2**32-1))
+                value["native"] = {"operation": operation, "domain": domain, "code": code}
+                self.assertEqual(helper.windows_normal_ui_managed_refusal(value), value)
+                for wrong in ("webview-version", "open", "security"):
+                    if wrong in operations: continue
+                    changed = deepcopy(value); changed["native"]["operation"] = wrong
+                    with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_managed_refusal(changed)
+                for bad in ([0, 259, -2147483643] if domain == "ntstatus" else [997] if domain == "win32" else [-2147483638]):
+                    changed = deepcopy(value); changed["native"]["code"] = bad
+                    with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_managed_refusal(changed)
+        rich = self.refusal_data("recheck-security")
+        rich.update(pathIndex=47, admission={"operation": "security-ancestor", "check": "ace-dangerous-rights", "index": 2047})
+        self.assertEqual(helper.windows_normal_ui_managed_refusal(rich), rich)
+        self.assertLessEqual(len(helper.canonical_json(rich)), 768)
+        for key, value in (("operation", "metadata"), ("check", "token-primary"), ("index", True), ("index", 2048), ("extra", 0)):
+            changed = deepcopy(rich); changed["admission"][key] = value
+            with self.subTest(key=key), self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_managed_refusal(changed)
+        for index in (-1, True, 48):
+            changed = deepcopy(rich); changed["pathIndex"] = index
+            with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_managed_refusal(changed)
+        for cause in ("unavailable", "ui-policy", "bounds", "state"):
+            changed = deepcopy(rich); changed["cause"] = cause
+            with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_managed_refusal(changed)
+        native = SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src"
+        self.assertIn("crate::ui::prerequisite_refusal_contract(&request);", (native / "ordinary_owner_ui.rs").read_text())
+        self.assertIn("fn prerequisite_refusal_contract(request:", (native / "ui.rs").read_text())
 
     def test_missing_late_mixed_or_unsettled_probe_originals_never_authorize_progress(self):
         for key, value in (("profileAbsentBefore", False), ("profileOriginalBound", False), ("profileHivesUnloaded", False),
