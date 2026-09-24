@@ -711,6 +711,8 @@ smoke_labels!(SmokeCheck {
     TransactionTimeout => "transaction-timeout-setting", WalkerAcquireState => "walker-acquire-state",
     WalkerAcquire => "raw-view-walker-acquire", WalkerMissing => "walker-original-missing",
     ElementAcquireState => "element-from-window-acquire-state", ElementFromWindow => "element-from-window",
+    InitialMainState => "initial-main-acquire-state", InitialMainTail => "initial-main-returned-tail",
+    InitialMainTimeoutCount => "initial-main-timeout-count",
     AdjacentAcquireState => "adjacent-element-acquire-state", FirstChild => "first-child-element",
     NextSibling => "next-sibling-element", NameOutputState => "name-output-state",
     NameContradiction => "name-contradictory-output", CurrentName => "current-name",
@@ -793,13 +795,16 @@ enum SmokeStatus { Hresult(i32), Win32(u32) }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SmokeFault {
     phase: SmokePhase, check: SmokeCheck, error: Error, status: Option<SmokeStatus>, dashboard: Option<DashboardProgress>,
+    main_binding_timeouts: Option<u16>,
 }
 struct SmokeTrace {
     phase: Cell<SmokePhase>, dashboard: Cell<Option<DashboardProgress>>, first: Cell<Option<SmokeFault>>, emitted: Cell<bool>,
+    main_binding_timeouts: Cell<u16>,
 }
 impl SmokeTrace {
     fn new() -> Self {
-        Self { phase: Cell::new(SmokePhase::Setup), dashboard: Cell::new(None), first: Cell::new(None), emitted: Cell::new(false) }
+        Self { phase: Cell::new(SmokePhase::Setup), dashboard: Cell::new(None), first: Cell::new(None), emitted: Cell::new(false),
+            main_binding_timeouts: Cell::new(0) }
     }
     fn dashboard_begin_pass(&self) {
         if self.phase.get() != SmokePhase::Dashboard { return; }
@@ -815,12 +820,18 @@ impl SmokeTrace {
             if self.first.get().is_none() {
                 let phase = self.phase.get();
                 let dashboard = if phase == SmokePhase::Dashboard { self.dashboard.get() } else { None };
-                self.first.set(Some(SmokeFault { phase, check, error: *error, status, dashboard }));
+                let main_binding_timeouts = (phase == SmokePhase::MainBinding).then(|| self.main_binding_timeouts.get());
+                self.first.set(Some(SmokeFault { phase, check, error: *error, status, dashboard, main_binding_timeouts }));
             }
         }
         result
     }
     fn need(&self, check: SmokeCheck, value: bool) -> Result<()> { self.result(check, need(value), None) }
+    fn initial_main_timeout(&self) -> Result<()> {
+        let count = self.result(SmokeCheck::InitialMainTimeoutCount,
+            self.main_binding_timeouts.get().checked_add(1).ok_or(Error::Bounds), None)?;
+        self.main_binding_timeouts.set(count); Ok(())
+    }
     fn admit_com(&self, unknown: bool, settled: bool, originals: usize, remaining: impl FnOnce() -> Result<u32>) -> Result<()> {
         self.need(SmokeCheck::ComReserveState, !unknown && !settled)?;
         self.need(SmokeCheck::ComReserveCapacity, originals < 2048)?;
@@ -856,6 +867,7 @@ impl SmokeTrace {
             }
             None => write!(output, "null")?,
         }
+        if let Some(count) = fault.main_binding_timeouts { write!(output, ",\"mainBindingTimeouts\":{count}")?; }
         writeln!(output, "}}")?; Ok(output.position() as usize)
     }
     fn emit_to(&self, output: &mut impl Write) -> std::io::Result<Option<usize>> {
@@ -1132,6 +1144,54 @@ impl Smoke {
         let status = unsafe { (table.base__.ElementFromHandle)(pointer, HWND(hwnd), output) }.0;
         self.acquire_return(index, status, false, clock, SmokeCheck::ElementFromWindow)?; Ok(index)
     }
+    fn initial_main_admitted(&self) -> bool {
+        self.trace.phase.get() == SmokePhase::MainBinding && self.main.is_none()
+            && self.trace.first.get().is_none() && !self.unknown && !self.settled
+    }
+    fn retire_initial_main_tail(&mut self, index: usize) -> Result<()> {
+        self.trace.need(SmokeCheck::InitialMainTail, self.initial_main_admitted()
+            && index.checked_add(1) == Some(self.originals.len())
+            && self.client.is_none_or(|original| original < index) && self.walker.is_none_or(|original| original < index)
+            && self.originals.get(index).is_some_and(|original| original.kind == ComKind::Element
+                && original.state == SlotState::NoHandle && !original.active && original.pointer.is_null()
+                && original.status == A::UIA_E_TIMEOUT as i32))?;
+        // Only this completed, returned-NULL tail has no reference to release.
+        // Existing accounting must accept it before its storage is discarded.
+        self.release_suffix(index)
+    }
+    fn complete_initial_main(&mut self, index: usize, status: i32,
+        after_return_clock: impl FnOnce() -> Result<()>) -> Result<Option<usize>> {
+        let admitted = self.initial_main_admitted();
+        let original = &mut self.originals[index];
+        let acquiring = original.kind == ComKind::Element && original.state == SlotState::Acquiring && original.active;
+        let result = original.returned(status, false);
+        self.unknown |= matches!(result, Err(Error::Unknown));
+        let pending = admitted && acquiring && result == Err(Error::Unsafe) && status == A::UIA_E_TIMEOUT as i32
+            && original.state == SlotState::NoHandle && !original.active && original.pointer.is_null();
+        let result = if pending {
+            // Record this observed timeout BEFORE a possible post-call clock
+            // refusal snapshots the first fault. Never clear a fatal latch.
+            self.trace.initial_main_timeout().map(|()| None)
+        } else {
+            self.trace.result(SmokeCheck::ElementFromWindow, result.and_then(|present| {
+                need(admitted && acquiring && present)?; Ok(Some(index))
+            }), Some(SmokeStatus::Hresult(status)))
+        };
+        self.trace.result(SmokeCheck::Clock, after_return_clock(), None)?;
+        let result = result?;
+        if result.is_none() { self.retire_initial_main_tail(index)?; }
+        Ok(result)
+    }
+    fn initial_main_from_window(&mut self, hwnd: F::HWND, clock: &mut Clock) -> Result<Option<usize>> {
+        self.trace.need(SmokeCheck::InitialMainState, self.initial_main_admitted())?;
+        let index = self.reserve(ComKind::Element, clock)?;
+        let output = self.trace.result(SmokeCheck::ElementAcquireState, self.originals[index].begin(), None)?;
+        let (pointer, table) = self.client()?;
+        let status = unsafe { (table.base__.ElementFromHandle)(pointer, HWND(hwnd), output) }.0;
+        // This is only the first read-only main binding, not a generic UIA
+        // retry policy. Dialog/property/walk/Invoke failures remain terminal.
+        self.complete_initial_main(index, status, || clock.effect())
+    }
     fn adjacent(&mut self, element: usize, child: bool, clock: &mut Clock) -> Result<Option<usize>> {
         let pointer = self.pointer(element, ComKind::Element)?;
         let walker = self.pointer(self.trace.result(SmokeCheck::WalkerMissing, self.walker.ok_or(Error::State), None)?, ComKind::Walker)?;
@@ -1262,7 +1322,17 @@ impl Smoke {
             self.trace.result(SmokeCheck::Clock, clock.effect(), None)?; std::thread::sleep(Duration::from_millis(100));
         };
         self.trace.phase.set(SmokePhase::MainBinding);
-        let element = self.from_window(hwnd, clock)?; let id = self.runtime_id(element, clock)?;
+        let element = loop {
+            // root(Some) refuses a missing, additional or replacement root
+            // after checking the SAME original live process/thread handles.
+            let _ = self.windows.root(launch, Some(hwnd), clock, &self.trace)?;
+            if let Some(element) = self.initial_main_from_window(hwnd, clock)? { break element; }
+            let _ = self.windows.root(launch, Some(hwnd), clock, &self.trace)?;
+            self.trace.result(SmokeCheck::Clock, clock.effect(), None)?;
+            std::thread::sleep(Duration::from_millis(100));
+            self.trace.result(SmokeCheck::Clock, clock.effect(), None)?;
+        };
+        let id = self.runtime_id(element, clock)?;
         self.main = Some((hwnd, element, id)); self.bound(launch, clock)?;
         self.trace.phase.set(SmokePhase::Dashboard);
         loop {
@@ -1553,8 +1623,9 @@ pub(super) fn run(role: UiRole, entry_tick: u64) -> Result<()> {
         smoke_result(smoke.as_ref(), SmokePhase::ObserveClock, SmokeCheck::Clock, clock.effect())
     })();
     if let Some(current) = account.as_mut() { current.zero(); }
-    // Settle the actual original driver before any original process close. A
-    // UIA timeout is failed even if its possibly-effectful operation later acts.
+    // Settle the actual original driver before any original process close.
+    // Only returned-NULL initial-main reads may wait for readiness above.
+    // All later/effectful UIA timeouts still fail even if a provider later acts.
     let smoke_settled = smoke.as_mut().is_none_or(|value| value.settle().is_ok());
     if !smoke_settled || matches!(observation, Err(Error::Unknown)) {
         diagnostic_smoke(stage, launch.as_deref(), true, trace.first, smoke.as_ref());
@@ -1930,7 +2001,8 @@ mod contract_tests {
         fn refuses(rows: Vec<WindowData>, bound: Option<usize>, error: Error, check: SmokeCheck, status: Option<SmokeStatus>) {
             let trace = SmokeTrace::new(); trace.phase.set(SmokePhase::MainWindow);
             assert_eq!(windows(rows).select_root(bound.map(|hwnd| hwnd as F::HWND), &trace), Err(error));
-            assert_eq!(trace.first.get(), Some(SmokeFault { phase: SmokePhase::MainWindow, check, error, status, dashboard: None }));
+            assert_eq!(trace.first.get(), Some(SmokeFault { phase: SmokePhase::MainWindow, check, error, status,
+                dashboard: None, main_binding_timeouts: None }));
         }
         let title = "Mobile Release Kit";
         accepts(vec![], None, None);
@@ -1993,9 +2065,137 @@ mod contract_tests {
         assert_eq!(trace.first.get(), Some(first)); // Later status/success cannot rewrite the original fault.
     }
 
+    fn initial_main_readiness_contract() {
+        // Only scalar output/clock DATA is supplied. No client, window, native
+        // clock or fake COM pointer is invoked; never settle the fake pointers.
+        fn fixture() -> Smoke {
+            let mut smoke = Smoke::new(); smoke.trace.phase.set(SmokePhase::MainBinding);
+            smoke.originals.push(Box::new(ComOriginal::new(ComKind::Client)));
+            smoke.originals.push(Box::new(ComOriginal::new(ComKind::Walker)));
+            smoke.client = Some(0); smoke.walker = Some(1); smoke
+        }
+        fn begin(smoke: &mut Smoke, pointer: usize) -> usize {
+            let index = smoke.originals.len(); smoke.originals.push(Box::new(ComOriginal::new(ComKind::Element)));
+            let original = &mut smoke.originals[index];
+            assert_eq!(original.state, SlotState::Reserved); assert_eq!(original.status, HRESULT_PENDING);
+            assert!(original.pointer.is_null() && !original.active);
+            assert!(original.begin().is_ok()); original.pointer = pointer as *mut c_void; index
+        }
+        let timeout = A::UIA_E_TIMEOUT as i32; assert_eq!(timeout as u32, 0x80131505);
+        let mut smoke = fixture(); let calls = Cell::new(0);
+        let prefix = [&*smoke.originals[0] as *const ComOriginal, &*smoke.originals[1] as *const ComOriginal];
+        for count in 1..=2 {
+            let index = begin(&mut smoke, 0);
+            assert_eq!(smoke.complete_initial_main(index, timeout, || { calls.set(calls.get() + 1); Ok(()) }), Ok(None));
+            assert_eq!(smoke.originals.len(), 2); assert_eq!(smoke.trace.main_binding_timeouts.get(), count);
+            assert_eq!([&*smoke.originals[0] as *const ComOriginal, &*smoke.originals[1] as *const ComOriginal], prefix);
+            assert!(smoke.trace.first.get().is_none() && smoke.main.is_none() && !smoke.dashboard_ready);
+            assert!(!smoke.windows.post_entered && !smoke.invoke_entered && !smoke.quit_confirmed && !smoke.passed());
+        }
+        let index = begin(&mut smoke, 1);
+        assert_eq!(smoke.complete_initial_main(index, 0, || { calls.set(calls.get() + 1); Ok(()) }), Ok(Some(index)));
+        assert_eq!(calls.get(), 3); assert_eq!(smoke.originals[index].state, SlotState::Owned);
+        assert_eq!(smoke.trace.main_binding_timeouts.get(), 2); assert_eq!(smoke.originals.len(), 3);
+        // A success-shaped element output is still not runtime-ID/PID binding,
+        // dashboard observation or quit/finality. The fake owned ref is not released.
+        assert!(smoke.main.is_none() && !smoke.dashboard_ready && !smoke.passed());
+
+        for (status, pointer, expected, state, active) in [
+            (0x80004005u32 as i32, 0, Error::Unsafe, SlotState::NoHandle, false),
+            (timeout, 1, Error::Unknown, SlotState::Unknown, true),
+            (HRESULT_PENDING, 0, Error::Unknown, SlotState::Unknown, true),
+            (0, 0, Error::Unsafe, SlotState::NoHandle, false),
+            (1, 0, Error::Unsafe, SlotState::NoHandle, false),
+            (1, 1, Error::Unsafe, SlotState::Owned, false),
+        ] {
+            let mut smoke = fixture(); let index = begin(&mut smoke, pointer); let calls = Cell::new(0);
+            assert_eq!(smoke.complete_initial_main(index, status, || { calls.set(calls.get() + 1); Ok(()) }), Err(expected));
+            assert_eq!(calls.get(), 1); assert_eq!(smoke.originals.len(), 3);
+            assert_eq!(smoke.originals[index].state, state); assert_eq!(smoke.originals[index].active, active);
+            assert_eq!(smoke.unknown, expected == Error::Unknown); assert_eq!(smoke.trace.main_binding_timeouts.get(), 0);
+            let fault = smoke.trace.first.get().unwrap(); assert_eq!(fault.check, SmokeCheck::ElementFromWindow);
+            assert_eq!(fault.status, Some(SmokeStatus::Hresult(status))); assert_eq!(fault.main_binding_timeouts, Some(0));
+        }
+        for denied in 0..8 {
+            let mut smoke = fixture(); let index = begin(&mut smoke, 0);
+            match denied {
+                0 => smoke.trace.phase.set(SmokePhase::Dashboard),
+                1 => smoke.trace.phase.set(SmokePhase::QuitDialog),
+                2 => smoke.trace.phase.set(SmokePhase::QuitInvoke),
+                3 => smoke.main = Some((1usize as F::HWND, 0, vec![1])),
+                4 => smoke.unknown = true,
+                5 => smoke.settled = true,
+                6 => { let _ = smoke.trace.result::<()>(SmokeCheck::Clock, Err(Error::Unsafe), None); },
+                7 => smoke.originals[index].kind = ComKind::Walker,
+                _ => unreachable!(),
+            }
+            let prior = smoke.trace.first.get(); let calls = Cell::new(0);
+            assert_eq!(smoke.complete_initial_main(index, timeout, || { calls.set(calls.get() + 1); Ok(()) }), Err(Error::Unsafe));
+            assert_eq!(calls.get(), 1); assert_eq!(smoke.trace.main_binding_timeouts.get(), 0);
+            assert_eq!(smoke.originals.len(), 3); if prior.is_some() { assert_eq!(smoke.trace.first.get(), prior); }
+        }
+        let mut not_begun = fixture(); not_begun.originals.push(Box::new(ComOriginal::new(ComKind::Element)));
+        assert_eq!(not_begun.complete_initial_main(2, timeout, || Ok(())), Err(Error::Unsafe));
+        assert_eq!(not_begun.trace.main_binding_timeouts.get(), 0);
+
+        // The completed pending observation is counted before a refusing clock;
+        // no tail is discarded on that error and a later fault cannot rewrite it.
+        let mut late = fixture(); let index = begin(&mut late, 0); let calls = Cell::new(0);
+        assert_eq!(late.complete_initial_main(index, timeout, || { calls.set(calls.get() + 1); Err(Error::Unsafe) }), Err(Error::Unsafe));
+        assert_eq!(calls.get(), 1); assert_eq!(late.originals.len(), 3);
+        assert_eq!(late.originals[index].state, SlotState::NoHandle);
+        let first = late.trace.first.get().unwrap(); assert_eq!(first.check, SmokeCheck::Clock);
+        assert_eq!(first.status, None); assert_eq!(first.main_binding_timeouts, Some(1));
+        late.trace.main_binding_timeouts.set(9); late.trace.phase.set(SmokePhase::DriverSettle);
+        let _ = late.trace.result::<()>(SmokeCheck::ComRelease, Err(Error::Unknown), None);
+        assert_eq!(late.trace.first.get(), Some(first)); let mut output = Vec::new(); late.trace.emit_to(&mut output).unwrap();
+        assert!(std::str::from_utf8(&output).unwrap().contains("\"mainBindingTimeouts\":1"));
+        assert_eq!(late.trace.emit_to(&mut Vec::new()).unwrap(), None);
+        for (status, pointer, expected_state, expected_first) in [
+            (0, 1, SlotState::Owned, SmokeCheck::Clock),
+            (HRESULT_PENDING, 0, SlotState::Unknown, SmokeCheck::ElementFromWindow),
+        ] {
+            let mut smoke = fixture(); let index = begin(&mut smoke, pointer);
+            assert_eq!(smoke.complete_initial_main(index, status, || Err(Error::Unsafe)), Err(Error::Unsafe));
+            assert_eq!(smoke.originals.len(), 3); assert_eq!(smoke.originals[index].state, expected_state);
+            assert_eq!(smoke.trace.first.get().unwrap().check, expected_first);
+            assert_eq!(smoke.trace.main_binding_timeouts.get(), 0); assert!(smoke.main.is_none() && !smoke.passed());
+        }
+
+        let mut exhausted = fixture(); let index = begin(&mut exhausted, 0);
+        assert_eq!(exhausted.complete_initial_main(index, timeout, || Ok(())), Ok(None));
+        assert_eq!(exhausted.trace.admit_com(false, false, exhausted.originals.len(), || Ok(1000)), Err(Error::Unsafe));
+        let fault = exhausted.trace.first.get().unwrap(); assert_eq!(fault.check, SmokeCheck::ComReserveBudget);
+        assert_eq!(fault.main_binding_timeouts, Some(1)); assert!(!exhausted.initial_main_admitted());
+
+        let mut overflow = fixture(); overflow.trace.main_binding_timeouts.set(u16::MAX);
+        let index = begin(&mut overflow, 0); let calls = Cell::new(0);
+        assert_eq!(overflow.complete_initial_main(index, timeout, || { calls.set(calls.get() + 1); Ok(()) }), Err(Error::Bounds));
+        assert_eq!(calls.get(), 1); assert_eq!(overflow.originals.len(), 3);
+        assert_eq!(overflow.trace.main_binding_timeouts.get(), u16::MAX);
+        let fault = overflow.trace.first.get().unwrap(); assert_eq!(fault.check, SmokeCheck::InitialMainTimeoutCount);
+        assert_eq!(fault.main_binding_timeouts, Some(u16::MAX)); let mut raw = [0u8; 512];
+        let size = SmokeTrace::format(fault, &mut raw).unwrap(); assert!(size <= 512);
+        assert!(std::str::from_utf8(&raw[..size]).unwrap().contains("\"mainBindingTimeouts\":65535"));
+
+        for denied in 0..4 {
+            let mut smoke = fixture(); let index = begin(&mut smoke, 0);
+            assert_eq!(smoke.originals[index].returned(timeout, false), Err(Error::Unsafe));
+            let retire = match denied {
+                0 => 0, // Never truncate a client/walker prefix.
+                1 => { smoke.originals.push(Box::new(ComOriginal::new(ComKind::Element))); index },
+                2 => { smoke.originals[index].active = true; index },
+                3 => { smoke.originals[index].state = SlotState::Owned; smoke.originals[index].pointer = 1usize as *mut c_void; index },
+                _ => unreachable!(),
+            };
+            let count = smoke.originals.len(); assert_eq!(smoke.retire_initial_main_tail(retire), Err(Error::Unsafe));
+            assert_eq!(smoke.originals.len(), count); // No release of the fake pointer or prefix.
+        }
+    }
+
     #[test]
     fn native_smoke_never_credits_posting_or_partial_release_as_finality() {
-        main_window_selection_contract();
+        main_window_selection_contract(); initial_main_readiness_contract();
         // Actual admission helper, inert Results/counters only: no native clock,
         // output reservation, HWND/COM call or cleanup is entered by these cases.
         for (unknown, settled, count, remaining, expected, check, expected_calls) in [
@@ -2104,13 +2304,15 @@ mod contract_tests {
         assert_eq!(prefix.first.get().unwrap().dashboard.unwrap().current_match_mask, Some(15));
         for phase in SmokePhase::ALL.iter().copied().filter(|phase| *phase != SmokePhase::Dashboard) {
             let trace = SmokeTrace::new(); trace.phase.set(SmokePhase::Dashboard); trace.dashboard_begin_pass();
-            trace.dashboard_update(|progress| *progress = loading); trace.phase.set(phase);
+            trace.dashboard_update(|progress| *progress = loading); trace.main_binding_timeouts.set(7); trace.phase.set(phase);
             trace.dashboard_begin_pass(); trace.dashboard_update(DashboardProgress::begin_walk);
             assert_eq!(trace.dashboard.get(), Some(loading));
             assert_eq!(trace.result::<()>(SmokeCheck::ComRelease, Err(Error::Unknown), None), Err(Error::Unknown));
             assert_eq!(trace.first.get().unwrap().dashboard, None);
+            assert_eq!(trace.first.get().unwrap().main_binding_timeouts, (phase == SmokePhase::MainBinding).then_some(7));
             let mut output = Vec::new(); trace.emit_to(&mut output).unwrap();
             assert!(std::str::from_utf8(&output).unwrap().contains("\"dashboard\":null"));
+            assert_eq!(std::str::from_utf8(&output).unwrap().contains("\"mainBindingTimeouts\""), phase == SmokePhase::MainBinding);
         }
         let mut data = Smoke::new(); assert!(!data.passed());
         data.trace.phase.set(SmokePhase::Dashboard); data.trace.dashboard_begin_pass();
@@ -2141,7 +2343,7 @@ mod contract_tests {
             let saved = Cell::new(i32::MIN);
             assert_eq!(trace.result::<u8>(SmokeCheck::CurrentName, Err(error), Some(SmokeStatus::Hresult(saved.get()))), Err(error));
             let first = SmokeFault { phase: SmokePhase::Dashboard, check: SmokeCheck::CurrentName,
-                error, status: Some(SmokeStatus::Hresult(i32::MIN)), dashboard: None };
+                error, status: Some(SmokeStatus::Hresult(i32::MIN)), dashboard: None, main_binding_timeouts: None };
             saved.set(0); trace.phase.set(SmokePhase::DriverSettle);
             assert_eq!(trace.result(SmokeCheck::Clock, Ok(false), None), Ok(false));
             assert_eq!(trace.result::<()>(SmokeCheck::ArrayDestroy, Err(Error::Unknown), Some(SmokeStatus::Hresult(saved.get()))), Err(Error::Unknown));
@@ -2203,7 +2405,8 @@ mod contract_tests {
         for dashboard in [None, Some(widest_dashboard), Some(nullable_dashboard)] {
             for status in [None, Some(SmokeStatus::Hresult(i32::MIN)), Some(SmokeStatus::Hresult(i32::MAX)),
                 Some(SmokeStatus::Win32(u32::MAX))] {
-                let fault = SmokeFault { phase: longest_phase, check: longest_check, error: Error::Unavailable, status, dashboard };
+                let fault = SmokeFault { phase: longest_phase, check: longest_check, error: Error::Unavailable, status, dashboard,
+                    main_binding_timeouts: None };
                 let mut raw = [0u8; 512]; let size = SmokeTrace::format(fault, &mut raw).unwrap();
                 let text = std::str::from_utf8(&raw[..size]).unwrap();
                 assert!(size <= 512 && text.is_ascii() && text.ends_with("}\n") && text.lines().count() == 1);
