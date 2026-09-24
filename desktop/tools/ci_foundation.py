@@ -912,7 +912,7 @@ WINDOWS_NORMAL_UI_CASE_CHECKS = {
 }
 WINDOWS_NATIVE_DECLARED_FEATURES = {
     "qualification-result": [], "runtime-publication": [],
-    "desktop-ui": ["dep:windows", "dep:webview2-com"],
+    "desktop-ui": ["dep:windows", "dep:webview2-com", "dep:windows-core"],
     "desktop-ui-dialogs": ["desktop-ui"], "windows-installed-observation": ["desktop-ui-dialogs"],
 }
 WINDOWS_NORMAL_UI_NATIVE_PACKAGES = frozenset((
@@ -11223,7 +11223,7 @@ def windows_normal_ui_native_graph(value: object, lock: object, *, source: Path,
         nodes[node["id"]] = node
     require(nodes[native]["features"] == ["desktop-ui"]
             and {(packages[item]["name"], packages[item]["version"]) for item in nodes[native]["dependencies"]}
-                == {("windows-sys", "0.61.2"), ("windows", "0.61.3"), ("webview2-com", "0.38.2")},
+                == {("windows-sys", "0.61.2"), ("windows", "0.61.3"), ("webview2-com", "0.38.2"), ("windows-core", "0.61.2")},
             "Windows UI cheap probe selected additional features or a GUI graph")
     seen, pending = set(), [native]
     while pending:

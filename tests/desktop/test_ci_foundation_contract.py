@@ -11373,8 +11373,27 @@ class WindowsNormalUiPrerequisiteTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--features") + 1], "desktop-ui")
         self.assertIn("--offline", argv); self.assertIn("--no-run", argv)
         self.assertEqual(helper.WINDOWS_NATIVE_DECLARED_FEATURES, {
-            "qualification-result": [], "runtime-publication": [], "desktop-ui": ["dep:windows", "dep:webview2-com"],
+            "qualification-result": [], "runtime-publication": [], "desktop-ui": ["dep:windows", "dep:webview2-com", "dep:windows-core"],
             "desktop-ui-dialogs": ["desktop-ui"], "windows-installed-observation": ["desktop-ui-dialogs"]})
+        manifest = helper.tomllib.loads((SOURCE / helper.WINDOWS_INSTALLED_CRATE / "Cargo.toml").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["features"], helper.WINDOWS_NATIVE_DECLARED_FEATURES)
+        target = 'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'
+        self.assertEqual(manifest["target"][target]["dependencies"]["windows-core"],
+                         {"version": "=0.61.2", "optional": True, "default-features": False})
+        self.assertNotIn("windows-core", manifest.get("dependencies", {}))
+        for name, table in manifest["target"].items():
+            if name != target:
+                self.assertNotIn("windows-core", table.get("dependencies", {}))
+        for directory, spelling in ((helper.WINDOWS_INSTALLED_CRATE, "windows-core"),
+                                    (helper.WINDOWS_INSTALLED_APP, "windows-core 0.61.2")):
+            lock = helper.tomllib.loads((SOURCE / directory / "Cargo.lock").read_text(encoding="utf-8"))
+            native = [row for row in lock["package"] if row["name"] == "mrk-windows-installed-native"]
+            self.assertEqual(len(native), 1)
+            self.assertEqual([edge for edge in native[0]["dependencies"] if edge.split(" ")[0] == "windows-core"], [spelling])
+            core = [row for row in lock["package"] if (row["name"], row["version"]) == ("windows-core", "0.61.2")]
+            self.assertEqual(len(core), 1)
+            self.assertEqual(core[0]["source"], "registry+https://github.com/rust-lang/crates.io-index")
+            self.assertEqual(core[0]["checksum"], "c0fdd3ddb90610c7638aa2b3a3ab2904fb9e5cdbecc643ddb3647212781c4ae3")
         for profile, features in ((helper.WINDOWS_INSTALLED_PASSIVE_PROFILE, []), (helper.WINDOWS_FULLWALK_PROFILE, []),
                                   (helper.WINDOWS_RUNTIME_PUBLICATION_PROFILE, ["runtime-publication"])):
             self.assertEqual(helper.windows_installed_features({**context, "qualificationProfile": profile}, "native"), features)
@@ -11568,6 +11587,17 @@ class WindowsNormalUiPrerequisiteTests(unittest.TestCase):
             changed = deepcopy(rows); changed[0]["features"] = ["desktop-ui", "desktop-ui-dialogs"]
             with self.assertRaises(helper.CheckFailure):
                 helper.windows_normal_ui_native_test_path(encode(changed), graph, source=source, root=root)
+        # Removing only the consumer's macro dependency must fail even though
+        # the same core package remains reachable through windows/webview2.
+        core = next(key for key, package in graph["packages"].items()
+                    if (package["name"], package["version"]) == ("windows-core", "0.61.2"))
+        changed = deepcopy(value)
+        native_node = next(node for node in changed["resolve"]["nodes"] if node["id"] == native)
+        native_node["dependencies"].remove(core)
+        self.assertEqual(sum(edge["pkg"] == core for edge in native_node["deps"]), 1)
+        native_node["deps"] = [edge for edge in native_node["deps"] if edge["pkg"] != core]
+        with self.assertRaises(helper.CheckFailure):
+            helper.windows_normal_ui_native_graph(changed, lock, source=source, root=root)
         for change in ("root-features", "declaration", "package", "edge", "foreign-path", "workspace"):
             changed = deepcopy(value)
             if change == "root-features": changed["resolve"]["nodes"][0]["features"].append("desktop-ui-dialogs")
