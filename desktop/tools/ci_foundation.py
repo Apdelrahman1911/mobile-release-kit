@@ -937,6 +937,9 @@ WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS = (
     "ordinary_owner::normal_ui::contract_tests::unavailable_probe_is_completed_observation_not_gui_authorization",
     "ordinary_owner::normal_ui::contract_tests::native_smoke_never_credits_posting_or_partial_release_as_finality",
     "tests::normal_ui_setup_data_requires_distinct_runtime_only_role_and_positive_probe_finality",
+    "ordinary_owner::normal_ui::contract_tests::profile_absence_epochs_do_not_consume_the_single_binding_path",
+    "ordinary_owner::normal_ui::contract_tests::profile_absence_results_distinguish_missing_collision_and_unknown",
+    "ordinary_owner::normal_ui::contract_tests::profile_absence_dependents_settle_before_namespace_parents",
 )
 WINDOWS_NORMAL_UI_SCALAR_TESTS = (
     "asset_session::tests::human_quit_stop_has_one_clock_without_inventing_a_work_endpoint",

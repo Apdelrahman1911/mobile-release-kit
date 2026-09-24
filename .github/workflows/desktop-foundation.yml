@@ -594,7 +594,7 @@ jobs:
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py acquire'
-      - name: Compile exact originals and run nine inert UI/native policies before the native prerequisite
+      - name: Compile exact originals and run the selected inert UI/native policies before the native prerequisite
         timeout-minutes: 12
         shell: bash
         env:

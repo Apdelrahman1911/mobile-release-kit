@@ -12209,7 +12209,10 @@ class WindowsNormalUiInertRegressionTests(unittest.TestCase):
                   "ordinary_owner::normal_ui::contract_tests::com_null_end_is_distinct_from_pending_failure_and_contradictory_output",
                   "ordinary_owner::normal_ui::contract_tests::unavailable_probe_is_completed_observation_not_gui_authorization",
                   "ordinary_owner::normal_ui::contract_tests::native_smoke_never_credits_posting_or_partial_release_as_finality",
-                  "tests::normal_ui_setup_data_requires_distinct_runtime_only_role_and_positive_probe_finality")
+                  "tests::normal_ui_setup_data_requires_distinct_runtime_only_role_and_positive_probe_finality",
+                  "ordinary_owner::normal_ui::contract_tests::profile_absence_epochs_do_not_consume_the_single_binding_path",
+                  "ordinary_owner::normal_ui::contract_tests::profile_absence_results_distinguish_missing_collision_and_unknown",
+                  "ordinary_owner::normal_ui::contract_tests::profile_absence_dependents_settle_before_namespace_parents")
         scalar_name = "asset_session::tests::human_quit_stop_has_one_clock_without_inventing_a_work_endpoint"
         self.assertEqual(helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS, native)
         self.assertEqual(helper.WINDOWS_NORMAL_UI_SCALAR_TESTS, (scalar_name,))
@@ -12220,7 +12223,7 @@ class WindowsNormalUiInertRegressionTests(unittest.TestCase):
         self.assertIn('#[path = "ui_profile.rs"]\nmod profile;', (crate / "ui.rs").read_text())
         self.assertIn('#[path = "ordinary_owner_ui.rs"]\nmod normal_ui;', (crate / "ordinary_owner.rs").read_text())
         for indices, filename, module in (((0,), "ui_profile.rs", "tests"), ((1,), "ui.rs", "tests"),
-                ((2,3,4), "project.rs", "tests"), ((5,6,7), "ordinary_owner_ui.rs", "contract_tests"),
+                ((2,3,4), "project.rs", "tests"), ((5,6,7,9,10,11), "ordinary_owner_ui.rs", "contract_tests"),
                 ((8,), "tests.rs", None)):
             source = (crate / filename).read_text()
             if module is not None: self.assertIn("mod " + module + " {", source)
@@ -12229,10 +12232,11 @@ class WindowsNormalUiInertRegressionTests(unittest.TestCase):
         app = SOURCE / helper.WINDOWS_INSTALLED_APP / "src"
         self.assertIn("mod asset_session;", (app / "lib.rs").read_text())
         self.assertIn("fn " + scalar_name.rsplit("::",1)[-1] + "()", (app / "asset_session.rs").read_text())
-        # A valid former two-test receipt cannot satisfy the expanded selection.
-        legacy = ("\nrunning 2 tests\n" + "".join("test " + name + " ... ok\n" for name in native[:2])
-            + "\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 317 filtered out; finished in 0.01s\n\n").encode("ascii")
-        with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_inert_output(legacy)
+        # Neither former selection proves the new profile-epoch regressions ran.
+        for count in (2, 9):
+            legacy = (f"\nrunning {count} tests\n" + "".join("test " + name + " ... ok\n" for name in native[:count])
+                + f"\ntest result: ok. {count} passed; 0 failed; 0 ignored; 0 measured; 317 filtered out; finished in 0.01s\n\n").encode("ascii")
+            with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_inert_output(legacy)
         for scalar, names in ((False,native),(True,(scalar_name,))):
             argv=helper.windows_normal_ui_inert_argv({"path":"/inert-never-run/original.exe"},scalar=scalar)
             self.assertEqual(argv,["/inert-never-run/original.exe",*names,"--exact","--nocapture","--test-threads=1"])

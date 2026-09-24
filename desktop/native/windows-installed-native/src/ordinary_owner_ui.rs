@@ -125,16 +125,133 @@ impl Key {
     }
 }
 
-// One relative expected-absence observation. A success is a collision, never
-// adopted as our fresh profile; an ambiguous result retains these original slots.
+// These are two different lifecycle observations, not retries of the one genuine
+// profile binding. NativeBook retains its once-only canonical-path reservation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AbsenceEpoch { BeforeLogon, AfterDeletion }
+impl AbsenceEpoch {
+    fn index(self) -> usize { match self { Self::BeforeLogon => 0, Self::AfterDeletion => 1 } }
+}
+
+// Each fixed epoch owns its original relative output and every native borrower.
+// A coherent success is collision, never adoption/deletion; ambiguity retains
+// this pinned frame and the same original namespace parent through settlement.
 struct Absence {
-    original: Original, attributes: OBJECT_ATTRIBUTES, unicode: F::UNICODE_STRING,
+    epoch: AbsenceEpoch, parent: usize, parent_handle: F::HANDLE, name: Vec<u16>,
+    output: UnsafeCell<F::HANDLE>, state: SlotState,
+    attributes: OBJECT_ATTRIBUTES, unicode: F::UNICODE_STRING,
     iosb: UnsafeCell<IO::IO_STATUS_BLOCK>, returned: i32, entered: bool, completed: bool,
+    claimed: bool, absent: bool, close_handle: F::HANDLE, close_entered: bool,
+    close_return: i32, close_error: u32,
     _pin: PhantomPinned,
+}
+impl Absence {
+    fn new(epoch: AbsenceEpoch, parent: usize, parent_handle: F::HANDLE, name: &str) -> Result<Pin<Box<Self>>> {
+        need(valid_handle(parent_handle) && decode::component(name))?;
+        let name = wide(name);
+        let length = u16::try_from((name.len() - 1).checked_mul(2).ok_or(Error::Bounds)?).map_err(|_| Error::Bounds)?;
+        let maximum = u16::try_from(name.len().checked_mul(2).ok_or(Error::Bounds)?).map_err(|_| Error::Bounds)?;
+        let mut frame = Box::pin(Self { epoch, parent, parent_handle, name,
+            output: UnsafeCell::new(null_mut()), state: SlotState::Reserved,
+            attributes: OBJECT_ATTRIBUTES::default(), unicode: F::UNICODE_STRING::default(),
+            iosb: UnsafeCell::new(IO::IO_STATUS_BLOCK {
+                Anonymous: IO::IO_STATUS_BLOCK_0 { Status: F::STATUS_PENDING }, Information: usize::MAX }),
+            returned: F::STATUS_PENDING, entered: false, completed: false, claimed: false, absent: false,
+            close_handle: null_mut(), close_entered: false, close_return: 0, close_error: 0, _pin: PhantomPinned });
+        // SAFETY: pinning precedes these self-references, publication and entry.
+        // Neither the name allocation nor this frame moves before settlement.
+        let f = unsafe { frame.as_mut().get_unchecked_mut() };
+        f.unicode = F::UNICODE_STRING { Length: length, MaximumLength: maximum, Buffer: f.name.as_mut_ptr() };
+        f.attributes = OBJECT_ATTRIBUTES { Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
+            RootDirectory: parent_handle, ObjectName: &mut f.unicode,
+            Attributes: F::OBJ_CASE_INSENSITIVE | F::OBJ_DONT_REPARSE,
+            SecurityDescriptor: null_mut(), SecurityQualityOfService: null_mut() };
+        Ok(frame)
+    }
+    fn unstarted(&self) -> bool {
+        !self.claimed && !self.entered && !self.completed && !self.close_entered && self.state == SlotState::Reserved
+    }
+    fn claim(&mut self) -> Result<()> {
+        if !self.unstarted() { return Err(Error::State); }
+        self.claimed = true; Ok(())
+    }
+    fn begin(&mut self) -> Result<()> {
+        if !self.claimed || self.entered || self.completed || self.state != SlotState::Reserved { return Err(Error::State); }
+        self.entered = true; self.state = SlotState::Acquiring; Ok(())
+    }
+    fn unknown(&mut self) -> Result<()> { self.state = SlotState::Unknown; Err(Error::Unknown) }
+    // Pure return/ownership decisions used by the real original call and the
+    // inert contracts. No native acquisition, clock or close is reachable here.
+    fn observe_return(&mut self, book: &NativeBook, other: &Absence) -> Result<()> {
+        if !self.entered || self.completed || self.state != SlotState::Acquiring { return Err(Error::State); }
+        if self.returned == F::STATUS_PENDING || self.returned != F::STATUS_SUCCESS && (self.returned as u32 >> 30) != 3 {
+            return self.unknown(); // Do not read possibly outstanding output/IOSB.
+        }
+        self.completed = true;
+        // SAFETY: only a definite completed NT return reaches these original
+        // output reads. The other/book owners are serialized and already Owned.
+        let handle = unsafe { *self.output.get() };
+        if self.returned == F::STATUS_SUCCESS {
+            if !valid_handle(handle) || unsafe { (*self.iosb.get()).Anonymous.Status } != F::STATUS_SUCCESS
+                || unsafe { (*self.iosb.get()).Information } != WP::FILE_OPENED as usize
+                || book.slots.iter().any(|slot| slot.state == SlotState::Owned && unsafe { *slot.output.get() == handle })
+                || other.state == SlotState::Owned && unsafe { *other.output.get() == handle } {
+                return self.unknown();
+            }
+            self.state = SlotState::Owned;
+            return Err(Error::Unsafe); // A collision has one close, never deletion.
+        }
+        if !handle.is_null() { return self.unknown(); }
+        self.state = SlotState::NoHandle;
+        // Error IOSB fields are unspecified; do not reinterpret their sentinels.
+        self.absent = self.returned as u32 == 0xc0000034;
+        need(self.absent)
+    }
+    fn exact_absence(&self) -> bool {
+        self.claimed && self.entered && self.completed && self.absent && !self.close_entered
+            && self.state == SlotState::NoHandle && self.returned as u32 == 0xc0000034
+    }
+    fn unresolved(&self) -> bool {
+        self.entered && !self.completed || matches!(self.state, SlotState::Acquiring | SlotState::Closing | SlotState::Unknown)
+            || self.close_entered && self.state != SlotState::Closed
+    }
+    fn begin_close(&mut self) -> Result<Option<F::HANDLE>> {
+        if self.unresolved() { self.unknown()?; }
+        if !self.entered && !self.completed && !self.close_entered && self.state == SlotState::Reserved {
+            self.state = SlotState::NoHandle; // Genuinely unentered, not an absence receipt.
+        }
+        if matches!(self.state, SlotState::NoHandle | SlotState::Closed) { return Ok(None); }
+        if self.state != SlotState::Owned || !self.completed || self.close_entered { self.unknown()?; }
+        // SAFETY: Owned was established by the definite coherent create return.
+        let handle = unsafe { *self.output.get() };
+        if !valid_handle(handle) { self.unknown()?; }
+        self.close_handle = handle; self.close_entered = true; self.state = SlotState::Closing;
+        unsafe { *self.output.get() = null_mut(); }
+        Ok(Some(handle))
+    }
+    fn observe_close(&mut self) -> Result<()> {
+        if !self.close_entered || self.state != SlotState::Closing { return Err(Error::State); }
+        if self.close_return == 0 { return self.unknown(); }
+        self.state = SlotState::Closed; Ok(())
+    }
+    fn close_once(&mut self) -> Result<()> {
+        if self.begin_close()?.is_none() { return Ok(()); }
+        // All return/error/input destinations were preregistered in this frame.
+        self.close_return = unsafe { F::CloseHandle(self.close_handle) };
+        self.close_error = if self.close_return != 0 { 0 } else { unsafe { F::GetLastError() } };
+        self.observe_close()
+    }
+    fn settled(&self) -> bool {
+        !self.unresolved() && match self.state {
+            SlotState::NoHandle => !self.close_entered && (!self.entered || self.completed),
+            SlotState::Closed => self.entered && self.completed && self.close_entered && self.close_return != 0,
+            _ => false,
+        }
+    }
 }
 struct ProfilePath { original: Original, metadata: Metadata }
 struct Profile {
-    native: NativeBook, paths: Vec<ProfilePath>, absence: Vec<Held<Absence>>, keys: Vec<Box<Key>>,
+    native: NativeBook, paths: Vec<ProfilePath>, absence: [Option<Held<Absence>>; 2], keys: Vec<Box<Key>>,
     directory: Box<[u16; 1024]>, units: u32, getter_entered: bool, getter_return: i32, getter_error: u32,
     sid: Vec<u16>, name: String, drive: String, device: String, expected: PathBuf,
     profile: Option<ProfilePath>, mapping: Option<usize>, root_key: Option<usize>,
@@ -148,7 +265,7 @@ impl Profile {
             decode::u32_at(&account.sid, 16)?, decode::u32_at(&account.sid, 20)?, decode::u32_at(&account.sid, 24)?);
         let name = String::from_utf16(&account.name[..account.name.len() - 1]).map_err(|_| Error::Unsafe)?;
         need(name.len() == 19 && name.starts_with("mrk") && is_hex(&name[3..], 16))?;
-        Ok(Self { native: NativeBook::new(), paths: Vec::with_capacity(16), absence: Vec::with_capacity(2),
+        Ok(Self { native: NativeBook::new(), paths: Vec::with_capacity(16), absence: [None, None],
             keys: Vec::with_capacity(64), directory: Box::new([0; 1024]), units: 1024,
             getter_entered: false, getter_return: 0, getter_error: 0, sid: wide(&sid), name,
             drive: String::new(), device: String::new(), expected: PathBuf::new(), profile: None,
@@ -170,48 +287,74 @@ impl Profile {
         }
         Ok(absent)
     }
-    fn profile_absent(&mut self, clock: &mut Clock) -> Result<()> {
-        clock.effect()?;
+    fn absence(&self, epoch: AbsenceEpoch) -> Result<&Absence> {
+        self.absence[epoch.index()].as_ref().map(|frame| frame.as_ref().get_ref()).ok_or(Error::State)
+    }
+    fn absence_mut(&mut self, epoch: AbsenceEpoch) -> Result<&mut Absence> {
+        let frame = self.absence[epoch.index()].as_mut().ok_or(Error::State)?;
+        Ok(unsafe { frame.as_mut().get_unchecked_mut() })
+    }
+    fn register_absence(&mut self) -> Result<()> {
+        self.native.clear()?;
+        need(!self.unknown && !self.settled && self.absence.iter().all(Option::is_none)
+            && !self.paths.is_empty() && self.paths.len() <= 14 && self.native.slots.len() == self.paths.len())?;
+        // Two fixed output originals plus the one future binding count against
+        // the SAME existing limits. At most14 parents+2 epochs+1 binding =17.
+        let records = self.native.slots.len().checked_add(3).ok_or(Error::Bounds)?;
+        if records > MAX_RECORDS || records > MAX_LIVE { return Err(Error::Bounds); }
         let parent = self.paths.last().ok_or(Error::State)?.original.index;
-        let canonical = format!("{}\\{}", self.native.slot(parent)?.canonical, self.name);
-        let original = self.native.reserve(Kind::Directory, Some(parent), &self.name, canonical)?;
-        let mut frame = Box::pin(Absence { original, attributes: OBJECT_ATTRIBUTES::default(), unicode: F::UNICODE_STRING::default(),
-            iosb: UnsafeCell::new(IO::IO_STATUS_BLOCK::default()), returned: F::STATUS_PENDING,
-            entered: false, completed: false, _pin: PhantomPinned });
-        let f = unsafe { frame.as_mut().get_unchecked_mut() };
-        let slot = self.native.slot(f.original.index)?;
-        f.unicode = F::UNICODE_STRING { Length: ((slot.name.len() - 1) * 2) as u16,
-            MaximumLength: (slot.name.len() * 2) as u16, Buffer: slot.name.as_ptr().cast_mut() };
-        f.attributes = OBJECT_ATTRIBUTES { Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
-            RootDirectory: self.native.handle(parent)?, ObjectName: &mut f.unicode,
-            Attributes: F::OBJ_CASE_INSENSITIVE | F::OBJ_DONT_REPARSE, SecurityDescriptor: null_mut(), SecurityQualityOfService: null_mut() };
-        let output = slot.output.get();
-        let index = f.original.index;
-        self.absence.push(ManuallyDrop::new(frame)); // BEFORE sole native entry.
-        self.native.slot_mut(index)?.state = SlotState::Acquiring;
-        let f = unsafe { self.absence.last_mut().ok_or(Error::State)?.as_mut().get_unchecked_mut() };
-        f.entered = true;
-        f.returned = unsafe { N::NtCreateFile(output, FS::FILE_READ_ATTRIBUTES | FS::SYNCHRONIZE,
+        let handle = self.native.handle(parent)?;
+        let before = Absence::new(AbsenceEpoch::BeforeLogon, parent, handle, &self.name)?;
+        let after = Absence::new(AbsenceEpoch::AfterDeletion, parent, handle, &self.name)?;
+        self.absence = [Some(ManuallyDrop::new(before)), Some(ManuallyDrop::new(after))];
+        Ok(()) // Both fixed frames are owned BEFORE either original call.
+    }
+    fn absence_permitted(&self, epoch: AbsenceEpoch) -> Result<()> {
+        if self.unknown { return Err(Error::Unknown); }
+        self.native.clear()?; need(!self.settled && !self.poststate)?;
+        let parent = self.paths.last().ok_or(Error::State)?.original.index;
+        let handle = self.native.handle(parent)?; let name = wide(&self.name);
+        for expected in [AbsenceEpoch::BeforeLogon, AbsenceEpoch::AfterDeletion] {
+            let frame = self.absence(expected)?;
+            need(frame.epoch == expected && frame.parent == parent && frame.parent_handle == handle && frame.name == name)?;
+        }
+        need(self.absence(epoch)?.unstarted())?;
+        match epoch {
+            AbsenceEpoch::BeforeLogon => need(!self.prestate && !self.exact && self.profile.is_none()
+                && !self.delete_entered && self.absence(AbsenceEpoch::AfterDeletion)?.unstarted()),
+            AbsenceEpoch::AfterDeletion => need(self.prestate && self.exact && self.hives_unloaded
+                && self.absence(AbsenceEpoch::BeforeLogon)?.exact_absence()
+                && self.profile.as_ref().is_some_and(|path| self.native.state(&path.original) == Ok(SlotState::Closed))
+                && self.mapping.and_then(|index| self.keys.get(index)).is_some_and(|key| key.state == SlotState::Closed && !key.active)
+                && self.delete_entered && self.delete_return != 0),
+        }
+    }
+    fn binding_permitted(&self) -> Result<()> {
+        if self.unknown { return Err(Error::Unknown); }
+        self.native.clear()?;
+        need(self.prestate && !self.exact && self.profile.is_none() && !self.delete_entered && !self.settled
+            && self.absence(AbsenceEpoch::BeforeLogon)?.exact_absence() && self.absence(AbsenceEpoch::AfterDeletion)?.unstarted())
+    }
+    fn absence_dependents_settled(&self) -> bool {
+        self.absence.iter().flatten().all(|frame| frame.settled())
+    }
+    fn profile_absent(&mut self, epoch: AbsenceEpoch, clock: &mut Clock) -> Result<()> {
+        let permission = self.absence_permitted(epoch);
+        if matches!(permission, Err(Error::Unknown)) { self.unknown = true; return permission; }
+        self.absence_mut(epoch)?.claim()?; // Even a pre-entry refusal spends this fixed epoch.
+        permission?; clock.effect()?;
+        let native = &self.native;
+        let [before, after] = &mut self.absence;
+        let (frame, other) = match epoch { AbsenceEpoch::BeforeLogon => (before, after), AbsenceEpoch::AfterDeletion => (after, before) };
+        let f = unsafe { frame.as_mut().ok_or(Error::State)?.as_mut().get_unchecked_mut() };
+        let other = other.as_ref().ok_or(Error::State)?.as_ref().get_ref();
+        f.begin()?;
+        f.returned = unsafe { N::NtCreateFile(f.output.get(), FS::FILE_READ_ATTRIBUTES | FS::SYNCHRONIZE,
             &f.attributes, f.iosb.get(), null(), 0, FS::FILE_SHARE_READ | FS::FILE_SHARE_WRITE, N::FILE_OPEN,
             N::FILE_DIRECTORY_FILE | N::FILE_OPEN_REPARSE_POINT | N::FILE_SYNCHRONOUS_IO_NONALERT, null(), 0) };
-        if f.returned == F::STATUS_PENDING || f.returned != F::STATUS_SUCCESS && (f.returned as u32 >> 30) != 3 {
-            self.unknown = true; return Err(Error::Unknown);
-        }
-        f.completed = true;
-        let handle = unsafe { *output };
-        if f.returned == F::STATUS_SUCCESS {
-            if !valid_handle(handle) || unsafe { (*f.iosb.get()).Anonymous.Status } != F::STATUS_SUCCESS
-                || unsafe { (*f.iosb.get()).Information } != WP::FILE_OPENED as usize || self.native.duplicate_live(index, handle) {
-                self.unknown = true; return Err(Error::Unknown);
-            }
-            self.native.slot_mut(index)?.state = SlotState::Owned;
-            return Err(Error::Unsafe); // Unexpected existing path; never delete/adopt.
-        }
-        if !handle.is_null() { self.unknown = true; return Err(Error::Unknown); }
-        self.native.slot_mut(index)?.state = SlotState::NoHandle;
-        // Only exact missing child is absence. Missing parent/access errors are not.
-        need(f.returned as u32 == 0xc0000034)?;
-        clock.effect()
+        let result = f.observe_return(native, other);
+        self.unknown |= f.state == SlotState::Unknown;
+        result?; clock.effect()
     }
     fn prepare(&mut self, clock: &mut Clock) -> Result<()> {
         need(!self.getter_entered)?; clock.effect()?;
@@ -245,7 +388,8 @@ impl Profile {
             self.paths.push(ProfilePath { original, metadata });
         }
         self.expected = root.join(&self.name);
-        self.profile_absent(clock)?;
+        self.register_absence()?;
+        self.profile_absent(AbsenceEpoch::BeforeLogon, clock)?;
         let (index, present) = self.key(R::HKEY_LOCAL_MACHINE, PROFILE_LIST, clock)?;
         need(present)?; self.root_key = Some(index);
         let handle = self.keys[index].handle;
@@ -254,7 +398,7 @@ impl Profile {
         self.prestate = true; clock.effect()
     }
     fn bind_after_logon(&mut self, clock: &mut Clock) -> Result<()> {
-        need(self.prestate && !self.exact && self.profile.is_none())?; clock.effect()?;
+        self.binding_permitted()?; clock.effect()?;
         let root = &self.paths.last().ok_or(Error::State)?.original;
         let original = self.native.open_child(root, &self.name, FileKind::Directory)?;
         clock.effect()?; let metadata = self.native.metadata(&original)?; clock.effect()?;
@@ -302,7 +446,7 @@ impl Profile {
         self.delete_error = if self.delete_return != 0 { 0 } else { unsafe { F::GetLastError() } };
         if self.delete_return == 0 { self.unknown = true; return Err(Error::Unknown); }
         clock.effect()?;
-        self.profile_absent(clock)?;
+        self.profile_absent(AbsenceEpoch::AfterDeletion, clock)?;
         let handle = self.keys[self.root_key.ok_or(Error::State)?].handle;
         let (index, present) = self.key(handle, &self.sid_name()?, clock)?;
         self.keys[index].close()?; need(!present && self.hives_absent(clock)?)?;
@@ -314,9 +458,16 @@ impl Profile {
     }
     fn settle(&mut self) -> Result<()> {
         if self.settled { return Ok(()); }
-        if self.unknown || self.native.is_unknown() || self.absence.iter().any(|f| f.entered && !f.completed) {
+        if self.unknown || self.native.is_unknown() || self.absence.iter().flatten().any(|frame| frame.unresolved()) {
             self.unknown = true; return Err(Error::Unknown);
         }
+        // These fixed frames are dependents of the original namespace parent,
+        // outside the binding path book. Their one closes MUST precede it.
+        for frame in self.absence.iter_mut().flatten() {
+            let frame = unsafe { frame.as_mut().get_unchecked_mut() };
+            if frame.close_once().is_err() { self.unknown = true; return Err(Error::Unknown); }
+        }
+        if !self.absence_dependents_settled() { self.unknown = true; return Err(Error::Unknown); }
         for key in self.keys.iter_mut().rev() {
             if key.close().is_err() { self.unknown = true; return Err(Error::Unknown); }
         }
@@ -324,8 +475,8 @@ impl Profile {
         if !self.settled { self.unknown = true; return Err(Error::Unknown); }
         // Original native frames have returned and every dependent original is
         // closed before any frame storage is deallocated.
-        for frame in &mut self.absence { unsafe { ManuallyDrop::drop(frame); } }
-        self.absence.clear(); Ok(())
+        for frame in &mut self.absence { if let Some(frame) = frame.take() { drop(ManuallyDrop::into_inner(frame)); } }
+        Ok(())
     }
 }
 
@@ -1187,6 +1338,178 @@ pub(super) fn run(role: UiRole, entry_tick: u64) -> Result<()> {
 #[cfg(test)]
 mod contract_tests {
     use super::*;
+
+    // All originals below are DATA, never passed to an OS API. Their explicit
+    // teardown may free even the deliberately Unknown fixtures; the production
+    // retained owner must never use this test-only allocation cleanup.
+    struct InertProfile(Profile);
+    impl InertProfile {
+        fn new() -> Result<Self> {
+            let sid = [vec![1, 5, 0, 0, 0, 0, 0, 5],
+                [21u32, 1, 2, 3, 1001].into_iter().flat_map(u32::to_le_bytes).collect()].concat();
+            let account = Account { name: wide("mrk0123456789abcdef"), password: Box::new([0; 65]),
+                users: Vec::new(), sid, absent: u32::MAX, absent_pointer_null: false, add: u32::MAX,
+                group_add: false, attempted: false, delete_attempted: false, delete_status: u32::MAX,
+                removed: false, queries: Vec::new() };
+            let mut fixture = Self(Profile::new(&account)?);
+            let profile = &mut fixture.0;
+            let original = profile.native.reserve(Kind::Directory, None, "fixture", "fixture".to_owned())?;
+            let slot = profile.native.slot_mut(original.index)?;
+            slot.state = SlotState::Owned; unsafe { *slot.output.get() = 11usize as F::HANDLE; }
+            let metadata = Metadata { identity: FileIdentity { volume_serial: 1, file_id: [1; 16] },
+                kind: FileKind::Directory, attributes: FS::FILE_ATTRIBUTE_DIRECTORY, size: 0,
+                allocation_size: 0, links: 1, creation: 1, write: 1, change: 1 };
+            profile.paths.push(ProfilePath { original, metadata });
+            profile.register_absence()?;
+            Ok(fixture)
+        }
+        fn returned(&mut self, epoch: AbsenceEpoch, status: i32, handle: F::HANDLE, io: i32, information: usize) -> Result<()> {
+            let native = &self.0.native;
+            let [before, after] = &mut self.0.absence;
+            let (frame, other) = match epoch { AbsenceEpoch::BeforeLogon => (before, after), AbsenceEpoch::AfterDeletion => (after, before) };
+            let frame = unsafe { frame.as_mut().ok_or(Error::State)?.as_mut().get_unchecked_mut() };
+            let other = other.as_ref().ok_or(Error::State)?.as_ref().get_ref();
+            frame.claim()?; frame.begin()?; frame.returned = status;
+            // No native entry occurred; these pinned cells have no OS borrower.
+            unsafe { *frame.output.get() = handle; *frame.iosb.get() = IO::IO_STATUS_BLOCK {
+                Anonymous: IO::IO_STATUS_BLOCK_0 { Status: io }, Information: information }; }
+            frame.observe_return(native, other)
+        }
+    }
+    impl Drop for InertProfile {
+        fn drop(&mut self) {
+            for frame in &mut self.0.absence { if let Some(frame) = frame.take() { drop(ManuallyDrop::into_inner(frame)); } }
+            if let Some(frame) = self.0.native.active.take() { drop(ManuallyDrop::into_inner(frame)); }
+            for slot in self.0.native.slots.drain(..) { drop(ManuallyDrop::into_inner(slot)); }
+        }
+    }
+
+    #[test]
+    fn profile_absence_epochs_do_not_consume_the_single_binding_path() -> Result<()> {
+        use AbsenceEpoch::{AfterDeletion, BeforeLogon};
+        let mut fixture = InertProfile::new()?;
+        let p = &mut fixture.0;
+        assert!(p.register_absence().is_err()); // Fixed registration has no reset.
+        assert_eq!(p.absence_permitted(BeforeLogon), Ok(()));
+        assert!(p.absence_permitted(AfterDeletion).is_err());
+        let before = p.absence(BeforeLogon)?; let after = p.absence(AfterDeletion)?;
+        assert_ne!(before.output.get(), after.output.get());
+        assert_eq!(before.parent_handle, after.parent_handle);
+        for frame in [before, after] {
+            assert!(std::ptr::eq(frame.attributes.ObjectName, &frame.unicode));
+            assert_eq!(frame.unicode.Buffer, frame.name.as_ptr().cast_mut());
+            assert_eq!(frame.attributes.RootDirectory, frame.parent_handle);
+        }
+        let native_count = p.native.slots.len();
+        assert_eq!(fixture.returned(BeforeLogon, 0xc0000034u32 as i32, null_mut(), F::STATUS_PENDING, usize::MAX), Ok(()));
+        let p = &mut fixture.0;
+        assert_eq!(p.native.slots.len(), native_count); // Preabsence spent no binding path.
+        assert!(p.absence_permitted(BeforeLogon).is_err());
+        assert_eq!(p.absence_mut(BeforeLogon)?.claim(), Err(Error::State));
+        p.prestate = true; assert_eq!(p.binding_permitted(), Ok(()));
+        let parent = p.paths[0].original.index;
+        let canonical = format!("{}\\{}", p.native.slot(parent)?.canonical, p.name);
+        let original = p.native.reserve(Kind::Directory, Some(parent), &p.name, canonical.clone())?;
+        assert!(matches!(p.native.reserve(Kind::Directory, Some(parent), &p.name, canonical), Err(Error::State)));
+        let index = original.index; let slot = p.native.slot_mut(index)?;
+        slot.state = SlotState::Owned; unsafe { *slot.output.get() = 42usize as F::HANDLE; }
+        p.profile = Some(ProfilePath { original, metadata: p.paths[0].metadata.clone() }); p.exact = true;
+        let mut key = Box::new(Key::new(R::HKEY_LOCAL_MACHINE, "inert")); key.state = SlotState::Owned;
+        p.mapping = Some(p.keys.len()); p.keys.push(key);
+        assert!(p.binding_permitted().is_err());
+        assert!(p.absence_permitted(AfterDeletion).is_err());
+        p.hives_unloaded = true; p.delete_entered = true; p.delete_return = 1;
+        assert!(p.absence_permitted(AfterDeletion).is_err()); // Deletion scalars cannot waive live originals.
+        p.native.slot_mut(index)?.state = SlotState::Closed;
+        assert!(p.absence_permitted(AfterDeletion).is_err()); // Mapping still live.
+        p.keys[p.mapping.ok_or(Error::State)?].state = SlotState::Closed;
+        p.delete_return = 0; assert!(p.absence_permitted(AfterDeletion).is_err());
+        p.delete_return = 1; p.delete_entered = false; assert!(p.absence_permitted(AfterDeletion).is_err());
+        p.delete_entered = true; p.hives_unloaded = false; assert!(p.absence_permitted(AfterDeletion).is_err());
+        p.hives_unloaded = true;
+        p.delete_entered = true; assert_eq!(p.absence_permitted(AfterDeletion), Ok(()));
+        assert_eq!(fixture.returned(AfterDeletion, 0xc0000034u32 as i32, null_mut(), F::STATUS_PENDING, usize::MAX), Ok(()));
+        assert!(fixture.0.absence_permitted(AfterDeletion).is_err());
+        assert_eq!(fixture.0.absence_mut(AfterDeletion)?.claim(), Err(Error::State));
+        assert!(fixture.0.absence_dependents_settled());
+        assert_eq!(fixture.0.native.slots.len(), native_count + 1);
+        assert!(!fixture.0.native.retiring && !fixture.0.settled); // DATA never manufactures native finality.
+        fixture.0.unknown = true; assert_eq!(fixture.0.absence_permitted(AfterDeletion), Err(Error::Unknown));
+        let mut wrong_parent = InertProfile::new()?;
+        wrong_parent.0.absence_mut(AfterDeletion)?.parent_handle = 12usize as F::HANDLE;
+        assert!(wrong_parent.0.absence_permitted(BeforeLogon).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn profile_absence_results_distinguish_missing_collision_and_unknown() -> Result<()> {
+        use AbsenceEpoch::{AfterDeletion, BeforeLogon};
+        for (status, handle, io, information, expected, state, absent) in [
+            (0xc0000034u32 as i32, 0, F::STATUS_PENDING, usize::MAX, Ok(()), SlotState::NoHandle, true),
+            (0xc0000034u32 as i32, 0, F::STATUS_SUCCESS, 0, Ok(()), SlotState::NoHandle, true),
+            (0xc000003au32 as i32, 0, F::STATUS_PENDING, usize::MAX, Err(Error::Unsafe), SlotState::NoHandle, false),
+            (F::STATUS_ACCESS_DENIED, 0, F::STATUS_PENDING, usize::MAX, Err(Error::Unsafe), SlotState::NoHandle, false),
+            (F::STATUS_PENDING, 42, F::STATUS_SUCCESS, WP::FILE_OPENED as usize, Err(Error::Unknown), SlotState::Unknown, false),
+            (1, 42, F::STATUS_SUCCESS, WP::FILE_OPENED as usize, Err(Error::Unknown), SlotState::Unknown, false),
+            (0x80000001u32 as i32, 0, F::STATUS_PENDING, usize::MAX, Err(Error::Unknown), SlotState::Unknown, false),
+            (F::STATUS_ACCESS_DENIED, 42, F::STATUS_SUCCESS, WP::FILE_OPENED as usize, Err(Error::Unknown), SlotState::Unknown, false),
+            (F::STATUS_SUCCESS, 0, F::STATUS_SUCCESS, WP::FILE_OPENED as usize, Err(Error::Unknown), SlotState::Unknown, false),
+            (F::STATUS_SUCCESS, usize::MAX, F::STATUS_SUCCESS, WP::FILE_OPENED as usize, Err(Error::Unknown), SlotState::Unknown, false),
+            (F::STATUS_SUCCESS, 42, F::STATUS_PENDING, WP::FILE_OPENED as usize, Err(Error::Unknown), SlotState::Unknown, false),
+            (F::STATUS_SUCCESS, 42, F::STATUS_SUCCESS, usize::MAX, Err(Error::Unknown), SlotState::Unknown, false),
+            (F::STATUS_SUCCESS, 11, F::STATUS_SUCCESS, WP::FILE_OPENED as usize, Err(Error::Unknown), SlotState::Unknown, false),
+            (F::STATUS_SUCCESS, 42, F::STATUS_SUCCESS, WP::FILE_OPENED as usize, Err(Error::Unsafe), SlotState::Owned, false),
+        ] {
+            let mut fixture = InertProfile::new()?;
+            assert_eq!(fixture.returned(BeforeLogon, status, handle as F::HANDLE, io, information), expected);
+            let p = &mut fixture.0; let frame = p.absence_mut(BeforeLogon)?;
+            assert_eq!(frame.state, state); assert_eq!(frame.exact_absence(), absent);
+            assert_eq!(frame.claim(), Err(Error::State));
+            if state == SlotState::Unknown { assert_eq!(frame.begin_close(), Err(Error::Unknown)); }
+            p.prestate = true; assert_eq!(p.binding_permitted().is_ok(), absent);
+        }
+        // Duplicate exclusion spans the other fixed original, not just NativeBook.
+        let mut fixture = InertProfile::new()?;
+        assert_eq!(fixture.returned(BeforeLogon, F::STATUS_SUCCESS, 42usize as F::HANDLE, F::STATUS_SUCCESS,
+            WP::FILE_OPENED as usize), Err(Error::Unsafe));
+        assert_eq!(fixture.returned(AfterDeletion, F::STATUS_SUCCESS, 42usize as F::HANDLE, F::STATUS_SUCCESS,
+            WP::FILE_OPENED as usize), Err(Error::Unknown));
+        assert_eq!(fixture.0.absence(BeforeLogon)?.state, SlotState::Owned);
+        assert_eq!(fixture.0.absence(AfterDeletion)?.state, SlotState::Unknown);
+        assert!(!fixture.0.absence_dependents_settled());
+        Ok(())
+    }
+
+    #[test]
+    fn profile_absence_dependents_settle_before_namespace_parents() -> Result<()> {
+        use AbsenceEpoch::{AfterDeletion, BeforeLogon};
+        let mut pending = InertProfile::new()?;
+        let frame = pending.0.absence_mut(BeforeLogon)?; frame.claim()?; frame.begin()?;
+        assert!(!pending.0.absence_dependents_settled());
+        assert_eq!(pending.0.absence_mut(BeforeLogon)?.begin_close(), Err(Error::Unknown));
+        assert!(!pending.0.native.retiring && !pending.0.absence_dependents_settled());
+        for success in [false, true] {
+            let mut fixture = InertProfile::new()?;
+            assert_eq!(fixture.returned(BeforeLogon, F::STATUS_SUCCESS, 42usize as F::HANDLE,
+                F::STATUS_SUCCESS, WP::FILE_OPENED as usize), Err(Error::Unsafe));
+            let p = &mut fixture.0;
+            assert_eq!(p.absence_mut(AfterDeletion)?.begin_close(), Ok(None));
+            assert!(!p.absence(AfterDeletion)?.exact_absence()); // Unentered settlement is not absence.
+            assert!(!p.absence_dependents_settled()); // Known collision is still held.
+            assert_eq!(p.absence_mut(BeforeLogon)?.begin_close(), Ok(Some(42usize as F::HANDLE)));
+            assert!(!p.absence_dependents_settled()); // Issuing a close is not its return.
+            let frame = p.absence_mut(BeforeLogon)?;
+            assert_eq!(frame.close_handle, 42usize as F::HANDLE);
+            assert!(frame.close_entered && unsafe { (*frame.output.get()).is_null() });
+            frame.close_return = if success { 1 } else { 0 };
+            assert_eq!(frame.observe_close(), if success { Ok(()) } else { Err(Error::Unknown) });
+            assert_eq!(p.absence_dependents_settled(), success);
+            let frame = p.absence_mut(BeforeLogon)?;
+            assert_eq!(frame.begin_close(), if success { Ok(None) } else { Err(Error::Unknown) });
+            assert!(!p.native.retiring); assert_eq!(p.native.state(&p.paths[0].original)?, SlotState::Owned);
+        }
+        Ok(())
+    }
 
     #[test]
     fn com_null_end_is_distinct_from_pending_failure_and_contradictory_output() {
