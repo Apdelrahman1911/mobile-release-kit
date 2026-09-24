@@ -1,7 +1,7 @@
 //! Fixed normal-UI extension of the existing original Account/Launch owner.
 //! No general launcher, inherited user environment, shipping switch or fallback.
 use super::*;
-use std::{ffi::c_void, marker::PhantomData, path::PathBuf};
+use std::{cell::Cell, ffi::c_void, io::Write, marker::PhantomData, path::PathBuf};
 use windows_sys::Win32::System::{Com as CO, Ole as OLE, Registry as R};
 use windows_sys::Win32::UI::WindowsAndMessaging as W;
 use windows::{core::Interface, Win32::{Foundation::HWND, UI::Accessibility as A}};
@@ -675,6 +675,127 @@ fn output_poststate(native: &mut NativeBook, files: &mut Vec<OriginalFile>, fixt
     Ok(())
 }
 
+// Qualification-only, same-thread DATA. No caller text or native identity can
+// enter this companion diagnostic, and no release/finality decision reads it.
+macro_rules! smoke_labels {
+    ($name:ident { $($variant:ident => $label:literal),+ $(,)? }) => {
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        enum $name { $($variant),+ }
+        impl $name {
+            fn label(self) -> &'static str { match self { $(Self::$variant => $label),+ } }
+            const ALL: &'static [Self] = &[$(Self::$variant),+];
+        }
+    };
+}
+smoke_labels!(SmokePhase {
+    Setup => "setup", MainWindow => "main-window", MainBinding => "main-binding",
+    Dashboard => "dashboard", CloseRequest => "close-request", QuitDialog => "quit-dialog",
+    QuitInvoke => "quit-invoke", ObserveClock => "observation-clock", DriverSettle => "driver-settle",
+    OwnerFinality => "owner-finality", OutputPoststate => "output-poststate", Retirement => "retirement",
+});
+smoke_labels!(SmokeCheck {
+    Clock => "original-clock", QueryState => "query-state", QueryBudget => "query-admission-budget",
+    QueryPending => "query-pending", ArrayDestroyState => "array-destroy-state", ArrayDestroy => "array-destroy",
+    WindowTitleLength => "window-title-length", WindowTitleEncoding => "window-title-encoding",
+    WindowQueryIdle => "window-query-idle", ProcessState => "original-process-state",
+    ProcessIdentity => "original-process-identity", ProcessLive => "original-process-live",
+    WindowEnumeration => "thread-window-enumeration", WindowOverflow => "thread-window-overflow",
+    WindowIdentity => "enumerated-window-identity", RootIdentity => "main-root-title-or-uniqueness",
+    RootContinuity => "main-root-continuity", ComReserve => "com-reservation",
+    ComIndex => "com-original-index", ComState => "com-original-kind-or-state",
+    ClientMissing => "client-original-missing", InitializeOnce => "apartment-initialize-once",
+    Initialize => "apartment-initialize", ClientAcquireState => "client-acquire-state",
+    ClientAcquire => "client-acquire", ConnectionTimeout => "connection-timeout-setting",
+    TransactionTimeout => "transaction-timeout-setting", WalkerAcquireState => "walker-acquire-state",
+    WalkerAcquire => "raw-view-walker-acquire", WalkerMissing => "walker-original-missing",
+    ElementAcquireState => "element-from-window-acquire-state", ElementFromWindow => "element-from-window",
+    AdjacentAcquireState => "adjacent-element-acquire-state", FirstChild => "first-child-element",
+    NextSibling => "next-sibling-element", NameOutputState => "name-output-state",
+    NameContradiction => "name-contradictory-output", CurrentName => "current-name",
+    NameLength => "name-length", NameEncoding => "name-encoding",
+    RuntimeIdOutputState => "runtime-id-output-state", RuntimeIdContradiction => "runtime-id-contradictory-output",
+    RuntimeId => "runtime-id", RuntimeIdPresent => "runtime-id-present",
+    RuntimeIdDimensions => "runtime-id-dimensions", RuntimeIdElementSize => "runtime-id-element-size",
+    RuntimeIdVariantCall => "runtime-id-variant-call", RuntimeIdVariant => "runtime-id-variant",
+    RuntimeIdLowerCall => "runtime-id-lower-bound-call", RuntimeIdUpperCall => "runtime-id-upper-bound-call",
+    RuntimeIdBounds => "runtime-id-bounds", RuntimeIdElement => "runtime-id-element",
+    NativeWindowHandle => "current-native-window-handle", ControlType => "current-control-type",
+    IsEnabled => "current-is-enabled", MainMissing => "main-element-missing",
+    MainBinding => "main-window-element-binding", ProcessId => "current-process-id",
+    MainProcess => "main-element-process-binding", WalkBounds => "walk-depth-or-count",
+    SiblingBounds => "walk-sibling-count", ComRelease => "com-original-release-state",
+    NativeServiceUnavailable => "native-service-unavailable", CatalogueUnavailable => "field-catalogue-unavailable",
+    BundledEngineUnavailable => "bundled-engine-unavailable", EngineDisabled => "engine-disabled",
+    BrowserPreview => "browser-preview", PostCloseOnce => "post-close-once", PostClose => "post-close",
+    QuitDialogIdentity => "quit-dialog-title-or-uniqueness", QuitClassEncoding => "quit-dialog-class-encoding",
+    QuitClass => "quit-dialog-class", QuitButtons => "quit-buttons-identity-or-parent",
+    QuitDefault => "quit-default-cancel", QuitDialogHandle => "quit-dialog-element-handle",
+    QuitOkIdentity => "quit-ok-identity-or-uniqueness", QuitCancelIdentity => "quit-cancel-identity-or-uniqueness",
+    QuitInstruction => "quit-instruction-or-cancel-missing", QuitOkMissing => "quit-ok-missing",
+    QuitBinding => "quit-dialog-original-binding", InvokeAcquireState => "invoke-pattern-acquire-state",
+    InvokeAcquire => "invoke-pattern-acquire", InvokeOnce => "invoke-once", Invoke => "invoke",
+    DriverUnknown => "driver-unknown", WindowQueryActive => "window-query-active",
+    QuerySettlement => "query-settlement", UninitializeOnce => "apartment-uninitialize-once",
+    OwnerResult => "original-owner-result", ParentSettlement => "parent-book-settlement",
+    OwnerFinality => "original-process-finality", RequestMissing => "original-request-missing",
+    SmokeFinality => "smoke-finality", ArtifactIndex => "artifact-original-index",
+    ArtifactStamp => "artifact-original-stamp", ArtifactExpected => "artifact-expected-stamp",
+    ArtifactUnchanged => "artifact-unchanged", InputStamp => "input-original-stamp",
+    InputUnchanged => "input-unchanged", OutputIndex => "output-original-index", OutputInventory => "output-inventory",
+    InventorySettlement => "inventory-settlement", InputClose => "input-original-close",
+    ProfileSettlement => "profile-settlement", ProfileRetirement => "profile-retirement",
+    AccountRetirement => "account-retirement",
+});
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SmokeStatus { Hresult(i32), Win32(u32) }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SmokeFault { phase: SmokePhase, check: SmokeCheck, error: Error, status: Option<SmokeStatus> }
+struct SmokeTrace { phase: Cell<SmokePhase>, first: Cell<Option<SmokeFault>>, emitted: Cell<bool> }
+impl SmokeTrace {
+    fn new() -> Self {
+        Self { phase: Cell::new(SmokePhase::Setup), first: Cell::new(None), emitted: Cell::new(false) }
+    }
+    fn result<T>(&self, check: SmokeCheck, result: Result<T>, status: Option<SmokeStatus>) -> Result<T> {
+        if let Err(error) = &result {
+            if self.first.get().is_none() {
+                self.first.set(Some(SmokeFault { phase: self.phase.get(), check, error: *error, status }));
+            }
+        }
+        result
+    }
+    fn need(&self, check: SmokeCheck, value: bool) -> Result<()> { self.result(check, need(value), None) }
+    fn format(fault: SmokeFault, raw: &mut [u8]) -> std::io::Result<usize> {
+        let mut output = std::io::Cursor::new(raw);
+        let error = match fault.error {
+            Error::Unavailable => "unavailable", Error::Unsafe => "unsafe", Error::Bounds => "bounds",
+            Error::State => "state", Error::Unknown => "unknown",
+        };
+        write!(output, "MRK_WINDOWS_NORMAL_UI_SMOKE_REFUSED={{\"diagnosticOnly\":true,\"phase\":\"{}\",\"check\":\"{}\",\"error\":\"{error}\",\"nativeStatus\":",
+            fault.phase.label(), fault.check.label())?;
+        match fault.status {
+            Some(SmokeStatus::Hresult(code)) => write!(output, "{{\"domain\":\"hresult\",\"code\":{code}}}")?,
+            Some(SmokeStatus::Win32(code)) => write!(output, "{{\"domain\":\"win32\",\"code\":{code}}}")?,
+            None => write!(output, "null")?,
+        }
+        writeln!(output, "}}")?; Ok(output.position() as usize)
+    }
+    fn emit_to(&self, output: &mut impl Write) -> std::io::Result<Option<usize>> {
+        let Some(fault) = self.first.get() else { return Ok(None); };
+        if self.emitted.replace(true) { return Ok(None); }
+        let mut raw = [0u8; 512];
+        let bytes: &[u8] = match Self::format(fault, &mut raw) {
+            Ok(size) => &raw[..size],
+            Err(_) => b"MRK_WINDOWS_NORMAL_UI_SMOKE_REFUSED={\"diagnosticOnly\":true,\"diagnosticIncomplete\":true}\n",
+        };
+        // Exactly one best-effort write. Short/error output is not a receipt,
+        // does not retry, and cannot change the original operation's result.
+        output.write(bytes).map(Some)
+    }
+    fn emit(&self) {
+        if self.first.get().is_some() && !self.emitted.get() { let _ = self.emit_to(&mut std::io::stdout().lock()); }
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ComKind { Client, Walker, Element, Invoke }
 struct ComOriginal {
@@ -723,28 +844,38 @@ impl UiQuery {
             lower: 0, upper: -1, index: 0, dimensions: 0, element_size: 0, variant: 0, values: [0; 16],
             destroy_entered: false, destroy_return: HRESULT_PENDING }
     }
-    fn begin(&mut self, clock: &mut Clock) -> Result<()> {
-        need(!self.active && !self.unknown)?;
+    fn begin(&mut self, clock: &mut Clock, trace: &SmokeTrace) -> Result<()> {
+        trace.need(SmokeCheck::QueryState, !self.active && !self.unknown)?;
         // The client transaction timeout is 1000ms. Refuse a new provider call
         // unless it fits under the original endpoint; never reset that clock.
-        need(clock.remaining_ms()? > 1000)?; self.active = true; self.status = HRESULT_PENDING; Ok(())
+        trace.need(SmokeCheck::QueryBudget, trace.result(SmokeCheck::Clock, clock.remaining_ms(), None)? > 1000)?;
+        self.active = true; self.status = HRESULT_PENDING; Ok(())
     }
-    fn returned(&mut self, status: i32, clock: &mut Clock) -> Result<()> {
+    fn returned(&mut self, status: i32, clock: &mut Clock, trace: &SmokeTrace, check: SmokeCheck) -> Result<()> {
         self.status = status;
-        if status == HRESULT_PENDING { self.unknown = true; return Err(Error::Unknown); }
-        self.active = false; clock.effect()?; need(status == 0)
+        if status == HRESULT_PENDING {
+            self.unknown = true; return trace.result(check, Err(Error::Unknown), Some(SmokeStatus::Hresult(status)));
+        }
+        self.active = false;
+        trace.result(SmokeCheck::Clock, clock.effect(), None)?;
+        trace.result(check, need(status == 0), Some(SmokeStatus::Hresult(status)))
     }
-    fn settle(&mut self) -> Result<()> {
-        if self.active || self.unknown { return Err(Error::Unknown); }
+    fn settle(&mut self, trace: &SmokeTrace) -> Result<()> {
+        if self.active || self.unknown { return trace.result(SmokeCheck::QueryPending, Err(Error::Unknown), None); }
         if !self.bstr.is_null() {
             self.active = true; unsafe { F::SysFreeString(self.bstr.cast()) };
             self.bstr = null_mut(); self.active = false;
         }
         if !self.array.is_null() {
-            if self.destroy_entered { self.unknown = true; return Err(Error::Unknown); }
+            if self.destroy_entered {
+                self.unknown = true; return trace.result(SmokeCheck::ArrayDestroyState, Err(Error::Unknown), None);
+            }
             self.destroy_entered = true; self.active = true;
             self.destroy_return = unsafe { OLE::SafeArrayDestroy(self.array) };
-            if self.destroy_return != 0 { self.unknown = true; return Err(Error::Unknown); }
+            if self.destroy_return != 0 {
+                self.unknown = true;
+                return trace.result(SmokeCheck::ArrayDestroy, Err(Error::Unknown), Some(SmokeStatus::Hresult(self.destroy_return)));
+            }
             self.array = null_mut(); self.active = false;
         }
         Ok(())
@@ -755,9 +886,10 @@ struct WindowData {
 }
 impl WindowData {
     fn new() -> Self { Self { hwnd: null_mut(), owner: null_mut(), pid: 0, tid: 0, title: [0; 256], length: 0 } }
-    fn title(&self) -> Result<String> {
-        need(self.length >= 0 && (self.length as usize) < self.title.len() - 1)?;
-        String::from_utf16(&self.title[..self.length as usize]).map_err(|_| Error::Unsafe)
+    fn title(&self, trace: &SmokeTrace) -> Result<String> {
+        trace.need(SmokeCheck::WindowTitleLength, self.length >= 0 && (self.length as usize) < self.title.len() - 1)?;
+        trace.result(SmokeCheck::WindowTitleEncoding,
+            String::from_utf16(&self.title[..self.length as usize]).map_err(|_| Error::Unsafe), None)
     }
 }
 struct WindowQuery {
@@ -784,42 +916,46 @@ impl WindowQuery {
             class: [0; 256], class_length: 0, ok: null_mut(), cancel: null_mut(), cancel_style: 0,
             post_entered: false, post_return: 0, post_error: 0 }
     }
-    fn original_live(&mut self, launch: &Launch, clock: &mut Clock) -> Result<()> {
-        need(launch.facts.created && !launch.facts.failed && !launch.facts.unknown
+    fn original_live(&mut self, launch: &Launch, clock: &mut Clock, trace: &SmokeTrace) -> Result<()> {
+        trace.need(SmokeCheck::ProcessState, launch.facts.created && !launch.facts.failed && !launch.facts.unknown
             && launch.facts.process == SlotState::Owned && launch.facts.thread == SlotState::Owned)?;
-        clock.effect()?; self.identity_pid = unsafe { T::GetProcessId(launch.outputs.hProcess) };
+        trace.result(SmokeCheck::Clock, clock.effect(), None)?; self.identity_pid = unsafe { T::GetProcessId(launch.outputs.hProcess) };
         self.identity_tid = unsafe { T::GetThreadId(launch.outputs.hThread) };
         self.thread_pid = unsafe { T::GetProcessIdOfThread(launch.outputs.hThread) };
-        need(self.identity_pid == launch.outputs.dwProcessId && self.thread_pid == launch.outputs.dwProcessId
+        trace.need(SmokeCheck::ProcessIdentity, self.identity_pid == launch.outputs.dwProcessId && self.thread_pid == launch.outputs.dwProcessId
             && self.identity_tid == launch.outputs.dwThreadId)?;
         self.wait = unsafe { T::WaitForSingleObject(launch.outputs.hProcess, 0) };
-        clock.effect()?; need(self.wait == F::WAIT_TIMEOUT)
+        trace.result(SmokeCheck::Clock, clock.effect(), None)?; trace.need(SmokeCheck::ProcessLive, self.wait == F::WAIT_TIMEOUT)
     }
-    fn scan(&mut self, launch: &Launch, clock: &mut Clock) -> Result<()> {
-        need(!self.active)?; self.original_live(launch, clock)?;
+    fn scan(&mut self, launch: &Launch, clock: &mut Clock, trace: &SmokeTrace) -> Result<()> {
+        trace.need(SmokeCheck::WindowQueryIdle, !self.active)?; self.original_live(launch, clock, trace)?;
         self.count = 0; self.overflow = false;
         for entry in &mut self.entries { *entry = WindowData::new(); }
         self.active = true;
         self.returned = unsafe { W::EnumThreadWindows(launch.outputs.dwThreadId, Some(thread_window), self as *mut Self as isize) };
         self.error = if self.returned != 0 { 0 } else { unsafe { F::GetLastError() } };
-        self.active = false; clock.effect()?; need(self.returned != 0 && !self.overflow)?;
-        need(self.entries[..self.count].iter().all(|entry|
+        self.active = false; trace.result(SmokeCheck::Clock, clock.effect(), None)?;
+        trace.result(if self.overflow { SmokeCheck::WindowOverflow } else { SmokeCheck::WindowEnumeration },
+            need(self.returned != 0 && !self.overflow), if self.overflow { None } else { Some(SmokeStatus::Win32(self.error)) })?;
+        trace.need(SmokeCheck::WindowIdentity, self.entries[..self.count].iter().all(|entry|
             entry.pid == launch.outputs.dwProcessId && entry.tid == launch.outputs.dwThreadId))
     }
-    fn root(&mut self, launch: &Launch, main: Option<F::HWND>, clock: &mut Clock) -> Result<Option<F::HWND>> {
-        self.scan(launch, clock)?;
+    fn root(&mut self, launch: &Launch, main: Option<F::HWND>, clock: &mut Clock, trace: &SmokeTrace) -> Result<Option<F::HWND>> {
+        self.scan(launch, clock, trace)?;
         let mut found = None;
         for entry in &self.entries[..self.count] {
             if entry.owner.is_null() {
-                need(entry.title()? == "Mobile Release Kit" && found.is_none())?; found = Some(entry.hwnd);
+                trace.need(SmokeCheck::RootIdentity, entry.title(trace)? == "Mobile Release Kit" && found.is_none())?;
+                found = Some(entry.hwnd);
             }
         }
-        if let Some(main) = main { need(found == Some(main))?; }
+        if let Some(main) = main { trace.need(SmokeCheck::RootContinuity, found == Some(main))?; }
         Ok(found)
     }
 }
 
 struct Smoke {
+    trace: SmokeTrace,
     initialized: bool, init_entered: bool, init_return: i32, uninit_entered: bool, uninit_returned: bool,
     originals: Vec<Box<ComOriginal>>, query: Box<UiQuery>, windows: Box<WindowQuery>,
     client: Option<usize>, walker: Option<usize>, main: Option<(F::HWND, usize, Vec<i32>)>,
@@ -828,152 +964,177 @@ struct Smoke {
 }
 impl Smoke {
     fn new() -> Self {
-        Self { initialized: false, init_entered: false, init_return: HRESULT_PENDING, uninit_entered: false,
+        Self { trace: SmokeTrace::new(), initialized: false, init_entered: false, init_return: HRESULT_PENDING, uninit_entered: false,
             uninit_returned: false, originals: Vec::with_capacity(2048), query: Box::new(UiQuery::new()),
             windows: Box::new(WindowQuery::new()), client: None, walker: None, main: None,
             invoke_entered: false, invoke_return: HRESULT_PENDING, dashboard_ready: false, quit_confirmed: false,
             unknown: false, settled: false, _thread: PhantomData }
     }
     fn reserve(&mut self, kind: ComKind, clock: &mut Clock) -> Result<usize> {
-        need(!self.unknown && !self.settled && self.originals.len() < 2048 && clock.remaining_ms()? > 1000)?;
+        self.trace.need(SmokeCheck::ComReserve, !self.unknown && !self.settled && self.originals.len() < 2048
+            && self.trace.result(SmokeCheck::Clock, clock.remaining_ms(), None)? > 1000)?;
         let index = self.originals.len(); self.originals.push(Box::new(ComOriginal::new(kind))); Ok(index)
     }
     fn pointer(&self, index: usize, kind: ComKind) -> Result<*mut c_void> {
-        let original = self.originals.get(index).ok_or(Error::State)?;
-        need(original.kind == kind && original.state == SlotState::Owned && !original.active)?; Ok(original.pointer)
+        let original = self.trace.result(SmokeCheck::ComIndex, self.originals.get(index).ok_or(Error::State), None)?;
+        self.trace.need(SmokeCheck::ComState, original.kind == kind && original.state == SlotState::Owned && !original.active)?;
+        Ok(original.pointer)
     }
     fn client(&self) -> Result<(*mut c_void, &A::IUIAutomation2_Vtbl)> {
-        let pointer = self.pointer(self.client.ok_or(Error::State)?, ComKind::Client)?;
+        let pointer = self.pointer(self.trace.result(SmokeCheck::ClientMissing, self.client.ok_or(Error::State), None)?, ComKind::Client)?;
         Ok((pointer, unsafe { &**pointer.cast::<*const A::IUIAutomation2_Vtbl>() }))
     }
-    fn acquire_return(&mut self, index: usize, status: i32, nullable: bool, clock: &mut Clock) -> Result<bool> {
+    fn acquire_return(&mut self, index: usize, status: i32, nullable: bool, clock: &mut Clock, check: SmokeCheck) -> Result<bool> {
         let result = self.originals[index].returned(status, nullable);
-        self.unknown |= matches!(result, Err(Error::Unknown)); clock.effect()?; result
+        self.unknown |= matches!(result, Err(Error::Unknown));
+        // Record the produced refusal without moving its return before the
+        // existing clock. A later clock error still has the same precedence.
+        let result = self.trace.result(check, result, Some(SmokeStatus::Hresult(status)));
+        self.trace.result(SmokeCheck::Clock, clock.effect(), None)?; result
     }
     fn setup(&mut self, clock: &mut Clock) -> Result<()> {
-        need(!self.init_entered)?; clock.effect()?; self.init_entered = true;
+        self.trace.need(SmokeCheck::InitializeOnce, !self.init_entered)?;
+        self.trace.result(SmokeCheck::Clock, clock.effect(), None)?; self.init_entered = true;
         self.init_return = unsafe { CO::CoInitializeEx(null(), CO::COINIT_MULTITHREADED as u32) };
-        if self.init_return == HRESULT_PENDING { self.unknown = true; return Err(Error::Unknown); }
+        if self.init_return == HRESULT_PENDING {
+            self.unknown = true;
+            return self.trace.result(SmokeCheck::Initialize, Err(Error::Unknown), Some(SmokeStatus::Hresult(self.init_return)));
+        }
         self.initialized = matches!(self.init_return, 0 | 1);
-        need(self.initialized)?; clock.effect()?;
+        self.trace.result(SmokeCheck::Initialize, need(self.initialized), Some(SmokeStatus::Hresult(self.init_return)))?;
+        self.trace.result(SmokeCheck::Clock, clock.effect(), None)?;
         let index = self.reserve(ComKind::Client, clock)?;
-        let output = self.originals[index].begin()?;
+        let output = self.trace.result(SmokeCheck::ClientAcquireState, self.originals[index].begin(), None)?;
         let status = unsafe { CO::CoCreateInstance((&A::CUIAutomation8 as *const windows::core::GUID).cast(), null_mut(),
             CO::CLSCTX_INPROC_SERVER, (&A::IUIAutomation2::IID as *const windows::core::GUID).cast(), output) };
-        self.acquire_return(index, status, false, clock)?; self.client = Some(index);
+        self.acquire_return(index, status, false, clock, SmokeCheck::ClientAcquire)?; self.client = Some(index);
         let pointer = self.pointer(index, ComKind::Client)?;
         let table = unsafe { &**pointer.cast::<*const A::IUIAutomation2_Vtbl>() };
-        for setter in [table.SetConnectionTimeout, table.SetTransactionTimeout] {
-            self.query.begin(clock)?;
+        for (setter, check) in [(table.SetConnectionTimeout, SmokeCheck::ConnectionTimeout),
+            (table.SetTransactionTimeout, SmokeCheck::TransactionTimeout)] {
+            self.query.begin(clock, &self.trace)?;
             let status = unsafe { setter(pointer, 1000) }.0;
-            self.query.returned(status, clock)?;
+            self.query.returned(status, clock, &self.trace, check)?;
         }
         let index = self.reserve(ComKind::Walker, clock)?;
-        let output = self.originals[index].begin()?;
+        let output = self.trace.result(SmokeCheck::WalkerAcquireState, self.originals[index].begin(), None)?;
         let status = unsafe { (table.base__.RawViewWalker)(pointer, output) }.0;
-        self.acquire_return(index, status, false, clock)?; self.walker = Some(index); Ok(())
+        self.acquire_return(index, status, false, clock, SmokeCheck::WalkerAcquire)?; self.walker = Some(index); Ok(())
     }
     fn from_window(&mut self, hwnd: F::HWND, clock: &mut Clock) -> Result<usize> {
         let index = self.reserve(ComKind::Element, clock)?;
-        let output = self.originals[index].begin()?;
+        let output = self.trace.result(SmokeCheck::ElementAcquireState, self.originals[index].begin(), None)?;
         let (pointer, table) = self.client()?;
         let status = unsafe { (table.base__.ElementFromHandle)(pointer, HWND(hwnd), output) }.0;
-        self.acquire_return(index, status, false, clock)?; Ok(index)
+        self.acquire_return(index, status, false, clock, SmokeCheck::ElementFromWindow)?; Ok(index)
     }
     fn adjacent(&mut self, element: usize, child: bool, clock: &mut Clock) -> Result<Option<usize>> {
         let pointer = self.pointer(element, ComKind::Element)?;
-        let walker = self.pointer(self.walker.ok_or(Error::State)?, ComKind::Walker)?;
+        let walker = self.pointer(self.trace.result(SmokeCheck::WalkerMissing, self.walker.ok_or(Error::State), None)?, ComKind::Walker)?;
         let table = unsafe { &**walker.cast::<*const A::IUIAutomationTreeWalker_Vtbl>() };
         let index = self.reserve(ComKind::Element, clock)?;
-        let output = self.originals[index].begin()?;
+        let output = self.trace.result(SmokeCheck::AdjacentAcquireState, self.originals[index].begin(), None)?;
         let status = unsafe { (if child { table.GetFirstChildElement } else { table.GetNextSiblingElement })(walker, pointer, output) }.0;
-        Ok(self.acquire_return(index, status, true, clock)?.then_some(index))
+        Ok(self.acquire_return(index, status, true, clock,
+            if child { SmokeCheck::FirstChild } else { SmokeCheck::NextSibling })?.then_some(index))
     }
     fn name(&mut self, element: usize, clock: &mut Clock) -> Result<String> {
         let pointer = self.pointer(element, ComKind::Element)?;
         let table = unsafe { &**pointer.cast::<*const A::IUIAutomationElement_Vtbl>() };
-        need(self.query.bstr.is_null())?; self.query.begin(clock)?;
+        self.trace.need(SmokeCheck::NameOutputState, self.query.bstr.is_null())?; self.query.begin(clock, &self.trace)?;
         let status = unsafe { (table.CurrentName)(pointer, &mut self.query.bstr) }.0;
-        if status != 0 && !self.query.bstr.is_null() { self.query.unknown = true; return Err(Error::Unknown); }
-        self.query.returned(status, clock)?;
+        if status != 0 && !self.query.bstr.is_null() {
+            self.query.unknown = true;
+            return self.trace.result(SmokeCheck::NameContradiction, Err(Error::Unknown), Some(SmokeStatus::Hresult(status)));
+        }
+        self.query.returned(status, clock, &self.trace, SmokeCheck::CurrentName)?;
         let length = unsafe { F::SysStringLen(self.query.bstr.cast()) } as usize;
-        need(length <= 1024)?;
+        self.trace.need(SmokeCheck::NameLength, length <= 1024)?;
         let text = if length == 0 { Ok(String::new()) } else {
             String::from_utf16(unsafe { std::slice::from_raw_parts(self.query.bstr.cast::<u16>(), length) }).map_err(|_| Error::Unsafe)
         };
-        self.query.settle()?; clock.effect()?; text
+        // Conversion already returned, but its Result still follows the same
+        // query settlement and clock checks. Neither may replace its first fault.
+        let text = self.trace.result(SmokeCheck::NameEncoding, text, None);
+        self.query.settle(&self.trace)?; self.trace.result(SmokeCheck::Clock, clock.effect(), None)?; text
     }
     fn runtime_id(&mut self, element: usize, clock: &mut Clock) -> Result<Vec<i32>> {
         let pointer = self.pointer(element, ComKind::Element)?;
         let table = unsafe { &**pointer.cast::<*const A::IUIAutomationElement_Vtbl>() };
-        need(self.query.array.is_null())?; self.query.destroy_entered = false;
-        self.query.begin(clock)?;
+        self.trace.need(SmokeCheck::RuntimeIdOutputState, self.query.array.is_null())?; self.query.destroy_entered = false;
+        self.query.begin(clock, &self.trace)?;
         let status = unsafe { (table.GetRuntimeId)(pointer, (&mut self.query.array as *mut *mut CO::SAFEARRAY).cast()) }.0;
-        if status != 0 && !self.query.array.is_null() { self.query.unknown = true; return Err(Error::Unknown); }
-        self.query.returned(status, clock)?; need(!self.query.array.is_null())?;
+        if status != 0 && !self.query.array.is_null() {
+            self.query.unknown = true;
+            return self.trace.result(SmokeCheck::RuntimeIdContradiction, Err(Error::Unknown), Some(SmokeStatus::Hresult(status)));
+        }
+        self.query.returned(status, clock, &self.trace, SmokeCheck::RuntimeId)?;
+        self.trace.need(SmokeCheck::RuntimeIdPresent, !self.query.array.is_null())?;
         self.query.dimensions = unsafe { OLE::SafeArrayGetDim(self.query.array) };
         self.query.element_size = unsafe { OLE::SafeArrayGetElemsize(self.query.array) };
-        need(self.query.dimensions == 1 && self.query.element_size == 4)?;
-        self.query.begin(clock)?;
+        self.trace.need(if self.query.dimensions != 1 { SmokeCheck::RuntimeIdDimensions } else { SmokeCheck::RuntimeIdElementSize },
+            self.query.dimensions == 1 && self.query.element_size == 4)?;
+        self.query.begin(clock, &self.trace)?;
         let status = unsafe { OLE::SafeArrayGetVartype(self.query.array, &mut self.query.variant) };
-        self.query.returned(status, clock)?;
-        need(self.query.variant == windows_sys::Win32::System::Variant::VT_I4)?;
-        self.query.begin(clock)?;
+        self.query.returned(status, clock, &self.trace, SmokeCheck::RuntimeIdVariantCall)?;
+        self.trace.need(SmokeCheck::RuntimeIdVariant, self.query.variant == windows_sys::Win32::System::Variant::VT_I4)?;
+        self.query.begin(clock, &self.trace)?;
         let status = unsafe { OLE::SafeArrayGetLBound(self.query.array, 1, &mut self.query.lower) };
-        self.query.returned(status, clock)?;
-        self.query.begin(clock)?;
+        self.query.returned(status, clock, &self.trace, SmokeCheck::RuntimeIdLowerCall)?;
+        self.query.begin(clock, &self.trace)?;
         let status = unsafe { OLE::SafeArrayGetUBound(self.query.array, 1, &mut self.query.upper) };
-        self.query.returned(status, clock)?;
-        need(self.query.lower == 0 && (1..=15).contains(&self.query.upper))?;
+        self.query.returned(status, clock, &self.trace, SmokeCheck::RuntimeIdUpperCall)?;
+        self.trace.need(SmokeCheck::RuntimeIdBounds, self.query.lower == 0 && (1..=15).contains(&self.query.upper))?;
         for index in 0..=self.query.upper {
-            self.query.index = index; self.query.begin(clock)?;
+            self.query.index = index; self.query.begin(clock, &self.trace)?;
             let status = unsafe { OLE::SafeArrayGetElement(self.query.array, &self.query.index,
                 (&mut self.query.values[index as usize] as *mut i32).cast()) };
-            self.query.returned(status, clock)?;
+            self.query.returned(status, clock, &self.trace, SmokeCheck::RuntimeIdElement)?;
         }
         let result = self.query.values[..=self.query.upper as usize].to_vec();
-        self.query.settle()?; clock.effect()?; Ok(result)
+        self.query.settle(&self.trace)?; self.trace.result(SmokeCheck::Clock, clock.effect(), None)?; Ok(result)
     }
     fn native_handle(&mut self, element: usize, clock: &mut Clock) -> Result<F::HWND> {
         let pointer = self.pointer(element, ComKind::Element)?;
         let table = unsafe { &**pointer.cast::<*const A::IUIAutomationElement_Vtbl>() };
-        self.query.hwnd = HWND(null_mut()); self.query.begin(clock)?;
+        self.query.hwnd = HWND(null_mut()); self.query.begin(clock, &self.trace)?;
         let status = unsafe { (table.CurrentNativeWindowHandle)(pointer, &mut self.query.hwnd) }.0;
-        self.query.returned(status, clock)?; Ok(self.query.hwnd.0)
+        self.query.returned(status, clock, &self.trace, SmokeCheck::NativeWindowHandle)?; Ok(self.query.hwnd.0)
     }
     fn enabled_button(&mut self, element: usize, clock: &mut Clock) -> Result<bool> {
         let pointer = self.pointer(element, ComKind::Element)?;
         let table = unsafe { &**pointer.cast::<*const A::IUIAutomationElement_Vtbl>() };
-        self.query.control = A::UIA_CONTROLTYPE_ID(0); self.query.begin(clock)?;
+        self.query.control = A::UIA_CONTROLTYPE_ID(0); self.query.begin(clock, &self.trace)?;
         let status = unsafe { (table.CurrentControlType)(pointer, &mut self.query.control) }.0;
-        self.query.returned(status, clock)?;
+        self.query.returned(status, clock, &self.trace, SmokeCheck::ControlType)?;
         if self.query.control != A::UIA_ButtonControlTypeId { return Ok(false); }
-        self.query.boolean = windows::core::BOOL(0); self.query.begin(clock)?;
+        self.query.boolean = windows::core::BOOL(0); self.query.begin(clock, &self.trace)?;
         let status = unsafe { (table.CurrentIsEnabled)(pointer, &mut self.query.boolean) }.0;
-        self.query.returned(status, clock)?; Ok(self.query.boolean.0 != 0)
+        self.query.returned(status, clock, &self.trace, SmokeCheck::IsEnabled)?; Ok(self.query.boolean.0 != 0)
     }
     fn bound(&mut self, launch: &Launch, clock: &mut Clock) -> Result<()> {
-        let (hwnd, index, expected) = self.main.as_ref().ok_or(Error::State)?;
+        let (hwnd, index, expected) = self.trace.result(SmokeCheck::MainMissing, self.main.as_ref().ok_or(Error::State), None)?;
         let (hwnd, index, expected) = (*hwnd, *index, expected.clone());
-        need(self.windows.root(launch, Some(hwnd), clock)? == Some(hwnd)
-            && self.native_handle(index, clock)? == hwnd && self.runtime_id(index, clock)? == expected)?;
+        let bound = self.windows.root(launch, Some(hwnd), clock, &self.trace)? == Some(hwnd)
+            && self.native_handle(index, clock)? == hwnd && self.runtime_id(index, clock)? == expected;
+        self.trace.need(SmokeCheck::MainBinding, bound)?;
         let pointer = self.pointer(index, ComKind::Element)?;
         let table = unsafe { &**pointer.cast::<*const A::IUIAutomationElement_Vtbl>() };
-        self.query.integer = 0; self.query.begin(clock)?;
+        self.query.integer = 0; self.query.begin(clock, &self.trace)?;
         let status = unsafe { (table.CurrentProcessId)(pointer, &mut self.query.integer) }.0;
-        self.query.returned(status, clock)?;
-        need(self.query.integer > 0 && self.query.integer as u32 == launch.outputs.dwProcessId)
+        self.query.returned(status, clock, &self.trace, SmokeCheck::ProcessId)?;
+        self.trace.need(SmokeCheck::MainProcess, self.query.integer > 0 && self.query.integer as u32 == launch.outputs.dwProcessId)
     }
     fn walk(&mut self, root: usize, clock: &mut Clock) -> Result<Vec<usize>> {
         let mut result = Vec::with_capacity(256); let mut stack = vec![(root, 0usize)];
         while let Some((index, depth)) = stack.pop() {
-            need(depth <= 40 && result.len() < 900)?; result.push(index);
+            self.trace.need(SmokeCheck::WalkBounds, depth <= 40 && result.len() < 900)?; result.push(index);
             // Follow only this element's children; never a desktop root/sibling
             // outside the caller's admitted main/dialog subtree.
             if let Some(child) = self.adjacent(index, true, clock)? {
                 let mut siblings = vec![child]; let mut at = child;
                 while let Some(next) = self.adjacent(at, false, clock)? {
-                    need(siblings.len() + result.len() < 900)?; siblings.push(next); at = next;
+                    self.trace.need(SmokeCheck::SiblingBounds, siblings.len() + result.len() < 900)?; siblings.push(next); at = next;
                 }
                 stack.extend(siblings.into_iter().rev().map(|index| (index, depth + 1)));
             }
@@ -981,17 +1142,23 @@ impl Smoke {
         Ok(result)
     }
     fn release_suffix(&mut self, from: usize) -> Result<()> {
-        for original in self.originals[from..].iter_mut().rev() { original.release()?; }
+        for original in self.originals[from..].iter_mut().rev() {
+            self.trace.result(SmokeCheck::ComRelease, original.release(), None)?;
+        }
         self.originals.truncate(from); Ok(())
     }
     fn observe(&mut self, launch: &Launch, version: &str, clock: &mut Clock) -> Result<()> {
+        self.trace.phase.set(SmokePhase::Setup);
         self.setup(clock)?;
+        self.trace.phase.set(SmokePhase::MainWindow);
         let hwnd = loop {
-            if let Some(hwnd) = self.windows.root(launch, None, clock)? { break hwnd; }
-            clock.effect()?; std::thread::sleep(Duration::from_millis(100));
+            if let Some(hwnd) = self.windows.root(launch, None, clock, &self.trace)? { break hwnd; }
+            self.trace.result(SmokeCheck::Clock, clock.effect(), None)?; std::thread::sleep(Duration::from_millis(100));
         };
+        self.trace.phase.set(SmokePhase::MainBinding);
         let element = self.from_window(hwnd, clock)?; let id = self.runtime_id(element, clock)?;
         self.main = Some((hwnd, element, id)); self.bound(launch, clock)?;
+        self.trace.phase.set(SmokePhase::Dashboard);
         loop {
             self.bound(launch, clock)?; let keep = self.originals.len();
             let elements = self.walk(element, clock)?;
@@ -1004,42 +1171,55 @@ impl Smoke {
                 found[3] |= name == expected_version;
                 if name == "Choose a project" { found[4] |= self.enabled_button(index, clock)?; }
                 let lower = name.to_ascii_lowercase();
-                need(!["the native service is unavailable", "the field catalogue could not be loaded",
-                    "bundled engine unavailable", "the engine is disabled", "browser preview"]
-                    .iter().any(|value| lower.contains(value)))?;
+                let unavailable = [
+                    ("the native service is unavailable", SmokeCheck::NativeServiceUnavailable),
+                    ("the field catalogue could not be loaded", SmokeCheck::CatalogueUnavailable),
+                    ("bundled engine unavailable", SmokeCheck::BundledEngineUnavailable),
+                    ("the engine is disabled", SmokeCheck::EngineDisabled),
+                    ("browser preview", SmokeCheck::BrowserPreview),
+                ].into_iter().find(|(value, _)| lower.contains(value)).map(|(_, check)| check);
+                if let Some(check) = unavailable { self.trace.need(check, false)?; }
                 if name.contains("Loading desktop capabilities and the core field catalogue") { found = [false; 5]; break; }
             }
             self.release_suffix(keep)?;
             if found == [true; 5] { self.dashboard_ready = true; break; }
-            clock.effect()?; std::thread::sleep(Duration::from_millis(100));
+            self.trace.result(SmokeCheck::Clock, clock.effect(), None)?; std::thread::sleep(Duration::from_millis(100));
         }
+        self.trace.phase.set(SmokePhase::CloseRequest);
         self.bound(launch, clock)?;
-        need(!self.windows.post_entered)?; self.windows.post_entered = true;
+        self.trace.need(SmokeCheck::PostCloseOnce, !self.windows.post_entered)?; self.windows.post_entered = true;
         self.windows.post_return = unsafe { W::PostMessageW(hwnd, W::WM_CLOSE, 0, 0) };
         self.windows.post_error = if self.windows.post_return != 0 { 0 } else { unsafe { F::GetLastError() } };
         // Posting is request delivery only, never response or original exit.
-        need(self.windows.post_return != 0)?; clock.effect()?;
+        self.trace.result(SmokeCheck::PostClose, need(self.windows.post_return != 0), Some(SmokeStatus::Win32(self.windows.post_error)))?;
+        self.trace.result(SmokeCheck::Clock, clock.effect(), None)?;
+        self.trace.phase.set(SmokePhase::QuitDialog);
         let dialog = loop {
             self.bound(launch, clock)?; let mut dialog = None;
             for entry in &self.windows.entries[..self.windows.count] {
                 if entry.owner == hwnd {
-                    need(entry.title()? == "Quit Mobile Release Kit?" && dialog.is_none())?; dialog = Some(entry.hwnd);
+                    self.trace.need(SmokeCheck::QuitDialogIdentity,
+                        entry.title(&self.trace)? == "Quit Mobile Release Kit?" && dialog.is_none())?;
+                    dialog = Some(entry.hwnd);
                 }
             }
             if let Some(dialog) = dialog { break dialog; }
-            clock.effect()?; std::thread::sleep(Duration::from_millis(100));
+            self.trace.result(SmokeCheck::Clock, clock.effect(), None)?; std::thread::sleep(Duration::from_millis(100));
         };
         self.windows.class_length = unsafe { W::GetClassNameW(dialog, self.windows.class.as_mut_ptr(), 256) };
-        need(self.windows.class_length > 0 && self.windows.class_length < 255
-            && String::from_utf16(&self.windows.class[..self.windows.class_length as usize]).map_err(|_| Error::Unsafe)? == "#32770")?;
+        self.trace.need(SmokeCheck::QuitClass, self.windows.class_length > 0 && self.windows.class_length < 255
+            && self.trace.result(SmokeCheck::QuitClassEncoding,
+                String::from_utf16(&self.windows.class[..self.windows.class_length as usize]).map_err(|_| Error::Unsafe), None)? == "#32770")?;
         self.windows.ok = unsafe { W::GetDlgItem(dialog, W::IDOK) };
         self.windows.cancel = unsafe { W::GetDlgItem(dialog, W::IDCANCEL) };
-        need(!self.windows.ok.is_null() && !self.windows.cancel.is_null() && self.windows.ok != self.windows.cancel
+        self.trace.need(SmokeCheck::QuitButtons, !self.windows.ok.is_null() && !self.windows.cancel.is_null() && self.windows.ok != self.windows.cancel
             && unsafe { W::GetParent(self.windows.ok) } == dialog && unsafe { W::GetParent(self.windows.cancel) } == dialog)?;
         self.windows.cancel_style = unsafe { W::GetWindowLongPtrW(self.windows.cancel, W::GWL_STYLE) };
-        need(self.windows.cancel_style & 0x0f == W::BS_DEFPUSHBUTTON as isize)?; clock.effect()?;
+        self.trace.need(SmokeCheck::QuitDefault, self.windows.cancel_style & 0x0f == W::BS_DEFPUSHBUTTON as isize)?;
+        self.trace.result(SmokeCheck::Clock, clock.effect(), None)?;
         let dialog_element = self.from_window(dialog, clock)?;
-        need(self.native_handle(dialog_element, clock)? == dialog)?;
+        let dialog_bound = self.native_handle(dialog_element, clock)? == dialog;
+        self.trace.need(SmokeCheck::QuitDialogHandle, dialog_bound)?;
         let dialog_id = self.runtime_id(dialog_element, clock)?;
         let elements = self.walk(dialog_element, clock)?;
         let mut instruction = false; let mut ok = None; let mut cancel = None;
@@ -1047,38 +1227,50 @@ impl Smoke {
             let name = self.name(index, clock)?;
             instruction |= name == "Quit and discard unsaved drafts?";
             if name == "OK" && self.enabled_button(index, clock)? {
-                need(ok.is_none() && self.native_handle(index, clock)? == self.windows.ok)?; ok = Some(index);
+                let bound = ok.is_none() && self.native_handle(index, clock)? == self.windows.ok;
+                self.trace.need(SmokeCheck::QuitOkIdentity, bound)?; ok = Some(index);
             }
             if name == "Cancel" && self.enabled_button(index, clock)? {
-                need(cancel.is_none() && self.native_handle(index, clock)? == self.windows.cancel)?; cancel = Some(index);
+                let bound = cancel.is_none() && self.native_handle(index, clock)? == self.windows.cancel;
+                self.trace.need(SmokeCheck::QuitCancelIdentity, bound)?; cancel = Some(index);
             }
         }
-        need(instruction && cancel.is_some())?; let ok = ok.ok_or(Error::Unsafe)?;
+        self.trace.need(SmokeCheck::QuitInstruction, instruction && cancel.is_some())?;
+        let ok = self.trace.result(SmokeCheck::QuitOkMissing, ok.ok_or(Error::Unsafe), None)?;
         self.bound(launch, clock)?;
-        need(unsafe { W::GetWindow(dialog, W::GW_OWNER) } == hwnd && self.runtime_id(dialog_element, clock)? == dialog_id
-            && self.native_handle(ok, clock)? == self.windows.ok && self.enabled_button(ok, clock)?)?;
+        let bound = unsafe { W::GetWindow(dialog, W::GW_OWNER) } == hwnd && self.runtime_id(dialog_element, clock)? == dialog_id
+            && self.native_handle(ok, clock)? == self.windows.ok && self.enabled_button(ok, clock)?;
+        self.trace.need(SmokeCheck::QuitBinding, bound)?;
+        self.trace.phase.set(SmokePhase::QuitInvoke);
         let pointer = self.pointer(ok, ComKind::Element)?;
         let table = unsafe { &**pointer.cast::<*const A::IUIAutomationElement_Vtbl>() };
         let index = self.reserve(ComKind::Invoke, clock)?;
-        let output = self.originals[index].begin()?;
+        let output = self.trace.result(SmokeCheck::InvokeAcquireState, self.originals[index].begin(), None)?;
         let status = unsafe { (table.GetCurrentPatternAs)(pointer, A::UIA_InvokePatternId, &A::IUIAutomationInvokePattern::IID, output) }.0;
-        self.acquire_return(index, status, false, clock)?;
-        self.bound(launch, clock)?; need(!self.invoke_entered)?;
+        self.acquire_return(index, status, false, clock, SmokeCheck::InvokeAcquire)?;
+        self.bound(launch, clock)?; self.trace.need(SmokeCheck::InvokeOnce, !self.invoke_entered)?;
         let pointer = self.pointer(index, ComKind::Invoke)?;
         let table = unsafe { &**pointer.cast::<*const A::IUIAutomationInvokePattern_Vtbl>() };
-        self.query.begin(clock)?; self.invoke_entered = true;
+        self.query.begin(clock, &self.trace)?; self.invoke_entered = true;
         self.invoke_return = unsafe { (table.Invoke)(pointer) }.0;
-        self.query.returned(self.invoke_return, clock)?;
-        self.quit_confirmed = true; clock.effect()
+        self.query.returned(self.invoke_return, clock, &self.trace, SmokeCheck::Invoke)?;
+        self.quit_confirmed = true; self.trace.result(SmokeCheck::Clock, clock.effect(), None)
     }
     fn settle(&mut self) -> Result<()> {
+        self.trace.phase.set(SmokePhase::DriverSettle);
         if self.settled { return Ok(()); }
-        if self.unknown || self.windows.active || self.query.settle().is_err() { self.unknown = true; return Err(Error::Unknown); }
+        if self.unknown || self.windows.active || self.query.settle(&self.trace).is_err() {
+            let check = if self.unknown { SmokeCheck::DriverUnknown }
+                else if self.windows.active { SmokeCheck::WindowQueryActive } else { SmokeCheck::QuerySettlement };
+            self.unknown = true; return self.trace.result(check, Err(Error::Unknown), None);
+        }
         for original in self.originals.iter_mut().rev() {
-            if original.release().is_err() { self.unknown = true; return Err(Error::Unknown); }
+            if self.trace.result(SmokeCheck::ComRelease, original.release(), None).is_err() {
+                self.unknown = true; return Err(Error::Unknown);
+            }
         }
         if self.initialized {
-            need(!self.uninit_entered)?; self.uninit_entered = true;
+            self.trace.need(SmokeCheck::UninitializeOnce, !self.uninit_entered)?; self.uninit_entered = true;
             unsafe { CO::CoUninitialize() }; self.uninit_returned = true;
         }
         self.settled = true; Ok(())
@@ -1092,6 +1284,18 @@ impl Smoke {
         need(self.passed())?;
         Ok("{\"mainRootBound\":true,\"dashboardReady\":true,\"postCloseCalls\":1,\"invokeCalls\":1,\"nativeQuitConfirmed\":true,\"comOriginalsSettled\":true,\"apartmentDecremented\":true}".to_owned())
     }
+}
+
+fn smoke_result<T>(smoke: Option<&Smoke>, phase: SmokePhase, check: SmokeCheck, result: Result<T>) -> Result<T> {
+    match smoke {
+        Some(smoke) => { smoke.trace.phase.set(phase); smoke.trace.result(check, result, None) },
+        None => result,
+    }
+}
+fn diagnostic_smoke(stage: &'static str, launch: Option<&Launch>, unknown: bool,
+    fault: Option<InputFault>, smoke: Option<&Smoke>) {
+    if let Some(smoke) = smoke { smoke.trace.emit(); }
+    diagnostic_with_fault(stage, launch, unknown, fault);
 }
 
 pub(super) fn run(role: UiRole, entry_tick: u64) -> Result<()> {
@@ -1231,34 +1435,41 @@ pub(super) fn run(role: UiRole, entry_tick: u64) -> Result<()> {
             smoke.as_mut().ok_or(Error::State)?.observe(launch.as_ref().ok_or(Error::State)?,
                 &request.as_ref().ok_or(Error::State)?.app_version, &mut clock)?;
         }
-        clock.effect()
+        smoke_result(smoke.as_ref(), SmokePhase::ObserveClock, SmokeCheck::Clock, clock.effect())
     })();
     if let Some(current) = account.as_mut() { current.zero(); }
     // Settle the actual original driver before any original process close. A
     // UIA timeout is failed even if its possibly-effectful operation later acts.
     let smoke_settled = smoke.as_mut().is_none_or(|value| value.settle().is_ok());
     if !smoke_settled || matches!(observation, Err(Error::Unknown)) {
-        diagnostic_with_fault(stage, launch.as_deref(), true, trace.first);
+        diagnostic_smoke(stage, launch.as_deref(), true, trace.first, smoke.as_ref());
         loop { std::thread::park(); std::hint::black_box((&mut smoke, &mut launch, &mut profile, &mut account,
             &mut book, &mut inventory, &mut files, &mut creates, &request, &fixture)); }
     }
     if let Some(original) = launch.as_mut() {
         if observation.is_err() { unsafe { original.as_mut().get_unchecked_mut() }.facts.failed = true; }
         original.as_mut().finish(clock.start, &mut clock.aggregate);
-        if !original.facts.passed() && observation.is_ok() { observation = Err(Error::Unsafe); }
+        if !original.facts.passed() && observation.is_ok() {
+            observation = smoke_result(smoke.as_ref(), SmokePhase::OwnerFinality, SmokeCheck::OwnerResult, Err(Error::Unsafe));
+        }
     }
     if !parent_attempted { parent_settled = book.settle_once() == CloseOutcome::Settled && book.settled(); }
     if !parent_settled || launch.as_ref().is_some_and(|value| value.facts.unknown || value.facts.created && !value.facts.signaled) {
-        diagnostic_with_fault(stage, launch.as_deref(), true, trace.first);
+        let _ = smoke_result::<()>(smoke.as_ref(), SmokePhase::OwnerFinality,
+            if !parent_settled { SmokeCheck::ParentSettlement } else { SmokeCheck::OwnerFinality }, Err(Error::Unknown));
+        diagnostic_smoke(stage, launch.as_deref(), true, trace.first, smoke.as_ref());
         loop { std::thread::park(); std::hint::black_box((&mut smoke, &mut launch, &mut profile, &mut account,
             &mut book, &mut inventory, &mut files, &mut creates, &request, &fixture)); }
     }
     if observation.is_ok() {
         observation = (|| -> Result<()> {
-            clock.effect()?; stage = "ui-original-exit-result";
-            let selected = request.as_ref().ok_or(Error::State)?;
+            smoke_result(smoke.as_ref(), SmokePhase::OwnerFinality, SmokeCheck::Clock, clock.effect())?;
+            stage = "ui-original-exit-result";
+            let selected = smoke_result(smoke.as_ref(), SmokePhase::OwnerFinality, SmokeCheck::RequestMissing,
+                request.as_ref().ok_or(Error::State))?;
             let result = if role == UiRole::NormalSmoke {
-                need(smoke.as_ref().is_some_and(Smoke::passed))?; None
+                smoke_result(smoke.as_ref(), SmokePhase::OwnerFinality, SmokeCheck::SmokeFinality,
+                    need(smoke.as_ref().is_some_and(Smoke::passed)))?; None
             } else {
                 let index = input(&mut files, &output.join(role.name("result.private.json")), false,
                     FS::FILE_GENERIC_READ, &mut clock, &mut trace)?;
@@ -1267,42 +1478,63 @@ pub(super) fn run(role: UiRole, entry_tick: u64) -> Result<()> {
                 if role == UiRole::Prerequisite { available = Some(accepted); } else { need(accepted)?; }
                 child_sha = Some(digest(&raw)?); Some(index)
             };
-            need(files[artifact_index.ok_or(Error::State)?].stamp()? == *artifact_after.as_ref().ok_or(Error::State)?)?;
-            for (index, stamp) in &input_stamps { clock.effect()?; need(files[*index].stamp()? == *stamp)?; }
+            let index = smoke_result(smoke.as_ref(), SmokePhase::OutputPoststate, SmokeCheck::ArtifactIndex,
+                artifact_index.ok_or(Error::State))?;
+            let stamp = smoke_result(smoke.as_ref(), SmokePhase::OutputPoststate, SmokeCheck::ArtifactStamp, files[index].stamp())?;
+            let expected = smoke_result(smoke.as_ref(), SmokePhase::OutputPoststate, SmokeCheck::ArtifactExpected,
+                artifact_after.as_ref().ok_or(Error::State))?;
+            smoke_result(smoke.as_ref(), SmokePhase::OutputPoststate, SmokeCheck::ArtifactUnchanged, need(stamp == *expected))?;
+            for (index, stamp) in &input_stamps {
+                smoke_result(smoke.as_ref(), SmokePhase::OutputPoststate, SmokeCheck::Clock, clock.effect())?;
+                let current = smoke_result(smoke.as_ref(), SmokePhase::OutputPoststate, SmokeCheck::InputStamp, files[*index].stamp())?;
+                smoke_result(smoke.as_ref(), SmokePhase::OutputPoststate, SmokeCheck::InputUnchanged, need(current == *stamp))?;
+            }
             stage = "ui-output-poststate";
-            output_poststate(&mut inventory, &mut files, &mut fixture, role, &output,
-                output_index.ok_or(Error::State)?, result, &mut clock, &mut trace)?;
-            clock.effect()
+            smoke_result(smoke.as_ref(), SmokePhase::OutputPoststate, SmokeCheck::OutputInventory,
+                output_poststate(&mut inventory, &mut files, &mut fixture, role, &output,
+                    smoke_result(smoke.as_ref(), SmokePhase::OutputPoststate, SmokeCheck::OutputIndex,
+                        output_index.ok_or(Error::State))?, result, &mut clock, &mut trace))?;
+            smoke_result(smoke.as_ref(), SmokePhase::OutputPoststate, SmokeCheck::Clock, clock.effect())
         })();
     }
     let inventory_settled = inventory.settle_once() == CloseOutcome::Settled && inventory.settled();
     if !inventory_settled || matches!(observation, Err(Error::Unknown)) || !close_files(&mut files) {
-        diagnostic_with_fault(stage, launch.as_deref(), true, trace.first);
+        let _ = smoke_result::<()>(smoke.as_ref(), SmokePhase::OutputPoststate,
+            if !inventory_settled { SmokeCheck::InventorySettlement }
+            else if matches!(observation, Err(Error::Unknown)) { SmokeCheck::OwnerFinality } else { SmokeCheck::InputClose },
+            Err(Error::Unknown));
+        diagnostic_smoke(stage, launch.as_deref(), true, trace.first, smoke.as_ref());
         loop { std::thread::park(); std::hint::black_box((&mut smoke, &mut launch, &mut profile, &mut account,
             &mut book, &mut inventory, &mut files, &mut creates, &request, &fixture)); }
     }
-    if clock.effect().is_err() { observation = Err(Error::Unsafe); }
+    if smoke_result(smoke.as_ref(), SmokePhase::OwnerFinality, SmokeCheck::Clock, clock.effect()).is_err() {
+        observation = Err(Error::Unsafe);
+    }
     if observation.is_err() {
-        if profile.as_mut().is_some_and(|value| value.settle().is_err()) {
-            diagnostic_with_fault("ui-profile-original-close", launch.as_deref(), true, trace.first);
+        if profile.as_mut().is_some_and(|value| smoke_result(smoke.as_ref(), SmokePhase::Retirement,
+            SmokeCheck::ProfileSettlement, value.settle()).is_err()) {
+            diagnostic_smoke("ui-profile-original-close", launch.as_deref(), true, trace.first, smoke.as_ref());
             loop { std::thread::park(); std::hint::black_box((&mut profile, &mut account, &mut launch, &mut files, &mut smoke)); }
         }
-        diagnostic_with_fault(stage, launch.as_deref(), false, trace.first);
+        diagnostic_smoke(stage, launch.as_deref(), false, trace.first, smoke.as_ref());
         return observation; // Failed process/driver never permits profile/account deletion.
     }
     stage = "ui-profile-retirement";
-    let retirement = profile.as_mut().ok_or(Error::State)?.retire(&mut clock);
+    let retirement = smoke_result(smoke.as_ref(), SmokePhase::Retirement, SmokeCheck::ProfileRetirement,
+        profile.as_mut().ok_or(Error::State)?.retire(&mut clock));
     if retirement.is_err() {
-        if matches!(retirement, Err(Error::Unknown)) || profile.as_mut().is_some_and(|value| value.settle().is_err()) {
-            diagnostic_with_fault(stage, launch.as_deref(), true, trace.first);
+        if matches!(retirement, Err(Error::Unknown)) || profile.as_mut().is_some_and(|value| smoke_result(smoke.as_ref(),
+            SmokePhase::Retirement, SmokeCheck::ProfileSettlement, value.settle()).is_err()) {
+            diagnostic_smoke(stage, launch.as_deref(), true, trace.first, smoke.as_ref());
             loop { std::thread::park(); std::hint::black_box((&mut profile, &mut account, &mut launch, &mut files, &mut smoke)); }
         }
         return retirement;
     }
     let current = account.as_mut().ok_or(Error::State)?;
-    let retirement = current.retire(clock.start, &mut clock.latched, &mut clock.aggregate);
+    let retirement = smoke_result(smoke.as_ref(), SmokePhase::Retirement, SmokeCheck::AccountRetirement,
+        current.retire(clock.start, &mut clock.latched, &mut clock.aggregate));
     if matches!(retirement, Err(Error::Unknown)) {
-        diagnostic_with_fault("ui-account-retirement", launch.as_deref(), true, trace.first);
+        diagnostic_smoke("ui-account-retirement", launch.as_deref(), true, trace.first, smoke.as_ref());
         loop { std::thread::park(); std::hint::black_box((&mut profile, &mut account, &mut launch, &mut files, &mut smoke)); }
     }
     retirement?; clock.effect()?;
@@ -1569,5 +1801,109 @@ mod contract_tests {
         assert!(data.passed()); data.unknown = true; assert!(!data.passed());
         data.unknown = false; data.dashboard_ready = false; assert!(!data.passed());
         // No native initialize/acquire happened. Never invoke settle on DATA.
+
+        let _ = data.trace.result::<()>(SmokeCheck::CurrentName, Err(Error::Unsafe), Some(SmokeStatus::Hresult(i32::MIN)));
+        assert!(!data.passed()); data.dashboard_ready = true; assert!(data.passed());
+        // Diagnostic DATA neither grants nor revokes the existing finality.
+        data.unknown = true; assert!(!data.passed());
+        let no_fault = SmokeTrace::new(); let mut silence = Vec::new();
+        assert_eq!(no_fault.result(SmokeCheck::Clock, Ok(7u8), None), Ok(7));
+        assert_eq!(no_fault.emit_to(&mut silence).unwrap(), None);
+        assert!(silence.is_empty() && !no_fault.emitted.get() && no_fault.first.get().is_none());
+
+        for error in [Error::Unavailable, Error::Unsafe, Error::Bounds, Error::State, Error::Unknown] {
+            let trace = SmokeTrace::new(); trace.phase.set(SmokePhase::Dashboard);
+            let saved = Cell::new(i32::MIN);
+            assert_eq!(trace.result::<u8>(SmokeCheck::CurrentName, Err(error), Some(SmokeStatus::Hresult(saved.get()))), Err(error));
+            let first = SmokeFault { phase: SmokePhase::Dashboard, check: SmokeCheck::CurrentName,
+                error, status: Some(SmokeStatus::Hresult(i32::MIN)) };
+            saved.set(0); trace.phase.set(SmokePhase::DriverSettle);
+            assert_eq!(trace.result(SmokeCheck::Clock, Ok(false), None), Ok(false));
+            assert_eq!(trace.result::<()>(SmokeCheck::ArrayDestroy, Err(Error::Unknown), Some(SmokeStatus::Hresult(saved.get()))), Err(Error::Unknown));
+            assert_eq!(trace.first.get(), Some(first));
+        }
+        // Actual ComOriginal DATA result, but invented later clock Result:
+        // acquisition failure is first; the later clock still controls return.
+        let early = SmokeTrace::new(); let mut original = ComOriginal::new(ComKind::Element);
+        assert!(original.begin().is_ok());
+        let mut late_checked = false;
+        let returned = (|| -> Result<bool> {
+            let result = early.result(SmokeCheck::ElementFromWindow,
+                original.returned(HRESULT_PENDING, false), Some(SmokeStatus::Hresult(HRESULT_PENDING)));
+            late_checked = true;
+            early.result(SmokeCheck::Clock, Err::<(), _>(Error::Unsafe), None)?;
+            result
+        })();
+        assert!(late_checked); assert_eq!(returned, Err(Error::Unsafe));
+        assert_eq!(early.first.get().unwrap().check, SmokeCheck::ElementFromWindow);
+        assert_eq!(early.first.get().unwrap().error, Error::Unknown);
+        // Returned query status is not a refusing predicate before its original
+        // clock check. Do not mislabel a clock error with a saved HRESULT.
+        let clock_first = SmokeTrace::new();
+        let returned = (|| -> Result<()> {
+            clock_first.result(SmokeCheck::Clock, Err(Error::Unsafe), None)?;
+            clock_first.result(SmokeCheck::CurrentName, need(false), Some(SmokeStatus::Hresult(i32::MIN)))
+        })();
+        assert_eq!(returned, Err(Error::Unsafe));
+        assert_eq!(clock_first.first.get().unwrap().check, SmokeCheck::Clock);
+        assert_eq!(clock_first.first.get().unwrap().status, None);
+        // Real inert UTF-16 conversion; invented settlement/clock Results only.
+        let conversion = SmokeTrace::new(); let mut clock_reached = false;
+        let returned = (|| -> Result<String> {
+            let text = conversion.result(SmokeCheck::NameEncoding,
+                String::from_utf16(&[0xd800]).map_err(|_| Error::Unsafe), None);
+            conversion.result(SmokeCheck::ArrayDestroy, Err::<(), _>(Error::Unknown), Some(SmokeStatus::Hresult(-1)))?;
+            clock_reached = true; conversion.result(SmokeCheck::Clock, Ok(()), None)?;
+            text
+        })();
+        assert_eq!(returned, Err(Error::Unknown)); assert!(!clock_reached);
+        assert_eq!(conversion.first.get().unwrap().check, SmokeCheck::NameEncoding);
+        assert_eq!(conversion.first.get().unwrap().error, Error::Unsafe);
+        assert_eq!(conversion.first.get().unwrap().status, None);
+
+        let longest_phase = *SmokePhase::ALL.iter().max_by_key(|value| value.label().len()).unwrap();
+        let longest_check = *SmokeCheck::ALL.iter().max_by_key(|value| value.label().len()).unwrap();
+        for label in SmokePhase::ALL.iter().map(|value| value.label()).chain(SmokeCheck::ALL.iter().map(|value| value.label())) {
+            assert!(label.bytes().all(|byte| byte.is_ascii_lowercase() || byte == b'-'));
+        }
+        for status in [None, Some(SmokeStatus::Hresult(i32::MIN)), Some(SmokeStatus::Hresult(i32::MAX)),
+            Some(SmokeStatus::Win32(u32::MAX))] {
+            let fault = SmokeFault { phase: longest_phase, check: longest_check, error: Error::Unavailable, status };
+            let mut raw = [0u8; 512]; let size = SmokeTrace::format(fault, &mut raw).unwrap();
+            let text = std::str::from_utf8(&raw[..size]).unwrap();
+            assert!(size <= 512 && text.is_ascii() && text.ends_with("}\n") && text.lines().count() == 1);
+            assert!(text.starts_with("MRK_WINDOWS_NORMAL_UI_SMOKE_REFUSED={\"diagnosticOnly\":true,"));
+            let expected_status = match status {
+                None => "\"nativeStatus\":null".to_owned(),
+                Some(SmokeStatus::Hresult(code)) => format!("\"nativeStatus\":{{\"domain\":\"hresult\",\"code\":{code}}}"),
+                Some(SmokeStatus::Win32(code)) => format!("\"nativeStatus\":{{\"domain\":\"win32\",\"code\":{code}}}"),
+            };
+            assert!(text.contains(&expected_status));
+            for forbidden in ["account", "Sid", "handle", "processId", "path", "title", "credential", "sourceSha"] {
+                assert!(!text.contains(&format!("\"{forbidden}\":")));
+            }
+            assert!(SmokeTrace::format(fault, &mut [0u8; 8]).is_err());
+        }
+        struct Sink { calls: usize, fail: bool, short: bool, bytes: Vec<u8> }
+        impl Write for Sink {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.calls += 1;
+                if self.fail { return Err(std::io::ErrorKind::Other.into()); }
+                let count = if self.short { bytes.len() - 1 } else { bytes.len() };
+                self.bytes.extend_from_slice(&bytes[..count]); Ok(count)
+            }
+            fn flush(&mut self) -> std::io::Result<()> { panic!("diagnostic must not add a flush"); }
+        }
+        for (fail, short) in [(false, false), (false, true), (true, false)] {
+            let trace = SmokeTrace::new(); let mut sink = Sink { calls: 0, fail, short, bytes: Vec::new() };
+            assert_eq!(trace.emit_to(&mut sink).unwrap(), None); assert_eq!(sink.calls, 0);
+            let result = trace.result::<()>(SmokeCheck::PostClose, Err(Error::Unsafe), Some(SmokeStatus::Win32(u32::MAX)));
+            let written = trace.emit_to(&mut sink);
+            assert_eq!(written.is_err(), fail); assert_eq!(result, Err(Error::Unsafe));
+            assert_eq!(sink.calls, 1); assert!(trace.emitted.get());
+            assert_eq!(trace.emit_to(&mut sink).unwrap(), None); assert_eq!(sink.calls, 1);
+            if !fail { assert_eq!(sink.bytes.ends_with(b"\n"), !short); }
+            assert!(sink.bytes.len() <= 512);
+        }
     }
 }
