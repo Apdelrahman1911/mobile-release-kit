@@ -321,7 +321,39 @@ pub struct PrerequisiteFacts {
     pub private_parent: bool,
     pub runtime_version: String,
 }
-struct PathOriginal { original: Original, metadata: Metadata, runtime_scope: Option<AuthorityScope> }
+struct PathOriginal {
+    original: Original, metadata: Metadata, runtime_scope: Option<AuthorityScope>,
+    metadata_profile: MetadataObservationProfile,
+}
+impl PathOriginal {
+    fn matches_profile(&self, kind: FileKind, profile: MetadataObservationProfile) -> Result<()> {
+        if self.metadata.kind == kind && self.metadata_profile == profile { Ok(()) } else { Err(Error::State) }
+    }
+    fn observe(&self, native: &mut NativeBook) -> Result<Metadata> {
+        observe_path_metadata(native, &self.original, self.metadata_profile)
+    }
+}
+fn path_metadata_profile(path: &str, kind: FileKind, protected_image: Option<&str>) -> UiResult<MetadataObservationProfile> {
+    match protected_image {
+        None => Ok(MetadataObservationProfile::Ordinary),
+        Some(expected) if kind == FileKind::File && path == expected => Ok(MetadataObservationProfile::ManagedWebViewImage),
+        Some(_) => Err(UiError::ManagedRuntimeUnavailable),
+    }
+}
+fn observe_path_metadata(native: &mut NativeBook, original: &Original, profile: MetadataObservationProfile) -> Result<Metadata> {
+    match profile {
+        MetadataObservationProfile::Ordinary => native.metadata(original),
+        MetadataObservationProfile::ManagedWebViewImage => native.managed_webview_image_metadata(original),
+    }
+}
+fn path_metadata_mismatch(metadata: &Metadata, original: &Metadata) -> Option<ProbeDetail> {
+    if metadata.identity != original.identity { Some(ProbeDetail::Identity) }
+    else if metadata.kind != original.kind { Some(ProbeDetail::Kind) }
+    else if metadata.attributes != original.attributes { Some(ProbeDetail::Attributes) }
+    else if metadata.creation != original.creation { Some(ProbeDetail::Creation) }
+    else if metadata.kind == FileKind::File && metadata != original { Some(ProbeDetail::File) }
+    else { None }
+}
 fn managed_runtime_scope(depth: usize, root_depth: usize) -> AuthorityScope {
     if depth >= root_depth { AuthorityScope::ImmutableVersion } else { AuthorityScope::AncestorOutsideVersion }
 }
@@ -522,7 +554,7 @@ impl Prerequisites {
         }
         self.program_files = known_folder(SH::CSIDL_PROGRAM_FILESX86 as i32)?;
         self.local_data = known_folder(SH::CSIDL_LOCAL_APPDATA as i32).map_err(|_| UiError::UserDataParent)?;
-        self.image_dos = format!("{}\\Microsoft\\EdgeWebView\\Application\\{}\\msedgewebview2.exe", self.program_files, version);
+        self.image_dos = format!("{}\\Microsoft\\EdgeWebView\\Application\\{}\\{}", self.program_files, version, MANAGED_WEBVIEW_IMAGE);
         let image_path = self.image_dos.clone();
         self.image = Some(self.path(&image_path, FileKind::File, true)?);
         let local_data = self.local_data.clone();
@@ -559,6 +591,9 @@ impl Prerequisites {
         let (drive, components) = self.probe.mapped(result, &self.native, refusal)?;
         self.probe.at(ProbeStage::Depth, None, protected, &self.native);
         if components.len() > 20 { self.probe.policy(None); return Err(refusal); }
+        // Only the exact getter-version-selected final image takes the provider
+        // profile. Every ancestor and all local-data paths remain ordinary.
+        let final_profile = path_metadata_profile(path, kind, if protected { Some(&self.image_dos) } else { None })?;
         let runtime_depth = if protected {
             let root = format!("{}\\Microsoft\\EdgeWebView", self.program_files);
             self.probe.at(ProbeStage::RootDecode, None, true, &self.native);
@@ -577,7 +612,11 @@ impl Prerequisites {
         let device = self.probe.mapped(result, &self.native, refusal)?;
         let root_name = format!("{device}\\");
         let mut index = if let Some(index) = self.paths.iter().position(|entry|
-            self.native.slot(entry.original.index).is_ok_and(|slot| slot.canonical == root_name)) { index } else {
+            self.native.slot(entry.original.index).is_ok_and(|slot| slot.canonical == root_name)) {
+            self.probe.at(ProbeStage::RootMetadata, None, protected, &self.native);
+            self.probe.mapped(self.paths[index].matches_profile(FileKind::Directory, MetadataObservationProfile::Ordinary), &self.native, refusal)?;
+            index
+        } else {
             // No pathIndex exists until its actual PathOriginal is bound below.
             self.probe.at(ProbeStage::Reserve, None, protected, &self.native);
             let result = self.native.reserve(Kind::Directory, None, &root_name, root_name.clone());
@@ -588,25 +627,31 @@ impl Prerequisites {
             self.probe.at(ProbeStage::RootMetadata, None, protected, &self.native);
             let result = self.native.metadata(&original);
             let metadata = self.probe.mapped(result, &self.native, refusal)?;
-            self.paths.push(PathOriginal { original, metadata, runtime_scope: None }); self.paths.len() - 1
+            self.paths.push(PathOriginal { original, metadata, runtime_scope: None,
+                metadata_profile: MetadataObservationProfile::Ordinary }); self.paths.len() - 1
         };
         self.admit_path(index, runtime_depth.map(|root| managed_runtime_scope(0, root)))?;
         for (position, name) in components.iter().enumerate() {
             let parent = index; let parent_slot = self.paths[parent].original.index;
             let child_kind = if position + 1 == components.len() { kind } else { FileKind::Directory };
+            let metadata_profile = if position + 1 == components.len() { final_profile } else { MetadataObservationProfile::Ordinary };
             index = if let Some(index) = self.paths.iter().position(|entry| self.native.slot(entry.original.index)
-                .is_ok_and(|slot| slot.parent == Some(parent_slot) && slot.name == wide(name))) { index } else {
+                .is_ok_and(|slot| slot.parent == Some(parent_slot) && slot.name == wide(name))) {
+                self.probe.at(ProbeStage::ChildMetadata, None, protected, &self.native);
+                self.probe.mapped(self.paths[index].matches_profile(child_kind, metadata_profile), &self.native, refusal)?;
+                index
+            } else {
                 self.probe.at(ProbeStage::ChildOpen, None, protected, &self.native);
                 let result = self.native.open_child(&self.paths[parent].original, name, child_kind);
                 let original = self.probe.mapped(result, &self.native, refusal)?;
                 self.probe.at(ProbeStage::ChildMetadata, None, protected, &self.native);
-                let result = self.native.metadata(&original);
+                let result = observe_path_metadata(&mut self.native, &original, metadata_profile);
                 let metadata = self.probe.mapped(result, &self.native, refusal)?;
                 self.probe.at(ProbeStage::Alias, None, protected, &self.native);
                 if self.paths.iter().any(|entry| entry.metadata.identity == metadata.identity) {
                     self.probe.policy(None); return Err(refusal);
                 }
-                self.paths.push(PathOriginal { original, metadata, runtime_scope: None }); self.paths.len() - 1
+                self.paths.push(PathOriginal { original, metadata, runtime_scope: None, metadata_profile }); self.paths.len() - 1
             };
             self.admit_path(index, runtime_depth.map(|root| managed_runtime_scope(position + 1, root)))?;
         }
@@ -653,16 +698,11 @@ impl Prerequisites {
             let managed = entry.runtime_scope.is_some();
             let refusal = if managed { UiError::ManagedRuntimeUnavailable } else { UiError::UserDataParent };
             self.probe.at(ProbeStage::RecheckMetadata, Some(index), managed, &self.native);
-            let result = self.native.metadata(&entry.original);
+            let result = entry.observe(&mut self.native);
             let metadata = self.probe.mapped(result, &self.native, refusal)?;
             // Same short-circuit equality order; retain only the rejecting tag.
             self.probe.at(ProbeStage::RecheckIdentity, Some(index), managed, &self.native);
-            let detail = if metadata.identity != entry.metadata.identity { Some(ProbeDetail::Identity) }
-                else if metadata.kind != entry.metadata.kind { Some(ProbeDetail::Kind) }
-                else if metadata.attributes != entry.metadata.attributes { Some(ProbeDetail::Attributes) }
-                else if metadata.creation != entry.metadata.creation { Some(ProbeDetail::Creation) }
-                else if metadata.kind == FileKind::File && metadata != entry.metadata { Some(ProbeDetail::File) }
-                else { None };
+            let detail = path_metadata_mismatch(&metadata, &entry.metadata);
             if let Some(detail) = detail { self.probe.policy(Some(detail)); return Err(refusal); }
             if let Some(scope) = entry.runtime_scope {
                 self.probe.at(ProbeStage::RecheckSecurity, Some(index), true, &self.native);
@@ -1100,7 +1140,7 @@ impl DocumentWatch {
         // Correspondence with the SAME protected executable original, not just
         // a version string, a numeric PID, or a new pathname open after launch.
         let image = prerequisites.image.ok_or(UiError::State)?;
-        if mapped(prerequisites.native.metadata(&prerequisites.paths[image].original), UiError::ManagedRuntimeUnavailable)?
+        if mapped(prerequisites.paths[image].observe(&mut prerequisites.native), UiError::ManagedRuntimeUnavailable)?
             != prerequisites.paths[image].metadata { return Err(UiError::ManagedRuntimeUnavailable); }
         // Expected browser identity is installed before either callback can run.
         self.failed_token.entered = true;
@@ -1422,11 +1462,87 @@ pub(super) fn prerequisite_refusal_contract(request: &super::qualification_resul
 mod tests {
     use super::*;
     #[test]
-    fn managed_runtime_root_and_every_descendant_use_immutable_policy() {
+    fn managed_runtime_root_and_every_descendant_use_immutable_policy() -> Result<()> {
         // C:\Program Files (x86)\Microsoft\EdgeWebView: depth three is the
         // managed root; Application, version and the executable are inside it.
         for depth in 0..3 { assert_eq!(managed_runtime_scope(depth, 3), AuthorityScope::AncestorOutsideVersion); }
         for depth in 3..7 { assert_eq!(managed_runtime_scope(depth, 3), AuthorityScope::ImmutableVersion); }
+        use MetadataObservationProfile as P;
+        let image = r"C:\Program Files (x86)\Microsoft\EdgeWebView\Application\142.0.3595.65\msedgewebview2.exe";
+        assert_eq!(path_metadata_profile(image, FileKind::File, Some(image)), Ok(P::ManagedWebViewImage));
+        assert_eq!(path_metadata_profile(image, FileKind::File, None), Ok(P::Ordinary));
+        assert_eq!(path_metadata_profile(image, FileKind::Directory, Some(image)), Err(UiError::ManagedRuntimeUnavailable));
+        assert_eq!(path_metadata_profile(r"C:\other\msedgewebview2.exe", FileKind::File, Some(image)), Err(UiError::ManagedRuntimeUnavailable));
+        assert!(P::ManagedWebViewImage.admits(Kind::File, &wide(MANAGED_WEBVIEW_IMAGE), false));
+        for (kind, name, os_image) in [(Kind::Directory, MANAGED_WEBVIEW_IMAGE, false),
+            (Kind::File, "other.exe", false), (Kind::File, MANAGED_WEBVIEW_IMAGE, true)] {
+            assert!(!P::ManagedWebViewImage.admits(kind, &wide(name), os_image));
+            let mut native = NativeBook::new();
+            let original = native.reserve(kind, None, name, name.to_owned())?;
+            if os_image { native.slot_mut(original.index)?.system_image = Some(SystemImage::Kernel32); }
+            // Real entry point must reject the role before any native call;
+            // all records in this fixture are inert, unentered allocations.
+            assert_eq!(native.managed_webview_image_metadata(&original), Err(Error::Unsafe));
+            assert!(!native.started && native.active.is_none());
+            for slot in native.slots.drain(..) { drop(ManuallyDrop::into_inner(slot)); }
+        }
+        let mut basic = vec![0; size_of::<FS::FILE_BASIC_INFO>()];
+        let mut standard = vec![0; size_of::<FS::FILE_STANDARD_INFO>()];
+        let mut tag = vec![0; size_of::<FS::FILE_ATTRIBUTE_TAG_INFO>()];
+        let mut id = vec![0; size_of::<FS::FILE_ID_INFO>()];
+        basic[offset_of!(FS::FILE_BASIC_INFO, FileAttributes)..][..4].copy_from_slice(&FS::FILE_ATTRIBUTE_NORMAL.to_le_bytes());
+        tag[offset_of!(FS::FILE_ATTRIBUTE_TAG_INFO, FileAttributes)..][..4].copy_from_slice(&FS::FILE_ATTRIBUTE_NORMAL.to_le_bytes());
+        standard[offset_of!(FS::FILE_STANDARD_INFO, EndOfFile)..][..8].copy_from_slice(&37u64.to_le_bytes());
+        standard[offset_of!(FS::FILE_STANDARD_INFO, AllocationSize)..][..8].copy_from_slice(&4096u64.to_le_bytes());
+        id[offset_of!(FS::FILE_ID_INFO, FileId)] = 1;
+        let observe = decode::Observed::new(Refusal::none());
+        for links in [0u32, 1, 2, u32::MAX] {
+            standard[offset_of!(FS::FILE_STANDARD_INFO, NumberOfLinks)..][..4].copy_from_slice(&links.to_le_bytes());
+            assert_eq!(observe.managed_webview_image_metadata(FileKind::File, &basic, &standard, &tag, &id).is_ok(), links > 0);
+            assert_eq!(observe.metadata(FileKind::File, &basic, &standard, &tag, &id).is_ok(), links == 1);
+            assert_eq!(observe.system_image_metadata(FileKind::File, &basic, &standard, &tag, &id).is_ok(), links > 0);
+            assert!(observe.managed_webview_image_metadata(FileKind::Directory, &basic, &standard, &tag, &id).is_err());
+        }
+        standard[offset_of!(FS::FILE_STANDARD_INFO, NumberOfLinks)..][..4].copy_from_slice(&2u32.to_le_bytes());
+        let original_metadata = observe.managed_webview_image_metadata(FileKind::File, &basic, &standard, &tag, &id)?;
+        let entry = PathOriginal { original: Original { book: Arc::new(()), index: 0 }, metadata: original_metadata.clone(),
+            metadata_profile: P::ManagedWebViewImage, runtime_scope: Some(AuthorityScope::ImmutableVersion) };
+        assert_eq!(entry.matches_profile(FileKind::File, P::ManagedWebViewImage), Ok(()));
+        assert_eq!(entry.matches_profile(FileKind::File, P::Ordinary), Err(Error::State));
+        assert_eq!(entry.matches_profile(FileKind::Directory, P::ManagedWebViewImage), Err(Error::State));
+        let ordinary = PathOriginal { original: Original { book: Arc::new(()), index: 0 }, metadata: original_metadata.clone(),
+            metadata_profile: P::Ordinary, runtime_scope: None };
+        assert_eq!(ordinary.matches_profile(FileKind::File, P::ManagedWebViewImage), Err(Error::State));
+        // Exercise the actual captured-profile dispatch used for rechecks AND
+        // the browser's same-original image correspondence. Reserved, wrong-
+        // role storage makes both routes refuse before any native entry.
+        let mut native = NativeBook::new();
+        let original = native.reserve(Kind::File, None, "other.exe", "other.exe".to_owned())?;
+        let managed = PathOriginal { original, metadata: original_metadata.clone(),
+            metadata_profile: P::ManagedWebViewImage, runtime_scope: Some(AuthorityScope::ImmutableVersion) };
+        assert_eq!(managed.observe(&mut native), Err(Error::Unsafe));
+        let ordinary = PathOriginal { metadata_profile: P::Ordinary, ..managed };
+        assert_eq!(ordinary.observe(&mut native), Err(Error::State));
+        assert!(!native.started && native.active.is_none());
+        for slot in native.slots.drain(..) { drop(ManuallyDrop::into_inner(slot)); }
+        assert_eq!(path_metadata_mismatch(&original_metadata, &original_metadata), None);
+        for changed in [0, 1, 3] {
+            let mut metadata = original_metadata.clone(); metadata.links = changed;
+            assert_eq!(path_metadata_mismatch(&metadata, &original_metadata), Some(ProbeDetail::File));
+        }
+        assert!(observe.managed_webview_image_metadata(FileKind::File, &basic[..basic.len() - 1], &standard, &tag, &id).is_err());
+        for size in [MAX_FILE_BYTES + 1, u64::MAX] {
+            standard[offset_of!(FS::FILE_STANDARD_INFO, EndOfFile)..][..8].copy_from_slice(&size.to_le_bytes());
+            assert!(observe.managed_webview_image_metadata(FileKind::File, &basic, &standard, &tag, &id).is_err());
+        }
+        standard[offset_of!(FS::FILE_STANDARD_INFO, EndOfFile)..][..8].copy_from_slice(&37u64.to_le_bytes());
+        standard[offset_of!(FS::FILE_STANDARD_INFO, DeletePending)] = 1;
+        assert!(observe.managed_webview_image_metadata(FileKind::File, &basic, &standard, &tag, &id).is_err());
+        standard[offset_of!(FS::FILE_STANDARD_INFO, DeletePending)] = 0;
+        basic[offset_of!(FS::FILE_BASIC_INFO, FileAttributes)..][..4].copy_from_slice(&FS::FILE_ATTRIBUTE_REPARSE_POINT.to_le_bytes());
+        tag[offset_of!(FS::FILE_ATTRIBUTE_TAG_INFO, FileAttributes)..][..4].copy_from_slice(&FS::FILE_ATTRIBUTE_REPARSE_POINT.to_le_bytes());
+        assert!(observe.managed_webview_image_metadata(FileKind::File, &basic, &standard, &tag, &id).is_err());
+        Ok(())
     }
     #[test]
     fn system_evergreen_version_never_admits_preview_channel_or_path() {

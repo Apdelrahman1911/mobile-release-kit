@@ -112,6 +112,12 @@ pub(crate) fn system_image_metadata(self, kind: FileKind, basic: &[u8], standard
     if kind != FileKind::File { return Err(self.0.unsafe_at(C::ObjectKind)); }
     self.metadata_inner(kind, basic, standard, tag, id, false)
 }
+// Separately protected provider files are not enumerated Windows OS images.
+// This observation alone grants no path, ACL, loader or execution authority.
+pub(crate) fn managed_webview_image_metadata(self, kind: FileKind, basic: &[u8], standard: &[u8], tag: &[u8], id: &[u8]) -> Result<Metadata> {
+    if kind != FileKind::File { return Err(self.0.unsafe_at(C::ObjectKind)); }
+    self.metadata_inner(kind, basic, standard, tag, id, false)
+}
 fn metadata_inner(self, kind: FileKind, basic: &[u8], standard: &[u8], tag: &[u8], id: &[u8], single_link: bool) -> Result<Metadata> {
     if basic.len() != size_of::<FS::FILE_BASIC_INFO>() || standard.len() != size_of::<FS::FILE_STANDARD_INFO>()
         || tag.len() != size_of::<FS::FILE_ATTRIBUTE_TAG_INFO>() || id.len() != size_of::<FS::FILE_ID_INFO>() { return Err(self.0.unsafe_at(C::MetadataSize)); }

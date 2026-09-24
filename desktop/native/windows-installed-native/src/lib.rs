@@ -250,6 +250,20 @@ impl<'a> Refusal<'a> {
 pub struct Original { book: Arc<()>, index: usize }
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Kind { Directory, File, ProcessToken, ThreadToken }
+// Metadata policy only, never an admission capability or SystemImage tag.
+// Ordinary payloads retain their existing single-link observation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MetadataObservationProfile { Ordinary, ManagedWebViewImage }
+const MANAGED_WEBVIEW_IMAGE: &str = "msedgewebview2.exe";
+impl MetadataObservationProfile {
+    fn admits(self, kind: Kind, name: &[u16], system_image: bool) -> bool {
+        match self {
+            Self::Ordinary => true,
+            Self::ManagedWebViewImage => kind == Kind::File && !system_image
+                && name == wide(MANAGED_WEBVIEW_IMAGE).as_slice(),
+        }
+    }
+}
 impl From<FileKind> for Kind {
     fn from(value: FileKind) -> Self {
         match value { FileKind::Directory => Self::Directory, FileKind::File => Self::File }
@@ -885,8 +899,19 @@ impl NativeBook {
         Ok(())
     }
     pub fn metadata(&mut self, original: &Original) -> Result<Metadata> {
+        self.metadata_with_profile(original, MetadataObservationProfile::Ordinary)
+    }
+    pub(crate) fn managed_webview_image_metadata(&mut self, original: &Original) -> Result<Metadata> {
+        self.metadata_with_profile(original, MetadataObservationProfile::ManagedWebViewImage)
+    }
+    fn metadata_with_profile(&mut self, original: &Original, profile: MetadataObservationProfile) -> Result<Metadata> {
         self.clear()?; let index = self.index(original)?;
-        let kind = match self.slot(index)?.kind { Kind::Directory => FileKind::Directory, Kind::File => FileKind::File, _ => return Err(Error::State) };
+        let slot = self.slot(index)?;
+        // Reject role mixing BEFORE FileType or any native metadata call.
+        if !profile.admits(slot.kind, &slot.name, slot.system_image.is_some()) {
+            return Err(self.admission.at(AdmissionOp::Metadata).unsafe_at(C::ObjectKind));
+        }
+        let kind = match slot.kind { Kind::Directory => FileKind::Directory, Kind::File => FileKind::File, _ => return Err(Error::State) };
         if self.original_call(index, Call::FileType)?.scalar()? != FS::FILE_TYPE_DISK { return Err(self.admission.at(AdmissionOp::Metadata).unsafe_at(C::FileType)); }
         let basic = self.original_call(index, Call::Info(FS::FileBasicInfo, size_of::<FS::FILE_BASIC_INFO>()))?;
         let standard = self.original_call(index, Call::Info(FS::FileStandardInfo, size_of::<FS::FILE_STANDARD_INFO>()))?;
@@ -897,7 +922,9 @@ impl NativeBook {
         let standard = standard.bytes_in(size_of::<FS::FILE_STANDARD_INFO>(), trace)?;
         let tag = tag.bytes_in(size_of::<FS::FILE_ATTRIBUTE_TAG_INFO>(), trace)?;
         let id = id.bytes_in(size_of::<FS::FILE_ID_INFO>(), trace)?;
-        let facts = if self.slot(index)?.system_image.is_some() {
+        let facts = if profile == MetadataObservationProfile::ManagedWebViewImage {
+            decode::Observed::new(trace).managed_webview_image_metadata(kind, basic, standard, tag, id)?
+        } else if self.slot(index)?.system_image.is_some() {
             decode::Observed::new(trace).system_image_metadata(kind, basic, standard, tag, id)?
         } else { decode::Observed::new(trace).metadata(kind, basic, standard, tag, id)? };
         if kind == FileKind::Directory {
