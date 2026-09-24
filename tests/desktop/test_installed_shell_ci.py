@@ -3065,7 +3065,7 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertEqual((query_bound, worker_bound, complete_bound), (26, 14, 412))
         self.assertLessEqual(complete_bound, 512)
         self.assertIn("const FAILURE_PAIR_LIMIT: usize = 512;", source)
-        self.assertIn("const SESSION_FAILURE_FRAME_BOUND: usize = 412;", source)
+        self.assertIn("const SESSION_FAILURE_FRAME_BOUND: usize = 466;", source)
         self.assertIn("fn assert_failure_pair_contract()", source)
         self.assertIn("    assert_failure_pair_contract();", source)
         self.assertLess(source.index("    assert_failure_pair_contract();"), source.index("let returned = super::run_builder("))
@@ -3089,6 +3089,143 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertNotIn("shell-normal-failure.labels", source)
         self.assertNotIn("shell-normal-failure.labels", commands)
         self.assertFalse(any(name.endswith("failure.labels") for name in lifecycle.public_files({"shell": {}})))
+
+    def test_assessment_failure_v3_closed_roundtrips_preserve_historical_frames(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        source = (SOURCE / "desktop/src-tauri/src/credential_assessment.rs").read_text()
+        packet = source.split("mod assessment_failure {", 1)[1].split("pub(crate) use assessment_failure::Failure", 1)[0]
+        origins = tuple(token.encode("ascii") for token in re.findall(r'=> b"([a-z-]+)"', packet.split("enum Origin", 1)[1].split("enum Class", 1)[0]))
+        classes = tuple(token.encode("ascii") for token in re.findall(r'=> b"([a-z-]+)"', packet.split("enum Class", 1)[1].split("enum Cause", 1)[0]))
+        causes = tuple(token.encode("ascii") for token in re.findall(r'=> b"([a-z-]+)"', packet.split("enum Cause", 1)[1].split("// No raw Value", 1)[0]))
+        self.assertEqual(origins, lifecycle.SHELL_SESSION_ASSESSMENT_ORIGINS)
+        self.assertEqual(classes, (b"na", b"serialize") + lifecycle.SHELL_SESSION_ASSESSMENT_BRIDGE_CLASSES
+                         + lifecycle.SHELL_SESSION_ASSESSMENT_RESULT_CLASSES)
+        self.assertEqual(causes, lifecycle.SHELL_SESSION_QUERY_CAUSES)
+        self.assertEqual(tuple(len(set(tokens)) for tokens in (origins, classes, causes)), (4, 20, 21))
+        maxima = tuple(max(map(len, tokens)) for tokens in (origins, classes, causes))
+        self.assertEqual(maxima, (7, 22, 11))
+        self.assertEqual(lifecycle.SHELL_SESSION_FAILURE_FRAME_BOUND, 412 + 3 * 4 + 7 + 24 + 11)
+        self.assertLessEqual(412 + 3 * 4 + sum(maxima), lifecycle.SHELL_SESSION_FAILURE_FRAME_BOUND)
+        self.assertLessEqual(lifecycle.SHELL_SESSION_FAILURE_FRAME_BOUND, lifecycle.SHELL_FAILURE_LABEL_LIMIT)
+        prefix = (b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionReview\n"
+                  b"MRK_INSTALLED_SHELL_FAILURE_PHASE=settlement\n"
+                  b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n")
+        rejections = {b"known-assessment": b"reply-assessment-invalid-request", b"busy": b"reply-busy",
+                      b"shutdown": b"reply-shutting-down", b"timeout": b"reply-query-timeout", b"cleanup": b"reply-cleanup-unknown"}
+        def frame(origin=b"none", classification=b"na", cause=b"none"):
+            rejection = rejections.get(classification, b"reply-assessment-unavailable")
+            return (prefix + b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v3;index=6;evaluations=13;reject=" + rejection
+                    + b";wait=native-reply-pending;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=" + origin
+                    + b";ac=" + classification + b";ax=" + cause + b"\n")
+        combinations = [(b"none", b"na", b"none"), (b"request", b"serialize", b"none")]
+        combinations += [(b"bridge", classification, cause) for classification in lifecycle.SHELL_SESSION_ASSESSMENT_BRIDGE_CLASSES for cause in causes]
+        combinations += [(b"result", classification, b"none") for classification in lifecycle.SHELL_SESSION_ASSESSMENT_RESULT_CLASSES]
+        for origin, classification, cause in combinations:
+            raw = frame(origin, classification, cause)
+            parsed = lifecycle._shell_label_pair(raw)
+            self.assertIsNotNone(parsed, (origin, classification, cause))
+            self.assertEqual(parsed["session"]["assessmentFailure"],
+                             {"origin": origin.decode("ascii"), "class": classification.decode("ascii"), "cause": cause.decode("ascii")})
+            self.assertEqual(parsed["session"]["rejection"], rejections.get(classification, b"reply-assessment-unavailable").decode("ascii"))
+            self.assertEqual(parsed["session"]["lastWait"], "native-reply-pending")
+            self.assertEqual(parsed["session"]["firstOrigin"],
+                             {"origin": "not-recorded", "detail": "none", "association": "unassociated", "query": "na", "worker": "na"})
+            self.assertLessEqual(len(raw), lifecycle.SHELL_SESSION_FAILURE_FRAME_BOUND)
+        known = frame(b"bridge", b"known-assessment", b"response")
+        for rejection in (b"reply-assessment-invalid-request", b"reply-assessment-limit", b"reply-assessment-version",
+                          b"reply-assessment-policy-stale", b"reply-assessment-context-invalid"):
+            self.assertIsNotNone(lifecycle._shell_label_pair(known.replace(b"reply-assessment-invalid-request", rejection)))
+        raw = frame(b"bridge", b"assessment-unavailable", b"sel-profile")
+        # Exact counterpart of Rust's inert original-Prepare reply frame, not a
+        # claim about a retained installed run or successful owner settlement.
+        rust = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        self.assertIn(raw[len(prefix):].decode("ascii").replace("\n", "\\n"), rust)
+        bound = raw.replace(b"o=not-recorded;d=none;a=unassociated;q=na;w=na;",
+                            b"o=supervisor-disabled;d=none;a=bound;q=cleanup.none.rr;w=settle-unknown;")
+        self.assertEqual(lifecycle._shell_label_pair(bound)["session"]["assessmentFailure"],
+                         lifecycle._shell_label_pair(raw)["session"]["assessmentFailure"])
+        v2 = raw.split(b";ao=", 1)[0].replace(b"=v3;", b"=v2;") + b"\n"
+        v1 = v2.split(b";o=", 1)[0].replace(b"=v2;", b"=v1;") + b"\n"
+        for historical in (v1, v2):
+            parsed = lifecycle._shell_label_pair(historical)
+            self.assertIsNotNone(parsed)
+            self.assertNotIn("assessmentFailure", parsed["session"])
+        self.assertNotIn("firstOrigin", lifecycle._shell_label_pair(v1)["session"])
+        self.assertIn("firstOrigin", lifecycle._shell_label_pair(v2)["session"])
+
+    def test_assessment_failure_v3_refuses_every_prefix_and_mixed_or_untrusted_packet(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        prefix = (b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionReview\n"
+                  b"MRK_INSTALLED_SHELL_FAILURE_PHASE=settlement\n"
+                  b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n"
+                  b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v3;index=6;evaluations=13;"
+                  b"reject=reply-assessment-unavailable;wait=native-reply-pending;"
+                  b"o=not-recorded;d=none;a=unassociated;q=na;w=na;")
+        def frame(origin=b"bridge", classification=b"assessment-unavailable", cause=b"sel-profile"):
+            return prefix + b"ao=" + origin + b";ac=" + classification + b";ax=" + cause + b"\n"
+        raw = frame()
+        for complete in (raw, frame(b"none", b"na", b"none"), frame(b"result", b"semantics", b"none")):
+            self.assertIsNotNone(lifecycle._shell_label_pair(complete))
+            for end in range(len(complete)):
+                self.assertIsNone(lifecycle._shell_label_pair(complete[:end]), end)
+                if end < len(complete) - 1:
+                    self.assertIsNone(lifecycle._shell_label_pair(complete[:end] + b"\n"), end)
+        for packet in ((b"none", b"serialize", b"none"), (b"none", b"na", b"response"),
+                       (b"request", b"na", b"none"), (b"request", b"serialize", b"spawn-exec"),
+                       (b"result", b"retryable", b"none"), (b"result", b"shape", b"sel-profile"),
+                       (b"bridge", b"semantics", b"none"), (b"bridge", b"serialize", b"response"),
+                       (b"bridge", b"other", b"future"), (b"future", b"other", b"none"),
+                       (b"bridge", b"busy", b"none"), (b"bridge", b"known-assessment", b"response"),
+                       (b"bridge", b"fictional-private-password", b"none"),
+                       (b"bridge", b"other", b"/private/credential")):
+            self.assertIsNone(lifecycle._shell_label_pair(frame(*packet)), packet)
+        for malformed in (raw + b"\n", raw + raw, raw + b"fictional-private-password", raw[:-1] + b";extra=none\n",
+                          raw.replace(b"=v3;", b"=v4;"), raw.replace(b"=v3;", b"=v2;"), raw.replace(b"=v3;", b"=v1;"),
+                          raw.replace(b";ao=bridge", b""), raw.replace(b";ac=assessment-unavailable", b""),
+                          raw.replace(b";ax=sel-profile", b""), raw.replace(b";ao=", b";ao=none;ao="),
+                          raw.replace(b";ac=", b";ac=other;ac="), raw.replace(b";ax=", b";ax=none;ax="),
+                          raw.replace(b"ao=bridge", b"ao=Bridge"), raw.replace(b"ac=assessment-unavailable", b"ac=assessment_unavailable"),
+                          raw.replace(b"index=6;", b"index=06;"), raw.replace(b"q=na;", b"q=timeout.none.rr;"),
+                          raw.replace(b"reject=reply-assessment-unavailable;", b"reject=reply-busy;"),
+                          raw.replace(b";ax=", b";ax=\x00")):
+            self.assertIsNone(lifecycle._shell_label_pair(malformed))
+
+    def test_assessment_failure_transport_keeps_the_same_guard_and_original_return(self):
+        assessment = (SOURCE / "desktop/src-tauri/src/credential_assessment.rs").read_text()
+        commands = (SOURCE / "desktop/src-tauri/src/asset_commands.rs").read_text()
+        shell = (SOURCE / "desktop/src-tauri/src/shell.rs").read_text()
+        observed = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        guard = ('#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", '
+                 'not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), '
+                 'target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]')
+        self.assertIn(guard + "\nmod assessment_failure {", assessment)
+        self.assertIn(guard + "\npub(crate) use assessment_failure::Failure as InstalledAssessmentFailure;", assessment)
+        self.assertIn(guard + "\n    #[serde(skip)]\n    failure: InstalledAssessmentFailure,", assessment)
+        self.assertIn(guard + "\n    pub(crate) fn installed_failure(&self)", assessment)
+        self.assertIn(guard + "\nimpl CommandError {", commands)
+        self.assertIn("Failure::Assessment(error) => error.installed_failure()", commands)
+        self.assertIn("Failure::Native(_) => crate::credential_assessment::InstalledAssessmentFailure::none()", commands)
+        prepare_macro = shell.split("($observed:ident, Prepare, $result:expr) => {", 1)[1].split("    };", 1)[0]
+        self.assertIn(guard, prepare_macro)
+        self.assertIn("q.session_prepare_result($result)", prepare_macro)
+        prepare = observed.split("fn session_prepare_result(", 1)[1].split("    fn session_record_result", 1)[0]
+        self.assertIn("result.as_ref().err()", prepare)
+        self.assertIn("error.installed_assessment_failure()", prepare)
+        self.assertIn("self.session_record_result(SessionCommand::Prepare, result, assessment)", prepare)
+        recorder = observed.split("fn session_record_result<", 1)[1].split("    pub(super) fn session_context_input", 1)[0]
+        self.assertIn("r.session.requests[index] != r.session.returns[index].saturating_add(1)", recorder)
+        self.assertIn("let ordinal = r.session.requests[index];", recorder)
+        self.assertIn("r.session.returns[index] += 1; r.session.replies[index] = reply;", recorder)
+        self.assertIn("SessionReply { status:None,error:Some(code),ordinal,assessment }", recorder)
+        association = observed.split("fn session_reply_refusal(", 1)[1].split("\n}\n", 1)[0]
+        for required in ("command == SessionCommand::Prepare.index()", "requested == returned", "base.checked_add(1) == Some(requested)", "reply.ordinal == requested"):
+            self.assertIn(required, association)
+        for helper in (prepare, recorder, association):
+            for forbidden in ("supervisor.", "snapshot.", "state.slot", "Instant::now", ".await", "Command::new"):
+                self.assertNotIn(forbidden, helper)
+        self.assertIn("fn session_failure_frame_contract_is_inert()", observed)
+        self.assertIn("diagnostic.assessment = assessment;", observed)
+        self.assertIn("latch_session_diagnostic(&self.failed,&mut r.session.diagnostic,diagnostic)", observed)
 
     def test_folder_selection_waits_for_the_exact_current_folder_before_one_activation(self):
         source = (SOURCE / "desktop/src-tauri/src/shell.rs").read_text()

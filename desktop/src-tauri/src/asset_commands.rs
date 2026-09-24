@@ -85,6 +85,15 @@ enum Failure { Native(AssetError), Assessment(crate::credential_assessment::Asse
 // an original owner/result. No serde `rc` feature or R1 DTO change is needed.
 #[derive(Clone)]
 pub(crate) struct CommandError(Arc<Failure>);
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl CommandError {
+    pub(crate) fn installed_assessment_failure(&self) -> crate::credential_assessment::InstalledAssessmentFailure {
+        match self.0.as_ref() {
+            Failure::Assessment(error) => error.installed_failure(),
+            Failure::Native(_) => crate::credential_assessment::InstalledAssessmentFailure::none(),
+        }
+    }
+}
 impl Serialize for CommandError {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> { self.0.serialize(serializer) }
 }

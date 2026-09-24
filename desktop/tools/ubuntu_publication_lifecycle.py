@@ -54,6 +54,7 @@ SHELL_PUBLIC_FILE_LIMIT = 160  # Exact eighteen-case roster:154; non-shell remai
 SHELL_FIXTURE_NAMESPACE_LIMIT = 2048
 SHELL_FAILURE_LABEL_LIMIT = 512
 SHELL_PATH_FAILURE_FRAME_BOUND = 256
+SHELL_SESSION_FAILURE_FRAME_BOUND = 466  # v3 only; historical v1/v2 admission stays unchanged.
 # Literal observer labels only; never a prefix parser or raw-output escape.
 SHELL_FAILURE_STEPS = (
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=Bootstrap\n",
@@ -315,6 +316,13 @@ SHELL_SESSION_QUERY_CAUSES = (
     b"capability", b"prepare", b"final-gate", b"final-claim", b"spawn-pfd", b"spawn-sfd", b"spawn-mem", b"spawn-res",
     b"spawn-deny", b"spawn-miss", b"spawn-exec", b"spawn-other", b"response",
 )
+# v3 original Prepare error provenance, independent of firstOrigin/Q/K.
+SHELL_SESSION_ASSESSMENT_ORIGINS = (b"none", b"request", b"bridge", b"result")
+SHELL_SESSION_ASSESSMENT_BRIDGE_CLASSES = (
+    b"runtime-unavailable", b"protocol", b"engine", b"io", b"output-limit", b"assessment-unavailable",
+    b"known-assessment", b"busy", b"shutdown", b"timeout", b"cleanup", b"retryable", b"other",
+)
+SHELL_SESSION_ASSESSMENT_RESULT_CLASSES = (b"value", b"bound", b"shape", b"dto", b"semantics")
 SHELL_SESSION_MANAGEMENT_JOINS = b"prmcxfi"
 # Exact refused public-spelling IDs only; not a prefix/grammar or object/cause claim.
 # Canonical roster body SHA-256: bf18de45262438226bbc80a1cc8a3c078821b4a1dc88ec16a00961c05c990710
@@ -3896,6 +3904,34 @@ def _shell_session_first_origin(origin, detail, association, query, worker):
             "query": query.decode("ascii"), "worker": worker.decode("ascii")}
 
 
+def _shell_session_assessment_failure(rejection, origin, classification, cause):
+    """Closed original-return labels only, never current-owner or finality claims."""
+    if origin not in SHELL_SESSION_ASSESSMENT_ORIGINS:
+        return None
+    if origin == b"none":
+        valid = (classification, cause) == (b"na", b"none")
+    elif origin == b"request":
+        valid = (classification, cause) == (b"serialize", b"none")
+    elif origin == b"result":
+        valid = classification in SHELL_SESSION_ASSESSMENT_RESULT_CLASSES and cause == b"none"
+    else:
+        valid = classification in SHELL_SESSION_ASSESSMENT_BRIDGE_CLASSES and cause in SHELL_SESSION_QUERY_CAUSES
+    if not valid:
+        return None
+    # These are the unchanged public mappings of the captured original error,
+    # not inferences from a current owner, wait, firstOrigin or worker sample.
+    if origin != b"none":
+        compatible = {
+            b"known-assessment": (b"reply-assessment-invalid-request", b"reply-assessment-limit", b"reply-assessment-version",
+                                  b"reply-assessment-policy-stale", b"reply-assessment-context-invalid"),
+            b"busy": (b"reply-busy",), b"shutdown": (b"reply-shutting-down",),
+            b"timeout": (b"reply-query-timeout",), b"cleanup": (b"reply-cleanup-unknown",),
+        }.get(classification, (b"reply-assessment-unavailable",))
+        if rejection not in compatible:
+            return None
+    return {"origin": origin.decode("ascii"), "class": classification.decode("ascii"), "cause": cause.decode("ascii")}
+
+
 def _shell_label_pair(raw):
     if type(raw) is not bytes or not 0 < len(raw) <= SHELL_FAILURE_LABEL_LIMIT:
         return None
@@ -3907,9 +3943,9 @@ def _shell_label_pair(raw):
         if len(lines) != 4 or len(raw) > SHELL_PATH_FAILURE_FRAME_BOUND:
             return None
         path_detail, lines = lines[0], lines[1:]
-    # Session traces require their complete fourth record. Historical v1 keeps
-    # its prior shape, distinguishable by absent firstOrigin metadata; never
-    # invent provenance for it or accept a truncated v2 as a historical frame.
+    # Session traces require their complete fourth record. Historical v1/v2
+    # keep their prior shape, with no invented assessmentFailure metadata.
+    # Never admit a proper prefix of v3 as a complete historical frame.
     if (len(lines) not in (3, 4) or lines[0] not in SHELL_FAILURE_STEPS or lines[1] not in SHELL_FAILURE_BOUNDARIES
             or lines[2] not in SHELL_BOOTSTRAP_PROGRESS):
         return None
@@ -3932,9 +3968,20 @@ def _shell_label_pair(raw):
             return None
         result["path"] = {"recipeIndex": index, "rejection": rejection.decode("ascii")}
     if session:
-        historical = lines[3].startswith(b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;")
-        version = b"v1" if historical else b"v2"
-        suffix = (rb"\n" if historical else rb";o=([a-z-]{1,19});d=([a-z-]{1,15});a=([a-z-]{1,12});q=([a-z.-]{1,26});w=([a-z-]{1,14})\n")
+        if lines[3].startswith(b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;"):
+            version = b"v1"
+        elif lines[3].startswith(b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v2;"):
+            version = b"v2"
+        elif lines[3].startswith(b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v3;"):
+            version = b"v3"
+            if len(raw) > SHELL_SESSION_FAILURE_FRAME_BOUND:
+                return None
+        else:
+            return None
+        suffix = b"" if version == b"v1" else rb";o=([a-z-]{1,19});d=([a-z-]{1,15});a=([a-z-]{1,12});q=([a-z.-]{1,26});w=([a-z-]{1,14})"
+        if version == b"v3":
+            suffix += rb";ao=([a-z-]{1,7});ac=([a-z-]{1,24});ax=([a-z-]{1,11})"
+        suffix += rb"\n"
         match = re.fullmatch(rb"MRK_INSTALLED_SHELL_SESSION_FAILURE=" + version + rb";index=(none|0|[1-9][0-9]?);"
                              rb"evaluations=(0|[1-9][0-9]{0,2});reject=([a-z-]{1,32});wait=([a-z-]{1,32})" + suffix, lines[3])
         if match is None:
@@ -3951,11 +3998,16 @@ def _shell_label_pair(raw):
             return None
         result["session"] = {"recipeIndex": index, "evaluations": evaluations,
                              "rejection": rejection.decode("ascii"), "lastWait": wait.decode("ascii")}
-        if not historical:
-            first_origin = _shell_session_first_origin(*match.groups()[4:])
+        if version != b"v1":
+            first_origin = _shell_session_first_origin(*match.groups()[4:9])
             if first_origin is None:
                 return None
             result["session"]["firstOrigin"] = first_origin
+        if version == b"v3":
+            assessment_failure = _shell_session_assessment_failure(rejection, *match.groups()[9:])
+            if assessment_failure is None:
+                return None
+            result["session"]["assessmentFailure"] = assessment_failure
     return result
 
 

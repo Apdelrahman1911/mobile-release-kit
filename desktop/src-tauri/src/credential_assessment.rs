@@ -242,10 +242,132 @@ pub(crate) struct AssessmentRequest {
     schema_version: u8, policy_version: PolicyVersion, context: RequestContext, input: Input,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResultFailure { Value, Bound, Shape, Dto, Semantics }
+
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+mod assessment_failure {
+    use super::{BridgeError, ResultFailure};
+    use crate::error::{LinuxPassiveCause as C, LinuxSpawnFailure as S};
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Origin { None, Request, Bridge, Result }
+    impl Origin {
+        const ALL: [Self; 4] = [Self::None, Self::Request, Self::Bridge, Self::Result];
+        fn token(self) -> &'static [u8] {
+            match self { Self::None => b"none", Self::Request => b"request", Self::Bridge => b"bridge", Self::Result => b"result" }
+        }
+    }
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Class { Na, Serialize, Runtime, Protocol, Engine, Io, Output, AssessmentUnavailable, KnownAssessment,
+        Busy, Shutdown, Timeout, Cleanup, Retryable, Other, Value, Bound, Shape, Dto, Semantics }
+    impl Class {
+        const ALL: [Self; 20] = [Self::Na, Self::Serialize, Self::Runtime, Self::Protocol, Self::Engine, Self::Io,
+            Self::Output, Self::AssessmentUnavailable, Self::KnownAssessment, Self::Busy, Self::Shutdown, Self::Timeout,
+            Self::Cleanup, Self::Retryable, Self::Other, Self::Value, Self::Bound, Self::Shape, Self::Dto, Self::Semantics];
+        fn token(self) -> &'static [u8] {
+            match self {
+                Self::Na => b"na", Self::Serialize => b"serialize", Self::Runtime => b"runtime-unavailable",
+                Self::Protocol => b"protocol", Self::Engine => b"engine", Self::Io => b"io", Self::Output => b"output-limit",
+                Self::AssessmentUnavailable => b"assessment-unavailable", Self::KnownAssessment => b"known-assessment",
+                Self::Busy => b"busy", Self::Shutdown => b"shutdown", Self::Timeout => b"timeout", Self::Cleanup => b"cleanup",
+                Self::Retryable => b"retryable", Self::Other => b"other", Self::Value => b"value", Self::Bound => b"bound",
+                Self::Shape => b"shape", Self::Dto => b"dto", Self::Semantics => b"semantics",
+            }
+        }
+        fn bridge(error: &BridgeError) -> Self {
+            if error.retryable { return Self::Retryable; }
+            match error.code.as_str() {
+                "runtime_unavailable" => Self::Runtime, "protocol_error" => Self::Protocol, "engine_failed" => Self::Engine,
+                "io_error" => Self::Io, "output_limit" => Self::Output, "assessment_unavailable" => Self::AssessmentUnavailable,
+                "assessment_invalid_request" | "assessment_limit" | "assessment_version" | "assessment_policy_stale"
+                    | "assessment_context_invalid" => Self::KnownAssessment,
+                "busy" => Self::Busy, "shutting_down" => Self::Shutdown, "query_timeout" => Self::Timeout,
+                "cleanup_unknown" => Self::Cleanup, _ => Self::Other,
+            }
+        }
+    }
+    // Same finite vocabulary as the original session-query projection, but read
+    // from THIS returned error, never a current owner/slot or a global last error.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Cause { None, SelectionProfile, SelectionCompile, SelectionMethod, Inspection, AcquisitionEntry,
+        AcquisitionCustody, AcquisitionLock, Capability, Preparation, FinalGate, FinalClaim,
+        SpawnProcessFd, SpawnSystemFd, SpawnMemory, SpawnResource, SpawnDenied, SpawnMissing, SpawnExec, SpawnOther, Response }
+    impl Cause {
+        const ALL: [Self; 21] = [Self::None, Self::SelectionProfile, Self::SelectionCompile, Self::SelectionMethod,
+            Self::Inspection, Self::AcquisitionEntry, Self::AcquisitionCustody, Self::AcquisitionLock, Self::Capability,
+            Self::Preparation, Self::FinalGate, Self::FinalClaim, Self::SpawnProcessFd, Self::SpawnSystemFd, Self::SpawnMemory,
+            Self::SpawnResource, Self::SpawnDenied, Self::SpawnMissing, Self::SpawnExec, Self::SpawnOther, Self::Response];
+        fn original(cause: Option<C>) -> Self {
+            match cause {
+                None => Self::None, Some(C::SelectionProfileClosed) => Self::SelectionProfile,
+                Some(C::SelectionCompileBinding) => Self::SelectionCompile, Some(C::SelectionMethodOutsideProfile) => Self::SelectionMethod,
+                Some(C::Inspection(_)) => Self::Inspection, Some(C::AcquisitionEntryNotReleased) => Self::AcquisitionEntry,
+                Some(C::AcquisitionCustodyMissing) => Self::AcquisitionCustody, Some(C::AcquisitionLock) => Self::AcquisitionLock,
+                Some(C::Capability(_)) => Self::Capability, Some(C::Preparation(_)) => Self::Preparation,
+                Some(C::FinalClaimOwnerGate) => Self::FinalGate, Some(C::FinalClaim(_)) => Self::FinalClaim,
+                Some(C::ReturnedSpawn(S::ProcessFdLimit)) => Self::SpawnProcessFd,
+                Some(C::ReturnedSpawn(S::SystemFdLimit)) => Self::SpawnSystemFd, Some(C::ReturnedSpawn(S::Memory)) => Self::SpawnMemory,
+                Some(C::ReturnedSpawn(S::ResourceUnavailable)) => Self::SpawnResource,
+                Some(C::ReturnedSpawn(S::PermissionDenied)) => Self::SpawnDenied, Some(C::ReturnedSpawn(S::NotFound)) => Self::SpawnMissing,
+                Some(C::ReturnedSpawn(S::ExecFormat)) => Self::SpawnExec, Some(C::ReturnedSpawn(S::Other)) => Self::SpawnOther,
+                Some(C::EngineResponse) => Self::Response,
+            }
+        }
+        fn token(self) -> &'static [u8] {
+            match self {
+                Self::None => b"none", Self::SelectionProfile => b"sel-profile", Self::SelectionCompile => b"sel-compile",
+                Self::SelectionMethod => b"sel-method", Self::Inspection => b"inspection", Self::AcquisitionEntry => b"acq-entry",
+                Self::AcquisitionCustody => b"acq-custody", Self::AcquisitionLock => b"acq-lock", Self::Capability => b"capability",
+                Self::Preparation => b"prepare", Self::FinalGate => b"final-gate", Self::FinalClaim => b"final-claim",
+                Self::SpawnProcessFd => b"spawn-pfd", Self::SpawnSystemFd => b"spawn-sfd", Self::SpawnMemory => b"spawn-mem",
+                Self::SpawnResource => b"spawn-res", Self::SpawnDenied => b"spawn-deny", Self::SpawnMissing => b"spawn-miss",
+                Self::SpawnExec => b"spawn-exec", Self::SpawnOther => b"spawn-other", Self::Response => b"response",
+            }
+        }
+    }
+    // No raw Value/error/String, reference, owner, allocation or public serializer.
+    // Only constructors in this module can create the cross-field combinations.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct Failure { origin: Origin, class: Class, cause: Cause }
+    impl Default for Failure { fn default() -> Self { Self::none() } }
+    impl Failure {
+        pub(crate) const fn none() -> Self { Self { origin: Origin::None, class: Class::Na, cause: Cause::None } }
+        pub(super) fn request() -> Self { Self { origin: Origin::Request, class: Class::Serialize, cause: Cause::None } }
+        pub(super) fn bridge(error: &BridgeError) -> Self {
+            Self { origin: Origin::Bridge, class: Class::bridge(error), cause: Cause::original(error.linux_passive_cause()) }
+        }
+        pub(super) fn result(stage: ResultFailure) -> Self {
+            let class = match stage { ResultFailure::Value => Class::Value, ResultFailure::Bound => Class::Bound,
+                ResultFailure::Shape => Class::Shape, ResultFailure::Dto => Class::Dto, ResultFailure::Semantics => Class::Semantics };
+            Self { origin: Origin::Result, class, cause: Cause::None }
+        }
+        pub(crate) fn tokens(self) -> (&'static [u8], &'static [u8], &'static [u8]) {
+            (self.origin.token(), self.class.token(), self.cause.token())
+        }
+        pub(crate) fn token_bounds() -> (usize, usize, usize) {
+            (Origin::ALL.iter().map(|v| v.token().len()).max().unwrap_or(0),
+             Class::ALL.iter().map(|v| v.token().len()).max().unwrap_or(0),
+             Cause::ALL.iter().map(|v| v.token().len()).max().unwrap_or(0))
+        }
+        pub(crate) fn contract_sample() -> Self {
+            Self { origin: Origin::Bridge, class: Class::AssessmentUnavailable, cause: Cause::SelectionProfile }
+        }
+        pub(crate) fn contract_result_sample() -> Self { Self::result(ResultFailure::Semantics) }
+    }
+}
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) use assessment_failure::Failure as InstalledAssessmentFailure;
+
 #[derive(Clone, Copy)]
 enum ErrorKind { InvalidRequest, Limit, Version, PolicyStale, ContextInvalid, Unavailable, Busy, ShuttingDown, QueryTimeout, CleanupUnknown, ContextStale }
 #[derive(Serialize)]
-pub(crate) struct AssessmentError { code: &'static str, message: &'static str, retryable: bool }
+pub(crate) struct AssessmentError {
+    code: &'static str, message: &'static str, retryable: bool,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[serde(skip)]
+    failure: InstalledAssessmentFailure,
+}
 impl AssessmentError {
     fn new(kind: ErrorKind) -> Self {
         let (code, message) = match kind {
@@ -261,28 +383,53 @@ impl AssessmentError {
             ErrorKind::CleanupUnknown => ("cleanup_unknown", "Original query cleanup is unconfirmed. Further queries are disabled; the owner is retained."),
             ErrorKind::ContextStale => ("assessment_context_stale", "Assessment context changed; prepare again."),
         };
-        Self { code, message, retryable: false }
+        Self { code, message, retryable: false,
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            failure: InstalledAssessmentFailure::none(),
+        }
     }
     fn invalid() -> Self { Self::new(ErrorKind::InvalidRequest) }
     fn limit() -> Self { Self::new(ErrorKind::Limit) }
     fn unavailable() -> Self { Self::new(ErrorKind::Unavailable) }
+    fn unavailable_request() -> Self {
+        let error = Self::unavailable();
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let error = error.with_failure(InstalledAssessmentFailure::request());
+        error
+    }
+    fn unavailable_result(_stage: ResultFailure) -> Self {
+        let error = Self::unavailable();
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let error = error.with_failure(InstalledAssessmentFailure::result(_stage));
+        error
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn with_failure(mut self, failure: InstalledAssessmentFailure) -> Self { self.failure = failure; self }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn installed_failure(&self) -> InstalledAssessmentFailure { self.failure }
+
     // Reserved for a real native tuple mismatch, not a core error or caller flag.
     // No document/selection binding is implemented or asserted by this helper.
     pub(crate) fn context_stale() -> Self { Self::new(ErrorKind::ContextStale) }
 }
 
 fn sanitized_error(error: BridgeError) -> AssessmentError {
+    // Copy only closed classes from this original return, before discarding it.
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let failure = InstalledAssessmentFailure::bridge(&error);
     // Discard message and never render Debug/Display for the raw BridgeError.
-    if error.retryable { return AssessmentError::unavailable(); }
-    let kind = match error.code.as_str() {
+    let kind = if error.retryable { ErrorKind::Unavailable } else { match error.code.as_str() {
         "assessment_invalid_request" => ErrorKind::InvalidRequest, "assessment_limit" => ErrorKind::Limit,
         "assessment_version" => ErrorKind::Version, "assessment_policy_stale" => ErrorKind::PolicyStale,
         "assessment_context_invalid" => ErrorKind::ContextInvalid, "assessment_unavailable" => ErrorKind::Unavailable,
         "busy" => ErrorKind::Busy, "shutting_down" => ErrorKind::ShuttingDown,
         "query_timeout" => ErrorKind::QueryTimeout, "cleanup_unknown" => ErrorKind::CleanupUnknown,
         _ => ErrorKind::Unavailable,
-    };
-    AssessmentError::new(kind)
+    }};
+    let result = AssessmentError::new(kind);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let result = result.with_failure(failure);
+    result
 }
 
 struct SizeBudget { used: usize, limit: usize }
@@ -494,7 +641,7 @@ impl AssessmentRequest {
             context: RequestContext { draft: draft.clone(), platform, stage, purpose }, input })
     }
     fn into_params(self) -> Result<Value, AssessmentError> {
-        serde_json::to_value(self).map_err(|_| AssessmentError::unavailable())
+        serde_json::to_value(self).map_err(|_| AssessmentError::unavailable_request())
     }
 }
 
@@ -769,10 +916,11 @@ fn result_shape(raw: &Value) -> bool {
 fn sanitized_result(raw: Value, expected: &Expected) -> Result<AssessmentResult, AssessmentError> {
     // Bound before allocating DTO strings/vectors. The only strings that can
     // survive deserialization are closed enums; all unknown members refuse.
-    protocol::check_value(&raw).map_err(|_| AssessmentError::unavailable())?;
-    if !size_within(&raw, RESULT_LIMIT) || !result_shape(&raw) { return Err(AssessmentError::unavailable()); }
-    let result: AssessmentResult = serde_json::from_value(raw).map_err(|_| AssessmentError::unavailable())?;
-    if !result_valid(&result, expected) { return Err(AssessmentError::unavailable()); }
+    protocol::check_value(&raw).map_err(|_| AssessmentError::unavailable_result(ResultFailure::Value))?;
+    if !size_within(&raw, RESULT_LIMIT) { return Err(AssessmentError::unavailable_result(ResultFailure::Bound)); }
+    if !result_shape(&raw) { return Err(AssessmentError::unavailable_result(ResultFailure::Shape)); }
+    let result: AssessmentResult = serde_json::from_value(raw).map_err(|_| AssessmentError::unavailable_result(ResultFailure::Dto))?;
+    if !result_valid(&result, expected) { return Err(AssessmentError::unavailable_result(ResultFailure::Semantics)); }
     Ok(result)
 }
 
@@ -785,6 +933,11 @@ pub(crate) async fn assess_supplied(supervisor: &Supervisor, request: Assessment
         Ok(raw) => sanitized_result(raw, &expected),
         Err(error) => Err(sanitized_error(error)),
     }
+}
+
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) fn assert_installed_assessment_failure_contract() {
+    tests::assert_failure_contract();
 }
 
 #[cfg(test)]
@@ -1292,6 +1445,132 @@ mod tests {
         assert_eq!(error.code, "assessment_unavailable");
     }
 
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(super) fn assert_failure_contract() {
+        failure_tests::assert_contract();
+    }
+
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    mod failure_tests {
+        use super::*;
+        use crate::error::{LinuxPassiveCause as C, LinuxSpawnFailure as S};
+        use crate::installed_runtime::AdmissionFailure as A;
+
+        fn assert_original_bridge_classes_keep_public_errors_and_command_clones_unchanged() {
+            let cases: &[(&str, &[u8], ErrorKind)] = &[
+                ("runtime_unavailable", b"runtime-unavailable", ErrorKind::Unavailable),
+                ("protocol_error", b"protocol", ErrorKind::Unavailable), ("engine_failed", b"engine", ErrorKind::Unavailable),
+                ("io_error", b"io", ErrorKind::Unavailable), ("output_limit", b"output-limit", ErrorKind::Unavailable),
+                ("assessment_unavailable", b"assessment-unavailable", ErrorKind::Unavailable),
+                ("assessment_invalid_request", b"known-assessment", ErrorKind::InvalidRequest),
+                ("assessment_limit", b"known-assessment", ErrorKind::Limit), ("assessment_version", b"known-assessment", ErrorKind::Version),
+                ("assessment_policy_stale", b"known-assessment", ErrorKind::PolicyStale),
+                ("assessment_context_invalid", b"known-assessment", ErrorKind::ContextInvalid),
+                ("busy", b"busy", ErrorKind::Busy), ("shutting_down", b"shutdown", ErrorKind::ShuttingDown),
+                ("query_timeout", b"timeout", ErrorKind::QueryTimeout), ("cleanup_unknown", b"cleanup", ErrorKind::CleanupUnknown),
+                ("assessment_context_stale", b"other", ErrorKind::Unavailable),
+                ("fictional-private-code/field\n", b"other", ErrorKind::Unavailable),
+            ];
+            for &(code, class, kind) in cases {
+                for retryable in [false, true] {
+                    let mut original = BridgeError::new(code, "fictional-private-password/path/field\n")
+                        .with_linux_passive_cause(Some(C::SelectionCompileBinding));
+                    original.retryable = retryable;
+                    let actual = sanitized_error(original);
+                    let expected = AssessmentError::new(if retryable { ErrorKind::Unavailable } else { kind });
+                    let public = serde_json::to_value(&expected).unwrap();
+                    assert_eq!(serde_json::to_value(&actual).unwrap(), public);
+                    assert_eq!(public.as_object().unwrap().len(), 3);
+                    let (origin, got_class, cause) = actual.installed_failure().tokens();
+                    assert_eq!(origin, b"bridge"); assert_eq!(got_class, if retryable { b"retryable".as_slice() } else { class });
+                    assert_eq!(cause, b"sel-compile");
+                    let packet = actual.installed_failure();
+                    let command: crate::asset_commands::CommandError = actual.into();
+                    let waiter = command.clone();
+                    assert!(command.installed_assessment_failure() == packet && waiter.installed_assessment_failure() == packet);
+                    assert_eq!(serde_json::to_value(&command).unwrap(), public);
+                    assert_eq!(serde_json::to_value(&waiter).unwrap(), public);
+                    assert!(!serde_json::to_string(&waiter).unwrap().contains("fictional-private"));
+                }
+            }
+        }
+
+        fn assert_only_this_original_error_supplies_a_closed_passive_cause() {
+            let causes: &[(Option<C>, &[u8])] = &[
+                (None, b"none"), (Some(C::SelectionProfileClosed), b"sel-profile"),
+                (Some(C::SelectionCompileBinding), b"sel-compile"), (Some(C::SelectionMethodOutsideProfile), b"sel-method"),
+                (Some(C::Inspection(None)), b"inspection"), (Some(C::Inspection(Some(A::Namespace))), b"inspection"),
+                (Some(C::AcquisitionEntryNotReleased), b"acq-entry"), (Some(C::AcquisitionCustodyMissing), b"acq-custody"),
+                (Some(C::AcquisitionLock), b"acq-lock"), (Some(C::Capability(A::Namespace)), b"capability"),
+                (Some(C::Preparation(A::Namespace)), b"prepare"), (Some(C::FinalClaimOwnerGate), b"final-gate"),
+                (Some(C::FinalClaim(A::Namespace)), b"final-claim"),
+                (Some(C::ReturnedSpawn(S::ProcessFdLimit)), b"spawn-pfd"), (Some(C::ReturnedSpawn(S::SystemFdLimit)), b"spawn-sfd"),
+                (Some(C::ReturnedSpawn(S::Memory)), b"spawn-mem"), (Some(C::ReturnedSpawn(S::ResourceUnavailable)), b"spawn-res"),
+                (Some(C::ReturnedSpawn(S::PermissionDenied)), b"spawn-deny"), (Some(C::ReturnedSpawn(S::NotFound)), b"spawn-miss"),
+                (Some(C::ReturnedSpawn(S::ExecFormat)), b"spawn-exec"), (Some(C::ReturnedSpawn(S::Other)), b"spawn-other"),
+                (Some(C::EngineResponse), b"response"),
+            ];
+            for &(cause, token) in causes {
+                let actual = sanitized_error(BridgeError::unavailable("fictional-private-passive-cause").with_linux_passive_cause(cause));
+                let (origin, class, got_cause) = actual.installed_failure().tokens();
+                assert_eq!(origin, b"bridge"); assert_eq!(class, b"runtime-unavailable"); assert_eq!(got_cause, token);
+                assert_eq!(serde_json::to_value(actual).unwrap(), serde_json::to_value(AssessmentError::unavailable()).unwrap());
+            }
+            let plain = sanitized_error(BridgeError::unavailable("fictional-private-without-cause"));
+            assert_eq!(plain.installed_failure().tokens().2, b"none");
+            for error in [AssessmentError::invalid(), AssessmentError::limit(), AssessmentError::context_stale(), AssessmentError::unavailable()] {
+                assert!(error.installed_failure() == InstalledAssessmentFailure::none());
+            }
+            let native: crate::asset_commands::CommandError = crate::asset_commands::AssetError::invalid().into();
+            assert!(native.installed_assessment_failure() == InstalledAssessmentFailure::none());
+            let request = AssessmentError::unavailable_request();
+            let (origin, class, cause) = request.installed_failure().tokens();
+            assert_eq!(origin, b"request"); assert_eq!(class, b"serialize"); assert_eq!(cause, b"none");
+            assert_eq!(serde_json::to_value(request).unwrap(), serde_json::to_value(AssessmentError::unavailable()).unwrap());
+            assert_eq!(InstalledAssessmentFailure::token_bounds(), (7, 22, 11));
+            assert!(!std::mem::needs_drop::<InstalledAssessmentFailure>() && std::mem::size_of::<InstalledAssessmentFailure>() <= 3);
+        }
+
+        fn assert_sanitizer_records_only_its_first_actual_rejecting_stage() {
+            let expected = admitted(&request(Kind::AndroidKeystore)).expected();
+            let value = json!({"fictional-private": "x".repeat(RESULT_LIMIT), "nodes": vec![Value::Null; protocol::NODE_LIMIT + 1]});
+            let mut bound = response(Kind::AndroidKeystore); bound["fictional-private"] = json!("x".repeat(RESULT_LIMIT));
+            let mut shape = response(Kind::AndroidKeystore); shape["fictional-private"] = json!(true);
+            let mut dto = response(Kind::AndroidKeystore); dto["fields"][0]["state"] = json!("fictional-private-state");
+            let mut semantics = response(Kind::AndroidKeystore); semantics["assurance"]["selectedFilesRead"] = json!(true);
+            let cases: [(Value, &[u8]); 5] = [(value,b"value"), (bound,b"bound"), (shape,b"shape"), (dto,b"dto"), (semantics,b"semantics")];
+            for (raw, stage) in cases {
+                let error = match sanitized_result(raw, &expected) { Err(error) => error, Ok(_) => panic!("inert malformed result admitted") };
+                let (origin, class, cause) = error.installed_failure().tokens();
+                assert_eq!(origin, b"result"); assert_eq!(class, stage); assert_eq!(cause, b"none");
+                assert_eq!(serde_json::to_value(&error).unwrap(), serde_json::to_value(AssessmentError::unavailable()).unwrap());
+                assert!(!serde_json::to_string(&error).unwrap().contains("fictional-private"));
+            }
+            assert!(sanitized_result(response(Kind::AndroidKeystore), &expected).is_ok());
+        }
+
+        pub(super) fn assert_contract() {
+            assert_original_bridge_classes_keep_public_errors_and_command_clones_unchanged();
+            assert_only_this_original_error_supplies_a_closed_passive_cause();
+            assert_sanitizer_records_only_its_first_actual_rejecting_stage();
+        }
+
+        #[test]
+        fn original_bridge_classes_keep_public_errors_and_command_clones_unchanged() {
+            assert_original_bridge_classes_keep_public_errors_and_command_clones_unchanged();
+        }
+
+        #[test]
+        fn only_this_original_error_supplies_a_closed_passive_cause() {
+            assert_only_this_original_error_supplies_a_closed_passive_cause();
+        }
+
+        #[test]
+        fn sanitizer_records_only_its_first_actual_rejecting_stage() {
+            assert_sanitizer_records_only_its_first_actual_rejecting_stage();
+        }
+    }
+
     #[test]
     fn native_stale_is_fixed_and_not_accepted_from_core() {
         let stale = AssessmentError::context_stale();
@@ -1312,5 +1591,117 @@ mod tests {
         refuses(&body, json!("fictional-private-password"));
         let mut raw = response(Kind::ProjectReadToken); raw["fields"][0]["issues"] = json!(["required-missing", "value-nul"]);
         refuses(&body, raw);
+    }
+}
+
+// One real core↔Rust correspondence case, not a runner or installed-runtime test.
+// The admitted OUTER command alone creates this private scratch directory and
+// marker, runs the real Python core between the two original Rust waits, and
+// binds its source + both DATA files. Neither entry point passes without input.
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+mod paired_core_test {
+    use super::*;
+    use serde_json::json;
+    use std::{fs::File, io::{Read, Write}, os::fd::OwnedFd};
+    use rustix::fs::{self, AtFlags, Mode, OFlags, Stat};
+
+    const DIRECTORY: &str = "/tmp/assessment-seam";
+    const MARKER: &[u8] = b"MRK_ASSESSMENT_CORE_RUST_PAIR_V1\n";
+    const ID: &str = "assessment-null-android-v1";
+    const REQUEST_DATA_LIMIT: usize = 4096;
+    const RESPONSE_DATA_LIMIT: usize = 32768;
+    enum InputFile { Owner, Request, Response }
+    fn same_data(left: &Stat, right: &Stat) -> bool {
+        left.st_dev == right.st_dev && left.st_ino == right.st_ino && left.st_mode == right.st_mode
+            && left.st_nlink == right.st_nlink && left.st_uid == right.st_uid && left.st_gid == right.st_gid
+            && left.st_size == right.st_size && left.st_mtime == right.st_mtime && left.st_mtime_nsec == right.st_mtime_nsec
+            && left.st_ctime == right.st_ctime && left.st_ctime_nsec == right.st_ctime_nsec
+    }
+    fn original_data(directory: &OwnedFd, input: InputFile) -> Vec<u8> {
+        let (leaf, limit, mode) = match input {
+            InputFile::Owner => ("owner", MARKER.len(), 0o100400),
+            InputFile::Request => ("request.json", REQUEST_DATA_LIMIT, 0o100600),
+            InputFile::Response => ("response.json", RESPONSE_DATA_LIMIT, 0o100600),
+        };
+        let fd = fs::openat(directory, leaf, OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK, Mode::empty()).unwrap();
+        let before = fs::fstat(&fd).unwrap();
+        assert!(before.st_mode == mode && before.st_uid == 0 && before.st_gid == 0 && before.st_nlink == 1
+            && before.st_size > 0 && before.st_size <= limit as i64);
+        let mut file = File::from(fd); let mut bytes = Vec::new();
+        (&mut file).take(limit as u64 + 1).read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes.len() as i64, before.st_size);
+        assert!(same_data(&before, &fs::fstat(&file).unwrap()));
+        assert!(same_data(&before, &fs::statat(directory, leaf, AtFlags::SYMLINK_NOFOLLOW).unwrap()));
+        bytes
+    }
+    fn original_directory() -> OwnedFd {
+        let directory = fs::open(DIRECTORY, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty()).unwrap();
+        let before = fs::fstat(&directory).unwrap();
+        assert!(before.st_mode == 0o40700 && before.st_uid == 0 && before.st_gid == 0 && before.st_nlink == 2);
+        assert_eq!(original_data(&directory, InputFile::Owner), MARKER);
+        assert!(same_data(&before, &fs::fstat(&directory).unwrap()));
+        assert!(same_data(&before, &fs::statat(fs::CWD, DIRECTORY, AtFlags::SYMLINK_NOFOLLOW).unwrap()));
+        directory
+    }
+    fn request() -> AssessmentRequest {
+        let body = json!({"schemaVersion":1,"policyVersion":POLICY,
+            "context":{"platform":"android","stage":"candidate","purpose":"full","draft":{
+                "android":{"applicationId":"org.assessment.fixture","enabled":true,"identityStatus":"unverified"},
+                "ios":{"enabled":false},
+                "metadata":{"androidLocales":["en-US"],"iosLocales":[],"root":"release/store"},
+                "projectChecks":{"androidArtifact":[],"iosArtifact":[],"preflight":[]},
+                "schemaVersion":1,"services":{"androidFirebase":"required","iosFirebase":"disabled"},
+                "source":{"candidateBranch":"main","productionBranch":"main","projectReadTokenRequired":true},
+                "version":{"buildKey":"BUILD_NUMBER","nameKey":"VERSION_NAME","source":"version.properties"}}},
+            "input":{"kind":"android-keystore","fields":{"storePassword":null,"keyAlias":null,"keyPassword":null},
+                "observation":{"status":"observed","format":"jks","byteCount":12,"version":2}}});
+        match AssessmentRequest::admit(&body) { Ok(request) => request, Err(_) => panic!("fixed paired request must admit") }
+    }
+    fn params(request: AssessmentRequest) -> Value {
+        match request.into_params() { Ok(params) => params, Err(_) => panic!("fixed paired request must serialize") }
+    }
+
+    #[test]
+    #[ignore = "requires the separately admitted original paired-core command owner"]
+    fn real_core_null_android_request() {
+        let directory = original_directory();
+        let bytes = protocol::encode_request(ID, Method::AssessCredentials, &params(request())).unwrap();
+        assert!(!bytes.is_empty() && bytes.len() <= REQUEST_DATA_LIMIT);
+        // One create-new fixed output; no directory creation or caller path.
+        let fd = fs::openat(&directory, "request.json", OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::RUSR | Mode::WUSR).unwrap();
+        let mut output = File::from(fd); output.write_all(&bytes).unwrap(); drop(output);
+        assert_eq!(original_data(&directory, InputFile::Request), bytes);
+    }
+
+    #[test]
+    #[ignore = "requires the original producer, real Python core response, and paired command owner"]
+    fn real_core_null_android_response() {
+        let directory = original_directory();
+        let request = request(); let expected = request.expected();
+        let original_request = protocol::encode_request(ID, Method::AssessCredentials, &params(request)).unwrap();
+        assert_eq!(original_data(&directory, InputFile::Request), original_request);
+        let bytes = original_data(&directory, InputFile::Response);
+        let raw = protocol::decode_response(&bytes, ID).unwrap(); let original = raw.clone();
+        let result = match sanitized_result(raw, &expected) {
+            Ok(result) => result, Err(_) => panic!("real paired core response failed the Rust sanitizer"),
+        };
+        assert!(!result.permits_session_preview());
+        let value = serde_json::to_value(result).unwrap(); assert_eq!(value, original);
+        assert_eq!(value["schemaVersion"], json!(1)); assert_eq!(value["policyVersion"], json!(POLICY));
+        assert_eq!(value["kind"], json!("android-keystore"));
+        assert_eq!(value["context"], json!({"platform":"android","stage":"candidate","purpose":"full"}));
+        assert_eq!(value["applicability"], json!({"state":"required","reason":"selected"}));
+        assert_eq!(value["state"], json!("missing")); assert_eq!(value["identity"], json!("not-applicable"));
+        let fields = value["fields"].as_array().unwrap(); assert_eq!(fields.len(), 4);
+        assert_eq!(fields[0], json!({"id":"file","requirement":"MOBILE_RELEASE_ANDROID_KEYSTORE_BASE64","presence":"supplied",
+            "state":"configured","issues":[],"checks":[{"scope":"jks-header","outcome":"asserted-pass"}]}));
+        for (index, id, requirement) in [(1,"storePassword","MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD"),
+            (2,"keyAlias","MOBILE_RELEASE_ANDROID_KEY_ALIAS"), (3,"keyPassword","MOBILE_RELEASE_ANDROID_KEY_PASSWORD")] {
+            assert_eq!(fields[index], json!({"id":id,"requirement":requirement,"presence":"missing","state":"missing","issues":["required-missing"],"checks":[]}));
+        }
+        assert_eq!(value["assurance"], json!({"basis":"supplied-input-only","scalarValuesProcessed":false,"fileObservationsProcessed":true,
+            "selectedFilesRead":false,"keyringAccessed":false,"storageWritesPerformed":false,"projectCodeExecuted":false,
+            "sourceCustody":"not-established","nativeValidation":"not-run","serviceValidation":"not-run","releaseReadiness":"unknown"}));
     }
 }

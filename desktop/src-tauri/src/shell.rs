@@ -65,6 +65,10 @@ macro_rules! installed_session_command {
     };
 }
 macro_rules! installed_session_result {
+    ($observed:ident, Prepare, $result:expr) => {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(q) = &$observed { q.session_prepare_result($result); }
+    };
     ($observed:ident, $kind:ident, $result:expr) => {
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         if let Some(q) = &$observed { q.session_result(installed_observation::SessionCommand::$kind,$result); }
