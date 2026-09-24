@@ -1,5 +1,5 @@
-//! Original read-only source custody. Linux credentials and the Mac project-only
-//! probe are separate; no pathname is renderer authority.
+//! Original read-only source custody. Linux credentials and the Mac/Windows
+//! project-only probes are separate; no pathname is renderer authority.
 //! The operation retains SourceBook outside its worker. A panic/uncertain close
 //! therefore cannot erase its original acquisition facts or authorize a retry.
 use std::{path::{Path, PathBuf}, sync::Arc};
@@ -44,8 +44,20 @@ impl DirectoryIdentity {
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct FileIdentity { common: DirectoryIdentity, nlink: u64, size: u64, mtime: (i64, i64), ctime: (i64, i64) }
+/// A completed native selection, not a continuing directory lease or write
+/// authority. Windows keeps its full native ID; it never invents POSIX facts.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectIdentity {
+    Posix(DirectoryIdentity),
+    Windows { volume: u64, file_id: [u8; 16] },
+}
+impl ProjectIdentity {
+    pub(crate) fn posix(self) -> Result<DirectoryIdentity, Reason> {
+        match self { Self::Posix(identity) => Ok(identity), Self::Windows { .. } => Err(Reason::UnsupportedPlatform) }
+    }
+}
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) struct RegisteredRoot { pub(crate) path: PathBuf, pub(crate) identity: DirectoryIdentity }
+pub(crate) struct RegisteredRoot { pub(crate) path: PathBuf, pub(crate) identity: ProjectIdentity }
 
 /// Test-only registration from an actually held fixture directory. This is not
 /// a ProjectProbe or a picker/asset qualification, and no synthetic identity is
@@ -61,19 +73,19 @@ pub(crate) fn offline_fixture_root(held: &std::fs::File, path: &Path) -> Result<
             != (named.dev(), named.ino(), named.mode(), named.uid(), named.gid()) {
         return Err(Reason::SourceRefused);
     }
-    Ok(RegisteredRoot { path: path.to_path_buf(), identity: DirectoryIdentity {
+    Ok(RegisteredRoot { path: path.to_path_buf(), identity: ProjectIdentity::Posix(DirectoryIdentity {
         dev: actual.dev(), ino: actual.ino(), mode: actual.mode(), uid: actual.uid(), gid: actual.gid(),
-    } })
+    }) })
 }
 
 // Native-only metadata hint. Not serialized, hashed into an ID, or a capability
 // to recapture bytes. Every later registration probe must match fresh originals.
 pub(crate) struct OriginWitness { path: PathBuf, ancestry: Vec<DirectoryIdentity>, leaf: FileIdentity }
 pub(crate) struct CapturedSource { pub(crate) bytes: Vec<u8>, pub(crate) origin: Arc<OriginWitness> }
-pub(crate) struct ProjectProbe { path: PathBuf, identity: DirectoryIdentity }
+pub(crate) struct ProjectProbe { path: PathBuf, identity: ProjectIdentity }
 impl ProjectProbe {
     pub(crate) fn path(&self) -> &Path { &self.path }
-    pub(crate) fn identity(&self) -> DirectoryIdentity { self.identity }
+    pub(crate) fn identity(&self) -> ProjectIdentity { self.identity }
 }
 // Metadata-only, point-in-time descendant proof. No native absolute path,
 // payload, source witness or reusable file/write authority reaches the DTO.
@@ -356,7 +368,7 @@ mod linux {
         let source = parts(&path)?;
         let (leaf_name, parents) = source.split_last().ok_or(Reason::SourceRefused)?;
         let mut root_parts = Vec::new(); root_parts.try_reserve_exact(roots.len()).map_err(|_| Reason::Capacity)?;
-        for root in roots { root_parts.push(parts(&root.path)?); }
+        for root in roots { root.identity.posix()?; root_parts.push(parts(&root.path)?); }
         let capacity = roster_limit(root_parts.iter().map(Vec::len).chain(std::iter::once(parents.len())), 1)?;
         book.begin(capacity, 0)?;
         let result = (|| {
@@ -365,7 +377,7 @@ mod linux {
             for (root, components) in roots.iter().zip(&root_parts) {
                 let chain = book.chain(components, stop)?;
                 let id = book.directory(*chain.last().ok_or(Reason::SourceRefused)?)?;
-                if id != root.identity { return Err(Reason::SourceChanged); } root_ids.push(id);
+                if ProjectIdentity::Posix(id) != root.identity { return Err(Reason::SourceChanged); } root_ids.push(id);
             }
             let ancestry_indices = book.chain(parents, stop)?;
             let mut ancestry = Vec::new(); ancestry.try_reserve_exact(ancestry_indices.len()).map_err(|_| Reason::Capacity)?;
@@ -434,7 +446,7 @@ mod linux {
                 if file_identity(&metadata)? != origin.leaf { return Err(Reason::ExclusionUnconfirmed); }
                 book.probes.push(LeafProbe { parent, name: copy_bytes(leaf_name)?, identity: origin.leaf });
             }
-            Ok(ProjectProbe { path: path.clone(), identity: project })
+            Ok(ProjectProbe { path: path.clone(), identity: ProjectIdentity::Posix(project) })
         })();
         book.finish(result, stop)
     }
@@ -461,6 +473,7 @@ mod linux {
     }
     pub(crate) fn probe_project_path(book: &mut SourceBook, root: &RegisteredRoot, path: PathBuf, field: ProjectPathField,
         stop: &mut dyn FnMut() -> bool) -> Result<ProjectPathProbe, Reason> {
+        let root_identity = root.identity.posix()?;
         let spelling = project_path_spelling(&root.path, &path, field)?;
         let file = !field.directory();
         let capacity = roster_limit([spelling.components.len() - usize::from(file)], 0)?;
@@ -469,7 +482,7 @@ mod linux {
             book.root(stop)?;
             let root_chain = book.chain(&spelling.components[..spelling.root_depth], stop)?;
             let mut parent = *root_chain.last().ok_or(Reason::SourceRefused)?;
-            if book.directory(parent)? != root.identity { return Err(Reason::SourceChanged); }
+            if book.directory(parent)? != root_identity { return Err(Reason::SourceChanged); }
             let (leaf, parents) = spelling.components[spelling.root_depth..].split_last().ok_or(Reason::SourceRefused)?;
             // Descendants continue from the SAME checked registered-root
             // descriptor, never a second pathname traversal or fresh parent.
@@ -562,7 +575,7 @@ mod linux {
         // The real probe rejects these before even SourceBook::begin. A
         // permanently-STOPped callback additionally forbids any native effect
         // if that lexical barrier regresses; this test never issues a syscall.
-        let registered = RegisteredRoot { path: root.to_path_buf(), identity: parent };
+        let registered = RegisteredRoot { path: root.to_path_buf(), identity: ProjectIdentity::Posix(parent) };
         for (path, field) in [("/inert/outside/VERSION", ProjectPathField::VersionSource),
             ("/inert/project2/VERSION", ProjectPathField::VersionSource), ("/inert/project", ProjectPathField::MetadataRoot),
             ("/inert/project/App.XCODEPROJ", ProjectPathField::IosProject)] {
@@ -614,7 +627,14 @@ mod macos;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(crate) use macos::{SourceBook, capture, probe_project, probe_project_path, suffix, path_hint};
 
-#[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+#[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+#[path = "asset_source_windows.rs"]
+mod windows;
+#[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+pub(crate) use windows::{SourceBook, capture, probe_project, probe_project_path, suffix, path_hint};
+
+#[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
 mod unsupported {
     use super::*;
     pub(crate) struct SourceBook;
@@ -625,7 +645,8 @@ mod unsupported {
     pub(crate) fn probe_project(_: &mut SourceBook, _: PathBuf, _: &[Arc<OriginWitness>], _: &mut dyn FnMut() -> bool) -> Result<ProjectProbe, Reason> { Err(Reason::UnsupportedPlatform) }
     pub(crate) fn probe_project_path(_: &mut SourceBook, _: &RegisteredRoot, _: PathBuf, _: ProjectPathField, _: &mut dyn FnMut() -> bool) -> Result<ProjectPathProbe, Reason> { Err(Reason::UnsupportedPlatform) }
 }
-#[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+#[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
 pub(crate) use unsupported::{SourceBook, capture, probe_project, probe_project_path, suffix, path_hint};
 
 #[cfg(test)]
@@ -657,14 +678,32 @@ mod tests {
         let wire = identity.workflow_identity();
         assert_eq!(wire.device,u64::MAX.to_string()); assert_eq!(wire.inode,u64::MAX.to_string());
         assert_eq!((wire.mode,wire.uid,wire.gid),(0o40750,u32::MAX,u32::MAX-1));
-        let original = WorkflowRegistration { generation:7,root:RegisteredRoot { path:PathBuf::from("/inert/project"),identity } };
+        let original = WorkflowRegistration { generation:7,root:RegisteredRoot { path:PathBuf::from("/inert/project"),identity: ProjectIdentity::Posix(identity) } };
         assert!(original == original.clone());
         for altered in [DirectoryIdentity { dev:1,..identity },DirectoryIdentity { ino:1,..identity },
             DirectoryIdentity { mode:0o40700,..identity },DirectoryIdentity { uid:1,..identity },DirectoryIdentity { gid:1,..identity }] {
-            let mut changed = original.clone(); changed.root.identity = altered; assert!(original != changed);
+            let mut changed = original.clone(); changed.root.identity = ProjectIdentity::Posix(altered); assert!(original != changed);
         }
         let mut changed = original.clone(); changed.root.path = PathBuf::from("/inert/other"); assert!(original != changed);
         let mut changed = original.clone(); changed.generation += 1; assert!(original != changed);
         // Value comparisons only: no stat/open, filesystem or registration.
+    }
+    #[test]
+    fn windows_project_ids_preserve_all_bits_and_cannot_project_posix_authority() {
+        let original = ProjectIdentity::Windows { volume: u64::MAX, file_id: [0xff; 16] };
+        assert!(original.posix().is_err());
+        for byte in 0..16 {
+            let mut changed = [0xff; 16]; changed[byte] = 0xfe;
+            assert!(original != ProjectIdentity::Windows { volume: u64::MAX, file_id: changed });
+        }
+        assert!(original != ProjectIdentity::Windows { volume: u64::MAX - 1, file_id: [0xff; 16] });
+        let posix = DirectoryIdentity::synthetic_evidence_identity();
+        assert!(ProjectIdentity::Posix(posix).posix().is_ok_and(|actual| actual == posix));
+        assert!(original != ProjectIdentity::Posix(posix));
+        let mut root = RegisteredRoot { path: PathBuf::from(if cfg!(windows) { r"C:\inert-project" } else { "/inert-project" }),
+            identity: ProjectIdentity::Posix(posix) };
+        assert!(crate::candidate_evidence_protocol::params(&root).is_ok());
+        root.identity = original;
+        assert!(crate::candidate_evidence_protocol::params(&root).is_err());
     }
 }

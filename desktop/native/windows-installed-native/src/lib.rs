@@ -3,8 +3,9 @@
 //! The caller must register this book inside its ORIGINAL retained Resources before
 //! releasing blocking work. Serialize it under that owner's Mutex; keep it and the
 //! actual workers reachable through STOP, document loss, timeout and settlement.
-//! This crate creates no worker, clock, broker, capability or process. It must not
-//! run on the UI/deadline thread. The production Windows profile remains closed.
+//! The facts/publication adapters create no worker, broker or consumer process;
+//! their blocking calls belong off the UI/deadline thread. The separately gated
+//! `desktop-ui` module owns only the original STA shell/document/dialog resources.
 //!
 //! Native output destinations already belong to the pinned book before entry.
 //! Drop never closes a HANDLE; unresolved storage is deliberately not deallocated.
@@ -30,10 +31,21 @@ mod decode;
 mod security;
 mod loader;
 pub use loader::SystemImage;
+mod project;
+pub use project::{ProjectBook, project_path_hint};
+#[cfg(feature = "desktop-ui")]
+pub mod ui;
+#[cfg(all(test, feature = "desktop-ui"))]
+mod hosted_ui_tests;
 #[cfg(any(test, feature = "qualification-result"))]
 mod qualification_result;
 #[cfg(feature = "qualification-result")]
 pub use qualification_result::{write_fullwalk_result_once, write_passive_result_once, require_passive_qualification, FullwalkFacts, PassiveFacts};
+#[cfg(all(feature = "qualification-result", feature = "windows-installed-observation"))]
+pub use qualification_result::{UiRole, UiCaseFacts, normal_ui_deadline, require_normal_ui_qualification, write_normal_ui_result_once};
+#[cfg(all(feature = "qualification-result", feature = "windows-installed-observation"))]
+pub use qualification_result::{normal_ui_project, mutate_normal_ui_fixture, verify_normal_ui_fixture,
+    UI_FIXTURE_CONFIG, UI_FIXTURE_CONFIG_AFTER, UI_FIXTURE_SOURCE, UI_FIXTURE_VERSION, UI_FIXTURE_KEEP};
 #[cfg(feature = "runtime-publication")]
 mod publication;
 #[cfg(feature = "runtime-publication")]

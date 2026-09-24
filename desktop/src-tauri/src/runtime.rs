@@ -43,7 +43,7 @@ pub struct RuntimeConfig { bundle_root: PathBuf,
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     passive_installed: PassiveInstalledSelection,
     #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
-    windows_passive_candidate: bool,
+    windows_passive: windows_version::Selection,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
         any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
     environment_fixture_core: Option<PathBuf>,
@@ -52,19 +52,27 @@ pub struct RuntimeConfig { bundle_root: PathBuf,
 #[derive(Debug)]
 pub struct VerifiedRuntime { pub python: PathBuf, pub bootstrap: PathBuf, pub core: PathBuf, pub cwd: PathBuf }
 
-// A sealed headless selection, not a Windows shipping availability switch.
+// Separate normal and headless selections; neither confers native custody.
 // Native ProgramFiles/SystemRoot selection belongs to the retained book. This
 // profile accepts no caller path or environment flag and cannot create handles.
 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
-pub(crate) struct PassiveInstalledProfile { _private: () }
+pub(crate) struct PassiveInstalledProfile { selection: windows_version::Selection }
 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
 impl PassiveInstalledProfile {
     pub(crate) fn compiled(&self) -> Result<windows_version::VersionSpec, BridgeError> {
-        if !cfg!(all(test, not(feature = "desktop-shell"), not(feature = "development-runtime"),
-            not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"),
-            not(feature = "macos-installed-installer"))) { return Err(unavailable()); }
+        let selected = match self.selection {
+            windows_version::Selection::Closed => false,
+            windows_version::Selection::HeadlessCandidate => cfg!(all(test, not(feature = "desktop-shell"),
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+                not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"))),
+            windows_version::Selection::Normal => cfg!(all(feature = "desktop-shell", feature = "custom-protocol",
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+                not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"))),
+        };
+        if !selected { return Err(unavailable()); }
         windows_version::VersionSpec::compiled()
     }
+    fn permits(&self, method: &str) -> bool { self.selection.permits(method) }
 }
 
 // Explicit compile inputs bind the successor staged payload. Neither a nearby
@@ -218,7 +226,7 @@ fn installed_passive_method(name: &str) -> bool {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     { macos_installed_passive_method(name) }
     #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
-    { windows_version::installed_candidate_method(name) }
+    { windows_version::passive_method(name) }
     #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
         all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
     { let _ = name; false }
@@ -379,7 +387,11 @@ fn exact_inventory(root: &Path, expected: &BTreeSet<String>, end: Instant) -> Re
 impl RuntimeConfig {
     pub fn packaged(resource_dir: PathBuf) -> Self { Self { bundle_root: resource_dir.join("runtime"),
         #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
-        windows_passive_candidate: false,
+        windows_passive: if cfg!(all(feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+            not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"))) {
+            windows_version::Selection::Normal
+        } else { windows_version::Selection::Closed },
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         passive_installed: {
             #[cfg(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
@@ -408,7 +420,7 @@ impl RuntimeConfig {
         not(feature = "macos-installed-installer")))]
     pub(crate) fn installed_windows_passive_candidate() -> Self {
         let mut config = Self::packaged(PathBuf::new());
-        config.windows_passive_candidate = true; config
+        config.windows_passive = windows_version::Selection::HeadlessCandidate; config
     }
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
         any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
@@ -431,7 +443,7 @@ impl RuntimeConfig {
         #[cfg(all(not(all(feature = "development-runtime", debug_assertions)), target_os = "macos", target_arch = "aarch64"))]
         { installed_passive_method(name) && self.passive_installed_profile().is_ok() }
         #[cfg(all(not(all(feature = "development-runtime", debug_assertions)), target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
-        { installed_passive_method(name) && self.passive_installed_profile().is_ok() }
+        { self.passive_installed_profile().is_ok_and(|profile| profile.permits(name)) }
         #[cfg(all(not(all(feature = "development-runtime", debug_assertions)), not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))))]
         { let _ = name; false }
     }
@@ -444,8 +456,12 @@ impl RuntimeConfig {
         { self.passive_installed_profile().is_ok() }
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         { self.passive_installed_profile().is_ok() }
+        #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+        { self.windows_passive == windows_version::Selection::Normal
+            && self.passive_installed_profile().is_ok_and(|profile| profile.permits("project.snapshot")) }
         #[cfg(not(any(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
-            target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+            target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"),
+            all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
         { false }
     }
     /// Separate P2 selection DATA. A project-only Mac profile is never a
@@ -509,8 +525,7 @@ impl RuntimeConfig {
     }
     #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
     fn passive_installed_profile(&self) -> Result<PassiveInstalledProfile, BridgeError> {
-        if !self.windows_passive_candidate { return Err(unavailable()); }
-        let profile = PassiveInstalledProfile { _private: () };
+        let profile = PassiveInstalledProfile { selection: self.windows_passive };
         profile.compiled()?; Ok(profile)
     }
     #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
@@ -518,8 +533,8 @@ impl RuntimeConfig {
         originals: &mut crate::installed_runtime_windows::PassiveRuntimeSlots,
         end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
         let profile = self.passive_installed_profile()?;
-        if !installed_passive_method(method.name()) {
-            return Err(BridgeError::unavailable("The Windows headless candidate supports only capabilities, catalog and in-memory configuration drafts; project snapshot and all external or mutating operations remain unavailable."));
+        if !profile.permits(method.name()) {
+            return Err(BridgeError::unavailable("This Windows profile admits only its compiled passive methods; the headless candidate excludes project snapshots, and both profiles exclude external and mutating operations."));
         }
         originals.inspect_once(profile, end, stop)
     }
@@ -1194,6 +1209,19 @@ pub(crate) mod windows_version {
     pub(crate) const BLOCK_SIZE: usize = 64 * 1024;
     pub(crate) const MANIFEST_BYTES: u64 = MANIFEST_LIMIT;
 
+    /// Pure selection DATA. A five-method qualification candidate is never
+    /// silently promoted into the normal window's six-method capability set.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) enum Selection { Closed, HeadlessCandidate, Normal }
+    impl Selection {
+        pub(crate) fn permits(self, name: &str) -> bool {
+            match self {
+                Self::Closed => false,
+                Self::HeadlessCandidate => installed_candidate_method(name),
+                Self::Normal => passive_method(name),
+            }
+        }
+    }
 
     // CPython dynload_win.c passes512 wchar_t to GetModuleFileNameW and
     // PathCchCombineEx. Count the complete path, a possible \\?\ expansion,
@@ -1554,15 +1582,23 @@ pub(crate) mod windows_version {
         }
         #[test]
         fn windows_six_method_data_does_not_enable_any_production_profile() {
+            // The scope predicate is DATA; only the separate compiled normal
+            // selector admits six methods. Preserve the five-method candidate.
             for method in ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview"] {
                 assert!(passive_method(method));
+                assert!(Selection::Normal.permits(method));
+                assert_eq!(Selection::HeadlessCandidate.permits(method), method != "project.snapshot");
+                assert!(!Selection::Closed.permits(method));
             }
             for method in ["", "project.snapshot ", "Config.Validate", "config.save", "credentials.assess",
                 "environment.requirements", "github.setup.propose", "release.version.observe", "metadata.text.observe",
                 "metadata.text.validate", "artifacts.candidate.observe", "environment.diagnostics", "android.build"] {
                 assert!(!passive_method(method));
+                assert!(!Selection::Normal.permits(method));
+                assert!(!Selection::HeadlessCandidate.permits(method));
             }
-            #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime")))]
+            #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc",
+                not(feature = "development-runtime"), not(feature = "desktop-shell")))]
             {
                 let runtime = RuntimeConfig::packaged(PathBuf::from("Z:\\inert-not-opened"));
                 assert!(!runtime.project_selection_profile_available());
@@ -1570,6 +1606,26 @@ pub(crate) mod windows_version {
                 assert!(!runtime.passive_method_available("capabilities"));
                 assert!(runtime.resolve(Instant::now()).is_err());
             }
+        }
+        #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc",
+            feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+            not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"),
+            not(feature = "macos-installed-installer")))]
+        #[test]
+        fn windows_normal_availability_uses_the_original_owner_selector_without_write_authority() {
+            let runtime = RuntimeConfig::packaged(PathBuf::from("Z:\\inert-never-opened"));
+            let available = runtime.passive_installed_profile().is_ok();
+            assert_eq!(runtime.windows_passive, Selection::Normal);
+            assert_eq!(runtime.project_selection_profile_available(), available);
+            for method in ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview"] {
+                assert_eq!(runtime.passive_method_available(method), available);
+            }
+            for method in ["config.save", "credentials.assess", "environment.requirements", "github.setup.propose",
+                "artifacts.candidate.observe", "android.build"] { assert!(!runtime.passive_method_available(method)); }
+            assert!(!runtime.configuration_edit_profile_available());
+            assert!(!runtime.project_path_selection_profile_available());
+            assert!(!runtime.evidence_selection_profile_available());
+            assert!(runtime.resolve(Instant::now()).is_err());
         }
     }
 }

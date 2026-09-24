@@ -1972,6 +1972,8 @@ fn passive_setup_profile_is_disjoint_from_publication_and_fullwalk() -> Result<(
     let reference = "refs/heads/verify/desktop-windows-installed-passive";
     assert_eq!(profile_route(PASSIVE_DISPATCH, reference)?, PASSIVE_PROFILE);
     for (scope, reference) in [(DISPATCH, reference), (PRODUCTION_DISPATCH, reference),
+        (qualification_fixture::NORMAL_UI_DISPATCH, reference),
+        (PASSIVE_DISPATCH, "refs/heads/verify/desktop-windows-normal-project-ui"),
         (PASSIVE_DISPATCH, "refs/heads/verify/desktop-windows-runtime-publication"),
         (PASSIVE_DISPATCH, "refs/heads/verify/desktop-windows-installed-native"), (PASSIVE_DISPATCH, "refs/heads/main")] {
         assert!(profile_route(scope, reference).is_err());
@@ -1997,5 +1999,85 @@ fn passive_setup_profile_is_disjoint_from_publication_and_fullwalk() -> Result<(
         let mut duplicate = raw; duplicate.extend_from_slice(b"profile=x\n");
         assert!(Wire::parse(&duplicate, header, keys, 16384).is_err());
     }
+    Ok(())
+}
+
+#[test]
+fn normal_ui_setup_data_requires_distinct_runtime_only_role_and_positive_probe_finality() -> Result<()> {
+    use qualification_fixture::{profile_route, NORMAL_UI_DISPATCH, NORMAL_UI_PROFILE, NORMAL_UI_STAGE, NORMAL_UI_OBSERVE,
+        NORMAL_UI_PRECHECK_HEADER, NORMAL_UI_PRECHECK_FIELDS, NORMAL_UI_OBSERVATION_HEADER, NORMAL_UI_SETUP_EXIT_HEADER,
+        NORMAL_UI_SETUP_PROOFS, OBSERVATION_FIELDS, PRODUCER_EXIT_FIELDS, PASSIVE_PRECHECK_HEADER,
+        PASSIVE_OBSERVATION_HEADER, PASSIVE_SETUP_EXIT_HEADER, PRECHECK_HEADER, PRODUCTION_PRECHECK_HEADER,
+        OBSERVATION_HEADER, PRODUCER_EXIT_HEADER, normal_ui_setup_features, normal_ui_setup_values, normal_ui_setup_probe_gate, Wire};
+    let reference = "refs/heads/verify/desktop-windows-normal-project-ui";
+    assert_eq!(profile_route(NORMAL_UI_DISPATCH, reference)?, NORMAL_UI_PROFILE);
+    for dispatch in [qualification_fixture::DISPATCH, qualification_fixture::PRODUCTION_DISPATCH,
+        qualification_fixture::PASSIVE_DISPATCH, "windows-installed-native", ""] {
+        assert!(profile_route(dispatch, reference).is_err());
+    }
+    for reference in ["refs/heads/main", "refs/heads/verify/desktop-windows-installed-passive",
+        "refs/heads/verify/desktop-windows-runtime-publication", "refs/heads/verify/desktop-windows-installed-native"] {
+        assert!(profile_route(NORMAL_UI_DISPATCH, reference).is_err());
+    }
+    normal_ui_setup_features([true, false, false, false, false])?;
+    for index in 0..5 {
+        let mut features = [true, false, false, false, false]; features[index] = !features[index];
+        assert!(normal_ui_setup_features(features).is_err());
+    }
+    assert_eq!(NORMAL_UI_PRECHECK_FIELDS.len(), 40);
+    assert_eq!(NORMAL_UI_SETUP_PROOFS.map(|proof| proof.0), ["stage", "stageExit", "helperSuccessExit"]);
+    assert!(!NORMAL_UI_PRECHECK_FIELDS.iter().any(|key| key.starts_with("app") || key.starts_with("ordinary")
+        || key.starts_with("fullwalk") || key.starts_with("headless")));
+    assert_ne!(NORMAL_UI_STAGE, qualification_fixture::PASSIVE_STAGE);
+    assert_ne!(NORMAL_UI_OBSERVE, qualification_fixture::OBSERVE_BEFORE);
+    for (header, fields, wrong) in [
+        (NORMAL_UI_PRECHECK_HEADER, NORMAL_UI_PRECHECK_FIELDS.as_slice(), [PASSIVE_PRECHECK_HEADER, PRECHECK_HEADER, PRODUCTION_PRECHECK_HEADER]),
+        (NORMAL_UI_OBSERVATION_HEADER, OBSERVATION_FIELDS.as_slice(), [PASSIVE_OBSERVATION_HEADER, OBSERVATION_HEADER, NORMAL_UI_PRECHECK_HEADER]),
+        (NORMAL_UI_SETUP_EXIT_HEADER, PRODUCER_EXIT_FIELDS.as_slice(), [PASSIVE_SETUP_EXIT_HEADER, PRODUCER_EXIT_HEADER, NORMAL_UI_PRECHECK_HEADER]),
+    ] {
+        let mut wire = Wire { values: std::collections::BTreeMap::new() };
+        for key in fields {
+            wire.put(key, if key.ends_with("Sha256") { "1".repeat(64) }
+                else if matches!(*key, "sourceSha" | "sourceTree") { "2".repeat(40) } else { "x".to_owned() });
+        }
+        let raw = wire.encoded(header, fields, 16384)?;
+        for other in wrong { assert!(Wire::parse(&raw, other, fields, 16384).is_err()); }
+        let mut duplicate = raw.clone(); duplicate.extend_from_slice(b"profile=x\n");
+        assert!(Wire::parse(&duplicate, header, fields, 16384).is_err());
+        assert!(Wire::parse(&raw[..raw.len() - 1], header, fields, 16384).is_err());
+    }
+    let mut pre = Wire { values: std::collections::BTreeMap::new() };
+    for key in NORMAL_UI_PRECHECK_FIELDS {
+        pre.put(key, if key.ends_with("Sha256") { "1".repeat(64) }
+            else if matches!(key, "sourceSha" | "sourceTree") { "2".repeat(40) } else { "1".to_owned() });
+    }
+    for (key, value) in [("profile", NORMAL_UI_PROFILE), ("stageTest", NORMAL_UI_STAGE), ("observerTest", NORMAL_UI_OBSERVE),
+        ("standaloneFeatures", "runtime-publication"), ("helperNativeFeatures", "runtime-publication"),
+        ("setupContract", "fixed-normal-ui-fresh-runtime-only-v1"), ("payloadFiles", "46")] { pre.put(key, value); }
+    pre.put("ownerArtifactIdentity", ordinary_stamp().wire()); pre.put("helperArtifactIdentity", ordinary_stamp().wire());
+    let manifest = "1".repeat(64); let protocol = "2".repeat(64); let request = "3".repeat(64); let finalized = "4".repeat(64);
+    pre.put("protocolSha256", &protocol); pre.put("prerequisiteRequestSha256", &request); pre.put("prerequisiteFinalizerSha256", &finalized);
+    normal_ui_setup_values(&pre, &manifest, &protocol)?;
+    normal_ui_setup_probe_gate(&pre, "true", "success", &request, &finalized)?;
+    for (key, value) in [("profile", qualification_fixture::PASSIVE_PROFILE), ("stageTest", qualification_fixture::STAGE_INPUT),
+        ("observerTest", qualification_fixture::PASSIVE_OBSERVE), ("standaloneFeatures", "desktop-ui"),
+        ("helperNativeFeatures", "qualification-result,runtime-publication"), ("setupContract", "fixed-installed-passive-original-owner-v1"),
+        ("payloadFiles", "47"), ("payloadBytes", "0"), ("ownerArtifactBytes", "134217729"),
+        ("ownerCompileMessagesBytes", "0"), ("helperArtifactBytes", "0"), ("helperCompileMessagesBytes", "16777217"),
+        ("preparedReceiptBytes", "4097"), ("rosterBytes", "16385")] {
+        let mut changed = pre.clone(); changed.put(key, value);
+        assert!(normal_ui_setup_values(&changed, &manifest, &protocol).is_err());
+    }
+    assert!(normal_ui_setup_values(&pre, &"9".repeat(64), &protocol).is_err());
+    assert!(normal_ui_setup_values(&pre, &manifest, &"9".repeat(64)).is_err());
+    for available in ["", "false", "True", "unavailable"] {
+        assert!(normal_ui_setup_probe_gate(&pre, available, "success", &request, &finalized).is_err());
+    }
+    for outcome in ["", "failure", "cancelled", "skipped", "observed"] {
+        assert!(normal_ui_setup_probe_gate(&pre, "true", outcome, &request, &finalized).is_err());
+    }
+    assert!(normal_ui_setup_probe_gate(&pre, "true", "success", &"5".repeat(64), &finalized).is_err());
+    assert!(normal_ui_setup_probe_gate(&pre, "true", "success", &request, &"5".repeat(64)).is_err());
+    assert!(normal_ui_setup_probe_gate(&pre, "true", "success", "", &finalized).is_err());
     Ok(())
 }

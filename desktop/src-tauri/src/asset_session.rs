@@ -554,6 +554,12 @@ fn stop_quit(state: &mut DocumentState, at: Instant) {
         quit.stop();
     }
 }
+#[cfg(any(test, all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+fn accepted_quit_cleanup_end(state: &DocumentState) -> Option<Instant> {
+    if state.stopping && state.quit_accepted && state.quit.as_ref().is_some_and(|quit| quit.stopped()) {
+        state.quit_cleanup_end
+    } else { None }
+}
 fn session_data_empty(state: &DocumentState) -> bool {
     state.records.is_empty() && state.assignments.is_empty() && state.context.is_none()
         && state.slot.as_ref().is_none_or(|slot| slot.candidate.is_none() && slot.staged.is_none() && slot.context.is_none()
@@ -696,11 +702,10 @@ impl DocumentBinding {
         false
     }
     pub(crate) fn project_selection_available(&self) -> bool {
-        // Profile/display DATA, never live lifecycle permission. Preserve the
-        // preexisting Windows compatibility picker. Mac now uses the retained
-        // original project route and stays closed until its own profile/panel
-        // is qualified; a pathname-only compatibility result is not admission.
-        self.project_selection_qualified() || cfg!(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos"))))
+        // Profile/display DATA, never live lifecycle permission. Windows uses
+        // the same retained original project route as its profile admission;
+        // a compatibility pathname result cannot enable native registration.
+        self.project_selection_qualified() || cfg!(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos", target_os = "windows"))))
     }
     pub(crate) fn project_path_selection_available(&self) -> bool {
         // Exact installed-profile DATA only. Neither the compatibility picker
@@ -1041,7 +1046,7 @@ impl DocumentBinding {
         self.inner.bridge.diagnostics.ensure_idle()?;
         action(&self.inner.bridge)
     }
-    #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos"))))]
+    #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos", target_os = "windows"))))]
     pub(crate) fn compatibility_picker_begin(&self) -> Result<(), BridgeError> {
         let mut state = self.lock();
         self.inner.bridge.diagnostics.context_changed();
@@ -1054,7 +1059,7 @@ impl DocumentBinding {
         if state.compatibility_picker_pending { return Err(BridgeError::new("busy", "A native project picker is already open.")); }
         state.compatibility_picker_pending = true; self.bump(&mut state); Ok(())
     }
-    #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos"))))]
+    #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos", target_os = "windows"))))]
     pub(crate) fn compatibility_picker_end(&self) {
         // This preserves the existing compatibility picker reservation; it is
         // NOT evidence for a qualified macOS/Windows document/GUI owner.
@@ -1062,7 +1067,7 @@ impl DocumentBinding {
         // begin already retired any old consent under this same mutex.
         let mut state = self.lock(); state.compatibility_picker_pending = false; self.bump(&mut state);
     }
-    #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos"))))]
+    #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos", target_os = "windows"))))]
     pub(crate) fn compatibility_picker_publish(&self, path: std::path::PathBuf) -> Result<Project, BridgeError> {
         let state = self.lock();
         if !state.compatibility_picker_pending { return Err(BridgeError::invalid()); }
@@ -1071,13 +1076,13 @@ impl DocumentBinding {
         self.inner.bridge.diagnostics.ensure_idle()?;
         self.inner.bridge.register_picked_project(path)
     }
-    #[cfg(all(feature = "desktop-shell", not(target_os = "linux")))]
+    #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "windows"))))]
     pub(crate) fn compatibility_quit_begin(&self) -> bool {
         let mut state = self.lock();
         if state.compatibility_picker_pending || state.quit_pending { return false; }
         state.quit_pending = true; self.bump(&mut state); true
     }
-    #[cfg(all(feature = "desktop-shell", not(target_os = "linux")))]
+    #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "windows"))))]
     pub(crate) fn compatibility_quit_result(&self, accepted: bool) {
         let mut state = self.lock(); state.quit_pending = false;
         if accepted {
@@ -2593,6 +2598,12 @@ impl DocumentBinding {
             && self.inner.bridge.supervisor.can_exit() && self.inner.bridge.edits.can_exit() && self.inner.bridge.diagnostics.can_exit()
             && self.inner.bridge.preflight.can_exit() && self.inner.bridge.android_build.can_exit()
     }
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+    pub(crate) fn exit_cleanup_end(&self) -> Option<Instant> {
+        // Observe only the retained accepted Quit's first STOP; never reconcile,
+        // start another owner, or create a timestamp in the exit observer.
+        accepted_quit_cleanup_end(&self.lock())
+    }
     pub(crate) fn request_quit(&self, app: tauri::AppHandle) {
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now());
         // An unresolved or already accepted quit only wakes its originals. A
@@ -3138,7 +3149,7 @@ mod fixture_observation {
                 || slot.owner.id != 2 || slot.phase != Phase::Idle || !slot.owner.resources_settled() { return None; }
             let roster = self.inner.bridge.native_roster().ok()?;
             if roster.roots.len() != 1 { return None; }
-            Some((slot.project.clone()?, roster.roots[0].identity.fixture_value()))
+            Some((slot.project.clone()?, roster.roots[0].identity.posix().ok()?.fixture_value()))
         }
         pub(crate) fn fixture_selection(&self) -> Option<Selection> {
             self.reconcile(); let state = self.lock(); let slot = state.slot.as_ref()?;
@@ -3287,7 +3298,7 @@ pub(crate) fn assert_project_path_document_contracts() {
 
     // Synthetic directory identity is comparison DATA only, not a SourceBook
     // proof or a fixture permit for this new purpose.
-    let root = asset_source::RegisteredRoot { path: "/inert/project".into(), identity: asset_source::DirectoryIdentity::synthetic_evidence_identity() };
+    let root = asset_source::RegisteredRoot { path: "/inert/project".into(), identity: asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity()) };
     let binding = Arc::new(ProjectPathBinding { project_id: "project-1".into(), field: commands::ProjectPathField::VersionSource, root: root.clone(), generation: 7 });
     assert!(binding.registration_matches(7, &root)); assert!(!binding.registration_matches(8, &root));
     let changed = asset_source::RegisteredRoot { path: "/inert/other".into(), ..root };
@@ -3458,7 +3469,7 @@ mod tests {
         let mut work = Slot::new(owner.clone(), Operation::InspectEvidence, None, None, None); work.evidence = Some(binding.clone());
         state.evidence.epoch = 4; state.evidence.operation = Some(binding); state.evidence.phase = evidence_wire::Phase::Observing;
         state.evidence.selection = Some(EvidenceSelection { view: evidence_wire::Selection { selection_id: "evidence-model".to_owned(), display_name: "Model".to_owned() },
-            root: asset_source::RegisteredRoot { path: "/synthetic/never-opened/evidence".into(), identity: asset_source::DirectoryIdentity::synthetic_evidence_identity() }, epoch: 4 });
+            root: asset_source::RegisteredRoot { path: "/synthetic/never-opened/evidence".into(), identity: asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity()) }, epoch: 4 });
         state.slot = Some(work); (state, owner)
     }
     fn evidence_cancel(id: u32) -> evidence_wire::Cancel {
@@ -3488,7 +3499,7 @@ mod tests {
 
     pub(super) fn evidence_cancel_preserves_source_context_records_github_and_first_cleanup_body() {
         let (mut state, owner) = evidence_model(3); let at = Instant::now();
-        let root = asset_source::RegisteredRoot { path: "/synthetic/never-opened/project".into(), identity: asset_source::DirectoryIdentity::synthetic_evidence_identity() };
+        let root = asset_source::RegisteredRoot { path: "/synthetic/never-opened/project".into(), identity: asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity()) };
         let context = Arc::new(NativeContext { revision: 9, project_id: "source-project".to_owned(), project: root, registry_generation: 7,
             draft: b"{\"unchanged\":true}".to_vec(), platform: Platform::Android, stage: Stage::Candidate, purpose: Purpose::Full });
         state.context = Some(context.clone());
@@ -3589,6 +3600,15 @@ mod tests {
         let owner = OriginalWork::new(2, false, Weak::new()); owner.set_endpoint(None); state.quit = Some(owner.clone());
         stop_quit(&mut state, at); stop_quit(&mut state, at + WORK);
         assert_eq!(state.quit_cleanup_end, Some(at + CLEANUP)); assert_eq!(owner.endpoint(), None); assert!(owner.stopped());
+        assert_eq!(accepted_quit_cleanup_end(&state), None);
+        state.stopping = true;
+        assert_eq!(accepted_quit_cleanup_end(&state), None);
+        state.quit_accepted = true;
+        assert_eq!(accepted_quit_cleanup_end(&state), Some(at + CLEANUP));
+        stop_quit(&mut state, at + WORK + CLEANUP);
+        assert_eq!(accepted_quit_cleanup_end(&state), Some(at + CLEANUP));
+        state.quit = None;
+        assert_eq!(accepted_quit_cleanup_end(&state), None);
     }
 
     #[test]

@@ -108,7 +108,8 @@ pub(crate) struct RootIdentity {
 pub(crate) fn params(root: &RegisteredRoot) -> Result<Value, BridgeError> {
     let path = root.path.to_str().ok_or_else(invalid)?;
     if path.len() > 4096 || !root.path.is_absolute() || root.path.components().count() > 129 { return Err(invalid()); }
-    let value = json!({"root":path,"expectedRoot":root.identity.evidence_identity()});
+    let identity = root.identity.posix().map_err(|_| invalid())?.evidence_identity();
+    let value = json!({"root":path,"expectedRoot":identity});
     value_bounds(&value, 3, 8 * 1024).map_err(|_| invalid())?;
     Ok(value)
 }

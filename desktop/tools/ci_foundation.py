@@ -887,6 +887,81 @@ WINDOWS_FULLWALK_REQUEST_FIELDS = (
     "selectedBootstrapIdentity", "selectedCoreIdentity",
 )
 
+# Additive UI lane: the cheap probe uses the production inspector, but starts no
+# WebView/runtime and carries no historical headless/publication authorization.
+WINDOWS_NORMAL_UI_PROFILE = "windows-normal-project-ui-v1"
+WINDOWS_NORMAL_UI_DISPATCH = "windows-normal-project-ui"
+WINDOWS_NORMAL_UI_REF = "refs/heads/verify/desktop-windows-normal-project-ui"
+WINDOWS_NORMAL_UI_REQUEST_FIELDS = (*WINDOWS_FULLWALK_REQUEST_FIELDS, "appVersion")
+WINDOWS_NORMAL_UI_ROLES = {
+    "prerequisite": ("hosted_ui_tests::hosted_normal_ui_prerequisites_contract", "prerequisite"),
+    "normal-smoke": ("normal-process-main", "smoke"),
+    "project-draft": ("observer-process-main", "project"),
+    "quit-passive": ("observer-process-main", "quit"),
+    "document-loss": ("observer-process-main", "document"),
+}
+WINDOWS_NORMAL_UI_PROBE_REASONS = (
+    "ordinary-context", "interactive-desktop", "managed-webview2", "webview2-overrides",
+    "private-user-data-parent", "native-failure", "original-state",
+)
+WINDOWS_NORMAL_UI_CASE_CHECKS = {
+    "project-draft": ("native-picker-cancel", "native-project-selected", "draft-hydrated-edited",
+        "validate-suggest-preview", "refresh-draft-preserved", "source-change-observed", "only-labelled-fixture-mutation"),
+    "quit-passive": ("native-quit-cancel", "native-quit-confirm", "passive-original-outstanding", "original-owner-retired"),
+    "document-loss": ("native-picker-outstanding", "passive-original-outstanding", "original-document-loss", "no-late-publication", "no-rebind"),
+}
+WINDOWS_NATIVE_DECLARED_FEATURES = {
+    "qualification-result": [], "runtime-publication": [],
+    "desktop-ui": ["dep:windows", "dep:webview2-com"],
+    "desktop-ui-dialogs": ["desktop-ui"], "windows-installed-observation": ["desktop-ui-dialogs"],
+}
+WINDOWS_NORMAL_UI_NATIVE_PACKAGES = frozenset((
+    ("mrk-windows-installed-native", "0.1.0"), ("proc-macro2", "1.0.107"), ("quote", "1.0.47"),
+    ("syn", "2.0.119"), ("syn", "3.0.6"), ("thiserror", "2.0.20"), ("thiserror-impl", "2.0.20"),
+    ("unicode-ident", "1.0.25"), ("webview2-com", "0.38.2"), ("webview2-com-macros", "0.8.1"),
+    ("webview2-com-sys", "0.38.2"), ("windows", "0.61.3"), ("windows-collections", "0.2.0"),
+    ("windows-core", "0.61.2"), ("windows-future", "0.2.1"), ("windows-implement", "0.60.2"),
+    ("windows-interface", "0.59.3"), ("windows-link", "0.1.3"), ("windows-link", "0.2.1"),
+    ("windows-numerics", "0.2.0"), ("windows-result", "0.3.4"), ("windows-strings", "0.4.2"),
+    ("windows-sys", "0.61.2"), ("windows-threading", "0.1.0"),
+))
+WINDOWS_NORMAL_UI_SETUP_STAGE = "qualification_fixture::hosted_stage_normal_ui_runtime_input"
+WINDOWS_NORMAL_UI_SETUP_OBSERVER = "qualification_fixture::hosted_observe_normal_ui_published_version"
+WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS = (
+    "ui::profile::tests::post_create_admission_failure_never_authorizes_profile_cleanup",
+    "ui::tests::managed_runtime_root_and_every_descendant_use_immutable_policy",
+    "project::tests::project_spelling_is_bounded_local_and_never_normalized",
+    "project::tests::project_identity_checks_full_ids_without_immutable_runtime_policy",
+    "project::tests::refused_spelling_and_early_stop_never_acquire_a_native_original",
+    "ordinary_owner::normal_ui::contract_tests::com_null_end_is_distinct_from_pending_failure_and_contradictory_output",
+    "ordinary_owner::normal_ui::contract_tests::unavailable_probe_is_completed_observation_not_gui_authorization",
+    "ordinary_owner::normal_ui::contract_tests::native_smoke_never_credits_posting_or_partial_release_as_finality",
+    "tests::normal_ui_setup_data_requires_distinct_runtime_only_role_and_positive_probe_finality",
+)
+WINDOWS_NORMAL_UI_SCALAR_TESTS = (
+    "asset_session::tests::human_quit_stop_has_one_clock_without_inventing_a_work_endpoint",
+)
+WINDOWS_NORMAL_UI_SETUP_BUILD_PHASES = ("windows-normal-ui-setup-acquire", "windows-normal-ui-setup-compile")
+WINDOWS_NORMAL_UI_SETUP_DATA_PHASES = ("windows-normal-ui-setup-preflight", "windows-normal-ui-setup-stage-finalize",
+    "windows-normal-ui-setup-publish-finalize", "windows-normal-ui-setup-publication-finalize")
+WINDOWS_NORMAL_UI_GUI_ROLES = ("normal-smoke", "project-draft", "quit-passive", "document-loss")
+WINDOWS_NORMAL_UI_GUI_BUILD_PHASES = ("windows-normal-ui-gui-acquire", "windows-normal-ui-gui-compile")
+WINDOWS_NORMAL_UI_GUI_DATA_PHASES = tuple("windows-normal-ui-" + role + suffix
+    for role in WINDOWS_NORMAL_UI_GUI_ROLES for suffix in ("-preflight", "-finalize"))
+WINDOWS_NORMAL_UI_DATA_PHASES = ("windows-normal-ui-prerequisite-finalize", *WINDOWS_NORMAL_UI_SETUP_DATA_PHASES,
+    *WINDOWS_NORMAL_UI_GUI_DATA_PHASES)
+WINDOWS_NORMAL_UI_MATERIAL_PACKAGES = {
+    "tauri": "2.11.5", "tauri-build": "2.6.3", "tauri-runtime": "2.11.3", "tauri-runtime-wry": "2.11.4",
+    "tauri-winres": "0.3.6", "wry": "0.55.1", "tao": "0.35.3", "webview2-com": "0.38.2",
+    "webview2-com-sys": "0.38.2", "windows": "0.61.3",
+}
+WINDOWS_NORMAL_UI_COMMON_CONTROLS_MANIFEST_SHA256 = "4636f3ba46080315ac3277d473d433b79c00863c9cdca1c93c0c83554c6a3d43"
+WINDOWS_NORMAL_UI_NOT_VERIFIED = (
+    "normal-binary-bootstrap", "project-snapshot-and-draft", "quit-with-passive-work",
+    "native-document-loss", "configuration-save", "msi-assembly-installation-and-session",
+    "other-windows-images", "protected-main-delivery",
+)
+
 # One explicit synthetic fullwalk profile, never automatic on source pushes.
 WINDOWS_FULLWALK_PROFILE = "windows-installed-fullwalk-v1"
 WINDOWS_FULLWALK_DISPATCH = "windows-installed-fullwalk"
@@ -1054,6 +1129,21 @@ WINDOWS_INSTALLED_PASSIVE_PROOFS = {
     "stage": ("passive-stage-result.private.txt", 64 << 10),
     "stageExit": ("passive-stage-exit.private.txt", 4096),
     "helperSuccessExit": ("passive-publisher-exit.private.txt", 4096),
+}
+WINDOWS_NORMAL_UI_SETUP_PRECHECK_FIELDS = (
+    "profile", "sourceSha", "sourceTree", "runId", "attempt", "sourceInventorySha256",
+    "prerequisiteRequestSha256", "prerequisiteFinalizerSha256", "ownerArtifact", "ownerArtifactBytes",
+    "ownerArtifactSha256", "ownerArtifactIdentity", "ownerCompileMessagesBytes", "ownerCompileMessagesSha256",
+    "ownerCompileArgvSha256", "stageTest", "stageCommandSha256", "observerTest", "observerCommandSha256",
+    "standaloneFeatures", "helperArtifact", "helperArtifactBytes", "helperArtifactSha256", "helperArtifactIdentity",
+    "helperCompileMessagesBytes", "helperCompileMessagesSha256", "helperCompileArgvSha256", "helperCommandSha256",
+    "helperNativeFeatures", "manifestSha256", "protocolSha256", "inventorySha256", "coreSha256", "payloadFiles",
+    "payloadBytes", "preparedReceiptBytes", "preparedReceiptSha256", "rosterBytes", "rosterSha256", "setupContract",
+)
+WINDOWS_NORMAL_UI_SETUP_PROOFS = {
+    "stage": ("normal-ui-setup-stage-result.private.txt", 64 << 10),
+    "stageExit": ("normal-ui-setup-stage-exit.private.txt", 4096),
+    "helperSuccessExit": ("normal-ui-setup-publisher-exit.private.txt", 4096),
 }
 
 WINDOWS_FULLWALK_PUBLICATION_FIELDS = (
@@ -1242,6 +1332,9 @@ WINDOWS_FULLWALK_SCHEMAS = {
     "passive-precheck": ("MRK_WINDOWS_INSTALLED_PASSIVE_PRECHECK_V1", WINDOWS_INSTALLED_PASSIVE_PRECHECK_FIELDS, 16 << 10),
     "passive-exit": ("MRK_WINDOWS_INSTALLED_PASSIVE_SETUP_EXIT_V1", WINDOWS_RUNTIME_PUBLICATION_EXIT_FIELDS, 4096),
     "passive-observation": ("MRK_WINDOWS_INSTALLED_PASSIVE_SETUP_OBSERVATION_V1", WINDOWS_RUNTIME_PUBLICATION_OBSERVATION_FIELDS, 64 << 10),
+    "normal-ui-setup-precheck": ("MRK_WINDOWS_NORMAL_UI_SETUP_PRECHECK_V1", WINDOWS_NORMAL_UI_SETUP_PRECHECK_FIELDS, 16 << 10),
+    "normal-ui-setup-exit": ("MRK_WINDOWS_NORMAL_UI_SETUP_EXIT_V1", WINDOWS_RUNTIME_PUBLICATION_EXIT_FIELDS, 4096),
+    "normal-ui-setup-observation": ("MRK_WINDOWS_NORMAL_UI_SETUP_OBSERVATION_V1", WINDOWS_RUNTIME_PUBLICATION_OBSERVATION_FIELDS, 64 << 10),
 }
 WINDOWS_FULLWALK_INVOCATION_NUMBERS = frozenset({"attempt", "artifactBytes", "originTickMs", "aggregateBudgetMs", "deadlineTickMs"})
 WINDOWS_FULLWALK_DATA_PHASES = (
@@ -1261,9 +1354,15 @@ WINDOWS_ORDINARY_ACLS = (
     ("target/x86_64-pc-windows-msvc/debug", 0x20), ("target/x86_64-pc-windows-msvc/debug/deps", 0x20),
     ("artifact", 0x1200a9), ("ordinary-output", 0x1000a2),
 )
+WINDOWS_NORMAL_UI_PROBE_ACLS = (
+    *((role, 0x1200a9) for role, _ in WINDOWS_ORDINARY_ACLS[:-2]),
+    ("artifact", 0x1200a9), ("normal-ui-output", 0x1200af),
+)
 WINDOWS_INSTALLED_PHASES = ("prepare", "acquire", "compile", "windows-installed-native",
                           "windows-installed-native-finalize", "windows-installed-runtime-data", *WINDOWS_FULLWALK_DATA_PHASES,
-                          *WINDOWS_INSTALLED_PASSIVE_DATA_PHASES, "retain")
+                          *WINDOWS_INSTALLED_PASSIVE_DATA_PHASES, "windows-normal-ui-prerequisite",
+                          *WINDOWS_NORMAL_UI_DATA_PHASES, *WINDOWS_NORMAL_UI_SETUP_BUILD_PHASES,
+                          *WINDOWS_NORMAL_UI_GUI_BUILD_PHASES, "retain")
 WINDOWS_INSTALLED_APP = "desktop/src-tauri"
 WINDOWS_INSTALLED_APP_LOCALS = {
     "mobile-release-kit-desktop": "desktop/src-tauri/Cargo.toml",
@@ -1945,6 +2044,12 @@ TOOL_CHECKS = frozenset({
     "windows-installed-source-status", "windows-installed-source-inventory",
     "windows-installed-app-locked-metadata", "windows-installed-app-test-compile-only", "windows-installed-app-inert-contracts",
     "windows-installed-helper-compile-only", "windows-installed-helper-locked-metadata",
+    "windows-normal-ui-native-metadata", "windows-normal-ui-native-compile-only",
+    "windows-normal-ui-native-policy", "windows-normal-ui-scalar-metadata",
+    "windows-normal-ui-scalar-compile-only", "windows-normal-ui-scalar-regression",
+    "windows-normal-ui-setup-native-metadata", "windows-normal-ui-setup-native-compile-only",
+    "windows-normal-ui-gui-metadata", "windows-normal-ui-gui-compile-only",
+    "windows-normal-ui-frontend-acquire", "windows-normal-ui-frontend-typecheck", "windows-normal-ui-frontend-assets",
     "windows-fullwalk-fixed-supplier", "windows-fullwalk-fixed-offline-preparer",
     "github-locked-headless-metadata", "github-headless-test-compile-only", "github-owner-native-contract",
     "github-tls-locked-headless-metadata", "github-tls-headless-test-compile-only",
@@ -2192,6 +2297,12 @@ def run(argv: list[str], *, check: str, cwd: Path, env: dict[str, str], timeout:
         "windows-installed-inert-contracts",
         "windows-installed-app-locked-metadata", "windows-installed-app-test-compile-only", "windows-installed-app-inert-contracts",
         "windows-installed-helper-compile-only", "windows-installed-helper-locked-metadata",
+        "windows-normal-ui-native-metadata", "windows-normal-ui-native-compile-only",
+        "windows-normal-ui-native-policy", "windows-normal-ui-scalar-metadata",
+        "windows-normal-ui-scalar-compile-only", "windows-normal-ui-scalar-regression",
+        "windows-normal-ui-setup-native-metadata", "windows-normal-ui-setup-native-compile-only",
+        "windows-normal-ui-gui-metadata", "windows-normal-ui-gui-compile-only",
+        "windows-normal-ui-frontend-acquire", "windows-normal-ui-frontend-typecheck", "windows-normal-ui-frontend-assets",
         "windows-fullwalk-fixed-supplier", "windows-fullwalk-fixed-offline-preparer"}),
         "Unexpected private diagnostic destination")
     print(f"Fixed check: {check}", flush=True)
@@ -9128,9 +9239,25 @@ def windows_fullwalk_curl_sha256(path: Path) -> str:
 def windows_installed_prepared_profile(context: dict) -> bool:
     require(type(context) is dict and ("qualificationProfile" not in context
             or context["qualificationProfile"] in (WINDOWS_FULLWALK_PROFILE, WINDOWS_RUNTIME_PUBLICATION_PROFILE,
-                                                   WINDOWS_INSTALLED_PASSIVE_PROFILE)),
+                                                   WINDOWS_INSTALLED_PASSIVE_PROFILE, WINDOWS_NORMAL_UI_PROFILE)),
             "Windows prepared profile marker differs")
-    return "qualificationProfile" in context
+    # UI preparation is deliberately deferred until a separately closed cheap
+    # prerequisite observation. A profile name is not a prepared runtime.
+    return context.get("qualificationProfile") in (WINDOWS_FULLWALK_PROFILE, WINDOWS_RUNTIME_PUBLICATION_PROFILE,
+                                                    WINDOWS_INSTALLED_PASSIVE_PROFILE)
+
+
+def windows_normal_ui_profile(context: dict) -> bool:
+    windows_installed_prepared_profile(context)
+    return context.get("qualificationProfile") == WINDOWS_NORMAL_UI_PROFILE
+
+
+def windows_normal_ui_features(role: str) -> list[str]:
+    roles = {"native": ["desktop-ui"], "app": ["custom-protocol", "desktop-shell"],
+             "observer": ["custom-protocol", "desktop-shell", "windows-installed-observation"],
+             "helper": ["windows-runtime-publisher"]}
+    require(type(role) is str and role in roles, "Windows normal UI compile role differs")
+    return roles[role]
 
 
 def windows_fullwalk_profile(context: dict) -> bool:
@@ -9149,11 +9276,16 @@ def windows_installed_passive_profile(context: dict) -> bool:
 
 
 def windows_installed_publisher_required(context: dict) -> bool:
-    return windows_runtime_publication_profile(context) or windows_installed_passive_profile(context)
+    # UI needs only the separate normal setup helper, never a publisher-enabled
+    # app/observer. Its acquisition/compile route additionally requires the
+    # independently finalized positive cheap probe before any preparation.
+    return windows_runtime_publication_profile(context) or windows_installed_passive_profile(context) or windows_normal_ui_profile(context)
 
 
 def windows_installed_features(context: dict, role: str) -> list[str]:
     require(role in ("native", "app", "helper"), "Unknown Windows compile role")
+    if windows_normal_ui_profile(context):
+        return windows_normal_ui_features(role)
     production = windows_runtime_publication_profile(context)
     require(role != "helper" or windows_installed_publisher_required(context),
             "The normal helper requires an explicit publication setup profile")
@@ -9213,8 +9345,9 @@ def windows_fullwalk_text(kind: str, values: dict) -> bytes:
     return raw
 
 
-def windows_fullwalk_binding(row: dict, context: dict) -> None:
-    require(windows_installed_prepared_profile(context)
+def windows_fullwalk_binding(row: dict, context: dict, *, normal_ui_setup: bool = False) -> None:
+    require(type(normal_ui_setup) is bool and (windows_normal_ui_profile(context) if normal_ui_setup
+            else windows_installed_prepared_profile(context))
             and all(row.get(key) == str(context[key]) for key in ("sourceSha", "sourceTree", "runId", "attempt"))
             and row.get("profile") == context["qualificationProfile"] and row.get("attempt") == "1",
             "Windows fullwalk fixed invocation binding differs")
@@ -9238,7 +9371,8 @@ def windows_fullwalk_command_sha(path: str, test: str) -> str:
                     WINDOWS_INSTALLED_TEST, WINDOWS_FULLWALK_PUBLISHER, WINDOWS_FULLWALK_RETIRE,
                     WINDOWS_RUNTIME_PUBLICATION_STAGE, WINDOWS_RUNTIME_PUBLICATION_BEFORE, WINDOWS_RUNTIME_PUBLICATION_AFTER,
                     WINDOWS_RUNTIME_PUBLICATION_SCALAR, WINDOWS_INSTALLED_PASSIVE_TEST, WINDOWS_INSTALLED_PASSIVE_OWNER,
-                    WINDOWS_INSTALLED_PASSIVE_STAGE, WINDOWS_INSTALLED_PASSIVE_OBSERVER),
+                    WINDOWS_INSTALLED_PASSIVE_STAGE, WINDOWS_INSTALLED_PASSIVE_OBSERVER,
+                    WINDOWS_NORMAL_UI_SETUP_STAGE, WINDOWS_NORMAL_UI_SETUP_OBSERVER),
             "Windows fullwalk command role differs")
     command = '"' + str(windows_ordinary_path(path)) + '" ' + test + " --exact --ignored --nocapture --test-threads=1"
     raw = command.encode("utf-16-le")
@@ -9282,6 +9416,8 @@ def windows_fullwalk_stamp(value: str) -> dict:
 
 
 def windows_fullwalk_precheck_data(context: dict, raw: bytes) -> dict:
+    if windows_normal_ui_profile(context):
+        return windows_normal_ui_setup_precheck_data(context, raw)
     production = windows_runtime_publication_profile(context)
     passive = windows_installed_passive_profile(context)
     row = windows_fullwalk_wire(raw, windows_fullwalk_kind(context, "precheck"))
@@ -9408,9 +9544,12 @@ def windows_fullwalk_publisher_exit(context: dict, raw: bytes, precheck_raw: byt
 
 def windows_runtime_publication_exit(context: dict, raw: bytes, precheck_raw: bytes, role: str, outcome: str) -> dict:
     passive = windows_installed_passive_profile(context)
+    normal_ui = windows_normal_ui_profile(context)
     require(windows_installed_publisher_required(context) and outcome == "success",
             "Windows actual producer original step has not returned and closed")
-    roles = ({"stage": ("owner", WINDOWS_INSTALLED_PASSIVE_STAGE, "0"), "helperSuccess": ("helper", None, "0"),
+    roles = ({"stage": ("owner", WINDOWS_NORMAL_UI_SETUP_STAGE, "0"), "helperSuccess": ("helper", None, "0"),
+              "observe": ("owner", WINDOWS_NORMAL_UI_SETUP_OBSERVER, "0")} if normal_ui else
+             {"stage": ("owner", WINDOWS_INSTALLED_PASSIVE_STAGE, "0"), "helperSuccess": ("helper", None, "0"),
               "observe": ("owner", WINDOWS_INSTALLED_PASSIVE_OBSERVER, "0")} if passive else
              {"scalar": ("owner", WINDOWS_RUNTIME_PUBLICATION_SCALAR, "0"), "stage": ("owner", WINDOWS_RUNTIME_PUBLICATION_STAGE, "0"),
              "helperSuccess": ("helper", None, "0"), "before": ("owner", WINDOWS_RUNTIME_PUBLICATION_BEFORE, "0"),
@@ -9418,8 +9557,8 @@ def windows_runtime_publication_exit(context: dict, raw: bytes, precheck_raw: by
     require(role in roles, "Windows actual producer original role differs")
     artifact, test, code = roles[role]
     pre = windows_fullwalk_precheck_data(context, precheck_raw)
-    row = windows_fullwalk_wire(raw, "passive-exit" if passive else "production-exit")
-    windows_fullwalk_binding(row, context)
+    row = windows_fullwalk_wire(raw, "normal-ui-setup-exit" if normal_ui else "passive-exit" if passive else "production-exit")
+    windows_fullwalk_binding(row, context, normal_ui_setup=normal_ui)
     expected = {"role": role, "artifactSha256": pre[artifact + "ArtifactSha256"],
         "precheckSha256": hashlib.sha256(precheck_raw).hexdigest(),
         "commandSha256": (windows_fullwalk_command_sha(pre["ownerArtifact"], test)
@@ -9490,7 +9629,9 @@ def windows_runtime_publication_observation(context: dict, raw: bytes, precheck_
                                             roster_raw: bytes, test: str) -> dict:
     """Strict DATA from original independent readers; never synthesize creation/seal receipts."""
     passive = windows_installed_passive_profile(context)
-    roles = ((WINDOWS_INSTALLED_PASSIVE_STAGE, WINDOWS_INSTALLED_PASSIVE_OBSERVER) if passive else
+    normal_ui = windows_normal_ui_profile(context)
+    roles = ((WINDOWS_NORMAL_UI_SETUP_STAGE, WINDOWS_NORMAL_UI_SETUP_OBSERVER) if normal_ui else
+             (WINDOWS_INSTALLED_PASSIVE_STAGE, WINDOWS_INSTALLED_PASSIVE_OBSERVER) if passive else
              (WINDOWS_RUNTIME_PUBLICATION_STAGE, WINDOWS_RUNTIME_PUBLICATION_BEFORE, WINDOWS_RUNTIME_PUBLICATION_AFTER))
     require(windows_installed_publisher_required(context) and test in roles,
             "Windows producer observation profile/role differs")
@@ -9498,8 +9639,8 @@ def windows_runtime_publication_observation(context: dict, raw: bytes, precheck_
             and all(byte == 10 or 32 <= byte <= 126 for byte in raw), "Windows producer observation framing differs")
     pre = windows_fullwalk_precheck_data(context, precheck_raw)
     items = {row["path"]: row for row in windows_fullwalk_roster(roster_raw)}
-    stage = test == (WINDOWS_INSTALLED_PASSIVE_STAGE if passive else WINDOWS_RUNTIME_PUBLICATION_STAGE)
-    proof_count = 0 if stage else (3 if passive or test == WINDOWS_RUNTIME_PUBLICATION_BEFORE else 6)
+    stage = test == (WINDOWS_NORMAL_UI_SETUP_STAGE if normal_ui else WINDOWS_INSTALLED_PASSIVE_STAGE if passive else WINDOWS_RUNTIME_PUBLICATION_STAGE)
+    proof_count = 0 if stage else (3 if normal_ui or passive or test == WINDOWS_RUNTIME_PUBLICATION_BEFORE else 6)
     directories = ("suffix-mrk", "source-input", "source-target", "source-version", "source-python",
                    *(() if stage else WINDOWS_FULLWALK_DIRECTORY_ROLES[1:]))
     roles = (*directories, *("source/" + name for name in WINDOWS_FULLWALK_PAYLOAD_NAMES),
@@ -9507,15 +9648,16 @@ def windows_runtime_publication_observation(context: dict, raw: bytes, precheck_
     lines = raw.splitlines(keepends=True)
     prefix = len(WINDOWS_RUNTIME_PUBLICATION_OBSERVATION_FIELDS) + 1
     require(len(lines) == prefix + proof_count + len(roles), "Windows producer complete observation count differs")
-    row = windows_fullwalk_wire(b"".join(lines[:prefix]), "passive-observation" if passive else "production-observation")
-    windows_fullwalk_binding(row, context)
+    row = windows_fullwalk_wire(b"".join(lines[:prefix]),
+        "normal-ui-setup-observation" if normal_ui else "passive-observation" if passive else "production-observation")
+    windows_fullwalk_binding(row, context, normal_ui_setup=normal_ui)
     windows_fullwalk_blob(pre, "roster", roster_raw)
     windows_fullwalk_blob(row, "precheck", precheck_raw)
     windows_fullwalk_blob(row, "roster", roster_raw)
     expected = {"observerTest": test, "payloadFiles": "46", "objectCount": str(len(roles)), "proofCount": str(proof_count),
         "sourceReaders": "47" if stage else "0", "payloadWriters": "47" if stage else "0",
         "postcheckReaders": "47" if stage else "94", "parentBookSettled": "true", "unknown": "false",
-        "actualFixedProducerObserved": "true" if passive and not stage or test == WINDOWS_RUNTIME_PUBLICATION_AFTER else "false",
+        "actualFixedProducerObserved": "true" if (normal_ui or passive) and not stage or test == WINDOWS_RUNTIME_PUBLICATION_AFTER else "false",
         "runtimeConsumerEnabled": "false", "pythonExecuted": "false", "appLaunched": "false",
         "resultCloseGate": "original-observer-exit-zero-required"}
     require(all(row[key] == value for key, value in expected.items())
@@ -9527,7 +9669,7 @@ def windows_runtime_publication_observation(context: dict, raw: bytes, precheck_
                     for key in ("artifactBytes", "artifactSha256", "artifactIdentity")),
             "Windows producer observation source/input/original compiler binding differs")
     proofs = []
-    proof_roles = WINDOWS_INSTALLED_PASSIVE_PROOFS if passive else WINDOWS_RUNTIME_PUBLICATION_PROOFS
+    proof_roles = WINDOWS_NORMAL_UI_SETUP_PROOFS if normal_ui else WINDOWS_INSTALLED_PASSIVE_PROOFS if passive else WINDOWS_RUNTIME_PUBLICATION_PROOFS
     for line, (role, (_, limit)) in zip(lines[prefix:prefix + proof_count], proof_roles.items()):
         value = line.decode("ascii").removesuffix("\n")
         parts = value.removeprefix("proof=").split("|")
@@ -9692,7 +9834,10 @@ def windows_runtime_publication_finalize(context: dict, through: str) -> None:
 
 
 def windows_fullwalk_pins(context: dict) -> list[dict]:
-    require(windows_installed_prepared_profile(context), "Windows supplier preparation is profile-only")
+    # Pure source DATA is shared; the UI's actual preparation entry below still
+    # requires independently finalized positive prerequisites, not this name.
+    require(windows_installed_prepared_profile(context) or windows_normal_ui_profile(context),
+            "Windows supplier preparation is profile-only")
     source = Path(context["source"])
     rows = {row["path"]: row for row in validate_environment_inventory(context["sourceFiles"], maximum=64 << 20)}
     expected = []
@@ -9717,6 +9862,8 @@ def windows_fullwalk_prepare_outputs_absent(root: Path) -> None:
 
 def windows_fullwalk_prepare_inputs(context: dict) -> dict:
     # All pin/tool checks precede even the private supplier staging directory.
+    if windows_normal_ui_profile(context):
+        windows_normal_ui_positive_probe(context)
     pins = windows_fullwalk_pins(context)
     root = Path(context["root"])
     require(len(windows_ordinary_path(str(root)).parents) + 1 <= 19, "Windows fullwalk root exceeds its original-file envelope")
@@ -9729,8 +9876,10 @@ def windows_fullwalk_prepare_inputs(context: dict) -> dict:
     return {"pins": pins, "curl": {"path": str(curl), "sha256": digest}}
 
 
-def windows_fullwalk_curl_argv(context: dict) -> list[str]:
-    admission = closed_object(context["fullwalkInputs"], {"pins", "curl"}, "Windows supplier admission fields differ")
+def windows_fullwalk_curl_argv(context: dict, *, setup_inputs: dict | None = None) -> list[str]:
+    require((setup_inputs is not None) == windows_normal_ui_profile(context), "Windows supplier admission role differs")
+    admission = closed_object(setup_inputs if setup_inputs is not None else context["fullwalkInputs"],
+                              {"pins", "curl"}, "Windows supplier admission fields differ")
     tool = closed_object(admission["curl"], {"path", "sha256"}, "Windows supplier tool fields differ")
     require(sha256_value(tool["sha256"]), "Windows supplier tool digest differs")
     return [tool["path"], "--disable", "--proto", "=https", "--tlsv1.2", "--noproxy", "*",
@@ -9784,7 +9933,8 @@ def windows_fullwalk_payload_rows(value: object, *, physical: bool) -> list[dict
 
 def windows_fullwalk_prepared_data(context: dict, receipt_raw: bytes, manifest_raw: bytes, physical: list[dict]) -> dict:
     """Strict fixed-profile DATA. The receipt does not claim native verification."""
-    require(windows_installed_prepared_profile(context), "Windows prepared DATA requires its explicit profile")
+    require(windows_installed_prepared_profile(context) or windows_normal_ui_profile(context),
+            "Windows prepared DATA requires its explicit profile")
     receipt = closed_object(bounded_json(receipt_raw, 4096), {"manifestSha256", "protocolSha256", "qualification",
         "inputSha256", "supplierInventorySha256", "stdlibInventorySha256", "noticeSha256"},
         "Windows fixed preparer receipt fields differ")
@@ -9899,16 +10049,20 @@ def windows_fullwalk_prepared(context: dict) -> dict:
     return prepared
 
 
-def windows_fullwalk_acquire(context: dict, environment: dict, deadline: float) -> dict:
+def windows_fullwalk_acquire(context: dict, environment: dict, deadline: float, *, setup_inputs: dict | None = None) -> dict:
     root = Path(context["root"])
-    admission = context["fullwalkInputs"]
+    normal_ui = windows_normal_ui_profile(context)
+    require((setup_inputs is not None) == normal_ui, "Windows supplier acquisition role differs")
+    if normal_ui:
+        windows_normal_ui_positive_probe(context)
+    admission = setup_inputs if normal_ui else context["fullwalkInputs"]
     require(admission["pins"] == windows_fullwalk_pins(context), "Windows supplier original source admission changed")
     inputs, archive = root / "inputs", root / "inputs" / WINDOWS_FULLWALK_ZIP
     windows_installed_directories(inputs)
     require(not archive.exists() and not archive.is_symlink(),
             "Windows supplier/preparation is one-use and output is occupied")
     windows_fullwalk_prepare_outputs_absent(root)
-    argv = windows_fullwalk_curl_argv(context)
+    argv = windows_fullwalk_curl_argv(context, setup_inputs=setup_inputs)
     require(windows_fullwalk_curl_sha256(Path(argv[0])) == admission["curl"]["sha256"],
             "Windows supplier original fixed tool changed immediately before invocation")
     # This downloader/preparer route never owns a logon child. The SAME acquire
@@ -9972,7 +10126,7 @@ def windows_fullwalk_native_argv(cargo: str, context: dict) -> list[str]:
     return [cargo, "test", "--locked", "--offline", "--jobs", "1", "--no-default-features", "--target", TARGETS["windows"],
         "--manifest-path", str(Path(context["source"]) / WINDOWS_INSTALLED_CRATE / "Cargo.toml"),
         "--target-dir", str(Path(context["root"]) / "target"),
-        *(["--features", ",".join(windows_installed_features(context, "native"))] if windows_runtime_publication_profile(context) else []),
+        *(["--features", ",".join(windows_installed_features(context, "native"))] if windows_installed_features(context, "native") else []),
         "--lib", "--no-run", "--message-format=json"]
 
 
@@ -10802,7 +10956,7 @@ def windows_installed_binding() -> dict:
     require(re.fullmatch(r"[0-9a-f]{40}", sha) is not None and sha != "0" * 40
             and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is not None
             and ref in ("refs/heads/verify/desktop-windows-installed-native", WINDOWS_RUNTIME_PUBLICATION_REF,
-                        WINDOWS_INSTALLED_PASSIVE_REF)
+                        WINDOWS_INSTALLED_PASSIVE_REF, WINDOWS_NORMAL_UI_REF)
             and e.get("GITHUB_WORKFLOW_SHA") == sha
             and e.get("GITHUB_WORKFLOW_REF") == repository + "/.github/workflows/desktop-foundation.yml@" + ref
             and re.fullmatch(r"[1-9][0-9]{0,19}", e.get("GITHUB_RUN_ID", "")) is not None
@@ -10815,7 +10969,9 @@ def windows_installed_binding() -> dict:
             or ref == WINDOWS_RUNTIME_PUBLICATION_REF and event == "workflow_dispatch"
             and dispatch == WINDOWS_RUNTIME_PUBLICATION_DISPATCH and expected == sha
             or ref == WINDOWS_INSTALLED_PASSIVE_REF and event == "workflow_dispatch"
-            and dispatch == WINDOWS_INSTALLED_PASSIVE_DISPATCH and expected == sha,
+            and dispatch == WINDOWS_INSTALLED_PASSIVE_DISPATCH and expected == sha
+            or ref == WINDOWS_NORMAL_UI_REF and event == "workflow_dispatch"
+            and dispatch == WINDOWS_NORMAL_UI_DISPATCH and expected == sha,
             "Windows native dispatch differs or has partial/conflicting selectors")
     binding = {"scope": WINDOWS_INSTALLED_SCOPE, "sourceSha": sha, "repository": repository, "ref": ref,
         "workflowSha": sha, "workflowRef": e["GITHUB_WORKFLOW_REF"], "runId": e["GITHUB_RUN_ID"], "attempt": 1,
@@ -10826,6 +10982,8 @@ def windows_installed_binding() -> dict:
         binding["qualificationProfile"] = WINDOWS_RUNTIME_PUBLICATION_PROFILE
     elif event == "workflow_dispatch" and dispatch == WINDOWS_INSTALLED_PASSIVE_DISPATCH:
         binding["qualificationProfile"] = WINDOWS_INSTALLED_PASSIVE_PROFILE
+    elif event == "workflow_dispatch" and dispatch == WINDOWS_NORMAL_UI_DISPATCH:
+        binding["qualificationProfile"] = WINDOWS_NORMAL_UI_PROFILE
     return binding
 
 
@@ -10915,7 +11073,8 @@ def windows_installed_context(*, create: bool, retention_only: bool = False) -> 
             context["fullwalkInputs"] = windows_fullwalk_prepare_inputs(context)
         write_json(root / "context.json", context)
         public = {key: context[key] for key in (*binding, "sourceTree", "sourceFiles", "pythonIdentity", "sdk", "windowsVersion")}
-        public.update(rust=RUST, target=TARGETS["windows"], python=PYTHON, notVerified=list(WINDOWS_INSTALLED_NOT_VERIFIED))
+        public.update(rust=RUST, target=TARGETS["windows"], python=PYTHON,
+            notVerified=list(WINDOWS_NORMAL_UI_NOT_VERIFIED if windows_normal_ui_profile(context) else WINDOWS_INSTALLED_NOT_VERIFIED))
         write_json(root / "public-bindings.json", public)
         with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
             output.write("root=" + str(root) + "\n")
@@ -10924,7 +11083,7 @@ def windows_installed_context(*, create: bool, retention_only: bool = False) -> 
         context = read_bounded_json(root / "context.json", 256 << 10)
         require(context.get("root") == str(root) and context.get("source") == str(source)
                 and context.get("python") == str(selected) and all(context.get(k) == v for k, v in binding.items())
-                and windows_installed_prepared_profile(context) == ("qualificationProfile" in binding)
+                and context.get("qualificationProfile") == binding.get("qualificationProfile")
                 and ("fullwalkInputs" in context) == windows_installed_prepared_profile(context),
                 "Windows native original context changed")
         windows_installed_inputs(context, retention_only=retention_only)
@@ -10934,6 +11093,12 @@ def windows_installed_context(*, create: bool, retention_only: bool = False) -> 
 
 def windows_installed_metadata(context: dict) -> dict:
     value = read_bounded_json(Path(context["root"]) / "metadata.json", 2 << 20)
+    return windows_installed_native_graph(value, source=Path(context["source"]), features=windows_installed_features(context, "native"))
+
+
+def windows_installed_native_graph(value: object, *, source: Path, features: list[str]) -> dict:
+    """The original three-package, lib-only native graph; never the UI graph."""
+    require(features in ([], ["runtime-publication"]), "Windows native runtime-only feature role differs")
     require(type(value) is dict and type(value.get("packages")) is list and len(value["packages"]) == 3,
             "Windows native standalone package graph differs")
     packages = {p["name"]: p for p in value["packages"]}
@@ -10941,7 +11106,7 @@ def windows_installed_metadata(context: dict) -> dict:
     require(set(packages) == set(expected) and all(p["version"] == expected[n] for n, p in packages.items()),
             "Windows native locked package identities differ")
     native = packages["mrk-windows-installed-native"]
-    require(native.get("source") is None and native.get("manifest_path") == str(Path(context["source"]) / WINDOWS_INSTALLED_CRATE / "Cargo.toml")
+    require(native.get("source") is None and native.get("manifest_path") == str(source / WINDOWS_INSTALLED_CRATE / "Cargo.toml")
             and all(packages[n].get("source") == "registry+https://github.com/rust-lang/crates.io-index" for n in ("windows-sys", "windows-link"))
             and all(p.get("targets") and all(t.get("kind") == ["lib"] for t in p["targets"]) for p in packages.values()),
             "Windows native graph has a foreign source, target or build script")
@@ -10950,12 +11115,589 @@ def windows_installed_metadata(context: dict) -> dict:
             and len(resolve["nodes"]) == 3, "Windows native original resolved root differs")
     nodes = {n["id"]: n for n in resolve["nodes"]}
     require(set(nodes) == {p["id"] for p in packages.values()}
-            and native.get("features") == {"qualification-result": [], "runtime-publication": []}
-            and nodes[native["id"]].get("features") == windows_installed_features(context, "native")
+            and native.get("features") == WINDOWS_NATIVE_DECLARED_FEATURES
+            and nodes[native["id"]].get("features") == features
             and nodes[native["id"]].get("dependencies") == [packages["windows-sys"]["id"]]
             and nodes[packages["windows-sys"]["id"]].get("dependencies") == [packages["windows-link"]["id"]]
             and nodes[packages["windows-link"]["id"]].get("dependencies") == [], "Windows native resolved edges differ")
     return packages
+
+
+def windows_normal_ui_native_graph(value: object, lock: object, *, source: Path, root: Path) -> dict:
+    """The one cheap locked native graph, not a permissive app-graph variant."""
+    registry = "registry+https://github.com/rust-lang/crates.io-index"
+    require(type(lock) is dict and lock.get("version") == 4 and type(lock.get("package")) is list
+            and len(lock["package"]) == len(WINDOWS_NORMAL_UI_NATIVE_PACKAGES), "Windows UI native lock differs")
+    locked = {}
+    for item in lock["package"]:
+        require(type(item) is dict and type(item.get("name")) is str and type(item.get("version")) is str,
+                "Windows UI native lock identity differs")
+        key = (item["name"], item["version"])
+        require(key in WINDOWS_NORMAL_UI_NATIVE_PACKAGES and key not in locked
+                and (item.get("source") is None if key[0] == "mrk-windows-installed-native" else
+                     item.get("source") == registry and sha256_value(item.get("checksum"))),
+                "Windows UI native lock contains a foreign/duplicate package")
+        locked[key] = item
+    require(set(locked) == WINDOWS_NORMAL_UI_NATIVE_PACKAGES, "Windows UI native lock inventory is incomplete")
+    require(type(value) is dict and value.get("version") == 1 and type(value.get("packages")) is list
+            and len(value["packages"]) == len(locked), "Windows UI native metadata inventory differs")
+    packages, ids = {}, {}
+    for package in value["packages"]:
+        require(type(package) is dict and type(package.get("id")) is str and 0 < len(package["id"]) <= 4096
+                and type(package.get("name")) is str and type(package.get("version")) is str
+                and type(package.get("manifest_path")) is str and type(package.get("features")) is dict,
+                "Windows UI native package identity differs")
+        key = (package["name"], package["version"])
+        require(key in locked and key not in ids and package["id"] not in packages
+                and package.get("source") == locked[key].get("source"), "Windows UI native package is foreign/duplicated")
+        manifest = Path(package["manifest_path"])
+        if key[0] == "mrk-windows-installed-native":
+            require(manifest == source / WINDOWS_INSTALLED_CRATE / "Cargo.toml"
+                    and package["features"] == WINDOWS_NATIVE_DECLARED_FEATURES,
+                    "Windows UI native root declaration differs")
+        else:
+            registry_root = root / "cargo/registry/src"
+            require(manifest.is_absolute() and manifest.is_relative_to(registry_root)
+                    and len(manifest.relative_to(registry_root).parts) == 3
+                    and manifest.parent.name == key[0] + "-" + key[1] and manifest.name == "Cargo.toml",
+                    "Windows UI native dependency left private acquisition")
+        targets = package.get("targets")
+        require(type(targets) is list and 0 < len(targets) <= 512, "Windows UI native target inventory differs")
+        for target in targets:
+            require(type(target) is dict and type(target.get("name")) is str and type(target.get("kind")) is list
+                    and type(target.get("crate_types")) is list and type(target.get("src_path")) is str,
+                    "Windows UI native target declaration differs")
+            path = Path(target["src_path"])
+            require(path.is_absolute() and path.is_relative_to(manifest.parent)
+                    and not any(part in {".", ".."} for part in path.relative_to(manifest.parent).parts),
+                    "Windows UI native target source left package")
+        if key[0] == "mrk-windows-installed-native":
+            require(len(targets) == 1 and targets[0]["kind"] == ["lib"] and targets[0]["crate_types"] == ["lib"]
+                    and targets[0]["name"] == "mrk_windows_installed_native"
+                    and targets[0]["src_path"] == str(manifest.parent / "src/lib.rs"),
+                    "Windows UI cheap native root must be one libtest/no build script")
+        packages[package["id"]], ids[key] = package, package["id"]
+    native = ids[("mrk-windows-installed-native", "0.1.0")]
+    require(value.get("workspace_root") == str(source / WINDOWS_INSTALLED_CRATE)
+            and value.get("workspace_members") == [native] and value.get("workspace_default_members") == [native]
+            and value.get("target_directory") == str(root / "target"), "Windows UI native workspace/target differs")
+    resolve = value.get("resolve")
+    require(type(resolve) is dict and resolve.get("root") == native and type(resolve.get("nodes")) is list
+            and len(resolve["nodes"]) == len(packages), "Windows UI native resolution differs")
+    nodes = {}
+    for node in resolve["nodes"]:
+        require(type(node) is dict and type(node.get("id")) is str and node["id"] in packages and node["id"] not in nodes
+                and type(node.get("features")) is list and type(node.get("dependencies")) is list
+                and type(node.get("deps")) is list, "Windows UI native resolved node differs")
+        features = node["features"]
+        require(all(type(item) is str for item in features) and features == sorted(set(features))
+                and set(features) <= set(packages[node["id"]]["features"]), "Windows UI native active feature differs")
+        package = packages[node["id"]]
+        expected = set()
+        for declaration in locked[(package["name"], package["version"])].get("dependencies", []):
+            require(type(declaration) is str, "Windows UI native locked dependency differs")
+            pieces = declaration.split(" ")
+            require(len(pieces) in (1, 2), "Windows UI native locked dependency spelling differs")
+            candidates = [identity for key, identity in ids.items()
+                          if key[0] == pieces[0] and (len(pieces) == 1 or key[1] == pieces[1])]
+            require(len(candidates) == 1 and candidates[0] not in expected,
+                    "Windows UI native locked dependency is missing/ambiguous")
+            expected.add(candidates[0])
+        require(all(type(item) is str for item in node["dependencies"])
+                and len(node["dependencies"]) == len(expected) and set(node["dependencies"]) == expected,
+                "Windows UI native resolved edges differ from lock")
+        edges = []
+        for edge in node["deps"]:
+            require(type(edge) is dict and edge.get("pkg") in expected and type(edge.get("name")) is str
+                    and edge["name"] == packages[edge["pkg"]]["name"].replace("-", "_")
+                    and type(edge.get("dep_kinds")) is list and 0 < len(edge["dep_kinds"]) <= 2,
+                    "Windows UI native dependency role differs")
+            for kind in edge["dep_kinds"]:
+                require(type(kind) is dict and set(kind) == {"kind", "target"} and kind["kind"] in (None, "build")
+                        and (kind["target"] is None or type(kind["target"]) is str), "Windows UI native dependency kind differs")
+            edges.append(edge["pkg"])
+        require(len(edges) == len(expected) and set(edges) == expected, "Windows UI native edge tables differ")
+        nodes[node["id"]] = node
+    require(nodes[native]["features"] == ["desktop-ui"]
+            and {(packages[item]["name"], packages[item]["version"]) for item in nodes[native]["dependencies"]}
+                == {("windows-sys", "0.61.2"), ("windows", "0.61.3"), ("webview2-com", "0.38.2")},
+            "Windows UI cheap probe selected additional features or a GUI graph")
+    seen, pending = set(), [native]
+    while pending:
+        item = pending.pop()
+        if item not in seen:
+            seen.add(item); pending.extend(nodes[item]["dependencies"])
+    require(seen == set(nodes), "Windows UI native graph has disconnected packages")
+    return {"packages": packages, "nodes": nodes, "nativeId": native}
+
+
+def windows_normal_ui_native_metadata(context: dict) -> dict:
+    require(windows_normal_ui_profile(context), "Windows UI native graph requires its explicit profile")
+    source, root = Path(context["source"]), Path(context["root"])
+    value = bounded_json(windows_installed_bytes(root / "metadata.json", 8 << 20), 8 << 20, max_nodes=200000)
+    try:
+        lock = tomllib.loads(windows_installed_bytes(source / WINDOWS_INSTALLED_CRATE / "Cargo.lock", 256 << 10).decode("utf-8"))
+    except (UnicodeError, tomllib.TOMLDecodeError):
+        raise CheckFailure("Windows UI native source lock is malformed") from None
+    return windows_normal_ui_native_graph(value, lock, source=source, root=root)
+
+
+def windows_normal_ui_native_test_path(raw: bytes, graph: dict, *, source: Path, root: Path) -> Path:
+    require(type(raw) is bytes and 0 < len(raw) <= 16 << 20, "Windows UI native compiler stream differs")
+    lines = raw.splitlines()
+    require(0 < len(lines) <= 4096, "Windows UI native compiler message count exceeds bound")
+    packages, nodes, native = graph["packages"], graph["nodes"], graph["nativeId"]
+    found, finished, compiled_packages = [], False, set()
+    for line in lines:
+        message = bounded_json(line, 2 << 20)
+        require(not finished and type(message) is dict and message.get("reason") in (
+            "compiler-artifact", "compiler-message", "build-script-executed", "build-finished"),
+            "Windows UI native compiler message/order differs")
+        reason = message["reason"]
+        if reason == "build-finished":
+            require(message.get("success") is True, "Windows UI native original build failed")
+            finished = True
+            continue
+        key = message.get("package_id")
+        require(type(key) is str and key in packages, "Windows UI native compiled a foreign package")
+        if reason == "compiler-message":
+            diagnostic = message.get("message")
+            require(type(diagnostic) is dict and diagnostic.get("level") != "error", "Windows UI native compiler error is not success")
+            continue
+        if reason == "build-script-executed":
+            require(key != native and any(target["kind"] == ["custom-build"] for target in packages[key]["targets"]),
+                    "Windows UI native build script is undeclared")
+            continue
+        target, profile = message.get("target"), message.get("profile")
+        require(type(target) is dict and type(profile) is dict and type(profile.get("test")) is bool
+                and any(all(same_compile_json(target.get(name), candidate.get(name))
+                            for name in ("name", "kind", "crate_types", "src_path")) for candidate in packages[key]["targets"])
+                and target.get("kind") in (["lib"], ["proc-macro"], ["custom-build"])
+                and message.get("manifest_path") == packages[key]["manifest_path"]
+                and message.get("features") == nodes[key]["features"], "Windows UI native selected unit/features differ")
+        compiled_packages.add(key)
+        executable = message.get("executable")
+        if executable is not None:
+            require(key == native and target["kind"] == ["lib"] and profile["test"] is True
+                    and message.get("fresh") is False, "Windows UI prerequisite must be the fresh original native libtest")
+            path = ordinary_windows_executable(executable, target_root=root / "target")
+            require(path.parent == root / "target/x86_64-pc-windows-msvc/debug/deps"
+                    and re.fullmatch(r"mrk_windows_installed_native-[0-9a-f]{16}\.exe", path.name) is not None,
+                    "Windows UI native artifact path differs")
+            found.append(path)
+        else:
+            require(profile["test"] is False, "Windows UI native unexpected test unit")
+    require(finished and len(found) == 1 and compiled_packages == set(nodes),
+            "Windows UI native compile did not produce its complete graph and one original libtest")
+    return found[0]
+
+
+def windows_normal_ui_native_artifact(context: dict) -> dict:
+    root, source = Path(context["root"]), Path(context["source"])
+    messages = root / "compile-messages.jsonl"
+    path = windows_normal_ui_native_test_path(windows_installed_bytes(messages, 16 << 20),
+        windows_normal_ui_native_metadata(context), source=source, root=root)
+    before = path.lstat()
+    record = windows_installed_record(path, 128 << 20)
+    require(windows_installed_state(before) == windows_installed_state(path.lstat()), "Windows UI native artifact changed")
+    return {"path": str(path), **record,
+            "identity": [before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns],
+            "messages": windows_installed_record(messages, 16 << 20)}
+
+
+def windows_normal_ui_app_graph(value: object, lock: object, *, source: Path, root: Path, observer: bool) -> dict:
+    """Source-locked GUI roles, separate from the historical headless graph.
+
+    Cargo remains the locked feature resolver. Metadata is its bounded union,
+    not permission to substitute that union for a host/target compiler unit.
+    The original stream below records each actual unit and checks exact material
+    app/native/browser roles; no second general Cargo resolver is introduced.
+    """
+    registry = "registry+https://github.com/rust-lang/crates.io-index"
+    require(type(observer) is bool and type(lock) is dict and type(lock.get("version")) is int and lock["version"] == 4
+            and type(lock.get("package")) is list and 4 <= len(lock["package"]) <= 2048,
+            "Windows GUI source-bound lock differs")
+    locked = {}
+    for row in lock["package"]:
+        require(type(row) is dict and type(row.get("name")) is str and type(row.get("version")) is str
+                and (row.get("source") is None or type(row["source"]) is str), "Windows GUI lock identity differs")
+        key = (row["name"], row["version"], row.get("source"))
+        require(key not in locked and (key[2] is None or key[2] == registry and sha256_value(row.get("checksum"))),
+                "Windows GUI lock source/checksum differs")
+        locked[key] = row
+    require({key[:2] for key in locked if key[2] is None} == {(name, "0.1.0") for name in WINDOWS_INSTALLED_APP_LOCALS},
+            "Windows GUI source lock local inventory differs")
+    require(type(value) is dict and type(value.get("version")) is int and value["version"] == 1 and type(value.get("packages")) is list
+            and 4 <= len(value["packages"]) <= 1024, "Windows GUI metadata inventory differs")
+    packages, local, identities = {}, {}, set()
+    for package in value["packages"]:
+        require(type(package) is dict and type(package.get("id")) is str and 0 < len(package["id"]) <= 4096
+                and type(package.get("name")) is str and type(package.get("version")) is str
+                and type(package.get("manifest_path")) is str and type(package.get("features")) is dict
+                and (package.get("source") is None or type(package["source"]) is str), "Windows GUI package identity differs")
+        key = (package["name"], package["version"], package.get("source"))
+        require(key in locked and key not in identities and package["id"] not in packages,
+                "Windows GUI package is duplicate/outside the source lock")
+        identities.add(key)
+        require(0 < len(package["manifest_path"]) <= 16384 and not any(part in {".", ".."}
+            for part in re.split(r"[\\/]", package["manifest_path"])), "Windows GUI package manifest spelling differs")
+        manifest = Path(package["manifest_path"])
+        if key[2] is None:
+            require(key[0] in ("mobile-release-kit-desktop", "mrk-windows-installed-native")
+                    and key[0] not in local and manifest == source / WINDOWS_INSTALLED_APP_LOCALS[key[0]],
+                    "Windows GUI selected a foreign local package")
+            local[key[0]] = package["id"]
+        else:
+            base = root / "cargo/registry/src"
+            require(manifest.is_absolute() and manifest.is_relative_to(base) and len(manifest.relative_to(base).parts) == 3
+                    and manifest.parent.name == key[0] + "-" + key[1] and manifest.name == "Cargo.toml",
+                    "Windows GUI package left its private locked acquisition")
+        require(type(package.get("targets")) is list and 0 < len(package["targets"]) <= 512,
+                "Windows GUI declared target inventory differs")
+        for target in package["targets"]:
+            require(type(target) is dict and type(target.get("name")) is str and type(target.get("kind")) is list
+                    and type(target.get("crate_types")) is list and type(target.get("src_path")) is str,
+                    "Windows GUI target declaration differs")
+            path = Path(target["src_path"])
+            require(path.is_absolute() and path.is_relative_to(manifest.parent)
+                    and not any(part in {".", ".."} for part in re.split(r"[\\/]", target["src_path"])),
+                    "Windows GUI target source left its original package")
+        packages[package["id"]] = package
+    require(set(local) == {"mobile-release-kit-desktop", "mrk-windows-installed-native"},
+            "Windows GUI needs exactly its two selected local packages")
+    app, native = local["mobile-release-kit-desktop"], local["mrk-windows-installed-native"]
+    require(value.get("workspace_root") == str(source / WINDOWS_INSTALLED_APP)
+            and value.get("workspace_members") == [app] and value.get("workspace_default_members") == [app]
+            and value.get("target_directory") == str(root / "target"), "Windows GUI workspace/target differs")
+    feature_map = packages[app]["features"]
+    require(feature_map.get("desktop-shell") == ["dep:tauri", "dep:tauri-build", "dep:rfd", "dep:webkit2gtk", "dep:gtk",
+                "mrk-windows-installed-native/desktop-ui-dialogs"]
+            and feature_map.get("custom-protocol") == ["tauri/custom-protocol"]
+            and feature_map.get("windows-installed-observation") == ["mrk-windows-installed-native/windows-installed-observation"]
+            and feature_map.get("default") == [] and packages[native]["features"] == WINDOWS_NATIVE_DECLARED_FEATURES,
+            "Windows GUI material feature forwarding differs")
+    resolve = value.get("resolve")
+    require(type(resolve) is dict and resolve.get("root") == app and type(resolve.get("nodes")) is list
+            and 4 <= len(resolve["nodes"]) <= 1024, "Windows GUI active resolution differs")
+    nodes = {}
+    for node in resolve["nodes"]:
+        require(type(node) is dict and type(node.get("id")) is str and node["id"] in packages and node["id"] not in nodes
+                and type(node.get("features")) is list and type(node.get("dependencies")) is list
+                and type(node.get("deps")) is list, "Windows GUI resolved node differs")
+        features = node["features"]
+        require(all(type(name) is str for name in features) and features == sorted(set(features))
+                and set(features) <= set(packages[node["id"]]["features"]), "Windows GUI active features differ")
+        nodes[node["id"]] = node
+    require(set(nodes) == set(packages), "Windows GUI package/active node inventory differs")
+    native_features = ["desktop-ui", "desktop-ui-dialogs", "qualification-result"]
+    if observer:
+        native_features.append("windows-installed-observation")
+    require(nodes[app]["features"] == windows_normal_ui_features("observer" if observer else "app")
+            and nodes[native]["features"] == native_features, "Windows GUI app/native selected features differ")
+    for key, node in nodes.items():
+        edges = []
+        for edge in node["deps"]:
+            require(type(edge) is dict and type(edge.get("name")) is str and type(edge.get("pkg")) is str
+                    and edge["pkg"] in nodes and type(edge.get("dep_kinds")) is list and 0 < len(edge["dep_kinds"]) <= 3,
+                    "Windows GUI active dependency differs")
+            for kind in edge["dep_kinds"]:
+                require(type(kind) is dict and set(kind) == {"kind", "target"} and kind["kind"] in (None, "dev", "build")
+                        and (kind["target"] is None or type(kind["target"]) is str), "Windows GUI dependency role differs")
+                declarations = packages[key].get("dependencies")
+                require(type(declarations) is list and len(declarations) <= 512, "Windows GUI dependency declarations differ")
+                matches = [dep for dep in declarations if type(dep) is dict
+                    and dep.get("name") == packages[edge["pkg"]]["name"] and dep.get("source") == packages[edge["pkg"]].get("source")
+                    and (dep.get("rename") or dep.get("name", "")).replace("-", "_") == edge["name"]
+                    and dep.get("kind") == kind["kind"] and dep.get("target") == kind["target"]]
+                require(len(matches) == 1, "Windows GUI resolved edge lacks one original declaration")
+            edges.append(edge["pkg"])
+        require(all(type(item) is str for item in node["dependencies"]) and len(set(node["dependencies"])) == len(node["dependencies"])
+                and set(edges) == set(node["dependencies"]), "Windows GUI dependency edge tables differ")
+    seen, pending = set(), [app]
+    while pending:
+        key = pending.pop()
+        if key not in seen:
+            seen.add(key); pending.extend(nodes[key]["dependencies"])
+    require(seen == set(nodes), "Windows GUI contains disconnected resolved packages")
+    require({(packages[key]["name"], packages[key]["version"]) for key in nodes[app]["dependencies"]} == {
+        ("getrandom", "0.3.4"), ("serde", "1.0.228"), ("serde_json", "1.0.145"), ("sha2", "0.10.9"), ("tokio", "1.48.0"),
+        ("mrk-windows-installed-native", "0.1.0"), ("rfd", "0.15.4"), ("tauri", "2.11.5"), ("tauri-build", "2.6.3")},
+        "Windows GUI direct app roles differ")
+    material = {}
+    for name, version in WINDOWS_NORMAL_UI_MATERIAL_PACKAGES.items():
+        selected = [key for key in nodes if (packages[key]["name"], packages[key]["version"], packages[key].get("source"))
+                    == (name, version, registry)]
+        require(len(selected) == 1, "Windows GUI material package is absent/ambiguous")
+        material[name] = selected[0]
+    require(nodes[material["tauri"]]["features"] == sorted(("compression", "custom-protocol", "tauri-runtime-wry", "webview2-com", "webkit2gtk", "wry"))
+            and {"os-webview", "protocol"} <= set(nodes[material["wry"]]["features"])
+            and not {"devtools", "tracing", "mac-proxy", "fullscreen", "transparent"} & set(nodes[material["wry"]]["features"]),
+            "Windows GUI selected a different browser/configuration role")
+    return {"packages": packages, "nodes": nodes, "appId": app, "nativeId": native, "materialIds": material, "observer": observer}
+
+
+def windows_normal_ui_app_metadata(context: dict, *, observer: bool) -> dict:
+    require(windows_normal_ui_profile(context) and type(observer) is bool, "Windows GUI metadata requires its fixed profile")
+    source, root = Path(context["source"]), Path(context["root"])
+    name = "observer-metadata.json" if observer else "normal-app-metadata.json"
+    value = bounded_json(windows_installed_bytes(root / name, 16 << 20), 16 << 20, max_nodes=200000)
+    try:
+        lock = tomllib.loads(windows_installed_bytes(source / WINDOWS_INSTALLED_APP / "Cargo.lock", 8 << 20).decode("utf-8"))
+    except (ValueError, UnicodeError):
+        raise CheckFailure("Windows GUI source lock is malformed") from None
+    return windows_normal_ui_app_graph(value, lock, source=source, root=root, observer=observer)
+
+
+def windows_normal_ui_gui_argv(cargo: str, context: dict, *, observer: bool) -> list[str]:
+    require(type(observer) is bool and windows_normal_ui_profile(context), "Windows GUI compile role differs")
+    return [cargo, "test" if observer else "build", "--locked", "--offline", "--jobs", "1", "--no-default-features",
+        "--target", TARGETS["windows"], "--manifest-path", str(Path(context["source"]) / WINDOWS_INSTALLED_APP / "Cargo.toml"),
+        "--target-dir", str(Path(context["root"]) / "target"), "--features", ",".join(windows_normal_ui_features("observer" if observer else "app")),
+        *(["--test", "installed-shell-observation", "--no-run"] if observer else ["--bin", "mobile-release-kit-desktop"]),
+        "--message-format=json"]
+
+
+def windows_normal_ui_gui_compiler_data(raw: bytes, graph: dict, *, source: Path, root: Path) -> dict:
+    """Validate the complete original stream, including actual host/target units.
+
+    Nonmaterial registry units may use a proper metadata-union subset because
+    resolver2 separates host/build features. Their exact observed features are
+    retained, locally closed and source/lock bound; no host/target union is
+    credited as an actual compiler unit. Exact local/browser roles stay closed.
+    """
+    require(type(raw) is bytes and 0 < len(raw) <= 16 << 20, "Windows GUI compiler stream exceeds its bound")
+    lines = raw.splitlines()
+    require(0 < len(lines) <= 8192, "Windows GUI compiler message count exceeds its bound")
+    packages, nodes, app, native = graph["packages"], graph["nodes"], graph["appId"], graph["nativeId"]
+    units, scripts, script_outputs, found, auxiliary, finished = [], set(), {}, None, None, False
+    for line in lines:
+        row = bounded_json(line, 2 << 20)
+        require(not finished and type(row) is dict and row.get("reason") in (
+            "compiler-artifact", "compiler-message", "build-script-executed", "build-finished"), "Windows GUI compiler stream order differs")
+        reason = row["reason"]
+        if reason == "build-finished":
+            require(row.get("success") is True, "Windows GUI original compiler did not succeed")
+            finished = True; continue
+        key = row.get("package_id")
+        require(type(key) is str and key in nodes, "Windows GUI compiled outside its active locked graph")
+        package = packages[key]
+        if reason == "build-script-executed":
+            require(type(row.get("out_dir")) is str and len(row["out_dir"]) <= 16384,
+                    "Windows GUI original build output spelling differs")
+            path = Path(row["out_dir"])
+            require(key in scripts and path.is_absolute() and path.is_relative_to(root / "target")
+                    and path.name == "out" and not any(part in {".", ".."} for part in re.split(r"[\\/]", str(path)))
+                    and path.parent.parent in (root / "target/debug/build", root / "target" / TARGETS["windows"] / "debug/build")
+                    and re.fullmatch(re.escape(package["name"]) + r"-[0-9a-f]{16}", path.parent.name) is not None
+                    and type(row.get("linked_libs")) is list and all(type(item) is str for item in row["linked_libs"]),
+                    "Windows GUI original build-script output differs")
+            if key in (app, native, graph["materialIds"]["webview2-com-sys"]):
+                require(path.parent.parent == root / "target" / TARGETS["windows"] / "debug/build",
+                        "Windows GUI material build output is not target-bound")
+            script_outputs.setdefault(key, []).append(row)
+            continue
+        target, profile = row.get("target"), row.get("profile")
+        require(type(target) is dict and any(same_compile_json(target, declared) for declared in package["targets"])
+                and (row.get("manifest_path") is None or row["manifest_path"] == package["manifest_path"]),
+                "Windows GUI compiler target differs from original declarations")
+        if reason == "compiler-message":
+            require(type(row.get("message")) is dict and row["message"].get("level") != "error",
+                    "Windows GUI original stream contains a compiler error")
+            continue
+        kind = target.get("kind")
+        require(kind in (["lib"], ["rlib"], ["proc-macro"], ["custom-build"])
+                or key == app and (kind == ["bin"] or graph["observer"] and kind == ["test"]),
+                "Windows GUI compiler selected an unrelated executable/test")
+        features = row.get("features")
+        require(type(features) is list and all(type(name) is str for name in features) and features == sorted(set(features))
+                and set(features) <= set(nodes[key]["features"]) and row.get("manifest_path") == package["manifest_path"]
+                and type(profile) is dict and type(profile.get("test")) is bool, "Windows GUI actual unit features/source differ")
+        for name in features:
+            refs = package["features"][name]
+            require(type(refs) is list and len(refs) <= 512 and all(type(ref) is str for ref in refs)
+                    and all(ref in features for ref in refs if ref in package["features"]),
+                    "Windows GUI actual unit features are not locally closed")
+        expected = nodes[key]["features"]
+        if key == native and not graph["observer"]:
+            expected = ["desktop-ui", "desktop-ui-dialogs"]  # Normal build has no dev qualification seam.
+        if key in (app, native) or key in graph["materialIds"].values():
+            require(features == expected, "Windows GUI material host/target unit features differ")
+        filenames = row.get("filenames")
+        require(type(filenames) is list and 0 < len(filenames) <= 16 and all(type(name) is str for name in filenames),
+                "Windows GUI actual compiler output inventory differs")
+        scopes = set()
+        for name in filenames:
+            path = Path(name)
+            require(path.is_absolute() and not any(part in {".", ".."} for part in re.split(r"[\\/]", name)),
+                    "Windows GUI compiler output path differs")
+            if path.is_relative_to(root / "target" / TARGETS["windows"] / "debug"):
+                scopes.add("target")
+            elif path.is_relative_to(root / "target/debug"):
+                scopes.add("host")
+            else:
+                raise CheckFailure("Windows GUI compiler output left its original target")
+        require(len(scopes) == 1, "Windows GUI compiler unit mixed host and target outputs")
+        scope = next(iter(scopes))
+        require(scope == "host" if kind in (["proc-macro"], ["custom-build"]) else True,
+                "Windows GUI compiler proc-macro/build unit is not host-bound")
+        if key in (app, native) and kind != ["custom-build"]:
+            require(scope == "target", "Windows GUI actual app/native unit is not target-bound")
+        require(not profile["test"] or key == app and graph["observer"] and kind == ["test"],
+                "Windows GUI compiler selected an unrelated test-profile unit")
+        units.append({"packageId": key, "target": target["name"], "kind": kind, "scope": scope, "features": features,
+                      "testProfile": profile["test"], "filenames": filenames})
+        if kind == ["custom-build"]:
+            scripts.add(key)
+        executable = row.get("executable")
+        if executable is not None:
+            if graph["observer"] and key == app and kind == ["bin"]:
+                # Cargo may build this intermediate solely for CARGO_BIN_EXE.
+                # It has observer features and is NEVER normal-smoke evidence.
+                require(auxiliary is None and target.get("name") == "mobile-release-kit-desktop"
+                        and target.get("src_path") == str(source / WINDOWS_INSTALLED_APP / "src/main.rs")
+                        and profile["test"] is False and row.get("fresh") is False
+                        and executable == str(root / "target" / TARGETS["windows"] / "debug/mobile-release-kit-desktop.exe")
+                        and executable in filenames, "Windows GUI observer auxiliary package-bin differs")
+                auxiliary = executable
+                continue
+            require(found is None and key == app and target.get("kind") == (["test"] if graph["observer"] else ["bin"])
+                    and target.get("name") == ("installed-shell-observation" if graph["observer"] else "mobile-release-kit-desktop")
+                    and target.get("src_path") == str(source / WINDOWS_INSTALLED_APP /
+                        ("tests/installed_shell_observation.rs" if graph["observer"] else "src/main.rs"))
+                    and profile["debug_assertions"] is True and profile["test"] is graph["observer"] and row.get("fresh") is False,
+                    "Windows GUI original executable role/profile differs")
+            found = windows_executable_path(executable, target_root=root / "target")
+            if graph["observer"]:
+                require(found.parent == root / "target" / TARGETS["windows"] / "debug/deps"
+                        and re.fullmatch(r"installed_shell_observation-[0-9a-f]{16}\.exe", found.name) is not None,
+                        "Windows GUI observer must be its original harness=false compiler artifact")
+            else:
+                require(found == root / "target" / TARGETS["windows"] / "debug/mobile-release-kit-desktop.exe",
+                        "Windows GUI normal compiler artifact path differs")
+            require(executable in filenames, "Windows GUI compiler executable is missing from its original outputs")
+    require(finished and found is not None and sum(unit["packageId"] == native for unit in units) == 1,
+            "Windows GUI compiler did not produce its complete original app/native role")
+    require(all(any(unit["packageId"] == key and unit["kind"] not in (["custom-build"],) for unit in units)
+                for key in graph["materialIds"].values()), "Windows GUI compiler omitted a material locked unit")
+    require(app in script_outputs and graph["materialIds"]["webview2-com-sys"] in script_outputs,
+            "Windows GUI original app/loader build script output is absent")
+    return {"path": str(found), "units": units, "buildScripts": script_outputs, "auxiliaryPackageBinary": auxiliary}
+
+
+def windows_normal_ui_pe_data(raw: bytes) -> dict:
+    """Bounded PE DATA, never LoadLibrary or executable/native availability.
+
+    Inspect the actual linked manifest, not an adjacent XML template or copied
+    loader DLL. Original Windows startup/activation remains a separate GUI gate.
+    """
+    require(type(raw) is bytes and 512 <= len(raw) <= 512 << 20 and raw[:2] == b"MZ", "Windows GUI PE input differs")
+    def number(at: int, count: int) -> int:
+        require(type(at) is int and 0 <= at <= len(raw) - count, "Windows GUI PE field exceeds file")
+        return int.from_bytes(raw[at:at + count], "little")
+    pe = number(0x3c, 4)
+    require(64 <= pe <= len(raw) - 24 and raw[pe:pe + 4] == b"PE\0\0" and number(pe + 4, 2) == 0x8664,
+            "Windows GUI binary is not native AMD64 PE")
+    count, optional_size = number(pe + 6, 2), number(pe + 20, 2)
+    optional = pe + 24
+    require(1 <= count <= 96 and 240 <= optional_size <= 4096 and optional + optional_size <= len(raw)
+            and number(optional, 2) == 0x20b and number(optional + 108, 4) >= 16,
+            "Windows GUI PE64 header/directory inventory differs")
+    sections = []
+    for index in range(count):
+        at = optional + optional_size + index * 40
+        require(at + 40 <= len(raw), "Windows GUI PE section table exceeds file")
+        virtual_size, address, size, offset = (number(at + field, 4) for field in (8, 12, 16, 20))
+        require(address > 0 and offset <= len(raw) and size <= len(raw) - offset and virtual_size < 2**31,
+                "Windows GUI PE section range differs")
+        sections.append((address, max(virtual_size, size), offset, size))
+    def address(value: int, length: int) -> int:
+        require(0 < value < 2**32 and 0 < length <= 16 << 20 and value + length <= 2**32,
+                "Windows GUI PE RVA range differs")
+        matches = [(offset + value - start, size - (value - start)) for start, extent, offset, size in sections
+                   if start <= value and value + length <= start + extent and value - start + length <= size]
+        require(len(matches) == 1, "Windows GUI PE RVA is unmapped/ambiguous")
+        return matches[0][0]
+    resource_rva, resource_size = number(optional + 112 + 16, 4), number(optional + 112 + 20, 4)
+    require(64 <= resource_size <= 4 << 20, "Windows GUI resource size differs")
+    resource = address(resource_rva, resource_size)
+    visited = set()
+    def entries(relative: int) -> list[tuple[int, int]]:
+        require(relative not in visited and 0 <= relative <= resource_size - 16, "Windows GUI manifest resource cycle/range differs")
+        visited.add(relative)
+        at = resource + relative
+        named, ids = number(at + 12, 2), number(at + 14, 2)
+        total = named + ids
+        require(0 < total <= 512 and relative + 16 + total * 8 <= resource_size, "Windows GUI resource entries exceed bound")
+        rows = [(number(at + 16 + index * 8, 4), number(at + 20 + index * 8, 4)) for index in range(total)]
+        require(len({name for name, _ in rows}) == total, "Windows GUI resource identifiers are duplicated")
+        require(all(bool(name & 0x80000000) == (index < named) for index, (name, _) in enumerate(rows)),
+                "Windows GUI resource named and numeric entries disagree with their table")
+        return rows
+    manifests = [offset for name, offset in entries(0) if name == 24]
+    require(len(manifests) == 1 and manifests[0] & 0x80000000, "Windows GUI linked manifest resource is absent/ambiguous")
+    names = entries(manifests[0] & 0x7fffffff)
+    require(len(names) == 1 and names[0][0] == 1 and names[0][1] & 0x80000000,
+            "Windows GUI linked executable manifest ID differs")
+    languages = entries(names[0][1] & 0x7fffffff)
+    # VERSIONINFO's language is not the manifest resource LANGID. There is
+    # exactly one bounded numeric leaf, so no locale can select a different
+    # accepted body. Preserve its actual value; only native startup proves SxS.
+    require(len(languages) == 1 and 0 <= languages[0][0] <= 0xffff and not languages[0][1] & 0x80000000,
+            "Windows GUI linked manifest language/data role differs")
+    data = languages[0][1]
+    require(0 <= data <= resource_size - 16, "Windows GUI manifest resource DATA exceeds its table")
+    data += resource
+    manifest_rva, manifest_size, codepage, reserved = (number(data + field, 4) for field in (0, 4, 8, 12))
+    require(1 <= manifest_size <= 16 << 10 and codepage in (0, 65001) and reserved == 0, "Windows GUI manifest encoding/size differs")
+    at = address(manifest_rva, manifest_size)
+    manifest = raw[at:at + manifest_size]
+    xml = manifest.rstrip(b"\0")
+    require(len(manifest) - len(xml) <= 3 and b"<!" not in xml and b"\0" not in xml,
+            "Windows GUI manifest contains unsupported declaration/encoding")
+    from xml.etree import ElementTree
+    try:
+        element = ElementTree.fromstring(xml)
+    except (ElementTree.ParseError, UnicodeError, ValueError):
+        raise CheckFailure("Windows GUI linked manifest XML differs") from None
+    namespace = "{urn:schemas-microsoft-com:asm.v1}"
+    chain = ("assembly", "dependency", "dependentAssembly", "assemblyIdentity")
+    for index, tag in enumerate(chain):
+        attributes = ({"manifestVersion": "1.0"} if index == 0 else
+            {"type": "win32", "name": "Microsoft.Windows.Common-Controls", "version": "6.0.0.0",
+             "processorArchitecture": "*", "publicKeyToken": "6595b64144ccf1df", "language": "*"} if index == 3 else {})
+        require(element.tag == namespace + tag and element.attrib == attributes and not (element.text or "").strip()
+                and not (element.tail or "").strip() and len(element) == (0 if index == 3 else 1),
+                "Windows GUI linked manifest is not the exact Common Controls v6 activation contract")
+        if index != 3:
+            element = element[0]
+    imports = []
+    for directory, stride, name_field in ((1, 20, 12), (13, 32, 4)):
+        rva, size = number(optional + 112 + directory * 8, 4), number(optional + 116 + directory * 8, 4)
+        if rva == 0:
+            require(size == 0, "Windows GUI empty import directory has nonempty size")
+            continue
+        require(stride <= size <= stride * 512, "Windows GUI import descriptor count exceeds bound")
+        start = address(rva, size)
+        terminated = False
+        for offset in range(0, size - stride + 1, stride):
+            descriptor = raw[start + offset:start + offset + stride]
+            if descriptor == bytes(stride):
+                terminated = True; break
+            if directory == 13:
+                require(number(start + offset, 4) == 1, "Windows GUI delay import must use RVAs")
+            name_rva = number(start + offset + name_field, 4)
+            name_at = address(name_rva, 1)
+            end = raw.find(b"\0", name_at, min(len(raw), name_at + 129))
+            require(end > name_at and address(name_rva, end - name_at + 1) == name_at,
+                    "Windows GUI DLL import name exceeds its mapped bound")
+            name = raw[name_at:end]
+            require(re.fullmatch(rb"[A-Za-z0-9_.-]{1,128}", name) is not None
+                    and b"webview2loader" not in name.lower(), "Windows GUI imports an unadmitted dynamic WebView2 loader")
+            imports.append(name.decode("ascii").lower())
+        require(terminated, "Windows GUI import descriptors lack a bounded terminator")
+    return {"machine": "amd64", "manifestType": 24, "manifestId": 1, "manifestLanguage": languages[0][0],
+        "manifest": {"size": len(manifest), "sha256": hashlib.sha256(manifest).hexdigest()},
+        "commonControlsV6": True, "dynamicWebView2LoaderImport": False, "dllImports": sorted(set(imports))}
 
 
 def windows_installed_app_graph(value: object, lock: object, *, source: Path, root: Path, publication: bool = False) -> dict:
@@ -11049,7 +11791,7 @@ def windows_installed_app_graph(value: object, lock: object, *, source: Path, ro
         nodes[node["id"]] = node
     require(set(nodes) & set(local.values()) == {app, local["mrk-windows-installed-native"]}
             and nodes[app]["features"] == (["windows-runtime-publisher"] if publication else [])
-            and packages[local["mrk-windows-installed-native"]]["features"] == {"qualification-result": [], "runtime-publication": []}
+            and packages[local["mrk-windows-installed-native"]]["features"] == WINDOWS_NATIVE_DECLARED_FEATURES
             and nodes[local["mrk-windows-installed-native"]]["features"]
                 == (["qualification-result", "runtime-publication"] if publication else ["qualification-result"]),
             "Windows app active locals/features differ")
@@ -11366,15 +12108,15 @@ def windows_installed_helper_refused(role: str, stage: str, details=None) -> Non
         pass  # Even interrupted diagnostics cannot replace the original failure.
 
 
-def windows_installed_helper_shape(details, *, compiler_source: bool, empty: bool = False) -> bool:
+def windows_installed_helper_shape(details, *, compiler_source: bool, empty: bool = False, normal_ui_app: bool = False) -> bool:
     # Actual Windows fields are mandatory on Windows. The POSIX branch supports
     # inert DATA file-copy contracts, never Windows/native qualification.
     attributes = getattr(details, "st_file_attributes", 0 if os.name != "nt" else None)
     tag = getattr(details, "st_reparse_tag", 0 if os.name != "nt" else None)
-    return (stat.S_ISREG(details.st_mode) and type(attributes) is int and not attributes & 0x400
+    return (type(normal_ui_app) is bool and stat.S_ISREG(details.st_mode) and type(attributes) is int and not attributes & 0x400
         and type(tag) is int and tag == 0 and type(details.st_nlink) is int
         and details.st_nlink in ((1, 2) if compiler_source else (1,))
-        and integer_between(details.st_size, 0 if empty else 1, 128 << 20))
+        and integer_between(details.st_size, 0 if empty else 1, (512 if normal_ui_app else 128) << 20))
 
 
 def windows_installed_helper_open_matches(named, opened) -> bool:
@@ -11387,8 +12129,11 @@ def windows_installed_helper_open_matches(named, opened) -> bool:
 
 
 @contextmanager
-def windows_installed_helper_observation(path: Path, *, compiler_source: bool, deadline: float | None = None):
+def windows_installed_helper_observation(path: Path, *, compiler_source: bool, deadline: float | None = None,
+                                       normal_ui_app: bool = False):
     """Keep the single original DATA reader through its consumer and actual close."""
+    require(type(normal_ui_app) is bool and (not normal_ui_app or path.name == "mobile-release-kit-desktop.exe"),
+            "Windows normal app reader role differs")
     role = "compiler-source" if compiler_source else "singleton-copy"
     stream, failure, close_entered = None, None, False
     stage, details = "deadline", None
@@ -11396,10 +12141,10 @@ def windows_installed_helper_observation(path: Path, *, compiler_source: bool, d
     try:
         gate(); stage = "ancestry"; windows_installed_directories(path.parent)
         stage = "shape"; before = path.lstat(); details = before
-        require(windows_installed_helper_shape(before, compiler_source=compiler_source), "Windows helper DATA file shape differs")
+        require(windows_installed_helper_shape(before, compiler_source=compiler_source, normal_ui_app=normal_ui_app), "Windows helper DATA file shape differs")
         details = None; stage = "deadline"; gate(); stage = "open"; stream = path.open("rb")
         stage = "opened-shape"; opened = os.fstat(stream.fileno()); details = opened
-        require(windows_installed_helper_shape(opened, compiler_source=compiler_source), "Windows helper opened DATA shape differs")
+        require(windows_installed_helper_shape(opened, compiler_source=compiler_source, normal_ui_app=normal_ui_app), "Windows helper opened DATA shape differs")
         details = None; stage = "open-identity"
         require(windows_installed_helper_open_matches(before, opened), "Windows helper DATA changed at open")
         stage = "deadline"; gate(); stage = "read"; raw = stream.read(before.st_size + 1)
@@ -11442,8 +12187,10 @@ def windows_installed_helper_observation(path: Path, *, compiler_source: bool, d
                     raise
 
 
-def windows_installed_helper_copy(path: Path, raw: bytes, source: dict, deadline: float) -> tuple[int, int]:
+def windows_installed_helper_copy(path: Path, raw: bytes, source: dict, deadline: float, *, normal_ui_app: bool = False) -> tuple[int, int]:
     """Exclusive byte writer only; its immutable copy epoch starts AFTER close."""
+    require(type(normal_ui_app) is bool and (not normal_ui_app or path.name == "mobile-release-kit-desktop.exe"),
+            "Windows normal app writer role differs")
     output, failure, close_entered = None, None, False
     stage, details = "deadline", None
     try:
@@ -11452,7 +12199,7 @@ def windows_installed_helper_copy(path: Path, raw: bytes, source: dict, deadline
         stage = "deadline"; windows_installed_remaining(deadline, 1)
         stage = "create"; output = path.open("xb")  # Collision retains every existing object.
         stage = "writer-shape"; created = os.fstat(output.fileno()); details = created
-        require(windows_installed_helper_shape(created, compiler_source=False, empty=True) and created.st_size == 0,
+        require(windows_installed_helper_shape(created, compiler_source=False, empty=True, normal_ui_app=normal_ui_app) and created.st_size == 0,
                 "Windows helper exclusive writer shape differs")
         original = (created.st_dev, created.st_ino)
         details = None; stage = "writer-identity"
@@ -11464,7 +12211,7 @@ def windows_installed_helper_copy(path: Path, raw: bytes, source: dict, deadline
         stage = "deadline"; windows_installed_remaining(deadline, 1)
         stage = "flush"; output.flush(); stage = "deadline"; windows_installed_remaining(deadline, 1)
         stage = "writer-shape"; after = os.fstat(output.fileno()); details = after
-        require(windows_installed_helper_shape(after, compiler_source=False) and after.st_size == len(raw),
+        require(windows_installed_helper_shape(after, compiler_source=False, normal_ui_app=normal_ui_app) and after.st_size == len(raw),
                 "Windows helper writer shape changed")
         details = None; stage = "writer-identity"
         require((after.st_dev, after.st_ino) == original and windows_installed_helper_open_matches(path.lstat(), after),
@@ -11540,6 +12287,7 @@ def windows_installed_native_inert(context: dict) -> tuple[str, ...]:
 
 def windows_installed_native_test_total(context: dict) -> int:
     """Count the reviewed fixed Rust test sources, without launching/listing a native binary."""
+    require(not windows_normal_ui_profile(context), "UI prerequisite does not use the historical inert selector roster")
     names = ("tests.rs", "hosted_tests.rs", "ordinary_owner.rs", "qualification_fixture.rs")
     if windows_runtime_publication_profile(context):
         names += ("publication.rs",)
@@ -11547,6 +12295,13 @@ def windows_installed_native_test_total(context: dict) -> int:
     for name in names:
         raw = windows_installed_bytes(Path(context["source"]) / WINDOWS_INSTALLED_CRATE / "src" / name, 512 << 10)
         total += len(re.findall(rb"(?m)^\s*#\[test\]\s*$", raw))
+        if name == "ordinary_owner.rs":
+            # These exact five wrappers are declared in the shared test source
+            # but compiled only by the separate desktop-ui native profile.
+            ui = re.findall(rb'(?m)^#\[cfg\(feature = "desktop-ui"\)\]\n#\[test\]\n#\[ignore = "[^\n]+"\]\nfn (hosted_normal_ui_[a-z_]+)\(\) -> Result<\(\)> \{', raw)
+            expected = {windows_normal_ui_owner(role).split("::", 1)[1].encode("ascii") for role in WINDOWS_NORMAL_UI_ROLES}
+            require(len(ui) == 5 and set(ui) == expected, "Windows native exact UI-only selector gates differ")
+            total -= len(ui)
     require(len(windows_installed_native_inert(context)) < total <= 256, "Windows native source-derived test count differs")
     return total
 
@@ -11659,7 +12414,8 @@ def windows_installed_phase_receipt(context: dict, phase: str, **facts) -> dict:
     return {"scope": WINDOWS_INSTALLED_SCOPE, "phase": phase, "status": "started" if facts.get("claimOnly") is True else "passed",
             "sourceSha": context["sourceSha"], "sourceTree": context["sourceTree"],
             "runId": context["runId"], "attempt": 1,
-            **({"qualificationProfile": context["qualificationProfile"]} if windows_installed_prepared_profile(context) else {}), **facts}
+            **({"qualificationProfile": context["qualificationProfile"]}
+               if windows_installed_prepared_profile(context) or windows_normal_ui_profile(context) else {}), **facts}
 
 
 def windows_installed_libtest(raw: bytes, names: tuple[str, ...], filtered: int, *, native: bool = False) -> dict | None:
@@ -11803,6 +12559,133 @@ def windows_fullwalk_file_identity(value: object) -> dict:
     return {"volume": int(fields[0]), "fileId": fields[1]}
 
 
+def windows_normal_ui_version(value: object) -> bool:
+    return (type(value) is str and 0 < len(value) <= 64
+            and re.fullmatch(r"[0-9]{1,10}(?:\.[0-9]{1,10}){1,5}", value) is not None)
+
+
+def windows_normal_ui_owner(role: str) -> str:
+    require(type(role) is str and role in WINDOWS_NORMAL_UI_ROLES, "Windows normal UI role differs")
+    return "ordinary_owner::hosted_normal_ui_" + WINDOWS_NORMAL_UI_ROLES[role][1] + "_original_handle_contract"
+
+
+def windows_normal_ui_request_data(raw: bytes, *, root: str) -> dict:
+    """Closed DATA only; neither a probe nor these fields transfer launch authority."""
+    require(type(raw) is bytes and 0 < len(raw) <= 4096 and raw.isascii() and raw.endswith(b"\n")
+            and all(byte == 10 or 32 <= byte <= 126 for byte in raw), "Windows normal UI request envelope differs")
+    lines = raw[:-1].decode("ascii").split("\n")
+    require(len(lines) == 36 and lines[0] == "MRK_WINDOWS_NORMAL_UI_REQUEST_V1", "Windows normal UI request header/count differs")
+    row = {}
+    for line, key in zip(lines[1:], WINDOWS_NORMAL_UI_REQUEST_FIELDS, strict=True):
+        name, separator, value = line.partition("=")
+        require(name == key and separator == "=" and value and "=" not in value, "Windows normal UI request field/order differs")
+        row[key] = value
+    role = row["role"]
+    require(role in WINDOWS_NORMAL_UI_ROLES and row["test"] == WINDOWS_NORMAL_UI_ROLES[role][0]
+            and row["attempt"] == "1" and windows_normal_ui_version(row["appVersion"])
+            and all(re.fullmatch(r"[0-9a-f]{40}", row[key]) is not None and row[key] != "0" * 40
+                    for key in ("sourceSha", "sourceTree")), "Windows normal UI request role/source/version differs")
+    windows_fullwalk_number(row["runId"], 2**64 - 1, minimum=1)
+    base = windows_ordinary_path(root)
+    require(base.name == "mrk-windows-installed-native-" + row["runId"] + "-1", "Windows normal UI request root differs")
+    probe = role == "prerequisite"
+    runtime_keys = WINDOWS_FULLWALK_REQUEST_FIELDS[22:34]
+    require(not probe or all(row[key] == "-" for key in runtime_keys), "Windows prerequisite cannot claim a prepared runtime")
+    for key, value in row.items():
+        if key.endswith("Sha256") and not (probe and key in runtime_keys):
+            require(sha256_value(value), "Windows normal UI request digest differs")
+    bounds = {"appArtifactBytes": (128 if probe else 512) << 20, "ownerArtifactBytes": 128 << 20,
+              "appCompileMessagesBytes": 16 << 20, "ownerCompileMessagesBytes": 16 << 20}
+    if not probe:
+        bounds.update(payloadFiles=2047, payloadBytes=1 << 30, publicationReceiptBytes=64 << 10)
+    for key, limit in bounds.items():
+        row[key] = windows_fullwalk_number(row[key], limit, minimum=1)
+    row["attempt"] = 1
+    identities = []
+    for selected in ("app", "owner"):
+        path = windows_ordinary_path(row[selected + "Artifact"])
+        prefix = ("mrk_windows_installed_native" if selected == "owner" or probe else "installed_shell_observation")
+        if selected == "app" and role == "normal-smoke":
+            require(path == base / "mobile-release-kit-desktop.exe",
+                    "Windows normal binary artifact path differs")
+        else:
+            require(path.parent == base / "target/x86_64-pc-windows-msvc/debug/deps"
+                    and re.fullmatch(prefix + r"-[0-9a-f]{16}\.exe", path.name) is not None,
+                    "Windows normal UI original artifact role/path differs")
+        identity = windows_ordinary_identity(row[selected + "ArtifactIdentity"])
+        identities.append(identity.split(":")[:2])
+        command = '"' + str(path) + '"'
+        if selected == "owner" or probe:
+            command += " " + (windows_normal_ui_owner(role) if selected == "owner" else row["test"])
+            command += " --exact --ignored --nocapture --test-threads=1"
+        encoded = command.encode("utf-16-le")
+        require(len(encoded) // 2 <= 1023 and hashlib.sha256(encoded).hexdigest() == row[selected + "CommandSha256"],
+                "Windows normal UI original command differs")
+    if probe:
+        require(all(row["app" + suffix] == row["owner" + suffix] for suffix in (
+            "Artifact", "ArtifactBytes", "ArtifactSha256", "ArtifactIdentity", "CompileMessagesBytes",
+            "CompileMessagesSha256", "CompileArgvSha256")), "Windows probe must use the same native artifact/compiler original")
+    else:
+        require(identities[0] != identities[1], "Windows UI app and owner alias one original")
+        originals = [windows_fullwalk_file_identity(row[key]) for key in WINDOWS_FULLWALK_REQUEST_FIELDS[-4:]]
+        require(len({item["volume"] for item in originals}) == 1 and len({item["fileId"] for item in originals}) == 4,
+                "Windows normal UI runtime originals alias/cross volumes")
+    return row
+
+
+def windows_normal_ui_probe_request(context: dict, artifact: dict, identity: str, argv_sha: str, version: str) -> bytes:
+    require(windows_normal_ui_profile(context), "Windows UI probe request requires its explicit profile")
+    role = "prerequisite"
+    values = {"role": role, "test": WINDOWS_NORMAL_UI_ROLES[role][0],
+              **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")},
+              **dict.fromkeys(WINDOWS_FULLWALK_REQUEST_FIELDS[22:34], "-"), "appVersion": version}
+    for selected, test in (("app", values["test"]), ("owner", windows_normal_ui_owner(role))):
+        command = '"' + artifact["path"] + '" ' + test + " --exact --ignored --nocapture --test-threads=1"
+        values.update({selected + "Artifact": artifact["path"], selected + "ArtifactBytes": artifact["size"],
+            selected + "ArtifactSha256": artifact["sha256"], selected + "ArtifactIdentity": identity,
+            selected + "CommandSha256": hashlib.sha256(command.encode("utf-16-le")).hexdigest(),
+            selected + "CompileMessagesBytes": artifact["messages"]["size"],
+            selected + "CompileMessagesSha256": artifact["messages"]["sha256"], selected + "CompileArgvSha256": argv_sha})
+    require(type(context["attempt"]) is int and type(context["runId"]) is str
+            and type(artifact["size"]) is int and type(artifact["messages"]["size"]) is int,
+            "Windows normal UI probe original scalar types differ")
+    raw = ("MRK_WINDOWS_NORMAL_UI_REQUEST_V1\n" + "".join(
+        key + "=" + str(values[key]) + "\n" for key in WINDOWS_NORMAL_UI_REQUEST_FIELDS)).encode("ascii")
+    windows_normal_ui_request_data(raw, root=context["root"])
+    return raw
+
+
+def windows_normal_ui_child_data(request_raw: bytes, child_raw: bytes, *, root: str, account_sid_sha256: str) -> dict:
+    """A child pre-close record is DATA, never child/owner exit or profile finality."""
+    request = windows_normal_ui_request_data(request_raw, root=root)
+    role = request["role"]
+    require(role != "normal-smoke" and sha256_value(account_sid_sha256), "Windows normal UI child/account role differs")
+    child = bounded_json(child_raw, 4096)
+    require(type(child) is dict and type(child.get("observation")) is dict, "Windows normal UI child observation is absent")
+    observation = child["observation"]
+    if role == "prerequisite":
+        available = observation.get("available")
+        require(type(available) is bool, "Windows UI prerequisite availability type differs")
+        reason, version = observation.get("reason"), observation.get("runtimeVersion")
+        require((available and reason is None and windows_normal_ui_version(version))
+                or (not available and reason in WINDOWS_NORMAL_UI_PROBE_REASONS and version is None),
+                "Windows UI prerequisite result/reason differs")
+        observed = {"available": available, "reason": reason, "ordinaryAccountMatched": True,
+            **dict.fromkeys(("ordinaryContext", "interactiveDesktop", "managedRuntime", "overrideFree", "privateParent"), available),
+            "runtimeVersion": version, "originalsSettled": True, "noWebviewCreated": True}
+    else:
+        observed = {"runtimeBindingMatched": True, "verifiedMethods": 6 if role == "project-draft" else 0,
+            "checks": list(WINDOWS_NORMAL_UI_CASE_CHECKS[role]), "finality": dict.fromkeys((
+                "dialogsSettled", "sourcesSettled", "passiveOwnersSettled", "documentHooksSettled", "relayJoined", "exitReady"), True)}
+    expected = {"schemaVersion": 1, **{key: request[key] for key in ("sourceSha", "sourceTree", "runId", "attempt", "role")},
+        "requestSha256": hashlib.sha256(request_raw).hexdigest(), "artifactBytes": request["appArtifactBytes"],
+        "artifactSha256": request["appArtifactSha256"], "commandSha256": request["appCommandSha256"],
+        "accountSidSha256": account_sid_sha256, "observation": observed,
+        "resultFile": {"createNew": True, "writeCalls": 1, "closeGate": "original-child-exit-zero-required"}}
+    require(same_compile_json(child, expected), "Windows normal UI child source/account/closed observation differs")
+    return expected
+
+
 def windows_fullwalk_request_data(raw: bytes, *, root: str, passive: bool = False) -> dict:
     """Closed inert DATA only. A valid request is NOT protected-publication or launch authority."""
     require(type(passive) is bool, "Windows request role differs")
@@ -11931,16 +12814,19 @@ def windows_fullwalk_child_result(request_raw: bytes, child_raw: bytes, *, root:
     return child
 
 
-def windows_ordinary_original(artifact: dict, *, app_role: bool = False) -> str:
-    """Bind descriptor ChangeTime separately; narrow512MiB applies ONLY to the fixed app libtest."""
+def windows_ordinary_original(artifact: dict, *, app_role: bool = False, ui_role: str | None = None) -> str:
+    """Bind descriptor ChangeTime;512MiB only for explicitly fixed app roles."""
     require(os.name == "nt", "Windows ordinary descriptor observation requires Windows")
     path = Path(artifact["path"])
-    require(type(app_role) is bool and (not app_role or re.fullmatch(r"mobile_release_desktop-[0-9a-f]{16}\.exe", path.name) is not None),
+    require(type(app_role) is bool and ui_role in (None, "normal", "observer") and not (app_role and ui_role is not None)
+            and (not app_role or re.fullmatch(r"mobile_release_desktop-[0-9a-f]{16}\.exe", path.name) is not None)
+            and (ui_role != "normal" or path.name == "mobile-release-kit-desktop.exe")
+            and (ui_role != "observer" or re.fullmatch(r"installed_shell_observation-[0-9a-f]{16}\.exe", path.name) is not None),
             "Windows original app-only artifact role differs")
     before = path.lstat()
-    identity = (list(windows_installed_state(before)) if app_role
+    identity = (list(windows_installed_state(before)) if app_role or ui_role == "observer"
                 else [before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns])
-    maximum = 512 << 20 if app_role else 128 << 20
+    maximum = 512 << 20 if app_role or ui_role is not None else 128 << 20
     require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and not before.st_file_attributes & 0x400
             and identity == artifact["identity"] and 0 < before.st_size == artifact["size"] <= maximum,
             "Windows ordinary original changed before open")
@@ -12566,18 +13452,1647 @@ def windows_ordinary_finalize(context: dict) -> None:
         windows_fullwalk_write(root / "fullwalk-ordinary-finality.private.txt", finality_raw, 16 << 10)
 
 
+def windows_normal_ui_app_version(context: dict) -> str:
+    try:
+        manifest = tomllib.loads(windows_installed_bytes(
+            Path(context["source"]) / WINDOWS_INSTALLED_APP / "Cargo.toml", 64 << 10).decode("utf-8"))
+        version = manifest["package"]["version"]
+    except (KeyError, UnicodeError, tomllib.TOMLDecodeError):
+        raise CheckFailure("Windows normal UI app version declaration differs") from None
+    require(windows_normal_ui_version(version), "Windows normal UI app version is not a fixed dotted value")
+    return version
+
+
+def windows_normal_ui_acquired(context: dict) -> tuple[dict, dict]:
+    """Rebind original compiler DATA only; never redo acquisition or execute tools."""
+    root = Path(context["root"])
+    graph = windows_normal_ui_native_metadata(context)
+    compiler = closed_object(read_bounded_json(root / "compiler-tools.json", 64 << 10), {"cargo", "rustc"},
+                             "Windows UI compiler role inventory differs")
+    for role in ("cargo", "rustc"):
+        item = closed_object(compiler[role], {"path", "size", "sha256"}, "Windows UI original compiler fields differ")
+        expected_path = root / "rustup/toolchains" / (RUST + "-" + TARGETS["windows"]) / "bin" / (role + ".exe")
+        require(item["path"] == str(expected_path) and integer_between(item["size"], 1, 128 << 20)
+                and {key: item[key] for key in ("size", "sha256")} == windows_installed_record(expected_path, 128 << 20),
+                "Windows UI original pinned compiler changed")
+    facts = {"rust": RUST, "target": TARGETS["windows"], "nativeFeatures": ["desktop-ui"],
+        "activePackageIds": sorted(graph["nodes"]), "metadata": windows_installed_record(root / "metadata.json", 8 << 20),
+        "compilerTools": windows_installed_record(root / "compiler-tools.json", 64 << 10),
+        "originalExitCode": 0, "nativePrerequisiteOnly": True, "appVersion": windows_normal_ui_app_version(context)}
+    require(same_compile_json(read_bounded_json(root / "acquire-checks.json", 64 << 10),
+                             windows_installed_phase_receipt(context, "acquire", **facts))
+            and same_compile_json(read_bounded_json(root / "acquire-started.json", 64 << 10),
+                                  windows_installed_phase_receipt(context, "acquire", claimOnly=True)),
+            "Windows UI native acquisition/source/original exit binding differs")
+    return compiler, facts
+
+
+def windows_normal_ui_inert_argv(artifact: dict, *, scalar: bool = False) -> list[str]:
+    require(type(scalar) is bool, "Windows UI inert selection role differs")
+    names = WINDOWS_NORMAL_UI_SCALAR_TESTS if scalar else WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS
+    return [artifact["path"], *names, "--exact", "--nocapture", "--test-threads=1"]
+
+
+def windows_normal_ui_inert_output(raw: bytes, *, scalar: bool = False) -> dict:
+    """Observe the real filtered count; never infer coverage from compilation."""
+    require(type(scalar) is bool and type(raw) is bytes and 0 < len(raw) <= 64 << 10 and raw.isascii(),
+            "Windows UI inert output shape differs")
+    names = WINDOWS_NORMAL_UI_SCALAR_TESTS if scalar else WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS
+    lines = [line.strip() for line in raw.decode("ascii").splitlines() if line.strip()]
+    match = re.fullmatch(r"test result: ok\. [0-9]+ passed; 0 failed; 0 ignored; 0 measured; "
+                         r"([0-9]{1,6}) filtered out; finished in [0-9]+\.[0-9]+s", lines[-1]) if lines else None
+    require(match is not None, "Windows UI inert original summary is absent or failed")
+    filtered = int(match.group(1))
+    windows_installed_libtest(raw, names, filtered)
+    return {"tests": list(names), "passed": len(names), "failed": 0, "ignored": 0, "measured": 0, "filtered": filtered}
+
+
+def windows_normal_ui_inert_facts(context: dict, artifact: dict, identity: str, *, scalar: bool = False) -> dict:
+    require(windows_normal_ui_profile(context) and type(scalar) is bool, "Windows UI inert evidence role differs")
+    root = Path(context["root"])
+    prefix = "normal-ui-scalar" if scalar else "normal-ui-native-policy"
+    records, blobs = {}, {}
+    for role in ("stdout", "stderr"):
+        path = root / (prefix + "." + role)
+        before = path.lstat()
+        raw = windows_installed_bytes(path, 64 << 10)
+        require(windows_installed_state(before) == windows_installed_state(path.lstat()),
+                "Windows UI inert original output identity changed")
+        records[role] = {"path": str(path), "identity": list(windows_installed_state(before)),
+                         "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+        blobs[role] = raw
+    require(blobs["stderr"] == b"", "Windows UI inert original emitted unexpected diagnostics")
+    argv = windows_normal_ui_inert_argv(artifact, scalar=scalar)
+    return {"compiledTest": artifact, "artifactNativeIdentity": windows_ordinary_identity(identity),
+        "invocation": argv, "invocationSha256": hashlib.sha256(canonical_json(argv)).hexdigest(),
+        "outputs": records, "result": windows_normal_ui_inert_output(blobs["stdout"], scalar=scalar),
+        "originalExitCode": 0, "originalWaitReturned": True, "originalWritersClosed": True,
+        "inertPolicyOnly": True, "nativeAvailabilityObserved": False, "guiNotStarted": True}
+
+
+def windows_normal_ui_compile_binding(context: dict) -> tuple[dict, dict]:
+    compiler, acquired = windows_normal_ui_acquired(context)
+    root = Path(context["root"])
+    artifact = windows_normal_ui_native_artifact(context)
+    saved = read_bounded_json(root / "compile-checks.json", 64 << 10)
+    require(type(saved) is dict and type(saved.get("inertPolicy")) is dict, "Windows UI original policy regression is absent")
+    # This is the original pre-probe epoch. The probe below separately joins
+    # it to the ONE authorized ACL transition; never adopt a new policy epoch.
+    policy = windows_normal_ui_inert_facts(context, artifact, saved["inertPolicy"].get("artifactNativeIdentity"))
+    facts = {"rust": RUST, "target": TARGETS["windows"], "nativeFeatures": ["desktop-ui"],
+        "compiledTest": artifact, "originalExitCode": 0, "nativePrerequisiteOnly": True,
+        "invocationSha256": hashlib.sha256(canonical_json(windows_fullwalk_native_argv(compiler["cargo"]["path"], context))).hexdigest(),
+        "appVersion": acquired["appVersion"], "inertPolicy": policy}
+    require(same_compile_json(read_bounded_json(root / "compiled-test.json", 64 << 10), artifact)
+            and same_compile_json(saved, windows_installed_phase_receipt(context, "compile", **facts))
+            and same_compile_json(read_bounded_json(root / "compile-started.json", 64 << 10),
+                                  windows_installed_phase_receipt(context, "compile", claimOnly=True)),
+            "Windows UI original native compile/artifact/messages binding differs")
+    return artifact, facts
+
+
+def windows_normal_ui_probe_preflight(context: dict) -> None:
+    root = Path(context["root"])
+    artifact, compiled = windows_normal_ui_compile_binding(context)
+    identity = windows_ordinary_original(artifact)
+    require(identity == compiled["inertPolicy"]["artifactNativeIdentity"],
+            "Windows UI original policy artifact changed before the prerequisite")
+    raw = windows_normal_ui_probe_request(context, artifact, identity, compiled["invocationSha256"], compiled["appVersion"])
+    for suffix in ("request.txt", "output", "owner-intent.private.json", "owner-result.private.json", "owner-exit.private.json"):
+        try:
+            (root / ("normal-ui-prerequisite-" + suffix)).lstat()
+        except FileNotFoundError:
+            continue
+        raise CheckFailure("Windows UI prerequisite original output is occupied")
+    for name in ("windows-normal-ui-prerequisite-checks.json", "windows-normal-ui-prerequisite-finalize-checks.json"):
+        require(not (root / name).exists() and not (root / name).is_symlink(), "Windows UI prerequisite phase output is occupied")
+    windows_fullwalk_write(root / "normal-ui-prerequisite-request.txt", raw, 4096)
+    record = {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+    write_json(root / "windows-normal-ui-prerequisite-checks.json", windows_installed_phase_receipt(context,
+        "windows-normal-ui-prerequisite", request=record, compiledTest=artifact,
+        artifactNativeIdentity=identity, appVersion=compiled["appVersion"], nativeNotStarted=True))
+    with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+        for key, value in (("artifact", artifact["path"]), ("artifactSha256", artifact["sha256"]),
+                           ("sourceTree", context["sourceTree"]), ("requestSha256", record["sha256"]),
+                           ("appVersion", compiled["appVersion"])):
+            output.write(key + "=" + str(value) + "\n")
+
+
+def windows_normal_ui_probe_transitions(value: object, request: dict, after_identity: str) -> list[dict]:
+    require(type(value) is list and len(value) == 7, "Windows UI probe ACL roster differs")
+    identities, public = set(), []
+    for row, (role, mask) in zip(value, WINDOWS_NORMAL_UI_PROBE_ACLS, strict=True):
+        row = closed_object(row, {"role", "mask", "before", "after", "securityBefore", "securityAfter", "singleExplicitNoninheritingAce"},
+                            "Windows UI probe ACL fields differ")
+        before, after = windows_ordinary_stamp(row["before"]), windows_ordinary_stamp(row["after"])
+        require(row["role"] == role and type(row["mask"]) is int and row["mask"] == mask
+                and row["singleExplicitNoninheritingAce"] is True
+                and sha256_value(row["securityBefore"]) and sha256_value(row["securityAfter"])
+                and row["securityBefore"] != row["securityAfter"]
+                and same_compile_json({**before, "change": after["change"]}, after) and after["change"] >= before["change"]
+                and bool(before["attributes"] & 0x10) == (role != "artifact"),
+                "Windows UI probe ACL changed outside the exact original transition")
+        identity = (before["volume"], before["fileId"])
+        require(identity not in identities, "Windows UI probe ACL originals alias")
+        identities.add(identity)
+        if role == "artifact":
+            require(before["size"] == request["appArtifactBytes"]
+                    and windows_ordinary_wire(before) == request["appArtifactIdentity"]
+                    and windows_ordinary_wire(after) == windows_ordinary_identity(after_identity),
+                    "Windows UI probe original artifact transition differs")
+        public.append({"role": role, "mask": mask, "singleExplicitNoninheritingAce": True,
+                       "originalIdentityTransitionChecked": True})
+    return public
+
+
+def windows_normal_ui_probe_records(context: dict, request_raw: bytes, owner_raw: bytes, child_raw: bytes,
+                                    exit_raw: bytes, intent_raw: bytes, outcome: str, *, after_identity: str) -> dict:
+    """Separate original child/owner/step finality. Negative availability remains negative."""
+    require(windows_normal_ui_profile(context) and outcome == "success"
+            and all(type(raw) is bytes for raw in (request_raw, owner_raw, child_raw, exit_raw, intent_raw)),
+            "Windows UI probe original owner/step close is unavailable")
+    request = windows_normal_ui_request_data(request_raw, root=context["root"])
+    require(request["role"] == "prerequisite" and all(same_compile_json(request[key], context[key])
+            for key in ("sourceSha", "sourceTree", "runId", "attempt")), "Windows UI probe belongs to another original run")
+    owner = bounded_json(owner_raw, 64 << 10)
+    require(type(owner) is dict and sha256_value(owner.get("accountSidSha256")), "Windows UI probe original account binding is absent")
+    child = windows_normal_ui_child_data(request_raw, child_raw, root=context["root"], account_sid_sha256=owner["accountSidSha256"])
+    observation = child["observation"]
+    binding = {"schemaVersion": 1, **{key: request[key] for key in ("sourceSha", "sourceTree", "runId", "attempt", "role")},
+               "requestSha256": hashlib.sha256(request_raw).hexdigest()}
+    intent = closed_object(bounded_json(intent_raw, 4096), {*binding, "accountName", "freshAccountIntent", "fixedNormalUiChildOnly"},
+                           "Windows UI probe account intent fields differ")
+    require(type(intent["accountName"] ) is str and re.fullmatch(r"mrk[0-9a-f]{16}", intent["accountName"]) is not None
+            and same_compile_json(intent, {**binding, "accountName": intent["accountName"],
+                                           "freshAccountIntent": True, "fixedNormalUiChildOnly": True}),
+            "Windows UI probe original account intent differs")
+    owner_test = windows_normal_ui_owner("prerequisite")
+    expected_exit = {**binding, "qualificationProfile": WINDOWS_NORMAL_UI_PROFILE,
+        "artifactSha256": request["appArtifactSha256"], "ownerArtifactSha256": request["ownerArtifactSha256"],
+        "ownerTest": owner_test, "originalWaitReturned": True, "exitCode": 0,
+        "writerCloseGate": "original-owner-step-success-required"}
+    require(same_compile_json(bounded_json(exit_raw, 4096), expected_exit), "Windows UI probe separate original owner exit differs")
+    ancestors = len(windows_ordinary_path(context["root"]).parents) + 1
+    require(ancestors <= 16, "Windows UI original ancestor count exceeds native bound")
+    count = ancestors + 9
+    fixed = {**binding, "qualificationProfile": WINDOWS_NORMAL_UI_PROFILE,
+        "artifactBytes": request["appArtifactBytes"], "artifactSha256": request["appArtifactSha256"],
+        "commandSha256": request["appCommandSha256"], "ownerArtifactBytes": request["ownerArtifactBytes"],
+        "ownerArtifactSha256": request["ownerArtifactSha256"], "ownerCommandSha256": request["ownerCommandSha256"],
+        "accountSidSha256": owner["accountSidSha256"], "ownerTest": owner_test, "childTest": request["test"],
+        "createCalls": 1, "createError": None, "firstWait": 0, "originalExitCode": 0, "terminateCalls": 0,
+        "deadlineLatched": False, "unknown": False, "parentBookSettled": True,
+        "inputOriginals": count, "inputOriginalsClosed": count, "freshAccountVerified": True, "onlyUsersMembership": True,
+        "profileAbsentBefore": True, "profileOriginalBound": True, "profileHivesUnloaded": True, "profileDeleteCalls": 1,
+        "profileAbsentAfter": True, "profileOriginalsSettled": True, "accountRemovedAfterProfileSettlement": True,
+        "outputInventoryVerified": True, "observationCompleted": True, "prerequisitesAvailable": observation["available"],
+        "verifiedMethods": 0, "nativeResultSha256": hashlib.sha256(child_raw).hexdigest(), "normalSmoke": None, "fixture": None,
+        "ownerResult": {"createNew": True, "writeCalls": 1, "closeGate": "original-owner-exit-zero-required"}}
+    returns = {"createReturn", "exitReturn", "processCloseReturn", "threadCloseReturn", "profileDeleteReturn"}
+    closed_object(owner, {*fixed, *returns, "aclTransitions"}, "Windows UI probe owner fields differ")
+    require(same_compile_json({key: owner[key] for key in fixed}, fixed)
+            and all(type(owner[key]) is int and -(2**31) <= owner[key] < 2**31 and owner[key] != 0 for key in returns),
+            "Windows UI probe create/wait/close/profile/account finality did not pass")
+    transitions = windows_normal_ui_probe_transitions(owner["aclTransitions"], request, after_identity)
+    return {"observationCompleted": True, "prerequisite": dict(observation), "verifiedMethods": 0,
+        "combinedPassed": False, "guiInstanceAuthorized": False,
+        "originalOwner": {"test": owner_test, "directCreateProcessWithLogonW": True, "logonWithProfile": True,
+            "originalOwnerExitCode": 0, "originalChildExitCode": 0, "processAndThreadOriginalsClosed": True,
+            "inputOriginalsClosed": count, "freshOrdinaryAccount": True, "profileAbsentBefore": True,
+            "profileOriginalBound": True, "profileHivesUnloaded": True, "profileDeleteCalls": 1,
+            "profileAbsentAfter": True, "profileOriginalsSettled": True, "accountRemovedAfterProfileSettlement": True,
+            "parentBookSettled": True, "outputInventoryVerified": True, "resultFilesClosedBySeparateExitGates": True,
+            "ownerAggregateSeconds": 90, "aclTransitions": transitions,
+            "nativeResultSha256": hashlib.sha256(child_raw).hexdigest(), "ownerResultSha256": hashlib.sha256(owner_raw).hexdigest()}}
+
+
+def windows_normal_ui_probe_observe_final(context: dict) -> dict:
+    root = Path(context["root"])
+    require(os.environ.get("MRK_WINDOWS_UI_PREREQUISITE_PREFLIGHT_STEP_OUTCOME") == "success"
+            and os.environ.get("MRK_WINDOWS_UI_PREREQUISITE_OWNER_STEP_OUTCOME") == "success",
+            "Windows UI probe requires its separately closed preflight and original owner step")
+    artifact, compiled = windows_normal_ui_compile_binding(context)
+    preflight = read_bounded_json(root / "windows-normal-ui-prerequisite-checks.json", 64 << 10)
+    require(type(preflight) is dict, "Windows UI probe preflight is absent")
+    identity = windows_ordinary_identity(preflight.get("artifactNativeIdentity"))
+    require(identity == compiled["inertPolicy"]["artifactNativeIdentity"],
+            "Windows UI prerequisite did not retain the original inert-policy epoch")
+    request = windows_normal_ui_probe_request(context, artifact, identity, compiled["invocationSha256"], compiled["appVersion"])
+    expected = windows_installed_phase_receipt(context, "windows-normal-ui-prerequisite",
+        request={"size": len(request), "sha256": hashlib.sha256(request).hexdigest()}, compiledTest=artifact,
+        artifactNativeIdentity=identity, appVersion=compiled["appVersion"], nativeNotStarted=True)
+    require(same_compile_json(preflight, expected)
+            and windows_installed_bytes(root / "normal-ui-prerequisite-request.txt", 4096) == request,
+            "Windows UI probe original request/preflight changed")
+    return windows_normal_ui_probe_records(context, request,
+        windows_installed_bytes(root / "normal-ui-prerequisite-owner-result.private.json", 64 << 10),
+        windows_installed_bytes(root / "normal-ui-prerequisite-output/normal-ui-prerequisite-result.private.json", 4096),
+        windows_installed_bytes(root / "normal-ui-prerequisite-owner-exit.private.json", 4096),
+        windows_installed_bytes(root / "normal-ui-prerequisite-owner-intent.private.json", 4096),
+        os.environ["MRK_WINDOWS_UI_PREREQUISITE_OWNER_STEP_OUTCOME"], after_identity=windows_ordinary_original(artifact))
+
+
+def windows_normal_ui_probe_finalize(context: dict) -> None:
+    facts = windows_normal_ui_probe_observe_final(context)
+    path = Path(context["root"]) / "windows-normal-ui-prerequisite-finalize-checks.json"
+    value = windows_installed_phase_receipt(context, "windows-normal-ui-prerequisite-finalize", status="observed", **facts)
+    write_json(path, value)
+    record = windows_installed_record(path, 64 << 10)
+    with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+        output.write("prerequisitesAvailable=" + ("true" if facts["prerequisite"]["available"] else "false") + "\n")
+        output.write("finalizerSha256=" + record["sha256"] + "\n")
+
+
+def windows_normal_ui_positive_probe(context: dict) -> dict:
+    """Authenticate the SAME cheap owner after its intentional original ACL change.
+
+    A compiler-time named snapshot does not contain descriptor ChangeTime. Keep
+    that original byte/compiler binding, but join its exact pre-probe request to
+    the separately finalized native transition and a freshly opened descriptor.
+    Neither a profile marker nor a current-state adoption authorizes setup.
+    """
+    require(windows_normal_ui_profile(context) and "fullwalkInputs" not in context
+            and os.environ.get("MRK_WINDOWS_UI_PREREQUISITES_AVAILABLE") == "true"
+            and os.environ.get("MRK_WINDOWS_UI_PREREQUISITE_FINALIZE_STEP_OUTCOME") == "success",
+            "Windows UI setup requires independently finalized positive prerequisites")
+    root = Path(context["root"])
+    facts = windows_normal_ui_probe_observe_final(context)
+    require(facts["prerequisite"]["available"] is True, "Windows UI unavailable prerequisites cannot prepare a runtime")
+    finalizer_raw = windows_installed_bytes(root / "windows-normal-ui-prerequisite-finalize-checks.json", 64 << 10)
+    expected = windows_installed_phase_receipt(context, "windows-normal-ui-prerequisite-finalize", status="observed", **facts)
+    require(same_compile_json(bounded_json(finalizer_raw, 64 << 10), expected), "Windows UI positive probe finalizer changed")
+    request_raw = windows_installed_bytes(root / "normal-ui-prerequisite-request.txt", 4096)
+    request = windows_normal_ui_request_data(request_raw, root=context["root"])
+    request_sha, finalizer_sha = hashlib.sha256(request_raw).hexdigest(), hashlib.sha256(finalizer_raw).hexdigest()
+    require(request_sha == os.environ.get("MRK_WINDOWS_UI_PREREQUISITE_REQUEST_SHA256")
+            and finalizer_sha == os.environ.get("MRK_WINDOWS_UI_PREREQUISITE_FINALIZER_SHA256"),
+            "Windows UI positive prerequisite original handoff changed")
+    artifact, compiled = windows_normal_ui_compile_binding(context)
+    owner_raw = windows_installed_bytes(root / "normal-ui-prerequisite-owner-result.private.json", 64 << 10)
+    require(hashlib.sha256(owner_raw).hexdigest() == facts["originalOwner"]["ownerResultSha256"],
+            "Windows UI finalized owner record changed")
+    owner = bounded_json(owner_raw, 64 << 10)
+    identity = windows_ordinary_original(artifact)
+    windows_normal_ui_probe_transitions(owner["aclTransitions"], request, identity)
+    return {"compiledTest": artifact, "artifactNativeIdentity": identity,
+        "artifactAclAfterSha256": owner["aclTransitions"][5]["securityAfter"],
+        "compileInvocationSha256": compiled["invocationSha256"], "appVersion": compiled["appVersion"],
+        "prerequisiteRequest": {"size": len(request_raw), "sha256": request_sha},
+        "prerequisiteFinalizer": {"size": len(finalizer_raw), "sha256": finalizer_sha}}
+
+
+def windows_normal_ui_gui_request(context: dict, role: str, app: dict, app_identity: str, probe: dict,
+                                  invocation_sha: str, publication: dict, publication_raw: bytes) -> bytes:
+    require(windows_normal_ui_profile(context) and role in WINDOWS_NORMAL_UI_GUI_ROLES
+            and canonical_json(publication) == publication_raw and publication.get("profile") == WINDOWS_NORMAL_UI_PROFILE
+            and all(same_compile_json(publication[key], context[key]) for key in ("sourceSha", "sourceTree", "runId", "attempt")),
+            "Windows GUI request requires its exact independently finalized publication")
+    values = {"role": role, "test": WINDOWS_NORMAL_UI_ROLES[role][0], "appVersion": probe["appVersion"],
+        **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")},
+        **{key: publication[key] for key in ("manifestSha256", "protocolSha256", "inventorySha256", "coreSha256",
+            "payloadFiles", "payloadBytes", "versionIdentity", "selectedPythonIdentity", "selectedBootstrapIdentity", "selectedCoreIdentity")},
+        "publicationReceiptBytes": len(publication_raw), "publicationReceiptSha256": hashlib.sha256(publication_raw).hexdigest()}
+    for selected, artifact, identity, argv_sha in (("app", app, app_identity, invocation_sha),
+        ("owner", probe["compiledTest"], probe["artifactNativeIdentity"], probe["compileInvocationSha256"])):
+        command = '"' + artifact["path"] + '"'
+        if selected == "owner":
+            command += " " + windows_normal_ui_owner(role) + " --exact --ignored --nocapture --test-threads=1"
+        values.update({selected + "Artifact": artifact["path"], selected + "ArtifactBytes": artifact["size"],
+            selected + "ArtifactSha256": artifact["sha256"], selected + "ArtifactIdentity": identity,
+            selected + "CommandSha256": hashlib.sha256(command.encode("utf-16-le")).hexdigest(),
+            selected + "CompileMessagesBytes": artifact["messages"]["size"], selected + "CompileMessagesSha256": artifact["messages"]["sha256"],
+            selected + "CompileArgvSha256": argv_sha})
+    raw = ("MRK_WINDOWS_NORMAL_UI_REQUEST_V1\n" + "".join(key + "=" + str(values[key]) + "\n"
+        for key in WINDOWS_NORMAL_UI_REQUEST_FIELDS)).encode("ascii")
+    windows_normal_ui_request_data(raw, root=context["root"])
+    return raw
+
+
+def windows_normal_ui_gui_transitions(value: object, request: dict, after_identity: str) -> list[dict]:
+    role = request["role"]
+    require(role in WINDOWS_NORMAL_UI_GUI_ROLES and type(value) is list, "Windows GUI ACL role differs")
+    extra = (() if role == "normal-smoke" else (("synthetic-project", 0x1200a9), ("synthetic-app", 0x1200a9),
+        ("synthetic-release", 0x1200ab if role == "project-draft" else 0x1200a9),
+        *(("synthetic-input", 0x120089),) * (3 if role == "project-draft" else 4)))
+    require(len(value) == 7 + len(extra), "Windows GUI exact ACL transition inventory differs")
+    public = windows_normal_ui_probe_transitions(value[:7], request, after_identity)
+    identities = {(row["before"]["volume"], row["before"]["fileId"]) for row in value[:7]}
+    for row, (name, mask) in zip(value[7:], extra, strict=True):
+        closed_object(row, {"role", "mask", "before", "after", "securityBefore", "securityAfter", "singleExplicitNoninheritingAce"},
+                      "Windows GUI fixture ACL fields differ")
+        before, after = windows_ordinary_stamp(row["before"]), windows_ordinary_stamp(row["after"])
+        identity = (before["volume"], before["fileId"])
+        require(row["role"] == name and type(row["mask"]) is int and row["mask"] == mask
+                and row["singleExplicitNoninheritingAce"] is True and sha256_value(row["securityBefore"])
+                and sha256_value(row["securityAfter"]) and row["securityBefore"] != row["securityAfter"]
+                and same_compile_json({**before, "change": after["change"]}, after) and after["change"] >= before["change"]
+                and bool(before["attributes"] & 0x10) is (name != "synthetic-input") and identity not in identities,
+                "Windows GUI fixture ACL changed outside its exact original transition")
+        identities.add(identity)
+        public.append({"role": name, "mask": mask, "singleExplicitNoninheritingAce": True, "originalIdentityTransitionChecked": True})
+    return public
+
+
+def windows_normal_ui_gui_records(context: dict, request_raw: bytes, owner_raw: bytes, child_raw: bytes | None,
+                                  exit_raw: bytes, intent_raw: bytes, outcome: str, *, after_identity: str) -> dict:
+    """Each actual account/application/owner closure; never a pre-close success."""
+    require(windows_normal_ui_profile(context) and outcome == "success"
+            and all(type(raw) is bytes for raw in (request_raw, owner_raw, exit_raw, intent_raw)),
+            "Windows GUI original owner step has not independently closed")
+    request = windows_normal_ui_request_data(request_raw, root=context["root"])
+    role = request["role"]
+    require(role in WINDOWS_NORMAL_UI_GUI_ROLES and all(same_compile_json(request[key], context[key])
+            for key in ("sourceSha", "sourceTree", "runId", "attempt")), "Windows GUI request belongs to another run")
+    owner = bounded_json(owner_raw, 64 << 10)
+    require(type(owner) is dict and sha256_value(owner.get("accountSidSha256")), "Windows GUI original account binding is absent")
+    if role == "normal-smoke":
+        require(child_raw is None, "Windows normal smoke cannot consume an app-written automation result")
+        observation = {"mainRootBound": True, "dashboardReady": True, "postCloseCalls": 1, "invokeCalls": 1,
+            "nativeQuitConfirmed": True, "comOriginalsSettled": True, "apartmentDecremented": True}
+        native_sha = None
+    else:
+        require(type(child_raw) is bytes, "Windows GUI original observer result is absent")
+        observation = windows_normal_ui_child_data(request_raw, child_raw, root=context["root"],
+            account_sid_sha256=owner["accountSidSha256"])["observation"]
+        native_sha = hashlib.sha256(child_raw).hexdigest()
+    binding = {"schemaVersion": 1, **{key: request[key] for key in ("sourceSha", "sourceTree", "runId", "attempt", "role")},
+               "requestSha256": hashlib.sha256(request_raw).hexdigest()}
+    intent = closed_object(bounded_json(intent_raw, 4096), {*binding, "accountName", "freshAccountIntent", "fixedNormalUiChildOnly"},
+                           "Windows GUI original account intent fields differ")
+    require(type(intent["accountName"]) is str and re.fullmatch(r"mrk[0-9a-f]{16}", intent["accountName"]) is not None
+            and same_compile_json(intent, {**binding, "accountName": intent["accountName"], "freshAccountIntent": True,
+                "fixedNormalUiChildOnly": True}), "Windows GUI original account intent differs")
+    owner_test = windows_normal_ui_owner(role)
+    expected_exit = {**binding, "qualificationProfile": WINDOWS_NORMAL_UI_PROFILE, "artifactSha256": request["appArtifactSha256"],
+        "ownerArtifactSha256": request["ownerArtifactSha256"], "ownerTest": owner_test, "originalWaitReturned": True, "exitCode": 0,
+        "writerCloseGate": "original-owner-step-success-required"}
+    require(same_compile_json(bounded_json(exit_raw, 4096), expected_exit), "Windows GUI separately closed original owner exit differs")
+    ancestors = len(windows_ordinary_path(context["root"]).parents) + 1
+    require(ancestors <= 16, "Windows GUI original ancestry exceeds its native bound")
+    # Every created fixture file retains BOTH its once-closed CREATE_NEW writer
+    # and its authenticated read original in the native files book. ProjectDraft
+    # also adds the later config reader; lifecycle fixtures start with config.
+    count = ancestors + {"normal-smoke": 11, "project-draft": 22, "quit-passive": 23, "document-loss": 23}[role]
+    fixture = (None if role == "normal-smoke" else {"initialFiles": 3 if role == "project-draft" else 4, "finalFiles": 4,
+        "immutableFilesVerified": 3 if role == "project-draft" else 4, "labelledCreateNew": role == "project-draft",
+        "completeInventoryVerified": True})
+    fixed = {**binding, "qualificationProfile": WINDOWS_NORMAL_UI_PROFILE,
+        "artifactBytes": request["appArtifactBytes"], "artifactSha256": request["appArtifactSha256"], "commandSha256": request["appCommandSha256"],
+        "ownerArtifactBytes": request["ownerArtifactBytes"], "ownerArtifactSha256": request["ownerArtifactSha256"],
+        "ownerCommandSha256": request["ownerCommandSha256"], "accountSidSha256": owner["accountSidSha256"],
+        "ownerTest": owner_test, "childTest": request["test"], "createCalls": 1, "createError": None, "firstWait": 0,
+        "originalExitCode": 0, "terminateCalls": 0, "deadlineLatched": False, "unknown": False, "parentBookSettled": True,
+        "inputOriginals": count, "inputOriginalsClosed": count, "freshAccountVerified": True, "onlyUsersMembership": True,
+        "profileAbsentBefore": True, "profileOriginalBound": True, "profileHivesUnloaded": True, "profileDeleteCalls": 1,
+        "profileAbsentAfter": True, "profileOriginalsSettled": True, "accountRemovedAfterProfileSettlement": True,
+        "outputInventoryVerified": True, "observationCompleted": True, "prerequisitesAvailable": None,
+        "verifiedMethods": 6 if role == "project-draft" else 0, "nativeResultSha256": native_sha,
+        "normalSmoke": observation if role == "normal-smoke" else None, "fixture": fixture,
+        "ownerResult": {"createNew": True, "writeCalls": 1, "closeGate": "original-owner-exit-zero-required"}}
+    returns = {"createReturn", "exitReturn", "processCloseReturn", "threadCloseReturn", "profileDeleteReturn"}
+    closed_object(owner, {*fixed, *returns, "aclTransitions"}, "Windows GUI owner original fields differ")
+    require(same_compile_json({key: owner[key] for key in fixed}, fixed)
+            and all(type(owner[key]) is int and -(2**31) <= owner[key] < 2**31 and owner[key] != 0 for key in returns),
+            "Windows GUI original create/wait/close/profile/account finality did not pass")
+    transitions = windows_normal_ui_gui_transitions(owner["aclTransitions"], request, after_identity)
+    records = {key: {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+        for key, raw in (("request", request_raw), ("owner", owner_raw), ("exit", exit_raw), ("intent", intent_raw))}
+    if child_raw is not None:
+        records["child"] = {"size": len(child_raw), "sha256": native_sha}
+    return {"role": role, "verifiedMethods": fixed["verifiedMethods"], "observation": observation,
+        "accountSidSha256": owner["accountSidSha256"], "accountNameSha256": hashlib.sha256(intent["accountName"].encode("ascii")).hexdigest(),
+        "beforeArtifactIdentity": request["appArtifactIdentity"], "afterArtifactIdentity": after_identity,
+        "artifactAclAfterSha256": owner["aclTransitions"][5]["securityAfter"], "evidence": records,
+        "originalOwner": {"test": owner_test, "directCreateProcessWithLogonW": True, "logonWithProfile": True,
+            "ownerAggregateSeconds": 90, "originalOwnerExitCode": 0, "originalChildExitCode": 0,
+            "processAndThreadOriginalsClosed": True, "inputOriginalsClosed": count, "freshOrdinaryAccount": True,
+            "profileOriginalBound": True, "profileHivesUnloaded": True, "profileDeleteCalls": 1, "profileAbsentAfter": True,
+            "profileOriginalsSettled": True, "accountRemovedAfterProfileSettlement": True,
+            "outputInventoryVerified": True, "resultFilesClosedBySeparateExitGates": True, "fixture": fixture, "aclTransitions": transitions}}
+
+
+def windows_normal_ui_setup_native_metadata(context: dict) -> dict:
+    require(windows_normal_ui_profile(context), "Windows UI runtime setup graph requires its exact profile")
+    root, source = Path(context["root"]), Path(context["source"])
+    value = bounded_json(windows_installed_bytes(root / "normal-ui-setup-metadata.json", 2 << 20), 2 << 20)
+    by_name = windows_installed_native_graph(value, source=source, features=["runtime-publication"])
+    packages = {package["id"]: package for package in by_name.values()}
+    native = by_name["mrk-windows-installed-native"]["id"]
+    require(value.get("workspace_root") == str(source / WINDOWS_INSTALLED_CRATE)
+            and value.get("workspace_members") == [native] and value.get("workspace_default_members") == [native]
+            and value.get("target_directory") == str(root / "target"), "Windows UI setup workspace/target differs")
+    nodes = {node["id"]: node for node in value["resolve"]["nodes"]}
+    for key, node in nodes.items():
+        package = packages[key]
+        require(type(package.get("features")) is dict and type(node.get("features")) is list
+                and all(type(item) is str for item in node["features"])
+                and node["features"] == sorted(set(node["features"]))
+                and set(node["features"]) <= set(package["features"]), "Windows UI setup resolved feature inventory differs")
+        if key != native:
+            manifest = Path(package["manifest_path"])
+            registry = root / "cargo/registry/src"
+            require(manifest.is_absolute() and manifest.is_relative_to(registry)
+                    and len(manifest.relative_to(registry).parts) == 3
+                    and manifest.parent.name == package["name"] + "-" + package["version"] and manifest.name == "Cargo.toml",
+                    "Windows UI setup dependency left private acquisition")
+    return {"packages": packages, "nodes": nodes, "nativeId": native}
+
+
+def windows_normal_ui_setup_native_argv(cargo: str, context: dict) -> list[str]:
+    require(windows_normal_ui_profile(context), "Windows UI setup compiler requires its exact profile")
+    return [cargo, "test", "--locked", "--offline", "--jobs", "1", "--no-default-features", "--target", TARGETS["windows"],
+        "--manifest-path", str(Path(context["source"]) / WINDOWS_INSTALLED_CRATE / "Cargo.toml"),
+        "--target-dir", str(Path(context["root"]) / "target"), "--features", "runtime-publication", "--lib", "--no-run", "--message-format=json"]
+
+
+def windows_normal_ui_setup_native_artifact(context: dict) -> dict:
+    root, source = Path(context["root"]), Path(context["source"])
+    messages = root / "normal-ui-setup-compile-messages.jsonl"
+    path = windows_normal_ui_native_test_path(windows_installed_bytes(messages, 16 << 20),
+        windows_normal_ui_setup_native_metadata(context), source=source, root=root)
+    before = path.lstat()
+    record = windows_installed_record(path, 128 << 20)
+    require(windows_installed_state(before) == windows_installed_state(path.lstat()), "Windows UI setup original artifact changed")
+    return {"path": str(path), **record,
+        "identity": [before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns],
+        "messages": windows_installed_record(messages, 16 << 20)}
+
+
+def windows_normal_ui_setup_distinct(probe: dict, artifact: dict, identity: str) -> None:
+    """Different features are not evidence of different original file objects."""
+    original = probe["compiledTest"]
+    require(windows_ordinary_path(artifact["path"]) != windows_ordinary_path(original["path"])
+            and windows_ordinary_identity(identity).split(":")[:2] != windows_ordinary_identity(probe["artifactNativeIdentity"]).split(":")[:2]
+            and artifact["messages"] != original["messages"], "Windows UI setup must retain a genuinely distinct original artifact/stream")
+
+
+def windows_normal_ui_setup_inputs(context: dict, probe: dict) -> dict:
+    """Separate fixed setup admission; never alter the original UI context."""
+    root = Path(context["root"])
+    value = closed_object(read_bounded_json(root / "normal-ui-setup-inputs.private.json", 64 << 10),
+        {"scope", "phase", "status", "sourceSha", "sourceTree", "runId", "attempt", "qualificationProfile", "retainedProbe", "inputs"},
+        "Windows UI setup original input admission fields differ")
+    inputs = closed_object(value["inputs"], {"pins", "curl"}, "Windows UI setup supplier fields differ")
+    system_root = os.environ.get("SystemRoot", "")
+    require(system_root != "", "Windows UI setup fixed supplier tool root is absent")
+    curl = Path(system_root) / "System32/curl.exe"
+    expected_inputs = {"pins": windows_fullwalk_pins(context), "curl": {"path": str(curl), "sha256": windows_fullwalk_curl_sha256(curl)}}
+    require(same_compile_json(inputs, expected_inputs)
+            and same_compile_json(value, windows_installed_phase_receipt(context, "windows-normal-ui-setup-inputs", retainedProbe=probe, inputs=inputs)),
+            "Windows UI original setup admission/probe/supplier changed")
+    return inputs
+
+
+def windows_normal_ui_setup_acquire_facts(context: dict, probe: dict, acquired: dict) -> dict:
+    root = Path(context["root"])
+    native = windows_normal_ui_setup_native_metadata(context)
+    helper_graph = windows_installed_helper_metadata(context)
+    return {"rust": RUST, "target": TARGETS["windows"], "standaloneFeatures": ["runtime-publication"],
+        "helperFeatures": ["windows-runtime-publisher"], "retainedProbe": probe,
+        "inputs": windows_installed_record(root / "normal-ui-setup-inputs.private.json", 64 << 10),
+        "metadata": windows_installed_record(root / "normal-ui-setup-metadata.json", 2 << 20),
+        "activePackageIds": sorted(native["nodes"]), "metadataOriginalExitCode": 0,
+        "helperMetadata": windows_installed_record(root / "helper-metadata.json", 8 << 20),
+        "helperActivePackageIds": sorted(helper_graph["nodes"]), "helperMetadataOriginalExitCode": 0,
+        "compilerTools": windows_installed_record(root / "compiler-tools.json", 64 << 10),
+        "fullwalk": acquired, "runtimeSetupOnly": True, "appCompiled": False, "guiCasesExecuted": 0}
+
+
+def windows_normal_ui_setup_acquired(context: dict) -> tuple[dict, dict, dict]:
+    require(os.environ.get("MRK_WINDOWS_UI_SETUP_ACQUIRE_STEP_OUTCOME") == "success",
+            "Windows UI setup acquisition step has not independently closed")
+    probe = windows_normal_ui_positive_probe(context)
+    root = Path(context["root"])
+    inputs = windows_normal_ui_setup_inputs(context, probe)
+    acquired = read_bounded_json(root / "windows-normal-ui-setup-acquire-checks.json", 64 << 10)
+    binding = closed_object(acquired["fullwalk"], {"supplier", "supplierInvocationSha256", "supplierOriginalExitCode",
+        "prepareInvocationSha256", "prepareOriginalExitCode", "prepared"}, "Windows UI setup acquired payload fields differ")
+    prepared = windows_fullwalk_prepared(context)
+    expected_binding = {"supplier": {"size": WINDOWS_FULLWALK_ZIP_BYTES, "sha256": WINDOWS_FULLWALK_ZIP_SHA256},
+        "supplierInvocationSha256": hashlib.sha256(canonical_json(windows_fullwalk_curl_argv(context, setup_inputs=inputs))).hexdigest(),
+        "supplierOriginalExitCode": 0, "prepareInvocationSha256": hashlib.sha256(canonical_json(windows_fullwalk_preparer_argv(context))).hexdigest(),
+        "prepareOriginalExitCode": 0, "prepared": prepared}
+    facts = windows_normal_ui_setup_acquire_facts(context, probe, binding)
+    require(same_compile_json(binding, expected_binding)
+            and same_compile_json(acquired, windows_installed_phase_receipt(context, "windows-normal-ui-setup-acquire", **facts))
+            and same_compile_json(read_bounded_json(root / "windows-normal-ui-setup-acquire-started.json", 64 << 10),
+                windows_installed_phase_receipt(context, "windows-normal-ui-setup-acquire", claimOnly=True)),
+            "Windows UI original setup acquisition/payload/graph/finality changed")
+    return probe, prepared, facts
+
+
+def windows_normal_ui_setup_compile_facts(context: dict, probe: dict, prepared: dict, owner: dict, helper: dict,
+                                        compiler: dict, owner_identity: str, helper_identity: str) -> dict:
+    windows_normal_ui_setup_distinct(probe, owner, owner_identity)
+    return {"rust": RUST, "target": TARGETS["windows"], "retainedProbe": probe,
+        "standaloneFeatures": ["runtime-publication"], "helperFeatures": ["windows-runtime-publisher"],
+        "compiledTest": owner, "artifactNativeIdentity": windows_ordinary_identity(owner_identity), "originalExitCode": 0,
+        "invocationSha256": hashlib.sha256(canonical_json(windows_normal_ui_setup_native_argv(compiler["cargo"]["path"], context))).hexdigest(),
+        "helperCompiledArtifact": helper, "helperArtifactNativeIdentity": windows_ordinary_identity(helper_identity), "helperOriginalExitCode": 0,
+        "helperInvocationSha256": hashlib.sha256(canonical_json(windows_installed_helper_argv(compiler["cargo"]["path"], context))).hexdigest(),
+        "manifestSha256": prepared["manifestSha256"], "protocolSha256": prepared["protocolSha256"], "preparedReceipt": prepared["receipt"],
+        "anchoredNativeBuilds": 1, "anchoredHelperBuilds": 1, "retainedUnanchoredCheapOwnerBuilds": 1,
+        "runtimeSetupOnly": True, "appCompiled": False, "guiCasesExecuted": 0}
+
+
+def windows_normal_ui_setup_compile_binding(context: dict) -> tuple[dict, dict, dict, dict]:
+    require(os.environ.get("MRK_WINDOWS_UI_SETUP_COMPILE_STEP_OUTCOME") == "success",
+            "Windows UI setup compiler step has not independently closed")
+    probe, prepared, _ = windows_normal_ui_setup_acquired(context)
+    root = Path(context["root"])
+    compiler, _ = windows_normal_ui_acquired(context)
+    owner, helper = windows_normal_ui_setup_native_artifact(context), windows_installed_helper_artifact(context)
+    facts = windows_normal_ui_setup_compile_facts(context, probe, prepared, owner, helper, compiler,
+        windows_ordinary_original(owner), windows_ordinary_original(helper))
+    require(same_compile_json(read_bounded_json(root / "normal-ui-setup-compiled-test.json", 64 << 10), owner)
+            and same_compile_json(read_bounded_json(root / "windows-normal-ui-setup-compile-checks.json", 64 << 10),
+                windows_installed_phase_receipt(context, "windows-normal-ui-setup-compile", **facts))
+            and same_compile_json(read_bounded_json(root / "windows-normal-ui-setup-compile-started.json", 64 << 10),
+                windows_installed_phase_receipt(context, "windows-normal-ui-setup-compile", claimOnly=True)),
+            "Windows UI original runtime-only setup compiler/artifact/anchor binding changed")
+    return owner, helper, prepared, facts
+
+
+def windows_normal_ui_setup_precheck_data(context: dict, raw: bytes) -> dict:
+    require(windows_normal_ui_profile(context), "Windows UI setup precheck has no historical role")
+    row = windows_fullwalk_wire(raw, "normal-ui-setup-precheck")
+    windows_fullwalk_binding(row, context, normal_ui_setup=True)
+    expected = {"stageTest": WINDOWS_NORMAL_UI_SETUP_STAGE, "observerTest": WINDOWS_NORMAL_UI_SETUP_OBSERVER,
+        "standaloneFeatures": "runtime-publication", "helperNativeFeatures": "runtime-publication", "payloadFiles": "46",
+        "setupContract": "fixed-normal-ui-fresh-runtime-only-v1"}
+    require(all(row[key] == value for key, value in expected.items())
+            and row["sourceInventorySha256"] == hashlib.sha256(canonical_json(
+                validate_environment_inventory(context["sourceFiles"], maximum=64 << 20))).hexdigest(),
+            "Windows UI setup source/features/selector contract differs")
+    root = windows_ordinary_path(context["root"])
+    owner = windows_ordinary_path(row["ownerArtifact"])
+    require(len(root.parents) + 1 <= 16 and owner.parent == root / "target/x86_64-pc-windows-msvc/debug/deps"
+            and re.fullmatch(r"mrk_windows_installed_native-[0-9a-f]{16}\.exe", owner.name) is not None
+            and windows_ordinary_path(row["helperArtifact"]) == root / (WINDOWS_RUNTIME_PUBLICATION_HELPER + ".exe"),
+            "Windows UI setup original path/role differs")
+    for role in ("owner", "helper"):
+        windows_ordinary_identity(row[role + "ArtifactIdentity"])
+        windows_fullwalk_number(row[role + "ArtifactBytes"], 128 << 20, minimum=1)
+        windows_fullwalk_number(row[role + "CompileMessagesBytes"], 16 << 20, minimum=1)
+    require(row["stageCommandSha256"] == windows_fullwalk_command_sha(row["ownerArtifact"], WINDOWS_NORMAL_UI_SETUP_STAGE)
+            and row["observerCommandSha256"] == windows_fullwalk_command_sha(row["ownerArtifact"], WINDOWS_NORMAL_UI_SETUP_OBSERVER)
+            and row["helperCommandSha256"] == windows_runtime_publication_helper_command_sha(row["helperArtifact"]),
+            "Windows UI setup exact original commands differ")
+    for key, limit in (("payloadBytes", 1 << 30), ("preparedReceiptBytes", 4096), ("rosterBytes", 16 << 10)):
+        windows_fullwalk_number(row[key], limit, minimum=1)
+    return row
+
+
+def windows_normal_ui_setup_precheck_text(context: dict, owner: dict, helper: dict, prepared: dict, compiled: dict, roster_raw: bytes) -> bytes:
+    probe = compiled["retainedProbe"]
+    values = {"profile": WINDOWS_NORMAL_UI_PROFILE, **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")},
+        "sourceInventorySha256": hashlib.sha256(canonical_json(validate_environment_inventory(context["sourceFiles"], maximum=64 << 20))).hexdigest(),
+        "prerequisiteRequestSha256": probe["prerequisiteRequest"]["sha256"], "prerequisiteFinalizerSha256": probe["prerequisiteFinalizer"]["sha256"],
+        "stageTest": WINDOWS_NORMAL_UI_SETUP_STAGE, "observerTest": WINDOWS_NORMAL_UI_SETUP_OBSERVER,
+        "stageCommandSha256": windows_fullwalk_command_sha(owner["path"], WINDOWS_NORMAL_UI_SETUP_STAGE),
+        "observerCommandSha256": windows_fullwalk_command_sha(owner["path"], WINDOWS_NORMAL_UI_SETUP_OBSERVER),
+        "standaloneFeatures": "runtime-publication", "helperNativeFeatures": "runtime-publication",
+        "helperCommandSha256": windows_runtime_publication_helper_command_sha(helper["path"]),
+        **{key: prepared[key] for key in ("manifestSha256", "protocolSha256", "inventorySha256", "coreSha256", "payloadFiles", "payloadBytes")},
+        "preparedReceiptBytes": prepared["receipt"]["size"], "preparedReceiptSha256": prepared["receipt"]["sha256"],
+        "rosterBytes": len(roster_raw), "rosterSha256": hashlib.sha256(roster_raw).hexdigest(),
+        "setupContract": "fixed-normal-ui-fresh-runtime-only-v1"}
+    for role, artifact, identity_key, invocation_key in (("owner", owner, "artifactNativeIdentity", "invocationSha256"),
+                                                       ("helper", helper, "helperArtifactNativeIdentity", "helperInvocationSha256")):
+        values.update({role + "Artifact": artifact["path"], role + "ArtifactBytes": artifact["size"], role + "ArtifactSha256": artifact["sha256"],
+            role + "ArtifactIdentity": compiled[identity_key], role + "CompileMessagesBytes": artifact["messages"]["size"],
+            role + "CompileMessagesSha256": artifact["messages"]["sha256"], role + "CompileArgvSha256": compiled[invocation_key]})
+    raw = windows_fullwalk_text("normal-ui-setup-precheck", values)
+    windows_normal_ui_setup_precheck_data(context, raw)
+    return raw
+
+
+def windows_normal_ui_setup_preflight_facts(raw: bytes, roster: bytes, compiled: dict) -> dict:
+    return {"precheck": {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()},
+        "roster": {"size": len(roster), "sha256": hashlib.sha256(roster).hexdigest()},
+        "retainedProbe": compiled["retainedProbe"], "artifactNativeIdentity": compiled["artifactNativeIdentity"],
+        "helperArtifactNativeIdentity": compiled["helperArtifactNativeIdentity"], "nativeNotStarted": True,
+        "runtimeSetupOnly": True, "appCompiled": False, "guiCasesExecuted": 0}
+
+
+def windows_normal_ui_setup_preflight(context: dict) -> None:
+    owner, helper, prepared, compiled = windows_normal_ui_setup_compile_binding(context)
+    root = Path(context["root"])
+    roster_raw = windows_fullwalk_roster_text(prepared["physical"])
+    raw = windows_normal_ui_setup_precheck_text(context, owner, helper, prepared, compiled, roster_raw)
+    for name in ("normal-ui-setup-precheck.private.txt", "fullwalk-fixture-roster.private.txt", "normal-ui-publication.private.json",
+                 *[name for name, _ in WINDOWS_NORMAL_UI_SETUP_PROOFS.values()], "normal-ui-setup-publication-observation.private.txt",
+                 "normal-ui-setup-observer-exit.private.txt", *(phase + "-checks.json" for phase in WINDOWS_NORMAL_UI_SETUP_DATA_PHASES)):
+        try:
+            (root / name).lstat()
+        except FileNotFoundError:
+            continue
+        raise CheckFailure("Windows UI setup one-use original output is occupied")
+    windows_fullwalk_write(root / "fullwalk-fixture-roster.private.txt", roster_raw, 16 << 10)
+    windows_fullwalk_write(root / "normal-ui-setup-precheck.private.txt", raw, 16 << 10)
+    facts = windows_normal_ui_setup_preflight_facts(raw, roster_raw, compiled)
+    write_json(root / "windows-normal-ui-setup-preflight-checks.json",
+               windows_installed_phase_receipt(context, "windows-normal-ui-setup-preflight", **facts))
+    with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8", newline="\n") as output:
+        values = {"artifact": owner["path"], "artifactSha256": owner["sha256"], "helperArtifact": helper["path"],
+            "helperArtifactSha256": helper["sha256"], "sourceTree": context["sourceTree"], "precheckSha256": facts["precheck"]["sha256"]}
+        text = "".join(key + "=" + value + "\n" for key, value in values.items())
+        require(output.write(text) == len(text), "Windows UI setup original handoff write is incomplete")
+
+
+def windows_normal_ui_setup_check_precheck(context: dict) -> tuple[dict, bytes, bytes, dict]:
+    owner, helper, prepared, compiled = windows_normal_ui_setup_compile_binding(context)
+    root = Path(context["root"])
+    raw = windows_installed_bytes(root / "normal-ui-setup-precheck.private.txt", 16 << 10)
+    roster = windows_installed_bytes(root / "fullwalk-fixture-roster.private.txt", 16 << 10)
+    pre = windows_normal_ui_setup_precheck_data(context, raw)
+    require(roster == windows_fullwalk_roster_text(prepared["physical"])
+            and raw == windows_normal_ui_setup_precheck_text(context, owner, helper, prepared, compiled, roster)
+            and os.environ.get("MRK_WINDOWS_UI_SETUP_PREFLIGHT_STEP_OUTCOME") == "success"
+            and os.environ.get("MRK_WINDOWS_UI_SETUP_PRECHECK_SHA256") == hashlib.sha256(raw).hexdigest()
+            and same_compile_json(read_bounded_json(root / "windows-normal-ui-setup-preflight-checks.json", 64 << 10),
+                windows_installed_phase_receipt(context, "windows-normal-ui-setup-preflight",
+                    **windows_normal_ui_setup_preflight_facts(raw, roster, compiled))),
+            "Windows UI setup original precheck/roster/compiler/finality changed")
+    return pre, raw, roster, compiled
+
+
+def windows_normal_ui_setup_data(context: dict, pre_raw: bytes, roster_raw: bytes, blobs: dict[str, bytes],
+                                 outcomes: dict[str, str], through: str) -> tuple[dict, dict | None]:
+    """Closed original setup DATA only, never ordinary-account or UI admission."""
+    steps = ("stage", "publish", "publication")
+    require(windows_normal_ui_profile(context) and through in steps, "Windows UI runtime setup role differs")
+    index = steps.index(through)
+    keys = ("stage", "stageExit", "helperSuccessExit", "observation", "observerExit")[:(2, 3, 5)[index]]
+    closed_object(blobs, set(keys), "Windows UI original setup inventory differs")
+    require(all(type(raw) is bytes for raw in blobs.values()) and same_compile_json(outcomes, dict.fromkeys(steps[:index + 1], "success")),
+            "Windows UI setup requires each actual separately closed original")
+    pre = windows_normal_ui_setup_precheck_data(context, pre_raw)
+    stage = windows_runtime_publication_observation(context, blobs["stage"], pre_raw, roster_raw, WINDOWS_NORMAL_UI_SETUP_STAGE)
+    windows_runtime_publication_exit(context, blobs["stageExit"], pre_raw, "stage", outcomes["stage"])
+    records = {key: {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()} for key, raw in blobs.items()}
+    facts = {"setupThrough": through, "originalExitCodes": dict.fromkeys(steps[:index + 1], 0),
+        "originalStepClosesChecked": True, "precheckSha256": hashlib.sha256(pre_raw).hexdigest(), "setupEvidence": records,
+        "prerequisiteRequestSha256": pre["prerequisiteRequestSha256"], "prerequisiteFinalizerSha256": pre["prerequisiteFinalizerSha256"],
+        "ownerArtifactSha256": pre["ownerArtifactSha256"], "helperArtifactSha256": pre["helperArtifactSha256"], "normalHelperNotLibtest": True,
+        "actualFixedProducerObserved": index == 2, "runtimeConsumerEnabled": False, "productionEnabled": False,
+        "combinedPassed": False, "guiCasesExecuted": 0, "verifiedMethods": 0}
+    if index >= 1:
+        windows_runtime_publication_exit(context, blobs["helperSuccessExit"], pre_raw, "helperSuccess", outcomes["publish"])
+    if index != 2:
+        return facts, None
+    observed = windows_runtime_publication_observation(context, blobs["observation"], pre_raw, roster_raw, WINDOWS_NORMAL_UI_SETUP_OBSERVER)
+    windows_runtime_publication_exit(context, blobs["observerExit"], pre_raw, "observe", outcomes["publication"])
+    require(same_compile_json(observed["proofs"], [{"role": role, **records[role]} for role in WINDOWS_NORMAL_UI_SETUP_PROOFS]),
+            "Windows UI observer did not retain these exact original setup records")
+    windows_runtime_publication_source_unchanged(stage, observed)
+    selected = {item["role"]: item["stamp"] for item in observed["objects"]}
+    identities = {key: str(selected[role]["volume"]) + ":" + selected[role]["fileId"] for key, role in (
+        ("versionIdentity", "version"), ("selectedPythonIdentity", "python/python.exe"),
+        ("selectedBootstrapIdentity", "engine_bootstrap.py"), ("selectedCoreIdentity", "core.zip"))}
+    facts.update(sourceObjectsUnchanged=True, observedObjects=103)
+    publication = {"schemaVersion": 1, "profile": WINDOWS_NORMAL_UI_PROFILE,
+        **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")},
+        "precheck": {"size": len(pre_raw), "sha256": hashlib.sha256(pre_raw).hexdigest()},
+        "roster": {"size": len(roster_raw), "sha256": hashlib.sha256(roster_raw).hexdigest()},
+        **{key: pre[key] for key in ("manifestSha256", "protocolSha256", "inventorySha256", "coreSha256")},
+        "payloadFiles": 46, "payloadBytes": windows_fullwalk_number(pre["payloadBytes"], 1 << 30, minimum=1),
+        **identities, "setup": facts, "comparisonDataOnly": True, "productionEnabled": False}
+    return facts, publication
+
+
+def windows_normal_ui_setup_evidence(context: dict, through: str, *, finalized: bool) -> tuple[dict, dict | None, tuple]:
+    steps = ("stage", "publish", "publication")
+    require(through in steps and type(finalized) is bool, "Windows UI setup evidence role differs")
+    index = steps.index(through)
+    prechecked = windows_normal_ui_setup_check_precheck(context)
+    _, pre_raw, roster_raw, _ = prechecked
+    root = Path(context["root"])
+    files = {**WINDOWS_NORMAL_UI_SETUP_PROOFS, "observation": ("normal-ui-setup-publication-observation.private.txt", 64 << 10),
+             "observerExit": ("normal-ui-setup-observer-exit.private.txt", 4096)}
+    blobs = {role: windows_installed_bytes(root / name, limit) for role, (name, limit) in list(files.items())[:(2, 3, 5)[index]]}
+    outcomes = {role: os.environ.get("MRK_WINDOWS_UI_SETUP_" + role.upper() + "_STEP_OUTCOME", "unavailable") for role in steps[:index + 1]}
+    facts, publication = windows_normal_ui_setup_data(context, pre_raw, roster_raw, blobs, outcomes, through)
+    for prior_index, role in enumerate(steps[:index + int(finalized)]):
+        require(os.environ.get("MRK_WINDOWS_UI_SETUP_" + role.upper() + "_FINALIZE_STEP_OUTCOME") == "success",
+                "Windows UI setup prior DATA finalizer did not close")
+        prior_facts, _ = windows_normal_ui_setup_data(context, pre_raw, roster_raw,
+            dict(list(blobs.items())[:(2, 3, 5)[prior_index]]), {step: outcomes[step] for step in steps[:prior_index + 1]}, role)
+        phase = "windows-normal-ui-setup-" + role + "-finalize"
+        require(same_compile_json(read_bounded_json(root / (phase + "-checks.json"), 64 << 10),
+            windows_installed_phase_receipt(context, phase, **prior_facts)), "Windows UI original setup finalizer changed")
+    if finalized and through == "publication":
+        require(windows_installed_bytes(root / "normal-ui-publication.private.json", 64 << 10) == canonical_json(publication),
+                "Windows UI original fresh-publication comparison receipt changed")
+    return facts, publication, prechecked
+
+
+def windows_normal_ui_setup_finalize(context: dict, through: str) -> None:
+    facts, publication, _ = windows_normal_ui_setup_evidence(context, through, finalized=False)
+    root = Path(context["root"])
+    if through == "publication":
+        windows_fullwalk_write(root / "normal-ui-publication.private.json", canonical_json(publication), 64 << 10)
+    phase = "windows-normal-ui-setup-" + through + "-finalize"
+    write_json(root / (phase + "-checks.json"), windows_installed_phase_receipt(context, phase, **facts))
+
+
+def windows_normal_ui_setup_build(name: str, context: dict, deadline: float) -> None:
+    require(windows_normal_ui_profile(context) and name in WINDOWS_NORMAL_UI_SETUP_BUILD_PHASES,
+            "Windows UI setup acquisition/compile phase differs")
+    probe = windows_normal_ui_positive_probe(context)
+    root, source = Path(context["root"]), Path(context["source"])
+    source_unchanged(context)
+    require(context["sdk"] == {"version": WINDOWS_SDK_VERSION, "headers": fixed_file_inventory(windows_sdk_root(), WINDOWS_SDK_HEADERS)},
+            "Windows UI setup original SDK changed")
+    environment = clean_environment(root)
+    environment.update(GITHUB_SHA=context["sourceSha"], GITHUB_RUN_ID=context["runId"],
+        MRK_WINDOWS_SOURCE_TREE=context["sourceTree"], CARGO_TARGET_DIR=str(root / "target"))
+    compiler, _ = windows_normal_ui_acquired(context)
+    cargo, rustc = tools(context, environment)
+    require(compiler == {role: {"path": path, **windows_installed_record(Path(path), 128 << 20)}
+                         for role, path in (("cargo", cargo), ("rustc", rustc))}, "Windows UI setup original selected compiler changed")
+    write_json(root / (name + "-started.json"), windows_installed_phase_receipt(context, name, claimOnly=True))
+    if name == "windows-normal-ui-setup-acquire":
+        inputs = windows_fullwalk_prepare_inputs(context)
+        write_json(root / "normal-ui-setup-inputs.private.json",
+            windows_installed_phase_receipt(context, "windows-normal-ui-setup-inputs", retainedProbe=probe, inputs=inputs))
+        acquired = windows_fullwalk_acquire(context, environment, deadline, setup_inputs=inputs)
+        # The runtime-only native graph is already contained in cheap native
+        # acquisition. Its new metadata/stream never overwrites the original24.
+        with (root / "normal-ui-setup-metadata.json").open("x", encoding="utf-8", newline="\n") as output, \
+                (root / "normal-ui-setup-acquire.stderr").open("x", encoding="utf-8") as diagnostics:
+            run([cargo, "metadata", "--locked", "--offline", "--format-version", "1", "--no-default-features",
+                 "--features", "runtime-publication", "--filter-platform", TARGETS["windows"],
+                 "--manifest-path", str(source / WINDOWS_INSTALLED_CRATE / "Cargo.toml")],
+                check="windows-normal-ui-setup-native-metadata", cwd=root, env=environment,
+                timeout=windows_installed_remaining(deadline, 180), output=output, diagnostics=diagnostics)
+        windows_normal_ui_setup_native_metadata(context)
+        with (root / "helper-metadata.json").open("x", encoding="utf-8", newline="\n") as output, \
+                (root / "helper-acquire.stderr").open("x", encoding="utf-8") as diagnostics:
+            run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features", "--filter-platform", TARGETS["windows"],
+                 "--features", "windows-runtime-publisher", "--manifest-path", str(source / WINDOWS_INSTALLED_APP / "Cargo.toml")],
+                check="windows-installed-helper-locked-metadata", cwd=root, env=environment,
+                timeout=windows_installed_remaining(deadline, 600), output=output, diagnostics=diagnostics)
+        require(same_compile_json(probe, windows_normal_ui_positive_probe(context))
+                and same_compile_json(acquired["prepared"], windows_fullwalk_prepared(context)),
+                "Windows UI original cheap probe or prepared input changed during acquisition")
+        facts = windows_normal_ui_setup_acquire_facts(context, probe, acquired)
+    else:
+        acquired_probe, prepared, _ = windows_normal_ui_setup_acquired(context)
+        require(same_compile_json(probe, acquired_probe), "Windows UI setup precompile probe original changed")
+        environment.update(MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=prepared["manifestSha256"],
+                           MRK_BUNDLED_PROTOCOL_SHA256=prepared["protocolSha256"])
+        argv = windows_normal_ui_setup_native_argv(cargo, context)
+        try:
+            with (root / "normal-ui-setup-compile-messages.jsonl").open("x", encoding="utf-8", newline="\n") as output, \
+                    (root / "normal-ui-setup-compile.stderr").open("x", encoding="utf-8") as diagnostics:
+                run(argv, check="windows-normal-ui-setup-native-compile-only", cwd=root, env=environment,
+                    timeout=windows_installed_remaining(deadline, 600), output=output, diagnostics=diagnostics)
+        except Exception:
+            try:
+                if output.closed and diagnostics.closed:
+                    detail = windows_installed_compile_failure_data(
+                        windows_installed_bytes(root / "normal-ui-setup-compile-messages.jsonl", 16 << 20), context, "standalone")
+                    print("MRK_WINDOWS_NORMAL_UI_SETUP_COMPILE_REFUSED=" + canonical_json(detail).decode("ascii"), flush=True)
+            except BaseException:
+                pass  # Fixed failure-only diagnostics cannot replace the original failure.
+            raise
+        owner = windows_normal_ui_setup_native_artifact(context)
+        owner_identity = windows_ordinary_original(owner)
+        windows_normal_ui_setup_distinct(probe, owner, owner_identity)
+        require(same_compile_json(probe, windows_normal_ui_positive_probe(context)),
+                "Windows UI cheap original artifact/messages changed during distinct setup compilation")
+        write_json(root / "normal-ui-setup-compiled-test.json", owner)
+        windows_installed_helper_outputs_absent(context)
+        helper_argv = windows_installed_helper_argv(cargo, context)
+        try:
+            with (root / "helper-compile-messages.jsonl").open("x", encoding="utf-8", newline="\n") as output, \
+                    (root / "helper-compile.stderr").open("x", encoding="utf-8") as diagnostics:
+                run(helper_argv, check="windows-installed-helper-compile-only", cwd=root, env=environment,
+                    timeout=windows_installed_remaining(deadline, 600), output=output, diagnostics=diagnostics)
+        except Exception:
+            try:
+                if output.closed and diagnostics.closed:
+                    windows_installed_compile_failure(context, "helper")
+            except BaseException:
+                pass
+            raise
+        require(output.closed and diagnostics.closed, "Windows UI setup helper original compiler writers are not closed")
+        helper = windows_installed_helper_handoff(context, deadline)
+        write_json(root / "helper-compiled-artifact.json", helper)
+        require(same_compile_json(probe, windows_normal_ui_positive_probe(context))
+                and same_compile_json(prepared, windows_fullwalk_prepared(context))
+                and same_compile_json(owner, windows_normal_ui_setup_native_artifact(context))
+                and owner_identity == windows_ordinary_original(owner),
+                "Windows UI original cheap/setup compiler or payload changed during helper build")
+        facts = windows_normal_ui_setup_compile_facts(context, probe, prepared, owner, helper, compiler,
+            owner_identity, windows_ordinary_original(helper))
+    windows_installed_inputs(context)
+    source_unchanged(context)
+    windows_installed_remaining(deadline, 1)
+    write_json(root / (name + "-checks.json"), windows_installed_phase_receipt(context, name, **facts))
+
+
+def windows_normal_ui_gui_messages(context: dict, *, observer: bool) -> tuple[dict, dict, dict]:
+    root = Path(context["root"])
+    path = root / ("observer-compile-messages.jsonl" if observer else "normal-app-compile-messages.jsonl")
+    graph = windows_normal_ui_app_metadata(context, observer=observer)
+    raw = windows_installed_bytes(path, 16 << 20)
+    parsed = windows_normal_ui_gui_compiler_data(raw, graph, source=Path(context["source"]), root=root)
+    return graph, parsed, {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def windows_normal_ui_normal_paths(context: dict) -> tuple[Path, Path, Path]:
+    require(windows_normal_ui_profile(context), "Windows normal singleton handoff requires its explicit profile")
+    root = Path(context["root"])
+    return (root / "target" / TARGETS["windows"] / "debug/mobile-release-kit-desktop.exe",
+            root / "mobile-release-kit-desktop.exe", root / "normal-app-compiled-artifact.json")
+
+
+def windows_normal_ui_absent(paths: tuple[Path, ...]) -> None:
+    for path in paths:
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            continue
+        raise CheckFailure("Windows GUI one-use original output is occupied")
+
+
+def windows_normal_ui_normal_handoff(context: dict, deadline: float) -> dict:
+    """One fixed normal app copy; raw compiler source/stream are never mutated."""
+    raw_path, destination, receipt = windows_normal_ui_normal_paths(context)
+    windows_normal_ui_absent((destination, receipt))
+    _, parsed, messages = windows_normal_ui_gui_messages(context, observer=False)
+    require(parsed["path"] == str(raw_path) and parsed["auxiliaryPackageBinary"] is None, "Windows normal app compiler role differs")
+    with windows_installed_helper_observation(raw_path, compiler_source=True, deadline=deadline, normal_ui_app=True) as (raw, source):
+        original = windows_installed_helper_copy(destination, raw, source, deadline, normal_ui_app=True)
+        with windows_installed_helper_observation(destination, compiler_source=False, deadline=deadline, normal_ui_app=True) as (copied, copy):
+            require(tuple(copy["descriptor"][:2]) == original and copied == raw, "Windows normal singleton closed readback differs")
+            result = windows_installed_helper_record(source, copy, messages)
+    windows_installed_remaining(deadline, 1)
+    return result
+
+
+def windows_normal_ui_normal_artifact(context: dict) -> dict:
+    """Read-only sealed lineage; the caller must also join current ChangeTime.
+
+    Byte/named/compiler-source epochs stay exact. The singleton descriptor may
+    differ ONLY in ChangeTime, which is NOT adopted here: preflight/finalizers
+    separately demand its exact native request/ACL transition chain.
+    """
+    raw_path, destination, receipt = windows_normal_ui_normal_paths(context)
+    saved = closed_object(read_bounded_json(receipt, 64 << 10),
+        {"path", "size", "sha256", "identity", "messages", "compilerSource", "copySnapshot"}, "Windows normal app handoff fields differ")
+    _, parsed, messages = windows_normal_ui_gui_messages(context, observer=False)
+    require(parsed["path"] == str(raw_path), "Windows normal original compiler path changed")
+    with windows_installed_helper_observation(raw_path, compiler_source=True, normal_ui_app=True) as (_, source):
+        with windows_installed_helper_observation(destination, compiler_source=False, normal_ui_app=True) as (_, copy):
+            observed = windows_installed_helper_record(source, copy, messages)
+            initial = closed_object(saved["copySnapshot"], {"named", "descriptor"}, "Windows normal singleton sealed epoch differs")
+            require(type(initial["descriptor"]) is list and len(initial["descriptor"]) == len(copy["descriptor"])
+                    and initial["descriptor"][:-1] == copy["descriptor"][:-1]
+                    and same_compile_json({**observed, "copySnapshot": initial}, saved)
+                    and initial["named"] == copy["named"], "Windows normal compiler source or singleton sealed identity changed")
+    return saved
+
+
+def windows_normal_ui_observer_artifact(context: dict) -> dict:
+    _, parsed, messages = windows_normal_ui_gui_messages(context, observer=True)
+    path = Path(parsed["path"])
+    before = path.lstat()
+    record = windows_installed_record(path, 512 << 20)
+    require(windows_installed_state(before) == windows_installed_state(path.lstat()), "Windows GUI original observer changed")
+    return {"path": str(path), **record, "identity": list(windows_installed_state(before)), "messages": messages}
+
+
+def windows_normal_ui_material_sources(graph: dict) -> dict:
+    packages, selected = graph["packages"], graph["materialIds"]
+    tauri = Path(packages[selected["tauri-build"]]["manifest_path"]).parent
+    webview = Path(packages[selected["webview2-com-sys"]]["manifest_path"]).parent
+    expected = {
+        "commonControlsTemplate": (tauri / "src/windows-app-manifest.xml", 392, WINDOWS_NORMAL_UI_COMMON_CONTROLS_MANIFEST_SHA256),
+        "webviewBuild": (webview / "build.rs", 2627, "ea73d2566f434a25e8172d0fb9eaad5fa29ee687a8f05b9c2be02b19e4366e16"),
+        "webviewLinkSelection": (webview / "src/lib.rs", 0, "bd953534fa9b15d39ac69c9afa82762adaaa81621a0adb687ba385327ee6689a"),
+        "webviewBindings": (webview / "src/bindings.rs", 0, "d47ecf982c4199d0a3b378caf66f076231af2b5b342497f7380630b22b29f917"),
+        "webviewX64StaticLibrary": (webview / "x64/WebView2LoaderStatic.lib", 10500016, "0659b741bde6348d4c4a6ec4ceb9af50e3d0048ed9cd3c8659bccbb61fde55ee"),
+    }
+    records = {}
+    for role, (path, size, digest) in expected.items():
+        record = windows_installed_record(path, 32 << 20)
+        require(record["sha256"] == digest and (size == 0 or record["size"] == size), "Windows GUI material source/library differs")
+        records[role] = record
+    return records
+
+
+def windows_normal_ui_link_inputs(graph: dict, parsed: dict) -> dict:
+    source = windows_normal_ui_material_sources(graph)
+    rows = parsed["buildScripts"].get(graph["materialIds"]["webview2-com-sys"])
+    require(type(rows) is list and len(rows) == 1, "Windows GUI original WebView2 build output is ambiguous")
+    row = rows[0]
+    require(row["linked_libs"] == ["advapi32"] and row.get("linked_paths") == ["native=" + str(Path(row["out_dir"]) / "x64")],
+            "Windows GUI original WebView2 target/search path differs")
+    library = windows_installed_record(Path(row["out_dir"]) / "x64/WebView2LoaderStatic.lib", 32 << 20)
+    require(library == source["webviewX64StaticLibrary"], "Windows GUI selected static loader bytes differ from source")
+    return {"materialSources": source, "actualTargetStaticLibrary": library, "targetEnvironment": "msvc",
+            "loaderSelection": "source-cfg-WebView2LoaderStatic", "loaderCargoFeature": None}
+
+
+def windows_normal_ui_frontend_files(context: dict) -> list[dict]:
+    base = Path(context["source"]) / "desktop/dist"
+    windows_installed_directories(base)
+    names, total, visited = [], 0, 0
+    for path in base.rglob("*"):
+        visited += 1
+        require(visited <= 128, "Windows GUI frontend path count exceeds bound")
+        details = path.lstat()
+        require(not stat.S_ISLNK(details.st_mode) and not getattr(details, "st_file_attributes", 0) & 0x400,
+                "Windows GUI frontend contains a redirected output")
+        if stat.S_ISDIR(details.st_mode):
+            continue
+        require(stat.S_ISREG(details.st_mode) and details.st_nlink == 1, "Windows GUI frontend output is not ordinary")
+        total += details.st_size
+        require(total <= 8 << 20, "Windows GUI frontend bytes exceed bound")
+        names.append(path.relative_to(base).as_posix())
+    require("index.html" in names and names, "Windows GUI packaged frontend entry is absent")
+    return fixed_file_inventory(base, tuple(sorted(names)))
+
+
+def windows_normal_ui_gui_base(context: dict) -> tuple[dict, dict, dict]:
+    probe = windows_normal_ui_positive_probe(context)
+    _, publication, checked = windows_normal_ui_setup_evidence(context, "publication", finalized=True)
+    require(type(publication) is dict and same_compile_json(checked[3]["retainedProbe"], probe),
+            "Windows GUI setup changed its original cheap prerequisite")
+    record = windows_installed_record(Path(context["root"]) / "normal-ui-publication.private.json", 64 << 10)
+    return probe, publication, record
+
+
+def windows_normal_ui_gui_acquire_facts(context: dict, probe: dict, publication: dict, frontend_tools: dict) -> dict:
+    root = Path(context["root"])
+    graphs = {role: windows_normal_ui_app_metadata(context, observer=role == "observer") for role in ("normal", "observer")}
+    material = windows_normal_ui_material_sources(graphs["normal"])
+    require(same_compile_json(material, windows_normal_ui_material_sources(graphs["observer"])),
+            "Windows GUI acquisition material sources differ by role")
+    return {"retainedProbe": probe, "publication": publication, "rust": RUST, "node": NODE, "target": TARGETS["windows"],
+        "frontendTools": frontend_tools, "materialSources": material,
+        "normalMetadata": windows_installed_record(root / "normal-app-metadata.json", 16 << 20),
+        "observerMetadata": windows_installed_record(root / "observer-metadata.json", 16 << 20),
+        "normalFeatures": windows_normal_ui_features("app"), "observerFeatures": windows_normal_ui_features("observer"),
+        "originalExitCodes": {"normalMetadata": 0, "observerMetadata": 0, "frontendAcquire": 0}, "guiNotStarted": True}
+
+
+def windows_normal_ui_gui_acquired(context: dict) -> tuple[dict, dict, dict, dict]:
+    require(os.environ.get("MRK_WINDOWS_UI_GUI_ACQUIRE_STEP_OUTCOME") == "success"
+            and os.environ.get("MRK_WINDOWS_UI_NODE_STEP_OUTCOME") == "success", "Windows GUI acquisition/Node step has not closed")
+    probe, publication, record = windows_normal_ui_gui_base(context)
+    root = Path(context["root"])
+    frontend = closed_object(read_bounded_json(root / "normal-ui-frontend-tools.json", 64 << 10), {"node", "npm"},
+                             "Windows GUI frontend compiler roles differ")
+    for role in ("node", "npm"):
+        item = closed_object(frontend[role], {"path", "size", "sha256"}, "Windows GUI frontend tool fields differ")
+        require(Path(item["path"]).is_absolute() and {key: item[key] for key in ("size", "sha256")}
+                == windows_installed_record(Path(item["path"]), 128 << 20), "Windows GUI frontend compiler changed")
+    require(frontend["npm"]["path"] == str(Path(frontend["node"]["path"]).parent / "node_modules/npm/bin/npm-cli.js"),
+            "Windows GUI npm is not part of the original selected Node")
+    facts = windows_normal_ui_gui_acquire_facts(context, probe, record, frontend)
+    phase = "windows-normal-ui-gui-acquire"
+    require(same_compile_json(read_bounded_json(root / (phase + "-checks.json"), 128 << 10), windows_installed_phase_receipt(context, phase, **facts))
+            and same_compile_json(read_bounded_json(root / (phase + "-started.json"), 64 << 10), windows_installed_phase_receipt(context, phase, claimOnly=True)),
+            "Windows GUI original acquisition/source/close record differs")
+    return probe, publication, record, frontend
+
+
+def windows_normal_ui_scalar_metadata(context: dict) -> dict:
+    require(windows_normal_ui_profile(context), "Windows UI scalar metadata requires its fixed profile")
+    root, source = Path(context["root"]), Path(context["source"])
+    value = bounded_json(windows_installed_bytes(root / "normal-ui-scalar-metadata.json", 8 << 20), 8 << 20, max_nodes=200000)
+    try:
+        lock = tomllib.loads(windows_installed_bytes(source / WINDOWS_INSTALLED_APP / "Cargo.lock", 8 << 20).decode("utf-8"))
+    except (ValueError, UnicodeError):
+        raise CheckFailure("Windows UI scalar source lock is malformed") from None
+    return windows_installed_app_graph(value, lock, source=source, root=root, publication=False)
+
+
+def windows_normal_ui_scalar_artifact(context: dict) -> dict:
+    root, source = Path(context["root"]), Path(context["source"])
+    messages = root / "normal-ui-scalar-compile-messages.jsonl"
+    path = windows_installed_app_test_path(windows_installed_bytes(messages, 16 << 20),
+        windows_normal_ui_scalar_metadata(context), source=source, root=root, helper=False)
+    require(path.parent == root / "target" / TARGETS["windows"] / "debug/deps"
+            and re.fullmatch(r"mobile_release_desktop-[0-9a-f]{16}\.exe", path.name) is not None,
+            "Windows UI scalar is not its original headless app libtest")
+    before = path.lstat()
+    record = windows_installed_record(path, 512 << 20)
+    require(windows_installed_state(before) == windows_installed_state(path.lstat()), "Windows UI scalar original artifact changed")
+    return {"path": str(path), **record, "identity": list(windows_installed_state(before)),
+            "messages": windows_installed_record(messages, 16 << 20)}
+
+
+def windows_normal_ui_scalar_facts(context: dict) -> dict:
+    root = Path(context["root"])
+    compiler, _ = windows_normal_ui_acquired(context)
+    artifact = windows_normal_ui_scalar_artifact(context)
+    identity = windows_ordinary_original(artifact, app_role=True)
+    return {"metadata": windows_installed_record(root / "normal-ui-scalar-metadata.json", 8 << 20),
+        "compilerInvocationSha256": hashlib.sha256(canonical_json(windows_installed_app_argv(compiler["cargo"]["path"], context))).hexdigest(),
+        "originalCompilerExitCode": 0, "appFeatures": [], "nativeFeatures": ["qualification-result"],
+        "regression": windows_normal_ui_inert_facts(context, artifact, identity, scalar=True)}
+
+
+def windows_normal_ui_scalar_build(context: dict, cargo: str, environment: dict, deadline: float) -> dict:
+    """One inert no-feature app libtest before either GUI artifact's final epoch."""
+    require(windows_normal_ui_profile(context), "Windows UI scalar build requires its fixed profile")
+    root, source = Path(context["root"]), Path(context["source"])
+    windows_normal_ui_absent((*windows_normal_ui_normal_paths(context), *(root / ("normal-ui-scalar" + suffix)
+        for suffix in ("-metadata.json", "-acquire.stderr", "-compile-messages.jsonl", "-compile.stderr", ".stdout", ".stderr"))))
+    with (root / "normal-ui-scalar-metadata.json").open("x", encoding="utf-8", newline="\n") as output, \
+            (root / "normal-ui-scalar-acquire.stderr").open("x", encoding="utf-8") as diagnostics:
+        run([cargo, "metadata", "--locked", "--offline", "--format-version", "1", "--no-default-features",
+             "--filter-platform", TARGETS["windows"], "--manifest-path", str(source / WINDOWS_INSTALLED_APP / "Cargo.toml")],
+            check="windows-normal-ui-scalar-metadata", cwd=root, env=environment,
+            timeout=windows_installed_remaining(deadline, 60), output=output, diagnostics=diagnostics)
+    require(output.closed and diagnostics.closed, "Windows UI scalar metadata original writers did not close")
+    windows_normal_ui_scalar_metadata(context)
+    argv = windows_installed_app_argv(cargo, context)
+    try:
+        with (root / "normal-ui-scalar-compile-messages.jsonl").open("x", encoding="utf-8", newline="\n") as output, \
+                (root / "normal-ui-scalar-compile.stderr").open("x", encoding="utf-8") as diagnostics:
+            run(argv, check="windows-normal-ui-scalar-compile-only", cwd=root, env=environment,
+                timeout=windows_installed_remaining(deadline, 600), output=output, diagnostics=diagnostics)
+    except Exception:
+        try:
+            if output.closed and diagnostics.closed:
+                detail = windows_installed_compile_failure_data(
+                    windows_installed_bytes(root / "normal-ui-scalar-compile-messages.jsonl", 16 << 20), context, "app")
+                print("MRK_WINDOWS_NORMAL_UI_SCALAR_COMPILE_REFUSED=" + canonical_json(detail).decode("ascii"), flush=True)
+        except BaseException:
+            pass
+        raise
+    require(output.closed and diagnostics.closed, "Windows UI scalar original compiler writers did not close")
+    artifact = windows_normal_ui_scalar_artifact(context)
+    identity = windows_ordinary_original(artifact, app_role=True)
+    argv = windows_normal_ui_inert_argv(artifact, scalar=True)
+    with (root / "normal-ui-scalar.stdout").open("x", encoding="utf-8", newline="\n") as output, \
+            (root / "normal-ui-scalar.stderr").open("x", encoding="utf-8") as diagnostics:
+        run(argv, check="windows-normal-ui-scalar-regression", cwd=root, env=environment,
+            timeout=windows_installed_remaining(deadline, 60), output=output, diagnostics=diagnostics)
+    require(output.closed and diagnostics.closed, "Windows UI scalar original regression writers did not close")
+    require(same_compile_json(artifact, windows_normal_ui_scalar_artifact(context))
+            and identity == windows_ordinary_original(artifact, app_role=True),
+            "Windows UI scalar regression changed its original artifact")
+    facts = windows_normal_ui_scalar_facts(context)
+    require(same_compile_json(facts["regression"]["compiledTest"], artifact)
+            and facts["regression"]["artifactNativeIdentity"] == identity, "Windows UI scalar original changed before its receipt")
+    return facts
+
+
+def windows_normal_ui_gui_compile_facts(context: dict, probe: dict, publication: dict, normal: dict, observer: dict,
+                                       normal_identity: str, observer_identity: str, auxiliary: dict, scalar: dict) -> dict:
+    root = Path(context["root"])
+    compiler, _ = windows_normal_ui_acquired(context)
+    require(same_compile_json(scalar, windows_normal_ui_scalar_facts(context)),
+            "Windows GUI compilation changed the original scalar regression or its outputs")
+    observations = {}
+    for role, artifact in (("normal", normal), ("observer", observer)):
+        graph, parsed, _ = windows_normal_ui_gui_messages(context, observer=role == "observer")
+        observations[role] = {"unitsSha256": hashlib.sha256(canonical_json(parsed["units"])).hexdigest(),
+            "hostUnits": sum(unit["scope"] == "host" for unit in parsed["units"]),
+            "targetUnits": sum(unit["scope"] == "target" for unit in parsed["units"]),
+            "linkInputs": windows_normal_ui_link_inputs(graph, parsed),
+            "pe": windows_normal_ui_pe_data(windows_installed_bytes(Path(artifact["path"]), 512 << 20))}
+    return {"retainedProbe": probe, "publication": publication, "rust": RUST, "node": NODE, "target": TARGETS["windows"],
+        "appVersion": probe["appVersion"], "frontend": windows_normal_ui_frontend_files(context),
+        "normalFeatures": windows_normal_ui_features("app"), "observerFeatures": windows_normal_ui_features("observer"),
+        "normalApp": normal, "observer": observer, "normalNativeIdentity": windows_ordinary_identity(normal_identity),
+        "observerNativeIdentity": windows_ordinary_identity(observer_identity), "compilerObservations": observations,
+        "observerAuxiliary": auxiliary, "inertScalar": scalar, "compileOrder": ["scalar", "observer", "normal"],
+        "normalInvocationSha256": hashlib.sha256(canonical_json(windows_normal_ui_gui_argv(compiler["cargo"]["path"], context, observer=False))).hexdigest(),
+        "observerInvocationSha256": hashlib.sha256(canonical_json(windows_normal_ui_gui_argv(compiler["cargo"]["path"], context, observer=True))).hexdigest(),
+        "originalExitCodes": {"frontendTypecheck": 0, "frontendAssets": 0, "scalarCompiler": 0, "scalarRegression": 0,
+                              "observer": 0, "normal": 0}, "guiNotStarted": True}
+
+
+def windows_normal_ui_gui_compiled(context: dict) -> tuple[dict, dict, dict, dict, dict]:
+    require(os.environ.get("MRK_WINDOWS_UI_GUI_COMPILE_STEP_OUTCOME") == "success", "Windows GUI compiler step has not closed")
+    probe, publication, record, _ = windows_normal_ui_gui_acquired(context)
+    root = Path(context["root"])
+    normal, observer = windows_normal_ui_normal_artifact(context), windows_normal_ui_observer_artifact(context)
+    auxiliary = windows_normal_ui_auxiliary(context, recheck_original=False)
+    saved = read_bounded_json(root / "windows-normal-ui-gui-compile-checks.json", 256 << 10)
+    require(type(saved) is dict, "Windows GUI original compiler receipt is absent")
+    facts = windows_normal_ui_gui_compile_facts(context, probe, record, normal, observer,
+        saved.get("normalNativeIdentity"), saved.get("observerNativeIdentity"), auxiliary, saved.get("inertScalar"))
+    require(same_compile_json(read_bounded_json(root / "observer-compiled-artifact.json", 64 << 10), observer)
+            and same_compile_json(saved, windows_installed_phase_receipt(context, "windows-normal-ui-gui-compile", **facts))
+            and same_compile_json(read_bounded_json(root / "windows-normal-ui-gui-compile-started.json", 64 << 10),
+                windows_installed_phase_receipt(context, "windows-normal-ui-gui-compile", claimOnly=True)),
+            "Windows GUI original compiler/source/artifacts changed")
+    windows_normal_ui_normal_compile_start(context, probe, observer, facts["observerNativeIdentity"], auxiliary, create=False)
+    return probe, publication, normal, observer, facts
+
+
+def windows_normal_ui_auxiliary(context: dict, *, recheck_original: bool, create: bool = False) -> dict:
+    """The observer-feature compiler intermediate, never a launchable normal app.
+
+    Before the normal compiler starts, re-open the exact retained full epoch.
+    Afterwards it is historical comparison DATA: Cargo was the sole allowed
+    writer, and the distinct normal stream starts the new normal-source epoch.
+    """
+    require(type(recheck_original) is bool and type(create) is bool and (not create or recheck_original),
+            "Windows GUI auxiliary observation role differs")
+    root = Path(context["root"])
+    path, _, _ = windows_normal_ui_normal_paths(context)
+    _, parsed, messages = windows_normal_ui_gui_messages(context, observer=True)
+    compiler, _ = windows_normal_ui_acquired(context)
+    invocation = hashlib.sha256(canonical_json(windows_normal_ui_gui_argv(compiler["cargo"]["path"], context, observer=True))).hexdigest()
+    receipt = root / "normal-ui-observer-auxiliary.private.json"
+    original = None
+    if recheck_original:
+        if parsed["auxiliaryPackageBinary"] is None:
+            windows_normal_ui_absent((path,))
+        else:
+            require(parsed["auxiliaryPackageBinary"] == str(path), "Windows GUI auxiliary compiler path differs")
+            with windows_installed_helper_observation(path, compiler_source=True, normal_ui_app=True) as (_, snapshot):
+                original = snapshot
+    if not create:
+        saved = closed_object(read_bounded_json(receipt, 64 << 10),
+            {"scope", "phase", "status", "qualificationProfile", "sourceSha", "sourceTree", "runId", "attempt",
+             "role", "messages", "invocationSha256", "original", "launchAuthority"}, "Windows GUI auxiliary receipt fields differ")
+        if not recheck_original:
+            original = saved["original"]
+    if original is not None:
+        closed_object(original, {"path", "size", "sha256", "named", "descriptor"}, "Windows GUI auxiliary original fields differ")
+        require(original["path"] == str(path) and parsed["auxiliaryPackageBinary"] == str(path)
+                and integer_between(original["size"], 1, 512 << 20) and sha256_value(original["sha256"]),
+                "Windows GUI auxiliary original role/content differs")
+        named, descriptor = original["named"], original["descriptor"]
+        require(all(type(row) is list and len(row) == 10 and all(type(value) is int for value in row)
+                    and row[0] > 0 and row[1] > 0 and stat.S_ISREG(row[2]) and row[3] in (1, 2)
+                    and row[4] == original["size"] and row[5] > 0 and row[6] > 0 and not row[7] & 0x400
+                    and row[8] == 0 and row[9] > 0 for row in (named, descriptor))
+                and [*named[:2], named[2] & ~0o111, *named[3:9]] == descriptor[:9],
+                "Windows GUI auxiliary full original epoch differs")
+    else:
+        require(parsed["auxiliaryPackageBinary"] is None, "Windows GUI emitted auxiliary lacks its original epoch")
+    expected = windows_installed_phase_receipt(context, "windows-normal-ui-observer-auxiliary",
+        role="observer-auxiliary-package-bin", messages=messages, invocationSha256=invocation,
+        original=original, launchAuthority=False)
+    if create:
+        write_json(receipt, expected)
+    else:
+        require(same_compile_json(saved, expected), "Windows GUI observer auxiliary epoch/stream changed")
+    return expected
+
+
+def windows_normal_ui_normal_compile_start(context: dict, probe: dict, observer: dict, identity: str,
+                                           auxiliary: dict, *, create: bool) -> None:
+    root = Path(context["root"])
+    expected = windows_installed_phase_receipt(context, "windows-normal-ui-normal-compile",
+        retainedProbe=probe, observer=observer, observerNativeIdentity=windows_ordinary_identity(identity),
+        auxiliary=auxiliary, normalOutputsAbsent=True, claimOnly=True)
+    path = root / "normal-ui-normal-compile-started.private.json"
+    if create:
+        _, singleton, receipt = windows_normal_ui_normal_paths(context)
+        windows_normal_ui_absent((singleton, receipt, root / "normal-app-compile-messages.jsonl", path))
+        require(same_compile_json(auxiliary, windows_normal_ui_auxiliary(context, recheck_original=True))
+                and same_compile_json(observer, windows_normal_ui_observer_artifact(context))
+                and identity == windows_ordinary_original(observer, ui_role="observer")
+                and same_compile_json(probe, windows_normal_ui_positive_probe(context)),
+                "Windows GUI originals changed immediately before the one normal compiler entry")
+        write_json(path, expected)
+    else:
+        require(same_compile_json(read_bounded_json(path, 128 << 10), expected),
+                "Windows GUI original normal compiler-start binding changed")
+
+
+def windows_normal_ui_gui_build(name: str, context: dict, deadline: float) -> None:
+    require(name in WINDOWS_NORMAL_UI_GUI_BUILD_PHASES and windows_normal_ui_profile(context),
+            "Windows GUI build role differs")
+    probe, publication, record = windows_normal_ui_gui_base(context)
+    root, source = Path(context["root"]), Path(context["source"])
+    desktop = source / "desktop"
+    source_unchanged(context)
+    require(context["sdk"] == {"version": WINDOWS_SDK_VERSION, "headers": fixed_file_inventory(windows_sdk_root(), WINDOWS_SDK_HEADERS)},
+            "Windows GUI original SDK changed")
+    environment = clean_environment(root)
+    environment.update(GITHUB_SHA=context["sourceSha"], GITHUB_RUN_ID=context["runId"], MRK_WINDOWS_SOURCE_TREE=context["sourceTree"],
+        MRK_WINDOWS_UI_APP_VERSION=probe["appVersion"], CARGO_TARGET_DIR=str(root / "target"),
+        MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=publication["manifestSha256"], MRK_BUNDLED_PROTOCOL_SHA256=publication["protocolSha256"])
+    compiler, _ = windows_normal_ui_acquired(context)
+    cargo, rustc = tools(context, environment)
+    require(compiler == {role: {"path": path, **windows_installed_record(Path(path), 128 << 20)}
+                         for role, path in (("cargo", cargo), ("rustc", rustc))}, "Windows GUI original selected compiler changed")
+    for ancestor in (desktop, source, *source.parents):
+        windows_normal_ui_absent((ancestor / ".npmrc",))
+    write_json(root / (name + "-started.json"), windows_installed_phase_receipt(context, name, claimOnly=True))
+    if name == "windows-normal-ui-gui-acquire":
+        require(os.environ.get("MRK_WINDOWS_UI_NODE_STEP_OUTCOME") == "success", "Windows GUI fixed Node setup has not closed")
+        windows_normal_ui_absent((desktop / "node_modules", desktop / "dist", root / "npm-cache", root / "npmrc-user", root / "npmrc-global"))
+        for leaf in ("npmrc-user", "npmrc-global"):
+            (root / leaf).touch(mode=0o600, exist_ok=False)
+        (root / "npm-cache").mkdir(mode=0o700)
+        node = shutil.which("node")
+        require(node is not None and Path(node).is_absolute(), "Windows GUI selected Node is unavailable")
+        npm = Path(node).parent / "node_modules/npm/bin/npm-cli.js"
+        frontend = {role: {"path": str(path), **windows_installed_record(Path(path), 128 << 20)}
+                    for role, path in (("node", node), ("npm", npm))}
+        require(run([node, "--version"], check="node-version", cwd=root, env=environment,
+                    timeout=windows_installed_remaining(deadline, 15), capture=True) == NODE, "Windows GUI selected Node version differs")
+        write_json(root / "normal-ui-frontend-tools.json", frontend)
+        for role, observer in (("observer", True), ("normal-app", False)):
+            with (root / (role + "-metadata.json")).open("x", encoding="utf-8", newline="\n") as output, \
+                    (root / (role + "-acquire.stderr")).open("x", encoding="utf-8") as diagnostics:
+                run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features",
+                     "--features", ",".join(windows_normal_ui_features("observer" if observer else "app")),
+                     "--filter-platform", TARGETS["windows"], "--manifest-path", str(source / WINDOWS_INSTALLED_APP / "Cargo.toml")],
+                    check="windows-normal-ui-gui-metadata", cwd=root, env=environment,
+                    timeout=windows_installed_remaining(deadline, 600), output=output, diagnostics=diagnostics)
+            require(output.closed and diagnostics.closed, "Windows GUI metadata original writers did not close")
+            windows_normal_ui_app_metadata(context, observer=observer)
+        with (root / "normal-ui-frontend-acquire.stdout").open("x", encoding="utf-8") as output, \
+                (root / "normal-ui-frontend-acquire.stderr").open("x", encoding="utf-8") as diagnostics:
+            run([node, "--max-old-space-size=768", str(npm), "ci", "--ignore-scripts", "--no-audit", "--no-fund",
+                 "--userconfig", str(root / "npmrc-user"), "--globalconfig", str(root / "npmrc-global"),
+                 "--cache", str(root / "npm-cache"), "--registry", "https://registry.npmjs.org/"],
+                check="windows-normal-ui-frontend-acquire", cwd=desktop, env=environment,
+                timeout=windows_installed_remaining(deadline, 300), output=output, diagnostics=diagnostics)
+        require(output.closed and diagnostics.closed, "Windows GUI frontend original acquisition writers did not close")
+        facts = windows_normal_ui_gui_acquire_facts(context, probe, record, frontend)
+    else:
+        acquired_probe, acquired_publication, acquired_record, frontend = windows_normal_ui_gui_acquired(context)
+        require(same_compile_json((probe, publication, record), (acquired_probe, acquired_publication, acquired_record)),
+                "Windows GUI acquired prerequisite/publication changed")
+        for leaf in ("npmrc-user", "npmrc-global"):
+            require(windows_installed_bytes(root / leaf, 1) == b"", "Windows GUI private npm configuration changed")
+        windows_normal_ui_absent((desktop / "dist", *windows_normal_ui_normal_paths(context),
+            root / "observer-compile-messages.jsonl", root / "normal-app-compile-messages.jsonl",
+            root / "observer-compiled-artifact.json", root / "normal-ui-observer-auxiliary.private.json",
+            root / "normal-ui-normal-compile-started.private.json"))
+        node = frontend["node"]["path"]
+        for role, argv, seconds in (("typecheck", [node, "--max-old-space-size=768", "node_modules/typescript/bin/tsc", "--noEmit", "-p", "tsconfig.json"], 60),
+            ("assets", [node, "--max-old-space-size=768", "node_modules/vite/bin/vite.js", "build", "--config", str(desktop / "vite.config.mjs"),
+                "--configLoader", "native", "--outDir", str(desktop / "dist")], 90)):
+            with (root / ("normal-ui-frontend-" + role + ".stdout")).open("x", encoding="utf-8") as output, \
+                    (root / ("normal-ui-frontend-" + role + ".stderr")).open("x", encoding="utf-8") as diagnostics:
+                if role == "typecheck":
+                    run(argv, check="windows-normal-ui-frontend-typecheck", cwd=desktop, env=environment,
+                        timeout=windows_installed_remaining(deadline, seconds), output=output, diagnostics=diagnostics)
+                else:
+                    run(argv, check="windows-normal-ui-frontend-assets", cwd=desktop, env=environment,
+                        timeout=windows_installed_remaining(deadline, seconds), output=output, diagnostics=diagnostics)
+            require(output.closed and diagnostics.closed, "Windows GUI frontend original compiler writers did not close")
+        windows_normal_ui_frontend_files(context)
+        scalar = windows_normal_ui_scalar_build(context, cargo, environment, deadline)
+        windows_normal_ui_absent(windows_normal_ui_normal_paths(context))
+        # Scalar -> observer -> normal share one target. The observer-feature
+        # auxiliary is never normal; only Cargo replaces that recorded interim.
+        for role, observer_selected in (("observer", True), ("normal-app", False)):
+            if not observer_selected:
+                windows_normal_ui_normal_compile_start(context, probe, observer, observer_identity, auxiliary, create=True)
+            argv = windows_normal_ui_gui_argv(cargo, context, observer=observer_selected)
+            try:
+                with (root / (role + "-compile-messages.jsonl")).open("x", encoding="utf-8", newline="\n") as output, \
+                        (root / (role + "-compile.stderr")).open("x", encoding="utf-8") as diagnostics:
+                    run(argv, check="windows-normal-ui-gui-compile-only", cwd=root, env=environment,
+                        timeout=windows_installed_remaining(deadline, 1800), output=output, diagnostics=diagnostics)
+            except Exception:
+                try:
+                    if output.closed and diagnostics.closed:
+                        detail = windows_installed_compile_failure_data(windows_installed_bytes(root / (role + "-compile-messages.jsonl"), 16 << 20), context, "app")
+                        print("MRK_WINDOWS_NORMAL_UI_GUI_COMPILE_REFUSED=" + canonical_json({"role": role, **detail}).decode("ascii"), flush=True)
+                except BaseException:
+                    pass
+                raise
+            require(output.closed and diagnostics.closed, "Windows GUI original compiler writers did not close")
+            windows_normal_ui_gui_messages(context, observer=observer_selected)
+            if observer_selected:
+                observer = windows_normal_ui_observer_artifact(context)
+                observer_identity = windows_ordinary_original(observer, ui_role="observer")
+                write_json(root / "observer-compiled-artifact.json", observer)
+                auxiliary = windows_normal_ui_auxiliary(context, recheck_original=True, create=True)
+            else:
+                normal = windows_normal_ui_normal_handoff(context, deadline)
+                write_json(root / "normal-app-compiled-artifact.json", normal)
+        require(same_compile_json(observer, windows_normal_ui_observer_artifact(context))
+                and observer_identity == windows_ordinary_original(observer, ui_role="observer"),
+                "Windows GUI normal compile changed the original observer")
+        facts = windows_normal_ui_gui_compile_facts(context, probe, record, normal, observer,
+            windows_ordinary_original(normal, ui_role="normal"), observer_identity, auxiliary, scalar)
+    require(same_compile_json((probe, publication, record), windows_normal_ui_gui_base(context)),
+            "Windows GUI build changed the original cheap owner or finalized runtime publication")
+    windows_installed_inputs(context)
+    source_unchanged(context)
+    windows_installed_remaining(deadline, 1)
+    write_json(root / (name + "-checks.json"), windows_installed_phase_receipt(context, name, **facts))
+
+
+def windows_normal_ui_case_paths(context: dict, role: str) -> dict[str, Path]:
+    require(role in WINDOWS_NORMAL_UI_GUI_ROLES, "Windows GUI case file role differs")
+    root, stem = Path(context["root"]), "normal-ui-" + role
+    return {"request": root / (stem + "-request.txt"), "owner": root / (stem + "-owner-result.private.json"),
+        "exit": root / (stem + "-owner-exit.private.json"), "intent": root / (stem + "-owner-intent.private.json"),
+        "output": root / (stem + "-output"), "child": root / (stem + "-output") / (stem + "-result.private.json"),
+        "preflight": root / ("windows-" + stem + "-preflight-checks.json"),
+        "finalize": root / ("windows-" + stem + "-finalize-checks.json")}
+
+
+def windows_normal_ui_case_preflight_facts(request: bytes, compiled: dict, previous: dict) -> dict:
+    return {"request": {"size": len(request), "sha256": hashlib.sha256(request).hexdigest()},
+            "originalCompile": compiled, "previousFinalizer": previous, "nativeNotStarted": True}
+
+
+def windows_normal_ui_case_data(context: dict, role: str, compiled: dict, publication_raw: bytes, before_identity: str,
+                               previous: dict, blobs: dict[str, bytes], outcomes: dict[str, str],
+                               used_accounts: set[tuple[str, str]], prior_security: str | None) -> dict:
+    """Closed DATA join for one owner; no current-identity adoption or execution."""
+    require(role in WINDOWS_NORMAL_UI_GUI_ROLES and outcomes.get("preflight") == "success"
+            and set(blobs) == {"request", "preflight", "owner", "exit", "intent", *( () if role == "normal-smoke" else ("child",))},
+            "Windows GUI case lacks independently closed preflight or original evidence")
+    normal = role == "normal-smoke"
+    app = compiled["normalApp" if normal else "observer"]
+    request = windows_normal_ui_gui_request(context, role, app, before_identity, compiled["retainedProbe"],
+        compiled["normalInvocationSha256" if normal else "observerInvocationSha256"],
+        bounded_json(publication_raw, 64 << 10), publication_raw)
+    preflight = windows_installed_phase_receipt(context, "windows-normal-ui-" + role + "-preflight",
+        **windows_normal_ui_case_preflight_facts(request, compiled["receipt"], previous))
+    require(request == blobs["request"] and same_compile_json(bounded_json(blobs["preflight"], 64 << 10), preflight),
+            "Windows GUI original request/preflight or preceding finalizer changed")
+    owner = bounded_json(blobs["owner"], 64 << 10)
+    require(type(owner) is dict and type(owner.get("aclTransitions")) is list and len(owner["aclTransitions"]) >= 7,
+            "Windows GUI original artifact transition is absent")
+    transition = owner["aclTransitions"][5]
+    require(type(transition) is dict and "after" in transition, "Windows GUI original artifact transition shape differs")
+    after_identity = windows_ordinary_wire(windows_ordinary_stamp(transition["after"]))
+    facts = windows_normal_ui_gui_records(context, request, blobs["owner"], blobs.get("child"), blobs["exit"], blobs["intent"],
+        outcomes.get("owner", "unavailable"), after_identity=after_identity)
+    require(prior_security is None or transition["securityBefore"] == prior_security,
+            "Windows GUI observer ACL did not continue the exact preceding finalized transition")
+    account = (facts["accountNameSha256"], facts["accountSidSha256"])
+    require(all(account[0] != prior[0] and account[1] != prior[1] for prior in used_accounts),
+            "Windows GUI reused a preceding account name or SID")
+    return {**facts, "originalCompile": compiled["receipt"], "previousFinalizer": previous,
+            "originalPreflight": {"size": len(blobs["preflight"]), "sha256": hashlib.sha256(blobs["preflight"]).hexdigest()}}
+
+
+def windows_normal_ui_case_chain(context: dict, through: str | None, *, finalized: bool) -> tuple[dict, list[dict], dict]:
+    """Reconstruct earlier ACL epochs from their CLOSED originals, then open latest.
+
+    The shared observer is intentionally granted to three distinct accounts.
+    Earlier finalizers must not reopen it expecting stale ChangeTime. Instead,
+    every original request/transition/finalizer forms one exact chain; only its
+    latest admitted post-transition epoch is compared to a fresh descriptor.
+    """
+    require((through is None or through in WINDOWS_NORMAL_UI_GUI_ROLES) and type(finalized) is bool,
+            "Windows GUI case chain role differs")
+    probe, publication, normal, observer, compiled = windows_normal_ui_gui_compiled(context)
+    root = Path(context["root"])
+    compiled = {**compiled, "receipt": windows_installed_record(root / "windows-normal-ui-gui-compile-checks.json", 256 << 10)}
+    publication_raw = windows_installed_bytes(root / "normal-ui-publication.private.json", 64 << 10)
+    require(publication_raw == canonical_json(publication), "Windows GUI publication original changed")
+    # The cheap prerequisite itself also consumed a fresh ordinary account.
+    probe_owner = read_bounded_json(root / "normal-ui-prerequisite-owner-result.private.json", 64 << 10)
+    probe_intent = read_bounded_json(root / "normal-ui-prerequisite-owner-intent.private.json", 4096)
+    used = {(hashlib.sha256(probe_intent["accountName"].encode("ascii")).hexdigest(), probe_owner["accountSidSha256"])}
+    identities = {"normal": compiled["normalNativeIdentity"], "observer": compiled["observerNativeIdentity"]}
+    previous = windows_installed_record(root / "windows-normal-ui-setup-publication-finalize-checks.json", 64 << 10)
+    security, cases = None, []
+    count = 0 if through is None else WINDOWS_NORMAL_UI_GUI_ROLES.index(through) + 1
+    for index, role in enumerate(WINDOWS_NORMAL_UI_GUI_ROLES[:count]):
+        paths = windows_normal_ui_case_paths(context, role)
+        prefix = "MRK_WINDOWS_UI_" + role.upper().replace("-", "_") + "_"
+        blobs = {key: windows_installed_bytes(paths[key], 64 << 10 if key in ("preflight", "owner") else 4096)
+            for key in ("request", "preflight", "owner", "exit", "intent", *( () if role == "normal-smoke" else ("child",)))}
+        selected = "normal" if role == "normal-smoke" else "observer"
+        facts = windows_normal_ui_case_data(context, role, compiled, publication_raw, identities[selected], previous, blobs,
+            {part: os.environ.get(prefix + part.upper() + "_STEP_OUTCOME", "unavailable") for part in ("preflight", "owner")},
+            used, None if role == "normal-smoke" else security)
+        if index < count - 1 or finalized:
+            require(os.environ.get(prefix + "FINALIZE_STEP_OUTCOME") == "success", "Windows GUI preceding DATA finalizer has not closed")
+            expected = windows_installed_phase_receipt(context, "windows-normal-ui-" + role + "-finalize", **facts)
+            require(same_compile_json(read_bounded_json(paths["finalize"], 64 << 10), expected),
+                    "Windows GUI original closed finalizer changed")
+            previous = windows_installed_record(paths["finalize"], 64 << 10)
+        used.add((facts["accountNameSha256"], facts["accountSidSha256"]))
+        identities[selected] = facts["afterArtifactIdentity"]
+        if role != "normal-smoke":
+            security = facts["artifactAclAfterSha256"]
+        cases.append(facts)
+    require(identities["normal"] == windows_ordinary_original(normal, ui_role="normal")
+            and identities["observer"] == windows_ordinary_original(observer, ui_role="observer"),
+            "Windows GUI latest original artifact/ACL epoch changed outside the finalized chain")
+    return compiled, cases, previous
+
+
+def windows_normal_ui_case_preflight(context: dict, role: str) -> None:
+    require(role in WINDOWS_NORMAL_UI_GUI_ROLES, "Windows GUI preflight role differs")
+    index = WINDOWS_NORMAL_UI_GUI_ROLES.index(role)
+    compiled, earlier, previous = windows_normal_ui_case_chain(context,
+        WINDOWS_NORMAL_UI_GUI_ROLES[index - 1] if index else None, finalized=True)
+    normal = role == "normal-smoke"
+    artifact = compiled["normalApp" if normal else "observer"]
+    identity = (earlier[-1]["afterArtifactIdentity"] if index > 1 else
+                compiled["normalNativeIdentity" if normal else "observerNativeIdentity"])
+    paths = windows_normal_ui_case_paths(context, role)
+    windows_normal_ui_absent(tuple(path for key, path in paths.items() if key != "child"))
+    publication_raw = windows_installed_bytes(Path(context["root"]) / "normal-ui-publication.private.json", 64 << 10)
+    request = windows_normal_ui_gui_request(context, role, artifact, identity, compiled["retainedProbe"],
+        compiled["normalInvocationSha256" if normal else "observerInvocationSha256"],
+        bounded_json(publication_raw, 64 << 10), publication_raw)
+    windows_fullwalk_write(paths["request"], request, 4096)
+    facts = windows_normal_ui_case_preflight_facts(request, compiled["receipt"], previous)
+    write_json(paths["preflight"], windows_installed_phase_receipt(context, "windows-normal-ui-" + role + "-preflight", **facts))
+    owner = compiled["retainedProbe"]["compiledTest"]
+    with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+        for key, value in (("artifact", owner["path"]), ("artifactSha256", owner["sha256"]),
+            ("appArtifactSha256", artifact["sha256"]), ("requestSha256", facts["request"]["sha256"]),
+            ("sourceTree", context["sourceTree"]), ("appVersion", compiled["appVersion"])):
+            output.write(key + "=" + str(value) + "\n")
+
+
+def windows_normal_ui_case_finalize(context: dict, role: str) -> None:
+    _, cases, _ = windows_normal_ui_case_chain(context, role, finalized=False)
+    write_json(windows_normal_ui_case_paths(context, role)["finalize"],
+        windows_installed_phase_receipt(context, "windows-normal-ui-" + role + "-finalize", **cases[-1]))
+
+
+def windows_normal_ui_retain(context: dict) -> None:
+    """Bounded public projection after success/failure; no repair or process action."""
+    root = Path(context["root"])
+    result = {"status": "unavailable", "facts": None}
+    if os.environ.get("MRK_WINDOWS_UI_PREREQUISITE_FINALIZE_STEP_OUTCOME") == "success":
+        try:
+            facts = windows_normal_ui_probe_observe_final(context)
+            expected = windows_installed_phase_receipt(context, "windows-normal-ui-prerequisite-finalize", status="observed", **facts)
+            require(same_compile_json(read_bounded_json(root / "windows-normal-ui-prerequisite-finalize-checks.json", 64 << 10), expected),
+                    "Windows UI probe original finalizer changed")
+            result = {"status": "available" if facts["prerequisite"]["available"] else "unavailable-observed", "facts": facts}
+        except (OSError, ValueError, CheckFailure, KeyError, TypeError):
+            result = {"status": "invalid", "facts": None}
+    try:
+        compile_raw = windows_installed_bytes(root / "compile-messages.jsonl", 16 << 20)
+    except (OSError, ValueError, CheckFailure):
+        compile_raw = None
+    setup = {"status": "unavailable", "facts": None}
+    for through in ("publication", "publish", "stage"):
+        if os.environ.get("MRK_WINDOWS_UI_SETUP_" + through.upper() + "_FINALIZE_STEP_OUTCOME") == "success":
+            try:
+                facts, _, _ = windows_normal_ui_setup_evidence(context, through, finalized=True)
+                setup = {"status": "observed", "facts": facts}
+            except (OSError, ValueError, CheckFailure, KeyError, TypeError):
+                setup = {"status": "invalid", "facts": None}
+            break  # A bad later original is never downgraded into an earlier success.
+    gui, cases = {"status": "unavailable", "facts": None}, []
+    for role in reversed(WINDOWS_NORMAL_UI_GUI_ROLES):
+        if os.environ.get("MRK_WINDOWS_UI_" + role.upper().replace("-", "_") + "_FINALIZE_STEP_OUTCOME") == "success":
+            try:
+                compiled, verified, _ = windows_normal_ui_case_chain(context, role, finalized=True)
+                cases = [{key: item[key] for key in ("role", "verifiedMethods", "observation", "evidence", "originalOwner")}
+                         for item in verified]
+                gui = {"status": "observed", "facts": {"originalCompile": compiled["receipt"],
+                    "normalArtifact": {key: compiled["normalApp"][key] for key in ("size", "sha256", "messages")},
+                    "observerArtifact": {key: compiled["observer"][key] for key in ("size", "sha256", "messages")},
+                    "compilerObservations": compiled["compilerObservations"], "normalFeatures": compiled["normalFeatures"],
+                    "observerFeatures": compiled["observerFeatures"], "compileOrder": compiled["compileOrder"]}}
+            except (OSError, ValueError, CheckFailure, KeyError, TypeError):
+                gui = {"status": "invalid", "facts": None}
+            break  # A failed later original is not relabeled as an earlier success.
+    complete = len(cases) == len(WINDOWS_NORMAL_UI_GUI_ROLES)
+    verified_names = dict(zip(WINDOWS_NORMAL_UI_GUI_ROLES, WINDOWS_NORMAL_UI_NOT_VERIFIED[:4], strict=True))
+    completed = {verified_names[item["role"]] for item in cases}
+    summary = {"schemaVersion": 1, "scope": WINDOWS_NORMAL_UI_PROFILE,
+        **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt", "imageOS", "imageVersion")},
+        "rust": RUST, "target": TARGETS["windows"], "nativeFeatures": ["desktop-ui"], "prerequisite": result,
+        "combinedPassed": complete, "verifiedMethods": sum(item["verifiedMethods"] for item in cases),
+        "guiCasesExecuted": len(cases), "runtimeSetup": setup, "guiCompilation": gui, "guiCases": cases,
+        "compileDiagnostic": windows_installed_compile_failure_data(compile_raw, context, "standalone"),
+        "notVerified": [name for name in WINDOWS_NORMAL_UI_NOT_VERIFIED if name not in completed]}
+    # Never publish raw native accounts/SIDs/paths/ACLs, compiler text, or a
+    # pre-close child/owner file. Existing public-bindings contains source DATA.
+    windows_fullwalk_write(root / "public/windows-normal-project-ui.json", canonical_json(summary), 64 << 10)
+
+
+def windows_normal_ui_phase(name: str, context: dict, deadline: float) -> None:
+    """Explicit UI stages. The historical raw app path is never a fallback."""
+    require(windows_normal_ui_profile(context) and name in ("acquire", "compile", "windows-normal-ui-prerequisite",
+        *WINDOWS_NORMAL_UI_DATA_PHASES, *WINDOWS_NORMAL_UI_SETUP_BUILD_PHASES, *WINDOWS_NORMAL_UI_GUI_BUILD_PHASES, "retain"), "Windows normal UI phase is unavailable in this profile")
+    root, source = Path(context["root"]), Path(context["source"])
+    if name in WINDOWS_NORMAL_UI_GUI_BUILD_PHASES:
+        windows_normal_ui_gui_build(name, context, deadline)
+        return
+    if name in WINDOWS_NORMAL_UI_GUI_DATA_PHASES:
+        role = name.removeprefix("windows-normal-ui-").removesuffix("-preflight").removesuffix("-finalize")
+        if name.endswith("-preflight"):
+            windows_normal_ui_case_preflight(context, role)
+        else:
+            windows_normal_ui_case_finalize(context, role)
+        return
+    if name in WINDOWS_NORMAL_UI_SETUP_BUILD_PHASES:
+        windows_normal_ui_setup_build(name, context, deadline)
+        return
+    if name in WINDOWS_NORMAL_UI_SETUP_DATA_PHASES:
+        if name == "windows-normal-ui-setup-preflight":
+            windows_normal_ui_setup_preflight(context)
+        else:
+            windows_normal_ui_setup_finalize(context, name.removeprefix("windows-normal-ui-setup-").removesuffix("-finalize"))
+        return
+    if name == "windows-normal-ui-prerequisite-finalize":
+        windows_normal_ui_probe_finalize(context)
+        return
+    if name == "retain":
+        windows_normal_ui_retain(context)
+        return
+    if name == "windows-normal-ui-prerequisite":
+        windows_normal_ui_probe_preflight(context)
+        return
+    source_unchanged(context)
+    require(context["sdk"] == {"version": WINDOWS_SDK_VERSION, "headers": fixed_file_inventory(windows_sdk_root(), WINDOWS_SDK_HEADERS)},
+            "Windows UI original SDK changed")
+    environment = clean_environment(root)
+    version = windows_normal_ui_app_version(context)
+    environment.update(GITHUB_SHA=context["sourceSha"], GITHUB_RUN_ID=context["runId"],
+        MRK_WINDOWS_SOURCE_TREE=context["sourceTree"], MRK_WINDOWS_UI_APP_VERSION=version, CARGO_TARGET_DIR=str(root / "target"))
+    write_json(root / (name + "-started.json"), windows_installed_phase_receipt(context, name, claimOnly=True))
+    if name == "acquire":
+        # No core ZIP, runtime supplier, frontend, Tauri graph or account exists
+        # during this native-only acquisition. The cheap owner is not held over
+        # any later build; its original artifact/messages remain unchanged.
+        run([context["rustup"], "toolchain", "install", RUST, "--profile", "minimal", "--no-self-update"],
+            check="rust-toolchain-install", cwd=root, env=environment, timeout=windows_installed_remaining(deadline, 600))
+        cargo, rustc = tools(context, environment)
+        with (root / "metadata.json").open("x", encoding="utf-8", newline="\n") as output, \
+                (root / "acquire.stderr").open("x", encoding="utf-8") as diagnostics:
+            run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features", "--features", "desktop-ui",
+                 "--filter-platform", TARGETS["windows"], "--manifest-path", str(source / WINDOWS_INSTALLED_CRATE / "Cargo.toml")],
+                check="windows-normal-ui-native-metadata", cwd=root, env=environment,
+                timeout=windows_installed_remaining(deadline, 600), output=output, diagnostics=diagnostics)
+        graph = windows_normal_ui_native_metadata(context)
+        compiler = {role: {"path": path, **windows_installed_record(Path(path), 128 << 20)}
+                    for role, path in (("cargo", cargo), ("rustc", rustc))}
+        write_json(root / "compiler-tools.json", compiler)
+        facts = {"rust": RUST, "target": TARGETS["windows"], "nativeFeatures": ["desktop-ui"],
+            "activePackageIds": sorted(graph["nodes"]), "metadata": windows_installed_record(root / "metadata.json", 8 << 20),
+            "compilerTools": windows_installed_record(root / "compiler-tools.json", 64 << 10),
+            "originalExitCode": 0, "nativePrerequisiteOnly": True, "appVersion": version}
+    else:
+        compiler, _ = windows_normal_ui_acquired(context)
+        cargo, rustc = tools(context, environment)
+        require(compiler == {role: {"path": path, **windows_installed_record(Path(path), 128 << 20)}
+                             for role, path in (("cargo", cargo), ("rustc", rustc))}, "Windows UI selected compiler changed")
+        argv = windows_fullwalk_native_argv(cargo, context)
+        try:
+            with (root / "compile-messages.jsonl").open("x", encoding="utf-8", newline="\n") as output, \
+                    (root / "compile.stderr").open("x", encoding="utf-8") as diagnostics:
+                run(argv, check="windows-normal-ui-native-compile-only", cwd=root, env=environment,
+                    timeout=windows_installed_remaining(deadline, 600), output=output, diagnostics=diagnostics)
+        except Exception:
+            # Source-bound fixed diagnostic only; do not mask the original error
+            # or run the executable following an unsuccessful compiler return.
+            try:
+                windows_installed_compile_failure(context, "standalone")
+            except Exception:
+                pass
+            raise
+        require(output.closed and diagnostics.closed, "Windows UI original native compiler writers did not close")
+        artifact = windows_normal_ui_native_artifact(context)
+        policy_identity = windows_ordinary_original(artifact)
+        policy_argv = windows_normal_ui_inert_argv(artifact)
+        with (root / "normal-ui-native-policy.stdout").open("x", encoding="utf-8", newline="\n") as output, \
+                (root / "normal-ui-native-policy.stderr").open("x", encoding="utf-8") as diagnostics:
+            run(policy_argv, check="windows-normal-ui-native-policy", cwd=root, env=environment,
+                timeout=windows_installed_remaining(deadline, 60), output=output, diagnostics=diagnostics)
+        require(output.closed and diagnostics.closed, "Windows UI original policy writers did not close")
+        require(same_compile_json(artifact, windows_normal_ui_native_artifact(context))
+                and policy_identity == windows_ordinary_original(artifact), "Windows UI policy execution changed its original artifact")
+        policy = windows_normal_ui_inert_facts(context, artifact, policy_identity)
+        write_json(root / "compiled-test.json", artifact)
+        facts = {"rust": RUST, "target": TARGETS["windows"], "nativeFeatures": ["desktop-ui"],
+            "compiledTest": artifact, "originalExitCode": 0, "nativePrerequisiteOnly": True,
+            "invocationSha256": hashlib.sha256(canonical_json(argv)).hexdigest(), "appVersion": version, "inertPolicy": policy}
+    windows_installed_inputs(context)
+    source_unchanged(context)
+    windows_installed_remaining(deadline, 1)
+    write_json(root / (name + "-checks.json"), windows_installed_phase_receipt(context, name, **facts))
+
+
 def windows_installed_phase(name: str, scope: str) -> None:
     require(scope == WINDOWS_INSTALLED_SCOPE and name in WINDOWS_INSTALLED_PHASES, "Unexpected fixed Windows headless phase")
     deadline = time.monotonic() + {"acquire": 840, "compile": 660, "windows-installed-native": 210,
-                                   "windows-installed-runtime-data": 40}.get(name, 60)
+                                   "windows-installed-runtime-data": 40,
+                                   "windows-normal-ui-setup-acquire": 840, "windows-normal-ui-setup-compile": 660,
+                                   "windows-normal-ui-gui-acquire": 1200, "windows-normal-ui-gui-compile": 2400}.get(name, 60)
     context = windows_installed_context(create=name == "prepare", retention_only=name in {
-        "retain", "windows-installed-native-finalize", *WINDOWS_FULLWALK_DATA_PHASES, *WINDOWS_INSTALLED_PASSIVE_DATA_PHASES})
+        "retain", "windows-installed-native-finalize", *WINDOWS_FULLWALK_DATA_PHASES, *WINDOWS_INSTALLED_PASSIVE_DATA_PHASES,
+        *WINDOWS_NORMAL_UI_DATA_PHASES})
     root, source = Path(context["root"]), Path(context["source"])
     production = windows_runtime_publication_profile(context)
     passive = windows_installed_passive_profile(context)
     publisher_required = windows_installed_publisher_required(context)
     if name == "prepare":
         return
+    if windows_normal_ui_profile(context):
+        windows_normal_ui_phase(name, context, deadline)
+        return
+    require(name not in ("windows-normal-ui-prerequisite", *WINDOWS_NORMAL_UI_DATA_PHASES, *WINDOWS_NORMAL_UI_SETUP_BUILD_PHASES, *WINDOWS_NORMAL_UI_GUI_BUILD_PHASES),
+            "Windows UI phases require their explicit profile; no historical fallback is available")
     if name in WINDOWS_FULLWALK_DATA_PHASES:
         require(windows_fullwalk_profile(context), "Windows fullwalk DATA phases require the exact explicit dispatch")
         {"windows-installed-fixture-finalize": windows_fullwalk_fixture_finalize,
@@ -12884,14 +15399,16 @@ def main() -> int:
     parser.add_argument("phase", choices=(*BOUNDARY_PHASES, "workflow-owner", "workflow-transaction-eof", "workflow-core",
                         "metadata-owner", "metadata-transaction-eof", "metadata-core", "windows-snapshot", "github-owner", "github-tls", "github-tls-deadline",
                          "environment-native", "offline-cli11", "retain", "windows-installed-native", "windows-installed-native-finalize", "windows-installed-runtime-data", *WINDOWS_FULLWALK_DATA_PHASES,
-                         *WINDOWS_INSTALLED_PASSIVE_DATA_PHASES, *CONVENTIONAL_PHASES))
+                         *WINDOWS_INSTALLED_PASSIVE_DATA_PHASES, "windows-normal-ui-prerequisite", *WINDOWS_NORMAL_UI_DATA_PHASES, *WINDOWS_NORMAL_UI_SETUP_BUILD_PHASES, *WINDOWS_NORMAL_UI_GUI_BUILD_PHASES,
+                         *CONVENTIONAL_PHASES))
     args = parser.parse_args()
     os.umask(0o077)
     print(f"Starting fixed desktop phase: {args.phase}", flush=True)
     try:
         scope = os.environ.get("MRK_DESKTOP_HOSTED_CHECKS", "")
         if scope == WINDOWS_INSTALLED_SCOPE or args.phase in {"windows-installed-native", "windows-installed-native-finalize", "windows-installed-runtime-data", *WINDOWS_FULLWALK_DATA_PHASES,
-                                                             *WINDOWS_INSTALLED_PASSIVE_DATA_PHASES}:
+                                                             *WINDOWS_INSTALLED_PASSIVE_DATA_PHASES,
+                                                             "windows-normal-ui-prerequisite", *WINDOWS_NORMAL_UI_DATA_PHASES, *WINDOWS_NORMAL_UI_SETUP_BUILD_PHASES, *WINDOWS_NORMAL_UI_GUI_BUILD_PHASES}:
             windows_installed_phase(args.phase, scope)
             return 0
         if scope in CONVENTIONAL_SCOPES or args.phase in CONVENTIONAL_PHASES:

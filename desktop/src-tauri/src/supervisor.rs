@@ -55,6 +55,16 @@ mod shell_shutdown_observation;
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
 pub(crate) use shell_shutdown_observation::HeldAppInfo;
 
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
+    target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"),
+    not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+#[path = "installed_shell_shutdown_observation_windows.rs"]
+mod windows_shell_observation;
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
+    target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"),
+    not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+pub(crate) use windows_shell_observation::WindowsPassiveWitness;
+
 fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
     // No user callback/serialization runs while these small bookkeeping locks
     // are held. Retain the data even on poisoning; never drop the resource owner.
@@ -65,6 +75,10 @@ fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
 pub struct Supervisor { inner: Arc<Inner> }
 struct Inner {
     runtime: RuntimeConfig, permits: Arc<Semaphore>, next: AtomicU64,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
+        target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"),
+        not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+    windows_ui: windows_shell_observation::Hooks,
     #[cfg(all(test, target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
     windows_test: windows_passive_tests::Hooks,
     stopping: AtomicBool, disabled: AtomicBool,
@@ -375,6 +389,10 @@ impl Supervisor {
     pub fn new(runtime: RuntimeConfig) -> Self {
         Self { inner: Arc::new(Inner {
             runtime, permits: Arc::new(Semaphore::new(ACTIVE_LIMIT)), next: AtomicU64::new(1),
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
+                target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"),
+                not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+            windows_ui: windows_shell_observation::Hooks::default(),
             #[cfg(all(test, target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
             windows_test: windows_passive_tests::Hooks::default(),
             stopping: AtomicBool::new(false), disabled: AtomicBool::new(false),
@@ -462,6 +480,10 @@ impl Supervisor {
             if self.stopping() { return Err(BridgeError::shutdown()); }
             if self.disabled() { return Err(BridgeError::cleanup_unknown()); }
             owners.insert(key, owner.clone());
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
+                target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"),
+                not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+            windows_shell_observation::registered(&self.inner, &owner);
         }
         // Construct before spawning, not inside the observer's first poll. This
         // also covers partial registration and an unpolled observer's loss.
@@ -1126,7 +1148,16 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         #[cfg(all(test, target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
         { resources.writer = Some(tokio::spawn(windows_passive_tests::write_request(stdin, bytes, owner.stop.subscribe(), faults.clone(), inner.windows_test.hold_writer()))); }
         #[cfg(not(all(test, target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"))))]
-        { resources.writer = Some(tokio::spawn(write_request(stdin, bytes, owner.stop.subscribe(), faults.clone()))); }
+        {
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
+                target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"),
+                not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+            { resources.writer = Some(tokio::spawn(windows_shell_observation::write_request(stdin, bytes, owner.stop.subscribe(), faults.clone(), windows_shell_observation::writer_hold(&inner, &owner)))); }
+            #[cfg(not(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
+                target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"),
+                not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"))))]
+            { resources.writer = Some(tokio::spawn(write_request(stdin, bytes, owner.stop.subscribe(), faults.clone()))); }
+        }
     }
     if let Some(stdout) = stdout {
         #[cfg(all(test, feature = "development-runtime"))]
@@ -1142,6 +1173,10 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     }
     #[cfg(all(test, target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
     windows_passive_tests::after_io_registered(&inner, &owner, &mut resources);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
+        target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"),
+        not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+    windows_shell_observation::after_io_registered(&inner, &owner, &mut resources);
     drop(faults);
     if resources.writer.is_none() || resources.stdout.is_none() || resources.stderr.is_none() {
         owner.fail(BridgeError::cleanup_unknown());
@@ -1244,6 +1279,10 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     if !settle_passive(&mut resources, &inner, &owner).await { return DriverEnd::RetainedUnknown; }
     #[cfg(all(test, target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
     windows_passive_tests::observe_settled_io(&inner, &resources);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
+        target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"),
+        not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+    windows_shell_observation::settled_io(&inner, &owner, &resources);
     let output = resources.out_end.take();
     let diagnostics = resources.err_end.take();
     if output.as_ref().is_some_and(|end| end.overflow) || diagnostics.as_ref().is_some_and(|end| end.overflow) {

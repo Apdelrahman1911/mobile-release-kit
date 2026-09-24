@@ -8,7 +8,7 @@ use serde_json::json;
 
 fn owner() -> OfflinePreflightOwner { OfflinePreflightOwner::new(RuntimeConfig::packaged(PathBuf::from("/unopened-runtime"))) }
 fn project() -> RegisteredRoot { RegisteredRoot { path: PathBuf::from("/unopened-preflight-project"),
-    identity: crate::asset_source::DirectoryIdentity::synthetic_evidence_identity() } }
+    identity: crate::asset_source::ProjectIdentity::Posix(crate::asset_source::DirectoryIdentity::synthetic_evidence_identity()) } }
 fn projection() -> RunProjection { RunProjection { operation_id: "a".repeat(32), owner_generation: "b".repeat(32),
     context: Context::OfflinePreflight(wire::tests::context()), phase: Phase::AwaitingConsent, intent_usable: true,
     outcome: None, reason: Reason::None, result: None, stage: None } }

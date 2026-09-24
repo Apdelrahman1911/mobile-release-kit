@@ -20,6 +20,16 @@ pub(super) const PASSIVE_OBSERVATION_FILE: &str = "passive-publication-observati
 pub(super) const PASSIVE_PRECHECK_HEADER: &str = "MRK_WINDOWS_INSTALLED_PASSIVE_PRECHECK_V1";
 pub(super) const PASSIVE_OBSERVATION_HEADER: &str = "MRK_WINDOWS_INSTALLED_PASSIVE_SETUP_OBSERVATION_V1";
 pub(super) const PASSIVE_SETUP_EXIT_HEADER: &str = "MRK_WINDOWS_INSTALLED_PASSIVE_SETUP_EXIT_V1";
+pub(super) const NORMAL_UI_PROFILE: &str = "windows-normal-project-ui-v1";
+pub(super) const NORMAL_UI_DISPATCH: &str = "windows-normal-project-ui";
+pub(super) const NORMAL_UI_STAGE: &str = "qualification_fixture::hosted_stage_normal_ui_runtime_input";
+pub(super) const NORMAL_UI_OBSERVE: &str = "qualification_fixture::hosted_observe_normal_ui_published_version";
+pub(super) const NORMAL_UI_PRECHECK_FILE: &str = "normal-ui-setup-precheck.private.txt";
+pub(super) const NORMAL_UI_STAGE_FILE: &str = "normal-ui-setup-stage-result.private.txt";
+pub(super) const NORMAL_UI_OBSERVATION_FILE: &str = "normal-ui-setup-publication-observation.private.txt";
+pub(super) const NORMAL_UI_PRECHECK_HEADER: &str = "MRK_WINDOWS_NORMAL_UI_SETUP_PRECHECK_V1";
+pub(super) const NORMAL_UI_OBSERVATION_HEADER: &str = "MRK_WINDOWS_NORMAL_UI_SETUP_OBSERVATION_V1";
+pub(super) const NORMAL_UI_SETUP_EXIT_HEADER: &str = "MRK_WINDOWS_NORMAL_UI_SETUP_EXIT_V1";
 pub(super) const STAGE_INPUT: &str = "qualification_fixture::hosted_stage_fixed_runtime_input";
 pub(super) const OBSERVE_BEFORE: &str = "qualification_fixture::hosted_observe_produced_version_before_collision";
 pub(super) const OBSERVE_AFTER: &str = "qualification_fixture::hosted_compare_after_occupied_producer";
@@ -48,6 +58,10 @@ pub(super) const PRODUCER_PROOFS: [(&str, &str, usize); 6] = [
 pub(super) const PASSIVE_SETUP_PROOFS: [(&str, &str, usize); 3] = [
     ("stage", PASSIVE_STAGE_FILE, OWNER_LIMIT), ("stageExit", "passive-stage-exit.private.txt", LIMIT),
     ("helperSuccessExit", "passive-publisher-exit.private.txt", LIMIT),
+];
+pub(super) const NORMAL_UI_SETUP_PROOFS: [(&str, &str, usize); 3] = [
+    ("stage", NORMAL_UI_STAGE_FILE, OWNER_LIMIT), ("stageExit", "normal-ui-setup-stage-exit.private.txt", LIMIT),
+    ("helperSuccessExit", "normal-ui-setup-publisher-exit.private.txt", LIMIT),
 ];
 pub(super) const PUBLISHER: &str = "qualification_fixture::hosted_publish_protected_version_fixture";
 pub(super) const RETIRE: &str = "qualification_fixture::hosted_retire_protected_version_fixture";
@@ -170,6 +184,64 @@ pub(super) fn passive_precheck_fields() -> Vec<&'static str> {
     fields.extend_from_slice(&PRECHECK_FIELDS[33..]);
     fields.extend(HELPER_FIELDS);
     fields
+}
+// Runtime setup has no app/headless claim. Its owner is a DISTINCT anchored
+// runtime-publication-only artifact, never the retained cheap desktop-ui owner.
+pub(super) const NORMAL_UI_PRECHECK_FIELDS: [&str; 40] = [
+    "profile", "sourceSha", "sourceTree", "runId", "attempt", "sourceInventorySha256",
+    "prerequisiteRequestSha256", "prerequisiteFinalizerSha256",
+    "ownerArtifact", "ownerArtifactBytes", "ownerArtifactSha256", "ownerArtifactIdentity",
+    "ownerCompileMessagesBytes", "ownerCompileMessagesSha256", "ownerCompileArgvSha256",
+    "stageTest", "stageCommandSha256", "observerTest", "observerCommandSha256", "standaloneFeatures",
+    "helperArtifact", "helperArtifactBytes", "helperArtifactSha256", "helperArtifactIdentity",
+    "helperCompileMessagesBytes", "helperCompileMessagesSha256", "helperCompileArgvSha256",
+    "helperCommandSha256", "helperNativeFeatures", "manifestSha256", "protocolSha256",
+    "inventorySha256", "coreSha256", "payloadFiles", "payloadBytes", "preparedReceiptBytes",
+    "preparedReceiptSha256", "rosterBytes", "rosterSha256", "setupContract",
+];
+
+// Closed role table shared only by the three explicit setup/observation lanes.
+// It selects existing custody/mutation bodies; it cannot dispatch a process or
+// choose a schema supplied by the caller. Fullwalk fixture/retire stays separate.
+#[derive(Clone, Copy)]
+struct SetupRoute {
+    profile: &'static str, stage: &'static str, observe: &'static str,
+    precheck_file: &'static str, observation_header: &'static str, exit_header: &'static str,
+    preflight_outcome: &'static str, proofs: &'static [(&'static str, &'static str, usize)],
+}
+fn setup_route(profile: &str) -> Result<SetupRoute> {
+    match profile {
+        PRODUCTION_PROFILE => Ok(SetupRoute { profile: PRODUCTION_PROFILE, stage: STAGE_INPUT, observe: OBSERVE_BEFORE,
+            precheck_file: PRECHECK_FILE, observation_header: OBSERVATION_HEADER, exit_header: PRODUCER_EXIT_HEADER,
+            preflight_outcome: "MRK_WINDOWS_ORDINARY_PREFLIGHT_STEP_OUTCOME", proofs: &PRODUCER_PROOFS }),
+        PASSIVE_PROFILE => Ok(SetupRoute { profile: PASSIVE_PROFILE, stage: PASSIVE_STAGE, observe: PASSIVE_OBSERVE,
+            precheck_file: PASSIVE_PRECHECK_FILE, observation_header: PASSIVE_OBSERVATION_HEADER, exit_header: PASSIVE_SETUP_EXIT_HEADER,
+            preflight_outcome: "MRK_WINDOWS_PASSIVE_PREFLIGHT_STEP_OUTCOME", proofs: &PASSIVE_SETUP_PROOFS }),
+        NORMAL_UI_PROFILE => Ok(SetupRoute { profile: NORMAL_UI_PROFILE, stage: NORMAL_UI_STAGE, observe: NORMAL_UI_OBSERVE,
+            precheck_file: NORMAL_UI_PRECHECK_FILE, observation_header: NORMAL_UI_OBSERVATION_HEADER, exit_header: NORMAL_UI_SETUP_EXIT_HEADER,
+            preflight_outcome: "MRK_WINDOWS_UI_SETUP_PREFLIGHT_STEP_OUTCOME", proofs: &NORMAL_UI_SETUP_PROOFS }),
+        _ => Err(Error::Unsafe),
+    }
+}
+fn setup_test(test: &str) -> Result<SetupRoute> {
+    setup_route(match test {
+        STAGE_INPUT | OBSERVE_BEFORE | OBSERVE_AFTER => PRODUCTION_PROFILE,
+        PASSIVE_STAGE | PASSIVE_OBSERVE => PASSIVE_PROFILE,
+        NORMAL_UI_STAGE | NORMAL_UI_OBSERVE => NORMAL_UI_PROFILE,
+        _ => return Err(Error::Unsafe),
+    })
+}
+impl SetupRoute {
+    fn proof_count(self, count: usize) -> Result<()> {
+        need(count == 3 || self.profile == PRODUCTION_PROFILE && count == 6)
+    }
+    fn observer(self, after: bool) -> Result<&'static str> {
+        need(!after || self.profile == PRODUCTION_PROFILE)?;
+        Ok(if after { OBSERVE_AFTER } else { self.observe })
+    }
+    fn producer_observed(self, test: &str) -> bool {
+        test == if self.profile == PRODUCTION_PROFILE { OBSERVE_AFTER } else { self.observe }
+    }
 }
 
 pub(super) const PUBLICATION_FIELDS: [&str; 37] = [
@@ -392,13 +464,15 @@ pub(super) fn profile_route(dispatch:&str,reference:&str) -> Result<&'static str
         (DISPATCH,"refs/heads/verify/desktop-windows-installed-native")=>Ok(PROFILE),
         (PRODUCTION_DISPATCH,"refs/heads/verify/desktop-windows-runtime-publication")=>Ok(PRODUCTION_PROFILE),
         (PASSIVE_DISPATCH,"refs/heads/verify/desktop-windows-installed-passive")=>Ok(PASSIVE_PROFILE),
+        (NORMAL_UI_DISPATCH,"refs/heads/verify/desktop-windows-normal-project-ui")=>Ok(NORMAL_UI_PROFILE),
         _=>Err(Error::Unsafe),
     }
 }
 pub(super) fn active_profile() -> Result<&'static str> {
     match std::env::var("MRK_DESKTOP_DISPATCH_SCOPE").as_deref() {
         Ok(DISPATCH) => Ok(PROFILE), Ok(PRODUCTION_DISPATCH) => Ok(PRODUCTION_PROFILE),
-        Ok(PASSIVE_DISPATCH) => Ok(PASSIVE_PROFILE), _ => Err(Error::Unsafe),
+        Ok(PASSIVE_DISPATCH) => Ok(PASSIVE_PROFILE), Ok(NORMAL_UI_DISPATCH) => Ok(NORMAL_UI_PROFILE),
+        _ => Err(Error::Unsafe),
     }
 }
 fn precheck_fields(production: bool) -> Vec<&'static str> {
@@ -418,6 +492,7 @@ fn prerequisite_fields(production: bool) -> Vec<String> {
 }
 pub(super) fn outcome(key: &str) -> Result<()> { need(std::env::var(key).as_deref() == Ok("success")) }
 pub(super) fn precheck(raw: &[u8], root: &Path) -> Result<Wire> {
+    if active_profile()? == NORMAL_UI_PROFILE { return normal_ui_setup_precheck(raw, root); }
     if active_profile()? == PASSIVE_PROFILE { return passive_precheck(raw, root); }
     let production = active_profile()? == PRODUCTION_PROFILE;
     let value = Wire::parse(raw, if production {PRODUCTION_PRECHECK_HEADER} else {PRECHECK_HEADER}, &precheck_fields(production), TEXT_LIMIT)?;
@@ -499,6 +574,62 @@ fn passive_precheck(raw: &[u8], root: &Path) -> Result<Wire> {
         .encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>())?)?;
     need(value.number("payloadFiles", 2047)? == 46 && value.number("payloadBytes", 1 << 30)? > 0
         && value.number("preparedReceiptBytes", 4096)? > 0 && value.number("rosterBytes", TEXT_LIMIT as u64)? > 0)?;
+    Ok(value)
+}
+
+pub(super) fn normal_ui_setup_features(enabled: [bool; 5]) -> Result<()> {
+    // runtime-publication, qualification-result, desktop-ui, desktop-ui-dialogs,
+    // windows-installed-observation. No UI crate/owner or result-writer feature.
+    need(enabled == [true, false, false, false, false])
+}
+pub(super) fn normal_ui_setup_values(value: &Wire, manifest: &str, protocol: &str) -> Result<()> {
+    need(is_hex(manifest, 64) && is_hex(protocol, 64))?;
+    for (key, expected) in [
+        ("profile", NORMAL_UI_PROFILE), ("stageTest", NORMAL_UI_STAGE), ("observerTest", NORMAL_UI_OBSERVE),
+        ("standaloneFeatures", "runtime-publication"), ("helperNativeFeatures", "runtime-publication"),
+        ("setupContract", "fixed-normal-ui-fresh-runtime-only-v1"),
+        ("manifestSha256", manifest), ("protocolSha256", protocol),
+    ] { value.equal(key, expected)?; }
+    for role in ["owner", "helper"] {
+        original_epoch(value.get(&format!("{role}ArtifactIdentity"))?, value.get(&format!("{role}ArtifactIdentity"))?)?;
+        need(value.number(&format!("{role}ArtifactBytes"), PAYLOAD_LIMIT as u64)? > 0
+            && value.number(&format!("{role}CompileMessagesBytes"), 16 << 20)? > 0)?;
+    }
+    need(value.number("payloadFiles", 2047)? == 46 && value.number("payloadBytes", 1 << 30)? > 0
+        && value.number("preparedReceiptBytes", 4096)? > 0 && value.number("rosterBytes", TEXT_LIMIT as u64)? > 0)
+}
+pub(super) fn normal_ui_setup_probe_gate(value: &Wire, available: &str, finalized: &str,
+    request_sha: &str, finalizer_sha: &str) -> Result<()> {
+    need(available == "true" && finalized == "success" && is_hex(request_sha, 64) && is_hex(finalizer_sha, 64))?;
+    value.equal("prerequisiteRequestSha256", request_sha)?;
+    value.equal("prerequisiteFinalizerSha256", finalizer_sha)
+}
+fn normal_ui_setup_precheck(raw: &[u8], root: &Path) -> Result<Wire> {
+    normal_ui_setup_features([cfg!(feature = "runtime-publication"), cfg!(feature = "qualification-result"),
+        cfg!(feature = "desktop-ui"), cfg!(feature = "desktop-ui-dialogs"), cfg!(feature = "windows-installed-observation")])?;
+    let value = Wire::parse(raw, NORMAL_UI_PRECHECK_HEADER, &NORMAL_UI_PRECHECK_FIELDS, TEXT_LIMIT)?;
+    value.binding()?;
+    normal_ui_setup_values(&value, option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256").ok_or(Error::State)?,
+        option_env!("MRK_BUNDLED_PROTOCOL_SHA256").ok_or(Error::State)?)?;
+    let get = |name: &str| std::env::var(name).map_err(|_| Error::State);
+    normal_ui_setup_probe_gate(&value, &get("MRK_WINDOWS_UI_PREREQUISITES_AVAILABLE")?,
+        &get("MRK_WINDOWS_UI_PREREQUISITE_FINALIZE_STEP_OUTCOME")?,
+        &get("MRK_WINDOWS_UI_PREREQUISITE_REQUEST_SHA256")?, &get("MRK_WINDOWS_UI_PREREQUISITE_FINALIZER_SHA256")?)?;
+    need(get("MRK_WINDOWS_UI_SETUP_PRECHECK_SHA256")? == digest(raw)?)?;
+    // Caller preflight has joined the positive probe's actual pre/post ACL
+    // identity and closed finalizer, then the DISTINCT setup compiler original.
+    // This runtime-only precheck never authorizes another ordinary account.
+    let owner = fixed_path(value.get("ownerArtifact")?)?;
+    need(owner.parent() == Some(fixed_directories(root)[3].1.as_path()))?;
+    let leaf = owner.file_name().and_then(|name| name.to_str()).ok_or(Error::Unsafe)?;
+    need(leaf.strip_prefix("mrk_windows_installed_native-").and_then(|name| name.strip_suffix(".exe"))
+        .is_some_and(|name| is_hex(name, 16)))?;
+    for (key, test) in [("stageCommandSha256", NORMAL_UI_STAGE), ("observerCommandSha256", NORMAL_UI_OBSERVE)] {
+        value.equal(key, &command_sha(value.get("ownerArtifact")?, test)?)?;
+    }
+    need(fixed_path(value.get("helperArtifact")?)? == root.join("mrk-windows-runtime-publish.exe"))?;
+    value.equal("helperCommandSha256", &digest(&format!("\"{}\"", value.get("helperArtifact")?)
+        .encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>())?)?;
     Ok(value)
 }
 #[derive(Clone, Debug)]
@@ -685,29 +816,28 @@ pub(super) fn observations_unchanged(before:&[ObservedObject],after:&[ObservedOb
         && before.iter().map(|o|o.role.as_str()).eq(observation_roles(false).iter().map(String::as_str)))
 }
 pub(super) fn observation(raw:&[u8],items:&[Payload],test:&str) -> Result<(Wire,Vec<ObservedObject>,Vec<ProducerProof>)> {
-    let passive=matches!(test,PASSIVE_STAGE|PASSIVE_OBSERVE);
-    need(matches!(test,STAGE_INPUT|OBSERVE_BEFORE|OBSERVE_AFTER|PASSIVE_STAGE|PASSIVE_OBSERVE) && items.len()==47
+    let route=setup_test(test)?;
+    need(items.len()==47
         && !raw.is_empty() && raw.len()<=OWNER_LIMIT && raw.is_ascii() && raw.ends_with(b"\n") && !raw.contains(&b'\r'))?;
-    let stage=matches!(test,STAGE_INPUT|PASSIVE_STAGE);let proof_count=if stage {0}else if test==OBSERVE_AFTER {6}else{3};
+    let stage=test==route.stage;let proof_count=if stage {0}else if test==OBSERVE_AFTER {6}else{3};
     let roles=observation_roles(stage);let directories=if stage {5}else{9};
     let lines:Vec<_>=std::str::from_utf8(raw).map_err(|_|Error::Unsafe)?[..raw.len()-1].split('\n').collect();
     let prefix=1+OBSERVATION_FIELDS.len();
     need(lines.len()==prefix+proof_count+roles.len())?;
     let header=lines[..prefix].join("\n")+"\n";
-    let record=Wire::parse(header.as_bytes(),if passive {PASSIVE_OBSERVATION_HEADER}else{OBSERVATION_HEADER},&OBSERVATION_FIELDS,OWNER_LIMIT)?;
-    record.binding()?;record.equal("profile",if passive {PASSIVE_PROFILE}else{PRODUCTION_PROFILE})?;record.equal("observerTest",test)?;
+    let record=Wire::parse(header.as_bytes(),route.observation_header,&OBSERVATION_FIELDS,OWNER_LIMIT)?;
+    record.binding()?;record.equal("profile",route.profile)?;record.equal("observerTest",test)?;
     for (key,value) in [("payloadFiles","46"),("sourceReaders",if stage {"47"}else{"0"}),
         ("payloadWriters",if stage {"47"}else{"0"}),("postcheckReaders",if stage {"47"}else{"94"}),
         ("parentBookSettled","true"),("unknown","false"),
-        ("actualFixedProducerObserved",if matches!(test,OBSERVE_AFTER|PASSIVE_OBSERVE) {"true"}else{"false"}),
+        ("actualFixedProducerObserved",if route.producer_observed(test) {"true"}else{"false"}),
         ("runtimeConsumerEnabled","false"),("pythonExecuted","false"),("appLaunched","false"),
         ("resultCloseGate","original-observer-exit-zero-required")] {record.equal(key,value)?;}
     need(record.number("objectCount",103)?==roles.len() as u64 && record.number("proofCount",6)?==proof_count as u64
         && record.number("fileOriginals",256)? >= (if stage {146}else{103})
         && record.get("fileOriginals")==record.get("fileOriginalsClosed"))?;
     let mut proofs=Vec::with_capacity(proof_count);
-    let proof_roles=if passive {PASSIVE_SETUP_PROOFS.as_slice()}else{PRODUCER_PROOFS.as_slice()};
-    for (line,(role,_,limit)) in lines[prefix..prefix+proof_count].iter().zip(proof_roles) {
+    for (line,(role,_,limit)) in lines[prefix..prefix+proof_count].iter().zip(route.proofs) {
         let parts:Vec<_>=line.strip_prefix("proof=").ok_or(Error::Unsafe)?.split('|').collect();
         need(parts.len()==3 && parts[0]==*role && is_hex(parts[2],64))?;
         let bytes=number(parts[1],*limit as u64)?;need(bytes>0)?;
@@ -747,17 +877,16 @@ fn bound_observation(raw:&[u8],test:&str,pre:&Wire,pre_raw:&[u8],roster_raw:&[u8
     Ok((record,objects,proofs))
 }
 pub(super) fn producer_exit(raw:&[u8],pre:&Wire,pre_raw:&[u8],role:&str) -> Result<()> {
-    let passive=active_profile()?==PASSIVE_PROFILE;
-    let (artifact,test,code)=if passive {match role {
-        "stage"=>("owner",Some(PASSIVE_STAGE),"0"),"helperSuccess"=>("helper",None,"0"),
-        "observe"=>("owner",Some(PASSIVE_OBSERVE),"0"),_=>return Err(Error::Unsafe),
-    }}else{match role {
-        "stage"=>("owner",Some(STAGE_INPUT),"0"),"before"=>("owner",Some(OBSERVE_BEFORE),"0"),
-        "after"=>("owner",Some(OBSERVE_AFTER),"0"),"helperSuccess"=>("helper",None,"0"),
-        "helperOccupied"=>("helper",None,"2"),_=>return Err(Error::Unsafe),
-    }};
-    let record=Wire::parse(raw,if passive {PASSIVE_SETUP_EXIT_HEADER}else{PRODUCER_EXIT_HEADER},&PRODUCER_EXIT_FIELDS,LIMIT)?;
-    record.binding()?;record.equal("profile",if passive {PASSIVE_PROFILE}else{PRODUCTION_PROFILE})?;record.equal("role",role)?;
+    let route=setup_route(active_profile()?)?;
+    let (artifact,test,code)=match role {
+        "stage"=>("owner",Some(route.stage),"0"),"helperSuccess"=>("helper",None,"0"),
+        "observe" if route.profile!=PRODUCTION_PROFILE=>("owner",Some(route.observe),"0"),
+        "before" if route.profile==PRODUCTION_PROFILE=>("owner",Some(OBSERVE_BEFORE),"0"),
+        "after" if route.profile==PRODUCTION_PROFILE=>("owner",Some(OBSERVE_AFTER),"0"),
+        "helperOccupied" if route.profile==PRODUCTION_PROFILE=>("helper",None,"2"),_=>return Err(Error::Unsafe),
+    };
+    let record=Wire::parse(raw,route.exit_header,&PRODUCER_EXIT_FIELDS,LIMIT)?;
+    record.binding()?;record.equal("profile",route.profile)?;record.equal("role",role)?;
     record.equal("artifactSha256",pre.get(&format!("{artifact}ArtifactSha256"))?)?;
     record.equal("precheckSha256",&digest(pre_raw)?)?;
     let command=match test {Some(test)=>command_sha(pre.get("ownerArtifact")?,test)?,None=>pre.get("helperCommandSha256")?.to_owned()};
@@ -766,11 +895,13 @@ pub(super) fn producer_exit(raw:&[u8],pre:&Wire,pre_raw:&[u8],role:&str) -> Resu
     record.equal("writerCloseGate",&format!("original-{role}-step-success-required"))
 }
 fn production_outcomes(count:usize) -> Result<()> {
-    if active_profile()?==PASSIVE_PROFILE {
+    let route=setup_route(active_profile()?)?;
+    if route.profile!=PRODUCTION_PROFILE {
         need(count==3)?;
+        let prefix=if route.profile==PASSIVE_PROFILE {"MRK_WINDOWS_PASSIVE"}else{"MRK_WINDOWS_UI_SETUP"};
         for role in ["STAGE","PUBLISH"] {
-            outcome(&format!("MRK_WINDOWS_PASSIVE_{role}_STEP_OUTCOME"))?;
-            outcome(&format!("MRK_WINDOWS_PASSIVE_{role}_FINALIZE_STEP_OUTCOME"))?;
+            outcome(&format!("{prefix}_{role}_STEP_OUTCOME"))?;
+            outcome(&format!("{prefix}_{role}_FINALIZE_STEP_OUTCOME"))?;
         }
         return Ok(());
     }
@@ -784,10 +915,9 @@ fn production_outcomes(count:usize) -> Result<()> {
 }
 fn checked_producer_chain(pre:&Wire,pre_raw:&[u8],roster_raw:&[u8],items:&[Payload],proof_raw:&[Vec<u8>])
     -> Result<(Vec<ObservedObject>,Option<Vec<ObservedObject>>)> {
-    let passive=active_profile()?==PASSIVE_PROFILE;
-    need(!passive || proof_raw.len()==3)?;
-    need(proof_raw.len()==3 || proof_raw.len()==6)?;
-    let (_,stage,stage_proofs)=bound_observation(&proof_raw[0],if passive {PASSIVE_STAGE}else{STAGE_INPUT},pre,pre_raw,roster_raw,items)?;
+    let route=setup_route(active_profile()?)?;
+    route.proof_count(proof_raw.len())?;
+    let (_,stage,stage_proofs)=bound_observation(&proof_raw[0],route.stage,pre,pre_raw,roster_raw,items)?;
     need(stage_proofs.is_empty())?;
     producer_exit(&proof_raw[1],pre,pre_raw,"stage")?;
     producer_exit(&proof_raw[2],pre,pre_raw,"helperSuccess")?;
@@ -1505,7 +1635,8 @@ impl Fixture {
 impl Fixture {
     fn publication_inputs(&mut self) -> Result<(Wire,Vec<Payload>,Vec<u8>,Vec<u8>)> {
         self.root_inputs()?;
-        let precheck_name=if active_profile()?==PASSIVE_PROFILE {PASSIVE_PRECHECK_FILE}else{PRECHECK_FILE};
+        let profile=active_profile()?;
+        let precheck_name=if profile==PROFILE {PRECHECK_FILE}else{setup_route(profile)?.precheck_file};
         let (_,pre_raw)=self.input(&self.root.join(precheck_name),TEXT_LIMIT)?;
         let pre=precheck(&pre_raw,&self.root)?;
         let (_,roster_raw)=self.input(&self.root.join(ROSTER_FILE),TEXT_LIMIT)?;
@@ -1531,7 +1662,7 @@ impl Fixture {
         Ok([p,input,target,version,python])
     }
     fn production_inputs(&mut self) -> Result<(Wire,Vec<Payload>,Vec<u8>,Vec<u8>)> {
-        need(matches!(active_profile()?,PRODUCTION_PROFILE|PASSIVE_PROFILE))?;
+        setup_route(active_profile()?)?;
         let values=self.publication_inputs()?;let pre=&values.0;
         let path=fixed_path(pre.get("helperArtifact")?)?;
         // Separate original from the executing helper, admitted only after its
@@ -1573,6 +1704,7 @@ impl Fixture {
         inventory_sha(&expected)
     }
     fn observation_record(&mut self,pre:&Wire,pre_raw:&[u8],roster_raw:&[u8],test:&str,objects:usize,proofs:usize) -> Result<Wire> {
+        let route=setup_test(test)?;
         let mut record=Wire {values:BTreeMap::new()};
         record.copy(pre,&["profile","sourceSha","sourceTree","runId","attempt","manifestSha256",
             "protocolSha256","inventorySha256","coreSha256","payloadFiles","payloadBytes"])?;
@@ -1583,14 +1715,14 @@ impl Fixture {
         for (key,value) in [("sourceReaders",self.source_readers),("payloadWriters",self.writers),
             ("postcheckReaders",self.postcheck_readers),("objectCount",objects),("proofCount",proofs)] {record.put(key,value);}
         for (key,value) in [("parentBookSettled","true"),("unknown","false"),
-            ("actualFixedProducerObserved",if matches!(test,OBSERVE_AFTER|PASSIVE_OBSERVE) {"true"}else{"false"}),
+            ("actualFixedProducerObserved",if route.producer_observed(test) {"true"}else{"false"}),
             ("runtimeConsumerEnabled","false"),("pythonExecuted","false"),("appLaunched","false"),
             ("resultCloseGate","original-observer-exit-zero-required")] {record.put(key,value);}
         Ok(record) // Counts of original closes are supplied only AFTER settle().
     }
     fn stage_source(&mut self) -> Result<(Wire,Vec<ObservedObject>,Vec<ProducerProof>)> {
-        let passive=active_profile()?==PASSIVE_PROFILE;
-        outcome(if passive {"MRK_WINDOWS_PASSIVE_PREFLIGHT_STEP_OUTCOME"}else{"MRK_WINDOWS_ORDINARY_PREFLIGHT_STEP_OUTCOME"})?;
+        let route=setup_route(active_profile()?)?;
+        outcome(route.preflight_outcome)?;
         let (pre,items,pre_raw,roster_raw)=self.production_inputs()?;
         let program_files=self.os_location()?;let paths=self.source_paths(pre.get("manifestSha256")?)?;
         fixture_capacity(self.ancestors,self.program_files,self.files.len()+5,2)?;
@@ -1642,16 +1774,14 @@ impl Fixture {
             objects[ordinal].inventory=self.observed_inventory(directories[ordinal],&objects,&roles[ordinal],pre.get("manifestSha256")?,true)?;
         }
         self.parent_link(program_files,directories[0])?;self.final_inputs()?;
-        let record=self.observation_record(&pre,&pre_raw,&roster_raw,if passive {PASSIVE_STAGE}else{STAGE_INPUT},objects.len(),0)?;
+        let record=self.observation_record(&pre,&pre_raw,&roster_raw,route.stage,objects.len(),0)?;
         Ok((record,objects,Vec::new()))
     }
     fn read_producer_proofs(&mut self,count:usize) -> Result<(Vec<Vec<u8>>,Vec<ProducerProof>)> {
-        let passive=active_profile()?==PASSIVE_PROFILE;
-        need(!passive || count==3)?;
-        need(count==3 || count==6)?;
+        let route=setup_route(active_profile()?)?;
+        route.proof_count(count)?;
         let mut raw=Vec::with_capacity(count);let mut proofs=Vec::with_capacity(count);
-        let roles=if passive {PASSIVE_SETUP_PROOFS.as_slice()}else{PRODUCER_PROOFS.as_slice()};
-        for (role,name,limit) in roles.iter().take(count) {
+        for (role,name,limit) in route.proofs.iter().take(count) {
             let (index,bytes)=self.input(&self.root.join(name),*limit)?;
             self.recheck(index)?;self.close(index)?;self.pop_closed(index)?;
             proofs.push(ProducerProof {role:(*role).to_owned(),bytes:bytes.len(),sha:digest(&bytes)?});raw.push(bytes);
@@ -1687,8 +1817,8 @@ impl Fixture {
         Ok(objects)
     }
     fn observe_producer(&mut self,after:bool) -> Result<(Wire,Vec<ObservedObject>,Vec<ProducerProof>)> {
-        let passive=active_profile()?==PASSIVE_PROFILE;
-        need(!passive || !after)?;
+        let route=setup_route(active_profile()?)?;
+        let test=route.observer(after)?;
         let proof_count=if after {6}else{3};production_outcomes(proof_count)?;
         let (pre,items,pre_raw,roster_raw)=self.production_inputs()?;
         let (proof_raw,proofs)=self.read_producer_proofs(proof_count)?;
@@ -1710,7 +1840,6 @@ impl Fixture {
         need(objects.len()==103 && self.source_readers==0 && self.writers==0 && self.postcheck_readers==94
             && self.mutation.is_none() && self.dispositions==0)?;
         self.final_inputs()?;
-        let test=if passive {PASSIVE_OBSERVE}else if after {OBSERVE_AFTER}else{OBSERVE_BEFORE};
         let record=self.observation_record(&pre,&pre_raw,&roster_raw,test,objects.len(),proofs.len())?;
         Ok((record,objects,proofs))
     }
@@ -1998,12 +2127,17 @@ fn hosted_retire_protected_version_fixture() -> Result<()> {
 // A separate test-only entry, sharing Fixture's original ownership/settlement
 // seam. Neither reader can enter a fixture mutation or the legacy retire path.
 fn producer_observation_run(test:&str,start:Instant) -> Result<()> {
-    let passive=matches!(test,PASSIVE_STAGE|PASSIVE_OBSERVE);
-    need(if passive {!cfg!(feature="runtime-publication") && !cfg!(feature="qualification-result")}
-        else {super::ordinary_owner::FULLWALK_PREREQUISITES_REVIEWED})?;
+    let route=setup_test(test)?;
+    if route.profile==NORMAL_UI_PROFILE {
+        normal_ui_setup_features([cfg!(feature = "runtime-publication"), cfg!(feature = "qualification-result"),
+            cfg!(feature = "desktop-ui"), cfg!(feature = "desktop-ui-dialogs"), cfg!(feature = "windows-installed-observation")])?;
+    }else {
+        need(if route.profile==PASSIVE_PROFILE {!cfg!(feature="runtime-publication") && !cfg!(feature="qualification-result")}
+            else {super::ordinary_owner::FULLWALK_PREREQUISITES_REVIEWED})?;
+    }
     profile()?;
-    need(if passive {active_profile()?==PASSIVE_PROFILE}
-        else {active_profile()?==PRODUCTION_PROFILE && matches!(test,STAGE_INPUT|OBSERVE_BEFORE|OBSERVE_AFTER)})?;
+    need(active_profile()?==route.profile)?;
+    if route.profile==NORMAL_UI_PROFILE {outcome(route.preflight_outcome)?;}
     let root=fixed_path(&std::env::var("MRK_DESKTOP_CI_ROOT").map_err(|_|Error::State)?)?;
     let temp=fixed_path(&std::env::var("RUNNER_TEMP").map_err(|_|Error::State)?)?;
     let run=std::env::var("GITHUB_RUN_ID").map_err(|_|Error::State)?;
@@ -2012,7 +2146,7 @@ fn producer_observation_run(test:&str,start:Instant) -> Result<()> {
     let image=std::env::current_exe().map_err(|_|Error::Unavailable)?;args_are(test,&image)?;
     let mut original=Fixture::new(start,root,image)?;
     let observed=std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if matches!(test,STAGE_INPUT|PASSIVE_STAGE) {original.stage_source()}else{original.observe_producer(test==OBSERVE_AFTER)}
+        if test==route.stage {original.stage_source()}else{original.observe_producer(test==OBSERVE_AFTER)}
     })).unwrap_or(Err(Error::Unknown));
     if matches!(observed,Err(Error::Unknown)) || original.unknown() {
         diagnostic_data("producer-observation-original-operation",None,true,None);
@@ -2025,20 +2159,21 @@ fn producer_observation_run(test:&str,start:Instant) -> Result<()> {
     }
     let (mut record,objects,proofs)=observed?;settled?;
     record.put("fileOriginals",original.opened);record.put("fileOriginalsClosed",original.closed);
-    let mut raw=record.encoded(if passive {PASSIVE_OBSERVATION_HEADER}else{OBSERVATION_HEADER},&OBSERVATION_FIELDS,OWNER_LIMIT)?;
+    let mut raw=record.encoded(route.observation_header,&OBSERVATION_FIELDS,OWNER_LIMIT)?;
     for proof in &proofs {raw.extend(proof.line().as_bytes());}
     for object in &objects {raw.extend(object.line().as_bytes());}
     need(raw.len()<=OWNER_LIMIT)?;
     // Same strict parser as the later DATA/prerequisite reader, not a new claim
     // about creation/grant/copy calls by the normal publisher.
     let items=PAYLOAD_NAMES.iter().map(|name| {
-        let role=if matches!(test,STAGE_INPUT|PASSIVE_STAGE) {format!("source/{name}")}else{(*name).to_owned()};
+        let role=if test==route.stage {format!("source/{name}")}else{(*name).to_owned()};
         let object=objects.iter().find(|o|o.role==role).ok_or(Error::State)?;
         Ok(Payload {path:(*name).to_owned(),bytes:object.stamp.size as usize,sha:object.sha.clone()})
     }).collect::<Result<Vec<_>>>()?;
     observation(&raw,&items,test)?;original.gate()?;
     let name=match test {STAGE_INPUT=>STAGE_FILE,OBSERVE_BEFORE=>BEFORE_FILE,OBSERVE_AFTER=>PUBLICATION_FILE,
-        PASSIVE_STAGE=>PASSIVE_STAGE_FILE,PASSIVE_OBSERVE=>PASSIVE_OBSERVATION_FILE,_=>return Err(Error::State)};
+        PASSIVE_STAGE=>PASSIVE_STAGE_FILE,PASSIVE_OBSERVE=>PASSIVE_OBSERVATION_FILE,
+        NORMAL_UI_STAGE=>NORMAL_UI_STAGE_FILE,NORMAL_UI_OBSERVE=>NORMAL_UI_OBSERVATION_FILE,_=>return Err(Error::State)};
     write_fixture_record(&original.root.join(name),&raw,OWNER_LIMIT,original.end)?;original.gate()
 }
 #[test]
@@ -2066,4 +2201,15 @@ fn hosted_stage_passive_runtime_input() -> Result<()> {
 #[ignore = "read-only original103-object setup observation after the fresh normal helper original exit0"]
 fn hosted_observe_passive_published_version() -> Result<()> {
     let start=Instant::now();producer_observation_run(PASSIVE_OBSERVE,start)
+}
+
+#[test]
+#[ignore = "fresh runtime-only normal UI setup after positively finalized native prerequisite; no GUI/account admission"]
+fn hosted_stage_normal_ui_runtime_input() -> Result<()> {
+    let start=Instant::now();producer_observation_run(NORMAL_UI_STAGE,start)
+}
+#[test]
+#[ignore = "read-only original103-object normal UI setup after original stage/helper and independent finalizers"]
+fn hosted_observe_normal_ui_published_version() -> Result<()> {
+    let start=Instant::now();producer_observation_run(NORMAL_UI_OBSERVE,start)
 }

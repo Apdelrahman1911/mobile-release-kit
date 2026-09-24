@@ -1972,7 +1972,7 @@ mod workflow {
             let project = self.document.workflow_fixture_publish(proof, generation).map_err(|_| Failure::NativeCommandRejected)?;
             let (_, registered) = self.bridge.native_project(&project.id).map_err(|_| Failure::NativeCommandRejected)?;
             let actual = fs::symlink_metadata(root).map_err(|_| Failure::FixtureIo)?;
-            let identity = registered.identity.workflow_identity();
+            let identity = registered.identity.posix().map_err(|_| Failure::PayloadMismatch)?.workflow_identity();
             require(registered.path == root && identity.device == actual.dev().to_string() && identity.inode == actual.ino().to_string()
                 && identity.mode == actual.mode() && identity.uid == actual.uid() && identity.gid == actual.gid(), Failure::PayloadMismatch)?;
             Ok(project)
@@ -2234,7 +2234,7 @@ mod workflow {
             fs::rename(&root,input.inputs.root.join("root-before-open-retired")).map_err(|_| Failure::FixtureIo)?;
             mkdir(&root)?; write_new(&root.join("unrelated.txt"),UNRELATED,0o600)?;
             require(fs::symlink_metadata(&root).map_err(|_| Failure::FixtureIo)?.ino().to_string()
-                != registered.1.identity.workflow_identity().inode, Failure::PayloadMismatch)?;
+                != registered.1.identity.posix().map_err(|_| Failure::PayloadMismatch)?.workflow_identity().inode, Failure::PayloadMismatch)?;
         }
         let before = snapshot(&root)?;
         let session = original.open(&project)?;
@@ -2859,7 +2859,7 @@ mod metadata {
                 .map_err(|_| Failure::NativeCommandRejected)?;
             let (_,registered)=self.bridge.native_project(&project.id).map_err(|_| Failure::UnexpectedStatus)?;
             let stat=fs::symlink_metadata(root).map_err(|_| Failure::FixtureIo)?;
-            let identity=registered.identity.workflow_identity();
+            let identity=registered.identity.posix().map_err(|_| Failure::PayloadMismatch)?.workflow_identity();
             require(registered.path == root && identity.device == stat.dev().to_string() && identity.inode == stat.ino().to_string()
                 && identity.mode == stat.mode() && identity.uid == stat.uid() && identity.gid == stat.gid(),Failure::PayloadMismatch)?;
             Ok(project)

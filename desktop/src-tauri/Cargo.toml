@@ -46,7 +46,7 @@ required-features = ["desktop-shell", "custom-protocol"]
 
 [features]
 default = []
-desktop-shell = ["dep:tauri", "dep:tauri-build", "dep:rfd", "dep:webkit2gtk", "dep:gtk"]
+desktop-shell = ["dep:tauri", "dep:tauri-build", "dep:rfd", "dep:webkit2gtk", "dep:gtk", "mrk-windows-installed-native/desktop-ui-dialogs"]
 custom-protocol = ["tauri/custom-protocol"]
 development-runtime = []
 # Selects the standalone privileged publisher, not any execution qualification.
@@ -57,6 +57,7 @@ macos-installed-installer = []
 macos-installed-installer-fixture = ["macos-installed-installer"]
 # Explicit engineering observer controls; absent from every shipping profile.
 macos-installed-observation = ["mrk-macos-installed-native/installed-observation"]
+windows-installed-observation = ["mrk-windows-installed-native/windows-installed-observation"]
 
 [dependencies]
 serde = { version = "=1.0.228", features = ["derive"] }

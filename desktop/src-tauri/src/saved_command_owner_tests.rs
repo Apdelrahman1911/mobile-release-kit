@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use serde_json::{json, Value};
 
 fn project() -> RegisteredRoot { RegisteredRoot { path: PathBuf::from("/unopened-saved-command-project"),
-    identity: crate::asset_source::DirectoryIdentity::synthetic_evidence_identity() } }
+    identity: crate::asset_source::ProjectIdentity::Posix(crate::asset_source::DirectoryIdentity::synthetic_evidence_identity()) } }
 fn application(domain: SavedCommandDomain) -> SavedCommandOwner {
     SavedCommandOwner::new(RuntimeConfig::packaged(PathBuf::from("/unopened-saved-command-runtime")), domain)
 }

@@ -3,7 +3,7 @@
 use std::{collections::BTreeMap, path::PathBuf, sync::{Mutex, atomic::{AtomicU32, Ordering}}};
 #[cfg(any(feature = "desktop-shell", all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
 use std::sync::atomic::AtomicU64;
-#[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos"))))]
+#[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos", target_os = "windows"))))]
 use std::path::Component;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -91,7 +91,7 @@ fn capabilities_failure_line(origin: CapabilitiesFailureOrigin, error: &BridgeEr
     }
 }
 
-struct RegisteredProject { view: Project, root: PathBuf, identity: Option<crate::asset_source::DirectoryIdentity> }
+struct RegisteredProject { view: Project, root: PathBuf, identity: Option<crate::asset_source::ProjectIdentity> }
 pub(crate) struct ProjectRoster { pub(crate) generation: u32, pub(crate) roots: Vec<crate::asset_source::RegisteredRoot> }
 
 pub struct DesktopBridge {
@@ -382,7 +382,7 @@ impl DesktopBridge {
         self.project_generation.store(next_generation, Ordering::SeqCst);
         Ok(project)
     }
-    #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos"))))]
+    #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos", target_os = "windows"))))]
     pub(crate) fn register_picked_project(&self, path: PathBuf) -> Result<Project, BridgeError> {
         self.preflight.ensure_idle()?;
         self.android_build.ensure_idle()?;

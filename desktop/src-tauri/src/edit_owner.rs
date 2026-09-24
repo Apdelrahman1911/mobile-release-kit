@@ -1036,9 +1036,9 @@ impl EditOwner {
         };
         let params = match (domain, registration.as_ref(), metadata.as_ref()) {
             (EditDomain::Configuration, None, None) => json!({"root": root}),
-            (EditDomain::GitHubWorkflows, Some(binding), None) => json!({"root":root,"registeredIdentity":binding.root.identity.workflow_identity()}),
+            (EditDomain::GitHubWorkflows, Some(binding), None) => json!({"root":root,"registeredIdentity":binding.root.identity.posix().map_err(|_| invalid_owner())?.workflow_identity()}),
             (EditDomain::MetadataText, Some(binding), Some(context)) if context.valid() => json!({"root":root,
-                "registeredIdentity":binding.root.identity.workflow_identity(),"platform":context.platform,"locale":context.locale}),
+                "registeredIdentity":binding.root.identity.posix().map_err(|_| invalid_owner())?.workflow_identity(),"platform":context.platform,"locale":context.locale}),
             _ => return Err(invalid_owner()),
         };
         let bytes = request_bytes(domain, &id, 0, "open", params)?;

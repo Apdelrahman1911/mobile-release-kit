@@ -15,6 +15,14 @@ path = "src/lib.rs"
 runtime-publication = []
 # Qualification DATA writer only; never a normal helper capability.
 qualification-result = []
+# Same narrow native inspector used by normal startup and the read-only probe.
+# Does not depend on Tauri/frontend or enable a publisher/headless executor.
+desktop-ui = ["dep:windows", "dep:webview2-com"]
+# Modal Common Controls code is absent from the cheap native-only probe/owner.
+# Normal/observer applications provide Tauri's Common Controls v6 manifest.
+desktop-ui-dialogs = ["desktop-ui"]
+# Fixed native actions/observations for the non-shipping process-main test only.
+windows-installed-observation = ["desktop-ui-dialogs"]
 
 [target.'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'.dependencies]
 windows-sys = { version = "=0.61.2", features = [
@@ -23,7 +31,14 @@ windows-sys = { version = "=0.61.2", features = [
   "Win32_NetworkManagement_NetManagement", "Win32_Security_Cryptography",
   "Win32_System_IO", "Win32_System_Threading", "Win32_System_SystemInformation",
   "Win32_System_SystemServices", "Win32_System_WindowsProgramming", "Win32_UI_Shell",
+  "Win32_System_Registry", "Win32_System_StationsAndDesktops", "Win32_System_LibraryLoader",
+  "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant", "Win32_Graphics_Gdi", "Win32_UI_Controls", "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Input_KeyboardAndMouse",
 ] }
+windows = { version = "=0.61.3", optional = true, features = [
+  "Win32_Foundation", "Win32_System_Com", "Win32_System_Ole", "Win32_UI_Shell", "Win32_UI_Accessibility",
+] }
+webview2-com = { version = "=0.38.2", optional = true }
 
 [lints.rust]
 unsafe_code = "deny"

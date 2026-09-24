@@ -946,3 +946,489 @@ fn write_installed_result(role: ResultRole, actual: &FullwalkFacts, passive: Opt
     std::hint::black_box((&acl, &descriptor, &attributes));
     result
 }
+
+// Normal-UI qualification is a separate closed wire. The historical ordinary,
+// Fullwalk and intentionally poisoned Passive parsers above are not widened.
+#[cfg(feature = "desktop-ui")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiRole { Prerequisite, NormalSmoke, ProjectDraft, QuitPassive, DocumentLoss }
+#[cfg(feature = "desktop-ui")]
+impl UiRole {
+    pub fn label(self) -> &'static str { match self {
+        Self::Prerequisite => "prerequisite", Self::NormalSmoke => "normal-smoke",
+        Self::ProjectDraft => "project-draft", Self::QuitPassive => "quit-passive", Self::DocumentLoss => "document-loss",
+    } }
+    pub(super) fn parse(value: &str) -> Result<Self> { match value {
+        "prerequisite" => Ok(Self::Prerequisite), "normal-smoke" => Ok(Self::NormalSmoke),
+        "project-draft" => Ok(Self::ProjectDraft), "quit-passive" => Ok(Self::QuitPassive),
+        "document-loss" => Ok(Self::DocumentLoss), _ => Err(Error::Unsafe),
+    } }
+    pub(super) fn owner(self) -> &'static str { match self {
+        Self::Prerequisite => "ordinary_owner::hosted_normal_ui_prerequisite_original_handle_contract",
+        Self::NormalSmoke => "ordinary_owner::hosted_normal_ui_smoke_original_handle_contract",
+        Self::ProjectDraft => "ordinary_owner::hosted_normal_ui_project_original_handle_contract",
+        Self::QuitPassive => "ordinary_owner::hosted_normal_ui_quit_original_handle_contract",
+        Self::DocumentLoss => "ordinary_owner::hosted_normal_ui_document_original_handle_contract",
+    } }
+    pub(super) fn entry(self) -> &'static str { match self {
+        Self::Prerequisite => "hosted_ui_tests::hosted_normal_ui_prerequisites_contract",
+        Self::NormalSmoke => "normal-process-main", _ => "observer-process-main",
+    } }
+    pub(super) fn name(self, suffix: &str) -> String { format!("normal-ui-{}-{suffix}", self.label()) }
+    pub(super) fn command(self, path: &str, owner: bool) -> String {
+        if owner || self == Self::Prerequisite {
+            format!("\"{path}\" {} {}", if owner { self.owner() } else { self.entry() }, FLAGS.join(" "))
+        } else { format!("\"{path}\"") }
+    }
+    pub(super) fn app_messages(self) -> &'static str { match self {
+        Self::Prerequisite => "compile-messages.jsonl", Self::NormalSmoke => "normal-app-compile-messages.jsonl",
+        _ => "observer-compile-messages.jsonl",
+    } }
+    fn checks(self) -> &'static [&'static str] { match self {
+        Self::ProjectDraft => &["native-picker-cancel", "native-project-selected", "draft-hydrated-edited",
+            "validate-suggest-preview", "refresh-draft-preserved", "source-change-observed", "only-labelled-fixture-mutation"],
+        Self::QuitPassive => &["native-quit-cancel", "native-quit-confirm", "passive-original-outstanding", "original-owner-retired"],
+        Self::DocumentLoss => &["native-picker-outstanding", "passive-original-outstanding", "original-document-loss", "no-late-publication", "no-rebind"],
+        _ => &[],
+    } }
+    pub(super) fn process_args(self, artifact: &Path, owner: bool) -> Result<()> {
+        if owner || self == Self::Prerequisite { args_are(if owner { self.owner() } else { self.entry() }, artifact) }
+        else {
+            let args: Vec<_> = std::env::args_os().collect();
+            need(args.len() == 1 && args[0] == artifact.as_os_str())
+        }
+    }
+}
+
+#[cfg(feature = "desktop-ui")]
+pub(super) const UI_REQUEST_FIELDS: [&str; 35] = [
+    "role", "test", "sourceSha", "sourceTree", "runId", "attempt",
+    "appArtifact", "appArtifactBytes", "appArtifactSha256", "appArtifactIdentity", "appCommandSha256",
+    "appCompileMessagesBytes", "appCompileMessagesSha256", "appCompileArgvSha256",
+    "ownerArtifact", "ownerArtifactBytes", "ownerArtifactSha256", "ownerArtifactIdentity", "ownerCommandSha256",
+    "ownerCompileMessagesBytes", "ownerCompileMessagesSha256", "ownerCompileArgvSha256",
+    "manifestSha256", "protocolSha256", "inventorySha256", "coreSha256", "payloadFiles", "payloadBytes",
+    "publicationReceiptBytes", "publicationReceiptSha256", "versionIdentity",
+    "selectedPythonIdentity", "selectedBootstrapIdentity", "selectedCoreIdentity", "appVersion",
+];
+#[cfg(feature = "desktop-ui")]
+#[derive(Clone)]
+pub(super) struct UiRequest {
+    pub role: UiRole, pub source: String, pub tree: String, pub run: String,
+    pub app: FullwalkArtifact, pub owner: FullwalkArtifact,
+    pub runtime: Option<FullwalkRequest>, pub app_version: String,
+}
+#[cfg(feature = "desktop-ui")]
+fn ui_version(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 64 && (2..=6).contains(&value.split('.').count())
+        && value.split('.').all(|part| !part.is_empty() && part.len() <= 10 && part.bytes().all(|b| b.is_ascii_digit()))
+}
+#[cfg(feature = "desktop-ui")]
+impl UiRequest {
+    pub fn parse(raw: &[u8]) -> Result<Self> {
+        need(!raw.is_empty() && raw.len() <= LIMIT && raw.is_ascii() && raw.ends_with(b"\n") && !raw.contains(&b'\r'))?;
+        let text = std::str::from_utf8(raw).map_err(|_| Error::Unsafe)?;
+        let lines: Vec<_> = text.lines().collect();
+        need(lines.len() == 36 && lines[0] == "MRK_WINDOWS_NORMAL_UI_REQUEST_V1")?;
+        let mut v = Vec::with_capacity(UI_REQUEST_FIELDS.len());
+        for (line, key) in lines[1..].iter().zip(UI_REQUEST_FIELDS) {
+            let (name, value) = line.split_once('=').ok_or(Error::Unsafe)?;
+            need(name == key && !value.is_empty())?; v.push(value);
+        }
+        let role = UiRole::parse(v[0])?;
+        need(v[1] == role.entry() && is_hex(v[2], 40) && v[2] != "0".repeat(40)
+            && is_hex(v[3], 40) && v[3] != "0".repeat(40) && decimal(v[4]) && v[4].parse::<u64>().is_ok()
+            && v[5] == "1" && ui_version(v[34]))?;
+        let artifact = |offset: usize, limit| -> Result<FullwalkArtifact> {
+            fixed_path(v[offset])?; artifact_identity(v[offset + 3])?;
+            need([2, 4, 6, 7].into_iter().all(|i| is_hex(v[offset + i], 64)))?;
+            Ok(FullwalkArtifact { path: v[offset].to_owned(), bytes: positive_size(v[offset + 1], limit)?,
+                sha: v[offset + 2].to_owned(), identity: v[offset + 3].to_owned(), command_sha: v[offset + 4].to_owned(),
+                messages_bytes: positive_size(v[offset + 5], 16 << 20)?, messages_sha: v[offset + 6].to_owned(),
+                argv_sha: v[offset + 7].to_owned() })
+        };
+        let app = artifact(6, if role == UiRole::Prerequisite { ORDINARY_ARTIFACT_LIMIT } else { APP_ARTIFACT_LIMIT })?;
+        let owner = artifact(14, ORDINARY_ARTIFACT_LIMIT)?;
+        let runtime = if role == UiRole::Prerequisite {
+            need(v[22..34].iter().all(|value| *value == "-") && app.path == owner.path && app.bytes == owner.bytes
+                && app.sha == owner.sha && app.identity == owner.identity && app.messages_bytes == owner.messages_bytes
+                && app.messages_sha == owner.messages_sha && app.argv_sha == owner.argv_sha)?;
+            None
+        } else {
+            need(v[22..26].iter().all(|value| is_hex(value, 64)) && is_hex(v[29], 64))?;
+            let version = fullwalk_identity(v[30])?;
+            let selected = [fullwalk_identity(v[31])?, fullwalk_identity(v[32])?, fullwalk_identity(v[33])?];
+            fullwalk_identities(version, &selected)?;
+            Some(FullwalkRequest { role: ResultRole::Passive, source: v[2].to_owned(), tree: v[3].to_owned(), run: v[4].to_owned(),
+                app: app.clone(), owner: owner.clone(), manifest_sha: v[22].to_owned(), protocol_sha: v[23].to_owned(),
+                inventory_sha: v[24].to_owned(), core_sha: v[25].to_owned(), files: positive_size(v[26], MAX_FILES - 1)?,
+                payload_bytes: positive_size(v[27], MAX_TOTAL_BYTES as usize)? as u64,
+                publication_bytes: positive_size(v[28], OWNER_LIMIT)?, publication_sha: v[29].to_owned(), version, selected })
+        };
+        let result = Self { role, source: v[2].to_owned(), tree: v[3].to_owned(), run: v[4].to_owned(), app, owner,
+            runtime, app_version: v[34].to_owned() };
+        for (path, expected, owner) in [(&result.app.path, &result.app.command_sha, false),
+            (&result.owner.path, &result.owner.command_sha, true)] {
+            let command = role.command(path, owner);
+            need(command.encode_utf16().count() <= 1023
+                && digest(&command.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>())? == *expected)?;
+        }
+        Ok(result)
+    }
+    pub fn compiled(&self) -> Result<()> {
+        need(option_env!("GITHUB_SHA") == Some(self.source.as_str())
+            && option_env!("MRK_WINDOWS_SOURCE_TREE") == Some(self.tree.as_str())
+            && option_env!("GITHUB_RUN_ID") == Some(self.run.as_str())
+            && option_env!("MRK_WINDOWS_UI_APP_VERSION") == Some(self.app_version.as_str()))?;
+        for (name, expected) in [
+            ("MRK_DESKTOP_HOSTED_CHECKS", "windows-installed-native-v1"), ("GITHUB_ACTIONS", "true"),
+            ("RUNNER_ENVIRONMENT", "github-hosted"), ("RUNNER_OS", "Windows"), ("RUNNER_ARCH", "X64"),
+            ("ImageOS", "win25-vs2026"), ("GITHUB_RUN_ATTEMPT", "1"), ("GITHUB_SHA", self.source.as_str()),
+            ("GITHUB_RUN_ID", self.run.as_str()), ("MRK_WINDOWS_SOURCE_TREE", self.tree.as_str()),
+            ("MRK_DESKTOP_DISPATCH_SCOPE", "windows-normal-project-ui"),
+            ("GITHUB_REF", "refs/heads/verify/desktop-windows-normal-project-ui"), ("GITHUB_EVENT_NAME", "workflow_dispatch"),
+        ] { need(std::env::var(name).as_deref() == Ok(expected))?; }
+        Ok(())
+    }
+    pub fn at_root(&self, root: &Path) -> Result<()> {
+        need(root.file_name().and_then(|name| name.to_str()) == Some(format!("mrk-windows-installed-native-{}-1", self.run).as_str()))?;
+        let debug = root.join("target/x86_64-pc-windows-msvc/debug");
+        let fixed_exe = |value: &str, prefix: &str| -> Result<()> {
+            let path = fixed_path(value)?;
+            let name = path.file_name().and_then(|value| value.to_str()).ok_or(Error::Unsafe)?;
+            let hash = name.strip_prefix(prefix).and_then(|value| value.strip_suffix(".exe")).ok_or(Error::Unsafe)?;
+            need(path.parent() == Some(debug.join("deps").as_path()) && is_hex(hash, 16))
+        };
+        fixed_exe(&self.owner.path, "mrk_windows_installed_native-")?;
+        match self.role {
+            UiRole::Prerequisite => need(self.app.path == self.owner.path),
+            UiRole::NormalSmoke => need(Path::new(&self.app.path) == root.join("mobile-release-kit-desktop.exe")),
+            _ => fixed_exe(&self.app.path, "installed_shell_observation-"),
+        }
+    }
+    pub fn app_after(&self, identity: &str) -> Result<()> {
+        artifact_identity(identity)?;
+        let before: Vec<_> = self.app.identity.split(':').collect(); let after: Vec<_> = identity.split(':').collect();
+        need([0, 1, 2, 3, 5].into_iter().all(|index| before[index] == after[index])
+            && after[4].parse::<i64>().map_err(|_| Error::Unsafe)? >= before[4].parse::<i64>().map_err(|_| Error::Unsafe)?)
+    }
+    fn envelope(&self, request_sha: &str, account_sha: &str, observation: &str) -> Result<String> {
+        need(is_hex(request_sha, 64) && is_hex(account_sha, 64))?;
+        let text = format!("{{\"schemaVersion\":1,\"sourceSha\":\"{}\",\"sourceTree\":\"{}\",\"runId\":\"{}\",\"attempt\":1,\"role\":\"{}\",\"requestSha256\":\"{request_sha}\",\"artifactBytes\":{},\"artifactSha256\":\"{}\",\"commandSha256\":\"{}\",\"accountSidSha256\":\"{account_sha}\",\"observation\":{observation},\"resultFile\":{{\"createNew\":true,\"writeCalls\":1,\"closeGate\":\"original-child-exit-zero-required\"}}}}\n",
+            self.source, self.tree, self.run, self.role.label(), self.app.bytes, self.app.sha, self.app.command_sha);
+        need(text.len() <= LIMIT)?; Ok(text)
+    }
+    fn case_observation(&self) -> Result<String> {
+        need(!self.role.checks().is_empty())?;
+        let checks = self.role.checks().iter().map(|value| format!("\"{value}\"")).collect::<Vec<_>>().join(",");
+        Ok(format!("{{\"runtimeBindingMatched\":true,\"verifiedMethods\":{},\"checks\":[{checks}],\"finality\":{{\"dialogsSettled\":true,\"sourcesSettled\":true,\"passiveOwnersSettled\":true,\"documentHooksSettled\":true,\"relayJoined\":true,\"exitReady\":true}}}}",
+            if self.role == UiRole::ProjectDraft { 6 } else { 0 }))
+    }
+    pub fn probe_result(&self, request_sha: &str, account_sha: &str, reason: Option<&str>, version: Option<&str>) -> Result<String> {
+        need(self.role == UiRole::Prerequisite)?;
+        let available = reason.is_none();
+        let (reason, version) = match (reason, version) {
+            (None, Some(version)) if ui_version(version) => ("null".to_owned(), format!("\"{version}\"")),
+            (Some(reason), None) if UI_PROBE_REASONS.contains(&reason) => (format!("\"{reason}\""), "null".to_owned()),
+            _ => return Err(Error::Unsafe),
+        };
+        self.envelope(request_sha, account_sha, &format!("{{\"available\":{available},\"reason\":{reason},\"ordinaryAccountMatched\":true,\"ordinaryContext\":{available},\"interactiveDesktop\":{available},\"managedRuntime\":{available},\"overrideFree\":{available},\"privateParent\":{available},\"runtimeVersion\":{version},\"originalsSettled\":true,\"noWebviewCreated\":true}}"))
+    }
+    pub fn accept_child(&self, raw: &[u8], request_sha: &str, account_sha: &str) -> Result<bool> {
+        need(raw.len() <= LIMIT && raw.is_ascii())?;
+        if self.role != UiRole::Prerequisite {
+            need(raw == self.envelope(request_sha, account_sha, &self.case_observation()?)?.as_bytes())?; return Ok(true);
+        }
+        for reason in UI_PROBE_REASONS {
+            if raw == self.probe_result(request_sha, account_sha, Some(reason), None)?.as_bytes() { return Ok(false); }
+        }
+        let text = std::str::from_utf8(raw).map_err(|_| Error::Unsafe)?;
+        let version = text.split_once("\"runtimeVersion\":\"").and_then(|(_, tail)| tail.split_once('"'))
+            .map(|(value, _)| value).ok_or(Error::Unsafe)?;
+        need(raw == self.probe_result(request_sha, account_sha, None, Some(version))?.as_bytes())?;
+        Ok(true)
+    }
+}
+#[cfg(feature = "desktop-ui")]
+const UI_PROBE_REASONS: [&str; 7] = ["ordinary-context", "interactive-desktop", "managed-webview2", "webview2-overrides",
+    "private-user-data-parent", "native-failure", "original-state"];
+
+/// Engineering-only DATA from the actual original runtime and GUI owners.
+/// Array order is fixed by UiRole::checks and the six named finality keys above.
+/// A result writer validates these facts but cannot acquire or settle an owner.
+#[cfg(feature = "desktop-ui")]
+pub struct UiCaseFacts {
+    pub version: FullwalkFacts, pub verified_methods: usize,
+    pub checks: [bool; 7], pub finality: [bool; 6],
+}
+
+/// The one original native owner's uptime endpoint, not a fresh ninety seconds.
+/// Call once at child process-main entry and retain the returned Instant.
+#[cfg(feature = "desktop-ui")]
+pub fn normal_ui_deadline() -> Result<Instant> {
+    let value = std::env::var("MRK_WINDOWS_NORMAL_UI_END_TICK_MS").map_err(|_| Error::State)?;
+    need(decimal(&value))?;
+    let endpoint = value.parse::<u64>().map_err(|_| Error::Unsafe)?;
+    let local = Instant::now();
+    let now = unsafe { SI::GetTickCount64() };
+    let remaining = endpoint.checked_sub(now).ok_or(Error::Unsafe)?;
+    need(remaining > 0 && remaining <= 90_000)?;
+    local.checked_add(std::time::Duration::from_millis(remaining)).ok_or(Error::Unsafe)
+}
+
+// Fixed synthetic project DATA, never project hooks or external signing inputs.
+#[cfg(feature = "desktop-ui")]
+pub const UI_FIXTURE_SOURCE: &[u8] = b"plugins { id(\"com.android.application\") }\nandroid { defaultConfig { applicationId = \"org.example.mrk.observed\" } }\n";
+#[cfg(feature = "desktop-ui")]
+pub const UI_FIXTURE_VERSION: &[u8] = b"VERSION_NAME=1.2.3\nBUILD_NUMBER=7\n";
+#[cfg(feature = "desktop-ui")]
+pub const UI_FIXTURE_KEEP: &[u8] = b"MRK_WINDOWS_NORMAL_UI_KEEP\n";
+#[cfg(feature = "desktop-ui")]
+pub const UI_FIXTURE_CONFIG: &[u8] = b"{\"android\":{\"applicationId\":\"org.example.mrk.observed\",\"enabled\":true,\"identityStatus\":\"unverified\"},\"ios\":{\"enabled\":false},\"metadata\":{\"androidLocales\":[\"en-US\"],\"iosLocales\":[],\"root\":\"release/store\"},\"projectChecks\":{\"androidArtifact\":[],\"iosArtifact\":[],\"preflight\":[]},\"schemaVersion\":1,\"services\":{\"androidFirebase\":\"disabled\",\"iosFirebase\":\"disabled\"},\"source\":{\"candidateBranch\":\"main\",\"productionBranch\":\"main\"},\"version\":{\"buildKey\":\"BUILD_NUMBER\",\"nameKey\":\"VERSION_NAME\",\"source\":\"version.properties\"}}\n";
+#[cfg(feature = "desktop-ui")]
+pub const UI_FIXTURE_CONFIG_AFTER: &[u8] = b"{\"android\":{\"applicationId\":\"org.example.mrk.observed\",\"enabled\":true,\"identityStatus\":\"unverified\"},\"ios\":{\"enabled\":false},\"metadata\":{\"androidLocales\":[\"en-US\"],\"iosLocales\":[],\"root\":\"release/store\"},\"projectChecks\":{\"androidArtifact\":[],\"iosArtifact\":[],\"preflight\":[]},\"schemaVersion\":1,\"services\":{\"androidFirebase\":\"disabled\",\"iosFirebase\":\"disabled\"},\"source\":{\"candidateBranch\":\"next\",\"productionBranch\":\"main\"},\"version\":{\"buildKey\":\"BUILD_NUMBER\",\"nameKey\":\"VERSION_NAME\",\"source\":\"version.properties\"}}\n";
+
+#[cfg(all(feature = "desktop-ui", feature = "qualification-result"))]
+pub fn normal_ui_project() -> Result<PathBuf> {
+    require_normal_ui_qualification()?;
+    let raw = std::env::var("MRK_WINDOWS_NORMAL_UI_REQUEST").map_err(|_| Error::State)?;
+    let request = UiRequest::parse(raw.as_bytes())?;
+    let output = fixed_path(&std::env::var("MRK_WINDOWS_NORMAL_UI_OUTPUT").map_err(|_| Error::State)?)?;
+    request.at_root(output.parent().ok_or(Error::Unsafe)?)?;
+    need(output.file_name().and_then(|name| name.to_str()) == Some(request.role.name("output").as_str())
+        && std::env::current_dir().map_err(|_| Error::Unavailable)? == output)?;
+    Ok(output.join("project"))
+}
+
+#[cfg(all(feature = "desktop-ui", feature = "qualification-result"))]
+static UI_FIXTURE_MUTATION_CLAIMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(all(feature = "desktop-ui", feature = "qualification-result"))]
+static UI_FIXTURE_VERIFIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// One explicit fixture-only CREATE_NEW, not the application's Save path.
+/// The ProjectDraft fixture starts without config so genuine Suggest/Adopt is
+/// visible. No caller chooses a path/bytes or receives a general write permit.
+#[cfg(all(feature = "desktop-ui", feature = "qualification-result"))]
+pub fn mutate_normal_ui_fixture(end: Instant) -> Result<()> {
+    need(require_normal_ui_qualification()? == UiRole::ProjectDraft)?;
+    deadline(Some(end))?;
+    need(!UI_FIXTURE_MUTATION_CLAIMED.swap(true, std::sync::atomic::Ordering::SeqCst))?;
+    let path = normal_ui_project()?.join("release/mobile-release.json");
+    let account = unhex(&std::env::var("MRK_WINDOWS_ORDINARY_SID").map_err(|_| Error::State)?)?;
+    let parent = unhex(&std::env::var("MRK_WINDOWS_PARENT_SID").map_err(|_| Error::State)?)?;
+    need(account.len() == 28 && parent.len() == 28 && account != parent)?;
+    let (mut acl, mut descriptor) = child_security_until(&parent, &account, Some(end))?;
+    // This is readable synthetic input, unlike the write-only result file.
+    // Amend only this new, private descriptor before any borrower enters it.
+    let account_ace = 8 + (8 + system_sid().len()) + (8 + builtin(544).len()) + (8 + parent.len());
+    need(&acl.0[account_ace + 8..account_ace + 8 + account.len()] == account.as_slice())?;
+    acl.0[account_ace + 4..account_ace + 8].copy_from_slice(&(FS::FILE_GENERIC_READ | FS::FILE_GENERIC_WRITE).to_le_bytes());
+    let attributes = S::SECURITY_ATTRIBUTES { nLength: size_of::<S::SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: (&mut *descriptor as *mut S::SECURITY_DESCRIPTOR).cast(), bInheritHandle: 0 };
+    let mut original = OriginalFile::new_until(&path, false, end)?;
+    let mut position = 0i64;
+    let observed = (|| -> Result<()> {
+        // Atomic absence check/creation. Collision is never opened or replaced.
+        original.open(FS::FILE_GENERIC_READ | FS::FILE_GENERIC_WRITE, true, &attributes)?;
+        original.named(&path)?;
+        let before = original.stamp()?;
+        need(before.size == 0 && before.links == 1)?;
+        original.write(UI_FIXTURE_CONFIG_AFTER, LIMIT)?; // ONE WriteFile only.
+        ui_fixture_seek(&mut original, &mut position)?;
+        need(original.read(LIMIT)? == UI_FIXTURE_CONFIG_AFTER)?;
+        let after = original.stamp()?;
+        need(before.volume == after.volume && before.id == after.id && before.creation == after.creation
+            && after.size == UI_FIXTURE_CONFIG_AFTER.len() as i64 && after.allocation >= after.size && before.links == after.links
+            && before.attributes == after.attributes && after.write >= before.write && after.change >= before.change)
+    })();
+    if matches!(observed, Err(Error::Unknown)) {
+        diagnostic_data("ui-fixture-mutation", None, true, None);
+        loop { std::thread::park(); std::hint::black_box((&mut original, &mut position, &acl, &descriptor, &attributes)); }
+    }
+    if original.close().is_err() {
+        diagnostic_data("ui-fixture-mutation-close", None, true, None);
+        loop { std::thread::park(); std::hint::black_box((&mut original, &mut position, &acl, &descriptor, &attributes)); }
+    }
+    observed?; deadline(Some(end))
+}
+
+/// Complete bounded fixture readback before the child report. It cannot turn
+/// the later parent original-exit/identity gate into a pre-close child receipt.
+#[cfg(all(feature = "desktop-ui", feature = "qualification-result"))]
+pub fn verify_normal_ui_fixture(end: Instant) -> Result<()> {
+    UI_FIXTURE_VERIFIED.store(false, std::sync::atomic::Ordering::SeqCst);
+    let role = require_normal_ui_qualification()?;
+    need(UI_FIXTURE_MUTATION_CLAIMED.load(std::sync::atomic::Ordering::SeqCst) == (role == UiRole::ProjectDraft))?;
+    let project = normal_ui_project()?;
+    let account = unhex(&std::env::var("MRK_WINDOWS_ORDINARY_SID").map_err(|_| Error::State)?)?;
+    let mut native = NativeBook::new();
+    let mut originals: Vec<(Original, Metadata)> = Vec::with_capacity(24);
+    let observed = (|| -> Result<()> {
+        deadline(Some(end))?;
+        need(native.observe_user_once()?.user.bytes() == account.as_slice())?;
+        let (drive, parts) = decode::dos_location(project.to_str().ok_or(Error::Unsafe)?)?;
+        need(parts.len() < 16)?;
+        let device = native.mapping(&drive)?;
+        let canonical = format!("{device}\\");
+        let root = native.reserve(Kind::Directory, None, &canonical, canonical.clone())?;
+        native.call(Call::Open(root.index), null_mut(), Vec::new())?;
+        native.noninherited(root.index)?; native.local_ntfs(&root)?;
+        let metadata = native.metadata(&root)?; originals.push((root, metadata));
+        for name in parts {
+            deadline(Some(end))?;
+            let original = native.open_child(&originals.last().ok_or(Error::State)?.0, &name, FileKind::Directory)?;
+            let metadata = native.metadata(&original)?; originals.push((original, metadata));
+        }
+        let project_index = originals.len() - 1;
+        let mut directory_indices = vec![project_index];
+        for name in ["app", "release"] {
+            let original = native.open_child(&originals[project_index].0, name, FileKind::Directory)?;
+            let metadata = native.metadata(&original)?;
+            directory_indices.push(originals.len()); originals.push((original, metadata));
+        }
+        let config = if role == UiRole::ProjectDraft { UI_FIXTURE_CONFIG_AFTER } else { UI_FIXTURE_CONFIG };
+        let mut children: Vec<(usize, &str, usize)> = vec![(project_index, "app", directory_indices[1]),
+            (project_index, "release", directory_indices[2])];
+        for (parent, name, bytes) in [(directory_indices[1], "build.gradle.kts", UI_FIXTURE_SOURCE),
+            (project_index, "version.properties", UI_FIXTURE_VERSION), (project_index, "keep.txt", UI_FIXTURE_KEEP),
+            (directory_indices[2], "mobile-release.json", config)] {
+            deadline(Some(end))?;
+            let original = native.open_child(&originals[parent].0, name, FileKind::File)?;
+            let metadata = native.metadata(&original)?;
+            native.no_alternate_streams(&original)?;
+            need(metadata.size == bytes.len() as u64 && native.read_next(&original, LIMIT)? == bytes
+                && native.read_next(&original, 1)?.is_empty() && native.metadata(&original)? == metadata)?;
+            children.push((parent, name, originals.len())); originals.push((original, metadata));
+        }
+        for index in directory_indices {
+            let mut names = std::collections::BTreeSet::new();
+            loop {
+                deadline(Some(end))?;
+                let Some(batch) = native.next_entries(&originals[index].0)? else { break; };
+                for entry in batch {
+                    need(names.insert(entry.name.clone()) && names.len() <= 6)?;
+                    if entry.name == "." { need(entry.file_id == originals[index].1.identity.file_id)?; continue; }
+                    if entry.name == ".." {
+                        let parent = if index == project_index { project_index - 1 } else { project_index };
+                        need(entry.file_id == originals[parent].1.identity.file_id)?; continue;
+                    }
+                    let (_, _, child) = children.iter().find(|(parent, name, _)| *parent == index && *name == entry.name)
+                        .ok_or(Error::Unsafe)?;
+                    need(entry.file_id == originals[*child].1.identity.file_id && entry.kind == originals[*child].1.kind)?;
+                }
+            }
+            let expected: std::collections::BTreeSet<_> = children.iter().filter(|(parent, _, _)| *parent == index)
+                .map(|(_, name, _)| name.to_string()).chain([".".to_owned(), "..".to_owned()]).collect();
+            need(names == expected)?;
+        }
+        for (original, before) in originals.iter().rev() {
+            deadline(Some(end))?; need(native.metadata(original)? == *before)?;
+        }
+        need(native.mapping(&drive)? == device)?; native.recheck_user()?; deadline(Some(end))
+    })();
+    if matches!(observed, Err(Error::Unknown)) || native.is_unknown() {
+        diagnostic_data("ui-fixture-readback", None, true, None);
+        loop { std::thread::park(); std::hint::black_box((&mut native, &originals)); }
+    }
+    if native.settle_once() != CloseOutcome::Settled || !native.settled() {
+        diagnostic_data("ui-fixture-readback-close", None, true, None);
+        loop { std::thread::park(); std::hint::black_box((&mut native, &originals)); }
+    }
+    observed?; deadline(Some(end))?;
+    UI_FIXTURE_VERIFIED.store(true, std::sync::atomic::Ordering::SeqCst); Ok(())
+}
+
+#[cfg(all(feature = "desktop-ui", feature = "qualification-result"))]
+fn ui_fixture_seek(original: &mut OriginalFile, position: &mut i64) -> Result<()> {
+    let b = original.body();
+    need(b.state == SlotState::Owned && !b.active)?; b.timely()?; b.active = true;
+    let returned = unsafe { FS::SetFilePointerEx(b.handle, 0, position, FS::FILE_BEGIN) };
+    b.error = if returned != 0 { 0 } else { unsafe { F::GetLastError() } };
+    b.active = returned == 0 && (b.error == 0 || b.error == F::ERROR_IO_PENDING);
+    if b.active { b.state = SlotState::Unknown; return Err(Error::Unknown); }
+    b.timely()?; need(returned != 0 && *position == 0)
+}
+
+#[cfg(feature = "desktop-ui")]
+fn ui_digest(raw: &[u8], end: Instant, app: bool) -> Result<String> {
+    deadline(Some(end))?;
+    let result = if app { digest_app_traced(raw, &mut InputTrace::default()) } else { digest(raw) };
+    deadline(Some(end))?; result
+}
+
+#[cfg(all(feature = "desktop-ui", feature = "qualification-result"))]
+pub fn require_normal_ui_qualification() -> Result<UiRole> {
+    let raw = std::env::var("MRK_WINDOWS_NORMAL_UI_REQUEST").map_err(|_| Error::State)?;
+    let request = UiRequest::parse(raw.as_bytes())?; request.compiled()?;
+    need(!request.role.checks().is_empty())?;
+    let runtime = request.runtime.as_ref().ok_or(Error::State)?;
+    need(option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256") == Some(runtime.manifest_sha.as_str())
+        && option_env!("MRK_BUNDLED_PROTOCOL_SHA256") == Some(runtime.protocol_sha.as_str()))?;
+    let artifact = std::env::current_exe().map_err(|_| Error::Unavailable)?;
+    need(artifact.to_str() == Some(request.app.path.as_str()))?;
+    request.role.process_args(&artifact, false)?;
+    Ok(request.role)
+}
+
+#[cfg(all(feature = "desktop-ui", feature = "qualification-result"))]
+pub fn write_normal_ui_result_once(actual: &UiCaseFacts, end: Instant) -> Result<()> {
+    deadline(Some(end))?;
+    let role = require_normal_ui_qualification()?;
+    let request_raw = std::env::var("MRK_WINDOWS_NORMAL_UI_REQUEST").map_err(|_| Error::State)?;
+    let request = UiRequest::parse(request_raw.as_bytes())?;
+    let runtime = request.runtime.as_ref().ok_or(Error::State)?;
+    actual.version.validate()?;
+    need(UI_FIXTURE_VERIFIED.load(std::sync::atomic::Ordering::SeqCst)
+        && actual.verified_methods == if role == UiRole::ProjectDraft { 6 } else { 0 }
+        && actual.checks.iter().enumerate().all(|(index, value)| *value == (index < role.checks().len()))
+        && actual.finality == [true; 6]
+        && actual.version.manifest_sha256 == runtime.manifest_sha && actual.version.protocol_sha256 == runtime.protocol_sha
+        && actual.version.inventory_sha256 == runtime.inventory_sha && actual.version.core_sha256 == runtime.core_sha
+        && actual.version.files == runtime.files && actual.version.payload_bytes == runtime.payload_bytes
+        && actual.version.version_identity == runtime.version && actual.version.selected_identities == runtime.selected)?;
+    let account = unhex(&std::env::var("MRK_WINDOWS_ORDINARY_SID").map_err(|_| Error::State)?)?;
+    need(fullwalk_digest(&account, end, false)? == actual.version.account_sid_sha256)?;
+    let value = request.envelope(&fullwalk_digest(request_raw.as_bytes(), end, false)?,
+        &actual.version.account_sid_sha256, &request.case_observation()?)?;
+    write_ui_child(&request, &value, end)
+}
+
+#[cfg(feature = "desktop-ui")]
+pub(super) fn write_ui_child(request: &UiRequest, value: &str, end: Instant) -> Result<()> {
+    deadline(Some(end))?; request.compiled()?;
+    let get = |name| std::env::var(name).map_err(|_| Error::State);
+    let output = fixed_path(&get("MRK_WINDOWS_NORMAL_UI_OUTPUT")?)?;
+    let root = output.parent().ok_or(Error::Unsafe)?; request.at_root(root)?;
+    need(output.file_name().and_then(|name| name.to_str()) == Some(request.role.name("output").as_str())
+        && std::env::current_dir().map_err(|_| Error::Unavailable)? == output)?;
+    let artifact = std::env::current_exe().map_err(|_| Error::Unavailable)?;
+    need(artifact.to_str() == Some(request.app.path.as_str()))?; request.role.process_args(&artifact, false)?;
+    let identity = get("MRK_WINDOWS_NORMAL_UI_ARTIFACT_IDENTITY")?; request.app_after(&identity)?;
+    let account = unhex(&get("MRK_WINDOWS_ORDINARY_SID")?)?;
+    let parent = unhex(&get("MRK_WINDOWS_PARENT_SID")?)?;
+    security::sid_at(&account, 0, account.len())?; security::sid_at(&parent, 0, parent.len())?;
+    need(account.len() == 28 && parent.len() == 28 && account != parent && account != system_sid() && account != builtin(544))?;
+    let mut artifact_original = OriginalFile::new_until(&artifact, false, end)?;
+    let observed = (|| -> Result<()> {
+        artifact_original.open(FS::FILE_GENERIC_READ, false, null())?; artifact_original.named(&artifact)?;
+        let before = artifact_original.stamp()?;
+        need(request.app.matches_identity(&before, &identity))?;
+        let bytes = artifact_original.read_app_traced(&mut InputTrace::default())?;
+        need(bytes.len() == request.app.bytes && ui_digest(&bytes, end, true)? == request.app.sha
+            && artifact_original.stamp()? == before)
+    })();
+    if matches!(observed, Err(Error::Unknown)) {
+        diagnostic_data("ui-result-artifact", None, true, None);
+        loop { std::thread::park(); std::hint::black_box((&mut artifact_original, request, value)); }
+    }
+    if artifact_original.close().is_err() {
+        diagnostic_data("ui-result-artifact-close", None, true, None);
+        loop { std::thread::park(); std::hint::black_box((&mut artifact_original, request, value)); }
+    }
+    observed?; deadline(Some(end))?;
+    let (acl, mut descriptor) = child_security_until(&parent, &account, Some(end))?;
+    let attributes = S::SECURITY_ATTRIBUTES { nLength: size_of::<S::SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: (&mut *descriptor as *mut S::SECURITY_DESCRIPTOR).cast(), bInheritHandle: 0 };
+    let written = write_one_until(&output.join(request.role.name("result.private.json")), value.as_bytes(), LIMIT, &attributes, Some(end));
+    std::hint::black_box((&acl, &descriptor, &attributes)); written?; deadline(Some(end))
+}

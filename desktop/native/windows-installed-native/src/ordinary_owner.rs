@@ -20,6 +20,12 @@ const OWNER_RESULT: &str = "ordinary-owner-result.private.json";
 const NATIVE_SECONDS: u64 = 90;
 const SETTLE_MS: u32 = 10_000;
 
+#[cfg(feature = "desktop-ui")]
+#[path = "ordinary_owner_ui.rs"]
+mod normal_ui;
+#[cfg(feature = "desktop-ui")]
+pub(super) fn ui_local_sid(sid: &[u8]) -> bool { local_account_sid(sid) }
+
 // Each fixed prerequisite profile has its separate review/dispatch gates.
 // The legacy synthetic receipt and actual-producer observation are distinct;
 // neither a request digest nor producer pre-close bytes replace original gates.
@@ -598,6 +604,7 @@ pub(super) fn write_native_result(actual_user: &[u8]) -> Result<()> {
 
 struct Launch {
     domain: [u16; 2], application: Vec<u16>, command: Vec<u16>, environment: Vec<u16>, directory: Vec<u16>,
+    logon_flags: u32,
     startup: T::STARTUPINFOW, outputs: T::PROCESS_INFORMATION,
     return_recorded: bool, returned: i32, error: u32, first_wait: u32,
     settle_wait: u32, first_wait_error: u32, settle_wait_error: u32, exit_output: u32, exit_return: i32,
@@ -670,7 +677,7 @@ impl Launch {
         // lpDesktop=null explicitly inherits the actual desktop/station. Their
         // access is NOT precomputed, granted, or inferred from headlessness.
         // All flags/std handles remain zero: no profile, shell or redirection.
-        Ok(Box::pin(Self { domain: [b'.' as u16, 0], application: wide(&binding.artifact), command: wide(&command),
+        Ok(Box::pin(Self { domain: [b'.' as u16, 0], application: wide(&binding.artifact), command: wide(&command), logon_flags: 0,
             environment, directory: wide(output), startup, outputs: T::PROCESS_INFORMATION::default(),
             return_recorded: false, returned: 0, error: 0, first_wait: u32::MAX,
             settle_wait: u32::MAX, first_wait_error: 0, settle_wait_error: 0, exit_output: 0,
@@ -686,7 +693,7 @@ impl Launch {
         // Every UTF-16 input, full STARTUPINFO, complete initialized PI and
         // return/error destinations are owned/stable BEFORE this sole entry.
         this.returned = unsafe { T::CreateProcessWithLogonW(account.name.as_ptr(), this.domain.as_ptr(),
-            account.password.as_ptr(), 0, this.application.as_ptr(), this.command.as_mut_ptr(),
+            account.password.as_ptr(), this.logon_flags, this.application.as_ptr(), this.command.as_mut_ptr(),
             T::CREATE_UNICODE_ENVIRONMENT, this.environment.as_ptr().cast(), this.directory.as_ptr(),
             &this.startup, &mut this.outputs) };
         this.error = if this.returned == 0 { unsafe { F::GetLastError() } } else { 0 };
@@ -789,6 +796,42 @@ fn hosted_protected_version_fullwalk_contract() -> Result<()> {
 fn hosted_installed_passive_original_handle_contract() -> Result<()> {
     let entry_tick = unsafe { SI::GetTickCount64() };
     run_owner(OwnerVariant::Passive, entry_tick)
+}
+
+#[cfg(feature = "desktop-ui")]
+#[test]
+#[ignore = "fixed fresh-account normal UI prerequisite owner; separate original-exit finalizer required"]
+fn hosted_normal_ui_prerequisite_original_handle_contract() -> Result<()> {
+    let tick = unsafe { SI::GetTickCount64() };
+    normal_ui::run(UiRole::Prerequisite, tick)
+}
+#[cfg(feature = "desktop-ui")]
+#[test]
+#[ignore = "fixed normal uninstrumented binary; original native UI smoke driver only"]
+fn hosted_normal_ui_smoke_original_handle_contract() -> Result<()> {
+    let tick = unsafe { SI::GetTickCount64() };
+    normal_ui::run(UiRole::NormalSmoke, tick)
+}
+#[cfg(feature = "desktop-ui")]
+#[test]
+#[ignore = "fixed genuine Project/draft GUI case; reviewed ordinary owner only"]
+fn hosted_normal_ui_project_original_handle_contract() -> Result<()> {
+    let tick = unsafe { SI::GetTickCount64() };
+    normal_ui::run(UiRole::ProjectDraft, tick)
+}
+#[cfg(feature = "desktop-ui")]
+#[test]
+#[ignore = "fixed genuine Quit/passive-owner GUI case; reviewed ordinary owner only"]
+fn hosted_normal_ui_quit_original_handle_contract() -> Result<()> {
+    let tick = unsafe { SI::GetTickCount64() };
+    normal_ui::run(UiRole::QuitPassive, tick)
+}
+#[cfg(feature = "desktop-ui")]
+#[test]
+#[ignore = "fixed original document-loss GUI case; reviewed ordinary owner only"]
+fn hosted_normal_ui_document_original_handle_contract() -> Result<()> {
+    let tick = unsafe { SI::GetTickCount64() };
+    normal_ui::run(UiRole::DocumentLoss, tick)
 }
 
 fn run_owner(variant: OwnerVariant, entry_tick: u64) -> Result<()> {
