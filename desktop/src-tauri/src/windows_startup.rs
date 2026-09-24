@@ -277,6 +277,33 @@ mod tests {
                 book.lost(); let first = book.diagnostic(); assert_eq!(first.event, Event::NativeRefused);
                 assert_eq!(first.stage, Stage::ParentIdentity); assert_eq!(first.detail, 1);
                 book.native_mark(NativeMark { stage: Stage::Complete, part: 0, error: None }); assert_eq!(book.diagnostic(), first);
+                for detail in 0..=36 {
+                    let mut audited = constructing(); assert!(audited.register_window("original").is_ok());
+                    assert!(audited.queue_hook()); audited.callback_entered(); assert!(audited.enter_hook());
+                    audited.native_mark(NativeMark { stage: Stage::Prerequisites, part: 0, error: None });
+                    let before = audited.conditions(); assert_eq!(before, 0x90053);
+                    let mark = NativeMark { stage: Stage::WatchOverrideAudit, part: detail, error: Some(NativeError::Overrides) };
+                    audited.native_mark(mark); let first = audited.diagnostic();
+                    assert_eq!(first, Word { conditions: before, event: Event::NativeRefused, detail,
+                        stage: Stage::WatchOverrideAudit, first_refusal: true, live: 0, seen: 0 });
+                    assert_eq!(Word::decode(first.encode().unwrap()), Some(first));
+                    assert_eq!(audited.conditions(), before); assert!(!audited.is_lost() && !audited.unknown);
+                    assert!(audited.accepts_hook_return()); // The diagnostic did not decide loss or installation.
+                    audited.native_mark(NativeMark { stage: Stage::Prerequisites, part: 0, error: Some(NativeError::Overrides) });
+                    assert_eq!(audited.diagnostic(), first); assert!(!audited.is_lost());
+                    audited.lost(); assert!(audited.is_lost()); assert!(!audited.hook_installed());
+                    assert_eq!(audited.diagnostic(), Word { live: 1, ..first }); audited.callback_returned();
+                    audited.request_observed(false, 8, 7);
+                    assert_eq!(audited.navigation_observed(false, false, UrlClass::Blank), EventRoute::Rejected);
+                    assert_eq!(audited.page_observed(false, false, true, UrlClass::Blank), EventRoute::Rejected);
+                    assert_eq!(audited.diagnostic(), Word { live: 1, seen: 11, ..first });
+                    assert!(!audited.first_party_phase()); assert!(!audited.finality());
+                    audited.stop(); audited.unknown(); assert_eq!(audited.diagnostic(), Word { live: 7, seen: 11, ..first });
+                    let mut earlier = constructing(); earlier.refuse(Event::WrongThread, 4, true);
+                    let winner = earlier.diagnostic(); earlier.native_mark(mark); earlier.lost();
+                    assert_eq!(earlier.diagnostic(), winner);
+                    earlier.note(Event::Protocol, 0); assert_eq!(earlier.diagnostic(), Word { seen: 1, ..winner });
+                }
             },
             _ => {
                 let glue = include_str!("shell_windows.rs");
@@ -285,6 +312,90 @@ mod tests {
                 assert!(tap.contains("mark.error.is_none()") && tap.contains("Stage::Adopted"));
                 let ordered = native.split("// Record the actual returned error BEFORE fail/on_loss.").nth(1).unwrap();
                 assert!(ordered.find("record(NativeMark").unwrap() < ordered.find("self.fail(error)").unwrap());
+                for (signature, guard) in [
+                    ("pub fn inspect(&mut self) -> UiResult<PrerequisiteFacts> {", "if self.begun || self.final_attempted || self.unknown"),
+                    ("pub fn recheck(&mut self) -> UiResult<()> {", "if self.facts.is_none() || self.final_attempted || self.unknown"),
+                ] {
+                    let entry = native.split(signature).nth(1).unwrap();
+                    assert!(entry.strip_prefix("\n        self.overrides.refusal.reset();\n        ").unwrap().starts_with(guard));
+                }
+                let watch = native.split("fn install_inner(&mut self, prerequisites:").nth(1).unwrap()
+                    .split("self.stage(Stage::Controller, record);").next().unwrap();
+                assert_eq!(watch.matches("prerequisites.recheck()").count(), 1);
+                assert!(watch.contains(r#"self.stage(Stage::Prerequisites, record);
+        let recheck = prerequisites.recheck();
+        let refusal = prerequisites.overrides.refusal.returned(recheck.as_ref().err().map(|error| error.diagnostic()));
+        if recheck == Err(UiError::RuntimeOverrides) {
+            if let Some(refusal) = refusal { self.install_stage.set((Stage::WatchOverrideAudit, refusal.code())); }
+        }
+        recheck?;"#));
+                assert_eq!(watch.matches("self.stage(").count(), 2);
+                assert_eq!(watch.matches("self.install_stage.set(").count(), 1);
+                assert!(!watch.contains("record(") && !watch.contains("publication") && !watch.contains("publish("));
+                assert_eq!(native.matches(".refusal.reset()").count(), 3);
+                assert_eq!(native.matches(".refusal.note(").count(), 3);
+                assert_eq!(native.matches(".refusal.returned(").count(), 1);
+                assert!(native.contains(r#"const OVERRIDE_KEYS: &[(&str, bool)] = &[
+    ("SOFTWARE\\Policies\\Microsoft\\Edge\\WebView2", false),
+    ("SOFTWARE\\Microsoft\\Edge\\WebView2", false),
+    ("SOFTWARE\\Microsoft\\EdgeUpdate", true),
+    ("SOFTWARE\\Microsoft\\EdgeWebView", true),
+];"#));
+                let audit = native.split("fn absent(&mut self, root:").nth(1).unwrap().split("fn settled(&self)").next().unwrap();
+                assert!(audit.contains(r#"if self.unknown || self.originals.len() >= 96 { return Err(UiError::CleanupUnknown); }
+        self.originals.push(ManuallyDrop::new(Box::pin(RegistryOriginal {
+            name: name.to_vec(), value: UnsafeCell::new(null_mut()), entered: false, returned: false, close_entered: false, settled: false })));
+        let original = self.originals.last_mut().ok_or(UiError::State)?;
+        let original = unsafe { original.as_mut().get_unchecked_mut() };
+        original.entered = true;
+        let result = unsafe { R::RegOpenKeyExW(root, original.name.as_ptr(), 0, R::KEY_QUERY_VALUE | view, original.value.get()) };
+        if result == F::ERROR_IO_PENDING { self.unknown = true; return Err(UiError::CleanupUnknown); }
+        original.returned = true;
+        let handle = unsafe { *original.value.get() };"#));
+                assert!(audit.contains(r#"if result == F::ERROR_FILE_NOT_FOUND || result == F::ERROR_PATH_NOT_FOUND {
+            if !handle.is_null() { self.unknown = true; return Err(UiError::CleanupUnknown); }
+            original.settled = true; return Ok(());
+        }"#));
+                assert!(audit.contains(r#"if result == F::ERROR_SUCCESS && !handle.is_null() {
+            original.close_entered = true;
+            if unsafe { R::RegCloseKey(handle) } != F::ERROR_SUCCESS { self.unknown = true; return Err(UiError::CleanupUnknown); }
+            original.settled = true;
+            self.refusal.note(OverrideRefusal::registry(probe, OverrideOpen::Present));
+            return Err(UiError::RuntimeOverrides);
+        }"#));
+                assert!(audit.contains(r#"if !handle.is_null() { self.unknown = true; return Err(UiError::CleanupUnknown); }
+        original.settled = true;
+        self.refusal.note(OverrideRefusal::registry(probe, if result == F::ERROR_SUCCESS {
+            OverrideOpen::SuccessNull
+        } else { OverrideOpen::OtherStatusNull }));
+        Err(UiError::RuntimeOverrides)"#));
+                assert_eq!(audit.matches("R::RegOpenKeyExW(").count(), 1); assert_eq!(audit.matches("R::RegCloseKey(").count(), 1);
+                assert_eq!(audit.matches(".refusal.note(").count(), 2);
+                let drop_audit = native.split("impl Drop for RegistryAudit {").nth(1).unwrap().split("fn overrides_absent(").next().unwrap();
+                assert!(drop_audit.contains("if original.settled { unsafe { ManuallyDrop::drop(original); } }"));
+                assert!(!drop_audit.contains("RegCloseKey"));
+                let overrides = native.split("fn overrides_absent(").nth(1).unwrap().split("// Mutable-user-parent").next().unwrap();
+                assert!(overrides.starts_with("audit: &mut RegistryAudit) -> UiResult<()> {\n    audit.refusal.reset();"));
+                assert!(overrides.contains(r#"for (name, _) in std::env::vars_os() {
+        let units: Vec<u16> = name.encode_wide().collect();
+        let prefix: Vec<u16> = "WEBVIEW2_".encode_utf16().collect();
+        if units.len() >= prefix.len() && units[..prefix.len()].iter().zip(&prefix)
+            .all(|(left, right)| *left == *right || *left >= b'a' as u16 && *left <= b'z' as u16 && *left - 32 == *right) {
+            audit.refusal.note(Some(OverrideRefusal::ENVIRONMENT));
+            return Err(UiError::RuntimeOverrides);
+        }
+    }"#));
+                assert!(overrides.contains(r#"for (key_index, (key, user_only)) in OVERRIDE_KEYS.iter().enumerate() {
+        for (hive_index, root) in [R::HKEY_CURRENT_USER, R::HKEY_LOCAL_MACHINE].iter().copied().enumerate() {
+            if *user_only && root != R::HKEY_CURRENT_USER { continue; }
+            for (view_index, view) in [R::KEY_WOW64_32KEY, R::KEY_WOW64_64KEY].iter().copied().enumerate() {
+                let probe = OverrideProbe::from_parts(key_index, hive_index, view_index);
+                audit.absent(root, &wide(key), view, probe)?;
+            }
+        }
+    }"#));
+                assert_eq!(overrides.matches("std::env::vars_os()").count(), 1); assert_eq!(overrides.matches("audit.absent(").count(), 1);
+                assert!(!overrides.contains("originals.len()"));
                 let close = glue.split("fn close_for_exit(").nth(1).unwrap().split("struct Session").next().unwrap();
                 assert!(close.find("self.publication.seal()").unwrap() < close.find("self.on_thread(8)").unwrap());
                 assert!(close.find("self.publication.retire(").unwrap() < close.find("book.take_window_for_close()").unwrap());

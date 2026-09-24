@@ -58,14 +58,16 @@ codes!(Stage {
     ProtectedMatch=45=>"protected-image-match", FailedCore=46=>"failed-core", FailedHandlerSlot=47=>"failed-handler-slot",
     FailedRegistration=48=>"failed-registration", ExitedEnvironment=49=>"exited-environment",
     ExitedHandlerSlot=50=>"exited-handler-slot", ExitedRegistration=51=>"exited-registration",
-    FinalWait=52=>"final-wait", CallbackState=53=>"callback-lost", CallbackUnknown=54=>"callback-unknown", Complete=55=>"complete", BrowserBind=56=>"browser-pid-bind"
+    FinalWait=52=>"final-wait", CallbackState=53=>"callback-lost", CallbackUnknown=54=>"callback-unknown", Complete=55=>"complete", BrowserBind=56=>"browser-pid-bind",
+    WatchOverrideAudit=57=>"watch-override-audit"
 });
 impl Stage {
     // Slot part0 is the original Option presence; part1 is that SAME
-    // ComOriginal::get/released check. Other stages have only part0.
+    // ComOriginal::get/released check. Other legacy stages have only part0;
+    // WatchOverrideAudit uses its separate closed discriminator, never a slot.
     fn part_valid(self, part: u8) -> bool {
-        part == 0 || part == 1 && matches!(self, Self::Controller | Self::Environment | Self::FolderEnvironment |
-            Self::BrowserCore | Self::FailedCore | Self::FailedHandlerSlot | Self::ExitedEnvironment | Self::ExitedHandlerSlot)
+        self != Self::WatchOverrideAudit && (part == 0 || part == 1 && matches!(self, Self::Controller | Self::Environment | Self::FolderEnvironment |
+            Self::BrowserCore | Self::FailedCore | Self::FailedHandlerSlot | Self::ExitedEnvironment | Self::ExitedHandlerSlot))
     }
 }
 codes!(NativeError {
@@ -73,11 +75,59 @@ codes!(NativeError {
     Overrides=4=>"webview2-overrides", Data=5=>"private-user-data-parent", Native=6=>"native-failure",
     Unknown=7=>"cleanup-unknown", State=8=>"original-state"
 });
+// Fixed diagnostic coordinates only: key order, HKCU/HKLM, then 32/64-bit
+// view. Invalid metadata suppresses a tag; it never changes a native Result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OverrideProbe(u8);
+impl OverrideProbe {
+    pub fn from_parts(key: usize, hive: usize, view: usize) -> Option<Self> {
+        match (key, hive, view) {
+            (0, 0, 0) => Some(Self(0)), (0, 0, 1) => Some(Self(1)),
+            (0, 1, 0) => Some(Self(2)), (0, 1, 1) => Some(Self(3)),
+            (1, 0, 0) => Some(Self(4)), (1, 0, 1) => Some(Self(5)),
+            (1, 1, 0) => Some(Self(6)), (1, 1, 1) => Some(Self(7)),
+            (2, 0, 0) => Some(Self(8)), (2, 0, 1) => Some(Self(9)),
+            (3, 0, 0) => Some(Self(10)), (3, 0, 1) => Some(Self(11)),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum OverrideOpen { Present=0, SuccessNull=1, OtherStatusNull=2 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OverrideRefusal(u8);
+impl OverrideRefusal {
+    pub const ENVIRONMENT: Self = Self(0);
+    pub const fn from_code(code: u8) -> Option<Self> { if code <= 36 { Some(Self(code)) } else { None } }
+    pub const fn code(self) -> u8 { self.0 }
+    pub fn registry(probe: Option<OverrideProbe>, category: OverrideOpen) -> Option<Self> {
+        let probe = probe?;
+        let code = probe.0.checked_mul(3)?.checked_add(1)?.checked_add(category as u8)?;
+        Self::from_code(code)
+    }
+}
+/// First closed refusal from this audit only. Reset before public call guards;
+/// consume on every returned result. No strings, handles, status or authority.
+#[derive(Default)]
+pub struct OverrideObservation { first: Option<OverrideRefusal> }
+impl OverrideObservation {
+    pub fn reset(&mut self) { self.first = None; }
+    pub fn note(&mut self, tag: Option<OverrideRefusal>) {
+        if self.first.is_none() { self.first = tag.and_then(|tag| OverrideRefusal::from_code(tag.code())); }
+    }
+    pub fn returned(&mut self, error: Option<NativeError>) -> Option<OverrideRefusal> {
+        let tag = self.first.take();
+        if error == Some(NativeError::Overrides) { tag } else { None }
+    }
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Loss { Operation, Stop, ProcessFailed, BrowserExited, CallbackUnknown }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-// NativeEnter detail is part. NativeRefused detail is (part << 4) | the
-// original UiError code1..8; unassigned combinations are invalid DATA.
+// Legacy NativeEnter detail is part; NativeRefused is (part << 4) | the
+// original UiError code1..8. WatchOverrideAudit instead carries part0..36
+// directly as a discriminator, ONLY with the actual Overrides returned error.
+// Unassigned combinations are invalid DATA, never authority.
 pub struct NativeMark { pub stage: Stage, pub part: u8, pub error: Option<NativeError> }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -90,7 +140,12 @@ impl UrlClass {
 }
 impl Event {
     pub fn refused(self) -> bool { self as u8 >= 22 }
-    fn detail_valid(self, detail: u8, stage: Stage) -> bool { match self {
+    fn detail_valid(self, detail: u8, stage: Stage) -> bool {
+        // Fence this stage before legacy event rules that otherwise ignore it.
+        if stage == Stage::WatchOverrideAudit {
+            return self == Self::NativeRefused && OverrideRefusal::from_code(detail).is_some();
+        }
+        match self {
         Self::Protocol | Self::ProtocolRefused => detail <= 31,
         Self::Navigation | Self::NavigationRefused | Self::Started | Self::StartedRefused |
         Self::Finished | Self::FinishedRefused => (1..=5).contains(&detail),
@@ -126,7 +181,11 @@ impl Word {
     }
     pub fn native(&mut self, conditions: u32, mark: NativeMark) {
         if !self.first_refusal { self.stage = mark.stage; }
-        let detail = if mark.stage.part_valid(mark.part) {
+        let detail = if mark.stage == Stage::WatchOverrideAudit {
+            if mark.error == Some(NativeError::Overrides) && OverrideRefusal::from_code(mark.part).is_some() {
+                mark.part
+            } else { u8::MAX }
+        } else if mark.stage.part_valid(mark.part) {
             mark.error.map_or(mark.part, |error| (mark.part << 4) | error as u8)
         } else { u8::MAX }; // Invalid closed metadata cannot truncate into a valid word.
         self.record(conditions, if mark.error.is_some() { Event::NativeRefused } else { Event::NativeEnter }, detail);
@@ -217,4 +276,107 @@ pub fn scalar_contract() {
     assert_eq!(order.begin(0), None); assert_eq!(order.begin(next), None); assert_eq!(order.retire(), None);
     let order = PublicationOrder::default(); assert!(order.bind()); order.seal(); order.returned(raw, true);
     assert!(!order.entered()); assert_eq!(order.retire(), None); assert_eq!(order.begin(next), None);
+    override_contract();
+}
+#[cfg(test)]
+fn override_contract() {
+    let probes = [(0, 0, 0), (0, 0, 1), (0, 1, 0), (0, 1, 1),
+        (1, 0, 0), (1, 0, 1), (1, 1, 0), (1, 1, 1),
+        (2, 0, 0), (2, 0, 1), (3, 0, 0), (3, 0, 1)];
+    let categories = [OverrideOpen::Present, OverrideOpen::SuccessNull, OverrideOpen::OtherStatusNull];
+    let environment = OverrideRefusal::ENVIRONMENT;
+    assert_eq!(environment.code(), 0); assert_eq!(OverrideRefusal::from_code(0), Some(environment));
+    assert_eq!(Stage::WatchOverrideAudit as u8, 57); assert_eq!(Stage::WatchOverrideAudit.label(), "watch-override-audit");
+    let mut assigned = [false; 37]; assigned[0] = true;
+    for (index, &(key, hive, view)) in probes.iter().enumerate() {
+        let probe = OverrideProbe::from_parts(key, hive, view); assert_eq!(probe, Some(OverrideProbe(index as u8)));
+        for (category, open) in categories.iter().copied().enumerate() {
+            let tag = OverrideRefusal::registry(probe, open).unwrap();
+            assert_eq!(tag.code() as usize, 1 + 3 * index + category);
+            assert!(!assigned[tag.code() as usize]); assigned[tag.code() as usize] = true;
+            assert_eq!(OverrideRefusal::from_code(tag.code()), Some(tag));
+        }
+    }
+    assert!(assigned.iter().all(|value| *value));
+    for key in [0, 1, 2, 3, 4, usize::MAX] {
+        for hive in [0, 1, 2, usize::MAX] { for view in [0, 1, 2, usize::MAX] {
+            let expected = probes.iter().position(|parts| *parts == (key, hive, view)).map(|index| OverrideProbe(index as u8));
+            assert_eq!(OverrideProbe::from_parts(key, hive, view), expected);
+        } }
+    }
+    for category in categories {
+        assert_eq!(OverrideRefusal::registry(None, category), None);
+        for probe in 12..=u8::MAX { assert_eq!(OverrideRefusal::registry(Some(OverrideProbe(probe)), category), None); }
+    }
+    let errors = [None, Some(NativeError::Ordinary), Some(NativeError::Interactive), Some(NativeError::Runtime),
+        Some(NativeError::Overrides), Some(NativeError::Data), Some(NativeError::Native), Some(NativeError::Unknown), Some(NativeError::State)];
+    let initial = Word::default();
+    for part in 0..=u8::MAX { for error in errors {
+        let mut value = initial; value.native(0x90053, NativeMark { stage: Stage::WatchOverrideAudit, part, error });
+        let valid = part <= 36 && error == Some(NativeError::Overrides);
+        assert_eq!(value.encode().is_some(), valid);
+        if valid {
+            assert_eq!((value.conditions, value.event, value.stage, value.detail, value.first_refusal),
+                (0x90053, Event::NativeRefused, Stage::WatchOverrideAudit, part, true));
+            let raw = (0x51u64 << 56) | 0x90053 | (29u64 << 26) | (u64::from(part) << 32) | (57u64 << 38) | (1u64 << 44);
+            assert_eq!(value.encode(), Some(raw)); assert_eq!(Word::decode(raw), Some(value));
+            for bit in 52..56 { assert_eq!(Word::decode(raw | (1u64 << bit)), None); }
+            for magic in 0..=u8::MAX { if magic != 0x51 {
+                assert_eq!(Word::decode((raw & !(255u64 << 56)) | (u64::from(magic) << 56)), None);
+            } }
+            for invalid in [Word { conditions: 1 << 26, ..value }, Word { live: 8, ..value },
+                Word { seen: 16, ..value }, Word { first_refusal: false, ..value }] { assert_eq!(invalid.encode(), None); }
+        }
+    } }
+    // All event/detail combinations: special-stage fencing precedes every
+    // legacy rule, including events whose own detail rules ignore the stage.
+    for code in 0..64 { for detail in 0..64 {
+        let event = Event::from_code(code);
+        let first_refusal = event.map_or(true, Event::refused);
+        let raw = (0x51u64 << 56) | (u64::from(code) << 26) | (u64::from(detail) << 32)
+            | (57u64 << 38) | (u64::from(first_refusal) << 44);
+        if let Some(event) = event {
+            let value = Word { event, detail, stage: Stage::WatchOverrideAudit, first_refusal, ..initial };
+            let valid = event == Event::NativeRefused && detail <= 36;
+            assert_eq!(value.encode().is_some(), valid);
+            assert_eq!(Word::decode(raw), valid.then_some(value));
+            assert_eq!(Word { first_refusal: !first_refusal, ..value }.encode(), None);
+        } else { assert_eq!(Word::decode(raw), None); }
+        assert_eq!(Word::decode(raw ^ (1u64 << 44)), None);
+    } }
+    for code in 58..64 {
+        assert_eq!(Stage::from_code(code), None);
+        assert_eq!(Word::decode((0x51u64 << 56) | (u64::from(code) << 38)), None);
+    }
+    // Production current-call slot: first valid capture wins; a public reset
+    // and every returned result consume stale metadata, including Ok/other Err.
+    let mut observation = OverrideObservation::default();
+    assert_eq!(observation.returned(Some(NativeError::Overrides)), None);
+    for code in 0..=36 {
+        let tag = OverrideRefusal::from_code(code).unwrap();
+        let later = OverrideRefusal::from_code((code + 1) % 37).unwrap();
+        observation.note(None); observation.note(Some(tag)); observation.note(None); observation.note(Some(later));
+        assert_eq!(observation.returned(Some(NativeError::Overrides)), Some(tag));
+        assert_eq!(observation.returned(Some(NativeError::Overrides)), None);
+        observation.note(Some(tag)); observation.reset(); assert_eq!(observation.returned(Some(NativeError::Overrides)), None);
+        for error in errors {
+            observation.note(Some(tag));
+            assert_eq!(observation.returned(error), if error == Some(NativeError::Overrides) { Some(tag) } else { None });
+            assert_eq!(observation.returned(Some(NativeError::Overrides)), None);
+        }
+    }
+    for code in 37..=u8::MAX {
+        assert_eq!(OverrideRefusal::from_code(code), None);
+        observation.note(OverrideRefusal::from_code(code)); assert_eq!(observation.returned(Some(NativeError::Overrides)), None);
+        observation.note(Some(OverrideRefusal(code))); // Same-module invalid metadata cannot claim the first slot.
+        observation.note(Some(environment)); assert_eq!(observation.returned(Some(NativeError::Overrides)), Some(environment));
+    }
+    let legacy = Word { conditions: 589907, event: Event::NativeRefused, detail: 4, stage: Stage::Prerequisites,
+        first_refusal: true, live: 1, seen: 11 };
+    assert_eq!(legacy.encode(), Some(0x510b_31c4_7409_0053u64));
+    assert_eq!(Word::decode(0x510b_31c4_7409_0053u64), Some(legacy));
+    let mut fallback = initial;
+    fallback.native(589907, NativeMark { stage: Stage::Prerequisites, part: 0, error: Some(NativeError::Overrides) });
+    fallback.record(0, Event::Protocol, 0); fallback.record(0, Event::Navigation, 3); fallback.record(0, Event::Finished, 3);
+    assert_eq!(fallback.snapshot(1 << 25), legacy);
 }

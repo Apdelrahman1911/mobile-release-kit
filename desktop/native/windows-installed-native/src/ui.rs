@@ -10,7 +10,7 @@ use windows::{core::{Interface, PCWSTR, PWSTR}, Win32::{Foundation::HWND,
     System::Com::{CoGetApartmentType, APTTYPE, APTTYPEQUALIFIER, APTTYPE_MAINSTA, APTTYPE_STA}}};
 use windows_sys::Win32::{System::{Registry as R, RemoteDesktop as RD, StationsAndDesktops as D}, UI::WindowsAndMessaging as W};
 use webview2_com::Microsoft::Web::WebView2::Win32 as WV;
-use crate::ui_startup_data::{Loss, NativeError, NativeMark, PublicationOrder, Stage, Word};
+use crate::ui_startup_data::{Loss, NativeError, NativeMark, OverrideObservation, OverrideOpen, OverrideProbe, OverrideRefusal, PublicationOrder, Stage, Word};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
 #[path = "ui_profile.rs"]
@@ -589,6 +589,7 @@ impl Prerequisites {
         self.probe.first.filter(|value| value.valid())
     }
     pub fn inspect(&mut self) -> UiResult<PrerequisiteFacts> {
+        self.overrides.refusal.reset();
         if self.begun || self.final_attempted || self.unknown { return Err(UiError::State); }
         self.begun = true;
         self.native.admission.active.set(true);
@@ -800,6 +801,7 @@ impl Prerequisites {
         Ok(())
     }
     pub fn recheck(&mut self) -> UiResult<()> {
+        self.overrides.refusal.reset();
         if self.facts.is_none() || self.final_attempted || self.unknown { return Err(UiError::State); }
         let result = self.recheck_inner();
         if result == Err(UiError::CleanupUnknown) { self.unknown = true; }
@@ -870,10 +872,10 @@ const OVERRIDE_KEYS: &[(&str, bool)] = &[
 struct RegistryOriginal {
     name: Vec<u16>, value: UnsafeCell<R::HKEY>, entered: bool, returned: bool, close_entered: bool, settled: bool,
 }
-struct RegistryAudit { originals: Vec<Held<RegistryOriginal>>, unknown: bool }
+struct RegistryAudit { originals: Vec<Held<RegistryOriginal>>, unknown: bool, refusal: OverrideObservation }
 impl RegistryAudit {
-    fn new() -> Self { Self { originals: Vec::new(), unknown: false } }
-    fn absent(&mut self, root: R::HKEY, name: &[u16], view: u32) -> UiResult<()> {
+    fn new() -> Self { Self { originals: Vec::new(), unknown: false, refusal: OverrideObservation::default() } }
+    fn absent(&mut self, root: R::HKEY, name: &[u16], view: u32, probe: Option<OverrideProbe>) -> UiResult<()> {
         if self.unknown || self.originals.len() >= 96 { return Err(UiError::CleanupUnknown); }
         self.originals.push(ManuallyDrop::new(Box::pin(RegistryOriginal {
             name: name.to_vec(), value: UnsafeCell::new(null_mut()), entered: false, returned: false, close_entered: false, settled: false })));
@@ -891,10 +893,16 @@ impl RegistryAudit {
         if result == F::ERROR_SUCCESS && !handle.is_null() {
             original.close_entered = true;
             if unsafe { R::RegCloseKey(handle) } != F::ERROR_SUCCESS { self.unknown = true; return Err(UiError::CleanupUnknown); }
-            original.settled = true; return Err(UiError::RuntimeOverrides);
+            original.settled = true;
+            self.refusal.note(OverrideRefusal::registry(probe, OverrideOpen::Present));
+            return Err(UiError::RuntimeOverrides);
         }
         if !handle.is_null() { self.unknown = true; return Err(UiError::CleanupUnknown); }
-        original.settled = true; Err(UiError::RuntimeOverrides)
+        original.settled = true;
+        self.refusal.note(OverrideRefusal::registry(probe, if result == F::ERROR_SUCCESS {
+            OverrideOpen::SuccessNull
+        } else { OverrideOpen::OtherStatusNull }));
+        Err(UiError::RuntimeOverrides)
     }
     fn settled(&self) -> bool { !self.unknown && self.originals.iter().all(|original| original.settled) }
 }
@@ -906,20 +914,23 @@ impl Drop for RegistryAudit {
     }
 }
 fn overrides_absent(audit: &mut RegistryAudit) -> UiResult<()> {
+    audit.refusal.reset();
     use std::os::windows::ffi::OsStrExt;
     for (name, _) in std::env::vars_os() {
         let units: Vec<u16> = name.encode_wide().collect();
         let prefix: Vec<u16> = "WEBVIEW2_".encode_utf16().collect();
         if units.len() >= prefix.len() && units[..prefix.len()].iter().zip(&prefix)
             .all(|(left, right)| *left == *right || *left >= b'a' as u16 && *left <= b'z' as u16 && *left - 32 == *right) {
+            audit.refusal.note(Some(OverrideRefusal::ENVIRONMENT));
             return Err(UiError::RuntimeOverrides);
         }
     }
-    for (key, user_only) in OVERRIDE_KEYS {
-        for root in [R::HKEY_CURRENT_USER, R::HKEY_LOCAL_MACHINE] {
+    for (key_index, (key, user_only)) in OVERRIDE_KEYS.iter().enumerate() {
+        for (hive_index, root) in [R::HKEY_CURRENT_USER, R::HKEY_LOCAL_MACHINE].iter().copied().enumerate() {
             if *user_only && root != R::HKEY_CURRENT_USER { continue; }
-            for view in [R::KEY_WOW64_32KEY, R::KEY_WOW64_64KEY] {
-                audit.absent(root, &wide(key), view)?;
+            for (view_index, view) in [R::KEY_WOW64_32KEY, R::KEY_WOW64_64KEY].iter().copied().enumerate() {
+                let probe = OverrideProbe::from_parts(key_index, hive_index, view_index);
+                audit.absent(root, &wide(key), view, probe)?;
             }
         }
     }
@@ -1196,7 +1207,13 @@ impl DocumentWatch {
     }
     fn install_inner(&mut self, prerequisites: &mut Prerequisites, data: &Path, record: &dyn Fn(NativeMark)) -> UiResult<()> {
         self.stage(Stage::Sta, record); sta()?;
-        self.stage(Stage::Prerequisites, record); prerequisites.recheck()?;
+        self.stage(Stage::Prerequisites, record);
+        let recheck = prerequisites.recheck();
+        let refusal = prerequisites.overrides.refusal.returned(recheck.as_ref().err().map(|error| error.diagnostic()));
+        if recheck == Err(UiError::RuntimeOverrides) {
+            if let Some(refusal) = refusal { self.install_stage.set((Stage::WatchOverrideAudit, refusal.code())); }
+        }
+        recheck?;
         self.stage(Stage::Controller, record);
         let controller = self.controller.as_ref().ok_or(UiError::State)?;
         self.substage(1, record); let controller = controller.get()?;
