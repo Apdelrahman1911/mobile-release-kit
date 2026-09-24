@@ -1,6 +1,6 @@
 //! One retained finite native owner, separate from disposable passive queries.
 //!
-//! Installed Configuration Save and Linux workflow Apply have separate fixed
+//! Installed Configuration Save, Linux workflow Apply and metadata Save have separate fixed
 //! profiles inside this SAME original owner and custody/settlement route.
 //! General edit qualification stays closed; no Windows edit backend is admitted.
 use std::{collections::BTreeSet, future::{Future, pending}, path::PathBuf, pin::Pin, process::ExitStatus,
@@ -15,7 +15,7 @@ use {std::process::Stdio, tokio::process::Command};
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 use crate::installed_runtime::{CloseOutcome, ConfigurationRuntimeSlots};
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-use crate::installed_runtime::GitHubWorkflowRuntimeSlots;
+use crate::installed_runtime::{GitHubWorkflowRuntimeSlots, MetadataTextRuntimeSlots};
 use crate::{edit_protocol::{self as wire, Capability, Checkout, ChildFrame, ConfigEditStatus, CoreReason,
     EditAvailability, EditDomain, EditProjection, Effect, Journal, NativeEditReason as Reason, NativeFinality, Phase,
     PrepareConfigEdit, Prepared, ResourceState}, github_workflow_edit_protocol::{self as workflow_wire, PrepareWorkflowEdit, WorkflowEditStatus},
@@ -43,15 +43,32 @@ fn configuration_installed_selected(domain: EditDomain, profile_available: bool)
 fn workflow_installed_selected(domain: EditDomain, profile_available: bool) -> bool {
     domain == EditDomain::GitHubWorkflows && profile_available
 }
+fn metadata_installed_selected(domain: EditDomain, profile_available: bool) -> bool {
+    domain == EditDomain::MetadataText && profile_available
+}
+fn installed_registration_matches(domain: EditDomain, registered: bool) -> bool {
+    match domain {
+        EditDomain::Configuration => true,
+        EditDomain::GitHubWorkflows | EditDomain::MetadataText => registered,
+    }
+}
+fn installed_bootstrap_argument(domain: EditDomain) -> Option<&'static str> {
+    match domain {
+        EditDomain::Configuration => None,
+        EditDomain::GitHubWorkflows => Some("github_workflows"),
+        EditDomain::MetadataText => Some("metadata_text"),
+    }
+}
 fn installed_edit_selected(domain: EditDomain, runtime: &RuntimeConfig) -> bool {
     match domain {
         EditDomain::Configuration => configuration_installed_selected(domain, runtime.configuration_edit_profile_available()),
         EditDomain::GitHubWorkflows => workflow_installed_selected(domain, runtime.github_workflow_edit_profile_available()),
-        EditDomain::MetadataText => false,
+        EditDomain::MetadataText => metadata_installed_selected(domain, runtime.metadata_text_edit_profile_available()),
     }
 }
 fn installed_domains_match(session: EditDomain, projection: EditDomain, slots: EditDomain) -> bool {
-    matches!(session, EditDomain::Configuration | EditDomain::GitHubWorkflows) && session == projection && session == slots
+    matches!(session, EditDomain::Configuration | EditDomain::GitHubWorkflows | EditDomain::MetadataText)
+        && session == projection && session == slots
 }
 
 // One closed adapter in Resources, not another owner/ledger/closer. The Mac
@@ -62,6 +79,8 @@ enum InstalledEditSlots {
     Configuration(ConfigurationRuntimeSlots),
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     GitHubWorkflows(GitHubWorkflowRuntimeSlots),
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    MetadataText(MetadataTextRuntimeSlots),
 }
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 enum InstalledPrepareFailure { CapabilityUnknown, Unavailable }
@@ -73,6 +92,8 @@ impl InstalledEditSlots {
             EditDomain::Configuration => Some(Self::Configuration(ConfigurationRuntimeSlots::new())),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             EditDomain::GitHubWorkflows => Some(Self::GitHubWorkflows(GitHubWorkflowRuntimeSlots::new())),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            EditDomain::MetadataText => Some(Self::MetadataText(MetadataTextRuntimeSlots::new())),
             _ => None,
         }
     }
@@ -80,6 +101,8 @@ impl InstalledEditSlots {
         Self::Configuration(_) => EditDomain::Configuration,
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         Self::GitHubWorkflows(_) => EditDomain::GitHubWorkflows,
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        Self::MetadataText(_) => EditDomain::MetadataText,
     } }
     fn require_domain(&self, domain: EditDomain) -> Result<(), BridgeError> {
         if self.domain() == domain { Ok(()) } else { Err(edit_unknown()) }
@@ -91,6 +114,8 @@ impl InstalledEditSlots {
             Self::Configuration(slots) => runtime.resolve_configuration_installed(slots, end, stop),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::GitHubWorkflows(slots) => runtime.resolve_github_workflow_installed(slots, end, stop),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::MetadataText(slots) => runtime.resolve_metadata_text_installed(slots, end, stop),
         }
     }
     fn transfer_once(&mut self, domain: EditDomain) -> Result<(), BridgeError> {
@@ -99,6 +124,8 @@ impl InstalledEditSlots {
             Self::Configuration(slots) => slots.transfer_once().map_err(|_| edit_unknown()),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::GitHubWorkflows(slots) => slots.transfer_once().map_err(|_| edit_unknown()),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::MetadataText(slots) => slots.transfer_once().map_err(|_| edit_unknown()),
         }
     }
     fn prepare_once(&mut self, domain: EditDomain, end: Instant, stop: &watch::Receiver<bool>)
@@ -110,6 +137,9 @@ impl InstalledEditSlots {
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::GitHubWorkflows(slots) => slots.capability().map_err(|_| InstalledPrepareFailure::CapabilityUnknown)?
                 .prepare_once(end, stop).map_err(|_| InstalledPrepareFailure::Unavailable),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::MetadataText(slots) => slots.capability().map_err(|_| InstalledPrepareFailure::CapabilityUnknown)?
+                .prepare_once(end, stop).map_err(|_| InstalledPrepareFailure::Unavailable),
         }
     }
     fn claim_once(&mut self, domain: EditDomain) -> Result<(), BridgeError> {
@@ -118,6 +148,8 @@ impl InstalledEditSlots {
             Self::Configuration(slots) => slots.capability().map_err(|_| edit_unknown())?.claim_once().map_err(|_| edit_unknown()),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::GitHubWorkflows(slots) => slots.capability().map_err(|_| edit_unknown())?.claim_once().map_err(|_| edit_unknown()),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::MetadataText(slots) => slots.capability().map_err(|_| edit_unknown())?.claim_once().map_err(|_| edit_unknown()),
         }
     }
     fn no_child_effect(&self, domain: EditDomain) -> bool {
@@ -125,12 +157,16 @@ impl InstalledEditSlots {
             Self::Configuration(slots) => slots.no_child_effect(),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::GitHubWorkflows(slots) => slots.no_child_effect(),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::MetadataText(slots) => slots.no_child_effect(),
         }
     }
     fn mark_interrupted(&mut self) { match self {
         Self::Configuration(slots) => slots.mark_interrupted(),
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         Self::GitHubWorkflows(slots) => slots.mark_interrupted(),
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        Self::MetadataText(slots) => slots.mark_interrupted(),
     } }
     fn settle_originals(&mut self, domain: EditDomain) -> CloseOutcome {
         if self.domain() != domain { self.mark_interrupted(); return CloseOutcome::Unknown; }
@@ -138,6 +174,8 @@ impl InstalledEditSlots {
             Self::Configuration(slots) => slots.settle_originals(),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::GitHubWorkflows(slots) => slots.settle_originals(),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::MetadataText(slots) => slots.settle_originals(),
         }
     }
     fn settled(&self, domain: EditDomain) -> bool {
@@ -145,6 +183,8 @@ impl InstalledEditSlots {
             Self::Configuration(slots) => slots.settled(),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::GitHubWorkflows(slots) => slots.settled(),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::MetadataText(slots) => slots.settled(),
         }
     }
 }
@@ -414,6 +454,17 @@ pub(crate) struct InstalledWorkflowFinality {
     pub(crate) runtime_ledger_settled: bool, pub(crate) runtime_settlement_joined: bool,
 }
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+    not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[derive(Clone)]
+pub(crate) struct InstalledMetadataFinality {
+    pub(crate) session_id: String, pub(crate) project_id: String, pub(crate) owner_generation: String,
+    pub(crate) writer_frames: usize, pub(crate) stdout_frames: usize,
+    pub(crate) inspection_joined: bool, pub(crate) acquisition_joined: bool, pub(crate) child_waited_success: bool,
+    pub(crate) stdin_closed: bool, pub(crate) stdout_eof_closed: bool, pub(crate) stderr_eof_closed: bool,
+    pub(crate) io_joined: bool, pub(crate) driver_joined: bool, pub(crate) watchdog_joined: bool, pub(crate) manager_joined: bool,
+    pub(crate) runtime_ledger_settled: bool, pub(crate) runtime_settlement_joined: bool,
+}
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
     not(feature = "ubuntu-runtime-publisher"),
     any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
         all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
@@ -421,6 +472,8 @@ enum InstalledEditFinality {
     Configuration(InstalledConfigFinality),
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     GitHubWorkflows(InstalledWorkflowFinality),
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    MetadataText(InstalledMetadataFinality),
 }
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
     not(feature = "ubuntu-runtime-publisher"),
@@ -437,6 +490,11 @@ impl InstalledEditFinality {
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::GitHubWorkflows(facts) => {
                 if projection.domain != EditDomain::GitHubWorkflows || projection.session_id != facts.session_id { return None; }
+                facts.project_id = projection.project_id.clone(); facts.owner_generation = projection.owner_generation.clone();
+            },
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::MetadataText(facts) => {
+                if projection.domain != EditDomain::MetadataText || projection.session_id != facts.session_id { return None; }
                 facts.project_id = projection.project_id.clone(); facts.owner_generation = projection.owner_generation.clone();
             },
         }
@@ -817,7 +875,7 @@ impl Inner {
             same_original: Arc::ptr_eq(&a.session, owner),
             same_domain: installed_domains_match(owner.domain, a.projection.domain, slots.domain()),
             same_identity: a.projection.session_id == owner.id && a.projection.owner_generation == r.generation
-                && (owner.domain != EditDomain::GitHubWorkflows || owner.registration.is_some()),
+                && installed_registration_matches(owner.domain, owner.registration.is_some()),
             document_live: r.window.is_some() && r.document_bound && !r.document_lost,
             opening: a.projection.phase == Phase::Opening && !a.opened && !a.prepared && !a.terminal && !a.unknown
                 && a.claimed_seq == 0 && !a.projection.apply_submitted && a.cleanup_start.is_none(),
@@ -895,7 +953,7 @@ impl EditOwner {
         let facts = match r.installed_final.as_ref()? {
             InstalledEditFinality::Configuration(facts) => facts,
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-            InstalledEditFinality::GitHubWorkflows(_) => return None,
+            InstalledEditFinality::GitHubWorkflows(_) | InstalledEditFinality::MetadataText(_) => return None,
         };
         (last.domain == EditDomain::Configuration && last.session_id == session_id && facts.session_id == session_id
             && facts.project_id == last.project_id && facts.owner_generation == last.owner_generation
@@ -909,6 +967,17 @@ impl EditOwner {
         let last = r.last.as_ref()?;
         let InstalledEditFinality::GitHubWorkflows(facts) = r.installed_final.as_ref()? else { return None; };
         (last.domain == EditDomain::GitHubWorkflows && last.session_id == session_id && facts.session_id == session_id
+            && facts.project_id == last.project_id && facts.owner_generation == last.owner_generation
+            && last.phase == Phase::Final && last.native_finality == NativeFinality::Settled && !last.late_settled)
+            .then(|| facts.clone())
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+        not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn installed_metadata_observation_final(&self, session_id: &str) -> Option<InstalledMetadataFinality> {
+        let r = self.inner.lock();
+        let last = r.last.as_ref()?;
+        let InstalledEditFinality::MetadataText(facts) = r.installed_final.as_ref()? else { return None; };
+        (last.domain == EditDomain::MetadataText && last.session_id == session_id && facts.session_id == session_id
             && facts.project_id == last.project_id && facts.owner_generation == last.owner_generation
             && last.phase == Phase::Final && last.native_finality == NativeFinality::Settled && !last.late_settled)
             .then(|| facts.clone())
@@ -1765,22 +1834,22 @@ fn acquire_installed_edit(inner: &Inner, owner: &Arc<Session>, native: &Arc<Mute
             Ok(slots) => slots,
             Err(_) => { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return; },
         };
-        let workflow_domain = slots.domain() == EditDomain::GitHubWorkflows;
+        let bootstrap_argument = installed_bootstrap_argument(slots.domain());
         let stop = owner.stop.subscribe();
         let selected = match slots.prepare_once(owner.domain, end, &stop) {
             Ok(selected) => selected,
             Err(InstalledPrepareFailure::CapabilityUnknown) => { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return; },
             Err(InstalledPrepareFailure::Unavailable) => { inner.trigger(&owner.id, Reason::RuntimeUnavailable, Instant::now()); return; },
         };
-        // Fixed bootstrap and a literal workflow domain from the checked slot,
-        // never a caller-supplied domain. Configuration retains its default ABI.
+        // Fixed bootstrap and literal domain from the checked original slot,
+        // never a caller-supplied selector. Configuration retains its default ABI.
         // No caller arguments,
         // environment or cwd. Complete ALL native work and allocations first.
         let mut command = Command::new(&selected.python);
         command.args(["-I", "-S", "-B"]).arg(&selected.bootstrap).arg(&selected.core)
             .current_dir(&selected.cwd).env_clear().env("LC_ALL", "C").env("LANG", "C")
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
-        if workflow_domain { command.arg("github_workflows"); } // Allocate BEFORE the final serialized claim.
+        if let Some(argument) = bootstrap_argument { command.arg(argument); } // Allocate BEFORE the final serialized claim.
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         if crate::runtime::macos_installed_environment(&mut command).is_err() {
             inner.trigger(&owner.id, Reason::RuntimeUnavailable, Instant::now()); return;
@@ -2496,6 +2565,16 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
                         io_joined, driver_joined: book.driver_joined, watchdog_joined: book.watchdog_joined, manager_joined: book.manager_joined,
                         runtime_ledger_settled: runtime_settled, runtime_settlement_joined: book.installed_settlement_joined,
                     })),
+                    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    EditDomain::MetadataText => Some(InstalledEditFinality::MetadataText(InstalledMetadataFinality {
+                        session_id: owner.id.clone(), project_id: String::new(), owner_generation: String::new(),
+                        writer_frames: write.frames, stdout_frames: out.frames,
+                        inspection_joined: book.inspection_joined, acquisition_joined: book.acquisition_joined,
+                        child_waited_success: book.waited.as_ref().is_some_and(ExitStatus::success) && !book.wait_failed,
+                        stdin_closed: write.closed, stdout_eof_closed: out.eof && out.closed, stderr_eof_closed: err.eof && err.closed,
+                        io_joined, driver_joined: book.driver_joined, watchdog_joined: book.watchdog_joined, manager_joined: book.manager_joined,
+                        runtime_ledger_settled: runtime_settled, runtime_settlement_joined: book.installed_settlement_joined,
+                    })),
                     _ => None,
                     };
                 }
@@ -2564,6 +2643,11 @@ pub(crate) fn assert_installed_workflow_owner_contract() {
 }
 
 #[cfg(test)]
+pub(crate) fn assert_installed_metadata_owner_contract() {
+    installed_configuration_data_tests::metadata_contract();
+}
+
+#[cfg(test)]
 mod installed_configuration_data_tests {
     use super::*;
 
@@ -2583,6 +2667,18 @@ mod installed_configuration_data_tests {
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         workflow_adapter_cannot_borrow_or_close_another_domain();
     }
+    pub(super) fn metadata_contract() {
+        workflow_selection_and_exact_domain_equality_are_closed();
+        registered_edit_claim_and_bootstrap_domains_cannot_fall_back_to_configuration();
+        installed_configuration_claim_refuses_stop_late_inspection_loss_quit_and_wrong_original();
+        only_actual_returned_original_borrowers_permit_settlement_and_loss_never_qualifies();
+        no_child_after_an_attempt_or_consumed_claim_is_never_inferred_from_an_empty_slot();
+        installed_finality_requires_the_original_settlement_join_and_same_ledger_close();
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        metadata_adapter_cannot_borrow_or_close_another_domain();
+    }
+    #[test]
+    fn installed_metadata_owner_contract_is_inert() { assert_installed_metadata_owner_contract(); }
     #[test]
     fn installed_configuration_owner_contract_is_inert() { assert_installed_configuration_owner_contract(); }
     #[test]
@@ -2594,11 +2690,12 @@ mod installed_configuration_data_tests {
         for domain in domains {
             for available in [false, true] {
                 assert_eq!(workflow_installed_selected(domain, available), domain == EditDomain::GitHubWorkflows && available);
+                assert_eq!(metadata_installed_selected(domain, available), domain == EditDomain::MetadataText && available);
                 assert_eq!(configuration_installed_selected(domain, available), domain == EditDomain::Configuration && available);
             }
             for projection in domains { for slots in domains {
                 assert_eq!(installed_domains_match(domain, projection, slots),
-                    domain != EditDomain::MetadataText && domain == projection && domain == slots);
+                    domain == projection && domain == slots);
             } }
             assert!(!qualified(domain, false));
         }
@@ -2622,6 +2719,37 @@ mod installed_configuration_data_tests {
         assert!(config.inspect_once(EditDomain::GitHubWorkflows, &runtime, Instant::now(), &stop).is_err());
         assert!(config.transfer_once(EditDomain::GitHubWorkflows).is_err() && config.claim_once(EditDomain::GitHubWorkflows).is_err());
         assert_eq!(config.settle_originals(EditDomain::GitHubWorkflows), CloseOutcome::Unknown);
+        assert!(!config.settled(EditDomain::Configuration));
+    }
+
+    fn registered_edit_claim_and_bootstrap_domains_cannot_fall_back_to_configuration() {
+        for (domain, argument) in [(EditDomain::Configuration, None), (EditDomain::GitHubWorkflows, Some("github_workflows")),
+            (EditDomain::MetadataText, Some("metadata_text"))] {
+            assert_eq!(installed_bootstrap_argument(domain), argument);
+            assert!(installed_registration_matches(domain, true));
+            assert_eq!(installed_registration_matches(domain, false), domain == EditDomain::Configuration);
+        }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn metadata_adapter_cannot_borrow_or_close_another_domain() {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-metadata-domain-must-not-be-opened"));
+        let (_sender, stop) = watch::channel(false);
+        for wrong in [EditDomain::Configuration, EditDomain::GitHubWorkflows] {
+            let mut slots = InstalledEditSlots::MetadataText(MetadataTextRuntimeSlots::new());
+            assert_eq!(slots.domain(), EditDomain::MetadataText);
+            assert!(slots.inspect_once(wrong, &runtime, Instant::now(), &stop).is_err());
+            assert!(slots.transfer_once(wrong).is_err() && slots.claim_once(wrong).is_err());
+            assert!(slots.prepare_once(wrong, Instant::now(), &stop).is_err());
+            assert!(!slots.no_child_effect(wrong) && !slots.settled(wrong));
+            assert!(slots.no_child_effect(EditDomain::MetadataText)); // Only the original EMPTY slots.
+            assert_eq!(slots.settle_originals(wrong), CloseOutcome::Unknown);
+            assert!(!slots.settled(wrong) && !slots.settled(EditDomain::MetadataText));
+        }
+        let mut config = InstalledEditSlots::Configuration(ConfigurationRuntimeSlots::new());
+        assert!(config.inspect_once(EditDomain::MetadataText, &runtime, Instant::now(), &stop).is_err());
+        assert!(config.transfer_once(EditDomain::MetadataText).is_err() && config.claim_once(EditDomain::MetadataText).is_err());
+        assert!(config.prepare_once(EditDomain::MetadataText, Instant::now(), &stop).is_err());
+        assert_eq!(config.settle_originals(EditDomain::MetadataText), CloseOutcome::Unknown);
         assert!(!config.settled(EditDomain::Configuration));
     }
 

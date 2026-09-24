@@ -144,6 +144,29 @@ impl GitHubWorkflowInstalledProfile {
     }
 }
 
+// The same authenticated A contains the existing metadata bootstrap/core, but
+// Configuration, workflow or passive selection is NOT authority for this edit domain.
+// Only the normal installed metadata selector below can mint this profile.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) struct MetadataTextInstalledProfile { _private: () }
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl MetadataTextInstalledProfile {
+    fn bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
+        PassiveInstalledProfile::bindings_match(target, manifest, protocol) // Fixed DATA only.
+    }
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !Self::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) { return Err(unavailable()); }
+        let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions")
+            .join(PassiveInstalledProfile::TARGET).join(PassiveInstalledProfile::MANIFEST);
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("config_edit_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+    pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
+        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+    }
+}
+
 // Separate configuration-only selection DATA. A passive candidate/profile is
 // not edit authority, and the feature-off native passive fixture cannot mint
 // this value. The original EditOwner still owes custody and a one-use claim.
@@ -532,6 +555,29 @@ impl RuntimeConfig {
         // returned paths are DATA; they cannot carry the ledger or spawn.
         originals.inspect_once(self.github_workflow_installed_profile()?, end, stop)
     }
+    /// SAME sealed metadata selector for capability and original-owner admission.
+    /// Neither another edit profile nor a feature-off native test can select it.
+    pub(crate) fn metadata_text_edit_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        { self.metadata_text_installed_profile().is_ok() }
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        { false }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn metadata_text_installed_profile(&self) -> Result<MetadataTextInstalledProfile, BridgeError> {
+        #[cfg(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        if MetadataTextInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
+            return Ok(MetadataTextInstalledProfile { _private: () });
+        }
+        Err(BridgeError::unavailable("The metadata text installed-runtime release and custody profile are not qualified."))
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn resolve_metadata_text_installed(&self, originals: &mut crate::installed_runtime::MetadataTextRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        // The registered original worker borrows its domain-bound slots. The
+        // returned paths are DATA; they cannot carry the ledger or spawn.
+        originals.inspect_once(self.metadata_text_installed_profile()?, end, stop)
+    }
     /// Separate fixed entry point for the finite configuration owner. Never
     /// dispatch stateful work through the passive engine or its supervisor.
     pub fn resolve_edit(&self, end: Instant) -> Result<VerifiedRuntime, BridgeError> {
@@ -873,6 +919,13 @@ pub(crate) fn assert_installed_workflow_profile_contract() {
     tests::installed_workflow_data_is_fixed_and_stopped_inspection_owes_original_settlement();
 }
 
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+pub(crate) fn assert_installed_metadata_profile_contract() {
+    tests::metadata_candidate_bindings_are_exactly_a_not_an_arbitrary_anchor();
+    tests::installed_metadata_data_is_fixed_and_stopped_inspection_owes_original_settlement();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1026,6 +1079,69 @@ mod tests {
         assert!(runtime.resolve(Instant::now()).is_err());
         assert!(runtime.resolve_edit(Instant::now()).is_err());
     }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"))))]
+    #[test]
+    fn installed_metadata_selector_is_closed_outside_the_normal_linux_shell() {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-metadata-path-must-not-be-opened"));
+        assert!(!runtime.metadata_text_edit_profile_available());
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        {
+            let mut slots = crate::installed_runtime::MetadataTextRuntimeSlots::new();
+            let (_sender, stop) = tokio::sync::watch::channel(false);
+            assert!(runtime.resolve_metadata_text_installed(&mut slots, Instant::now(), &stop).is_err());
+            assert!(slots.never_started() && !slots.settled() && slots.capability().is_err());
+        }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn metadata_candidate_bindings_data_contract() { metadata_candidate_bindings_are_exactly_a_not_an_arbitrary_anchor(); }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(super) fn metadata_candidate_bindings_are_exactly_a_not_an_arbitrary_anchor() {
+        let (target, manifest, protocol) = (PassiveInstalledProfile::TARGET, PassiveInstalledProfile::MANIFEST, PassiveInstalledProfile::PROTOCOL);
+        assert!(MetadataTextInstalledProfile::bindings_match(target, Some(manifest), Some(protocol)));
+        let wrong = "0".repeat(64);
+        for (target, manifest, protocol) in [
+            ("aarch64-unknown-linux-gnu", Some(manifest), Some(protocol)), (target, None, Some(protocol)),
+            (target, Some(manifest), None), (target, Some(wrong.as_str()), Some(protocol)), (target, Some(manifest), Some(wrong.as_str())),
+        ] { assert!(!MetadataTextInstalledProfile::bindings_match(target, manifest, protocol)); }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    #[test]
+    fn installed_metadata_profile_contract_is_inert() { assert_installed_metadata_profile_contract(); }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    pub(super) fn installed_metadata_data_is_fixed_and_stopped_inspection_owes_original_settlement() {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-metadata-data-only"));
+        let profile = runtime.metadata_text_installed_profile();
+        assert_eq!(runtime.metadata_text_edit_profile_available(), profile.is_ok());
+        assert_eq!(profile.is_ok(), MetadataTextInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR));
+        if let Ok(profile) = profile {
+            let data = profile.selection().unwrap();
+            let root = PathBuf::from("/var/lib/mobile-release-kit/versions").join(PassiveInstalledProfile::TARGET).join(PassiveInstalledProfile::MANIFEST);
+            assert_eq!(data.python, root.join("python/bin/python3"));
+            assert_eq!(data.bootstrap, root.join("config_edit_bootstrap.py"));
+            assert_eq!(data.core, root.join("core.zip")); assert_eq!(data.cwd, root);
+            assert!(profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure"));
+            for release in [b"6.8.0-91-generic".as_slice(), b"6.17.0-1021-azure", b"6.17.0-1022-azure-custom"] {
+                assert!(!profile.accepts_platform(b"Linux", b"x86_64", release));
+            }
+            assert!(!profile.accepts_platform(b"Linux", b"aarch64", b"6.17.0-1022-azure"));
+            assert!(!profile.accepts_platform(b"FreeBSD", b"x86_64", b"6.17.0-1022-azure"));
+            let mut slots = crate::installed_runtime::MetadataTextRuntimeSlots::new();
+            let (_sender, stop) = tokio::sync::watch::channel(true);
+            // Sticky STOP precedes uname/open: this is empty DATA bookkeeping,
+            // never an executed runtime, transferred ledger or native witness.
+            assert!(runtime.resolve_metadata_text_installed(&mut slots, Instant::now() + std::time::Duration::from_secs(1), &stop).is_err());
+            assert!(!slots.never_started() && !slots.settled() && slots.no_child_effect());
+            assert!(slots.transfer_once().is_err() && slots.capability().is_err());
+            assert_eq!(slots.settle_originals(), crate::installed_runtime::CloseOutcome::Settled);
+            assert!(slots.settled() && slots.capability().is_err());
+        }
+        assert!(runtime.resolve(Instant::now()).is_err());
+        assert!(runtime.resolve_edit(Instant::now()).is_err());
+    }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     #[test]
     fn configuration_candidate_bindings_data_contract() { configuration_candidate_bindings_are_exactly_a_not_an_arbitrary_anchor(); }
@@ -1111,6 +1227,10 @@ mod tests {
         let mut originals = crate::installed_runtime::PassiveRuntimeSlots::new();
         let (_sender, stop) = tokio::sync::watch::channel(false);
         assert!(candidate.resolve_configuration_installed(&mut configuration, Instant::now(), &stop).is_err());
+        let mut metadata = crate::installed_runtime::MetadataTextRuntimeSlots::new();
+        assert!(!candidate.metadata_text_edit_profile_available());
+        assert!(candidate.resolve_metadata_text_installed(&mut metadata, Instant::now(), &stop).is_err());
+        assert!(metadata.never_started() && metadata.capability().is_err());
         assert!(configuration.never_started()); // Passive candidate never acquires configuration authority.
         assert!(candidate.resolve_passive_installed(crate::protocol::Method::AssessCredentials, &mut originals, Instant::now(), &stop).is_err());
         assert!(originals.never_started()); // An unselected method cannot begin inspection.

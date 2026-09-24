@@ -22,9 +22,11 @@ Snapshot and draft validation return the core result without inventing verified
 facts or saving files. Project IDs refer to Rust-held native picker selections;
 renderer-provided roots/executables/command lines/method names are not admitted.
 There are also five finite configuration-edit commands and four fixed GitHub
-connection commands, described below. Configuration editing has a separate
-installed Linux profile; the GitHub connection qualification gate remains
-disabled. There are no generic shell,
+connection commands, described below. Configuration, local workflow Apply and
+public metadata text editing have separate sealed installed Linux profiles;
+the remote GitHub connection qualification gate remains disabled. Installed
+metadata integration is source-authored, awaiting independent native evidence.
+There are no generic shell,
 filesystem, opener, build, Store, credential, or recovery commands/plugins.
 The sole local webview denies remote/new-window navigation.
 The CSP allows only local assets and Tauri IPC, not project-provided web content.
@@ -376,9 +378,20 @@ cleanup or assumed rollback is provided. Unsaved newer renderer drafts are not
 replaced by an older successful save, and native quit confirmation remains
 independent of renderer state.
 
-`NATIVE_EDIT_QUALIFIED` stays false. Only the exact installed Linux configuration
-profile adds its separate original-owned route; workflow/metadata Save and the
-general resolver remain closed. The ignored hosted fixture has only a private
+`NATIVE_EDIT_QUALIFIED` stays false. The exact installed Linux configuration,
+workflow and metadata profiles add separate original-owned routes; the general
+resolver remains closed. Metadata reuses the original slots and settlement,
+requires registered-root ownership at the same serialized final claim as
+workflow, and supplies the closed `metadata_text` bootstrap argument before
+that claim. The metadata preparation phase participates in interruption and
+absorbing Unknown handling; no new ledger or fallback owner is introduced.
+The observer-only metadata finality accessor returns only the exact settled
+original session from the existing tagged terminal record, never another
+domain's last result. A discarded first Review must settle before a later
+Review replaces that record. The new installed Save case requires exact
+plan/readback and independent filesystem postconditions; source and inert
+checks do not establish installed qualification.
+The ignored hosted fixture has only a private
 test-build authorization after its fixed environment/source/root checks; it
 cannot enable production constructors. Core inert tests, three initial actual-
 owner cases, compilation, or a passing negative fault assertion alone cannot

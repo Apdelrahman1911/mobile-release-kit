@@ -49,9 +49,13 @@ def metadata():
          "manifest_path": "/source/desktop/src-tauri/Cargo.toml"},
         {"id": "mount", "name": "mrk-linux-mount-observation", "version": "0.1.0", "source": None,
          "manifest_path": "/source/desktop/native/linux-mount-observation/Cargo.toml"},
+        {"id": "secret-service", "name": "secret-service", "version": "5.2.0", "source": None,
+         "manifest_path": "/source/desktop/vendor/secret-service-5.2.0/Cargo.toml"},
+        {"id": "zbus", "name": "zbus", "version": "5.19.0", "source": None,
+         "manifest_path": "/source/desktop/vendor/zbus-5.19.0/Cargo.toml"},
     ]
-    # Original Cargo 1.98.0 Linux DATA has two local packages/nodes, while the
-    # root dependencies retain these three complete target-specific declarations.
+    # The native platform declarations remain distinct from the two maintained
+    # SDKs' normal/dev inputs; Cargo resolves both SDKs to their one local source.
     packages[0]["dependencies"] = [
         {"name": name, "path": "/source/desktop/native/" + directory, "target": cfg,
          "source": None, "req": "*", "kind": None, "rename": None, "optional": False,
@@ -65,6 +69,20 @@ def metadata():
              'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'),
         )
     ]
+    for kind, support in ((None, []), ("dev", ["mrk-retrieval-test-support"])):
+        packages[0]["dependencies"].append({
+            "name": "secret-service", "path": "/source/desktop/vendor/secret-service-5.2.0",
+            "target": 'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))',
+            "source": None, "req": "=5.2.0", "kind": kind, "rename": None, "optional": False,
+            "uses_default_features": False, "features": ["rt-tokio-crypto-rust", *support], "registry": None,
+        })
+    for kind, support in ((None, []), ("dev", ["mrk-owned-test-support"])):
+        packages[0]["dependencies"].append({
+            "name": "zbus", "target": 'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))',
+            "source": "registry+https://github.com/rust-lang/crates.io-index", "req": "=5.19.0", "kind": kind,
+            "rename": None, "optional": False, "uses_default_features": False,
+            "features": ["tokio", *support], "registry": None,
+        })
     fixed = [("tauri", "2.11.5"), ("tauri-build", "2.6.3"), ("gtk", "0.18.2"),
              ("webkit2gtk", "2.0.2"), ("wry", "0.55.1"), ("rfd", "0.15.4"), ("sha2", "0.10.9")]
     for name, version in fixed + [("inert-" + str(index), "1.0.0") for index in range(27)]:
@@ -75,7 +93,7 @@ def metadata():
     for row in nodes:
         if row["id"] == "root":
             row["features"] = S.SHELL_FEATURES
-            row["deps"] = [{"pkg": "mount"}]
+            row["deps"] = [{"pkg": name} for name in ("mount", "secret-service", "zbus")]
         elif row["id"] == "tauri":
             row["features"] = ["compression", "custom-protocol", "wry"]
         elif row["id"] == "sha2":
@@ -397,13 +415,13 @@ class InstalledShellCompilerContracts(unittest.TestCase):
     def test_full_metadata_rejects_incomplete_or_development_graph(self):
         value = metadata()
         parsed, packages, nodes = S.shell_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/target"))
-        self.assertEqual(len(packages), 36)
+        self.assertEqual(len(packages), 38)
         self.assertEqual(nodes["root"]["features"], S.SHELL_FEATURES)
         changes = (
             lambda row: row["resolve"]["nodes"][0].update(features=[*S.SHELL_FEATURES, "development-runtime"]),
-            lambda row: row["resolve"]["nodes"][2].update(features=["wry"]),
-            lambda row: row["packages"].append(deepcopy(row["packages"][2])),
-            lambda row: row["packages"][2].update(source="git+https://unreviewed.invalid/repo"),
+            lambda row: next(item for item in row["resolve"]["nodes"] if item["id"] == "tauri").update(features=["wry"]),
+            lambda row: row["packages"].append(deepcopy(next(item for item in row["packages"] if item["id"] == "tauri"))),
+            lambda row: next(item for item in row["packages"] if item["id"] == "tauri").update(source="git+https://unreviewed.invalid/repo"),
             lambda row: row.update(target_directory="/source/desktop/src-tauri/target"),
             lambda row: row["resolve"]["nodes"][0].update(deps=[{"pkg": "missing"}]),
         )
@@ -415,12 +433,14 @@ class InstalledShellCompilerContracts(unittest.TestCase):
 
     def test_declared_platforms_cannot_enter_linux_graph_or_compiler(self):
         _, packages, nodes = S.shell_cargo_metadata(S.D.canonical(metadata()), Path("/source"), Path("/target"))
-        self.assertEqual({row["id"] for row in packages.values() if row["source"] is None}, {"root", "mount"})
-        self.assertEqual(set(nodes) & {"root", "mount", "macos", "windows"}, {"root", "mount"})
+        local_ids = {"root", "mount", "secret-service", "zbus"}
+        self.assertEqual({row["id"] for row in packages.values() if row["source"] is None}, local_ids)
+        self.assertEqual(set(nodes) & (local_ids | {"macos", "windows"}), local_ids)
         declared = packages["root"]["dependencies"]
-        self.assertEqual(len(declared), 3)
+        self.assertEqual(len(declared), 7)
         self.assertEqual({row["name"] for row in declared},
-                         {"mrk-linux-mount-observation", "mrk-macos-installed-native", "mrk-windows-installed-native"})
+                         {"mrk-linux-mount-observation", "mrk-macos-installed-native", "mrk-windows-installed-native",
+                          "secret-service", "zbus"})
         # Declaration order and unrelated registry declarations do not change
         # the exact local contract.
         value = metadata()
@@ -428,7 +448,7 @@ class InstalledShellCompilerContracts(unittest.TestCase):
             {"name": "sha2", "source": "registry+https://github.com/rust-lang/crates.io-index"})
         value["packages"][0]["dependencies"].reverse()
         S.shell_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/target"))
-        for index in (0, 1):
+        for index in range(4):
             for field, replacement in (("name", "unreviewed-local"), ("version", "0.2.0"),
                                        ("manifest_path", "/elsewhere/Cargo.toml"),
                                        ("source", "registry+https://github.com/rust-lang/crates.io-index")):
@@ -440,8 +460,20 @@ class InstalledShellCompilerContracts(unittest.TestCase):
             value["packages"].pop(index)
             with self.subTest(missing_package=index), self.assertRaises(S.D.Refused):
                 S.shell_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/target"))
+            value = metadata()
+            value["resolve"]["nodes"].pop(index)
+            with self.subTest(missing_local_node=index), self.assertRaises(S.D.Refused):
+                S.shell_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/target"))
+        for name in ("secret-service", "zbus"):
+            value = metadata()
+            duplicate = deepcopy(packages[name])
+            duplicate.update(id=name + "-registry", source="registry+https://github.com/rust-lang/crates.io-index",
+                             manifest_path="/private/cargo/registry/src/" + name + "/Cargo.toml")
+            value["packages"].append(duplicate)
+            value["resolve"]["nodes"].append({"id": duplicate["id"], "features": [], "deps": []})
+            with self.subTest(duplicate_sdk=name), self.assertRaises(S.D.Refused):
+                S.shell_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/target"))
         changes = (
-            lambda row: row["resolve"]["nodes"].pop(1),  # Required Linux helper absent.
             lambda row: row["packages"][0].pop("dependencies"),
             lambda row: row["packages"][0].update(dependencies=None),
             lambda row: row["packages"][0].update(dependencies={}),
@@ -480,7 +512,7 @@ class InstalledShellCompilerContracts(unittest.TestCase):
             ("uses_default_features", False), ("uses_default_features", 1), ("uses_default_features", None),
             ("unreviewed-field", None),
         )
-        for index in range(3):
+        for index, declaration in enumerate(declared):
             for mutation in ("missing", "duplicate", "duplicate-replacement"):
                 value = metadata()
                 dependencies = value["packages"][0]["dependencies"]
@@ -489,7 +521,7 @@ class InstalledShellCompilerContracts(unittest.TestCase):
                 elif mutation == "duplicate":
                     dependencies.append(deepcopy(dependencies[index]))
                 else:
-                    dependencies[(index + 1) % 3] = deepcopy(dependencies[index])
+                    dependencies[(index + 1) % len(declared)] = deepcopy(dependencies[index])
                 with self.subTest(declaration=index, mutation=mutation), self.assertRaises(S.D.Refused):
                     S.shell_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/target"))
             for field in declared[index]:
@@ -497,8 +529,12 @@ class InstalledShellCompilerContracts(unittest.TestCase):
                 del value["packages"][0]["dependencies"][index][field]
                 with self.subTest(declaration=index, missing_field=field), self.assertRaises(S.D.Refused):
                     S.shell_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/target"))
-            swaps = tuple((field, declared[(index + 1) % 3][field]) for field in ("name", "path", "target"))
-            for field, replacement in (*field_changes, *swaps, ("path", declared[index]["path"] + "/Cargo.toml")):
+            successor = declared[(index + 1) % len(declared)]
+            swaps = tuple((field, successor[field]) for field in ("name", "path", "target", "kind") if field in successor)
+            bad_path = declaration.get("path", "/source/desktop/vendor/zbus-5.19.0") + "/Cargo.toml"
+            for field, replacement in (*field_changes, *swaps, ("path", bad_path)):
+                if field in declaration and S.D.canonical(declaration[field]) == S.D.canonical(replacement):
+                    continue  # Only identical typed DATA is a no-op, not an accepted mutation.
                 value = metadata()
                 value["packages"][0]["dependencies"][index][field] = replacement
                 with self.subTest(declaration=index, field=field, value=replacement), self.assertRaises(S.D.Refused):
@@ -537,6 +573,42 @@ class InstalledShellCompilerContracts(unittest.TestCase):
         with self.assertRaises(S.D.Refused):
             S.shell_compiler_units([*units, extra], inactive_packages, inactive_nodes)
 
+    def test_fixed_local_graph_matches_actual_manifest_data(self):
+        # Prevent an internally consistent synthetic graph/validator from
+        # silently retaining an obsolete local-source roster. Read only these
+        # four fixed manifests; do not run Cargo or follow their declared paths.
+        value = metadata()
+        root = S.tomllib.loads((SOURCE / "desktop/src-tauri/Cargo.toml").read_text(encoding="utf-8"))
+        for package in value["packages"]:
+            if package["source"] is None:
+                relative = Path(package["manifest_path"]).relative_to("/source")
+                manifest = root if package["id"] == "root" else S.tomllib.loads((SOURCE / relative).read_text(encoding="utf-8"))
+                self.assertEqual((manifest["package"]["name"], manifest["package"]["version"]),
+                                 (package["name"], package["version"]))
+        self.assertEqual(S.D.canonical(root.get("patch")), S.D.canonical({
+            "crates-io": {"zbus": {"path": "../vendor/zbus-5.19.0"}}}))
+        declarations = value["packages"][0]["dependencies"]
+        names = {row["name"] for row in declarations}
+        expected = []
+        for row in declarations:
+            fields = {}
+            if "path" in row:
+                fields["path"] = "../" + Path(row["path"]).relative_to("/source/desktop").as_posix()
+            if row["req"] != "*":
+                fields["version"] = row["req"]
+            if not row["uses_default_features"]:
+                fields["default-features"] = False
+            if row["features"]:
+                fields["features"] = row["features"]
+            expected.append({"name": row["name"], "target": row["target"], "kind": row["kind"], "fields": fields})
+        actual = []
+        for target, table in [(None, root), *root.get("target", {}).items()]:
+            for kind, key in ((None, "dependencies"), ("dev", "dev-dependencies"), ("build", "build-dependencies")):
+                for name, fields in table.get(key, {}).items():
+                    if name in names or isinstance(fields, dict) and "path" in fields:
+                        actual.append({"name": name, "target": target, "kind": kind, "fields": fields})
+        self.assertEqual(sorted(S.D.canonical(row) for row in actual), sorted(S.D.canonical(row) for row in expected))
+
     def test_actual_sha2_optimized_profile_is_required_not_inferred(self):
         _, packages, nodes = S.shell_cargo_metadata(S.D.canonical(metadata()), Path("/source"), Path("/target"))
         _, units = S.shell_compiled_artifacts(messages(compiler_rows()), Path("/source"), Path("/target"))
@@ -560,7 +632,7 @@ class InstalledShellCompilerContracts(unittest.TestCase):
         with self.assertRaises(S.C.CheckFailure):
             S.C.bounded_json(raw, S.SHELL_METADATA_LIMIT)
         _, packages, _ = S.shell_cargo_metadata(raw, Path("/source"), Path("/target"))
-        self.assertEqual(len(packages), 36)
+        self.assertEqual(len(packages), 38)
         value["metadata"] = [None] * 200000
         with self.assertRaises(S.C.CheckFailure):
             S.shell_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/target"))
@@ -893,6 +965,15 @@ def closed_project_draft_data(lifecycle):
         "callers": [{"path": name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(), "mode": 0o640 if index == 0 else 0o600}
                     for index, (name, raw) in enumerate(lifecycle.SHELL_WORKFLOW_CALLERS.items())],
         "before": {"size": 3500, "sha256": "f" * 64}, "after": {"size": 4500, "sha256": "9" * 64}}
+    metadata = deepcopy(lifecycle.SHELL_METADATA_RECEIPT)
+    metadata_fixture = {"fixture": "android-metadata-save-v1", "rootRetained": True, "preservedOriginals": True,
+        "createdCount": 1, "replacedCount": 1, "beforeCount": 13, "afterCount": 14,
+        "configurationUnchanged": True, "noUnexpectedEntries": True, "noPendingState": True,
+        "files": [{"path": "release/store/android/en-US/" + name, "size": len(raw),
+                   "sha256": hashlib.sha256(raw).hexdigest(), "mode": 0o600}
+                  for name, raw in (("title.txt", b"Public title"), ("short_description.txt", b"Public summary"),
+                                    ("keep.txt", b"untouched\n"), ("full_description.txt", b"Public description"))],
+        "before": {"size": 4600, "sha256": "1" * 64}, "after": {"size": 4800, "sha256": "2" * 64}}
     return {"state": "normal-shell-installed-runtime-connection-observed", "productQualified": False,
             "packageLifecycleQualified": False, "shellPackageBuilt": False,
             "cases": {
@@ -905,10 +986,13 @@ def closed_project_draft_data(lifecycle):
                                   "maps": [], "projectPaths": paths},
                 "workflow-apply": {"case": "workflow-apply", "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
                                    "maps": [], "workflowApply": workflows},
+                "metadata-save": {"case": "metadata-save", "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
+                                  "maps": [], "metadataSave": metadata},
             }, "projectDraft": {"native": deepcopy(receipt), "fixture": fixture},
             "candidateDocuments": {"native": deepcopy(candidate), "fixture": candidate_fixture},
             "projectPaths": {"native": deepcopy(paths), "fixture": path_fixture},
             "workflowApply": {"native": deepcopy(workflows), "fixture": workflow_fixture},
+            "metadataSave": {"native": deepcopy(metadata), "fixture": metadata_fixture},
             "files": [{"path": "lifecycle-shell-positive-project-" + phase + ".json", **fixture[phase]}
                       for phase in ("before", "after")]
                      + [{"path": "lifecycle-shell-positive-candidate-" + phase + ".json", **candidate_fixture[phase]}
@@ -916,6 +1000,8 @@ def closed_project_draft_data(lifecycle):
                       + [{"path": "lifecycle-shell-project-paths-" + phase + ".json", **path_fixture[phase]}
                          for phase in ("before", "after")]
                       + [{"path": "lifecycle-shell-workflow-apply-" + phase + ".json", **workflow_fixture[phase]}
+                         for phase in ("before", "after")]
+                      + [{"path": "lifecycle-shell-metadata-save-" + phase + ".json", **metadata_fixture[phase]}
                          for phase in ("before", "after")]}
 
 
@@ -965,7 +1051,7 @@ class InstalledProjectDraftReceiptContracts(unittest.TestCase):
         self.assertEqual(result["fixture"]["entryCount"], 7)
         self.assertEqual(result["fixture"]["sourceBytes"], 149)
         self.assertNotEqual(result["fixture"]["before"], result["fixture"]["after"])
-        self.assertEqual(set(observed["cases"]), {"normal", "positive", "quit-outstanding", "project-paths", "workflow-apply"})
+        self.assertEqual(set(observed["cases"]), {"normal", "positive", "quit-outstanding", "project-paths", "workflow-apply", "metadata-save"})
 
     def test_rejects_legacy_partial_mistyped_or_relabelled_positive_receipts(self):
         lifecycle = S.local("ubuntu_publication_lifecycle")
@@ -1400,6 +1486,106 @@ class InstalledWorkflowApplyReceiptContracts(unittest.TestCase):
             changed = deepcopy(documents[1]); mutate(changed)
             with self.subTest(mutate=mutate), self.assertRaises(ValueError):
                 lifecycle.shell_workflow_fixture(value, before, lifecycle.canonical(changed))
+
+
+class InstalledMetadataSaveReceiptContracts(unittest.TestCase):
+    def test_sixth_receipt_requires_two_original_reviews_one_apply_and_ordered_completion(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        expected = lifecycle.SHELL_METADATA_RECEIPT
+        raw = lifecycle.canonical(expected)
+        self.assertLessEqual(len(raw), 2048)
+        self.assertEqual(lifecycle.shell_metadata_receipt(raw), expected)
+        self.assertEqual(expected["requests"], {"observe": 2, "validate": 1, "open": 2, "prepare": 2, "apply": 1,
+            "close": 1, "configuration": [0, 0, 0, 0], "workflow": [0, 0, 0, 0]})
+        self.assertEqual(expected["originals"]["writerFrames"], [2, 3])  # Explicit close uses original writer EOF.
+        self.assertEqual(expected["originals"]["stdoutFrames"], [3, 3])
+        self.assertEqual(expected["reviews"]["actions"], [1, 1, 1])
+        self.assertEqual(expected["outcomes"], [["not_started", "not_created", "settled", "cancelled"],
+                                               ["committed", "clean", "settled", "none"]])
+        lines = [b"MRK_DESKTOP_CAPABILITIES=available\n", b"MRK_DESKTOP_CATALOGUE=returned\n",
+                 b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n",
+                 lifecycle.SHELL_METADATA_MARKER + raw, b"MRK_INSTALLED_SHELL_OBSERVATION=metadata-save-verified\n"]
+        result = lifecycle.shell_result(b"".join(lines), b"", "metadata-save", 0, {})
+        self.assertEqual(result["metadataSave"], expected)
+        self.assertEqual(set(result), {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps", "metadataSave"})
+        for output in (b"".join(lines[:3] + lines[4:]), b"".join(lines + [lines[3]]),
+                       b"".join(lines[:3] + [lines[4], lines[3]]),
+                       b"".join(lines).replace(lifecycle.SHELL_METADATA_MARKER, lifecycle.SHELL_WORKFLOW_MARKER),
+                       b"".join(lines).replace(b"\n", b"\r\n")):
+            with self.subTest(output=hashlib.sha256(output).hexdigest()), self.assertRaises(ValueError):
+                lifecycle.shell_result(output, b"", "metadata-save", 0, {})
+        for stdout, stderr, code in ((b"", b"".join(lines), 0), (b"".join(lines), lines[3], 0),
+                                     (b"".join(lines), b"", 1), (b"".join(lines), b"", False)):
+            with self.subTest(code=code), self.assertRaises(ValueError):
+                lifecycle.shell_result(stdout, stderr, "metadata-save", code, {})
+        for malformed in (raw[:-1], raw + b"\n", b" " + raw, raw + b" " * 2048):
+            with self.assertRaises(ValueError):
+                lifecycle.shell_metadata_receipt(malformed)
+
+    def test_every_metadata_receipt_leaf_and_original_projection_is_required(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        expected = closed_project_draft_data(lifecycle)
+        self.assertEqual(S.shell_project_draft_observation(expected, lifecycle), expected["projectDraft"])
+
+        def leaves(value, prefix=()):
+            if type(value) is dict:
+                for key, child in value.items(): yield from leaves(child, (*prefix, key))
+            elif type(value) is list:
+                for key, child in enumerate(value): yield from leaves(child, (*prefix, key))
+            else: yield prefix, value
+
+        for path, old in leaves(expected["metadataSave"]["native"]):
+            for mode in ("missing", "wrong-type", "changed"):
+                receipt = deepcopy(expected["metadataSave"]["native"])
+                parent = receipt
+                for key in path[:-1]: parent = parent[key]
+                if mode == "missing":
+                    del parent[path[-1]]
+                elif mode == "wrong-type":
+                    parent[path[-1]] = int(old) if type(old) is bool else True if type(old) is int else None
+                else:
+                    parent[path[-1]] = not old if type(old) is bool else old + 1 if type(old) is int else old + "-other"
+                for target in ("case", "combined", "both"):
+                    changed = deepcopy(expected)
+                    if target in ("case", "both"):
+                        changed["cases"]["metadata-save"]["metadataSave"] = deepcopy(receipt)
+                    if target in ("combined", "both"):
+                        changed["metadataSave"]["native"] = deepcopy(receipt)
+                    with self.subTest(path=path, mode=mode, target=target), self.assertRaises((S.D.Refused, ValueError)):
+                        S.shell_project_draft_observation(changed, lifecycle)
+
+    def test_metadata_fixture_exports_and_domain_cannot_be_substituted(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        mutations = (
+            lambda v: v.pop("metadataSave"), lambda v: v["cases"].pop("metadata-save"),
+            lambda v: v["cases"]["metadata-save"].pop("metadataSave"), lambda v: v["metadataSave"].pop("fixture"),
+            lambda v: v["cases"]["metadata-save"].update(exitCode=True),
+            lambda v: v["cases"]["metadata-save"].update(domAndGtkObserved=1),
+            lambda v: v["cases"]["metadata-save"].update(workflowApply=v["workflowApply"]["native"]),
+            lambda v: v["cases"]["normal"].update(metadataSave=v["metadataSave"]["native"]),
+            lambda v: v["cases"]["workflow-apply"].update(metadataSave=v["metadataSave"]["native"]),
+            lambda v: v["metadataSave"]["fixture"].update(preservedOriginals=False),
+            lambda v: v["metadataSave"]["fixture"].update(configurationUnchanged=False),
+            lambda v: v["metadataSave"]["fixture"].update(createdCount=True),
+            lambda v: v["metadataSave"]["fixture"].update(replacedCount=0),
+            lambda v: v["metadataSave"]["fixture"].update(noPendingState=1),
+            lambda v: v["metadataSave"]["fixture"].update(extra=True),
+            lambda v: v["metadataSave"]["fixture"]["files"].pop(),
+            lambda v: v["metadataSave"]["fixture"]["files"].reverse(),
+            lambda v: v["metadataSave"]["fixture"]["files"][1].update(mode=0o644),
+            lambda v: v["metadataSave"]["fixture"]["files"][1].update(sha256="0" * 64),
+            lambda v: v["metadataSave"]["fixture"].update(after=deepcopy(v["metadataSave"]["fixture"]["before"])),
+            lambda v: v["metadataSave"]["fixture"]["before"].update(size=8193),
+            lambda v: v["metadataSave"]["fixture"]["after"].update(sha256="unbound"),
+            lambda v: v["files"].pop(8), lambda v: v["files"].pop(9),
+            lambda v: v["files"].append(deepcopy(v["files"][8])),
+            lambda v: v["files"][8].update(size=True), lambda v: v["files"][9].update(sha256="0" * 64),
+            lambda v: v["files"][9].update(path="lifecycle-shell-workflow-apply-after.json"),
+        )
+        for mutate in mutations:
+            changed = closed_project_draft_data(lifecycle); mutate(changed)
+            with self.subTest(mutate=mutate), self.assertRaises((S.D.Refused, ValueError, KeyError)):
+                S.shell_project_draft_observation(changed, lifecycle)
 
 
 class InstalledFailureLabelSourceContracts(unittest.TestCase):

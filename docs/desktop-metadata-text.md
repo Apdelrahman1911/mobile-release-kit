@@ -1,16 +1,16 @@
 # Guided public metadata text
 
-## Status: source implementation, Save still gated
+## Status: installed Linux Save routing implemented, verification pending
 
 The narrow desktop path is **configure locale → load public text → edit and
 validate → review exact files → confirm typed Save**. This is an app-managed
 preview/save implementation, not a manual-copy substitute. The fixed installed
-Linux profile includes passive text observation and validation; its native
-verification remains pending. The metadata writer and its native qualification
-and packaged-runtime gates remain closed. A visible
-editor, source-authored inert tests, another edit domain's evidence or a browser
-preview does not enable or qualify Save. No test execution or native/Store
-readiness is asserted by this document.
+Linux profile includes passive text observation and validation and now a
+separately sealed metadata writer route. Its installed native verification
+remains pending. General native qualification and packaged-runtime gates
+remain closed. A visible editor, source-authored inert tests, another edit
+domain's evidence or a browser preview does not qualify Save. No new test
+execution or native/Store readiness is asserted by this document.
 
 The separate metadata writer gate targets Linux x86_64 GNU with strong original
 root registration. It does not inherit configuration/workflow fixture
@@ -19,6 +19,13 @@ uses only the supported POSIX named reader; the staged Windows snapshot reader
 does not enable it. Pure validation is portable. Browser preview may display
 the shipped help, but refuses actual file observation, core validation and Save
 rather than returning successful fixtures.
+
+Only the normal Linux x86_64 GNU `desktop-shell` profile can select this
+installed route, using the existing fixed runtime, original custody and
+platform checks. Development/publisher builds and generic resolvers cannot
+substitute for it. The same edit owner and ledger keep metadata separate from
+configuration and workflows through inspection, preparation, registered-root
+claim, the exact `metadata_text` bootstrap selector and final settlement.
 
 ## One enabled platform and one saved locale
 
@@ -210,3 +217,15 @@ command admission. Real Save enablement additionally requires independent
 exact-source native original-owner/direct-child, filesystem replacement/fault,
 cancellation/STOP/settlement and installed-resource qualification. None is
 inferred from source review, inert checks or another domain's qualification.
+
+The added installed `metadata-save` observation exercises a real saved Android
+locale, two explicit Reviews and one Apply. Closing the first Review must
+settle its original child and retain the draft; reopening is a new explicit
+review, not a retry of an uncertain write. Save remains disabled until both
+acknowledgment and exact typed `SAVE`. The observer correlates the actual
+plan/revision/session and finality before accepting Saved, then uses Load to
+read the persisted text and quits through the original GUI/relay lifecycle.
+Post-exit inventories separately verify one replaced short description, one
+created full description, preserved title/sentinel/configuration/inputs and
+no pending state. Its 45-second case, 128 DOM evaluations and 2048-byte receipt
+ceilings are unchanged. These are required checks, not claimed native results.

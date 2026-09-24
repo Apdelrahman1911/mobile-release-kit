@@ -7,12 +7,12 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tauri::Manager;
 use crate::{asset_session::{InstalledEvidenceWitness, InstalledProjectWitness}, bridge::{AppInfo, Project},
-    candidate_evidence_protocol as evidence, edit_owner::{EditOwner, InstalledConfigFinality, InstalledWorkflowFinality},
-    github_workflow_edit_protocol as workflow,
+    candidate_evidence_protocol as evidence, edit_owner::{EditOwner, InstalledConfigFinality, InstalledWorkflowFinality, InstalledMetadataFinality},
+    github_workflow_edit_protocol as workflow, metadata_text_edit_protocol as metadata,
     edit_protocol::{self as edit, ConfigEditStatus, EditProjection}, error::BridgeError, supervisor::{HeldAppInfo, Supervisor}};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Case { Positive, Outstanding, ProjectPaths, WorkflowApply }
+enum Case { Positive, Outstanding, ProjectPaths, WorkflowApply, MetadataSave }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Step {
     Bootstrap, Environment, ReadEnvironment, Dashboard, ChooseCancel, Cancel, Cancelled, ReadCancelled,
@@ -25,7 +25,7 @@ enum Step {
     EnterTitle, EnterShortDescription, EnterFullDescription, ReadMetadataInputs, ValidateMetadata, ReadMetadataValidation,
     SavedSettings, ReadSavedDraft, Artifacts, ReadEvidenceEmpty, ChooseEvidenceCancel, CancelEvidence, EvidenceCancelled, ReadEvidenceCancelled,
     ChooseEvidenceSelect, SetEvidence, SelectEvidence, EvidenceSelected, ReadEvidenceSelected, InspectEvidence, EvidenceObserved, ReadEvidenceObserved,
-    CandidateSettings, ReadCandidateDraft, PrepareNoop, ReadNoopReview, Close, Quit, Exit, Paths(PathStep), Workflow(WorkflowStep),
+    CandidateSettings, ReadCandidateDraft, PrepareNoop, ReadNoopReview, Close, Quit, Exit, Paths(PathStep), Workflow(WorkflowStep), MetadataSave(MetadataStep),
 }
 impl Step {
     fn failure_line(self) -> &'static [u8] {
@@ -113,6 +113,44 @@ impl Step {
             Self::Exit => b"MRK_INSTALLED_SHELL_FAILURE_STEP=Exit\n",
             Self::Paths(step) => step.failure_line(),
             Self::Workflow(step) => step.failure_line(),
+            Self::MetadataSave(step) => step.failure_line(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MetadataStep {
+    Navigate, Load, ReadLoaded, Short, Full, ReadInputs, Validate, ReadValidation,
+    Review(u8), OpenText(u8), ReadReview(u8), CloseReview, ReadClosed,
+    Confirm, ReadConfirmation, Check, ReadChecked, Type, ReadTyped, Apply, ReadSaved,
+    Refresh, ReadReadback,
+}
+impl MetadataStep {
+    fn failure_line(self) -> &'static [u8] {
+        match self {
+            Self::Navigate => b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataNavigate\n",
+            Self::Load => b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataLoad\n",
+            Self::ReadLoaded => b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadLoaded\n",
+            Self::Short => b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataShort\n",
+            Self::Full => b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataFull\n",
+            Self::ReadInputs => b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadInputs\n",
+            Self::Validate => b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataValidate\n",
+            Self::ReadValidation => b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadValidation\n",
+            Self::Review(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReview\n",
+            Self::OpenText(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataOpenText\n",
+            Self::ReadReview(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadReview\n",
+            Self::CloseReview => b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataCloseReview\n",
+            Self::ReadClosed => b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadClosed\n",
+            Self::Confirm => b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataConfirm\n",
+            Self::ReadConfirmation => b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadConfirmation\n",
+            Self::Check => b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataCheck\n",
+            Self::ReadChecked => b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadChecked\n",
+            Self::Type => b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataType\n",
+            Self::ReadTyped => b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadTyped\n",
+            Self::Apply => b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataApply\n",
+            Self::ReadSaved => b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadSaved\n",
+            Self::Refresh => b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataRefresh\n",
+            Self::ReadReadback => b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadReadback\n",
         }
     }
 }
@@ -300,6 +338,7 @@ fn failure_sink(case: Case) -> Option<rustix::fd::OwnedFd> {
         Case::Outstanding => "shell-quit-outstanding-failure.labels",
         Case::ProjectPaths => "shell-project-paths-failure.labels",
         Case::WorkflowApply => "shell-workflow-apply-failure.labels",
+        Case::MetadataSave => "shell-metadata-save-failure.labels",
     };
     let fd = fs::openat(&parent, leaf, OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
         Mode::empty()).ok()?;
@@ -864,8 +903,12 @@ fn metadata_validation_display(result: &crate::metadata_text_edit_protocol::Vali
         fields.push(serde_json::json!({"id":row["id"],"path":original["path"],"text":input["text"],"badges":["Required","Unsaved text"],
             "count":{"characterCount":row["characterCount"],"limit":row["limit"],"bytes":input["text"].as_str()?.len()},"invalid":"false"}));
     }
-    Some(metadata_display(fields, Some(serde_json::json!({"badge":"Format-valid selected text",
-        "text":"Format-valid selected text Not a saved file, whole-metadata validation, native asset check, Store approval or release-readiness result."}))))
+    let mut display = metadata_display(fields, Some(serde_json::json!({"badge":"Format-valid selected text",
+        "text":"Format-valid selected text Not a saved file, whole-metadata validation, native asset check, Store approval or release-readiness result."})));
+    // The independent native metadata status must also be available/idle;
+    // ReadMetadataValidation waits for that actual original before this DOM.
+    display["reviewAvailable"] = serde_json::json!(true);
+    Some(display)
 }
 #[derive(Default)]
 struct SavedReads {
@@ -1184,10 +1227,308 @@ fn workflow_start_step(step: Step, index: usize) -> bool {
     matches!(step, Step::Workflow(WorkflowStep::Start(i) | WorkflowStep::OpenText(i) | WorkflowStep::ReadResult(i)) if usize::from(i) == index)
 }
 
+// One fixed public bundle. These DATA comparisons grant no filesystem or
+// owner authority. All text is obtained through the genuine controller/core.
+fn metadata_baseline(saved: bool) -> Value {
+    let fields: Vec<_> = METADATA_FIELDS.iter().enumerate().map(|(index, (id, text, _))| {
+        if !saved && index == 2 { serde_json::json!({"id":id,"state":"absent"}) }
+        else {
+            let text = if !saved && index == 1 { "Old summary" } else { text };
+            serde_json::json!({"id":id,"state":"present","byteLength":text.len(),"sha256":format!("{:x}",Sha256::digest(text.as_bytes()))})
+        }
+    }).collect();
+    serde_json::json!({"config":{"byteLength":CONFIG_BYTES,"sha256":CONFIG_SHA256},"fields":fields})
+}
+fn metadata_saved_observation(result: &metadata::Observation, saved: bool) -> Option<Value> {
+    let raw = edit::bounded(result, metadata::RESPONSE_LIMIT).ok()?;
+    let value = crate::protocol::strict_json(&raw).ok()?;
+    if !keys(&value, &["schemaVersion","platform","locale","metadataRoot","observationScope","baseline","fields","assurance"])
+        || value["schemaVersion"] != 1 || value["platform"] != "android" || value["locale"] != "en-US"
+        || value["metadataRoot"] != "release/store" || value["observationScope"] != "single-request-non-atomic"
+        || value["baseline"] != metadata_baseline(saved) || !assurance(&value,"static-text") { return None; }
+    let rows = value["fields"].as_array().filter(|rows| rows.len() == 3)?;
+    for (index, (row, (id, text, _))) in rows.iter().zip(METADATA_FIELDS).enumerate() {
+        let mut expected = value["baseline"]["fields"][index].clone();
+        expected["path"] = serde_json::json!(format!("release/store/android/en-US/{id}"));
+        if saved || index != 2 { expected["text"] = serde_json::json!(if !saved && index == 1 { "Old summary" } else { text }); }
+        if row != &expected { return None; }
+    }
+    Some(value)
+}
+fn metadata_validation_sample(result: &metadata::ValidationResult) -> Option<Value> {
+    let raw = edit::bounded(result, metadata::RESPONSE_LIMIT).ok()?;
+    let value = crate::protocol::strict_json(&raw).ok()?;
+    let rows: Vec<_> = METADATA_FIELDS.iter().map(|(id,text,limit)| serde_json::json!({"id":id,"valid":true,
+        "characterCount":text.len(),"limit":limit,"issues":[]})).collect();
+    (keys(&value,&["schemaVersion","platform","valid","state","fields","assurance"])
+        && value["schemaVersion"] == 1 && value["platform"] == "android" && value["valid"] == true
+        && value["state"] == "format-valid" && value["fields"] == serde_json::json!(rows)
+        && assurance(&value,"schema-policy")).then_some(value)
+}
+fn metadata_save_display(edited: bool, validated: bool, saved: bool, available: bool) -> Value {
+    let fields: Vec<_> = METADATA_FIELDS.iter().enumerate().map(|(index,(id,text,_))| {
+        let text = if edited { *text } else { match index { 0 => "Public title", 1 => "Old summary", _ => "" } };
+        let badge = if saved { "Saved baseline" } else if edited && index > 0 { "Unsaved text" }
+            else if index == 2 { "Missing · observed" } else { "Observed original" };
+        serde_json::json!({"id":id,"path":format!("release/store/android/en-US/{id}"),"text":text,
+            "badges":["Required",badge],"invalid":if validated && !saved { Some("false") } else { None }})
+    }).collect();
+    serde_json::json!({"context":"android / en-US","badge":"Selected text only","fields":fields,
+        "loadLabel":"Refresh text","loadAvailable":true,"validateAvailable":true,"reviewAvailable":available,
+        "validation":if saved { Some("Stale validation") } else if validated { Some("Format-valid selected text") } else { None }})
+}
+fn metadata_review_sample(view: &metadata::PreparedView) -> Option<Value> {
+    if edit::bounded(view,metadata::VIEW_LIMIT).is_err() || view.schema_version != 1
+        || view.platform != metadata::Platform::Android || view.locale != "en-US" || view.metadata_root != "release/store"
+        || !view.create_directories.is_empty() || view.files.len() != 3 || metadata_validation_sample(&view.validation).is_none() { return None; }
+    let mut expected = Vec::new();
+    for (index,(id,text,_)) in METADATA_FIELDS.iter().enumerate() {
+        let old = if index == 0 { Some("Public title") } else if index == 1 { Some("Old summary") } else { None };
+        let before = old.map_or_else(|| serde_json::json!({"state":"absent"}), |text|
+            serde_json::json!({"state":"present","text":text,"byteLength":text.len(),"sha256":format!("{:x}",Sha256::digest(text.as_bytes()))}));
+        expected.push(serde_json::json!({"id":id,"path":format!("release/store/android/en-US/{id}"),
+            "action":match index { 0 => "preserve", 1 => "replace", _ => "create" },"before":before,
+            "after":{"text":text,"byteLength":text.len(),"sha256":format!("{:x}",Sha256::digest(text.as_bytes()))},"lineEndingsChanged":false}));
+    }
+    let actual = serde_json::to_value(&view.files).ok()?;
+    (actual == serde_json::json!(expected)).then_some(actual)
+}
+struct MetadataSession {
+    projection: metadata::Projection, prepared: Option<Value>, review: Option<Value>, binding: Option<(u32,u32)>,
+    first_revision: u32, open_returned: bool,
+    prepare_requested: bool, prepare_returned: bool, review_visible: bool, config_blocked: bool,
+    close_requested: bool, close_returned: bool, apply_requested: bool, apply_returned: bool,
+    finality: Option<InstalledMetadataFinality>,
+}
+impl MetadataSession {
+    fn live_review(&self) -> bool {
+        self.open_returned && self.projection.phase == edit::Phase::Reviewing && self.projection.review_remaining_ms > 0
+            && !self.projection.apply_submitted && self.projection.native_reason == edit::NativeEditReason::None
+            && self.projection.native_finality == edit::NativeFinality::Pending && self.projection.core_outcome.is_none()
+            && self.prepared.is_some() && self.review.is_some() && self.finality.is_none()
+    }
+}
+struct MetadataOpen {
+    index: usize, after_revision: u32, project_id: String, generation: String,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MetadataOpenMatch { First, Reply }
+#[derive(Default)]
+struct MetadataRecord {
+    capability: bool, ready: bool, native_revision: Option<u32>, saved_config: Option<Value>,
+    observations: Vec<Value>, observe_requests: u8, observe_pending: bool, loaded_visible: bool,
+    entered: [bool;2], inputs: Option<Value>, validation_requested: bool, validation: Option<Value>, validation_visible: bool,
+    sessions: Vec<MetadataSession>, requests: [u8;4], open_pending: Option<MetadataOpen>, prepare_pending: Option<usize>,
+    retained_after_close: bool, confirmation_opened: u8, initially_disabled: bool, checkbox_only_disabled: bool,
+    typed_save: bool, acknowledged: bool, saved_visible: bool, readback_visible: bool,
+}
+impl MetadataRecord {
+    fn open_match(&self, status: &metadata::MetadataTextEditStatus, returned: bool) -> Option<MetadataOpenMatch> {
+        let pending = self.open_pending.as_ref()?;
+        let owner = status.active.as_ref()?;
+        if pending.index >= 2 || usize::from(self.requests[0]) != pending.index + 1
+            || status.schema_version != 1 || status.domain != metadata::DOMAIN
+            || status.window_generation != pending.generation || !edit::token(&status.window_generation)
+            || status.status_revision <= pending.after_revision
+            || !status.capability.available || status.capability.reason != edit::EditAvailability::Available
+            || owner.domain != metadata::DOMAIN || owner.project_id != pending.project_id
+            || owner.owner_generation != pending.generation || !edit::token(&owner.session_id)
+            || owner.platform != metadata::Platform::Android || owner.locale != "en-US"
+            || owner.prepared.is_some() || owner.core_outcome.is_some() || owner.apply_submitted || owner.late_settled
+            || owner.native_reason != edit::NativeEditReason::None || owner.native_finality != edit::NativeFinality::Pending
+            || (if returned { owner.phase != edit::Phase::Opening } else { !matches!(owner.phase,edit::Phase::Opening | edit::Phase::Editing) })
+            || (owner.phase == edit::Phase::Opening) != owner.checkout.is_none() { return None; }
+        if self.sessions.len() == pending.index {
+            if self.native_revision.is_some_and(|revision|status.status_revision < revision)
+                || self.sessions.iter().any(|s|!s.open_returned || s.finality.is_none() || s.projection.session_id == owner.session_id) { return None; }
+            if let Some(checkout) = &owner.checkout {
+                if !edit::token(&checkout.revision) || checkout.metadata_root != "release/store"
+                    || serde_json::to_value(&checkout.baseline).ok() != self.observations.first().map(|o|o["baseline"].clone())
+                    || self.sessions.iter().any(|s|s.projection.checkout.as_ref().is_some_and(|c|c.revision == checkout.revision)) { return None; }
+            }
+            Some(MetadataOpenMatch::First)
+        } else {
+            let session = self.sessions.get(pending.index)?;
+            (returned && self.sessions.len() == pending.index + 1 && !session.open_returned
+                && session.projection.session_id == owner.session_id && session.projection.project_id == owner.project_id
+                && session.projection.owner_generation == owner.owner_generation && status.status_revision <= session.first_revision)
+                .then_some(MetadataOpenMatch::Reply)
+        }
+    }
+    fn observe_open(&mut self, status: &metadata::MetadataTextEditStatus, returned: bool, config: Option<&ConfigEditStatus>) -> bool {
+        let Some(matched) = self.open_match(status,returned) else { return false; };
+        let Some(pending) = self.open_pending.as_ref() else { return false; };
+        let index = pending.index;
+        if matched == MetadataOpenMatch::First {
+            let Some(config) = config else { return false; };
+            if config.schema_version != 1 || config.window_generation != pending.generation
+                || config.status_revision < status.status_revision || config.capability.available
+                || config.capability.reason != edit::EditAvailability::OtherEditActive
+                || config.active.is_some() || config.last_terminal.is_some() { return false; }
+            let Some(owner) = status.active.as_ref() else { return false; };
+            self.sessions.push(MetadataSession { projection:owner.clone(), prepared:None, review:None, binding:None,
+                first_revision:status.status_revision, open_returned:false,
+                prepare_requested:false, prepare_returned:false, review_visible:false, config_blocked:true,
+                close_requested:false, close_returned:false, apply_requested:false, apply_returned:false, finality:None });
+        } else if config.is_some() { return false; }
+        if returned {
+            // The actual captured Opening reply is independent evidence. It
+            // never replaces a newer genuine Editing/Preparing/Reviewing event.
+            self.sessions[index].open_returned = true; self.open_pending = None;
+        }
+        true
+    }
+    fn record_prepare(&mut self, args: &metadata::PrepareMetadataTextEdit) -> bool {
+        let index = usize::from(self.requests[1]);
+        let Some(session) = self.sessions.get(index) else { return false; };
+        if self.prepare_pending.is_some() || session.prepare_requested || session.binding.is_some()
+            || session.projection.phase != edit::Phase::Editing || session.projection.session_id != args.session_id
+            || args.draft_revision != 2 || args.baseline_generation != 0
+            || !session.projection.checkout.as_ref().is_some_and(|c|c.revision == args.revision && c.baseline == args.expected_baseline)
+            || serde_json::to_value(&args.expected_baseline).ok() != self.observations.first().and_then(|o|o.get("baseline")).cloned()
+            || serde_json::to_value(&args.fields).ok().as_ref() != self.inputs.as_ref() || !session.config_blocked { return false; }
+        // A genuine Editing event can cause Prepare before Open's captured
+        // reply returns. Event-bound identity/checkout are sufficient for this
+        // request, but never for visible review, Close, Apply or completion.
+        let session = &mut self.sessions[index];
+        session.prepare_requested = true; session.binding = Some((args.draft_revision,args.baseline_generation));
+        self.prepare_pending = Some(index); self.requests[1] += 1;
+        true
+    }
+    fn complete(&self) -> bool {
+        self.capability && self.saved_config.is_some() && self.observe_requests == 2 && self.observations.len() == 2
+            && !self.observe_pending && self.loaded_visible && self.entered == [true;2] && self.inputs.is_some()
+            && self.validation_requested && self.validation.is_some() && self.validation_visible
+            && self.requests == [2,2,1,1] && self.open_pending.is_none() && self.prepare_pending.is_none()
+            && self.retained_after_close && self.confirmation_opened == 1 && self.initially_disabled && self.checkbox_only_disabled
+            && self.typed_save && self.acknowledged && self.saved_visible && self.readback_visible && self.sessions.len() == 2
+            && self.sessions.iter().enumerate().all(|(index,s)| s.open_returned && s.prepare_requested && s.prepare_returned && s.binding == Some((2,0))
+                && s.review_visible && s.config_blocked && s.finality.is_some()
+                && s.close_requested == (index == 0) && s.close_returned == (index == 0)
+                && s.apply_requested == (index == 1) && s.apply_returned == (index == 1))
+    }
+}
+fn metadata_start_step(step: Step, index: usize) -> bool {
+    matches!(step,Step::MetadataSave(MetadataStep::Review(i) | MetadataStep::OpenText(i) | MetadataStep::ReadReview(i)) if usize::from(i) == index)
+}
+fn metadata_original_final(facts: &InstalledMetadataFinality, projection: &metadata::Projection) -> bool {
+    projection.domain == metadata::DOMAIN && facts.session_id == projection.session_id
+        && facts.project_id == projection.project_id && facts.owner_generation == projection.owner_generation
+        && facts.writer_frames == (if projection.apply_submitted { 3 } else { 2 }) && facts.stdout_frames == 3
+        && facts.inspection_joined && facts.acquisition_joined && facts.child_waited_success
+        && facts.stdin_closed && facts.stdout_eof_closed && facts.stderr_eof_closed && facts.io_joined
+        && facts.driver_joined && facts.watchdog_joined && facts.manager_joined
+        && facts.runtime_ledger_settled && facts.runtime_settlement_joined
+}
+
+fn assert_metadata_open_race_contract() {
+    // Inert data through the SAME binding/reply/Prepare predicates used below.
+    // No owner, native status call, UI, clock, file or finality evidence is made.
+    let generation = "0".repeat(32); let session_id = "1".repeat(32); let revision = "2".repeat(32);
+    let fields = serde_json::json!(METADATA_FIELDS.iter().map(|(id,text,_)|
+        serde_json::json!({"id":id,"text":text})).collect::<Vec<_>>());
+    let opening = metadata::MetadataTextEditStatus { schema_version:1, domain:metadata::DOMAIN,
+        window_generation:generation.clone(), status_revision:11,
+        capability:edit::Capability { available:true, reason:edit::EditAvailability::Available },
+        active:Some(metadata::Projection { domain:metadata::DOMAIN, project_id:"inert-project".into(),
+            session_id:session_id.clone(), owner_generation:generation.clone(), platform:metadata::Platform::Android,
+            locale:"en-US".into(), phase:edit::Phase::Opening, review_remaining_ms:1000, checkout:None, prepared:None,
+            apply_submitted:false, core_outcome:None, native_reason:edit::NativeEditReason::None,
+            native_finality:edit::NativeFinality::Pending, late_settled:false }), last_terminal:None };
+    let mut editing = opening.clone(); editing.status_revision = 12;
+    let active = editing.active.as_mut().unwrap(); active.phase = edit::Phase::Editing;
+    active.checkout = Some(metadata::Checkout { revision:revision.clone(), metadata_root:"release/store".into(),
+        baseline:serde_json::from_value(metadata_baseline(false)).unwrap() });
+    let config = ConfigEditStatus { schema_version:1, window_generation:generation.clone(), status_revision:13,
+        capability:edit::Capability { available:false, reason:edit::EditAvailability::OtherEditActive }, active:None, last_terminal:None };
+    let pending = |index,after_revision| MetadataOpen { index, after_revision, project_id:"inert-project".into(), generation:generation.clone() };
+    let record = || MetadataRecord { native_revision:Some(10), open_pending:Some(pending(0,10)), requests:[1,0,0,0],
+        observations:vec![serde_json::json!({"baseline":metadata_baseline(false)})], inputs:Some(fields.clone()), ..MetadataRecord::default() };
+    let args: metadata::PrepareMetadataTextEdit = serde_json::from_value(serde_json::json!({
+        "sessionId":session_id,"revision":revision,"expectedBaseline":metadata_baseline(false),"fields":fields,
+        "draftRevision":2,"baselineGeneration":0})).unwrap();
+
+    let mut reply_first = record();
+    assert!(reply_first.observe_open(&opening,true,Some(&config)));
+    assert!(reply_first.open_pending.is_none() && reply_first.sessions[0].open_returned);
+    assert_eq!(reply_first.sessions[0].projection.phase,edit::Phase::Opening);
+    assert!(reply_first.sessions[0].projection.checkout.is_none() && !reply_first.record_prepare(&args));
+    assert!(!reply_first.observe_open(&opening,true,None)); // Duplicate reply is not a new original.
+
+    // Cover both schedules: Editing before the Open hook, and the actual
+    // controller Prepare before that hook. The captured older Opening cannot
+    // replace the checkout, pending Prepare, or first native revision.
+    for prepare_before_reply in [false,true] {
+        let mut early = record();
+        assert!(early.observe_open(&editing,false,Some(&config)));
+        assert!(early.sessions[0].config_blocked && !early.sessions[0].open_returned);
+        assert_eq!(early.sessions[0].first_revision,12);
+        early.native_revision = Some(editing.status_revision); // Completed native projection reconciliation.
+        if prepare_before_reply { assert!(early.record_prepare(&args)); }
+        let before = serde_json::to_value(&early.sessions[0].projection).unwrap();
+        assert!(!early.observe_open(&opening,true,Some(&config))); // No second snapshot path.
+        assert!(early.observe_open(&opening,true,None));
+        assert_eq!(serde_json::to_value(&early.sessions[0].projection).unwrap(),before);
+        assert_eq!(early.native_revision,Some(12));
+        if !prepare_before_reply { assert!(early.record_prepare(&args)); }
+        assert_eq!(early.prepare_pending,Some(0)); assert_eq!(early.sessions[0].binding,Some((2,0)));
+        assert!(early.sessions[0].prepare_requested && early.sessions[0].open_returned && !early.record_prepare(&args));
+    }
+
+    let mut no_reply = record(); assert!(no_reply.observe_open(&editing,false,Some(&config)));
+    assert!(no_reply.record_prepare(&args));
+    // Isolate the real visible-review gate with otherwise-ready inert data.
+    no_reply.sessions[0].projection.phase = edit::Phase::Reviewing;
+    no_reply.sessions[0].prepared = Some(Value::Null); no_reply.sessions[0].review = Some(Value::Null);
+    assert!(!no_reply.sessions[0].live_review() && no_reply.open_pending.is_some());
+    let mut foreign = opening.clone(); foreign.active.as_mut().unwrap().session_id = "3".repeat(32);
+    assert!(!no_reply.observe_open(&foreign,true,None));
+    let mut too_late = opening.clone(); too_late.status_revision = 13;
+    assert!(!no_reply.observe_open(&too_late,true,None));
+    assert!(no_reply.observe_open(&opening,true,None) && no_reply.sessions[0].live_review());
+    assert_eq!(no_reply.sessions[0].projection.phase,edit::Phase::Reviewing);
+
+    let mutations: [fn(&mut metadata::MetadataTextEditStatus);11] = [
+        |s|s.status_revision = 10,
+        |s|s.domain = "wrong-domain",
+        |s|s.window_generation = "4".repeat(32),
+        |s|s.active.as_mut().unwrap().project_id = "other-project".into(),
+        |s|s.active.as_mut().unwrap().owner_generation = "4".repeat(32),
+        |s|s.active.as_mut().unwrap().domain = "wrong-domain",
+        |s|s.active.as_mut().unwrap().platform = metadata::Platform::Ios,
+        |s|s.active.as_mut().unwrap().locale = "fr-FR".into(),
+        |s|s.active.as_mut().unwrap().phase = edit::Phase::Preparing,
+        |s|s.active.as_mut().unwrap().checkout = None,
+        |s|s.active.as_mut().unwrap().checkout.as_mut().unwrap().metadata_root = "other/root".into(),
+    ];
+    for mutate in mutations {
+        let mut wrong = editing.clone(); mutate(&mut wrong);
+        let mut sample = record(); assert!(!sample.observe_open(&wrong,false,Some(&config)) && sample.sessions.is_empty());
+    }
+    let mut missing_config = record(); assert!(!missing_config.observe_open(&editing,false,None));
+    let mut stale_config = config.clone(); stale_config.status_revision = 11;
+    assert!(!missing_config.observe_open(&editing,false,Some(&stale_config)));
+    let mut available_config = config.clone(); available_config.capability.available = true;
+    assert!(!missing_config.observe_open(&editing,false,Some(&available_config)) && missing_config.sessions.is_empty());
+
+    // Inert settled-first-original data isolates second-original ID reuse;
+    // these booleans are never passed to a native observation or receipt.
+    reply_first.sessions[0].finality = Some(InstalledMetadataFinality { session_id:session_id.clone(),
+        project_id:"inert-project".into(), owner_generation:generation.clone(), writer_frames:2, stdout_frames:3,
+        inspection_joined:true, acquisition_joined:true, child_waited_success:true, stdin_closed:true,
+        stdout_eof_closed:true, stderr_eof_closed:true, io_joined:true, driver_joined:true, watchdog_joined:true,
+        manager_joined:true, runtime_ledger_settled:true, runtime_settlement_joined:true });
+    reply_first.open_pending = Some(pending(1,20)); reply_first.requests[0] = 2;
+    let mut reused = opening.clone(); reused.status_revision = 21;
+    assert_eq!(reply_first.open_match(&reused,true),None);
+    reused.active.as_mut().unwrap().session_id = "3".repeat(32);
+    assert_eq!(reply_first.open_match(&reused,true),Some(MetadataOpenMatch::First));
+}
+
 struct Record {
     attached: bool, started: bool, loaded: bool, info: bool, methods: usize, catalog: bool, environment: bool,
     pickers: [Picker; 2], cancel_returned: bool, cancelled: bool, project: Option<Project>, selected: bool,
-    project_witness: Option<InstalledProjectWitness>, candidate: Candidate, paths: Paths, workflow: WorkflowRecord,
+    project_witness: Option<InstalledProjectWitness>, candidate: Candidate, paths: Paths, workflow: WorkflowRecord, metadata: MetadataRecord,
     snapshot_requests: u8, snapshot: bool, snapshot_visible: bool, suggest_called: bool, suggested: Option<Value>, provenance: Option<Value>,
     provenance_visible: bool, adopted: bool, draft_visible: bool, guidance: Guidance,
     capability: bool, generation: Option<String>, native_revision: Option<u32>, sessions: Vec<SaveSession>, requests: [u8; 4],
@@ -1216,7 +1557,7 @@ impl Observation {
         let end = Instant::now() + Duration::from_secs(45);
         let project_path = (case != Case::Outstanding).then(project_path).flatten().map(|path|
             match case { Case::ProjectPaths => path.with_file_name("path-project"),
-                Case::WorkflowApply => path.with_file_name("workflow-project"), _ => path });
+                Case::WorkflowApply => path.with_file_name("workflow-project"), Case::MetadataSave => path.with_file_name("metadata-project"), _ => path });
         let paths = Paths::new((case == Case::ProjectPaths).then_some(project_path.as_deref()).flatten());
         let evidence_path = project_path.as_ref().and_then(|path| path.parent()).map(|root| root.join("candidate-evidence"));
         Self { case, main: std::thread::current().id(), end,
@@ -1227,7 +1568,7 @@ impl Observation {
                 step: Step::Bootstrap, pending: None, evaluations: 0, trace: (Step::Bootstrap, Boundary::Bootstrap),
                 bootstrap: BootstrapProgress::NotSampled,
                 pickers: std::array::from_fn(|_| Picker::default()), cancel_returned: false, cancelled: false, project: None, selected: false,
-                project_witness: None, candidate: Candidate::default(), paths, workflow: WorkflowRecord::default(),
+                project_witness: None, candidate: Candidate::default(), paths, workflow: WorkflowRecord::default(), metadata: MetadataRecord::default(),
                 snapshot_requests: 0, snapshot: false, snapshot_visible: false, suggest_called: false, suggested: None, provenance: None,
                 provenance_visible: false, adopted: false, draft_visible: false, guidance: Guidance::default(),
                 capability: false, generation: None, native_revision: None, sessions: Vec::new(), requests: [0; 4],
@@ -1334,7 +1675,8 @@ impl Observation {
             Ok(None) if r.step == Step::Cancelled && !r.cancel_returned && r.pickers[0].responded && r.pickers[0].returned => r.cancel_returned = true,
             Ok(Some(project)) if r.step == Step::Selected && r.cancelled && r.project.is_none() && r.pickers[1].responded && r.pickers[1].returned
                 && self.project_path().is_some_and(|path| Path::new(&project.path) == path)
-                && project.name == (match self.case { Case::ProjectPaths => "path-project", Case::WorkflowApply => "workflow-project", _ => "positive-project" })
+                && project.name == (match self.case { Case::ProjectPaths => "path-project", Case::WorkflowApply => "workflow-project",
+                    Case::MetadataSave => "metadata-project", _ => "positive-project" })
                 && crate::protocol::valid_id(&project.id) => r.project = Some(project.clone()),
             _ => self.fail(),
         }
@@ -1353,9 +1695,14 @@ impl Observation {
     pub(super) fn snapshot(&self, project_id: &str, result: &Result<Value, BridgeError>) {
         let Some(mut r) = self.record_at(Boundary::Result) else { return; };
         let saved = r.snapshot_requests == 2;
+        let initial_saved = self.case == Case::MetadataSave;
         let valid = result.as_ref().is_ok_and(|value| {
             let config = &value["config"]; let discovery = &value["discovery"]; let scan = &discovery["scan"];
-            let configuration = if saved {
+            let configuration = if initial_saved {
+                config["state"].as_str() == Some("format-valid") && config["issues"].as_array().is_some_and(Vec::is_empty)
+                    && config["data"].is_object()
+                    && config["content"] == serde_json::json!({"bytes":CONFIG_BYTES,"sha256":CONFIG_SHA256})
+            } else if saved {
                 config["state"].as_str() == Some("format-valid") && config["issues"].as_array().is_some_and(Vec::is_empty)
                     && r.suggested.as_ref() == config.get("data")
                     // Exact raw-byte descriptor is produced by the fresh core
@@ -1385,15 +1732,16 @@ impl Observation {
                 && discovery["hints"]["versionSource"].as_str() == Some(VERSION_SOURCE)
                 && discovery["hints"]["versionNameKey"].as_str() == Some("VERSION_NAME")
                 && discovery["hints"]["versionBuildKey"].as_str() == Some("BUILD_NUMBER")
-                && scan["sourceFiles"].as_u64() == Some(if saved { 3 } else { 2 })
-                && scan["sourceBytes"].as_u64() == Some(PROJECT_SOURCE.len() as u64 + u64::from(VERSION_BYTES) + if saved { u64::from(CONFIG_BYTES) } else { 0 })
-                && scan["entries"].as_u64() == Some(if self.case == Case::WorkflowApply { 5 } else if saved { 6 } else { 3 })
-                && scan["excludedEntries"].as_u64() == Some(if self.case == Case::WorkflowApply { 2 } else { u64::from(saved) }) })
+                && scan["sourceFiles"].as_u64() == Some(if saved || initial_saved { 3 } else { 2 })
+                && scan["sourceBytes"].as_u64() == Some(PROJECT_SOURCE.len() as u64 + u64::from(VERSION_BYTES) + if saved || initial_saved { u64::from(CONFIG_BYTES) } else { 0 })
+                && scan["entries"].as_u64() == Some(if initial_saved { 12 } else if self.case == Case::WorkflowApply { 5 } else if saved { 6 } else { 3 })
+                && scan["excludedEntries"].as_u64() == Some(if self.case == Case::WorkflowApply { 2 } else { u64::from(saved || initial_saved) }) })
                 && value["issues"].as_array().is_some_and(Vec::is_empty) && assurance(value, "static-text")
         });
         let stage = if saved { matches!(r.step, Step::Refresh | Step::ReadReadback) && r.saved_visible && !r.readback }
             else { r.snapshot_requests == 1 && matches!(r.step, Step::Selected | Step::ReadSnapshot) && !r.snapshot };
         if self.case == Case::Outstanding || !stage || !valid { self.fail(); return; }
+        if initial_saved { r.metadata.saved_config = result.as_ref().ok().and_then(|v|v["config"].get("data")).cloned(); }
         if saved { r.readback = true; } else { r.snapshot = true; }
     }
     pub(super) fn suggest_request(&self, hints: &Value) {
@@ -1483,6 +1831,7 @@ impl Observation {
         r.saved_reads.version = sample;
     }
     pub(super) fn metadata_request(&self, body: &Value) {
+        if self.case == Case::MetadataSave { self.metadata_save_observe_request(body); return; }
         let Some(mut r) = self.record_at(Boundary::Request) else { return; };
         if self.case != Case::Positive || !saved_read_context(&r) || !r.saved_reads.version_visible || r.saved_reads.metadata_called
             || !matches!(r.step, Step::LoadMetadata | Step::ReadMetadata) || !keys(body, &["projectId", "platform", "locale"])
@@ -1491,6 +1840,7 @@ impl Observation {
         r.saved_reads.metadata_called = true;
     }
     pub(super) fn metadata_observation(&self, result: &Result<crate::metadata_text_edit_protocol::Observation, BridgeError>) {
+        if self.case == Case::MetadataSave { self.metadata_save_observed(result); return; }
         let sample = result.as_ref().ok().and_then(MetadataSample::read);
         let Some(mut r) = self.record_at(Boundary::Result) else { return; };
         if self.case != Case::Positive || !saved_read_context(&r) || !r.saved_reads.version_visible
@@ -1499,6 +1849,7 @@ impl Observation {
         r.saved_reads.metadata = sample;
     }
     pub(super) fn metadata_validation_request(&self, body: &Value) {
+        if self.case == Case::MetadataSave { self.metadata_save_validate_request(body); return; }
         let Some(mut r) = self.record_at(Boundary::Request) else { return; };
         if self.case != Case::Positive || !saved_read_context(&r) || !r.saved_reads.metadata_visible
             || !r.saved_reads.entered.iter().all(|entered| *entered) || r.saved_reads.validation_called
@@ -1508,6 +1859,7 @@ impl Observation {
         r.saved_reads.validation_called = true;
     }
     pub(super) fn metadata_validation(&self, result: &Result<crate::metadata_text_edit_protocol::ValidationResult, BridgeError>) {
+        if self.case == Case::MetadataSave { self.metadata_save_validated(result); return; }
         let Some(mut r) = self.record_at(Boundary::Result) else { return; };
         let sample = result.as_ref().ok().and_then(|result| r.saved_reads.metadata.as_ref().and_then(|observed|
             r.saved_reads.inputs.as_ref().and_then(|inputs| metadata_validation_display(result, observed, inputs))));
@@ -1658,18 +2010,20 @@ impl Observation {
         self.fail(); // Keep reviewing is not Close; native Quit owns the sole EOF.
     }
     pub(super) fn edit_status(&self, status: &ConfigEditStatus, edits: &EditOwner) {
-        if self.case == Case::WorkflowApply {
+        if matches!(self.case, Case::WorkflowApply | Case::MetadataSave) {
             let Some(mut r) = self.record_at(Boundary::Result) else { return; };
             if status.schema_version != 1 || !edit::token(&status.window_generation)
                 || r.generation.as_ref().is_some_and(|generation| generation != &status.window_generation)
                 || status.active.is_some() || status.last_terminal.is_some() { self.fail(); return; }
             if r.generation.is_none() { r.generation = Some(status.window_generation.clone()); }
             if r.native_revision.is_some_and(|revision| status.status_revision < revision)
-                || r.workflow.native_revision.is_some_and(|revision| status.status_revision < revision) { return; }
+                || r.workflow.native_revision.is_some_and(|revision| status.status_revision < revision)
+                || r.metadata.native_revision.is_some_and(|revision| status.status_revision < revision) { return; }
             match (status.capability.available, status.capability.reason) {
                 (true, edit::EditAvailability::Available) => r.capability = true,
                 (false, edit::EditAvailability::OtherEditActive) if r.workflow.open_pending
-                    || r.workflow.sessions.last().is_some_and(|s| s.finality.is_none()) => {},
+                    || r.workflow.sessions.last().is_some_and(|s| s.finality.is_none()) || r.metadata.open_pending.is_some()
+                    || r.metadata.sessions.last().is_some_and(|s| s.finality.is_none()) => {},
                 (false, edit::EditAvailability::Shutdown) if r.close_prevented => {},
                 (false, edit::EditAvailability::RuntimeUnqualified) if !r.capability => {},
                 _ => { self.fail(); return; },
@@ -1741,6 +2095,234 @@ impl Observation {
             r.sessions[index].projection = projection.clone();
         }
         r.native_revision = Some(status.status_revision);
+    }
+
+    fn metadata_save_observe_request(&self, body: &Value) {
+        let Some(mut r) = self.record_at(Boundary::Request) else { return; };
+        let m = &r.metadata; let index = usize::from(m.observe_requests);
+        let allowed = match index {
+            0 => matches!(r.step,Step::MetadataSave(MetadataStep::Load | MetadataStep::ReadLoaded)) && m.sessions.is_empty(),
+            1 => matches!(r.step,Step::MetadataSave(MetadataStep::Refresh | MetadataStep::ReadReadback)) && m.saved_visible
+                && m.requests == [2,2,1,1] && m.sessions.len() == 2 && m.sessions.iter().all(|s|s.open_returned && s.finality.is_some()),
+            _ => false,
+        };
+        if self.case != Case::MetadataSave || !allowed || m.observe_pending || m.observations.len() != index
+            || !r.snapshot_visible || m.saved_config.is_none() || !keys(body,&["projectId","platform","locale"])
+            || body["platform"] != "android" || body["locale"] != "en-US"
+            || !r.project.as_ref().is_some_and(|p| body["projectId"].as_str() == Some(p.id.as_str())) { self.fail(); return; }
+        r.metadata.observe_pending = true; r.metadata.observe_requests += 1;
+    }
+    fn metadata_save_observed(&self, result: &Result<metadata::Observation,BridgeError>) {
+        let Some(mut r) = self.record_at(Boundary::Result) else { return; };
+        let index = r.metadata.observations.len();
+        let sample = result.as_ref().ok().and_then(|value| metadata_saved_observation(value,index == 1));
+        if self.case != Case::MetadataSave || index >= 2 || !r.metadata.observe_pending || sample.is_none()
+            || usize::from(r.metadata.observe_requests) != index + 1
+            || !(index == 0 && matches!(r.step,Step::MetadataSave(MetadataStep::Load | MetadataStep::ReadLoaded))
+                || index == 1 && matches!(r.step,Step::MetadataSave(MetadataStep::Refresh | MetadataStep::ReadReadback))) { self.fail(); return; }
+        let Some(sample) = sample else { self.fail(); return; };
+        if index == 1 {
+            let Some(view) = r.metadata.sessions.get(1).and_then(|s|s.projection.prepared.as_ref()).map(|p|&p.view) else { self.fail(); return; };
+            if view.files.iter().zip(sample["fields"].as_array().into_iter().flatten()).any(|(file,row)|
+                row["text"].as_str() != Some(file.after.text.as_str()) || row["sha256"].as_str() != Some(file.after.sha256.as_str())
+                    || row["byteLength"].as_u64() != Some(u64::from(file.after.byte_length))) { self.fail(); return; }
+        }
+        r.metadata.observations.push(sample); r.metadata.observe_pending = false;
+    }
+    fn metadata_save_validate_request(&self, body: &Value) {
+        let Some(mut r) = self.record_at(Boundary::Request) else { return; };
+        if self.case != Case::MetadataSave || !matches!(r.step,Step::MetadataSave(MetadataStep::Validate | MetadataStep::ReadValidation))
+            || !r.metadata.loaded_visible || r.metadata.entered != [true;2] || r.metadata.validation_requested
+            || !keys(body,&["platform","fields"]) || body["platform"] != "android"
+            || r.metadata.inputs.as_ref() != body.get("fields") || !r.metadata.sessions.is_empty() { self.fail(); return; }
+        r.metadata.validation_requested = true;
+    }
+    fn metadata_save_validated(&self, result: &Result<metadata::ValidationResult,BridgeError>) {
+        let sample = result.as_ref().ok().and_then(metadata_validation_sample);
+        let Some(mut r) = self.record_at(Boundary::Result) else { return; };
+        if self.case != Case::MetadataSave || !matches!(r.step,Step::MetadataSave(MetadataStep::Validate | MetadataStep::ReadValidation))
+            || !r.metadata.validation_requested || r.metadata.validation.is_some() || sample.is_none() { self.fail(); return; }
+        r.metadata.validation = sample;
+    }
+    pub(super) fn metadata_open_request(&self, args: &crate::metadata_text_commands::Open) {
+        let Some(mut r) = self.record_at(Boundary::Request) else { return; };
+        let m = &r.metadata; let index = m.sessions.len();
+        if self.case != Case::MetadataSave || index >= 2 || !metadata_start_step(r.step,index)
+            || !m.validation_visible || !m.ready || !m.capability || !r.capability || m.open_pending.is_some()
+            || usize::from(m.requests[0]) != index || m.requests[2] != 0 || r.requests != [0;4] || r.workflow.requests != [0;4]
+            || m.sessions.iter().any(|s|!s.open_returned || !s.close_returned || s.finality.is_none()) || index == 1 && !m.retained_after_close
+            || !r.project.as_ref().is_some_and(|p|p.id == args.project_id)
+            || args.platform != metadata::Platform::Android || args.locale != "en-US" { self.fail(); return; }
+        let (Some(metadata_revision),Some(config_revision),Some(project),Some(generation)) =
+            (m.native_revision,r.native_revision,r.project.as_ref(),r.generation.as_ref()) else { self.fail(); return; };
+        let pending = MetadataOpen { index, after_revision:metadata_revision.max(config_revision),
+            project_id:project.id.clone(), generation:generation.clone() };
+        r.metadata.open_pending = Some(pending); r.metadata.requests[0] += 1;
+    }
+    pub(super) fn metadata_open_result(&self, result: &Result<metadata::MetadataTextEditStatus,BridgeError>, edits: &EditOwner) {
+        let Ok(status) = result else { self.fail(); return; };
+        if self.case != Case::MetadataSave { self.fail(); return; }
+        self.metadata_status(status,edits,true);
+    }
+    pub(super) fn metadata_prepare_request(&self, args: &metadata::PrepareMetadataTextEdit) {
+        let Some(mut r) = self.record_at(Boundary::Request) else { return; };
+        let index = usize::from(r.metadata.requests[1]);
+        if self.case != Case::MetadataSave || !metadata_start_step(r.step,index)
+            || !r.metadata.record_prepare(args) { self.fail(); }
+    }
+    pub(super) fn metadata_prepare_result(&self, result: &Result<metadata::MetadataTextEditStatus,BridgeError>, edits: &EditOwner) {
+        {
+            let Some(mut r) = self.record_at(Boundary::Result) else { return; };
+            let Some(index) = r.metadata.prepare_pending.take() else { self.fail(); return; };
+            let Some(owner) = result.as_ref().ok().and_then(|status|status.active.as_ref()) else { self.fail(); return; };
+            let session = &mut r.metadata.sessions[index];
+            if session.prepare_returned || owner.session_id != session.projection.session_id || owner.phase != edit::Phase::Preparing
+                || owner.prepared.is_some() || owner.apply_submitted
+                || owner.checkout.as_ref().map(|c|&c.revision) != session.projection.checkout.as_ref().map(|c|&c.revision) { self.fail(); return; }
+            session.prepare_returned = true;
+        }
+        if let Ok(status) = result { self.metadata_edit_status(status,edits); }
+    }
+    pub(super) fn metadata_close_request(&self, session_id: &str) {
+        let Some(mut r) = self.record_at(Boundary::Request) else { return; };
+        if self.case != Case::MetadataSave || !matches!(r.step,Step::MetadataSave(MetadataStep::CloseReview | MetadataStep::ReadClosed))
+            || r.metadata.requests != [1,1,0,0] || !r.metadata.sessions.first().is_some_and(|s|
+                s.live_review() && s.review_visible && s.prepare_returned && !s.close_requested && s.projection.session_id == session_id)
+            || r.metadata.confirmation_opened != 0 { self.fail(); return; }
+        r.metadata.sessions[0].close_requested = true; r.metadata.requests[3] += 1;
+    }
+    pub(super) fn metadata_close_result(&self, result: &Result<metadata::MetadataTextEditStatus,BridgeError>, edits: &EditOwner) {
+        {
+            let Some(mut r) = self.record_at(Boundary::Result) else { return; };
+            let Some(owner) = result.as_ref().ok().and_then(|status|status.active.as_ref()) else { self.fail(); return; };
+            let Some(session) = r.metadata.sessions.first_mut() else { self.fail(); return; };
+            if !session.close_requested || session.close_returned || owner.session_id != session.projection.session_id
+                || owner.phase != edit::Phase::Finalizing || owner.apply_submitted || owner.native_reason != edit::NativeEditReason::Discarded
+                || owner.prepared.as_ref().map(|p|&p.plan_token) != session.projection.prepared.as_ref().map(|p|&p.plan_token) { self.fail(); return; }
+            session.close_returned = true;
+        }
+        if let Ok(status) = result { self.metadata_edit_status(status,edits); }
+    }
+    pub(super) fn metadata_apply_request(&self, session_id: &str, plan_token: &str) {
+        let Some(mut r) = self.record_at(Boundary::Request) else { return; };
+        let m = &r.metadata;
+        if self.case != Case::MetadataSave || !matches!(r.step,Step::MetadataSave(MetadataStep::Apply | MetadataStep::ReadSaved))
+            || m.requests != [2,2,0,1] || !m.retained_after_close || m.confirmation_opened != 1
+            || !m.initially_disabled || !m.checkbox_only_disabled || !m.typed_save || !m.acknowledged
+            || !m.sessions.get(1).is_some_and(|s|s.live_review() && s.review_visible && s.prepare_returned && !s.apply_requested
+                && s.projection.session_id == session_id && s.projection.prepared.as_ref().is_some_and(|p|p.plan_token == plan_token)) { self.fail(); return; }
+        r.metadata.sessions[1].apply_requested = true; r.metadata.requests[2] += 1;
+    }
+    pub(super) fn metadata_apply_result(&self, result: &Result<metadata::MetadataTextEditStatus,BridgeError>, edits: &EditOwner) {
+        {
+            let Some(mut r) = self.record_at(Boundary::Result) else { return; };
+            let Some(owner) = result.as_ref().ok().and_then(|status|status.active.as_ref()) else { self.fail(); return; };
+            let Some(session) = r.metadata.sessions.get_mut(1) else { self.fail(); return; };
+            if !session.apply_requested || session.apply_returned || owner.session_id != session.projection.session_id
+                || owner.phase != edit::Phase::Applying || !owner.apply_submitted
+                || owner.prepared.as_ref().map(|p|&p.plan_token) != session.projection.prepared.as_ref().map(|p|&p.plan_token) { self.fail(); return; }
+            session.apply_returned = true;
+        }
+        if let Ok(status) = result { self.metadata_edit_status(status,edits); }
+    }
+    pub(super) fn metadata_edit_status(&self, status: &metadata::MetadataTextEditStatus, edits: &EditOwner) {
+        self.metadata_status(status,edits,false);
+    }
+    fn metadata_status(&self, status: &metadata::MetadataTextEditStatus, edits: &EditOwner, open_returned: bool) {
+        if !matches!(self.case,Case::Positive | Case::MetadataSave) { return; }
+        let Some(mut r) = self.record_at(Boundary::Result) else { return; };
+        if self.failed.load(Ordering::SeqCst) { return; }
+        if status.schema_version != 1 || status.domain != metadata::DOMAIN || !edit::token(&status.window_generation)
+            || r.generation.as_ref().is_some_and(|generation|generation != &status.window_generation) { self.fail(); return; }
+        if r.generation.is_none() { r.generation = Some(status.window_generation.clone()); }
+        // An Open reply is captured before the worker starts. Match it against
+        // that request/first native observation even when later events won.
+        if !open_returned && (r.metadata.native_revision.is_some_and(|revision|status.status_revision < revision)
+            || r.native_revision.is_some_and(|revision|status.status_revision < revision)) { return; }
+        if self.case == Case::Positive {
+            if status.active.is_some() || status.last_terminal.is_some()
+                || status.capability.available != (status.capability.reason == edit::EditAvailability::Available) { self.fail(); return; }
+            r.metadata.ready = status.capability.available;
+            r.metadata.native_revision = Some(status.status_revision); return;
+        }
+        let first_active = status.active.as_ref().is_some_and(|active|
+            !r.metadata.sessions.iter().any(|s|s.projection.session_id == active.session_id));
+        let config = if open_returned || first_active {
+            let Some(matched) = r.metadata.open_match(status,open_returned) else { self.fail(); return; };
+            let config = if matched == MetadataOpenMatch::First {
+                // Relocate the single opposite-domain snapshot per Open, do
+                // not add a query or drop an event. Shell native locks have
+                // already been released; status() is a callback-free registry
+                // snapshot, using the existing record -> registry lock order.
+                let Ok(config) = edits.status() else { self.fail(); return; }; Some(config)
+            } else { None };
+            if !r.metadata.observe_open(status,open_returned,config.as_ref()) { self.fail(); return; }
+            if matched == MetadataOpenMatch::Reply { return; } // Never regress the actual later projection/revision.
+            config
+        } else { None };
+        if status.capability.available && status.capability.reason == edit::EditAvailability::Available { r.metadata.capability = true; }
+        else if r.metadata.capability && !(r.close_prevented && !status.capability.available
+            && status.capability.reason == edit::EditAvailability::Shutdown) { self.fail(); return; }
+        r.metadata.ready = status.capability.available && status.capability.reason == edit::EditAvailability::Available && status.active.is_none();
+        for projection in status.last_terminal.iter().chain(status.active.iter()) {
+            let Some(index) = r.metadata.sessions.iter().position(|s|s.projection.session_id == projection.session_id) else { self.fail(); return; };
+            let old = r.metadata.sessions[index].projection.clone();
+            let session = &r.metadata.sessions[index];
+            if projection.domain != metadata::DOMAIN || projection.platform != metadata::Platform::Android || projection.locale != "en-US"
+                || projection.project_id != old.project_id || projection.owner_generation != status.window_generation
+                || !edit::token(&projection.session_id) || projection.late_settled || projection.phase == edit::Phase::Unknown
+                || phase_order(projection.phase) < phase_order(old.phase) || projection.native_finality == edit::NativeFinality::Unknown
+                || projection.apply_submitted != (session.apply_requested && phase_order(projection.phase) >= phase_order(edit::Phase::Applying))
+                || projection.native_reason != (if index == 0 && session.close_requested
+                    && phase_order(projection.phase) >= phase_order(edit::Phase::Finalizing) { edit::NativeEditReason::Discarded }
+                    else { edit::NativeEditReason::None }) { self.fail(); return; }
+            if let Some(checkout) = &projection.checkout {
+                if !edit::token(&checkout.revision) || checkout.metadata_root != "release/store"
+                    || serde_json::to_value(&checkout.baseline).ok() != r.metadata.observations.first().map(|o|o["baseline"].clone())
+                    || old.checkout.as_ref().is_some_and(|c|serde_json::to_value(c).ok() != serde_json::to_value(checkout).ok())
+                    || r.metadata.sessions.iter().enumerate().any(|(i,s)|i != index && s.projection.checkout.as_ref().is_some_and(|c|c.revision == checkout.revision)) { self.fail(); return; }
+            } else if old.checkout.is_some() { self.fail(); return; }
+            let review = if let Some(prepared) = &projection.prepared {
+                let Some(review) = metadata_review_sample(&prepared.view) else { self.fail(); return; };
+                let Ok(value) = serde_json::to_value(prepared) else { self.fail(); return; };
+                if !session.prepare_requested || !edit::token(&prepared.plan_token)
+                    || !projection.checkout.as_ref().is_some_and(|c|c.revision == prepared.revision)
+                    || session.binding != Some((prepared.draft_revision,prepared.baseline_generation))
+                    || session.prepared.as_ref().is_some_and(|before|before != &value)
+                    || r.metadata.sessions.iter().enumerate().any(|(i,s)|i != index
+                        && s.projection.prepared.as_ref().is_some_and(|p|p.plan_token == prepared.plan_token)) { self.fail(); return; }
+                Some((value,review))
+            } else { if session.prepared.is_some() { self.fail(); return; } None };
+            if let Some(core) = &projection.core_outcome {
+                if core.effect != (if index == 0 { edit::Effect::NotStarted } else { edit::Effect::Committed })
+                    || core.journal != (if index == 0 { edit::Journal::NotCreated } else { edit::Journal::Clean })
+                    || core.resources != edit::ResourceState::Settled
+                    || core.reason != (if index == 0 { edit::CoreReason::Cancelled } else { edit::CoreReason::None })
+                    || phase_order(projection.phase) < phase_order(edit::Phase::Finalizing) { self.fail(); return; }
+            }
+            if projection.phase == edit::Phase::Final {
+                if projection.native_finality != edit::NativeFinality::Settled || projection.core_outcome.is_none() || projection.prepared.is_none()
+                    || index == 0 && !session.close_requested || index == 1 && !session.apply_requested { self.fail(); return; }
+                // A real relay final can race ahead of the synchronous command
+                // reply hook. Freeze the original now; native_pending still
+                // requires that distinct reply before any result DOM/next Open.
+                if session.finality.is_none() {
+                    let Some(facts) = edits.installed_metadata_observation_final(&projection.session_id) else { self.fail(); return; };
+                    if !metadata_original_final(&facts,projection) { self.fail(); return; }
+                    r.metadata.sessions[index].finality = Some(facts);
+                }
+            } else if projection.native_finality != edit::NativeFinality::Pending { self.fail(); return; }
+            let session = &mut r.metadata.sessions[index];
+            if let Some((prepared,review)) = review { session.prepared = Some(prepared); session.review = Some(review); }
+            session.projection = projection.clone();
+        }
+        r.metadata.native_revision = Some(status.status_revision);
+        // Fully reconcile/store the first metadata projection before a newer
+        // Configuration snapshot can advance the shared revision. In
+        // particular, real Editing and config_blocked are ready before the
+        // original relay emits and the controller can immediately Prepare.
+        drop(r);
+        if let Some(config) = config { self.edit_status(&config,edits); }
     }
 
     pub(super) fn workflow_open_request(&self, project_id: &str) {
@@ -1918,6 +2500,94 @@ impl Observation {
             session.projection = projection.clone();
         }
         r.workflow.native_revision = Some(status.status_revision);
+    }
+
+    fn metadata_dom(&self, step: MetadataStep, value: &Value) {
+        let Some(object) = value.as_object() else { self.fail(); return; };
+        let Some(mut r) = self.record_at(Boundary::Dom) else { return; };
+        if self.case != Case::MetadataSave || r.pending.take() != Some(Pending::Dom(Step::MetadataSave(step)))
+            || r.step != Step::MetadataSave(step) { self.fail(); return; }
+        match value.get("state").and_then(Value::as_str) {
+            Some("wait") if object.len() == 1 => return,
+            Some("ready") => {}, _ => { self.fail(); return; },
+        }
+        let m = &r.metadata;
+        let outcome = |index: usize| {
+            let Some(session) = m.sessions.get(index) else { return false; };
+            if !session.open_returned { return false; }
+            let Some(core) = session.projection.core_outcome.as_ref() else { return false; };
+            let Ok(core) = serde_json::to_value(core) else { return false; };
+            value["outcome"] == serde_json::json!({"title":if index == 0 { "Text review ended; draft kept" } else { "Text saved" },
+                "project":"metadata-project · android / en-US",
+                "effect":format!("{} / {}",core["effect"].as_str().unwrap_or(""),core["journal"].as_str().unwrap_or("")),
+                "resources":format!("{} / settled",core["resources"].as_str().unwrap_or("")),"reason":core["reason"]})
+        };
+        let valid = match step {
+            MetadataStep::ReadLoaded => object.len() == 2 && m.observations.len() == 1 && !m.observe_pending
+                && value["display"] == metadata_save_display(false,false,false,false),
+            MetadataStep::Short => object.len() == 1 && m.loaded_visible && m.entered == [false;2],
+            MetadataStep::Full => object.len() == 1 && m.loaded_visible && m.entered == [true,false],
+            MetadataStep::ReadInputs => object.len() == 2 && m.entered == [true;2]
+                && value["display"] == metadata_save_display(true,false,false,false),
+            MetadataStep::ReadValidation => object.len() == 2 && m.validation_requested && m.validation.is_some() && m.ready
+                && value["display"] == metadata_save_display(true,true,false,true)
+                && m.inputs.is_some() && m.inputs == metadata_inputs(&value["display"]),
+            MetadataStep::ReadReview(index) => object.len() == 3 && index < 2
+                && m.sessions.get(usize::from(index)).is_some_and(|s|s.prepare_returned && s.live_review() && s.review.as_ref() == value.get("review"))
+                && m.inputs.as_ref() == value.get("draft"),
+            MetadataStep::ReadClosed => object.len() == 3 && m.requests == [1,1,0,1] && m.ready
+                && m.sessions.first().is_some_and(|s|s.finality.is_some() && s.close_returned) && outcome(0)
+                && value["display"] == metadata_save_display(true,true,false,true)
+                && m.inputs == metadata_inputs(&value["display"]),
+            MetadataStep::ReadConfirmation | MetadataStep::ReadChecked | MetadataStep::ReadTyped => {
+                let checked = step != MetadataStep::ReadConfirmation;
+                let typed = step == MetadataStep::ReadTyped;
+                let files = m.sessions.get(1).and_then(|s|s.projection.prepared.as_ref()).map(|p|
+                    p.view.files.iter().map(|file|serde_json::json!([file.path,file.action])).collect::<Vec<_>>());
+                object.len() == 2 && m.requests == [2,2,0,1] && m.confirmation_opened == 1
+                    && m.sessions.get(1).is_some_and(|s|s.live_review() && s.review_visible) && files.is_some()
+                    && value["confirmation"] == serde_json::json!({"title":"Save this reviewed locale bundle?","files":files,
+                        "checked":checked,"typed":if typed { "SAVE" } else { "" },"applyAvailable":typed})
+            },
+            MetadataStep::ReadSaved => object.len() == 3 && m.requests == [2,2,1,1]
+                && m.sessions.get(1).is_some_and(|s|s.finality.is_some() && s.apply_returned) && outcome(1)
+                && value["display"] == metadata_save_display(true,true,true,false)
+                && m.inputs == metadata_inputs(&value["display"]),
+            MetadataStep::ReadReadback => object.len() == 3 && m.saved_visible && m.observations.len() == 2 && !m.observe_pending
+                && outcome(1) && value["display"] == metadata_save_display(true,true,true,false)
+                && m.inputs == metadata_inputs(&value["display"]),
+            _ => object.len() == 1,
+        };
+        if !valid { self.fail(); return; }
+        let next = match step {
+            MetadataStep::Navigate => MetadataStep::Load,
+            MetadataStep::Load => MetadataStep::ReadLoaded,
+            MetadataStep::ReadLoaded => { r.metadata.loaded_visible = true; MetadataStep::Short },
+            MetadataStep::Short => { r.metadata.entered[0] = true; MetadataStep::Full },
+            MetadataStep::Full => { r.metadata.entered[1] = true; MetadataStep::ReadInputs },
+            MetadataStep::ReadInputs => { r.metadata.inputs = metadata_inputs(&value["display"]); MetadataStep::Validate },
+            MetadataStep::Validate => MetadataStep::ReadValidation,
+            MetadataStep::ReadValidation => { r.metadata.validation_visible = true; MetadataStep::Review(0) },
+            MetadataStep::Review(index) => MetadataStep::OpenText(index),
+            MetadataStep::OpenText(index) => MetadataStep::ReadReview(index),
+            MetadataStep::ReadReview(index) => {
+                r.metadata.sessions[usize::from(index)].review_visible = true;
+                if index == 0 { MetadataStep::CloseReview } else { MetadataStep::Confirm }
+            },
+            MetadataStep::CloseReview => MetadataStep::ReadClosed,
+            MetadataStep::ReadClosed => { r.metadata.retained_after_close = true; MetadataStep::Review(1) },
+            MetadataStep::Confirm => { r.metadata.confirmation_opened += 1; MetadataStep::ReadConfirmation },
+            MetadataStep::ReadConfirmation => { r.metadata.initially_disabled = true; MetadataStep::Check },
+            MetadataStep::Check => MetadataStep::ReadChecked,
+            MetadataStep::ReadChecked => { r.metadata.checkbox_only_disabled = true; MetadataStep::Type },
+            MetadataStep::Type => MetadataStep::ReadTyped,
+            MetadataStep::ReadTyped => { r.metadata.typed_save = true; r.metadata.acknowledged = true; MetadataStep::Apply },
+            MetadataStep::Apply => MetadataStep::ReadSaved,
+            MetadataStep::ReadSaved => { r.metadata.saved_visible = true; MetadataStep::Refresh },
+            MetadataStep::Refresh => MetadataStep::ReadReadback,
+            MetadataStep::ReadReadback => { r.metadata.readback_visible = true; r.step = Step::Close; return; },
+        };
+        r.step = Step::MetadataSave(next);
     }
 
     fn workflow_dom(&self, step: WorkflowStep, value: &Value) {
@@ -2257,6 +2927,14 @@ impl Observation {
             // Wait for already-requested native replies without spending DOM
             // evaluations on work that has not returned. No new task/deadline.
             let native_pending = match r.step {
+                Step::MetadataSave(MetadataStep::OpenText(index) | MetadataStep::ReadReview(index)) =>
+                    !r.metadata.sessions.get(usize::from(index)).is_some_and(|s|s.prepare_returned && s.live_review()),
+                Step::MetadataSave(MetadataStep::ReadLoaded) => r.metadata.observations.len() != 1 || r.metadata.observe_pending,
+                Step::MetadataSave(MetadataStep::ReadValidation) => r.metadata.validation.is_none() || !r.metadata.ready,
+                Step::MetadataSave(MetadataStep::ReadClosed) => !r.metadata.ready
+                    || !r.metadata.sessions.first().is_some_and(|s|s.open_returned && s.close_returned && s.finality.is_some()),
+                Step::MetadataSave(MetadataStep::ReadSaved) => !r.metadata.sessions.get(1).is_some_and(|s|s.open_returned && s.apply_returned && s.finality.is_some()),
+                Step::MetadataSave(MetadataStep::ReadReadback) => r.metadata.observations.len() != 2 || r.metadata.observe_pending,
                 Step::Workflow(WorkflowStep::OpenText(index) | WorkflowStep::ReadReview(index)) =>
                     !r.workflow.sessions.get(usize::from(index)).is_some_and(|s| s.prepare_returned && s.live_review()),
                 Step::Workflow(WorkflowStep::ReadResult(index)) =>
@@ -2272,7 +2950,7 @@ impl Observation {
                 Step::ReadReadback => !r.readback,
                 Step::ReadVersionCard => r.saved_reads.version.is_none(),
                 Step::ReadMetadata => r.saved_reads.metadata.is_none(),
-                Step::ReadMetadataValidation => r.saved_reads.validation.is_none(),
+                Step::ReadMetadataValidation => r.saved_reads.validation.is_none() || !r.metadata.ready,
                 Step::ReadEvidenceEmpty => !r.candidate.initial_idle,
                 Step::CancelEvidence => !r.candidate.choose_returned[0],
                 Step::SetEvidence => !r.candidate.choose_returned[1],
@@ -2382,6 +3060,8 @@ impl Observation {
                             || !r.workflow.sessions[3].live_review() || !r.workflow.sessions[3].review_visible { self.fail(); return; }
                         r.workflow.outstanding = true;
                     }
+                    if self.case == Case::MetadataSave && (!r.metadata.complete() || r.requests != [0;4]
+                        || !r.sessions.is_empty() || r.workflow.requests != [0;4]) { self.fail(); return; }
                     r.step = Step::Quit; Pending::Close
                 },
                 Step::Quit => { if !r.close_prevented { self.fail(); return; } Pending::Gtk },
@@ -2442,6 +3122,7 @@ impl Observation {
         let Ok(value) = crate::protocol::strict_json(raw.as_bytes()) else { self.fail(); return; };
         if let Step::Paths(path) = step { self.path_dom(path,&value); return; }
         if let Step::Workflow(workflow) = step { self.workflow_dom(workflow, &value); return; }
+        if let Step::MetadataSave(metadata) = step { self.metadata_dom(metadata, &value); return; }
         let Some(object) = value.as_object() else { self.fail(); return; };
         let Some(mut r) = self.record_at(Boundary::Dom) else { return; };
         if r.pending.take() != Some(Pending::Dom(step)) || r.step != step { self.fail(); return; }
@@ -2473,10 +3154,11 @@ impl Observation {
             Step::ReadCancelled => object.len() == 3 && r.cancelled && value["unselected"].as_bool() == Some(true)
                 && value["chooseEnabled"].as_bool() == Some(true),
             Step::ReadSnapshot => object.len() == 4 && r.selected && r.snapshot
-                && value["configuration"].as_str() == Some("Not configured")
-                && value["sourceFiles"].as_str() == Some(if self.case == Case::ProjectPaths { "0 recognized files" } else { "2 recognized files" })
+                && value["configuration"].as_str() == Some(if self.case == Case::MetadataSave { "Format-valid only" } else { "Not configured" })
+                && value["sourceFiles"].as_str() == Some(if self.case == Case::ProjectPaths { "0 recognized files" }
+                    else if self.case == Case::MetadataSave { "3 recognized files" } else { "2 recognized files" })
                 && value["name"].as_str() == Some(match self.case { Case::ProjectPaths => "path-project",
-                    Case::WorkflowApply => "workflow-project", _ => "positive-project" }),
+                    Case::WorkflowApply => "workflow-project", Case::MetadataSave => "metadata-project", _ => "positive-project" }),
             Step::ReadSuggestion => object.len() == 2 && r.suggested.is_some() && r.provenance.as_ref() == value.get("provenance"),
             Step::ReadDraft | Step::ReadRetainedDraft => object.len() == 5 && r.adopted && r.capability && source() && draft(false, true)
                 && (step != Step::ReadRetainedDraft || r.guidance.workflows_visible),
@@ -2531,7 +3213,7 @@ impl Observation {
             Step::ReadMetadataInputs => object.len() == 2 && saved_read_context(&r) && r.saved_reads.metadata_visible
                 && r.saved_reads.entered.iter().all(|entered| *entered) && r.saved_reads.inputs.is_none()
                 && r.saved_reads.metadata.as_ref().is_some_and(|sample| value.get("display") == Some(&sample.edited)),
-            Step::ReadMetadataValidation => object.len() == 2 && saved_read_context(&r) && r.saved_reads.validation_called
+            Step::ReadMetadataValidation => object.len() == 2 && saved_read_context(&r) && r.saved_reads.validation_called && r.metadata.ready
                 && r.saved_reads.validation.as_ref().is_some_and(|display| value.get("display") == Some(display))
                 && r.saved_reads.inputs.is_some() && r.saved_reads.inputs == metadata_inputs(&value["display"]),
             Step::ReadSavedDraft => object.len() == 6 && r.readback_visible && r.saved_reads.complete() && source() && draft(true, true)
@@ -2557,7 +3239,8 @@ impl Observation {
             Step::ChooseCancel => Step::Cancel,
             Step::ReadCancelled => Step::ChooseSelect,
             Step::ChooseSelect => Step::SetProject,
-            Step::ReadSnapshot => { r.snapshot_visible = true; Step::Settings },
+            Step::ReadSnapshot => { r.snapshot_visible = true;
+                if self.case == Case::MetadataSave { Step::MetadataSave(MetadataStep::Navigate) } else { Step::Settings } },
             Step::Settings => if self.case == Case::ProjectPaths { Step::Paths(PathStep::Start) } else { Step::Suggest },
             Step::Suggest => Step::ReadSuggestion,
             Step::ReadSuggestion => { r.provenance_visible = true; Step::Adopt },
@@ -2745,7 +3428,7 @@ impl Observation {
     pub(super) fn native_created(&self, id: u32, quit: bool) {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return; };
         if !quit || id == 0 || self.case == Case::Positive && id != 6 || self.case == Case::ProjectPaths && id != 14
-            || self.case == Case::WorkflowApply && id != 3
+            || matches!(self.case,Case::WorkflowApply | Case::MetadataSave) && id != 3
             || !r.close_prevented || r.step != Step::Quit || r.native_id.is_some() { self.fail(); return; }
         r.native_id = Some(id);
     }
@@ -2829,22 +3512,27 @@ impl Observation {
             match edits.status() { Ok(status) => self.edit_status(&status, edits), Err(_) => self.fail() }
             match edits.workflow_status() { Ok(status) => self.workflow_status(&status, edits), Err(_) => self.fail() }
         }
+        if self.case == Case::MetadataSave {
+            match edits.status() { Ok(status) => self.edit_status(&status, edits), Err(_) => self.fail() }
+            match edits.metadata_text_status() { Ok(status) => self.metadata_edit_status(&status, edits), Err(_) => self.fail() }
+        }
         let originals_final = if self.case == Case::Outstanding { true } else {
             let Some(r) = self.record_at(Boundary::Exit) else { return; };
             if self.case == Case::ProjectPaths { r.paths.complete() && r.project_witness.as_ref().is_some_and(|project| document.installed_observation_paths_final(project)) }
-            else if self.case == Case::WorkflowApply { r.project_witness.is_some() && document.installed_observation_final() }
+            else if matches!(self.case,Case::WorkflowApply | Case::MetadataSave) { r.project_witness.is_some() && document.installed_observation_final() }
             else { r.candidate.complete() && r.project_witness.as_ref().is_some_and(|project| document.installed_observation_candidate_final(project)) }
         };
         let Some(mut r) = self.record_at(Boundary::Exit) else { return; };
         if !ready || !originals_final || !r.relay_joined || !r.released || r.exit
             || self.case == Case::Positive && (r.sessions.len() != 2 || !r.sessions.iter().all(|session| session.finality.is_some()))
-            || self.case == Case::WorkflowApply && !r.workflow.complete() { self.fail(); return; }
+            || self.case == Case::WorkflowApply && !r.workflow.complete()
+            || self.case == Case::MetadataSave && !r.metadata.complete() { self.fail(); return; }
         r.originals_final = originals_final; r.exit = true;
     }
     fn finish(&self) -> bool {
         let held = match self.record() { Some(mut r) => r.held.take(), None => return false };
         let retired = match (self.case, held) {
-            (Case::Positive | Case::ProjectPaths | Case::WorkflowApply, None) => true,
+            (Case::Positive | Case::ProjectPaths | Case::WorkflowApply | Case::MetadataSave, None) => true,
             (Case::Outstanding, Some(mut held)) => {
                 // Borrow/join the same original after the NORMAL event loop
                 // exits. No additional task, shutdown call, or replacement
@@ -2873,7 +3561,52 @@ impl Observation {
                 && r.snapshot && r.snapshot_visible && r.snapshot_requests == 1 && r.suggested.is_some()
                 && r.provenance_visible && r.adopted && r.draft_visible && r.guidance.complete()
                 && r.capability && r.requests == [0; 4] && r.sessions.is_empty() && !r.open_pending && r.prepare_pending.is_none()
-                && r.workflow.complete() && r.project_witness.is_some() && r.originals_final)
+                && r.workflow.complete() && r.project_witness.is_some() && r.originals_final
+                || self.case == Case::MetadataSave && r.info && r.catalog && r.environment
+                && r.cancelled && r.pickers[0].settled(false) && r.selected && r.pickers[1].settled(true)
+                && r.snapshot && r.snapshot_visible && r.snapshot_requests == 1 && r.metadata.complete()
+                && r.requests == [0;4] && r.sessions.is_empty() && !r.open_pending && r.prepare_pending.is_none()
+                && r.workflow.requests == [0;4] && r.workflow.sessions.is_empty() && r.project_witness.is_some() && r.originals_final)
+    }
+    fn metadata_report(&self) -> Option<Vec<u8>> {
+        let r = self.record()?;
+        if self.case != Case::MetadataSave || !r.exit || !r.originals_final || !r.metadata.complete() { return None; }
+        let m = &r.metadata;
+        let finals: Vec<_> = m.sessions.iter().filter_map(|s|s.finality.as_ref()).collect();
+        if finals.len() != 2 { return None; }
+        let count = |test: fn(&InstalledMetadataFinality)->bool| finals.iter().filter(|facts|test(facts)).count();
+        let outcomes: Option<Vec<_>> = m.sessions.iter().map(|s|s.projection.core_outcome.as_ref()
+            .map(|core|serde_json::json!([core.effect,core.journal,core.resources,core.reason]))).collect();
+        let prepared = m.sessions[1].projection.prepared.as_ref()?;
+        let actions: Vec<_> = [metadata::Action::Create,metadata::Action::Replace,metadata::Action::Preserve].iter()
+            .map(|action|prepared.view.files.iter().filter(|file|file.action == *action).count()).collect();
+        let (revision,baseline_generation) = m.sessions[1].binding?;
+        serde_json::to_vec(&serde_json::json!({
+            "schemaVersion":1,"fixture":"android-metadata-save-v1","gate":"installed-metadata-profile",
+            "project":{"cancelSettled":r.cancelled && r.pickers[0].settled(false),
+                "registered":r.selected && r.pickers[1].settled(true) && r.project_witness.is_some(),"snapshot":r.snapshot && r.snapshot_visible},
+            "requests":{"observe":m.observe_requests,"validate":u8::from(m.validation_requested),
+                "open":m.requests[0],"prepare":m.requests[1],"apply":m.requests[2],"close":m.requests[3],
+                "configuration":r.requests,"workflow":r.workflow.requests},
+            "draft":{"revision":revision,"baselineGeneration":baseline_generation,
+                "wholeMatched":m.sessions.iter().all(|s|s.binding == Some((revision,baseline_generation))),
+                "retainedAfterClose":m.retained_after_close,"browserEdit":"insertText"},
+            "reviews":{"fullText":m.sessions.iter().filter(|s|s.review_visible).count(),"actions":actions,
+                "distinctOriginals":m.sessions[0].projection.session_id != m.sessions[1].projection.session_id,
+                "configBlocked":m.sessions.iter().filter(|s|s.config_blocked).count()},
+            "confirmation":{"opened":m.confirmation_opened,"initiallyDisabled":m.initially_disabled,
+                "checkboxOnlyDisabled":m.checkbox_only_disabled,"typedSave":m.typed_save,"acknowledged":m.acknowledged},
+            "outcomes":outcomes?,"nativeReasons":m.sessions.iter().map(|s|s.projection.native_reason).collect::<Vec<_>>(),
+            "originals":{"sessions":finals.len(),"writerFrames":finals.iter().map(|f|f.writer_frames).collect::<Vec<_>>(),
+                "stdoutFrames":finals.iter().map(|f|f.stdout_frames).collect::<Vec<_>>(),
+                "startupJoined":count(|f|f.inspection_joined && f.acquisition_joined),"childWaited":count(|f|f.child_waited_success),
+                "ioSettled":count(|f|f.stdin_closed && f.stdout_eof_closed && f.stderr_eof_closed && f.io_joined),
+                "ownersJoined":count(|f|f.driver_joined && f.watchdog_joined && f.manager_joined),
+                "runtimeLedgerSettled":count(|f|f.runtime_ledger_settled),"runtimeSettlementJoined":count(|f|f.runtime_settlement_joined)},
+            "readback":{"planMatched":m.readback_visible,"savedBaseline":m.saved_visible,"originalObservation":m.observations.len() == 2 && !m.observe_pending},
+            "quit":{"operation":r.native_id?,"gtkSettled":r.native_id == Some(3) && r.gtk_returned && r.destroyed && r.released,
+                "originalsSettled":r.originals_final,"relayJoined":r.relay_joined,"exit":r.exit}
+        })).ok().filter(|raw|raw.len()+1 <= 2048)
     }
     fn workflow_report(&self) -> Option<Vec<u8>> {
         let r = self.record()?;
@@ -3065,6 +3798,161 @@ fn path_script(step: PathStep) -> Option<String> {
     }} catch {{ return {{state:'error'}} }} }})()"#))
 }
 
+fn metadata_script(step: MetadataStep) -> Option<String> {
+    if matches!(step,MetadataStep::Review(index) | MetadataStep::OpenText(index) | MetadataStep::ReadReview(index) if index > 1) { return None; }
+    let body = match step {
+        MetadataStep::Navigate => r#"const b=document.querySelector('nav[aria-label="Workspace navigation"] button[aria-label="Metadata"]');
+            if (!b || b.disabled || document.querySelector('dialog')) throw 0; show(b); b.click(); return {state:'ready'};"#,
+        MetadataStep::Load => r#"if (!selected('Metadata') || !document.querySelector('.metadata-text-editor')) return {state:'wait'};
+            const m=controls(); if (m.load.disabled) return {state:'wait'};
+            if (text(m.load)!=='Load public text' || !m.validate.disabled || !m.review.disabled || document.querySelector('.metadata-text-fields, .metadata-save-panel')) throw 0;
+            show(m.load); m.load.click(); return {state:'ready'};"#,
+        MetadataStep::ReadLoaded => r#"const m=controls(); if (m.load.disabled || text(m.load)!=='Refresh text' || !m.editor.querySelector('.metadata-text-fields')) return {state:'wait'};
+            return {state:'ready',display:display(m)};"#,
+        MetadataStep::Short => r#"return insert(1,'Public summary',['Public title','Old summary','']);"#,
+        MetadataStep::Full => r#"return insert(2,'Public description',['Public title','Public summary','']);"#,
+        MetadataStep::ReadInputs => r#"const m=controls();return {state:'ready',display:display(m)};"#,
+        MetadataStep::Validate => r#"const m=controls();if (m.validate.disabled || !m.review.disabled || text(m.validate)!=='Validate text'
+            || m.editor.querySelector('.metadata-validation-status')) throw 0;
+            show(m.validate); m.validate.click();return {state:'ready'};"#,
+        MetadataStep::ReadValidation => r#"const m=controls();if (m.validate.disabled || m.review.disabled || !m.editor.querySelector('.metadata-validation-status')) return {state:'wait'};
+            return {state:'ready',display:display(m)};"#,
+        MetadataStep::Review(_) => r#"const m=controls();if (m.review.disabled || document.querySelector('dialog')) return {state:'wait'};
+            show(m.review);m.review.click();return {state:'ready'};"#,
+        MetadataStep::OpenText(_) => r#"if (!document.querySelector('.metadata-native-review')) return {state:'wait'};
+            const p=panel();if (text(p.querySelector('.section-heading h2'))!=='Review text changes') return {state:'wait'};
+            const rows=p.querySelectorAll('.metadata-file-review');if (rows.length!==3 || document.querySelector('dialog')) throw 0;
+            for (const row of rows) {const summary=row.querySelector(':scope > summary');show(summary);if (!row.open) summary.click();}
+            return {state:'ready'};"#,
+        MetadataStep::ReadReview(_) => r#"const m=controls(),p=panel();if (text(p.querySelector('.section-heading h2'))!=='Review text changes') return {state:'wait'};
+            if (document.querySelector('dialog')) throw 0;return {state:'ready',review:review(),draft:rows(m).map(row=>({id:row.id,text:row.input.value}))};"#,
+        MetadataStep::CloseReview => r#"const p=panel(),buttons=[...p.querySelectorAll(':scope > .button-row button')];
+            const matches=buttons.filter(b=>text(b)==='Close review, keep draft');if (matches.length!==1 || matches[0].disabled || document.querySelector('dialog')) throw 0;
+            show(matches[0]);matches[0].click();return {state:'ready'};"#,
+        MetadataStep::ReadClosed => r#"const m=controls(),p=panel();if (text(p.querySelector('.section-heading h2'))!=='Text review ended; draft kept' || m.review.disabled) return {state:'wait'};
+            return {state:'ready',display:display(m),outcome:outcome()};"#,
+        MetadataStep::Confirm => r#"const p=panel(),buttons=[...p.querySelectorAll(':scope > .button-row button.primary')];
+            if (buttons.length!==1 || buttons[0].disabled || text(buttons[0])!=='Save text…' || document.querySelector('dialog')) throw 0;
+            show(buttons[0]);buttons[0].click();return {state:'ready'};"#,
+        MetadataStep::ReadConfirmation | MetadataStep::ReadChecked | MetadataStep::ReadTyped => r#"if (!document.querySelector('dialog[open].metadata-confirm-dialog')) return {state:'wait'};
+            return {state:'ready',confirmation:confirmationDisplay()};"#,
+        MetadataStep::Check => r#"const c=confirmation();if (c.check.checked || c.input.value!=='' || !c.apply.disabled) throw 0;
+            show(c.check);c.check.click();return {state:'ready'};"#,
+        MetadataStep::Type => r#"const c=confirmation();if (!c.check.checked || c.input.value!=='' || !c.apply.disabled) throw 0;
+            show(c.input);c.input.focus();c.input.select();if (document.activeElement!==c.input || c.input.selectionStart!==0 || c.input.selectionEnd!==0
+                || !document.execCommand('insertText',false,'SAVE')) throw 0;return {state:'ready'};"#,
+        MetadataStep::Apply => r#"const c=confirmation();if (!c.check.checked || c.input.value!=='SAVE' || c.apply.disabled) throw 0;
+            show(c.apply);c.apply.click();return {state:'ready'};"#,
+        MetadataStep::ReadSaved | MetadataStep::ReadReadback => r#"const m=controls(),p=panel();
+            if (document.querySelector('dialog') || text(p.querySelector('.section-heading h2'))!=='Text saved' || m.load.disabled || text(m.load)!=='Refresh text') return {state:'wait'};
+            return {state:'ready',display:display(m),outcome:outcome()};"#,
+        MetadataStep::Refresh => r#"const m=controls();if (m.load.disabled || text(m.load)!=='Refresh text' || document.querySelector('dialog')) throw 0;
+            show(m.load);m.load.click();return {state:'ready'};"#,
+    };
+    // Fixed existing renderer controls only. No invoke/controller access,
+    // injected DTO, fabricated reply, synthetic event or input.value setter.
+    Some([r#"(() => { try {
+        if (document.querySelector('.preview-banner, .fatal-error, #main-content > .notice-danger, .metadata-save-panel .notice-danger')) throw 0;
+        const text=e=>{if (!e || typeof e.textContent!=='string' || e.textContent.length>4096) throw 0;return e.textContent;};
+        const visible=e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e);return e.isConnected && r.width>0 && r.height>0 && s.display!=='none' && s.visibility==='visible';};
+        const show=e=>{if (!e) throw 0;e.scrollIntoView({block:'center'});if (!visible(e)) throw 0;};
+        const selected=label=>[...document.querySelectorAll('nav[aria-label="Workspace navigation"] button[aria-current="page"]')].some(b=>b.getAttribute('aria-label')===label);
+        const ids=['title.txt','short_description.txt','full_description.txt'];
+        const controls=()=>{
+            const editors=document.querySelectorAll('.metadata-text-editor');if (!selected('Metadata') || editors.length!==1) throw 0;
+            const editor=editors[0];if (editor.querySelector('.notice-danger, .notice-warning, .review-caution, .issues, .metadata-latest-observation')) throw 0;
+            const contexts=editor.querySelectorAll('.metadata-context-row select'),loads=editor.querySelectorAll('.metadata-context-row > button.button.secondary');
+            const validations=editor.querySelectorAll('.metadata-text-actions > button.button.secondary'),reviews=editor.querySelectorAll('.metadata-text-actions > button.button.primary');
+            if (contexts.length!==1 || loads.length!==1 || validations.length!==1 || reviews.length!==1) throw 0;
+            const context=contexts[0];if (context.disabled || !context.value || context.selectedOptions.length!==1
+                || text(context.selectedOptions[0])!=='android / en-US' || context.selectedOptions[0].parentElement?.getAttribute('label')!=='Current saved configuration'
+                || text(reviews[0])!=='Review changes') throw 0;
+            return {editor,context,load:loads[0],validate:validations[0],review:reviews[0]};
+        };
+        const rows=m=>{
+            const elements=[...m.editor.querySelectorAll('.metadata-text-fields > .metadata-text-field')];if (elements.length!==3) throw 0;
+            return elements.map((row,index)=>{const codes=row.querySelectorAll(':scope > code'),inputs=row.querySelectorAll(':scope > textarea');
+                if (codes.length!==1 || inputs.length!==1) throw 0;const input=inputs[0],id=ids[index],path=text(codes[0]);
+                if (path!=='release/store/android/en-US/'+id || input.disabled || input.readOnly || input.value.length>32768
+                    || !input.id || row.querySelector('.inline-heading label')?.getAttribute('for')!==input.id) throw 0;
+                return {row,input,id,path};});
+        };
+        const display=m=>{
+            if (text(m.validate)!=='Validate text') throw 0;
+            const statuses=m.editor.querySelectorAll('.metadata-validation-status');if (statuses.length>1) throw 0;
+            const fields=rows(m).map(item=>{show(item.row);show(item.input);const badges=[...item.row.querySelectorAll('.inline-heading .badge')];if (badges.length!==2) throw 0;
+                return {id:item.id,path:item.path,text:item.input.value,badges:badges.map(text),invalid:item.input.getAttribute('aria-invalid')};});
+            return {context:text(m.context.selectedOptions[0]),badge:text(m.editor.querySelector('.section-heading .badge')),fields,
+                loadLabel:text(m.load),loadAvailable:!m.load.disabled,validateAvailable:!m.validate.disabled,reviewAvailable:!m.review.disabled,
+                validation:statuses.length?text(statuses[0].querySelector('.badge')):null};
+        };
+        const insert=(index,replacement,before)=>{
+            const m=controls(),items=rows(m);if (m.load.disabled || m.validate.disabled || !m.review.disabled || text(m.load)!=='Refresh text'
+                || m.editor.querySelector('.metadata-validation-status') || items.some((item,offset)=>item.input.value!==before[offset])) throw 0;
+            const input=items[index].input;show(input);input.focus();input.select();
+            if (document.activeElement!==input || input.selectionStart!==0 || input.selectionEnd!==before[index].length
+                || !document.execCommand('insertText',false,replacement)) throw 0;return {state:'ready'};
+        };
+        const panel=()=>{const panels=document.querySelectorAll('.metadata-save-panel');if (!selected('Metadata') || panels.length!==1) throw 0;return panels[0];};
+        const raw=(element,path,before)=>{
+            if (text(element.querySelector('h4'))!==(before?'Original bytes':'Reviewed replacement bytes')) throw 0;
+            const pres=element.querySelectorAll('pre');show(element);
+            if (before && pres.length===0) {if (text(element.querySelector('p'))!=='Observed absent. No original text was fabricated.') throw 0;return {state:'absent'};}
+            if (pres.length!==1 || pres[0].getAttribute('aria-label')!==`Complete ${before?'original':'reviewed'} public text for ${path}`) throw 0;
+            show(pres[0]);const content=text(pres[0].querySelector('code'));
+            const numbers=/^(.+) UTF-8 bytes · No line endings · No final line ending$/.exec(text(element.querySelector('p')));
+            const digest=/^SHA256 ([0-9a-f]{64})$/.exec(text(element.querySelector('.metadata-digest')));
+            if (!numbers || !digest) throw 0;const byteLength=Number(numbers[1].replace(/[^0-9]/g,''));
+            if (!Number.isSafeInteger(byteLength) || byteLength.toLocaleString()!==numbers[1]) throw 0;
+            const result={text:content,byteLength,sha256:digest[1]};return before?{state:'present',...result}:result;
+        };
+        const review=()=>{
+            const p=panel(),views=p.querySelectorAll('.metadata-native-review');if (views.length!==1) throw 0;const view=views[0];
+            const tables=view.querySelectorAll('.review-table'),details=[...view.querySelectorAll('.metadata-file-review')];
+            if (tables.length!==1 || text(tables[0].querySelector('caption'))!=='Files in this review' || details.length!==3 || details.some(d=>!d.open)) throw 0;
+            const inventory=[...tables[0].querySelectorAll('tbody > tr')];if (inventory.length!==3) throw 0;
+            if (text(view.querySelector(':scope > .save-note'))!=='No missing directories need to be created. Exact-preserved files keep their bytes, mode and identity. No file is deleted or renamed.') throw 0;
+            return inventory.map((row,index)=>{
+                show(row);const cells=row.querySelectorAll(':scope > td');if (cells.length!==3) throw 0;
+                const path=text(row.querySelector(':scope > th code')),label=text(cells[0]);
+                const action=label==='Preserve exact original'?'preserve':label==='Replace reviewed original'?'replace':label==='Create absent file'?'create':null;
+                const detail=details[index],sides=detail.querySelectorAll('.metadata-raw-grid > .metadata-raw');
+                if (!action || path!=='release/store/android/en-US/'+ids[index] || sides.length!==2
+                    || text(detail.querySelector('summary > code'))!==path || text(detail.querySelector('summary > .badge'))!==action) throw 0;
+                const before=raw(sides[0],path,true),after=raw(sides[1],path,false);
+                if (text(cells[1])!==`${before.state==='absent'?'Absent':before.byteLength+' bytes'} → ${after.byteLength} bytes`
+                    || text(cells[2])!=='Unchanged') throw 0;
+                return {id:ids[index],path,action,before,after,lineEndingsChanged:false};
+            });
+        };
+        const outcome=()=>{
+            const p=panel(),details=p.querySelectorAll('.metadata-outcome-details');if (details.length!==1) throw 0;
+            if (!details[0].open) {const summary=details[0].querySelector(':scope > summary');show(summary);summary.click();}
+            const facts=[...details[0].querySelectorAll('.save-outcome-facts > div')];if (facts.length!==4) throw 0;
+            const labels=['Original project / locale','Effect / journal','Core / native resources','Reason'];
+            const values=facts.map((row,index)=>{show(row);if (text(row.querySelector('dt'))!==labels[index]) throw 0;return text(row.querySelector('dd'));});
+            return {title:text(p.querySelector('.section-heading h2')),project:values[0],effect:values[1],resources:values[2],reason:values[3]};
+        };
+        const confirmation=()=>{
+            const dialogs=document.querySelectorAll('dialog');if (dialogs.length!==1 || !dialogs[0].classList.contains('metadata-confirm-dialog')
+                || !dialogs[0].open || dialogs[0].querySelector('[role="alert"]')) throw 0;
+            const dialog=dialogs[0],checks=dialog.querySelectorAll('.save-confirm-check input[type="checkbox"]');
+            const inputs=dialog.querySelectorAll('.dialog-content > input'),buttons=dialog.querySelectorAll('.button-row > button');
+            if (checks.length!==1 || inputs.length!==1 || buttons.length!==2 || checks[0].disabled || inputs[0].disabled || inputs[0].readOnly
+                || inputs[0].type!=='text' || inputs[0].value.length>4 || buttons[0].disabled || text(buttons[0])!=='Keep reviewing' || text(buttons[1])!=='Save text'
+                || text(dialog.querySelector('.save-confirm-check'))!=='I reviewed all exact paths, full original/replacement text, digests and line-ending changes.') throw 0;
+            return {dialog,check:checks[0],input:inputs[0],apply:buttons[1]};
+        };
+        const confirmationDisplay=()=>{
+            const c=confirmation(),files=[...c.dialog.querySelectorAll('.metadata-confirm-files > li')];if (files.length!==3) throw 0;
+            const rows=files.map((row,index)=>{show(row);const path=text(row.querySelector('code')),match=/ — (create|replace|preserve)$/.exec(text(row));
+                if (path!=='release/store/android/en-US/'+ids[index] || !match || text(row)!==path+match[0]) throw 0;return [path,match[1]];});
+            show(c.check);show(c.input);show(c.apply);
+            return {title:text(c.dialog.querySelector('h2')),files:rows,checked:c.check.checked,typed:c.input.value,applyAvailable:!c.apply.disabled};
+        };
+    "#,body,r#" } catch { return {state:'error'}; } })()"#].concat())
+}
+
 fn workflow_script(step: WorkflowStep) -> Option<String> {
     let body = match step {
         WorkflowStep::GitHub(_) => r#"const b=document.querySelector('nav[aria-label="Workspace navigation"] button[aria-label="GitHub"]');
@@ -3202,7 +4090,8 @@ fn workflow_script(step: WorkflowStep) -> Option<String> {
 fn script(step: Step, case: Case) -> Option<String> {
     if let Step::Paths(path) = step { return path_script(path); }
     if let Step::Workflow(workflow) = step { return workflow_script(workflow); }
-    let project_name = if case == Case::WorkflowApply { "workflow-project" } else { "positive-project" };
+    if let Step::MetadataSave(metadata) = step { return metadata_script(metadata); }
+    let project_name = match case { Case::WorkflowApply => "workflow-project", Case::MetadataSave => "metadata-project", _ => "positive-project" };
     let body = match step {
         Step::Environment | Step::GuidanceEnvironment => r#"
             const b = document.querySelector('nav[aria-label="Workspace navigation"] button[aria-label="Environment"]');
@@ -3491,7 +4380,7 @@ fn script(step: Step, case: Case) -> Option<String> {
             m.validate.click(); return {state:'ready'};"#,
         Step::ReadMetadataValidation => r#"
             const m = metadataControls();
-            if (m.load.disabled || m.validate.disabled || !m.editor.querySelector('.metadata-validation-status')) return {state:'wait'};
+            if (m.load.disabled || m.validate.disabled || m.review.disabled || !m.editor.querySelector('.metadata-validation-status')) return {state:'wait'};
             return {state:'ready', display:metadataDisplay(m)};"#,
         Step::ReadSavedDraft | Step::ReadCandidateDraft => r#"
             if (!selected('Project settings') || !field() || !document.querySelector('.draft-banner')) return {state:'wait'};
@@ -3602,7 +4491,10 @@ fn script(step: Step, case: Case) -> Option<String> {
             const context=contexts[0], load=loads[0], validate=validations[0], review=reviews[0];
             if (context.disabled || !context.value || context.selectedOptions.length!==1 || text(context.selectedOptions[0])!=='android / en-US'
                 || context.selectedOptions[0].parentElement?.getAttribute('label')!=='Current saved configuration'
-                || !review.disabled || text(review)!=='Review changes') throw 0;
+                || text(review)!=='Review changes') throw 0;
+            const validation=editor.querySelector('.metadata-validation-status .badge');
+            const valid=validation && text(validation)==='Format-valid selected text';
+            if (!valid && !review.disabled) throw 0;
             return {{editor,context,load,validate,review}};
         }};
         const metadataRows = m => {{
@@ -3739,6 +4631,7 @@ pub(crate) fn main() -> std::process::ExitCode {
         Some(value) if value == OsStr::new("quit-outstanding") => Some(Case::Outstanding),
         Some(value) if value == OsStr::new("project-paths") => Some(Case::ProjectPaths),
         Some(value) if value == OsStr::new("workflow-apply") => Some(Case::WorkflowApply),
+        Some(value) if value == OsStr::new("metadata-save") => Some(Case::MetadataSave),
         _ => None,
     };
     let Some(case) = case.filter(|_| args.next().is_none() && route()) else {
@@ -3781,6 +4674,13 @@ pub(crate) fn main() -> std::process::ExitCode {
         crate::installed_runtime::assert_installed_workflow_slots_contract();
         crate::edit_owner::assert_installed_workflow_owner_contract();
     }
+    if case == Case::MetadataSave {
+        crate::asset_session::assert_project_selection_gate_contract();
+        crate::runtime::assert_installed_metadata_profile_contract();
+        crate::installed_runtime::assert_installed_metadata_slots_contract();
+        crate::edit_owner::assert_installed_metadata_owner_contract();
+        assert_metadata_open_race_contract();
+    }
     // Routing DATA is not native admission. The ordinary builder constructs
     // DesktopBridge::new / RuntimeConfig::packaged and owes every real check.
     let returned = super::run_builder(super::builder().manage(q.clone()));
@@ -3794,10 +4694,16 @@ pub(crate) fn main() -> std::process::ExitCode {
         Case::Outstanding => b"MRK_INSTALLED_SHELL_OBSERVATION=quit-outstanding-verified\n",
         Case::ProjectPaths => b"MRK_INSTALLED_SHELL_OBSERVATION=project-paths-verified\n",
         Case::WorkflowApply => b"MRK_INSTALLED_SHELL_OBSERVATION=workflow-apply-verified\n",
+        Case::MetadataSave => b"MRK_INSTALLED_SHELL_OBSERVATION=metadata-save-verified\n",
     };
     let mut stdout = std::io::stdout().lock();
     if stdout.write_all(b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n")
         .and_then(|_| {
+            if case == Case::MetadataSave {
+                let report = q.metadata_report().ok_or_else(||std::io::Error::other("metadata receipt unavailable"))?;
+                stdout.write_all(b"MRK_INSTALLED_SHELL_METADATA_SAVE=")?;
+                stdout.write_all(&report)?; return stdout.write_all(b"\n");
+            }
             if case == Case::WorkflowApply {
                 let report = q.workflow_report().ok_or_else(|| std::io::Error::other("workflow receipt unavailable"))?;
                 stdout.write_all(b"MRK_INSTALLED_SHELL_WORKFLOW_APPLY=")?;

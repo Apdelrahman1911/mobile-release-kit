@@ -1048,10 +1048,11 @@ class LifecycleData(unittest.TestCase):
             baseline = (sum(row["size"] for row in candidate["packages"].values()) + candidate["library"]["size"]
                         + (12 if profile == "installed" else 68 if profile == "shell" else 0)
                         + 2 * 1024 + 1 + 2 * 2048 + (32 << 20) + (1 << 20))
-            # Five original logs plus four failure leaves retain the 64 MiB
-            # ceiling; the fixed workflow bytes and 13 nodes are additional.
-            required = baseline + ((576 << 20) + 7235 + 13 if profile == "shell" else 0)
-            inodes = 2 * 16 + 2 * 8192 + 128 + (17 if profile == "shell" else 0)
+            # Six original logs plus five failure leaves retain the 64 MiB
+            # ceiling. Include final metadata bytes plus its replaced 11-byte
+            # original, and one block per namespace/workflow/metadata node.
+            required = baseline + ((704 << 20) + 7235 + 1095 + 11 + 27 if profile == "shell" else 0)
+            inodes = 2 * 16 + 2 * 8192 + 128 + (32 if profile == "shell" else 0)
             for available in (required - 1, required):
                 with self.subTest(profile=profile, available=available), \
                      patch.object(Path, "stat", return_value=SimpleNamespace(st_dev=1)), \
@@ -2192,8 +2193,8 @@ def positive_capture(receipt=None, candidate=None):
 def fixture_namespace_data(value):
     suffix = value["runId"] + "-" + value["attempt"]
     return {"root": "/var/lib/mrk-ubuntu-shell-fixtures-" + suffix,
-            "identity": [1, 5, stat.S_IFDIR | 0o755, 0, 0, 7, 4096, 11, 11],
-            "children": ["candidate-evidence", "path-outside", "path-project", "positive-project", "workflow-project"],
+            "identity": [1, 5, stat.S_IFDIR | 0o755, 0, 0, 8, 4096, 11, 11],
+            "children": ["candidate-evidence", "metadata-project", "path-outside", "path-project", "positive-project", "workflow-project"],
             "control": {"path": "/var/lib/mrk-ubuntu-native-" + suffix, "identity": [1, 4, stat.S_IFDIR | 0o711, 0, 0]},
             "ancestors": [{"path": path, "identity": [1, i + 1, stat.S_IFDIR | 0o755, 0, 0]}
                           for i, path in enumerate(("/", "/var", "/var/lib"))]}
@@ -2330,6 +2331,72 @@ def workflow_fixture_data(value, *, installed=False):
             "installed": installed, "entries": rows, "absent": absent + ([] if installed else list(callers[1:])), "namespace": namespace}
 
 
+def metadata_receipt_data():
+    """Independent fixed expected DATA, not native finality or Save authority."""
+    return {
+        "schemaVersion": 1, "fixture": "android-metadata-save-v1", "gate": "installed-metadata-profile",
+        "project": {"cancelSettled": True, "registered": True, "snapshot": True},
+        "requests": {"observe": 2, "validate": 1, "open": 2, "prepare": 2, "apply": 1, "close": 1,
+                     "configuration": [0, 0, 0, 0], "workflow": [0, 0, 0, 0]},
+        "draft": {"revision": 2, "baselineGeneration": 0, "wholeMatched": True,
+                  "retainedAfterClose": True, "browserEdit": "insertText"},
+        "reviews": {"fullText": 2, "actions": [1, 1, 1], "distinctOriginals": True, "configBlocked": 2},
+        "confirmation": {"opened": 1, "initiallyDisabled": True, "checkboxOnlyDisabled": True,
+                         "typedSave": True, "acknowledged": True},
+        "outcomes": [["not_started", "not_created", "settled", "cancelled"], ["committed", "clean", "settled", "none"]],
+        "nativeReasons": ["discarded", "none"],
+        "originals": {"sessions": 2, "writerFrames": [2, 3], "stdoutFrames": [3, 3],
+                      "startupJoined": 2, "childWaited": 2, "ioSettled": 2, "ownersJoined": 2,
+                      "runtimeLedgerSettled": 2, "runtimeSettlementJoined": 2},
+        "readback": {"planMatched": True, "savedBaseline": True, "originalObservation": True},
+        "quit": {"operation": 3, "gtkSettled": True, "originalsSettled": True, "relayJoined": True, "exit": True},
+    }
+
+
+def metadata_capture(receipt=None):
+    return (b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n"
+            + b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
+            + b"MRK_INSTALLED_SHELL_METADATA_SAVE=" + L.canonical(metadata_receipt_data() if receipt is None else receipt)
+            + b"MRK_INSTALLED_SHELL_OBSERVATION=metadata-save-verified\n", b"")
+
+
+def metadata_fixture_data(value, *, saved=False):
+    """Finite synthetic originals and one replacement/create; never a writer."""
+    owner = (value["runnerUid"], value["runnerGid"])
+    locale = "release/store/android/en-US"
+    names = ["keep.txt", "short_description.txt", "title.txt"]
+    directories = ((".", 0o700, owner, 4, [".gitignore", "app", "release", "version.properties"]),
+                   ("app", 0o555, (0, 0), 2, ["build.gradle.kts"]),
+                   ("release", 0o700, owner, 3, ["mobile-release.json", "store"]),
+                   ("release/store", 0o700, owner, 3, ["android"]),
+                   ("release/store/android", 0o700, owner, 3, ["en-US"]),
+                   (locale, 0o700, owner, 2, ["full_description.txt", *names] if saved else names))
+    rows = []
+    for index, (name, mode, owners, links, children) in enumerate(directories):
+        stamp = 22 if saved and name in (".", locale) else 11
+        rows.append({"path": name, "kind": "directory", "children": children,
+                     "identity": [1, 500 + index, stat.S_IFDIR | mode, *owners, links, 4096, stamp, stamp]})
+    files = [("app/build.gradle.kts", L.SHELL_PROJECT_SOURCE, 0o444, (0, 0)),
+             ("version.properties", L.SHELL_PROJECT_VERSION, 0o600, owner),
+             (".gitignore", L.SHELL_PROJECT_IGNORE, 0o600, owner),
+             ("release/mobile-release.json", L.SHELL_PROJECT_CONFIG, 0o600, owner),
+             (locale + "/title.txt", b"Public title", 0o600, owner),
+             (locale + "/short_description.txt", b"Public summary" if saved else b"Old summary", 0o600, owner),
+             (locale + "/keep.txt", b"untouched\n", 0o600, owner)]
+    if saved:
+        files.append((locale + "/full_description.txt", b"Public description", 0o600, owner))
+    for index, (name, raw, mode, owners) in enumerate(files):
+        replaced = saved and name == locale + "/short_description.txt"
+        stamp = 22 if replaced or index == 7 else 11
+        rows.append({"path": name, "kind": "file", "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+                     "identity": [1, 514 if replaced else 506 + index, stat.S_IFREG | mode, *owners, 1, len(raw), stamp, stamp]})
+    absent = [".mobile-release", ".mobile-release-init-prepare", ".mobile-release-init", ".mobile-release-init-cleanup",
+              ".mobile-release-metadata-text-prepare", ".mobile-release-metadata-text", ".mobile-release-metadata-text-cleanup"]
+    namespace = fixture_namespace_data(value)
+    return {"schemaVersion": 1, "fixture": "android-metadata-save-v1", "root": namespace["root"] + "/metadata-project",
+            "saved": saved, "entries": rows, "absent": absent + ([] if saved else [locale + "/full_description.txt"]), "namespace": namespace}
+
+
 def closed_shell_data():
     value, expected = installed_handoff(), map_data()
     value.pop("installed")
@@ -2341,7 +2408,7 @@ def closed_shell_data():
                 "positive": positive_capture(),
                 "quit-outstanding": (b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
                     + L.CHILD_MARKER.encode() + L.canonical(maps) + b"MRK_INSTALLED_SHELL_OBSERVATION=quit-outstanding-verified\n", b""),
-                "project-paths": path_capture(), "workflow-apply": workflow_capture()}
+                "project-paths": path_capture(), "workflow-apply": workflow_capture(), "metadata-save": metadata_capture()}
     cases, files, commands = {}, {}, []
     for case, (stdout, stderr) in captures.items():
         cases[case] = L.shell_result(stdout, stderr, case, 0, expected)
@@ -2355,6 +2422,7 @@ def closed_shell_data():
         files["shell-positive-candidate-" + phase + ".json"] = L.canonical(candidate_fixture_data(value))
         files["shell-project-paths-" + phase + ".json"] = L.canonical(path_fixture_data(value, changed=phase == "after"))
         files["shell-workflow-apply-" + phase + ".json"] = L.canonical(workflow_fixture_data(value, installed=phase == "after"))
+        files["shell-metadata-save-" + phase + ".json"] = L.canonical(metadata_fixture_data(value, saved=phase == "after"))
     keys = [{"phase": "key", "exitCode": 0, "stdout": "", "stderr": "",
              "argv": L._drop(value, ["/usr/bin/xdotool", "key", "--clearmodifiers", key])} for key in ("ctrl+q", "alt+o")]
     files["shell-normal-control.json"] = L.canonical({"joined": True, "inputs": 2, "workerGuardState": "RESTORED",
@@ -2406,7 +2474,8 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
         value = installed_handoff(); value.pop("installed"); value["shell"] = {}
         namespace = fixture_namespace_data(value); root = Path(namespace["root"])
         ancestry = {key: namespace[key] for key in ("control", "ancestors")}
-        for fault in (None, "occupied", "mode", "owner", "device", "alias", "acl", "leaf-acl", "write", "unknown-child", "identity", "ancestry", "published-identity"):
+        for fault in (None, "occupied", "mode", "owner", "device", "alias", "acl", "leaf-acl", "metadata-acl", "metadata-leaf-acl",
+                      "write", "unknown-child", "identity", "ancestry", "published-identity"):
             node = inert_stat(5, stat.S_IFDIR | 0o700, size=4096, stamp=11)
             if fault == "mode": node.st_mode = stat.S_IFDIR | 0o755
             if fault == "owner": node.st_uid = value["runnerUid"]
@@ -2427,10 +2496,15 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
             def chmod(path, mode):
                 self.assertIn((path, mode), ((root / "positive-project/app", 0o555),
                     (root / "workflow-project/.github/workflows", 0o700), (root / "workflow-project/.github", 0o700),
-                    (root / "workflow-project/app", 0o555), (root / "workflow-project", 0o700), (root, 0o755)))
+                    (root / "workflow-project/app", 0o555), (root / "workflow-project", 0o700),
+                    (root / "metadata-project/release/store/android/en-US", 0o700), (root / "metadata-project/release/store/android", 0o700),
+                    (root / "metadata-project/release/store", 0o700), (root / "metadata-project/release", 0o700),
+                    (root / "metadata-project/app", 0o555), (root / "metadata-project", 0o700), (root, 0o755)))
                 if path == root: node.st_mode = stat.S_IFDIR | mode
             def attrs(path, directory):
-                if fault == "acl" and path == root or fault == "leaf-acl" and path == root / "path-outside/VERSION":
+                if (fault == "acl" and path == root or fault == "leaf-acl" and path == root / "path-outside/VERSION"
+                        or fault == "metadata-acl" and path == root / "metadata-project/release/store/android/en-US"
+                        or fault == "metadata-leaf-acl" and path == root / "metadata-project/release/store/android/en-US/short_description.txt"):
                     raise L.Refused("inert ACL")
             def scan(path):
                 self.assertEqual(path, root)
@@ -2457,7 +2531,9 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
                         root / "candidate-evidence", root / "candidate-evidence/operation",
                         *(root / name for name, directory in PATH_FIXTURE_NODES if directory),
                         root / "workflow-project", root / "workflow-project/app", root / "workflow-project/.github",
-                        root / "workflow-project/.github/workflows"])
+                        root / "workflow-project/.github/workflows", root / "metadata-project", root / "metadata-project/app",
+                        root / "metadata-project/release", root / "metadata-project/release/store",
+                        root / "metadata-project/release/store/android", root / "metadata-project/release/store/android/en-US"])
                     self.assertEqual([call.args for call in writer.call_args_list], [
                         (root / "positive-project/app/build.gradle.kts", L.SHELL_PROJECT_SOURCE, 0o444),
                         (root / "positive-project/version.properties", L.SHELL_PROJECT_VERSION, 0o600),
@@ -2467,7 +2543,14 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
                         (root / "workflow-project/version.properties", L.SHELL_PROJECT_VERSION, 0o600),
                         (root / "workflow-project/.gitignore", L.SHELL_WORKFLOW_IGNORE, 0o640),
                         (root / "workflow-project/.github/workflows/unrelated.yml", L.SHELL_WORKFLOW_SIBLING, 0o600),
-                        (root / "workflow-project/.github/workflows/mobile-preflight.yml", L.SHELL_WORKFLOW_CALLERS[".github/workflows/mobile-preflight.yml"], 0o640)])
+                        (root / "workflow-project/.github/workflows/mobile-preflight.yml", L.SHELL_WORKFLOW_CALLERS[".github/workflows/mobile-preflight.yml"], 0o640),
+                        (root / "metadata-project/app/build.gradle.kts", L.SHELL_PROJECT_SOURCE, 0o444),
+                        (root / "metadata-project/version.properties", L.SHELL_PROJECT_VERSION, 0o600),
+                        (root / "metadata-project/.gitignore", L.SHELL_PROJECT_IGNORE, 0o600),
+                        (root / "metadata-project/release/mobile-release.json", L.SHELL_PROJECT_CONFIG, 0o600),
+                        (root / "metadata-project/release/store/android/en-US/title.txt", b"Public title", 0o600),
+                        (root / "metadata-project/release/store/android/en-US/short_description.txt", b"Old summary", 0o600),
+                        (root / "metadata-project/release/store/android/en-US/keep.txt", b"untouched\n", 0o600)])
                     self.assertEqual([call.args for call in ownership.call_args_list], [
                         (path, value["runnerUid"], value["runnerGid"]) for path in
                         (root / "positive-project/version.properties", root / "positive-project",
@@ -2477,10 +2560,19 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
                         *((root / "workflow-project" / name, value["runnerUid"], value["runnerGid"]) for name in
                           ("version.properties", ".gitignore", ".github/workflows/unrelated.yml", ".github/workflows/mobile-preflight.yml",
                            ".github/workflows", ".github")),
-                        (root / "workflow-project/app", 0, 0), (root / "workflow-project", value["runnerUid"], value["runnerGid"])])
+                        (root / "workflow-project/app", 0, 0), (root / "workflow-project", value["runnerUid"], value["runnerGid"]),
+                        (root / "metadata-project/app/build.gradle.kts", 0, 0),
+                        *((root / "metadata-project" / name, value["runnerUid"], value["runnerGid"]) for name in
+                          ("version.properties", ".gitignore", "release/mobile-release.json", "release/store/android/en-US/title.txt",
+                           "release/store/android/en-US/short_description.txt", "release/store/android/en-US/keep.txt",
+                           "release/store/android/en-US", "release/store/android", "release/store", "release")),
+                        (root / "metadata-project/app", 0, 0), (root / "metadata-project", value["runnerUid"], value["runnerGid"])])
                     self.assertEqual([call.args for call in modes.call_args_list], [(root / "positive-project/app", 0o555),
                         (root / "workflow-project/.github/workflows", 0o700), (root / "workflow-project/.github", 0o700),
-                        (root / "workflow-project/app", 0o555), (root / "workflow-project", 0o700), (root, 0o755)])
+                        (root / "workflow-project/app", 0o555), (root / "workflow-project", 0o700),
+                        (root / "metadata-project/release/store/android/en-US", 0o700), (root / "metadata-project/release/store/android", 0o700),
+                        (root / "metadata-project/release/store", 0o700), (root / "metadata-project/release", 0o700),
+                        (root / "metadata-project/app", 0o555), (root / "metadata-project", 0o700), (root, 0o755)])
                 else:
                     with self.assertRaises((ValueError, OSError)): L._shell_fixtures_prepare(value)
                     publications = [call.args for call in modes.call_args_list if call.args[0] == root]
@@ -2535,7 +2627,8 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
             altered = deepcopy(original); mutate(altered)
             with self.subTest(mutate=mutate), self.assertRaises(ValueError): L._shell_namespace_data(value, altered)
         families = ((L.shell_project_fixture, "shell-positive-project"), (L.shell_candidate_fixture, "shell-positive-candidate"),
-                    (L.shell_paths_fixture, "shell-project-paths"), (L.shell_workflow_fixture, "shell-workflow-apply"))
+                    (L.shell_paths_fixture, "shell-project-paths"), (L.shell_workflow_fixture, "shell-workflow-apply"),
+                    (L.shell_metadata_fixture, "shell-metadata-save"))
         for validate, prefix in families:
             for change in ("missing", "old-schema", "old-root", "binding-drift"):
                 before, after = (L.decode(files[prefix + "-" + phase + ".json"]) for phase in ("before", "after"))
@@ -2545,7 +2638,8 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
                 else: after["namespace"]["identity"][1] = 50
                 with self.subTest(family=prefix, change=change), self.assertRaises(ValueError):
                     validate(value, L.canonical(before), L.canonical(after))
-        for validate, prefix in ((L.shell_candidate_fixture, "shell-positive-candidate"), (L.shell_workflow_fixture, "shell-workflow-apply")):
+        for validate, prefix in ((L.shell_candidate_fixture, "shell-positive-candidate"), (L.shell_workflow_fixture, "shell-workflow-apply"),
+                                 (L.shell_metadata_fixture, "shell-metadata-save")):
             altered = dict(files)
             for phase in ("before", "after"):
                 name = prefix + "-" + phase + ".json"; document = L.decode(altered[name])
@@ -2563,7 +2657,8 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
         self.assertLess(len(L.canonical(namespace)), 1024)
         for document in (project_fixture_data(value), project_fixture_data(value, saved=True), candidate_fixture_data(value),
                          path_fixture_data(value), path_fixture_data(value, changed=True),
-                         workflow_fixture_data(value), workflow_fixture_data(value, installed=True)):
+                         workflow_fixture_data(value), workflow_fixture_data(value, installed=True),
+                         metadata_fixture_data(value), metadata_fixture_data(value, saved=True)):
             self.assertLessEqual(len(L.canonical(document)), 8192)
         for field in ("runId", "attempt"):
             for bad in ("", "0", "01", "1-2", "9" * 21, 10, True):
@@ -2627,6 +2722,7 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
 
     def test_shell_fixture_roster_fits_the_unchanged_root_evidence_cap(self):
         value, _, _, _ = closed_shell_data()
+        self.assertEqual(L.SHELL_CASES, ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply", "metadata-save"))
         roster = L.public_files(value)
         self.assertEqual({name for name in roster if name.startswith("shell-positive-project-")},
                          {"shell-positive-project-before.json", "shell-positive-project-after.json"})
@@ -2636,14 +2732,17 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                          {"shell-positive-candidate-before.json", "shell-positive-candidate-after.json"})
         self.assertEqual({name for name in roster if name.startswith("shell-workflow-apply-") and name.endswith(".json")},
                          {"shell-workflow-apply-before.json", "shell-workflow-apply-after.json"})
-        self.assertEqual(len(roster), 89)
-        self.assertEqual(len(roster) + 2, 91)
-        self.assertEqual(len(L.root_phases(value)), 19)
+        self.assertEqual({name for name in roster if name.startswith("shell-metadata-save-") and name.endswith(".json")},
+                         {"shell-metadata-save-before.json", "shell-metadata-save-after.json"})
+        self.assertEqual(len(roster), 94)
+        self.assertEqual(len(roster) + 2, 96)
+        self.assertEqual(len(L.root_phases(value)), 20)
         self.assertLessEqual(len(roster), 128)
         for case in ("positive", "refuse-writable", "refuse-pth"):
             self.assertFalse(any(name.startswith("shell-positive-project-") for name in L.public_files(installed_handoff(case))))
             self.assertFalse(any(name.startswith("shell-positive-candidate-") for name in L.public_files(installed_handoff(case))))
             self.assertFalse(any(name.startswith("shell-workflow-apply-") for name in L.public_files(installed_handoff(case))))
+            self.assertFalse(any(name.startswith("shell-metadata-save-") for name in L.public_files(installed_handoff(case))))
 
     def test_positive_typed_schema_rejects_each_missing_or_changed_leaf(self):
         expected = project_draft_receipt()
@@ -2885,7 +2984,8 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                  patch.object(L, "_shell_project_inventory", return_value=project_fixture_data(value)) as inventory, \
                  patch.object(L, "_shell_candidate_inventory", return_value=candidate_fixture_data(value)) as candidate_inventory, \
                  patch.object(L, "_shell_paths_inventory", return_value=path_fixture_data(value)) as path_inventory, \
-                 patch.object(L, "_shell_workflow_inventory", return_value=workflow_fixture_data(value)) as workflow_inventory:
+                 patch.object(L, "_shell_workflow_inventory", return_value=workflow_fixture_data(value)) as workflow_inventory, \
+                 patch.object(L, "_shell_metadata_inventory", return_value=metadata_fixture_data(value)) as metadata_inventory:
                 self.assertEqual(L._shell_prepare(value, case, binding), (L.shell_environment(value, case), "original-log-binding"))
                 namespace_check.assert_called_once_with(value, binding)
                 prepare.assert_not_called(); chmod.assert_not_called()
@@ -2899,21 +2999,29 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                     inventory.assert_called_once_with(value, binding)
                     candidate_inventory.assert_called_once_with(value, binding)
                     path_inventory.assert_not_called(); workflow_inventory.assert_not_called()
+                    metadata_inventory.assert_not_called()
                     self.assertEqual([call.args for call in retain.call_args_list], [
                         ("shell-positive-project-before.json", L.canonical(project_fixture_data(value))),
                         ("shell-positive-candidate-before.json", L.canonical(candidate_fixture_data(value)))])
                 elif case == "project-paths":
                     inventory.assert_not_called(); candidate_inventory.assert_not_called()
                     path_inventory.assert_called_once_with(value, binding)
-                    workflow_inventory.assert_not_called()
+                    workflow_inventory.assert_not_called(); metadata_inventory.assert_not_called()
                     retain.assert_called_once_with("shell-project-paths-before.json", L.canonical(path_fixture_data(value)))
                 elif case == "workflow-apply":
                     inventory.assert_not_called(); candidate_inventory.assert_not_called(); path_inventory.assert_not_called()
                     workflow_inventory.assert_called_once_with(value, binding)
+                    metadata_inventory.assert_not_called()
                     retain.assert_called_once_with("shell-workflow-apply-before.json", L.canonical(workflow_fixture_data(value)))
+                elif case == "metadata-save":
+                    inventory.assert_not_called(); candidate_inventory.assert_not_called(); path_inventory.assert_not_called()
+                    workflow_inventory.assert_not_called()
+                    metadata_inventory.assert_called_once_with(value, binding)
+                    retain.assert_called_once_with("shell-metadata-save-before.json", L.canonical(metadata_fixture_data(value)))
                 else:
                     inventory.assert_not_called(); candidate_inventory.assert_not_called(); path_inventory.assert_not_called()
-                    workflow_inventory.assert_not_called(); retain.assert_not_called(); chmod.assert_not_called()
+                    workflow_inventory.assert_not_called(); metadata_inventory.assert_not_called()
+                    retain.assert_not_called(); chmod.assert_not_called()
         with patch.object(L, "_shell_namespace_check", side_effect=L.Refused("original namespace changed")), \
              patch.object(L, "_shell_log_prepare") as logs, patch.object(Path, "mkdir") as mkdir:
             with self.assertRaises(ValueError): L._shell_prepare(value, "normal", binding)
@@ -2964,6 +3072,300 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                 current["commands"][1]["argv"][-1] = "quit-outstanding"
             with self.subTest(change=change), patch.object(L, "shell_closed_loader", return_value=expected), self.assertRaises((ValueError, KeyError)):
                 L.shell_closed_result(value, current, changed)
+
+    def test_metadata_receipt_requires_each_typed_original_finality_and_readback_leaf(self):
+        expected = metadata_receipt_data(); raw = L.canonical(expected)
+        self.assertLessEqual(len(raw), 2048)
+        self.assertEqual(L.shell_metadata_receipt(raw), expected)
+        value, outcome, files, mappings = closed_shell_data()
+
+        def leaves(value, prefix=()):
+            for key, child in (value.items() if type(value) is dict else enumerate(value)):
+                if type(child) in (dict, list):
+                    yield from leaves(child, (*prefix, key))
+                else:
+                    yield (*prefix, key), child
+
+        for path, original in leaves(expected):
+            for mode in ("missing", "changed", "wrong-type"):
+                changed = deepcopy(expected); parent = changed
+                for key in path[:-1]:
+                    parent = parent[key]
+                if mode == "missing":
+                    del parent[path[-1]]
+                elif mode == "wrong-type":
+                    parent[path[-1]] = int(original) if type(original) is bool else float(original) if type(original) is int else None
+                else:
+                    parent[path[-1]] = not original if type(original) is bool else original + 1 if type(original) is int else original + "-other"
+                with self.subTest(path=path, mode=mode):
+                    with self.assertRaises(ValueError):
+                        L.shell_metadata_receipt(L.canonical(changed))
+                    with self.assertRaises(ValueError):
+                        L.shell_result(*metadata_capture(changed), "metadata-save", 0, mappings)
+                    altered = dict(files); cases = L.decode(altered["shell-cases.json"])
+                    cases["metadata-save"]["metadataSave"] = changed
+                    altered["shell-cases.json"] = L.canonical(cases)
+                    with patch.object(L, "shell_closed_loader", return_value=mappings), self.assertRaises(ValueError):
+                        L.shell_closed_result(value, outcome, altered)
+        for changed in (b"", b"{}", b"[]", b"null", raw + b" " * 2048,
+                        raw.replace(b'"apply":1', b'"apply":1,"apply":1'),
+                        raw.replace(b'"originals":{', b'"originals":{},"originals":{'),
+                        L.canonical(project_draft_receipt()), L.canonical(L.SHELL_WORKFLOW_RECEIPT),
+                        L.canonical({**expected, "message": "not a finality fact"}),
+                        *(L.canonical({key: child for key, child in expected.items() if key != omitted})
+                          for omitted in ("requests", "draft", "reviews", "confirmation", "outcomes", "nativeReasons", "originals", "readback", "quit"))):
+            with self.subTest(raw=changed), self.assertRaises(ValueError):
+                L.shell_metadata_receipt(changed)
+
+    def test_metadata_requires_original_stdout_order_complete_receipt_and_zero_exit(self):
+        stdout, stderr = metadata_capture(); expected = map_data()
+        parsed = L.shell_result(stdout, stderr, "metadata-save", 0, expected)
+        self.assertEqual(parsed["metadataSave"], metadata_receipt_data())
+        lines = stdout.splitlines(keepends=True)
+        self.assertEqual(len(lines), 5)
+        noise = b"ordinary wrapper text\nMRKDBG_DESKTOP_BOOTSTRAP=setup-enter\n"
+        self.assertEqual(L.shell_result(noise + noise.join(lines), noise, "metadata-save", 0, expected), parsed)
+        for order in permutations(range(5)):
+            if order != (0, 1, 2, 3, 4):
+                with self.subTest(order=order), self.assertRaises(ValueError):
+                    L.shell_result(b"".join(lines[index] for index in order), stderr, "metadata-save", 0, expected)
+        changes = [(b"", b""), (b"", stdout), (stdout.rstrip(b"\n"), b""), (stdout.replace(b"\n", b"\r\n"), b""),
+                   (stdout.replace(b"=available", b"=unavailable"), b""), (stdout + b"MRK_UNEXPECTED=1\n", b""),
+                   (stdout + L.SHELL_WORKFLOW_MARKER + L.canonical(L.SHELL_WORKFLOW_RECEIPT), b"")]
+        for index, line in enumerate(lines):
+            changes.extend(((b"".join(lines[:index] + lines[index + 1:]), b""), (stdout + line, b""),
+                            (b"".join(lines[:index] + lines[index + 1:]), line), (stdout, line)))
+        # JSON and its original LF must fit the same unchanged receipt bound.
+        body = lines[3][len(L.SHELL_METADATA_MARKER):-1]
+        changes.append((b"".join(lines[:3]) + L.SHELL_METADATA_MARKER + body + b" " * (2048 - len(body)) + b"\n" + lines[4], b""))
+        for out, err in changes:
+            with self.subTest(stdout=out, stderr=err), self.assertRaises(ValueError):
+                L.shell_result(out, err, "metadata-save", 0, expected)
+        for code in (True, False, 1, -1, None):
+            with self.subTest(code=code), self.assertRaises(ValueError):
+                L.shell_result(stdout, stderr, "metadata-save", code, expected)
+        for case in L.SHELL_CASES:
+            if case != "metadata-save":
+                with self.subTest(case=case), self.assertRaises(ValueError):
+                    L.shell_result(stdout, stderr, case, 0, expected)
+
+    def test_metadata_fixture_preserves_originals_and_requires_one_new_and_one_replaced_inode(self):
+        value = installed_handoff(); before = metadata_fixture_data(value); after = metadata_fixture_data(value, saved=True)
+        raw, final = L.canonical(before), L.canonical(after)
+        locale = "release/store/android/en-US"
+        short, full = (locale + "/" + name + "_description.txt" for name in ("short", "full"))
+        first, last = ({row["path"]: row for row in document["entries"]} for document in (before, after))
+        with patch.object(Path, "lstat", side_effect=AssertionError("Closed metadata DATA cannot inspect a live tree")), \
+             patch.object(L, "record", side_effect=AssertionError("Closed metadata DATA cannot reopen text")):
+            result = L.shell_metadata_fixture(value, raw, final)
+        self.assertEqual(result, {
+            "fixture": "android-metadata-save-v1", "rootRetained": True, "preservedOriginals": True,
+            "createdCount": 1, "replacedCount": 1, "beforeCount": 13, "afterCount": 14,
+            "configurationUnchanged": True, "noUnexpectedEntries": True, "noPendingState": True,
+            "files": [{"path": locale + "/" + name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest(), "mode": 0o600}
+                      for name, data in (("title.txt", b"Public title"), ("short_description.txt", b"Public summary"),
+                                         ("keep.txt", b"untouched\n"), ("full_description.txt", b"Public description"))],
+            "before": {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()},
+            "after": {"size": len(final), "sha256": hashlib.sha256(final).hexdigest()}})
+        self.assertEqual((len(first), len(last), set(last) - set(first)), (13, 14, {full}))
+        self.assertEqual((sum(row["size"] for row in first.values() if row["kind"] == "file"),
+                          sum(row["size"] for row in last.values() if row["kind"] == "file"), first[short]["size"]), (1074, 1095, 11))
+        self.assertEqual(first[short]["sha256"], hashlib.sha256(b"Old summary").hexdigest())
+        self.assertEqual(before["absent"], [*after["absent"], full])
+        for name, original in first.items():
+            if name == short:
+                continue
+            if name not in (".", locale):
+                self.assertEqual(original, last[name])
+            # Only staging-root and locale timestamps/size may move. The
+            # title, sentinel, hint, version, config and ignore stay identical.
+            for field in range(6 if name in (".", locale) else 9):
+                changed = deepcopy(after)
+                next(row for row in changed["entries"] if row["path"] == name)["identity"][field] += 1
+                with self.subTest(preserved=name, identity=field), self.assertRaises(ValueError):
+                    L.shell_metadata_fixture(value, raw, L.canonical(changed))
+        for name in (short, full):
+            for original in first.values():
+                changed = deepcopy(after)
+                next(row for row in changed["entries"] if row["path"] == name)["identity"][1] = original["identity"][1]
+                with self.subTest(new=name, reused=original["path"]), self.assertRaises(ValueError):
+                    L.shell_metadata_fixture(value, raw, L.canonical(changed))
+        changed = deepcopy(after)
+        next(row for row in changed["entries"] if row["path"] == full)["identity"][1] = last[short]["identity"][1]
+        with self.assertRaises(ValueError): L.shell_metadata_fixture(value, raw, L.canonical(changed))
+        fresh = deepcopy(after)
+        for index, name in enumerate((short, full)):
+            next(row for row in fresh["entries"] if row["path"] == name)["identity"][1] = 900 + index
+        self.assertTrue(L.shell_metadata_fixture(value, raw, L.canonical(fresh))["preservedOriginals"])
+        mutations = (
+            lambda d: d.update(schemaVersion=True), lambda d: d.update(fixture="android-workflow-apply-v1"),
+            lambda d: d.update(root=d["root"].replace("metadata-project", "positive-project")),
+            lambda d: d.update(saved=int(d["saved"])), lambda d: d.update(absent=[]),
+            lambda d: d["entries"].pop(), lambda d: d["entries"].append(deepcopy(d["entries"][-1])),
+            lambda d: d["entries"].reverse(), lambda d: d["entries"][0]["children"].append(".mobile-release-metadata-text"),
+            lambda d: d["entries"][5]["children"].append("private"),
+            lambda d: d["entries"][6].update(path="app/../build.gradle.kts"),
+            lambda d: d["entries"][-1].update(sha256="f" * 64), lambda d: d["entries"][-1].update(size=True),
+            lambda d: d["entries"][-1].update(extra=True), lambda d: d["entries"][-1]["identity"].__setitem__(1, True),
+            lambda d: d["entries"][-1]["identity"].__setitem__(2, stat.S_IFLNK | 0o600),
+            lambda d: d["entries"][-1]["identity"].__setitem__(2, stat.S_IFREG | 0o644),
+            lambda d: d["entries"][-1]["identity"].__setitem__(3, 0),
+            lambda d: d["entries"][-1]["identity"].__setitem__(5, 2),
+            lambda d: d["entries"][-1]["identity"].__setitem__(0, 2),
+            lambda d: d["entries"][-1]["identity"].__setitem__(1, d["namespace"]["identity"][1]),
+        )
+        for phase, document in (("before", before), ("after", after)):
+            for mutate in mutations:
+                changed = deepcopy(document); mutate(changed)
+                with self.subTest(phase=phase, mutate=mutate), self.assertRaises(ValueError):
+                    L.shell_metadata_fixture(value, L.canonical(changed) if phase == "before" else raw,
+                                              L.canonical(changed) if phase == "after" else final)
+            for index, row in enumerate(document["entries"]):
+                if row["kind"] == "file":
+                    for field, bad in (("sha256", "f" * 64), ("size", float(row["size"]))):
+                        changed = deepcopy(document); changed["entries"][index][field] = bad
+                        with self.subTest(phase=phase, text=row["path"], field=field), self.assertRaises(ValueError):
+                            L.shell_metadata_fixture(value, L.canonical(changed) if phase == "before" else raw,
+                                                      L.canonical(changed) if phase == "after" else final)
+        for first_raw, last_raw in ((raw, raw), (final, final), (final, raw), (b"{}", final), (raw, b"[]"),
+                                   (json.dumps(before, indent=2).encode(), final), (raw, final + b" " * 8192),
+                                   (raw, final.replace(b'"saved":true', b'"saved":true,"saved":true'))):
+            with self.subTest(before=first_raw, after=last_raw), self.assertRaises(ValueError):
+                L.shell_metadata_fixture(value, first_raw, last_raw)
+
+    def test_metadata_inventory_reads_only_fixed_public_files_and_refuses_drift_or_residue(self):
+        value = installed_handoff(); namespace = fixture_namespace_data(value); binding = L.canonical(namespace)
+        project = Path(namespace["root"]) / "metadata-project"
+        for saved in (False, True):
+            for fault in (None, "pending", "locale-child", "mode", "owner", "bytes", "file-drift", "parent-drift", "residue", "namespace-drift"):
+                fixture = metadata_fixture_data(value, saved=saved)
+                by_path = {project if row["path"] == "." else project / row["path"]: row for row in fixture["entries"]}
+                if fault == "pending": by_path[project]["children"].append(".mobile-release-metadata-text")
+                if fault == "locale-child": by_path[project / "release/store/android/en-US"]["children"].append("private")
+                source = by_path[project / "app/build.gradle.kts"]
+                if fault == "mode": source["identity"][2] = stat.S_IFLNK | 0o444
+                if fault == "owner": source["identity"][3] = value["runnerUid"]
+                reads_seen = []
+                def file_stat(path):
+                    values = list(by_path[path]["identity"])
+                    if (fault == "file-drift" and path in reads_seen
+                            or fault == "parent-drift" and path == project and reads_seen):
+                        values[8] += 1
+                    return SimpleNamespace(**dict(zip(("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns"), values)))
+                def scan(path):
+                    context = Mock()
+                    context.__enter__ = Mock(return_value=iter(SimpleNamespace(name=name) for name in by_path[path]["children"]))
+                    context.__exit__ = Mock(return_value=False)
+                    return context
+                def read_data(path, limit):
+                    row = by_path[path]; self.assertEqual(limit, row["size"]); reads_seen.append(path)
+                    return {"path": str(path), "size": row["size"], "sha256": "f" * 64 if fault == "bytes" else row["sha256"]}
+                with self.subTest(saved=saved, fault=fault), patch.object(L, "_ROOT", L.root_path(value)), patch.object(L, "directory"), \
+                     patch.object(L, "_shell_namespace_check", side_effect=[namespace, L.Refused("changed namespace")]
+                                  if fault == "namespace-drift" else None, return_value=namespace) as namespace_check, \
+                     patch.object(Path, "lstat", file_stat), patch.object(L.os, "scandir", side_effect=scan) as scans, \
+                     patch.object(L, "record", side_effect=read_data) as reads, \
+                     patch.object(L, "_absent", side_effect=L.Refused("pending state") if fault == "residue" else None) as absent:
+                    if fault is None:
+                        self.assertEqual(L._shell_metadata_inventory(value, binding, saved=saved), fixture)
+                        self.assertEqual([call.args for call in namespace_check.call_args_list], [(value, binding)] * 2)
+                        self.assertEqual([call.args for call in reads.call_args_list],
+                                         [(project / row["path"], row["size"]) for row in fixture["entries"] if row["kind"] == "file"])
+                        self.assertEqual(reads.call_count, 8 if saved else 7)
+                        self.assertEqual([call.args[0] for call in absent.call_args_list], [project / name for name in fixture["absent"]])
+                    else:
+                        with self.assertRaises(ValueError): L._shell_metadata_inventory(value, binding, saved=saved)
+                        if fault in ("pending", "locale-child", "mode", "owner"): reads.assert_not_called()
+                    self.assertTrue(all(by_path[call.args[0]]["kind"] == "directory" for call in scans.call_args_list))
+                    self.assertTrue(all(by_path[call.args[0]]["kind"] == "file" for call in reads.call_args_list))
+        with patch.object(L, "_ROOT", L.root_path(value)), \
+             patch.object(L, "_shell_namespace_check", side_effect=AssertionError("Untyped phase cannot authorize observation")):
+            for saved in (0, 1, None, "true"):
+                with self.subTest(saved=saved), self.assertRaises(ValueError):
+                    L._shell_metadata_inventory(value, binding, saved=saved)
+
+    def test_closed_metadata_requires_native_receipt_original_exports_and_successful_command(self):
+        value, outcome, files, expected = closed_shell_data()
+        with patch.object(L, "shell_closed_loader", return_value=expected):
+            result = L.shell_closed_result(value, outcome, files)
+        self.assertEqual(result["metadataSave"]["native"], metadata_receipt_data())
+        fixture = result["metadataSave"]["fixture"]
+        self.assertEqual((fixture["createdCount"], fixture["replacedCount"]), (1, 1))
+        self.assertTrue(fixture["preservedOriginals"] and fixture["configurationUnchanged"] and fixture["noPendingState"])
+        self.assertNotEqual(fixture["before"], fixture["after"])
+        for change in ("missing-before", "missing-after", "missing-display", "display-type", "old-five-cases", "partial-closed",
+                       "foreign-closed", "partial-native", "foreign-native", "unchanged-after", "journal", "short-in-place",
+                       "missing-command", "wrong-exit", "wrong-argv"):
+            altered, current = dict(files), deepcopy(outcome)
+            if change in ("missing-before", "missing-after"):
+                altered.pop("shell-metadata-save-" + change.removeprefix("missing-") + ".json")
+            elif change == "missing-display":
+                altered.pop("shell-metadata-save-xvfb.stderr")
+            elif change == "display-type":
+                altered["shell-metadata-save-xvfb.stderr"] = "not captured bytes"
+            elif change in ("old-five-cases", "partial-closed", "foreign-closed"):
+                cases = L.decode(altered["shell-cases.json"])
+                if change == "old-five-cases": cases.pop("metadata-save")
+                elif change == "partial-closed": cases["metadata-save"]["metadataSave"].pop("readback")
+                else: cases["metadata-save"]["metadataSave"] = L.SHELL_WORKFLOW_RECEIPT
+                altered["shell-cases.json"] = L.canonical(cases)
+            elif change == "partial-native":
+                receipt = metadata_receipt_data(); receipt.pop("originals")
+                altered["shell-metadata-save.stdout"] = metadata_capture(receipt)[0]
+            elif change == "foreign-native":
+                altered["shell-metadata-save.stdout"] = workflow_capture()[0]
+            elif change == "unchanged-after":
+                altered["shell-metadata-save-after.json"] = altered["shell-metadata-save-before.json"]
+            elif change in ("journal", "short-in-place"):
+                document = L.decode(altered["shell-metadata-save-after.json"])
+                if change == "journal": document["entries"][0]["children"].append(".mobile-release-metadata-text")
+                else:
+                    name = "release/store/android/en-US/short_description.txt"
+                    original = L.decode(altered["shell-metadata-save-before.json"])
+                    next(row for row in document["entries"] if row["path"] == name)["identity"][1] = next(
+                        row for row in original["entries"] if row["path"] == name)["identity"][1]
+                altered["shell-metadata-save-after.json"] = L.canonical(document)
+            elif change == "missing-command":
+                current["commands"] = [row for row in current["commands"] if row["phase"] != "shell-metadata-save"]
+            else:
+                command = next(row for row in current["commands"] if row["phase"] == "shell-metadata-save")
+                if change == "wrong-exit": command["exitCode"] = 1
+                else: command["argv"][-1] = "workflow-apply"
+            with self.subTest(change=change), patch.object(L, "shell_closed_loader", return_value=expected), \
+                 patch.object(L, "_shell_metadata_inventory", side_effect=AssertionError("No failed-work metadata rescan")), \
+                 patch.object(L, "_shell_namespace_check", side_effect=AssertionError("Closed DATA is not live authority")), \
+                 self.assertRaises((ValueError, KeyError)):
+                L.shell_closed_result(value, current, altered)
+
+    def test_metadata_postexit_inventory_and_other_original_rechecks_follow_the_success_gate(self):
+        tree = ast.parse((SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_text())
+        unit = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "unit_start")
+        loop = next(node for node in ast.walk(unit) if isinstance(node, ast.For)
+                    and isinstance(node.iter, ast.Name) and node.iter.id == "SHELL_CASES")
+        branch = loop.body[1]
+        self.assertIsInstance(branch, ast.If)
+        self.assertEqual(ast.unparse(branch.orelse[0]),
+                         "result = command('shell-' + case, shell_argv(value, case), maximum=60, env=environment, shell_log=(value, case, log_binding))")
+        self.assertEqual(ast.unparse(branch.orelse[1]),
+                         "cases[case] = shell_result(result.stdout, result.stderr, case, result.returncode, expected)")
+        metadata = next(node for node in branch.orelse[2:] if isinstance(node, ast.If) and ast.unparse(node.test) == "case == 'metadata-save'")
+        self.assertEqual(len(metadata.body), 4)
+        self.assertEqual([ast.unparse(node) for node in metadata.body[:3]], [
+            "metadata_after = canonical(_shell_metadata_inventory(value, namespace, saved=True))",
+            "_retain('shell-metadata-save-after.json', metadata_after)",
+            "shell_metadata_fixture(value, read(_ROOT / 'public/shell-metadata-save-before.json', 8192), metadata_after)"])
+        recheck = metadata.body[3].value
+        self.assertEqual(ast.unparse(recheck.func), "need")
+        self.assertEqual([ast.unparse(node) for node in recheck.args[0].values], [
+            "canonical(_shell_project_inventory(value, namespace, saved=True)) == read(_ROOT / 'public/shell-positive-project-after.json', 8192)",
+            "canonical(_shell_candidate_inventory(value, namespace)) == read(_ROOT / 'public/shell-positive-candidate-after.json', 8192)",
+            "canonical(_shell_paths_inventory(value, namespace, changed=True)) == read(_ROOT / 'public/shell-project-paths-after.json', 8192)",
+            "canonical(_shell_workflow_inventory(value, namespace, installed=True)) == read(_ROOT / 'public/shell-workflow-apply-after.json', 8192)"])
+        calls = [node for node in ast.walk(unit) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                 and node.func.id == "_shell_metadata_inventory"]
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(metadata.body[0].lineno <= calls[0].lineno <= metadata.body[0].end_lineno)
+        self.assertFalse(any(isinstance(node, ast.Try) for node in ast.walk(loop)))
 
 
 class CandidateDocumentsLifecycleContracts(unittest.TestCase):
@@ -3217,7 +3619,7 @@ class CandidateDocumentsLifecycleContracts(unittest.TestCase):
         calls = [(node.func.id, node.lineno) for node in ast.walk(body) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)]
         gated = [line for name, line in calls if name == "shell_result"]
         inventories = sorted(line for name, line in calls if name == "_shell_candidate_inventory")
-        self.assertEqual((len(gated), len(inventories)), (1, 2))
+        self.assertEqual((len(gated), len(inventories)), (1, 3))
         self.assertLess(gated[0], inventories[0])
         loop = next(node for node in ast.walk(body) if isinstance(node, ast.For)
                     and isinstance(node.iter, ast.Name) and node.iter.id == "SHELL_CASES")
@@ -3228,19 +3630,21 @@ class CandidateDocumentsLifecycleContracts(unittest.TestCase):
         self.assertIsInstance(positive, ast.If)
         self.assertEqual(ast.unparse(positive.test), "case == 'positive'")
         # The original post-exit capture remains a direct positive-branch
-        # assignment. The only additional call is the fifth-case recheck below.
+        # assignment. Only the two later successful cases may recheck it.
         self.assertTrue(any(isinstance(node, ast.Assign) and node.lineno <= inventories[0] <= node.end_lineno for node in positive.body))
-        workflow = next(node for node in branch.orelse[gate + 1:]
-                        if isinstance(node, ast.If) and ast.unparse(node.test) == "case == 'workflow-apply'")
-        rechecks = [node for node in workflow.body if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
-                    and isinstance(node.value.func, ast.Name) and node.value.func.id == "need"]
-        self.assertEqual(len(rechecks), 1)
-        self.assertLess(gated[0], inventories[1])
-        self.assertTrue(rechecks[0].lineno <= inventories[1] <= rechecks[0].end_lineno)
-        self.assertEqual([node.func.id for node in ast.walk(rechecks[0]) if isinstance(node, ast.Call)
-                          and isinstance(node.func, ast.Name) and node.func.id in
-                          {"_shell_project_inventory", "_shell_candidate_inventory", "_shell_paths_inventory"}],
-                         ["_shell_project_inventory", "_shell_candidate_inventory", "_shell_paths_inventory"])
+        names = ["_shell_project_inventory", "_shell_candidate_inventory", "_shell_paths_inventory"]
+        for index, (case, expected_calls) in enumerate((("workflow-apply", names),
+                ("metadata-save", [*names, "_shell_workflow_inventory"])), 1):
+            later = next(node for node in branch.orelse[gate + 1:]
+                         if isinstance(node, ast.If) and ast.unparse(node.test) == "case == '" + case + "'")
+            rechecks = [node for node in later.body if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                        and isinstance(node.value.func, ast.Name) and node.value.func.id == "need"]
+            self.assertEqual(len(rechecks), 1)
+            self.assertLess(gated[0], inventories[index])
+            self.assertTrue(rechecks[0].lineno <= inventories[index] <= rechecks[0].end_lineno)
+            self.assertEqual([node.func.id for node in ast.walk(rechecks[0]) if isinstance(node, ast.Call)
+                              and isinstance(node.func, ast.Name) and node.func.id in {*names, "_shell_workflow_inventory"}],
+                             expected_calls)
 
 
 
@@ -3399,7 +3803,12 @@ class ProjectPathLifecycleContracts(unittest.TestCase):
                           and isinstance(n.func, ast.Name) and n.func.id == "_shell_workflow_inventory"]
         self.assertEqual(len(workflow_calls), 1)
         self.assertEqual([(arg.arg, ast.literal_eval(arg.value)) for arg in workflow_calls[0].keywords], [("installed", True)])
-        self.assertEqual(set(L.SHELL_CASES), {"normal", "positive", "quit-outstanding", "project-paths", "workflow-apply"})
+        metadata_branch = next(n for n in branch.orelse[gate+1:] if isinstance(n, ast.If) and ast.unparse(n.test) == "case == 'metadata-save'")
+        metadata_calls = [n for n in ast.walk(metadata_branch) if isinstance(n, ast.Call)
+                          and isinstance(n.func, ast.Name) and n.func.id == "_shell_metadata_inventory"]
+        self.assertEqual(len(metadata_calls), 1)
+        self.assertEqual([(arg.arg, ast.literal_eval(arg.value)) for arg in metadata_calls[0].keywords], [("saved", True)])
+        self.assertEqual(set(L.SHELL_CASES), {"normal", "positive", "quit-outstanding", "project-paths", "workflow-apply", "metadata-save"})
 
 
 class FailureLabelSinkContracts(unittest.TestCase):

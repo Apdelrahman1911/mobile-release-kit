@@ -2004,18 +2004,25 @@ def shell_cargo_metadata(raw, source, target):
            and set(nodes) <= set(by_id), "Shell Cargo metadata IDs differ/duplicate")
     roots = [row for row in packages if row.get("manifest_path") == str(source / "desktop/src-tauri/Cargo.toml")]
     D.need(len(roots) == 1 and roots[0]["name"] == "mobile-release-kit-desktop" and roots[0]["version"] == "0.1.0"
-           and resolve.get("root") == roots[0]["id"] and nodes[roots[0]["id"]]["features"] == SHELL_FEATURES,
+           and resolve.get("root") == roots[0]["id"] and roots[0]["id"] in nodes
+           and nodes[roots[0]["id"]]["features"] == SHELL_FEATURES,
            "Shell root feature graph is not the fixed production graph")
     for row in nodes.values():
         D.need(type(row.get("features")) is list and all(type(name) is str for name in row["features"])
                and type(row.get("deps")) is list and all(dep.get("pkg") in nodes for dep in row["deps"]),
                "Shell resolved Cargo edge/features differ")
-    # The Linux-filtered package/resolve roster contains only app + Linux.
-    local_paths = {"mobile-release-kit-desktop": source / "desktop/src-tauri/Cargo.toml",
-                   "mrk-linux-mount-observation": source / "desktop/native/linux-mount-observation/Cargo.toml"}
+    # The Linux-filtered graph includes the two maintained SDK sources, not
+    # additional native platforms or arbitrary path/registry replacements.
+    local_paths = {
+        "mobile-release-kit-desktop": ("0.1.0", source / "desktop/src-tauri/Cargo.toml"),
+        "mrk-linux-mount-observation": ("0.1.0", source / "desktop/native/linux-mount-observation/Cargo.toml"),
+        "secret-service": ("5.2.0", source / "desktop/vendor/secret-service-5.2.0/Cargo.toml"),
+        "zbus": ("5.19.0", source / "desktop/vendor/zbus-5.19.0/Cargo.toml"),
+    }
     local = [row for row in packages if row.get("source") is None]
     D.need(len(local) == len(local_paths) and {row["name"] for row in local} == set(local_paths)
-           and all(row["version"] == "0.1.0" and row["manifest_path"] == str(local_paths[row["name"]]) for row in local),
+           and all((row["version"], row["manifest_path"]) == (local_paths[row["name"]][0], str(local_paths[row["name"]][1]))
+                   for row in local),
            "Shell Cargo local source roster differs")
     D.need(all(row["id"] in nodes for row in local), "Shell Cargo active local graph differs")
     # Other-target helpers remain root dependency declarations, not packages.
@@ -2036,16 +2043,33 @@ def shell_cargo_metadata(raw, source, target):
              'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'),
         )
     ]
+    for kind, support in ((None, []), ("dev", ["mrk-retrieval-test-support"])):
+        expected_declarations.append({
+            "name": "secret-service", "path": str(source / "desktop/vendor/secret-service-5.2.0"),
+            "target": 'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))',
+            "source": None, "req": "=5.2.0", "kind": kind, "rename": None, "optional": False,
+            "uses_default_features": False, "features": ["rt-tokio-crypto-rust", *support], "registry": None,
+        })
+    # Cargo retains registry declarations for the patched SDK. Both roles must
+    # resolve to the one exact local zbus above; a registry fallback is refused.
+    for kind, support in ((None, []), ("dev", ["mrk-owned-test-support"])):
+        expected_declarations.append({
+            "name": "zbus", "target": 'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))',
+            "source": "registry+https://github.com/rust-lang/crates.io-index", "req": "=5.19.0", "kind": kind,
+            "rename": None, "optional": False, "uses_default_features": False,
+            "features": ["tokio", *support], "registry": None,
+        })
     local_names = {row["name"] for row in expected_declarations}
     local_declarations = [row for row in declarations
                           if row.get("source") is None or "path" in row or row["name"] in local_names]
     D.need(len(local_declarations) == len(expected_declarations)
-           and D.canonical(sorted(local_declarations, key=lambda row: row["name"]))
-           == D.canonical(sorted(expected_declarations, key=lambda row: row["name"])),
+           and sorted(D.canonical(row) for row in local_declarations)
+           == sorted(D.canonical(row) for row in expected_declarations),
            "Shell Cargo local dependency declarations differ")
     registry = [row for row in packages if row.get("source") is not None]
     keys = {(row["name"], row["version"]) for row in registry}
-    D.need(len(keys) == len(registry) and all(row["source"] == "registry+https://github.com/rust-lang/crates.io-index"
+    D.need(len(keys) == len(registry) and all(row["name"] not in local_paths
+           and row["source"] == "registry+https://github.com/rust-lang/crates.io-index"
            and re.fullmatch(r"[A-Za-z0-9_-]+", row["name"]) is not None
            and re.fullmatch(r"[0-9][A-Za-z0-9.+_-]+", row["version"]) is not None for row in registry),
            "Shell Cargo registry/source identity differs")
@@ -3095,7 +3119,7 @@ def shell_project_draft_observation(observed, lifecycle):
     cases, combined, files = observed.get("cases"), observed.get("projectDraft"), observed.get("files")
     # The unchanged root cap is 128; its exporter adds the original client's
     # stdout/stderr, not two more root evidence slots or another capture.
-    D.need(type(cases) is dict and set(cases) == {"normal", "positive", "quit-outstanding", "project-paths", "workflow-apply"}
+    D.need(type(cases) is dict and set(cases) == {"normal", "positive", "quit-outstanding", "project-paths", "workflow-apply", "metadata-save"}
            and type(combined) is dict and set(combined) == {"native", "fixture"}
            and type(files) is list and len(files) <= 130, "Closed project/draft receipt or exported original roster is missing")
     positive = cases["positive"]
@@ -3144,6 +3168,7 @@ def shell_project_draft_observation(observed, lifecycle):
     _shell_candidate_documents_observation(positive, observed.get("candidateDocuments"), files, lifecycle)
     _shell_project_paths_observation(cases["project-paths"], observed.get("projectPaths"), files, lifecycle)
     _shell_workflow_apply_observation(cases["workflow-apply"], observed.get("workflowApply"), files, lifecycle)
+    _shell_metadata_save_observation(cases["metadata-save"], observed.get("metadataSave"), files, lifecycle)
     return {"native": receipt, "fixture": fixture}
 
 
@@ -3249,6 +3274,40 @@ def _shell_workflow_apply_observation(case, combined, files, lifecycle):
     D.need(fixture["before"]["sha256"] != fixture["after"]["sha256"], "Workflow inventory incorrectly claims no created callers")
 
 
+def _shell_metadata_save_observation(case, combined, files, lifecycle):
+    """Require the sixth original, both real Reviews and the exact saved locale."""
+    D.need(type(case) is dict and set(case) == {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps", "metadataSave"}
+           and case["case"] == "metadata-save" and type(case["exitCode"]) is int and case["exitCode"] == 0
+           and case["bootstrapReturned"] is True and case["domAndGtkObserved"] is True and case["maps"] == [],
+           "Closed metadata original result is incomplete")
+    D.need(type(combined) is dict and set(combined) == {"native", "fixture"}, "Closed metadata Save observation is missing")
+    receipt = lifecycle.shell_metadata_receipt(D.canonical(case["metadataSave"]))
+    D.need(D.canonical(combined["native"]) == D.canonical(receipt), "Closed metadata native receipt correspondence differs")
+    fixture = combined["fixture"]
+    expected = {"fixture": "android-metadata-save-v1", "rootRetained": True, "preservedOriginals": True,
+                "createdCount": 1, "replacedCount": 1, "beforeCount": 13, "afterCount": 14,
+                "configurationUnchanged": True, "noUnexpectedEntries": True, "noPendingState": True,
+                "files": [{"path": lifecycle.SHELL_METADATA_LOCALE + "/" + name, "size": len(raw),
+                           "sha256": hashlib.sha256(raw).hexdigest(), "mode": 0o600}
+                          for name, raw in (("title.txt", lifecycle.SHELL_METADATA_TITLE),
+                                            ("short_description.txt", lifecycle.SHELL_METADATA_SHORT_AFTER),
+                                            ("keep.txt", lifecycle.SHELL_METADATA_KEEP),
+                                            ("full_description.txt", lifecycle.SHELL_METADATA_FULL))]}
+    D.need(type(fixture) is dict and set(fixture) == set(expected) | {"before", "after"}
+           and D.canonical({key: fixture[key] for key in expected}) == D.canonical(expected),
+           "Closed metadata fixture originals or exact saved bytes differ")
+    for phase in ("before", "after"):
+        pin = fixture[phase]
+        D.need(type(pin) is dict and set(pin) == {"size", "sha256"} and type(pin["size"]) is int and 0 < pin["size"] <= 8192
+               and type(pin["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", pin["sha256"]) is not None,
+               "Closed metadata original inventory pin differs")
+        matches = [row for row in files if type(row) is dict and row.get("path") == "lifecycle-shell-metadata-save-" + phase + ".json"]
+        D.need(len(matches) == 1 and set(matches[0]) == {"path", "size", "sha256"}
+               and type(matches[0]["size"]) is int and matches[0]["size"] == pin["size"] and matches[0]["sha256"] == pin["sha256"],
+               "Original metadata before/after export pin differs")
+    D.need(fixture["before"]["sha256"] != fixture["after"]["sha256"], "Metadata inventory incorrectly claims no saved text")
+
+
 def verify_installed_shell():
     """One installed connection gate; reuse U, not its entire lifecycle again."""
     D.need(os.environ.get("MRK_INSTALLED_SHELL_CASE") == "observe", "Only the fixed shell observation job is accepted")
@@ -3313,12 +3372,12 @@ def verify_installed_shell():
         D.need(time.monotonic() < deadline, "Original shell result endpoint expired")
         D.write(public / "result.json", D.canonical({**source_record, "lifecycle": observed,
             "projectDraft": project_draft, "candidateDocuments": observed["candidateDocuments"], "projectPaths": observed["projectPaths"],
-            "workflowApply": observed["workflowApply"],
-            "commands": check.commands, "cases": ["normal", "positive", "quit-outstanding", "project-paths", "workflow-apply"], "compilerRerun": False,
+            "workflowApply": observed["workflowApply"], "metadataSave": observed["metadataSave"],
+            "commands": check.commands, "cases": ["normal", "positive", "quit-outstanding", "project-paths", "workflow-apply", "metadata-save"], "compilerRerun": False,
             "supplierRebuilt": False, "packageBuilt": False, "upgradeOrRefusalRerun": False,
             "scope": "normal-shell-to-accepted-installed-runtime-connection-only"}))
         D.need(time.monotonic() < deadline, "Original shell result close/readback was late")
-        print("Normal window and four original observer cases retained with service finality; no product/package qualification.", flush=True)
+        print("Normal window and five original observer cases retained with service finality; no product/package qualification.", flush=True)
     except BaseException as error:
         retain_failure(root, phase if check is None else check.phase, [] if check is None else check.commands, error)
         raise
