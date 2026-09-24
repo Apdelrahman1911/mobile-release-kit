@@ -120,6 +120,10 @@ pub struct Panel {
     observation_identity_armed: bool,
     #[cfg(feature = "installed-observation")]
     observation_start: Option<observation::IdentityStartReturn>,
+    #[cfg(feature = "installed-observation")]
+    observation_completion: Option<observation::CompletionReturn>,
+    #[cfg(feature = "installed-observation")]
+    observation_completion_captured: bool,
 }
 pub fn main_thread() -> bool { unsafe { mrk_main_thread() == 1 } }
 impl Panel {
@@ -131,6 +135,10 @@ impl Panel {
             observation_identity_armed: false,
             #[cfg(feature = "installed-observation")]
             observation_start: None,
+            #[cfg(feature = "installed-observation")]
+            observation_completion: None,
+            #[cfg(feature = "installed-observation")]
+            observation_completion_captured: false,
         })
     }
     fn usable(&self) -> io::Result<()> {
@@ -158,6 +166,16 @@ impl Panel {
         let mut result_code = 0; let mut path = [0u8; 4097];
         // SAFETY: retained object and bounded writable result buffers.
         let state = unsafe { mrk_panel_poll(self.original.as_ptr(), &mut result_code, path.as_mut_ptr(), path.len()) };
+        #[cfg(feature = "installed-observation")]
+        if self.observation_identity_armed && !self.observation_completion_captured {
+            // This original poll ACTUALLY returned. Save fixed completion DATA
+            // before ANY state/path/error conversion, including the -1 path.
+            // A normal early Showing/no-completion poll does not spend the slot.
+            if let Some(returned) = observation::completion_return(self.original, state) {
+                self.observation_completion = Some(returned);
+                self.observation_completion_captured = true;
+            }
+        }
         match state {
             0 => Ok(PanelState::Showing),
             1 => {
@@ -197,7 +215,7 @@ impl Panel {
 // nondefault feature forwarding selects BOTH this Rust seam and the C controls.
 #[cfg(feature = "installed-observation")]
 pub use observation::{PanelAction, PanelActionDiagnostic, PanelObservation, OpenIdentity, OpenDiagnostic, OpenReport,
-    OpenInputReturn, OpenRecheckReturn, ControlContainerButtonProof, RowSelectionProof, RowSelectionLimit, installed_prompt_button,
+    OpenInputReturn, OpenRecheckReturn, ControlContainerButtonProof, CompletionSelection, CompletionReturn, installed_prompt_button,
     IdentityConfiguration, IdentityStartReturn, IdentityBinding, IdentityBindingReturn,
     OriginalWindowState, OriginalWindowReturn, installed_original_window,
     installed_accessibility_trusted, installed_observation_flags_data_check};
@@ -206,14 +224,7 @@ mod observation {
     use super::*;
     use std::{path::Path, os::unix::ffi::OsStrExt, panic::{catch_unwind, AssertUnwindSafe}, time::{Duration, Instant}};
 
-    pub enum PanelAction<'a> {
-        ProjectCancel,
-        /// Immutable fixture-root target, once per original panel. Native
-        /// preparation browses its parent; navigation is NOT selection proof.
-        ProjectDirectory(&'a Path),
-        QuitCancel,
-        QuitConfirm,
-    }
+    pub enum PanelAction { ProjectCancel, QuitCancel, QuitConfirm }
     /// Closed labels copied from one original return, never a native query or
     /// action/finality permit. Missing/invalid DATA does not change that return.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -226,7 +237,7 @@ mod observation {
             4 => Some("quit-cancel"), 5 => Some("quit-confirm"), _ => None }
     }
     // Same numbered sites and Darwin errno values as the feature-gated shim.
-    // Code 3 remains historical diagnostic DATA only, never a callable action.
+    // Codes 2/3 remain historical diagnostic DATA only, never callable actions.
     // label, original native-return status (-1 = exception-only), action mask,
     // whether an EXISTING Objective-C query/action at this site can throw.
     const ACTION_SITES: [(&str, c_int, u8, bool); 35] = [
@@ -313,8 +324,9 @@ mod observation {
         fn mrk_panel_observe_action(panel: *mut c_void, action: c_int, directory: *const c_char,
             diagnostic: *mut u32) -> c_int;
         fn mrk_observation_ax_trusted() -> c_int;
-        fn mrk_panel_observe_arm_open_identity(panel: *mut c_void) -> c_int;
+        fn mrk_panel_observe_arm_open_identity(panel: *mut c_void, target: *const u8, capacity: usize) -> c_int;
         fn mrk_panel_observe_identity_data(panel: *mut c_void, data: *mut IdentityWire);
+        fn mrk_panel_observe_completion_data(panel: *mut c_void, data: *mut CompletionWire);
         fn mrk_panel_observe_open_identity(panel: *mut c_void, parent: *mut u8, sheet: *mut u8,
             prompt: *mut u8, capacity: usize, target: *mut u8, target_capacity: usize) -> c_int;
         fn mrk_panel_observe_open_recheck(panel: *mut c_void, parent: *const u8, sheet: *const u8,
@@ -333,11 +345,11 @@ mod observation {
             identity_tag(&self.parent, b"mrk-parent-") && identity_actual(&self.panel) && self.parent != self.panel
                 && self.prompt.starts_with(b"MRK") && self.prompt[7] == 0
                 && self.prompt[3..7].iter().zip(&self.parent[11..15]).all(|(p, b)| *p == b.to_ascii_uppercase())
-                && selection_target(&self.target)
+                && project_target(&self.target)
         }
-        pub fn targets(&self, path: &Path) -> bool { selection_target(&self.target) && path.as_os_str().as_bytes() == self.target.split(|b| *b == 0).next().unwrap_or(&[]) }
+        pub fn targets(&self, path: &Path) -> bool { project_target(&self.target) && path.as_os_str().as_bytes() == self.target.split(|b| *b == 0).next().unwrap_or(&[]) }
     }
-    fn selection_target(bytes: &[u8; 4097]) -> bool {
+    fn project_target(bytes: &[u8; 4097]) -> bool {
         let Some(end) = bytes.iter().position(|b| *b == 0).filter(|end| *end > 1) else { return false; };
         bytes[0] == b'/' && bytes[end..].iter().all(|b| *b == 0) && std::str::from_utf8(&bytes[..end]).is_ok()
             && bytes[1..end].split(|b| *b == b'/').all(|part| !part.is_empty() && part.len() <= 255 && part != b"." && part != b"..")
@@ -370,8 +382,9 @@ mod observation {
         binding: IdentityProofWire,
     }
     const IDENTITY_CLASSES: [Option<&str>; 5] = [None, Some("nil"), Some("match"), Some("different"), Some("type-invalid")];
-    const IDENTITY_SITES: [Option<&str>; 8] = [None, Some("objects"), Some("parent-tag"), Some("parent-set"),
-        Some("parent-get"), Some("complete"), Some("prompt-set"), Some("prompt-get")];
+    const IDENTITY_SITES: [Option<&str>; 10] = [None, Some("objects"), Some("parent-tag"), Some("parent-set"),
+        Some("parent-get"), Some("complete"), Some("prompt-set"), Some("prompt-get"),
+        Some("initial-directory-url"), Some("initial-directory-set")];
     const PANEL_ID_CLASSES: [Option<&str>; 10] = [None, Some("nil"), Some("type-invalid"), Some("empty"),
         Some("byte-limit"), Some("nul"), Some("encoding-invalid"), Some("valid"), Some("match"), Some("different")];
     const PROOF_SITES: [&str; 14] = ["objects", "attachment", "directory", "parent-identifier", "panel-identifier",
@@ -381,6 +394,7 @@ mod observation {
     pub struct IdentityConfiguration {
         pub attempted: bool, pub parent_setter_entered: bool, pub parent_setter_returned: bool,
         pub prompt_setter_entered: bool, pub prompt_setter_returned: bool,
+        pub initial_directory_setter_entered: bool, pub initial_directory_setter_returned: bool,
         pub parent: Option<&'static str>, pub prompt: Option<&'static str>,
         pub site: Option<&'static str>, pub error: Option<&'static str>,
     }
@@ -388,6 +402,7 @@ mod observation {
         pub fn complete(self) -> bool {
             self.attempted && self.parent_setter_entered && self.parent_setter_returned
                 && self.prompt_setter_entered && self.prompt_setter_returned && self.prompt == Some("match")
+                && self.initial_directory_setter_entered && self.initial_directory_setter_returned
                 && self.parent.is_some() && self.site == Some("complete") && self.error == Some("none")
         }
     }
@@ -414,12 +429,13 @@ mod observation {
     #[derive(Clone, Copy)]
     pub struct IdentityBindingReturn { pub configuration: IdentityConfiguration, pub binding: IdentityBinding }
     fn identity_configuration(w: IdentityWire) -> Option<IdentityConfiguration> {
-        if w.flags & !127 != 0 || w.flags & 1 == 0 { return None; }
+        if w.flags & !511 != 0 || w.flags & 1 == 0 { return None; }
         let parent = *IDENTITY_CLASSES.get(w.parent as usize)?;
         let prompt = *IDENTITY_CLASSES.get(w.prompt as usize)?;
         let c = IdentityConfiguration {
             attempted: w.flags & 2 != 0, parent_setter_entered: w.flags & 4 != 0, parent_setter_returned: w.flags & 8 != 0,
             prompt_setter_entered: w.flags & 32 != 0, prompt_setter_returned: w.flags & 64 != 0,
+            initial_directory_setter_entered: w.flags & 128 != 0, initial_directory_setter_returned: w.flags & 256 != 0,
             parent, prompt, site: *IDENTITY_SITES.get(w.site as usize)?,
             error: (w.flags & 2 != 0).then_some(*OPEN_ERRORS.get(w.error as usize)?),
         };
@@ -433,7 +449,9 @@ mod observation {
             (6, 14) => w.flags == 47 && parent.is_some() && prompt.is_none(),
             (7, 14) => w.flags == 111 && parent.is_some() && prompt.is_none(),
             (7, 13) => w.flags == 111 && parent.is_some() && matches!(prompt, Some("nil" | "different" | "type-invalid")),
-            (5, 0) => w.flags == 127 && c.complete(),
+            (8, 2 | 14) => w.flags == 111 && parent.is_some() && prompt == Some("match"),
+            (9, 14) => w.flags == 239 && parent.is_some() && prompt == Some("match"),
+            (5, 0) => w.flags == 511 && c.complete(),
             _ => false,
         };
         valid.then_some(c)
@@ -486,13 +504,19 @@ mod observation {
         if !identity_configuration(empty).is_some_and(|c| !c.attempted && !c.complete() && c.parent.is_none())
             || identity_configuration(IdentityWire::default()).is_some() { return false; }
         for parent in 1..=4 {
-            let configured = IdentityWire { flags: 127, parent, prompt: 2, site: 5, ..IdentityWire::default() };
+            let configured = IdentityWire { flags: 511, parent, prompt: 2, site: 5, ..IdentityWire::default() };
             if !identity_configuration(configured).is_some_and(IdentityConfiguration::complete) { return false; }
         }
         for (flags, site) in [(3, 2), (7, 3), (15, 4)] {
             let partial = IdentityWire { flags, site, error: 14, ..IdentityWire::default() };
             if !identity_configuration(partial).is_some_and(|c| !c.complete())
                 || identity_configuration(IdentityWire { parent: 2, ..partial }).is_some() { return false; }
+        }
+        for (flags, site, error) in [(111, 8, 2), (111, 8, 14), (239, 9, 14)] {
+            let partial = IdentityWire { flags, site, error, parent: 2, prompt: 2, ..IdentityWire::default() };
+            if !identity_configuration(partial).is_some_and(|c| !c.complete()
+                && c.initial_directory_setter_entered == (site == 9) && !c.initial_directory_setter_returned)
+                || identity_configuration(IdentityWire { flags: flags | 256, ..partial }).is_some() { return false; }
         }
         let proof = IdentityProofWire { flags: 1, checked: 0xfff, matched: 0xfff, parent: 2, panel: 8,
             children: 2, originals: 2, site: 14, error: 0 };
@@ -517,83 +541,139 @@ mod observation {
                 || identity_proof(4, IdentityProofWire { error: 4, ..changed }).is_some()
                 || identity_proof(13, IdentityProofWire { checked: 0xfff, ..changed }).is_some() { return false; }
         }
-        let configured = IdentityWire { flags: 127, parent: 2, prompt: 2, site: 5, binding: proof, ..IdentityWire::default() };
+        let configured = IdentityWire { flags: 511, parent: 2, prompt: 2, site: 5, binding: proof, ..IdentityWire::default() };
         let early = IdentityProofWire { flags: 1, checked: 1, matched: 0, site: 1, error: 3, ..IdentityProofWire::default() };
         identity_binding_return(0, configured).is_some_and(|r| r.binding.matched())
             && identity_binding_return(14, configured).is_none()
             && identity_binding_return(0, IdentityWire { binding: IdentityProofWire::default(), ..configured }).is_none()
             && identity_binding_return(3, IdentityWire { binding: early, ..configured }).is_some_and(|r| !r.binding.matched())
+            && identity_configuration(IdentityWire { flags: 127, ..configured }).is_none()
             && identity_configuration(IdentityWire { flags: 255, ..configured }).is_none()
+            && identity_configuration(IdentityWire { flags: 1023, ..configured }).is_none()
             && identity_configuration(IdentityWire { prompt: 3, ..configured }).is_none()
             && identity_configuration(IdentityWire { flags: 31, ..configured }).is_none()
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, Default, PartialEq, Eq)]
+    struct CompletionWire { flags: u32, response: u32, selection: u32 }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct CompletionSelection {
+        pub callback_entered: bool, pub urls_read_entered: bool, pub urls_read_returned: bool,
+        pub callback_returned: bool, pub duplicate: bool, pub native_unknown: bool,
+        pub response: Option<&'static str>, pub selection: Option<&'static str>,
+    }
+    impl CompletionSelection {
+        pub fn matched(self) -> bool {
+            self.callback_entered && self.urls_read_entered && self.urls_read_returned && self.callback_returned
+                && !self.duplicate && !self.native_unknown && self.response == Some("accept") && self.selection == Some("match")
+        }
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct CompletionReturn { pub poll_result: &'static str, pub facts: Option<CompletionSelection> }
+    impl CompletionReturn {
+        pub fn succeeded(self) -> bool { self.poll_result == "responded" && self.facts.is_some_and(CompletionSelection::matched) }
+    }
+    fn completion_selection(w: CompletionWire) -> Option<CompletionSelection> {
+        if w.flags & !63 != 0 { return None; }
+        let r = CompletionSelection {
+            callback_entered: w.flags & 1 != 0, urls_read_entered: w.flags & 2 != 0, urls_read_returned: w.flags & 4 != 0,
+            callback_returned: w.flags & 8 != 0, duplicate: w.flags & 16 != 0, native_unknown: w.flags & 32 != 0,
+            response: *[None, Some("accept"), Some("decline"), Some("other")].get(w.response as usize)?,
+            selection: *[None, Some("empty"), Some("malformed"), Some("multiple"), Some("different"),
+                Some("ordinary-path-disagreement"), Some("match")].get(w.selection as usize)?,
+        };
+        if !r.callback_entered && (w.flags & !32 != 0 || r.response.is_some() || r.selection.is_some())
+            || r.urls_read_entered && r.response != Some("accept")
+            || r.urls_read_returned && !r.urls_read_entered
+            || r.selection.is_some() && !r.urls_read_returned
+            || r.duplicate && !r.native_unknown { return None; }
+        let incomplete = if r.response == Some("accept") { !r.urls_read_returned || r.selection.is_none() }
+            else { r.urls_read_entered || r.selection.is_some() };
+        if !r.native_unknown && (!r.callback_entered || !r.callback_returned || r.response.is_none() || incomplete) { return None; }
+        Some(r)
+    }
+    fn completion_poll_return(w: CompletionWire, status: c_int) -> Option<CompletionReturn> {
+        if status == 0 && w == CompletionWire::default() { return None; }
+        // No completion on an earlier Showing poll is absence, not publication.
+        // All other actual returns keep their history (or invalid DATA) once.
+        let poll_result = match status { 0 => "showing", 1 => "responded", 2 => "closed", -1 => "error", _ => "invalid-return" };
+        Some(CompletionReturn { poll_result, facts: completion_selection(w) })
+    }
+    pub(super) fn completion_return(original: NonNull<c_void>, status: c_int) -> Option<CompletionReturn> {
+        let mut wire = CompletionWire::default();
+        // SAFETY: immediate post-poll scalar copy from the same retained original,
+        // BEFORE usable/error conversion or release. No AppKit call/recovery poll.
+        unsafe { mrk_panel_observe_completion_data(original.as_ptr(), &mut wire); }
+        completion_poll_return(wire, status)
+    }
+    fn completion_data_check() -> bool {
+        if std::mem::size_of::<CompletionWire>() != 12 { return false; }
+        let matched = CompletionWire { flags: 15, response: 1, selection: 6 };
+        if !completion_poll_return(matched, 1).is_some_and(CompletionReturn::succeeded)
+            || completion_poll_return(CompletionWire::default(), 0).is_some() { return false; }
+        for status in [-1, 0, 2, 3] {
+            if completion_poll_return(matched, status).is_none_or(CompletionReturn::succeeded) { return false; }
+        }
+        for selection in 1..=5 {
+            let Some(r) = completion_poll_return(CompletionWire { selection, ..matched }, 1) else { return false; };
+            if r.succeeded() || !r.facts.is_some_and(|f| !f.native_unknown && f.callback_returned) { return false; }
+        }
+        // Getter entry without return, returned getter whose classification
+        // threw, known mismatch plus preexisting Unknown, and duplicate/reentry.
+        for wire in [CompletionWire { flags: 43, selection: 0, ..matched },
+            CompletionWire { flags: 47, selection: 0, ..matched },
+            CompletionWire { flags: 47, selection: 4, ..matched },
+            CompletionWire { flags: 63, ..matched }, CompletionWire { flags: 32, ..CompletionWire::default() }] {
+            if !completion_poll_return(wire, -1).is_some_and(|r| r.poll_result == "error" && !r.succeeded()
+                && r.facts.is_some_and(|f| f.native_unknown)) { return false; }
+        }
+        for response in [2, 3] {
+            if !completion_poll_return(CompletionWire { flags: 9, response, selection: 0 }, 1).is_some_and(|r|
+                !r.succeeded() && r.facts.is_some_and(|f| !f.native_unknown && !f.urls_read_entered)) { return false; }
+        }
+        for wire in [CompletionWire { flags: 79, ..matched }, CompletionWire { flags: 31, ..matched },
+            CompletionWire { flags: 13, ..matched }, CompletionWire { flags: 7, ..matched },
+            CompletionWire { flags: 3, ..matched }, CompletionWire { response: 0, ..matched },
+            CompletionWire { response: 4, ..matched }, CompletionWire { response: 2, ..matched },
+            CompletionWire { selection: 0, ..matched }, CompletionWire { selection: 7, ..matched }] {
+            if completion_selection(wire).is_some() { return false; }
+        }
+        // Unusable/missing DATA never upgrades an actual error/absent callback.
+        completion_poll_return(CompletionWire::default(), -1).is_some_and(|r| r.facts.is_none() && !r.succeeded())
     }
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
     struct OpenWire { flags: u32, site: u32, error: u32, checks: u32, calls: u32,
         initial_nodes_examined: u32, recheck_nodes_examined: u32, owned: u32, released: u32, ax_error: i32,
-        last_role: u32, last_depth: u32, selection_checks: u32, selection_flags: u32, selection_nodes_examined: u32,
-        selection_limit_queued: u32, selection_limit_count: i64 }
+        last_role: u32, last_depth: u32 }
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
-    struct RecheckWire { known: u32, error: u32, prompt: u32, proof: IdentityProofWire, selected_target: u32 }
+    struct RecheckWire { known: u32, error: u32, prompt: u32, proof: IdentityProofWire }
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct OpenRecheckReturn {
-        pub stage: u32, pub custody_known: bool, pub error: &'static str, pub selected_target: Option<&'static str>,
+        pub stage: u32, pub custody_known: bool, pub error: &'static str,
         pub prompt: Option<bool>, pub proof: Option<IdentityBinding>,
     }
     impl OpenRecheckReturn {
         pub fn matched(self) -> bool {
             self.custody_known && self.error == "none" && self.prompt == Some(true)
-                && self.proof.is_some_and(IdentityBinding::matched)
-                && matches!((self.stage, self.selected_target), (1, None) | (2, Some("match")))
+                && self.proof.is_some_and(IdentityBinding::matched) && (1..=2).contains(&self.stage)
         }
     }
     fn recheck_return(w: RecheckWire, stage: u32) -> Option<OpenRecheckReturn> {
-        if !(1..=2).contains(&stage) || w.known > 1 || w.prompt > 2 || matches!(w.error, 10..=12 | 15)
-            || stage == 1 && w.selected_target != 0 { return None; }
+        if !(1..=2).contains(&stage) || w.known > 1 || w.prompt > 2 || matches!(w.error, 10..=12 | 15) { return None; }
         let proof = if w.proof == IdentityProofWire::default() { None }
             else { Some(identity_proof(c_int::try_from(w.proof.error).ok()?, w.proof)?) };
-        let selected_target = *[None, Some("entered-not-returned"), Some("not-ready"), Some("match"),
-            Some("different"), Some("malformed"), Some("multiple")].get(w.selected_target as usize)?;
-        let r = OpenRecheckReturn { stage, custody_known: w.known == 1, error: *OPEN_ERRORS.get(w.error as usize)?, selected_target,
+        let r = OpenRecheckReturn { stage, custody_known: w.known == 1,
+            error: *OPEN_ERRORS.get(w.error as usize)?,
             prompt: match w.prompt { 1 => Some(true), 2 => Some(false), _ => None }, proof };
         if r.prompt.is_some() && !proof.is_some_and(IdentityBinding::matched)
-            || selected_target.is_some() && r.prompt != Some(true)
-            || w.error == 0 && !r.matched() || w.error == 13 && r.prompt == Some(true) && selected_target != Some("different")
+            || w.error == 0 && !r.matched() || w.error == 13 && r.prompt == Some(true)
             || matches!(w.error, 9 | 14) && r.custody_known
             || !matches!(w.error, 9 | 14) && !r.custody_known
             || proof.is_none() && !matches!(w.error, 9 | 14)
             || proof.is_some_and(|p| p.error != "none") && proof.map(|p| p.error) != Some(r.error) { return None; }
-        if let Some(selected) = selected_target {
-            let allowed = match selected {
-                "entered-not-returned" => w.error == 14,
-                "not-ready" => matches!(w.error, 3 | 9 | 14),
-                "match" => matches!(w.error, 0 | 3 | 9 | 14),
-                "different" => matches!(w.error, 13 | 9 | 14),
-                "malformed" => matches!(w.error, 6 | 9 | 14),
-                "multiple" => matches!(w.error, 5 | 9 | 14),
-                _ => false,
-            };
-            if !allowed { return None; }
-        }
         Some(r)
-    }
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub struct RowSelectionLimit {
-        pub role: &'static str, pub depth: u32, pub count: i64, pub queued_nodes: u32,
-    }
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub struct RowSelectionProof {
-        pub checks: [bool; 3], pub nodes_examined: u32,
-        pub attempted: bool, pub returned: bool, pub setter_succeeded: Option<bool>,
-        pub limit: Option<RowSelectionLimit>,
-    }
-    impl RowSelectionProof {
-        pub fn matched(self) -> bool {
-            self.checks == [true; 3] && (2..=48).contains(&self.nodes_examined)
-                && self.attempted && self.returned && self.setter_succeeded == Some(true)
-                && self.limit.is_none()
-        }
     }
     /// Finite actual AX/CF DATA from the one original worker. A retired slot is
     /// either a definite empty out-slot or its CFRelease actually returned;
@@ -620,14 +700,12 @@ mod observation {
         pub triggered: Option<bool>, pub custody_known: bool,
         pub initial_proof: Option<IdentityBinding>, pub proof: Option<IdentityBinding>,
         pub prompt: [Option<bool>; 2], pub button: ControlContainerButtonProof,
-        pub selection: RowSelectionProof, pub selected_target: Option<&'static str>,
     }
     impl OpenReport {
         pub fn succeeded(self) -> bool {
             self.attempted && self.press_returned && self.triggered == Some(true) && self.custody_known
                 && self.initial_proof.is_some_and(IdentityBinding::matched) && self.proof.is_some_and(IdentityBinding::matched)
                 && self.prompt == [Some(true); 2] && self.button.matched()
-                && self.selection.matched() && self.selected_target == Some("match")
                 && self.diagnostic == OpenDiagnostic { site: "press", error: "none" }
         }
     }
@@ -637,82 +715,35 @@ mod observation {
         if w.flags & !15 != 0 || w.checks > 127 || w.checks & (w.checks + 1) != 0
             || w.calls > 512 || w.initial_nodes_examined > 16 || w.recheck_nodes_examined > 16
             || w.last_depth > 8 || w.owned > 256 || w.released > w.owned
-            || !(w.ax_error == 0 || (-25214..=-25200).contains(&w.ax_error))
-            || !matches!(w.selection_checks, 0 | 1 | 3 | 7) || !matches!(w.selection_flags, 0 | 1 | 3 | 7)
-            || w.selection_nodes_examined > 48 { return None; }
-        let limit = if matches!(w.site, 22..=25) {
-            // Only these first local refusals may reuse the raw role/depth.
-            // Validate them before excluding that geometry from button DATA.
-            if w.error != 7 || w.ax_error != 0 || w.checks != 3 || w.flags & 7 != 0
-                || w.initial_nodes_examined != 0 || w.recheck_nodes_examined != 0
-                || w.selection_checks != 0 || w.selection_flags != 0 || w.calls == 0 || w.owned == 0
-                || !rechecks[0].is_some_and(OpenRecheckReturn::matched) || rechecks[1].is_some()
-                || !(1..=49).contains(&w.selection_limit_queued)
-                || w.selection_limit_queued < w.selection_nodes_examined + 1 { return None; }
-            let root = w.last_role == 1 && w.last_depth == 0 && w.selection_nodes_examined == 0
-                && w.selection_limit_queued == 1;
-            let container = matches!(w.last_role, 2 | 3 | 6 | 7 | 8)
-                && (1..=8).contains(&w.last_depth) && w.last_depth <= w.selection_nodes_examined;
-            let count = w.selection_limit_count;
-            let array_limit = if matches!(w.last_role, 6 | 7) { 32 } else { 16 };
-            let local_site = match w.site {
-                22 => count > array_limit && (root || container),
-                23 => (count < 0 || count > array_limit) && (root || container),
-                24 => (1..=array_limit).contains(&count) && count > i64::from(49 - w.selection_limit_queued)
-                    && container && w.last_depth < 8,
-                25 => (1..=array_limit).contains(&count) && container && w.last_depth == 8,
-                _ => false,
-            };
-            if !local_site { return None; }
-            let role = match w.last_role { 1 => "Sheet", 2 => "Group", 3 => "SplitGroup", 6 => "Table",
-                7 => "Outline", 8 => "ScrollArea", _ => return None };
-            Some(RowSelectionLimit { role, depth: w.last_depth, count, queued_nodes: w.selection_limit_queued })
-        } else {
-            if w.selection_limit_queued != 0 || w.selection_limit_count != 0 { return None; }
-            None
-        };
-        let selection = RowSelectionProof { checks: std::array::from_fn(|i| w.selection_checks & (1 << i) != 0),
-            nodes_examined: w.selection_nodes_examined, attempted: w.selection_flags & 1 != 0,
-            returned: w.selection_flags & 2 != 0, setter_succeeded: (w.selection_flags & 2 != 0).then_some(w.selection_flags & 4 != 0), limit };
+            || !(w.ax_error == 0 || (-25214..=-25200).contains(&w.ax_error)) { return None; }
         let button = ControlContainerButtonProof { checks: std::array::from_fn(|i| w.checks & (1 << i) != 0), calls: w.calls,
             initial_nodes_examined: w.initial_nodes_examined, recheck_nodes_examined: w.recheck_nodes_examined,
             last_role: *["not-read", "Sheet", "Group", "SplitGroup", "Button", "Browser", "Table", "Outline", "ScrollArea", "opaque"]
-                .get(if limit.is_some() { 0 } else { w.last_role as usize })?,
-            last_depth: if limit.is_some() { 0 } else { w.last_depth }, cf_slots: w.owned, cf_slots_retired: w.released,
+                .get(w.last_role as usize)?,
+            last_depth: w.last_depth, cf_slots: w.owned, cf_slots_retired: w.released,
             cleanup_returned: w.flags & 8 != 0, ax_error: w.ax_error };
         let r = OpenReport { diagnostic: OpenDiagnostic {
             site: *["entry", "application", "windows", "parent-identifier", "sheet", "topology", "control-projection", "button",
                 "control-recheck", "initial-original-proof", "original-proof", "admission", "press", "cleanup",
-                "control-title-limit", "control-child-count-limit", "control-child-copy-limit", "control-node-limit", "control-depth-limit",
-                "selection", "selection-write", "selection-count-limit", "selection-copy-limit", "selection-node-limit", "selection-depth-limit"]
+                "control-title-limit", "control-child-count-limit", "control-child-copy-limit", "control-node-limit", "control-depth-limit"]
                 .get(w.site.checked_sub(1)? as usize)?, error: *OPEN_ERRORS.get(w.error as usize)?, },
             attempted: w.flags & 1 != 0, press_returned: w.flags & 2 != 0,
             triggered: (w.flags & 2 != 0).then_some(w.flags & 4 != 0),
             custody_known: known && button.cleanup_returned && rechecks.iter().flatten().all(|r| r.custody_known),
             initial_proof: rechecks[0].and_then(|r| r.proof), proof: rechecks[1].and_then(|r| r.proof),
-            prompt: rechecks.map(|r| r.and_then(|r| r.prompt)), button, selection,
-            selected_target: rechecks[1].and_then(|r| r.selected_target) };
+            prompt: rechecks.map(|r| r.and_then(|r| r.prompt)), button };
         if w.flags & 4 != 0 && !r.press_returned || r.press_returned && !r.attempted
             || r.attempted && (w.checks != 127 || !rechecks.into_iter().all(|r| r.is_some_and(OpenRecheckReturn::matched))
-                || !matches!(r.diagnostic.site, "press" | "cleanup") || !selection.matched() || r.selected_target != Some("match"))
+                || !matches!(r.diagnostic.site, "press" | "cleanup"))
             || button.cleanup_returned && w.released != w.owned
             || matches!(w.error, 9 | 14 | 15) && r.custody_known
             || w.calls != 0 && !rechecks[0].is_some_and(OpenRecheckReturn::matched)
             || rechecks.iter().enumerate().any(|(i, r)| r.is_some_and(|r| r.stage != i as u32 + 1))
-            || w.selection_nodes_examined != 0 && (w.checks & 3 != 3 || w.calls == 0 || w.owned == 0)
-            || w.selection_checks != 0 && w.selection_nodes_examined < 2
-            || selection.attempted && (w.selection_checks != 7 || w.calls == 0 || w.owned == 0)
-            || selection.setter_succeeded == Some(false) && w.ax_error == 0
-            || selection.attempted && !selection.returned && (w.site != 21 || w.error != 14 || w.ax_error != 0
-                || button.cleanup_returned || w.released != 0)
-            || (w.initial_nodes_examined != 0 || w.checks > 3) && !selection.matched()
-            || matches!(w.site, 7..=9 | 11..=13 | 15..=19) && !selection.matched()
-            || w.selection_flags != 0 && !selection.matched() && !matches!(w.site, 21 | 14)
             || (w.checks != 0 || w.last_role != 0) && (w.calls == 0 || w.owned == 0)
             || w.initial_nodes_examined != 0 && w.checks & 3 != 3
             || w.checks & 4 != 0 && w.initial_nodes_examined == 0
             || w.checks < 63 && w.recheck_nodes_examined != 0
-            || limit.is_none() && w.last_depth > w.initial_nodes_examined.max(w.recheck_nodes_examined)
+            || w.last_depth > w.initial_nodes_examined.max(w.recheck_nodes_examined)
             || w.checks == 127 && (w.recheck_nodes_examined == 0 || w.last_role != 4 || w.last_depth == 0
                 || w.last_depth > w.initial_nodes_examined.min(w.recheck_nodes_examined))
             || rechecks[1].is_some() && w.checks != 127
@@ -720,9 +751,6 @@ mod observation {
             || r.triggered == Some(true) && w.ax_error != 0
             || w.ax_error != 0 && w.error == 0
             || w.error == 0 && !r.succeeded() { return None; }
-        if matches!(w.site, 20 | 21) && (w.checks != 3 || w.initial_nodes_examined != 0 || w.recheck_nodes_examined != 0
-            || w.flags & 7 != 0 || rechecks[1].is_some() || w.last_depth != 0
-            || w.site == 20 && w.selection_flags != 0 || w.site == 21 && !selection.attempted) { return None; }
         if w.site == 7 && (!matches!(w.checks, 3 | 7) || w.recheck_nodes_examined != 0)
             || w.site == 8 && (!matches!(w.checks, 15 | 31 | 63) || w.recheck_nodes_examined != 0)
             || w.site == 9 && (w.checks != 63 || w.last_depth > w.recheck_nodes_examined) { return None; }
@@ -896,20 +924,18 @@ mod observation {
     }
     fn semantic_data_check() -> bool {
         // Inert decoder/timeout DATA only: never manufacture a native return.
-        if std::mem::size_of::<IdentityWire>() != 56 || std::mem::size_of::<OpenWire>() != 72
-            || std::mem::offset_of!(OpenWire, selection_limit_queued) != 60
-            || std::mem::offset_of!(OpenWire, selection_limit_count) != 64
-            || std::mem::size_of::<RecheckWire>() != 52 || std::mem::size_of::<OpenTimeout>() != 16 { return false; }
+        if std::mem::size_of::<IdentityWire>() != 56 || std::mem::size_of::<OpenWire>() != 48
+            || std::mem::size_of::<RecheckWire>() != 48 || std::mem::size_of::<OpenTimeout>() != 16
+            || !completion_data_check() { return false; }
         let p = IdentityProofWire { flags: 1, checked: 0xfff, matched: 0xfff, parent: 2, panel: 8,
             children: 2, originals: 2, site: 14, error: 0 };
-        let rw = RecheckWire { known: 1, error: 0, prompt: 1, proof: p, selected_target: 0 };
+        let rw = RecheckWire { known: 1, error: 0, prompt: 1, proof: p };
         let Some(recheck) = recheck_return(rw, 1) else { return false; };
-        let Some(final_recheck) = recheck_return(RecheckWire { selected_target: 3, ..rw }, 2) else { return false; };
+        let Some(final_recheck) = recheck_return(rw, 2) else { return false; };
         let rechecks = [Some(recheck), Some(final_recheck)];
         let full = OpenWire { flags: 15, site: 13, error: 0, checks: 127, calls: 101,
             initial_nodes_examined: 4, recheck_nodes_examined: 4, owned: 60, released: 60, ax_error: 0,
-            last_role: 4, last_depth: 2, selection_checks: 7, selection_flags: 7, selection_nodes_examined: 4,
-            selection_limit_queued: 0, selection_limit_count: 0 };
+            last_role: 4, last_depth: 2 };
         let Some(success) = open_return(full, rechecks, true) else { return false; };
         if !success.succeeded() { return false; }
         // Neither incomplete eligible projection, missing unique button, nor
@@ -929,79 +955,29 @@ mod observation {
             RecheckWire { known: 0, ..rw }, RecheckWire { proof: IdentityProofWire::default(), ..rw }] {
             if recheck_return(bad, 1).is_some() { return false; }
         }
-        // Pure selection DATA: parent browsing, setter return and selected URL
-        // are separate facts. Missing/malformed/foreign proof never permits Press.
+        // Immutable target DATA is bound before native start, never a selected-path substitute.
         let mut target = [0u8; 4097]; target[..23].copy_from_slice(b"/synthetic/project-root");
-        if !selection_target(&target) { return false; }
+        if !project_target(&target) { return false; }
         for bad in [b"/".as_slice(), b"/synthetic/../root", b"/synthetic//root", b"relative/root", b"/synthetic/root/"] {
             let mut bytes = [0u8; 4097]; bytes[..bad.len()].copy_from_slice(bad);
-            if selection_target(&bytes) { return false; }
+            if project_target(&bytes) { return false; }
         }
-        target[100] = 1; if selection_target(&target) { return false; }
-        for bad in [OpenWire { selection_checks: 3, ..full }, OpenWire { selection_flags: 3, ..full },
-            OpenWire { selection_flags: 0, ..full }, OpenWire { selection_nodes_examined: 1, ..full },
-            OpenWire { selection_nodes_examined: 49, ..full }] {
-            if open_return(bad, rechecks, true).is_some() { return false; }
-        }
-        // Widened selection DATA survives unchanged; control/global bounds do not widen.
-        for nodes in [17, 36, 48] {
-            if !open_return(OpenWire { selection_nodes_examined: nodes, ..full }, rechecks, true)
-                .is_some_and(|r| r.selection.nodes_examined == nodes && r.succeeded()) { return false; }
-        }
-        if recheck_return(rw, 2).is_some() || recheck_return(RecheckWire { selected_target: 3, ..rw }, 1).is_some()
-            || open_return(full, [Some(recheck); 2], true).is_some() { return false; }
-        for (selected_target, error, known) in [(1, 14, 0), (2, 3, 1), (4, 13, 1), (5, 6, 1), (6, 5, 1)] {
-            let Some(refused) = recheck_return(RecheckWire { selected_target, error, known, ..rw }, 2) else { return false; };
-            let wire = OpenWire { flags: if known == 1 { 8 } else { 0 }, error, site: 11,
-                released: if known == 1 { full.owned } else { 0 }, ..full };
-            if !open_return(wire, [Some(recheck), Some(refused)], known == 1).is_some_and(|r|
-                !r.attempted && r.selection.matched() && r.selected_target == refused.selected_target && !r.succeeded())
-                || open_return(full, [Some(recheck), Some(refused)], true).is_some() { return false; }
-        }
-        for (selection_checks, selection_nodes_examined, error) in [(0, 2, 4), (0, 36, 5), (0, 2, 6),
-            (1, 2, 13), (3, 2, 4), (0, 48, 7)] {
-            let wire = OpenWire { flags: 8, checks: 3, site: 20, error, selection_checks, selection_flags: 0,
-                selection_nodes_examined, initial_nodes_examined: 0, recheck_nodes_examined: 0,
-                last_role: 0, last_depth: 0, ..full };
-            if !open_return(wire, [Some(recheck), None], true).is_some_and(|r| !r.attempted && !r.selection.attempted
-                && r.selected_target.is_none() && !r.succeeded()) { return false; }
-        }
-        for (selection_flags, error, ax_error, known) in [(1, 14, 0, false), (3, 11, -25204, true), (7, 8, 0, true)] {
-            let wire = OpenWire { flags: if known { 8 } else { 0 }, checks: 3, site: 21, error, ax_error, selection_flags,
-                initial_nodes_examined: 0, recheck_nodes_examined: 0, last_role: 1, last_depth: 0,
-                released: if known { full.owned } else { 0 }, ..full };
-            if !open_return(wire, [Some(recheck), None], known).is_some_and(|r| !r.attempted && r.selection.attempted
-                && r.selection.returned == (selection_flags != 1) && r.selected_target.is_none() && !r.succeeded()) { return false; }
-            if selection_flags == 1 {
-                // A caught selector exception keeps the original callback
-                // context intact, but cannot invent CF/action retirement.
-                if !open_return(wire, [Some(recheck), None], true).is_some_and(|r| !r.custody_known) { return false; }
-                for bad in [OpenWire { flags: 8, error: 4, released: full.owned, ..wire },
-                    OpenWire { error: 4, ..wire }, OpenWire { site: 14, ..wire }, OpenWire { ax_error: -25204, ..wire },
-                    OpenWire { flags: 8, released: full.owned, ..wire }, OpenWire { released: 1, ..wire }] {
-                    for context_known in [false, true] {
-                        if open_return(bad, [Some(recheck), None], context_known).is_some() { return false; }
-                    }
-                }
-            }
-        }
-        // SelectedRows precedes the control passes. A later common-budget refusal
-        // preserves its completed effect, never inventing Press or finality.
+        target[100] = 1; if project_target(&target) { return false; }
+        if open_return(full, [Some(recheck); 2], true).is_some() { return false; }
+        // A common-budget refusal still cannot invent Press or native finality.
         let budget_limited = OpenWire { flags: 8, site: 7, error: 7, checks: 3, calls: 512,
             initial_nodes_examined: 3, recheck_nodes_examined: 0, owned: 256, released: 256,
-            last_role: 2, last_depth: 2, selection_nodes_examined: 36, ..full };
+            last_role: 2, last_depth: 2, ..full };
         for (flags, released, known) in [(8, 256, true), (8, 256, false), (0, 16, false), (0, 16, true)] {
             let Some(r) = open_return(OpenWire { flags, released, ..budget_limited }, [Some(recheck), None], known)
                 else { return false; };
-            if r.selection != (RowSelectionProof { nodes_examined: 36, ..success.selection })
-                || r.diagnostic != (OpenDiagnostic { site: "control-projection", error: "limit" })
-                || r.attempted || r.press_returned || r.triggered.is_some() || r.selected_target.is_some()
+            if r.diagnostic != (OpenDiagnostic { site: "control-projection", error: "limit" })
+                || r.attempted || r.press_returned || r.triggered.is_some()
                 || r.proof.is_some() || r.succeeded() || r.custody_known != (known && flags & 8 != 0)
                 || r.button.calls != 512 || r.button.cf_slots != 256 || r.button.cf_slots_retired != released
                 || r.button.cleanup_returned != (flags & 8 != 0) { return false; }
         }
-        for bad in [OpenWire { selection_flags: 0, ..budget_limited }, OpenWire { selection_checks: 0, ..budget_limited },
-            OpenWire { flags: 9, ..budget_limited }, OpenWire { error: 0, ..budget_limited },
+        for bad in [OpenWire { flags: 9, ..budget_limited }, OpenWire { error: 0, ..budget_limited },
             OpenWire { calls: 513, ..budget_limited }, OpenWire { owned: 257, released: 257, ..budget_limited },
             OpenWire { initial_nodes_examined: 17, ..budget_limited }, OpenWire { released: 16, ..budget_limited }] {
             if open_return(bad, [Some(recheck), None], true).is_some() { return false; }
@@ -1071,123 +1047,6 @@ mod observation {
                     || open_return(OpenWire { site, ..full }, rechecks, true).is_some() { return false; }
             }
         }
-        // Synthetic successor-policy DATA, not observed layouts. The historical
-        // Outline20 refusal remains bound to its original16/17 source policy.
-        for (site, label, role, name, depth, nodes, queued, count) in [
-            (22, "selection-count-limit", 1, "Sheet", 0, 0, 1, 17),
-            (22, "selection-count-limit", 1, "Sheet", 0, 0, 1, i64::MAX),
-            (22, "selection-count-limit", 2, "Group", 1, 1, 2, 17),
-            (22, "selection-count-limit", 3, "SplitGroup", 8, 8, 9, i64::MAX),
-            (22, "selection-count-limit", 8, "ScrollArea", 3, 12, 17, 17),
-            (22, "selection-count-limit", 6, "Table", 1, 1, 2, i64::MAX),
-            (22, "selection-count-limit", 7, "Outline", 8, 48, 49, 33),
-            (23, "selection-copy-limit", 1, "Sheet", 0, 0, 1, i64::MIN),
-            (23, "selection-copy-limit", 1, "Sheet", 0, 0, 1, -1),
-            (23, "selection-copy-limit", 1, "Sheet", 0, 0, 1, 17),
-            (23, "selection-copy-limit", 1, "Sheet", 0, 0, 1, i64::MAX),
-            (23, "selection-copy-limit", 2, "Group", 1, 1, 2, -1),
-            (23, "selection-copy-limit", 3, "SplitGroup", 8, 8, 9, i64::MIN),
-            (23, "selection-copy-limit", 8, "ScrollArea", 3, 12, 17, i64::MAX),
-            (23, "selection-copy-limit", 6, "Table", 1, 1, 2, 33),
-            (23, "selection-copy-limit", 7, "Outline", 8, 48, 49, i64::MIN),
-            (24, "selection-node-limit", 2, "Group", 3, 12, 34, 16),
-            (24, "selection-node-limit", 3, "SplitGroup", 7, 20, 40, 10),
-            (24, "selection-node-limit", 8, "ScrollArea", 3, 12, 49, 1),
-            (24, "selection-node-limit", 6, "Table", 3, 12, 18, 32),
-            (24, "selection-node-limit", 7, "Outline", 7, 48, 49, 1),
-            (25, "selection-depth-limit", 2, "Group", 8, 8, 9, 1),
-            (25, "selection-depth-limit", 3, "SplitGroup", 8, 8, 9, 8),
-            (25, "selection-depth-limit", 8, "ScrollArea", 8, 12, 17, 16),
-            (25, "selection-depth-limit", 6, "Table", 8, 8, 49, 32),
-            (25, "selection-depth-limit", 7, "Outline", 8, 48, 49, 32)] {
-            let failed = OpenWire { flags: 8, site, error: 7, checks: 3, calls: 100, owned: 45, released: 45,
-                initial_nodes_examined: 0, recheck_nodes_examined: 0, last_role: role, last_depth: depth,
-                selection_checks: 0, selection_flags: 0, selection_nodes_examined: nodes,
-                selection_limit_queued: queued, selection_limit_count: count, ..full };
-            let diagnostic = RowSelectionLimit { role: name, depth, count, queued_nodes: queued };
-            // Context and CF cleanup histories stay independent of the tuple;
-            // a known callback context cannot repair unreturned CF cleanup.
-            for (flags, released, known) in [(8, 45, true), (8, 45, false), (0, 16, false), (0, 16, true), (0, 0, true)] {
-                let Some(r) = open_return(OpenWire { flags, released, ..failed }, [Some(recheck), None], known)
-                    else { return false; };
-                if r.diagnostic != (OpenDiagnostic { site: label, error: "limit" }) || r.succeeded()
-                    || r.attempted || r.press_returned || r.triggered.is_some() || r.proof.is_some() || r.selected_target.is_some()
-                    || r.prompt != [Some(true), None] || r.initial_proof != success.initial_proof
-                    || r.selection.limit != Some(diagnostic) || r.selection.nodes_examined != nodes
-                    || r.selection.checks != [false; 3] || r.selection.attempted || r.selection.returned
-                    || r.selection.setter_succeeded.is_some() || r.selection.matched()
-                    || r.button.checks != [true, true, false, false, false, false, false]
-                    || r.button.initial_nodes_examined != 0 || r.button.recheck_nodes_examined != 0
-                    || r.button.last_role != "not-read" || r.button.last_depth != 0
-                    || r.button.calls != 100 || r.button.cf_slots != 45 || r.button.cf_slots_retired != released
-                    || r.button.cleanup_returned != (flags & 8 != 0) || r.custody_known != (known && flags & 8 != 0) { return false; }
-            }
-            let complete = RowSelectionProof { limit: Some(diagnostic), ..success.selection };
-            if complete.matched() || (OpenReport { selection: complete, ..success }).succeeded() { return false; }
-            for bad in [OpenWire { error: 0, ..failed }, OpenWire { error: 8, ..failed }, OpenWire { error: 14, ..failed },
-                OpenWire { ax_error: -25204, ..failed }, OpenWire { calls: 0, ..failed }, OpenWire { calls: 513, ..failed },
-                OpenWire { owned: 0, released: 0, ..failed }, OpenWire { owned: 257, released: 257, ..failed },
-                OpenWire { released: 44, ..failed }, OpenWire { checks: 1, ..failed }, OpenWire { checks: 7, ..failed },
-                OpenWire { flags: 9, ..failed }, OpenWire { flags: 10, ..failed }, OpenWire { flags: 12, ..failed },
-                OpenWire { initial_nodes_examined: 1, ..failed }, OpenWire { recheck_nodes_examined: 1, ..failed },
-                OpenWire { selection_checks: 1, ..failed }, OpenWire { selection_checks: 3, ..failed },
-                OpenWire { selection_checks: 7, ..failed }, OpenWire { selection_flags: 1, ..failed },
-                OpenWire { selection_flags: 3, ..failed }, OpenWire { selection_flags: 7, ..failed },
-                OpenWire { selection_nodes_examined: 49, ..failed }, OpenWire { selection_limit_queued: 0, ..failed },
-                OpenWire { selection_limit_queued: 50, ..failed }, OpenWire { selection_limit_queued: nodes, ..failed },
-                OpenWire { last_role: 0, ..failed }, OpenWire { last_role: 4, ..failed }, OpenWire { last_role: 5, ..failed },
-                OpenWire { last_role: 9, ..failed }, OpenWire { last_role: 10, ..failed }, OpenWire { last_role: u32::MAX, ..failed },
-                OpenWire { last_depth: 9, ..failed }, OpenWire { last_role: 1, last_depth: 1, ..failed },
-                OpenWire { last_role: 2, last_depth: 0, ..failed },
-                OpenWire { last_role: 2, last_depth: 2, selection_nodes_examined: 1, selection_limit_queued: 2, ..failed },
-                OpenWire { last_role: 1, last_depth: 0, selection_nodes_examined: 0, selection_limit_queued: 2, ..failed },
-                OpenWire { last_role: 1, last_depth: 0, selection_nodes_examined: 1, selection_limit_queued: 2, ..failed }] {
-                if open_return(bad, [Some(recheck), None], true).is_some() { return false; }
-            }
-            let array_limit = if matches!(role, 6 | 7) { 32 } else { 16 };
-            let invalid_counts: &[i64] = match site {
-                22 => &[i64::MIN, -1, 0, 1, array_limit], 23 => &[0, 1, array_limit],
-                _ => &[i64::MIN, -1, 0, array_limit + 1, i64::MAX],
-            };
-            for &selection_limit_count in invalid_counts {
-                if open_return(OpenWire { selection_limit_count, ..failed }, [Some(recheck), None], true).is_some() { return false; }
-            }
-            let incompatible_sites: &[u32] = match site { 22 | 23 => &[24, 25], 24 => &[22, 23, 25], _ => &[22, 23, 24] };
-            for &site in incompatible_sites {
-                if open_return(OpenWire { site, ..failed }, [Some(recheck), None], true).is_some() { return false; }
-            }
-            if site == 23 && count < 0 && open_return(OpenWire { site: 22, ..failed }, [Some(recheck), None], true).is_some()
-                || open_return(failed, [None; 2], true).is_some() || open_return(failed, rechecks, true).is_some()
-                || open_return(failed, [Some(final_recheck), None], true).is_some() { return false; }
-            // None of the old sites acquires an appended-field exception.
-            for site in 1..=21 {
-                if open_return(OpenWire { site, ..failed }, [Some(recheck), None], true).is_some() { return false; }
-            }
-            let generic = OpenWire { site: 20, last_role: 0, last_depth: 0,
-                selection_limit_queued: 0, selection_limit_count: 0, ..failed };
-            if !open_return(generic, [Some(recheck), None], true).is_some_and(|r| r.selection.limit.is_none() && !r.succeeded()) { return false; }
-        }
-        let geometry = OpenWire { flags: 8, site: 24, error: 7, checks: 3, last_role: 2, last_depth: 3,
-            initial_nodes_examined: 0, recheck_nodes_examined: 0, selection_checks: 0, selection_flags: 0,
-            selection_nodes_examined: 12, selection_limit_queued: 34, selection_limit_count: 16, ..full };
-        for bad in [OpenWire { selection_limit_count: 15, ..geometry }, // Exactly the remaining15 slots.
-            OpenWire { last_role: 1, last_depth: 0, selection_nodes_examined: 0, selection_limit_queued: 1, ..geometry },
-            OpenWire { last_depth: 8, selection_nodes_examined: 8, selection_limit_queued: 49, selection_limit_count: 1, ..geometry },
-            OpenWire { site: 25, last_depth: 7, selection_nodes_examined: 7, selection_limit_queued: 49, selection_limit_count: 1, ..geometry },
-            OpenWire { selection_limit_queued: 1, ..full }, OpenWire { selection_limit_count: 17, ..full }] {
-            if open_return(bad, [Some(recheck), None], true).is_some() || open_return(bad, rechecks, true).is_some() { return false; }
-        }
-        // At queue17, both observed20 and the32-row bound fit; neither is a
-        // count/copy/node refusal under the successor policy. No native claim.
-        for role in [6, 7] {
-            for count in [20, 32] {
-                for site in [22, 23, 24] {
-                    let fits = OpenWire { site, last_role: role, selection_limit_queued: 17,
-                        selection_limit_count: count, ..geometry };
-                    if open_return(fits, [Some(recheck), None], true).is_some() { return false; }
-                }
-            }
-        }
         let changed = recheck_return(RecheckWire { prompt: 2, error: 13, ..rw }, 2);
         if !changed.is_some_and(|r| r.custody_known && !r.matched()) { return false; }
         for ns in [1, 99, 10_000_001, 99_999_999, 100_000_000, 2_000_000_000] {
@@ -1225,16 +1084,26 @@ mod observation {
                 .into_iter().all(|flags| !observation_flags_valid(flags))
     }
     impl Panel {
-        pub fn installed_arm_open_identity(&mut self) -> io::Result<()> {
+        pub fn installed_arm_open_identity(&mut self, path: &Path) -> io::Result<()> {
             self.usable()?;
             if self.observation_identity_armed { return Err(io::ErrorKind::Other.into()); }
-            // SAFETY: fresh retained original. The C arm writes a scalar only.
-            let returned = result(unsafe { mrk_panel_observe_arm_open_identity(self.original.as_ptr()) });
+            let bytes = path.as_os_str().as_bytes();
+            if bytes.len() > 4096 { return Err(io::ErrorKind::InvalidInput.into()); }
+            let mut target = [0u8; 4097]; target[..bytes.len()].copy_from_slice(bytes);
+            if !project_target(&target) { return Err(io::ErrorKind::InvalidInput.into()); }
+            // SAFETY: fresh retained original and validated fixed target DATA.
+            // The passive arm copies it before start; no AppKit call or action.
+            let returned = result(unsafe { mrk_panel_observe_arm_open_identity(self.original.as_ptr(), target.as_ptr(), target.len()) });
             if returned.is_ok() { self.observation_identity_armed = true; } else { self.unknown = true; }
             returned
         }
         pub fn take_installed_identity_start_return(&mut self) -> Option<IdentityStartReturn> {
             self.observation_start.take() // Rust DATA only, including an original failed start.
+        }
+        pub fn take_installed_completion_return(&mut self) -> Option<CompletionReturn> {
+            // Saved Rust DATA even when the returned poll made this Panel unknown.
+            // No usable(), native call, new poll, release, or publication retry.
+            self.observation_completion.take()
         }
         pub fn installed_open_identity(&mut self, returned: &mut Option<IdentityBindingReturn>) -> Result<OpenIdentity, OpenDiagnostic> {
             *returned = None;
@@ -1296,43 +1165,22 @@ mod observation {
         /// false means a not-yet-ready sheet/directory/button was observed
         /// BEFORE any action. true means only the actual action call returned;
         /// the real callback and original coordinator still own all outcomes.
-        pub fn installed_action(&mut self, action: PanelAction<'_>, diagnostic: &mut Option<PanelActionDiagnostic>) -> io::Result<bool> {
+        pub fn installed_action(&mut self, action: PanelAction, diagnostic: &mut Option<PanelActionDiagnostic>) -> io::Result<bool> {
             *diagnostic = None; // Never expose a previous action's diagnostic.
             let name = match &action { PanelAction::ProjectCancel => "project-cancel",
-                PanelAction::ProjectDirectory(_) => "project-directory",
                 PanelAction::QuitCancel => "quit-cancel", PanelAction::QuitConfirm => "quit-confirm" };
             if let Err(error) = self.usable() {
                 *diagnostic = Some(PanelActionDiagnostic { action: name, domain: "rust-precondition",
                     site: "original-usability", error: "other" });
                 return Err(error);
             }
-            let (code, directory) = match action {
-                PanelAction::ProjectCancel => (1, None),
-                PanelAction::ProjectDirectory(path) => {
-                    let text = path.to_str().ok_or(io::ErrorKind::InvalidInput).map_err(|error| {
-                        *diagnostic = Some(PanelActionDiagnostic { action: name, domain: "rust-precondition",
-                            site: "directory-utf8", error: "invalid-input" }); error
-                    })?;
-                    if !path.is_absolute() || text.len() > 4096 || text.split('/').skip(1)
-                        .any(|part| part.is_empty() || part == "." || part == "..") {
-                        *diagnostic = Some(PanelActionDiagnostic { action: name, domain: "rust-precondition",
-                            site: "directory-path", error: "invalid-input" });
-                        return Err(io::ErrorKind::InvalidInput.into());
-                    }
-                    (2, Some(CString::new(text).map_err(|_| {
-                        *diagnostic = Some(PanelActionDiagnostic { action: name, domain: "rust-precondition",
-                            site: "directory-cstring", error: "invalid-input" }); io::ErrorKind::InvalidInput
-                    })?))
-                }
-                PanelAction::QuitCancel => (4, None),
-                PanelAction::QuitConfirm => (5, None),
+            let code = match action {
+                PanelAction::ProjectCancel => 1, PanelAction::QuitCancel => 4, PanelAction::QuitConfirm => 5,
             };
-            // SAFETY: same retained main-thread original; optional bounded
-            // CString lives through the call and is copied once by the shim.
-            // The initialized writable diagnostic belongs to THIS call only.
+            // SAFETY: same retained main-thread original; no late directory or
+            // direct Open route. Diagnostic belongs to THIS original call only.
             let mut wire = 0u32;
-            let status = unsafe { mrk_panel_observe_action(self.original.as_ptr(), code,
-                directory.as_ref().map_or(std::ptr::null(), |path| path.as_ptr()), &mut wire) };
+            let status = unsafe { mrk_panel_observe_action(self.original.as_ptr(), code, std::ptr::null(), &mut wire) };
             *diagnostic = action_return_diagnostic(code, status, wire);
             match result(status) {
                 Ok(()) => Ok(true),

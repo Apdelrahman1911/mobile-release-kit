@@ -34,7 +34,7 @@ TRACEBACK_LIMIT = 64
 SCOPE = "programmatic genuine controls; no Store, release, distribution or physical-device evidence"
 FAILURE_STEPS = frozenset((
     "Bootstrap Environment ReadEnvironment Dashboard ChooseCancel CancelProject CancelSettled ReadCancelled "
-    "ChooseProject SetProject OpenProject ProjectSettled Snapshot Settings Suggest Suggestion Adopt Draft "
+    "ChooseProject OpenProject ProjectSettled Snapshot Settings Suggest Suggestion Adopt Draft "
     "Validate Validation Preview Previewed RequirementsPage LoadRequirements Requirements GitHubPage "
     "GitHubRepository GitHubSha GitHubPropose GitHubProposal ReturnSettings KeepReviewing KeptReview "
     "ReadbackPage Refresh Readback SavedSettings ChangeDraft ChangedDraft MutateIgnore CloseCancel "
@@ -71,7 +71,8 @@ FAILURE_REASONS = frozenset((
     "edit-status-schema edit-status-generation edit-status-owner edit-status-projection "
     "relay-join-contract exit-edit-status exit-finality-contract observer-report-unavailable "
     "project-result-path-app-child project-result-path-descendant project-result-path-ancestor "
-    "project-result-path-sibling project-result-path-tmp-spelling project-result-path-data-spelling"
+    "project-result-path-sibling project-result-path-tmp-spelling project-result-path-data-spelling "
+    "native-completion-custody native-completion-data native-completion-unknown native-completion-selection"
 ).split())
 PROJECT_SELECTION_CUSTODY = frozenset(("bound-original-data", "unavailable-original-data", "inconsistent-original-data"))
 PROJECT_SELECTION_OBJECTS = frozenset(("fixture-root-all5", "captured-app-all5", "captured-release-all5",
@@ -89,12 +90,10 @@ PROJECT_SELECTION_BOUND_LOCATIONS = {
     "project-result-path-tmp-spelling": frozenset(("outside-namespace",)),
     "project-result-path-data-spelling": frozenset(("outside-namespace",)),
 }
-NATIVE_STEPS = frozenset("CancelProject SetProject OpenProject QuitCancel Quit PickerPending".split())
+NATIVE_STEPS = frozenset("CancelProject OpenProject QuitCancel Quit PickerPending".split())
 # Closed same-origin action DATA, not a panel query or an action/finality permit.
 NATIVE_ACTION_STEPS = {
     "CancelProject": ("project-cancel", "project", (1,), 1),
-    "SetProject": ("project-directory", "project", (1, 2), 2),
-    "OpenProject": ("project-open", "project", (1, 2), 4),
     "QuitCancel": ("quit-cancel", "quit", (3,), 8),
     "Quit": ("quit-confirm", "quit", (2, 4), 16),
 }
@@ -122,15 +121,10 @@ NATIVE_ACTION_SITES = {
 ACCESSIBILITY_CONTROL_LIMIT_SITES = frozenset((
     "control-title-limit control-child-count-limit control-child-copy-limit control-node-limit control-depth-limit"
 ).split())
-ACCESSIBILITY_SELECTION_LIMIT_SITES = frozenset((
-    "selection-count-limit selection-copy-limit selection-node-limit selection-depth-limit"
-).split())
 ACCESSIBILITY_SITES = frozenset((
     "entry application windows parent-identifier sheet topology control-projection button control-recheck "
-    "initial-original-proof original-proof admission press cleanup selection selection-write"
-).split()) | ACCESSIBILITY_CONTROL_LIMIT_SITES | ACCESSIBILITY_SELECTION_LIMIT_SITES
-ACCESSIBILITY_SELECTION_CHECKS = ("targetRowBound", "sameTargetRechecked", "selectedRowsSettable")
-ACCESSIBILITY_SELECTED_TARGETS = frozenset(("entered-not-returned", "not-ready", "match", "different", "malformed", "multiple"))
+    "initial-original-proof original-proof admission press cleanup"
+).split()) | ACCESSIBILITY_CONTROL_LIMIT_SITES
 ACCESSIBILITY_CONTROL_ROLES = ("not-read", "Sheet", "Group", "SplitGroup", "Button",
                                "Browser", "Table", "Outline", "ScrollArea", "opaque")
 ACCESSIBILITY_ERRORS = frozenset((
@@ -140,6 +134,7 @@ ACCESSIBILITY_ERRORS = frozenset((
 ACCESSIBILITY_BINDING_CLASSES = frozenset(("nil", "match", "different", "type-invalid"))
 ACCESSIBILITY_BINDING_SITES = frozenset((
     "objects", "parent-tag", "parent-set", "parent-get", "prompt-set", "prompt-get", "complete",
+    "initial-directory-url", "initial-directory-set",
 ))
 ACCESSIBILITY_PANEL_CLASSES = frozenset((
     "nil", "type-invalid", "empty", "byte-limit", "nul", "encoding-invalid", "valid", "match", "different",
@@ -256,10 +251,14 @@ def _expected_prompt_button():
             "cfSlots": 32, "cfSlotsRetired": 32, "cleanupReturned": True, "axError": 0}
 
 
-def _expected_row_selection():
-    # Inert parser fixture only, not an observed setter or selection effect.
-    return {"checks": dict.fromkeys(ACCESSIBILITY_SELECTION_CHECKS, True), "nodesExamined": 2,
-            "attempted": True, "returned": True, "setterSucceeded": True, "limit": None}
+def _expected_completion_selection(case):
+    # Literal parser DATA only. Browsing/Press never supplies this witness.
+    return {"mechanism": "original-ok-singleton-selection-v1", "case": case,
+            "id": 2 if case == "first-save" else 1, "kind": "project",
+            "pollReturned": True, "pollResult": "responded", "timely": True,
+            "facts": {"callbackEntered": True, "urlsReadEntered": True, "urlsReadReturned": True,
+                      "callbackReturned": True, "duplicate": False, "nativeUnknown": False,
+                      "response": "accept", "selection": "match"}}
 
 
 def expected_result(binding, case):
@@ -296,10 +295,10 @@ def expected_result(binding, case):
                 "state": {"applicationPresent": True, "active": True, "mainPresent": True,
                     "originalMain": True, "ordinaryWindow": True, "noAttachedSheet": True}},
             "panelAttachments": [True, True, first, first],
-            "controlReturns": [first, case != "picker-loss", case != "picker-loss", first, True],
+            "controlReturns": [first, case != "picker-loss", first, True],
             "accessibilityTrustedWithoutPrompt": True,
             "projectOpenInput": None if case == "picker-loss" else {
-                "mechanism": "accessibility-select-original-row-and-press-v4", "step": "OpenProject", "id": 2 if first else 1,
+                "mechanism": "accessibility-preconfigured-original-press-v5", "step": "OpenProject", "id": 2 if first else 1,
                 "prepared": True, "requested": True, "dispatchAttempted": True, "state": "retired",
                 "bodyEntered": True, "nativeEntered": True, "bodyReturned": True, "receiptJoined": True,
                 "workerRegistered": True, "workerJoined": True, "rechecksSettled": True,
@@ -307,15 +306,16 @@ def expected_result(binding, case):
                 "attempted": True, "pressReturned": True, "triggered": True,
                 "initialOriginalProof": _expected_identity_proof(), "originalProof": _expected_identity_proof(),
                 "promptChecks": {"initial": True, "final": True},
-                "promptButton": _expected_prompt_button(), "rowSelection": _expected_row_selection(),
-                "selectedTarget": "match", "site": "press", "error": "none"},
+                "promptButton": _expected_prompt_button(), "site": "press", "error": "none"},
             "projectOpenBinding": None if case == "picker-loss" else {
-                "mechanism": "public-original-sheet-v1", "case": case, "id": 2 if first else 1, "kind": "project",
+                "mechanism": "preconfigured-original-sheet-v2", "case": case, "id": 2 if first else 1, "kind": "project",
                 "start": {"returned": True, "result": "ok"},
                 "configuration": {"attempted": True, "parentSetterEntered": True, "parentSetterReturned": True,
                     "promptSetterEntered": True, "promptSetterReturned": True,
+                    "initialDirectorySetterEntered": True, "initialDirectorySetterReturned": True,
                     "parent": "match", "prompt": "match", "site": "complete", "error": "none"},
                 "binding": _expected_identity_proof()},
+            "projectCompletionSelection": None if case == "picker-loss" else _expected_completion_selection(case),
             "quitCancelKeptOriginalReview": first, "originalDocumentAndQuitSettled": True},
         "saveSessions": sessions, "freshCoreReadback": first, "syntheticFileReadback": True,
         "staleMarkerWriterReturnedAndClosed": stale,
@@ -375,6 +375,13 @@ def parse_result(stdout, stderr, binding, case):
         need(input_data is not None and _accessibility_succeeded(input_data),
              "project-open-input")
         expected["native"]["projectOpenInput"] = input_data
+        # A genuine original Press is input success only. The actual original
+        # OK callback must independently return one exact, ordinary-path-agreeing
+        # selection before any unchanged project/Save/finality gate may pass.
+        completion = _completion_selection_context(value["native"].get("projectCompletionSelection"), case)
+        need(completion is not None and _completion_selection_succeeded(completion),
+             "project-completion-selection")
+        expected["native"]["projectCompletionSelection"] = completion
     if case in ("picker-loss", "save-loss"):
         need(type(value) is dict and type(value.get("reload")) is dict, "reload-object")
         reload = value["reload"]
@@ -444,9 +451,7 @@ def _native_action_context(value, native, panel):
              and panel["kind"] == spec[1], "native-action-data")
         domain, site, error = value["domain"], value["site"], value["error"]
         if domain == "rust-precondition":
-            need(site == "original-usability" and error == "other"
-                 or value["action"] == "project-directory" and site in ("directory-utf8", "directory-path", "directory-cstring")
-                 and error == "invalid-input", "native-action-data")
+            need(site == "original-usability" and error == "other", "native-action-data")
         else:
             rule = NATIVE_ACTION_SITES.get(site)
             need(rule is not None and rule[1] & spec[3], "native-action-data")
@@ -526,43 +531,6 @@ def _accessibility_prompt_button(value):
     return value
 
 
-def _accessibility_row_selection(value):
-    label = "accessibility-row-selection"
-    need(type(value) is dict and set(value) == {"checks", "nodesExamined", "attempted", "returned", "setterSucceeded", "limit"}, label)
-    checks = value["checks"]
-    need(type(checks) is dict and set(checks) == set(ACCESSIBILITY_SELECTION_CHECKS)
-         and all(type(v) is bool for v in checks.values()), label)
-    ordered = tuple(checks[k] for k in ACCESSIBILITY_SELECTION_CHECKS)
-    need(all(not flag or all(ordered[:index]) for index, flag in enumerate(ordered)), label)
-    need(type(value["nodesExamined"]) is int and 0 <= value["nodesExamined"] <= 48
-         and (not any(ordered) or value["nodesExamined"] >= 2), label)
-    need(type(value["attempted"]) is bool and type(value["returned"]) is bool
-         and (value["setterSucceeded"] is None or type(value["setterSucceeded"]) is bool), label)
-    need(not value["returned"] or value["attempted"], label)
-    need((value["setterSucceeded"] is not None) == value["returned"], label)
-    need(not value["attempted"] or all(ordered), label)
-    limit = value["limit"]
-    if limit is not None:
-        need(type(limit) is dict and set(limit) == {"role", "depth", "count", "queuedNodes"}, label)
-        need(type(limit["role"]) is str and limit["role"] in ("Sheet", "Group", "SplitGroup", "ScrollArea", "Table", "Outline"), label)
-        need(type(limit["depth"]) is int and 0 <= limit["depth"] <= 8
-             and type(limit["count"]) is int and -(1 << 63) <= limit["count"] < 1 << 63
-             and type(limit["queuedNodes"]) is int and 1 <= limit["queuedNodes"] <= 49, label)
-        nodes, depth, queued = value["nodesExamined"], limit["depth"], limit["queuedNodes"]
-        need(nodes + 1 <= queued, label)
-        need((limit["role"] == "Sheet" and depth == nodes == 0 and queued == 1)
-             or (limit["role"] != "Sheet" and 1 <= depth <= nodes), label)
-        need(not any(ordered) and value["attempted"] is False and value["returned"] is False
-             and value["setterSucceeded"] is None, label)
-    return value
-
-
-def _row_selection_succeeded(value):
-    return (value is not None and all(value["checks"].values()) and 2 <= value["nodesExamined"] <= 48
-            and value["attempted"] is True and value["returned"] is True and value["setterSucceeded"] is True
-            and value["limit"] is None)
-
-
 def _accessibility_succeeded(value):
     # A matching receipt alone never means that its input thread has joined.
     return (all(value[key] is True for key in ("prepared", "requested", "dispatchAttempted", "bodyEntered", "nativeEntered",
@@ -571,7 +539,6 @@ def _accessibility_succeeded(value):
             and value["expired"] is False and value["state"] == "retired" and value["site"] == "press" and value["error"] == "none"
             and all(value[key] is not None and value[key]["error"] == "none" for key in ("initialOriginalProof", "originalProof"))
             and all(value["promptChecks"][key] is True for key in ("initial", "final"))
-            and _row_selection_succeeded(value["rowSelection"]) and value["selectedTarget"] == "match"
             and value["promptButton"] is not None and all(value["promptButton"]["checks"].values())
             and value["promptButton"]["cleanupReturned"] is True and value["promptButton"]["axError"] == 0
             and value["promptButton"]["cfSlotsRetired"] == value["promptButton"]["cfSlots"])
@@ -586,8 +553,8 @@ def _accessibility_context(value, native, panel, *, expected_id=None):
                  "workerRegistered", "workerJoined")
         observed = ("bodyEntered", "nativeEntered", "attempted", "pressReturned", "triggered", "timely", "custodyKnown", "rechecksSettled")
         need(type(value) is dict and set(value) == {"mechanism", "step", "id", "state", "site", "error",
-             "initialOriginalProof", "originalProof", "promptChecks", "promptButton", "rowSelection", "selectedTarget", *flags, *observed}, label)
-        need(value["mechanism"] == "accessibility-select-original-row-and-press-v4" and value["step"] == "OpenProject"
+             "initialOriginalProof", "originalProof", "promptChecks", "promptButton", *flags, *observed}, label)
+        need(value["mechanism"] == "accessibility-preconfigured-original-press-v5" and value["step"] == "OpenProject"
              and type(value["id"]) is int and value["id"] in (1, 2), label)
         if expected_id is not None:
             need(value["id"] == expected_id, label)
@@ -650,9 +617,6 @@ def _accessibility_context(value, native, panel, *, expected_id=None):
             if prompt[name] is not None:
                 need(proof is not None and proof["error"] == "none", label)
         button = value["promptButton"]
-        selection, selected = value["rowSelection"], value["selectedTarget"]
-        need((selection is None) == (button is None), label)
-        need(selected is None or type(selected) is str and selected in ACCESSIBILITY_SELECTED_TARGETS, label)
         if button is not None:
             need(value["bodyReturned"] and value["nativeEntered"] is True, label)
             _accessibility_prompt_button(button)
@@ -660,47 +624,21 @@ def _accessibility_context(value, native, panel, *, expected_id=None):
                  and proofs[0]["error"] == "none" and prompt["initial"] is True, label)
             need(button["cleanupReturned"] or value["custodyKnown"] is not True
                  and not value["receiptJoined"] and not value["barrierRetired"], label)
-            _accessibility_row_selection(selection)
-            need((selection["limit"] is not None) == (site in ACCESSIBILITY_SELECTION_LIMIT_SITES), label)
-            need(selection["nodesExamined"] == 0 or button["checks"]["parentBound"] and button["checks"]["sheetBound"]
-                 and button["calls"] > 0 and button["cfSlots"] > 0, label)
-            need(selection["setterSucceeded"] is not False or button["axError"] != 0, label)
-            if selection["attempted"] and not selection["returned"]:
-                need(site == "selection-write" and error == "objc-exception" and button["axError"] == 0
-                     and button["cleanupReturned"] is False and button["cfSlotsRetired"] == 0
-                     and value["custodyKnown"] is False and not value["receiptJoined"] and not value["barrierRetired"], label)
-            need(button["initialNodesExamined"] == 0 and not any(tuple(button["checks"][k] for k in ACCESSIBILITY_BUTTON_CHECKS)[2:])
-                 or _row_selection_succeeded(selection), label)
-            need(not selection["attempted"] or _row_selection_succeeded(selection) or site in ("selection-write", "cleanup"), label)
         need(proofs[1] is None or button is not None and all(button["checks"].values()), label)
-        if site in ("original-proof", "admission", "press") and button is not None:
-            need(_row_selection_succeeded(selection), label)
-        if selected is not None:
-            need(_row_selection_succeeded(selection) and proofs[1] is not None and proofs[1]["error"] == "none"
-                 and prompt["final"] is True, label)
-            if selected != "match":
-                expected = {"entered-not-returned": "objc-exception", "not-ready": "ineligible", "different": "changed",
-                            "malformed": "malformed", "multiple": "ambiguous"}[selected]
-                need(error in (expected, "custody") and value["attempted"] is False, label)
-                if selected == "entered-not-returned":
-                    need(value["custodyKnown"] is False, label)
         ready = (all(p is not None and p["error"] == "none" for p in proofs)
-                 and prompt == {"initial": True, "final": True} and button is not None and all(button["checks"].values())
-                 and _row_selection_succeeded(selection) and selected == "match")
+                 and prompt == {"initial": True, "final": True} and button is not None and all(button["checks"].values()))
         need(value["attempted"] is not True or ready and site in ("press", "cleanup"), label)
         if value["nativeEntered"] is False:
             need(all(p is None for p in proofs) and all(p is None for p in prompt.values()) and button is None
-                 and selection is None and selected is None
                  and value["attempted"] is False and value["pressReturned"] is False and value["triggered"] is None, label)
         elif value["nativeEntered"] is None:
             need(all(p is None for p in proofs) and all(p is None for p in prompt.values()) and button is None
-                 and selection is None and selected is None
                  and value["attempted"] is None and value["pressReturned"] is None and value["triggered"] is None, label)
         else:
             need(value["bodyReturned"], label)
         if not value["bodyReturned"]:
             need(all(p is None for p in proofs) and all(p is None for p in prompt.values()) and button is None
-                 and selection is None and selected is None and value["triggered"] is None, label)
+                 and value["triggered"] is None, label)
         if value["triggered"] is False:
             need(button is not None and button["axError"] != 0 and error not in (None, "none"), label)
         elif value["triggered"] is True:
@@ -713,7 +651,7 @@ def _accessibility_context(value, native, panel, *, expected_id=None):
         if error == "invalid-element":
             need(button is not None and button["axError"] == -25202, label)
         if site in ("control-projection", "button", "control-recheck"):
-            need(button is not None and _row_selection_succeeded(selection), label)
+            need(button is not None, label)
             completed = sum(button["checks"].values())
             need((site == "control-projection" and completed in (2, 3) and button["recheckNodesExamined"] == 0)
                  or (site == "button" and completed in (4, 5, 6) and button["recheckNodesExamined"] == 0)
@@ -723,7 +661,6 @@ def _accessibility_context(value, native, panel, *, expected_id=None):
             # Preserve both actual counters and current role/depth even through
             # late/Unknown cleanup; no local diagnostic can supply proof.
             need(error == "limit" and button is not None and button["axError"] == 0
-                 and _row_selection_succeeded(selection)
                  and button["calls"] > 0 and button["cfSlots"] > 0
                  and proofs[0] is not None and proofs[0]["error"] == "none" and proofs[1] is None
                  and prompt == {"initial": True, "final": None} and value["attempted"] is False
@@ -741,32 +678,6 @@ def _accessibility_context(value, native, panel, *, expected_id=None):
                      and (container or role == "Sheet" and depth == 0 and examined == 0))
                  or (site == "control-node-limit" and container and depth < 8)
                  or (site == "control-depth-limit" and container and depth == 8), label)
-        if site in ("selection", "selection-write"):
-            need(button is not None and tuple(button["checks"][k] for k in ACCESSIBILITY_BUTTON_CHECKS)
-                 == (True, True, False, False, False, False, False)
-                 and button["initialNodesExamined"] == button["recheckNodesExamined"] == button["lastDepth"] == 0
-                 and proofs[1] is None and selected is None and prompt["final"] is None
-                 and value["attempted"] is False and value["pressReturned"] is False and value["triggered"] is None, label)
-            need(selection["attempted"] == (site == "selection-write"), label)
-        if site in ACCESSIBILITY_SELECTION_LIMIT_SITES:
-            # Failure-only saved scalars, never selection/control completion.
-            # The common lifecycle rules still decide cleanup and retirement.
-            need(error == "limit" and button is not None and selection["limit"] is not None
-                 and button["axError"] == 0 and button["calls"] > 0 and button["cfSlots"] > 0
-                 and tuple(button["checks"][k] for k in ACCESSIBILITY_BUTTON_CHECKS)
-                 == (True, True, False, False, False, False, False)
-                 and button["initialNodesExamined"] == button["recheckNodesExamined"] == button["lastDepth"] == 0
-                 and button["lastRole"] == "not-read"
-                 and proofs[0] is not None and proofs[0]["error"] == "none" and proofs[1] is None
-                 and prompt == {"initial": True, "final": None} and selected is None
-                 and value["attempted"] is False and value["pressReturned"] is False and value["triggered"] is None, label)
-            limit = selection["limit"]
-            count, depth, queued = limit["count"], limit["depth"], limit["queuedNodes"]
-            array_limit = 32 if limit["role"] in ("Table", "Outline") else 16
-            need((site == "selection-count-limit" and count > array_limit)
-                 or (site == "selection-copy-limit" and (count < 0 or count > array_limit))
-                 or (site == "selection-node-limit" and 1 <= count <= array_limit and count > 49 - queued and 1 <= depth < 8)
-                 or (site == "selection-depth-limit" and 1 <= count <= array_limit and depth == 8), label)
         for name, proof in (("initial-original-proof", proofs[0]), ("original-proof", proofs[1])):
             if site == name and proof is not None and proof["error"] != "none":
                 need(proof["error"] == error, label)
@@ -784,14 +695,15 @@ def _accessibility_binding_context(value, case):
         need(type(case) is str and case in CASES and case != "picker-loss", label)
         need(type(value) is dict and set(value) == {
             "mechanism", "case", "id", "kind", "start", "configuration", "binding"}, label)
-        need(value["mechanism"] == "public-original-sheet-v1" and value["case"] == case
+        need(value["mechanism"] == "preconfigured-original-sheet-v2" and value["case"] == case
              and type(value["id"]) is int and value["id"] == (2 if case == "first-save" else 1)
              and value["kind"] == "project", label)
         start, configured, bound = value["start"], value["configuration"], value["binding"]
         need(type(start) is dict and set(start) == {"returned", "result"} and start["returned"] is True
              and type(start["result"]) is str
              and start["result"] in ("ok", "permission-denied", "io", "invalid-input", "already", "other"), label)
-        flags = ("parentSetterEntered", "parentSetterReturned", "promptSetterEntered", "promptSetterReturned")
+        flags = ("parentSetterEntered", "parentSetterReturned", "promptSetterEntered", "promptSetterReturned",
+                 "initialDirectorySetterEntered", "initialDirectorySetterReturned")
         need(type(configured) is dict and set(configured) == {"attempted", *flags, "parent", "prompt", "site", "error"}
              and all(type(configured[key]) is bool for key in ("attempted", *flags)), label)
         parent, prompt, site, error = (configured[key] for key in ("parent", "prompt", "site", "error"))
@@ -809,14 +721,20 @@ def _accessibility_binding_context(value, case):
                 need(not any(bits) and parent is prompt is None
                      and error in (("ineligible",) if site == "objects" else ("invalid-input", "objc-exception")), label)
             elif site == "parent-set":
-                need(bits == (True, False, False, False) and parent is prompt is None and error == "objc-exception", label)
+                need(bits == (True, False, False, False, False, False) and parent is prompt is None and error == "objc-exception", label)
             elif site == "parent-get":
-                need(bits == (True, True, False, False) and parent is prompt is None and error == "objc-exception", label)
+                need(bits == (True, True, False, False, False, False) and parent is prompt is None and error == "objc-exception", label)
             elif site == "prompt-set":
-                need(bits == (True, True, True, False) and parent is not None and prompt is None and error == "objc-exception", label)
+                need(bits == (True, True, True, False, False, False) and parent is not None and prompt is None and error == "objc-exception", label)
             elif site == "prompt-get":
-                need(all(bits) and parent is not None
+                need(bits == (True, True, True, True, False, False) and parent is not None
                      and (prompt is None and error == "objc-exception" or prompt is not None and prompt != "match" and error == "changed"), label)
+            elif site == "initial-directory-url":
+                need(bits == (True, True, True, True, False, False) and parent is not None and prompt == "match"
+                     and error in ("invalid-input", "objc-exception"), label)
+            elif site == "initial-directory-set":
+                need(bits == (True, True, True, True, True, False) and parent is not None and prompt == "match"
+                     and error == "objc-exception", label)
             else:
                 need(site == "complete" and all(bits) and parent is not None and prompt == "match" and error == "none", label)
             if start["result"] == "ok":
@@ -827,6 +745,58 @@ def _accessibility_binding_context(value, case):
         return value
     except (Refused, KeyError, TypeError, ValueError):
         return None
+
+
+def _completion_selection_context(value, case):
+    """Saved same-original poll DATA, including returned errors, never a join."""
+    if value is None:
+        return None
+    try:
+        label = "completion-selection-data"
+        need(type(case) is str and case in CASES and case != "picker-loss", label)
+        need(type(value) is dict and set(value) == {
+            "mechanism", "case", "id", "kind", "pollReturned", "pollResult", "timely", "facts"}, label)
+        need(value["mechanism"] == "original-ok-singleton-selection-v1" and value["case"] == case
+             and type(value["id"]) is int and value["id"] == (2 if case == "first-save" else 1)
+             and value["kind"] == "project" and value["pollReturned"] is True
+             and type(value["timely"]) is bool and type(value["pollResult"]) is str
+             and value["pollResult"] in ("showing", "responded", "closed", "error", "invalid-return"), label)
+        facts = value["facts"]
+        if facts is not None:
+            flags = ("callbackEntered", "urlsReadEntered", "urlsReadReturned", "callbackReturned", "duplicate", "nativeUnknown")
+            need(type(facts) is dict and set(facts) == {*flags, "response", "selection"}
+                 and all(type(facts[key]) is bool for key in flags), label)
+            response, selection = facts["response"], facts["selection"]
+            need(response is None or type(response) is str and response in ("accept", "decline", "other"), label)
+            need(selection is None or type(selection) is str and selection in (
+                "empty", "malformed", "multiple", "different", "ordinary-path-disagreement", "match"), label)
+            if not facts["callbackEntered"]:
+                need(not any(facts[key] for key in flags[:-1]) and response is selection is None, label)
+            need(not facts["urlsReadEntered"] or response == "accept", label)
+            need(not facts["urlsReadReturned"] or facts["urlsReadEntered"], label)
+            need(selection is None or facts["urlsReadReturned"], label)
+            need(not facts["duplicate"] or facts["nativeUnknown"], label)
+            if not facts["nativeUnknown"]:
+                need(facts["callbackEntered"] and facts["callbackReturned"] and response is not None, label)
+                if response == "accept":
+                    need(facts["urlsReadReturned"] and selection is not None, label)
+                else:
+                    need(not facts["urlsReadEntered"] and selection is None, label)
+        return value
+    except (Refused, KeyError, TypeError, ValueError):
+        return None
+
+
+def _completion_selection_succeeded(value):
+    # Unknown/late/unavailable DATA may explain a failure but never resolve it.
+    # This predicate receives only a closed, case/id-bound decoded sample.
+    if value is None or value["pollResult"] != "responded" or value["timely"] is not True:
+        return False
+    facts = value["facts"]
+    return (facts is not None and all(facts[key] is True for key in (
+                "callbackEntered", "urlsReadEntered", "urlsReadReturned", "callbackReturned"))
+            and facts["duplicate"] is False and facts["nativeUnknown"] is False
+            and facts["response"] == "accept" and facts["selection"] == "match")
 
 
 def _original_window_context(value):
@@ -885,7 +855,7 @@ def failure_context(stdout, stderr, case=None):
     try:
         value = json.loads(row.decode("ascii"), object_pairs_hook=_pairs,
                            parse_constant=lambda _: (_ for _ in ()).throw(Refused("failure-context")))
-        need(type(value) is dict and set(value) - {"accessibilityBinding", "snapshotSource", "originalWindow", "projectSelection"} in (
+        need(type(value) is dict and set(value) - {"accessibilityBinding", "snapshotSource", "originalWindow", "projectSelection", "completionSelection"} in (
             {"pending", "nativeHandler", "lastPanel"},
             {"pending", "nativeHandler", "lastPanel", "nativeAction"},
             {"pending", "nativeHandler", "lastPanel", "nativeAction", "accessibility"}), "failure-context")
@@ -896,6 +866,11 @@ def failure_context(stdout, stderr, case=None):
         if "projectSelection" in value:
             value["projectSelection"] = _project_selection_context(value["projectSelection"], value.get("snapshotSource"),
                 failure_step(stdout, stderr), failure_reason(stdout, stderr), case)
+        if "completionSelection" in value:
+            # Only the saved original Record can carry this post-poll sample.
+            # No native handler/Press receipt is invented to fill missing DATA.
+            value["completionSelection"] = (_completion_selection_context(value["completionSelection"], case)
+                                             if value.get("snapshotSource") == "record" else None)
         pending, native, panel = value["pending"], value["nativeHandler"], value["lastPanel"]
         if pending is not None:
             need(type(pending) is dict and set(pending) == {"kind", "step"}
@@ -931,12 +906,12 @@ def failure_context(stdout, stderr, case=None):
             # The fixed pre-arm original fields are historical, while only the
             # one atomic progress/expiry sample was refreshed at the deadline.
             need(pending == {"kind": "accessibility", "step": "OpenProject"}
-                 and "projectSelection" not in value
+                 and "projectSelection" not in value and "completionSelection" not in value
                  and native == {"step": "OpenProject", "entered": True, "returned": True}
                  and sample is not None and sample["prepared"] and sample["requested"]
                  and sample["expired"] and sample["timely"] is False
                  and all(sample[key] is None for key in ("nativeEntered", "attempted", "pressReturned", "triggered",
-                     "initialOriginalProof", "originalProof", "promptButton", "rowSelection", "selectedTarget", "site", "error"))
+                      "initialOriginalProof", "originalProof", "promptButton", "site", "error"))
                  and sample["promptChecks"] == {"initial": None, "final": None}, "failure-context")
         if "accessibilityBinding" in value:
             # Early start failure legitimately has no nativeHandler/lastPanel
