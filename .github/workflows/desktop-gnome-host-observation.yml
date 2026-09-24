@@ -16,12 +16,12 @@ jobs:
       run:
         shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
     env:
-      MRK_GNO_SOURCE_SHA256: f52ba1a41d8cc07918e98de41b0fc1305b40ecbc6d6f1a0887f2edeb7e1e9a1d
+      MRK_GNO_SOURCE_SHA256: 876b40514a88306402f7648c70abdb971bc6402c0902034d14a4571bff5e9bf5
       MRK_GNO_PROGRAM: |-
-        """Two fixed public Python alias texts; no target file observation or admission.
+        """Two fixed Python target seeds and nine parent originals; DATA only.
         
         Reuse the original provider bootstrap, private owner, foreground wait and return.
-        Only the five protected original supplier parents and two readlinks are observed.
+        Only a bounded actual library chain, two body hashes and parent facts are public.
         """
         import base64
         import errno
@@ -33,8 +33,8 @@ jobs:
         import stat
         import sys
         
-        POLICY_SHA256 = "d645ade62ac5f45f310e549fc37bc9e61fe45c808576af4ef4294d4a3f6543a5"
-        RUNTIME_POLICY_JSON = r'''{"attempt":"1","bootstrapTrust":"provider-managed disposable runner/OS, workflow shell, env/timeout/initial isolated Python; post-use hashes are not retroactive admission","caps":{"frameBytes":65536,"outputBytes":16384,"pathBytes":512},"event":"push","links":[{"basename":"libpython3.12.so","normalizedPublicTargetPrefix":"/usr/lib/x86_64-linux-gnu/","parent":"/usr/lib/python3.12/config-3.12-x86_64-linux-gnu","path":"/usr/lib/python3.12/config-3.12-x86_64-linux-gnu/libpython3.12.so","sha256":"925cccb5e8c295cbbf5acb9934ce6f6eccab5dcd459a53fb046278c06ea300ea","utf8Bytes":41},{"basename":"sitecustomize.py","normalizedPublicTargetPrefix":"/etc/python3.12/","parent":"/usr/lib/python3.12","path":"/usr/lib/python3.12/sitecustomize.py","sha256":"32f1de153f7e1e3f9b543ada197eb2630524868b92869513a393775d30c77cbd","utf8Bytes":32}],"nonClaims":["not a C/A/W or native fixture run","no initial interpreter self-authentication","no actual loader/cache mapping or unknown config/provider closure","no sudo/PAM/policy/account bodies or account reservation proof","no continuity to H0 or any later VM","no compiler-wide or service/runner/checkout/action/Node/Docker census","all future exact source/runtime/native/account/ownership gates remain required","exact two alias texts only; normalized targets are not target-file or ancestry evidence","no supplier directory listing, target stat/read, CA alias, proc read or body census"],"parents":["/","/usr","/usr/lib","/usr/lib/python3.12","/usr/lib/python3.12/config-3.12-x86_64-linux-gnu"],"ref":"refs/heads/verify/desktop-gnome-host-observation","repository":"Apdelrahman1911/mobile-release-kit","workflow":".github/workflows/desktop-gnome-host-observation.yml"}'''
+        POLICY_SHA256 = "02ab217343932e833906c457e266c7c8c929484b41ebb8e11dda714414df6eff"
+        RUNTIME_POLICY_JSON = r'''{"attempt":"1","bootstrapTrust":"provider-managed disposable runner/OS, workflow shell, env/timeout/initial isolated Python; post-use hashes are not retroactive admission","caps":{"frameBytes":65536,"linkTextBytes":512,"outputBytes":16384,"pathBytes":512,"streamBytes":65536},"event":"push","nonClaims":["not a C/A/W or native fixture run","no initial interpreter self-authentication","no actual loader/cache mapping or unknown config/provider closure","no sudo/PAM/policy/account bodies or account reservation proof","no continuity to H0, earlier observations or any later VM","no compiler-wide or service/runner/checkout/action/Node/Docker census","all future exact source/runtime/native/account/ownership gates remain required","host target measurements are not package provenance, G2 closure or consumer admission","no source-alias reread, supplier directory listing, resolver body, CA alias or proc read","only validated numeric library-alias texts and body hashes are public; no regular body export","resolver service ownership applies to one metadata-only parent, not root-trusted hostFiles"],"parents":[{"gid":0,"mode":493,"parent":null,"path":"/","role":"protected-parent","uid":0},{"gid":0,"mode":493,"parent":0,"path":"/usr","role":"protected-parent","uid":0},{"gid":0,"mode":493,"parent":1,"path":"/usr/lib","role":"protected-parent","uid":0},{"gid":0,"mode":493,"parent":2,"path":"/usr/lib/x86_64-linux-gnu","role":"protected-parent","uid":0},{"gid":0,"mode":493,"parent":0,"path":"/etc","role":"protected-parent","uid":0},{"gid":0,"mode":493,"parent":4,"path":"/etc/python3.12","role":"protected-parent","uid":0},{"gid":0,"mode":493,"parent":0,"path":"/run","role":"protected-parent","uid":0},{"gid":0,"mode":493,"parent":6,"path":"/run/systemd","role":"protected-parent","uid":0},{"gid":991,"mode":493,"parent":7,"path":"/run/systemd/resolve","role":"resolver-parent-metadata-only","uid":991}],"ref":"refs/heads/verify/desktop-gnome-host-observation","repository":"Apdelrahman1911/mobile-release-kit","targets":[{"maxBytes":16777216,"maxEdges":2,"parent":3,"path":"/usr/lib/x86_64-linux-gnu/libpython3.12.so.1"},{"maxBytes":16384,"maxEdges":0,"parent":5,"path":"/etc/python3.12/sitecustomize.py"}],"workflow":".github/workflows/desktop-gnome-host-observation.yml"}'''
         P = json.loads(RUNTIME_POLICY_JSON)
         D = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
         F = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
@@ -180,94 +180,167 @@ jobs:
             return row
         
         
-        def protected_parent(s):
-            need(stat.S_ISDIR(s.st_mode) and s.st_uid == 0 and s.st_gid == 0
-                 and s.st_nlink > 0 and not stat.S_IMODE(s.st_mode) & 0o022)
+        def protected_parent(s, spec):
+            need(stat.S_ISDIR(s.st_mode) and s.st_uid == spec["uid"] and s.st_gid == spec["gid"]
+                 and s.st_nlink > 0 and stat.S_IMODE(s.st_mode) == spec["mode"])
         
         
-        def fixed_alias_shape(s, spec):
-            need(stat.S_ISLNK(s.st_mode) and s.st_uid == 0 and s.st_gid == 0
+        def fixed_alias_shape(s):
+            need(stat.S_ISLNK(s.st_mode) and s.st_uid == s.st_gid == 0
                  and s.st_nlink == 1 and stat.S_IMODE(s.st_mode) == 0o777
-                 and s.st_size == spec["utf8Bytes"])
+                 and 0 < s.st_size <= P["caps"]["linkTextBytes"])
         
         
-        def public_alias_text(raw, spec):
-            need(type(raw) is bytes and len(raw) == spec["utf8Bytes"]
-                 and hashlib.sha256(raw).hexdigest() == spec["sha256"])
-            text = raw.decode("utf-8")
-            need(text.encode("utf-8") == raw
-                 and re.fullmatch(r"[A-Za-z0-9_./+@=-]+", text) is not None)
-            target = os.path.normpath(os.path.join(os.path.dirname(spec["path"]), text))
-            need(path_ok(target) and target.startswith(spec["normalizedPublicTargetPrefix"]))
+        def fixed_regular_shape(s, spec):
+            need(stat.S_ISREG(s.st_mode) and s.st_uid == s.st_gid == 0
+                 and s.st_nlink == 1 and stat.S_IMODE(s.st_mode) in (0o644, 0o755)
+                 and 0 < s.st_size <= spec["maxBytes"])
+        
+        
+        def public_alias_text(raw):
+            """Only an actual numeric library basename or its exact fixed absolute path."""
+            need(type(raw) is bytes and 0 < len(raw) <= P["caps"]["linkTextBytes"])
+            text = raw.decode("ascii")
+            prefix = P["parents"][P["targets"][0]["parent"]]["path"] + "/"
+            name = text[len(prefix):] if text.startswith(prefix) else text
+            need(0 < len(name) <= 255
+                 and re.fullmatch(r"libpython3\.12\.so\.[0-9]+(?:\.[0-9]+)*", name) is not None)
+            target = prefix + name
+            need(text in (name, target) and path_ok(target))
             return text, target
         
         
-        def fixed_alias_texts():
-            """Only two readlinks through the five original protected parent FDs."""
-            paths = P["parents"]
-            fds = [None] * len(paths)
-            parent_rows, links, closed = [], [], []
-            original_error = None
-            close_failed = False
+        def fixed_targets():
+            """Two target seeds through one explicit nine-parent DAG, no directory census."""
+            specs = P["parents"]
+            parent_fds, terminal_fds = [None] * len(specs), [None] * len(P["targets"])
+            terminal_paths = [None] * len(P["targets"])
+            parents, targets, closed = [], [], []
+            reads = {"symlinkTexts": 0, "symlinkBytes": 0, "regularBodies": 0, "regularBodyBytes": 0}
+            original_error, close_failed = None, False
             try:
-                for number, path in enumerate(paths):
-                    if number == 0:
-                        before = os.stat("/", follow_symlinks=False)
-                        protected_parent(before)
-                        fds[number] = os.open("/", D)
-                    else:
-                        name = path.rsplit("/", 1)[1]
-                        before = os.stat(name, dir_fd=fds[number - 1], follow_symlinks=False)
-                        protected_parent(before)
-                        fds[number] = os.open(name, D, dir_fd=fds[number - 1])
-                    held = os.fstat(fds[number])
-                    protected_parent(held)
-                    need(ident(before) == ident(held) and not os.get_inheritable(fds[number]))
-                    parent_rows.append({"path": path, "before": ident(held), "after": None})
-                for spec in P["links"]:
-                    pfd = fds[paths.index(spec["parent"])]
-                    name = spec["basename"]
+                for number, spec in enumerate(specs):
+                    edge = spec["parent"]
+                    pfd = None if edge is None else parent_fds[edge]
+                    name = "/" if edge is None else spec["path"].rsplit("/", 1)[1]
                     before = os.stat(name, dir_fd=pfd, follow_symlinks=False)
-                    fixed_alias_shape(before, spec)
-                    raw = os.readlink(name.encode("ascii"), dir_fd=pfd)
-                    after = os.stat(name, dir_fd=pfd, follow_symlinks=False)
-                    fixed_alias_shape(after, spec)
-                    need(ident(before) == ident(after))
-                    text, target = public_alias_text(raw, spec)
-                    links.append({"path": spec["path"], "before": ident(before), "after": ident(after),
-                                  "text": text, "utf8Bytes": len(raw), "sha256": spec["sha256"],
-                                  "normalizedTarget": target, "targetObserved": False})
-                for row, spec in zip(links, P["links"]):
-                    last = os.stat(spec["basename"], dir_fd=fds[paths.index(spec["parent"])],
-                                   follow_symlinks=False)
-                    fixed_alias_shape(last, spec)
-                    need(ident(last) == row["before"] == row["after"])
-                for number, row in enumerate(parent_rows):
-                    named = (os.stat("/", follow_symlinks=False) if number == 0 else
-                             os.stat(paths[number].rsplit("/", 1)[1],
-                                     dir_fd=fds[number - 1], follow_symlinks=False))
-                    held = os.fstat(fds[number])
-                    protected_parent(named)
-                    protected_parent(held)
+                    protected_parent(before, spec)
+                    # Immediate fixed-slot registration, before any further operation.
+                    parent_fds[number] = os.open(name, D, dir_fd=pfd)
+                    held = os.fstat(parent_fds[number])
+                    named = os.stat(name, dir_fd=pfd, follow_symlinks=False)
+                    protected_parent(held, spec)
+                    protected_parent(named, spec)
+                    need(ident(before) == ident(held) == ident(named)
+                         and not os.get_inheritable(parent_fds[number]))
+                    parents.append({"path": spec["path"], "parent": edge, "kind": "directory",
+                                    "role": spec["role"], "before": ident(held), "after": None})
+                for number, spec in enumerate(P["targets"]):
+                    pfd = parent_fds[spec["parent"]]
+                    current, seen, nodes = spec["path"], set(), []
+                    for hop in range(spec["maxEdges"] + 1):
+                        need(current not in seen)
+                        seen.add(current)
+                        name = current.rsplit("/", 1)[1]
+                        before = os.stat(name, dir_fd=pfd, follow_symlinks=False)
+                        if stat.S_ISLNK(before.st_mode):
+                            need(number == 0 and hop < spec["maxEdges"])
+                            fixed_alias_shape(before)
+                            raw = os.readlink(name.encode("ascii"), dir_fd=pfd)
+                            named = os.stat(name, dir_fd=pfd, follow_symlinks=False)
+                            fixed_alias_shape(named)
+                            need(ident(before) == ident(named) and len(raw) == before.st_size)
+                            text, target = public_alias_text(raw)
+                            need(target not in seen)
+                            nodes.append({"path": current, "kind": "symlink", "before": ident(before),
+                                          "after": ident(named), "text": text, "textBytes": len(raw),
+                                          "sha256": hashlib.sha256(raw).hexdigest(), "nextPath": target})
+                            reads["symlinkTexts"] += 1
+                            reads["symlinkBytes"] += len(raw)
+                            current = target
+                            continue
+                        fixed_regular_shape(before, spec)
+                        terminal_paths[number] = current
+                        terminal_fds[number] = os.open(name, F, dir_fd=pfd)
+                        fd = terminal_fds[number]
+                        held = os.fstat(fd)
+                        named = os.stat(name, dir_fd=pfd, follow_symlinks=False)
+                        fixed_regular_shape(held, spec)
+                        fixed_regular_shape(named, spec)
+                        need(ident(before) == ident(held) == ident(named) and not os.get_inheritable(fd))
+                        digest, size = hashlib.sha256(), 0
+                        while size < before.st_size:
+                            count = min(P["caps"]["streamBytes"], before.st_size - size)
+                            chunk = os.read(fd, count)
+                            need(type(chunk) is bytes and 0 < len(chunk) <= count)
+                            digest.update(chunk)
+                            size += len(chunk)
+                            reads["regularBodyBytes"] += len(chunk)
+                        need(os.read(fd, 1) == b"")
+                        held = os.fstat(fd)
+                        named = os.stat(name, dir_fd=pfd, follow_symlinks=False)
+                        fixed_regular_shape(held, spec)
+                        fixed_regular_shape(named, spec)
+                        need(size == before.st_size and ident(before) == ident(held) == ident(named)
+                             and not os.get_inheritable(fd))
+                        nodes.append({"path": current, "kind": "regular", "before": ident(before),
+                                      "after": ident(held), "bytes": size, "sha256": digest.hexdigest()})
+                        reads["regularBodies"] += 1
+                        targets.append({"seed": spec["path"], "parent": spec["parent"], "nodes": nodes})
+                        break
+                    else:
+                        need(False)
+                for number, target in enumerate(targets):
+                    spec = P["targets"][number]
+                    pfd = parent_fds[spec["parent"]]
+                    for row in target["nodes"]:
+                        named = os.stat(row["path"].rsplit("/", 1)[1], dir_fd=pfd, follow_symlinks=False)
+                        if row["kind"] == "symlink":
+                            fixed_alias_shape(named)
+                        else:
+                            fixed_regular_shape(named, spec)
+                            held = os.fstat(terminal_fds[number])
+                            fixed_regular_shape(held, spec)
+                            need(ident(held) == row["before"]
+                                 and not os.get_inheritable(terminal_fds[number]))
+                        need(ident(named) == row["before"] == row["after"])
+                for number, (row, spec) in enumerate(zip(parents, specs)):
+                    edge = spec["parent"]
+                    pfd = None if edge is None else parent_fds[edge]
+                    name = "/" if edge is None else spec["path"].rsplit("/", 1)[1]
+                    named = os.stat(name, dir_fd=pfd, follow_symlinks=False)
+                    held = os.fstat(parent_fds[number])
+                    protected_parent(named, spec)
+                    protected_parent(held, spec)
                     need(ident(named) == ident(held) == row["before"]
-                         and not os.get_inheritable(fds[number]))
+                         and not os.get_inheritable(parent_fds[number]))
                     row["after"] = ident(held)
             except BaseException as error:
                 original_error = error
             finally:
-                for number in range(len(fds) - 1, -1, -1):
-                    held, fds[number] = fds[number], None
-                    if held is not None:
+                for number in range(len(terminal_fds) - 1, -1, -1):
+                    fd, terminal_fds[number] = terminal_fds[number], None
+                    if fd is not None:
                         try:
-                            os.close(held)
+                            os.close(fd)
                         except BaseException:
                             close_failed = True
                         else:
-                            closed.append(paths[number])
+                            closed.append(terminal_paths[number])
+                for number in range(len(parent_fds) - 1, -1, -1):
+                    fd, parent_fds[number] = parent_fds[number], None
+                    if fd is not None:
+                        try:
+                            os.close(fd)
+                        except BaseException:
+                            close_failed = True
+                        else:
+                            closed.append(specs[number]["path"])
             if original_error is not None:
                 raise original_error
-            need(not close_failed and closed == list(reversed(paths)))
-            return links, parent_rows, {"order": closed, "allReturned": True}
+            expected = list(reversed(terminal_paths)) + [s["path"] for s in reversed(specs)]
+            need(not close_failed and closed == expected)
+            return targets, parents, {"order": closed, "allReturned": True}, reads
         
         
         def context():
@@ -368,12 +441,11 @@ jobs:
                      and s.st_uid == os.getuid() and stat.S_IMODE(s.st_mode) == 0o600
                      and s.st_nlink == 1 and s.st_size == 0)
                 captures[name] = ident(s)
-            links, parents, closes = fixed_alias_texts()
-            value = {"schema": "mrk-gnome-python-alias-text-observation-1",
-                     "scope": "two-fixed-python-alias-texts-only-no-admission",
-                     "binding": binding(e, event_digest), "links": links, "parents": parents,
-                     "parentCloses": closes,
-                     "supplierReads": {"symlinkTexts": 2, "symlinkBytes": 73, "regularBodyBytes": 0},
+            targets, parents, closes, reads = fixed_targets()
+            value = {"schema": "mrk-gnome-python-target-parent-observation-1",
+                     "scope": "two-python-targets-nine-parents-only-no-admission",
+                     "binding": binding(e, event_digest), "targets": targets, "parents": parents,
+                     "originalCloses": closes, "supplierReads": reads,
                      "bootstrapTrust": P["bootstrapTrust"], "nonClaims": P["nonClaims"],
                      "hostQualified": False, "nativeQualified": False,
                      "original": {"directories": dirs, "captures": captures,
@@ -392,51 +464,95 @@ jobs:
                 os.close(root)
         
         
+        def public_identity(value):
+            need(type(value) is dict and set(value) == set(STAT_KEYS)
+                 and all(type(v) is int for v in value.values()))
+            need(all(value[k] >= 0 for k in ("device", "uid", "gid", "bytes", "blocks"))
+                 and value["inode"] > 0 and value["links"] > 0 and 0 <= value["mode"] <= 0o7777
+                 and all(-(2**63) <= value[k] < 2**63 for k in ("mtimeNs", "ctimeNs")))
+            return value
+        
+        
+        def public_pair(row):
+            before, after = public_identity(row["before"]), public_identity(row["after"])
+            need(before == after)
+            return before
+        
+        
         def public_observation(value, expected_binding):
-            """Only the two fixed public texts after their exact digest/privacy checks."""
-            need(type(value) is dict and set(value) == {"schema", "scope", "binding", "links", "parents",
-                "parentCloses", "supplierReads", "bootstrapTrust", "nonClaims",
-                "hostQualified", "nativeQualified", "original"})
-            need(value["schema"] == "mrk-gnome-python-alias-text-observation-1"
-                 and value["scope"] == "two-fixed-python-alias-texts-only-no-admission")
+            """Strict saved DATA only; no supplier I/O or package/native acceptance."""
+            need(type(value) is dict and set(value) == {"schema", "scope", "binding", "targets", "parents",
+                 "originalCloses", "supplierReads", "bootstrapTrust", "nonClaims",
+                 "hostQualified", "nativeQualified", "original"})
+            need(value["schema"] == "mrk-gnome-python-target-parent-observation-1"
+                 and value["scope"] == "two-python-targets-nine-parents-only-no-admission")
             need(value["binding"] == expected_binding
                  and value["hostQualified"] is False and value["nativeQualified"] is False)
             need(value["bootstrapTrust"] == P["bootstrapTrust"] and value["nonClaims"] == P["nonClaims"])
-            stat_ok = lambda s: (type(s) is dict and set(s) == set(STAT_KEYS)
-                                and all(type(v) is int for v in s.values()))
-            need(type(value["links"]) is list and len(value["links"]) == 2)
-            for row, spec in zip(value["links"], P["links"]):
-                need(type(row) is dict and set(row) == {"path", "before", "after", "text",
-                     "utf8Bytes", "sha256", "normalizedTarget", "targetObserved"})
-                need(row["path"] == spec["path"] and stat_ok(row["before"]) and stat_ok(row["after"]))
-                need(row["before"] == row["after"])
-                s = row["before"]
-                need(s["uid"] == s["gid"] == 0 and s["links"] == 1
-                     and s["mode"] == 0o777 and s["bytes"] == spec["utf8Bytes"])
-                need(type(row["text"]) is str and type(row["utf8Bytes"]) is int
-                     and row["utf8Bytes"] == spec["utf8Bytes"] and row["sha256"] == spec["sha256"]
-                     and row["targetObserved"] is False)
-                text, target = public_alias_text(row["text"].encode("utf-8"), spec)
-                need(row["text"] == text and row["normalizedTarget"] == target)
-            need(type(value["parents"]) is list and len(value["parents"]) == 5)
-            for row, path in zip(value["parents"], P["parents"]):
-                need(type(row) is dict and set(row) == {"path", "before", "after"} and row["path"] == path)
-                need(stat_ok(row["before"]) and stat_ok(row["after"]) and row["before"] == row["after"])
-                s = row["before"]
-                need(s["uid"] == s["gid"] == 0 and s["links"] > 0
-                     and 0 <= s["mode"] <= 0o7777 and not s["mode"] & 0o022)
-            closes = value["parentCloses"]
+            need(type(value["parents"]) is list and len(value["parents"]) == len(P["parents"]))
+            for row, spec in zip(value["parents"], P["parents"]):
+                need(type(row) is dict and set(row) == {"path", "parent", "kind", "role", "before", "after"})
+                edge = row["parent"]
+                need(row["path"] == spec["path"] and row["kind"] == "directory" and row["role"] == spec["role"]
+                     and (edge is None if spec["parent"] is None else type(edge) is int and edge == spec["parent"]))
+                s = public_pair(row)
+                need(s["uid"] == spec["uid"] and s["gid"] == spec["gid"] and s["mode"] == spec["mode"])
+            need(type(value["targets"]) is list and len(value["targets"]) == len(P["targets"]))
+            reads = {"symlinkTexts": 0, "symlinkBytes": 0, "regularBodies": 0, "regularBodyBytes": 0}
+            terminals = []
+            for number, (target, spec) in enumerate(zip(value["targets"], P["targets"])):
+                need(type(target) is dict and set(target) == {"seed", "parent", "nodes"}
+                     and target["seed"] == spec["path"] and type(target["parent"]) is int
+                     and target["parent"] == spec["parent"] and type(target["nodes"]) is list
+                     and 1 <= len(target["nodes"]) <= spec["maxEdges"] + 1)
+                expected, seen = spec["path"], set()
+                for i, row in enumerate(target["nodes"]):
+                    need(type(row) is dict and row.get("kind") in ("symlink", "regular"))
+                    keys = {"path", "kind", "before", "after", "sha256"}
+                    keys |= {"text", "textBytes", "nextPath"} if row["kind"] == "symlink" else {"bytes"}
+                    need(set(row) == keys and row["path"] == expected and expected not in seen)
+                    seen.add(expected)
+                    s = public_pair(row)
+                    need(s["uid"] == s["gid"] == 0 and s["links"] == 1
+                         and type(row["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is not None)
+                    if row["kind"] == "symlink":
+                        need(number == 0 and i < len(target["nodes"]) - 1 and s["mode"] == 0o777
+                             and type(row["text"]) is str and type(row["textBytes"]) is int
+                             and 0 < row["textBytes"] == s["bytes"] <= P["caps"]["linkTextBytes"])
+                        raw = row["text"].encode("ascii")
+                        text, next_path = public_alias_text(raw)
+                        need(len(raw) == row["textBytes"] and row["text"] == text
+                             and row["nextPath"] == next_path and next_path not in seen
+                             and row["sha256"] == hashlib.sha256(raw).hexdigest())
+                        expected = next_path
+                        reads["symlinkTexts"] += 1
+                        reads["symlinkBytes"] += len(raw)
+                    else:
+                        need(i == len(target["nodes"]) - 1 and s["mode"] in (0o644, 0o755)
+                             and type(row["bytes"]) is int and 0 < row["bytes"] == s["bytes"] <= spec["maxBytes"])
+                        terminals.append(row["path"])
+                        reads["regularBodies"] += 1
+                        reads["regularBodyBytes"] += row["bytes"]
+            need(reads["regularBodies"] == 2 and reads["symlinkTexts"] <= 2
+                 and reads["symlinkBytes"] <= 1024)
+            closes = value["originalCloses"]
             need(type(closes) is dict and set(closes) == {"order", "allReturned"}
-                 and closes["order"] == list(reversed(P["parents"])) and closes["allReturned"] is True)
-            reads = value["supplierReads"]
-            need(type(reads) is dict and all(type(v) is int for v in reads.values())
-                 and reads == {"symlinkTexts": 2, "symlinkBytes": 73, "regularBodyBytes": 0})
+                 and type(closes["order"]) is list
+                 and closes["order"] == list(reversed(terminals)) + [s["path"] for s in reversed(P["parents"])]
+                 and closes["allReturned"] is True)
+            actual = value["supplierReads"]
+            need(type(actual) is dict and set(actual) == set(reads)
+                 and all(type(v) is int for v in actual.values()) and actual == reads)
             original = value["original"]
-            need(set(original) == {"directories", "captures", "observerArgv"}
-                 and set(original["captures"]) == {"stdout.bin", "stderr.bin"})
+            need(type(original) is dict and set(original) == {"directories", "captures", "observerArgv"}
+                 and type(original["captures"]) is dict
+                 and set(original["captures"]) == {"stdout.bin", "stderr.bin"}
+                 and type(original["directories"]) is dict)
             need(original["observerArgv"] == ["/usr/bin/python3.12", "-I", "-S", "-B", "-", "observe"])
-            need(all(stat_ok(v) for v in original["captures"].values())
-                 and all(stat_ok(v) for v in original["directories"].values()))
+            for group in ("captures", "directories"):
+                for facts in original[group].values():
+                    public_identity(facts)
+            need(len(canonical(value)) <= P["caps"]["outputBytes"])
             return value
         
         
@@ -542,9 +658,9 @@ jobs:
           [[ ${GITHUB_EVENT_PATH-} == /home/runner/work/_temp/_github_workflow/event.json ]] || fail
           [[ ${ImageOS-} =~ ^[A-Za-z0-9_.-]{1,32}$ && ${ImageVersion-} =~ ^[0-9]{8}\.[0-9]{1,6}\.[0-9]{1,6}$ ]] || fail
           [[ $UID == "$EUID" && $EUID -gt 0 && -d /tmp && ! -L /tmp ]] || fail
-          [[ ${MRK_GNO_SOURCE_SHA256-} == f52ba1a41d8cc07918e98de41b0fc1305b40ecbc6d6f1a0887f2edeb7e1e9a1d && ${MRK_GNO_PROGRAM+x} == x ]] || fail
+          [[ ${MRK_GNO_SOURCE_SHA256-} == 876b40514a88306402f7648c70abdb971bc6402c0902034d14a4571bff5e9bf5 && ${MRK_GNO_PROGRAM+x} == x ]] || fail
           readonly MRK_GNO_PROGRAM MRK_GNO_SOURCE_SHA256
-          [[ ${#MRK_GNO_PROGRAM} -eq 24561 ]] || fail
+          [[ ${#MRK_GNO_PROGRAM} -eq 31597 ]] || fail
           S="/tmp/mrk-gnome-host-observe-${GITHUB_RUN_ID}-1"
           readonly S
           # Bash non-POSIX ulimit -f is KiB; Python reapplies byte-exact limits.
@@ -603,9 +719,9 @@ jobs:
           [[ ${GITHUB_EVENT_PATH-} == /home/runner/work/_temp/_github_workflow/event.json ]] || fail
           [[ ${ImageOS-} =~ ^[A-Za-z0-9_.-]{1,32}$ && ${ImageVersion-} =~ ^[0-9]{8}\.[0-9]{1,6}\.[0-9]{1,6}$ ]] || fail
           [[ $UID == "$EUID" && $EUID -gt 0 && -d /tmp && ! -L /tmp ]] || fail
-          [[ ${MRK_GNO_SOURCE_SHA256-} == f52ba1a41d8cc07918e98de41b0fc1305b40ecbc6d6f1a0887f2edeb7e1e9a1d && ${MRK_GNO_PROGRAM+x} == x ]] || fail
+          [[ ${MRK_GNO_SOURCE_SHA256-} == 876b40514a88306402f7648c70abdb971bc6402c0902034d14a4571bff5e9bf5 && ${MRK_GNO_PROGRAM+x} == x ]] || fail
           readonly MRK_GNO_PROGRAM MRK_GNO_SOURCE_SHA256
-          [[ ${#MRK_GNO_PROGRAM} -eq 24561 ]] || fail
+          [[ ${#MRK_GNO_PROGRAM} -eq 31597 ]] || fail
           S="/tmp/mrk-gnome-host-observe-${GITHUB_RUN_ID}-1"
           readonly S
           # Bash non-POSIX ulimit -f is KiB; Python reapplies byte-exact limits.
