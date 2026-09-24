@@ -241,8 +241,9 @@ fn prompt_button_value(p: mrk_macos_installed_native::ControlContainerButtonProo
         "cfSlots":p.cf_slots,"cfSlotsRetired":p.cf_slots_retired,"cleanupReturned":p.cleanup_returned,"axError":p.ax_error})
 }
 fn row_selection_value(p: mrk_macos_installed_native::RowSelectionProof) -> Value {
+    let limit = p.limit.map(|l| json!({"role":l.role,"depth":l.depth,"count":l.count,"queuedNodes":l.queued_nodes}));
     json!({"checks":{"targetRowBound":p.checks[0],"sameTargetRechecked":p.checks[1],"selectedRowsSettable":p.checks[2]},
-        "nodesExamined":p.nodes_examined,"attempted":p.attempted,"returned":p.returned,"setterSucceeded":p.setter_succeeded})
+        "nodesExamined":p.nodes_examined,"attempted":p.attempted,"returned":p.returned,"setterSucceeded":p.setter_succeeded,"limit":limit})
 }
 struct OpenActionReceipt { token: OpenAction, body: OpenActionBody, returned_at: Instant }
 struct OpenRecheckReceipt { token: OpenAction, stage: u32, body: OpenRecheckBody, returned_at: Instant }
@@ -2620,7 +2621,7 @@ fn route() -> Option<(PathBuf,u32)> {
 // Pure regression checks in the already-required instrumented native entry.
 // These do not call AppKit, acquire files, dispatch actions, or supply receipts.
 fn native_recheck_data_check() -> bool {
-    use mrk_macos_installed_native::{ControlContainerButtonProof, IdentityBinding, OpenDiagnostic, OpenReport, RowSelectionProof};
+    use mrk_macos_installed_native::{ControlContainerButtonProof, IdentityBinding, OpenDiagnostic, OpenReport, RowSelectionProof, RowSelectionLimit};
     let proof = IdentityBinding { attempted: true, parent: Some("match"), panel: Some("match"), checks: [Some(true); 12],
         children: Some(1), originals: Some("one"), site: "complete", error: "none" };
     let button = ControlContainerButtonProof { checks: [true; 7], calls: 101, initial_nodes_examined: 4, recheck_nodes_examined: 4,
@@ -2629,7 +2630,8 @@ fn native_recheck_data_check() -> bool {
     let report = OpenReport { diagnostic: OpenDiagnostic { site: "press", error: "none" }, attempted: true,
         press_returned: true, triggered: Some(true), custody_known: true, initial_proof: Some(proof), proof: Some(proof),
         prompt: [Some(true); 2], button, selected_target: Some("match"),
-        selection: RowSelectionProof { checks: [true; 3], nodes_examined: 4, attempted: true, returned: true, setter_succeeded: Some(true) } };
+        selection: RowSelectionProof { checks: [true; 3], nodes_examined: 4, attempted: true, returned: true,
+            setter_succeeded: Some(true), limit: None } };
     let full = OpenInputSample { id: 2, prepared: true, requested: true, dispatch_attempted: true, state: "retired",
         entered: Some(true), native_entered: Some(true), returned: true, joined: true, retired: true, expired: false,
         timely: Some(true), custody_known: Some(true), attempted: Some(true), press_returned: Some(true), triggered: Some(true),
@@ -2639,6 +2641,7 @@ fn native_recheck_data_check() -> bool {
     if !full.succeeded() || value.get("confirmReturned").is_some()
         || value["mechanism"] != "accessibility-select-original-row-and-press-v4"
         || value["rowSelection"]["setterSucceeded"] != true || value["selectedTarget"] != "match"
+        || value["rowSelection"].get("limit") != Some(&Value::Null)
         || value["promptButton"]["initialNodesExamined"] != 4 || value["promptButton"]["recheckNodesExamined"] != 4
         || value["promptButton"]["lastRole"] != "Button" || value["promptButton"]["lastDepth"] != 2
         || value["promptButton"].get("directChildrenExamined").is_some()
@@ -2647,6 +2650,34 @@ fn native_recheck_data_check() -> bool {
         || value["promptButton"]["checks"]["completeControlProjection"] != true
         || value["promptButton"]["checks"]["uniquePromptButton"] != true
         || value["promptButton"]["checks"]["sameOriginalControlPathRechecked"] != true { return false; }
+    // Literal renderer DATA only. In particular these role/depth/count/queue
+    // values were not observed on the prior 12-node/100-call/45-slot failure.
+    for (site, depth, count) in [("selection-count-limit", 3, i64::MAX), ("selection-copy-limit", 8, i64::MIN),
+        ("selection-node-limit", 7, 16), ("selection-depth-limit", 8, 16)] {
+        let limit = RowSelectionLimit { role: "ScrollArea", depth, count, queued_nodes: 17 };
+        let selection = RowSelectionProof { checks: [false; 3], nodes_examined: 12, attempted: false, returned: false,
+            setter_succeeded: None, limit: Some(limit) };
+        let expected = json!({"checks":{"targetRowBound":false,"sameTargetRechecked":false,"selectedRowsSettable":false},
+            "nodesExamined":12,"attempted":false,"returned":false,"setterSucceeded":null,
+            "limit":{"role":"ScrollArea","depth":depth,"count":count,"queuedNodes":17}});
+        for known in [true, false] {
+            let refused = OpenReport { diagnostic: OpenDiagnostic { site, error: "limit" }, attempted: false,
+                press_returned: false, triggered: None, custody_known: known, proof: None, prompt: [Some(true), None],
+                selection, selected_target: None,
+                button: ControlContainerButtonProof { checks: [true, true, false, false, false, false, false],
+                    initial_nodes_examined: 0, recheck_nodes_examined: 0, last_role: "not-read", last_depth: 0,
+                    calls: 100, cf_slots: 45, cf_slots_retired: if known { 45 } else { 16 }, cleanup_returned: known, ..button }, ..report };
+            let sample = OpenInputSample { report: Some(refused), diagnostic: Some(refused.diagnostic), attempted: Some(false),
+                press_returned: Some(false), triggered: None, custody_known: Some(known), joined: known, retired: known,
+                state: if known { "retired" } else { "unknown" }, expired: !known, timely: Some(known),
+                rechecks_settled: Some(known), ..full };
+            let value = sample.value();
+            if sample.succeeded() || value["rowSelection"] != expected || value["site"] != site || value["error"] != "limit"
+                || value["promptButton"]["lastRole"] != "not-read" || value["promptButton"]["lastDepth"] != 0
+                || value["workerJoined"] != true || value["receiptJoined"] != known || value["barrierRetired"] != known { return false; }
+        }
+        if (RowSelectionProof { limit: Some(limit), ..report.selection }).matched() { return false; }
+    }
     let mutations: [fn(&mut OpenInputSample); 15] = [|s| s.expired = true, |s| s.timely = Some(false),
         |s| s.joined = false, |s| s.returned = false, |s| s.entered = None, |s| s.native_entered = Some(false),
         |s| s.retired = false, |s| s.state = "unknown", |s| s.custody_known = Some(false),

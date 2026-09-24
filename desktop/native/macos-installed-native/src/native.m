@@ -540,16 +540,20 @@ enum { MRK_OPEN_ENTRY = 1u, MRK_OPEN_APPLICATION, MRK_OPEN_WINDOWS, MRK_OPEN_PAR
     MRK_OPEN_SHEET, MRK_OPEN_TOPOLOGY, MRK_OPEN_CONTROL_PROJECTION, MRK_OPEN_BUTTON, MRK_OPEN_CONTROL_RECHECK,
     MRK_OPEN_INITIAL_PROOF, MRK_OPEN_FINAL_PROOF, MRK_OPEN_ADMISSION, MRK_OPEN_PRESS, MRK_OPEN_CLEANUP,
     MRK_OPEN_CONTROL_TITLE_LIMIT, MRK_OPEN_CONTROL_CHILD_COUNT_LIMIT, MRK_OPEN_CONTROL_CHILD_COPY_LIMIT,
-    MRK_OPEN_CONTROL_NODE_LIMIT, MRK_OPEN_CONTROL_DEPTH_LIMIT, MRK_OPEN_SELECTION, MRK_OPEN_SELECTION_WRITE };
+    MRK_OPEN_CONTROL_NODE_LIMIT, MRK_OPEN_CONTROL_DEPTH_LIMIT, MRK_OPEN_SELECTION, MRK_OPEN_SELECTION_WRITE,
+    MRK_OPEN_SELECTION_COUNT_LIMIT, MRK_OPEN_SELECTION_COPY_LIMIT, MRK_OPEN_SELECTION_NODE_LIMIT, MRK_OPEN_SELECTION_DEPTH_LIMIT };
 enum { MRK_OPEN_ATTEMPTED = 1u, MRK_OPEN_RETURNED = 2u, MRK_OPEN_TRIGGERED = 4u, MRK_OPEN_KNOWN = 8u };
 enum { MRK_ROLE_NOT_READ, MRK_ROLE_SHEET, MRK_ROLE_GROUP, MRK_ROLE_SPLIT_GROUP, MRK_ROLE_BUTTON,
     MRK_ROLE_BROWSER, MRK_ROLE_TABLE, MRK_ROLE_OUTLINE, MRK_ROLE_SCROLL_AREA, MRK_ROLE_OPAQUE, MRK_ROLE_ROW };
 typedef struct { uint32_t flags, site, error, checks, calls, initial_nodes_examined, recheck_nodes_examined, owned, released;
-    int32_t ax_error; uint32_t last_role, last_depth, selection_checks, selection_flags, selection_nodes_examined; } MRKOpenResult;
+    int32_t ax_error; uint32_t last_role, last_depth, selection_checks, selection_flags, selection_nodes_examined;
+    uint32_t selection_limit_queued; int64_t selection_limit_count; } MRKOpenResult;
 enum { MRK_TARGET_UNREAD, MRK_TARGET_ENTERED, MRK_TARGET_NOT_READY, MRK_TARGET_MATCH,
     MRK_TARGET_DIFFERENT, MRK_TARGET_MALFORMED, MRK_TARGET_MULTIPLE };
 typedef struct { uint32_t known, error, prompt; MRKIdentityProof proof; uint32_t selected_target; } MRKOpenRecheck;
-_Static_assert(sizeof(MRKOpenResult) == 60 && sizeof(MRKOpenRecheck) == 52, "fixed selection/press scalar ABI");
+_Static_assert(sizeof(MRKOpenResult) == 72 && sizeof(MRKOpenRecheck) == 52, "fixed selection/press scalar ABI");
+_Static_assert(offsetof(MRKOpenResult, selection_limit_queued) == 60
+    && offsetof(MRKOpenResult, selection_limit_count) == 64 && sizeof(CFIndex) == sizeof(int64_t), "exact selection limit scalars");
 typedef struct { float seconds; uint64_t required_ns; } MRKOpenTimeout;
 typedef int (*MRKOpenAdmission)(void *, uint64_t, int, MRKOpenTimeout *);
 typedef int (*MRKOpenRecheckCall)(void *, int);
@@ -877,6 +881,15 @@ static BOOL mrk_ax_control_limit(MRKPrompt *s, uint32_t site) {
         && !s->result.error) s->result.site = site;
     return mrk_ax_fail(s, MRK_OPEN_LIMIT);
 }
+static BOOL mrk_ax_selection_limit(MRKPrompt *s, uint32_t site, uint32_t role, uint32_t depth, uint32_t queued, CFIndex count) {
+    // Only the already-taken first local refusal captures these existing scalars.
+    // No visit telemetry, native query, allocation, or changed search/cleanup.
+    if (s->result.site == MRK_OPEN_SELECTION && !s->result.error) {
+        s->result.site = site; s->result.last_role = role; s->result.last_depth = depth;
+        s->result.selection_limit_queued = queued; s->result.selection_limit_count = (int64_t)count;
+    }
+    return mrk_ax_fail(s, MRK_OPEN_LIMIT);
+}
 static uint32_t mrk_ax_role(CFStringRef role) {
     if (CFEqual(role, kAXSheetRole)) return MRK_ROLE_SHEET;
     if (CFEqual(role, kAXGroupRole)) return MRK_ROLE_GROUP;
@@ -943,7 +956,8 @@ static CFTypeRef mrk_ax_copy(MRKPrompt *s, AXUIElementRef element, CFStringRef a
     if (!slot->value) { mrk_ax_fail(s, MRK_OPEN_MALFORMED); return NULL; }
     return slot->value;
 }
-static CFArrayRef mrk_ax_array(MRKPrompt *s, AXUIElementRef element, CFStringRef attribute, CFIndex limit, BOOL allow_empty) {
+static CFArrayRef mrk_ax_array(MRKPrompt *s, AXUIElementRef element, CFStringRef attribute, CFIndex limit, BOOL allow_empty,
+    uint32_t selection_role, uint32_t selection_depth, uint32_t selection_queued) {
     // A returned zero count is an ordinary empty array, not an illegal index0
     // Copy converted to absence. Count and bounded Copy both spend the common
     // timeout/call budget; a changed or truncated array cannot prove a search.
@@ -953,7 +967,11 @@ static CFArrayRef mrk_ax_array(MRKPrompt *s, AXUIElementRef element, CFStringRef
     BOOL counted = mrk_ax_status(s, count_status), admitted = mrk_ax_admit(s, 0, 0, NULL);
     if (!counted || !admitted) return NULL;
     if (expected < 0) { mrk_ax_fail(s, MRK_OPEN_MALFORMED); return NULL; }
-    if (expected > limit) { mrk_ax_control_limit(s, MRK_OPEN_CONTROL_CHILD_COUNT_LIMIT); return NULL; }
+    if (expected > limit) {
+        if (selection_queued) mrk_ax_selection_limit(s, MRK_OPEN_SELECTION_COUNT_LIMIT, selection_role, selection_depth, selection_queued, expected);
+        else mrk_ax_control_limit(s, MRK_OPEN_CONTROL_CHILD_COUNT_LIMIT);
+        return NULL;
+    }
     if (!expected) { if (!allow_empty) mrk_ax_fail(s, MRK_OPEN_UNSUPPORTED); return NULL; }
     MRKPromptOwned *slot = mrk_ax_slot(s); if (!slot || !mrk_ax_before(s, element)) return NULL;
     s->result.calls++;
@@ -961,7 +979,11 @@ static CFArrayRef mrk_ax_array(MRKPrompt *s, AXUIElementRef element, CFStringRef
     BOOL copied = mrk_ax_status(s, status); admitted = mrk_ax_admit(s, 0, 0, NULL);
     if (!copied || !admitted || !mrk_ax_type(s, slot->value, CFArrayGetTypeID())) return NULL;
     CFIndex count = CFArrayGetCount(slot->array);
-    if (count < 0 || count > limit) { mrk_ax_control_limit(s, MRK_OPEN_CONTROL_CHILD_COPY_LIMIT); return NULL; }
+    if (count < 0 || count > limit) {
+        if (selection_queued) mrk_ax_selection_limit(s, MRK_OPEN_SELECTION_COPY_LIMIT, selection_role, selection_depth, selection_queued, count);
+        else mrk_ax_control_limit(s, MRK_OPEN_CONTROL_CHILD_COPY_LIMIT);
+        return NULL;
+    }
     if (count != expected) { mrk_ax_fail(s, MRK_OPEN_CHANGED); return NULL; }
     // Each caller validates an element when that node begins. In the control
     // pass this keeps a failed type/parent/role read paired with its own counter,
@@ -977,7 +999,7 @@ static BOOL mrk_ax_projection(MRKPrompt *s, AXUIElementRef app, CFStringRef pare
     AXUIElementRef *parent, AXUIElementRef *sheet) {
     s->result.last_depth = 0; s->result.last_role = MRK_ROLE_NOT_READ;
     s->result.site = MRK_OPEN_WINDOWS;
-    CFArrayRef windows = mrk_ax_array(s, app, kAXWindowsAttribute, 4, NO); if (!windows) return NO;
+    CFArrayRef windows = mrk_ax_array(s, app, kAXWindowsAttribute, 4, NO, 0, 0, 0); if (!windows) return NO;
     AXUIElementRef found_parent = NULL, found_sheet = NULL;
     s->result.site = MRK_OPEN_PARENT_ID;
     for (CFIndex i = 0; i < CFArrayGetCount(windows); ++i) {
@@ -995,7 +1017,7 @@ static BOOL mrk_ax_projection(MRKPrompt *s, AXUIElementRef app, CFStringRef pare
     if (!found_parent) return mrk_ax_fail(s, MRK_OPEN_UNSUPPORTED);
     if (*parent && !CFEqual(*parent, found_parent)) return mrk_ax_fail(s, MRK_OPEN_CHANGED);
     s->result.checks |= 1u; s->result.site = MRK_OPEN_SHEET;
-    CFArrayRef children = mrk_ax_array(s, found_parent, kAXChildrenAttribute, 16, NO); if (!children) return NO;
+    CFArrayRef children = mrk_ax_array(s, found_parent, kAXChildrenAttribute, 16, NO, 0, 0, 0); if (!children) return NO;
     for (CFIndex i = 0; i < CFArrayGetCount(children); ++i) {
         AXUIElementRef candidate = (AXUIElementRef)CFArrayGetValueAtIndex(children, i);
         s->result.last_depth = 0; s->result.last_role = MRK_ROLE_NOT_READ;
@@ -1045,7 +1067,7 @@ static BOOL mrk_ax_control_roster(MRKPrompt *s, AXUIElementRef sheet, CFStringRe
             }
         }
         if (at && !CFEqual(role, kAXGroupRole) && !CFEqual(role, kAXSplitGroupRole)) continue;
-        CFArrayRef children = mrk_ax_array(s, node, kAXChildrenAttribute, 16, at != 0);
+        CFArrayRef children = mrk_ax_array(s, node, kAXChildrenAttribute, 16, at != 0, 0, 0, 0);
         if (!children) { if (s->result.error) return NO; continue; } // Only actual Count0 may be empty.
         CFIndex count = CFArrayGetCount(children);
         if (pass->depths[at] == MRK_CONTROL_DEPTH) return mrk_ax_control_limit(s, MRK_OPEN_CONTROL_DEPTH_LIMIT);
@@ -1151,11 +1173,14 @@ static BOOL mrk_ax_selection_roster(MRKPrompt *s, AXUIElementRef sheet, const ch
         }
         BOOL rows = kind == MRK_ROLE_TABLE || kind == MRK_ROLE_OUTLINE;
         if (at && !rows && kind != MRK_ROLE_GROUP && kind != MRK_ROLE_SPLIT_GROUP && kind != MRK_ROLE_SCROLL_AREA) continue;
-        CFArrayRef children = mrk_ax_array(s, node, rows ? kAXRowsAttribute : kAXChildrenAttribute, 16, at != 0);
+        CFArrayRef children = mrk_ax_array(s, node, rows ? kAXRowsAttribute : kAXChildrenAttribute, 16, at != 0,
+            kind, pass->depths[at], queued);
         if (!children) { if (s->result.error) return NO; continue; }
         CFIndex count = CFArrayGetCount(children);
-        if (count && pass->depths[at] == MRK_CONTROL_DEPTH) return mrk_ax_fail(s, MRK_OPEN_LIMIT);
-        if ((unsigned)count > MRK_CONTROL_NODES - queued) return mrk_ax_fail(s, MRK_OPEN_LIMIT);
+        if (count && pass->depths[at] == MRK_CONTROL_DEPTH)
+            return mrk_ax_selection_limit(s, MRK_OPEN_SELECTION_DEPTH_LIMIT, kind, pass->depths[at], queued, count);
+        if ((unsigned)count > MRK_CONTROL_NODES - queued)
+            return mrk_ax_selection_limit(s, MRK_OPEN_SELECTION_NODE_LIMIT, kind, pass->depths[at], queued, count);
         for (CFIndex i = 0; i < count; ++i) {
             pass->nodes[queued] = (AXUIElementRef)CFArrayGetValueAtIndex(children, i);
             pass->parents[queued] = at; pass->depths[queued] = pass->depths[at] + 1; queued++;

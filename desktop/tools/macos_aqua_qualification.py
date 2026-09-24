@@ -122,10 +122,13 @@ NATIVE_ACTION_SITES = {
 ACCESSIBILITY_CONTROL_LIMIT_SITES = frozenset((
     "control-title-limit control-child-count-limit control-child-copy-limit control-node-limit control-depth-limit"
 ).split())
+ACCESSIBILITY_SELECTION_LIMIT_SITES = frozenset((
+    "selection-count-limit selection-copy-limit selection-node-limit selection-depth-limit"
+).split())
 ACCESSIBILITY_SITES = frozenset((
     "entry application windows parent-identifier sheet topology control-projection button control-recheck "
     "initial-original-proof original-proof admission press cleanup selection selection-write"
-).split()) | ACCESSIBILITY_CONTROL_LIMIT_SITES
+).split()) | ACCESSIBILITY_CONTROL_LIMIT_SITES | ACCESSIBILITY_SELECTION_LIMIT_SITES
 ACCESSIBILITY_SELECTION_CHECKS = ("targetRowBound", "sameTargetRechecked", "selectedRowsSettable")
 ACCESSIBILITY_SELECTED_TARGETS = frozenset(("entered-not-returned", "not-ready", "match", "different", "malformed", "multiple"))
 ACCESSIBILITY_CONTROL_ROLES = ("not-read", "Sheet", "Group", "SplitGroup", "Button",
@@ -256,7 +259,7 @@ def _expected_prompt_button():
 def _expected_row_selection():
     # Inert parser fixture only, not an observed setter or selection effect.
     return {"checks": dict.fromkeys(ACCESSIBILITY_SELECTION_CHECKS, True), "nodesExamined": 2,
-            "attempted": True, "returned": True, "setterSucceeded": True}
+            "attempted": True, "returned": True, "setterSucceeded": True, "limit": None}
 
 
 def expected_result(binding, case):
@@ -525,7 +528,7 @@ def _accessibility_prompt_button(value):
 
 def _accessibility_row_selection(value):
     label = "accessibility-row-selection"
-    need(type(value) is dict and set(value) == {"checks", "nodesExamined", "attempted", "returned", "setterSucceeded"}, label)
+    need(type(value) is dict and set(value) == {"checks", "nodesExamined", "attempted", "returned", "setterSucceeded", "limit"}, label)
     checks = value["checks"]
     need(type(checks) is dict and set(checks) == set(ACCESSIBILITY_SELECTION_CHECKS)
          and all(type(v) is bool for v in checks.values()), label)
@@ -538,12 +541,26 @@ def _accessibility_row_selection(value):
     need(not value["returned"] or value["attempted"], label)
     need((value["setterSucceeded"] is not None) == value["returned"], label)
     need(not value["attempted"] or all(ordered), label)
+    limit = value["limit"]
+    if limit is not None:
+        need(type(limit) is dict and set(limit) == {"role", "depth", "count", "queuedNodes"}, label)
+        need(type(limit["role"]) is str and limit["role"] in ("Sheet", "Group", "SplitGroup", "ScrollArea", "Table", "Outline"), label)
+        need(type(limit["depth"]) is int and 0 <= limit["depth"] <= 8
+             and type(limit["count"]) is int and -(1 << 63) <= limit["count"] < 1 << 63
+             and type(limit["queuedNodes"]) is int and 1 <= limit["queuedNodes"] <= 17, label)
+        nodes, depth, queued = value["nodesExamined"], limit["depth"], limit["queuedNodes"]
+        need(nodes + 1 <= queued, label)
+        need((limit["role"] == "Sheet" and depth == nodes == 0 and queued == 1)
+             or (limit["role"] != "Sheet" and 1 <= depth <= nodes), label)
+        need(not any(ordered) and value["attempted"] is False and value["returned"] is False
+             and value["setterSucceeded"] is None, label)
     return value
 
 
 def _row_selection_succeeded(value):
     return (value is not None and all(value["checks"].values()) and 2 <= value["nodesExamined"] <= 16
-            and value["attempted"] is True and value["returned"] is True and value["setterSucceeded"] is True)
+            and value["attempted"] is True and value["returned"] is True and value["setterSucceeded"] is True
+            and value["limit"] is None)
 
 
 def _accessibility_succeeded(value):
@@ -644,6 +661,7 @@ def _accessibility_context(value, native, panel, *, expected_id=None):
             need(button["cleanupReturned"] or value["custodyKnown"] is not True
                  and not value["receiptJoined"] and not value["barrierRetired"], label)
             _accessibility_row_selection(selection)
+            need((selection["limit"] is not None) == (site in ACCESSIBILITY_SELECTION_LIMIT_SITES), label)
             need(selection["nodesExamined"] == 0 or button["checks"]["parentBound"] and button["checks"]["sheetBound"]
                  and button["calls"] > 0 and button["cfSlots"] > 0, label)
             need(selection["setterSucceeded"] is not False or button["axError"] != 0, label)
@@ -730,6 +748,24 @@ def _accessibility_context(value, native, panel, *, expected_id=None):
                  and proofs[1] is None and selected is None and prompt["final"] is None
                  and value["attempted"] is False and value["pressReturned"] is False and value["triggered"] is None, label)
             need(selection["attempted"] == (site == "selection-write"), label)
+        if site in ACCESSIBILITY_SELECTION_LIMIT_SITES:
+            # Failure-only saved scalars, never selection/control completion.
+            # The common lifecycle rules still decide cleanup and retirement.
+            need(error == "limit" and button is not None and selection["limit"] is not None
+                 and button["axError"] == 0 and button["calls"] > 0 and button["cfSlots"] > 0
+                 and tuple(button["checks"][k] for k in ACCESSIBILITY_BUTTON_CHECKS)
+                 == (True, True, False, False, False, False, False)
+                 and button["initialNodesExamined"] == button["recheckNodesExamined"] == button["lastDepth"] == 0
+                 and button["lastRole"] == "not-read"
+                 and proofs[0] is not None and proofs[0]["error"] == "none" and proofs[1] is None
+                 and prompt == {"initial": True, "final": None} and selected is None
+                 and value["attempted"] is False and value["pressReturned"] is False and value["triggered"] is None, label)
+            limit = selection["limit"]
+            count, depth, queued = limit["count"], limit["depth"], limit["queuedNodes"]
+            need((site == "selection-count-limit" and count > 16)
+                 or (site == "selection-copy-limit" and (count < 0 or count > 16))
+                 or (site == "selection-node-limit" and 1 <= count <= 16 and count > 17 - queued and 1 <= depth < 8)
+                 or (site == "selection-depth-limit" and 1 <= count <= 16 and depth == 8), label)
         for name, proof in (("initial-original-proof", proofs[0]), ("original-proof", proofs[1])):
             if site == name and proof is not None and proof["error"] != "none":
                 need(proof["error"] == error, label)
