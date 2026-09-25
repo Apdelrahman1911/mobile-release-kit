@@ -2643,7 +2643,7 @@ fn script(step: Step) -> Option<String> {
             return rows.map(row=>{{const cells=row.querySelectorAll(':scope > td');if(cells.length!==3||!action[text(cells[0])])throw 0;
                 return {{path:text(row.querySelector('th code')),action:action[text(cells[0])],beforeBytes:bytes(cells[1],true),afterBytes:bytes(cells[2],false)}}}})}};
         const review=r=>{{const files=inventory(r),ignore=[...r.querySelectorAll('.save-ignore li code')].map(text),counts=[...r.querySelectorAll('.review-counts > span > strong')].map(number);
-            if(ignore.length>7||counts.length!==3)throw 0;return {{files,release:[...r.querySelectorAll(':scope > .save-note code')].some(e=>text(e)==='release'),rewrite:!!r.querySelector(':scope > .notice-warning'),
+            if(ignore.length>{ignore_limit}||counts.length!==3)throw 0;return {{files,release:[...r.querySelectorAll(':scope > .save-note code')].some(e=>text(e)==='release'),rewrite:!!r.querySelector(':scope > .notice-warning'),
                 ignore,counts:{{added:counts[0],changed:counts[1],removed:counts[2]}},basis:text(r.querySelector('.review-basis strong')),badge:text(r.querySelector('.review-counts .badge'))}}}};
         const confirm=()=>{{const dialogs=document.querySelectorAll('dialog');if(dialogs.length!==1)throw 0;const d=dialogs[0];
             if(!d.classList.contains('save-confirm-dialog')||!d.open||!visible(d)||d.querySelector('[role="alert"]'))throw 0;
@@ -2651,7 +2651,7 @@ fn script(step: Step) -> Option<String> {
             if(checks.length!==1||checks[0].disabled||buttons.length!==2||buttons[0].disabled||text(buttons[0])!=='Keep reviewing'
                 ||!['Apply reviewed save','Confirm no-op plan'].includes(text(buttons[1])))throw 0;return {{dialog:d,check:checks[0],keep:buttons[0],apply:buttons[1]}}}};
         {body}
-    }}catch{{return {{state:'error'}}}}}})()"#))
+    }}catch{{return {{state:'error'}}}}}})()"#, ignore_limit = IGNORE_LINES.len()))
 }
 
 fn route() -> Option<(PathBuf,u32)> {

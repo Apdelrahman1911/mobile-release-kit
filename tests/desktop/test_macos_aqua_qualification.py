@@ -397,7 +397,7 @@ class AquaDataTests(unittest.TestCase):
 
     def test_literal_data_and_protocol_distinctions(self):
         self.assertEqual((len(M.CONFIG), M.digest(M.CONFIG)), (684, "0c47aaffe3971b122f21ebddf8070ab29014c4b7c79a56e23335ed110f1e6acc"))
-        self.assertEqual((len(M.VERSION), len(M.IGNORE_PREFIX), len(M.IGNORE_RULES), len(M.STALE)), (34, 40, 208, 26))
+        self.assertEqual((len(M.VERSION), len(M.IGNORE_PREFIX), len(M.IGNORE_RULES), len(M.STALE)), (34, 40, 299, 26))
         self.assertEqual(M.SOURCE, b'plugins { id("com.android.application") }\nandroid { defaultConfig { applicationId = "org.example.mrk.observed" } }\n')
         expected = {
             "first-save": [(1, 1, True, 2, True, "committed", "clean", "none", "none", 3),
@@ -415,6 +415,26 @@ class AquaDataTests(unittest.TestCase):
                              s["nativeReason"], s["writerFrames"]) for s in report["saveSessions"]]
                 self.assertEqual(observed, rows)
                 self.assertEqual(M.parse_result(captured(report), b"", BINDING, case), report)
+
+    def test_review_ignore_bound_uses_the_exact_native_fixture_roster(self):
+        # Source/DATA regression only; real DOM execution remains a macOS gate.
+        observer = (PATH.parents[1] / "src-tauri" / "src" / "installed_shell_observation_macos.rs").read_text(encoding="utf-8")
+        fixture = M.re.search(r"const IGNORE_LINES: \[&str; ([0-9]+)\] = \[(.*?)\];", observer, M.re.S)
+        self.assertIsNotNone(fixture)
+        expected = M.IGNORE_RULES.decode("ascii").splitlines()
+        self.assertEqual(int(fixture.group(1)), len(expected))
+        self.assertEqual(M.re.findall(r'"([^"]+)"', fixture.group(2)), expected)
+        script = observer.split("fn script(step: Step)", 1)[1].split("\nfn route(", 1)[0]
+        self.assertEqual(script.count("if(ignore.length>{ignore_limit}||counts.length!==3)throw 0;"), 1,
+                         "review-ignore-count-bound")
+        self.assertEqual(script.count('Some(format!(r#"'), 1)
+        self.assertTrue(script.rstrip().endswith('"#, ignore_limit = IGNORE_LINES.len()))\n}'),
+                        "review-ignore-count-argument")
+        native = observer.split("    fn review_sample(", 1)[1].split("\n    pub(super) fn open_request(", 1)[0]
+        self.assertIn("!view.ignore_additions.iter().map(String::as_str).eq(if create { IGNORE_LINES.as_slice() } else { &[] }.iter().copied())", native)
+        body = observer.split("    fn dom_body(", 1)[1].split("    pub(super) fn relay_joined", 1)[0]
+        self.assertIn('s.live_review() && s.review.as_ref() == v.get("review")', body)
+        self.assertIn('v["project"].as_str() != self.project_path.to_str()', body)
 
     def test_strict_result_rejects_missing_extra_wrong_type_or_wrong_finality(self):
         good = M.expected_result(BINDING, "first-save")
