@@ -8102,6 +8102,10 @@ class WindowsReaderGateTests(unittest.TestCase):
             ("digest", "0.10.7", {}, []),
             ("block-buffer", "0.10.4", {}, []),
             ("serde_derive", "1.0.228", {"default": []}, ["default"]),
+            ("serde_core", "1.0.228", {
+                "alloc": [], "default": ["std", "result"], "rc": [],
+                "result": [], "std": [], "unstable": [],
+            }, ["alloc", "result", "std"]),
             ("tokio-macros", "2.6.1", {}, []),
             ("syn", "2.0.119", syn_features, sorted(syn_features)),
         )
@@ -8116,6 +8120,27 @@ class WindowsReaderGateTests(unittest.TestCase):
             value["packages"].append(package); value["resolve"]["nodes"].append(node)
             lock["package"].append({"name": name, "version": version, "source": registry, "checksum": "3" * 64})
             packages[name], nodes[node["id"]] = package, node
+        families = {
+            "serde": {
+                "alloc": ["serde_core/alloc"], "default": ["std"], "derive": ["serde_derive"],
+                "rc": ["serde_core/rc"], "serde_derive": ["dep:serde_derive"],
+                "std": ["serde_core/std"], "unstable": ["serde_core/unstable"],
+            },
+            "serde_json": {
+                "alloc": ["serde_core/alloc"], "default": ["std"],
+                "std": ["memchr/std", "serde_core/std"],
+            },
+        }
+        for name, features in families.items():
+            packages[name]["features"] = features
+            nodes[packages[name]["id"]]["features"] = sorted(features)
+        core = packages["serde_core"]
+        core["targets"].append({
+            "name": "build-script-build", "kind": ["custom-build"], "crate_types": ["bin"],
+            "src_path": str(Path(core["manifest_path"]).parent / "build.rs"),
+        })
+        next(dep for dep in packages["mobile-release-kit-desktop"]["dependencies"]
+             if dep["name"] == "serde")["features"] = ["derive"]
         tokio, platform = packages["tokio"], packages["windows-sys"]
         tokio["features"] = tokio_features
         nodes[tokio["id"]]["features"] = sorted(tokio_features)
@@ -8145,6 +8170,21 @@ class WindowsReaderGateTests(unittest.TestCase):
         edge("crypto-common", "typenum", "^1.14")
         edge("generic-array", "typenum", "^1.12")
         edge("serde", "serde_derive", "^1", optional=True)
+        edge("serde", "serde_core", "=1.0.228", ("result",), defaults=False)
+        edge("serde_json", "serde_core", "^1.0.220", defaults=False)
+        # Inactive cfg(any()) and nonroot dev declarations are not normal
+        # consumers. Keep them without fabricating active resolution edges.
+        for parent, child, requirement, kind, target, defaults, features in (
+                ("serde_json", "serde", "^1.0.220", None, "cfg(any())", False, []),
+                ("serde_json", "serde", "^1.0.194", "dev", None, True, ["derive"]),
+                ("serde_core", "serde", "^1", "dev", None, True, []),
+                ("serde_core", "serde_derive", "^1", "dev", None, True, []),
+                ("serde_core", "serde_derive", "=1.0.228", None, "cfg(any())", True, [])):
+            packages[parent]["dependencies"].append({
+                "name": child, "source": registry, "req": requirement, "kind": kind, "rename": None,
+                "optional": False, "uses_default_features": defaults, "features": features,
+                "target": target, "registry": None,
+            })
         edge("tokio", "tokio-macros", "~2.6.0", optional=True)
         edge("tokio", "windows-sys", "^0.61", optional=True, target="cfg(windows)")
         edge("serde_derive", "syn", "^2.0.81",
@@ -8399,8 +8439,9 @@ class WindowsReaderGateTests(unittest.TestCase):
     def test_windows_reader_unit_refusal_is_bounded_and_preserves_original_first_failure(self):
         value, lock, context = self.graph_data(publication=True)
         dependency = next(package for package in value["packages"] if package["name"] == "serde_json")
-        # Legal source-admitted feature surplus in metadata, not a new unit policy.
-        next(node for node in value["resolve"]["nodes"] if node["id"] == dependency["id"])["features"] = ["allowed"]
+        # Metadata alloc is not a normal-unit grant. Keep the positive row
+        # feature-valid so later manifest/profile/first-failure checks execute.
+        next(node for node in value["resolve"]["nodes"] if node["id"] == dependency["id"])["features"] = ["alloc", "default", "std"]
         source, root = Path(context["source"]), Path(context["root"])
         graph = helper.windows_installed_app_graph(value, lock, source=source, root=root, publication=True)
         app, native = (graph["packages"][graph["localIds"][name]] for name in
@@ -8413,7 +8454,7 @@ class WindowsReaderGateTests(unittest.TestCase):
                    "features": ["windows-runtime-publisher"], "profile": dict(unit["profile"])}
         binary = {**library, "target": app["targets"][2], "executable": str(executable)}
         selected = {**unit, "package_id": dependency["id"], "manifest_path": dependency["manifest_path"],
-                    "target": dependency["targets"][0], "features": ["allowed"]}
+                    "target": dependency["targets"][0], "features": ["default", "std"]}
         rows = [selected, unit, library, binary, {"reason": "build-finished", "success": True}]
 
         def parse(items, *, helper_role=True):
@@ -8429,7 +8470,7 @@ class WindowsReaderGateTests(unittest.TestCase):
         message = "Windows app compiler unit features/source differ"
         prefix = "MRK_WINDOWS_COMPILER_UNIT_REFUSED="
         cases = [
-            ("legal-feature-surplus", {"features": []}, "features", [False, None, None, None], "admitted"),
+            ("legal-feature-surplus", {"features": ["alloc", "default", "std"]}, "features", [False, None, None, None], "admitted"),
             ("first-feature-only", {"features": [], "manifest_path": None, "profile": None},
              "features", [False, None, None, None], "admitted"),
             ("missing-manifest", {"manifest_path": None, "profile": None},
@@ -8443,7 +8484,7 @@ class WindowsReaderGateTests(unittest.TestCase):
              "features", [False, None, None, None], "unknown"),
             ("feature-path", {"features": ["/PRIVATE-COMPILER-TEXT"]},
              "features", [False, None, None, None], "malformed"),
-            ("overbound-feature-list", {"features": ["allowed"] * 65},
+            ("overbound-feature-list", {"features": ["default"] * 65},
              "features", [False, None, None, None], "overbound"),
         ]
         labels = ("features", "manifest", "profile-object", "test-boolean")
@@ -8459,7 +8500,7 @@ class WindowsReaderGateTests(unittest.TestCase):
             self.assertEqual((diagnostic["role"], diagnostic["unitKind"], diagnostic["first"]), ("helper", "lib", first))
             self.assertEqual(diagnostic["checks"], dict(zip(labels, checks, strict=True)))
             self.assertEqual(diagnostic["package"], {"state": "admitted", "name": "serde_json", "version": "1.0.145"})
-            self.assertEqual(diagnostic["expectedFeatures"], {"state": "admitted", "values": ["allowed"]})
+            self.assertEqual(diagnostic["expectedFeatures"], {"state": "admitted", "values": ["default", "std"]})
             self.assertEqual(diagnostic["actualFeatures"]["state"], feature_state)
             self.assertNotIn("PRIVATE-COMPILER-TEXT", marker)
             self.assertNotIn(dependency["id"], marker); self.assertNotIn(dependency["manifest_path"], marker)
@@ -8615,6 +8656,9 @@ class WindowsReaderGateTests(unittest.TestCase):
                       "rt", "rt-multi-thread", "signal-hook-registry", "socket2", "sync", "time",
                       "tokio-macros", "windows-sys"],
             "syn": ["clone-impls", "default", "derive", "full", "parsing", "printing", "proc-macro"],
+            "serde": ["default", "derive", "serde_derive", "std"],
+            "serde_json": ["default", "std"],
+            "serde_core": ["result", "std"],
         }
         for publication, helper_role in ((False, False), (True, False), (True, True)):
             value, lock, context = self.graph_data(publication=publication)
@@ -8638,6 +8682,10 @@ class WindowsReaderGateTests(unittest.TestCase):
                 return {**row, "package_id": package["id"], "manifest_path": package["manifest_path"],
                         "target": package["targets"][0], "features": features}
             rows = [unit(packages[name], features) for name, features in wanted.items()]
+            # Preserve the actual refused core custom-build shape, not just
+            # its library, in every role's successful complete stream.
+            rows.append({**unit(packages["serde_core"], wanted["serde_core"]),
+                         "target": packages["serde_core"]["targets"][1]})
             rows.append(unit(native, expected_native))
             app_features = ["windows-runtime-publisher"] if publication else []
             library = unit(app, app_features)
@@ -8659,14 +8707,14 @@ class WindowsReaderGateTests(unittest.TestCase):
                 self.assertEqual(parse(rows), executable)
             if helper_role:
                 # Shared equality needs one mutation cycle, not three copies.
-                for index, (name, expected) in enumerate(wanted.items()):
+                for index, (name, expected) in enumerate([*wanted.items(), ("serde_core", wanted["serde_core"])]):
                     surplus = graph["nodes"][packages[name]["id"]]["features"]
                     invalid = [surplus]
                     if expected:
                         invalid += [expected[:-1], list(reversed(expected)), expected + [expected[0]]]
                     for features in invalid:
                         altered = deepcopy(rows); altered[index]["features"] = features
-                        with self.subTest(unit=name, features=features), redirect_stdout(io.StringIO()), \
+                        with self.subTest(unit=name, kind=altered[index]["target"]["kind"], features=features), redirect_stdout(io.StringIO()), \
                              self.assertRaisesRegex(helper.CheckFailure, "compiler unit features/source differ"):
                             parse(altered)
         # Corrected parent features, not inactive metadata forwarding, drive the
@@ -8696,7 +8744,7 @@ class WindowsReaderGateTests(unittest.TestCase):
                 helper.windows_installed_app_unit_features(graph, helper=True)
         def declaration(packages, parent, child):
             return next(row for row in packages[parent]["dependencies"] if row["name"] == child)
-        for name in ("typenum", "tokio", "syn"):
+        for name in ("typenum", "tokio", "syn", "serde", "serde_json", "serde_core"):
             reject("version-" + name, lambda g, p, n, name=name: p[name].update(version="0.0.0"))
             reject("source-" + name, lambda g, p, n, name=name: p[name].update(source="git+https://example.invalid/other"))
             reject("missing-" + name, lambda g, p, n, name=name: g["nodes"].pop(p[name]["id"]))
@@ -8706,20 +8754,25 @@ class WindowsReaderGateTests(unittest.TestCase):
             graph["nodes"][copy["id"]] = {**deepcopy(nodes["typenum"]), "id": copy["id"]}
         reject("duplicated-unit", duplicate_unit)
         for parent, child in (("crypto-common", "typenum"), ("generic-array", "typenum"),
-                              ("mobile-release-kit-desktop", "tokio"), ("serde_derive", "syn"), ("tokio-macros", "syn")):
+                              ("mobile-release-kit-desktop", "tokio"), ("serde_derive", "syn"), ("tokio-macros", "syn"),
+                              ("mobile-release-kit-desktop", "serde"), ("mobile-release-kit-desktop", "serde_json"),
+                              ("serde", "serde_core"), ("serde_json", "serde_core"), ("serde", "serde_derive")):
             for field, value in (("req", "*"), ("rename", "alias"), ("kind", "build"), ("target", "cfg(unix)"),
-                                 ("optional", True), ("optional", 0), ("uses_default_features", 1),
+                                 ("optional", 0), ("uses_default_features", 1),
                                  ("features", ()), ("features", ["const-generics"]), ("registry", "other")):
-                reject(parent + "-" + field + "-" + str(value),
+                reject(parent + "-" + child + "-" + field + "-" + str(value),
                        lambda g, p, n, parent=parent, child=child, field=field, value=value:
                            declaration(p, parent, child).update({field: value}))
-            reject(parent + "-defaults",
+            reject(parent + "-" + child + "-optionality",
+                   lambda g, p, n, parent=parent, child=child:
+                       declaration(p, parent, child).update(optional=not declaration(p, parent, child)["optional"]))
+            reject(parent + "-" + child + "-defaults",
                    lambda g, p, n, parent=parent, child=child:
                        declaration(p, parent, child).update(
                            uses_default_features=not declaration(p, parent, child)["uses_default_features"]))
-            reject(parent + "-missing-field",
+            reject(parent + "-" + child + "-missing-field",
                    lambda g, p, n, parent=parent, child=child: declaration(p, parent, child).pop("optional"))
-            reject(parent + "-duplicate-declaration",
+            reject(parent + "-" + child + "-duplicate-declaration",
                    lambda g, p, n, parent=parent, child=child:
                        p[parent]["dependencies"].append(deepcopy(declaration(p, parent, child))))
         reject("missing-parent-edge", lambda g, p, n: n["generic-array"].update(deps=[]))
@@ -8743,13 +8796,31 @@ class WindowsReaderGateTests(unittest.TestCase):
         for ref in ("typenum/const-generics", "typenum?/const-generics"):
             reject("parent-forward-" + ref, lambda g, p, n, ref=ref:
                    p["generic-array"]["features"]["more_lengths"].append(ref))
-        for name, feature in (("tokio", "time"), ("syn", "full")):
+        for name, feature in (("tokio", "time"), ("syn", "full"), ("serde", "serde_derive"),
+                              ("serde", "std"), ("serde_json", "std"), ("serde_core", "result"), ("serde_core", "std")):
             reject(name + "-selected-definition", lambda g, p, n, name=name, feature=feature:
                    p[name]["features"].update({feature: ["unreviewed"]}))
             # Independent PLAN review: required normal features must be present
             # in metadata too; compiler equality alone cannot repair bad DATA.
             reject(name + "-missing-required-metadata", lambda g, p, n, name=name, feature=feature:
                    n[name]["features"].remove(feature))
+        def incoming(packages, nodes, parent, child):
+            return next(edge for edge in nodes[parent]["deps"] if edge["pkg"] == packages[child]["id"])
+        for parent, child in (("serde", "serde_core"), ("serde_json", "serde_core"), ("serde", "serde_derive")):
+            reject(parent + "-" + child + "-missing-edge", lambda g, p, n, parent=parent, child=child:
+                   n[parent]["deps"].remove(incoming(p, n, parent, child)))
+            reject(parent + "-" + child + "-duplicate-edge", lambda g, p, n, parent=parent, child=child:
+                   n[parent]["deps"].append(deepcopy(incoming(p, n, parent, child))))
+            for field, value in (("kind", "build"), ("kind", "dev"), ("target", "cfg(windows)")):
+                reject(parent + "-" + child + "-" + str(value),
+                       lambda g, p, n, parent=parent, child=child, field=field, value=value:
+                           incoming(p, n, parent, child)["dep_kinds"][0].update({field: value}))
+            reject(parent + "-" + child + "-alias", lambda g, p, n, parent=parent, child=child:
+                   incoming(p, n, parent, child).update(name="other"))
+        for child in ("serde", "serde_json", "serde_core"):
+            reject(child + "-additional-parent", lambda g, p, n, child=child:
+                   n["tokio"]["deps"].append({"name": child, "pkg": p[child]["id"],
+                                             "dep_kinds": [{"kind": None, "target": None}]}))
         reject("metadata-feature-type", lambda g, p, n: n["tokio"].update(features=True))
         reject("metadata-feature-duplicate", lambda g, p, n: n["syn"]["features"].append("full"))
         reject("declaration-list-type", lambda g, p, n: p["crypto-common"].update(dependencies=None))

@@ -13034,7 +13034,7 @@ def windows_installed_helper_metadata(context: dict) -> dict:
 
 
 def windows_installed_fixed_normal_features(graph: dict) -> dict:
-    """Three source-locked Windows target/host units; never a Cargo resolver."""
+    """Source-locked Windows normal target/host units; never a Cargo resolver."""
     packages, nodes = graph["packages"], graph["nodes"]
     registry = "registry+https://github.com/rust-lang/crates.io-index"
 
@@ -13101,6 +13101,19 @@ def windows_installed_fixed_normal_features(graph: dict) -> dict:
             ("serde_derive", "1.0.228", "^2.0.81", False,
              ["clone-impls", "derive", "parsing", "printing", "proc-macro"]),
             ("tokio-macros", "2.6.1", "^2.0", True, ["full"]))),
+        ("serde", "1.0.228", {
+            "default": ["std"], "derive": ["serde_derive"],
+            "serde_derive": ["dep:serde_derive"], "std": ["serde_core/std"],
+        }, (("mobile-release-kit-desktop", "0.1.0", "=1.0.228", True, ["derive"]),)),
+        ("serde_json", "1.0.145", {
+            "default": ["std"], "std": ["memchr/std", "serde_core/std"],
+        }, (("mobile-release-kit-desktop", "0.1.0", "=1.0.145", True, []),)),
+        # Parents precede core: metadata-only alloc/rc forwarding is not a
+        # normal compiler grant. In this locked core manifest std does not
+        # activate the alloc Cargo feature.
+        ("serde_core", "1.0.228", {"result": [], "std": []}, (
+            ("serde", "1.0.228", "=1.0.228", False, ["result"]),
+            ("serde_json", "1.0.145", "^1.0.220", False, []))),
     )
     corrected = {}
     for name, version, definitions, parents in contracts:
@@ -13122,12 +13135,15 @@ def windows_installed_fixed_normal_features(graph: dict) -> dict:
             feature_map, selected = feature_data(parent_key, parent)
             if name == "syn":
                 library(parent, macro=True)
-            elif name == "typenum":
+            elif name in {"typenum", "serde_core"}:
                 library(parent)
-            # No selected parent feature in these exact declarations forwards
-            # more features into this unit. Unknown new forwarding needs review.
-            require(not any(ref.startswith(name + "/") or ref.startswith(name + "?/")
-                            for feature in selected for ref in feature_map[feature]),
+            if name == "serde_core":
+                selected = corrected[parent_key]
+            # All other contracts have no selected incoming forwarding. Core
+            # has exactly one std request from each corrected normal parent.
+            forwarding = [ref for feature in selected for ref in feature_map[feature]
+                          if ref.startswith(name + "/") or ref.startswith(name + "?/")]
+            require(same_compile_json(forwarding, ["serde_core/std"] if name == "serde_core" else []),
                     "Windows fixed normal unit parent forwarding differs: " + name)
         seen = set()
         for parent_key, node in nodes.items():
@@ -13153,6 +13169,20 @@ def windows_installed_fixed_normal_features(graph: dict) -> dict:
         require(set(expected) <= set(metadata_features),
                 "Windows fixed normal unit required features are missing from metadata: " + name)
         corrected[key] = expected
+    serde_key, serde = package("serde", "1.0.228")
+    derive_key, derive = package("serde_derive", "1.0.228")
+    library(derive, macro=True)
+    # The selected derive feature activates this exact optional host macro;
+    # its own compiler features retain the existing equality policy.
+    declarations = [item for item in serde["dependencies"] if item.get("name") == "serde_derive"]
+    edges = [edge for edge in nodes[serde_key]["deps"] if edge["pkg"] == derive_key]
+    require(len(declarations) == 1 and same_compile_json(declarations[0], {
+                "name": "serde_derive", "source": registry, "req": "^1", "kind": None, "rename": None,
+                "optional": True, "uses_default_features": True, "features": [],
+                "target": None, "registry": None,
+            }) and len(edges) == 1 and edges[0]["name"] == "serde_derive"
+            and same_compile_json(edges[0]["dep_kinds"], [{"kind": None, "target": None}]),
+            "Windows fixed normal unit derive activation differs")
     return corrected
 
 
