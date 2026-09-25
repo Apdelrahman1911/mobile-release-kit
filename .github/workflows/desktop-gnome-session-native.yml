@@ -1,0 +1,710 @@
+name: Desktop foreground GNOME SESSION native verification
+
+on:
+  push:
+    branches: [verify/desktop-gnome-session-native, verify/desktop-gnome-controller-characterization]
+    paths:
+      - desktop/**
+      - src/mobile_release/**
+      - tests/desktop/test_gnome_session_hosted_contract.py
+      - .github/workflows/desktop-gnome-session-native.yml
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact independently reviewed foreground SESSION candidate; no installed provider or GUI
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: desktop-gnome-session-native-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  gnome-session-native:
+    if: github.ref == 'refs/heads/verify/desktop-gnome-session-native'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      MRK_EXPECTED_SHA: ${{ inputs.expected_sha }}
+      MRK_PUSH_EVENT_AFTER: ${{ github.event.after }}
+    steps:
+      - name: Require dedicated fresh non-root hosted Ubuntu source
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          # Provider runner/OS, pinned checkout and this fixed shell/bootstrap
+          # are explicit trust, not retroactively pre-use-authenticated tools.
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == X64 ]]
+          # Observed accepted V image, not a promise of future scheduling.
+          [[ "$ImageOS" == ubuntu24 && "$ImageVersion" == 20260920.314.1 && "$EUID" -ne 0 ]]
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-gnome-session-native ]]
+          [[ "$GITHUB_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]{0,19}$ && "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$GITHUB_SHA" != 0000000000000000000000000000000000000000 ]]
+          [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-gnome-session-native.yml@$GITHUB_REF" ]]
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            [[ "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" ]]
+          else
+            [[ "$GITHUB_EVENT_NAME" == push && "$MRK_PUSH_EVENT_AFTER" == "$GITHUB_SHA" ]]
+          fi
+      - name: Check out exact candidate without persistent credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Authenticate fixed controls before privileged preparation
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          # SOURCE-PINS-BEGIN: concrete helper pins are frozen with this workflow.
+          /usr/bin/sha256sum --strict --check <<'SOURCE_PINS'
+          5c4c3a1e035027408c5c11e88521d96640d8038fe78ba6430beccddebf52ddbe  desktop/tools/gnome_session_hosted.py
+          ba50d93078c0ffbcb41925930a2879466410b75bd08113477ab2cdbc2d3482e9  desktop/tools/gnome_session_native/owner.py
+          ec675d02cc74cc6c8f45488b96ae66eceae6eac393d34179061a4f788bfcbc8a  desktop/tools/gnome_session_native/native-entry.sh
+          359ebf6213cec838593e0e04e9d86abc591273ff44faeeb0c747667c7aa97f08  desktop/tools/gnome_session_native/compile-only.sh
+          f4fde79383d60442c722bf2ebc50e15954f55460fadd0431007efcfa142a4f45  desktop/tools/gnome_session_native/host-admit.py
+          f2ddbeb70dc2c786f59a38126177290c64ed046f107f3abe9333dad8bb767628  desktop/tools/gnome_session_native/prepare.py
+          ba6c49c31f87781c9fd660bd4e55d95774ab64e9bed1749301e1e65d261900c6  desktop/tools/gnome_session_native/check-compile.py
+          b009148067794c9f4cedf6a284ac1dc0892e0efe718a30580cb5e382978463a4  desktop/tools/gnome_session_native/runtime-layout.json
+          8eb73f49d3e34fdc3cf3473b8d4540b9c90b7a6bce0d8541a11fc1b172f2aa00  desktop/tools/gnome_session_native/runtime-suppliers.json
+          add25aceb1ccdd812a25d1f79b642d9fa74d3181cbac2e70332ae91fa5285bcf  tests/desktop/test_gnome_session_hosted_contract.py
+          b22b83554231bef19178fbb8723acfed71e4476df14048bd9b4c763b937743d5  desktop/tools/conventional_runtime_data.py
+          SOURCE_PINS
+          # SOURCE-PINS-END
+          # Refuse an occupied path; do not adopt or change any existing output.
+          /usr/bin/mkdir -m 0700 /var/tmp/mrk-gnome-session-native-outer-v1
+          /usr/bin/mkdir -m 0700 /var/tmp/mrk-gnome-controller-supplier-v2
+          /usr/bin/mkdir -m 0700 /var/tmp/mrk-gnome-controller-check-v1
+          /usr/bin/mkdir -m 0700 /var/tmp/mrk-gnome-controller-check-v1/source
+          # Explicit provider/bootstrap trust, BEFORE any Python startup. The
+          # later interpreter cannot retroactively authenticate these utilities.
+          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C HOME=/nonexistent \
+            /usr/bin/sudo -n -- /usr/bin/setpriv --clear-groups -- /usr/bin/env -i \
+            PATH=/usr/bin:/bin LANG=C LC_ALL=C HOME=/nonexistent \
+            /usr/bin/bash --noprofile --norc -s <<'PYCACHE_BOOTSTRAP'
+          set -euo pipefail
+          umask 077
+          [[ "$EUID" -eq 0 ]]
+          protected_parent() {
+            local path="$1" value device inode mode uid gid
+            [[ -d "$path" && ! -L "$path" ]] || return 1
+            value=$(/usr/bin/stat --printf='%d:%i:%f:%u:%g' -- "$path") || return 1
+            IFS=: read -r device inode mode uid gid <<< "$value"
+            [[ "$device" =~ ^[0-9]+$ && "$inode" =~ ^[0-9]+$ && "$mode" =~ ^[0-9a-f]+$ \
+               && "$uid" == 0 && "$gid" == 0 ]] || return 1
+            (( (16#$mode & 0170000) == 0040000 && (16#$mode & 0022) == 0 )) || return 1
+            printf '%s' "$value"
+          }
+          root_before=$(protected_parent /)
+          run_before=$(protected_parent /run)
+          # Exclusive mkdir, never mkdir -p/adoption/chmod of an occupied path.
+          # Successful creation under this protected chain establishes emptiness.
+          /usr/bin/mkdir -m 0555 -- /run/mrk-gnome-python-empty-pycache-v1
+          root_after=$(protected_parent /)
+          run_after=$(protected_parent /run)
+          [[ "$root_after" == "$root_before" && "$run_after" == "$run_before" ]]
+          leaf=$(/usr/bin/stat --printf='%a:%u:%g:%F' -- /run/mrk-gnome-python-empty-pycache-v1)
+          [[ "$leaf" == 555:0:0:directory ]]
+          # Leave the prefix untouched through settle/Unknown, until VM disposal.
+          PYCACHE_BOOTSTRAP
+      # Fixed accepted V transport, not caller-selected artifacts. The token is
+      # confined to this pinned action; no controller environment receives it.
+      - name: Download exactly the accepted V prepared-runtime DATA
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          repository: Apdelrahman1911/mobile-release-kit
+          run-id: '36074195702'
+          artifact-ids: '10839621457'
+          merge-multiple: true
+          digest-mismatch: error
+          github-token: ${{ github.token }}
+          path: /var/tmp/mrk-gnome-controller-supplier-v2
+      - name: Stage only accepted Python as DATA and make its private prefix read-only
+        id: controller-runtime
+        timeout-minutes: 4
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -v 4194304
+          ulimit -t 120
+          ulimit -n 256
+          ulimit -c 0
+          ulimit -f 131072
+          # A readonly BIND of the original checkout, not a copied source tree.
+          # The provider records original/view native identities before startup.
+          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C HOME=/nonexistent \
+            /usr/bin/sudo -n -- /usr/bin/setpriv --clear-groups -- /usr/bin/env -i \
+            PATH=/usr/bin:/bin LANG=C LC_ALL=C HOME=/nonexistent \
+            /usr/bin/timeout --signal=TERM --kill-after=5s 10s \
+            /usr/bin/mount --bind "$GITHUB_WORKSPACE" /var/tmp/mrk-gnome-controller-check-v1/source </dev/null
+          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C HOME=/nonexistent \
+            /usr/bin/sudo -n -- /usr/bin/setpriv --clear-groups -- /usr/bin/env -i \
+            PATH=/usr/bin:/bin LANG=C LC_ALL=C HOME=/nonexistent \
+            /usr/bin/timeout --signal=TERM --kill-after=5s 10s \
+            /usr/bin/mount -o remount,bind,ro /var/tmp/mrk-gnome-controller-check-v1/source </dev/null
+          # The provider3.12 runs only authenticated bounded DATA staging.
+          # This is explicit bootstrap trust, not private-runtime qualification.
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent \
+            /usr/bin/sudo -n -- /usr/bin/setpriv --clear-groups -- /usr/bin/env -i \
+            PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" RUNNER_ARCH="$RUNNER_ARCH" \
+            ImageOS="$ImageOS" ImageVersion="$ImageVersion" GITHUB_REF="$GITHUB_REF" \
+            GITHUB_SHA="$GITHUB_SHA" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            GITHUB_WORKFLOW_SHA="$GITHUB_WORKFLOW_SHA" GITHUB_WORKFLOW_REF="$GITHUB_WORKFLOW_REF" \
+            GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" MRK_EXPECTED_SHA="$MRK_EXPECTED_SHA" MRK_PUSH_EVENT_AFTER="$MRK_PUSH_EVENT_AFTER" \
+            /usr/bin/timeout --signal=TERM --kill-after=5s 120s \
+            /usr/bin/python3.12 -I -S -B -X pycache_prefix=/run/mrk-gnome-python-empty-pycache-v1 "$GITHUB_WORKSPACE/desktop/tools/gnome_session_hosted.py" stage-controller-runtime </dev/null
+          # All three original statuses are fail-fast; no private startup on
+          # a staged-only receipt, failed bind, failed remount or missing ro flag.
+          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C HOME=/nonexistent \
+            /usr/bin/sudo -n -- /usr/bin/setpriv --clear-groups -- /usr/bin/env -i \
+            PATH=/usr/bin:/bin LANG=C LC_ALL=C HOME=/nonexistent \
+            /usr/bin/timeout --signal=TERM --kill-after=5s 10s \
+            /usr/bin/mount --bind /run/mrk-gnome-controller-runtime-v2 /run/mrk-gnome-controller-runtime-v2 </dev/null
+          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C HOME=/nonexistent \
+            /usr/bin/sudo -n -- /usr/bin/setpriv --clear-groups -- /usr/bin/env -i \
+            PATH=/usr/bin:/bin LANG=C LC_ALL=C HOME=/nonexistent \
+            /usr/bin/timeout --signal=TERM --kill-after=5s 10s \
+            /usr/bin/mount -o remount,bind,ro /run/mrk-gnome-controller-runtime-v2 </dev/null
+          records=0
+          controller_mounts=0
+          while IFS=' ' read -r mount_id parent_id device root point options rest; do
+            (( ++records <= 4096 ))
+            if [[ "$point" == /run/mrk-gnome-controller-runtime-v2 ]]; then
+              [[ ",$options," == *,ro,* ]]
+              (( ++controller_mounts == 1 ))
+            fi
+          done </proc/self/mountinfo
+          (( controller_mounts == 1 ))
+          # Retain the readonly runtime and original stage through settle, or
+          # disposable VM retirement on Unknown. Never clean up a live prefix.
+      - name: One bounded supplied-runtime compatibility check before any bwrap supply
+        id: controller-check
+        timeout-minutes: 1
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          set +o posix
+          unset POSIXLY_CORRECT
+          set -C
+          umask 077
+          # Fresh admission immediately before the one original launch.
+          records=0
+          mem_seen=0
+          mem_available=0
+          while IFS=' ' read -r key value unit extra; do
+            (( ++records <= 256 ))
+            if [[ "$key" == MemAvailable: ]]; then
+              [[ "$value" =~ ^[0-9]+$ && "$unit" == kB && -z "$extra" ]]
+              (( ++mem_seen == 1 ))
+              mem_available="$value"
+            fi
+          done </proc/meminfo
+          (( mem_seen == 1 && mem_available > 6291456 ))
+          for evidence_fs in /var/tmp/mrk-gnome-controller-check-v1 /tmp; do
+            available=$(/usr/bin/stat --file-system --format='%a:%S' -- "$evidence_fs")
+            IFS=: read -r blocks block_size extra <<< "$available"
+            [[ "$blocks" =~ ^[0-9]+$ && "$block_size" =~ ^[0-9]+$ && -z "$extra" ]]
+            (( block_size >= 512 && block_size <= 1048576 && blocks > 2147483648 / block_size ))
+          done
+          ulimit -v 524288
+          ulimit -t 15
+          ulimit -n 64
+          ulimit -c 0
+          # Non-POSIX Bash -f units are 1024B: 131072B for EACH stream.
+          ulimit -f 128
+          exec 3>/var/tmp/mrk-gnome-controller-check-v1/waits.json
+          exec 4>/var/tmp/mrk-gnome-controller-check-v1/stdout
+          exec 5>/var/tmp/mrk-gnome-controller-check-v1/stderr
+          set +e
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent \
+            /usr/bin/sudo -n -- /usr/bin/setpriv --clear-groups -- /usr/bin/env -i \
+            PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" RUNNER_ARCH="$RUNNER_ARCH" \
+            ImageOS="$ImageOS" ImageVersion="$ImageVersion" GITHUB_REF="$GITHUB_REF" \
+            GITHUB_SHA="$GITHUB_SHA" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            GITHUB_WORKFLOW_SHA="$GITHUB_WORKFLOW_SHA" GITHUB_WORKFLOW_REF="$GITHUB_WORKFLOW_REF" \
+            GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" MRK_EXPECTED_SHA="$MRK_EXPECTED_SHA" MRK_PUSH_EVENT_AFTER="$MRK_PUSH_EVENT_AFTER" \
+            /usr/bin/timeout --signal=TERM --kill-after=2s 30s \
+            /run/mrk-gnome-controller-runtime-v2/python/bin/python3 -I -S -B -X pycache_prefix=/run/mrk-gnome-python-empty-pycache-v1 "/var/tmp/mrk-gnome-controller-check-v1/source/desktop/tools/gnome_session_hosted.py" check-controller-runtime \
+            </dev/null 1>&4 3>&- 2>&5 4>&- 5>&-
+          result=$?
+          final_result="$result"
+          writers_closed=true
+          exec 4>&- 5>&-
+          close_result=$?
+          if (( close_result != 0 )); then
+            writers_closed=false
+            if (( final_result == 0 )); then final_result=125; fi
+          fi
+          printf '{"schema":"gnome-controller-runtime-check-1","sourceSha":"%s","runId":"%s","attempt":"%s","originalWait":true,"exitCode":%d,"outputWritersClosed":%s,"statusWriterCloseGate":"original-step-success-required"}\n' \
+            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$result" "$writers_closed" >&3
+          status_result=$?
+          if (( status_result != 0 && final_result == 0 )); then final_result=125; fi
+          exec 3>&-
+          status_close_result=$?
+          if (( status_close_result != 0 && final_result == 0 )); then final_result=125; fi
+          # Never replace an original failure with a later successful POST.
+          exit "$final_result"
+      - name: Provider DATA POST of original source runtime cache and original check writers
+        id: controller-check-post
+        if: always() && steps.controller-runtime.outcome != 'skipped'
+        timeout-minutes: 1
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_CONTROLLER_STAGE_OUTCOME: ${{ steps.controller-runtime.outcome }}
+          MRK_CONTROLLER_CHECK_OUTCOME: ${{ steps.controller-check.outcome }}
+        run: |
+          set -euo pipefail
+          set +o posix
+          unset POSIXLY_CORRECT
+          umask 077
+          ulimit -v 524288
+          ulimit -t 15
+          ulimit -n 64
+          ulimit -c 0
+          ulimit -f 128
+          # Trusted provider DATA only, even after timeout/ABI/entry failure.
+          # The source view/runtime remain mounted; no retry or live cleanup.
+          # A 13s TERM + 2s kill bound leaves settlement within 15s.
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent \
+            /usr/bin/sudo -n -- /usr/bin/setpriv --clear-groups -- /usr/bin/env -i \
+            PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" RUNNER_ARCH="$RUNNER_ARCH" \
+            ImageOS="$ImageOS" ImageVersion="$ImageVersion" GITHUB_REF="$GITHUB_REF" \
+            GITHUB_SHA="$GITHUB_SHA" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            GITHUB_WORKFLOW_SHA="$GITHUB_WORKFLOW_SHA" GITHUB_WORKFLOW_REF="$GITHUB_WORKFLOW_REF" \
+            GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" MRK_EXPECTED_SHA="$MRK_EXPECTED_SHA" MRK_PUSH_EVENT_AFTER="$MRK_PUSH_EVENT_AFTER" \
+            MRK_CONTROLLER_STAGE_OUTCOME="$MRK_CONTROLLER_STAGE_OUTCOME" MRK_CONTROLLER_CHECK_OUTCOME="$MRK_CONTROLLER_CHECK_OUTCOME" \
+            /usr/bin/timeout --signal=TERM --kill-after=2s 13s \
+            /usr/bin/python3.12 -I -S -B -X pycache_prefix=/run/mrk-gnome-python-empty-pycache-v1 "$GITHUB_WORKSPACE/desktop/tools/gnome_session_hosted.py" post-controller-check </dev/null
+      - name: Supply only the separately admitted absent bwrap executable
+        id: bwrap
+        timeout-minutes: 5
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          # Full supplier/host facts still gate this fixed, non-native phase.
+          # Only this disposable VM may acquire the exact absent canonical leaf;
+          # no package installer or native namespace runs during provisioning.
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent \
+            /usr/bin/sudo -n -- /usr/bin/setpriv --clear-groups -- /usr/bin/env -i \
+            PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" RUNNER_ARCH="$RUNNER_ARCH" \
+            ImageOS="$ImageOS" ImageVersion="$ImageVersion" GITHUB_REF="$GITHUB_REF" \
+            GITHUB_SHA="$GITHUB_SHA" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            GITHUB_WORKFLOW_SHA="$GITHUB_WORKFLOW_SHA" GITHUB_WORKFLOW_REF="$GITHUB_WORKFLOW_REF" \
+            GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" MRK_EXPECTED_SHA="$MRK_EXPECTED_SHA" MRK_PUSH_EVENT_AFTER="$MRK_PUSH_EVENT_AFTER" \
+            /run/mrk-gnome-controller-runtime-v2/python/bin/python3 -I -S -B -X pycache_prefix=/run/mrk-gnome-python-empty-pycache-v1 "$GITHUB_WORKSPACE/desktop/tools/gnome_session_hosted.py" supply-bwrap </dev/null
+      - name: Prepare positive host reservation and only locked offline inputs
+        id: prepare
+        timeout-minutes: 17
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          # These are fixed phases, not caller-supplied commands. Each original
+          # phase has its own tighter source-owned common deadline.
+          # sudo/PAM remain the explicit provider bootstrap boundary.
+          # The controller requires cleared-groups root and later exact gates;
+          # noninteractive sudo is neither PAM absence nor universal policy.
+          for phase in prepare acquire; do
+            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent \
+              /usr/bin/sudo -n -- /usr/bin/setpriv --clear-groups -- /usr/bin/env -i \
+              PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent \
+              RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" RUNNER_ARCH="$RUNNER_ARCH" \
+              ImageOS="$ImageOS" ImageVersion="$ImageVersion" GITHUB_REF="$GITHUB_REF" \
+              GITHUB_SHA="$GITHUB_SHA" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
+              GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+              GITHUB_WORKFLOW_SHA="$GITHUB_WORKFLOW_SHA" GITHUB_WORKFLOW_REF="$GITHUB_WORKFLOW_REF" \
+              GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" MRK_EXPECTED_SHA="$MRK_EXPECTED_SHA" MRK_PUSH_EVENT_AFTER="$MRK_PUSH_EVENT_AFTER" \
+              /run/mrk-gnome-controller-runtime-v2/python/bin/python3 -I -S -B -X pycache_prefix=/run/mrk-gnome-python-empty-pycache-v1 "$GITHUB_WORKSPACE/desktop/tools/gnome_session_hosted.py" "$phase" </dev/null
+          done
+      - name: One entry smoke before one fresh compile and seven SESSION cases
+        id: native
+        timeout-minutes: 13
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          set +o posix
+          unset POSIXLY_CORRECT
+          set -C
+          umask 077
+          ulimit -S -f 8192
+          exec 3>/var/tmp/mrk-gnome-session-native-outer-v1/waits.json
+          exec 4>/var/tmp/mrk-gnome-session-native-outer-v1/stdout
+          exec 5>/var/tmp/mrk-gnome-session-native-outer-v1/stderr
+          set +e
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent \
+            /usr/bin/sudo -n -- /usr/bin/setpriv --clear-groups -- /usr/bin/env -i \
+            PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" RUNNER_ARCH="$RUNNER_ARCH" \
+            ImageOS="$ImageOS" ImageVersion="$ImageVersion" GITHUB_REF="$GITHUB_REF" \
+            GITHUB_SHA="$GITHUB_SHA" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            GITHUB_WORKFLOW_SHA="$GITHUB_WORKFLOW_SHA" GITHUB_WORKFLOW_REF="$GITHUB_WORKFLOW_REF" \
+            GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" MRK_EXPECTED_SHA="$MRK_EXPECTED_SHA" MRK_PUSH_EVENT_AFTER="$MRK_PUSH_EVENT_AFTER" \
+            /run/mrk-gnome-controller-runtime-v2/python/bin/python3 -I -S -B -X pycache_prefix=/run/mrk-gnome-python-empty-pycache-v1 "$GITHUB_WORKSPACE/desktop/tools/gnome_session_hosted.py" run \
+            </dev/null 1>&4 2>&5 3>&- 4>&- 5>&-
+          result=$?
+          set -e
+          exec 4>&- 5>&- || exit 125
+          printf '{"schema":"gnome-session-hosted-native-v1","sourceSha":"%s","runId":"%s","attempt":"%s","originalWait":true,"exitCode":%d,"outputWritersClosed":true,"statusWriterCloseGate":"original-step-success-required"}\n' \
+            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$result" >&3 || exit 125
+          exec 3>&- || exit 125
+          exit "$result"
+      - name: Validate original writers and remove only proven settled task outputs
+        id: settle
+        if: always() && steps.native.outcome == 'success'
+        timeout-minutes: 2
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_ORIGINAL_OUTCOME: ${{ steps.native.outcome }}
+        run: |
+          set -euo pipefail
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent \
+            /usr/bin/sudo -n -- /usr/bin/setpriv --clear-groups -- /usr/bin/env -i \
+            PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" RUNNER_ARCH="$RUNNER_ARCH" \
+            ImageOS="$ImageOS" ImageVersion="$ImageVersion" GITHUB_REF="$GITHUB_REF" \
+            GITHUB_SHA="$GITHUB_SHA" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            GITHUB_WORKFLOW_SHA="$GITHUB_WORKFLOW_SHA" GITHUB_WORKFLOW_REF="$GITHUB_WORKFLOW_REF" \
+            GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" MRK_EXPECTED_SHA="$MRK_EXPECTED_SHA" MRK_PUSH_EVENT_AFTER="$MRK_PUSH_EVENT_AFTER" \
+            MRK_ORIGINAL_OUTCOME="$MRK_ORIGINAL_OUTCOME" \
+            /run/mrk-gnome-controller-runtime-v2/python/bin/python3 -I -S -B -X pycache_prefix=/run/mrk-gnome-python-empty-pycache-v1 "$GITHUB_WORKSPACE/desktop/tools/gnome_session_hosted.py" settle </dev/null
+      - name: Retain only explicit redacted verification evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-gnome-session-native-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            /var/tmp/mrk-gnome-controller-check-v1/receipt.json
+            /var/tmp/mrk-gnome-controller-check-v1/waits.json
+            /var/tmp/mrk-gnome-controller-check-v1/stage-controller-runtime-refusal.json
+            /var/tmp/mrk-gnome-controller-check-v1/post-controller-check-refusal.json
+            /var/tmp/mrk-gnome-session-native-public-v1/prepare.json
+            /var/tmp/mrk-gnome-session-native-public-v1/acquire.json
+            /var/tmp/mrk-gnome-session-native-public-v1/native.json
+            /var/tmp/mrk-gnome-session-native-public-v1/result.json
+            /var/tmp/mrk-gnome-session-native-public-v1/owner-diagnostic.json
+            /var/tmp/mrk-gnome-session-native-public-v1/prepare-refusal.json
+            /var/tmp/mrk-gnome-session-native-public-v1/acquire-refusal.json
+            /var/tmp/mrk-gnome-session-native-public-v1/run-refusal.json
+            /var/tmp/mrk-gnome-session-native-public-v1/settle-refusal.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 1
+
+  gnome-controller-characterization:
+    if: github.ref == 'refs/heads/verify/desktop-gnome-controller-characterization'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      MRK_EXPECTED_SHA: ${{ inputs.expected_sha }}
+      MRK_PUSH_EVENT_AFTER: ${{ github.event.after }}
+    steps:
+      - name: Require dedicated fresh non-root hosted Ubuntu source
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          # Provider runner/OS, pinned checkout and this fixed shell/bootstrap
+          # are explicit trust, not retroactively pre-use-authenticated tools.
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == X64 ]]
+          # Observed accepted V image, not a promise of future scheduling.
+          [[ "$ImageOS" == ubuntu24 && "$ImageVersion" == 20260920.314.1 && "$EUID" -ne 0 ]]
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-gnome-controller-characterization ]]
+          [[ "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit ]]
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "$GITHUB_RUN_ATTEMPT" == 1 ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$GITHUB_SHA" != 0000000000000000000000000000000000000000 ]]
+          [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-gnome-session-native.yml@$GITHUB_REF" ]]
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            [[ "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" ]]
+          else
+            [[ "$GITHUB_EVENT_NAME" == push && "$MRK_PUSH_EVENT_AFTER" == "$GITHUB_SHA" ]]
+          fi
+      - name: Check out exact candidate without persistent credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Authenticate fixed controls before privileged preparation
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          # SOURCE-PINS-BEGIN: concrete helper pins are frozen with this workflow.
+          /usr/bin/sha256sum --strict --check <<'SOURCE_PINS'
+          5c4c3a1e035027408c5c11e88521d96640d8038fe78ba6430beccddebf52ddbe  desktop/tools/gnome_session_hosted.py
+          ba50d93078c0ffbcb41925930a2879466410b75bd08113477ab2cdbc2d3482e9  desktop/tools/gnome_session_native/owner.py
+          ec675d02cc74cc6c8f45488b96ae66eceae6eac393d34179061a4f788bfcbc8a  desktop/tools/gnome_session_native/native-entry.sh
+          359ebf6213cec838593e0e04e9d86abc591273ff44faeeb0c747667c7aa97f08  desktop/tools/gnome_session_native/compile-only.sh
+          f4fde79383d60442c722bf2ebc50e15954f55460fadd0431007efcfa142a4f45  desktop/tools/gnome_session_native/host-admit.py
+          f2ddbeb70dc2c786f59a38126177290c64ed046f107f3abe9333dad8bb767628  desktop/tools/gnome_session_native/prepare.py
+          ba6c49c31f87781c9fd660bd4e55d95774ab64e9bed1749301e1e65d261900c6  desktop/tools/gnome_session_native/check-compile.py
+          b009148067794c9f4cedf6a284ac1dc0892e0efe718a30580cb5e382978463a4  desktop/tools/gnome_session_native/runtime-layout.json
+          8eb73f49d3e34fdc3cf3473b8d4540b9c90b7a6bce0d8541a11fc1b172f2aa00  desktop/tools/gnome_session_native/runtime-suppliers.json
+          add25aceb1ccdd812a25d1f79b642d9fa74d3181cbac2e70332ae91fa5285bcf  tests/desktop/test_gnome_session_hosted_contract.py
+          b22b83554231bef19178fbb8723acfed71e4476df14048bd9b4c763b937743d5  desktop/tools/conventional_runtime_data.py
+          SOURCE_PINS
+          # SOURCE-PINS-END
+          # Refuse an occupied path; do not adopt or change any existing output.
+          /usr/bin/mkdir -m 0700 /var/tmp/mrk-gnome-session-native-outer-v1
+          /usr/bin/mkdir -m 0700 /var/tmp/mrk-gnome-controller-supplier-v2
+          /usr/bin/mkdir -m 0700 /var/tmp/mrk-gnome-controller-check-v1
+          /usr/bin/mkdir -m 0700 /var/tmp/mrk-gnome-controller-check-v1/source
+          # Explicit provider/bootstrap trust, BEFORE any Python startup. The
+          # later interpreter cannot retroactively authenticate these utilities.
+          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C HOME=/nonexistent \
+            /usr/bin/sudo -n -- /usr/bin/setpriv --clear-groups -- /usr/bin/env -i \
+            PATH=/usr/bin:/bin LANG=C LC_ALL=C HOME=/nonexistent \
+            /usr/bin/bash --noprofile --norc -s <<'PYCACHE_BOOTSTRAP'
+          set -euo pipefail
+          umask 077
+          [[ "$EUID" -eq 0 ]]
+          protected_parent() {
+            local path="$1" value device inode mode uid gid
+            [[ -d "$path" && ! -L "$path" ]] || return 1
+            value=$(/usr/bin/stat --printf='%d:%i:%f:%u:%g' -- "$path") || return 1
+            IFS=: read -r device inode mode uid gid <<< "$value"
+            [[ "$device" =~ ^[0-9]+$ && "$inode" =~ ^[0-9]+$ && "$mode" =~ ^[0-9a-f]+$ \
+               && "$uid" == 0 && "$gid" == 0 ]] || return 1
+            (( (16#$mode & 0170000) == 0040000 && (16#$mode & 0022) == 0 )) || return 1
+            printf '%s' "$value"
+          }
+          root_before=$(protected_parent /)
+          run_before=$(protected_parent /run)
+          # Exclusive mkdir, never mkdir -p/adoption/chmod of an occupied path.
+          # Successful creation under this protected chain establishes emptiness.
+          /usr/bin/mkdir -m 0555 -- /run/mrk-gnome-python-empty-pycache-v1
+          root_after=$(protected_parent /)
+          run_after=$(protected_parent /run)
+          [[ "$root_after" == "$root_before" && "$run_after" == "$run_before" ]]
+          leaf=$(/usr/bin/stat --printf='%a:%u:%g:%F' -- /run/mrk-gnome-python-empty-pycache-v1)
+          [[ "$leaf" == 555:0:0:directory ]]
+          # Leave the prefix untouched through settle/Unknown, until VM disposal.
+          PYCACHE_BOOTSTRAP
+      # Fixed accepted V transport, not caller-selected artifacts. The token is
+      # confined to this pinned action; no controller environment receives it.
+      - name: Download exactly the accepted V prepared-runtime DATA
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          repository: Apdelrahman1911/mobile-release-kit
+          run-id: '36074195702'
+          artifact-ids: '10839621457'
+          merge-multiple: true
+          digest-mismatch: error
+          github-token: ${{ github.token }}
+          path: /var/tmp/mrk-gnome-controller-supplier-v2
+      - name: Stage only accepted Python as DATA and make its private prefix read-only
+        id: controller-runtime
+        timeout-minutes: 4
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -v 4194304
+          ulimit -t 120
+          ulimit -n 256
+          ulimit -c 0
+          ulimit -f 131072
+          # A readonly BIND of the original checkout, not a copied source tree.
+          # The provider records original/view native identities before startup.
+          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C HOME=/nonexistent \
+            /usr/bin/sudo -n -- /usr/bin/setpriv --clear-groups -- /usr/bin/env -i \
+            PATH=/usr/bin:/bin LANG=C LC_ALL=C HOME=/nonexistent \
+            /usr/bin/timeout --signal=TERM --kill-after=5s 10s \
+            /usr/bin/mount --bind "$GITHUB_WORKSPACE" /var/tmp/mrk-gnome-controller-check-v1/source </dev/null
+          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C HOME=/nonexistent \
+            /usr/bin/sudo -n -- /usr/bin/setpriv --clear-groups -- /usr/bin/env -i \
+            PATH=/usr/bin:/bin LANG=C LC_ALL=C HOME=/nonexistent \
+            /usr/bin/timeout --signal=TERM --kill-after=5s 10s \
+            /usr/bin/mount -o remount,bind,ro /var/tmp/mrk-gnome-controller-check-v1/source </dev/null
+          # The provider3.12 runs only authenticated bounded DATA staging.
+          # This is explicit bootstrap trust, not private-runtime qualification.
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent \
+            /usr/bin/sudo -n -- /usr/bin/setpriv --clear-groups -- /usr/bin/env -i \
+            PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" RUNNER_ARCH="$RUNNER_ARCH" \
+            ImageOS="$ImageOS" ImageVersion="$ImageVersion" GITHUB_REF="$GITHUB_REF" \
+            GITHUB_SHA="$GITHUB_SHA" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            GITHUB_WORKFLOW_SHA="$GITHUB_WORKFLOW_SHA" GITHUB_WORKFLOW_REF="$GITHUB_WORKFLOW_REF" \
+            GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" MRK_EXPECTED_SHA="$MRK_EXPECTED_SHA" MRK_PUSH_EVENT_AFTER="$MRK_PUSH_EVENT_AFTER" \
+            /usr/bin/timeout --signal=TERM --kill-after=5s 120s \
+            /usr/bin/python3.12 -I -S -B -X pycache_prefix=/run/mrk-gnome-python-empty-pycache-v1 "$GITHUB_WORKSPACE/desktop/tools/gnome_session_hosted.py" stage-controller-characterization </dev/null
+          # All three original statuses are fail-fast; no private startup on
+          # a staged-only receipt, failed bind, failed remount or missing ro flag.
+          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C HOME=/nonexistent \
+            /usr/bin/sudo -n -- /usr/bin/setpriv --clear-groups -- /usr/bin/env -i \
+            PATH=/usr/bin:/bin LANG=C LC_ALL=C HOME=/nonexistent \
+            /usr/bin/timeout --signal=TERM --kill-after=5s 10s \
+            /usr/bin/mount --bind /run/mrk-gnome-controller-runtime-v2 /run/mrk-gnome-controller-runtime-v2 </dev/null
+          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C HOME=/nonexistent \
+            /usr/bin/sudo -n -- /usr/bin/setpriv --clear-groups -- /usr/bin/env -i \
+            PATH=/usr/bin:/bin LANG=C LC_ALL=C HOME=/nonexistent \
+            /usr/bin/timeout --signal=TERM --kill-after=5s 10s \
+            /usr/bin/mount -o remount,bind,ro /run/mrk-gnome-controller-runtime-v2 </dev/null
+          records=0
+          controller_mounts=0
+          while IFS=' ' read -r mount_id parent_id device root point options rest; do
+            (( ++records <= 4096 ))
+            if [[ "$point" == /run/mrk-gnome-controller-runtime-v2 ]]; then
+              [[ ",$options," == *,ro,* ]]
+              (( ++controller_mounts == 1 ))
+            fi
+          done </proc/self/mountinfo
+          (( controller_mounts == 1 ))
+          # Retain the readonly runtime and original stage through settle, or
+          # disposable VM retirement on Unknown. Never clean up a live prefix.
+      - name: One bounded supplied-runtime host-selection characterization; no native follow-on
+        id: controller-check
+        timeout-minutes: 1
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          set +o posix
+          unset POSIXLY_CORRECT
+          set -C
+          umask 077
+          # Fresh admission immediately before the one original launch.
+          records=0
+          mem_seen=0
+          mem_available=0
+          while IFS=' ' read -r key value unit extra; do
+            (( ++records <= 256 ))
+            if [[ "$key" == MemAvailable: ]]; then
+              [[ "$value" =~ ^[0-9]+$ && "$unit" == kB && -z "$extra" ]]
+              (( ++mem_seen == 1 ))
+              mem_available="$value"
+            fi
+          done </proc/meminfo
+          (( mem_seen == 1 && mem_available > 6291456 ))
+          for evidence_fs in /var/tmp/mrk-gnome-controller-check-v1 /tmp; do
+            available=$(/usr/bin/stat --file-system --format='%a:%S' -- "$evidence_fs")
+            IFS=: read -r blocks block_size extra <<< "$available"
+            [[ "$blocks" =~ ^[0-9]+$ && "$block_size" =~ ^[0-9]+$ && -z "$extra" ]]
+            (( block_size >= 512 && block_size <= 1048576 && blocks > 2147483648 / block_size ))
+          done
+          ulimit -v 524288
+          ulimit -t 15
+          ulimit -n 64
+          ulimit -c 0
+          # Non-POSIX Bash -f units are 1024B: 131072B for EACH stream.
+          ulimit -f 128
+          exec 3>/var/tmp/mrk-gnome-controller-check-v1/waits.json
+          exec 4>/var/tmp/mrk-gnome-controller-check-v1/stdout
+          exec 5>/var/tmp/mrk-gnome-controller-check-v1/stderr
+          set +e
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent \
+            /usr/bin/sudo -n -- /usr/bin/setpriv --clear-groups -- /usr/bin/env -i \
+            PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" RUNNER_ARCH="$RUNNER_ARCH" \
+            ImageOS="$ImageOS" ImageVersion="$ImageVersion" GITHUB_REF="$GITHUB_REF" \
+            GITHUB_SHA="$GITHUB_SHA" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            GITHUB_WORKFLOW_SHA="$GITHUB_WORKFLOW_SHA" GITHUB_WORKFLOW_REF="$GITHUB_WORKFLOW_REF" \
+            GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" MRK_EXPECTED_SHA="$MRK_EXPECTED_SHA" MRK_PUSH_EVENT_AFTER="$MRK_PUSH_EVENT_AFTER" \
+            /usr/bin/timeout --signal=TERM --kill-after=2s 30s \
+            /run/mrk-gnome-controller-runtime-v2/python/bin/python3 -I -S -B -X pycache_prefix=/run/mrk-gnome-python-empty-pycache-v1 "/var/tmp/mrk-gnome-controller-check-v1/source/desktop/tools/gnome_session_hosted.py" characterize-controller-host \
+            </dev/null 1>&4 3>&- 2>&5 4>&- 5>&-
+          result=$?
+          final_result="$result"
+          writers_closed=true
+          exec 4>&- 5>&-
+          close_result=$?
+          if (( close_result != 0 )); then
+            writers_closed=false
+            if (( final_result == 0 )); then final_result=125; fi
+          fi
+          printf '{"schema":"gnome-controller-host-characterization-1","sourceSha":"%s","runId":"%s","attempt":"%s","originalWait":true,"exitCode":%d,"outputWritersClosed":%s,"statusWriterCloseGate":"original-step-success-required"}\n' \
+            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$result" "$writers_closed" >&3
+          status_result=$?
+          if (( status_result != 0 && final_result == 0 )); then final_result=125; fi
+          exec 3>&-
+          status_close_result=$?
+          if (( status_close_result != 0 && final_result == 0 )); then final_result=125; fi
+          # Never replace an original failure with a later successful POST.
+          exit "$final_result"
+      - name: Provider DATA POST of original source runtime cache and original check writers
+        id: controller-check-post
+        if: always() && steps.controller-runtime.outcome != 'skipped'
+        timeout-minutes: 1
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_CONTROLLER_STAGE_OUTCOME: ${{ steps.controller-runtime.outcome }}
+          MRK_CONTROLLER_CHECK_OUTCOME: ${{ steps.controller-check.outcome }}
+        run: |
+          set -euo pipefail
+          set +o posix
+          unset POSIXLY_CORRECT
+          umask 077
+          ulimit -v 524288
+          ulimit -t 15
+          ulimit -n 64
+          ulimit -c 0
+          ulimit -f 128
+          # Trusted provider DATA only, even after timeout/ABI/entry failure.
+          # The source view/runtime remain mounted; no retry or live cleanup.
+          # A 13s TERM + 2s kill bound leaves settlement within 15s.
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent \
+            /usr/bin/sudo -n -- /usr/bin/setpriv --clear-groups -- /usr/bin/env -i \
+            PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" RUNNER_ARCH="$RUNNER_ARCH" \
+            ImageOS="$ImageOS" ImageVersion="$ImageVersion" GITHUB_REF="$GITHUB_REF" \
+            GITHUB_SHA="$GITHUB_SHA" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            GITHUB_WORKFLOW_SHA="$GITHUB_WORKFLOW_SHA" GITHUB_WORKFLOW_REF="$GITHUB_WORKFLOW_REF" \
+            GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" MRK_EXPECTED_SHA="$MRK_EXPECTED_SHA" MRK_PUSH_EVENT_AFTER="$MRK_PUSH_EVENT_AFTER" \
+            MRK_CONTROLLER_STAGE_OUTCOME="$MRK_CONTROLLER_STAGE_OUTCOME" MRK_CONTROLLER_CHECK_OUTCOME="$MRK_CONTROLLER_CHECK_OUTCOME" \
+            /usr/bin/timeout --signal=TERM --kill-after=2s 13s \
+            /usr/bin/python3.12 -I -S -B -X pycache_prefix=/run/mrk-gnome-python-empty-pycache-v1 "$GITHUB_WORKSPACE/desktop/tools/gnome_session_hosted.py" post-controller-characterization </dev/null
+      - name: Retain only closed controller characterization DATA
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-gnome-controller-characterization-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            /var/tmp/mrk-gnome-controller-check-v1/receipt.json
+            /var/tmp/mrk-gnome-controller-check-v1/waits.json
+            /var/tmp/mrk-gnome-controller-check-v1/loader-search.json
+            /var/tmp/mrk-gnome-controller-check-v1/provider-config.json
+            /var/tmp/mrk-gnome-controller-check-v1/actual-mappings.json
+            /var/tmp/mrk-gnome-controller-check-v1/stage-controller-characterization-refusal.json
+            /var/tmp/mrk-gnome-controller-check-v1/post-controller-characterization-refusal.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 1

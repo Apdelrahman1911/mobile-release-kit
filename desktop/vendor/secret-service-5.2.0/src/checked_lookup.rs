@@ -263,10 +263,14 @@ pub fn check_empty_owner_reply(body: &Body, owner: &UniqueName<'_>) -> Result<()
     bounded_reply::check_empty_owner_reply(body, owner)
 }
 
-/// Inert fixtures/assertions only, excluded from the normal dependency graph.
+/// Fixed DATA assertions and native-fixture setup witnesses only, excluded
+/// from the normal dependency graph. No provider is started by these helpers.
 #[cfg(feature = "mrk-retrieval-test-support")]
 pub mod test_support {
-    pub use crate::session::test_support::{assert_crypto_helpers, exchange_and_secret};
+    pub use crate::session::test_support::{assert_crypto_helpers, exchange_and_secret,
+        assert_native_canary_helpers, encrypt_native_canary, is_native_canary};
+    pub use crate::bounded_reply::native_fixture::{assert_setup_decoders,
+        decode_bus_identity, decode_created_item, decode_session_alias};
 
     pub fn assert_facade_helpers() {
         #[cfg(all(unix, feature = "rt-tokio"))]

@@ -26,6 +26,12 @@ const RECORD_METADATA_BYTES: usize = 1024 * 1024;
 // Never inferred from crate presence, a renderer boolean, or R1 DTO passes.
 const NATIVE_QUALIFIED: bool = false;
 
+// Explicitly ignored component fixture only: no installed window, persistent
+// provider admission or renderer command is enabled by compiling this module.
+#[cfg(all(test, debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[path = "asset_session_gnome_transport_fixture.rs"]
+mod gnome_transport_fixture;
+
 fn installed_evidence_profile(evidence_selection: bool, candidate_method: bool) -> bool {
     // An advertised development method or broad asset fixture is not authority
     // for this separate installed, documents-only picker.
@@ -180,6 +186,8 @@ pub(crate) struct OriginalWork {
     keyring: Mutex<crate::vault_keyring_linux::LookupBook>,
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     large_work_started: AtomicBool,
+    #[cfg(all(test, debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    gnome_transport_gate: Mutex<Option<Arc<gnome_transport_fixture::BoundaryGate>>>,
 }
 impl OriginalWork {
     fn new(id: u32, gui_needed: bool, document: Weak<Inner>) -> Arc<Self> {
@@ -191,6 +199,8 @@ impl OriginalWork {
             keyring: Mutex::new(crate::vault_keyring_linux::LookupBook::new()),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             large_work_started: AtomicBool::new(false),
+            #[cfg(all(test, debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            gnome_transport_gate: Mutex::new(None),
             gui: Arc::new(GuiCall { owner: owner.clone(), document, facts: Mutex::new(GuiFacts { dispatched: false, constructing: false,
                 created: false, showing: false, response: false, accepted: false, declined: false, accepted_at: None,
                 destroyed: false, released: !gui_needed, not_created: !gui_needed, close_queued: false, close_ack: false, release_queued: false,
@@ -817,6 +827,11 @@ impl DocumentBinding {
             self.report_keyring_problem(owner);
             match next {
                 Some(Ok(Next::Admit(step))) => {
+                    // The ignored headless fixture may defer only this fixed
+                    // successor. Re-enter THIS driver to keep pumping its real
+                    // owner stream/deadline; no alternate IO loop or grant.
+                    #[cfg(all(test, debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    if gnome_transport_fixture::hold_successor(owner, step).await { continue; }
                     // Prepare fallible RNG/DH outside the document lock, under
                     // this same already-charged original coordinator. The real
                     // document/slot gate still must admit and first-poll the RPC.

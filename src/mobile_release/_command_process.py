@@ -1670,6 +1670,13 @@ else:
 
 def _command_spec(context: _Context, role: str,
                   sources: tuple[native.FDLease, ...]) -> native.SpawnSpec:
+    # This one setting is launch policy DATA, never authority over its directory.
+    # In particular, do not forward arbitrary -X options or Python environment.
+    cache_prefix = sys.pycache_prefix
+    _require(cache_prefix is None or type(cache_prefix) is str
+             and cache_prefix == "/run/mrk-gnome-python-empty-pycache-v1")
+    cache_args = (() if cache_prefix is None else
+                  ("-X", "pycache_prefix=/run/mrk-gnome-python-empty-pycache-v1"))
     context.check()
     _require(role in ("C", "A", "W") and {"O": "C", "C": "A", "A": "W"}.get(context.role) == role
              and len(sources) == 8)
@@ -1678,7 +1685,7 @@ def _command_spec(context: _Context, role: str,
     hold = sources[5].account_binding
     account = "-" if hold is None else ",".join(str(value) for value in (hold.uid, *hold.identity))
     _require(role != "W" or account == "-")
-    argv = (executable, "-I", "-S", "-B", "-c", _BOOTSTRAP, module_root, role,
+    argv = (executable, "-I", "-S", "-B", *cache_args, "-c", _BOOTSTRAP, module_root, role,
             str(context.pid), str(os.getsid(0)), str(os.getpgrp()),
             str(context.run), str(context.hard), context.nonce.hex(), account, "1")
     environment = (("PATH", os.defpath), ("LC_ALL", "C"), ("LANG", "C"))
