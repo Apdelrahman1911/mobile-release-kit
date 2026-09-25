@@ -66,7 +66,7 @@ jobs:
           umask 077
           # SOURCE-PINS-BEGIN: concrete helper pins are frozen with this workflow.
           /usr/bin/sha256sum --strict --check <<'SOURCE_PINS'
-          5c4c3a1e035027408c5c11e88521d96640d8038fe78ba6430beccddebf52ddbe  desktop/tools/gnome_session_hosted.py
+          b8ca343231f0a74cfdc7e6516586ac4b1a36f7f9851b461e77fdb763a75849c2  desktop/tools/gnome_session_hosted.py
           ba50d93078c0ffbcb41925930a2879466410b75bd08113477ab2cdbc2d3482e9  desktop/tools/gnome_session_native/owner.py
           ec675d02cc74cc6c8f45488b96ae66eceae6eac393d34179061a4f788bfcbc8a  desktop/tools/gnome_session_native/native-entry.sh
           359ebf6213cec838593e0e04e9d86abc591273ff44faeeb0c747667c7aa97f08  desktop/tools/gnome_session_native/compile-only.sh
@@ -75,7 +75,7 @@ jobs:
           ba6c49c31f87781c9fd660bd4e55d95774ab64e9bed1749301e1e65d261900c6  desktop/tools/gnome_session_native/check-compile.py
           b009148067794c9f4cedf6a284ac1dc0892e0efe718a30580cb5e382978463a4  desktop/tools/gnome_session_native/runtime-layout.json
           8eb73f49d3e34fdc3cf3473b8d4540b9c90b7a6bce0d8541a11fc1b172f2aa00  desktop/tools/gnome_session_native/runtime-suppliers.json
-          add25aceb1ccdd812a25d1f79b642d9fa74d3181cbac2e70332ae91fa5285bcf  tests/desktop/test_gnome_session_hosted_contract.py
+          71141d2833a16c8a6c70c537125e6ca834683229e3074e639f8ebdfb1d1d7571  tests/desktop/test_gnome_session_hosted_contract.py
           b22b83554231bef19178fbb8723acfed71e4476df14048bd9b4c763b937743d5  desktop/tools/conventional_runtime_data.py
           SOURCE_PINS
           # SOURCE-PINS-END
@@ -463,7 +463,7 @@ jobs:
           umask 077
           # SOURCE-PINS-BEGIN: concrete helper pins are frozen with this workflow.
           /usr/bin/sha256sum --strict --check <<'SOURCE_PINS'
-          5c4c3a1e035027408c5c11e88521d96640d8038fe78ba6430beccddebf52ddbe  desktop/tools/gnome_session_hosted.py
+          b8ca343231f0a74cfdc7e6516586ac4b1a36f7f9851b461e77fdb763a75849c2  desktop/tools/gnome_session_hosted.py
           ba50d93078c0ffbcb41925930a2879466410b75bd08113477ab2cdbc2d3482e9  desktop/tools/gnome_session_native/owner.py
           ec675d02cc74cc6c8f45488b96ae66eceae6eac393d34179061a4f788bfcbc8a  desktop/tools/gnome_session_native/native-entry.sh
           359ebf6213cec838593e0e04e9d86abc591273ff44faeeb0c747667c7aa97f08  desktop/tools/gnome_session_native/compile-only.sh
@@ -472,7 +472,7 @@ jobs:
           ba6c49c31f87781c9fd660bd4e55d95774ab64e9bed1749301e1e65d261900c6  desktop/tools/gnome_session_native/check-compile.py
           b009148067794c9f4cedf6a284ac1dc0892e0efe718a30580cb5e382978463a4  desktop/tools/gnome_session_native/runtime-layout.json
           8eb73f49d3e34fdc3cf3473b8d4540b9c90b7a6bce0d8541a11fc1b172f2aa00  desktop/tools/gnome_session_native/runtime-suppliers.json
-          add25aceb1ccdd812a25d1f79b642d9fa74d3181cbac2e70332ae91fa5285bcf  tests/desktop/test_gnome_session_hosted_contract.py
+          71141d2833a16c8a6c70c537125e6ca834683229e3074e639f8ebdfb1d1d7571  tests/desktop/test_gnome_session_hosted_contract.py
           b22b83554231bef19178fbb8723acfed71e4476df14048bd9b4c763b937743d5  desktop/tools/conventional_runtime_data.py
           SOURCE_PINS
           # SOURCE-PINS-END

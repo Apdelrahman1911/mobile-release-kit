@@ -104,6 +104,23 @@ CONTROLLER_CHECK_SYMBOLS = frozenset(("fcntl", "close", "sigaction", "posix_spaw
     "posix_spawn_file_actions_init", "posix_spawn_file_actions_destroy",
     "posix_spawn_file_actions_adddup2", "posix_spawn_file_actions_addclosefrom_np",
     "gnu_get_libc_version"))
+CONTROLLER_AUDIT_STAGES = frozenset((
+    "audit-install", "load-carrier", "load-host", "load-owner", "load-data", "load-core",
+    "compile-prepare", "compile-check", "memory-tar", "native-abi", "load-contract",
+    "run-contract", "body-final", "post-reconcile", "post-host", "post-origins",
+    "post-mappings", "post-finish"))
+CONTROLLER_AUDIT_RULES = frozenset((
+    "open-path-type", "open-path-set", "open-flags-type", "open-write-flags",
+    "directory-fd-identity", "directory-target", "environment-window", "environment-key",
+    "loader-name", "loader-python-count", "loader-native-count", "loader-callsite",
+    "symbol-window", "symbol-callsite", "symbol-shape", "symbol-not-admitted", "symbol-duplicate",
+    "denied-ctypes", "denied-socket", "denied-subprocess", "denied-pty", "denied-shutil",
+    "denied-tempfile", "denied-os-effect", "denied-thread", "denied-input"))
+_CONTROLLER_AUDIT_FAMILIES = {
+    "ctypes": "denied-ctypes", "socket": "denied-socket", "subprocess": "denied-subprocess",
+    "pty": "denied-pty", "shutil": "denied-shutil", "tempfile": "denied-tempfile",
+    "os": "denied-os-effect", "_thread": "denied-thread", "builtins": "denied-input"}
+
 _CONTROLLER_SOURCE = None
 _CONTROLLER_CHECK_STATE = None
 
@@ -3360,6 +3377,8 @@ class ControllerCheckAudit:
         # empty PRE/POST, and no sourceless/cache origin is admitted.
         self.reads.update(importlib.util.cache_from_source(path) for path in tuple(self.reads) if path.endswith(".py"))
         self.first = None
+        self.stage = "audit-install"
+        self.denial = None
         self.native_code = None
         self.native_window = False
         self.native_handles = 0
@@ -3368,9 +3387,17 @@ class ControllerCheckAudit:
         self.contract_window = False
         self.environment = dict(os.environ)
 
-    def reject(self):
+    def reject(self, rule, *, event=None):
         if self.first is None:
             self.first = "controller-check-effect-denied"
+            try:
+                # Only a closed label survives. Classification/allocation cannot
+                # replace the original refusal, even if this metadata is lost.
+                if event is not None:
+                    rule = _CONTROLLER_AUDIT_FAMILIES[event.partition(".")[0]]
+                self.denial = {"stage": self.stage, "rule": rule}
+            finally:
+                raise Refused(self.first)
         raise Refused(self.first)
 
     def from_code(self, code):
@@ -3386,25 +3413,33 @@ class ControllerCheckAudit:
     def __call__(self, event, args):
         if event == "open":
             path, mode, flags = args
-            if (type(path) is not str or path not in self.reads or type(flags) is not int
-                    or flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND)):
-                self.reject()
+            # Preserve the original ordered disjuncts, each evaluated once.
+            if type(path) is not str:
+                self.reject("open-path-type")
+            elif path not in self.reads:
+                self.reject("open-path-set")
+            elif type(flags) is not int:
+                self.reject("open-flags-type")
+            elif flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND):
+                self.reject("open-write-flags")
         elif event in ("os.listdir", "os.scandir"):
             target = args[0]
             if type(target) is int:
                 if identity(os.fstat(target)) not in self.directory_ids:
-                    self.reject()
+                    self.reject("directory-fd-identity")
             elif type(target) is not str or target not in self.directories:
-                self.reject()
+                self.reject("directory-target")
         elif event in ("os.putenv", "os.unsetenv"):
             key = args[0].decode("ascii") if type(args[0]) is bytes else args[0]
             # The one real test intentionally patches/restores this process's
             # own environment; never a child environment or an account change.
-            if not self.contract_window or key not in set(self.environment) | {"PYTHONPYCACHEPREFIX"}:
-                self.reject()
+            if not self.contract_window:
+                self.reject("environment-window")
+            elif key not in set(self.environment) | {"PYTHONPYCACHEPREFIX"}:
+                self.reject("environment-key")
         elif event == "ctypes.dlopen":
             if args != (None,):
-                self.reject()
+                self.reject("loader-name")
             frame = sys._getframe(1)
             python_api = False
             for _ in range(8):
@@ -3416,28 +3451,54 @@ class ControllerCheckAudit:
             if python_api:
                 self.python_handles += 1
                 if self.python_handles != 1:
-                    self.reject()
+                    self.reject("loader-python-count")
             elif self.native_window and self.from_code(self.native_code):
                 self.native_handles += 1
                 if self.native_handles != 1:
-                    self.reject()
+                    self.reject("loader-native-count")
             else:
-                self.reject()
+                self.reject("loader-callsite")
         elif event == "ctypes.dlsym":
-            if (not self.native_window or not self.from_code(self.native_code) or len(args) != 2
-                    or args[1] not in CONTROLLER_CHECK_SYMBOLS or args[1] in self.symbols):
-                self.reject()
+            if not self.native_window:
+                self.reject("symbol-window")
+            elif not self.from_code(self.native_code):
+                self.reject("symbol-callsite")
+            elif len(args) != 2:
+                self.reject("symbol-shape")
+            elif args[1] not in CONTROLLER_CHECK_SYMBOLS:
+                self.reject("symbol-not-admitted")
+            elif args[1] in self.symbols:
+                self.reject("symbol-duplicate")
             self.symbols.append(args[1])
-        elif (event.startswith(("ctypes.", "socket.", "subprocess.", "pty.", "shutil.", "tempfile."))
-              or event in ("os.system", "os.exec", "os.posix_spawn", "os.fork", "os.forkpty", "os.kill", "os.killpg",
-                           "os.startfile", "os.chdir", "os.fchdir", "os.chmod", "os.chown", "os.chroot", "os.truncate",
-                           "os.link", "os.symlink", "os.rename", "os.remove", "os.rmdir", "os.mkdir", "os.utime",
-                           "os.setxattr", "os.removexattr", "os.setuid", "os.setgid", "os.setgroups",
-                           "os.setresuid", "os.setresgid", "os.setreuid", "os.setregid", "os.unshare", "os.setns",
-                           "_thread.start_new_thread", "_thread.start_joinable_thread", "builtins.input")):
-            self.reject()
+        elif event.startswith(("ctypes.", "socket.", "subprocess.", "pty.", "shutil.", "tempfile.")):
+            self.reject(None, event=event)
+        elif event in ("os.system", "os.exec", "os.posix_spawn", "os.fork", "os.forkpty", "os.kill", "os.killpg",
+                       "os.startfile", "os.chdir", "os.fchdir", "os.chmod", "os.chown", "os.chroot", "os.truncate",
+                       "os.link", "os.symlink", "os.rename", "os.remove", "os.rmdir", "os.mkdir", "os.utime",
+                       "os.setxattr", "os.removexattr", "os.setuid", "os.setgid", "os.setgroups",
+                       "os.setresuid", "os.setresgid", "os.setreuid", "os.setregid", "os.unshare", "os.setns",
+                       "_thread.start_new_thread", "_thread.start_joinable_thread", "builtins.input"):
+            self.reject(None, event=event)
         # Once caught, a denial remains failed even if a dependency consumes the
         # exception. Read-only POST/stdio still run; there is no reset API.
+
+
+def controller_audit_diagnostic(body):
+    """Closed failure DATA only; never event arguments or a success authority."""
+    code = "controller-check-audit-diagnostic-shape"
+    need(type(body) is dict and type(body.get("passed")) is bool
+         and type(body.get("auditDenied")) is bool and "auditDenial" in body, code)
+    denial = body["auditDenial"]
+    if not body["auditDenied"]:
+        need(denial is None, code)
+        return None
+    need(body["passed"] is False and type(denial) is dict and set(denial) == {"stage", "rule"}
+         and type(denial["stage"]) is str and denial["stage"] in CONTROLLER_AUDIT_STAGES
+         and type(denial["rule"]) is str and denial["rule"] in CONTROLLER_AUDIT_RULES, code)
+    # bodyPassed may be true: the first denial can occur in the retained POST.
+    result = {"stage": denial["stage"], "rule": denial["rule"]}
+    need(len(canonical(result)) <= 256, code)
+    return result
 
 
 def controller_load_module(name, relative):
@@ -3500,10 +3561,15 @@ def _controller_fixed_check_body(receipt, state, mapping_reader):
     audit = ControllerCheckAudit(receipt)
     state["audit"] = audit
     sys.addaudithook(audit)
-    modules = [controller_load_module("_mrk_controller_check_carrier", "desktop/tools/gnome_session_hosted.py"),
-               controller_load_module("_mrk_controller_check_host", CONTROL + "host-admit.py"),
-               controller_load_module("_mrk_controller_check_owner", CONTROL + "owner.py"),
-               controller_load_module("_mrk_controller_check_data", "desktop/tools/conventional_runtime_data.py")]
+    audit.stage = "load-carrier"
+    modules = [controller_load_module("_mrk_controller_check_carrier", "desktop/tools/gnome_session_hosted.py")]
+    audit.stage = "load-host"
+    modules.append(controller_load_module("_mrk_controller_check_host", CONTROL + "host-admit.py"))
+    audit.stage = "load-owner"
+    modules.append(controller_load_module("_mrk_controller_check_owner", CONTROL + "owner.py"))
+    audit.stage = "load-data"
+    modules.append(controller_load_module("_mrk_controller_check_data", "desktop/tools/conventional_runtime_data.py"))
+    audit.stage = "load-core"
     previous = list(sys.path)
     try:
         sys.path.insert(0, str(CONTROLLER_CHECK_SOURCE / "src"))
@@ -3513,12 +3579,15 @@ def _controller_fixed_check_body(receipt, state, mapping_reader):
     modules.extend((owned_process, _command_process, _native_process))
     # These two files execute top-level work. Their exact text is compiled
     # ONLY: never imported, exec'd, or dispatched to a main.
-    for relative in (CONTROL + "prepare.py", CONTROL + "check-compile.py"):
+    for stage, relative in (("compile-prepare", CONTROL + "prepare.py"), ("compile-check", CONTROL + "check-compile.py")):
+        audit.stage = stage
         path = CONTROLLER_CHECK_SOURCE / relative
         raw, _ = read(path, MIB, root=False)
         compile(raw, str(path), "exec", dont_inherit=True, optimize=0)
     state["compiledOnly"] = ["prepare.py", "check-compile.py"]
+    audit.stage = "memory-tar"
     state["tarModes"] = controller_tar_compatibility()
+    audit.stage = "native-abi"
     audit.native_code = _native_process._Native.__init__.__code__
     audit.native_window = True
     try:
@@ -3533,6 +3602,7 @@ def _controller_fixed_check_body(receipt, state, mapping_reader):
          "controller-check-actual-native-admission")
     state["nativeAdmission"] = {"abi": _native_process._abi_record(native.abi),
                                "publicSymbols": sorted(audit.symbols), "onlyLibcCall": "gnu_get_libc_version"}
+    audit.stage = "load-contract"
     contract = controller_load_module("_mrk_controller_check_contract", "tests/desktop/test_gnome_session_hosted_contract.py")
     modules.extend((contract, contract.C, contract.H, contract.N))
     state["modules"], state["nativeRoot"] = modules, native
@@ -3541,11 +3611,13 @@ def _controller_fixed_check_body(receipt, state, mapping_reader):
          and contract.C._PYTHON_RUNTIME is None and contract.C._PYCACHE is None,
          "controller-check-test-custody-not-separate")
     originals = (_PYTHON_RUNTIME, _PYCACHE, _CONTROLLER_SOURCE, _PINS)
+    audit.stage = "run-contract"
     audit.contract_window = True
     try:
         state["contract"] = controller_run_contract(contract)
     finally:
         audit.contract_window = False
+    audit.stage = "body-final"
     need(all(left is right for left, right in zip(originals, (_PYTHON_RUNTIME, _PYCACHE, _CONTROLLER_SOURCE, _PINS)))
          and dict(os.environ) == audit.environment, "controller-check-test-mutated-live-custody")
     need(audit.first is None, "controller-check-effect-denied")
@@ -3663,6 +3735,9 @@ def _check_controller_runtime(context, catalogue, *, characterization):
     except BaseException as error:
         controller_failure(state, "body", error)
     finally:
+        audit = state.get("audit")
+        if audit is not None:
+            audit.stage = "post-reconcile"
         if receipt is not None:
             if characterization:
                 # An early runtime/ABI error cannot suppress other retained
@@ -3673,7 +3748,11 @@ def _check_controller_runtime(context, catalogue, *, characterization):
                     ("cacheBegin", _PYCACHE, lambda: pycache_begin(receipt["pythonPycache"]))):
                     if owned is None:
                         controller_attempt(state, role, begin)
+            if audit is not None:
+                audit.stage = "post-host"
             controller_attempt(state, "host", lambda: post_host(catalogue, receipt))
+            if audit is not None:
+                audit.stage = "post-origins"
             state["originsAfter"] = controller_attempt(state, "moduleOrigins",
                 lambda: controller_module_origins(receipt, state.get("modules", ())))
             def mapping_post():
@@ -3682,16 +3761,20 @@ def _check_controller_runtime(context, catalogue, *, characterization):
                     need(actual["files"] == state["mappingsBefore"]["files"],
                          "controller-characterization-selected-closure-changed")
                 return actual
+            if audit is not None:
+                audit.stage = "post-mappings"
             state["mappingsAfter"] = controller_attempt(state, "mappings", mapping_post)
-        audit = state.get("audit")
         if audit is not None and audit.first is not None:
             controller_failure(state, "audit", Refused(audit.first))
+        if audit is not None:
+            audit.stage = "post-finish"
         controller_finish_check(state)
     passed = state["bodyPassed"] and state["firstFailure"] is None
     frame = {"schema": schema, **context, "phase": phase,
              "passed": passed, "bodyPassed": state["bodyPassed"], "firstFailure": state["firstFailure"],
              "errors": state["errors"], "post": state["post"], "originalsSettled": _ORIGINALS_SETTLED,
              "auditDenied": audit is not None and audit.first is not None,
+             "auditDenial": None if audit is None else audit.denial,
              "controllerCatalogueSha256": CONTROLLER_RUNTIME_SHA256,
              "contract": state.get("contract"), "compiledOnly": state.get("compiledOnly"),
              "tarModes": state.get("tarModes"), "nativeAdmission": state.get("nativeAdmission"),
@@ -3702,7 +3785,9 @@ def _check_controller_runtime(context, catalogue, *, characterization):
         controller_failure(state, "stdout", Refused("controller-check-private-frame-bound"))
         frame = {"schema": schema, **context, "phase": phase,
                  "passed": False, "bodyPassed": False, "firstFailure": state["firstFailure"],
-                 "errors": state["errors"], "post": state["post"], "originalsSettled": False}
+                 "errors": state["errors"], "post": state["post"], "originalsSettled": False,
+                 "auditDenied": audit is not None and audit.first is not None,
+                 "auditDenial": None if audit is None else audit.denial}
         raw, passed = canonical(frame), False
     # Only original stdio. No task/public roots, side-file writer, new process,
     # cleanup, replacement observer, or swallowed writer error can pass.
@@ -3737,6 +3822,7 @@ def _controller_original_join(context, outcome, body, waits, *, characterization
          and body.get("passed") is True and body.get("bodyPassed") is True
          and body.get("firstFailure") is None and body.get("errors") == []
          and body.get("originalsSettled") is True and body.get("auditDenied") is False
+         and "auditDenial" in body and body["auditDenial"] is None
          and body.get("controllerCatalogueSha256") == CONTROLLER_RUNTIME_SHA256
          and body.get("post") == {"source": True, "runtime": True, "cache": True,
                                   "host": True, "moduleOrigins": True, "mappings": True}
@@ -3787,6 +3873,7 @@ def _post_controller_check(context, catalogue, *, characterization):
     state = {"firstFailure": None, "errors": [], "post": {}}
     _CONTROLLER_CHECK_STATE = state
     receipt, body, waits, original = None, None, None, None
+    diagnostic = None
     provider = catalogue["controllerRuntime"]["bootstrap"]["python"]
     need(sys.executable == provider["path"] and sys.version_info[:2] == (3, 12)
          and sys.prefix == sys.base_prefix == "/usr", "controller-check-post-provider-only")
@@ -3808,13 +3895,16 @@ def _post_controller_check(context, catalogue, *, characterization):
              "controller-check-stdout-bound")
         body = decode(raw)
         need(type(body) is dict and body.get("schema") == schema
-             and all(body.get(key) == value for key, value in context.items()), "controller-check-private-body-binding")
+             and all(body.get(key) == value for key, value in context.items())
+             and body.get("phase") == ("characterize-controller-host" if characterization else "check-controller-runtime"),
+             "controller-check-private-body-binding")
         first = body.get("firstFailure")
         if first is not None:
             need(type(first) is dict and set(first) == {"role", "refusal"}
                  and all(type(value) is str and re.fullmatch(r"[A-Za-z0-9_-]{1,96}", value) for value in first.values()),
                  "controller-check-private-refusal-shape")
             controller_failure(state, "body", Refused(first["refusal"]))
+        diagnostic = controller_audit_diagnostic(body)
     except BaseException as error:
         controller_failure(state, "body-original", error)
     try:
@@ -3858,6 +3948,7 @@ def _post_controller_check(context, catalogue, *, characterization):
              "originalCheckOutcome": outcome, "originalStageOutcome": stage_outcome,
              "originalWaitAndWriters": original, "providerDataPost": state["post"],
              "originalsSettled": _ORIGINALS_SETTLED, "checkBodyPassed": body is not None and body.get("passed") is True,
+             "auditDenial": diagnostic,
              "runtimeQualified": False, "compilerQualified": False, "nativeQualified": False, "desktopReady": False,
              "scope": "supplied-GN-import-ABI-and-one-inert-argv-contract-only",
              "privateSourceAndMappingsUploaded": False, "retirement": "retain-readonly-views-and-runtime-until-disposable-vm-retirement"}

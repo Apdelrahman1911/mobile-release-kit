@@ -1331,7 +1331,8 @@ class CarrierContracts(unittest.TestCase):
         context, provider = C.controller_characterization_context(env, post=True), runtime["bootstrap"]["python"]
         pin = {"bytes": provider["size"], "sha256": provider["sha256"], "mode": "0o755"}
         receipt = {"sourceBinding": {"inert": "source"}, "pythonPycache": {"inert": "cache"}, "providerPython": pin}
-        body = {"schema": C.CONTROLLER_CHARACTERIZATION_SCHEMA, **context, "passed": False,
+        body = {"schema": C.CONTROLLER_CHARACTERIZATION_SCHEMA, **context, "phase": "characterize-controller-host", "passed": False,
+                "bodyPassed": False, "auditDenied": False, "auditDenial": None,
                 "firstFailure": {"role": "body", "refusal": "inert-abi-first"}}
         def read(path, limit, **kwargs):
             if str(path) == provider["path"]:
@@ -1513,17 +1514,33 @@ class CarrierContracts(unittest.TestCase):
         import io
         context, cache = C.workflow_context(environment()), {"inert": "retained-cache"}
         receipt = {"pythonPycache": cache, "sourceBinding": {"inert": "source-originals"}}
-        for case in ("good", "body-first", "host-post", "finish"):
+        for case in ("good", "body-first", "host-post", "finish", "audit-host-post", "audit-finish"):
             output = io.StringIO()
             selected = self.selected_python()
             selected.stdout = output
             source_state = {"closed": True, "postchecked": True, "handlesClosed": True}
             primary = C.Refused("inert-abi-first")
+            audit, host_calls = self.controller_audit_fixture(), []
+            def body_run(receipt, state):
+                if case.startswith("audit-"):
+                    state["audit"] = audit
+                if case == "body-first":
+                    raise primary
+                return True
+            def host_run(*args):
+                host_calls.append(args)
+                if len(host_calls) == 2:
+                    if case == "audit-host-post":
+                        audit("socket.inert-sensitive-marker", ())
+                    if case in ("body-first", "host-post"):
+                        raise C.Refused("inert-host-later")
             def finish(*, failed):
                 for key in ("controllerRuntime", "pythonPycache"):
                     C._EVIDENCE[key] = {"phaseCustodyPostchecked": True, "phaseHandlesClosed": True}
                 if case in ("body-first", "finish"):
                     raise C.Refused("inert-finish-later")
+                if case == "audit-finish":
+                    audit("ctypes.inert-sensitive-marker", ())
             with self.subTest(case=case), ExitStack() as stack:
                 stack.enter_context(patch.object(C, "sys", selected))
                 stack.enter_context(patch.object(C, "SOURCE", C.CONTROLLER_CHECK_SOURCE))
@@ -1535,10 +1552,8 @@ class CarrierContracts(unittest.TestCase):
                 stack.enter_context(patch.object(C, "authenticate_python_runtime"))
                 cache_begin = stack.enter_context(patch.object(C, "pycache_begin"))
                 forbidden_cache = stack.enter_context(patch.object(C, "pycache_for_phase"))
-                body = stack.enter_context(patch.object(C, "controller_check_body",
-                    side_effect=primary if case == "body-first" else None, return_value=True))
-                host = stack.enter_context(patch.object(C, "controller_post_host",
-                    side_effect=[None, C.Refused("inert-host-later")] if case in ("body-first", "host-post") else None))
+                body = stack.enter_context(patch.object(C, "controller_check_body", side_effect=body_run))
+                host = stack.enter_context(patch.object(C, "controller_post_host", side_effect=host_run))
                 stack.enter_context(patch.object(C, "controller_module_origins", return_value=[]))
                 stack.enter_context(patch.object(C, "controller_check_mappings", return_value={"inert": "maps"}))
                 stack.enter_context(patch.object(C, "phase_finish", side_effect=finish))
@@ -1548,6 +1563,17 @@ class CarrierContracts(unittest.TestCase):
                 if case == "body-first":
                     self.assertEqual(frame["firstFailure"], {"role": "body", "refusal": "inert-abi-first"})
                     self.assertEqual([row["role"] for row in frame["errors"]], ["body", "host", "finish"])
+                if case.startswith("audit-"):
+                    stage, rule = (("post-host", "denied-socket") if case == "audit-host-post"
+                                   else ("post-finish", "denied-ctypes"))
+                    self.assertTrue(frame["bodyPassed"] and frame["auditDenied"])
+                    self.assertEqual(frame["auditDenial"], {"stage": stage, "rule": rule})
+                    self.assertEqual(C.controller_audit_diagnostic(frame), frame["auditDenial"])
+                    self.assertEqual(frame["firstFailure"]["refusal"], "controller-check-effect-denied")
+                    self.assertNotIn("inert-sensitive-marker", output.getvalue())
+                else:
+                    self.assertFalse(frame["auditDenied"])
+                    self.assertIsNone(frame["auditDenial"])
                 self.assertTrue(frame["post"]["source"] and frame["post"]["runtime"] and frame["post"]["cache"])
                 cache_begin.assert_called_once_with(cache)
                 forbidden_cache.assert_not_called()
@@ -1607,24 +1633,176 @@ class CarrierContracts(unittest.TestCase):
                 self.assertTrue(state["closed"] and state["closeFailed"])
                 self.assertFalse(state["postchecked"] or state["handlesClosed"] or C._ORIGINALS_SETTLED)
 
-    def test_controller_check_audit_denial_is_absorbing_without_installing_any_hook(self):
-        path = str(C.CONTROLLER_CHECK_SOURCE / "one.py")
+    def controller_audit_fixture(self):
         receipt = {"sourceBinding": {"originalRoot": "/inert-source", "viewRoot": str(C.CONTROLLER_CHECK_SOURCE),
             "originals": {"files": {"one.py": {}}, "directories": []}, "nativeOuter": []},
             "projection": {"files": [], "directories": []}, "controllerCheckInputs": {"files": {}, "directories": []},
             "pythonPycache": {"identity": []}}
+        return C.ControllerCheckAudit(receipt)
+
+    def test_controller_check_audit_denial_is_absorbing_without_installing_any_hook(self):
+        path = str(C.CONTROLLER_CHECK_SOURCE / "one.py")
         with patch.object(C.sys, "addaudithook") as install:
-            audit = C.ControllerCheckAudit(receipt)
+            audit = self.controller_audit_fixture()
+            audit.stage = "load-core"
+            expected = {"stage": "load-core", "rule": "denied-socket"}
             for event, args in (("socket.__new__", (None,)), ("subprocess.Popen", (None,)),
                                 ("ctypes.dlopen", ("/inert-unbound.so",)), ("os.mkdir", ("/inert-write", 0o700, -1))):
                 with self.subTest(event=event), self.assertRaisesRegex(C.Refused, "controller-check-effect-denied"):
                     audit(event, args)
                 self.assertEqual(audit.first, "controller-check-effect-denied")
+                self.assertEqual(audit.denial, expected)
+                audit.stage = "post-finish"
                 audit("open", (path, None, C.os.O_RDONLY))
                 self.assertEqual(audit.first, "controller-check-effect-denied")
+                self.assertEqual(audit.denial, expected)
             with self.assertRaises(C.Refused):
                 audit("open", (path, None, C.os.O_WRONLY))
+            self.assertEqual(audit.denial, expected)
         install.assert_not_called()
+
+    def test_controller_audit_diagnostic_labels_preserve_original_decisions_and_evaluation(self):
+        path = str(C.CONTROLLER_CHECK_SOURCE / "one.py")
+        cases = (
+            ("open", (17, None, C.os.O_RDONLY), {}, "open-path-type"),
+            ("open", ("/inert-sensitive-path", None, C.os.O_RDONLY), {}, "open-path-set"),
+            ("open", (path, None, True), {}, "open-flags-type"),
+            ("open", (path, None, C.os.O_WRONLY), {}, "open-write-flags"),
+            ("os.scandir", (57,), {}, "directory-fd-identity"),
+            ("os.listdir", ("/inert-sensitive-directory",), {}, "directory-target"),
+            ("os.putenv", (b"PYTHONPYCACHEPREFIX", b"/inert-sensitive-value"), {}, "environment-window"),
+            ("os.unsetenv", (b"INERT_SENSITIVE_KEY",), {"contract_window": True, "environment": {}}, "environment-key"),
+            ("ctypes.dlopen", ("/inert-sensitive-library",), {}, "loader-name"),
+            ("ctypes.dlopen", (None,), {}, "loader-callsite"),
+            ("ctypes.dlsym", (object(), "fcntl"), {}, "symbol-window"),
+            ("ctypes.dlsym", (object(), "fcntl"), {"native_window": True}, "symbol-callsite"),
+            ("ctypes.dlsym", (object(),), {"native_window": True}, "symbol-shape"),
+            ("ctypes.dlsym", (object(), "inert_sensitive_symbol"), {"native_window": True}, "symbol-not-admitted"),
+            ("ctypes.dlsym", (object(), "fcntl"), {"native_window": True, "symbols": ["fcntl"]}, "symbol-duplicate"),
+            ("ctypes.inert-sensitive-event", (), {}, "denied-ctypes"),
+            ("socket.inert-sensitive-event", (), {}, "denied-socket"),
+            ("subprocess.inert-sensitive-event", (), {}, "denied-subprocess"),
+            ("pty.inert-sensitive-event", (), {}, "denied-pty"),
+            ("shutil.inert-sensitive-event", (), {}, "denied-shutil"),
+            ("tempfile.inert-sensitive-event", (), {}, "denied-tempfile"),
+            ("os.mkdir", ("/inert-sensitive-path", 0o700, -1), {}, "denied-os-effect"),
+            ("_thread.start_joinable_thread", (), {}, "denied-thread"),
+            ("builtins.input", ("inert-sensitive-prompt",), {}, "denied-input"),
+        )
+        with patch.object(C.sys, "addaudithook") as install:
+            for event, args, changes, rule in cases:
+                audit = self.controller_audit_fixture()
+                audit.stage = "native-abi"
+                for key, value in changes.items():
+                    setattr(audit, key, value)
+                callsite = rule != "symbol-callsite"
+                with self.subTest(rule=rule), patch.object(C.sys, "_getframe", return_value=None) as frame, \
+                     patch.object(C.os, "fstat", return_value=file_info()) as info, \
+                     patch.object(audit, "from_code", return_value=callsite) as lookup:
+                    with self.assertRaisesRegex(C.Refused, "^controller-check-effect-denied$"):
+                        audit(event, args)
+                    self.assertEqual(audit.denial, {"stage": "native-abi", "rule": rule})
+                    raw = C.canonical(C.controller_audit_diagnostic(
+                        {"passed": False, "auditDenied": True, "auditDenial": audit.denial}))
+                    self.assertLessEqual(len(raw), 256)
+                    self.assertNotIn(b"inert-sensitive", raw)
+                    self.assertNotIn(b"INERT_SENSITIVE", raw)
+                    self.assertEqual(info.call_count, int(rule == "directory-fd-identity"))
+                    self.assertEqual(frame.call_count, int(event == "ctypes.dlopen" and args == (None,)))
+                    self.assertEqual(lookup.call_count, int(event == "ctypes.dlsym" and changes.get("native_window") is True))
+            # The same admitted handles/symbols still pass, and counts stay exact.
+            audit = self.controller_audit_fixture()
+            python_frame = SimpleNamespace(f_code=SimpleNamespace(
+                co_filename=C.PYTHON_STDLIB + "/ctypes/__init__.py", co_name="<module>"), f_back=None)
+            with patch.object(C.sys, "_getframe", return_value=python_frame):
+                audit("ctypes.dlopen", (None,))
+                self.assertEqual(audit.python_handles, 1)
+                with self.assertRaises(C.Refused):
+                    audit("ctypes.dlopen", (None,))
+                self.assertEqual(audit.python_handles, 2)
+                self.assertEqual(audit.denial["rule"], "loader-python-count")
+            audit = self.controller_audit_fixture()
+            audit.native_window = True
+            with patch.object(C.sys, "_getframe", return_value=None), \
+                 patch.object(audit, "from_code", return_value=True) as lookup:
+                audit("ctypes.dlopen", (None,))
+                audit("ctypes.dlsym", (object(), "fcntl"))
+                self.assertEqual((audit.native_handles, audit.symbols), (1, ["fcntl"]))
+                self.assertIsNone(audit.first)
+                with self.assertRaises(C.Refused):
+                    audit("ctypes.dlopen", (None,))
+                self.assertEqual(audit.native_handles, 2)
+                self.assertEqual(audit.denial["rule"], "loader-native-count")
+                self.assertEqual(lookup.call_count, 3)
+            audit = self.controller_audit_fixture()
+            audit("open", (path, None, C.os.O_RDONLY))
+            audit("os.listdir", (str(C.PYTHON_PYCACHE),))
+            audit.directory_ids = [C.identity(file_info())]
+            with patch.object(C.os, "fstat", return_value=file_info()) as info:
+                audit("os.scandir", (57,))
+                info.assert_called_once_with(57)
+            audit.contract_window = True
+            audit("os.putenv", (b"PYTHONPYCACHEPREFIX", b"/inert-value"))
+            audit("os.unsetenv", (b"PYTHONPYCACHEPREFIX",))
+            audit("inert-unrelated-event", ())
+            self.assertIsNone(audit.first)
+            self.assertIsNone(audit.denial)
+            # Exceptions before an original refusal retain their old meaning.
+            with self.assertRaises(ValueError):
+                audit("open", ())
+            with self.assertRaises(UnicodeDecodeError):
+                audit("os.putenv", (b"\xff", b"value"))
+            self.assertIsNone(audit.first)
+        install.assert_not_called()
+
+    def test_controller_audit_diagnostic_failure_cannot_replace_or_rebuild_original_refusal(self):
+        class BrokenDiagnostic(str):
+            def partition(self, separator):
+                raise RuntimeError("inert-sensitive-classification-failure")
+        audit = self.controller_audit_fixture()
+        with patch.object(C.sys, "addaudithook") as install:
+            with self.assertRaisesRegex(C.Refused, "^controller-check-effect-denied$"):
+                audit(BrokenDiagnostic("socket.__new__"), ())
+            self.assertEqual(audit.first, "controller-check-effect-denied")
+            self.assertIsNone(audit.denial)
+            audit.stage = "post-finish"
+            with self.assertRaisesRegex(C.Refused, "^controller-check-effect-denied$"):
+                audit("ctypes.inert", ())
+            self.assertIsNone(audit.denial)
+            with self.assertRaisesRegex(C.Refused, "^controller-check-audit-diagnostic-shape$"):
+                C.controller_audit_diagnostic({"passed": False, "auditDenied": True, "auditDenial": audit.denial})
+        install.assert_not_called()
+
+    def test_controller_audit_diagnostic_projection_is_closed_and_bound_to_final_success(self):
+        body = {"passed": False, "bodyPassed": True, "auditDenied": True,
+                "auditDenial": {"stage": "post-finish", "rule": "denied-ctypes"}}
+        diagnostic = C.controller_audit_diagnostic(body)
+        self.assertEqual(diagnostic, body["auditDenial"])
+        self.assertIsNot(diagnostic, body["auditDenial"])
+        for passed in (False, True):
+            self.assertIsNone(C.controller_audit_diagnostic(
+                {"passed": passed, "auditDenied": False, "auditDenial": None}))
+        mutations = (
+            lambda value: value.pop("auditDenial"),
+            lambda value: value.pop("auditDenied"),
+            lambda value: value.update(auditDenied=1),
+            lambda value: value.update(passed=0),
+            lambda value: value.update(passed=True),
+            lambda value: value.update(auditDenied=False),
+            lambda value: value.update(auditDenial=None),
+            lambda value: value.update(auditDenial=[]),
+            lambda value: value["auditDenial"].pop("rule"),
+            lambda value: value["auditDenial"].update(private="inert-sensitive-data"),
+            lambda value: value["auditDenial"].update(stage="inert-sensitive-stage"),
+            lambda value: value["auditDenial"].update(stage=True),
+            lambda value: value["auditDenial"].update(rule="inert-sensitive-rule"),
+            lambda value: value["auditDenial"].update(rule=1),
+        )
+        for index, mutate in enumerate(mutations):
+            changed = copy.deepcopy(body)
+            mutate(changed)
+            with self.subTest(index=index), self.assertRaisesRegex(C.Refused, "^controller-check-audit-diagnostic-shape$"):
+                C.controller_audit_diagnostic(changed)
 
     def test_controller_host_post_scans_only_retained_host_directory_originals_under_audit(self):
         # Inert positive loader evidence exercises the real gate and POST, not a
@@ -1728,7 +1906,7 @@ class CarrierContracts(unittest.TestCase):
         context = C.workflow_context(environment())
         body = {"schema": C.CONTROLLER_CHECK_SCHEMA, **context, "phase": "check-controller-runtime",
             "passed": True, "bodyPassed": True, "firstFailure": None, "errors": [], "originalsSettled": True,
-            "auditDenied": False, "controllerCatalogueSha256": C.CONTROLLER_RUNTIME_SHA256,
+            "auditDenied": False, "auditDenial": None, "controllerCatalogueSha256": C.CONTROLLER_RUNTIME_SHA256,
             "post": {"source": True, "runtime": True, "cache": True, "host": True, "moduleOrigins": True, "mappings": True},
             "contract": {"id": C.CONTROLLER_CHECK_TEST, "testsRun": 1, "failures": 0, "errors": 0, "skips": 0,
                          "expectedFailures": 0, "unexpectedSuccesses": 0, "failfast": True},
@@ -1749,6 +1927,9 @@ class CarrierContracts(unittest.TestCase):
             ("writers", lambda b, w: w.update(outputWritersClosed=False)),
             ("status-close", lambda b, w: w.pop("statusWriterCloseGate")),
             ("body", lambda b, w: b.update(bodyPassed=False)),
+            ("audit-missing", lambda b, w: b.pop("auditDenial")),
+            ("audit-present", lambda b, w: b.update(auditDenial={"stage": "post-finish", "rule": "denied-ctypes"})),
+            ("audit-denied", lambda b, w: b.update(auditDenied=True)),
             ("post", lambda b, w: b["post"].update(cache=False)),
             ("failure", lambda b, w: b.update(firstFailure={"role": "body", "refusal": "first"})),
             ("skip", lambda b, w: b["contract"].update(skips=1)),
@@ -1772,7 +1953,8 @@ class CarrierContracts(unittest.TestCase):
         context, provider = C.workflow_context(environment()), runtime["bootstrap"]["python"]
         provider_pin = {"bytes": provider["size"], "sha256": provider["sha256"], "mode": "0o755"}
         receipt = {"sourceBinding": {"inert": "source"}, "pythonPycache": {"inert": "cache"}, "providerPython": provider_pin}
-        body = {"schema": C.CONTROLLER_CHECK_SCHEMA, **context, "passed": False,
+        body = {"schema": C.CONTROLLER_CHECK_SCHEMA, **context, "phase": "check-controller-runtime", "passed": False,
+                "bodyPassed": False, "auditDenied": False, "auditDenial": None,
                 "firstFailure": {"role": "body", "refusal": "inert-abi-first"}}
         waits = {"schema": C.CONTROLLER_CHECK_SCHEMA, "exitCode": 124}
         written = []
@@ -1820,6 +2002,99 @@ class CarrierContracts(unittest.TestCase):
         self.assertTrue(frame["providerDataPost"]["runtime"] and frame["providerDataPost"]["cache"])
         for private in ("mappingsBefore", "mappingsAfter", "sourceBinding", "originsAfter", "nativeAdmission"):
             self.assertNotIn(private, frame)
+
+    def test_controller_provider_diagnostics_bind_failed_original_phase_and_keep_every_post(self):
+        fixture = self.controller_fixture()
+        catalogue, runtime = fixture["catalogue"], fixture["runtime"]
+        provider = runtime["bootstrap"]["python"]
+        pin = {"bytes": provider["size"], "sha256": provider["sha256"], "mode": "0o755"}
+        receipt = {"sourceBinding": {"inert": "source"}, "pythonPycache": {"inert": "cache"}, "providerPython": pin}
+        mutations = (
+            ("post-first", lambda body: None),
+            ("unknown-label", lambda body: body["auditDenial"].update(rule="inert-sensitive-rule")),
+            ("missing-diagnostic", lambda body: body.pop("auditDenial")),
+            ("inconsistent-success", lambda body: body.update(passed=True)),
+            ("wrong-phase", lambda body: body.update(phase="inert-sensitive-phase")),
+            ("wrong-context", lambda body: body.update(sourceSha="b" * 40)),
+            ("wrong-schema", lambda body: body.update(schema="inert-sensitive-schema")),
+        )
+        for characterization in (False, True):
+            env = (characterization_environment(post=True) if characterization else
+                   {**environment(), "MRK_CONTROLLER_STAGE_OUTCOME": "success"})
+            env["MRK_CONTROLLER_CHECK_OUTCOME"] = "failure"
+            context = (C.controller_characterization_context(env, post=True) if characterization
+                       else C.workflow_context(env))
+            schema = C.CONTROLLER_CHARACTERIZATION_SCHEMA if characterization else C.CONTROLLER_CHECK_SCHEMA
+            phase = "characterize-controller-host" if characterization else "check-controller-runtime"
+            staging_name = ("controller_characterization_staging_receipt" if characterization
+                            else "controller_staging_receipt")
+            runtime_name = ("controller_characterization_runtime_begin" if characterization
+                            else "controller_runtime_begin")
+            host_name = "controller_characterization_post_host" if characterization else "controller_post_host"
+            entry = C.post_controller_characterization if characterization else C.post_controller_check
+            for name, mutate in mutations:
+                diagnostic = {"stage": "post-host", "rule": "denied-socket"}
+                body = {"schema": schema, **context, "phase": phase, "passed": False, "bodyPassed": True,
+                        "auditDenied": True, "auditDenial": copy.deepcopy(diagnostic),
+                        "firstFailure": {"role": "host", "refusal": "controller-check-effect-denied"},
+                        "privateOriginal": "inert-sensitive-original"}
+                mutate(body)
+                waits = {"schema": schema, **{key: context[key] for key in ("sourceSha", "runId", "attempt")},
+                         "originalWait": True, "exitCode": 1, "outputWritersClosed": True,
+                         "statusWriterCloseGate": "original-step-success-required"}
+                def read(path, limit, **kwargs):
+                    if str(path) == provider["path"]:
+                        return b"inert-provider", pin
+                    raw = (C.canonical(body) if path.name == "stdout" else b"" if path.name == "stderr"
+                           else C.canonical(waits))
+                    return raw, {"bytes": len(raw), "mode": "0o600"}
+                def finish(*, failed):
+                    self.assertTrue(failed)
+                    for key in ("controllerRuntime", "pythonPycache"):
+                        C._EVIDENCE[key] = {"phaseCustodyPostchecked": True, "phaseHandlesClosed": True}
+                outputs = []
+                with self.subTest(characterization=characterization, case=name), ExitStack() as stack:
+                    stack.enter_context(patch.object(C, "sys", SimpleNamespace(executable=provider["path"],
+                        version_info=(3, 12, 3), prefix="/usr", base_prefix="/usr")))
+                    stack.enter_context(patch.object(C.os, "environ", env))
+                    stack.enter_context(patch.multiple(C, _CONTROLLER_CHECK_STATE=None, _ORIGINALS_SETTLED=True,
+                        _CONTROLLER_SOURCE={"closed": True, "postchecked": True, "handlesClosed": True},
+                        _EVIDENCE=copy.deepcopy(C._EVIDENCE)))
+                    stack.enter_context(patch.object(C, "read", side_effect=read))
+                    stack.enter_context(patch.object(C, "controller_check_output_root"))
+                    stack.enter_context(patch.object(C, staging_name, return_value=receipt))
+                    source = stack.enter_context(patch.object(C, "controller_source_begin"))
+                    begin = stack.enter_context(patch.object(C, runtime_name))
+                    cache = stack.enter_context(patch.object(C, "pycache_begin"))
+                    host = stack.enter_context(patch.object(C, host_name))
+                    finish_call = stack.enter_context(patch.object(C, "phase_finish", side_effect=finish))
+                    documents = stack.enter_context(patch.object(C, "controller_characterization_documents"))
+                    stack.enter_context(patch.object(C, "write",
+                        side_effect=lambda path, raw, mode: outputs.append(raw)))
+                    stack.enter_context(patch("builtins.print"))
+                    self.assertEqual(entry(context, catalogue), 1)
+                for operation in (source, begin, cache, host, finish_call):
+                    operation.assert_called_once()
+                documents.assert_not_called()
+                self.assertEqual(len(outputs), 1)
+                self.assertNotIn(b"inert-sensitive", outputs[0])
+                frame = C.decode(outputs[0])
+                self.assertFalse(frame["passed"])
+                self.assertIsNone(frame["originalWaitAndWriters"])
+                self.assertTrue(frame["originalsSettled"] and all(frame["providerDataPost"].values()))
+                self.assertTrue(all(frame[key] is False for key in
+                    ("runtimeQualified", "compilerQualified", "nativeQualified", "desktopReady")))
+                self.assertEqual(frame["auditDenial"], diagnostic if name == "post-first" else None)
+                if name.startswith("wrong-"):
+                    self.assertEqual(frame["firstFailure"]["refusal"], "controller-check-private-body-binding")
+                else:
+                    self.assertEqual(frame["firstFailure"], {"role": "body", "refusal": "controller-check-effect-denied"})
+                codes = [row["refusal"] for row in frame["errors"]]
+                self.assertIn("controller-check-original-wait-or-writer-unproved", codes)
+                if name in ("unknown-label", "missing-diagnostic", "inconsistent-success"):
+                    self.assertIn("controller-check-audit-diagnostic-shape", codes)
+                if characterization:
+                    self.assertIsNone(frame["candidate"])
 
     def test_controller_check_workflow_orders_readonly_bind_check_post_and_native_gates(self):
         source = (ROOT / "desktop/tools/gnome_session_hosted.py").read_text()
