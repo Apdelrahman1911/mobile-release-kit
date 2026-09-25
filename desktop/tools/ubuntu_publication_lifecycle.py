@@ -1592,7 +1592,7 @@ REFUSAL = "Runtime publication refused: {}. Partial or published objects were no
 CORE_PINS = {
     "__init__.py": (144, "557bcb0cdcf7f7ef329f04f82cf388c746bb73eba34857b97782a8bcf2e596b2"),
     "owned_process.py": (7631, "430a596c5069b7acf248334d1f60fdd12ad8212cf9c2e9dfef717c9ba2179c02"),
-    "_command_process.py": (169926, "075fa6e9838017feb6a1716ab3a75074e3a65dffe8b217613aff7e87c0201f68"),
+    "_command_process.py": (170410, "803226dd3252d97763758a20222ec41bdfc3f9a75021bf6412d1c5590eb1e75b"),
     "_native_process.py": (62175, "70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4"),
     "cancellation.py": (29094, "1840232213e877e26c4cebd1434b3b851f9fa4c6961baa26eeaae9fa1442db78"),
     "_lifetime_evidence.py": (18536, "d64948f26984ed692030834221f0cfd93b85117da89b4860f8b69a6f7919e1b3"),
@@ -1727,6 +1727,20 @@ def record(path, limit=FILE_LIMIT, *, content=False):
 
 def read(path, limit=JSON_LIMIT):
     return record(path, limit, content=True)[1]
+
+
+def check_source_pins(source):
+    """Refuse stale source before compilation; never initialize a lifecycle."""
+    expected = {"src/mobile_release/" + name: pin for name, pin in CORE_PINS.items()}
+    expected["desktop/tools/conventional_runtime_data.py"] = DATA_PIN
+    for relative, (size, digest) in expected.items():
+        path = source / relative
+        try:
+            actual = record(path, size)
+            need(actual == {"path": str(path), "size": size, "sha256": digest}, "Source pin differs")
+        except (OSError, Refused):
+            # Fixed source names identify the defect without exposing raw errors.
+            raise Refused("Lifecycle source pin differs: " + relative) from None
 
 
 def copy_pinned(source, target, expected, mode=0o444):

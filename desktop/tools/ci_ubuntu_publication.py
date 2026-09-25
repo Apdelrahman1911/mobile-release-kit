@@ -2928,6 +2928,7 @@ def verify_installed_shell_compile():
         entry_sha = D.sha(os.environ.get("MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256"))
         D.need(D.file_record(source / "desktop/tools/ubuntu_publication_lifecycle.py", 1 << 20)["sha256"] == entry_sha,
                "Workflow reviewed shell lifecycle entry differs")
+        local("ubuntu_publication_lifecycle").check_source_pins(source)
         source_record = {"sourceSha": sha, "sourceTree": tree, "sourceInputs": source_inputs,
                          "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
                          "workflow": D.file_record(source / WORKFLOW, 128 << 10), "features": SHELL_FEATURES,
@@ -3141,6 +3142,7 @@ def verify(*, installed_compile=False):
         entry_sha = D.sha(os.environ.get("MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256"))
         D.need(D.file_record(source / "desktop/tools/ubuntu_publication_lifecycle.py", 1 << 20)["sha256"] == entry_sha,
                "Workflow reviewed lifecycle entry differs")
+        local("ubuntu_publication_lifecycle").check_source_pins(source)
         kernel = os.uname()
         metadata = {"sourceSha": sha, "sourceTree": tree, "workflow": D.file_record(source / WORKFLOW, 64 << 10),
                     "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
@@ -3337,6 +3339,7 @@ def verify_installed():
         entry_sha = D.sha(os.environ.get("MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256"))
         D.need(D.file_record(source / "desktop/tools/ubuntu_publication_lifecycle.py", 1 << 20)["sha256"] == entry_sha,
                "Workflow reviewed installed lifecycle entry differs")
+        local("ubuntu_publication_lifecycle").check_source_pins(source)
         library, packages, old_compiler, accepted = installed_u_inputs(work)
         candidate, compiler, graph, roster_sha, producer_attempt, candidate_artifact_id = installed_candidate(work, sha)
         D.need(elf_dependencies(D.read(Path(library["path"]), MAX_BINARY)) == old_compiler["nativeInputs"]["outputs"]["libtest"]["elf"],
@@ -4118,6 +4121,7 @@ def verify_installed_shell():
         entry_sha = D.sha(os.environ.get("MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256"))
         D.need(D.file_record(source / "desktop/tools/ubuntu_publication_lifecycle.py", 1 << 20)["sha256"] == entry_sha,
                "Workflow reviewed shell lifecycle entry differs")
+        local("ubuntu_publication_lifecycle").check_source_pins(source)
         library, packages, old_compiler, accepted = installed_u_inputs(work)
         binaries, compiler, native, roster_sha, producer_attempt, artifact_id = installed_shell_candidate(work, sha)
         D.need(elf_dependencies(D.read(Path(library["path"]), MAX_BINARY)) == old_compiler["nativeInputs"]["outputs"]["libtest"]["elf"],
