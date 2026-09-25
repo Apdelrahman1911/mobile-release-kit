@@ -1,7 +1,7 @@
 //! One retained finite native owner, separate from disposable passive queries.
 //!
-//! Installed Configuration Save, Linux workflow Apply and metadata Save have separate fixed
-//! profiles inside this SAME original owner and custody/settlement route.
+//! Installed Configuration Save, Linux workflow Apply, metadata Save and saved-version Save
+//! have separate fixed profiles inside this SAME original owner and custody/settlement route.
 //! General edit qualification stays closed; no Windows edit backend is admitted.
 use std::{collections::BTreeSet, future::{Future, pending}, path::PathBuf, pin::Pin, process::ExitStatus,
     sync::{Arc, Mutex, MutexGuard, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
@@ -26,7 +26,8 @@ use crate::{edit_protocol::{self as wire, Capability, Checkout, ChildFrame, Conf
 const NATIVE_EDIT_QUALIFIED: bool = false;
 const NATIVE_WORKFLOW_EDIT_QUALIFIED: bool = false;
 const NATIVE_METADATA_TEXT_EDIT_QUALIFIED: bool = false;
-// Distinct writer gate: no metadata fixture/profile can qualify these writes.
+// General/development writer gate stays closed; the installed-only selector
+// separately requires this domain's exact source-bound runtime profile.
 const NATIVE_RELEASE_VERSION_EDIT_QUALIFIED: bool = false;
 const ACTIVE: Duration = Duration::from_secs(30);
 const REVIEW: Duration = Duration::from_secs(15 * 60);
@@ -51,7 +52,7 @@ fn metadata_installed_selected(domain: EditDomain, profile_available: bool) -> b
     domain == EditDomain::MetadataText && profile_available
 }
 fn version_installed_selected(domain: EditDomain, profile_available: bool) -> bool {
-    domain == EditDomain::ReleaseVersion && profile_available && NATIVE_RELEASE_VERSION_EDIT_QUALIFIED
+    domain == EditDomain::ReleaseVersion && profile_available
 }
 fn installed_registration_matches(domain: EditDomain, registered: bool) -> bool {
     match domain {
@@ -2903,6 +2904,14 @@ pub(crate) fn assert_installed_metadata_owner_contract() {
 }
 
 #[cfg(test)]
+pub(crate) fn assert_installed_version_owner_contract() {
+    installed_configuration_data_tests::version_contract();
+    workflow_domain_tests::version_actions_and_exact_submitted_receipts_remain_in_the_same_original_domain_contract();
+    workflow_domain_tests::malformed_version_requests_retire_only_its_own_unsubmitted_editing_or_reviewing_projection_contract();
+    workflow_domain_tests::version_installed_selection_keeps_the_general_gate_closed();
+}
+
+#[cfg(test)]
 mod installed_configuration_data_tests {
     use super::*;
 
@@ -2932,6 +2941,18 @@ mod installed_configuration_data_tests {
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         metadata_adapter_cannot_borrow_or_close_another_domain();
     }
+    pub(super) fn version_contract() {
+        workflow_selection_and_exact_domain_equality_are_closed();
+        registered_edit_claim_and_bootstrap_domains_cannot_fall_back_to_configuration();
+        installed_configuration_claim_refuses_stop_late_inspection_loss_quit_and_wrong_original();
+        only_actual_returned_original_borrowers_permit_settlement_and_loss_never_qualifies();
+        no_child_after_an_attempt_or_consumed_claim_is_never_inferred_from_an_empty_slot();
+        installed_finality_requires_the_original_settlement_join_and_same_ledger_close();
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        version_adapter_cannot_borrow_or_close_another_domain();
+    }
+    #[test]
+    fn installed_version_owner_contract_is_inert() { assert_installed_version_owner_contract(); }
     #[test]
     fn installed_metadata_owner_contract_is_inert() { assert_installed_metadata_owner_contract(); }
     #[test]
@@ -2940,13 +2961,14 @@ mod installed_configuration_data_tests {
     fn installed_workflow_owner_contract_is_inert() { assert_installed_workflow_owner_contract(); }
 
     fn workflow_selection_and_exact_domain_equality_are_closed() {
-        assert!(!NATIVE_EDIT_QUALIFIED && !NATIVE_WORKFLOW_EDIT_QUALIFIED && !NATIVE_METADATA_TEXT_EDIT_QUALIFIED);
-        let domains = [EditDomain::Configuration, EditDomain::GitHubWorkflows, EditDomain::MetadataText];
+        assert!(!NATIVE_EDIT_QUALIFIED && !NATIVE_WORKFLOW_EDIT_QUALIFIED && !NATIVE_METADATA_TEXT_EDIT_QUALIFIED && !NATIVE_RELEASE_VERSION_EDIT_QUALIFIED);
+        let domains = [EditDomain::Configuration, EditDomain::GitHubWorkflows, EditDomain::MetadataText, EditDomain::ReleaseVersion];
         for domain in domains {
             for available in [false, true] {
                 assert_eq!(workflow_installed_selected(domain, available), domain == EditDomain::GitHubWorkflows && available);
                 assert_eq!(metadata_installed_selected(domain, available), domain == EditDomain::MetadataText && available);
                 assert_eq!(configuration_installed_selected(domain, available), domain == EditDomain::Configuration && available);
+                assert_eq!(version_installed_selected(domain, available), domain == EditDomain::ReleaseVersion && available);
             }
             for projection in domains { for slots in domains {
                 assert_eq!(installed_domains_match(domain, projection, slots),
@@ -2979,7 +3001,7 @@ mod installed_configuration_data_tests {
 
     fn registered_edit_claim_and_bootstrap_domains_cannot_fall_back_to_configuration() {
         for (domain, argument) in [(EditDomain::Configuration, None), (EditDomain::GitHubWorkflows, Some("github_workflows")),
-            (EditDomain::MetadataText, Some("metadata_text"))] {
+            (EditDomain::MetadataText, Some("metadata_text")), (EditDomain::ReleaseVersion, Some("release_version"))] {
             assert_eq!(installed_bootstrap_argument(domain), argument);
             assert!(installed_registration_matches(domain, true));
             assert_eq!(installed_registration_matches(domain, false), domain == EditDomain::Configuration);
@@ -3006,6 +3028,37 @@ mod installed_configuration_data_tests {
         assert!(config.prepare_once(EditDomain::MetadataText, Instant::now(), &stop).is_err());
         assert_eq!(config.settle_originals(EditDomain::MetadataText), CloseOutcome::Unknown);
         assert!(!config.settled(EditDomain::Configuration));
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn version_adapter_cannot_borrow_or_close_another_domain() {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-version-domain-must-not-be-opened"));
+        let (_sender, stop) = watch::channel(false);
+        for wrong in [EditDomain::Configuration, EditDomain::GitHubWorkflows, EditDomain::MetadataText] {
+            let mut slots = InstalledEditSlots::ReleaseVersion(ReleaseVersionRuntimeSlots::new());
+            assert_eq!(slots.domain(), EditDomain::ReleaseVersion);
+            assert!(slots.inspect_once(wrong, &runtime, Instant::now(), &stop).is_err());
+            assert!(slots.transfer_once(wrong).is_err() && slots.claim_once(wrong).is_err());
+            assert!(slots.prepare_once(wrong, Instant::now(), &stop).is_err());
+            assert!(!slots.no_child_effect(wrong) && !slots.settled(wrong));
+            assert!(slots.no_child_effect(EditDomain::ReleaseVersion)); // Only the original EMPTY slots.
+            assert_eq!(slots.settle_originals(wrong), CloseOutcome::Unknown);
+            assert!(!slots.settled(wrong) && !slots.settled(EditDomain::ReleaseVersion));
+        }
+        for mut slots in [
+            InstalledEditSlots::Configuration(ConfigurationRuntimeSlots::new()),
+            InstalledEditSlots::GitHubWorkflows(GitHubWorkflowRuntimeSlots::new()),
+            InstalledEditSlots::MetadataText(MetadataTextRuntimeSlots::new()),
+        ] {
+            let original = slots.domain();
+            assert!(slots.inspect_once(EditDomain::ReleaseVersion, &runtime, Instant::now(), &stop).is_err());
+            assert!(slots.transfer_once(EditDomain::ReleaseVersion).is_err() && slots.claim_once(EditDomain::ReleaseVersion).is_err());
+            assert!(slots.prepare_once(EditDomain::ReleaseVersion, Instant::now(), &stop).is_err());
+            assert!(!slots.no_child_effect(EditDomain::ReleaseVersion) && !slots.settled(EditDomain::ReleaseVersion));
+            assert!(slots.no_child_effect(original));
+            assert_eq!(slots.settle_originals(EditDomain::ReleaseVersion), CloseOutcome::Unknown);
+            assert!(!slots.settled(original));
+        }
     }
 
     fn installed_configuration_selection_never_opens_other_edit_domains_or_global_flags() {
@@ -3349,6 +3402,9 @@ mod workflow_domain_tests {
     }
     #[test]
     fn version_actions_and_exact_submitted_receipts_remain_in_the_same_original_domain() {
+        version_actions_and_exact_submitted_receipts_remain_in_the_same_original_domain_contract();
+    }
+    pub(super) fn version_actions_and_exact_submitted_receipts_remain_in_the_same_original_domain_contract() {
         for action in [version_wire::Action::Create,version_wire::Action::Replace,version_wire::Action::Preserve] {
             let mut original = version_projection(action);
             assert!(original.workflow_projection().is_err() && original.metadata_text_projection().is_err());
@@ -3378,6 +3434,9 @@ mod workflow_domain_tests {
     }
     #[test]
     fn malformed_version_requests_retire_only_its_own_unsubmitted_editing_or_reviewing_projection() {
+        malformed_version_requests_retire_only_its_own_unsubmitted_editing_or_reviewing_projection_contract();
+    }
+    pub(super) fn malformed_version_requests_retire_only_its_own_unsubmitted_editing_or_reviewing_projection_contract() {
         let mut original = version_projection(version_wire::Action::Replace);
         for domain in [EditDomain::Configuration,EditDomain::GitHubWorkflows,EditDomain::MetadataText,EditDomain::ReleaseVersion] {
             for phase in [Phase::Opening,Phase::Editing,Phase::Preparing,Phase::Reviewing,Phase::Applying,Phase::Finalizing,Phase::Final,Phase::Unknown] {
@@ -3393,14 +3452,32 @@ mod workflow_domain_tests {
         assert!(!release_version_request_retirable(EditDomain::ReleaseVersion,&original,GENERATION));
     }
     #[test]
-    fn version_writer_requires_both_its_separate_gate_and_a_new_source_bound_profile() {
+    fn version_writer_requires_its_own_installed_profile_without_opening_the_general_gate() {
+        version_installed_selection_keeps_the_general_gate_closed();
+    }
+    pub(super) fn version_installed_selection_keeps_the_general_gate_closed() {
         assert!(!NATIVE_RELEASE_VERSION_EDIT_QUALIFIED);
         for domain in [EditDomain::Configuration,EditDomain::GitHubWorkflows,EditDomain::MetadataText,EditDomain::ReleaseVersion] {
-            assert!(!version_installed_selected(domain,false)); assert!(!version_installed_selected(domain,true));
+            for available in [false,true] {
+                assert_eq!(version_installed_selected(domain,available),domain == EditDomain::ReleaseVersion && available);
+            }
+        }
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-version-selector-data-only"));
+        let selected = runtime.release_version_edit_profile_available();
+        assert_eq!(installed_edit_selected(EditDomain::ReleaseVersion,&runtime),selected);
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        {
+            let slots = InstalledEditSlots::new(EditDomain::ReleaseVersion,&runtime);
+            assert_eq!(slots.is_some(),selected);
+            if let Some(slots) = slots {
+                assert_eq!(slots.domain(),EditDomain::ReleaseVersion);
+                assert!(slots.no_child_effect(EditDomain::ReleaseVersion) && !slots.settled(EditDomain::ReleaseVersion));
+            }
         }
         assert!(!qualified(EditDomain::ReleaseVersion,false)); assert!(!qualified(EditDomain::ReleaseVersion,true));
         assert!(!installed_registration_matches(EditDomain::ReleaseVersion,false));
         assert!(installed_registration_matches(EditDomain::ReleaseVersion,true)); // Binding DATA, never runtime authority.
+        assert_eq!(installed_bootstrap_argument(EditDomain::ReleaseVersion),Some("release_version"));
         assert!(request_bytes(EditDomain::ReleaseVersion,SESSION,0,"open",json!({"root":"/inert/project"})).is_err());
         let mut version = version_projection(version_wire::Action::Replace);
         version.workflow = projection(false).workflow;

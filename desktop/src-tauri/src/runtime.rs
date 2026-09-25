@@ -276,15 +276,18 @@ impl MetadataTextInstalledProfile {
     }
 }
 
-// This writer changed the core/bootstrap. Old A and another domain's positive
-// evidence MUST NOT select it. Populate this closed binding only after a new
-// source-bound core ZIP/manifest and distinct version-writer review.
+// This writer binds exactly the admitted current core/bootstrap payload. Old A
+// and another domain's positive evidence MUST NOT select it. Only the normal
+// installed version selector below mints this fixed DATA profile.
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 pub(crate) struct ReleaseVersionInstalledProfile { _private: () }
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 impl ReleaseVersionInstalledProfile {
     const TARGET: &'static str = "x86_64-unknown-linux-gnu";
-    const SOURCE_BINDING: Option<(&'static str, &'static str)> = None;
+    const SOURCE_BINDING: Option<(&'static str, &'static str)> = Some((
+        "556b2ea59b4b3e9abb9d04a3d263e0fd420e8c44b3f71c478b1f71bdd21ec417",
+        "860d1cee0072730a487ac8e632206c69e3ba676cab849b144a61755c4b84e41e",
+    ));
     fn bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
         Self::SOURCE_BINDING.is_some_and(|(approved_manifest, approved_protocol)|
             target == Self::TARGET && manifest == Some(approved_manifest) && protocol == Some(approved_protocol))
@@ -302,7 +305,7 @@ impl ReleaseVersionInstalledProfile {
 }
 
 // Fixed A selection DATA, not another owner's execution permission. The two
-// command owners keep their independent, initially closed qualification gates.
+// command owners retain their independent, domain-local qualification gates.
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 pub(crate) struct EnvironmentDiagnosticsInstalledProfile { _private: () }
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1233,6 +1236,13 @@ pub(crate) fn assert_installed_metadata_profile_contract() {
     tests::installed_metadata_data_is_fixed_and_stopped_inspection_owes_original_settlement();
 }
 
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+pub(crate) fn assert_installed_version_profile_contract() {
+    tests::version_candidate_bindings_are_exactly_the_current_payload();
+    tests::installed_version_data_is_fixed_and_stopped_inspection_owes_original_settlement();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1454,24 +1464,81 @@ mod tests {
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     #[test]
-    fn version_profile_refuses_old_a_and_every_binding_before_inspection() {
-        assert!(ReleaseVersionInstalledProfile::SOURCE_BINDING.is_none());
-        let (target,manifest,protocol) = (PassiveInstalledProfile::TARGET,PassiveInstalledProfile::MANIFEST,PassiveInstalledProfile::PROTOCOL);
-        let other = "0".repeat(64);
-        for (target,manifest,protocol) in [
-            (target,Some(manifest),Some(protocol)), (target,None,None),
-            (target,Some(other.as_str()),Some(protocol)), (target,Some(manifest),Some(other.as_str())),
-            ("aarch64-unknown-linux-gnu",Some(manifest),Some(protocol)),
-        ] { assert!(!ReleaseVersionInstalledProfile::bindings_match(target,manifest,protocol)); }
-        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-version-source-data-only"));
+    fn version_candidate_bindings_data_contract() { version_candidate_bindings_are_exactly_the_current_payload(); }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(super) fn version_candidate_bindings_are_exactly_the_current_payload() {
+        let (target, manifest, protocol) = ("x86_64-unknown-linux-gnu",
+            "556b2ea59b4b3e9abb9d04a3d263e0fd420e8c44b3f71c478b1f71bdd21ec417",
+            "860d1cee0072730a487ac8e632206c69e3ba676cab849b144a61755c4b84e41e");
+        assert_eq!(ReleaseVersionInstalledProfile::TARGET, target);
+        assert_eq!(ReleaseVersionInstalledProfile::SOURCE_BINDING, Some((manifest, protocol)));
+        assert!(ReleaseVersionInstalledProfile::bindings_match(target, Some(manifest), Some(protocol)));
+        let wrong = "0".repeat(64);
+        for (target, manifest, protocol) in [
+            (target, None, None), (target, None, Some(protocol)), (target, Some(manifest), None),
+            (target, Some("e3375ff140d69df54b2445f756711e0245d397ba6ded76e8559732ec2e4e3801"), Some(protocol)),
+            (target, Some("a2297f8c43ea5469bbe4c56f51ebd61fcb127872d5cc72bee8d3cc75a5f8b1d6"), Some(protocol)),
+            (target, Some(wrong.as_str()), Some(protocol)), (target, Some(manifest), Some(wrong.as_str())),
+            ("aarch64-unknown-linux-gnu", Some(manifest), Some(protocol)),
+            ("x86_64-pc-windows-msvc", Some(manifest), Some(protocol)),
+            ("aarch64-apple-darwin", Some(manifest), Some(protocol)),
+        ] { assert!(!ReleaseVersionInstalledProfile::bindings_match(target, manifest, protocol)); }
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"))))]
+    #[test]
+    fn installed_version_selector_is_closed_outside_the_normal_linux_shell() {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-version-path-must-not-be-opened"));
         assert!(!runtime.release_version_edit_profile_available());
-        assert!(runtime.release_version_installed_profile().is_err());
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        {
+            let mut slots = crate::installed_runtime::ReleaseVersionRuntimeSlots::new();
+            let (_sender, stop) = tokio::sync::watch::channel(true);
+            assert!(runtime.release_version_installed_profile().is_err());
+            assert!(runtime.resolve_release_version_installed(&mut slots, Instant::now(), &stop).is_err());
+            assert!(slots.never_started() && slots.no_child_effect() && !slots.settled() && slots.capability().is_err());
+        }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    #[test]
+    fn installed_version_profile_contract_is_inert() { assert_installed_version_profile_contract(); }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    pub(super) fn installed_version_data_is_fixed_and_stopped_inspection_owes_original_settlement() {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-version-source-data-only"));
+        let profile = runtime.release_version_installed_profile();
+        assert_eq!(runtime.release_version_edit_profile_available(), profile.is_ok());
+        assert_eq!(profile.is_ok(), ReleaseVersionInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR));
         let mut slots = crate::installed_runtime::ReleaseVersionRuntimeSlots::new();
-        let (_sender,stop) = tokio::sync::watch::channel(true);
-        // None binding refuses before slot inspection, uname, file IO or a child.
-        assert!(runtime.resolve_release_version_installed(&mut slots,Instant::now(),&stop).is_err());
-        assert!(slots.never_started() && slots.no_child_effect() && !slots.settled());
-        assert!(slots.capability().is_err());
+        let (_sender, stop) = tokio::sync::watch::channel(true);
+        if let Ok(profile) = profile {
+            let data = profile.selection().unwrap();
+            let (manifest, _) = ReleaseVersionInstalledProfile::SOURCE_BINDING.unwrap();
+            let root = PathBuf::from("/var/lib/mobile-release-kit/versions").join(ReleaseVersionInstalledProfile::TARGET).join(manifest);
+            assert_eq!(data.python, root.join("python/bin/python3"));
+            assert_eq!(data.bootstrap, root.join("config_edit_bootstrap.py"));
+            assert_eq!(data.core, root.join("core.zip")); assert_eq!(data.cwd, root);
+            assert!(profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure"));
+            for release in [b"6.8.0-91-generic".as_slice(), b"6.17.0-1021-azure", b"6.17.0-1022-azure-custom"] {
+                assert!(!profile.accepts_platform(b"Linux", b"x86_64", release));
+            }
+            assert!(!profile.accepts_platform(b"Linux", b"aarch64", b"6.17.0-1022-azure"));
+            assert!(!profile.accepts_platform(b"FreeBSD", b"x86_64", b"6.17.0-1022-azure"));
+            // Sticky STOP precedes uname/open: these are the original empty DATA
+            // slots, not a native witness, transferred ledger or child capability.
+            assert!(runtime.resolve_release_version_installed(&mut slots, Instant::now() + std::time::Duration::from_secs(1), &stop).is_err());
+            assert!(!slots.never_started() && !slots.settled() && slots.no_child_effect());
+            assert!(slots.transfer_once().is_err() && slots.capability().is_err());
+            assert_eq!(slots.settle_originals(), crate::installed_runtime::CloseOutcome::Settled);
+            assert!(slots.settled() && slots.capability().is_err());
+        } else {
+            // Missing/stale compiled anchors refuse before even empty-slot inspection.
+            assert!(runtime.resolve_release_version_installed(&mut slots, Instant::now(), &stop).is_err());
+            assert!(slots.never_started() && slots.no_child_effect() && !slots.settled() && slots.capability().is_err());
+        }
+        assert!(runtime.resolve(Instant::now()).is_err());
+        assert!(runtime.resolve_edit(Instant::now()).is_err());
     }
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]

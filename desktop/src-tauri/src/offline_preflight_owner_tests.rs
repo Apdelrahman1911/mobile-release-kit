@@ -46,14 +46,38 @@ fn offline_context(owner: &Session) -> &wire::Context {
 }
 
 pub(crate) fn qualification_is_closed_without_a_runtime_or_another_owners_permit() {
-    let owner = owner(); assert!(!owner.original_for_test().inner.qualified());
+    let owner = owner();
+    let selected = cfg!(feature = "custom-protocol") && owner.original_for_test().inner.runtime.offline_preflight_installed_profile_available();
+    assert_eq!(owner.original_for_test().inner.qualified(), selected);
+    assert_eq!(owner.original_for_test().inner.lock().revision, 0);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    assert!(owner.original_for_test().inner.observation.lock().unwrap().is_none());
     let status = owner.status(wire::Availability::Available).unwrap();
-    assert!(matches!(status.availability, wire::Availability::RuntimeUnqualified | wire::Availability::UnsupportedPlatform));
+    assert_eq!(status.availability, if wire::Profile::current().is_none() { wire::Availability::UnsupportedPlatform }
+        else if selected { wire::Availability::Available } else { wire::Availability::RuntimeUnqualified });
     assert!(status.operation.is_none()); assert!(owner.can_exit());
     let input = wire::prepare(&json!({"projectId":"inert-project","draftRevision":2,"baselineGeneration":3,
         "savedConfig":{"bytes":123,"sha256":"c".repeat(64)}})).unwrap();
-    assert!(owner.prepare(input, 1, project(), wire::Availability::Available).is_err());
+    let prepared = owner.prepare(input, 1, project(), wire::Availability::Available);
+    if selected {
+        assert_eq!(status.status_revision, 1);
+        // Ordinary Status/Prepare need no observation token. The synthetic
+        // project is only comparison DATA: no Start, runtime inspect or child.
+        let prepared = prepared.unwrap();
+        assert_eq!((prepared.status_revision, prepared.availability), (3, wire::Availability::Busy));
+        let operation = prepared.operation.unwrap();
+        assert_eq!(operation.phase, wire::Phase::AwaitingConsent); assert!(operation.intent_usable);
+        assert!(owner.original_for_test().inner.lock().prepared.is_some());
+        assert!(owner.original_for_test().inner.lock().active.is_none());
+        let cancelled = owner.cancel(&operation.operation_id, &operation.owner_generation, wire::Availability::Available).unwrap();
+        assert_eq!((cancelled.status_revision, cancelled.availability), (5, wire::Availability::Available));
+        let retired = cancelled.operation.unwrap();
+        assert_eq!((retired.phase, retired.outcome, retired.reason),
+            (wire::Phase::Terminal, Some(wire::Outcome::Cancelled), wire::Reason::Cancelled));
+        assert!(!retired.intent_usable);
+    } else { assert!(prepared.is_err()); }
     assert!(owner.original_for_test().inner.lock().prepared.is_none()); assert!(owner.original_for_test().inner.lock().active.is_none());
+    assert!(owner.can_exit());
 }
 
 pub(crate) fn no_owner_startup_and_unsupported_status_do_not_claim_document_loss() {
@@ -62,7 +86,9 @@ pub(crate) fn no_owner_startup_and_unsupported_status_do_not_claim_document_loss
     assert!(initial.operation.is_none());
     assert_eq!(initial.availability, if wire::Profile::current().is_some() { wire::Availability::Busy } else { wire::Availability::UnsupportedPlatform });
     let bound = owner.status(wire::Availability::Available).unwrap();
-    assert_eq!(bound.availability, if wire::Profile::current().is_some() { wire::Availability::RuntimeUnqualified } else { wire::Availability::UnsupportedPlatform });
+    let selected = cfg!(feature = "custom-protocol") && owner.original_for_test().inner.runtime.offline_preflight_installed_profile_available();
+    assert_eq!(bound.availability, if wire::Profile::current().is_none() { wire::Availability::UnsupportedPlatform }
+        else if selected { wire::Availability::Available } else { wire::Availability::RuntimeUnqualified });
     assert!(bound.operation.is_none());
     if initial.availability != bound.availability { assert!(bound.status_revision > initial.status_revision); }
     owner.document_lost();
@@ -95,12 +121,14 @@ pub(crate) fn intent_expires_with_a_new_revision_and_cancel_never_creates_an_own
 
 pub(crate) fn start_burns_before_unavailability_and_foreign_start_grants_nothing() {
     let owner = owner(); prepared(&owner, Instant::now() + INTENT);
-    assert!(owner.start(start_input(&"f".repeat(32)), Instant::now(), Some((1, project())), wire::Availability::Available).is_err());
+    // A supplied closed gate keeps this synthetic identity out of installed
+    // startup even when the ordinary build profile is selected.
+    assert!(owner.start(start_input(&"f".repeat(32)), Instant::now(), Some((1, project())), wire::Availability::RuntimeUnqualified).is_err());
     assert!(owner.original_for_test().inner.lock().prepared.is_some());
-    let status = owner.start(start_input(&"a".repeat(32)), Instant::now(), Some((1, project())), wire::Availability::Available).unwrap().release();
+    let status = owner.start(start_input(&"a".repeat(32)), Instant::now(), Some((1, project())), wire::Availability::RuntimeUnqualified).unwrap().release();
     assert!(owner.original_for_test().inner.lock().prepared.is_none()); assert!(owner.original_for_test().inner.lock().active.is_none());
     assert_eq!(status.operation.unwrap().outcome, Some(wire::Outcome::Refused));
-    assert!(owner.start(start_input(&"a".repeat(32)), Instant::now(), Some((1, project())), wire::Availability::Available).is_err());
+    assert!(owner.start(start_input(&"a".repeat(32)), Instant::now(), Some((1, project())), wire::Availability::RuntimeUnqualified).is_err());
 }
 
 pub(crate) fn whole_run_endpoints_and_first_stop_never_renew() {

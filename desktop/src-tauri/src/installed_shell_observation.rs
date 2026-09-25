@@ -8,12 +8,12 @@ use sha2::{Digest, Sha256};
 use tauri::Manager;
 use crate::{asset_session::{InstalledEvidenceWitness, InstalledProjectWitness, InstalledSessionSnapshot, InstalledSessionFailure}, bridge::{AppInfo, Project},
     candidate_evidence_protocol as evidence, credential_assessment::InstalledAssessmentFailure,
-    edit_owner::{EditOwner, InstalledConfigFinality, InstalledWorkflowFinality, InstalledMetadataFinality},
-    github_workflow_edit_protocol as workflow, metadata_text_edit_protocol as metadata,
+    edit_owner::{EditOwner, InstalledConfigFinality, InstalledWorkflowFinality, InstalledMetadataFinality, InstalledVersionFinality},
+    github_workflow_edit_protocol as workflow, metadata_text_edit_protocol as metadata, release_version_edit_protocol as version,
     edit_protocol::{self as edit, ConfigEditStatus, EditProjection}, error::BridgeError, supervisor::{HeldAppInfo, Supervisor}};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Case { Positive, Outstanding, ProjectPaths, WorkflowApply, Session(SessionCase), MetadataSave, Commands(commands::Case), SettledFailure }
+enum Case { Positive, Outstanding, ProjectPaths, WorkflowApply, Session(SessionCase), MetadataSave, VersionSave, Commands(commands::Case), SettledFailure }
 #[path = "installed_tools_observation.rs"]
 pub(crate) mod commands;
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -49,7 +49,7 @@ enum Step {
     EnterTitle, EnterShortDescription, EnterFullDescription, ReadMetadataInputs, ValidateMetadata, ReadMetadataValidation,
     SavedSettings, ReadSavedDraft, Artifacts, ReadEvidenceEmpty, ChooseEvidenceCancel, CancelEvidence, EvidenceCancelled, ReadEvidenceCancelled,
     ChooseEvidenceSelect, SetEvidence, SelectEvidence, EvidenceSelected, ReadEvidenceSelected, InspectEvidence, EvidenceObserved, ReadEvidenceObserved,
-    CandidateSettings, ReadCandidateDraft, PrepareNoop, ReadNoopReview, Close, Quit, Exit, Paths(PathStep), Workflow(WorkflowStep), Session(SessionStep), MetadataSave(MetadataStep), Commands(commands::Step),
+    CandidateSettings, ReadCandidateDraft, PrepareNoop, ReadNoopReview, Close, Quit, Exit, Paths(PathStep), Workflow(WorkflowStep), Session(SessionStep), MetadataSave(MetadataStep), VersionSave(VersionStep), Commands(commands::Step),
 }
 impl Step {
     fn failure_line(self) -> &'static [u8] {
@@ -140,9 +140,45 @@ impl Step {
             Self::Workflow(step) => step.failure_line(),
             Self::Session(step) => step.failure_line(),
             Self::MetadataSave(step) => step.failure_line(),
+            Self::VersionSave(step) => step.failure_line(),
             Self::Commands(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=ToolsOffline\n",
         }
     }
+}
+
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VersionStep {
+    Open(u8), ReadOpen(u8), Name(u8), Build(u8), ReadInputs(u8), Review(u8), ReadReview(u8),
+    Confirm(u8), ReadConfirmation(u8), Check(u8), ReadChecked(u8), Type(u8), ReadTyped(u8),
+    Apply(u8), ReadSaved(u8), Readback(u8), ReadReadback(u8),
+}
+impl VersionStep {
+    fn index(self) -> usize { usize::from(match self {
+        Self::Open(i) | Self::ReadOpen(i) | Self::Name(i) | Self::Build(i) | Self::ReadInputs(i)
+        | Self::Review(i) | Self::ReadReview(i) | Self::Confirm(i) | Self::ReadConfirmation(i)
+        | Self::Check(i) | Self::ReadChecked(i) | Self::Type(i) | Self::ReadTyped(i)
+        | Self::Apply(i) | Self::ReadSaved(i) | Self::Readback(i) | Self::ReadReadback(i) => i,
+    }) }
+    fn failure_line(self) -> &'static [u8] { match self {
+        Self::Open(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionOpen\n",
+        Self::ReadOpen(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionReadOpen\n",
+        Self::Name(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionName\n",
+        Self::Build(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionBuild\n",
+        Self::ReadInputs(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionReadInputs\n",
+        Self::Review(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionReview\n",
+        Self::ReadReview(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionReadReview\n",
+        Self::Confirm(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionConfirm\n",
+        Self::ReadConfirmation(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionReadConfirmation\n",
+        Self::Check(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionCheck\n",
+        Self::ReadChecked(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionReadChecked\n",
+        Self::Type(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionType\n",
+        Self::ReadTyped(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionReadTyped\n",
+        Self::Apply(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionApply\n",
+        Self::ReadSaved(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionReadSaved\n",
+        Self::Readback(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionReadback\n",
+        Self::ReadReadback(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionReadReadback\n",
+    } }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -373,7 +409,7 @@ impl SessionRejection {
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum SessionWait { NotSampled, RequestNotSeen, ReplyPending, OwnerUnsettled, PhaseNotReady, DisplayMismatch, ControlsMismatch,
-    GtkDialogAbsent, GtkActionInsensitive, GtkSelectionPending }
+    GtkDialogAbsent, GtkActionInsensitive, GtkSelectionAbsent, GtkSelectionDifferent }
 impl SessionWait {
     fn token(self) -> &'static [u8] {
         match self {
@@ -386,21 +422,73 @@ impl SessionWait {
             Self::ControlsMismatch => b"rendered-control-mismatch",
             Self::GtkDialogAbsent => b"gtk-dialog-absent",
             Self::GtkActionInsensitive => b"gtk-action-insensitive",
-            Self::GtkSelectionPending => b"gtk-selection-pending",
+            Self::GtkSelectionAbsent => b"gtk-selection-absent",
+            Self::GtkSelectionDifferent => b"gtk-selection-different",
         }
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct SessionDiagnostic {
     step: SessionStep, evaluations: u16, rejection: SessionRejection, wait: SessionWait, first_failure: InstalledSessionFailure,
-    assessment: InstalledAssessmentFailure,
+    assessment: InstalledAssessmentFailure, gtk_callbacks: SessionGtkCallbacks,
 }
 impl SessionDiagnostic {
     fn sample(step: Step, evaluations: u16, previous: Option<Self>) -> Option<Self> {
         let Step::Session(step) = step else { return None; };
         Some(Self { step, evaluations, rejection: SessionRejection::NotRecorded,
             wait: previous.filter(|old| old.step == step).map_or(SessionWait::NotSampled, |old| old.wait),
-            first_failure: InstalledSessionFailure::not_recorded(), assessment: InstalledAssessmentFailure::none() })
+            first_failure: InstalledSessionFailure::not_recorded(), assessment: InstalledAssessmentFailure::none(),
+            gtk_callbacks: previous.filter(|old| old.step == step)
+                .map_or_else(|| SessionGtkCallbacks::initial(step), |old| old.gtk_callbacks) })
+    }
+}
+
+// Only authenticated original helper notifications for one exact role/index.
+// Reserved is pending admission, not dispatch success or callback-entry proof;
+// returned is the helper notification, not closure exit or owner settlement.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SessionGtkReturns { None, One, Multiple }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SessionGtkPhase { Idle, Reserved, WaitObserved }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SessionGtkCallbacks { NotApplicable, Active { returns: SessionGtkReturns, phase: SessionGtkPhase } }
+impl SessionGtkCallbacks {
+    fn initial(step: SessionStep) -> Self {
+        if matches!(step, SessionStep::SetFile(_) | SessionStep::ActivateFile(_)) {
+            Self::Active { returns: SessionGtkReturns::None, phase: SessionGtkPhase::Idle }
+        } else { Self::NotApplicable }
+    }
+    fn matches_step(self, step: SessionStep) -> bool {
+        matches!(step, SessionStep::SetFile(_) | SessionStep::ActivateFile(_)) != matches!(self, Self::NotApplicable)
+    }
+    fn reserved(&mut self) {
+        if let Self::Active { phase, .. } = self { *phase = SessionGtkPhase::Reserved; }
+    }
+    fn wait_observed(&mut self) {
+        if let Self::Active { phase, .. } = self { *phase = SessionGtkPhase::WaitObserved; }
+    }
+    fn returned(&mut self) {
+        if let Self::Active { returns, phase } = self {
+            *returns = match *returns { SessionGtkReturns::None => SessionGtkReturns::One,
+                SessionGtkReturns::One | SessionGtkReturns::Multiple => SessionGtkReturns::Multiple };
+            *phase = SessionGtkPhase::Idle;
+        }
+    }
+    fn token(self) -> &'static [u8] {
+        use SessionGtkReturns as R;
+        use SessionGtkPhase as P;
+        match self {
+            Self::NotApplicable => b"na",
+            Self::Active { returns:R::None, phase:P::Idle } => b"0i",
+            Self::Active { returns:R::None, phase:P::Reserved } => b"0p",
+            Self::Active { returns:R::None, phase:P::WaitObserved } => b"0w",
+            Self::Active { returns:R::One, phase:P::Idle } => b"1i",
+            Self::Active { returns:R::One, phase:P::Reserved } => b"1p",
+            Self::Active { returns:R::One, phase:P::WaitObserved } => b"1w",
+            Self::Active { returns:R::Multiple, phase:P::Idle } => b"mi",
+            Self::Active { returns:R::Multiple, phase:P::Reserved } => b"mp",
+            Self::Active { returns:R::Multiple, phase:P::WaitObserved } => b"mw",
+        }
     }
 }
 
@@ -809,7 +897,7 @@ fn assert_failure_quit_contract() {
     let mut progress = BootstrapProgress::Advanced;
     let failed = AtomicBool::new(false);
     let first = SessionDiagnostic { step, evaluations: 25, rejection: SessionRejection::ReplyAssessmentUnavailable,
-        wait: SessionWait::ReplyPending, first_failure: InstalledSessionFailure::not_recorded(), assessment: InstalledAssessmentFailure::none() };
+        wait: SessionWait::ReplyPending, first_failure: InstalledSessionFailure::not_recorded(), assessment: InstalledAssessmentFailure::none(), gtk_callbacks:SessionGtkCallbacks::NotApplicable };
     let mut diagnostic = None;
     latch_session_diagnostic(&failed, &mut diagnostic, first);
     let frame = failure_pair(trace, progress, diagnostic, None);
@@ -1075,6 +1163,7 @@ fn failure_sink(case: Case) -> Option<rustix::fd::OwnedFd> {
         Case::Session(SessionCase::Loss) => "shell-session-loss-failure.labels",
         Case::Session(SessionCase::Deadline) => "shell-session-deadline-failure.labels",
         Case::MetadataSave => "shell-metadata-save-failure.labels",
+        Case::VersionSave => "shell-version-save-failure.labels",
         Case::Commands(case) => case.failure_leaf(),
         Case::SettledFailure => "shell-settled-failure-failure.labels",
     };
@@ -1092,9 +1181,9 @@ fn failure_sink(case: Case) -> Option<rustix::fd::OwnedFd> {
 }
 
 const FAILURE_PAIR_LIMIT: usize = 512;
-// Existing conservative v4 492B plus the 3B Unknown prefix and 14B maximum.
+// v6 keeps every v5 field: eval saves 7B, ;g= plus its closed token adds 5B.
 // Never omit/truncate a field to fit the unchanged 512B sink.
-const SESSION_FAILURE_FRAME_BOUND: usize = 509;
+const SESSION_FAILURE_FRAME_BOUND: usize = 507;
 // At most 174B of existing lines plus a 77B closed prefix, within the same sink.
 const PATH_FAILURE_FRAME_BOUND: usize = 256;
 fn failure_pair(trace: (Step, Boundary), progress: BootstrapProgress, session: Option<SessionDiagnostic>,
@@ -1133,12 +1222,15 @@ fn failure_pair(trace: (Step, Boundary), progress: BootstrapProgress, session: O
     match (trace.0, session) {
         (Step::Session(step), Some(diagnostic)) if diagnostic.step == step => {
             if diagnostic.evaluations > 128 || step.recipe_index().is_some_and(|index| index >= 64)
-                || diagnostic.rejection == SessionRejection::EvaluationBudget && diagnostic.evaluations != 128 { return None; }
-            append(&mut bytes, &mut length, b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v5;index=")?;
+                || diagnostic.rejection == SessionRejection::EvaluationBudget && diagnostic.evaluations != 128
+                || !diagnostic.gtk_callbacks.matches_step(step)
+                || matches!(diagnostic.wait, SessionWait::GtkSelectionAbsent | SessionWait::GtkSelectionDifferent)
+                    && !matches!(step, SessionStep::ActivateFile(_)) { return None; }
+            append(&mut bytes, &mut length, b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v6;index=")?;
             if let Some(index) = step.recipe_index() {
                 let (digits, begin) = decimal(u16::from(index))?; append(&mut bytes, &mut length, &digits[begin..])?;
             } else { append(&mut bytes, &mut length, b"none")?; }
-            append(&mut bytes, &mut length, b";evaluations=")?;
+            append(&mut bytes, &mut length, b";eval=")?;
             let (digits, begin) = decimal(diagnostic.evaluations)?; append(&mut bytes, &mut length, &digits[begin..])?;
             append(&mut bytes, &mut length, b";reject=")?;
             append(&mut bytes, &mut length, diagnostic.rejection.token())?;
@@ -1166,6 +1258,8 @@ fn failure_pair(trace: (Step, Boundary), progress: BootstrapProgress, session: O
             append(&mut bytes, &mut length, admission)?;
             append(&mut bytes, &mut length, b";u=")?;
             append(&mut bytes, &mut length, diagnostic.first_failure.unknown_boundary_token())?;
+            append(&mut bytes, &mut length, b";g=")?;
+            append(&mut bytes, &mut length, diagnostic.gtk_callbacks.token())?;
             append(&mut bytes, &mut length, b"\n")?;
             if length > SESSION_FAILURE_FRAME_BOUND { return None; }
         },
@@ -1212,31 +1306,31 @@ fn assert_failure_pair_contract() {
     }
     let step = SessionStep::Read(63,SA::Prepare("android-keystore","save"));
     let trace = (Step::Session(step),Boundary::Settlement);
-    let first = SessionDiagnostic { step, evaluations:128, rejection:SessionRejection::EvaluationBudget, wait:SessionWait::DisplayMismatch, first_failure:InstalledSessionFailure::not_recorded(), assessment:InstalledAssessmentFailure::none() };
+    let first = SessionDiagnostic { step, evaluations:128, rejection:SessionRejection::EvaluationBudget, wait:SessionWait::DisplayMismatch, first_failure:InstalledSessionFailure::not_recorded(), assessment:InstalledAssessmentFailure::none(), gtk_callbacks:SessionGtkCallbacks::NotApplicable };
     let expected = [step.failure_line(), Boundary::Settlement.failure_line(), BootstrapProgress::Advanced.failure_line(),
-        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v5;index=63;evaluations=128;reject=evaluation-budget;wait=rendered-display-mismatch;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na;u=na\n"].concat();
+        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v6;index=63;eval=128;reject=evaluation-budget;wait=rendered-display-mismatch;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na;u=na;g=na\n"].concat();
     assert!(failure_pair(trace,BootstrapProgress::Advanced,Some(first),None).is_some_and(|(bytes,length)|
         length <= FAILURE_PAIR_LIMIT && bytes.get(..length) == Some(expected.as_slice())));
     let longest = SessionDiagnostic { step:SessionStep::QuitPreserved,evaluations:128,
-        rejection:SessionRejection::UnavailableScript,wait:SessionWait::ControlsMismatch, first_failure:InstalledSessionFailure::not_recorded(), assessment:InstalledAssessmentFailure::none() };
+        rejection:SessionRejection::UnavailableScript,wait:SessionWait::ControlsMismatch, first_failure:InstalledSessionFailure::not_recorded(), assessment:InstalledAssessmentFailure::none(), gtk_callbacks:SessionGtkCallbacks::NotApplicable };
     let expected = [longest.step.failure_line(),Boundary::Settlement.failure_line(),BootstrapProgress::AppInfoReturnedBeforeHold.failure_line(),
-        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v5;index=none;evaluations=128;reject=unavailable-projection-script;wait=rendered-control-mismatch;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na;u=na\n"].concat();
+        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v6;index=none;eval=128;reject=unavailable-projection-script;wait=rendered-control-mismatch;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na;u=na;g=na\n"].concat();
     assert!(failure_pair((Step::Session(longest.step),Boundary::Settlement),BootstrapProgress::AppInfoReturnedBeforeHold,Some(longest),None)
         .is_some_and(|(bytes,length)|length <= FAILURE_PAIR_LIMIT && bytes.get(..length) == Some(expected.as_slice())));
     let bound = SessionDiagnostic { first_failure:InstalledSessionFailure::contract_sample(), ..longest };
     let expected = [bound.step.failure_line(),Boundary::Settlement.failure_line(),BootstrapProgress::AppInfoReturnedBeforeHold.failure_line(),
-        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v5;index=none;evaluations=128;reject=unavailable-projection-script;wait=rendered-control-mismatch;o=supervisor-disabled;d=none;a=bound;q=unavailable.spawn-other.xf;w=settle-unknown;ao=none;ac=na;ax=none;af=na;u=settlement\n"].concat();
+        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v6;index=none;eval=128;reject=unavailable-projection-script;wait=rendered-control-mismatch;o=supervisor-disabled;d=none;a=bound;q=unavailable.spawn-other.xf;w=settle-unknown;ao=none;ac=na;ax=none;af=na;u=settlement;g=na\n"].concat();
     assert!(failure_pair((Step::Session(bound.step),Boundary::Settlement),BootstrapProgress::AppInfoReturnedBeforeHold,Some(bound),None)
         .is_some_and(|(bytes,length)|length <= SESSION_FAILURE_FRAME_BOUND && bytes.get(..length) == Some(expected.as_slice())
             && bytes[..length].is_ascii() && bytes[..length].iter().filter(|byte| **byte == b'\n').count() == 4));
     let (origin_bound, class_bound, cause_bound, admission_bound) = InstalledAssessmentFailure::token_bounds();
     assert!(origin_bound <= 7 && class_bound <= 24 && cause_bound <= 11 && admission_bound <= 22);
-    assert_eq!(311 + 5 * 3 + 19 + 15 + 12 + 26 + 14 + 3 * 4 + 7 + 24 + 11 + 4 + 22 + 3 + 14, SESSION_FAILURE_FRAME_BOUND);
-    assert_eq!(FAILURE_PAIR_LIMIT - SESSION_FAILURE_FRAME_BOUND, 3);
+    assert_eq!(311 + 5 * 3 + 19 + 15 + 12 + 26 + 14 + 3 * 4 + 7 + 24 + 11 + 4 + 22 + 3 + 14 - 7 + 5, SESSION_FAILURE_FRAME_BOUND);
+    assert_eq!(FAILURE_PAIR_LIMIT - SESSION_FAILURE_FRAME_BOUND, 5);
     for evaluations in [0,9,10,99,100,128] {
         for step in [SessionStep::Navigate,SessionStep::Read(0,SA::Prepare("android-keystore","save")),SessionStep::Read(63,SA::ReviewRemoval(1))] {
-            let diagnostic = SessionDiagnostic { step,evaluations,rejection:SessionRejection::NotRecorded,wait:SessionWait::NotSampled, first_failure:InstalledSessionFailure::not_recorded(), assessment:InstalledAssessmentFailure::none() };
-            let expected = format!("MRK_INSTALLED_SHELL_SESSION_FAILURE=v5;index={};evaluations={evaluations};reject=not-recorded;wait=not-sampled;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na;u=na\n",
+            let diagnostic = SessionDiagnostic { step,evaluations,rejection:SessionRejection::NotRecorded,wait:SessionWait::NotSampled, first_failure:InstalledSessionFailure::not_recorded(), assessment:InstalledAssessmentFailure::none(), gtk_callbacks:SessionGtkCallbacks::NotApplicable };
+            let expected = format!("MRK_INSTALLED_SHELL_SESSION_FAILURE=v6;index={};eval={evaluations};reject=not-recorded;wait=not-sampled;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na;u=na;g=na\n",
                 step.recipe_index().map_or_else(|| "none".to_owned(),|index|index.to_string()));
             assert!(failure_pair((Step::Session(step),Boundary::Settlement),BootstrapProgress::Advanced,Some(diagnostic),None)
                 .is_some_and(|(bytes,length)|bytes[..length].ends_with(expected.as_bytes())));
@@ -1282,11 +1376,13 @@ fn assert_failure_pair_contract() {
     assert!(SessionDiagnostic::sample(Step::Session(bound.step),128,Some(bound)).unwrap().first_failure
         == InstalledSessionFailure::not_recorded());
 
+    let mut gtk_callbacks = SessionGtkCallbacks::initial(SessionStep::ActivateFile(3));
+    gtk_callbacks.reserved(); gtk_callbacks.wait_observed();
     let gtk = SessionDiagnostic { step:SessionStep::ActivateFile(3),evaluations:16,
-        rejection:SessionRejection::GtkObserverEndpoint,wait:SessionWait::GtkActionInsensitive, first_failure:InstalledSessionFailure::not_recorded(), assessment:InstalledAssessmentFailure::none() };
+        rejection:SessionRejection::GtkObserverEndpoint,wait:SessionWait::GtkActionInsensitive, first_failure:InstalledSessionFailure::not_recorded(), assessment:InstalledAssessmentFailure::none(), gtk_callbacks };
     let gtk_trace = (Step::Session(gtk.step),Boundary::Gtk);
     let expected = [gtk.step.failure_line(),Boundary::Gtk.failure_line(),BootstrapProgress::Advanced.failure_line(),
-        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v5;index=3;evaluations=16;reject=gtk-observer-endpoint;wait=gtk-action-insensitive;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na;u=na\n"].concat();
+        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v6;index=3;eval=16;reject=gtk-observer-endpoint;wait=gtk-action-insensitive;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na;u=na;g=0w\n"].concat();
     assert!(failure_pair(gtk_trace,BootstrapProgress::Advanced,Some(gtk),None).is_some_and(|(bytes,length)|
         length <= FAILURE_PAIR_LIMIT && bytes.get(..length) == Some(expected.as_slice())));
     let same = SessionDiagnostic::sample(gtk_trace.0,16,Some(gtk)).unwrap();
@@ -1327,6 +1423,59 @@ fn assert_failure_pair_contract() {
         assert!(trace == if deadline_first { (gtk_trace.0,Boundary::Deadline) } else { gtk_trace });
         assert!(retained == Some(if deadline_first { same } else { gtk }));
     }
+    // Closed helper progress is not native liveness or original-owner finality.
+    let mut na = SessionGtkCallbacks::initial(SessionStep::Navigate);
+    na.reserved(); na.wait_observed(); na.returned();
+    assert_eq!(na.token(), b"na");
+    assert!(!na.matches_step(SessionStep::ActivateFile(3)));
+    for step in [SessionStep::SetFile(3), SessionStep::ActivateFile(3)] {
+        let mut callbacks = SessionGtkCallbacks::initial(step);
+        assert_eq!(callbacks.token(), b"0i");
+        callbacks.reserved(); assert_eq!(callbacks.token(), b"0p");
+        callbacks.wait_observed(); assert_eq!(callbacks.token(), b"0w");
+        callbacks.returned(); assert_eq!(callbacks.token(), b"1i");
+        callbacks.reserved(); assert_eq!(callbacks.token(), b"1p");
+        callbacks.wait_observed(); assert_eq!(callbacks.token(), b"1w");
+        callbacks.returned(); assert_eq!(callbacks.token(), b"mi");
+        for _ in 0..3 {
+            callbacks.reserved(); assert_eq!(callbacks.token(), b"mp");
+            callbacks.wait_observed(); assert_eq!(callbacks.token(), b"mw");
+            callbacks.returned(); assert_eq!(callbacks.token(), b"mi");
+        }
+        let diagnostic = SessionDiagnostic { step, gtk_callbacks:callbacks, ..gtk };
+        assert!(SessionDiagnostic::sample(Step::Session(step),16,Some(diagnostic)).unwrap().gtk_callbacks == callbacks);
+        for other in [SessionStep::SetFile(4),SessionStep::ActivateFile(4),SessionStep::Navigate] {
+            assert!(SessionDiagnostic::sample(Step::Session(other),16,Some(diagnostic)).unwrap().gtk_callbacks
+                == SessionGtkCallbacks::initial(other));
+        }
+        let other_role = if matches!(step,SessionStep::SetFile(_)) { SessionStep::ActivateFile(3) } else { SessionStep::SetFile(3) };
+        assert_eq!(SessionDiagnostic::sample(Step::Session(other_role),16,Some(diagnostic)).unwrap().gtk_callbacks.token(),b"0i");
+        assert!(!callbacks.matches_step(SessionStep::Capture(3)));
+    }
+    for wait in [SessionWait::GtkSelectionAbsent,SessionWait::GtkSelectionDifferent] {
+        let diagnostic = SessionDiagnostic { wait,..gtk };
+        assert!(failure_pair(gtk_trace,BootstrapProgress::Advanced,Some(diagnostic),None).is_some_and(|(bytes,length)|
+            length <= SESSION_FAILURE_FRAME_BOUND && bytes[..length].ends_with(b";u=na;g=0w\n")));
+        let wrong_role = SessionDiagnostic { step:SessionStep::SetFile(3),..diagnostic };
+        assert!(failure_pair((Step::Session(wrong_role.step),Boundary::Gtk),BootstrapProgress::Advanced,Some(wrong_role),None).is_none());
+    }
+    assert!(failure_pair(gtk_trace,BootstrapProgress::Advanced,
+        Some(SessionDiagnostic { gtk_callbacks:SessionGtkCallbacks::NotApplicable,..gtk }),None).is_none());
+    for deadline_first in [false,true] {
+        let failed = AtomicBool::new(false);
+        let mut trace = gtk_trace; let mut progress = BootstrapProgress::Advanced;
+        let mut retained = Some(gtk); let mut pending = Some(Pending::Dom(gtk_trace.0));
+        if deadline_first { assert!(latch_failure(&failed,&mut trace,&mut progress,(gtk_trace.0,Boundary::Deadline),BootstrapProgress::Advanced)); }
+        // Actual return authentication consumes pending even after failure.
+        assert!(pending.take() == Some(Pending::Dom(gtk_trace.0)));
+        if !failed.load(Ordering::SeqCst) { retained.as_mut().unwrap().gtk_callbacks.returned(); }
+        assert!(pending.is_none());
+        if !deadline_first { assert!(latch_failure(&failed,&mut trace,&mut progress,(gtk_trace.0,Boundary::Deadline),BootstrapProgress::Advanced)); }
+        let frozen = retained;
+        if !failed.load(Ordering::SeqCst) { retained.as_mut().unwrap().gtk_callbacks.returned(); }
+        assert!(retained == frozen);
+        assert_eq!(retained.unwrap().gtk_callbacks.token(),if deadline_first { b"0w" } else { b"1i" });
+    }
     // Inert codes only: these contracts do not identify a historical failure.
     for (code, rejection) in [("asset_deadline",SessionRejection::ReplyAssetDeadline),
         ("assessment_context_stale",SessionRejection::ReplyAssessmentContextStale),
@@ -1344,7 +1493,7 @@ fn assert_failure_pair_contract() {
     }
     let step = SessionStep::Read(29,SA::Prepare("android-keystore","save"));
     let trace = (Step::Session(step),Boundary::Settlement);
-    let pending = SessionDiagnostic { step,evaluations:73,rejection:SessionRejection::NotRecorded,wait:SessionWait::ReplyPending, first_failure:InstalledSessionFailure::not_recorded(), assessment:InstalledAssessmentFailure::none() };
+    let pending = SessionDiagnostic { step,evaluations:73,rejection:SessionRejection::NotRecorded,wait:SessionWait::ReplyPending, first_failure:InstalledSessionFailure::not_recorded(), assessment:InstalledAssessmentFailure::none(), gtk_callbacks:SessionGtkCallbacks::NotApplicable };
     let sampled = SessionDiagnostic::sample(trace.0,73,Some(pending)).unwrap();
     assert!(sampled.wait == SessionWait::ReplyPending && sampled.rejection == SessionRejection::NotRecorded);
     assert!(SessionRejection::ReplyAssessmentInvalidRequest.token().len() == 32);
@@ -1352,8 +1501,8 @@ fn assert_failure_pair_contract() {
         SessionRejection::ReplyCodeUnavailable,SessionRejection::CapabilityUnavailable] {
         let diagnostic = SessionDiagnostic { rejection,..sampled };
         let expected = [step.failure_line(),Boundary::Settlement.failure_line(),BootstrapProgress::Advanced.failure_line(),
-            b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v5;index=29;evaluations=73;reject=",rejection.token(),
-            b";wait=native-reply-pending;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na;u=na\n"].concat();
+            b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v6;index=29;eval=73;reject=",rejection.token(),
+            b";wait=native-reply-pending;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na;u=na;g=na\n"].concat();
         assert!(failure_pair(trace,BootstrapProgress::Advanced,Some(diagnostic),None).is_some_and(|(bytes,length)|
             length <= FAILURE_PAIR_LIMIT && bytes.get(..length) == Some(expected.as_slice())));
     }
@@ -1393,11 +1542,11 @@ fn assert_failure_pair_contract() {
     for action in [SA::Prepare("android-keystore","missing"),SA::Reassess(0,"android-keystore")] {
         let step = SessionStep::Read(6,action); let trace = (Step::Session(step),Boundary::Settlement);
         let pending = SessionDiagnostic { step,evaluations:13,wait:SessionWait::ReplyPending,
-            rejection:SessionRejection::NotRecorded,first_failure:InstalledSessionFailure::not_recorded(),assessment:InstalledAssessmentFailure::none() };
+            rejection:SessionRejection::NotRecorded,first_failure:InstalledSessionFailure::not_recorded(),assessment:InstalledAssessmentFailure::none(), gtk_callbacks:SessionGtkCallbacks::NotApplicable };
         let sampled = SessionDiagnostic::sample(trace.0,13,Some(pending)).unwrap();
         let rejected = SessionDiagnostic { rejection:original.rejection,assessment:original.assessment,..sampled };
         let expected = [step.failure_line(),Boundary::Settlement.failure_line(),BootstrapProgress::Advanced.failure_line(),
-            b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v5;index=6;evaluations=13;reject=reply-assessment-unavailable;wait=native-reply-pending;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=bridge;ac=runtime-unavailable;ax=prepare;af=missing-compile-anchor;u=na\n"].concat();
+            b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v6;index=6;eval=13;reject=reply-assessment-unavailable;wait=native-reply-pending;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=bridge;ac=runtime-unavailable;ax=prepare;af=missing-compile-anchor;u=na;g=na\n"].concat();
         assert!(failure_pair(trace,BootstrapProgress::Advanced,Some(rejected),None).is_some_and(|(bytes,length)|
             length <= SESSION_FAILURE_FRAME_BOUND && bytes.get(..length) == Some(expected.as_slice())));
         assert!(SessionDiagnostic::sample(trace.0,13,Some(rejected)).unwrap().assessment == InstalledAssessmentFailure::none());
@@ -1984,15 +2133,18 @@ impl Guidance {
 struct VersionSample { name: String, build: u64, pair_matched: bool, display: Value }
 impl VersionSample {
     fn read(result: &crate::release_version_protocol::Observation) -> Option<Self> {
+        Self::read_values(result,"1.2.3",7,VERSION_SHA256)
+    }
+    fn read_values(result: &crate::release_version_protocol::Observation, expected_name: &str, expected_build: u64, expected_digest: &str) -> Option<Self> {
         // Project only the genuine already-admitted DTO; neither these bytes
         // nor the saved pair comparisons are returned to the renderer.
         let raw = edit::bounded(result, crate::release_version_protocol::RESULT_LIMIT).ok()?;
         let value = crate::protocol::strict_json(&raw).ok()?;
         let pair_matched = value["savedConfig"] == serde_json::json!({"bytes":CONFIG_BYTES,"sha256":CONFIG_SHA256})
-            && value["savedVersion"] == serde_json::json!({"bytes":VERSION_BYTES,"sha256":VERSION_SHA256});
+            && value["savedVersion"] == serde_json::json!({"bytes":VERSION_BYTES,"sha256":expected_digest});
         if !keys(&value, &["schemaVersion", "source", "version", "savedConfig", "savedVersion", "observationScope", "assurance"])
             || value["schemaVersion"].as_u64() != Some(2) || value["source"].as_str() != Some(VERSION_SOURCE)
-            || value["version"] != serde_json::json!({"name":"1.2.3","build":7}) || !pair_matched
+            || value["version"] != serde_json::json!({"name":expected_name,"build":expected_build}) || !pair_matched
             || value["observationScope"].as_str() != Some("single-request-non-atomic") || !assurance(&value, "static-text") { return None; }
         let name = value["version"]["name"].as_str()?.to_owned(); let build = value["version"]["build"].as_u64()?;
         let source = value["source"].as_str()?;
@@ -2679,10 +2831,328 @@ fn assert_metadata_open_race_contract() {
     assert_eq!(reply_first.open_match(&reused,true),Some(MetadataOpenMatch::First));
 }
 
+
+// Three fixed, serial UI submissions. These are expected public fixture DATA,
+// never substitute checkout, plan, status, result, original or finality objects.
+const VERSION_EDIT_SHA256: &str = "3b8dbd6b58e9f42a0ed893e73020cf2f8ddde787e2b1a153da49d382b1e7a9d4";
+const VERSION_TEXTS: [&str; 2] = ["VERSION_NAME=1.2.3\nBUILD_NUMBER=7\n", "VERSION_NAME=2.3.4\nBUILD_NUMBER=8\n"];
+const VERSION_BINDINGS: [(u32,u32);3] = [(2,0),(4,1),(4,2)];
+const VERSION_JOURNALS: [&str;3] = [".mobile-release-version-prepare", ".mobile-release-version", ".mobile-release-version-cleanup"];
+fn version_values(index: usize) -> Option<version::Values> {
+    let (name,build) = match index { 0 => ("1.2.3","7"), 1 | 2 => ("2.3.4","8"), _ => return None };
+    Some(version::Values { name:name.into(), build:build.into() })
+}
+fn version_digest(index: usize) -> Option<&'static str> {
+    match index { 0 => Some(VERSION_SHA256), 1 | 2 => Some(VERSION_EDIT_SHA256), _ => None }
+}
+fn version_baseline(index: usize) -> Option<Value> {
+    Some(serde_json::json!({"savedConfig":{"bytes":CONFIG_BYTES,"sha256":CONFIG_SHA256},
+        "savedVersion":if index == 0 { serde_json::json!({"state":"absent"}) } else {
+            serde_json::json!({"state":"present","bytes":VERSION_BYTES,"sha256":version_digest(index.checked_sub(1)?)?}) }}))
+}
+fn version_checkout_matches(index: usize, checkout: &version::Checkout) -> bool {
+    index < 3 && edit::token(&checkout.revision) && checkout.source == VERSION_SOURCE
+        && checkout.name_key == "VERSION_NAME" && checkout.build_key == "BUILD_NUMBER" && !checkout.ios_enabled
+        && checkout.values == (if index == 0 { None } else { version_values(index - 1) })
+        && serde_json::to_value(&checkout.baseline).ok() == version_baseline(index)
+}
+fn version_review_sample(index: usize, view: &version::PreparedView) -> Option<Value> {
+    let values = version_values(index)?; let after_text = VERSION_TEXTS[usize::from(index != 0)];
+    let before = if index == 0 { serde_json::json!({"state":"absent"}) } else {
+        serde_json::json!({"state":"present","text":VERSION_TEXTS[usize::from(index == 2)],
+            "bytes":VERSION_BYTES,"sha256":version_digest(index - 1)?}) };
+    let after = serde_json::json!({"text":after_text,"bytes":VERSION_BYTES,"sha256":version_digest(index)?});
+    let action = match index { 0 => "create", 1 => "replace", 2 => "preserve", _ => return None };
+    let expected = serde_json::json!({"schemaVersion":1,"source":VERSION_SOURCE,"nameKey":"VERSION_NAME","buildKey":"BUILD_NUMBER",
+        "iosEnabled":false,"intent":if index == 0 { "create" } else { "edit" },"values":values,
+        "file":{"path":VERSION_SOURCE,"action":action,"before":before,"after":after,
+            "requestedMode":if index == 0 { 0o644 } else { 0o600 },"preserveMode":index != 0},
+        "createDirectories":[],"lineEndings":{"before":if index == 0 { vec![] } else { vec!["lf"] },
+            "after":["lf"],"finalNewlineBefore":index != 0,"finalNewlineAfter":true,"preserved":index != 0},
+        "validation":{"valid":true,"state":"format-valid","issues":[]}});
+    if serde_json::to_value(view).ok()? != expected { return None; }
+    Some(serde_json::json!({
+        "title":match index { 0 => "Create the observed-absent source", 1 => "Edit only the two selected value spans", _ => "Preserve the exact original" },
+        "facts":[
+            format!("{VERSION_SOURCE} — {action}. Saved name key VERSION_NAME; build key BUILD_NUMBER. Saved iOS policy is disabled."),
+            format!("Reviewed values: {} · Build {}. Core format-valid only; Store acceptance and artifact agreement remain unknown.",values.name,values.build),
+            if index == 0 { "Creation emits exactly two KEY=VALUE lines, UTF-8/LF with a final newline. No serializer or automatic version bump is used." }
+                else { "Unrelated bytes, spacing, quotes, comments, all separators and final-newline presence are preserved. No serializer or automatic version bump is used." },
+            if index == 0 { "Request new-file mode 0644. New-file and directory modes are subject to the native umask; parent directories request 0755." }
+                else { "Preserve original mode 0600." },
+            "No parent directories will be created. Saved configuration and .gitignore are rechecked read-only dependencies.",
+            "Complete bounded text, never a truncated diff. The browser may display separators similarly; the explicit styles, byte counts and native hashes describe the frozen bytes."
+        ],"before":before,"after":after
+    }))
+}
+fn version_fixture_absent(path: &Path) -> bool {
+    matches!(std::fs::symlink_metadata(path),Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+}
+struct VersionFixture { originals: [FixtureIdentity;5] }
+impl VersionFixture {
+    fn sample(root: &Path) -> Option<[FixtureIdentity;5]> {
+        let names = ["","release","release/mobile-release.json",".gitignore","unrelated.txt"];
+        let mut rows = Vec::with_capacity(names.len());
+        for (index,name) in names.iter().enumerate() {
+            let row = fixture_identity(&root.join(name)).ok()?;
+            if row[2] != (if index < 2 { 0o040700 } else { 0o100600 })
+                || row[3] != u64::from(rustix::process::geteuid().as_raw())
+                || row[4] != u64::from(rustix::process::getegid().as_raw())
+                || index >= 2 && (row[5] != 1 || row[6] != [u64::from(CONFIG_BYTES),u64::from(IGNORE_BYTES),36][index - 2]) { return None; }
+            rows.push(row);
+        }
+        rows.try_into().ok()
+    }
+    fn begin(root: &Path) -> Option<Self> {
+        let originals = Self::sample(root)?;
+        if !version_fixture_absent(&root.join(VERSION_SOURCE))
+            || !VERSION_JOURNALS.iter().all(|name|version_fixture_absent(&root.join(name)))
+            || Self::sample(root)? != originals { return None; }
+        Some(Self { originals })
+    }
+    fn after_original_final(&self, root: &Path) -> Option<FixtureIdentity> {
+        // Only called after the genuine original finality getter succeeded.
+        // Fixed metadata samples do not read text, change files or authorize cleanup.
+        let before = Self::sample(root)?;
+        if before[0][..6] != self.originals[0][..6] || before[1..] != self.originals[1..]
+            || !VERSION_JOURNALS.iter().all(|name|version_fixture_absent(&root.join(name))) { return None; }
+        let source = fixture_identity(&root.join(VERSION_SOURCE)).ok()?;
+        if source[2] != 0o100600 || source[3..5] != self.originals[2][3..5]
+            || source[5] != 1 || source[6] != u64::from(VERSION_BYTES)
+            || fixture_identity(&root.join(VERSION_SOURCE)).ok()? != source || Self::sample(root)? != before { return None; }
+        Some(source)
+    }
+}
+struct VersionSession {
+    projection: version::Projection, prepared: Option<Value>, review: Option<Value>, binding: Option<(u32,u32)>,
+    first_revision: u32, open_returned: bool, open_visible: bool, entered: [bool;2], inputs_visible: bool,
+    prepare_requested: bool, prepare_returned: bool, review_visible: bool, config_blocked: bool,
+    confirmation_opened: bool, initially_disabled: bool, checkbox_only_disabled: bool, typed_save: bool, acknowledged: bool,
+    apply_requested: bool, apply_returned: bool, saved_visible: bool, readback_visible: bool,
+    finality: Option<InstalledVersionFinality>, source_final: Option<FixtureIdentity>,
+}
+impl VersionSession {
+    fn live_review(&self) -> bool {
+        self.open_returned && self.projection.phase == edit::Phase::Reviewing && self.projection.review_remaining_ms > 0
+            && !self.projection.apply_submitted && self.projection.native_reason == edit::NativeEditReason::None
+            && self.projection.native_finality == edit::NativeFinality::Pending && self.projection.core_outcome.is_none()
+            && self.prepared.is_some() && self.review.is_some() && self.finality.is_none()
+    }
+    fn complete(&self, index: usize) -> bool {
+        self.open_returned && self.open_visible && self.entered == (if index == 2 { [false;2] } else { [true;2] })
+            && self.inputs_visible && self.prepare_requested && self.prepare_returned && self.binding == VERSION_BINDINGS.get(index).copied()
+            && self.review_visible && self.config_blocked && self.confirmation_opened && self.initially_disabled
+            && self.checkbox_only_disabled && self.typed_save && self.acknowledged && self.apply_requested && self.apply_returned
+            && self.saved_visible && self.readback_visible && self.finality.is_some() && self.source_final.is_some()
+            && self.projection.phase == edit::Phase::Final && self.projection.native_finality == edit::NativeFinality::Settled
+            && !self.projection.late_settled
+    }
+}
+struct VersionOpen { index: usize, after_revision: u32, project_id: String, generation: String }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VersionOpenMatch { First, Reply }
+#[derive(Default)]
+struct VersionRecord {
+    capability: bool, ready: bool, native_revision: Option<u32>, saved_config: Option<Value>, fixture: Option<VersionFixture>,
+    sessions: Vec<VersionSession>, requests: [u8;4], open_pending: Option<VersionOpen>, prepare_pending: Option<usize>,
+    observe_requests: u8, observe_pending: bool, observations: Vec<VersionSample>,
+}
+impl VersionRecord {
+    fn open_match(&self, status: &version::ReleaseVersionEditStatus, returned: bool) -> Option<VersionOpenMatch> {
+        let pending = self.open_pending.as_ref()?; let owner = status.active.as_ref()?;
+        if pending.index >= 3 || usize::from(self.requests[0]) != pending.index + 1
+            || status.schema_version != 1 || status.domain != version::DOMAIN || status.window_generation != pending.generation
+            || !edit::token(&status.window_generation) || status.status_revision <= pending.after_revision
+            || !status.capability.available || status.capability.reason != edit::EditAvailability::Available
+            || owner.domain != version::DOMAIN || owner.project_id != pending.project_id || owner.owner_generation != pending.generation
+            || !edit::token(&owner.session_id) || owner.prepared.is_some() || owner.core_outcome.is_some() || owner.apply_submitted || owner.late_settled
+            || owner.native_reason != edit::NativeEditReason::None || owner.native_finality != edit::NativeFinality::Pending
+            || (if returned { owner.phase != edit::Phase::Opening } else { !matches!(owner.phase,edit::Phase::Opening | edit::Phase::Editing) })
+            || (owner.phase == edit::Phase::Opening) != owner.checkout.is_none() { return None; }
+        if self.sessions.len() == pending.index {
+            if self.native_revision.is_some_and(|revision|status.status_revision < revision)
+                || self.sessions.iter().enumerate().any(|(i,s)|!s.complete(i) || s.projection.session_id == owner.session_id) { return None; }
+            if let Some(checkout) = &owner.checkout {
+                if !version_checkout_matches(pending.index,checkout)
+                    || self.sessions.iter().any(|s|s.projection.checkout.as_ref().is_some_and(|c|c.revision == checkout.revision)) { return None; }
+            }
+            Some(VersionOpenMatch::First)
+        } else {
+            let session = self.sessions.get(pending.index)?;
+            (returned && self.sessions.len() == pending.index + 1 && !session.open_returned
+                && session.projection.session_id == owner.session_id && session.projection.project_id == owner.project_id
+                && session.projection.owner_generation == owner.owner_generation && status.status_revision <= session.first_revision)
+                .then_some(VersionOpenMatch::Reply)
+        }
+    }
+    fn observe_open(&mut self, status: &version::ReleaseVersionEditStatus, returned: bool, config: Option<&ConfigEditStatus>) -> bool {
+        let Some(matched) = self.open_match(status,returned) else { return false; };
+        let Some(pending) = self.open_pending.as_ref() else { return false; }; let index = pending.index;
+        if matched == VersionOpenMatch::First {
+            let Some(config) = config else { return false; };
+            if config.schema_version != 1 || config.window_generation != pending.generation || config.status_revision < status.status_revision
+                || config.capability.available || config.capability.reason != edit::EditAvailability::OtherEditActive
+                || config.active.is_some() || config.last_terminal.is_some() { return false; }
+            let Some(owner) = status.active.as_ref() else { return false; };
+            self.sessions.push(VersionSession { projection:owner.clone(), prepared:None, review:None, binding:None,
+                first_revision:status.status_revision, open_returned:false, open_visible:false, entered:[false;2], inputs_visible:false,
+                prepare_requested:false, prepare_returned:false, review_visible:false, config_blocked:true,
+                confirmation_opened:false, initially_disabled:false, checkbox_only_disabled:false, typed_save:false, acknowledged:false,
+                apply_requested:false, apply_returned:false, saved_visible:false, readback_visible:false, finality:None, source_final:None });
+        } else if config.is_some() { return false; }
+        if returned {
+            // Preserve later actual events; the original captured Opening reply
+            // independently closes the request/reply obligation, never regresses it.
+            self.sessions[index].open_returned = true; self.open_pending = None;
+        }
+        true
+    }
+    fn record_prepare(&mut self, args: &version::PrepareReleaseVersionEdit) -> bool {
+        let index = usize::from(self.requests[1]); let Some(session) = self.sessions.get(index) else { return false; };
+        if index >= 3 || self.prepare_pending.is_some() || session.prepare_requested || session.binding.is_some()
+            || !session.open_visible || !session.inputs_visible || !session.config_blocked
+            || session.projection.phase != edit::Phase::Editing || session.projection.session_id != args.session_id
+            || (args.draft_revision,args.baseline_generation) != VERSION_BINDINGS[index]
+            || args.intent != (if index == 0 { version::Intent::Create } else { version::Intent::Edit })
+            || Some(args.values.clone()) != version_values(index)
+            || !session.projection.checkout.as_ref().is_some_and(|c|c.revision == args.revision && c.baseline == args.expected_baseline)
+            || serde_json::to_value(&args.expected_baseline).ok() != version_baseline(index) { return false; }
+        let session = &mut self.sessions[index]; session.prepare_requested = true;
+        session.binding = Some((args.draft_revision,args.baseline_generation));
+        self.prepare_pending = Some(index); self.requests[1] += 1; true
+    }
+    fn complete(&self) -> bool {
+        self.capability && self.saved_config.is_some() && self.fixture.is_some() && self.requests == [3,3,3,0]
+            && self.open_pending.is_none() && self.prepare_pending.is_none() && self.observe_requests == 3 && !self.observe_pending
+            && self.observations.len() == 3 && self.observations.iter().all(|o|o.pair_matched)
+            && self.sessions.len() == 3 && self.sessions.iter().enumerate().all(|(i,s)|s.complete(i))
+            && self.sessions[1].source_final.is_some_and(|s|self.sessions[0].source_final.is_some_and(|old|s[..2] != old[..2]))
+            && self.sessions[2].source_final == self.sessions[1].source_final
+    }
+}
+fn version_original_final(facts: &InstalledVersionFinality, projection: &version::Projection) -> bool {
+    projection.domain == version::DOMAIN && facts.session_id == projection.session_id && facts.project_id == projection.project_id
+        && facts.owner_generation == projection.owner_generation && facts.writer_frames == 3 && facts.stdout_frames == 3
+        && facts.inspection_joined && facts.acquisition_joined && facts.child_waited_success
+        && facts.stdin_closed && facts.stdout_eof_closed && facts.stderr_eof_closed && facts.io_joined
+        && facts.driver_joined && facts.watchdog_joined && facts.manager_joined
+        && facts.runtime_ledger_settled && facts.runtime_settlement_joined
+}
+
+fn version_editor_display(index: usize, edited: bool, saved: bool, reviewing: bool) -> Option<Value> {
+    if index >= 3 { return None; }
+    let original = if saved { version_values(index) } else if index == 0 { None } else { version_values(index - 1) };
+    let current = if edited || saved { version_values(index)? } else { original.clone().unwrap_or(version::Values { name:String::new(),build:String::new() }) };
+    let mut digests = vec![format!("Saved config: {CONFIG_BYTES} bytes · SHA256 {CONFIG_SHA256}")];
+    if saved || index != 0 {
+        digests.push(format!("Saved source: {VERSION_BYTES} bytes · SHA256 {}",version_digest(if saved { index } else { index - 1 })?));
+    }
+    Some(serde_json::json!({"title":if original.is_none() { "Create saved version values" } else { "Edit saved version values" },
+        "project":"Project: version-project. No automatic bump, trimming or numeric coercion.",
+        "badge":"Separate native writer","selection":[
+            format!("Saved source: {VERSION_SOURCE}"),
+            "Saved keys: VERSION_NAME and BUILD_NUMBER. iOS policy is disabled.",
+            original.as_ref().map(|v|format!("Original values: {} · Build {}. These may need policy correction.",v.name,v.build))
+                .unwrap_or("Observed absent: creation is explicit. The empty fields below are not detected values.".into())],
+        "digests":digests,"values":current,"openAvailable":saved,
+        "reviewLabel":if original.is_none() { "Validate and review creation" } else { "Validate and review values" },
+        "reviewAvailable":!reviewing && (saved || edited || index != 0)}))
+}
+fn version_outcome_display(index: usize, session: &VersionSession) -> Option<Value> {
+    let prepared = session.projection.prepared.as_ref()?; let core = session.projection.core_outcome.as_ref()?;
+    let raw = serde_json::to_value(core).ok()?;
+    Some(serde_json::json!({"title":if index == 2 { "Submitted version values unchanged and rechecked" } else { "Submitted version values saved" },
+        "submitted":format!("Submitted review: {} · Build {} · {}.",prepared.view.values.name,prepared.view.values.build,prepared.view.source),
+        "facts":format!("Core effect: {}; journal: {}; native finality: settled. Reason: {}.",
+            raw["effect"].as_str()?,raw["journal"].as_str()?,raw["reason"].as_str()?)}))
+}
+
+fn assert_version_open_race_contract() {
+    // Inert DATA through the same request/reply predicates, not a native
+    // execution, acquired original, settled session, filesystem or receipt.
+    let generation = "0".repeat(32); let session_id = "1".repeat(32); let revision = "2".repeat(32);
+    let opening = version::ReleaseVersionEditStatus { schema_version:1, domain:version::DOMAIN,
+        window_generation:generation.clone(), status_revision:11,
+        capability:edit::Capability { available:true, reason:edit::EditAvailability::Available },
+        active:Some(version::Projection { domain:version::DOMAIN, project_id:"inert-project".into(),
+            session_id:session_id.clone(), owner_generation:generation.clone(), phase:edit::Phase::Opening,
+            review_remaining_ms:1000, checkout:None, prepared:None, apply_submitted:false, core_outcome:None,
+            native_reason:edit::NativeEditReason::None, native_finality:edit::NativeFinality::Pending, late_settled:false }),
+        last_terminal:None };
+    let mut editing = opening.clone(); editing.status_revision = 12;
+    let active = editing.active.as_mut().unwrap(); active.phase = edit::Phase::Editing;
+    active.checkout = Some(version::Checkout { revision:revision.clone(), source:VERSION_SOURCE.into(),
+        name_key:"VERSION_NAME".into(), build_key:"BUILD_NUMBER".into(), ios_enabled:false, values:None,
+        baseline:serde_json::from_value(version_baseline(0).unwrap()).unwrap() });
+    let config = ConfigEditStatus { schema_version:1, window_generation:generation.clone(), status_revision:13,
+        capability:edit::Capability { available:false, reason:edit::EditAvailability::OtherEditActive }, active:None, last_terminal:None };
+    let record = || VersionRecord { native_revision:Some(10), requests:[1,0,0,0],
+        open_pending:Some(VersionOpen { index:0,after_revision:10,project_id:"inert-project".into(),generation:generation.clone() }),
+        ..VersionRecord::default() };
+    let args: version::PrepareReleaseVersionEdit = serde_json::from_value(serde_json::json!({
+        "sessionId":session_id,"revision":revision,"expectedBaseline":version_baseline(0).unwrap(),"intent":"create",
+        "values":{"name":"1.2.3","build":"7"},"draftRevision":2,"baselineGeneration":0})).unwrap();
+    let mut reply_first = record();
+    assert!(reply_first.observe_open(&opening,true,Some(&config)));
+    assert!(reply_first.open_pending.is_none() && reply_first.sessions[0].open_returned);
+    assert_eq!(reply_first.sessions[0].projection.phase,edit::Phase::Opening);
+    assert!(!reply_first.record_prepare(&args) && !reply_first.observe_open(&opening,true,None));
+    for prepare_before_reply in [false,true] {
+        let mut early = record();
+        assert!(early.observe_open(&editing,false,Some(&config)));
+        assert_eq!(early.sessions[0].first_revision,12);
+        assert!(early.sessions[0].config_blocked && !early.sessions[0].open_returned);
+        early.native_revision = Some(12);
+        // Isolate request/reply scheduling; no UI observation is claimed.
+        early.sessions[0].open_visible = true; early.sessions[0].inputs_visible = true;
+        if prepare_before_reply { assert!(early.record_prepare(&args)); }
+        let before = serde_json::to_value(&early.sessions[0].projection).unwrap();
+        assert!(!early.observe_open(&opening,true,Some(&config)));
+        assert!(early.observe_open(&opening,true,None));
+        assert_eq!(serde_json::to_value(&early.sessions[0].projection).unwrap(),before);
+        assert_eq!(early.native_revision,Some(12));
+        if !prepare_before_reply { assert!(early.record_prepare(&args)); }
+        assert_eq!(early.prepare_pending,Some(0)); assert_eq!(early.sessions[0].binding,Some((2,0)));
+        assert!(!early.record_prepare(&args) && !early.complete());
+    }
+    let mut no_reply = record(); assert!(no_reply.observe_open(&editing,false,Some(&config)));
+    no_reply.sessions[0].projection.phase = edit::Phase::Reviewing;
+    no_reply.sessions[0].prepared = Some(Value::Null); no_reply.sessions[0].review = Some(Value::Null);
+    assert!(!no_reply.sessions[0].live_review() && no_reply.open_pending.is_some());
+    let mut foreign = opening.clone(); foreign.active.as_mut().unwrap().session_id = "3".repeat(32);
+    assert!(!no_reply.observe_open(&foreign,true,None));
+    let mut later = opening.clone(); later.status_revision = 13;
+    assert!(!no_reply.observe_open(&later,true,None));
+    assert!(no_reply.observe_open(&opening,true,None) && no_reply.sessions[0].live_review());
+    assert_eq!(no_reply.sessions[0].projection.phase,edit::Phase::Reviewing);
+    assert!(!no_reply.complete()); // No native original/finality can be minted by these DATA.
+    let mutations: [fn(&mut version::ReleaseVersionEditStatus);10] = [
+        |s|s.status_revision = 10,
+        |s|s.domain = "wrong-domain",
+        |s|s.window_generation = "4".repeat(32),
+        |s|s.active.as_mut().unwrap().project_id = "other-project".into(),
+        |s|s.active.as_mut().unwrap().owner_generation = "4".repeat(32),
+        |s|s.active.as_mut().unwrap().domain = "wrong-domain",
+        |s|s.active.as_mut().unwrap().phase = edit::Phase::Preparing,
+        |s|s.active.as_mut().unwrap().checkout = None,
+        |s|s.active.as_mut().unwrap().checkout.as_mut().unwrap().source = "other-source".into(),
+        |s|s.active.as_mut().unwrap().checkout.as_mut().unwrap().ios_enabled = true,
+    ];
+    for mutate in mutations {
+        let mut wrong = editing.clone(); mutate(&mut wrong);
+        let mut sample = record(); assert!(!sample.observe_open(&wrong,false,Some(&config)) && sample.sessions.is_empty());
+    }
+    let mut missing = record(); assert!(!missing.observe_open(&editing,false,None));
+    let mut stale = config.clone(); stale.status_revision = 11;
+    assert!(!missing.observe_open(&editing,false,Some(&stale)));
+    let mut available = config.clone(); available.capability.available = true;
+    assert!(!missing.observe_open(&editing,false,Some(&available)) && missing.sessions.is_empty());
+}
+
 struct Record {
     attached: bool, started: bool, loaded: bool, info: bool, methods: usize, catalog: bool, environment: bool,
     pickers: [Picker; 2], cancel_returned: bool, cancelled: bool, project: Option<Project>, selected: bool,
-    project_witness: Option<InstalledProjectWitness>, candidate: Candidate, paths: Paths, workflow: WorkflowRecord, metadata: MetadataRecord,
+    project_witness: Option<InstalledProjectWitness>, candidate: Candidate, paths: Paths, workflow: WorkflowRecord, metadata: MetadataRecord, version: VersionRecord,
     session: SessionRecord,
     snapshot_requests: u8, snapshot: bool, snapshot_visible: bool, suggest_called: bool, suggested: Option<Value>, provenance: Option<Value>,
     provenance_visible: bool, adopted: bool, draft_visible: bool, guidance: Guidance,
@@ -2735,7 +3205,8 @@ impl Observation {
                 Case::WorkflowApply => path.with_file_name("workflow-project"),
                 Case::Session(case) => path.with_file_name(case.name()).join("project"),
                 Case::Commands(case) => path.with_file_name(case.name()).join("project"),
-                Case::MetadataSave => path.with_file_name("metadata-project"), _ => path });
+                Case::MetadataSave => path.with_file_name("metadata-project"),
+                Case::VersionSave => path.with_file_name("version-project"), _ => path });
         let paths = Paths::new((case == Case::ProjectPaths).then_some(project_path.as_deref()).flatten());
         let evidence_path = project_path.as_ref().and_then(|path| path.parent()).map(|root| root.join("candidate-evidence"));
         Self { case, main: std::thread::current().id(), end,
@@ -2746,7 +3217,7 @@ impl Observation {
                 step: Step::Bootstrap, pending: None, evaluations: 0, trace: (Step::Bootstrap, Boundary::Bootstrap),
                 bootstrap: BootstrapProgress::NotSampled,
                 pickers: std::array::from_fn(|_| Picker::default()), cancel_returned: false, cancelled: false, project: None, selected: false,
-                project_witness: None, candidate: Candidate::default(), paths, workflow: WorkflowRecord::default(), metadata: MetadataRecord::default(),
+                project_witness: None, candidate: Candidate::default(), paths, workflow: WorkflowRecord::default(), metadata: MetadataRecord::default(), version: VersionRecord::default(),
                 session: SessionRecord::new(case.session()),
                 snapshot_requests: 0, snapshot: false, snapshot_visible: false, suggest_called: false, suggested: None, provenance: None,
                 provenance_visible: false, adopted: false, draft_visible: false, guidance: Guidance::default(),
@@ -2942,7 +3413,8 @@ impl Observation {
             Ok(Some(project)) if r.step == Step::Selected && r.cancelled && r.project.is_none() && r.pickers[1].responded && r.pickers[1].returned
                 && self.project_path().is_some_and(|path| Path::new(&project.path) == path)
                 && project.name == (match self.case { Case::ProjectPaths => "path-project", Case::WorkflowApply => "workflow-project",
-                    Case::Session(_) | Case::Commands(_) => "project", Case::MetadataSave => "metadata-project", _ => "positive-project" })
+                    Case::Session(_) | Case::Commands(_) => "project", Case::MetadataSave => "metadata-project",
+                    Case::VersionSave => "version-project", _ => "positive-project" })
                 && crate::protocol::valid_id(&project.id) => r.project = Some(project.clone()),
             _ => self.fail(),
         }
@@ -2963,7 +3435,7 @@ impl Observation {
         if self.case.session().is_some() { self.session_snapshot_result(project_id,result); return; }
         let Some(mut r) = self.record_at(Boundary::Result) else { return; };
         let saved = r.snapshot_requests == 2;
-        let initial_saved = self.case == Case::MetadataSave;
+        let initial_saved = matches!(self.case,Case::MetadataSave | Case::VersionSave);
         let valid = result.as_ref().is_ok_and(|value| {
             let config = &value["config"]; let discovery = &value["discovery"]; let scan = &discovery["scan"];
             let configuration = if initial_saved {
@@ -2993,6 +3465,10 @@ impl Observation {
                         "schemes":[],"bundleIds":[],"generatedProjectSources":[]}})
                         && scan["sourceFiles"].as_u64() == Some(0) && scan["sourceBytes"].as_u64() == Some(0)
                         && scan["entries"].as_u64() == Some(11) && scan["excludedEntries"].as_u64() == Some(0)
+                } else if self.case == Case::VersionSave {
+                    discovery["hints"] == serde_json::json!({}) && scan["sourceFiles"].as_u64() == Some(1)
+                        && scan["sourceBytes"].as_u64() == Some(u64::from(CONFIG_BYTES))
+                        && scan["entries"].as_u64() == Some(4) && scan["excludedEntries"].as_u64() == Some(1)
                 } else { discovery["hints"].as_object().is_some_and(|hints| hints.len() == 4)
                 && discovery["hints"]["android"]["applicationId"].as_str() == Some(APP_ID)
                 && discovery["hints"]["android"]["module"].as_str() == Some(":app")
@@ -3009,7 +3485,8 @@ impl Observation {
         let stage = if saved { matches!(r.step, Step::Refresh | Step::ReadReadback) && r.saved_visible && !r.readback }
             else { r.snapshot_requests == 1 && matches!(r.step, Step::Selected | Step::ReadSnapshot) && !r.snapshot };
         if self.case == Case::Outstanding || !stage || !valid { self.fail(); return; }
-        if initial_saved { r.metadata.saved_config = result.as_ref().ok().and_then(|v|v["config"].get("data")).cloned(); }
+        if self.case == Case::MetadataSave { r.metadata.saved_config = result.as_ref().ok().and_then(|v|v["config"].get("data")).cloned(); }
+        if self.case == Case::VersionSave { r.version.saved_config = result.as_ref().ok().and_then(|v|v["config"].get("data")).cloned(); }
         if saved { r.readback = true; } else { r.snapshot = true; }
     }
     pub(super) fn suggest_request(&self, hints: &Value) {
@@ -3085,6 +3562,7 @@ impl Observation {
         r.guidance.proposal = sample;
     }
     pub(super) fn release_version_request(&self, body: &Value) {
+        if self.case == Case::VersionSave { self.version_save_observe_request(body); return; }
         let Some(mut r) = self.record_at(Boundary::Request) else { return; };
         if self.case != Case::Positive || !saved_read_context(&r) || r.saved_reads.version_called
             || !matches!(r.step, Step::ReadVersion | Step::ReadVersionCard) || !keys(body, &["projectId"])
@@ -3092,6 +3570,7 @@ impl Observation {
         r.saved_reads.version_called = true;
     }
     pub(super) fn release_version(&self, result: &Result<crate::release_version_protocol::Observation, BridgeError>) {
+        if self.case == Case::VersionSave { self.version_save_observed(result); return; }
         let sample = result.as_ref().ok().and_then(VersionSample::read);
         let Some(mut r) = self.record_at(Boundary::Result) else { return; };
         if self.case != Case::Positive || !saved_read_context(&r) || !r.saved_reads.version_called || r.saved_reads.version.is_some()
@@ -3278,7 +3757,7 @@ impl Observation {
         self.fail(); // Keep reviewing is not Close; native Quit owns the sole EOF.
     }
     pub(super) fn edit_status(&self, status: &ConfigEditStatus, edits: &EditOwner) {
-        if matches!(self.case, Case::WorkflowApply | Case::MetadataSave) {
+        if matches!(self.case, Case::WorkflowApply | Case::MetadataSave | Case::VersionSave) {
             let Some(mut r) = self.record_at(Boundary::Result) else { return; };
             if status.schema_version != 1 || !edit::token(&status.window_generation)
                 || r.generation.as_ref().is_some_and(|generation| generation != &status.window_generation)
@@ -3286,12 +3765,14 @@ impl Observation {
             if r.generation.is_none() { r.generation = Some(status.window_generation.clone()); }
             if r.native_revision.is_some_and(|revision| status.status_revision < revision)
                 || r.workflow.native_revision.is_some_and(|revision| status.status_revision < revision)
-                || r.metadata.native_revision.is_some_and(|revision| status.status_revision < revision) { return; }
+                || r.metadata.native_revision.is_some_and(|revision| status.status_revision < revision)
+                || r.version.native_revision.is_some_and(|revision| status.status_revision < revision) { return; }
             match (status.capability.available, status.capability.reason) {
                 (true, edit::EditAvailability::Available) => r.capability = true,
                 (false, edit::EditAvailability::OtherEditActive) if r.workflow.open_pending
                     || r.workflow.sessions.last().is_some_and(|s| s.finality.is_none()) || r.metadata.open_pending.is_some()
-                    || r.metadata.sessions.last().is_some_and(|s| s.finality.is_none()) => {},
+                    || r.metadata.sessions.last().is_some_and(|s| s.finality.is_none()) || r.version.open_pending.is_some()
+                    || r.version.sessions.last().is_some_and(|s| s.finality.is_none()) => {},
                 (false, edit::EditAvailability::Shutdown) if r.close_prevented => {},
                 (false, edit::EditAvailability::RuntimeUnqualified) if !r.capability => {},
                 _ => { self.fail(); return; },
@@ -3363,6 +3844,191 @@ impl Observation {
             r.sessions[index].projection = projection.clone();
         }
         r.native_revision = Some(status.status_revision);
+    }
+
+
+    fn version_save_observe_request(&self, body: &Value) {
+        let Some(mut r) = self.record_at(Boundary::Request) else { return; };
+        let v = &r.version; let index = usize::from(v.observe_requests);
+        if self.case != Case::VersionSave || index >= 3 || v.observe_pending || v.observations.len() != index
+            || !matches!(r.step,Step::VersionSave(VersionStep::Readback(i) | VersionStep::ReadReadback(i)) if usize::from(i) == index)
+            || v.sessions.len() != index + 1 || !v.sessions.get(index).is_some_and(|s|s.saved_visible && s.open_returned
+                && s.apply_returned && s.finality.is_some() && s.source_final.is_some())
+            || !keys(body,&["projectId"]) || !r.project.as_ref().is_some_and(|p|body["projectId"].as_str() == Some(p.id.as_str())) { self.fail(); return; }
+        r.version.observe_pending = true; r.version.observe_requests += 1;
+    }
+    fn version_save_observed(&self, result: &Result<crate::release_version_protocol::Observation,BridgeError>) {
+        let Some(mut r) = self.record_at(Boundary::Result) else { return; }; let index = r.version.observations.len();
+        let sample = result.as_ref().ok().and_then(|result| {
+            let values = version_values(index)?;
+            VersionSample::read_values(result,&values.name,if index == 0 { 7 } else { 8 },version_digest(index)?)
+        });
+        if self.case != Case::VersionSave || index >= 3 || !r.version.observe_pending || sample.is_none()
+            || usize::from(r.version.observe_requests) != index + 1
+            || !matches!(r.step,Step::VersionSave(VersionStep::Readback(i) | VersionStep::ReadReadback(i)) if usize::from(i) == index) { self.fail(); return; }
+        let Some(sample) = sample else { self.fail(); return; };
+        let Some(prepared) = r.version.sessions.get(index).and_then(|s|s.projection.prepared.as_ref()) else { self.fail(); return; };
+        if prepared.view.values.name != sample.name || prepared.view.values.build != sample.build.to_string()
+            || prepared.view.file.after.bytes != VERSION_BYTES || Some(prepared.view.file.after.sha256.as_str()) != version_digest(index) { self.fail(); return; }
+        r.version.observations.push(sample); r.version.observe_pending = false;
+    }
+    pub(super) fn version_open_request(&self, args: &crate::release_version_edit_commands::Open) {
+        let Some(mut r) = self.record_at(Boundary::Request) else { return; }; let v = &r.version; let index = v.sessions.len();
+        if self.case != Case::VersionSave || index >= 3 || !r.snapshot_visible || v.saved_config.is_none()
+            || !matches!(r.step,Step::VersionSave(VersionStep::Open(i) | VersionStep::ReadOpen(i)) if usize::from(i) == index)
+            || !v.ready || !v.capability || !r.capability || v.open_pending.is_some() || v.prepare_pending.is_some()
+            || v.requests != [index as u8,index as u8,index as u8,0] || v.observe_requests != index as u8 || v.observe_pending
+            || v.sessions.iter().enumerate().any(|(i,s)|!s.complete(i))
+            || r.requests != [0;4] || r.workflow.requests != [0;4] || r.metadata.requests != [0;4]
+            || !r.project.as_ref().is_some_and(|p|p.id == args.project_id) { self.fail(); return; }
+        let (Some(version_revision),Some(config_revision),Some(project),Some(generation)) =
+            (v.native_revision,r.native_revision,r.project.as_ref(),r.generation.as_ref()) else { self.fail(); return; };
+        let pending = VersionOpen { index, after_revision:version_revision.max(config_revision),project_id:project.id.clone(),generation:generation.clone() };
+        if index == 0 {
+            let Some(fixture) = self.project_path().and_then(VersionFixture::begin) else { self.fail(); return; };
+            if r.version.fixture.is_some() { self.fail(); return; } r.version.fixture = Some(fixture);
+        }
+        r.version.open_pending = Some(pending); r.version.requests[0] += 1;
+    }
+    pub(super) fn version_open_result(&self, result: &Result<version::ReleaseVersionEditStatus,BridgeError>, edits: &EditOwner) {
+        let Ok(status) = result else { self.fail(); return; };
+        if self.case != Case::VersionSave { self.fail(); return; } self.version_status(status,edits,true);
+    }
+    pub(super) fn version_prepare_request(&self, args: &version::PrepareReleaseVersionEdit) {
+        let Some(mut r) = self.record_at(Boundary::Request) else { return; }; let index = usize::from(r.version.requests[1]);
+        if self.case != Case::VersionSave
+            || !matches!(r.step,Step::VersionSave(VersionStep::Review(i) | VersionStep::ReadReview(i)) if usize::from(i) == index)
+            || !r.version.record_prepare(args) { self.fail(); }
+    }
+    pub(super) fn version_prepare_result(&self, result: &Result<version::ReleaseVersionEditStatus,BridgeError>, edits: &EditOwner) {
+        {
+            let Some(mut r) = self.record_at(Boundary::Result) else { return; };
+            let Some(index) = r.version.prepare_pending.take() else { self.fail(); return; };
+            let Some(owner) = result.as_ref().ok().and_then(|s|s.active.as_ref()) else { self.fail(); return; };
+            let Some(session) = r.version.sessions.get_mut(index) else { self.fail(); return; };
+            if session.prepare_returned || owner.session_id != session.projection.session_id || owner.phase != edit::Phase::Preparing
+                || owner.prepared.is_some() || owner.apply_submitted
+                || owner.checkout.as_ref().map(|c|&c.revision) != session.projection.checkout.as_ref().map(|c|&c.revision) { self.fail(); return; }
+            session.prepare_returned = true;
+        }
+        if let Ok(status) = result { self.version_edit_status(status,edits); }
+    }
+    pub(super) fn version_apply_request(&self, session_id: &str, plan_token: &str) {
+        let Some(mut r) = self.record_at(Boundary::Request) else { return; }; let v = &r.version; let index = usize::from(v.requests[2]);
+        if self.case != Case::VersionSave || index >= 3
+            || !matches!(r.step,Step::VersionSave(VersionStep::Apply(i) | VersionStep::ReadSaved(i)) if usize::from(i) == index)
+            || v.requests != [index as u8+1,index as u8+1,index as u8,0]
+            || !v.sessions.get(index).is_some_and(|s|s.live_review() && s.prepare_returned && s.review_visible
+                && s.confirmation_opened && s.initially_disabled && s.checkbox_only_disabled && s.typed_save && s.acknowledged
+                && !s.apply_requested && s.projection.session_id == session_id
+                && s.projection.prepared.as_ref().is_some_and(|p|p.plan_token == plan_token)) { self.fail(); return; }
+        r.version.sessions[index].apply_requested = true; r.version.requests[2] += 1;
+    }
+    pub(super) fn version_apply_result(&self, result: &Result<version::ReleaseVersionEditStatus,BridgeError>, edits: &EditOwner) {
+        {
+            let Some(mut r) = self.record_at(Boundary::Result) else { return; };
+            let Some(index) = usize::from(r.version.requests[2]).checked_sub(1) else { self.fail(); return; };
+            let Some(owner) = result.as_ref().ok().and_then(|s|s.active.as_ref()) else { self.fail(); return; };
+            let Some(session) = r.version.sessions.get_mut(index) else { self.fail(); return; };
+            if !session.apply_requested || session.apply_returned || owner.session_id != session.projection.session_id
+                || owner.phase != edit::Phase::Applying || !owner.apply_submitted
+                || owner.prepared.as_ref().map(|p|&p.plan_token) != session.projection.prepared.as_ref().map(|p|&p.plan_token) { self.fail(); return; }
+            session.apply_returned = true;
+        }
+        if let Ok(status) = result { self.version_edit_status(status,edits); }
+    }
+    pub(super) fn version_close_request(&self, _session_id: &str) {
+        if let Some(mut r) = self.record_at(Boundary::Request) { r.version.requests[3] = r.version.requests[3].saturating_add(1); }
+        self.fail(); // No Close is claimed by this three-Apply recipe; unexpected requests must refuse the receipt.
+    }
+    pub(super) fn version_close_result(&self, _result: &Result<version::ReleaseVersionEditStatus,BridgeError>, _edits: &EditOwner) {
+        self.fail(); // Instrument the actual handler without manufacturing unused Close coverage.
+    }
+    pub(super) fn version_edit_status(&self, status: &version::ReleaseVersionEditStatus, edits: &EditOwner) {
+        self.version_status(status,edits,false);
+    }
+    fn version_status(&self, status: &version::ReleaseVersionEditStatus, edits: &EditOwner, open_returned: bool) {
+        if self.case != Case::VersionSave { return; }
+        let Some(mut r) = self.record_at(Boundary::Result) else { return; };
+        if self.failed.load(Ordering::SeqCst) { return; }
+        if status.schema_version != 1 || status.domain != version::DOMAIN || !edit::token(&status.window_generation)
+            || r.generation.as_ref().is_some_and(|g|g != &status.window_generation) { self.fail(); return; }
+        if r.generation.is_none() { r.generation = Some(status.window_generation.clone()); }
+        if !open_returned && (r.version.native_revision.is_some_and(|revision|status.status_revision < revision)
+            || r.native_revision.is_some_and(|revision|status.status_revision < revision)) { return; }
+        let first_active = status.active.as_ref().is_some_and(|active|!r.version.sessions.iter().any(|s|s.projection.session_id == active.session_id));
+        let config = if open_returned || first_active {
+            let Some(matched) = r.version.open_match(status,open_returned) else { self.fail(); return; };
+            let config = if matched == VersionOpenMatch::First {
+                let Ok(config) = edits.status() else { self.fail(); return; }; Some(config)
+            } else { None };
+            if !r.version.observe_open(status,open_returned,config.as_ref()) { self.fail(); return; }
+            if matched == VersionOpenMatch::Reply { return; }
+            config
+        } else { None };
+        match (status.capability.available,status.capability.reason) {
+            (true,edit::EditAvailability::Available) => r.version.capability = true,
+            (false,edit::EditAvailability::RuntimeUnqualified) if !r.version.capability => {},
+            (false,edit::EditAvailability::Shutdown) if r.close_prevented => {},
+            _ => { self.fail(); return; },
+        }
+        r.version.ready = status.capability.available && status.capability.reason == edit::EditAvailability::Available && status.active.is_none();
+        for projection in status.last_terminal.iter().chain(status.active.iter()) {
+            let Some(index) = r.version.sessions.iter().position(|s|s.projection.session_id == projection.session_id) else { self.fail(); return; };
+            let old = r.version.sessions[index].projection.clone(); let session = &r.version.sessions[index];
+            if projection.domain != version::DOMAIN || projection.project_id != old.project_id
+                || projection.owner_generation != status.window_generation || !edit::token(&projection.session_id)
+                || projection.late_settled || projection.phase == edit::Phase::Unknown || phase_order(projection.phase) < phase_order(old.phase)
+                || projection.native_finality == edit::NativeFinality::Unknown || projection.native_reason != edit::NativeEditReason::None
+                || projection.apply_submitted != (session.apply_requested && phase_order(projection.phase) >= phase_order(edit::Phase::Applying)) { self.fail(); return; }
+            if let Some(checkout) = &projection.checkout {
+                if !version_checkout_matches(index,checkout)
+                    || old.checkout.as_ref().is_some_and(|c|serde_json::to_value(c).ok() != serde_json::to_value(checkout).ok())
+                    || r.version.sessions.iter().enumerate().any(|(i,s)|i != index
+                        && s.projection.checkout.as_ref().is_some_and(|c|c.revision == checkout.revision)) { self.fail(); return; }
+            } else if old.checkout.is_some() { self.fail(); return; }
+            let review = if let Some(prepared) = &projection.prepared {
+                let Some(review) = version_review_sample(index,&prepared.view) else { self.fail(); return; };
+                let Ok(value) = serde_json::to_value(prepared) else { self.fail(); return; };
+                if !session.prepare_requested || !edit::token(&prepared.plan_token)
+                    || !projection.checkout.as_ref().is_some_and(|c|c.revision == prepared.revision)
+                    || session.binding != Some((prepared.draft_revision,prepared.baseline_generation))
+                    || session.prepared.as_ref().is_some_and(|before|before != &value)
+                    || r.version.sessions.iter().enumerate().any(|(i,s)|i != index
+                        && s.projection.prepared.as_ref().is_some_and(|p|p.plan_token == prepared.plan_token)) { self.fail(); return; }
+                Some((value,review))
+            } else { if session.prepared.is_some() { self.fail(); return; } None };
+            if let Some(core) = &projection.core_outcome {
+                if core.effect != (if index == 2 { edit::Effect::Unchanged } else { edit::Effect::Committed })
+                    || core.journal != (if index == 2 { edit::Journal::NotCreated } else { edit::Journal::Clean })
+                    || core.resources != edit::ResourceState::Settled || core.reason != edit::CoreReason::None
+                    || phase_order(projection.phase) < phase_order(edit::Phase::Finalizing) { self.fail(); return; }
+            }
+            if projection.phase == edit::Phase::Final {
+                if projection.native_finality != edit::NativeFinality::Settled || projection.core_outcome.is_none()
+                    || projection.prepared.is_none() || !session.apply_requested { self.fail(); return; }
+                if session.finality.is_none() {
+                    // Capture before the next Open can replace last_terminal.
+                    // A fast actual Final may precede its synchronous Apply reply;
+                    // the recipe still waits for that separate original reply.
+                    let Some(facts) = edits.installed_version_observation_final(&projection.session_id) else { self.fail(); return; };
+                    if !version_original_final(&facts,projection) { self.fail(); return; }
+                    let Some(source) = r.version.fixture.as_ref().and_then(|fixture|
+                        self.project_path().and_then(|root|fixture.after_original_final(root))) else { self.fail(); return; };
+                    if index == 1 && !r.version.sessions[0].source_final.is_some_and(|old|old[..2] != source[..2])
+                        || index == 2 && r.version.sessions[1].source_final != Some(source) { self.fail(); return; }
+                    r.version.sessions[index].finality = Some(facts); r.version.sessions[index].source_final = Some(source);
+                }
+            } else if projection.native_finality != edit::NativeFinality::Pending { self.fail(); return; }
+            let session = &mut r.version.sessions[index];
+            if let Some((prepared,review)) = review { session.prepared = Some(prepared); session.review = Some(review); }
+            session.projection = projection.clone();
+        }
+        r.version.native_revision = Some(status.status_revision);
+        drop(r);
+        // Reconcile the genuine version projection before advancing the shared
+        // revision using the one opposite-domain snapshot for this original.
+        if let Some(config) = config { self.edit_status(&config,edits); }
     }
 
     fn metadata_save_observe_request(&self, body: &Value) {
@@ -3768,6 +4434,78 @@ impl Observation {
             session.projection = projection.clone();
         }
         r.workflow.native_revision = Some(status.status_revision);
+    }
+
+
+    fn version_dom(&self, step: VersionStep, value: &Value) {
+        let Some(object) = value.as_object() else { self.fail(); return; };
+        let Some(mut r) = self.record_at(Boundary::Dom) else { return; };
+        let index = step.index();
+        if self.case != Case::VersionSave || index >= 3 || r.pending.take() != Some(Pending::Dom(Step::VersionSave(step)))
+            || r.step != Step::VersionSave(step) { self.fail(); return; }
+        match value.get("state").and_then(Value::as_str) {
+            Some("wait") if object.len() == 1 => return,
+            Some("ready") => {}, _ => { self.fail(); return; },
+        }
+        let v = &r.version;
+        let valid = match step {
+            VersionStep::ReadOpen(_) => object.len() == 2 && value.get("display") == version_editor_display(index,false,false,false).as_ref()
+                && v.sessions.get(index).is_some_and(|s|s.open_returned && s.projection.phase == edit::Phase::Editing
+                    && s.projection.checkout.as_ref().is_some_and(|c|version_checkout_matches(index,c))),
+            VersionStep::Name(_) => object.len() == 1 && index < 2
+                && v.sessions.get(index).is_some_and(|s|s.open_visible && s.entered == [false;2]),
+            VersionStep::Build(_) => object.len() == 1 && index < 2
+                && v.sessions.get(index).is_some_and(|s|s.open_visible && s.entered == [true,false]),
+            VersionStep::ReadInputs(_) => object.len() == 2 && value.get("display") == version_editor_display(index,true,false,false).as_ref()
+                && v.sessions.get(index).is_some_and(|s|s.open_visible && s.entered == (if index == 2 { [false;2] } else { [true;2] })),
+            VersionStep::ReadReview(_) => object.len() == 3 && value.get("display") == version_editor_display(index,true,false,true).as_ref()
+                && v.sessions.get(index).is_some_and(|s|s.inputs_visible && s.prepare_returned && s.live_review()
+                    && s.review.as_ref() == value.get("review")),
+            VersionStep::ReadConfirmation(_) | VersionStep::ReadChecked(_) | VersionStep::ReadTyped(_) => {
+                let checked = !matches!(step,VersionStep::ReadConfirmation(_));
+                let typed = matches!(step,VersionStep::ReadTyped(_));
+                let expected = version_values(index).map(|values|serde_json::json!({
+                    "title":match index { 0 => "Create this saved version source?", 1 => "Save these reviewed version values?", _ => "Confirm this unchanged version file?" },
+                    "selection":format!("Only {VERSION_SOURCE}, with marketing version {} and build {}. The original configuration, ignore proof, source and parents must still match.",values.name,values.build),
+                    "scope":"No configuration Save, native-project rewrite, build, Git/index operation, Store request or release is included. A submitted save may finish after cancellation.",
+                    "checked":checked,"typed":if typed { "SAVE" } else { "" },"applyAvailable":typed}));
+                object.len() == 2 && value.get("confirmation") == expected.as_ref()
+                    && v.sessions.get(index).is_some_and(|s|s.live_review() && s.review_visible && s.confirmation_opened)
+            },
+            VersionStep::ReadSaved(_) => object.len() == 3 && value.get("display") == version_editor_display(index,true,true,false).as_ref()
+                && v.sessions.get(index).is_some_and(|s|s.open_returned && s.apply_returned && s.finality.is_some()
+                    && s.source_final.is_some() && value.get("outcome") == version_outcome_display(index,s).as_ref()),
+            VersionStep::ReadReadback(_) => object.len() == 4 && v.observations.len() == index + 1 && !v.observe_pending
+                && value.get("display") == version_editor_display(index,true,true,false).as_ref()
+                && v.sessions.get(index).is_some_and(|s|s.saved_visible && s.finality.is_some()
+                    && value.get("outcome") == version_outcome_display(index,s).as_ref())
+                && v.observations.get(index).is_some_and(|s|value.get("readback") == Some(&s.display)),
+            _ => object.len() == 1,
+        };
+        if !valid { self.fail(); return; }
+        let i = index as u8;
+        let next = match step {
+            VersionStep::Open(_) => VersionStep::ReadOpen(i),
+            VersionStep::ReadOpen(_) => { r.version.sessions[index].open_visible = true;
+                if index == 2 { VersionStep::ReadInputs(i) } else { VersionStep::Name(i) } },
+            VersionStep::Name(_) => { r.version.sessions[index].entered[0] = true; VersionStep::Build(i) },
+            VersionStep::Build(_) => { r.version.sessions[index].entered[1] = true; VersionStep::ReadInputs(i) },
+            VersionStep::ReadInputs(_) => { r.version.sessions[index].inputs_visible = true; VersionStep::Review(i) },
+            VersionStep::Review(_) => VersionStep::ReadReview(i),
+            VersionStep::ReadReview(_) => { r.version.sessions[index].review_visible = true; VersionStep::Confirm(i) },
+            VersionStep::Confirm(_) => { r.version.sessions[index].confirmation_opened = true; VersionStep::ReadConfirmation(i) },
+            VersionStep::ReadConfirmation(_) => { r.version.sessions[index].initially_disabled = true; VersionStep::Check(i) },
+            VersionStep::Check(_) => VersionStep::ReadChecked(i),
+            VersionStep::ReadChecked(_) => { r.version.sessions[index].checkbox_only_disabled = true; VersionStep::Type(i) },
+            VersionStep::Type(_) => VersionStep::ReadTyped(i),
+            VersionStep::ReadTyped(_) => { r.version.sessions[index].typed_save = true; r.version.sessions[index].acknowledged = true; VersionStep::Apply(i) },
+            VersionStep::Apply(_) => VersionStep::ReadSaved(i),
+            VersionStep::ReadSaved(_) => { r.version.sessions[index].saved_visible = true; VersionStep::Readback(i) },
+            VersionStep::Readback(_) => VersionStep::ReadReadback(i),
+            VersionStep::ReadReadback(_) => { r.version.sessions[index].readback_visible = true;
+                if index == 2 { r.step = Step::Close; return; } VersionStep::Open(i+1) },
+        };
+        r.step = Step::VersionSave(next);
     }
 
     fn metadata_dom(&self, step: MetadataStep, value: &Value) {
@@ -4221,6 +4959,14 @@ impl Observation {
             // Wait for already-requested native replies without spending DOM
             // evaluations on work that has not returned. No new task/deadline.
             let native_pending = match r.step {
+                Step::VersionSave(VersionStep::ReadOpen(index)) => !r.version.sessions.get(usize::from(index))
+                    .is_some_and(|s|s.open_returned && s.projection.phase == edit::Phase::Editing),
+                Step::VersionSave(VersionStep::ReadReview(index)) => !r.version.sessions.get(usize::from(index))
+                    .is_some_and(|s|s.prepare_returned && s.live_review()),
+                Step::VersionSave(VersionStep::ReadSaved(index)) => !r.version.sessions.get(usize::from(index))
+                    .is_some_and(|s|s.open_returned && s.apply_returned && s.finality.is_some() && s.source_final.is_some()),
+                Step::VersionSave(VersionStep::ReadReadback(index)) => r.version.observe_pending
+                    || r.version.observations.len() != usize::from(index)+1,
                 Step::MetadataSave(MetadataStep::OpenText(index) | MetadataStep::ReadReview(index)) =>
                     !r.metadata.sessions.get(usize::from(index)).is_some_and(|s|s.prepare_returned && s.live_review()),
                 Step::MetadataSave(MetadataStep::ReadLoaded) => r.metadata.observations.len() != 1 || r.metadata.observe_pending,
@@ -4363,6 +5109,8 @@ impl Observation {
                     }
                     if self.case == Case::MetadataSave && (!r.metadata.complete() || r.requests != [0;4]
                         || !r.sessions.is_empty() || r.workflow.requests != [0;4]) { self.fail(); return; }
+                    if self.case == Case::VersionSave && (!r.version.complete() || r.requests != [0;4]
+                        || !r.sessions.is_empty() || r.workflow.requests != [0;4] || r.metadata.requests != [0;4]) { self.fail(); return; }
                     if self.commands.as_ref().is_some_and(|c| !c.complete() || r.requests != [0;4] || !r.sessions.is_empty()
                         || r.workflow.requests != [0;4]) { self.fail(); return; }
                     r.step = Step::Quit; Pending::Close
@@ -4432,6 +5180,7 @@ impl Observation {
         if let Step::Paths(path) = step { self.path_dom(path,&value); return; }
         if let Step::Workflow(workflow) = step { self.workflow_dom(workflow, &value); return; }
         if let Step::MetadataSave(metadata) = step { self.metadata_dom(metadata, &value); return; }
+        if let Step::VersionSave(version) = step { self.version_dom(version, &value); return; }
         let Some(object) = value.as_object() else { self.fail(); return; };
         let Some(mut r) = self.record_at(Boundary::Dom) else { return; };
         if r.pending.take() != Some(Pending::Dom(step)) || r.step != step { self.fail(); return; }
@@ -4466,11 +5215,13 @@ impl Observation {
                 && value["configuration"].as_str() == Some("Format-valid only") && value["name"].as_str() == Some("project")
                 && value["sourceFiles"].as_str().is_some_and(|text| text.ends_with(" recognized files")),
             Step::ReadSnapshot => object.len() == 4 && r.selected && r.snapshot
-                && value["configuration"].as_str() == Some(if self.case == Case::MetadataSave { "Format-valid only" } else { "Not configured" })
+                && value["configuration"].as_str() == Some(if matches!(self.case,Case::MetadataSave | Case::VersionSave) { "Format-valid only" } else { "Not configured" })
                 && value["sourceFiles"].as_str() == Some(if self.case == Case::ProjectPaths { "0 recognized files" }
-                    else if self.case == Case::MetadataSave { "3 recognized files" } else { "2 recognized files" })
+                    else if self.case == Case::MetadataSave { "3 recognized files" }
+                    else if self.case == Case::VersionSave { "1 recognized files" } else { "2 recognized files" })
                 && value["name"].as_str() == Some(match self.case { Case::ProjectPaths => "path-project",
-                    Case::WorkflowApply => "workflow-project", Case::MetadataSave => "metadata-project", _ => "positive-project" }),
+                    Case::WorkflowApply => "workflow-project", Case::MetadataSave => "metadata-project",
+                    Case::VersionSave => "version-project", _ => "positive-project" }),
             Step::ReadSuggestion => object.len() == 2 && r.suggested.is_some() && r.provenance.as_ref() == value.get("provenance"),
             Step::ReadDraft | Step::ReadRetainedDraft => object.len() == 5 && r.adopted && r.capability && source() && draft(false, true)
                 && (step != Step::ReadRetainedDraft || r.guidance.workflows_visible),
@@ -4565,7 +5316,8 @@ impl Observation {
             Step::ReadSnapshot => { r.snapshot_visible = true;
                 if self.commands.is_some() { Step::Commands(commands::Step::Navigate) }
                 else if self.case.session().is_some() { Step::Session(SessionStep::Navigate) }
-                else if self.case == Case::MetadataSave { Step::MetadataSave(MetadataStep::Navigate) } else { Step::Settings } },
+                else if self.case == Case::MetadataSave { Step::MetadataSave(MetadataStep::Navigate) }
+                else if self.case == Case::VersionSave { Step::VersionSave(VersionStep::Open(0)) } else { Step::Settings } },
             Step::Settings => if self.case == Case::ProjectPaths { Step::Paths(PathStep::Start) } else { Step::Suggest },
             Step::Suggest => Step::ReadSuggestion,
             Step::ReadSuggestion => { r.provenance_visible = true; Step::Adopt },
@@ -4767,7 +5519,7 @@ impl Observation {
             r.session.quit_cancel_id=Some(id); r.session.quit_cancel.created=true; return;
         }
         if !quit || id == 0 || self.case == Case::Positive && id != 6 || self.case == Case::ProjectPaths && id != 14
-            || matches!(self.case,Case::WorkflowApply | Case::MetadataSave | Case::Commands(_)) && id != 3
+            || matches!(self.case,Case::WorkflowApply | Case::MetadataSave | Case::VersionSave | Case::Commands(_)) && id != 3
             || !r.close_prevented || r.step != Step::Quit || r.native_id.is_some() { self.fail(); return; }
         r.native_id = Some(id);
     }
@@ -4895,10 +5647,14 @@ impl Observation {
             match edits.status() { Ok(status) => self.edit_status(&status, edits), Err(_) => self.fail() }
             match edits.metadata_text_status() { Ok(status) => self.metadata_edit_status(&status, edits), Err(_) => self.fail() }
         }
+        if self.case == Case::VersionSave {
+            match edits.status() { Ok(status) => self.edit_status(&status, edits), Err(_) => self.fail() }
+            match edits.release_version_status() { Ok(status) => self.version_edit_status(&status, edits), Err(_) => self.fail() }
+        }
         let originals_final = if self.case == Case::Outstanding { true } else {
             let Some(r) = self.record_at(Boundary::Exit) else { return; };
             if self.case == Case::ProjectPaths { r.paths.complete() && r.project_witness.as_ref().is_some_and(|project| document.installed_observation_paths_final(project)) }
-            else if matches!(self.case,Case::WorkflowApply | Case::MetadataSave | Case::Commands(_)) { r.project_witness.is_some()
+            else if matches!(self.case,Case::WorkflowApply | Case::MetadataSave | Case::VersionSave | Case::Commands(_)) { r.project_witness.is_some()
                 && self.commands.as_ref().is_none_or(|c| c.complete()) && document.installed_observation_final() }
             else if let Some(case) = self.case.session() { self.session_behavior_complete(&r)
                 && r.project_witness.as_ref().is_some_and(|project| document.installed_session_final(project,case == SessionCase::Loss)) }
@@ -4909,7 +5665,8 @@ impl Observation {
         if !ready || !originals_final || !r.relay_joined || !r.released || r.exit
             || self.case == Case::Positive && (r.sessions.len() != 2 || !r.sessions.iter().all(|session| session.finality.is_some()))
             || self.case == Case::WorkflowApply && !r.workflow.complete()
-            || self.case == Case::MetadataSave && !r.metadata.complete() { self.fail(); return; }
+            || self.case == Case::MetadataSave && !r.metadata.complete()
+            || self.case == Case::VersionSave && !r.version.complete() { self.fail(); return; }
         if let Some(case) = self.case.session() {
             if r.session.queries.is_some() { self.fail(); return; }
             match document.take_installed_session_queries() {
@@ -4933,7 +5690,7 @@ impl Observation {
             r.session.queries = Some(queries); r.session.r1_final = retired; retired
         } else { self.case.session().is_none() };
         let retired = match (self.case, held) {
-            (Case::Positive | Case::ProjectPaths | Case::WorkflowApply | Case::Session(_) | Case::MetadataSave | Case::Commands(_), None) => true,
+            (Case::Positive | Case::ProjectPaths | Case::WorkflowApply | Case::Session(_) | Case::MetadataSave | Case::VersionSave | Case::Commands(_), None) => true,
             (Case::Outstanding, Some(mut held)) => {
                 // Borrow/join the same original after the NORMAL event loop
                 // exits. No additional task, shutdown call, or replacement
@@ -4968,6 +5725,12 @@ impl Observation {
                 && r.snapshot && r.snapshot_visible && r.snapshot_requests == 1 && r.metadata.complete()
                 && r.requests == [0;4] && r.sessions.is_empty() && !r.open_pending && r.prepare_pending.is_none()
                 && r.workflow.requests == [0;4] && r.workflow.sessions.is_empty() && r.project_witness.is_some() && r.originals_final
+                || self.case == Case::VersionSave && r.info && r.catalog && r.environment
+                && r.cancelled && r.pickers[0].settled(false) && r.selected && r.pickers[1].settled(true)
+                && r.snapshot && r.snapshot_visible && r.snapshot_requests == 1 && r.version.complete()
+                && r.requests == [0;4] && r.sessions.is_empty() && !r.open_pending && r.prepare_pending.is_none()
+                && r.workflow.requests == [0;4] && r.workflow.sessions.is_empty() && r.metadata.requests == [0;4]
+                && r.metadata.sessions.is_empty() && r.project_witness.is_some() && r.originals_final
                 || self.case.session().is_some() && r.info && r.catalog && !r.environment
                 && r.cancelled && r.pickers[0].settled(false) && r.selected && r.pickers[1].settled(true)
                 && r.snapshot && r.snapshot_visible && r.snapshot_requests == 1 && r.project_witness.is_some()
@@ -4979,6 +5742,58 @@ impl Observation {
                 && r.requests == [0;4] && r.sessions.is_empty() && !r.open_pending && r.prepare_pending.is_none()
                 && r.workflow.requests == [0;4] && r.workflow.sessions.is_empty() && r.originals_final)
     }
+
+    fn version_report(&self) -> Option<Vec<u8>> {
+        let r = self.record()?;
+        if self.case != Case::VersionSave || !r.exit || !r.originals_final || !r.version.complete() { return None; }
+        let v = &r.version; let fixture = v.fixture.as_ref()?;
+        let finals: Vec<_> = v.sessions.iter().filter_map(|s|s.finality.as_ref()).collect();
+        if finals.len() != 3 { return None; }
+        let count = |test: fn(&InstalledVersionFinality)->bool| finals.iter().filter(|facts|test(facts)).count();
+        let sessions = |test: fn(&VersionSession)->bool| v.sessions.iter().filter(|session|test(session)).count();
+        let outcomes: Option<Vec<_>> = v.sessions.iter().map(|s|s.projection.core_outcome.as_ref()
+            .map(|core|serde_json::json!([core.effect,core.journal,core.resources,core.reason]))).collect();
+        let actions: Option<Vec<_>> = v.sessions.iter().map(|s|s.projection.prepared.as_ref().map(|p|p.view.file.action)).collect();
+        let bindings: Option<Vec<_>> = v.sessions.iter().map(|s|s.binding).collect();
+        let modes: Option<Vec<_>> = v.sessions.iter().map(|s|s.source_final.map(|f|f[2] & 0o7777)).collect();
+        let prepared: Option<Vec<_>> = v.sessions.iter().map(|s|s.projection.prepared.as_ref()).collect();
+        let prepared = prepared?;
+        let distinct_originals = v.sessions.iter().enumerate().all(|(i,s)|
+            v.sessions[..i].iter().all(|prior|prior.projection.session_id != s.projection.session_id));
+        let distinct_plans = prepared.iter().enumerate().all(|(i,p)|prepared[..i].iter().all(|prior|prior.plan_token != p.plan_token));
+        let plan_matched = v.observations.iter().zip(prepared.iter()).filter(|(o,p)|
+            o.pair_matched && o.name == p.view.values.name && o.build.to_string() == p.view.values.build).count();
+        serde_json::to_vec(&serde_json::json!({
+            "schemaVersion":1,"fixture":"release-version-save-v1","gate":"installed-version-profile",
+            "project":{"cancelSettled":r.cancelled && r.pickers[0].settled(false),
+                "registered":r.selected && r.pickers[1].settled(true) && r.project_witness.is_some(),"snapshot":r.snapshot && r.snapshot_visible},
+            "requests":{"observe":v.observe_requests,"open":v.requests[0],"prepare":v.requests[1],"apply":v.requests[2],"close":v.requests[3],
+                "configuration":r.requests,"workflow":r.workflow.requests,"metadata":r.metadata.requests},
+            "draft":{"bindings":bindings?,"wholeMatched":v.sessions.iter().enumerate().all(|(i,s)|s.binding == VERSION_BINDINGS.get(i).copied()),
+                "browserEdit":"insertText"},
+            "reviews":{"fullText":sessions(|s|s.review_visible),"actions":actions?,"distinctOriginals":distinct_originals,
+                "distinctPlans":distinct_plans,"configBlocked":sessions(|s|s.config_blocked)},
+            "confirmation":{"opened":sessions(|s|s.confirmation_opened),"initiallyDisabled":sessions(|s|s.initially_disabled),
+                "checkboxOnlyDisabled":sessions(|s|s.checkbox_only_disabled),"typedSave":sessions(|s|s.typed_save),"acknowledged":sessions(|s|s.acknowledged)},
+            "outcomes":outcomes?,"nativeReasons":v.sessions.iter().map(|s|s.projection.native_reason).collect::<Vec<_>>(),
+            "originals":{"sessions":finals.len(),"writerFrames":finals.iter().map(|f|f.writer_frames).collect::<Vec<_>>(),
+                "stdoutFrames":finals.iter().map(|f|f.stdout_frames).collect::<Vec<_>>(),
+                "startupJoined":count(|f|f.inspection_joined && f.acquisition_joined),"childWaited":count(|f|f.child_waited_success),
+                "ioSettled":count(|f|f.stdin_closed && f.stdout_eof_closed && f.stderr_eof_closed && f.io_joined),
+                "ownersJoined":count(|f|f.driver_joined && f.watchdog_joined && f.manager_joined),
+                "runtimeLedgerSettled":count(|f|f.runtime_ledger_settled),"runtimeSettlementJoined":count(|f|f.runtime_settlement_joined)},
+            "readback":{"values":v.observations.iter().map(|o|serde_json::json!([o.name,o.build])).collect::<Vec<_>>(),
+                "planMatched":plan_matched,"savedBaseline":sessions(|s|s.saved_visible),"originalObservations":v.observations.len()},
+            "filesystem":{"preservedFiles":fixture.originals[2..].len(),"parents":fixture.originals[..2].len(),"afterModes":modes?,
+                "replaceIdentityChanged":v.sessions[1].source_final.is_some_and(|s|v.sessions[0].source_final.is_some_and(|old|s[..2] != old[..2])),
+                "preserveFull9":v.sessions[2].source_final == v.sessions[1].source_final},
+            "quit":{"operation":r.native_id?,"gtkSettled":r.native_id == Some(3) && r.gtk_returned && r.destroyed && r.released,
+                "originalsSettled":r.originals_final,"relayJoined":r.relay_joined,"exit":r.exit},
+            "domain":version::DOMAIN,"nativeFinality":v.sessions.iter().map(|s|s.projection.native_finality).collect::<Vec<_>>(),
+            "lateSettled":v.sessions.iter().map(|s|s.projection.late_settled).collect::<Vec<_>>()
+        })).ok().filter(|raw|raw.len()+1 <= 2048)
+    }
+
     fn metadata_report(&self) -> Option<Vec<u8>> {
         let r = self.record()?;
         if self.case != Case::MetadataSave || !r.exit || !r.originals_final || !r.metadata.complete() { return None; }
@@ -5511,6 +6326,7 @@ impl Observation {
                 let Some(mut r)=self.record_at(Boundary::Settlement) else { return; };
                 if self.failed.load(Ordering::SeqCst) { return; }
                 if r.pending.is_some() { self.session_fail(&mut r,SessionRejection::StepPendingInvariant); return; } r.pending=Some(Pending::Dom(Step::Session(step)));
+                if let Some(diagnostic) = r.session.diagnostic.as_mut() { diagnostic.gtk_callbacks.reserved(); }
             }
             let q=self.clone(); let app=app.clone();
             if window.run_on_main_thread(move || {
@@ -5712,7 +6528,12 @@ impl Observation {
         let Some(mut r)=self.record() else { return; };
         if !session_file_wait_pending(r.step,r.pending,index,activating) || self.failed.load(Ordering::SeqCst) { return; }
         r.trace=(r.step,Boundary::Gtk);
-        self.session_wait(&mut r,wait);
+        if !self.failed.load(Ordering::SeqCst) {
+            if let Some(mut diagnostic) = SessionDiagnostic::sample(r.step,r.evaluations,r.session.diagnostic) {
+                diagnostic.wait = wait; diagnostic.gtk_callbacks.wait_observed();
+                r.session.diagnostic = Some(diagnostic);
+            }
+        }
     }
     pub(super) fn session_file_created(&self, id: u32, kind: crate::credential_format::FileKind) {
         let Some(mut r)=self.record_at(Boundary::Gtk) else { return; };
@@ -5800,6 +6621,9 @@ impl Observation {
             self.session_fail(&mut r,SessionRejection::GtkReturnRole); return;
         }
         let index=match step { SessionStep::SetFile(i) | SessionStep::ActivateFile(i)=>i,_=>{self.session_fail(&mut r,SessionRejection::GtkReturnRole);return;} };
+        if !self.failed.load(Ordering::SeqCst) {
+            if let Some(diagnostic) = r.session.diagnostic.as_mut() { diagnostic.gtk_callbacks.returned(); }
+        }
         let Some(file)=r.session.files.last_mut().filter(|file| file.index==index) else {
             if result!=Ok(false) { self.session_fail(&mut r,SessionRejection::GtkReturnState); } return;
         };
@@ -6015,6 +6839,161 @@ fn path_script(step: PathStep) -> Option<String> {
         const readField=label=>{{const f=field(label);if(!f)throw 0;return fieldValue(f)}};
         {body}
     }} catch {{ return {{state:'error'}} }} }})()"#))
+}
+
+
+fn version_script(step: VersionStep) -> Option<String> {
+    let index = step.index(); if index >= 3 { return None; }
+    let body = match step {
+        VersionStep::Open(_) => r#"const e=editor(),b=openButton(e);if (b.disabled) return {state:'wait'};
+            if (document.querySelector('dialog')) throw 0;show(b);b.click();return {state:'ready'};"#,
+        VersionStep::ReadOpen(_) => r#"const e=editor();if (!e.querySelector('.version-selection')) return {state:'wait'};
+            const m=controls();if (!m.open.disabled || phase>0 && m.review.disabled) return {state:'wait'};
+            return {state:'ready',display:display(m)};"#,
+        VersionStep::Name(_) if index < 2 => r#"return insert(0,phase===0?'1.2.3':'2.3.4',phase===0?['','']:['1.2.3','7']);"#,
+        VersionStep::Build(_) if index < 2 => r#"return insert(1,phase===0?'7':'8',phase===0?['1.2.3','']:['2.3.4','7']);"#,
+        VersionStep::Name(_) | VersionStep::Build(_) => return None,
+        VersionStep::ReadInputs(_) => r#"const m=controls();return {state:'ready',display:display(m)};"#,
+        VersionStep::Review(_) => r#"const m=controls();if (m.review.disabled) return {state:'wait'};
+            if (document.querySelector('dialog')) throw 0;show(m.review);m.review.click();return {state:'ready'};"#,
+        VersionStep::ReadReview(_) => r#"const m=controls();if (!m.editor.querySelector('.version-review')) return {state:'wait'};
+            if (document.querySelector('dialog')) throw 0;return {state:'ready',display:display(m),review:review(m)};"#,
+        VersionStep::Confirm(_) => r#"const m=controls(),buttons=[...m.editor.querySelectorAll(':scope > button.button.primary')];
+            const label=['Create version file…','Save version values…','Confirm unchanged values…'][phase];
+            if (buttons.length!==1 || text(buttons[0])!==label || buttons[0].disabled || document.querySelector('dialog')) throw 0;
+            show(buttons[0]);buttons[0].click();return {state:'ready'};"#,
+        VersionStep::ReadConfirmation(_) | VersionStep::ReadChecked(_) | VersionStep::ReadTyped(_) => r#"if (!document.querySelector('.version-editor > dialog[open].confirm-dialog')) return {state:'wait'};
+            return {state:'ready',confirmation:confirmationDisplay()};"#,
+        VersionStep::Check(_) => r#"const c=confirmation();if (c.check.checked || c.input.value!=='' || !c.apply.disabled) throw 0;
+            show(c.check);c.check.click();return {state:'ready'};"#,
+        VersionStep::Type(_) => r#"const c=confirmation();if (!c.check.checked || c.input.value!=='' || !c.apply.disabled) throw 0;
+            show(c.input);c.input.focus();c.input.select();if (document.activeElement!==c.input || c.input.selectionStart!==0 || c.input.selectionEnd!==0
+                || !document.execCommand('insertText',false,'SAVE')) throw 0;return {state:'ready'};"#,
+        VersionStep::Apply(_) => r#"const c=confirmation();if (!c.check.checked || c.input.value!=='SAVE' || c.apply.disabled) throw 0;
+            show(c.apply);c.apply.click();return {state:'ready'};"#,
+        VersionStep::ReadSaved(_) => r#"const m=controls();if (document.querySelector('dialog') || m.open.disabled || m.review.disabled) return {state:'wait'};
+            return {state:'ready',display:display(m),outcome:outcome(m)};"#,
+        VersionStep::Readback(_) => r#"const p=passive();if (p.button.disabled || p.live.getAttribute('aria-busy')==='true') return {state:'wait'};
+            if (document.querySelector('dialog')) throw 0;show(p.button);p.button.click();return {state:'ready'};"#,
+        VersionStep::ReadReadback(_) => r#"const m=controls(),p=passive();if (p.button.disabled || p.live.getAttribute('aria-busy')==='true') return {state:'wait'};
+            if (document.querySelector('dialog')) throw 0;return {state:'ready',display:display(m),outcome:outcome(m),readback:readback(p)};"#,
+    };
+    // The actual original handler/status hooks separately attest every native
+    // boundary. This script only operates and reads existing visible controls.
+    let phase = format!("const phase={index};");
+    Some([r#"(() => { try {
+        if (document.querySelector('.preview-banner, .fatal-error, #main-content > .notice-danger')) throw 0;
+        const text=e=>{if (!e || typeof e.textContent!=='string' || e.textContent.length>4096) throw 0;return e.textContent;};
+        const visible=e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e);return e.isConnected && r.width>0 && r.height>0 && s.display!=='none' && s.visibility==='visible';};
+        const show=e=>{if (!e) throw 0;e.scrollIntoView({block:'center'});if (!visible(e)) throw 0;};
+        const selected=()=>[...document.querySelectorAll('nav[aria-label="Workspace navigation"] button[aria-current="page"]')].some(b=>b.getAttribute('aria-label')==='Dashboard');
+        const editor=()=>{
+            const editors=document.querySelectorAll('section[aria-label="Edit or create saved version values"]');
+            if (!selected() || editors.length!==1) throw 0;const e=editors[0];
+            if (e.querySelector('.notice-danger, .review-caution, [role="alert"]')) throw 0;return e;
+        };
+        const openButton=e=>{
+            const groups=e.querySelectorAll(':scope > .button-row');if (groups.length<1 || groups.length>2) throw 0;
+            const buttons=groups[0].querySelectorAll(':scope > button');
+            if (buttons.length!==3 || text(buttons[0])!=='Open saved version editor'
+                || text(buttons[1])!=='Project Settings / ignore prerequisite' || text(buttons[2])!=='Check writer availability') throw 0;
+            return buttons[0];
+        };
+        const controls=()=>{
+            const e=editor(),groups=e.querySelectorAll(':scope > .button-row');
+            const fields=[...e.querySelectorAll(':scope > .version-values > div')];
+            if (groups.length!==2 || fields.length!==2) throw 0;
+            const inputs=fields.map((field,index)=>{
+                const input=field.querySelector(':scope > input'),label=field.querySelector(':scope > label');
+                if (!input || !label || !input.id || label.getAttribute('for')!==input.id || input.disabled || input.readOnly
+                    || input.type!=='text' || input.maxLength!==(index===0?64:10)
+                    || !text(label).startsWith(index===0?'Marketing version':'Build number') || input.value.length>(index===0?64:10)) throw 0;
+                return input;
+            });
+            const buttons=groups[1].querySelectorAll(':scope > button');
+            if (buttons.length!==3 || !['Validate and review creation','Validate and review values'].includes(text(buttons[0]))
+                || text(buttons[1])!=='Discard value changes' || text(buttons[2])!=='Reload saved values') throw 0;
+            return {editor:e,open:openButton(e),review:buttons[0],inputs};
+        };
+        const display=m=>{
+            const e=m.editor,selection=e.querySelectorAll(':scope > .version-selection');
+            if (selection.length!==1) throw 0;const paragraphs=selection[0].querySelectorAll(':scope > p');
+            const digests=selection[0].querySelectorAll(':scope > code.version-digest');
+            if (paragraphs.length!==3 || digests.length<1 || digests.length>2) throw 0;
+            [...paragraphs,...digests,...m.inputs].forEach(show);
+            return {title:text(e.querySelector(':scope > .section-heading h2')),project:text(e.querySelector(':scope > p')),
+                badge:text(e.querySelector(':scope > .section-heading .badge')),selection:[...paragraphs].map(text),digests:[...digests].map(text),
+                values:{name:m.inputs[0].value,build:m.inputs[1].value},openAvailable:!m.open.disabled,
+                reviewLabel:text(m.review),reviewAvailable:!m.review.disabled};
+        };
+        const insert=(index,replacement,before)=>{
+            const m=controls();if (document.querySelector('dialog') || m.inputs.some((input,i)=>input.value!==before[i])) throw 0;
+            const input=m.inputs[index];show(input);input.focus();input.select();
+            if (document.activeElement!==input || input.selectionStart!==0 || input.selectionEnd!==before[index].length
+                || !document.execCommand('insertText',false,replacement)) throw 0;return {state:'ready'};
+        };
+        const raw=(element,before)=>{
+            if (text(element.querySelector(':scope > h4'))!==(before?'Complete original text':'Complete reviewed text')) throw 0;
+            const pres=element.querySelectorAll(':scope > pre');show(element);
+            if (before && pres.length===0) {
+                if (text(element.querySelector(':scope > p'))!=='Observed absent. Empty or malformed files are not treated as absence.') throw 0;
+                return {state:'absent'};
+            }
+            if (pres.length!==1 || pres[0].getAttribute('aria-label')!=='Complete '+(before?'original':'reviewed')+' version source') throw 0;
+            show(pres[0]);const content=text(pres[0].querySelector(':scope > code'));
+            const size=/^([0-9]+) UTF-8 bytes · lf · Final line ending present$/.exec(text(element.querySelector(':scope > p')));
+            const digest=/^SHA256 ([0-9a-f]{64})$/.exec(text(element.querySelector(':scope > code.version-digest')));
+            if (!size || !digest) throw 0;const bytes=Number(size[1]);
+            if (!Number.isSafeInteger(bytes) || String(bytes)!==size[1] || bytes>4096) throw 0;
+            const value={text:content,bytes,sha256:digest[1]};return before?{state:'present',...value}:value;
+        };
+        const review=m=>{
+            const views=m.editor.querySelectorAll(':scope > .version-review');if (views.length!==1) throw 0;const view=views[0];
+            const facts=view.querySelectorAll(':scope > p'),sides=view.querySelectorAll('.version-raw-grid > .version-raw');
+            if (facts.length!==6 || sides.length!==2) throw 0;[...facts].forEach(show);
+            return {title:text(view.querySelector(':scope > h3')),facts:[...facts].map(text),before:raw(sides[0],true),after:raw(sides[1],false)};
+        };
+        const confirmation=()=>{
+            const e=editor(),dialogs=document.querySelectorAll('dialog');
+            if (dialogs.length!==1 || dialogs[0].parentElement!==e || !dialogs[0].classList.contains('confirm-dialog')
+                || !dialogs[0].open || dialogs[0].querySelector('[role="alert"]')) throw 0;
+            const dialog=dialogs[0],checks=dialog.querySelectorAll('.save-confirm-check input[type="checkbox"]');
+            const inputs=dialog.querySelectorAll('.dialog-content > input'),buttons=dialog.querySelectorAll('.button-row > button');
+            if (checks.length!==1 || inputs.length!==1 || buttons.length!==2 || checks[0].disabled || inputs[0].disabled || inputs[0].readOnly
+                || inputs[0].type!=='text' || inputs[0].value.length>4 || buttons[0].disabled || text(buttons[0])!=='Keep reviewing'
+                || text(buttons[1])!==['Create version file','Save version values','Confirm unchanged values'][phase]
+                || text(dialog.querySelector('.save-confirm-check'))!=='I reviewed the full original/after text, exact destination, byte comparisons, mode and directory/line-ending facts.') throw 0;
+            return {dialog,check:checks[0],input:inputs[0],apply:buttons[1]};
+        };
+        const confirmationDisplay=()=>{
+            const c=confirmation(),paragraphs=c.dialog.querySelectorAll('.dialog-content > p');
+            if (paragraphs.length!==2) throw 0;[c.check,c.input,c.apply,...paragraphs].forEach(show);
+            return {title:text(c.dialog.querySelector('h2')),selection:text(paragraphs[0]),scope:text(paragraphs[1]),
+                checked:c.check.checked,typed:c.input.value,applyAvailable:!c.apply.disabled};
+        };
+        const outcome=m=>{
+            const panels=m.editor.querySelectorAll(':scope > .version-status'),notices=panels.length===1?panels[0].querySelectorAll(':scope > .notice-info'): [];
+            if (panels.length!==1 || notices.length!==1 || notices[0].getAttribute('role')!=='status') throw 0;
+            const content=notices[0].querySelector(':scope > div'),paragraphs=content?.querySelectorAll(':scope > p');
+            if (!content || paragraphs.length!==3
+                || text(paragraphs[2])!=='This receipt is for the submitted revision only, not later edits. Read saved version again explicitly before using its new values for build consent.') throw 0;
+            show(content);return {title:text(content.querySelector(':scope > strong')),submitted:text(paragraphs[0]),facts:text(paragraphs[1])};
+        };
+        const passive=()=>{
+            const cards=document.querySelectorAll('section[aria-label="Saved version and build"]');
+            if (!selected() || cards.length!==1) throw 0;const card=cards[0],live=card.querySelector('div[aria-live="polite"]'),buttons=card.querySelectorAll(':scope > button');
+            if (!live || buttons.length!==1 || text(buttons[0])!=='Read saved version') throw 0;return {card,live,button:buttons[0]};
+        };
+        const readback=p=>{
+            const name=p.live.querySelector('strong.summary-value'),paragraphs=[...p.live.querySelectorAll(':scope > p')];
+            const badges=p.live.querySelectorAll(':scope > .badge'),scope=p.card.querySelectorAll(':scope > p');
+            if (p.live.getAttribute('aria-busy')!=='false' || p.live.children.length!==4 || paragraphs.length!==2 || badges.length!==1 || scope.length!==1) throw 0;
+            const sources=paragraphs[1].querySelectorAll(':scope > code');if (sources.length!==1) throw 0;
+            [p.card,name,...paragraphs,badges[0],scope[0],p.button].forEach(show);
+            return {name:text(name),build:text(paragraphs[0]),badge:text(badges[0]),source:text(sources[0]),sourceText:text(paragraphs[1]),
+                scope:text(scope[0]),config:text(p.card.querySelector('.summary-foot code')),readAvailable:!p.button.disabled};
+        };
+    "#,&phase,body,r#" } catch { return {state:'error'}; } })()"#].concat())
 }
 
 fn metadata_script(step: MetadataStep) -> Option<String> {
@@ -6311,7 +7290,9 @@ fn script(step: Step, case: Case) -> Option<String> {
     if let Step::Paths(path) = step { return path_script(path); }
     if let Step::Workflow(workflow) = step { return workflow_script(workflow); }
     if let Step::MetadataSave(metadata) = step { return metadata_script(metadata); }
-    let project_name = match case { Case::WorkflowApply => "workflow-project", Case::Session(_) | Case::Commands(_) => "project", Case::MetadataSave => "metadata-project", _ => "positive-project" };
+    if let Step::VersionSave(version) = step { return version_script(version); }
+    let project_name = match case { Case::WorkflowApply => "workflow-project", Case::Session(_) | Case::Commands(_) => "project", Case::MetadataSave => "metadata-project",
+        Case::VersionSave => "version-project", _ => "positive-project" };
     let body = match step {
         Step::Environment | Step::GuidanceEnvironment => r#"
             const b = document.querySelector('nav[aria-label="Workspace navigation"] button[aria-label="Environment"]');
@@ -6856,6 +7837,7 @@ pub(crate) fn main() -> std::process::ExitCode {
         Some(value) if value == OsStr::new("session-loss") => Some(Case::Session(SessionCase::Loss)),
         Some(value) if value == OsStr::new("session-deadline") => Some(Case::Session(SessionCase::Deadline)),
         Some(value) if value == OsStr::new("metadata-save") => Some(Case::MetadataSave),
+        Some(value) if value == OsStr::new("version-save") => Some(Case::VersionSave),
         Some(value) if cfg!(target_os = "linux") && value == OsStr::new("settled-failure") => Some(Case::SettledFailure),
         Some(value) => commands::Case::parse(value).map(Case::Commands),
         _ => None,
@@ -6916,6 +7898,13 @@ pub(crate) fn main() -> std::process::ExitCode {
         crate::edit_owner::assert_installed_metadata_owner_contract();
         assert_metadata_open_race_contract();
     }
+    if case == Case::VersionSave {
+        crate::asset_session::assert_project_selection_gate_contract();
+        crate::runtime::assert_installed_version_profile_contract();
+        crate::installed_runtime::assert_installed_version_slots_contract();
+        crate::edit_owner::assert_installed_version_owner_contract();
+        assert_version_open_race_contract();
+    }
     if case.commands().is_some() { commands::assert_contracts(); }
     // Routing DATA is not native admission. The ordinary builder constructs
     // DesktopBridge::new / RuntimeConfig::packaged and owes every real check.
@@ -6936,6 +7925,7 @@ pub(crate) fn main() -> std::process::ExitCode {
         Case::Session(SessionCase::Loss) => b"MRK_INSTALLED_SHELL_OBSERVATION=session-loss-verified\n",
         Case::Session(SessionCase::Deadline) => b"MRK_INSTALLED_SHELL_OBSERVATION=session-deadline-verified\n",
         Case::MetadataSave => b"MRK_INSTALLED_SHELL_OBSERVATION=metadata-save-verified\n",
+        Case::VersionSave => b"MRK_INSTALLED_SHELL_OBSERVATION=version-save-verified\n",
         Case::Commands(case) => case.verified_line(),
         // A missing deliberate rejection must never become a positive receipt.
         Case::SettledFailure => return std::process::ExitCode::FAILURE,
@@ -6946,6 +7936,11 @@ pub(crate) fn main() -> std::process::ExitCode {
             if let Some(commands) = &q.commands {
                 let report = commands.report().ok_or_else(|| std::io::Error::other("tools/offline receipt unavailable"))?;
                 stdout.write_all(b"MRK_INSTALLED_SHELL_TOOLS_OFFLINE=")?;
+                stdout.write_all(&report)?; return stdout.write_all(b"\n");
+            }
+            if case == Case::VersionSave {
+                let report = q.version_report().ok_or_else(||std::io::Error::other("version receipt unavailable"))?;
+                stdout.write_all(b"MRK_INSTALLED_SHELL_VERSION_SAVE=")?;
                 stdout.write_all(&report)?; return stdout.write_all(b"\n");
             }
             if case == Case::MetadataSave {
@@ -6991,10 +7986,10 @@ pub(crate) fn main() -> std::process::ExitCode {
 // Metadata and finite directory rosters only. The outside publication owner
 // hashes the fictional bytes; SourceBook alone owns any open source original.
 // This object never opens a file body, repairs a fixture, or grants cleanup.
-const SESSION_FIXTURE_NAMESPACE: [&str; 18] = [
+const SESSION_FIXTURE_NAMESPACE: [&str; 19] = [
     "candidate-evidence", "metadata-project", "offline-cancel", "offline-drift", "offline-negative", "offline-pass", "offline-settlement",
     "path-outside", "path-project", "positive-project", "session-deadline", "session-inputs", "session-loss", "session-refusals",
-    "tools-cancel", "tools-observed", "tools-settlement", "workflow-project",
+    "tools-cancel", "tools-observed", "tools-settlement", "version-project", "workflow-project",
 ];
 const SESSION_FIXTURE_COMMON: [(&str, u64, u64); 9] = [
     (".", 0o040700, 0), ("project", 0o040700, 0),
@@ -7100,7 +8095,7 @@ impl SessionFixture {
             if id[0] == 0 || id[1] == 0 || id[2] & 0o170000 != 0o040000
                 || id[2] & 0o022 != 0 || id[3..5] != [0, 0]
                 || (if path == namespace {
-                    id[2] != 0o040755 || id[5] == 0 || id[5] > 20 || id[6] > 1 << 20
+                    id[2] != 0o040755 || id[5] == 0 || id[5] > (SESSION_FIXTURE_NAMESPACE.len() as u64 + 2) || id[6] > 1 << 20
                 } else { id[2] & 0o005 != 0o005 })
                 || ancestors.iter().any(|(_, old)| old[0] != id[0] || old[..2] == id[..2]) { return Err(()); }
             ancestors.push((path.to_path_buf(), id));

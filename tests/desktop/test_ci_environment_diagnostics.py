@@ -1235,8 +1235,20 @@ class OfflineNativeCIContracts(unittest.TestCase):
         fixture = (SOURCE / "desktop/src-tauri/src/offline_preflight_owner_tests.rs").read_text(encoding="utf-8")
         self.assertIn("SavedCommandOwner::offline_preflight(runtime)", adapter)
         self.assertIn("self.saved.start_offline(", adapter)
-        for text in ("const OFFLINE_NATIVE_QUALIFIED: bool = false;", "const OFFLINE_RUNTIME_QUALIFIED: bool = false;",
-                     "const ANDROID_NATIVE_QUALIFIED: bool = false;", "const ANDROID_RUNTIME_QUALIFIED: bool = false;",
+        for obsolete in ("OFFLINE_NATIVE_QUALIFIED", "OFFLINE_RUNTIME_QUALIFIED"):
+            self.assertNotIn(obsolete, owner)
+        selected = owner.split("fn offline_installed_selected(&self) -> bool {", 1)[1].split("\n    }", 1)[0]
+        self.assertEqual(" ".join(selected.split()),
+            'self.domain == SavedCommandDomain::OfflinePreflight && cfg!(feature = "custom-protocol") '
+            '&& self.runtime.offline_preflight_installed_profile_available()')
+        admission = owner.split("pub(crate) fn admit_installed_observation(", 1)[1].split(
+            "pub(crate) fn installed_observation_snapshot(", 1)[0]
+        for original in ("r.revision != 0", "r.active.is_some()", "r.prepared.is_some()", "r.last.is_some()"):
+            self.assertIn(original, admission)
+        self.assertLess(admission.index("!self.inner.offline_installed_selected()"), admission.index("token.consume()"))
+        for forbidden in (".status(", ".status_offline("):
+            self.assertNotIn(forbidden, admission)
+        for text in ("const ANDROID_NATIVE_QUALIFIED: bool = false;", "const ANDROID_RUNTIME_QUALIFIED: bool = false;",
                      "const ANDROID_TOOLCHAIN_QUALIFIED: bool = false;",
                      "const OFFLINE_WORK: Duration = Duration::from_secs(1800);", "const OFFLINE_HARD: Duration = Duration::from_secs(1810);",
                      "const ANDROID_WORK: Duration = Duration::from_secs(3000);", "const ANDROID_HARD: Duration = Duration::from_secs(3010);",

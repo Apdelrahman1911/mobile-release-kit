@@ -2125,15 +2125,18 @@ def shell_source_manifest(source):
              "desktop/src-tauri/src/main.rs", "desktop/src-tauri/tests/installed_shell_observation.rs",
              "desktop/src-tauri/src/error.rs", "desktop/src-tauri/src/protocol.rs", "desktop/src-tauri/src/installed_runtime.rs",
              "desktop/src-tauri/src/passive_management_tests.rs", "desktop/src-tauri/src/credential_assessment.rs",
-             "desktop/src-tauri/src/runtime.rs", "desktop/src-tauri/src/bridge.rs", "desktop/src-tauri/src/asset_session.rs",
+             "desktop/src-tauri/src/edit_owner.rs", "desktop/src-tauri/src/release_version_edit_commands.rs",
+             "desktop/src-tauri/src/release_version_edit_protocol.rs", "desktop/src-tauri/src/runtime.rs", "desktop/src-tauri/src/bridge.rs", "desktop/src-tauri/src/asset_session.rs",
              "desktop/src-tauri/src/asset_source.rs", "desktop/src-tauri/src/shell.rs", "desktop/src-tauri/src/installed_shell_observation.rs",
              "desktop/src-tauri/src/supervisor.rs", "desktop/src-tauri/src/installed_shell_shutdown_observation.rs",
              "desktop/src-tauri/src/installed_tools_observation.rs", "desktop/src-tauri/src/environment_diagnostics_owner.rs",
              "desktop/src-tauri/src/environment_diagnostics_protocol.rs", "desktop/src-tauri/src/saved_command_owner.rs",
-             "desktop/src-tauri/src/offline_preflight_owner.rs", "desktop/src-tauri/src/offline_preflight_protocol.rs",
+             "desktop/src-tauri/src/offline_preflight_owner.rs", "desktop/src-tauri/src/offline_preflight_owner_tests.rs",
+             "desktop/src-tauri/src/offline_preflight_protocol.rs",
              "desktop/src-tauri/tauri.conf.json", "desktop/package.json", "desktop/package-lock.json",
              "desktop/vite.config.mjs", "desktop/tsconfig.json", "desktop/src/App.tsx",
-             "desktop/src/components/EnvironmentDiagnostics.tsx", "desktop/tests/environment-diagnostics.test.mjs",
+             "desktop/src/components/ReleaseVersionEditor.tsx", "desktop/src/releaseVersionEdit.ts",
+             "desktop/src/releaseVersionEditController.ts", "desktop/src/components/EnvironmentDiagnostics.tsx", "desktop/tests/environment-diagnostics.test.mjs",
              "desktop/tools/ci_ubuntu_publication.py", "desktop/tools/ubuntu_publication_lifecycle.py",
              "desktop/tools/prepare_hosted_ubuntu_data.py")
     return [{**D.file_record(source / path, 2 << 20), "path": path} for path in sorted(paths)]
@@ -3407,7 +3410,7 @@ def shell_project_draft_observation(observed, lifecycle):
            and observed.get("productQualified") is False and observed.get("packageLifecycleQualified") is False
            and observed.get("shellPackageBuilt") is False, "Closed project/draft observation was relabelled as qualification")
     cases, combined, files = observed.get("cases"), observed.get("projectDraft"), observed.get("files")
-    # The nineteen-case root cap is160 (158 exact names); its exporter adds the original client's
+    # The twenty-case root cap is165 (163 exact names); its exporter adds the original client's
     # stdout/stderr, not two more root evidence slots or another capture.
     D.need(type(cases) is dict and set(cases) == set(lifecycle.SHELL_CASES)
            and type(combined) is dict and set(combined) == {"native", "fixture"}
@@ -3470,6 +3473,7 @@ def shell_project_draft_observation(observed, lifecycle):
     _shell_workflow_apply_observation(cases["workflow-apply"], observed.get("workflowApply"), files, lifecycle)
     _shell_session_inputs_observation(cases, observed.get("sessionInputs"), files, lifecycle)
     _shell_metadata_save_observation(cases["metadata-save"], observed.get("metadataSave"), files, lifecycle)
+    _shell_version_save_observation(cases["version-save"], observed.get("versionSave"), files, lifecycle)
     _shell_tools_offline_observation(cases, observed.get("toolsOffline"), files, lifecycle)
     return {"native": receipt, "fixture": fixture}
 
@@ -3664,6 +3668,37 @@ def _shell_metadata_save_observation(case, combined, files, lifecycle):
                and type(matches[0]["size"]) is int and matches[0]["size"] == pin["size"] and matches[0]["sha256"] == pin["sha256"],
                "Original metadata before/after export pin differs")
     D.need(fixture["before"]["sha256"] != fixture["after"]["sha256"], "Metadata inventory incorrectly claims no saved text")
+
+
+def _shell_version_save_observation(case, combined, files, lifecycle):
+    """Require the three original Reviews/Applies and the exact final saved source."""
+    D.need(type(case) is dict and set(case) == {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps", "versionSave"}
+           and case["case"] == "version-save" and type(case["exitCode"]) is int and case["exitCode"] == 0
+           and case["bootstrapReturned"] is True and case["domAndGtkObserved"] is True and case["maps"] == [],
+           "Closed version original result is incomplete")
+    D.need(type(combined) is dict and set(combined) == {"native", "fixture"}, "Closed version Save observation is missing")
+    receipt = lifecycle.shell_version_receipt(D.canonical(case["versionSave"]))
+    D.need(D.canonical(combined["native"]) == D.canonical(receipt), "Closed version native receipt correspondence differs")
+    fixture = combined["fixture"]
+    expected = {"fixture": "release-version-save-v1", "rootRetained": True, "preservedOriginals": True,
+                "createdFileCount": 1, "beforeCount": 5, "afterCount": 6,
+                "configurationUnchanged": True, "ignoreUnchanged": True, "sentinelUnchanged": True,
+                "noUnexpectedEntries": True, "noPendingState": True,
+                "version": {"path": "version.properties", "size": len(lifecycle.SHELL_VERSION_EDITED),
+                            "sha256": hashlib.sha256(lifecycle.SHELL_VERSION_EDITED).hexdigest(), "mode": 0o600}}
+    D.need(type(fixture) is dict and set(fixture) == set(expected) | {"before", "after"}
+           and D.canonical({key: fixture[key] for key in expected}) == D.canonical(expected),
+           "Closed version fixture originals or exact saved bytes differ")
+    for phase in ("before", "after"):
+        pin = fixture[phase]
+        D.need(type(pin) is dict and set(pin) == {"size", "sha256"} and type(pin["size"]) is int and 0 < pin["size"] <= 8192
+               and type(pin["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", pin["sha256"]) is not None,
+               "Closed version original inventory pin differs")
+        matches = [row for row in files if type(row) is dict and row.get("path") == "lifecycle-shell-version-save-" + phase + ".json"]
+        D.need(len(matches) == 1 and set(matches[0]) == {"path", "size", "sha256"}
+               and type(matches[0]["size"]) is int and matches[0]["size"] == pin["size"] and matches[0]["sha256"] == pin["sha256"],
+               "Original version before/after export pin differs")
+    D.need(fixture["before"]["sha256"] != fixture["after"]["sha256"], "Version inventory incorrectly claims no saved source")
 
 
 def shell_tools_input_root():
@@ -4181,13 +4216,14 @@ def verify_installed_shell():
         D.write(public / "result.json", D.canonical({**source_record, "lifecycle": observed,
             "projectDraft": project_draft, "candidateDocuments": observed["candidateDocuments"], "projectPaths": observed["projectPaths"],
             "workflowApply": observed["workflowApply"], "sessionInputs": observed["sessionInputs"], "metadataSave": observed["metadataSave"],
+            "versionSave": observed["versionSave"],
             "toolsOffline": observed["toolsOffline"], "toolsOfflineQualificationOnly": True, "offlineFullWorkDeadlineExercised": False,
             "settledFailure": observed["settledFailure"],
             "commands": check.commands, "cases": list(lifecycle.SHELL_CASES), "compilerRerun": False,
             "supplierRebuilt": False, "packageBuilt": False, "upgradeOrRefusalRerun": False,
             "scope": "normal-shell-to-accepted-installed-runtime-connection-only"}))
         D.need(time.monotonic() < deadline, "Original shell result close/readback was late")
-        print("Normal window, seventeen success-requiring observers and one raw-exit1 expected negative retained with service finality; no product/package qualification.", flush=True)
+        print("Normal window, eighteen success-requiring observers and one raw-exit1 expected negative retained with service finality; no product/package qualification.", flush=True)
     except BaseException as error:
         retain_failure(root, phase if check is None else check.phase, [] if check is None else check.commands, error)
         raise

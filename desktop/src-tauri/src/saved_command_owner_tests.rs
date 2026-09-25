@@ -74,7 +74,8 @@ fn document_prepared_saved_domains_exclude_peers_and_retire_before_configuration
         };
         original.inner.lock().prepared = Some(Prepared { projection: projection(domain),
             expires: Instant::now() + INTENT, registration: bridge.registry_generation(), project: project() });
-        assert!(!original.inner.qualified());
+        assert_eq!(original.inner.qualified(), domain == SavedCommandDomain::OfflinePreflight && cfg!(feature = "custom-protocol")
+            && original.inner.runtime.offline_preflight_installed_profile_available());
         assert_eq!(document.offline_preflight_status().unwrap().availability, wire::Availability::Busy);
         assert_eq!(document.android_build_status().unwrap().availability, android_wire::Availability::Busy);
         assert_eq!(document.environment_diagnostics_status().unwrap().capability.reason,
@@ -113,7 +114,9 @@ fn document_active_saved_domains_stop_before_writes_and_unknown_retains_status_a
             SavedCommandDomain::AndroidBuild => bridge.android_build.original_for_test(),
         };
         let (application, owner) = active_in(original.clone());
-        assert!(Arc::ptr_eq(&application.inner, &original.inner) && !application.inner.qualified());
+        assert!(Arc::ptr_eq(&application.inner, &original.inner));
+        assert_eq!(application.inner.qualified(), domain == SavedCommandDomain::OfflinePreflight && cfg!(feature = "custom-protocol")
+            && application.inner.runtime.offline_preflight_installed_profile_available());
         // Real mutex contention keeps reconciliation observation-only while
         // exercising Active. There is NO synthetic JoinHandle/return receipt.
         // Once released, the real missing-original path must become Unknown.
@@ -426,7 +429,8 @@ async fn late_inspection_data_is_cleanup_only_and_cannot_rearm_acquisition() {
 async fn late_positive_memory_returns_cannot_retire_unknown_and_original_cutoff_never_renews() {
     for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild] {
         let (application, owner) = active(domain);
-        assert!(!application.inner.qualified());
+        assert_eq!(application.inner.qualified(), domain == SavedCommandDomain::OfflinePreflight && cfg!(feature = "custom-protocol")
+            && application.inner.runtime.offline_preflight_installed_profile_available());
         let cutoff = owner.native_audit_cutoff.subscribe();
         assert_eq!(*cutoff.borrow(), owner.clocks.work);
         {

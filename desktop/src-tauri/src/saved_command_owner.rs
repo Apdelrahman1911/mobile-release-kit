@@ -18,8 +18,6 @@ use crate::{android_toolchain::AndroidToolchainCustody,
 
 // Qualification is domain-local. No environment/GitHub/offline permit, parsed
 // tool binding, hash, mode or host profile can qualify Android build custody.
-const OFFLINE_NATIVE_QUALIFIED: bool = false;
-const OFFLINE_RUNTIME_QUALIFIED: bool = false;
 const ANDROID_NATIVE_QUALIFIED: bool = false;
 const ANDROID_RUNTIME_QUALIFIED: bool = false;
 const ANDROID_TOOLCHAIN_QUALIFIED: bool = false;
@@ -809,10 +807,8 @@ fn set_failure_outcome(p: &mut RunProjection) {
 }
 impl Inner {
     fn offline_installed_selected(&self) -> bool {
-        let qualified = OFFLINE_NATIVE_QUALIFIED && OFFLINE_RUNTIME_QUALIFIED;
-        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-        let qualified = qualified || self.observation.lock().is_ok_and(|o| o.is_some());
-        self.domain == SavedCommandDomain::OfflinePreflight && qualified && self.runtime.offline_preflight_installed_profile_available()
+        self.domain == SavedCommandDomain::OfflinePreflight && cfg!(feature = "custom-protocol")
+            && self.runtime.offline_preflight_installed_profile_available()
     }
     fn qualified(&self) -> bool {
         #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
@@ -1789,7 +1785,7 @@ impl SavedCommandOwner {
         let r = self.inner.lock();
         if self.inner.domain != SavedCommandDomain::OfflinePreflight || r.revision != 0 || r.active.is_some() || r.prepared.is_some() || r.last.is_some()
             || r.disabled || r.stopping || r.document_lost || r.exhausted || self.inner.poisoned.load(Ordering::SeqCst)
-            || !self.inner.runtime.offline_preflight_installed_profile_available() { return Err(self.inner.domain.unavailable()); }
+            || !self.inner.offline_installed_selected() { return Err(self.inner.domain.unavailable()); }
         let mut slot = self.inner.observation.lock().map_err(|_| BridgeError::cleanup_unknown())?;
         if slot.is_some() { return Err(self.inner.domain.unavailable()); }
         *slot = Some(InstalledObservation { control: token.consume()?, original: None, retired: false, core_settled: false }); Ok(())

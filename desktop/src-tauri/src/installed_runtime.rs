@@ -2440,6 +2440,12 @@ pub(crate) fn assert_installed_metadata_slots_contract() {
 }
 
 #[cfg(test)]
+pub(crate) fn assert_installed_version_slots_contract() {
+    pure_tests::version_slots_keep_the_same_empty_originals_and_reject_all_foreign_domains_data();
+    pure_tests::version_unreturned_acquisition_and_preparation_stay_unknown_without_retry_or_new_owner_data();
+}
+
+#[cfg(test)]
 mod pure_tests {
     use super::*;
 
@@ -2999,7 +3005,8 @@ mod pure_tests {
     }
 
     #[test]
-    fn version_slots_keep_the_same_empty_originals_and_reject_all_foreign_domains() {
+    fn version_slots_keep_the_same_empty_originals_and_reject_all_foreign_domains() { version_slots_keep_the_same_empty_originals_and_reject_all_foreign_domains_data(); }
+    pub(super) fn version_slots_keep_the_same_empty_originals_and_reject_all_foreign_domains_data() {
         // Empty bookkeeping DATA only: no OS descriptor, inspection, transfer,
         // executable capability or positive native close is synthesized.
         let mut slots = ReleaseVersionRuntimeSlots::new();
@@ -3022,7 +3029,8 @@ mod pure_tests {
         all_edit_claim_domains_require_their_own_preparation_once();
     }
     #[test]
-    fn version_unreturned_acquisition_and_preparation_stay_unknown_without_retry_or_new_owner() {
+    fn version_unreturned_acquisition_and_preparation_stay_unknown_without_retry_or_new_owner() { version_unreturned_acquisition_and_preparation_stay_unknown_without_retry_or_new_owner_data(); }
+    pub(super) fn version_unreturned_acquisition_and_preparation_stay_unknown_without_retry_or_new_owner_data() {
         let mut slots = ReleaseVersionRuntimeSlots::new();
         let original = slots.inner.inspection.as_mut().unwrap();
         let pending = original.book.arm(Purpose::Payload).unwrap(); // Armed, NEVER opened.

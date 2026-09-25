@@ -251,7 +251,7 @@ impl Fixture {
             if ancestors.len() >= 4 { return Err(()); }
             let id = super::fixture_identity(path)?;
             if id[0] == 0 || id[1] == 0 || id[2] & 0o170000 != 0o040000 || id[2] & 0o022 != 0 || id[3..5] != [0,0]
-                || (path == namespace && (id[2] != 0o040755 || id[5] == 0 || id[5] > 20 || id[6] > 1 << 20))
+                || (path == namespace && (id[2] != 0o040755 || id[5] == 0 || id[5] > (super::SESSION_FIXTURE_NAMESPACE.len() as u64 + 2) || id[6] > 1 << 20))
                 || id[2] & 0o005 != 0o005 { return Err(()); }
             ancestors.push((path.to_path_buf(),id));
         }
@@ -726,6 +726,12 @@ impl Control {
 }
 
 pub(super) fn assert_contracts() {
+    // Separate inert owner: exercise ordinary Status/Prepare/Cancel without an
+    // observation token, Start, runtime inspection or project IO. The real
+    // native owner below retains its virgin revision and original admission.
+    assert!(cfg!(feature = "custom-protocol") && crate::runtime::RuntimeConfig::packaged(std::path::PathBuf::from("/unopened-runtime"))
+        .offline_preflight_installed_profile_available());
+    crate::saved_command_owner::offline_tests::qualification_is_closed_without_a_runtime_or_another_owners_permit();
     // Inert DATA only. These synthetic bits/DTOs never enter an Observation,
     // original owner, fixture, report emitter or native admission.
     let empty: super::FixtureIdentity = [1,2,0o100600,1000,1000,1,0,10,10];

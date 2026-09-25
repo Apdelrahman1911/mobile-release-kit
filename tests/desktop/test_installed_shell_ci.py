@@ -541,13 +541,16 @@ class InstalledShellCompilerContracts(unittest.TestCase):
                      and any(isinstance(target, ast.Name) and target.id == "paths" for target in node.targets))
         names = ast.literal_eval(paths)
         self.assertEqual(len(names), len(set(names)))
+        self.assertEqual(len(names), 42)
         self.assertTrue({"desktop/src-tauri/src/" + name + ".rs" for name in (
-            "runtime", "bridge", "asset_session", "asset_source", "shell", "installed_shell_observation",
+            "edit_owner", "release_version_edit_commands", "release_version_edit_protocol", "runtime", "bridge", "asset_session", "asset_source", "shell", "installed_shell_observation",
             "supervisor", "installed_shell_shutdown_observation", "error", "protocol", "installed_runtime",
             "passive_management_tests", "credential_assessment", "installed_tools_observation", "environment_diagnostics_owner",
-            "environment_diagnostics_protocol", "saved_command_owner", "offline_preflight_owner", "offline_preflight_protocol")} <= set(names))
+            "environment_diagnostics_protocol", "saved_command_owner", "offline_preflight_owner", "offline_preflight_owner_tests", "offline_preflight_protocol")} <= set(names))
         self.assertTrue({"desktop/src-tauri/src/main.rs", "desktop/src-tauri/tests/installed_shell_observation.rs"} <= set(names))
-        self.assertTrue({"desktop/src/components/EnvironmentDiagnostics.tsx", "desktop/tests/environment-diagnostics.test.mjs"} <= set(names))
+        self.assertTrue({"desktop/src/components/EnvironmentDiagnostics.tsx", "desktop/tests/environment-diagnostics.test.mjs",
+                         "desktop/src/components/ReleaseVersionEditor.tsx", "desktop/src/releaseVersionEdit.ts",
+                         "desktop/src/releaseVersionEditController.ts"} <= set(names))
 
     def test_observer_module_roster_matches_production_supported_platforms(self):
         # The actual-main observer has its own crate root. Library compilation
@@ -1359,6 +1362,19 @@ def closed_project_draft_data(lifecycle):
         "domAndGtkObserved": True, "maps": [], "qualified": False, "expectedFailureObserved": True,
         "failureHandoff": "original-quit-relay-loop-returned"}
     observed["settledFailure"] = deepcopy(observed["cases"]["settled-failure"])
+    version = deepcopy(lifecycle.SHELL_VERSION_RECEIPT)
+    version_fixture = {"fixture": "release-version-save-v1", "rootRetained": True, "preservedOriginals": True,
+        "createdFileCount": 1, "beforeCount": 5, "afterCount": 6,
+        "configurationUnchanged": True, "ignoreUnchanged": True, "sentinelUnchanged": True,
+        "noUnexpectedEntries": True, "noPendingState": True,
+        "version": {"path": "version.properties", "size": 34,
+                    "sha256": hashlib.sha256(b"VERSION_NAME=2.3.4\nBUILD_NUMBER=8\n").hexdigest(), "mode": 0o600},
+        "before": {"size": 2600, "sha256": "5" * 64}, "after": {"size": 2800, "sha256": "6" * 64}}
+    observed["cases"]["version-save"] = {"case": "version-save", "exitCode": 0, "bootstrapReturned": True,
+        "domAndGtkObserved": True, "maps": [], "versionSave": version}
+    observed["versionSave"] = {"native": deepcopy(version), "fixture": version_fixture}
+    observed["files"].extend({"path": "lifecycle-shell-version-save-" + phase + ".json", **version_fixture[phase]}
+                             for phase in ("before", "after"))
     return observed
 
 
@@ -1442,7 +1458,7 @@ class InstalledProjectDraftReceiptContracts(unittest.TestCase):
         self.assertEqual(set(observed["cases"]), {"normal", "positive", "quit-outstanding", "project-paths", "workflow-apply",
                                                 "session-inputs", "session-refusals", "session-loss", "session-deadline", "metadata-save",
                                                 "tools-observed", "tools-cancel", "tools-settlement", "offline-pass", "offline-negative",
-                                                "offline-drift", "offline-cancel", "offline-settlement", "settled-failure"})
+                                                "offline-drift", "offline-cancel", "offline-settlement", "settled-failure", "version-save"})
 
     def test_rejects_legacy_partial_mistyped_or_relabelled_positive_receipts(self):
         lifecycle = S.local("ubuntu_publication_lifecycle")
@@ -1583,18 +1599,18 @@ class InstalledCandidateDocumentsReceiptContracts(unittest.TestCase):
         self.assertEqual(fixture["before"], fixture["after"])
         expected_exports = ["lifecycle-shell-" + family + "-" + phase + ".json"
                             for family in ("positive-project", "positive-candidate", "project-paths",
-                                           "workflow-apply", "metadata-save", "session-inputs",
+                                           "workflow-apply", "metadata-save", "version-save", "session-inputs",
                                            "session-refusals", "session-loss", "session-deadline", *lifecycle.SHELL_TOOLS_OFFLINE_CASES)
                             for phase in ("before", "after")]
         self.assertCountEqual([item["path"] for item in observed["files"]], expected_exports)
-        # Only this shell profile allows160 originals plus the same client's
+        # Only this shell profile allows165 root slots plus the same client's
         # two captures. The non-shell128 and aggregate32MiB caps do not change.
         observed["files"].extend({"path": "inert-" + str(index), "size": 0, "sha256": "0" * 64}
-                                 for index in range(162 - len(observed["files"])))
-        self.assertEqual(len(observed["files"]), 162)
+                                 for index in range(167 - len(observed["files"])))
+        self.assertEqual(len(observed["files"]), 167)
         S.shell_project_draft_observation(observed, lifecycle)
         observed["files"].append({"path": "over-cap", "size": 0, "sha256": "0" * 64})
-        self.assertEqual(len(observed["files"]), 163)
+        self.assertEqual(len(observed["files"]), 168)
         with self.assertRaises(S.D.Refused):
             S.shell_project_draft_observation(observed, lifecycle)
 
@@ -1996,6 +2012,76 @@ class InstalledMetadataSaveReceiptContracts(unittest.TestCase):
                 S.shell_project_draft_observation(changed, lifecycle)
 
 
+
+class InstalledVersionSaveReceiptContracts(unittest.TestCase):
+    def test_combined_consumer_requires_the_three_original_version_reviews_and_exports(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        observed = closed_project_draft_data(lifecycle)
+        self.assertEqual(S.shell_project_draft_observation(observed, lifecycle), observed["projectDraft"])
+        version = observed["versionSave"]
+        self.assertEqual(version["native"]["reviews"]["actions"], ["create", "replace", "preserve"])
+        self.assertEqual(version["native"]["requests"]["open"], 3)
+        self.assertEqual(version["native"]["originals"]["runtimeSettlementJoined"], 3)
+        self.assertEqual(version["native"]["outcomes"][-1], ["unchanged", "not_created", "settled", "none"])
+        self.assertEqual(version["native"]["nativeFinality"], ["settled"] * 3)
+        self.assertEqual(version["native"]["lateSettled"], [False] * 3)
+        self.assertEqual(version["fixture"]["version"]["size"], 34)
+        for phase in ("before", "after"):
+            exported = [row for row in observed["files"] if row["path"] == "lifecycle-shell-version-save-" + phase + ".json"]
+            self.assertEqual(exported, [{"path": "lifecycle-shell-version-save-" + phase + ".json", **version["fixture"][phase]}])
+
+    def test_version_case_native_projection_fixture_and_export_pins_cannot_be_substituted(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        mutations = (
+            lambda v: v.pop("versionSave"), lambda v: v["cases"].pop("version-save"),
+            lambda v: v["cases"]["version-save"].pop("versionSave"), lambda v: v["versionSave"].pop("fixture"),
+            lambda v: v["cases"]["version-save"].update(exitCode=True),
+            lambda v: v["cases"]["version-save"].update(bootstrapReturned=1),
+            lambda v: v["cases"]["version-save"].update(domAndGtkObserved=False),
+            lambda v: v["cases"]["version-save"].update(metadataSave=v["metadataSave"]["native"]),
+            lambda v: v["versionSave"].update(native=deepcopy(v["metadataSave"]["native"])),
+            lambda v: v["cases"]["version-save"]["versionSave"]["originals"].update(ownersJoined=2),
+            lambda v: v["versionSave"]["native"]["originals"].update(runtimeLedgerSettled=2),
+            lambda v: v["versionSave"]["native"].update(nativeFinality=["settled", "settled", "retained"]),
+            lambda v: v["versionSave"]["native"]["filesystem"].update(preserveFull9=False),
+            lambda v: v["cases"]["normal"].update(versionSave=v["versionSave"]["native"]),
+            lambda v: v["cases"]["metadata-save"].update(versionSave=v["versionSave"]["native"]),
+            lambda v: v["versionSave"]["fixture"].update(preservedOriginals=False),
+            lambda v: v["versionSave"]["fixture"].update(configurationUnchanged=False),
+            lambda v: v["versionSave"]["fixture"].update(ignoreUnchanged=False),
+            lambda v: v["versionSave"]["fixture"].update(sentinelUnchanged=False),
+            lambda v: v["versionSave"]["fixture"].update(createdFileCount=True),
+            lambda v: v["versionSave"]["fixture"].update(beforeCount=4),
+            lambda v: v["versionSave"]["fixture"].update(afterCount=7),
+            lambda v: v["versionSave"]["fixture"].update(noPendingState=1),
+            lambda v: v["versionSave"]["fixture"]["version"].update(path="release/version.properties"),
+            lambda v: v["versionSave"]["fixture"]["version"].update(size=True),
+            lambda v: v["versionSave"]["fixture"]["version"].update(mode=0o644),
+            lambda v: v["versionSave"]["fixture"]["version"].update(sha256="0" * 64),
+            lambda v: v["versionSave"]["fixture"].update(after=deepcopy(v["versionSave"]["fixture"]["before"])),
+            lambda v: v["versionSave"]["fixture"]["before"].update(size=8193),
+            lambda v: v["versionSave"]["fixture"]["after"].update(sha256="unbound"),
+        )
+        for mutate in mutations:
+            changed = closed_project_draft_data(lifecycle); mutate(changed)
+            with self.subTest(mutate=mutate), self.assertRaises((S.D.Refused, ValueError, KeyError)):
+                S.shell_project_draft_observation(changed, lifecycle)
+        for phase in ("before", "after"):
+            for change in ("missing", "duplicate", "size-type", "size", "hash", "name", "extra"):
+                changed = closed_project_draft_data(lifecycle)
+                name = "lifecycle-shell-version-save-" + phase + ".json"
+                row = next(row for row in changed["files"] if row["path"] == name)
+                if change == "missing": changed["files"].remove(row)
+                elif change == "duplicate": changed["files"].append(deepcopy(row))
+                elif change == "size-type": row["size"] = float(row["size"])
+                elif change == "size": row["size"] += 1
+                elif change == "hash": row["sha256"] = "0" * 64
+                elif change == "name": row["path"] = "lifecycle-shell-metadata-save-" + phase + ".json"
+                else: row["qualified"] = True
+                with self.subTest(phase=phase, change=change), self.assertRaises((S.D.Refused, ValueError, KeyError)):
+                    S.shell_project_draft_observation(changed, lifecycle)
+
+
 class InstalledSessionReceiptContracts(unittest.TestCase):
     def test_all_four_session_receipts_remain_distinct_from_ordinary_twelve_methods(self):
         lifecycle = S.local("ubuntu_publication_lifecycle")
@@ -2056,7 +2142,7 @@ class InstalledToolsOfflineReceiptContracts(unittest.TestCase):
     def test_eight_closed_engineering_cases_preserve_negative_refused_and_no_child_facts(self):
         lifecycle = S.local("ubuntu_publication_lifecycle"); observed = closed_project_draft_data(lifecycle)
         self.assertEqual(S.shell_project_draft_observation(observed, lifecycle), observed["projectDraft"])
-        self.assertEqual(len(observed["cases"]), 18)
+        self.assertEqual(len(observed["cases"]), 20)
         self.assertEqual(set(observed["toolsOffline"]), set(lifecycle.SHELL_TOOLS_OFFLINE_CASES))
         for case, pair in observed["toolsOffline"].items():
             receipt = pair["native"]
@@ -2936,7 +3022,7 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertIn("if path.is_some() && length > PATH_FAILURE_FRAME_BOUND { return None; }", encoder)
         rejections = source.split("impl SessionRejection {", 1)[1].split("enum SessionWait", 1)[0]
         waits = source.split("impl SessionWait {", 1)[1].split("struct SessionDiagnostic", 1)[0]
-        for block, expected in ((rejections, lifecycle.SHELL_SESSION_REJECTIONS), (waits, lifecycle.SHELL_SESSION_WAITS)):
+        for block, expected in ((rejections, lifecycle.SHELL_SESSION_REJECTIONS), (waits, lifecycle.SHELL_SESSION_V6_WAITS)):
             tokens = tuple(value.encode("ascii") for value in re.findall(r'=> b"([a-z-]+)"', block))
             self.assertEqual(tokens, expected)
             self.assertEqual(len(tokens), len(set(tokens)))
@@ -3207,7 +3293,15 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertEqual((query_bound, worker_bound, complete_bound), (26, 14, 412))
         self.assertLessEqual(complete_bound, 512)
         self.assertIn("const FAILURE_PAIR_LIMIT: usize = 512;", source)
-        self.assertIn("const SESSION_FAILURE_FRAME_BOUND: usize = 509;", source)
+        self.assertIn("const SESSION_FAILURE_FRAME_BOUND: usize = 507;", source)
+        callbacks = source.split("impl SessionGtkCallbacks {", 1)[1].split("// Map only cached public DATA", 1)[0]
+        callback_tokens = tuple(value.encode("ascii") for value in re.findall(r'=> b"([a-z0-9]{2})"', callbacks))
+        self.assertEqual(callback_tokens, lifecycle.SHELL_SESSION_GTK_CALLBACKS)
+        self.assertEqual(len(callback_tokens), len(set(callback_tokens)))
+        self.assertEqual(lifecycle.SHELL_SESSION_FAILURE_V6_FRAME_BOUND, lifecycle.SHELL_SESSION_FAILURE_V5_FRAME_BOUND - 7 + 3 + max(map(len, callback_tokens)))
+        self.assertLessEqual(max(map(len, lifecycle.SHELL_SESSION_V6_WAITS)), max(map(len, lifecycle.SHELL_SESSION_WAITS)))
+        self.assertIn('append(&mut bytes, &mut length, b";eval=")?;', encoder)
+        self.assertIn('append(&mut bytes, &mut length, diagnostic.gtk_callbacks.token())?;', encoder)
         self.assertIn("fn assert_failure_pair_contract()", source)
         self.assertIn("    assert_failure_pair_contract();", source)
         self.assertLess(source.index("    assert_failure_pair_contract();"), source.index("let returned = super::run_builder("))
@@ -3228,7 +3322,9 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertEqual(parent_leaves.count("Case::Commands(case) => case.failure_leaf(),"), 1)
         actual_leaves = re.findall(r'=> "([^"\n]*)"',
             parent_leaves.replace("Case::Commands(case) => case.failure_leaf(),", command_leaves))
-        self.assertEqual(actual_leaves, ["shell-" + case + "-failure.labels" for case in lifecycle.SHELL_CASES[1:]])
+        # Match-arm declaration order is not lifecycle execution order.
+        # Require every allowed leaf exactly once, independent of source placement.
+        self.assertCountEqual(actual_leaves, ["shell-" + case + "-failure.labels" for case in lifecycle.SHELL_CASES[1:]])
         self.assertNotIn("shell-normal-failure.labels", source)
         self.assertNotIn("shell-normal-failure.labels", commands)
         self.assertEqual({name for name in lifecycle.public_files({"shell": {}}) if name.endswith("failure.labels")},
@@ -3388,10 +3484,12 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
                     self.assertLessEqual(len(raw), lifecycle.SHELL_SESSION_FAILURE_V4_FRAME_BOUND)
         raw = frame()
         # Preserve the historical v4 parser fixture; the live shared pre-GTK
-        # Rust contract emits v5. Neither is an installed qualification receipt.
+        # Rust contract emits v6. Neither is an installed qualification receipt.
         rust = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
-        live = raw.replace(b"=v4;", b"=v5;")[:-1] + b";u=na\n"
+        live = raw.replace(b"=v4;", b"=v6;").replace(b";evaluations=", b";eval=")[:-1] + b";u=na;g=na\n"
         self.assertIn(live[len(prefix):].decode("ascii").replace("\n", "\\n"), rust)
+        self.assertEqual(lifecycle._shell_label_pair(live)["session"]["assessmentFailure"],
+                         lifecycle._shell_label_pair(raw)["session"]["assessmentFailure"])
         self.assertIn('assert_eq!(packet.tokens().3, b"missing-compile-anchor");', rust)
         self.assertIn("latch_session_diagnostic(&failed,&mut retained,rejected);\n            assert!(retained == Some(first));", rust)
         bound = raw.replace(b"o=not-recorded;d=none;a=unassociated;q=na;w=na;",
@@ -3468,7 +3566,7 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertIn("fn unknown_boundary_token(self) -> &'static [u8] { self.boundary.token() }", query)
         self.assertIn("fn unknown_boundary_token(self) -> &'static [u8] { self.query.unknown_boundary_token() }", session)
         encoder = observed.split("fn failure_pair(", 1)[1].split("fn assert_failure_pair_contract", 1)[0]
-        self.assertIn('b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v5;index="', encoder)
+        self.assertIn('b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v6;index="', encoder)
         self.assertIn('append(&mut bytes, &mut length, b";af=")?;\n'
                       '            append(&mut bytes, &mut length, admission)?;\n'
                       '            append(&mut bytes, &mut length, b";u=")?;\n'
@@ -3642,7 +3740,6 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
     def test_file_selection_waits_for_current_gfile_before_one_activation(self):
         source = (SOURCE / "desktop/src-tauri/src/shell.rs").read_text()
         observed = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
-        readiness = "if !dialog.file().is_some_and(|file| file.equal(&gtk::gio::File::for_path(&path)))"
         for role, guard, activation in (
             ("path", "if let Some(path) = target {", "q.path_activation(id,index)?"),
             ("session_file", "if select {", "q.session_file_activation(id, index)?"),
@@ -3652,11 +3749,23 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
                 activating = source.split("    pub(super) fn activate_observed_" + role + "(", 1)[1].split("    #[cfg(", 1)[0]
                 self.assertEqual(selecting.count("dialog.set_filename("), 1)
                 self.assertEqual(activating.count("dialog.file()"), 1)
+                readiness = ("if !dialog.file().is_some_and(|file| file.equal(&gtk::gio::File::for_path(&path)))"
+                             if role == "path" else "let Some(file) = dialog.file() else")
                 self.assertIn(readiness, activating)
                 # None/different selection waits; Cancel does not require a file.
                 self.assertLess(activating.index(guard), activating.index(readiness))
                 wait = activating.split(readiness, 1)[1].split("}", 1)[0]
                 self.assertIn("return Ok(false)", wait)
+                if role == "session_file":
+                    different = "if !file.equal(&gtk::gio::File::for_path(&path))"
+                    self.assertEqual(activating.count("file.equal("), 1)
+                    self.assertIn("W::GtkSelectionAbsent", wait)
+                    self.assertLess(activating.index(readiness), activating.index(different))
+                    self.assertLess(activating.index(different), activating.index("dialog.widget_for_response(response)"))
+                    other_wait = activating.split(different, 1)[1].split("}", 1)[0]
+                    self.assertIn("W::GtkSelectionDifferent", other_wait)
+                    self.assertIn("return Ok(false)", other_wait)
+                    self.assertLess(activating.index("q.session_file_target(index)"), activating.index(readiness))
                 self.assertLess(activating.index(readiness), activating.index("dialog.widget_for_response(response)"))
                 self.assertLess(activating.index(readiness), activating.index(activation))
                 self.assertLess(activating.index(activation), activating.index("button.emit_clicked()"))
@@ -3664,8 +3773,10 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
                 self.assertNotIn("set_filename", activating)
                 for forbidden in (".filename(", "native_path(", "selected_path(", ".response("):
                     self.assertNotIn(forbidden, selecting + activating)
-        self.assertIn("q.session_file_wait(index, true, W::GtkSelectionPending); return Ok(false);", source)
-        self.assertIn('Self::GtkSelectionPending => b"gtk-selection-pending"', observed)
+        for name, token in (("GtkSelectionAbsent", "gtk-selection-absent"), ("GtkSelectionDifferent", "gtk-selection-different")):
+            self.assertIn("q.session_file_wait(index, true, W::" + name + "); return Ok(false);", source)
+            self.assertIn('Self::' + name + ' => b"' + token + '"', observed)
+        self.assertNotIn("GtkSelectionPending", observed)
         self.assertEqual(source.count("let path = native_path(dialog, &call);"), 1)
         self.assertIn("path!=self.session_file_target(file.index).as_deref()", observed)
         self.assertIn("path != self.path_target(index as u8).as_deref()", observed)

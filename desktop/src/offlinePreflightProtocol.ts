@@ -167,7 +167,7 @@ export function parseOfflinePreflightResult(value: unknown): OfflinePreflightRes
   try { const safe = copyData(value, 65536); return result(safe) ? safe : null; } catch { return null; }
 }
 export const offlineAvailabilityText: Record<OfflinePreflightAvailability, string> = {
-  available: 'The separate native offline-preflight capability is available. Review and explicit Run are still required.',
+  available: 'This installed build supports reviewing saved offline checks. Review and explicit Run are required; Run still checks the actual host and bundled runtime.',
   busy: 'An original operation owns the native slot. Finish or cancel that operation and check its status before new work.',
   shutdown: 'The application is stopping its original operations. No new offline check can start.',
   'cleanup-unknown': 'Original cleanup is unconfirmed. Keep the original owner; conflicting work and normal exit remain blocked.',

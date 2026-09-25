@@ -47,16 +47,17 @@ EMFILE_MARKER = "MRK_INSTALLED_NATIVE_EMFILE_RETAINED_UNKNOWN"
 SHELL_SESSION_CASES = ("session-inputs", "session-refusals", "session-loss", "session-deadline")
 SHELL_TOOLS_OFFLINE_CASES = ("tools-observed", "tools-cancel", "tools-settlement", "offline-pass", "offline-negative",
                            "offline-drift", "offline-cancel", "offline-settlement")
-# Preserve all eighteen existing cases; the last case expects one exact raw failure.
+# Preserve all nineteen existing cases, including the exact raw failure; append saved version.
 SHELL_CASES = ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply", *SHELL_SESSION_CASES, "metadata-save",
-               *SHELL_TOOLS_OFFLINE_CASES, "settled-failure")
-SHELL_PUBLIC_FILE_LIMIT = 160  # Exact nineteen-case roster:158; non-shell remains128.
+               *SHELL_TOOLS_OFFLINE_CASES, "settled-failure", "version-save")
+SHELL_PUBLIC_FILE_LIMIT = 165  # Exact twenty-case root roster:163, exported:165; non-shell remains128.
 SHELL_FIXTURE_NAMESPACE_LIMIT = 2048
 SHELL_FAILURE_LABEL_LIMIT = 512
 SHELL_PATH_FAILURE_FRAME_BOUND = 256
 SHELL_SESSION_FAILURE_FRAME_BOUND = 466  # v3 only; historical v1/v2 admission stays unchanged.
 SHELL_SESSION_FAILURE_V4_FRAME_BOUND = 492  # Same 512B sink; ;af= plus at most 22B.
 SHELL_SESSION_FAILURE_V5_FRAME_BOUND = 509  # v4 plus ;u= and at most 14B; no larger sink.
+SHELL_SESSION_FAILURE_V6_FRAME_BOUND = 507  # v5 - 7B (eval) + 5B (;g= and two closed bytes).
 # Literal observer labels only; never a prefix parser or raw-output escape.
 SHELL_FAILURE_STEPS = (
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=Bootstrap\n",
@@ -214,6 +215,23 @@ SHELL_FAILURE_STEPS = (
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataRefresh\n",
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadReadback\n",
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=ToolsOffline\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionOpen\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionReadOpen\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionName\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionBuild\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionReadInputs\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionReview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionReadReview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionConfirm\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionReadConfirmation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionCheck\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionReadChecked\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionType\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionReadTyped\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionApply\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionReadSaved\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionReadback\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionReadReadback\n",
 )
 SHELL_FAILURE_BOUNDARIES = (
     b"MRK_INSTALLED_SHELL_FAILURE_PHASE=bootstrap\n",
@@ -302,6 +320,13 @@ SHELL_SESSION_WAITS = (
     b"native-phase-not-ready", b"rendered-display-mismatch", b"rendered-control-mismatch",
     b"gtk-dialog-absent", b"gtk-action-insensitive", b"gtk-selection-pending",
 )
+# v1-v5 retain their exact historical spellings and parsed shapes.
+SHELL_SESSION_V6_WAITS = (
+    b"not-sampled", b"request-not-yet-seen", b"native-reply-pending", b"original-owner-unsettled",
+    b"native-phase-not-ready", b"rendered-display-mismatch", b"rendered-control-mismatch",
+    b"gtk-dialog-absent", b"gtk-action-insensitive", b"gtk-selection-absent", b"gtk-selection-different",
+)
+SHELL_SESSION_GTK_CALLBACKS = (b"na", b"0i", b"0p", b"0w", b"1i", b"1p", b"1w", b"mi", b"mp", b"mw")
 # v2 first document transition, plus a single later cached original R1 sample.
 # Neither association nor none-recorded establishes causation or settlement.
 SHELL_SESSION_ORIGINS = (
@@ -843,6 +868,56 @@ SHELL_METADATA_RECEIPT = {
     "readback": {"planMatched": True, "savedBaseline": True, "originalObservation": True},
     "quit": {"operation": 3, "gtkSettled": True, "originalsSettled": True, "relayJoined": True, "exit": True},
 }
+SHELL_VERSION_MARKER = b"MRK_INSTALLED_SHELL_VERSION_SAVE="
+SHELL_VERSION_RECEIPT = {'confirmation': {'acknowledged': 3,
+                  'checkboxOnlyDisabled': 3,
+                  'initiallyDisabled': 3,
+                  'opened': 3,
+                  'typedSave': 3},
+ 'domain': 'release_version',
+ 'draft': {'bindings': [[2, 0], [4, 1], [4, 2]], 'browserEdit': 'insertText', 'wholeMatched': True},
+ 'filesystem': {'afterModes': [384, 384, 384],
+                'parents': 2,
+                'preserveFull9': True,
+                'preservedFiles': 3,
+                'replaceIdentityChanged': True},
+ 'fixture': 'release-version-save-v1',
+ 'gate': 'installed-version-profile',
+ 'lateSettled': [False, False, False],
+ 'nativeFinality': ['settled', 'settled', 'settled'],
+ 'nativeReasons': ['none', 'none', 'none'],
+ 'originals': {'childWaited': 3,
+               'ioSettled': 3,
+               'ownersJoined': 3,
+               'runtimeLedgerSettled': 3,
+               'runtimeSettlementJoined': 3,
+               'sessions': 3,
+               'startupJoined': 3,
+               'stdoutFrames': [3, 3, 3],
+               'writerFrames': [3, 3, 3]},
+ 'outcomes': [['committed', 'clean', 'settled', 'none'],
+              ['committed', 'clean', 'settled', 'none'],
+              ['unchanged', 'not_created', 'settled', 'none']],
+ 'project': {'cancelSettled': True, 'registered': True, 'snapshot': True},
+ 'quit': {'exit': True, 'gtkSettled': True, 'operation': 3, 'originalsSettled': True, 'relayJoined': True},
+ 'readback': {'originalObservations': 3,
+              'planMatched': 3,
+              'savedBaseline': 3,
+              'values': [['1.2.3', 7], ['2.3.4', 8], ['2.3.4', 8]]},
+ 'requests': {'apply': 3,
+              'close': 0,
+              'configuration': [0, 0, 0, 0],
+              'metadata': [0, 0, 0, 0],
+              'observe': 3,
+              'open': 3,
+              'prepare': 3,
+              'workflow': [0, 0, 0, 0]},
+ 'reviews': {'actions': ['create', 'replace', 'preserve'],
+             'configBlocked': 3,
+             'distinctOriginals': True,
+             'distinctPlans': True,
+             'fullText': 3},
+ 'schemaVersion': 1}
 # Reviewed literal caller DATA, never a second runtime generator. The existing
 # focused fixture contract compares every byte with the shared core proposal and
 # shipped template resource before this source may be qualified.
@@ -1115,6 +1190,8 @@ SHELL_PROJECT_IGNORE = (b".mobile-release/\n.mobile-release-init-prepare/\n.mobi
                         b".mobile-release-init-cleanup/\n.mobile-release-metadata-text-prepare/\n"
                         b".mobile-release-metadata-text/\n.mobile-release-metadata-text-cleanup/\n"
     b".mobile-release-version-prepare/\n.mobile-release-version/\n.mobile-release-version-cleanup/\n")
+SHELL_VERSION_KEEP = b"keep unrelated version fixture data\n"
+SHELL_VERSION_EDITED = b"VERSION_NAME=2.3.4\nBUILD_NUMBER=8\n"
 SHELL_METADATA_LOCALE = "release/store/android/en-US"
 # Public fixed DATA, not a serializer or an alternate metadata writer.
 SHELL_METADATA_TITLE = b"Public title"
@@ -2073,24 +2150,26 @@ def _capacity(value):
             + len(SHELL_PROJECT_SOURCE) + len(SHELL_PROJECT_VERSION)
         required += sum(len(data) for _, mode, _, data in _shell_metadata_roster(value, True) if stat.S_ISREG(mode)) \
             + len(SHELL_METADATA_SHORT_BEFORE)
+        version_nodes = _shell_version_roster(value, True)
+        required += sum(len(data) for _, mode, _, data in version_nodes if stat.S_ISREG(mode))
         session_nodes = [row for case in SHELL_SESSION_CASES for row in _shell_session_roster(value, case)]
         required += sum(len(row[3]) for row in session_nodes if not stat.S_ISDIR(row[1]))
         tools_offline_nodes = [row for case in SHELL_TOOLS_OFFLINE_CASES for row in _shell_tools_offline_roster(value, case, True)]
         required += sum(len(row[3]) for row in tools_offline_nodes if stat.S_ISREG(row[1]))
         # Each added existing GUI route creates eight directories, auth and
-        # bus-config files, its log, and a bus socket. The shell-only160 output
-        # slots cover the158 originals; TOTAL_LIMIT is unchanged. The last
-        # settled-failure route is outside both fixture groups but needs its
-        # own same twelve-node GUI environment in both block/inode accounting.
-        session_environment_nodes = 12 * (len(SHELL_SESSION_CASES) + len(SHELL_TOOLS_OFFLINE_CASES) + 1)
+        # bus-config files, its log, and a bus socket. The shell-only165 output
+        # slots cover the163 root originals; TOTAL_LIMIT is unchanged.
+        # Settled-failure and version-save are outside both fixture groups:
+        # each needs twelve GUI environment nodes in block/inode accounting.
+        session_environment_nodes = 12 * (len(SHELL_SESSION_CASES) + len(SHELL_TOOLS_OFFLINE_CASES) + 2)
     inodes = 2 * max(capacity["installedEntries"].values()) + 2 * 8192 + (SHELL_PUBLIC_FILE_LIMIT if "shell" in value else 128)
     if "shell" in value:
-        inodes += len(SHELL_CASES[1:]) + 1 + 12 + 14 + len(session_nodes) + len(tools_offline_nodes) + session_environment_nodes
+        inodes += len(SHELL_CASES[1:]) + 1 + 12 + 14 + len(version_nodes) + len(session_nodes) + len(tools_offline_nodes) + session_environment_nodes
     need(len({Path(name).stat().st_dev for name in ("/", "/var", "/var/lib", "/usr")}) == 1,
          "Capacity DATA does not cover the same root package/publication filesystem")
     space = os.statvfs("/var/lib")
     if "shell" in value:
-        required += (27 + len(session_nodes) + len(tools_offline_nodes) + session_environment_nodes) * space.f_frsize  # Finite nodes, not a quota.
+        required += (27 + len(version_nodes) + len(session_nodes) + len(tools_offline_nodes) + session_environment_nodes) * space.f_frsize  # Finite nodes, not a quota.
     need(space.f_bavail * space.f_frsize >= required and space.f_favail >= inodes, "Insufficient original host capacity; do not clear caches")
 
 
@@ -2786,6 +2865,7 @@ def public_files(value):
                         "shell-project-paths-before.json", "shell-project-paths-after.json",
                         "shell-workflow-apply-before.json", "shell-workflow-apply-after.json",
                         "shell-metadata-save-before.json", "shell-metadata-save-after.json",
+                        "shell-version-save-before.json", "shell-version-save-after.json",
                         "published-before-upgrade.txt", "mutation-denials.txt", "shell-settled-failure-failure.labels"} \
             | {"shell-" + case + "-xvfb.stderr" for case in SHELL_CASES} \
             | {"shell-" + case + "-" + phase + ".json" for case in SHELL_SESSION_CASES for phase in ("before", "after")} \
@@ -4039,7 +4119,7 @@ def _shell_label_pair(raw):
         path_detail, lines = lines[0], lines[1:]
     # Session traces require their complete fourth record. Historical v1/v2
     # keep their prior shape, with no invented assessmentFailure metadata.
-    # Never admit a proper prefix of v3/v4/v5 as a complete historical frame.
+    # Never admit a proper prefix of v3/v4/v5/v6 as a complete historical frame.
     if (len(lines) not in (3, 4) or lines[0] not in SHELL_FAILURE_STEPS or lines[1] not in SHELL_FAILURE_BOUNDARIES
             or lines[2] not in SHELL_BOOTSTRAP_PROGRESS):
         return None
@@ -4078,18 +4158,25 @@ def _shell_label_pair(raw):
             version = b"v5"
             if len(raw) > SHELL_SESSION_FAILURE_V5_FRAME_BOUND:
                 return None
+        elif lines[3].startswith(b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v6;"):
+            version = b"v6"
+            if len(raw) > SHELL_SESSION_FAILURE_V6_FRAME_BOUND:
+                return None
         else:
             return None
         suffix = b"" if version == b"v1" else rb";o=([a-z-]{1,19});d=([a-z-]{1,15});a=([a-z-]{1,12});q=([a-z.-]{1,26});w=([a-z-]{1,14})"
-        if version in (b"v3", b"v4", b"v5"):
+        if version in (b"v3", b"v4", b"v5", b"v6"):
             suffix += rb";ao=([a-z-]{1,7});ac=([a-z-]{1,24});ax=([a-z-]{1,11})"
-        if version in (b"v4", b"v5"):
+        if version in (b"v4", b"v5", b"v6"):
             suffix += rb";af=([a-z-]{1,22})"
-        if version == b"v5":
+        if version in (b"v5", b"v6"):
             suffix += rb";u=([a-z-]{1,14})"
+        if version == b"v6":
+            suffix += rb";g=([a-z0-9]{2})"
         suffix += rb"\n"
+        evaluations_key = rb"eval" if version == b"v6" else rb"evaluations"
         match = re.fullmatch(rb"MRK_INSTALLED_SHELL_SESSION_FAILURE=" + version + rb";index=(none|0|[1-9][0-9]?);"
-                             rb"evaluations=(0|[1-9][0-9]{0,2});reject=([a-z-]{1,32});wait=([a-z-]{1,32})" + suffix, lines[3])
+                             + evaluations_key + rb"=(0|[1-9][0-9]{0,2});reject=([a-z-]{1,32});wait=([a-z-]{1,32})" + suffix, lines[3])
         if match is None:
             return None
         index_raw, evaluations_raw, rejection, wait = match.groups()[:4]
@@ -4097,8 +4184,9 @@ def _shell_label_pair(raw):
         evaluations = int(evaluations_raw)
         unindexed = {"SessionNavigate", "SessionReload", "SessionLoss", "SessionDeadline", "SessionQuitPreserved"}
         mixed = {"SessionQuitCancel", "SessionFinality"}
+        waits = SHELL_SESSION_V6_WAITS if version == b"v6" else SHELL_SESSION_WAITS
         if (index is not None and index >= 64 or evaluations > 128 or rejection not in SHELL_SESSION_REJECTIONS
-                or wait not in SHELL_SESSION_WAITS or rejection == b"evaluation-budget" and evaluations != 128
+                or wait not in waits or rejection == b"evaluation-budget" and evaluations != 128
                 or result["step"] in unindexed and index is not None
                 or result["step"] not in unindexed | mixed and index is None):
             return None
@@ -4108,19 +4196,19 @@ def _shell_label_pair(raw):
             first_origin = _shell_session_first_origin(*match.groups()[4:9])
             if first_origin is None:
                 return None
-            if version == b"v5":
+            if version in (b"v5", b"v6"):
                 unknown_boundary = _shell_session_unknown_boundary(
                     match.groups()[6], match.groups()[7], match.groups()[8], match.groups()[13])
                 if unknown_boundary is None:
                     return None
                 first_origin["unknownBoundary"] = unknown_boundary
             result["session"]["firstOrigin"] = first_origin
-        if version in (b"v3", b"v4", b"v5"):
+        if version in (b"v3", b"v4", b"v5", b"v6"):
             origin, classification, cause = match.groups()[9:12]
             assessment_failure = _shell_session_assessment_failure(rejection, origin, classification, cause)
             if assessment_failure is None:
                 return None
-            if version in (b"v4", b"v5"):
+            if version in (b"v4", b"v5", b"v6"):
                 admission = match.groups()[12]
                 if (admission not in SHELL_SESSION_ASSESSMENT_ADMISSIONS
                         or admission != b"na" and not (origin == b"bridge" and cause in (b"inspection", b"capability", b"prepare", b"final-claim"))
@@ -4128,6 +4216,18 @@ def _shell_label_pair(raw):
                     return None
                 assessment_failure["admission"] = admission.decode("ascii")
             result["session"]["assessmentFailure"] = assessment_failure
+        if version == b"v6":
+            callbacks = match.groups()[14]
+            gtk_role = result["step"] in ("SessionSetFile", "SessionActivateFile")
+            if (callbacks not in SHELL_SESSION_GTK_CALLBACKS or (callbacks == b"na") == gtk_role
+                    or wait in (b"gtk-selection-absent", b"gtk-selection-different") and result["step"] != "SessionActivateFile"):
+                return None
+            # p is dispatch reservation, not successful dispatch/callback entry.
+            # Returns are helper notifications, never native-owner settlement.
+            result["session"]["gtkCallbacks"] = None if callbacks == b"na" else {
+                "returns": {b"0": "none", b"1": "one", b"m": "multiple"}[callbacks[:1]],
+                "phase": {b"i": "idle", b"p": "pending", b"w": "wait-observed"}[callbacks[1:]]}
+
     return result
 
 
@@ -4195,7 +4295,7 @@ def _shell_log_capture(value, case, original, result):
 
 SHELL_FIXTURE_CHILDREN = ("candidate-evidence", "metadata-project", "offline-cancel", "offline-drift", "offline-negative",
     "offline-pass", "offline-settlement", "path-outside", "path-project", "positive-project", "session-deadline", "session-inputs",
-    "session-loss", "session-refusals", "tools-cancel", "tools-observed", "tools-settlement", "workflow-project")
+    "session-loss", "session-refusals", "tools-cancel", "tools-observed", "tools-settlement", "version-project", "workflow-project")
 
 
 def _shell_session_roster(value, case, changed=False):
@@ -4588,7 +4688,7 @@ def _shell_namespace_check(value, binding):
 
 
 def _shell_fixtures_prepare(value):
-    """Create the eighteen fixed DATA trees once, retained on every failure.
+    """Create the nineteen fixed DATA trees once, retained on every failure.
 
     The sibling follows the existing disposable-runner retention policy; there
     is no deletion, cleanup scan, retry or permission repair of an old object.
@@ -4651,6 +4751,20 @@ def _shell_fixtures_prepare(value):
             _D.write(path, expected, stat.S_IMODE(mode))
             os.chown(path, *owners)
     for path, mode, owners, _ in reversed(metadata_nodes):
+        if stat.S_ISDIR(mode):
+            os.chmod(path, stat.S_IMODE(mode))
+            os.chown(path, *owners)
+        _xattrs(path, stat.S_ISDIR(mode))
+    version_root = root / "version-project"
+    version_nodes = [(version_root if name == "." else version_root / name, mode, owners, expected)
+                      for name, mode, owners, expected in _shell_version_roster(value, False)]
+    for path, mode, owners, expected in version_nodes:
+        if stat.S_ISDIR(mode):
+            path.mkdir(mode=0o700)
+        else:
+            _D.write(path, expected, stat.S_IMODE(mode))
+            os.chown(path, *owners)
+    for path, mode, owners, _ in reversed(version_nodes):
         if stat.S_ISDIR(mode):
             os.chmod(path, stat.S_IMODE(mode))
             os.chown(path, *owners)
@@ -5036,6 +5150,117 @@ def shell_metadata_fixture(value, before_raw, after_raw):
             "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
 
 
+def _shell_version_roster(value, saved):
+    """Fixed private version fixture: one absent source, config and sentinel."""
+    need(type(saved) is bool, "Version fixture phase is not a boolean")
+    owner = (value["runnerUid"], value["runnerGid"])
+    return [
+        (".", stat.S_IFDIR | 0o700, owner,
+         [".gitignore", "release", "unrelated.txt", "version.properties"] if saved
+         else [".gitignore", "release", "unrelated.txt"]),
+        ("release", stat.S_IFDIR | 0o700, owner, ["mobile-release.json"]),
+        (".gitignore", stat.S_IFREG | 0o600, owner, SHELL_PROJECT_IGNORE),
+        ("release/mobile-release.json", stat.S_IFREG | 0o600, owner, SHELL_PROJECT_CONFIG),
+        ("unrelated.txt", stat.S_IFREG | 0o600, owner, SHELL_VERSION_KEEP),
+        *([("version.properties", stat.S_IFREG | 0o600, owner, SHELL_VERSION_EDITED)] if saved else []),
+    ]
+
+
+def _shell_version_absent(saved):
+    return list(SHELL_METADATA_ABSENT) + ([] if saved else ["version.properties"])
+
+
+def _shell_version_inventory(value, namespace, *, saved=False):
+    """Inventory only before launch or after the original successful finality."""
+    need(_ROOT == root_path(value) and type(saved) is bool, "Different version fixture route or phase")
+    binding = namespace
+    namespace = _shell_namespace_check(value, binding)
+    root = shell_fixture_root(value) / "version-project"
+    rows, parents = [], []
+    for relative, mode, owners, expected in _shell_version_roster(value, saved):
+        path = root if relative == "." else root / relative
+        before = path.lstat()
+        need(before.st_mode == mode and (before.st_uid, before.st_gid) == owners, "Version fixture mode or ownership differs")
+        if stat.S_ISDIR(mode):
+            directory(path)
+            children = []
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    need(len(children) < len(expected) and entry.name in expected, "Unexpected version fixture entry")
+                    children.append(entry.name)
+            need(sorted(children) == expected and identity(path.lstat()) == identity(before), "Version fixture parent changed")
+            rows.append({"path": relative, "kind": "directory", "identity": list(identity(before)), "children": expected})
+            parents.append((path, identity(before)))
+        else:
+            observed = record(path, len(expected))
+            need(observed["size"] == len(expected) and observed["sha256"] == hashlib.sha256(expected).hexdigest()
+                 and identity(path.lstat()) == identity(before), "Version fixture input or sentinel differs")
+            rows.append({**observed, "path": relative, "kind": "file", "identity": list(identity(before))})
+    absent = _shell_version_absent(saved)
+    for relative in absent:
+        _absent(root / relative)
+    need(all(identity(path.lstat()) == original for path, original in parents), "Version fixture changed during inventory")
+    _shell_namespace_check(value, binding)
+    return {"schemaVersion": 1, "fixture": "release-version-save-v1", "root": str(root), "saved": saved,
+            "entries": rows, "absent": absent, "namespace": namespace}
+
+
+def shell_version_fixture(value, before_raw, after_raw):
+    """Outer fixture correspondence; per-phase originals are checked by the observer."""
+    inventories, namespaces = [], []
+    for raw, saved in ((before_raw, False), (after_raw, True)):
+        document = decode(raw, 8192)
+        need(type(document) is dict and set(document) == {"schemaVersion", "fixture", "root", "saved", "entries", "absent", "namespace"}
+             and canonical(document) == raw and type(document["schemaVersion"]) is int and document["schemaVersion"] == 1
+             and document["fixture"] == "release-version-save-v1" and document["saved"] is saved
+             and document["root"] == str(shell_fixture_root(value) / "version-project")
+             and document["absent"] == _shell_version_absent(saved), "Version fixture inventory is incomplete or out of phase")
+        namespace = _shell_namespace_data(value, document["namespace"])
+        namespaces.append(namespace)
+        roster, rows = _shell_version_roster(value, saved), document["entries"]
+        need(type(rows) is list and len(rows) == len(roster), "Version fixture node roster differs")
+        observed = {}
+        for row, (relative, mode, owners, expected) in zip(rows, roster):
+            is_directory = stat.S_ISDIR(mode)
+            wanted = {"path", "kind", "identity", "children"} if is_directory else {"path", "kind", "identity", "size", "sha256"}
+            need(type(row) is dict and set(row) == wanted and row["path"] == relative
+                 and row["kind"] == ("directory" if is_directory else "file"), "Version fixture node kind/path differs")
+            original = row["identity"]
+            need(type(original) is list and len(original) == 9 and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+                 and original[0] > 0 and original[1] > 0 and original[2] == mode and tuple(original[3:5]) == owners
+                 and 0 < original[5] <= 16 and original[6] <= 1 << 20, "Version fixture original identity differs")
+            if is_directory:
+                need(row["children"] == expected, "Version fixture has an unexpected child or pending state")
+            else:
+                need(original[5] == 1 and original[6] == len(expected) and type(row["size"]) is int
+                     and row["size"] == len(expected) and row["sha256"] == hashlib.sha256(expected).hexdigest(),
+                     "Version fixture bytes differ from the reviewed input/version/sentinel DATA")
+            observed[relative] = row
+        reserved = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
+        need(all(row["identity"][0] == namespace["identity"][0] and tuple(row["identity"][:2]) not in reserved for row in rows)
+             and len({tuple(row["identity"][:2]) for row in rows}) == len(rows), "Version fixture nodes alias or cross devices")
+        inventories.append(observed)
+    first, last = inventories
+    need(namespaces[0] == namespaces[1] and len(first) == 5 and len(last) == 6
+         and set(last) - set(first) == {"version.properties"}, "Version fixture does not contain exactly one new source")
+    for name, old in first.items():
+        new = last[name]
+        if name == ".":
+            need(old["identity"][:6] == new["identity"][:6], "Version fixture original root was replaced or chmodded")
+        else:
+            need(old == new, "Version Save changed an exact-preserved original")
+    need(tuple(last["version.properties"]["identity"][:2]) not in {tuple(row["identity"][:2]) for row in first.values()},
+         "Version source aliases an original fixture node")
+    return {"fixture": "release-version-save-v1", "rootRetained": True, "preservedOriginals": True,
+            "createdFileCount": 1, "beforeCount": len(first), "afterCount": len(last),
+            "configurationUnchanged": True, "ignoreUnchanged": True, "sentinelUnchanged": True,
+            "noUnexpectedEntries": True, "noPendingState": True,
+            "version": {"path": "version.properties", "size": len(SHELL_VERSION_EDITED),
+                        "sha256": hashlib.sha256(SHELL_VERSION_EDITED).hexdigest(), "mode": 0o600},
+            "before": {"size": len(before_raw), "sha256": hashlib.sha256(before_raw).hexdigest()},
+            "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
+
+
 def _shell_candidate_inventory(value, namespace):
     """Only the five fixed nodes, before launch or after successful finality.
 
@@ -5161,6 +5386,13 @@ def shell_metadata_receipt(raw):
     receipt = decode(raw, 2048)
     need(raw == canonical(receipt) == canonical(SHELL_METADATA_RECEIPT),
          "Metadata Save receipt is missing, malformed or premature")
+    return receipt
+
+
+def shell_version_receipt(raw):
+    receipt = decode(raw, 2048)
+    need(raw == canonical(receipt) == canonical(SHELL_VERSION_RECEIPT),
+         "Version Save receipt is missing, malformed or premature")
     return receipt
 
 
@@ -5488,6 +5720,8 @@ def _shell_prepare(value, case, namespace):
         _retain("shell-" + case + "-before.json", canonical(_shell_session_inventory(value, namespace, case)))
     if case == "metadata-save":
         _retain("shell-metadata-save-before.json", canonical(_shell_metadata_inventory(value, namespace)))
+    if case == "version-save":
+        _retain("shell-version-save-before.json", canonical(_shell_version_inventory(value, namespace)))
     if case in SHELL_TOOLS_OFFLINE_CASES:
         _retain("shell-" + case + "-before.json", canonical(_shell_tools_offline_inventory(value, namespace, case)))
     return environment, log_binding
@@ -5497,7 +5731,7 @@ def _shell_fixtures_final(value, namespace):
     """Compare retained fixtures only after every original case has returned."""
     # Every original case, including the eight Tools/Offline cases, returned through the
     # same shell_result gate. Check every earlier original family and the
-    # saved metadata together, never by following a failed/possibly-live case.
+    # saved metadata/version together, never by following a failed/possibly-live case.
     need(canonical(_shell_project_inventory(value, namespace, saved=True))
          == read(_ROOT / "public/shell-positive-project-after.json", 8192)
          and canonical(_shell_candidate_inventory(value, namespace))
@@ -5507,7 +5741,9 @@ def _shell_fixtures_final(value, namespace):
          and canonical(_shell_workflow_inventory(value, namespace, installed=True))
          == read(_ROOT / "public/shell-workflow-apply-after.json", 8192)
          and canonical(_shell_metadata_inventory(value, namespace, saved=True))
-         == read(_ROOT / "public/shell-metadata-save-after.json", 8192),
+         == read(_ROOT / "public/shell-metadata-save-after.json", 8192)
+         and canonical(_shell_version_inventory(value, namespace, saved=True))
+         == read(_ROOT / "public/shell-version-save-after.json", 8192),
          "Shell observations changed another original fixture family")
     for case in SHELL_SESSION_CASES:
         need(canonical(_shell_session_inventory(value, namespace, case, changed=case == "session-refusals"))
@@ -5584,11 +5820,12 @@ def shell_result(stdout, stderr, case, code, expected, *, failure_labels=None):
         candidate = shell_candidate_receipt(output[4][len(SHELL_CANDIDATE_MARKER):])
         return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
                 "maps": [], "projectDraft": receipt, "candidateDocuments": candidate}
-    if case in ("project-paths", "workflow-apply", "metadata-save"):
+    if case in ("project-paths", "workflow-apply", "metadata-save", "version-save"):
         receipt_marker, receipt_reader, field = {
             "project-paths": (SHELL_PATH_MARKER, shell_path_receipt, "projectPaths"),
             "workflow-apply": (SHELL_WORKFLOW_MARKER, shell_workflow_receipt, "workflowApply"),
             "metadata-save": (SHELL_METADATA_MARKER, shell_metadata_receipt, "metadataSave"),
+            "version-save": (SHELL_VERSION_MARKER, shell_version_receipt, "versionSave"),
         }[case]
         output = [line for line in stdout.splitlines(keepends=True) if line.startswith(b"MRK_")]
         diagnostics = [line for line in stderr.splitlines() if line.startswith(b"MRK_")]
@@ -5596,7 +5833,7 @@ def shell_result(stdout, stderr, case, code, expected, *, failure_labels=None):
              b"MRK_DESKTOP_CATALOGUE=returned\n", contracts + b"\n"]
              and output[3].startswith(receipt_marker) and output[3].endswith(b"\n")
              and output[4] == marker + b"\n" and diagnostics == [],
-             "Original path/workflow/metadata bootstrap/contract/receipt/completion order differs")
+             "Original path/workflow/metadata/version bootstrap/contract/receipt/completion order differs")
         receipt = receipt_reader(output[3][len(receipt_marker):])
         return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True, "maps": [],
                 field: receipt}
@@ -6454,6 +6691,10 @@ def unit_start():
                     metadata_after = canonical(_shell_metadata_inventory(value, namespace, saved=True))
                     _retain("shell-metadata-save-after.json", metadata_after)
                     shell_metadata_fixture(value, read(_ROOT / "public/shell-metadata-save-before.json", 8192), metadata_after)
+                if case == "version-save":
+                    version_after = canonical(_shell_version_inventory(value, namespace, saved=True))
+                    _retain("shell-version-save-after.json", version_after)
+                    shell_version_fixture(value, read(_ROOT / "public/shell-version-save-before.json", 8192), version_after)
                 if case in SHELL_TOOLS_OFFLINE_CASES:
                     tools_offline_after = canonical(_shell_tools_offline_inventory(value, namespace, case, after=True))
                     _retain("shell-" + case + "-after.json", tools_offline_after)
@@ -6733,6 +6974,7 @@ def shell_closed_result(value, outcome, raw_files):
     paths = shell_paths_fixture(value, raw_files["shell-project-paths-before.json"], raw_files["shell-project-paths-after.json"])
     workflow = shell_workflow_fixture(value, raw_files["shell-workflow-apply-before.json"], raw_files["shell-workflow-apply-after.json"])
     metadata = shell_metadata_fixture(value, raw_files["shell-metadata-save-before.json"], raw_files["shell-metadata-save-after.json"])
+    version = shell_version_fixture(value, raw_files["shell-version-save-before.json"], raw_files["shell-version-save-after.json"])
     sessions = {case: {"native": cases[case]["sessionInputs"],
         "fixture": shell_session_fixture(value, case, raw_files["shell-" + case + "-before.json"], raw_files["shell-" + case + "-after.json"])}
         for case in SHELL_SESSION_CASES}
@@ -6744,7 +6986,7 @@ def shell_closed_result(value, outcome, raw_files):
          "Tools/Offline original native fixture observations differ from the outer inventories")
     namespaces = [decode(raw_files[name], 8192)["namespace"] for name in
                   ("shell-positive-project-before.json", "shell-positive-candidate-before.json", "shell-project-paths-before.json", "shell-workflow-apply-before.json",
-                   *("shell-" + case + "-before.json" for case in SHELL_SESSION_CASES), "shell-metadata-save-before.json")]
+                   *("shell-" + case + "-before.json" for case in SHELL_SESSION_CASES), "shell-metadata-save-before.json", "shell-version-save-before.json")]
     namespaces.extend(decode(raw_files["shell-" + case + "-before.json"], SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT)["namespace"]
                       for case in SHELL_TOOLS_OFFLINE_CASES)
     need(all(namespace == namespaces[0] for namespace in namespaces), "Closed shell fixture families have different original namespaces")
@@ -6769,6 +7011,7 @@ def shell_closed_result(value, outcome, raw_files):
             "workflowApply": {"native": cases["workflow-apply"]["workflowApply"], "fixture": workflow},
             "sessionInputs": sessions,
             "metadataSave": {"native": cases["metadata-save"]["metadataSave"], "fixture": metadata},
+            "versionSave": {"native": cases["version-save"]["versionSave"], "fixture": version},
             "toolsOffline": tools_offline,
             "settledFailure": cases["settled-failure"],
             "packageLifecycleQualified": False, "shellPackageBuilt": False}

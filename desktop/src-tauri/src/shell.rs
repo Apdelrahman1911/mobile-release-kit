@@ -626,15 +626,26 @@ async fn release_version_edit_open(webview: Webview, request: tauri::ipc::Reques
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
     let args = release_version_edit_commands::open(request_body(&request)?)?;
-    state.bridge.open_release_version_edit(&state.document, window, args)
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.version_open_request(&args); }
+    let result = state.bridge.open_release_version_edit(&state.document, window, args);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.version_open_result(&result, &state.bridge.edits); }
+    result
 }
 #[tauri::command]
 async fn release_version_edit_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<ReleaseVersionEditStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
     let result = request_body(&request).and_then(release_version_edit_commands::prepare)
-        .and_then(|args| state.bridge.prepare_release_version_edit(&state.document, window, args));
+        .and_then(|args| {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(q) = &state.observation { q.version_prepare_request(&args); }
+        state.bridge.prepare_release_version_edit(&state.document, window, args)
+    });
     if result.is_err() { state.bridge.edits.retire_release_version_request(window); }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.version_prepare_result(&result, &state.bridge.edits); }
     result
 }
 #[tauri::command]
@@ -642,8 +653,14 @@ async fn release_version_edit_apply(webview: Webview, request: tauri::ipc::Reque
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
     let result = request_body(&request).and_then(edit_commands::apply)
-        .and_then(|args| state.bridge.apply_release_version_edit(&state.document, window, &args.session_id, &args.plan_token));
+        .and_then(|args| {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(q) = &state.observation { q.version_apply_request(&args.session_id, &args.plan_token); }
+        state.bridge.apply_release_version_edit(&state.document, window, &args.session_id, &args.plan_token)
+    });
     if result.is_err() { state.bridge.edits.retire_release_version_request(window); }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.version_apply_result(&result, &state.bridge.edits); }
     result
 }
 #[tauri::command]
@@ -651,15 +668,23 @@ async fn release_version_edit_close(webview: Webview, request: tauri::ipc::Reque
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
     let args = edit_commands::close(request_body(&request)?)?;
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.version_close_request(&args.session_id); }
     // Original STOP stays available during quit without another root lookup.
-    state.bridge.edits.close_release_version(window, &args.session_id)
+    let result = state.bridge.edits.close_release_version(window, &args.session_id);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.version_close_result(&result, &state.bridge.edits); }
+    result
 }
 #[tauri::command]
 async fn release_version_edit_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<ReleaseVersionEditStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview)?;
     edit_commands::status(request_body(&request)?)?;
-    state.bridge.edits.release_version_status()
+    let result = state.bridge.edits.release_version_status();
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let (Some(q), Ok(status)) = (&state.observation, &result) { q.version_edit_status(status, &state.bridge.edits); }
+    result
 }
 
 fn github_connection_body<'a>(webview: &Webview, request: &'a tauri::ipc::Request<'_>) -> Result<&'a Value, BridgeError> {
@@ -952,6 +977,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             }
             if release_version_revision != Some(revision) {
                 if let Ok(status) = edits.release_version_status() {
+                    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() { q.version_edit_status(&status, &edits); }
                     release_version_revision = Some(status.status_revision);
                     let _ = app.emit_to(MAIN_WINDOW, release_version_wire::EVENT, &status);
                 }
@@ -1643,8 +1670,11 @@ mod owned_gtk {
             let Some(path) = q.session_file_target(index) else { q.session_file_failed(R::GtkSelectionState); return Err(()); };
             // Observe only readiness on the original chooser. The accepted
             // production callback still owns the sole native_path transfer.
-            if !dialog.file().is_some_and(|file| file.equal(&gtk::gio::File::for_path(&path))) {
-                q.session_file_wait(index, true, W::GtkSelectionPending); return Ok(false);
+            let Some(file) = dialog.file() else {
+                q.session_file_wait(index, true, W::GtkSelectionAbsent); return Ok(false);
+            };
+            if !file.equal(&gtk::gio::File::for_path(&path)) {
+                q.session_file_wait(index, true, W::GtkSelectionDifferent); return Ok(false);
             }
         }
         let response = if select { gtk::ResponseType::Accept } else { gtk::ResponseType::Cancel };
