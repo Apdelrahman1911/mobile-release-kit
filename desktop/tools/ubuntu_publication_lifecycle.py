@@ -59,6 +59,18 @@ SHELL_SESSION_FAILURE_FRAME_BOUND = 466  # v3 only; historical v1/v2 admission s
 SHELL_SESSION_FAILURE_V4_FRAME_BOUND = 492  # Same 512B sink; ;af= plus at most 22B.
 SHELL_SESSION_FAILURE_V5_FRAME_BOUND = 509  # v4 plus ;u= and at most 14B; no larger sink.
 SHELL_SESSION_FAILURE_V6_FRAME_BOUND = 507  # v5 - 7B (eval) + 5B (;g= and two closed bytes).
+SHELL_EVIDENCE_CHECKS = (
+    b"status-pending", b"bridge", b"case", b"observe-pending", b"observe-returned", b"observe-requests",
+    b"revision", b"schema", b"availability", b"previous-revision", b"equal-revision", b"operation-order",
+    b"operation", b"operation-kind", b"operation-selection", b"phase", b"problem", b"result", b"selection",
+    b"selection-witness", b"selection-format", b"selection-name", b"selection-changed", b"choose-requests",
+    b"cancel-status", b"picker-activated", b"cancelled", b"observation-present", b"observation-changed")
+SHELL_EVIDENCE_PHASES = (b"na", b"idle", b"choosing", b"selected", b"observing", b"observed", b"stopping", b"cancelled", b"refused", b"unknown")
+SHELL_EVIDENCE_PROBLEMS = (b"na", b"none", b"unavailable", b"busy", b"cancelled", b"stale-selection", b"unsafe-selection",
+                           b"observation-failed", b"limit", b"deadline", b"cleanup-unknown")
+SHELL_EVIDENCE_ERRORS = (b"none", b"unavailable", b"busy", b"cancelled", b"stale-selection", b"unsafe-selection",
+                         b"observation-failed", b"limit", b"deadline", b"cleanup-unknown", b"invalid", b"runtime-unavailable",
+                         b"protocol", b"shutdown", b"query-timeout", b"other")
 # Literal observer labels only; never a prefix parser or raw-output escape.
 SHELL_FAILURE_STEPS = (
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=Bootstrap\n",
@@ -4111,8 +4123,12 @@ def _shell_label_pair(raw):
     if type(raw) is not bytes or not 0 < len(raw) <= SHELL_FAILURE_LABEL_LIMIT:
         return None
     lines = raw.splitlines(keepends=True)
-    path_detail = None
-    if lines[0].startswith(b"MRK_INSTALLED_SHELL_PATH_FAILURE="):
+    path_detail = evidence_detail = None
+    if lines[0].startswith(b"MRK_INSTALLED_SHELL_EVIDENCE_FAILURE="):
+        if len(lines) != 4:
+            return None
+        evidence_detail, lines = lines[0], lines[1:]
+    elif lines[0].startswith(b"MRK_INSTALLED_SHELL_PATH_FAILURE="):
         # Prefix first, so no proper prefix of this new frame can masquerade
         # as an old three-line Path result with the detail silently lost.
         path_bound = (SHELL_PATH_FAILURE_V2_FRAME_BOUND if lines[0].startswith(b"MRK_INSTALLED_SHELL_PATH_FAILURE=v2;")
@@ -4132,6 +4148,31 @@ def _shell_label_pair(raw):
     session = result["step"].startswith("Session")  # Membership was checked above, not prefix admission.
     if len(lines) != (4 if session else 3):
         return None
+    if evidence_detail is not None:
+        # A finite original first-failure observation, never a result or native
+        # receipt. Missing detail in historical three-line records stays absent.
+        if session or result["step"].startswith("Path") or result["boundary"] != "result":
+            return None
+        match = re.fullmatch(rb"MRK_INSTALLED_SHELL_EVIDENCE_FAILURE=v1;callback=(status|observe-start);check=([a-z-]{1,20})"
+                             rb";phase=([a-z-]{1,20});problem=([a-z-]{1,20});error=([a-z-]{1,20})\n", evidence_detail)
+        if match is None:
+            return None
+        callback, check, phase, problem, error = match.groups()
+        if (check not in SHELL_EVIDENCE_CHECKS or phase not in SHELL_EVIDENCE_PHASES
+                or problem not in SHELL_EVIDENCE_PROBLEMS or error not in SHELL_EVIDENCE_ERRORS
+                or callback == b"observe-start" and result["step"] not in {"InspectEvidence", "EvidenceObserved"}
+                or check in {b"case", b"observe-pending", b"observe-returned"} and callback != b"observe-start"):
+            return None
+        if check == b"bridge":
+            if phase != b"na" or problem != b"na" or error == b"none":
+                return None
+        elif check == b"status-pending":
+            if callback != b"status" or phase != b"na" or problem != b"na" or error != b"none":
+                return None
+        elif phase == b"na" or problem == b"na" or error != b"none":
+            return None
+        result["evidence"] = {key: value.decode("ascii") for key, value in
+                              zip(("callback", "check", "phase", "problem", "error"), match.groups())}
     if path_detail is not None:
         sample = None
         match = re.fullmatch(rb"MRK_INSTALLED_SHELL_PATH_FAILURE=v1;index=(none|0|[1-9]|10);reject=([a-z-]{1,22})\n", path_detail)

@@ -1295,6 +1295,23 @@ fn failure_pair(trace: (Step, Boundary), progress: BootstrapProgress, session: O
 #[test]
 fn session_failure_frame_contract_is_inert() { assert_failure_pair_contract(); }
 
+fn failure_frame(trace: (Step, Boundary), progress: BootstrapProgress, session: Option<SessionDiagnostic>,
+    path: Option<PathDiagnostic>, evidence: Option<EvidenceDiagnostic>) -> Option<([u8; FAILURE_PAIR_LIMIT], usize)> {
+    let Some(diagnostic) = evidence else { return failure_pair(trace, progress, session, path); };
+    if session.is_some() || path.is_some() || !diagnostic.valid(trace) { return None; }
+    let (legacy, legacy_length) = failure_pair(trace, progress, None, None)?;
+    let mut bytes = [0_u8; FAILURE_PAIR_LIMIT]; let mut length = 0_usize;
+    // Prefix FIRST: a partial write cannot look like a complete old frame.
+    // Every value below is a closed token, never renderer/engine error text.
+    for part in [b"MRK_INSTALLED_SHELL_EVIDENCE_FAILURE=v1;callback=".as_slice(), diagnostic.callback.token(),
+        b";check=", diagnostic.check.token(), b";phase=", diagnostic.phase_token(),
+        b";problem=", diagnostic.problem_token(), b";error=", diagnostic.error.token(), b"\n", &legacy[..legacy_length]] {
+        let end = length.checked_add(part.len())?;
+        bytes.get_mut(length..end)?.copy_from_slice(part); length = end;
+    }
+    Some((bytes, length))
+}
+
 fn assert_failure_pair_contract() {
     // Pure byte contracts only; no open, write, GTK or process work.
     for trace in [(Step::Bootstrap, Boundary::Bootstrap), (Step::PrepareSave, Boundary::Request),
@@ -2400,6 +2417,105 @@ impl CandidateSample {
         Some(Self { value, display })
     }
 }
+// Closed, failure-only observations. No DTO, path, identifier or arbitrary
+// BridgeError string can enter the original bounded diagnostic channel.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EvidenceCallback { Status, ObserveStart }
+impl EvidenceCallback {
+    fn token(self) -> &'static [u8] { match self { Self::Status => b"status", Self::ObserveStart => b"observe-start" } }
+    fn permits(self, step: Step) -> bool { match self {
+        Self::Status => !matches!(step, Step::Paths(_) | Step::Session(_)),
+        Self::ObserveStart => matches!(step, Step::InspectEvidence | Step::EvidenceObserved),
+    } }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EvidenceCheck {
+    StatusPending, Bridge, Case, ObservePending, ObserveReturned, ObserveRequests,
+    Revision, Schema, Availability, PreviousRevision, EqualRevision, OperationOrder,
+    Operation, OperationKind, OperationSelection, Phase, Problem, Result, Selection,
+    SelectionWitness, SelectionFormat, SelectionName, SelectionChanged, ChooseRequests,
+    CancelStatus, PickerActivated, Cancelled, ObservationPresent, ObservationChanged,
+}
+impl EvidenceCheck {
+    fn token(self) -> &'static [u8] { match self {
+        Self::StatusPending => b"status-pending", Self::Bridge => b"bridge", Self::Case => b"case",
+        Self::ObservePending => b"observe-pending", Self::ObserveReturned => b"observe-returned",
+        Self::ObserveRequests => b"observe-requests", Self::Revision => b"revision", Self::Schema => b"schema",
+        Self::Availability => b"availability", Self::PreviousRevision => b"previous-revision",
+        Self::EqualRevision => b"equal-revision", Self::OperationOrder => b"operation-order",
+        Self::Operation => b"operation", Self::OperationKind => b"operation-kind",
+        Self::OperationSelection => b"operation-selection", Self::Phase => b"phase", Self::Problem => b"problem",
+        Self::Result => b"result", Self::Selection => b"selection", Self::SelectionWitness => b"selection-witness",
+        Self::SelectionFormat => b"selection-format", Self::SelectionName => b"selection-name",
+        Self::SelectionChanged => b"selection-changed", Self::ChooseRequests => b"choose-requests",
+        Self::CancelStatus => b"cancel-status", Self::PickerActivated => b"picker-activated", Self::Cancelled => b"cancelled",
+        Self::ObservationPresent => b"observation-present", Self::ObservationChanged => b"observation-changed",
+    } }
+}
+fn evidence_require(accepted: bool, check: EvidenceCheck) -> Result<(), EvidenceCheck> {
+    if accepted { Ok(()) } else { Err(check) }
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EvidenceError { None, Unavailable, Busy, Cancelled, StaleSelection, UnsafeSelection, ObservationFailed,
+    Limit, Deadline, CleanupUnknown, Invalid, RuntimeUnavailable, Protocol, Shutdown, QueryTimeout, Other }
+impl EvidenceError {
+    fn classify(error: &BridgeError) -> Self { match error.code.as_str() {
+        "artifact_evidence_unavailable" => Self::Unavailable, "artifact_evidence_busy" => Self::Busy,
+        "artifact_evidence_cancelled" => Self::Cancelled, "artifact_evidence_stale_selection" => Self::StaleSelection,
+        "artifact_evidence_unsafe_selection" => Self::UnsafeSelection,
+        "artifact_evidence_observation_failed" => Self::ObservationFailed, "artifact_evidence_limit" => Self::Limit,
+        "artifact_evidence_deadline" => Self::Deadline, "artifact_evidence_cleanup_unknown" | "cleanup_unknown" => Self::CleanupUnknown,
+        "artifact_evidence_invalid" | "invalid_request" => Self::Invalid, "runtime_unavailable" => Self::RuntimeUnavailable,
+        "protocol_error" => Self::Protocol, "shutting_down" => Self::Shutdown, "query_timeout" => Self::QueryTimeout,
+        _ => Self::Other,
+    } }
+    fn token(self) -> &'static [u8] { match self {
+        Self::None => b"none", Self::Unavailable => b"unavailable", Self::Busy => b"busy", Self::Cancelled => b"cancelled",
+        Self::StaleSelection => b"stale-selection", Self::UnsafeSelection => b"unsafe-selection",
+        Self::ObservationFailed => b"observation-failed", Self::Limit => b"limit", Self::Deadline => b"deadline",
+        Self::CleanupUnknown => b"cleanup-unknown", Self::Invalid => b"invalid", Self::RuntimeUnavailable => b"runtime-unavailable",
+        Self::Protocol => b"protocol", Self::Shutdown => b"shutdown", Self::QueryTimeout => b"query-timeout", Self::Other => b"other",
+    } }
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct EvidenceDiagnostic { step: Step, callback: EvidenceCallback, check: EvidenceCheck,
+    phase: Option<evidence::Phase>, problem: Option<evidence::Problem>, error: EvidenceError }
+impl EvidenceDiagnostic {
+    fn valid(self, trace: (Step, Boundary)) -> bool {
+        if trace != (self.step, Boundary::Result) || !self.callback.permits(self.step) { return false; }
+        match self.check {
+            EvidenceCheck::Bridge => self.phase.is_none() && self.problem.is_none() && self.error != EvidenceError::None,
+            EvidenceCheck::StatusPending => self.callback == EvidenceCallback::Status && self.phase.is_none()
+                && self.problem.is_none() && self.error == EvidenceError::None,
+            _ => self.phase.is_some() && self.error == EvidenceError::None
+                && (!matches!(self.check, EvidenceCheck::Case | EvidenceCheck::ObservePending | EvidenceCheck::ObserveReturned)
+                    || self.callback == EvidenceCallback::ObserveStart),
+        }
+    }
+    fn phase_token(self) -> &'static [u8] { match self.phase {
+        None => b"na", Some(evidence::Phase::Idle) => b"idle", Some(evidence::Phase::Choosing) => b"choosing",
+        Some(evidence::Phase::Selected) => b"selected", Some(evidence::Phase::Observing) => b"observing",
+        Some(evidence::Phase::Observed) => b"observed", Some(evidence::Phase::Stopping) => b"stopping",
+        Some(evidence::Phase::Cancelled) => b"cancelled", Some(evidence::Phase::Refused) => b"refused",
+        Some(evidence::Phase::Unknown) => b"unknown",
+    } }
+    fn problem_token(self) -> &'static [u8] { match self.problem {
+        None if self.phase.is_none() => b"na", None => b"none",
+        Some(evidence::Problem::Unavailable) => b"unavailable", Some(evidence::Problem::Busy) => b"busy",
+        Some(evidence::Problem::Cancelled) => b"cancelled", Some(evidence::Problem::StaleSelection) => b"stale-selection",
+        Some(evidence::Problem::UnsafeSelection) => b"unsafe-selection", Some(evidence::Problem::ObservationFailed) => b"observation-failed",
+        Some(evidence::Problem::Limit) => b"limit", Some(evidence::Problem::Deadline) => b"deadline",
+        Some(evidence::Problem::CleanupUnknown) => b"cleanup-unknown",
+    } }
+}
+fn latch_evidence_diagnostic(failed: &AtomicBool, trace: &mut (Step, Boundary),
+    retained: &mut Option<EvidenceDiagnostic>, next: EvidenceDiagnostic) {
+    // Record is held by the caller. Winning the original failure latch is the
+    // only authority to publish both this detail and its matching trace.
+    if !failed.swap(true, Ordering::SeqCst) {
+        *trace = (next.step, Boundary::Result); *retained = Some(next);
+    }
+}
 #[derive(Default)]
 struct Candidate {
     initial_idle: bool, initial_visible: bool, pickers: [Picker; 2],
@@ -2420,53 +2536,106 @@ impl Candidate {
     }
     fn complete(&self) -> bool { self.documents_complete() && self.draft_retained }
     fn status(&mut self, status: &evidence::Status, closing: bool) -> bool {
+        self.checked_status(status, closing).is_ok()
+    }
+    fn checked_status(&mut self, status: &evidence::Status, closing: bool) -> Result<(), EvidenceCheck> {
+        use EvidenceCheck as C;
         // These are actual command replies, not fabricated native finality.
         // Match the original revision/binding and ignore only genuine older
         // replies exactly as the existing controller does. Poll counts vary.
-        let Ok(revision) = status.revision.parse::<u64>() else { return false; };
-        if status.schema_version != 1 || status.availability != "available" || revision.to_string() != status.revision { return false; }
+        let revision = status.revision.parse::<u64>().map_err(|_| C::Revision)?;
+        evidence_require(status.schema_version == 1, C::Schema)?;
+        evidence_require(status.availability == "available", C::Availability)?;
+        evidence_require(revision.to_string() == status.revision, C::Revision)?;
         if let Some(old) = &self.latest {
-            let Ok(before) = old.revision.parse::<u64>() else { return false; };
-            if revision < before { return true; }
-            if revision == before { return status == old; }
+            let before = old.revision.parse::<u64>().map_err(|_| C::PreviousRevision)?;
+            if revision < before { return Ok(()); }
+            if revision == before { return evidence_require(status == old, C::EqualRevision); }
         }
         let id = status.operation.as_ref().and_then(|op| evidence::operation_id(&op.operation_id));
-        if self.latest.as_ref().and_then(|old| old.operation.as_ref()).and_then(|op| evidence::operation_id(&op.operation_id)) > id { return false; }
+        evidence_require(self.latest.as_ref().and_then(|old| old.operation.as_ref())
+            .and_then(|op| evidence::operation_id(&op.operation_id)) <= id, C::OperationOrder)?;
         if closing {
             // Quit normally revokes selection/result. Earlier positive facts
             // stay latched; exit uses the original slot5/Quit6 witness instead.
-            return id == Some(5) && matches!(status.phase, evidence::Phase::Refused | evidence::Phase::Stopping)
-                && status.problem == Some(evidence::Problem::StaleSelection) && status.selection.is_none() && status.result.is_none();
+            evidence_require(id == Some(5), C::Operation)?;
+            evidence_require(matches!(status.phase, evidence::Phase::Refused | evidence::Phase::Stopping), C::Phase)?;
+            evidence_require(status.problem == Some(evidence::Problem::StaleSelection), C::Problem)?;
+            evidence_require(status.selection.is_none(), C::Selection)?;
+            return evidence_require(status.result.is_none(), C::Result);
         }
-        let valid = match id {
-            None => self.choose_requests == 0 && status.phase == evidence::Phase::Idle && status.operation.is_none()
-                && status.selection.is_none() && status.result.is_none() && status.problem.is_none(),
-            Some(3) => self.choose_requests >= 1 && status.operation.as_ref().is_some_and(|op| op.kind == evidence::OperationKind::Choose && op.selection_id.is_none())
-                && status.selection.is_none() && status.result.is_none()
-                && match status.phase {
-                    evidence::Phase::Choosing => !self.cancel_status && status.problem.is_none(),
-                    evidence::Phase::Stopping | evidence::Phase::Cancelled => self.pickers[0].activated && status.problem == Some(evidence::Problem::Cancelled),
-                    _ => false,
-                },
-            Some(4) => self.choose_requests == 2 && self.cancelled && status.result.is_none() && status.problem.is_none()
-                && status.operation.as_ref().is_some_and(|op| op.kind == evidence::OperationKind::Choose && op.selection_id.is_none())
-                && match status.phase {
-                    evidence::Phase::Choosing => self.selection_status.is_none() && status.selection.is_none(),
-                    evidence::Phase::Selected => status.selection.as_ref().is_some_and(|selection| evidence::selection_id(&selection.selection_id)
-                        && selection.display_name == "candidate-evidence" && self.selection_status.as_ref().is_none_or(|old| old == selection)),
-                    _ => false,
-                },
-            Some(5) => self.observe_requests == 1 && status.problem.is_none() && self.selected.as_ref().is_some_and(|selected|
-                status.selection.as_ref() == Some(&selected.selection) && status.operation.as_ref().is_some_and(|op|
-                    op.kind == evidence::OperationKind::Observe && op.selection_id.as_deref() == Some(selected.selection.selection_id.as_str())))
-                && match status.phase {
-                    evidence::Phase::Observing => self.observation_status.is_none() && status.result.is_none(),
-                    evidence::Phase::Observed => status.result.as_ref().is_some_and(|result| self.observation_status.as_ref().is_none_or(|old| old == result)),
-                    _ => false,
-                },
-            _ => false,
-        };
-        if !valid { return false; }
+        match id {
+            None => {
+                evidence_require(self.choose_requests == 0, C::ChooseRequests)?;
+                evidence_require(status.phase == evidence::Phase::Idle, C::Phase)?;
+                evidence_require(status.operation.is_none(), C::Operation)?;
+                evidence_require(status.selection.is_none(), C::Selection)?;
+                evidence_require(status.result.is_none(), C::Result)?;
+                evidence_require(status.problem.is_none(), C::Problem)?;
+            },
+            Some(3) => {
+                evidence_require(self.choose_requests >= 1, C::ChooseRequests)?;
+                let op = status.operation.as_ref().ok_or(C::Operation)?;
+                evidence_require(op.kind == evidence::OperationKind::Choose, C::OperationKind)?;
+                evidence_require(op.selection_id.is_none(), C::OperationSelection)?;
+                evidence_require(status.selection.is_none(), C::Selection)?;
+                evidence_require(status.result.is_none(), C::Result)?;
+                match status.phase {
+                    evidence::Phase::Choosing => {
+                        evidence_require(!self.cancel_status, C::CancelStatus)?;
+                        evidence_require(status.problem.is_none(), C::Problem)?;
+                    },
+                    evidence::Phase::Stopping | evidence::Phase::Cancelled => {
+                        evidence_require(self.pickers[0].activated, C::PickerActivated)?;
+                        evidence_require(status.problem == Some(evidence::Problem::Cancelled), C::Problem)?;
+                    },
+                    _ => return Err(C::Phase),
+                }
+            },
+            Some(4) => {
+                evidence_require(self.choose_requests == 2, C::ChooseRequests)?;
+                evidence_require(self.cancelled, C::Cancelled)?;
+                evidence_require(status.result.is_none(), C::Result)?;
+                evidence_require(status.problem.is_none(), C::Problem)?;
+                let op = status.operation.as_ref().ok_or(C::Operation)?;
+                evidence_require(op.kind == evidence::OperationKind::Choose, C::OperationKind)?;
+                evidence_require(op.selection_id.is_none(), C::OperationSelection)?;
+                match status.phase {
+                    evidence::Phase::Choosing => {
+                        evidence_require(self.selection_status.is_none(), C::SelectionChanged)?;
+                        evidence_require(status.selection.is_none(), C::Selection)?;
+                    },
+                    evidence::Phase::Selected => {
+                        let selection = status.selection.as_ref().ok_or(C::Selection)?;
+                        evidence_require(evidence::selection_id(&selection.selection_id), C::SelectionFormat)?;
+                        evidence_require(selection.display_name == "candidate-evidence", C::SelectionName)?;
+                        evidence_require(self.selection_status.as_ref().is_none_or(|old| old == selection), C::SelectionChanged)?;
+                    },
+                    _ => return Err(C::Phase),
+                }
+            },
+            Some(5) => {
+                evidence_require(self.observe_requests == 1, C::ObserveRequests)?;
+                evidence_require(status.problem.is_none(), C::Problem)?;
+                let selected = self.selected.as_ref().ok_or(C::SelectionWitness)?;
+                evidence_require(status.selection.as_ref() == Some(&selected.selection), C::Selection)?;
+                let op = status.operation.as_ref().ok_or(C::Operation)?;
+                evidence_require(op.kind == evidence::OperationKind::Observe, C::OperationKind)?;
+                evidence_require(op.selection_id.as_deref() == Some(selected.selection.selection_id.as_str()), C::OperationSelection)?;
+                match status.phase {
+                    evidence::Phase::Observing => {
+                        evidence_require(self.observation_status.is_none(), C::ObservationPresent)?;
+                        evidence_require(status.result.is_none(), C::Result)?;
+                    },
+                    evidence::Phase::Observed => {
+                        let result = status.result.as_ref().ok_or(C::Result)?;
+                        evidence_require(self.observation_status.as_ref().is_none_or(|old| old == result), C::ObservationChanged)?;
+                    },
+                    _ => return Err(C::Phase),
+                }
+            },
+            _ => return Err(C::Operation),
+        }
         match status.phase {
             evidence::Phase::Idle => self.initial_idle = true,
             evidence::Phase::Cancelled => self.cancel_status = true,
@@ -2474,7 +2643,78 @@ impl Candidate {
             evidence::Phase::Observed => self.observation_status = status.result.clone(),
             _ => {},
         }
-        self.latest = Some(status.clone()); true
+        self.latest = Some(status.clone()); Ok(())
+    }
+}
+
+fn assert_evidence_failure_contract() {
+    // Inert original-state contracts, run in the existing native policy gate.
+    // These observations neither start a worker nor prove native finality.
+    let mut status = evidence::Status::unavailable(7); status.availability = "available"; status.problem = None;
+    let mut candidate = Candidate::default();
+    assert_eq!(candidate.checked_status(&status, false), Ok(()));
+    assert!(candidate.initial_idle && candidate.latest.as_ref() == Some(&status));
+    let mut older = status.clone(); older.revision = "6".into(); older.phase = evidence::Phase::Unknown;
+    older.problem = Some(evidence::Problem::CleanupUnknown);
+    assert_eq!(candidate.checked_status(&older, false), Ok(()));
+    assert!(candidate.latest.as_ref() == Some(&status) && candidate.observation_status.is_none());
+    let mut equal = status.clone(); equal.problem = Some(evidence::Problem::Busy);
+    assert_eq!(candidate.checked_status(&equal, false), Err(EvidenceCheck::EqualRevision));
+    assert!(candidate.latest.as_ref() == Some(&status));
+    let mut choose = status.clone(); choose.revision = "8".into(); choose.phase = evidence::Phase::Choosing;
+    choose.operation = Some(evidence::Operation { operation_id: "3".into(), kind: evidence::OperationKind::Choose, selection_id: None });
+    assert_eq!(candidate.checked_status(&choose, false), Err(EvidenceCheck::ChooseRequests));
+    assert!(candidate.latest.as_ref() == Some(&status));
+    candidate.choose_requests = 1;
+    assert_eq!(candidate.checked_status(&choose, false), Ok(()));
+    let mut cancelled = choose.clone(); cancelled.revision = "9".into(); cancelled.phase = evidence::Phase::Cancelled;
+    cancelled.problem = Some(evidence::Problem::Cancelled);
+    assert_eq!(candidate.checked_status(&cancelled, false), Err(EvidenceCheck::PickerActivated));
+    assert!(!candidate.cancel_status && candidate.latest.as_ref() == Some(&choose));
+    candidate.pickers[0].activated = true;
+    assert_eq!(candidate.checked_status(&cancelled, false), Ok(()));
+    assert!(candidate.cancel_status && candidate.latest.as_ref() == Some(&cancelled));
+    let mut closing = cancelled.clone(); closing.revision = "10".into(); closing.phase = evidence::Phase::Refused;
+    closing.problem = Some(evidence::Problem::StaleSelection); closing.operation.as_mut().unwrap().operation_id = "5".into();
+    assert_eq!(candidate.checked_status(&closing, true), Ok(()));
+    assert!(candidate.latest.as_ref() == Some(&cancelled)); // Closing never replaces prior accepted facts.
+    let mut malformed = status.clone(); malformed.revision = "07".into();
+    assert_eq!(candidate.checked_status(&malformed, false), Err(EvidenceCheck::Revision));
+
+    let first = EvidenceDiagnostic { step: Step::EvidenceObserved, callback: EvidenceCallback::Status,
+        check: EvidenceCheck::Problem, phase: Some(evidence::Phase::Refused), problem: Some(evidence::Problem::Deadline),
+        error: EvidenceError::None };
+    let trace = (first.step, Boundary::Result);
+    let (bytes, length) = failure_frame(trace, BootstrapProgress::Advanced, None, None, Some(first)).unwrap();
+    assert!(length <= FAILURE_PAIR_LIMIT && bytes[..length].starts_with(
+        b"MRK_INSTALLED_SHELL_EVIDENCE_FAILURE=v1;callback=status;check=problem;phase=refused;problem=deadline;error=none\n"));
+    let (legacy, legacy_length) = failure_pair(trace, BootstrapProgress::Advanced, None, None).unwrap();
+    assert_eq!(&bytes[length-legacy_length..length], &legacy[..legacy_length]);
+    assert!(failure_frame(trace, BootstrapProgress::Advanced, None, None, None)
+        == failure_pair(trace, BootstrapProgress::Advanced, None, None));
+    assert!(failure_frame((first.step, Boundary::Deadline), BootstrapProgress::Advanced, None, None, Some(first)).is_none());
+    assert!(failure_frame((Step::InspectEvidence, Boundary::Result), BootstrapProgress::Advanced, None, None, Some(first)).is_none());
+    let path = PathDiagnostic::sample(Step::Paths(PathStep::Activate(0)), 0, None).unwrap();
+    assert!(failure_frame(trace, BootstrapProgress::Advanced, None, Some(path), Some(first)).is_none());
+    let wrong_role = EvidenceDiagnostic { step: Step::ReadEvidenceObserved, callback: EvidenceCallback::ObserveStart, ..first };
+    assert!(!wrong_role.valid((wrong_role.step, Boundary::Result)));
+    let unknown = EvidenceError::classify(&BridgeError::new("unrecognized-code", "not diagnostic output"));
+    assert!(unknown == EvidenceError::Other && unknown.token() == b"other");
+    let bridge = EvidenceDiagnostic { check: EvidenceCheck::Bridge, phase: None, problem: None, error: unknown, ..first };
+    assert!(failure_frame(trace, BootstrapProgress::Advanced, None, None, Some(bridge)).is_some());
+    assert!(!EvidenceDiagnostic { phase: first.phase, ..bridge }.valid(trace));
+    assert!(!EvidenceDiagnostic { callback: EvidenceCallback::ObserveStart, check: EvidenceCheck::StatusPending,
+        phase: None, problem: None, ..first }.valid(trace));
+
+    for already_failed in [false, true] {
+        let failed = AtomicBool::new(already_failed);
+        let original_trace = (Step::Bootstrap, Boundary::Bootstrap);
+        let mut retained_trace = original_trace; let mut retained = None;
+        latch_evidence_diagnostic(&failed, &mut retained_trace, &mut retained, first);
+        latch_evidence_diagnostic(&failed, &mut retained_trace, &mut retained, bridge);
+        assert!(failed.load(Ordering::SeqCst));
+        assert!(retained == if already_failed { None } else { Some(first) });
+        assert!(retained_trace == if already_failed { original_trace } else { trace });
     }
 }
 
@@ -3265,6 +3505,7 @@ struct Record {
     confirmation_opened: u8, kept_reviewing: bool, acknowledged: bool, saved_visible: bool,
     readback: bool, readback_visible: bool, saved_reads: SavedReads, saved_draft_retained: bool, noop_outstanding: bool, originals_final: bool,
     step: Step, pending: Option<Pending>, evaluations: u16, trace: (Step, Boundary), bootstrap: BootstrapProgress,
+    evidence_diagnostic: Option<EvidenceDiagnostic>,
     close_prevented: bool, native_id: Option<u32>, activated: bool,
     responded: bool, disposal_response: bool, destroyed: bool, released: bool, gtk_returned: bool,
     relay_joined: bool, exit: bool, held: Option<HeldAppInfo>, failure_quit: FailureQuit,
@@ -3319,7 +3560,7 @@ impl Observation {
             failure_reported: AtomicBool::new(false), failure_sink, commands: case.commands().map(commands::Control::new), record: Mutex::new(Record {
                 attached: false, started: false, loaded: false, info: false, methods: 0, catalog: false, environment: false,
                 step: Step::Bootstrap, pending: None, evaluations: 0, trace: (Step::Bootstrap, Boundary::Bootstrap),
-                bootstrap: BootstrapProgress::NotSampled,
+                bootstrap: BootstrapProgress::NotSampled, evidence_diagnostic: None,
                 pickers: std::array::from_fn(|_| Picker::default()), cancel_returned: false, cancelled: false, project: None, selected: false,
                 project_witness: None, candidate: Candidate::default(), paths, workflow: WorkflowRecord::default(), metadata: MetadataRecord::default(), version: VersionRecord::default(),
                 session: SessionRecord::new(case.session()),
@@ -3399,15 +3640,24 @@ impl Observation {
             if let Some(diagnostic) = r.paths.diagnostic.as_mut() { diagnostic.wait = wait; }
         }
     }
+    fn evidence_fail(&self, r: &mut Record, callback: EvidenceCallback, check: EvidenceCheck,
+        status: Option<&evidence::Status>, error: EvidenceError) {
+        let next = EvidenceDiagnostic { step: r.step, callback, check,
+            phase: status.map(|value| value.phase), problem: status.and_then(|value| value.problem), error };
+        if !next.valid((r.step, Boundary::Result)) { self.fail(); return; }
+        let Record { trace, evidence_diagnostic, .. } = r;
+        latch_evidence_diagnostic(&self.failed, trace, evidence_diagnostic, next);
+    }
     fn report_failure(&self) {
         if !self.failed.load(Ordering::SeqCst) || self.failure_reported.load(Ordering::SeqCst) { return; }
-        let (trace, progress, session, path) = match self.record.try_lock() { Ok(r) => (r.trace, r.bootstrap, r.session.diagnostic, r.paths.diagnostic), Err(_) => return };
+        let (trace, progress, session, path, evidence) = match self.record.try_lock() {
+            Ok(r) => (r.trace, r.bootstrap, r.session.diagnostic, r.paths.diagnostic, r.evidence_diagnostic), Err(_) => return };
         if self.failure_reported.swap(true, Ordering::SeqCst) { return; }
         // Fixed enums and bounded cached counters/recipe indices, outside every
         // record/GTK lock. No identifiers, DTOs, inputs or exception bodies.
         // One unbuffered attempt before stderr: partial/EINTR/error is not
         // retried, formatted or allowed to affect the original failure latch.
-        if let Some((bytes, length)) = failure_pair(trace, progress, session, path) {
+        if let Some((bytes, length)) = failure_frame(trace, progress, session, path, evidence) {
             if let Some(pair) = bytes.get(..length) { let _ = rustix::io::write(&self.failure_sink, pair); }
         }
         super::diagnostic(trace.0.failure_line()); super::diagnostic(trace.1.failure_line());
@@ -3778,10 +4028,17 @@ impl Observation {
     pub(super) fn evidence_status_result(&self, result: &Result<evidence::Status, BridgeError>) {
         if self.case == Case::Outstanding { return; }
         let Some(mut r) = self.record_at(Boundary::Result) else { return; };
-        let Some(pending) = r.candidate.status_pending.checked_sub(1) else { self.fail(); return; };
+        let Some(pending) = r.candidate.status_pending.checked_sub(1) else {
+            self.evidence_fail(&mut r, EvidenceCallback::Status, EvidenceCheck::StatusPending, None, EvidenceError::None); return;
+        };
         r.candidate.status_pending = pending;
         let closing = r.close_prevented;
-        if !result.as_ref().is_ok_and(|status| r.candidate.status(status, closing)) { self.fail(); }
+        match result {
+            Err(error) => self.evidence_fail(&mut r, EvidenceCallback::Status, EvidenceCheck::Bridge, None, EvidenceError::classify(error)),
+            Ok(status) => if let Err(check) = r.candidate.checked_status(status, closing) {
+                self.evidence_fail(&mut r, EvidenceCallback::Status, check, Some(status), EvidenceError::None);
+            },
+        }
     }
     pub(super) fn evidence_observe_request(&self, body: &Value) {
         let Some(mut r) = self.record_at(Boundary::Request) else { return; };
@@ -3794,14 +4051,35 @@ impl Observation {
     }
     pub(super) fn evidence_observe_result(&self, result: &Result<evidence::Status, BridgeError>) {
         let Some(mut r) = self.record_at(Boundary::Result) else { return; };
-        let Some(status) = result.as_ref().ok() else { self.fail(); return; };
-        if self.case != Case::Positive || !r.candidate.observe_pending || r.candidate.observe_returned || r.candidate.observe_requests != 1
-            || status.phase != evidence::Phase::Observing || status.result.is_some() || status.problem.is_some()
-            || !r.candidate.selected.as_ref().is_some_and(|selected| status.selection.as_ref() == Some(&selected.selection)
-                && status.operation.as_ref().is_some_and(|op| op.operation_id == "5" && op.kind == evidence::OperationKind::Observe
-                    && op.selection_id.as_deref() == Some(selected.selection.selection_id.as_str()))) { self.fail(); return; }
+        let status = match result {
+            Ok(status) => status,
+            Err(error) => {
+                self.evidence_fail(&mut r, EvidenceCallback::ObserveStart, EvidenceCheck::Bridge, None, EvidenceError::classify(error)); return;
+            },
+        };
+        let accepted = (|| {
+            use EvidenceCheck as C;
+            evidence_require(self.case == Case::Positive, C::Case)?;
+            evidence_require(r.candidate.observe_pending, C::ObservePending)?;
+            evidence_require(!r.candidate.observe_returned, C::ObserveReturned)?;
+            evidence_require(r.candidate.observe_requests == 1, C::ObserveRequests)?;
+            evidence_require(status.phase == evidence::Phase::Observing, C::Phase)?;
+            evidence_require(status.result.is_none(), C::Result)?;
+            evidence_require(status.problem.is_none(), C::Problem)?;
+            let selected = r.candidate.selected.as_ref().ok_or(C::SelectionWitness)?;
+            evidence_require(status.selection.as_ref() == Some(&selected.selection), C::Selection)?;
+            let op = status.operation.as_ref().ok_or(C::Operation)?;
+            evidence_require(op.operation_id == "5", C::Operation)?;
+            evidence_require(op.kind == evidence::OperationKind::Observe, C::OperationKind)?;
+            evidence_require(op.selection_id.as_deref() == Some(selected.selection.selection_id.as_str()), C::OperationSelection)
+        })();
+        if let Err(check) = accepted {
+            self.evidence_fail(&mut r, EvidenceCallback::ObserveStart, check, Some(status), EvidenceError::None); return;
+        }
         r.candidate.observe_pending = false; r.candidate.observe_returned = true;
-        if !r.candidate.status(status, false) { self.fail(); }
+        if let Err(check) = r.candidate.checked_status(status, false) {
+            self.evidence_fail(&mut r, EvidenceCallback::ObserveStart, check, Some(status), EvidenceError::None);
+        }
     }
     pub(super) fn open_request(&self, project_id: &str) {
         let Some(mut r) = self.record_at(Boundary::Request) else { return; };
@@ -7993,6 +8271,7 @@ pub(crate) fn main() -> std::process::ExitCode {
     crate::runtime::assert_packaged_shell_allowlist_contract();
     assert_recent_files_suppression_contract();
     assert_failure_pair_contract();
+    assert_evidence_failure_contract();
     assert_failure_quit_contract();
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     crate::credential_assessment::assert_installed_assessment_failure_contract();

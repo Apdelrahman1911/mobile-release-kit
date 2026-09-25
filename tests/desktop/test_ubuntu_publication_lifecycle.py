@@ -5162,6 +5162,49 @@ class SessionFixtureContracts(unittest.TestCase):
 
 
 class FailureLabelSinkContracts(unittest.TestCase):
+    def test_evidence_result_prefix_is_closed_complete_and_not_a_native_receipt(self):
+        def frame(callback=b"status", check=b"problem", phase=b"refused", problem=b"deadline", error=b"none",
+                  step=b"EvidenceObserved", boundary=b"result"):
+            return (b"MRK_INSTALLED_SHELL_EVIDENCE_FAILURE=v1;callback=" + callback + b";check=" + check
+                    + b";phase=" + phase + b";problem=" + problem + b";error=" + error + b"\n"
+                    + b"MRK_INSTALLED_SHELL_FAILURE_STEP=" + step + b"\nMRK_INSTALLED_SHELL_FAILURE_PHASE=" + boundary
+                    + b"\nMRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n")
+        raw = frame()
+        self.assertEqual(L._shell_label_pair(raw), {
+            "step": "EvidenceObserved", "boundary": "result", "bootstrapProgress": "advanced",
+            "evidence": {"callback": "status", "check": "problem", "phase": "refused", "problem": "deadline", "error": "none"}})
+        self.assertLessEqual(len(raw), L.SHELL_FAILURE_LABEL_LIMIT)
+        for end in range(len(raw)):
+            self.assertIsNone(L._shell_label_pair(raw[:end]), end)
+        legacy = raw.split(b"\n", 1)[1]
+        self.assertEqual(L._shell_label_pair(legacy), {"step": "EvidenceObserved", "boundary": "result", "bootstrapProgress": "advanced"})
+        for check in L.SHELL_EVIDENCE_CHECKS:
+            if check == b"bridge":
+                value = frame(check=check, phase=b"na", problem=b"na", error=b"other")
+            elif check == b"status-pending":
+                value = frame(check=check, phase=b"na", problem=b"na")
+            else:
+                value = frame(callback=b"observe-start", check=check)
+            self.assertEqual(L._shell_label_pair(value)["evidence"]["check"], check.decode("ascii"))
+        for error in L.SHELL_EVIDENCE_ERRORS[1:]:
+            self.assertEqual(L._shell_label_pair(frame(check=b"bridge", phase=b"na", problem=b"na", error=error))["evidence"]["error"], error.decode("ascii"))
+        for phase in L.SHELL_EVIDENCE_PHASES[1:]:
+            self.assertEqual(L._shell_label_pair(frame(phase=phase))["evidence"]["phase"], phase.decode("ascii"))
+        for problem in L.SHELL_EVIDENCE_PROBLEMS[1:]:
+            self.assertEqual(L._shell_label_pair(frame(problem=problem))["evidence"]["problem"], problem.decode("ascii"))
+        for bad in (
+            frame(callback=b"other"), frame(check=b"raw-error"), frame(phase=b"raw-error"), frame(problem=b"raw-error"),
+            frame(error=b"raw-error"), frame(check=b"bridge"), frame(check=b"bridge", phase=b"na", problem=b"na"),
+            frame(error=b"other"), frame(phase=b"na"), frame(problem=b"na"),
+            frame(callback=b"observe-start", step=b"ReadEvidenceObserved"), frame(callback=b"observe-start", check=b"status-pending", phase=b"na", problem=b"na"),
+            frame(check=b"observe-pending"), frame(check=b"observe-returned"), frame(check=b"case"),
+            frame(step=b"PathActivate"), frame(step=b"SessionReview"), frame(boundary=b"deadline"),
+            raw + raw, raw + b"\n", raw.replace(b"v1;", b"v2;"), b"x" * 513,
+            b"MRK_INSTALLED_SHELL_PATH_FAILURE=v1;index=0;reject=not-recorded\n" + raw,
+            raw + b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=0;eval=0;reject=not-recorded;wait=not-sampled\n",
+        ):
+            self.assertIsNone(L._shell_label_pair(bad), bad)
+
     def test_path_v2_timing_callback_wait_preserves_closed_prefix_contract(self):
         good = (b"MRK_INSTALLED_SHELL_PATH_FAILURE=v2;index=8;reject=not-recorded;start=43000;now=45000;"
                 b"rsv=m;in=m;out=m;cb=returned;wait=selection-different\n"

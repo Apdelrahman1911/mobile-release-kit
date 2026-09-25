@@ -2859,6 +2859,42 @@ class InstalledToolsNamespaceContracts(unittest.TestCase):
 
 
 class InstalledFailureLabelSourceContracts(unittest.TestCase):
+    def test_evidence_result_diagnostics_keep_closed_tokens_first_fault_and_original_status_order(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        checks = source.split("impl EvidenceCheck {", 1)[1].split("fn evidence_require(", 1)[0]
+        errors = source.split("impl EvidenceError {", 1)[1].split("struct EvidenceDiagnostic", 1)[0]
+        phases = source.split("fn phase_token(self)", 1)[1].split("fn problem_token(self)", 1)[0]
+        problems = source.split("fn problem_token(self)", 1)[1].split("fn latch_evidence_diagnostic(", 1)[0]
+        for block, expected in ((checks, lifecycle.SHELL_EVIDENCE_CHECKS), (errors, lifecycle.SHELL_EVIDENCE_ERRORS),
+                                (phases, lifecycle.SHELL_EVIDENCE_PHASES), (problems, lifecycle.SHELL_EVIDENCE_PROBLEMS)):
+            self.assertEqual(tuple(token.encode("ascii") for token in re.findall(r'=> b"([a-z-]+)"', block)), expected)
+            self.assertEqual(len(expected), len(set(expected)))
+        self.assertIn("_ => Self::Other", errors)
+        self.assertNotIn("error.message", errors)
+        frame = source.split("fn failure_frame(", 1)[1].split("fn assert_failure_pair_contract()", 1)[0]
+        self.assertIn("return failure_pair(trace, progress, session, path)", frame)
+        self.assertIn("session.is_some() || path.is_some() || !diagnostic.valid(trace)", frame)
+        self.assertLess(frame.index('b"MRK_INSTALLED_SHELL_EVIDENCE_FAILURE=v1;callback="'), frame.index("&legacy[..legacy_length]"))
+        self.assertIn("bytes.get_mut(length..end)?", frame)
+        latch = source.split("fn latch_evidence_diagnostic(", 1)[1].split("#[derive(Default)]", 1)[0]
+        self.assertEqual(latch.count("failed.swap(true, Ordering::SeqCst)"), 1)
+        self.assertIn("if !failed.swap(true, Ordering::SeqCst)", latch)
+        self.assertIn("*trace = (next.step, Boundary::Result); *retained = Some(next);", latch)
+        caller = source.split("fn evidence_fail(", 1)[1].split("fn report_failure(", 1)[0]
+        self.assertIn("latch_evidence_diagnostic(&self.failed, trace, evidence_diagnostic, next)", caller)
+        self.assertNotIn("evidence_diagnostic =", caller)
+        status = source.split("fn checked_status(", 1)[1].split("fn assert_evidence_failure_contract()", 1)[0]
+        self.assertLess(status.index("revision < before"), status.index("if closing"))
+        self.assertLess(status.index("revision == before"), status.index("if closing"))
+        self.assertLess(status.index("if closing"), status.index("match id"))
+        self.assertEqual(status.count("self.latest = Some(status.clone())"), 1)
+        self.assertLess(status.index("match status.phase", status.index("_ => return Err(C::Operation)")), status.index("self.latest ="))
+        self.assertIn("self.checked_status(status, closing).is_ok()", source)
+        self.assertLess(source.index("    assert_evidence_failure_contract();"), source.index("let returned = super::run_builder("))
+        # These are source contracts; the inert Rust state tests still require
+        # their actual compiled native route, not a substituted Python result.
+
     def test_fixture_parent_is_readable_but_diagnostic_parent_stays_control_bound(self):
         source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
         parser = source.split("fn control_root_from_executable(", 1)[1].split("fn control_root()", 1)[0]
