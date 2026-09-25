@@ -115,7 +115,7 @@ fn native_path(path: &Path) -> Option<&str> {
 pub(crate) fn request(operation: &str, generation: &str, context: &Context, profile: Profile,
     project: &RegisteredRoot, cwd: &Path) -> Result<Vec<u8>, BridgeError> {
     if !token(operation) || !token(generation) || !context.valid() { return Err(invalid()); }
-    let identity = project.identity.preflight_identity();
+    let identity = project.identity.posix().map_err(|_| invalid())?.preflight_identity();
     if !decimal(&identity.device) || !decimal(&identity.inode) || identity.inode == "0" || identity.mode & 0o170000 != 0o040000 { return Err(invalid()); }
     let value = json!({"protocol":PROTOCOL,"operationId":operation,"ownerGeneration":generation,"context":context,
         "native":{"profile":profile,"projectRoot":native_path(&project.path).ok_or_else(invalid)?,

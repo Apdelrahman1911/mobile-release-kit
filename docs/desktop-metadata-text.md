@@ -127,7 +127,8 @@ originals/absences and parent facts. Config and ignore are **read-only
 dependencies**, never metadata writable entries. Dependency-only parents are
 not part of target-directory staging or creation.
 
-Before Open, `.gitignore` must conservatively cover the fixed private rules:
+Before metadata Open, `.gitignore` must conservatively cover these original
+**seven** private rules (explicit `METADATA_IGNORE_LINES`):
 
 ```text
 .mobile-release/
@@ -143,7 +144,10 @@ Missing or ambiguous coverage, including conflicting negations, requires a
 separate reviewed configuration save. That configuration operation still has
 exactly two writable destinations: `release/mobile-release.json` and
 `.gitignore`. Only its fixed ignore vocabulary expands; metadata never writes
-ignore rules or bypasses their proof.
+ignore rules or bypasses their proof. Configuration now knows ten rules for
+the separately gated [saved-version VALUE writer](desktop-release-version-edit.md),
+but metadata admission deliberately remains valid with the seven-only list
+above. The version namespace/profile cannot be borrowed as metadata authority.
 
 Prepare accepts the original revision, complete field/text bundle and expected
 baseline. Baseline config and per-file digest/length/absence assertions detect

@@ -6,10 +6,10 @@ main thread and three pipes. No extra reader, cancellation setter, transaction,
 thread, child, descriptor or rendezvous file is introduced. This is NOT ordinary
 bootstrap-startup evidence or permission to enable production configuration Save.
 
-The optional, exact github_workflows and metadata_text selectors have separate
-receipt prefixes and three fixed cases each. Their conflict sibling is inserted
+The optional, exact github_workflows, metadata_text and release_version selectors
+have separate receipt prefixes and three fixed cases each. Their conflict sibling is inserted
 by the original parent fixture's file ledger, never by this shim. Existing
-configuration/workflow argv and two-record bytes stay exact.
+configuration/workflow/metadata argv and two-record bytes stay exact.
 """
 from __future__ import annotations
 
@@ -33,6 +33,8 @@ def _selection(arguments):
         return True, arguments[2]
     if len(arguments) == 3 and arguments[1] == "metadata_text" and arguments[2] in _WORKFLOW_CASES:
         return "metadata_text", arguments[2]
+    if len(arguments) == 3 and arguments[1] == "release_version" and arguments[2] in _WORKFLOW_CASES:
+        return "release_version", arguments[2]
     return None
 
 
@@ -42,13 +44,17 @@ def _need(condition: bool) -> None:
 
 
 class _Observation:
-    def __init__(self, case, control, transaction, cancellation, descriptors, *, workflows=False, metadata=False, custody=None):
-        _need(type(workflows) is bool and type(metadata) is bool and not (workflows and metadata))
+    def __init__(self, case, control, transaction, cancellation, descriptors, *,
+                 workflows=False, metadata=False, version=False, custody=None):
+        _need(type(workflows) is bool and type(metadata) is bool and type(version) is bool
+              and sum((workflows, metadata, version)) <= 1)
         self.case = case
         self.workflows = workflows
         self.metadata = metadata
+        self.version = version
         self.custody = custody
         self.metadata_binding = None
+        self.version_binding = None
         self.control = control
         self.transaction = transaction
         self.cancellation = cancellation
@@ -71,10 +77,12 @@ class _Observation:
 
     @property
     def precommit(self):
-        return self.case == "precommit-eof" or (self.workflows or self.metadata) and self.case == "precommit-conflict-eof"
+        return self.case == "precommit-eof" or (self.workflows or self.metadata or self.version) and self.case == "precommit-conflict-eof"
 
     @property
     def prefix(self):
+        if self.version:
+            return "MRK_RELEASE_VERSION_EOF_V1"
         return "MRK_METADATA_TEXT_EOF_V1" if self.metadata else "MRK_WORKFLOW_EOF_V1" if self.workflows else "MRK_CONFIG_EOF_V1"
 
     def retain_boundary(self, workspace, fd) -> None:
@@ -129,6 +137,43 @@ class _Observation:
                   and tuple(row["path"] for row in plan["files"]) == targets.paths
                   and tuple(row["path"] for row in plan["directories"]) == targets.directories)
             self.metadata_binding = (lease, scope, revision, targets)
+        if self.version:
+            lease, targets, revision = scope.lease, workspace._version_targets, workspace._rooted_revision
+            _need(self.custody is not None and self.version_binding is None
+                  and type(scope) is self.custody.LockedInitScope and type(lease) is self.custody.InitRootLease
+                  and scope is lease._active and scope.locked and lease.guard is guard
+                  and workspace._typed_profile is lease.profile is self.transaction.TypedEditProfile.RELEASE_VERSION
+                  and type(targets) is self.custody.VersionTargets and targets is lease._version_targets
+                  and type(revision) is self.custody.RootedRevision and revision is lease._revision
+                  and revision._lease is lease and revision._version_targets is targets
+                  and workspace._metadata_targets is None and lease._metadata_targets is None
+                  and revision._metadata_targets is None
+                  and source.protocol == self.control.VERSION_PROTOCOL == "mrk-release-version/1"
+                  and workspace._state_names == self.transaction.VERSION_STATE_NAMES
+                  and workspace._workflow_complete and type(workspace._workflow_header) is bytes
+                  and type(workspace._workflow_plan) is bytes)
+            targets._check_workspace(workspace)  # The real active version descriptor, not MetadataTargets or detached DATA.
+            header, plan = json.loads(workspace._workflow_header), json.loads(workspace._workflow_plan)
+            selection = targets.selection
+            parent = "release" if self.case == "postcommit-eof" else "public"
+            expected_source = parent + "/version.properties"
+            conflict = self.case == "precommit-conflict-eof"
+            _need(header["domain"] == plan["domain"] == "release_version"
+                  and revision.version_selection is selection and selection.source == expected_source
+                  and selection.name_key == "VERSION_NAME" and selection.build_key == "BUILD_NUMBER"
+                  and selection.ios_enabled is True and selection.paths == (expected_source,)
+                  and selection.directories == (parent,)
+                  and tuple(row["path"] for row in plan["files"]) == targets.paths
+                  and tuple(row["path"] for row in plan["directories"]) == targets.directories)
+            file, directory = plan["files"][0], plan["directories"][0]
+            # Pre/post are ASCII-seeded Edit; conflict is explicit Create with
+            # missing public parent. Rust inserts the unrelated sibling and
+            # closes its original stdin. This shim neither mutates nor reads it.
+            _need(type(file["after"]) is dict
+                  and (file["before"] is None if conflict else type(file["before"]) is dict)
+                  and (directory["before"] is None and type(directory["after"]) is dict if conflict else
+                       type(directory["before"]) is dict and directory["after"] is None))
+            self.version_binding = (lease, scope, revision, targets)
         slots = [slot for slot in workspace._slots if slot.number == fd]
         _need(len(slots) == 1 and type(slots[0]) is self.descriptors._FD
               and slots[0].guard is guard and slots[0].open_state == "OPEN"
@@ -212,6 +257,24 @@ class _Observation:
                          and binding[3] is workspace._metadata_targets is binding[0]._metadata_targets
                          and workspace._typed_profile is self.transaction.TypedEditProfile.METADATA_TEXT
                          and source.protocol == self.control.METADATA_PROTOCOL)
+            if self.version:
+                binding = self.version_binding
+                valid = (valid and binding is not None and binding[0]._active is binding[1]
+                         and binding[1] is workspace._scope and binding[1].workspace is workspace
+                         and binding[1].lease is binding[0] and binding[0].guard is guard
+                         and binding[1].locked and not binding[1].closed and not binding[1].claimed
+                         and binding[2] is workspace._rooted_revision is binding[0]._revision
+                         and binding[2]._lease is binding[0] and binding[2]._version_targets is binding[3]
+                         and binding[3] is workspace._version_targets is binding[0]._version_targets
+                         and binding[2].version_selection is binding[3].selection
+                         and workspace._metadata_targets is None and binding[0]._metadata_targets is None
+                         and binding[2]._metadata_targets is None
+                         and workspace._typed_profile is binding[0].profile is self.transaction.TypedEditProfile.RELEASE_VERSION
+                         and workspace._state_names == self.transaction.VERSION_STATE_NAMES
+                         and workspace._workflow_complete
+                         and source.protocol == self.control.VERSION_PROTOCOL == "mrk-release-version/1")
+                if valid:
+                    binding[3]._check_workspace(workspace)
             # Fixed-depth ORIGINAL call-chain observation, not a replacement
             # poll/checkpoint. Do not retain frames or inspect caller payloads.
             frame = sys._getframe(2)  # record_read <- facade.read <- EditInput.poll
@@ -265,6 +328,21 @@ class _Observation:
                        and binding[2]._metadata_targets is binding[3]
                        and workspace._typed_profile is binding[0].profile is self.transaction.TypedEditProfile.METADATA_TEXT
                        and workspace._workflow_complete and workspace._state_names == self.transaction.METADATA_STATE_NAMES)
+        if self.version:
+            binding = self.version_binding
+            applied = (applied and binding is not None and engine.domain == "release_version" and engine.workflows is False
+                       and source.protocol == self.control.VERSION_PROTOCOL == "mrk-release-version/1"
+                       and engine.lease is binding[0] and workspace._scope is binding[1]
+                       and binding[1].workspace is workspace and binding[1].lease is binding[0]
+                       and binding[0].guard is guard and binding[0]._active is None
+                       and workspace._rooted_revision is binding[2] is binding[0]._revision
+                       and binding[2]._lease is binding[0] and binding[2]._version_targets is binding[3]
+                       and workspace._version_targets is binding[3] is binding[0]._version_targets
+                       and binding[2].version_selection is binding[3].selection
+                       and workspace._metadata_targets is None and binding[0]._metadata_targets is None
+                       and binding[2]._metadata_targets is None
+                       and workspace._typed_profile is binding[0].profile is self.transaction.TypedEditProfile.RELEASE_VERSION
+                       and workspace._workflow_complete and workspace._state_names == self.transaction.VERSION_STATE_NAMES)
         terminal = workspace._terminal_seen if workspace._terminal_seen in {"COMMITTED", "ROLLED_BACK"} else "UNKNOWN"
         durable = workspace._terminal_durable and not workspace._terminal_ambiguous
         recovery = workspace._recovery_claimed and not workspace._cleanup_mode
@@ -275,7 +353,7 @@ class _Observation:
                    and guard.handler_state == "RESTORED" and not guard.lifetime_ledger.fatal
                    and outcome is not None and outcome.resources == "settled")
         cancelled = guard.cancelled and source.stopped and outcome is not None and outcome.reason == "cancelled"
-        # A workflow/metadata precommit conflict is NOT rolled-back success. Original
+        # A workflow/metadata/version precommit conflict is NOT rolled-back success. Original
         # _locations refuses the sibling before rollback moves: terminal UNKNOWN,
         # recovery-required, resources settled, cancelled. Rust validates that
         # distinct exact record and ends the original invocation after it.
@@ -315,19 +393,19 @@ def main() -> int:
             or threading.current_thread() is not threading.main_thread()):
         return 78
     selector, case = selected
-    workflows, metadata = selector is True, selector == "metadata_text"
-    if (workflows or metadata) and (sys.platform != "linux" or os.uname().machine != "x86_64"):
+    workflows, metadata, version = selector is True, selector == "metadata_text", selector == "release_version"
+    if (workflows or metadata or version) and (sys.platform != "linux" or os.uname().machine != "x86_64"):
         return 78
     sys.path.insert(0, sys.argv[1])
     from mobile_release import _desktop_edit_control as control
     from mobile_release import _desktop_edit_engine as engine
     from mobile_release import build_inputs, cancellation, init_transaction
     custody = None
-    if metadata:
+    if metadata or version:
         from mobile_release import init_workspace_custody as custody
 
     observation = _Observation(case, control, init_transaction, cancellation, build_inputs,
-                               workflows=workflows, metadata=metadata, custody=custody)
+                               workflows=workflows, metadata=metadata, version=version, custody=custody)
     original_os = control.os
     original_terminal = engine._Engine.terminal
 
@@ -345,6 +423,8 @@ def main() -> int:
         control.os = _ControlOS(original_os, observation)
         init_transaction.InitWorkspace._publish_terminal = publish
         engine._Engine.terminal = terminal
+        if version:
+            return engine.main(started=started, domain="release_version")
         if metadata:
             return engine.main(started=started, domain="metadata_text")
         return engine.main(started=started, workflows=True) if workflows else engine.main(started=started)

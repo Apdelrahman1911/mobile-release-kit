@@ -26,6 +26,12 @@ const RECORD_METADATA_BYTES: usize = 1024 * 1024;
 // Never inferred from crate presence, a renderer boolean, or R1 DTO passes.
 const NATIVE_QUALIFIED: bool = false;
 
+// Explicitly ignored component fixture only: no installed window, persistent
+// provider admission or renderer command is enabled by compiling this module.
+#[cfg(all(test, debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[path = "asset_session_gnome_transport_fixture.rs"]
+mod gnome_transport_fixture;
+
 fn installed_evidence_profile(evidence_selection: bool, candidate_method: bool) -> bool {
     // An advertised development method or broad asset fixture is not authority
     // for this separate installed, documents-only picker.
@@ -202,6 +208,8 @@ pub(crate) struct OriginalWork {
     large_work_started: AtomicBool,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     installed_capture: Mutex<Option<Arc<asset_source::InstalledCaptureCheckpoint>>>,
+    #[cfg(all(test, debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    gnome_transport_gate: Mutex<Option<Arc<gnome_transport_fixture::BoundaryGate>>>,
 }
 impl OriginalWork {
     fn new(id: u32, gui_needed: bool, document: Weak<Inner>) -> Arc<Self> {
@@ -215,6 +223,8 @@ impl OriginalWork {
             large_work_started: AtomicBool::new(false),
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             installed_capture: Mutex::new(None),
+            #[cfg(all(test, debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            gnome_transport_gate: Mutex::new(None),
             gui: Arc::new(GuiCall { owner: owner.clone(), document, facts: Mutex::new(GuiFacts { dispatched: false, constructing: false,
                 created: false, showing: false, response: false, accepted: false, declined: false, accepted_at: None,
                 destroyed: false, released: !gui_needed, not_created: !gui_needed, close_queued: false, close_ack: false, release_queued: false,
@@ -403,15 +413,17 @@ impl GuiCall {
         self.changed();
     }
     pub(crate) fn failed(&self, reason: Reason) {
+        self.failed_at(reason, Instant::now());
+    }
+    pub(crate) fn failed_at(&self, reason: Reason, at: Instant) {
+        // The original failure time precedes lock acquisition. A delayed
+        // observer cannot grant this same operation another cleanup allowance.
         let Some(inner) = self.document.upgrade() else { return; };
         let document = DocumentBinding { inner };
         let Some(owner) = self.owner() else { return; };
         let mut state = document.lock();
-        if let Some(mut facts) = self.facts() { if facts.refusal.is_none() { facts.refusal = Some(reason); } }
-        let now = Instant::now();
-        if let Some(slot) = state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, &owner)) { slot.stop(reason, now); }
-        if state.quit.as_ref().is_some_and(|quit| Arc::ptr_eq(quit, &owner)) { stop_quit(&mut state, now); }
-        owner.stop(); document.bump(&mut state); self.changed();
+        fail_gui_original_locked(&mut state, self, &owner, reason, at);
+        document.bump(&mut state); self.changed();
     }
     pub(crate) fn begin_response(&self, response: NativeResponse, quit: bool) -> Option<bool> {
         let Some(inner) = self.document.upgrade() else { return None; };
@@ -448,6 +460,15 @@ impl GuiCall {
             owner.set_endpoint(None);
         }
     }
+}
+
+fn fail_gui_original_locked(state: &mut DocumentState, call: &GuiCall, owner: &Arc<OriginalWork>, reason: Reason, at: Instant) {
+    // Same transition and notification order as the ordinary native failure
+    // path. This only requests STOP; it supplies no response or settlement.
+    if let Some(mut facts) = call.facts() { if facts.refusal.is_none() { facts.refusal = Some(reason); } }
+    if let Some(slot) = state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, owner)) { slot.stop(reason, at); }
+    if state.quit.as_ref().is_some_and(|quit| Arc::ptr_eq(quit, owner)) { stop_quit(state, at); }
+    owner.stop();
 }
 
 struct Slot {
@@ -616,6 +637,12 @@ fn stop_quit(state: &mut DocumentState, at: Instant) {
         if state.quit_cleanup_end.is_none() { state.quit_cleanup_end = Some(first_cleanup_end(at, quit.endpoint(), None)); }
         quit.stop();
     }
+}
+#[cfg(any(test, all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+fn accepted_quit_cleanup_end(state: &DocumentState) -> Option<Instant> {
+    if state.stopping && state.quit_accepted && state.quit.as_ref().is_some_and(|quit| quit.stopped()) {
+        state.quit_cleanup_end
+    } else { None }
 }
 fn session_data_empty(state: &DocumentState) -> bool {
     state.records.is_empty() && state.assignments.is_empty() && state.context.is_none()
@@ -849,6 +876,11 @@ impl DocumentBinding {
             self.report_keyring_problem(owner);
             match next {
                 Some(Ok(Next::Admit(step))) => {
+                    // The ignored headless fixture may defer only this fixed
+                    // successor. Re-enter THIS driver to keep pumping its real
+                    // owner stream/deadline; no alternate IO loop or grant.
+                    #[cfg(all(test, debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    if gnome_transport_fixture::hold_successor(owner, step).await { continue; }
                     // Prepare fallible RNG/DH outside the document lock, under
                     // this same already-charged original coordinator. The real
                     // document/slot gate still must admit and first-poll the RPC.
@@ -1139,7 +1171,7 @@ mod lookup_memory {
         }
         fn data_context() -> Arc<NativeContext> {
             Arc::new(NativeContext { revision: 1, project_id: "data-project".into(),
-                project: asset_source::RegisteredRoot { path: "/inert/project".into(), identity: asset_source::DirectoryIdentity::synthetic_evidence_identity() },
+                project: asset_source::RegisteredRoot { path: "/inert/project".into(), identity: asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity()) },
                 registry_generation: 1, draft: Vec::with_capacity(97), platform: Platform::Android, stage: Stage::Candidate, purpose: Purpose::Signing })
         }
         fn tokens() -> TokenBatch {
@@ -1409,11 +1441,10 @@ impl DocumentBinding {
         false
     }
     pub(crate) fn project_selection_available(&self) -> bool {
-        // Profile/display DATA, never live lifecycle permission. Preserve the
-        // preexisting Windows compatibility picker. Mac now uses the retained
-        // original project route and stays closed until its own profile/panel
-        // is qualified; a pathname-only compatibility result is not admission.
-        self.project_selection_qualified() || cfg!(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos"))))
+        // Profile/display DATA, never live lifecycle permission. Windows uses
+        // the same retained original project route as its profile admission;
+        // a compatibility pathname result cannot enable native registration.
+        self.project_selection_qualified() || cfg!(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos", target_os = "windows"))))
     }
     pub(crate) fn project_path_selection_available(&self) -> bool {
         // Exact installed-profile DATA only. Neither the compatibility picker
@@ -1755,7 +1786,7 @@ impl DocumentBinding {
         self.inner.bridge.diagnostics.ensure_idle()?;
         action(&self.inner.bridge)
     }
-    #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos"))))]
+    #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos", target_os = "windows"))))]
     pub(crate) fn compatibility_picker_begin(&self) -> Result<(), BridgeError> {
         let mut state = self.lock();
         self.inner.bridge.diagnostics.context_changed();
@@ -1768,7 +1799,7 @@ impl DocumentBinding {
         if state.compatibility_picker_pending { return Err(BridgeError::new("busy", "A native project picker is already open.")); }
         state.compatibility_picker_pending = true; self.bump(&mut state); Ok(())
     }
-    #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos"))))]
+    #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos", target_os = "windows"))))]
     pub(crate) fn compatibility_picker_end(&self) {
         // This preserves the existing compatibility picker reservation; it is
         // NOT evidence for a qualified macOS/Windows document/GUI owner.
@@ -1776,7 +1807,7 @@ impl DocumentBinding {
         // begin already retired any old consent under this same mutex.
         let mut state = self.lock(); state.compatibility_picker_pending = false; self.bump(&mut state);
     }
-    #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos"))))]
+    #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos", target_os = "windows"))))]
     pub(crate) fn compatibility_picker_publish(&self, path: std::path::PathBuf) -> Result<Project, BridgeError> {
         let state = self.lock();
         if !state.compatibility_picker_pending { return Err(BridgeError::invalid()); }
@@ -1785,13 +1816,13 @@ impl DocumentBinding {
         self.inner.bridge.diagnostics.ensure_idle()?;
         self.inner.bridge.register_picked_project(path)
     }
-    #[cfg(all(feature = "desktop-shell", not(target_os = "linux")))]
+    #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "windows"))))]
     pub(crate) fn compatibility_quit_begin(&self) -> bool {
         let mut state = self.lock();
         if state.compatibility_picker_pending || state.quit_pending { return false; }
         state.quit_pending = true; self.bump(&mut state); true
     }
-    #[cfg(all(feature = "desktop-shell", not(target_os = "linux")))]
+    #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "windows"))))]
     pub(crate) fn compatibility_quit_result(&self, accepted: bool) {
         let mut state = self.lock(); state.quit_pending = false;
         if accepted {
@@ -1996,14 +2027,21 @@ impl DocumentBinding {
     ) -> Result<T, BridgeError> {
         self.registered_edit_admit(crate::edit_protocol::EditDomain::MetadataText, project_id, enqueue)
     }
-    // Only the two explicitly registered-root domains use this same mutex and
+    pub(crate) fn release_version_edit_admit<T>(
+        &self,
+        project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
+        enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot) -> Result<T, BridgeError>,
+    ) -> Result<T, BridgeError> {
+        self.registered_edit_admit(crate::edit_protocol::EditDomain::ReleaseVersion, project_id, enqueue)
+    }
+    // Only the three explicitly registered-root domains use this same mutex and
     // proof. A proof never qualifies a writer or changes configuration custody.
     fn registered_edit_admit<T>(
         &self, domain: crate::edit_protocol::EditDomain,
         project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
         enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot) -> Result<T, BridgeError>,
     ) -> Result<T, BridgeError> {
-        if !matches!(domain, crate::edit_protocol::EditDomain::GitHubWorkflows | crate::edit_protocol::EditDomain::MetadataText) {
+        if !matches!(domain, crate::edit_protocol::EditDomain::GitHubWorkflows | crate::edit_protocol::EditDomain::MetadataText | crate::edit_protocol::EditDomain::ReleaseVersion) {
             return Err(BridgeError::invalid());
         }
         let mut state = self.lock();
@@ -2053,6 +2091,10 @@ impl DocumentBinding {
         self.registered_fixture_publish(proof, generation, crate::edit_protocol::EditDomain::MetadataText)
     }
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn version_fixture_publish(&self, proof: crate::asset_source::ProjectProbe, generation: u32) -> Result<Project, AssetError> {
+        self.registered_fixture_publish(proof, generation, crate::edit_protocol::EditDomain::ReleaseVersion)
+    }
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fn registered_fixture_publish(&self, proof: crate::asset_source::ProjectProbe, generation: u32,
         domain: crate::edit_protocol::EditDomain) -> Result<Project, AssetError> {
         let mut state = self.lock();
@@ -2062,6 +2104,7 @@ impl DocumentBinding {
         let permitted = match domain {
             crate::edit_protocol::EditDomain::GitHubWorkflows => self.inner.bridge.edits.workflow_fixture_registration_permitted(proof.path()),
             crate::edit_protocol::EditDomain::MetadataText => self.inner.bridge.edits.metadata_fixture_registration_permitted(proof.path()),
+            crate::edit_protocol::EditDomain::ReleaseVersion => self.inner.bridge.edits.version_fixture_registration_permitted(proof.path()),
             crate::edit_protocol::EditDomain::Configuration => false,
         };
         if state.stopping || state.quit_pending || state.retiring || state.lock_pending || state.slot.is_some()
@@ -3289,6 +3332,21 @@ impl DocumentBinding {
         drop(state); let _ = start.send(()); Ok(id)
     }
     pub(crate) async fn project_result(&self, id: u32) -> Result<Option<Project>, AssetError> {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+            target_os = "macos", target_arch = "aarch64"))]
+        { self.project_result_original(id, None).await }
+        #[cfg(not(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+            target_os = "macos", target_arch = "aarch64")))]
+        { self.project_result_original(id).await }
+    }
+    async fn project_result_original(&self, id: u32,
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+            target_os = "macos", target_arch = "aarch64"))]
+        mut selection: Option<&mut Option<InstalledMacProjectSelectionData>>,
+    ) -> Result<Option<Project>, AssetError> {
         loop {
             self.reconcile();
             {
@@ -3296,7 +3354,18 @@ impl DocumentBinding {
                 let slot = state.slot.as_ref().filter(|slot| slot.owner.id == id).ok_or_else(|| AssetError::new(Reason::ContextStale))?;
                 if state.unknown { return Err(AssetError::new(Reason::CleanupUnknown)); }
                 if slot.phase == Phase::Idle && slot.owner.resources_settled() {
-                    if slot.reason == Reason::None || slot.reason == Reason::UserCancelled { return Ok(slot.project.clone()); }
+                    if slot.reason == Reason::None || slot.reason == Reason::UserCancelled {
+                        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+                            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+                            target_os = "macos", target_arch = "aarch64"))]
+                        if let (Some(companion), Some(project)) = (selection.as_deref_mut(), slot.project.as_ref()) {
+                            // This guard still binds the original id/slot. Only
+                            // saved DATA crosses the return, never an observer
+                            // callback/Record lock or a later success witness.
+                            *companion = Some(installed_macos_observation::capture_project_selection(&self.inner, id, slot, project));
+                        }
+                        return Ok(slot.project.clone());
+                    }
                     return Err(AssetError::new(slot.reason));
                 }
             }
@@ -3393,6 +3462,12 @@ impl DocumentBinding {
             && self.inner.bridge.supervisor.can_exit() && self.inner.bridge.edits.can_exit() && self.inner.bridge.diagnostics.can_exit()
             && self.inner.bridge.preflight.can_exit() && self.inner.bridge.android_build.can_exit()
     }
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+    pub(crate) fn exit_cleanup_end(&self) -> Option<Instant> {
+        // Observe only the retained accepted Quit's first STOP; never reconcile,
+        // start another owner, or create a timestamp in the exit observer.
+        accepted_quit_cleanup_end(&self.lock())
+    }
     pub(crate) fn request_quit(&self, app: tauri::AppHandle) {
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now());
         // An unresolved or already accepted quit only wakes its originals. A
@@ -3475,6 +3550,141 @@ async fn run_quit(document: DocumentBinding, owner: Arc<OriginalWork>, app: taur
     target_os = "macos", target_arch = "aarch64"))]
 mod installed_macos_observation {
     use super::*;
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum SelectionCustody { Bound, Unavailable, Inconsistent }
+    impl SelectionCustody {
+        pub(crate) fn label(self) -> &'static str { match self {
+            Self::Bound => "bound-original-data", Self::Unavailable => "unavailable-original-data",
+            Self::Inconsistent => "inconsistent-original-data",
+        }}
+    }
+    // Short-lived, bounded return companion, not a ProjectWitness, native
+    // owner or serializable DTO. Only fixed relational labels may be exported.
+    pub(crate) struct ProjectSelectionData {
+        operation_id: u32, returned: Option<Project>, custody: SelectionCustody,
+        selected: Option<std::path::PathBuf>, identity: Option<[u64; 5]>,
+    }
+    pub(crate) fn selection_path_bounded(path: &std::path::Path) -> bool {
+        path.to_str().is_some_and(|text| text.len() <= asset_source::PATH_LIMIT && text.starts_with('/')
+            && !text.as_bytes().contains(&0) && (text == "/" || text[1..].split('/').all(|part|
+                !part.is_empty() && part != "." && part != ".." && part.len() <= 255)))
+    }
+    fn selection_project_bounded(project: &Project) -> bool {
+        crate::protocol::valid_id(&project.id) && project.name.len() <= 255
+            && selection_path_bounded(std::path::Path::new(&project.path))
+    }
+    fn recorded_identity(root: &asset_source::RegisteredRoot) -> Option<[u64; 5]> {
+        // Pure projection of stored scalars. Fixture index5/nlink is NOT part
+        // of RegisteredRoot; dev/ino stay lossless u64s, never JSON numbers.
+        let identity = root.identity.posix().ok()?.preflight_identity();
+        Some([identity.device.parse().ok()?, identity.inode.parse().ok()?,
+            u64::from(identity.mode), u64::from(identity.uid), u64::from(identity.gid)])
+    }
+    fn saved_project_selection(id: u32, original_bound: bool, project: &Project,
+        response: Option<&InstalledNativeResponseWitness>, registration: Option<&(u32, asset_source::RegisteredRoot)>) -> ProjectSelectionData {
+        let mut data = ProjectSelectionData { operation_id: id, returned: None, custody: SelectionCustody::Inconsistent,
+            selected: None, identity: None };
+        if !original_bound || id == 0 || !selection_project_bounded(project) { return data; }
+        data.returned = Some(project.clone());
+        // These independent axes describe saved response/registry facts, even
+        // if their transfer is inconsistent. A foreign response id never
+        // supplies a selected path; an absent registration supplies no inode.
+        data.selected = response.filter(|saved| saved.operation_id == id && saved.response == NativeResponse::Accept)
+            .and_then(|saved| saved.selected.as_deref()).filter(|path| selection_path_bounded(path))
+            .map(std::path::Path::to_path_buf);
+        data.identity = registration.and_then(|(_, root)| recorded_identity(root));
+        let inconsistent = response.is_some_and(|saved| saved.operation_id != id || saved.response != NativeResponse::Accept
+                || !saved.callback_returned || saved.selected.as_deref().and_then(std::path::Path::to_str) != Some(project.path.as_str()))
+            || registration.is_some_and(|(generation, root)| *generation != 2 || root.path.to_str() != Some(project.path.as_str()));
+        data.custody = if inconsistent { SelectionCustody::Inconsistent }
+            else if response.is_none() || registration.is_none() || data.identity.is_none() { SelectionCustody::Unavailable }
+            else { SelectionCustody::Bound };
+        data
+    }
+    impl ProjectSelectionData {
+        pub(crate) fn for_result(&self, id: u32, returned: &Project) -> (SelectionCustody, Option<[u64; 5]>, Option<&std::path::Path>) {
+            // The shell must carry this companion with that SAME public
+            // result. Neither a replaced slot nor renderer id is queried here.
+            if self.operation_id != id || !self.returned.as_ref().is_some_and(|project| same_project(project, returned)) {
+                return (SelectionCustody::Inconsistent, None, None);
+            }
+            (self.custody, self.identity, self.selected.as_deref())
+        }
+    }
+    pub(super) fn capture_project_selection(document: &Arc<Inner>, id: u32, slot: &Slot, project: &Project) -> ProjectSelectionData {
+        // Called only under project_result_original's existing document guard,
+        // immediately before its selected return. No extra lifecycle gate:
+        // later owner.ended/joins/edit readiness cannot hide these saved facts.
+        let original_bound = slot.operation == Operation::ChooseProject && slot.owner.id == id && original_call(document, &slot.owner)
+            && slot.project.as_ref().is_some_and(|saved| same_project(saved, project));
+        if !original_bound { return saved_project_selection(id, false, project, None, None); }
+        let response = slot.owner.gui.installed_native_response().ok().flatten();
+        let registration = if selection_project_bounded(project) { document.bridge.native_project(&project.id).ok() } else { None };
+        saved_project_selection(id, original_bound, project, response.as_ref(), registration.as_ref())
+    }
+    pub(crate) fn selection_saved_data_checks() -> bool {
+        // Synthetic stored DATA only. No document/bridge, native object, task,
+        // probe, ProjectWitness or runtime is made. These are not receipts.
+        let owner = OriginalWork::new(2, false, Weak::new());
+        let Ok(mut coordinator) = owner.coordinator.lock() else { return false; };
+        coordinator.receipt = JoinReceipt::Returned; drop(coordinator);
+        let project = Project { id: "project-1".into(), name: "other".into(), path: "/synthetic/other".into() };
+        let root = asset_source::RegisteredRoot { path: project.path.clone().into(), identity: asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity()) };
+        let registration = (2, root);
+        let response = InstalledNativeResponseWitness { operation_id: 2, response: NativeResponse::Accept,
+            selected: Some(project.path.clone().into()), callback_returned: true };
+        let Ok(mut saved) = owner.gui.installed_native_response_witness.lock() else { return false; };
+        *saved = Some(response.clone()); drop(saved);
+        let Ok(saved) = owner.gui.installed_native_response() else { return false; };
+        // The immediate resources_settled predicate can be true while the
+        // unchanged completed() predicate's ended/probed-child requirements
+        // are false. A synthetic positive binding tests only DATA reduction.
+        if !owner.resources_settled() || owner.ended.load(Ordering::SeqCst)
+            || !owner.child.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::New) { return false; }
+        let data = saved_project_selection(2, true, &project, saved.as_ref(), Some(&registration));
+        if data.for_result(2, &project) != (SelectionCustody::Bound, Some([1, 2, 0o40700, 123, 123]), Some(std::path::Path::new(&project.path)))
+            || owner.ended.load(Ordering::SeqCst) || owner.project_path_settled(true) { return false; }
+        for (native, registered, custody, has_identity, has_path) in [
+            (None, Some(&registration), SelectionCustody::Unavailable, true, false),
+            (Some(&response), None, SelectionCustody::Unavailable, false, true),
+            (None, None, SelectionCustody::Unavailable, false, false),
+        ] {
+            let data = saved_project_selection(2, true, &project, native, registered);
+            let (actual, identity, path) = data.for_result(2, &project);
+            if actual != custody || identity.is_some() != has_identity || path.is_some() != has_path { return false; }
+        }
+        for (response, expected_path) in [
+            (InstalledNativeResponseWitness { operation_id: 3, ..response.clone() }, None),
+            (InstalledNativeResponseWitness { response: NativeResponse::Decline, ..response.clone() }, None),
+            (InstalledNativeResponseWitness { selected: None, ..response.clone() }, None),
+            (InstalledNativeResponseWitness { selected: Some("/synthetic/first-save".into()), ..response.clone() }, Some(std::path::Path::new("/synthetic/first-save"))),
+            (InstalledNativeResponseWitness { callback_returned: false, ..response.clone() }, Some(std::path::Path::new("/synthetic/other"))),
+        ] {
+            let data = saved_project_selection(2, true, &project, Some(&response), Some(&registration));
+            if data.for_result(2, &project) != (SelectionCustody::Inconsistent, Some([1, 2, 0o40700, 123, 123]), expected_path) { return false; }
+        }
+        for registration in [(3, registration.1.clone()), (2, asset_source::RegisteredRoot { path: "/synthetic/unrelated".into(), ..registration.1.clone() })] {
+            if saved_project_selection(2, true, &project, Some(&response), Some(&registration)).for_result(2, &project).0
+                != SelectionCustody::Inconsistent { return false; }
+        }
+        let foreign = saved_project_selection(2, false, &project, Some(&response), Some(&registration));
+        if foreign.for_result(2, &project) != (SelectionCustody::Inconsistent, None, None)
+            || data.for_result(1, &project) != (SelectionCustody::Inconsistent, None, None) { return false; }
+        for changed in [Project { id: "project-2".into(), ..project.clone() }, Project { name: "changed".into(), ..project.clone() },
+            Project { path: "/synthetic/changed".into(), ..project.clone() }] {
+            if data.for_result(2, &changed) != (SelectionCustody::Inconsistent, None, None) { return false; }
+        }
+        let maximum = format!("/{}", vec!["x".repeat(255); 16].join("/"));
+        if maximum.len() != asset_source::PATH_LIMIT || !selection_path_bounded(std::path::Path::new(&maximum))
+            || selection_path_bounded(std::path::Path::new(&(maximum + "/x"))) { return false; }
+        for path in ["relative", "/bad/../path", "/bad//path", "/bad/path/", "/bad/\0path"] {
+            let malformed = Project { path: path.into(), ..project.clone() };
+            if selection_path_bounded(std::path::Path::new(path))
+                || saved_project_selection(2, true, &malformed, Some(&response), Some(&registration)).for_result(2, &malformed)
+                    != (SelectionCustody::Inconsistent, None, None) { return false; }
+        }
+        true
+    }
     pub(crate) struct ProjectWitness {
         document: Weak<Inner>, owner: Weak<OriginalWork>, project: Project,
         generation: u32, root: asset_source::RegisteredRoot, edit: crate::edit_owner::InstalledMacDocumentWitness,
@@ -3539,6 +3749,10 @@ mod installed_macos_observation {
         left.id == right.id && left.name == right.name && left.path == right.path
     }
     impl DocumentBinding {
+        pub(crate) async fn installed_macos_project_result(&self, id: u32, selection: &mut Option<ProjectSelectionData>) -> Result<Option<Project>, AssetError> {
+            *selection = None;
+            self.project_result_original(id, Some(selection)).await
+        }
         fn macos_registered(&self, witness: &ProjectWitness) -> bool {
             // Call only under this actual document's admission mutex.
             let Ok(roster) = self.inner.bridge.native_roster() else { return false; };
@@ -3675,7 +3889,9 @@ mod installed_macos_observation {
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
     target_os = "macos", target_arch = "aarch64"))]
-pub(crate) use installed_macos_observation::{ProjectWitness as InstalledMacProjectWitness, PickerWitness as InstalledMacPickerWitness};
+pub(crate) use installed_macos_observation::{ProjectWitness as InstalledMacProjectWitness, PickerWitness as InstalledMacPickerWitness,
+    ProjectSelectionData as InstalledMacProjectSelectionData, SelectionCustody as InstalledMacSelectionCustody,
+    selection_path_bounded as installed_macos_selection_path_bounded, selection_saved_data_checks as installed_macos_selection_saved_data_checks};
 
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
@@ -4249,7 +4465,7 @@ mod fixture_observation {
                 || slot.owner.id != 2 || slot.phase != Phase::Idle || !slot.owner.resources_settled() { return None; }
             let roster = self.inner.bridge.native_roster().ok()?;
             if roster.roots.len() != 1 { return None; }
-            Some((slot.project.clone()?, roster.roots[0].identity.fixture_value()))
+            Some((slot.project.clone()?, roster.roots[0].identity.posix().ok()?.fixture_value()))
         }
         pub(crate) fn fixture_selection(&self) -> Option<Selection> {
             self.reconcile(); let state = self.lock(); let slot = state.slot.as_ref()?;
@@ -4403,7 +4619,7 @@ pub(crate) fn assert_project_path_document_contracts() {
 
     // Synthetic directory identity is comparison DATA only, not a SourceBook
     // proof or a fixture permit for this new purpose.
-    let root = asset_source::RegisteredRoot { path: "/inert/project".into(), identity: asset_source::DirectoryIdentity::synthetic_evidence_identity() };
+    let root = asset_source::RegisteredRoot { path: "/inert/project".into(), identity: asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity()) };
     let binding = Arc::new(ProjectPathBinding { project_id: "project-1".into(), field: commands::ProjectPathField::VersionSource, root: root.clone(), generation: 7 });
     assert!(binding.registration_matches(7, &root)); assert!(!binding.registration_matches(8, &root));
     let changed = asset_source::RegisteredRoot { path: "/inert/other".into(), ..root };
@@ -4607,7 +4823,7 @@ mod tests {
         let mut work = Slot::new(owner.clone(), Operation::InspectEvidence, None, None, None); work.evidence = Some(binding.clone());
         state.evidence.epoch = 4; state.evidence.operation = Some(binding); state.evidence.phase = evidence_wire::Phase::Observing;
         state.evidence.selection = Some(EvidenceSelection { view: evidence_wire::Selection { selection_id: "evidence-model".to_owned(), display_name: "Model".to_owned() },
-            root: asset_source::RegisteredRoot { path: "/synthetic/never-opened/evidence".into(), identity: asset_source::DirectoryIdentity::synthetic_evidence_identity() }, epoch: 4 });
+            root: asset_source::RegisteredRoot { path: "/synthetic/never-opened/evidence".into(), identity: asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity()) }, epoch: 4 });
         state.slot = Some(work); (state, owner)
     }
     fn evidence_cancel(id: u32) -> evidence_wire::Cancel {
@@ -4637,7 +4853,7 @@ mod tests {
 
     pub(super) fn evidence_cancel_preserves_source_context_records_github_and_first_cleanup_body() {
         let (mut state, owner) = evidence_model(3); let at = Instant::now();
-        let root = asset_source::RegisteredRoot { path: "/synthetic/never-opened/project".into(), identity: asset_source::DirectoryIdentity::synthetic_evidence_identity() };
+        let root = asset_source::RegisteredRoot { path: "/synthetic/never-opened/project".into(), identity: asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity()) };
         let context = Arc::new(NativeContext { revision: 9, project_id: "source-project".to_owned(), project: root, registry_generation: 7,
             draft: b"{\"unchanged\":true}".to_vec(), platform: Platform::Android, stage: Stage::Candidate, purpose: Purpose::Full });
         state.context = Some(context.clone());
@@ -4733,11 +4949,76 @@ mod tests {
     }
 
     #[test]
+    fn gui_failure_stops_exact_original_without_response_or_settlement() {
+        // Actual state transition, closed DATA only: no bridge, native panel,
+        // worker, callback or purported execution/settlement receipt.
+        let at = Instant::now(); let mut state = empty_state();
+        let owner = OriginalWork::new(7, true, Weak::new()); owner.set_endpoint(None);
+        owner.coordinator.lock().unwrap().receipt = JoinReceipt::Pending;
+        {
+            let mut facts = owner.gui.facts().unwrap();
+            facts.dispatched = true; facts.created = true; facts.showing = true;
+        }
+        let mut work = Slot::new(owner.clone(), Operation::ChooseProject, None, None, None);
+        work.phase = Phase::Picking; state.slot = Some(work);
+        assert!(!quit_question_admitted(&state));
+
+        fail_gui_original_locked(&mut state, &owner.gui, &owner, Reason::SourceRefused, at);
+        let work = state.slot.as_ref().unwrap();
+        assert!(Arc::ptr_eq(&work.owner, &owner) && owner.stopped() && work.discard);
+        assert!(work.operation == Operation::ChooseProject && work.phase == Phase::Stopping);
+        assert_eq!(work.reason, Reason::SourceRefused);
+        assert_eq!(work.cleanup_end, Some(at + CLEANUP));
+        assert_eq!((work.review_end, owner.endpoint()), (None, None));
+        {
+            let facts = owner.gui.facts().unwrap();
+            assert_eq!(facts.refusal, Some(Reason::SourceRefused));
+            assert!(facts.dispatched && facts.created && facts.showing);
+            assert!(!facts.response && !facts.accepted && !facts.declined && facts.accepted_at.is_none());
+            assert!(!facts.not_created && !facts.destroyed && !facts.released && !facts.close_queued
+                && !facts.close_ack && !facts.release_queued && facts.selected.is_none());
+        }
+        assert!(!owner.resources_settled() && !quit_question_admitted(&state));
+        assert!(owner.coordinator.lock().unwrap().receipt == JoinReceipt::Pending);
+
+        // Later receipt/lock delay does not choose a fresh cleanup endpoint;
+        // an existing Unknown or first reason cannot be repaired by STOP.
+        state.slot.as_mut().unwrap().phase = Phase::Unknown;
+        state.slot.as_mut().unwrap().settlement = Settlement::Unknown; state.unknown = true;
+        fail_gui_original_locked(&mut state, &owner.gui, &owner, Reason::Deadline, at + WORK);
+        let work = state.slot.as_ref().unwrap();
+        assert!(state.unknown && work.phase == Phase::Unknown && work.settlement == Settlement::Unknown);
+        assert_eq!((work.reason, work.cleanup_end), (Reason::SourceRefused, Some(at + CLEANUP)));
+        assert_eq!(owner.gui.facts().unwrap().refusal, Some(Reason::SourceRefused));
+
+        // A reused numeric operation ID is never authority over a successor's
+        // Slot/quit, GUI facts, clocks or STOP bit. Only the old original stops.
+        let other = OriginalWork::new(owner.id, true, Weak::new()); other.set_endpoint(None);
+        let mut foreign = Slot::new(other.clone(), Operation::ChooseProject, None, None, None);
+        foreign.phase = Phase::Picking; state.slot = Some(foreign); state.quit = Some(other.clone());
+        fail_gui_original_locked(&mut state, &owner.gui, &owner, Reason::Deadline, at + WORK + CLEANUP);
+        let work = state.slot.as_ref().unwrap();
+        assert!(Arc::ptr_eq(&work.owner, &other) && work.phase == Phase::Picking && !other.stopped());
+        assert_eq!((work.reason, work.cleanup_end, state.quit_cleanup_end), (Reason::None, None, None));
+        assert_eq!(other.gui.facts().unwrap().refusal, None);
+        assert!(!owner.resources_settled() && !quit_question_admitted(&state));
+    }
+
+    #[test]
     fn human_quit_stop_has_one_clock_without_inventing_a_work_endpoint() {
         let at = Instant::now(); let mut state = empty_state();
         let owner = OriginalWork::new(2, false, Weak::new()); owner.set_endpoint(None); state.quit = Some(owner.clone());
         stop_quit(&mut state, at); stop_quit(&mut state, at + WORK);
         assert_eq!(state.quit_cleanup_end, Some(at + CLEANUP)); assert_eq!(owner.endpoint(), None); assert!(owner.stopped());
+        assert_eq!(accepted_quit_cleanup_end(&state), None);
+        state.stopping = true;
+        assert_eq!(accepted_quit_cleanup_end(&state), None);
+        state.quit_accepted = true;
+        assert_eq!(accepted_quit_cleanup_end(&state), Some(at + CLEANUP));
+        stop_quit(&mut state, at + WORK + CLEANUP);
+        assert_eq!(accepted_quit_cleanup_end(&state), Some(at + CLEANUP));
+        state.quit = None;
+        assert_eq!(accepted_quit_cleanup_end(&state), None);
     }
 
     #[test]

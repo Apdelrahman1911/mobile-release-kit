@@ -735,6 +735,31 @@ class MetadataTextGuide(TypedDict):
     limits: MetadataTextGuideLimits
 
 
+class ReleaseVersionHelpText(TypedDict):
+    id: str
+    label: str
+    requiredness: Literal["required", "optional"]
+    requiredWhen: str
+    what: str
+    why: str
+    where: str
+    format: str
+    failure: str
+
+
+class ReleaseVersionGuideLimits(TypedDict):
+    maxNameBytes: Literal[64]
+    maxBuildBytes: Literal[10]
+    maxSourceBytes: Literal[65536]
+
+
+class ReleaseVersionEditGuide(TypedDict):
+    schemaVersion: Literal[1]
+    fields: list[ReleaseVersionHelpText]
+    actions: list[ReleaseVersionHelpText]
+    limits: ReleaseVersionGuideLimits
+
+
 class CatalogResult(TypedDict):
     schemaVersion: Literal[1]
     schema: dict[str, Any]
@@ -743,6 +768,7 @@ class CatalogResult(TypedDict):
     credentialGuide: CredentialGuide | None
     metadata: dict[str, Any]
     metadataText: MetadataTextGuide | None
+    releaseVersionEdit: ReleaseVersionEditGuide | None
     githubSetup: GitHubSetupHelp
     githubConnection: GitHubConnectionHelp | None
     assurance: Assurance

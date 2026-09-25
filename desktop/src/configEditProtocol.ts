@@ -8,7 +8,8 @@ const CONFIG_BYTES = 512 * 1024;
 const IGNORE_BYTES = 1024 * 1024;
 const encoder = new TextEncoder();
 const IGNORE_LINES = ['.mobile-release/', '.mobile-release-init-prepare/', '.mobile-release-init/', '.mobile-release-init-cleanup/',
-  '.mobile-release-metadata-text-prepare/', '.mobile-release-metadata-text/', '.mobile-release-metadata-text-cleanup/'] as const;
+  '.mobile-release-metadata-text-prepare/', '.mobile-release-metadata-text/', '.mobile-release-metadata-text-cleanup/',
+  '.mobile-release-version-prepare/', '.mobile-release-version/', '.mobile-release-version-cleanup/'] as const;
 const phases = ['opening', 'editing', 'preparing', 'reviewing', 'applying', 'finalizing', 'final', 'unknown'] as const;
 const nativeReasons = ['none', 'discarded', 'cancelled', 'active_timeout', 'review_expired', 'caller_lost', 'window_lost', 'shutdown', 'runtime_unavailable', 'spawn_failed', 'protocol_error', 'io_error', 'output_limit', 'cleanup_unknown'] as const;
 const coreReasons = ['none', 'invalid_params', 'invalid_config', 'ignore_conflict', 'stale_revision', 'pending_state', 'busy', 'cancelled', 'filesystem_error', 'custody_unknown', 'unsupported_platform'] as const;

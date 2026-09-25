@@ -190,7 +190,7 @@ pub(crate) fn probe_project(book: &mut SourceBook, path: PathBuf, origins: &[Arc
         let mut leaf = book.root(stop)?;
         for name in components { leaf = book.child(leaf, name, stop)?; }
         let identity = book.slots[leaf].identity.ok_or(Reason::SourceRefused)?;
-        Ok(ProjectProbe { path: path.clone(), identity })
+        Ok(ProjectProbe { path: path.clone(), identity: ProjectIdentity::Posix(identity) })
     })();
     book.finish(result, stop)
 }

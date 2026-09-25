@@ -618,6 +618,60 @@ pub(crate) fn assert_retrieval_empty_reply_helper() {
     tests::owner_empty_reply_is_not_a_bus_receipt_or_a_body_guess();
 }
 
+// Fixed native-fixture setup codecs only. Reuse the same raw-signature,
+// owner/envelope, bounded borrowed path and complete-consumption checks. These
+// helpers do not create a shipping collection/item creation API.
+#[cfg(feature = "mrk-retrieval-test-support")]
+pub(crate) mod native_fixture {
+    use super::*;
+    type Created<'a> = (BoundedPath<'a>, BoundedPath<'a>);
+    impl ReplySignature for Created<'_> { const WIRE_SIGNATURE: &'static str = "oo"; }
+    impl ReplySignature for u32 { const WIRE_SIGNATURE: &'static str = "u"; }
+
+    pub fn decode_session_alias<'a>(body: &'a Body, owner: &UniqueName<'_>) -> Result<&'a str, Error> {
+        let path = decode_read_alias(body, owner)?;
+        if path.as_str() == "/" { return Err(Error::InvalidReply); }
+        Ok(path.as_str())
+    }
+    pub fn decode_created_item<'a>(body: &'a Body, owner: &UniqueName<'_>) -> Result<&'a str, Error> {
+        let (item, prompt): Created<'a> = checked_body(body, owner)?;
+        if item.as_str() == "/" || prompt.as_str() != "/" { return Err(Error::InvalidReply); }
+        Ok(item.as_str())
+    }
+    pub fn decode_bus_identity(body: &Body) -> Result<u32, Error> {
+        let bus = UniqueName::try_from(BUS).map_err(|_| Error::InvalidReply)?;
+        checked_body(body, &bus)
+    }
+    pub fn assert_setup_decoders() {
+        use zbus::{Message, zvariant::ObjectPath};
+        let owner = UniqueName::try_from(":1.23").unwrap();
+        let call = Message::method_call("/", "Fixture").unwrap().build(&()).unwrap();
+        let item = ObjectPath::try_from("/item").unwrap();
+        let root = ObjectPath::try_from("/").unwrap();
+        let prompt = ObjectPath::try_from("/prompt").unwrap();
+        for (path, prompt, accepted) in [(item.clone(), root.clone(), true),
+            (root.clone(), root.clone(), false), (item.clone(), prompt, false)] {
+            let reply = Message::method_return(&call.header()).unwrap().sender(":1.23").unwrap()
+                .build(&(path, prompt)).unwrap();
+            assert_eq!(decode_created_item(&reply.body(), &owner).is_ok(), accepted);
+        }
+        let nested = Message::method_return(&call.header()).unwrap().sender(":1.23").unwrap()
+            .build(&((item.clone(), root.clone()),)).unwrap();
+        assert!(decode_created_item(&nested.body(), &owner).is_err());
+        let reply = Message::method_return(&call.header()).unwrap().sender(":1.23").unwrap()
+            .build(&(item.clone(), root.clone())).unwrap();
+        assert!(decode_created_item(&reply.body(), &UniqueName::try_from(":1.24").unwrap()).is_err());
+        let absent = Message::method_return(&call.header()).unwrap().sender(":1.23").unwrap().build(&root).unwrap();
+        assert!(decode_session_alias(&absent.body(), &owner).is_err());
+        let alias = Message::method_return(&call.header()).unwrap().sender(":1.23").unwrap().build(&item).unwrap();
+        assert_eq!(decode_session_alias(&alias.body(), &owner).unwrap(), "/item");
+        let id = Message::method_return(&call.header()).unwrap().sender(BUS).unwrap().build(&123u32).unwrap();
+        assert_eq!(decode_bus_identity(&id.body()).unwrap(), 123);
+        let false_id = Message::method_return(&call.header()).unwrap().sender(":1.23").unwrap().build(&123u32).unwrap();
+        assert!(decode_bus_identity(&false_id.body()).is_err());
+    }
+}
+
 #[cfg(any(test, feature = "mrk-retrieval-test-support"))]
 mod tests {
     // Synthetic DATA only. These tests never connect to a bus or a keyring.

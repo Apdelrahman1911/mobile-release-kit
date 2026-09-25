@@ -2978,7 +2978,7 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertEqual(hashlib.sha256(canonical).hexdigest(), "bf18de45262438226bbc80a1cc8a3c078821b4a1dc88ec16a00961c05c990710")
         self.assertEqual(public_tokens, lifecycle.SHELL_SESSION_PUBLIC_MAP_WORKERS)
         self.assertTrue(set(public_tokens).isdisjoint(map_tokens))
-        version = "/var/lib/mobile-release-kit/versions/x86_64-unknown-linux-gnu/e3375ff140d69df54b2445f756711e0245d397ba6ded76e8559732ec2e4e3801"
+        version = "/var/lib/mobile-release-kit/versions/x86_64-unknown-linux-gnu/556b2ea59b4b3e9abb9d04a3d263e0fd420e8c44b3f71c478b1f71bdd21ec417"
         accepted = {version + suffix for suffix in ("/python/bin/python3", "/python/lib/libssl.so.3", "/python/lib/libcrypto.so.3")}
         accepted.update(prefix + name for prefix in ("/usr/lib/x86_64-linux-gnu/", "/lib/x86_64-linux-gnu/")
                         for name in ("ld-linux-x86-64.so.2", "libc.so.6", "libm.so.6"))
@@ -3590,6 +3590,38 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertLess(activating.index(readiness), activating.index("q.evidence_activation(id, select)?"))
         self.assertEqual(activating.count("button.emit_clicked()"), 1)
         # This source correspondence cannot prove GTK readiness or acceptance.
+
+    def test_file_selection_waits_for_current_gfile_before_one_activation(self):
+        source = (SOURCE / "desktop/src-tauri/src/shell.rs").read_text()
+        observed = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        readiness = "if !dialog.file().is_some_and(|file| file.equal(&gtk::gio::File::for_path(&path)))"
+        for role, guard, activation in (
+            ("path", "if let Some(path) = target {", "q.path_activation(id,index)?"),
+            ("session_file", "if select {", "q.session_file_activation(id, index)?"),
+        ):
+            with self.subTest(role=role):
+                selecting = source.split("    pub(super) fn select_observed_" + role + "(", 1)[1].split("    #[cfg(", 1)[0]
+                activating = source.split("    pub(super) fn activate_observed_" + role + "(", 1)[1].split("    #[cfg(", 1)[0]
+                self.assertEqual(selecting.count("dialog.set_filename("), 1)
+                self.assertEqual(activating.count("dialog.file()"), 1)
+                self.assertIn(readiness, activating)
+                # None/different selection waits; Cancel does not require a file.
+                self.assertLess(activating.index(guard), activating.index(readiness))
+                wait = activating.split(readiness, 1)[1].split("}", 1)[0]
+                self.assertIn("return Ok(false)", wait)
+                self.assertLess(activating.index(readiness), activating.index("dialog.widget_for_response(response)"))
+                self.assertLess(activating.index(readiness), activating.index(activation))
+                self.assertLess(activating.index(activation), activating.index("button.emit_clicked()"))
+                self.assertEqual(activating.count("button.emit_clicked()"), 1)
+                self.assertNotIn("set_filename", activating)
+                for forbidden in (".filename(", "native_path(", "selected_path(", ".response("):
+                    self.assertNotIn(forbidden, selecting + activating)
+        self.assertIn("q.session_file_wait(index, true, W::GtkSelectionPending); return Ok(false);", source)
+        self.assertIn('Self::GtkSelectionPending => b"gtk-selection-pending"', observed)
+        self.assertEqual(source.count("let path = native_path(dialog, &call);"), 1)
+        self.assertIn("path!=self.session_file_target(file.index).as_deref()", observed)
+        self.assertIn("path != self.path_target(index as u8).as_deref()", observed)
+        # Source correspondence is not GTK execution or accepted-path evidence.
 
     def test_picker_return_latch_keeps_response_and_original_finality_independent(self):
         source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()

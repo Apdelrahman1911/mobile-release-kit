@@ -1644,7 +1644,7 @@ pub(crate) mod metadata_fixture_probe {
                 && self.supervisor.inner.permits.available_permits() == ACTIVE_LIMIT, "metadata_passive_registry")?;
             require(matches!((method, expected_error),
                 (Method::MetadataTextObserve, None | Some("metadata_text_sensitive" | "metadata_text_encoding"))
-                | (Method::MetadataTextValidate | Method::Catalog, None)), "metadata_passive_method")?;
+                | (Method::MetadataTextValidate | Method::Catalog | Method::ReleaseVersionObserve, None)), "metadata_passive_method")?;
             let owners = self.supervisor.inner.test.owners();
             let done = self.tails.lock().map_err(|_| "metadata_passive_tail_poison")?.len();
             require(owners.len() == done + 1 && owners.len() <= 40, "metadata_passive_roster")?;
@@ -1652,7 +1652,8 @@ pub(crate) mod metadata_fixture_probe {
             require(matches!((owner.profile, method),
                 (Profile::Passive(Method::MetadataTextObserve), Method::MetadataTextObserve)
                 | (Profile::Passive(Method::MetadataTextValidate), Method::MetadataTextValidate)
-                | (Profile::Passive(Method::Catalog), Method::Catalog))
+                | (Profile::Passive(Method::Catalog), Method::Catalog)
+                | (Profile::Passive(Method::ReleaseVersionObserve), Method::ReleaseVersionObserve))
                 && native(owner) && lock(&owner.state).error.as_ref().map(|error| error.code.as_str()) == expected_error,
                 "metadata_passive_original_unsettled")?;
             let mut slot = owner.observer.lock().await;
@@ -1665,7 +1666,8 @@ pub(crate) mod metadata_fixture_probe {
             lock(&owner.observation).observer_joined = true;
             self.tails.lock().map_err(|_| "metadata_passive_tail_poison")?.push(owner.key);
             let name = match method { Method::MetadataTextObserve => "observe", Method::MetadataTextValidate => "validate",
-                Method::Catalog => "catalogue", _ => return Err("metadata_passive_method") };
+                Method::Catalog => "catalogue", Method::ReleaseVersionObserve => "release-version-observe",
+                _ => return Err("metadata_passive_method") };
             let value = json!({"method":name,"key":owner.key.to_string(),"error":expected_error,
                 "native":lock(&owner.observation).clone(),"observerJoin":"ok","permitRetired":true,"resourceBookRetired":true});
             require(self.settled(), "metadata_passive_original_roster_unsettled")?;

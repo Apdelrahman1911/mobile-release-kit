@@ -227,6 +227,47 @@ mod checked {
         use super::*;
         use aes::cipher::BlockModeEncrypt;
 
+        /// Native-fixture setup only: the actual provider-derived key encrypts
+        /// exactly the public canary. No caller plaintext or key-byte accessor.
+        /// A fresh fallible IV is used for each separate native CreateItem.
+        pub fn encrypt_native_canary(key: CheckedSessionKey) -> Result<([u8; 16], [u8; 48]), Error> {
+            encrypt_canary_with(key, |iv| getrandom::fill(iv)
+                .map_err(|_| Error::Crypto("fixture IV refused")))
+        }
+
+        fn encrypt_canary_with(key: CheckedSessionKey, fill: impl FnOnce(&mut [u8]) -> Result<(), Error>)
+            -> Result<([u8; 16], [u8; 48]), Error> {
+            let mut iv = [0u8; 16];
+            fill(&mut iv)?;
+            let mut scratch = Zeroizing::new([0u8; 48]);
+            scratch[..32].fill(0xa5);
+            cbc::Encryptor::<aes::Aes128>::new_from_slices(&key.aes[..], &iv)
+                .map_err(|_| Error::Crypto("fixture cipher refused"))?
+                .encrypt_padded::<Pkcs7>(&mut scratch[..], 32)
+                .map_err(|_| Error::Crypto("fixture padding refused"))?;
+            Ok((iv, *scratch))
+        }
+
+        /// Fixed Boolean witness only. The native caller additionally requires
+        /// its actual Close/removal/local settlement before consulting this.
+        pub fn is_native_canary(candidate: &WrappingKeyCandidate) -> bool {
+            candidate.bytes.iter().all(|byte| *byte == 0xa5)
+        }
+
+        /// Inert regression for the new fixed-canary helper, without OS RNG.
+        pub fn assert_native_canary_helpers() {
+            let key = || CheckedSessionKey { aes: Zeroizing::new([0x39; 16]) };
+            let mut calls = 0;
+            let (iv, ciphertext) = encrypt_canary_with(key(), |iv| {
+                calls += 1; iv.fill(0x27); Ok(())
+            }).unwrap();
+            assert_eq!(calls, 1);
+            assert!(is_native_canary(&key().decrypt_wrapping_key(&iv, &ciphertext).unwrap()));
+            let other = WrappingKeyCandidate { bytes: Zeroizing::new([0; 32]) };
+            assert!(!is_native_canary(&other));
+            assert!(encrypt_canary_with(key(), |_| Err(Error::Crypto("fixture RNG refusal"))).is_err());
+        }
+
         /// The real checked exchange (x=2), peer8, IV16 and library-encrypted
         /// synthetic32-byte key. No OS randomness, native call or public scalar
         /// constructor is used; there is deliberately no plaintext accessor.

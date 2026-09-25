@@ -1164,7 +1164,7 @@ class LifecycleData(unittest.TestCase):
                 for _, mode, _, data in L._shell_session_roster(value, case) if not stat.S_ISDIR(mode))
             tools_bytes = sum(len(data) for case in L.SHELL_TOOLS_OFFLINE_CASES
                 for _, mode, _, data in L._shell_tools_offline_roster(value, case, True) if stat.S_ISREG(mode))
-            required = baseline + ((2368 << 20) + 7235 + session_bytes + tools_bytes + 1095 + 11 + 393 if profile == "shell" else 0)
+            required = baseline + ((2368 << 20) + 7235 + session_bytes + tools_bytes + 1186 + 11 + 393 if profile == "shell" else 0)
             inodes = 2 * 16 + 2 * 8192 + (160 + 411 if profile == "shell" else 128)
             for available in (required - 1, required):
                 with self.subTest(profile=profile, available=available), \
@@ -2608,7 +2608,8 @@ def path_fixture_data(value, *, changed=False):
                      "identity": [1, 314, stat.S_IFLNK | 0o777, value["runnerUid"], value["runnerGid"], 1, 13, 22, 22], "target": "link-original"})
     absent = ["path-project/.gitignore", "path-project/release", "path-project/.mobile-release",
               "path-project/.mobile-release-init-prepare", "path-project/.mobile-release-init", "path-project/.mobile-release-init-cleanup",
-              "path-project/.mobile-release-metadata-text-prepare", "path-project/.mobile-release-metadata-text", "path-project/.mobile-release-metadata-text-cleanup"]
+              "path-project/.mobile-release-metadata-text-prepare", "path-project/.mobile-release-metadata-text", "path-project/.mobile-release-metadata-text-cleanup",
+            "path-project/.mobile-release-version-prepare", "path-project/.mobile-release-version", "path-project/.mobile-release-version-cleanup"]
     absent += ["path-project/inputs/kind-directory", "path-project/ios/Kind.file"] if changed else [
         "path-project/inputs/link-original", "path-project/inputs/kind-original", "path-project/ios/Kind.original"]
     namespace = fixture_namespace_data(value)
@@ -2662,7 +2663,8 @@ def workflow_fixture_data(value, *, installed=False):
         rows.append({"path": name, "kind": "file", "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
                      "identity": [1, 404 + index, stat.S_IFREG | mode, *owners, 1, len(raw), stamp, stamp]})
     absent = ["release", ".mobile-release", ".mobile-release-init-prepare", ".mobile-release-init", ".mobile-release-init-cleanup",
-              ".mobile-release-metadata-text-prepare", ".mobile-release-metadata-text", ".mobile-release-metadata-text-cleanup"]
+              ".mobile-release-metadata-text-prepare", ".mobile-release-metadata-text", ".mobile-release-metadata-text-cleanup",
+            ".mobile-release-version-prepare", ".mobile-release-version", ".mobile-release-version-cleanup"]
     namespace = fixture_namespace_data(value)
     return {"schemaVersion": 1, "fixture": "android-workflow-apply-v1", "root": namespace["root"] + "/workflow-project",
             "installed": installed, "entries": rows, "absent": absent + ([] if installed else list(callers[1:])), "namespace": namespace}
@@ -2728,7 +2730,8 @@ def metadata_fixture_data(value, *, saved=False):
         rows.append({"path": name, "kind": "file", "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
                      "identity": [1, 514 if replaced else 506 + index, stat.S_IFREG | mode, *owners, 1, len(raw), stamp, stamp]})
     absent = [".mobile-release", ".mobile-release-init-prepare", ".mobile-release-init", ".mobile-release-init-cleanup",
-              ".mobile-release-metadata-text-prepare", ".mobile-release-metadata-text", ".mobile-release-metadata-text-cleanup"]
+              ".mobile-release-metadata-text-prepare", ".mobile-release-metadata-text", ".mobile-release-metadata-text-cleanup",
+            ".mobile-release-version-prepare", ".mobile-release-version", ".mobile-release-version-cleanup"]
     namespace = fixture_namespace_data(value)
     return {"schemaVersion": 1, "fixture": "android-metadata-save-v1", "root": namespace["root"] + "/metadata-project",
             "saved": saved, "entries": rows, "absent": absent + ([] if saved else [locale + "/full_description.txt"]), "namespace": namespace}
@@ -3179,7 +3182,7 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         self.assertEqual(hashlib.sha256(L.SHELL_PROJECT_CONFIG).hexdigest(), L.SHELL_PROJECT_RECEIPT["readback"]["sha256"])
         ignored, additions = prepare_edit_ignore(b"")
         self.assertEqual(ignored, L.SHELL_PROJECT_IGNORE)
-        self.assertEqual(len(additions), 7)
+        self.assertEqual(len(additions), 10)
         self.assertEqual(prepare_edit_ignore(ignored), (ignored, ()))
 
     def test_shell_fixture_roster_fits_shell_only_cap_without_changing_aggregate_or_other_profiles(self):
@@ -4875,6 +4878,8 @@ class FailureLabelSinkContracts(unittest.TestCase):
                b"reject=gtk-observer-endpoint;wait=gtk-action-insensitive\n")
         self.assertEqual(L._shell_label_pair(gtk), {"step": "SessionActivateFile", "boundary": "gtk", "bootstrapProgress": "advanced",
             "session": {"recipeIndex": 3, "evaluations": 16, "rejection": "gtk-observer-endpoint", "lastWait": "gtk-action-insensitive"}})
+        self.assertEqual(L._shell_label_pair(gtk.replace(b"gtk-action-insensitive", b"gtk-selection-pending"))["session"],
+            {"recipeIndex": 3, "evaluations": 16, "rejection": "gtk-observer-endpoint", "lastWait": "gtk-selection-pending"})
         historical = header + (b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=29;evaluations=73;"
                                b"reject=native-readiness-invariant;wait=native-reply-pending\n")
         self.assertEqual(L._shell_label_pair(historical)["session"], {"recipeIndex": 29, "evaluations": 73,

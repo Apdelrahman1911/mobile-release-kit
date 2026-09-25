@@ -115,6 +115,8 @@ pub(crate) struct LookupBook {
     problem: Option<Problem>, problem_at: Option<Instant>, registration: Registration,
     shutdown: Shutdown, shutdown_ready: bool, local_settlement: Option<LocalSettlement>,
     build_error: Option<ErrorClass>, raw_error: Option<ErrorClass>, cleanup_error: Option<ErrorClass>,
+    #[cfg(all(test, debug_assertions, not(feature = "desktop-shell")))]
+    fixture_first_polls: [u8; 11],
 }
 // App share of the SAME 64KiB whole-attempt control row. The document adds
 // its fixed owner/slot/source cells and asserts the combined share <=16KiB.
@@ -133,7 +135,10 @@ impl LookupBook {
             owner: None, query: None, rule: None, candidate: None, observation: None,
             problem: None, problem_at: None, registration: Registration::Unsent,
             shutdown: Shutdown::Unrequested, shutdown_ready: false, local_settlement: None,
-            build_error: None, raw_error: None, cleanup_error: None }
+            build_error: None, raw_error: None, cleanup_error: None,
+            #[cfg(all(test, debug_assertions, not(feature = "desktop-shell")))]
+            fixture_first_polls: [0; 11],
+        }
     }
     pub(crate) fn resources_settled(&self) -> bool {
         !self.entered || ((self.constructor_refused && self.attempt.is_none()
@@ -440,6 +445,8 @@ impl LookupBook {
         self.commit_removal_reply();
         self.shutdown = Shutdown::Entered;
         self.abandon_remote_session();
+        #[cfg(all(test, debug_assertions, not(feature = "desktop-shell")))]
+        { self.fixture_first_polls[10] = self.fixture_first_polls[10].saturating_add(1); }
         self.poll_shutdown(cx);
         cx.waker().wake_by_ref();
     }
@@ -538,6 +545,17 @@ impl LookupBook {
             if self.refuse_unpolled_pending().is_ok() { self.pending = None; }
             else { self.fail(Problem::CleanupUnknown); }
             self.cleanup_or_hold(); cx.waker().wake_by_ref(); return;
+        }
+        #[cfg(all(test, debug_assertions, not(feature = "desktop-shell")))]
+        if self.attempt.is_some() {
+            let index = match self.pending.as_ref() {
+                Some(Pending::Connect { future: ConnectOriginal::Native, .. }) => Some(0),
+                Some(Pending::Rpc { future: RpcOriginal::Native, .. }) => self.current_step().map(fixture_step_index),
+                _ => None,
+            };
+            if let Some(index) = index {
+                self.fixture_first_polls[index] = self.fixture_first_polls[index].saturating_add(1);
+            }
         }
         self.poll_pending(cx);
     }
@@ -843,6 +861,46 @@ impl LookupBook {
             Step::OpenSession => return Err(Problem::CleanupUnknown), // Handled before the semantic gate above.
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, debug_assertions, not(feature = "desktop-shell")))]
+fn fixture_step_index(step: Step) -> usize {
+    match step { Step::AddMatch => 1, Step::GetNameOwner => 2, Step::SearchItems => 3,
+        Step::Attributes => 4, Step::Locked => 5, Step::OpenSession => 6, Step::GetSecret => 7,
+        Step::CloseSession => 8, Step::RemoveMatch => 9 }
+}
+
+/// Closed nonsecret component observations, never a provider/persistence grant.
+#[cfg(all(test, debug_assertions, not(feature = "desktop-shell")))]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct NativeFixtureSnapshot {
+    pub(crate) first_polls: [u8; 11],
+    pub(crate) owner_matches: bool,
+    pub(crate) candidate_present: bool,
+    pub(crate) settled_canary: bool,
+    pub(crate) session_closed: bool,
+    pub(crate) session_unknown: bool,
+    pub(crate) subscription_removed: bool,
+    pub(crate) local: Option<LocalSettlement>,
+    pub(crate) resources_settled: bool,
+    pub(crate) charged: bool,
+    pub(crate) problem: Option<Problem>,
+    pub(crate) problem_at: Option<Instant>,
+}
+#[cfg(all(test, debug_assertions, not(feature = "desktop-shell")))]
+impl LookupBook {
+    pub(crate) fn native_fixture_snapshot(&self, expected_owner: &str) -> NativeFixtureSnapshot {
+        NativeFixtureSnapshot { first_polls: self.fixture_first_polls,
+            owner_matches: self.owner.as_ref().is_some_and(|owner| owner.as_str() == expected_owner),
+            candidate_present: self.key_candidate.is_some(),
+            settled_canary: self.key_ready() && self.key_candidate.as_ref()
+                .is_some_and(checked_lookup::test_support::is_native_canary),
+            session_closed: self.session == RemoteSession::Closed,
+            session_unknown: self.session == RemoteSession::Unknown,
+            subscription_removed: self.registration == Registration::Removed,
+            local: self.local_settlement, resources_settled: self.resources_settled(),
+            charged: self.memory_held(), problem: self.problem, problem_at: self.problem_at }
     }
 }
 

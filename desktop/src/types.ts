@@ -5,6 +5,7 @@ import type { MetadataTextApi, MetadataTextGuide } from './metadataText.ts';
 import type { EnvironmentRequest, EnvironmentResult } from './environment.ts';
 import type { EnvironmentDiagnosticsApi } from './environmentDiagnosticsTypes.ts';
 import type { ReleaseVersionApi } from './releaseVersion.ts';
+import type { ReleaseVersionEditApi, VersionEditGuide } from './releaseVersionEdit.ts';
 import type { CandidateEvidenceApi } from './candidateEvidence.ts';
 import type { OfflinePreflightApi, SavedConfigContent } from './offlinePreflightTypes.ts';
 import type { AndroidBuildApi } from './androidBuildTypes.ts';
@@ -116,6 +117,7 @@ export interface Catalog {
   credentialGuide: CredentialGuide | null;
   metadata: MetadataRules | null;
   metadataText: MetadataTextGuide | null;
+  releaseVersionEdit: VersionEditGuide | null;
   githubSetup: GitHubSetupHelp;
   githubConnection: GitHubConnectionHelp | null;
   assurance: Assurance;
@@ -333,7 +335,8 @@ export interface CoreEditOutcome {
   reason: CoreEditReason;
 }
 export type FixedIgnoreLine = '.mobile-release/' | '.mobile-release-init-prepare/' | '.mobile-release-init/' | '.mobile-release-init-cleanup/' |
-  '.mobile-release-metadata-text-prepare/' | '.mobile-release-metadata-text/' | '.mobile-release-metadata-text-cleanup/';
+  '.mobile-release-metadata-text-prepare/' | '.mobile-release-metadata-text/' | '.mobile-release-metadata-text-cleanup/' |
+  '.mobile-release-version-prepare/' | '.mobile-release-version/' | '.mobile-release-version-cleanup/';
 export interface PreparedConfigView {
   schemaVersion: 1;
   files: [
@@ -376,7 +379,7 @@ export interface PrepareConfigEditRequest {
   baselineGeneration: number;
 }
 
-export interface DesktopApi extends AssetSessionApi, GitHubWorkflowEditApi, GitHubConnectionApi, MetadataTextApi, EnvironmentDiagnosticsApi, ReleaseVersionApi, CandidateEvidenceApi, OfflinePreflightApi, AndroidBuildApi {
+export interface DesktopApi extends AssetSessionApi, GitHubWorkflowEditApi, GitHubConnectionApi, MetadataTextApi, ReleaseVersionEditApi, EnvironmentDiagnosticsApi, ReleaseVersionApi, CandidateEvidenceApi, OfflinePreflightApi, AndroidBuildApi {
   mode: BridgeMode;
   appInfo(): Promise<AppInfo>;
   chooseProject(): Promise<ProjectReference | null>;

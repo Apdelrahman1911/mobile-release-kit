@@ -9,10 +9,13 @@ use std::{ffi::OsStr, fs::OpenOptions, io::{Read, Write},
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tauri::Manager;
-use crate::{asset_session::{DocumentBinding, InstalledMacProjectWitness, InstalledMacPickerWitness, NativeResponse}, bridge::{AppInfo, Project},
+use crate::{asset_session::{DocumentBinding, InstalledMacProjectWitness, InstalledMacPickerWitness, NativeResponse,
+        InstalledMacProjectSelectionData, InstalledMacSelectionCustody, installed_macos_selection_path_bounded,
+        installed_macos_selection_saved_data_checks}, bridge::{AppInfo, Project},
     edit_owner::{EditOwner, InstalledConfigFinality, InstalledMacReviewWitness}, edit_protocol::{self as edit, ConfigEditStatus, EditProjection},
     error::BridgeError, supervisor::Supervisor};
-use super::owned_macos::observation::{observed_panel, observe_panel_action, ObservedPanel, PanelAction};
+use super::owned_macos::observation::{observed_panel, observe_panel_action, prepare_open_input,
+    ObservedPanel, OpenAction, OpenActionBody, OpenRecheckBody, OpenProgress, OpenRelease, PanelAction, PreparedOpenInput};
 
 // Closed public categories only. The first winner is published before failure;
 // no Record lock, native call, path, or arbitrary error text enters this latch.
@@ -25,6 +28,7 @@ const FAILURE_REASONS: &[&str] = &[
     "native-action-returned", "native-callback-returned", "native-response-present",
     "native-selection-present", "native-close-attempted", "native-closed", "native-attachment-lost",
     "native-preaction-history", "native-dismissed", "native-duplicate-action",
+    "native-ax-not-trusted", "native-ax-trust", "native-default-binding", "native-default-input", "native-default-custody", "native-default-deadline",
     "cancel-unexpected-project", "cancel-duplicate-result",
     "adapter-wrong-thread", "adapter-book-borrow", "adapter-original-call", "adapter-original-owner",
     "adapter-original-binding", "adapter-missing-facts", "adapter-missing-panel", "adapter-ineligible",
@@ -34,13 +38,29 @@ const FAILURE_REASONS: &[&str] = &[
     "asset_source_changed", "asset_material_limit", "asset_parser_limit", "asset_project_overlap",
     "asset_exclusion_unconfirmed", "asset_capacity", "assessment_context_stale", "asset_user_cancelled",
     "asset_review_expired", "asset_deadline", "asset_document_lost", "asset_shutdown", "asset_cleanup_unknown",
+    "project-result-shape", "project-result-order", "project-result-path", "project-result-name", "project-result-id",
+    "snapshot-request-order", "snapshot-request-project",
+    "snapshot-error-runtime", "snapshot-error-protocol", "snapshot-error-invalid", "snapshot-error-shutdown",
+    "snapshot-error-timeout", "snapshot-error-cleanup", "snapshot-error-busy", "snapshot-error-unavailable",
+    "snapshot-error-project", "snapshot-error-limit", "snapshot-error-io", "snapshot-error-engine", "snapshot-error-other",
+    "snapshot-value-root", "snapshot-value-scope", "snapshot-config-path", "snapshot-value-assurance",
+    "snapshot-value-issues", "snapshot-hints-android", "snapshot-hints-version", "snapshot-discovery-state",
+    "snapshot-config-state", "snapshot-config-data", "snapshot-config-content", "snapshot-config-issues",
+    "snapshot-return-order", "snapshot-return-project",
+    "project-witness-identity", "project-witness-response", "project-witness-selection", "project-witness-callback",
+    "edit-status-schema", "edit-status-generation", "edit-status-owner", "edit-status-projection",
+    "relay-join-contract", "exit-edit-status", "exit-finality-contract", "observer-report-unavailable",
+    "project-result-path-app-child", "project-result-path-descendant", "project-result-path-ancestor",
+    "project-result-path-sibling", "project-result-path-tmp-spelling", "project-result-path-data-spelling",
+    "native-completion-custody", "native-completion-data", "native-completion-unknown", "native-completion-selection",
 ];
 const _: () = assert!(FAILURE_REASONS.len() < u8::MAX as usize);
-fn latch_failure(first: &AtomicU8, failed: &AtomicBool, reason: &'static str) {
+fn latch_failure(first: &AtomicU8, failed: &AtomicBool, reason: &'static str) -> bool {
     // Unknown internal labels degrade only to generic failure, never raw text.
     let code = FAILURE_REASONS.iter().position(|label| *label == reason).map_or(1, |index| index as u8 + 1);
-    let _ = first.compare_exchange(0, code, Ordering::SeqCst, Ordering::SeqCst);
+    let won = first.compare_exchange(0, code, Ordering::SeqCst, Ordering::SeqCst).is_ok();
     failed.store(true, Ordering::SeqCst);
+    won
 }
 fn first_failure_reason(first: &AtomicU8) -> Option<&'static str> {
     FAILURE_REASONS.get(usize::from(first.load(Ordering::SeqCst).checked_sub(1)?)).copied()
@@ -48,7 +68,7 @@ fn first_failure_reason(first: &AtomicU8) -> Option<&'static str> {
 
 /// A read-only readiness predicate, never an action/close/finality permit.
 fn panel_readiness(panel: &ObservedPanel, id: u32, quit: bool, ever_attached: bool,
-    same_action_returned: bool) -> Result<bool, &'static str> {
+    same_action_returned: bool, preconfigured: bool) -> Result<bool, &'static str> {
     let native = &panel.native;
     if panel.id != id { return Err("native-original-id"); }
     if matches!(native.kind, mrk_macos_installed_native::PanelKind::Quit) != quit { return Err("native-kind"); }
@@ -63,11 +83,15 @@ fn panel_readiness(panel: &ObservedPanel, id: u32, quit: bool, ever_attached: bo
     if native.closed { return Err("native-closed"); }
     if !native.attached {
         if ever_attached { return Err("native-attachment-lost"); }
-        if native.directory_bound || native.directory_returned || native.directory_ready || same_action_returned {
+        let unexpected_setup = if preconfigured { !native.directory_bound || !native.directory_returned }
+            else { native.directory_bound || native.directory_returned || native.directory_ready };
+        if same_action_returned || unexpected_setup {
             return Err("native-preaction-history");
         }
-        // dismissed is an instantaneous not-visible/not-parented sample. Before
-        // first attachment and with NO history, either value can mean not ready.
+        // A returned, identity-bound PRE-presentation setup may precede first
+        // attachment. It is not an action history or permission to lose an
+        // attachment; all other native response/close/history vetoes stay above.
+        // dismissed is an instantaneous not-visible/not-parented sample.
         return Ok(false);
     }
     if native.dismissed { return Err("native-dismissed"); }
@@ -82,9 +106,10 @@ const SOURCE: &[u8] = b"plugins { id(\"com.android.application\") }\nandroid { d
 const KEEP: &[u8] = b"MRK_MACOS_AQUA_KEEP\n";
 const IGNORE_PREFIX: &[u8] = b"# MRK Mac Aqua user ignore\nuser-output/\n";
 const STALE_MARKER: &[u8] = b"# MRK Mac Aqua stale base\n";
-const IGNORE_LINES: [&str; 7] = [".mobile-release/", ".mobile-release-init-prepare/", ".mobile-release-init/",
+const IGNORE_LINES: [&str; 10] = [".mobile-release/", ".mobile-release-init-prepare/", ".mobile-release-init/",
     ".mobile-release-init-cleanup/", ".mobile-release-metadata-text-prepare/", ".mobile-release-metadata-text/",
-    ".mobile-release-metadata-text-cleanup/"];
+    ".mobile-release-metadata-text-cleanup/",
+    ".mobile-release-version-prepare/", ".mobile-release-version/", ".mobile-release-version-cleanup/"];
 // Fixed synthetic DATA shared with staging. This is not a second serializer:
 // every real request/result is compared with these bytes, never manufactured.
 const CONFIG: &[u8] = br#"{
@@ -140,7 +165,7 @@ impl Case {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Step {
     Bootstrap, Environment, ReadEnvironment, Dashboard, ChooseCancel, CancelProject, CancelSettled, ReadCancelled,
-    ChooseProject, SetProject, OpenProject, ProjectSettled, Snapshot, Settings, Suggest, Suggestion, Adopt, Draft,
+    ChooseProject, OpenProject, ProjectSettled, Snapshot, Settings, Suggest, Suggestion, Adopt, Draft,
     Validate, Validation, Preview, Previewed, RequirementsPage, LoadRequirements, Requirements,
     GitHubPage, GitHubRepository, GitHubSha, GitHubPropose, GitHubProposal, ReturnSettings,
     Prepare(usize), Review(usize), OpenConfirmation(usize), Confirmation(usize), KeepReviewing,
@@ -152,7 +177,7 @@ enum Step {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DomDispatch { step: Step, sequence: u16 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Pending { Dom(DomDispatch), Native(Step), Close(Step), Reload, FailureClose }
+enum Pending { Dom(DomDispatch), Native(Step), Accessibility(u32), Close(Step), Reload, FailureClose }
 
 fn dom_step_entry(pending: Option<Pending>, current: Step, original: DomDispatch) -> bool {
     (1..=160).contains(&original.sequence) && current == original.step && pending == Some(Pending::Dom(original))
@@ -198,8 +223,206 @@ fn retire_returned_native(pending: &mut Option<Pending>, current: Step, returned
     if current != returned || *pending != Some(Pending::Native(returned)) { return false; }
     *pending = None; true
 }
+fn open_step_entry(pending: Option<Pending>, current: Step, id: u32) -> bool {
+    matches!(id, 1 | 2) && current == Step::OpenProject && pending == Some(Pending::Accessibility(id))
+}
+fn retire_returned_open(pending: &mut Option<Pending>, current: Step, id: u32) -> bool {
+    if !open_step_entry(*pending, current, id) { return false; }
+    *pending = None; true
+}
+fn native_proof_value(p: mrk_macos_installed_native::IdentityBinding) -> Value {
+    let c = p.checks;
+    json!({"returned":true,"attempted":p.attempted,"parent":p.parent,"panel":p.panel,
+        "children":p.children,"originals":p.originals,"site":p.site,"error":p.error,
+        "checks":{"eligible":c[0],"attached":c[1],"directory":c[2],"parentIdentifier":c[3],
+            "panelIdentifier":c[4],"parentSingleton":c[5],"noNestedSheet":c[6],"nativeChild":c[7],
+            "nativeParent":c[8],"nativeRole":c[9],"stableIdentifier":c[10],"finalEligibility":c[11]}})
+}
+fn prompt_button_value(p: mrk_macos_installed_native::ControlContainerButtonProof) -> Value {
+    let c = p.checks;
+    json!({"checks":{"parentBound":c[0],"sheetBound":c[1],"completeControlProjection":c[2],"uniquePromptButton":c[3],
+        "enabled":c[4],"pressAdvertised":c[5],"sameOriginalControlPathRechecked":c[6]},"calls":p.calls,
+        "initialNodesExamined":p.initial_nodes_examined,"recheckNodesExamined":p.recheck_nodes_examined,
+        "lastRole":p.last_role,"lastDepth":p.last_depth,
+        "cfSlots":p.cf_slots,"cfSlotsRetired":p.cf_slots_retired,"cleanupReturned":p.cleanup_returned,"axError":p.ax_error})
+}
+struct OpenActionReceipt { token: OpenAction, body: OpenActionBody, returned_at: Instant }
+struct OpenRecheckReceipt { token: OpenAction, stage: u32, body: OpenRecheckBody, returned_at: Instant }
+struct OpenRecheckSlot {
+    receipt: std::sync::mpsc::Receiver<OpenRecheckReceipt>,
+    dispatched: bool, uncertain: bool, returned: Option<OpenRecheckReceipt>,
+}
+impl OpenRecheckSlot {
+    fn settled(&self, token: &OpenAction, stage: u32, end: Instant) -> bool {
+        !self.uncertain && if self.dispatched {
+            self.returned.as_ref().is_some_and(|r| token.same(&r.token) && r.stage == stage
+                && r.returned_at < end && r.body.custody_known())
+        } else { self.returned.is_none() }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OpenWorkerReturn { Body, NoGo, ChannelClosed, Panicked }
+fn worker_retirement_ready(worker: Option<OpenWorkerReturn>, same_receipt: bool,
+    rechecks_settled: Option<bool>, body_known: bool, state: &str) -> bool {
+    worker == Some(OpenWorkerReturn::Body) && same_receipt && rechecks_settled == Some(true)
+        && body_known && state == "returned"
+}
+struct OpenFlight {
+    input: PreparedOpenInput, token: OpenAction,
+    receipt: std::sync::mpsc::Receiver<OpenActionReceipt>, returned: Option<OpenActionReceipt>,
+    go: Option<std::sync::mpsc::SyncSender<Option<Instant>>>,
+    worker: Option<std::thread::JoinHandle<OpenWorkerReturn>>, worker_returned: Option<OpenWorkerReturn>,
+    // Only the worker acquires this during the armed allowance. Main sends
+    // actual-body receipts without its lock; relay inspects only AFTER join.
+    rechecks: Arc<Mutex<[OpenRecheckSlot; 2]>>,
+    baseline: FailureSnapshot,
+}
+#[derive(Clone, Copy)]
+struct OpenInputSample {
+    id: u32, prepared: bool, requested: bool, dispatch_attempted: bool, state: &'static str,
+    entered: Option<bool>, native_entered: Option<bool>, returned: bool, joined: bool, retired: bool,
+    expired: bool, timely: Option<bool>, custody_known: Option<bool>,
+    attempted: Option<bool>, press_returned: Option<bool>, triggered: Option<bool>,
+    worker_registered: bool, worker_joined: bool, rechecks_settled: Option<bool>,
+    diagnostic: Option<mrk_macos_installed_native::OpenDiagnostic>, report: Option<mrk_macos_installed_native::OpenReport>,
+}
+impl OpenInputSample {
+    fn preparing(id: u32) -> Self {
+        Self { id, prepared: false, requested: false, dispatch_attempted: false, state: "prepared",
+            entered: Some(false), native_entered: Some(false), returned: false, joined: false, retired: false,
+            expired: false, timely: None, custody_known: None, attempted: Some(false), press_returned: Some(false),
+            triggered: None, worker_registered: false, worker_joined: false, rechecks_settled: None, diagnostic: None, report: None }
+    }
+    fn requested(&mut self) {
+        self.requested = true; self.state = "requested";
+        self.entered = None; self.native_entered = None; self.attempted = None; self.press_returned = None;
+    }
+    fn reconciled(mut self, progress: OpenProgress) -> Self {
+        // One atomic phase/history sample, never an acquisition of action or
+        // native custody. Unknown vetoes permission without erasing real events.
+        self.state = progress.state; self.requested |= progress.requested;
+        self.dispatch_attempted |= progress.dispatched; self.entered = Some(self.entered == Some(true) || progress.entered);
+        self.returned |= progress.returned; self.joined |= progress.joined; self.retired |= progress.retired;
+        self.expired |= progress.expired;
+        if self.expired { self.timely = Some(false); }
+        if progress.state == "unknown" { self.custody_known = Some(false); }
+        else if matches!(progress.state, "joined" | "retired") { self.custody_known = Some(true); }
+        self
+    }
+    fn complete(&mut self, body: OpenActionBody, token: &OpenAction, timely: bool) {
+        let progress = token.progress();
+        self.native_entered = Some(body.native.is_some_and(|n| n.entered));
+        self.timely = Some(timely); self.custody_known = Some(body.custody_known() && progress.state != "unknown");
+        *self = self.reconciled(progress);
+        self.report = body.native.and_then(|n| n.report);
+        if let Some(r) = self.report {
+            self.attempted = Some(r.attempted); self.press_returned = Some(r.press_returned); self.triggered = r.triggered;
+            self.diagnostic = Some(r.diagnostic);
+        } else {
+            self.attempted = body.native.is_none_or(|n| !n.entered).then_some(false); self.press_returned = self.attempted;
+            self.diagnostic = Some(mrk_macos_installed_native::OpenDiagnostic { site: "admission",
+                error: if !body.custody_known() { "custody" } else if self.expired { "deadline" } else { "ineligible" } });
+        }
+    }
+    fn succeeded(self) -> bool {
+        self.prepared && self.requested && self.dispatch_attempted && self.state == "retired"
+            && self.worker_registered && self.worker_joined && self.rechecks_settled == Some(true)
+            && self.entered == Some(true) && self.native_entered == Some(true) && self.returned && self.joined && self.retired
+            && !self.expired && self.timely == Some(true) && self.custody_known == Some(true)
+            && self.attempted == Some(true) && self.press_returned == Some(true) && self.triggered == Some(true)
+            && self.report.is_some_and(|r| r.succeeded() && self.diagnostic == Some(r.diagnostic))
+    }
+    fn value(self) -> Value {
+        json!({"mechanism":"accessibility-preconfigured-original-press-v5","step":"OpenProject","id":self.id,
+            "prepared":self.prepared,"requested":self.requested,"dispatchAttempted":self.dispatch_attempted,"state":self.state,
+            "bodyEntered":self.entered,"nativeEntered":self.native_entered,"bodyReturned":self.returned,
+            "receiptJoined":self.joined,"workerRegistered":self.worker_registered,"workerJoined":self.worker_joined,
+            "rechecksSettled":self.rechecks_settled,"barrierRetired":self.retired,"expired":self.expired,"timely":self.timely,
+            "custodyKnown":self.custody_known,"attempted":self.attempted,"pressReturned":self.press_returned,"triggered":self.triggered,
+            "site":self.diagnostic.map(|d| d.site),"error":self.diagnostic.map(|d| d.error),
+            "initialOriginalProof":self.report.and_then(|r| r.initial_proof).map(native_proof_value),
+            "originalProof":self.report.and_then(|r| r.proof).map(native_proof_value),
+            "promptChecks":{"initial":self.report.and_then(|r| r.prompt[0]),"final":self.report.and_then(|r| r.prompt[1])},
+            "promptButton":self.report.map(|r| prompt_button_value(r.button))})
+    }
+}
+#[derive(Clone, Copy)]
+struct IdentitySample {
+    case: Case, id: u32, start_result: &'static str,
+    configuration: mrk_macos_installed_native::IdentityConfiguration,
+    binding: Option<mrk_macos_installed_native::IdentityBinding>,
+}
+impl IdentitySample {
+    fn configured(self, id: u32) -> bool { self.id == id && self.start_result == "ok" && self.configuration.complete() }
+    fn succeeded(self, id: u32) -> bool { self.configured(id) && self.binding.is_some_and(mrk_macos_installed_native::IdentityBinding::matched) }
+    fn value(self) -> Value {
+        let c = self.configuration;
+        json!({"mechanism":"preconfigured-original-sheet-v2","case":self.case.name(),"id":self.id,"kind":"project",
+            "start":{"returned":true,"result":self.start_result},
+            "configuration":{"attempted":c.attempted,"parentSetterEntered":c.parent_setter_entered,
+                "parentSetterReturned":c.parent_setter_returned,"parent":c.parent,
+                "promptSetterEntered":c.prompt_setter_entered,"promptSetterReturned":c.prompt_setter_returned,"prompt":c.prompt,
+                "initialDirectorySetterEntered":c.initial_directory_setter_entered,
+                "initialDirectorySetterReturned":c.initial_directory_setter_returned,
+                "site":c.site,"error":c.error},
+            "binding":self.binding.map(native_proof_value)})
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CompletionSample {
+    case: Case, id: u32, timely: bool, returned: mrk_macos_installed_native::CompletionReturn,
+}
+impl CompletionSample {
+    fn succeeded(self, id: u32) -> bool {
+        self.case != Case::PickerLoss && self.id == self.case.selected_id() && self.id == id
+            && self.timely && self.returned.succeeded()
+    }
+    fn value(self) -> Value {
+        json!({"mechanism":"original-ok-singleton-selection-v1","case":self.case.name(),"id":self.id,"kind":"project",
+            "pollReturned":true,"pollResult":self.returned.poll_result,"timely":self.timely,
+            "facts":self.returned.facts.map(|f| json!({"callbackEntered":f.callback_entered,
+                "urlsReadEntered":f.urls_read_entered,"urlsReadReturned":f.urls_read_returned,
+                "callbackReturned":f.callback_returned,"duplicate":f.duplicate,"nativeUnknown":f.native_unknown,
+                "response":f.response,"selection":f.selection}))})
+    }
+}
+fn publish_completion(slot: &mut Option<CompletionSample>, case: Case, id: u32,
+    returned: mrk_macos_installed_native::CompletionReturn, timely: bool) -> Result<(), &'static str> {
+    if case == Case::PickerLoss || id != case.selected_id() || slot.is_some() { return Err("native-completion-custody"); }
+    *slot = Some(CompletionSample { case, id, timely, returned });
+    Ok(()) // Actual returned DATA even on error/expiry; never cleanup authority.
+}
 #[derive(Clone, Copy)]
 struct NativeDispatch { step: Step, entered: bool, returned: bool }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct OriginalWindowSample {
+    native_returned: bool, result: &'static str,
+    state: Option<mrk_macos_installed_native::OriginalWindowState>, admitted: bool,
+}
+impl OriginalWindowSample {
+    fn positive(self) -> bool {
+        self.native_returned && self.result == "ok"
+            && self.state.is_some_and(mrk_macos_installed_native::OriginalWindowState::ready)
+    }
+    fn value(self) -> Value {
+        json!({"mechanism":"passive-original-window-callback-v1","accessorReturned":true,
+            "nativeReturned":self.native_returned,"result":self.result,"admitted":self.admitted,
+            "state":self.state.map(|s| json!({"applicationPresent":s.application_present,"active":s.active,
+                "mainPresent":s.main_present,"originalMain":s.original_main,
+                "ordinaryWindow":s.ordinary_window,"noAttachedSheet":s.no_attached_sheet}))})
+    }
+}
+fn original_window_needed(attached: bool, step: Step, pending: Option<Pending>, sample: Option<OriginalWindowSample>) -> bool {
+    attached && step == Step::Bootstrap && pending.is_none() && !sample.is_some_and(|s| s.admitted)
+}
+// Only after the accessor/native synchronous return. Keep returned scalar DATA
+// even if the endpoint failed, but never convert that late return to readiness.
+fn publish_original_window(slot: &mut Option<OriginalWindowSample>, mut returned: OriginalWindowSample,
+    needed: bool, timely: bool, failed: bool) {
+    if slot.is_some_and(|s| s.admitted) { return; }
+    returned.admitted = needed && timely && !failed && returned.positive();
+    *slot = Some(returned);
+}
 #[derive(Clone, Copy)]
 struct NativeActionSample {
     step: Step, id: u32, diagnostic: mrk_macos_installed_native::PanelActionDiagnostic,
@@ -221,11 +444,12 @@ impl PanelSample {
     }
 }
 
-fn same_panel_action_returned(step: Step, actions: &[bool; 5]) -> Result<bool, &'static str> {
+fn same_panel_action_returned(step: Step, actions: &[bool; 4]) -> Result<bool, &'static str> {
+    // Cancel, actual Open Press, Quit Cancel, Quit. No late-directory action.
     match step {
         Step::CancelProject => Ok(actions[0]),
-        Step::SetProject | Step::OpenProject | Step::PickerPending => Ok(actions[1] || actions[2]),
-        Step::QuitCancel => Ok(actions[3]), Step::Quit => Ok(actions[4]),
+        Step::OpenProject | Step::PickerPending => Ok(actions[1]),
+        Step::QuitCancel => Ok(actions[2]), Step::Quit => Ok(actions[3]),
         _ => Err("native-step"),
     }
 }
@@ -399,12 +623,17 @@ impl Session {
 }
 struct Record {
     step: Step, pending: Option<Pending>, evaluations: u16, attached: bool, started: bool, loaded: bool,
+    original_window: Option<OriginalWindowSample>,
     native_dispatch: Option<NativeDispatch>, last_panel: Option<PanelSample>, native_action: Option<NativeActionSample>,
+    ax_trusted: bool, prepared_open: Option<PreparedOpenInput>, accessibility: Option<OpenInputSample>,
+    open_progress: Option<Arc<OpenRelease>>,
+    identity_binding: Option<IdentitySample>, completion_selection: Option<CompletionSample>,
     initial_navigation: bool, info: bool, catalog: bool, methods: usize, capability: bool,
     project_calls: u8, cancel_returned: bool, project_returned: bool, project: Option<Project>,
+    project_selection: Option<ProjectSelectionSample>,
     project_witness: Option<InstalledMacProjectWitness>, picker_witness: Option<InstalledMacPickerWitness>,
-    cancel_settled: bool, project_settled: bool, selected_native: bool, panel_attached: [bool; 4],
-    native_actions_returned: [bool; 5], snapshot_requests: u8, snapshot_pending: bool, snapshots: u8,
+    cancel_settled: bool, project_settled: bool, panel_attached: [bool; 4],
+    native_actions_returned: [bool; 4], snapshot_requests: u8, snapshot_pending: bool, snapshots: u8,
     suggestion_requested: bool, suggestion: Option<Value>, validation_requested: bool, validation: bool,
     preview_requested: bool, preview: Option<Value>, requirements_requested: bool, requirements: Option<Value>,
     github_requested: bool, workflows: Option<Value>, draft_visible: bool, guidance_visible: bool,
@@ -416,10 +645,53 @@ struct Record {
     failure_close_requested: bool, failure_quit_attempted: bool,
     fixture: Fixture,
 }
-fn failure_context(r: &Record) -> Value {
+impl Record {
+    fn open_sample(&self) -> Option<OpenInputSample> {
+        self.accessibility.map(|sample| self.open_progress.as_ref()
+            .map_or(sample, |progress| sample.reconciled(progress.snapshot())))
+    }
+}
+#[derive(Clone, Copy)]
+struct FailureSnapshot {
+    source: &'static str, step: Step, pending: Option<Pending>, native_dispatch: Option<NativeDispatch>,
+    original_window: Option<OriginalWindowSample>,
+    last_panel: Option<PanelSample>, native_action: Option<NativeActionSample>,
+    accessibility: Option<OpenInputSample>, identity_binding: Option<IdentitySample>, completion_selection: Option<CompletionSample>,
+    project_selection: Option<ProjectSelectionSample>,
+}
+impl FailureSnapshot {
+    fn from_record(r: &Record) -> Self {
+        Self { source: "record", step: r.step, pending: r.pending, native_dispatch: r.native_dispatch,
+            original_window: r.original_window,
+            last_panel: r.last_panel, native_action: r.native_action, accessibility: r.open_sample(), identity_binding: r.identity_binding,
+            project_selection: r.project_selection, completion_selection: r.completion_selection }
+    }
+    fn at_expiry(mut self, progress: OpenProgress) -> Self {
+        // Non-accessibility fields are the original pre-arm sample, NOT fresh
+        // pending/panel absence observations. The schema labels this explicitly.
+        self.source = "prearm-open-progress";
+        self.project_selection = None; // Never attach fresh return DATA to a pre-arm snapshot.
+        self.completion_selection = None;
+        self.accessibility = self.accessibility.map(|sample| sample.reconciled(progress));
+        self
+    }
+    fn frame(self, reason: &'static str) -> Option<Vec<u8>> {
+        let step = format!("{:?}", self.step);
+        if step.len() > 32 || !step.is_ascii() || !FAILURE_REASONS.contains(&reason) { return None; }
+        if self.project_selection.is_some() && (self.source != "record" || !project_selection_failure_reason(reason)
+            || !matches!(self.step, Step::OpenProject | Step::ProjectSettled)) { return None; }
+        let context = edit::bounded(&failure_context(&self), 8192).ok()?;
+        if !context.is_ascii() { return None; }
+        let mut frame = format!("MRK_MACOS_AQUA_FAILURE_STEP={step}\nMRK_MACOS_AQUA_FAILURE_REASON={reason}\nMRK_MACOS_AQUA_FAILURE_CONTEXT=").into_bytes();
+        frame.extend_from_slice(&context); frame.extend_from_slice(b"\nMRK_MACOS_AQUA=failed\n");
+        (frame.len() <= 8448).then_some(frame)
+    }
+}
+fn failure_context(r: &FailureSnapshot) -> Value {
     let pending = r.pending.map(|pending| {
         let (kind, step) = match pending {
             Pending::Dom(original) => ("dom", Some(original.step)), Pending::Native(step) => ("native", Some(step)),
+            Pending::Accessibility(_) => ("accessibility", Some(Step::OpenProject)),
             Pending::Close(step) => ("close", Some(step)), Pending::Reload => ("reload", None),
             Pending::FailureClose => ("failure-close", None),
         };
@@ -436,26 +708,98 @@ fn failure_context(r: &Record) -> Value {
     let action = r.native_action.map(|action| json!({"step":format!("{:?}", action.step), "id":action.id,
         "action":action.diagnostic.action, "domain":action.diagnostic.domain,
         "site":action.diagnostic.site, "error":action.diagnostic.error}));
-    json!({"pending":pending, "nativeHandler":native, "lastPanel":panel, "nativeAction":action})
+    let mut value = json!({"snapshotSource":r.source,"pending":pending, "nativeHandler":native, "lastPanel":panel, "nativeAction":action,
+        "originalWindow":r.original_window.map(OriginalWindowSample::value),
+        "accessibility":r.accessibility.map(OpenInputSample::value),
+        "accessibilityBinding":r.identity_binding.map(IdentitySample::value)});
+    if let Some(completion) = r.completion_selection { value["completionSelection"] = completion.value(); }
+    if let Some(selection) = r.project_selection { value["projectSelection"] = selection.value(); }
+    value
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiagnosticReturn { Stopped, Written, OutputFailed, ChannelClosed, Panicked }
+struct DiagnosticOwner {
+    handle: Option<std::thread::JoinHandle<DiagnosticReturn>>, returned: Option<DiagnosticReturn>,
+}
+struct DiagnosticWriter {
+    sender: std::sync::mpsc::SyncSender<Option<Vec<u8>>>,
+    // Open=0, frame claimed=1, Stop claimed=2, refused handoff=3. Terminal
+    // choices never reopen; successful try_send is submission, not delivery.
+    claim: AtomicU8, owner: Mutex<DiagnosticOwner>,
+}
+impl DiagnosticWriter {
+    fn new() -> Result<Self, ()> {
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<Option<Vec<u8>>>(1);
+        let handle = std::thread::Builder::new().name("mrk-aqua-report".into()).spawn(move || {
+            // Only immutable bounded DATA and this diagnostic receiver cross
+            // into the writer. Sink locks/I/O never touch relay/action custody.
+            match receiver.recv() {
+                Ok(Some(frame)) => {
+                    let mut out = std::io::stderr().lock();
+                    if out.write_all(&frame).and_then(|_| out.flush()).is_ok() { DiagnosticReturn::Written }
+                    else { DiagnosticReturn::OutputFailed }
+                },
+                Ok(None) => DiagnosticReturn::Stopped,
+                Err(_) => DiagnosticReturn::ChannelClosed,
+            }
+        }).map_err(|_| ())?;
+        // No fallible allocation or user callback after spawn and before the
+        // actual handle is registered in its original owner.
+        Ok(Self { sender, claim: AtomicU8::new(0), owner: Mutex::new(DiagnosticOwner { handle: Some(handle), returned: None }) })
+    }
+    fn available(&self) -> bool { self.claim.load(Ordering::SeqCst) == 0 }
+    fn submit(&self, frame: Option<Vec<u8>>) {
+        let frame = frame.filter(|frame| frame.len() <= 8448 && frame.is_ascii());
+        let choice = if frame.is_some() { 1 } else { 3 };
+        if self.claim.compare_exchange(0, choice, Ordering::SeqCst, Ordering::SeqCst).is_err() { return; }
+        // Refused frame construction makes this sole message Stop, not a
+        // second report/fallback. Output remains truthfully unreported.
+        if self.sender.try_send(frame).is_err() {
+            self.claim.store(3, Ordering::SeqCst);
+        }
+    }
+    fn finish(&self, end: Instant) -> Option<DiagnosticReturn> {
+        if self.claim.compare_exchange(0, 2, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+            && self.sender.try_send(None).is_err() { self.claim.store(3, Ordering::SeqCst); }
+        let Ok(mut owner) = self.owner.try_lock() else { return None; };
+        if owner.returned.is_some() { return owner.returned; }
+        loop {
+            let remaining = end.saturating_duration_since(Instant::now());
+            if remaining.is_zero() { return None; } // Actual handle remains owned.
+            if owner.handle.as_ref()?.is_finished() { break; }
+            std::thread::sleep(remaining.min(Duration::from_millis(1)));
+        }
+        let returned = match owner.handle.take()?.join() {
+            Ok(returned) => returned,
+            Err(payload) => { std::mem::forget(payload); DiagnosticReturn::Panicked },
+        };
+        owner.returned = Some(returned); // Actual result, including error/partial output.
+        Some(returned) // Caller must recheck the SAME endpoint after actual join.
+    }
 }
 pub(super) struct Observation {
+    // Only the original relay owns this lock; main never acquires it. Unknown
+    // retains the exact receiver/token/owners here past the finite wait.
+    open_custody: Mutex<Option<OpenFlight>>,
     case: Case, main: ThreadId, end: Instant, project_path: PathBuf, base: Value,
-    failed: AtomicBool, failure_reason: AtomicU8, failure_reported: AtomicBool, record: Mutex<Record>,
+    failed: AtomicBool, failure_reason: AtomicU8, diagnostic: DiagnosticWriter, record: Mutex<Record>,
 }
 impl Observation {
     fn new(case: Case, fixture: Fixture) -> Result<Self, ()> {
         let base = crate::protocol::strict_json(CONFIG).map_err(|_| ())?;
-        Ok(Self { case, main: std::thread::current().id(), end: Instant::now() + Duration::from_secs(45),
-            project_path: fixture.root.clone(), base, failed: AtomicBool::new(false), failure_reason: AtomicU8::new(0),
-            failure_reported: AtomicBool::new(false),
-            record: Mutex::new(Record {
+        let end = Instant::now() + Duration::from_secs(45);
+        let project_path = fixture.root.clone();
+        let record = Mutex::new(Record {
                 step: Step::Bootstrap, pending: None, evaluations: 0, attached: false, started: false, loaded: false,
+                original_window: None,
                 native_dispatch: None, last_panel: None, native_action: None,
+                ax_trusted: false, prepared_open: None, accessibility: None, open_progress: None, identity_binding: None, completion_selection: None,
                 initial_navigation: false, info: false, catalog: false, methods: 0, capability: false,
                 project_calls: 0, cancel_returned: false, project_returned: false, project: None,
+                project_selection: None,
                 project_witness: None, picker_witness: None,
-                cancel_settled: false, project_settled: false, selected_native: false, panel_attached: [false; 4],
-                native_actions_returned: [false; 5], snapshot_requests: 0, snapshot_pending: false, snapshots: 0,
+                cancel_settled: false, project_settled: false, panel_attached: [false; 4],
+                native_actions_returned: [false; 4], snapshot_requests: 0, snapshot_pending: false, snapshots: 0,
                 suggestion_requested: false, suggestion: None, validation_requested: false, validation: false,
                 preview_requested: false, preview: None, requirements_requested: false, requirements: None,
                 github_requested: false, workflows: None, draft_visible: false, guidance_visible: false,
@@ -465,33 +809,77 @@ impl Observation {
                 quit_cancelled: false, close_count: 0, reload_requested: false, reload_returned: false, reload_navigation: false,
                 loss_seen: false, loss_settled: false, relay_joined: false, actual_exit: false, originals_final: false,
                 failure_close_requested: false, failure_quit_attempted: false, fixture,
-            }) })
+            });
+        let diagnostic = DiagnosticWriter::new()?; // All fallible setup precedes spawn/registration.
+        Ok(Self { open_custody: Mutex::new(None), case, main: std::thread::current().id(), end,
+            project_path, base, failed: AtomicBool::new(false), failure_reason: AtomicU8::new(0), diagnostic, record })
     }
     fn fail(&self) { self.fail_with("observer-invariant"); }
     fn fail_with(&self, reason: &'static str) { latch_failure(&self.failure_reason, &self.failed, reason); }
     fn record(&self) -> Option<MutexGuard<'_, Record>> {
         match self.record.lock() { Ok(r) => Some(r), Err(_) => { self.fail_with("observer-record-unavailable"); None } }
     }
-    fn timely(&self) -> bool {
+    pub(super) fn timely(&self) -> bool {
         if self.failed.load(Ordering::SeqCst) { return false; }
         if Instant::now() >= self.end { self.fail_with("observer-deadline"); false } else { true }
     }
+    pub(super) fn open_identity_scope(&self, id: u32, kind: mrk_macos_installed_native::PanelKind) -> bool {
+        // The real command can construct before the ChooseProject DOM return.
+        // Immutable case/id only: no step/project_calls/acknowledgement race.
+        self.case != Case::PickerLoss && id == self.case.selected_id()
+            && matches!(kind, mrk_macos_installed_native::PanelKind::Project)
+    }
+    pub(super) fn open_identity_target(&self, id: u32, kind: mrk_macos_installed_native::PanelKind) -> Option<&Path> {
+        self.open_identity_scope(id, kind).then_some(self.project_path.as_path())
+    }
+    pub(super) fn completion_returned(&self, id: u32, returned: mrk_macos_installed_native::CompletionReturn) {
+        // Adapter's SAME original poll/tick returned, including Err, and all
+        // native/PANEL/GuiFacts guards are gone before this Record publication.
+        let Some(mut r) = self.record() else { return; };
+        let timely = Instant::now() < self.end;
+        if let Err(reason) = publish_completion(&mut r.completion_selection, self.case, id, returned, timely) {
+            self.fail_with(reason); return;
+        }
+        if !timely { self.fail_with("observer-deadline"); }
+        else if returned.facts.is_none() { self.fail_with("native-completion-data"); }
+        else if matches!(returned.poll_result, "error" | "invalid-return")
+            || returned.facts.is_some_and(|f| f.native_unknown || f.duplicate) { self.fail_with("native-completion-unknown"); }
+        else if returned.poll_result != "responded" { self.fail_with("native-completion-data"); }
+        // Known wrong/empty/multiple/disagreeing URLs do not change ordinary
+        // callback/cleanup. Preserve a wrong-path Project result's first reason;
+        // the separate ProjectSettled/final gates below still forbid success.
+    }
+    pub(super) fn identity_start_returned(&self, id: u32, returned: mrk_macos_installed_native::IdentityStartReturn) {
+        let Some(mut r) = self.record() else { return; };
+        if !self.open_identity_scope(id, mrk_macos_installed_native::PanelKind::Project) || r.identity_binding.is_some() {
+            self.fail_with("native-default-custody"); return;
+        }
+        let Some(configuration) = returned.configuration else { self.fail_with("native-default-binding"); return; };
+        r.identity_binding = Some(IdentitySample { case: self.case, id, start_result: returned.result, configuration,
+            binding: None });
+        // Saved original-return DATA precedes this latch/one-shot report. A
+        // previous failure stays absorbing; none of this grants finality.
+        if !returned.succeeded() { self.fail_with("native-default-binding"); }
+    }
     fn report_failure(&self) {
-        if !self.failed.load(Ordering::SeqCst) || self.failure_reported.load(Ordering::SeqCst) { return; }
+        if !self.failed.load(Ordering::SeqCst) || !self.diagnostic.available() { return; }
         let Some(reason) = first_failure_reason(&self.failure_reason) else { return; };
         let Ok(r) = self.record.try_lock() else { return; };
         // This reason is latched only after the original action body returns.
         // Let its matching Record publication precede the one-shot report;
         // unrelated failures still report truthful unknown/nonreturned DATA.
-        if reason == "adapter-native-action" && r.pending == Some(Pending::Native(r.step))
+        if matches!(reason, "adapter-native-action" | "native-default-binding") && r.pending == Some(Pending::Native(r.step))
             && r.native_dispatch.is_some_and(|native| native.step == r.step && native.entered && !native.returned) {
             return;
         }
-        if self.failure_reported.swap(true, Ordering::SeqCst) { return; }
-        // Fixed labels and the already recorded sample only; no new native
-        // observation. Later cleanup cannot replace the first reason/sample.
-        let _ = writeln!(std::io::stderr().lock(), "MRK_MACOS_AQUA_FAILURE_STEP={:?}\nMRK_MACOS_AQUA_FAILURE_REASON={}\nMRK_MACOS_AQUA_FAILURE_CONTEXT={}",
-            r.step, reason, failure_context(&r));
+        let snapshot = FailureSnapshot::from_record(&r); drop(r);
+        self.diagnostic.submit(snapshot.frame(reason));
+    }
+    fn report_expiry(&self, snapshot: FailureSnapshot, progress: OpenProgress) {
+        if !self.failed.load(Ordering::SeqCst) || !self.diagnostic.available() { return; }
+        if let Some(reason) = first_failure_reason(&self.failure_reason) {
+            self.diagnostic.submit(snapshot.at_expiry(progress).frame(reason));
+        }
     }
     pub(super) fn attach(&self, _: &Supervisor) -> Result<(), BridgeError> {
         let Some(mut r) = self.record() else { return Err(BridgeError::cleanup_unknown()); };
@@ -499,6 +887,34 @@ impl Observation {
             self.fail(); return Err(BridgeError::invalid());
         }
         r.attached = true; Ok(())
+    }
+    pub(super) fn observe_original_window(&self, window: &tauri::Window) {
+        if std::thread::current().id() != self.main || !mrk_macos_installed_native::main_thread() {
+            self.fail_with("native-wrong-thread"); return;
+        }
+        if !self.timely() { return; }
+        {
+            let Some(r) = self.record() else { return; };
+            if !original_window_needed(r.attached, r.step, r.pending, r.original_window) { return; }
+        } // No record guard may span the synchronous accessor/native reads.
+        if !self.timely() { return; }
+        // The existing Tauri event callback borrows its captured original
+        // Window. No label lookup, saved pointer, extra Window clone or task.
+        let returned = match window.ns_window() {
+            Ok(original) => {
+                let sample = mrk_macos_installed_native::installed_original_window(original as usize);
+                OriginalWindowSample { native_returned: true, result: sample.result, state: sample.state, admitted: false }
+            },
+            Err(_) => OriginalWindowSample { native_returned: false, result: "accessor-error", state: None, admitted: false },
+        };
+        let Some(mut r) = self.record() else { return; };
+        if returned.result != "ok" { self.fail(); }
+        // Actual calls returned. Recheck the SAME endpoint/absorbing failure;
+        // nil/inactive/different-main are nonterminal unsatisfied snapshots.
+        let needed = original_window_needed(r.attached, r.step, r.pending, r.original_window);
+        let timely = self.timely();
+        let failed = self.failed.load(Ordering::SeqCst);
+        publish_original_window(&mut r.original_window, returned, needed, timely, failed);
     }
     pub(super) fn navigation(&self, trusted: bool, allowed: bool) {
         let Some(mut r) = self.record() else { return; };
@@ -546,7 +962,7 @@ impl Observation {
         let Some(mut r) = self.record() else { return; };
         if !r.info || r.catalog || !valid || r.reload_requested { self.fail(); return; } r.catalog = true;
     }
-    pub(super) fn project_result(&self, result: &Result<Option<Project>, crate::asset_commands::AssetError>) {
+    pub(super) fn project_result(&self, result: &Result<Option<Project>, crate::asset_commands::AssetError>, selection: Option<&InstalledMacProjectSelectionData>) {
         let Some(mut r) = self.record() else { return; };
         match project_return_route(self.case, r.step, r.reload_requested, r.cancel_returned, r.project_returned, result) {
             Ok(ProjectReturn::Lost) => { r.project_returned = true; return; },
@@ -554,10 +970,16 @@ impl Observation {
             Ok(ProjectReturn::Selected) => {},
             Err(reason) => { self.fail_with(reason); return; },
         }
-        let Ok(Some(project)) = result else { self.fail(); return; };
-        if !matches!(r.step, Step::OpenProject | Step::ProjectSettled) || r.project.is_some()
-            || Path::new(&project.path) != self.project_path || project.name != self.case.name() || !crate::protocol::valid_id(&project.id) {
-            self.fail(); return;
+        let Ok(Some(project)) = result else { self.fail_with("project-result-shape"); return; };
+        if let Some(reason) = selected_project_failure(r.step, r.project.is_some(), project, &self.project_path, self.case.name()) {
+            if project_selection_failure_reason(reason) {
+                let sample = ProjectSelectionSample::from_data(selection, project, self.case, &r.fixture);
+                // The Record guard coordinates the first CAS winner and its
+                // fixed detail with report_failure's snapshot. No later winner
+                // or cleanup can overwrite it, and no success field is filled.
+                latch_project_selection(&self.failure_reason, &self.failed, &mut r.project_selection, reason, sample);
+            } else { self.fail_with(reason); }
+            return;
         }
         r.project_returned = true; r.project = Some(project.clone());
     }
@@ -565,32 +987,27 @@ impl Observation {
         let Some(mut r) = self.record() else { return; };
         let allowed = r.snapshot_requests == 0 && matches!(r.step, Step::OpenProject | Step::ProjectSettled | Step::Snapshot)
             || self.case == Case::FirstSave && r.snapshot_requests == 1 && matches!(r.step, Step::Refresh | Step::Readback);
-        if !allowed || r.snapshot_pending || r.reload_requested || !r.project.as_ref().is_some_and(|p| p.id == project) {
-            self.fail(); return;
+        if !allowed || r.snapshot_pending || r.reload_requested {
+            self.fail_with("snapshot-request-order"); return;
+        }
+        if !r.project.as_ref().is_some_and(|p| p.id == project) {
+            self.fail_with("snapshot-request-project"); return;
         }
         r.snapshot_requests += 1; r.snapshot_pending = true;
     }
     pub(super) fn snapshot(&self, project: &str, result: &Result<Value, BridgeError>) {
         let Some(mut r) = self.record() else { return; };
         let saved = self.case == Case::NoopStale || r.snapshot_requests == 2;
-        let valid = result.as_ref().is_ok_and(|v| {
-            let config = &v["config"]; let hints = &v["discovery"]["hints"];
-            v["root"].as_str() == self.project_path.to_str() && v["observationScope"] == "single-request-non-atomic"
-                && config["path"] == "release/mobile-release.json" && assurance(v, "static-text")
-                && v["issues"].as_array().is_some_and(Vec::is_empty)
-                && hints["android"]["applicationId"] == APP_ID && hints["android"]["module"] == ":app"
-                && hints["android"]["buildFile"] == "app/build.gradle.kts" && hints["versionSource"] == "version.properties"
-                && hints["versionNameKey"] == "VERSION_NAME" && hints["versionBuildKey"] == "BUILD_NUMBER"
-                && v["discovery"]["partial"] == false && v["discovery"]["state"] == "unverified"
-                && if saved { config["state"] == "format-valid" && config["data"] == self.base
-                    && config["content"] == json!({"bytes":CONFIG.len(), "sha256":digest(CONFIG)})
-                    && config["issues"].as_array().is_some_and(Vec::is_empty) }
-                else { config["state"] == "missing" && config["data"].is_null() && config["content"].is_null()
-                    && config["issues"].as_array().is_some_and(|issues| issues.len() == 1 && issues[0]["code"] == "config.missing") }
-        });
-        if !valid || !r.snapshot_pending || !r.project.as_ref().is_some_and(|p| p.id == project) || r.snapshots + 1 != r.snapshot_requests {
-            self.fail(); return;
+        let failure = match result {
+            Ok(value) => snapshot_value_failure(value, &self.project_path, saved, &self.base),
+            Err(error) => Some(snapshot_error_reason(&error.code)),
+        };
+        if let Some(reason) = failure { self.fail_with(reason); return; }
+        if !r.snapshot_pending { self.fail_with("snapshot-return-order"); return; }
+        if !r.project.as_ref().is_some_and(|p| p.id == project) {
+            self.fail_with("snapshot-return-project"); return;
         }
+        if r.snapshots + 1 != r.snapshot_requests { self.fail_with("snapshot-return-order"); return; }
         r.snapshot_pending = false; r.snapshots += 1;
     }
     pub(super) fn suggest_request(&self, hints: &Value) {
@@ -800,55 +1217,55 @@ impl Observation {
     pub(super) fn close_request(&self) { self.fail(); } // Native Quit/loss, never synthetic Close IPC, owns EOF.
     pub(super) fn edit_status(&self, status: &ConfigEditStatus, edits: &EditOwner) {
         let Some(mut r) = self.record() else { return; };
-        if status.schema_version != 1 || !edit::token(&status.window_generation) { self.fail(); return; }
+        if status.schema_version != 1 || !edit::token(&status.window_generation) { self.fail_with("edit-status-schema"); return; }
         if r.status_revision.is_some_and(|old| old > status.status_revision) { return; }
         if let Some(before) = &r.generation {
-            if before != &status.window_generation && !r.reload_requested { self.fail(); return; }
+            if before != &status.window_generation && !r.reload_requested { self.fail_with("edit-status-generation"); return; }
         } else { r.generation = Some(status.window_generation.clone()); }
         if status.capability.available && status.capability.reason == edit::EditAvailability::Available && !r.reload_requested { r.capability = true; }
         for p in status.last_terminal.iter().chain(status.active.iter()) {
             let Some(round) = r.sessions.iter().position(|s| s.projection.session_id == p.session_id) else {
-                if r.open_pending { continue; } self.fail(); return;
+                if r.open_pending { continue; } self.fail_with("edit-status-owner"); return;
             };
             let old = &r.sessions[round].projection;
             if p.domain != edit::EditDomain::Configuration || p.workflow.is_some() || p.metadata_text.is_some()
                 || p.project_id != old.project_id || p.owner_generation != old.owner_generation || p.late_settled
                 || !edit::token(&p.session_id) || p.phase == edit::Phase::Unknown || p.native_finality == edit::NativeFinality::Unknown
                 || phase(p.phase) < phase(old.phase) || p.apply_submitted && !r.sessions[round].apply_requested
-                || old.apply_submitted && !p.apply_submitted { self.fail(); return; }
+                || old.apply_submitted && !p.apply_submitted { self.fail_with("edit-status-projection"); return; }
             if let Some(c) = &p.checkout {
                 if !edit::token(&c.revision) || c.base != *self.expected_base(round)
-                    || old.checkout.as_ref().is_some_and(|v| v.revision != c.revision || v.base != c.base) { self.fail(); return; }
-            } else if old.checkout.is_some() { self.fail(); return; }
+                    || old.checkout.as_ref().is_some_and(|v| v.revision != c.revision || v.base != c.base) { self.fail_with("edit-status-projection"); return; }
+            } else if old.checkout.is_some() { self.fail_with("edit-status-projection"); return; }
             if let Some(prepared) = &p.prepared {
-                let Some(review) = self.review_sample(&prepared.view,round) else { self.fail(); return; };
+                let Some(review) = self.review_sample(&prepared.view,round) else { self.fail_with("edit-status-projection"); return; };
                 if !r.sessions[round].prepare_requested || !edit::token(&prepared.plan_token)
                     || !p.checkout.as_ref().is_some_and(|c| c.revision == prepared.revision)
                     || (prepared.draft_revision,prepared.baseline_generation) != self.revisions(round)
                     || old.prepared.as_ref().is_some_and(|v| v.plan_token != prepared.plan_token)
-                    || r.sessions[round].review.as_ref().is_some_and(|v| v != &review) { self.fail(); return; }
+                    || r.sessions[round].review.as_ref().is_some_and(|v| v != &review) { self.fail_with("edit-status-projection"); return; }
                 r.sessions[round].review = Some(review);
-            } else if r.sessions[round].review.is_some() { self.fail(); return; }
+            } else if r.sessions[round].review.is_some() { self.fail_with("edit-status-projection"); return; }
             let cancelled = self.case == Case::SaveLoss || self.case == Case::FirstSave && round == 1;
             let expected_native = if cancelled && phase(p.phase) >= phase(edit::Phase::Finalizing) {
                 if self.case == Case::SaveLoss { edit::NativeEditReason::WindowLost } else { edit::NativeEditReason::Shutdown }
             } else { edit::NativeEditReason::None };
-            if p.native_reason != expected_native { self.fail(); return; }
+            if p.native_reason != expected_native { self.fail_with("edit-status-projection"); return; }
             if let Some(core) = &p.core_outcome {
                 let (effect,journal,reason) = if cancelled { (edit::Effect::NotStarted,edit::Journal::NotCreated,edit::CoreReason::Cancelled) }
                     else if self.case == Case::FirstSave { (edit::Effect::Committed,edit::Journal::Clean,edit::CoreReason::None) }
                     else if round == 0 { (edit::Effect::Unchanged,edit::Journal::NotCreated,edit::CoreReason::None) }
                     else { (edit::Effect::NotStarted,edit::Journal::NotCreated,edit::CoreReason::StaleRevision) };
                 if core.effect != effect || core.journal != journal || core.reason != reason || core.resources != edit::ResourceState::Settled {
-                    self.fail(); return;
+                    self.fail_with("edit-status-projection"); return;
                 }
             }
             if p.phase == edit::Phase::Final {
                 if p.native_finality != edit::NativeFinality::Settled || p.core_outcome.is_none() || p.prepared.is_none()
-                    || p.apply_submitted != !cancelled || cancelled && !(r.reload_requested || r.close_count == 2) { self.fail(); return; }
+                    || p.apply_submitted != !cancelled || cancelled && !(r.reload_requested || r.close_count == 2) { self.fail_with("edit-status-projection"); return; }
                 if r.sessions[round].finality.is_none() {
-                    let Some(facts) = edits.installed_observation_final(&p.session_id) else { self.fail(); return; };
-                    if !finality(&facts,p,if cancelled { 2 } else { 3 }) { self.fail(); return; }
+                    let Some(facts) = edits.installed_observation_final(&p.session_id) else { self.fail_with("edit-status-projection"); return; };
+                    if !finality(&facts,p,if cancelled { 2 } else { 3 }) { self.fail_with("edit-status-projection"); return; }
                     r.sessions[round].finality = Some(facts);
                 }
             }
@@ -857,14 +1274,23 @@ impl Observation {
         r.status_revision = Some(status.status_revision);
     }
     pub(super) fn tick(self: &Arc<Self>, app: &tauri::AppHandle) {
-        if !self.timely() { self.report_failure(); self.failure_shutdown(app); return; }
         if std::thread::current().id() == self.main { self.fail(); return; }
+        // Drain the one prepared original even after failure/deadline: known
+        // non-entry may retire its barrier, never dispatch a late Press.
+        if self.accessibility_step(app) {
+            if !self.timely() { self.report_failure(); self.failure_shutdown(app); }
+            return;
+        }
+        if !self.timely() { self.report_failure(); self.failure_shutdown(app); return; }
         let state = app.state::<super::ShellState>();
         let step = {
             let Some(mut r) = self.record() else { return; };
             if !r.attached || !r.loaded || r.pending.is_some() { return; }
             if r.step == Step::Bootstrap {
-                if !r.info || !r.catalog || !r.capability || !state.document.installed_macos_live() { return; }
+                // Natural callbacks are opportunities only. No timely witness
+                // is not proof of permanent inactivity; the same endpoint wins.
+                if !r.original_window.is_some_and(|s| s.admitted) || !r.info || !r.catalog || !r.capability
+                    || !state.document.installed_macos_live() { return; }
                 r.step = Step::Environment;
             }
             match r.step {
@@ -879,10 +1305,18 @@ impl Observation {
                 Step::ProjectSettled => {
                     let Some(returned) = &r.project else { return; };
                     let Some((project,witness,response)) = state.document.installed_macos_project(self.case.selected_id()) else { return; };
-                    if project.id != returned.id || project.path != returned.path || project.name != returned.name
-                        || response.operation_id != self.case.selected_id() || response.response != NativeResponse::Accept
-                        || response.selected.as_deref() != Some(self.project_path.as_path()) || !response.callback_returned {
-                        self.fail(); return;
+                    if project.id != returned.id || project.path != returned.path || project.name != returned.name {
+                        self.fail_with("project-witness-identity"); return;
+                    }
+                    if response.operation_id != self.case.selected_id() || response.response != NativeResponse::Accept {
+                        self.fail_with("project-witness-response"); return;
+                    }
+                    if response.selected.as_deref() != Some(self.project_path.as_path()) {
+                        self.fail_with("project-witness-selection"); return;
+                    }
+                    if !response.callback_returned { self.fail_with("project-witness-callback"); return; }
+                    if !r.completion_selection.is_some_and(|s| s.succeeded(self.case.selected_id())) {
+                        self.fail_with("native-completion-selection"); return;
                     }
                     r.project_witness = Some(witness); r.project_settled = true; r.step = Step::Snapshot; return;
                 },
@@ -968,7 +1402,7 @@ impl Observation {
             }
             if window.close().is_err() { self.fail(); } return;
         }
-        if matches!(step,Step::CancelProject|Step::SetProject|Step::OpenProject|Step::QuitCancel|Step::Quit|Step::PickerPending) {
+        if matches!(step,Step::CancelProject|Step::OpenProject|Step::QuitCancel|Step::Quit|Step::PickerPending) {
             {
                 let Some(mut r) = self.record() else { return; };
                 // The entry check preceded this lock. A late tick must not
@@ -1031,6 +1465,345 @@ impl Observation {
             self.fail_with("dom-dispatch-refused");
         }
     }
+    fn action_original(&self, r: &Record, token: &OpenAction) -> bool {
+        r.ax_trusted && token.id == self.case.selected_id() && open_step_entry(r.pending, r.step, token.id)
+            && r.open_progress.as_ref().is_some_and(|progress| token.same_progress(progress))
+            && r.prepared_open.is_none() && r.accessibility.is_some_and(|s|
+                s.id == token.id && s.prepared && s.requested) && !r.native_actions_returned[1]
+            && r.native_dispatch.is_some_and(|n| n.step == Step::OpenProject && n.entered && n.returned)
+            && r.identity_binding.is_some_and(|s| s.succeeded(token.id))
+    }
+    fn action_admission(&self, token: &OpenAction, after: bool) -> Option<bool> {
+        if std::thread::current().id() != self.main { return None; }
+        let allowed = {
+            let r = self.record()?;
+            if !self.action_original(&r, token) || token.state() != "entered" { return None; }
+            token.admitted(after)?
+        }; // All guards gone BEFORE the caller resumes any AppKit selector.
+        Some(allowed && self.timely() && (after || !token.stopped() && !token.expired()))
+    }
+    fn action_recheck_main(self: &Arc<Self>, token: OpenAction, stage: u32, end: Instant,
+        done: std::sync::mpsc::SyncSender<OpenRecheckReceipt>) {
+        let body = if std::thread::current().id() != self.main {
+            token.unknown(); self.fail_with("native-default-custody"); OpenRecheckBody::no_native(None)
+        } else { token.recheck(end, stage, |after| self.action_admission(&token, after)) };
+        // token.recheck ACTUALLY returned, including every native/TLS/owner
+        // guard. A queued-main dispatch return never stands in for this receipt.
+        if !body.custody_known() { token.unknown(); self.fail_with("native-default-custody"); }
+        let receipt = OpenRecheckReceipt { token: token.clone(), stage, body, returned_at: Instant::now() };
+        if done.try_send(receipt).is_err() { token.unknown(); self.fail_with("native-default-custody"); }
+        // Successful send is last; no post-send native query or guard remains.
+    }
+    fn worker_admission(&self, token: &OpenAction, after: bool) -> Option<bool> {
+        // This last-boundary permit is ONLY scalar/atomic/clock observation.
+        // Owner/Record/GuiFacts locks belong to main's read-only recheck, never
+        // to the AX client's final permit or the independent deadline relay.
+        if std::thread::current().id() == self.main || token.state() != "entered" || Instant::now() >= self.end {
+            return None; // Past original45s: retain CF/queued-main originals, never begin more cleanup calls.
+        }
+        Some(!self.failed.load(Ordering::SeqCst) && !token.expired() && (after || !token.stopped()))
+    }
+    fn worker_recheck(self: &Arc<Self>, app: &tauri::AppHandle, token: &OpenAction, stage: u32, end: Instant,
+        rechecks: &Arc<Mutex<[OpenRecheckSlot; 2]>>,
+        senders: &mut [Option<std::sync::mpsc::SyncSender<OpenRecheckReceipt>>; 2])
+        -> Result<(mrk_macos_installed_native::OpenRecheckReturn, bool), u32> {
+        if !(1..=2).contains(&stage) { return Err(9); }
+        let Ok(mut ledger) = rechecks.lock() else { return Err(9); };
+        let slot = &mut ledger[stage as usize - 1];
+        if slot.dispatched || slot.returned.is_some() || slot.uncertain { return Err(9); }
+        let Some(done) = senders[stage as usize - 1].take() else { return Err(9); };
+        if token.expired() || Instant::now() >= end { return Err(8); }
+        match self.worker_admission(token, false) { Some(true) => {}, Some(false) => return Err(3), None => return Err(9) }
+        slot.dispatched = true; // Exact receiver was rooted BEFORE spawn/GO.
+        let q = self.clone(); let original = token.clone();
+        if app.run_on_main_thread(move || q.action_recheck_main(original, stage, end, done)).is_err() {
+            slot.uncertain = true; token.unknown(); self.fail_with("native-default-custody");
+            return Err(9); // Err does not mean cancellation or definite no entry.
+        }
+        use std::sync::mpsc::RecvTimeoutError;
+        let receipt = match slot.receipt.recv_timeout(end.saturating_duration_since(Instant::now())) {
+            Ok(receipt) => Some(receipt),
+            Err(RecvTimeoutError::Disconnected) => None,
+            Err(RecvTimeoutError::Timeout) => {
+                token.expire(); self.fail_with("native-default-deadline");
+                // Only this same queued body/receiver, only until original45s.
+                // Late known cleanup is retained DATA, never fresh success.
+                slot.receipt.recv_timeout(self.end.saturating_duration_since(Instant::now())).ok()
+            },
+        };
+        slot.returned = receipt;
+        if !slot.settled(token, stage, self.end) {
+            slot.uncertain = true; token.unknown(); self.fail_with("native-default-custody"); return Err(9);
+        }
+        let receipt = slot.returned.as_ref().expect("settled matching main receipt");
+        if let Some(native) = receipt.body.native {
+            // Preserve the actual original proof even on a late/STOP return.
+            // The FFI callback rechecks the SAME armed endpoint before success.
+            return Ok((native, receipt.body.admitted == Some(true)));
+        }
+        Err(if token.expired() || Instant::now() >= end { 8 } else { 3 })
+    }
+    fn action_worker(self: &Arc<Self>, app: tauri::AppHandle, token: OpenAction,
+        go: std::sync::mpsc::Receiver<Option<Instant>>, done: std::sync::mpsc::SyncSender<OpenActionReceipt>,
+        rechecks: Arc<Mutex<[OpenRecheckSlot; 2]>>,
+        mut senders: [Option<std::sync::mpsc::SyncSender<OpenRecheckReceipt>>; 2]) -> OpenWorkerReturn {
+        let end = match go.recv() {
+            Ok(Some(end)) => end,
+            Ok(None) => return OpenWorkerReturn::NoGo,
+            Err(_) => return OpenWorkerReturn::ChannelClosed,
+        }; // No native body can precede original handle registration and GO.
+        let entered = token.enter();
+        let body = if !entered || std::thread::current().id() == self.main {
+            OpenActionBody::no_native(None)
+        } else if token.expired() || Instant::now() >= end {
+            token.expire(); self.fail_with("native-default-deadline"); OpenActionBody::no_native(Some(false))
+        } else {
+            let native = mrk_macos_installed_native::installed_prompt_button(token.identity(), end,
+                |after| self.worker_admission(&token, after),
+                |stage| self.worker_recheck(&app, &token, stage, end, &rechecks, &mut senders));
+            OpenActionBody { native: Some(native), admitted: self.worker_admission(&token, true) }
+        };
+        if Instant::now() >= end { token.expire(); self.fail_with("native-default-deadline"); }
+        if !body.custody_known() { token.unknown(); self.fail_with("native-default-custody"); }
+        else if !body.succeeded() { self.fail_with("native-default-input"); }
+        if !token.returned() { self.fail_with("native-default-custody"); }
+        let receipt = OpenActionReceipt { token: token.clone(), body, returned_at: Instant::now() };
+        if done.try_send(receipt).is_err() { token.unknown(); self.fail_with("native-default-custody"); }
+        // A receipt is NOT this thread's completion. The relay must separately
+        // observe is_finished and join the registered handle before retirement.
+        OpenWorkerReturn::Body
+    }
+    fn open_unknown(&self, token: &OpenAction) {
+        token.unknown(); self.fail_with("native-default-custody");
+        if let Ok(mut r) = self.record.try_lock() {
+            if open_step_entry(r.pending, r.step, token.id) {
+                if let Some(s) = r.accessibility.as_mut() { *s = s.reconciled(token.progress()); }
+            }
+        }
+    }
+    fn accessibility_step(self: &Arc<Self>, app: &tauri::AppHandle) -> bool {
+        let prearm_refusal_at = Instant::now(); // Before any original-custody/Record wait.
+        // Main never takes this private relay-custody lock. It retains the
+        // original packet/receiver on every unknown path, including >45s.
+        let Ok(mut custody) = self.open_custody.try_lock() else { self.fail_with("native-default-custody"); return true; };
+        if custody.is_some() { return true; } // Unresolved original; no retry/replacement.
+        let (input, token, baseline) = {
+            let Some(mut r) = self.record() else { return true; };
+            let Some(Pending::Accessibility(id)) = r.pending else { return false; };
+            if id != self.case.selected_id() || !open_step_entry(r.pending, r.step, id) {
+                self.fail_with("native-default-custody"); return true;
+            }
+            let Some(input) = r.prepared_open.take() else { self.fail_with("native-default-custody"); return true; };
+            let token = input.token();
+            if input.id != id || !r.accessibility.is_some_and(|s| s.id == id && s.prepared && !s.requested && !s.returned)
+                || !r.native_dispatch.is_some_and(|n| n.step == Step::OpenProject && n.entered && n.returned) {
+                self.open_unknown(&token); r.prepared_open = Some(input); return true;
+            }
+            let allowed = input.admitted(false); // Before the one action clock is armed.
+            if !self.timely() || allowed != Some(true) {
+                let observer_expired = Instant::now() >= self.end;
+                let stop_at = if observer_expired { self.end } else { prearm_refusal_at };
+                let reason = if observer_expired { crate::asset_commands::Reason::Deadline } else { crate::asset_commands::Reason::SourceRefused };
+                let retired = input.no_entry(allowed.is_some() && input.admitted(true).is_some());
+                if let Some(s) = r.accessibility.as_mut() {
+                    s.state = token.state(); s.retired = retired; s.custody_known = Some(retired);
+                    s.diagnostic = Some(mrk_macos_installed_native::OpenDiagnostic { site: "admission", error: "ineligible" });
+                }
+                self.fail_with("native-default-input");
+                let current = r.step;
+                if !retired || !retire_returned_open(&mut r.pending, current, id) {
+                    token.unknown(); r.prepared_open = Some(input); self.fail_with("native-default-custody");
+                    return true;
+                }
+                // No action endpoint exists in this pre-arm branch. Use the
+                // captured refusal/original observer endpoint, never a new one.
+                drop(r); drop(input); drop(custody);
+                if token.refuse_original_at(stop_at, reason).is_err() { self.open_unknown(&token); }
+                return true;
+            }
+            if !token.request() { r.prepared_open = Some(input); self.fail_with("native-default-custody"); return true; }
+            if let Some(s) = r.accessibility.as_mut() { s.requested(); }
+            (input, token, FailureSnapshot::from_record(&r))
+        };
+        let (done, receipt) = std::sync::mpsc::sync_channel(1);
+        let (go, go_receipt) = std::sync::mpsc::sync_channel(1);
+        let (first_done, first_receipt) = std::sync::mpsc::sync_channel(1);
+        let (final_done, final_receipt) = std::sync::mpsc::sync_channel(1);
+        let rechecks = Arc::new(Mutex::new([
+            OpenRecheckSlot { receipt: first_receipt, dispatched: false, uncertain: false, returned: None },
+            OpenRecheckSlot { receipt: final_receipt, dispatched: false, uncertain: false, returned: None },
+        ]));
+        *custody = Some(OpenFlight { input, token: token.clone(), receipt, returned: None, go: Some(go),
+            worker: None, worker_returned: None, rechecks: rechecks.clone(), baseline });
+        let flight = custody.as_mut().expect("original stored before spawn");
+        let q = self.clone(); let worker_token = token.clone(); let application = app.clone();
+        let started = std::thread::Builder::new().name("mrk-aqua-open".into()).spawn(move ||
+            q.action_worker(application, worker_token, go_receipt, done, rechecks, [Some(first_done), Some(final_done)]));
+        match started {
+            Ok(handle) => { flight.worker = Some(handle); } // Register ACTUAL handle before arming or GO.
+            Err(_) => {
+                // std::thread::spawn returned a definite failure: no worker/GO
+                // or main recheck exists. This is not a dispatch ambiguity.
+                self.fail_with("native-default-input");
+                let Ok(mut r) = self.record.try_lock() else { self.open_unknown(&token); return true; };
+                let retired = flight.input.no_entry(true);
+                if !self.action_original(&r, &token) || !retired { self.open_unknown(&token); return true; }
+                if let Some(sample) = r.accessibility.as_mut() {
+                    *sample = sample.reconciled(token.progress()); sample.custody_known = Some(true);
+                    sample.entered = Some(false); sample.native_entered = Some(false);
+                    sample.attempted = Some(false); sample.press_returned = Some(false);
+                    sample.diagnostic = Some(mrk_macos_installed_native::OpenDiagnostic { site: "admission", error: "ineligible" });
+                }
+                let current = r.step;
+                if !retire_returned_open(&mut r.pending, current, token.id) { self.open_unknown(&token); return true; }
+                drop(r); *custody = None; drop(custody);
+                if token.refuse_original_at(prearm_refusal_at.min(self.end), crate::asset_commands::Reason::SourceRefused).is_err() {
+                    self.open_unknown(&token);
+                }
+                return true;
+            },
+        }
+        if let Some(sample) = flight.baseline.accessibility.as_mut() { sample.worker_registered = true; }
+        let registered = if let Ok(mut r) = self.record.try_lock() {
+            let original = self.action_original(&r, &token);
+            if let Some(sample) = r.accessibility.as_mut().filter(|s| s.id == token.id) { sample.worker_registered = true; }
+            original
+        } else { false };
+        // One endpoint includes GO, queued-main proofs, AX, cleanup, receipt,
+        // actual worker join and scalar publication. No spawn or blocking
+        // Record/PANEL/GuiFacts/owner lock is allowed on this armed relay.
+        let end = self.end.min(Instant::now() + Duration::from_secs(2));
+        let refusal_at = Instant::now();
+        let mut go_published = false;
+        let ready = registered && self.timely() && !token.stopped() && Instant::now() < end;
+        if ready && token.queue() {
+            if flight.go.take().is_some_and(|sender| sender.try_send(Some(end)).is_ok()) { go_published = true; }
+            else { self.open_unknown(&token); }
+        } else {
+            if Instant::now() >= end { token.expire(); self.fail_with("native-default-deadline"); }
+            else { self.fail_with("native-default-input"); }
+            // Definite no-GO still needs the registered worker's ACTUAL return
+            // and join. It has never entered the native/body state machine.
+            if !flight.go.take().is_some_and(|sender| sender.try_send(None).is_ok()) { self.open_unknown(&token); }
+        }
+        if let Ok(mut r) = self.record.try_lock() {
+            if let Some(s) = r.accessibility.as_mut().filter(|s| s.id == token.id) { *s = s.reconciled(token.progress()); }
+        }
+        let mut deadline_observed = false;
+        loop {
+            // Receipt arrival does not stop this independent deadline owner.
+            // Latch BEFORE receiving, inspecting finality, reporting or joining.
+            let now = Instant::now();
+            if now >= end && !deadline_observed {
+                deadline_observed = true;
+                token.expire(); self.fail_with("native-default-deadline");
+                self.report_expiry(flight.baseline, token.progress());
+            }
+            if now >= self.end { self.open_unknown(&token); return true; }
+            if flight.returned.is_none() {
+                if let Ok(receipt) = flight.receipt.try_recv() { flight.returned = Some(receipt); }
+            }
+            if flight.worker.as_ref().is_some_and(|handle| handle.is_finished()) {
+                let returned = match flight.worker.take().expect("positively finished original").join() {
+                    Ok(returned) => returned,
+                    Err(payload) => { std::mem::forget(payload); OpenWorkerReturn::Panicked },
+                };
+                flight.worker_returned = Some(returned); // Actual join, not a receipt or process exit.
+                if Instant::now() >= end {
+                    token.expire(); self.fail_with("native-default-deadline");
+                    self.report_expiry(flight.baseline, token.progress());
+                }
+                break;
+            }
+            // A worker can remain alive AFTER its body receipt. Observe only
+            // this same handle to the original2s/45s endpoints; never detach.
+            let wait_end = if token.expired() { self.end } else { end };
+            let remaining = wait_end.saturating_duration_since(Instant::now());
+            if !remaining.is_zero() {
+                std::thread::sleep(remaining.min(Duration::from_millis(if token.expired() { 5 } else { 1 })));
+            }
+        }
+        if flight.returned.is_none() {
+            if let Ok(receipt) = flight.receipt.try_recv() { flight.returned = Some(receipt); }
+        }
+        // Only after actual worker join: no live worker holds the ledger. Main
+        // never takes it; retained queued/uncertain stages cannot be lost here.
+        let rechecks_settled = flight.rechecks.try_lock().ok().map(|ledger|
+            ledger.iter().enumerate().all(|(index, slot)| slot.settled(&token, index as u32 + 1, self.end)));
+        if let Ok(mut r) = self.record.try_lock() {
+            if let Some(sample) = r.accessibility.as_mut().filter(|s| s.id == token.id) {
+                sample.worker_registered = true; sample.worker_joined = true; sample.rechecks_settled = rechecks_settled;
+            }
+        } else { self.open_unknown(&token); return true; }
+        if Instant::now() >= self.end || !flight.token.same(&token) || rechecks_settled != Some(true) {
+            self.open_unknown(&token); return true;
+        }
+        if !go_published && flight.worker_returned == Some(OpenWorkerReturn::NoGo) && flight.returned.is_none() {
+            let Ok(mut r) = self.record.try_lock() else { self.open_unknown(&token); return true; };
+            let retired = flight.input.no_entry(true);
+            if !self.action_original(&r, &token) || !retired { self.open_unknown(&token); return true; }
+            if let Some(s) = r.accessibility.as_mut() {
+                *s = s.reconciled(token.progress()); s.custody_known = Some(true);
+                s.entered = Some(false); s.native_entered = Some(false); s.attempted = Some(false); s.press_returned = Some(false);
+                s.diagnostic = Some(mrk_macos_installed_native::OpenDiagnostic { site: "admission",
+                    error: if token.expired() { "deadline" } else { "ineligible" } });
+            }
+            let current = r.step;
+            if !retire_returned_open(&mut r.pending, current, token.id) { self.open_unknown(&token); return true; }
+            let deadline_first = first_failure_reason(&self.failure_reason) == Some("native-default-deadline");
+            let stop_at = if deadline_first { end } else { refusal_at.min(end) };
+            let reason = if deadline_first { crate::asset_commands::Reason::Deadline } else { crate::asset_commands::Reason::SourceRefused };
+            drop(r); *custody = None; drop(custody);
+            if token.refuse_original_at(stop_at, reason).is_err() { self.open_unknown(&token); }
+            return true;
+        }
+        let Some(receipt) = flight.returned.as_ref() else { self.open_unknown(&token); return true; };
+        let returned_at = receipt.returned_at;
+        let body = receipt.body;
+        let same = go_published && token.same(&receipt.token) && returned_at <= Instant::now() && returned_at < self.end;
+        let known = worker_retirement_ready(flight.worker_returned, same, rechecks_settled, body.custody_known(), token.state());
+        if !body.succeeded() { self.fail_with("native-default-input"); }
+        let Ok(mut r) = self.record.try_lock() else { self.open_unknown(&token); return true; };
+        if !self.action_original(&r, &token) { self.open_unknown(&token); return true; }
+        let joined = known && token.joined();
+        let retired = joined && token.retire();
+        let timely = Instant::now() < end && !token.expired();
+        if let Some(s) = r.accessibility.as_mut() {
+            s.worker_joined = true; s.rechecks_settled = rechecks_settled; s.complete(body, &token, timely);
+        }
+        if !retired { self.open_unknown(&token); return true; }
+        let current = r.step;
+        if !retire_returned_open(&mut r.pending, current, token.id) { self.open_unknown(&token); return true; }
+        // The exact same endpoint also includes scalar publication.
+        if Instant::now() >= end {
+            token.expire(); self.fail_with("native-default-deadline");
+            if let Some(s) = r.accessibility.as_mut() { s.expired = true; s.timely = Some(false); }
+        }
+        let mut success = self.timely() && !token.stopped() && r.accessibility.is_some_and(OpenInputSample::succeeded);
+        if success {
+            if r.native_actions_returned[1] { self.fail_with("native-duplicate-action"); return true; }
+            r.native_actions_returned[1] = true; r.step = Step::ProjectSettled;
+        }
+        if Instant::now() >= end {
+            token.expire(); self.fail_with("native-default-deadline"); success = false;
+            if let Some(s) = r.accessibility.as_mut() { s.expired = true; s.timely = Some(false); }
+        }
+        let failed = !success && self.failed.load(Ordering::SeqCst);
+        // A timely known input failure predating a slow thread join keeps its
+        // earlier original timestamp/reason; later expiry cannot overwrite it.
+        let earlier_input_failure = !body.succeeded() && returned_at < end
+            && first_failure_reason(&self.failure_reason) == Some("native-default-input");
+        let deadline_first = token.expired() && !earlier_input_failure;
+        let stop_at = if deadline_first { end } else { returned_at.min(end) };
+        let reason = if deadline_first { crate::asset_commands::Reason::Deadline } else { crate::asset_commands::Reason::SourceRefused };
+        // Body, main rechecks, CF cleanup, receipt AND actual input worker are
+        // all known retired. Only now may ordinary same-original failure cleanup
+        // acquire its document/GUI locks. No outer guard crosses that call.
+        drop(r); *custody = None; drop(custody);
+        if failed && token.refuse_original_at(stop_at, reason).is_err() { self.open_unknown(&token); }
+        true
+    }
+
     fn native_step(&self, step: Step) {
         let timely = self.timely();
         {
@@ -1040,7 +1813,8 @@ impl Observation {
             }
         }
         let mut action_diagnostic = None;
-        let result = self.native_step_body(step, timely, &mut action_diagnostic);
+        let mut prepared_open = None; let mut open_sample = None; let mut binding_return = None;
+        let result = self.native_step_body(step, timely, &mut action_diagnostic, &mut prepared_open, &mut open_sample, &mut binding_return);
         // Preserve the exact first refusal before any Record/cleanup failure.
         if let Err(reason) = result { self.fail_with(reason); }
         let Some(mut r) = self.record() else { return; };
@@ -1049,36 +1823,59 @@ impl Observation {
         if result == Err("adapter-native-action") && first_failure_reason(&self.failure_reason) == Some("adapter-native-action") {
             r.native_action = action_diagnostic; // This same first error's returned DATA only.
         }
+        if let Some(sample) = open_sample {
+            if r.accessibility.is_some() { self.fail_with("native-default-custody"); return; }
+            r.accessibility = Some(sample);
+        }
+        if let Some(returned) = binding_return {
+            let Some(sample) = r.identity_binding.as_mut().filter(|sample|
+                sample.configured(self.case.selected_id()) && sample.binding.is_none()
+                    && sample.configuration == returned.configuration) else { self.fail_with("native-default-custody"); return; };
+            if step != Step::OpenProject { self.fail_with("native-default-custody"); return; }
+            sample.binding = Some(returned.binding);
+        }
         // Keep the historical wrong-thread refusal conservative. Diagnostics
         // never authorize retirement; a different/unknown owner is untouched.
         if matches!(result, Err("native-wrong-thread" | "native-pending-custody")) { return; }
         let current = r.step;
         if !retire_returned_native(&mut r.pending, current, step) { self.fail_with("native-pending-custody"); return; }
+        if let Some(input) = prepared_open {
+            if step != Step::OpenProject || result != Ok(false) || r.prepared_open.is_some()
+                || !r.native_dispatch.is_some_and(|n| n.step == step && n.entered && n.returned)
+                || !r.identity_binding.is_some_and(|sample| sample.succeeded(input.id)) {
+                self.fail_with("native-default-custody"); return;
+            }
+            // Publish only the returned preparation, not an action/dispatch
+            // success. Nothing native runs after this handoff from the body.
+            if r.open_progress.is_some() { self.fail_with("native-default-custody"); return; }
+            r.open_progress = Some(input.progress_handle());
+            r.pending = Some(Pending::Accessibility(input.id)); r.prepared_open = Some(input); return;
+        }
         match result {
             Ok(false) => {},
             Err(_) => {},
             Ok(true) => {
                 let (index,next) = match step {
-                    Step::CancelProject => (0,Step::CancelSettled), Step::SetProject => (1,Step::OpenProject),
-                    Step::OpenProject => (2,Step::ProjectSettled), Step::QuitCancel => (3,Step::QuitCancelled),
-                    Step::Quit => (4,Step::Exit), Step::PickerPending => { r.step = Step::Reload; return; },
+                    Step::CancelProject => (0,Step::CancelSettled), Step::QuitCancel => (2,Step::QuitCancelled),
+                    Step::Quit => (3,Step::Exit), Step::PickerPending => { r.step = Step::Reload; return; },
                     _ => { self.fail_with("native-step"); return; },
                 };
                 if r.native_actions_returned[index] { self.fail_with("native-duplicate-action"); return; }
                 r.native_actions_returned[index] = true;
-                if step == Step::OpenProject { r.selected_native = true; } r.step = next;
+                r.step = next;
             },
         }
     }
     fn native_step_body(&self, step: Step, timely: bool,
-        action_diagnostic: &mut Option<NativeActionSample>) -> Result<bool, &'static str> {
+        action_diagnostic: &mut Option<NativeActionSample>, prepared_open: &mut Option<PreparedOpenInput>,
+        open_sample: &mut Option<OpenInputSample>, binding_return: &mut Option<mrk_macos_installed_native::IdentityBindingReturn>) -> Result<bool, &'static str> {
         // This returned body has made no native query/action. Keep failed,
         // first reason, Step and original endpoint; only its matching slot may
         // retire in the caller, permitting ordinary failure shutdown to check.
         if !native_step_entry(std::thread::current().id() == self.main, timely)? { return Ok(false); }
         let (id,quit) = match step {
             Step::CancelProject | Step::PickerPending => (1,false),
-            Step::SetProject | Step::OpenProject => (self.case.selected_id(),false),
+            Step::OpenProject => (self.case.selected_id(),false),
             Step::QuitCancel => (3,true), Step::Quit => (self.case.quit_id(),true), _ => return Err("native-step"),
         };
         {
@@ -1091,7 +1888,8 @@ impl Observation {
             if r.pending != Some(Pending::Native(step)) || r.step != step { return Err("native-pending-custody"); }
             r.last_panel = Some(PanelSample::from_original(step, &panel));
             if !panel_readiness(&panel, id, quit, r.panel_attached[(id - 1) as usize],
-                same_panel_action_returned(step, &r.native_actions_returned)?)? {
+                same_panel_action_returned(step, &r.native_actions_returned)?,
+                step == Step::OpenProject && r.identity_binding.is_some_and(|s| s.configured(id)))? {
                 // Only this known never-attached/no-history phase may wait.
                 // No action, progress fact, or renewed endpoint is produced.
                 return Ok(false);
@@ -1102,9 +1900,24 @@ impl Observation {
         if step == Step::OpenProject && (!panel.native.directory_ready || !panel.native.directory_bound || !panel.native.directory_returned) {
             return Ok(false); // Before any Open action; original deadline remains unchanged.
         }
+        if step == Step::OpenProject {
+            if !self.timely() { return Err("observer-deadline"); }
+            {
+                let r = self.record().ok_or("observer-record-unavailable")?;
+                if !r.identity_binding.is_some_and(|sample| sample.configured(id) && sample.binding.is_none()) {
+                    return Err("native-default-binding");
+                }
+            }
+            let mut sample = OpenInputSample::preparing(id);
+            let prepared = prepare_open_input(id, &self.project_path, binding_return).map_err(|error| {
+                sample.diagnostic = error.binding_diagnostic(); error.reason()
+            });
+            sample.prepared = prepared.is_ok(); *open_sample = Some(sample);
+            *prepared_open = Some(prepared?);
+            return Ok(false); // Deliberately NOT a native action return.
+        }
         let action = match step {
             Step::CancelProject => PanelAction::ProjectCancel,
-            Step::SetProject => PanelAction::ProjectDirectory(&self.project_path), Step::OpenProject => PanelAction::ProjectOpen,
             Step::QuitCancel => PanelAction::QuitCancel, Step::Quit => PanelAction::QuitConfirm, _ => return Err("native-step"),
         };
         if !self.timely() { return Err("observer-deadline"); }
@@ -1117,10 +1930,10 @@ impl Observation {
     pub(super) fn close_prevented(&self) {
         let Some(mut r) = self.record() else { return; };
         if self.failed.load(Ordering::SeqCst) && r.failure_close_requested { return; }
-        let Some(Pending::Close(request)) = r.pending.take() else { self.fail(); return; };
+        let Some(Pending::Close(request)) = r.pending else { self.fail(); return; };
         if !matches!((request,r.step),(Step::CloseCancel,Step::QuitCancel)|(Step::Close,Step::Quit)) {
             self.fail(); return;
-        } r.close_count += 1;
+        } r.pending = None; r.close_count += 1;
     }
     fn failure_shutdown(self: &Arc<Self>, app: &tauri::AppHandle) {
         let state = app.state::<super::ShellState>();
@@ -1250,7 +2063,7 @@ impl Observation {
             Step::Environment => Step::ReadEnvironment, Step::ReadEnvironment => Step::Dashboard,
             Step::Dashboard => if self.case == Case::FirstSave { Step::ChooseCancel } else { Step::ChooseProject },
             Step::ChooseCancel => { r.project_calls += 1; Step::CancelProject }, Step::ReadCancelled => Step::ChooseProject,
-            Step::ChooseProject => { r.project_calls += 1; if self.case == Case::PickerLoss { Step::PickerPending } else { Step::SetProject } },
+            Step::ChooseProject => { r.project_calls += 1; if self.case == Case::PickerLoss { Step::PickerPending } else { Step::OpenProject } },
             Step::Snapshot => Step::Settings, Step::Settings => if self.case == Case::NoopStale { Step::Draft } else { Step::Suggest },
             Step::Suggest => Step::Suggestion, Step::Suggestion => Step::Adopt, Step::Adopt => Step::Draft,
             Step::Draft => { r.draft_visible = true; Step::Validate }, Step::Validate => Step::Validation,
@@ -1284,34 +2097,41 @@ impl Observation {
     }
     pub(super) fn relay_joined(&self, joined: bool) {
         let Some(mut r) = self.record() else { return; };
-        if !joined || r.relay_joined { self.fail(); return; } r.relay_joined = true;
+        if !joined || r.relay_joined { self.fail_with("relay-join-contract"); return; } r.relay_joined = true;
     }
     pub(super) fn actual_exit(&self, ready: bool, document: &DocumentBinding, edits: &EditOwner) {
-        if let Ok(status) = edits.status() { self.edit_status(&status,edits); } else { self.fail(); }
+        if let Ok(status) = edits.status() { self.edit_status(&status,edits); } else { self.fail_with("exit-edit-status"); }
         let Some(mut r) = self.record() else { return; };
         let finality = document.installed_macos_final(self.case.quit_id(),r.project_witness.as_ref(),r.picker_witness.as_ref(),self.case.loses_document());
         if !ready || !finality || !r.relay_joined || r.actual_exit || r.step != Step::Exit || r.pending.is_some()
-            || !r.native_actions_returned[4] || !r.sessions.iter().all(|s| s.finality.is_some()) { self.fail(); return; }
+            || !r.native_actions_returned[3] || !r.sessions.iter().all(|s| s.finality.is_some()) { self.fail_with("exit-finality-contract"); return; }
         r.originals_final = true; r.actual_exit = true;
     }
     fn finish(&self) -> Option<Value> {
         if !self.timely() { return None; }
         let r = self.record()?;
+        let accessibility = r.open_sample();
         let common = r.attached && r.loaded && r.info && r.catalog && r.capability && r.actual_exit && r.originals_final
+            && r.original_window.is_some_and(|s| s.admitted && s.positive())
             && r.relay_joined && r.pending.is_none() && r.step == Step::Exit && r.file_readback
+            && r.ax_trusted && r.prepared_open.is_none()
+            && (if self.case == Case::PickerLoss { accessibility.is_none() && r.identity_binding.is_none() && r.completion_selection.is_none() }
+                else { accessibility.is_some_and(|s| s.id == self.case.selected_id() && s.succeeded())
+                    && r.identity_binding.is_some_and(|sample| sample.succeeded(self.case.selected_id()))
+                    && r.completion_selection.is_some_and(|sample| sample.succeeded(self.case.selected_id())) })
             && r.sessions.len() == self.case.rounds() && r.sessions.iter().all(|s| s.review_visible && s.finality.is_some())
             && (self.case == Case::FirstSave || r.panel_attached == [true,true,false,false])
             && r.project_calls == (if self.case == Case::FirstSave { 2 } else { 1 });
         let specific = match self.case {
             Case::FirstSave => r.cancel_settled && r.project_settled && r.keep_reviewing && r.saved_visible && r.guidance_visible
-                && r.snapshots == 2 && r.quit_cancelled && r.close_count == 2 && r.native_actions_returned == [true;5]
+                && r.snapshots == 2 && r.quit_cancelled && r.close_count == 2 && r.native_actions_returned == [true;4]
                 && r.panel_attached == [true;4] && r.fixture.written && !r.fixture.mutated,
             Case::NoopStale => r.project_settled && r.noop_visible && r.stale_visible && r.fixture.mutated && !r.fixture.written
-                && r.close_count == 1 && r.native_actions_returned == [false,true,true,false,true] && r.snapshots == 1,
+                && r.close_count == 1 && r.native_actions_returned == [false,true,false,true] && r.snapshots == 1,
             Case::PickerLoss => r.picker_witness.is_some() && r.project.is_none() && r.sessions.is_empty()
-                && r.native_actions_returned == [false,false,false,false,true] && r.loss_settled && r.close_count == 1,
+                && r.native_actions_returned == [false,false,false,true] && r.loss_settled && r.close_count == 1,
             Case::SaveLoss => r.project_settled && r.review_witness.is_some() && r.loss_settled && r.close_count == 1
-                && r.native_actions_returned == [false,true,true,false,true] && r.sessions[0].apply_requested == false,
+                && r.native_actions_returned == [false,true,false,true] && r.sessions[0].apply_requested == false,
         };
         if !common || !specific || r.fixture.verify(matches!(self.case,Case::FirstSave|Case::NoopStale)).is_err() { return None; }
         let sessions: Vec<_> = r.sessions.iter().map(|s| {
@@ -1326,8 +2146,12 @@ impl Observation {
         let report = json!({"schemaVersion":1,"sourceCommit":option_env!("GITHUB_SHA"),"runId":option_env!("GITHUB_RUN_ID"),
             "runAttempt":option_env!("GITHUB_RUN_ATTEMPT"),"case":self.case.name(),"instrumentedEngineeringApp":true,
             "shippingBinaryQualified":false,"distributionQualified":false,"methods":"eight-passive","actionsAvailable":false,
-            "native":{"projectCancelSettled":r.cancel_settled,"selectedPathMatched":r.selected_native && r.project_settled,
+            "native":{"projectCancelSettled":r.cancel_settled,"selectedPathMatched":r.project_settled && r.completion_selection.is_some_and(|s| s.succeeded(self.case.selected_id())),
+                "originalWindow":r.original_window.map(OriginalWindowSample::value),
                 "panelAttachments":r.panel_attached,"controlReturns":r.native_actions_returned,
+                "accessibilityTrustedWithoutPrompt":r.ax_trusted,"projectOpenInput":accessibility.map(OpenInputSample::value),
+                "projectOpenBinding":r.identity_binding.map(IdentitySample::value),
+                "projectCompletionSelection":r.completion_selection.map(CompletionSample::value),
                 "quitCancelKeptOriginalReview":r.quit_cancelled,"originalDocumentAndQuitSettled":r.originals_final},
             "saveSessions":sessions,"freshCoreReadback":self.case == Case::FirstSave && r.snapshots == 2,
             "syntheticFileReadback":r.file_readback,"staleMarkerWriterReturnedAndClosed":r.fixture.mutated,
@@ -1352,6 +2176,350 @@ fn assurance(v: &Value, basis: &str) -> bool { v["assurance"]["basis"] == basis 
         .iter().all(|k| v["assurance"][*k] == false) }
 fn format_valid(v: &Value) -> bool { v["valid"] == true && v["state"] == "format-valid" && v["issues"].as_array().is_some_and(Vec::is_empty)
     && v["requirements"].as_array().is_some_and(|r| r.len() <= 128 && r.iter().all(|r| r["state"] == "unknown")) && assurance(v,"schema-policy") }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecordedSelectionObject { FixtureRoot, CapturedApp, CapturedRelease, MetadataChanged, Different, Unavailable }
+impl RecordedSelectionObject {
+    fn label(self) -> &'static str { match self {
+        Self::FixtureRoot => "fixture-root-all5", Self::CapturedApp => "captured-app-all5",
+        Self::CapturedRelease => "captured-release-all5", Self::MetadataChanged => "captured-object-metadata-changed",
+        Self::Different => "different-object", Self::Unavailable => "unavailable",
+    }}
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelectionLocation { CurrentProject, CurrentApp, CurrentRelease, OtherCase, CaseCwd, CaseHome, CaseTmp,
+    NamespaceOther, OutsideNamespace, Unavailable }
+impl SelectionLocation {
+    fn label(self) -> &'static str { match self {
+        Self::CurrentProject => "current-project", Self::CurrentApp => "current-app", Self::CurrentRelease => "current-release",
+        Self::OtherCase => "other-case", Self::CaseCwd => "case-cwd", Self::CaseHome => "case-home", Self::CaseTmp => "case-tmp",
+        Self::NamespaceOther => "namespace-other", Self::OutsideNamespace => "outside-namespace", Self::Unavailable => "unavailable",
+    }}
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProjectSelectionSample { custody: InstalledMacSelectionCustody, object: RecordedSelectionObject, location: SelectionLocation }
+impl ProjectSelectionSample {
+    fn from_data(data: Option<&InstalledMacProjectSelectionData>, returned: &Project, case: Case, fixture: &Fixture) -> Self {
+        let (custody, identity, selected) = data.map_or((InstalledMacSelectionCustody::Unavailable, None, None),
+            |data| data.for_result(case.selected_id(), returned));
+        Self { custody, object: selection_recorded_object(identity, &fixture.root_identity, &fixture.app_identity, fixture.release.as_ref()),
+            location: selection_location(selected, &fixture.root, case) }
+    }
+    fn value(self) -> Value {
+        json!({"custody":self.custody.label(), "recordedObject":self.object.label(), "lexicalLocation":self.location.label()})
+    }
+}
+fn selection_recorded_object(identity: Option<[u64; 5]>, root: &[u64; 6], app: &[u64; 6], release: Option<&[u64; 6]>) -> RecordedSelectionObject {
+    let Some(identity) = identity else { return RecordedSelectionObject::Unavailable; };
+    for (captured, matched) in [(Some(root), RecordedSelectionObject::FixtureRoot), (Some(app), RecordedSelectionObject::CapturedApp),
+        (release, RecordedSelectionObject::CapturedRelease)] {
+        let Some(captured) = captured else { continue; };
+        if identity[..2] == captured[..2] {
+            // Exactly dev/ino/mode/uid/gid. The captured nlink at index5 has no
+            // registry counterpart, and a metadata change is not a new object.
+            return if identity[..] == captured[..5] { matched } else { RecordedSelectionObject::MetadataChanged };
+        }
+    }
+    RecordedSelectionObject::Different
+}
+fn selection_location(selected: Option<&Path>, root: &Path, case: Case) -> SelectionLocation {
+    let Some(selected) = selected.filter(|path| installed_macos_selection_path_bounded(path)) else { return SelectionLocation::Unavailable; };
+    if !installed_macos_selection_path_bounded(root) || root.file_name() != Some(OsStr::new(case.name())) { return SelectionLocation::Unavailable; }
+    let Some(namespace) = root.parent().filter(|path| *path != Path::new("/")) else { return SelectionLocation::Unavailable; };
+    // Only fixed roles within the already bound fixture namespace. Component
+    // comparisons do not treat lookalike prefixes or aliases as this location.
+    if selected == root { return SelectionLocation::CurrentProject; }
+    if selected == root.join("app").as_path() { return SelectionLocation::CurrentApp; }
+    if selected == root.join("release").as_path() { return SelectionLocation::CurrentRelease; }
+    for other in [Case::FirstSave, Case::NoopStale, Case::PickerLoss, Case::SaveLoss] {
+        if other != case && selected.starts_with(namespace.join(other.name())) { return SelectionLocation::OtherCase; }
+    }
+    let cwd = namespace.join("state").join(case.name());
+    if selected == cwd.as_path() { return SelectionLocation::CaseCwd; }
+    if selected.starts_with(cwd.join("home")) { return SelectionLocation::CaseHome; }
+    if selected.starts_with(cwd.join("tmp")) { return SelectionLocation::CaseTmp; }
+    if selected.starts_with(namespace) { SelectionLocation::NamespaceOther } else { SelectionLocation::OutsideNamespace }
+}
+fn project_selection_failure_reason(reason: &str) -> bool {
+    matches!(reason, "project-result-path" | "project-result-path-app-child" | "project-result-path-descendant"
+        | "project-result-path-ancestor" | "project-result-path-sibling" | "project-result-path-tmp-spelling" | "project-result-path-data-spelling")
+}
+fn latch_project_selection(first: &AtomicU8, failed: &AtomicBool, detail: &mut Option<ProjectSelectionSample>, reason: &'static str, sample: ProjectSelectionSample) {
+    // The caller holds Record until both publications are complete. No second
+    // detail atomic, diagnostic writer, or independent first-winner decision.
+    if latch_failure(first, failed, reason) && project_selection_failure_reason(reason) { *detail = Some(sample); }
+}
+
+fn project_selection_data_checks() -> bool {
+    if !installed_macos_selection_saved_data_checks() { return false; }
+    let root = [7, 100, 0o40700, 501, 20, 3];
+    let app = [7, 101, 0o40700, 501, 20, 2];
+    let release = [7, 102, 0o40755, 501, 20, 2];
+    let first5 = |identity: [u64; 6]| [identity[0], identity[1], identity[2], identity[3], identity[4]];
+    for (identity, expected) in [(Some(first5(root)), RecordedSelectionObject::FixtureRoot),
+        (Some(first5(app)), RecordedSelectionObject::CapturedApp), (Some(first5(release)), RecordedSelectionObject::CapturedRelease),
+        (Some([7, 999, 0o40700, 501, 20]), RecordedSelectionObject::Different), (None, RecordedSelectionObject::Unavailable)] {
+        if selection_recorded_object(identity, &root, &app, Some(&release)) != expected { return false; }
+    }
+    for captured in [root, app, release] {
+        for index in 2..5 {
+            let mut changed = first5(captured); changed[index] += 1;
+            if selection_recorded_object(Some(changed), &root, &app, Some(&release)) != RecordedSelectionObject::MetadataChanged { return false; }
+        }
+    }
+    let mut changed_links = root; changed_links[5] = u64::MAX;
+    if selection_recorded_object(Some(first5(root)), &changed_links, &app, None) != RecordedSelectionObject::FixtureRoot
+        || selection_recorded_object(Some(first5(release)), &root, &app, None) != RecordedSelectionObject::Different
+        || selection_recorded_object(Some([8, 100, 0o40700, 501, 20]), &root, &app, None) != RecordedSelectionObject::Different { return false; }
+    let path = Path::new("/private/tmp/mrk-selection-data/first-save");
+    for (selected, expected) in [
+        ("/private/tmp/mrk-selection-data/first-save", SelectionLocation::CurrentProject),
+        ("/private/tmp/mrk-selection-data/first-save/app", SelectionLocation::CurrentApp),
+        ("/private/tmp/mrk-selection-data/first-save/release", SelectionLocation::CurrentRelease),
+        ("/private/tmp/mrk-selection-data/noop-stale/app", SelectionLocation::OtherCase),
+        ("/private/tmp/mrk-selection-data/picker-loss", SelectionLocation::OtherCase),
+        ("/private/tmp/mrk-selection-data/save-loss", SelectionLocation::OtherCase),
+        ("/private/tmp/mrk-selection-data/state/first-save", SelectionLocation::CaseCwd),
+        ("/private/tmp/mrk-selection-data/state/first-save/home", SelectionLocation::CaseHome),
+        ("/private/tmp/mrk-selection-data/state/first-save/home/nested", SelectionLocation::CaseHome),
+        ("/private/tmp/mrk-selection-data/state/first-save/tmp/nested", SelectionLocation::CaseTmp),
+        ("/private/tmp/mrk-selection-data/state/first-save/home-other", SelectionLocation::NamespaceOther),
+        ("/private/tmp/mrk-selection-data/noop-stale-other", SelectionLocation::NamespaceOther),
+        ("/private/tmp/mrk-selection-data/state/noop-stale/home", SelectionLocation::NamespaceOther),
+        ("/private/tmp/mrk-selection-data/first-save/app/nested", SelectionLocation::NamespaceOther),
+        ("/private/tmp/mrk-selection-data", SelectionLocation::NamespaceOther),
+        ("/private/tmp/mrk-selection-data-other/first-save", SelectionLocation::OutsideNamespace),
+        ("/tmp/mrk-selection-data/first-save", SelectionLocation::OutsideNamespace),
+        ("/System/Volumes/Data/private/tmp/mrk-selection-data/first-save", SelectionLocation::OutsideNamespace),
+        ("/unrelated/private-location", SelectionLocation::OutsideNamespace),
+        ("relative", SelectionLocation::Unavailable), ("/bad/../path", SelectionLocation::Unavailable),
+        ("/bad//path", SelectionLocation::Unavailable), ("/bad/path/", SelectionLocation::Unavailable),
+    ] {
+        if selection_location(Some(Path::new(selected)), path, Case::FirstSave) != expected { return false; }
+    }
+    if selection_location(None, path, Case::FirstSave) != SelectionLocation::Unavailable
+        || selection_location(Some(path), path, Case::NoopStale) != SelectionLocation::Unavailable { return false; }
+    // Unequal spelling of the same recorded object and an unrelated object
+    // stay distinct; neither removes the original lexical failure.
+    let alias = Path::new("/tmp/mrk-selection-data/first-save");
+    let same_object = ProjectSelectionSample { custody: InstalledMacSelectionCustody::Bound,
+        object: selection_recorded_object(Some(first5(root)), &root, &app, None), location: selection_location(Some(alias), path, Case::FirstSave) };
+    let different = ProjectSelectionSample { object: RecordedSelectionObject::Different, ..same_object };
+    if same_object == different || project_path_mismatch_reason(alias, path) != "project-result-path-tmp-spelling" { return false; }
+    for first_reason in FAILURE_REASONS {
+        let first = AtomicU8::new(0); let failed = AtomicBool::new(false); let mut detail = None;
+        latch_project_selection(&first, &failed, &mut detail, *first_reason, same_object);
+        let expected = project_selection_failure_reason(first_reason).then_some(same_object);
+        if detail != expected || !failed.load(Ordering::SeqCst) || first_failure_reason(&first) != Some(*first_reason) { return false; }
+        latch_project_selection(&first, &failed, &mut detail, "project-result-path", different);
+        latch_failure(&first, &failed, "observer-deadline");
+        if detail != expected || first_failure_reason(&first) != Some(*first_reason) { return false; }
+    }
+    true
+}
+
+// Same selected-result/snapshot predicates, in their original order. Only a
+// closed site label leaves these pure classifiers; never the supplied data.
+fn project_path_mismatch_reason(actual: &Path, expected: &Path) -> &'static str {
+    // Called only after the original path inequality already refused this
+    // result. Relationships are lexical DATA, never object equivalence or a
+    // replacement selection. No path, suffix or supplied name leaves here.
+    const OTHER: &str = "project-result-path";
+    let (Some(actual_text), Some(expected_text)) = (actual.to_str(), expected.to_str()) else { return OTHER; };
+    let bounded = |text: &str| text.len() <= crate::asset_source::PATH_LIMIT && text.starts_with('/')
+        && !text.as_bytes().contains(&0) && (text == "/" || text[1..].split('/').all(|part|
+            !part.is_empty() && part != "." && part != ".." && part.len() <= 255));
+    if !bounded(actual_text) || !bounded(expected_text) || actual == expected { return OTHER; }
+    if let Ok(relative) = actual.strip_prefix(expected) {
+        if relative == Path::new("app") { return "project-result-path-app-child"; }
+        return "project-result-path-descendant";
+    }
+    if expected.starts_with(actual) { return "project-result-path-ancestor"; }
+    if actual.parent() == expected.parent() { return "project-result-path-sibling"; }
+    if expected_text.strip_prefix("/private/tmp/").is_some_and(|suffix| actual_text.strip_prefix("/tmp/") == Some(suffix)) {
+        return "project-result-path-tmp-spelling";
+    }
+    if actual_text.strip_prefix("/System/Volumes/Data") == Some(expected_text) { return "project-result-path-data-spelling"; }
+    OTHER
+}
+fn selected_project_failure(step: Step, already_selected: bool, project: &Project,
+    expected_path: &Path, expected_name: &str) -> Option<&'static str> {
+    if !matches!(step, Step::OpenProject | Step::ProjectSettled) || already_selected { return Some("project-result-order"); }
+    if Path::new(&project.path) != expected_path { return Some(project_path_mismatch_reason(Path::new(&project.path), expected_path)); }
+    if project.name != expected_name { return Some("project-result-name"); }
+    if !crate::protocol::valid_id(&project.id) { return Some("project-result-id"); }
+    None
+}
+fn snapshot_error_reason(code: &str) -> &'static str {
+    // BridgeError contains arbitrary strings. Do not format or copy one into a
+    // diagnostic, including when it resembles an allowed observer reason.
+    match code {
+        "runtime_unavailable" => "snapshot-error-runtime", "protocol_error" => "snapshot-error-protocol",
+        "invalid_request" => "snapshot-error-invalid", "shutting_down" => "snapshot-error-shutdown",
+        "query_timeout" => "snapshot-error-timeout", "cleanup_unknown" => "snapshot-error-cleanup",
+        "busy" => "snapshot-error-busy", "unavailable" => "snapshot-error-unavailable",
+        "unknown_project" => "snapshot-error-project", "output_limit" => "snapshot-error-limit",
+        "io_error" => "snapshot-error-io", "engine_failed" => "snapshot-error-engine",
+        _ => "snapshot-error-other",
+    }
+}
+fn snapshot_value_failure(v: &Value, expected_path: &Path, saved: bool, base: &Value) -> Option<&'static str> {
+    let config = &v["config"]; let hints = &v["discovery"]["hints"];
+    if v["root"].as_str() != expected_path.to_str() { return Some("snapshot-value-root"); }
+    if v["observationScope"] != "single-request-non-atomic" { return Some("snapshot-value-scope"); }
+    if config["path"] != "release/mobile-release.json" { return Some("snapshot-config-path"); }
+    if !assurance(v, "static-text") { return Some("snapshot-value-assurance"); }
+    if !v["issues"].as_array().is_some_and(Vec::is_empty) { return Some("snapshot-value-issues"); }
+    if !(hints["android"]["applicationId"] == APP_ID && hints["android"]["module"] == ":app"
+        && hints["android"]["buildFile"] == "app/build.gradle.kts") { return Some("snapshot-hints-android"); }
+    if !(hints["versionSource"] == "version.properties" && hints["versionNameKey"] == "VERSION_NAME"
+        && hints["versionBuildKey"] == "BUILD_NUMBER") { return Some("snapshot-hints-version"); }
+    if !(v["discovery"]["partial"] == false && v["discovery"]["state"] == "unverified") { return Some("snapshot-discovery-state"); }
+    if saved {
+        if config["state"] != "format-valid" { return Some("snapshot-config-state"); }
+        if config["data"] != *base { return Some("snapshot-config-data"); }
+        if config["content"] != json!({"bytes":CONFIG.len(), "sha256":digest(CONFIG)}) { return Some("snapshot-config-content"); }
+        if !config["issues"].as_array().is_some_and(Vec::is_empty) { return Some("snapshot-config-issues"); }
+    } else {
+        if config["state"] != "missing" { return Some("snapshot-config-state"); }
+        if !config["data"].is_null() { return Some("snapshot-config-data"); }
+        if !config["content"].is_null() { return Some("snapshot-config-content"); }
+        if !config["issues"].as_array().is_some_and(|issues| issues.len() == 1 && issues[0]["code"] == "config.missing") {
+            return Some("snapshot-config-issues");
+        }
+    }
+    None
+}
+fn project_snapshot_failure_data_checks() -> bool {
+    // Fixed synthetic values exercise only the classifiers. No native call,
+    // Observation, writer, process, filesystem probe or ownership is created.
+    if !project_path_mismatch_data_checks() { return false; }
+    let root = Path::new("/synthetic/first-save");
+    let mut project = Project { id: "project-1".into(), name: "first-save".into(), path: "/synthetic/first-save".into() };
+    for step in [Step::OpenProject, Step::ProjectSettled] {
+        if selected_project_failure(step, false, &project, root, "first-save").is_some()
+            || selected_project_failure(step, true, &project, root, "first-save") != Some("project-result-order") { return false; }
+    }
+    for step in [Step::ChooseProject, Step::Dashboard, Step::Snapshot] {
+        if selected_project_failure(step, false, &project, root, "first-save") != Some("project-result-order") { return false; }
+    }
+    project.path = "/synthetic/other".into(); project.name = "other".into(); project.id = "invalid id".into();
+    if selected_project_failure(Step::ProjectSettled, true, &project, root, "first-save") != Some("project-result-order")
+        || selected_project_failure(Step::ProjectSettled, false, &project, root, "first-save") != Some("project-result-path-sibling") { return false; }
+    project.path = "/synthetic/first-save".into();
+    if selected_project_failure(Step::ProjectSettled, false, &project, root, "first-save") != Some("project-result-name") { return false; }
+    project.name = "first-save".into();
+    if selected_project_failure(Step::ProjectSettled, false, &project, root, "first-save") != Some("project-result-id") { return false; }
+    for (code, expected) in [
+        ("runtime_unavailable", "snapshot-error-runtime"), ("protocol_error", "snapshot-error-protocol"),
+        ("invalid_request", "snapshot-error-invalid"), ("shutting_down", "snapshot-error-shutdown"),
+        ("query_timeout", "snapshot-error-timeout"), ("cleanup_unknown", "snapshot-error-cleanup"),
+        ("busy", "snapshot-error-busy"), ("unavailable", "snapshot-error-unavailable"),
+        ("unknown_project", "snapshot-error-project"), ("output_limit", "snapshot-error-limit"),
+        ("io_error", "snapshot-error-io"), ("engine_failed", "snapshot-error-engine"),
+        ("", "snapshot-error-other"), ("untrusted-private-code", "snapshot-error-other"),
+        ("observer-deadline", "snapshot-error-other"), ("snapshot-error-runtime", "snapshot-error-other"),
+    ] {
+        let error = BridgeError::new(code, "untrusted-private-message");
+        if snapshot_error_reason(&error.code) != expected { return false; }
+    }
+    let Ok(base) = crate::protocol::strict_json(CONFIG) else { return false; };
+    let mutations: &[(&[&str], Value, &str)] = &[
+        (&["root"], json!("/synthetic/other"), "snapshot-value-root"),
+        (&["observationScope"], Value::Null, "snapshot-value-scope"),
+        (&["config", "path"], Value::Null, "snapshot-config-path"),
+        (&["assurance", "writesPerformed"], json!(true), "snapshot-value-assurance"),
+        (&["issues"], json!([{}]), "snapshot-value-issues"),
+        (&["discovery", "hints", "android", "applicationId"], Value::Null, "snapshot-hints-android"),
+        (&["discovery", "hints", "versionSource"], Value::Null, "snapshot-hints-version"),
+        (&["discovery", "partial"], json!(true), "snapshot-discovery-state"),
+        (&["config", "state"], Value::Null, "snapshot-config-state"),
+        (&["config", "data"], json!(false), "snapshot-config-data"),
+        (&["config", "content"], json!(false), "snapshot-config-content"),
+        (&["config", "issues"], json!(false), "snapshot-config-issues"),
+        (&["config"], Value::Null, "snapshot-config-path"),
+        (&["discovery"], json!([]), "snapshot-hints-android"),
+    ];
+    for saved in [false, true] {
+        let value = json!({"root":"/synthetic/first-save", "observationScope":"single-request-non-atomic",
+            "config":{"path":"release/mobile-release.json", "state":if saved { "format-valid" } else { "missing" },
+                "data":if saved { base.clone() } else { Value::Null },
+                "content":if saved { json!({"bytes":CONFIG.len(),"sha256":digest(CONFIG)}) } else { Value::Null },
+                "issues":if saved { json!([]) } else { json!([{"code":"config.missing"}]) }},
+            "discovery":{"state":"unverified", "partial":false, "hints":{
+                "android":{"applicationId":APP_ID, "module":":app", "buildFile":"app/build.gradle.kts"},
+                "versionSource":"version.properties", "versionNameKey":"VERSION_NAME", "versionBuildKey":"BUILD_NUMBER"}},
+            "assurance":{"basis":"static-text", "releaseReadiness":"unknown", "projectCodeExecuted":false,
+                "toolsProbed":false, "credentialsRead":false, "gitObserved":false, "storeContacted":false, "writesPerformed":false}, "issues":[]});
+        if snapshot_value_failure(&value, root, saved, &base).is_some() { return false; }
+        for (path, replacement, expected) in mutations {
+            let mut changed = value.clone(); let mut field = &mut changed;
+            for key in *path { field = &mut field[*key]; }
+            *field = replacement.clone();
+            if snapshot_value_failure(&changed, root, saved, &base) != Some(*expected) { return false; }
+        }
+        for (field, expected) in [("config", "snapshot-config-path"), ("discovery", "snapshot-hints-android")] {
+            let mut missing = value.clone(); let Some(object) = missing.as_object_mut() else { return false; };
+            object.remove(field);
+            if snapshot_value_failure(&missing, root, saved, &base) != Some(expected) { return false; }
+        }
+        let mut changed = value.clone(); changed["root"] = json!("/synthetic/other"); changed["observationScope"] = Value::Null;
+        if snapshot_value_failure(&changed, root, saved, &base) != Some("snapshot-value-root") { return false; }
+    }
+    true
+}
+
+fn project_path_mismatch_data_checks() -> bool {
+    // Synthetic lexical inputs only; these names are never opened or selected.
+    let root = Path::new("/private/tmp/mrk-path-data/first-save");
+    let good = Project { id: "project-1".into(), name: "first-save".into(), path: "/private/tmp/mrk-path-data/first-save".into() };
+    for step in [Step::OpenProject, Step::ProjectSettled] {
+        if selected_project_failure(step, false, &good, root, "first-save").is_some() { return false; }
+    }
+    for (path, expected) in [
+        ("/private/tmp/mrk-path-data/first-save/app", "project-result-path-app-child"),
+        ("/private/tmp/mrk-path-data/first-save/app/nested", "project-result-path-descendant"),
+        ("/private/tmp/mrk-path-data/first-save/apple", "project-result-path-descendant"),
+        ("/private/tmp/mrk-path-data", "project-result-path-ancestor"),
+        ("/", "project-result-path-ancestor"),
+        ("/private/tmp/mrk-path-data/noop-stale", "project-result-path-sibling"),
+        ("/private/tmp/mrk-path-data/first-save-more", "project-result-path-sibling"),
+        ("/tmp/mrk-path-data/first-save", "project-result-path-tmp-spelling"),
+        ("/System/Volumes/Data/private/tmp/mrk-path-data/first-save", "project-result-path-data-spelling"),
+        ("/private/tmp/mrk-path", "project-result-path"),
+        ("/tmp/mrk-path-data/first-save-more", "project-result-path"),
+        ("/tmp/another-namespace/first-save", "project-result-path"),
+        ("/System/Volumes/DataExtra/private/tmp/mrk-path-data/first-save", "project-result-path"),
+        ("/System/Volumes/Data/private/tmp/mrk-path-data/first-save-more", "project-result-path"),
+        ("/unrelated/other", "project-result-path"),
+        ("relative/first-save", "project-result-path"),
+        ("", "project-result-path"),
+        ("/private/tmp/mrk-path-data/first-save/../app", "project-result-path"),
+        ("/private/tmp/mrk-path-data/first-save/./app", "project-result-path"),
+        ("/private/tmp/mrk-path-data/first-save//app", "project-result-path"),
+        ("/private/tmp/mrk-path-data/first-save/app/", "project-result-path"),
+        ("/private/tmp/mrk-path-data/first-save/\0app", "project-result-path"),
+    ] {
+        // Path still wins over the later name/id failures, but never over the
+        // original phase/duplicate guard. No category can become acceptance.
+        let project = Project { id: "invalid id".into(), name: "untrusted-name".into(), path: path.into() };
+        for step in [Step::OpenProject, Step::ProjectSettled] {
+            if selected_project_failure(step, false, &project, root, "first-save") != Some(expected)
+                || selected_project_failure(step, true, &project, root, "first-save") != Some("project-result-order") { return false; }
+        }
+        if selected_project_failure(Step::Dashboard, false, &project, root, "first-save") != Some("project-result-order") { return false; }
+    }
+    let oversized = "/private/tmp/mrk-path-data/first-save/".to_owned() + &"x".repeat(crate::asset_source::PATH_LIMIT);
+    let long_component = "/private/tmp/mrk-path-data/first-save/".to_owned() + &"x".repeat(256);
+    if project_path_mismatch_reason(Path::new(&oversized), root) != "project-result-path"
+        || project_path_mismatch_reason(Path::new(&long_component), root) != "project-result-path"
+        || project_path_mismatch_reason(root, Path::new("relative/expected")) != "project-result-path"
+        || project_path_mismatch_reason(root, root) != "project-result-path" { return false; }
+    use std::os::unix::ffi::OsStrExt;
+    if project_path_mismatch_reason(Path::new(OsStr::from_bytes(b"/private/tmp/mrk-path-data/first-save/\xff")), root)
+        != "project-result-path" { return false; }
+    true
+}
 
 // Synchronous expressions operate only existing production controls. No direct
 // invoke/reducer access, DTO injection, synthetic event, Promise or hidden UI.
@@ -1504,6 +2672,180 @@ fn route() -> Option<(PathBuf,u32)> {
 
 // Pure regression checks in the already-required instrumented native entry.
 // These do not call AppKit, acquire files, dispatch actions, or supply receipts.
+fn native_recheck_data_check() -> bool {
+    use mrk_macos_installed_native::{ControlContainerButtonProof, IdentityBinding, OpenDiagnostic, OpenReport};
+    let proof = IdentityBinding { attempted: true, parent: Some("match"), panel: Some("match"), checks: [Some(true); 12],
+        children: Some(1), originals: Some("one"), site: "complete", error: "none" };
+    let button = ControlContainerButtonProof { checks: [true; 7], calls: 101, initial_nodes_examined: 4, recheck_nodes_examined: 4,
+        last_role: "Button", last_depth: 2,
+        cf_slots: 60, cf_slots_retired: 60, cleanup_returned: true, ax_error: 0 };
+    let report = OpenReport { diagnostic: OpenDiagnostic { site: "press", error: "none" }, attempted: true,
+        press_returned: true, triggered: Some(true), custody_known: true, initial_proof: Some(proof), proof: Some(proof),
+        prompt: [Some(true); 2], button };
+    let full = OpenInputSample { id: 2, prepared: true, requested: true, dispatch_attempted: true, state: "retired",
+        entered: Some(true), native_entered: Some(true), returned: true, joined: true, retired: true, expired: false,
+        timely: Some(true), custody_known: Some(true), attempted: Some(true), press_returned: Some(true), triggered: Some(true),
+        worker_registered: true, worker_joined: true, rechecks_settled: Some(true),
+        diagnostic: Some(report.diagnostic), report: Some(report) };
+    let value = full.value();
+    if !full.succeeded() || value.get("confirmReturned").is_some()
+        || value["mechanism"] != "accessibility-preconfigured-original-press-v5"
+        || value.get("rowSelection").is_some() || value.get("selectedTarget").is_some()
+        || value["promptButton"]["initialNodesExamined"] != 4 || value["promptButton"]["recheckNodesExamined"] != 4
+        || value["promptButton"]["lastRole"] != "Button" || value["promptButton"]["lastDepth"] != 2
+        || value["promptButton"].get("directChildrenExamined").is_some()
+        || value["promptButton"].get("nodes").is_some()
+        || value["promptButton"]["checks"].get("completeSearch").is_some()
+        || value["promptButton"]["checks"]["completeControlProjection"] != true
+        || value["promptButton"]["checks"]["uniquePromptButton"] != true
+        || value["promptButton"]["checks"]["sameOriginalControlPathRechecked"] != true { return false; }
+    let mutations: [fn(&mut OpenInputSample); 15] = [|s| s.expired = true, |s| s.timely = Some(false),
+        |s| s.joined = false, |s| s.returned = false, |s| s.entered = None, |s| s.native_entered = Some(false),
+        |s| s.retired = false, |s| s.state = "unknown", |s| s.custody_known = Some(false),
+        |s| s.requested = false, |s| s.dispatch_attempted = false, |s| s.report = None,
+        |s| s.worker_registered = false, |s| s.worker_joined = false, |s| s.rechecks_settled = None];
+    for mutation in mutations { let mut failed = full; mutation(&mut failed); if failed.succeeded() { return false; } }
+    for report in [OpenReport { triggered: Some(false), ..report }, OpenReport { press_returned: false, ..report },
+        OpenReport { custody_known: false, ..report }, OpenReport { proof: None, ..report },
+        OpenReport { initial_proof: None, ..report }, OpenReport { prompt: [Some(true), Some(false)], ..report },
+        OpenReport { button: ControlContainerButtonProof { cleanup_returned: false, ..button }, ..report },
+        OpenReport { button: ControlContainerButtonProof { initial_nodes_examined: 0, ..button }, ..report },
+        OpenReport { button: ControlContainerButtonProof { recheck_nodes_examined: 17, ..button }, ..report },
+        OpenReport { button: ControlContainerButtonProof { last_role: "Group", ..button }, ..report },
+        OpenReport { button: ControlContainerButtonProof { last_depth: 9, ..button }, ..report },
+        OpenReport { button: ControlContainerButtonProof { checks: [true, true, true, true, true, true, false], ..button }, ..report },
+        OpenReport { button: ControlContainerButtonProof { checks: [true, true, true, false, false, false, false], ..button }, ..report }] {
+        if (OpenInputSample { report: Some(report), ..full }).succeeded() { return false; }
+    }
+    // The exact live retirement predicate: an actual matching body receipt
+    // before worker completion cannot authorize join/barrier retirement.
+    for worker in [None, Some(OpenWorkerReturn::Body), Some(OpenWorkerReturn::NoGo),
+        Some(OpenWorkerReturn::ChannelClosed), Some(OpenWorkerReturn::Panicked)] {
+        for receipt in [false, true] { for settled in [None, Some(false), Some(true)] {
+            for known in [false, true] { for state in ["entered", "returned", "unknown"] {
+                let expected = worker == Some(OpenWorkerReturn::Body) && receipt && settled == Some(true) && known && state == "returned";
+                if worker_retirement_ready(worker, receipt, settled, known, state) != expected { return false; }
+            } }
+        } }
+    }
+    let unknown = full.reconciled(OpenProgress { state: "unknown", requested: true, dispatched: true,
+        entered: true, returned: true, joined: true, retired: true, expired: true });
+    if unknown.succeeded() || !unknown.joined || !unknown.retired || unknown.custody_known != Some(false)
+        || unknown.timely != Some(false) || unknown.report != full.report { return false; }
+    let mut baseline = OpenInputSample::preparing(2); baseline.prepared = true; baseline.requested(); baseline.worker_registered = true;
+    let progress = OpenProgress { state: "unknown", requested: true, dispatched: true, entered: true,
+        returned: true, joined: false, retired: false, expired: true };
+    let sample = baseline.reconciled(progress);
+    if !sample.dispatch_attempted || sample.entered != Some(true) || !sample.returned || sample.worker_joined
+        || sample.custody_known != Some(false) || sample.native_entered.is_some() || sample.report.is_some() { return false; }
+    // Channel DATA only: exercise the real one-shot handoff without a worker,
+    // sink, sleep or a fake completion/JoinHandle. Native runs own the actual one.
+    let writer = || {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        (DiagnosticWriter { sender, claim: AtomicU8::new(0), owner: Mutex::new(DiagnosticOwner { handle: None, returned: None }) }, receiver)
+    };
+    let (sink, receiver) = writer();
+    sink.submit(Some(b"first".to_vec())); sink.submit(Some(b"second".to_vec()));
+    if receiver.try_recv() != Ok(Some(b"first".to_vec())) || receiver.try_recv().is_ok()
+        || sink.available() || sink.finish(Instant::now()).is_some() { return false; }
+    for refused in [None, Some(vec![b'x'; 8449]), Some(vec![0xff])] {
+        let (sink, receiver) = writer(); sink.submit(refused); sink.submit(Some(b"later".to_vec()));
+        if receiver.try_recv() != Ok(None) || receiver.try_recv().is_ok() || sink.claim.load(Ordering::SeqCst) != 3 { return false; }
+    }
+    let (sink, receiver) = writer();
+    if sink.finish(Instant::now()).is_some() { return false; }
+    sink.submit(Some(b"post-stop".to_vec()));
+    if receiver.try_recv() != Ok(None) || receiver.try_recv().is_ok() || sink.claim.load(Ordering::SeqCst) != 2 { return false; }
+    true
+}
+fn original_window_witness_data_check() -> bool {
+    // Inert returned DATA/policy only; no Window, callback, native query or
+    // fabricated sample from this check is published as runtime evidence.
+    use mrk_macos_installed_native::OriginalWindowState;
+    let state = OriginalWindowState { application_present: true, active: true, main_present: true,
+        original_main: true, ordinary_window: true, no_attached_sheet: true };
+    let positive = OriginalWindowSample { native_returned: true, result: "ok", state: Some(state), admitted: false };
+    let negative = OriginalWindowSample { state: Some(OriginalWindowState { active: false, ..state }), ..positive };
+    let mut slot = None;
+    if original_window_needed(false, Step::Bootstrap, None, slot)
+        || original_window_needed(true, Step::Environment, None, slot)
+        || original_window_needed(true, Step::Bootstrap, Some(Pending::FailureClose), slot)
+        || !original_window_needed(true, Step::Bootstrap, None, slot) { return false; }
+    publish_original_window(&mut slot, negative, true, true, false);
+    if slot.is_some_and(|s| s.admitted || s.positive())
+        || !original_window_needed(true, Step::Bootstrap, None, slot) { return false; }
+    // A later natural callback may succeed; no second-focus/timer obligation.
+    publish_original_window(&mut slot, positive, true, true, false);
+    if !slot.is_some_and(|s| s.admitted && s.positive())
+        || original_window_needed(true, Step::Bootstrap, None, slot) { return false; }
+    let original = slot;
+    publish_original_window(&mut slot, negative, false, false, true);
+    if slot != original { return false; }
+    for (needed, timely, failed) in [(false, true, false), (true, false, false),
+        (true, true, true), (true, false, true)] {
+        let mut refused = None;
+        publish_original_window(&mut refused, positive, needed, timely, failed);
+        if !refused.is_some_and(|s| s.positive() && !s.admitted) { return false; }
+    }
+    for (native_returned, result) in [(false, "accessor-error"), (true, "entry-refused"),
+        (true, "native-error"), (true, "invalid-return")] {
+        let mut refused = None;
+        publish_original_window(&mut refused,
+            OriginalWindowSample { native_returned, result, state: None, admitted: false }, true, true, false);
+        if !refused.is_some_and(|s| !s.admitted && !s.positive()) { return false; }
+    }
+    let first = AtomicU8::new(0); let failed = AtomicBool::new(false);
+    latch_failure(&first, &failed, "observer-deadline");
+    let mut refused = None;
+    publish_original_window(&mut refused, positive, true, true, failed.load(Ordering::SeqCst));
+    refused.is_some_and(|s| !s.admitted) && failed.load(Ordering::SeqCst)
+        && first_failure_reason(&first) == Some("observer-deadline")
+}
+fn completion_ownership_data_check() -> bool {
+    use mrk_macos_installed_native::{CompletionReturn, CompletionSelection};
+    // Inert saved DATA, not a native callback/return or a substitute owner.
+    let facts = CompletionSelection { callback_entered: true, urls_read_entered: true, urls_read_returned: true,
+        callback_returned: true, duplicate: false, native_unknown: false, response: Some("accept"), selection: Some("match") };
+    let returned = CompletionReturn { poll_result: "responded", facts: Some(facts) };
+    let mut slot = None;
+    if publish_completion(&mut slot, Case::FirstSave, 2, returned, true).is_err()
+        || !slot.is_some_and(|s| s.succeeded(2) && !s.succeeded(1)) { return false; }
+    let original = slot;
+    for (case, id) in [(Case::FirstSave, 1), (Case::FirstSave, 3), (Case::PickerLoss, 1)] {
+        let mut unbound = None;
+        if publish_completion(&mut unbound, case, id, returned, true) != Err("native-completion-custody")
+            || unbound.is_some() { return false; }
+    }
+    if publish_completion(&mut slot, Case::FirstSave, 2, returned, false) != Err("native-completion-custody")
+        || slot != original { return false; }
+    let mut late = None;
+    if publish_completion(&mut late, Case::FirstSave, 2, returned, false).is_err()
+        || !late.is_some_and(|s| s.returned == returned && !s.succeeded(2)) { return false; }
+    for selection in [None, Some("empty"), Some("malformed"), Some("multiple"), Some("different"), Some("ordinary-path-disagreement")] {
+        let failed = CompletionReturn { facts: Some(CompletionSelection { selection, ..facts }), ..returned };
+        let mut saved = None;
+        if publish_completion(&mut saved, Case::FirstSave, 2, failed, true).is_err()
+            || !saved.is_some_and(|s| !s.succeeded(2) && s.returned.facts.is_some_and(|f| !f.native_unknown)) { return false; }
+    }
+    for facts in [CompletionSelection { urls_read_entered: false, urls_read_returned: false, selection: None, native_unknown: true, ..facts },
+        CompletionSelection { urls_read_returned: false, selection: None, native_unknown: true, ..facts },
+        CompletionSelection { selection: None, native_unknown: true, ..facts },
+        CompletionSelection { duplicate: true, native_unknown: true, ..facts },
+        CompletionSelection { selection: Some("different"), native_unknown: true, ..facts }] {
+        let failed = CompletionReturn { poll_result: "error", facts: Some(facts) };
+        let mut saved = None;
+        if publish_completion(&mut saved, Case::FirstSave, 2, failed, true).is_err()
+            || !saved.is_some_and(|s| !s.succeeded(2) && s.value()["facts"]["nativeUnknown"] == true
+                && s.value()["pollResult"] == "error" && s.value()["pollReturned"] == true) { return false; }
+    }
+    for failed in [CompletionReturn { facts: None, ..returned }, CompletionReturn { poll_result: "showing", ..returned },
+        CompletionReturn { poll_result: "closed", ..returned }, CompletionReturn { poll_result: "error", ..returned }] {
+        if (CompletionSample { case: Case::FirstSave, id: 2, timely: true, returned: failed }).succeeded(2) { return false; }
+    }
+    let value = original.unwrap().value();
+    value["mechanism"] == "original-ok-singleton-selection-v1" && value["facts"]["selection"] == "match"
+        && value.get("rowSelection").is_none() && value.get("selectedTarget").is_none()
+}
 fn observer_data_checks() -> bool {
     use mrk_macos_installed_native::{PanelKind, PanelObservation, PanelResponse};
     crate::asset_session::assert_project_selection_gate_contract();
@@ -1512,7 +2854,29 @@ fn observer_data_checks() -> bool {
     let profile = crate::runtime::RuntimeConfig::packaged(PathBuf::from("/inert-mrk-profile-not-opened"));
     if !profile.project_selection_profile_available() || profile.project_path_selection_profile_available()
         || profile.evidence_selection_profile_available() { return false; }
-    if !mrk_macos_installed_native::installed_observation_flags_data_check() { return false; }
+    if !mrk_macos_installed_native::installed_observation_flags_data_check()
+        || !super::owned_macos::observation::open_release_data_check() || !native_recheck_data_check()
+        || !original_window_witness_data_check() || !completion_ownership_data_check() { return false; }
+    let mut prepared = OpenInputSample::preparing(2);
+    prepared.prepared = true;
+    if prepared.succeeded() || prepared.entered != Some(false) || prepared.attempted != Some(false) || prepared.returned { return false; }
+    prepared.requested();
+    if prepared.succeeded() || prepared.entered.is_some() || prepared.attempted.is_some() || prepared.press_returned.is_some()
+        || prepared.returned || prepared.retired { return false; }
+    for id in [1, 2] {
+        let mut pending = Some(Pending::Accessibility(id));
+        if !open_step_entry(pending, Step::OpenProject, id)
+            || retire_returned_open(&mut pending, Step::ProjectSettled, id)
+            || retire_returned_open(&mut pending, Step::OpenProject, 3 - id)
+            || pending != Some(Pending::Accessibility(id))
+            || !retire_returned_open(&mut pending, Step::OpenProject, id) || pending.is_some() { return false; }
+    }
+    for pending in [None, Some(Pending::Native(Step::OpenProject)), Some(Pending::Accessibility(0)),
+        Some(Pending::Accessibility(3)), Some(Pending::Close(Step::OpenProject)), Some(Pending::FailureClose)] {
+        let mut unchanged = pending;
+        if open_step_entry(unchanged, Step::OpenProject, 2) || retire_returned_open(&mut unchanged, Step::OpenProject, 2)
+            || unchanged != pending { return false; }
+    }
     let fresh = || ObservedPanel { id: 1, action_allowed: true, native: PanelObservation {
         kind: PanelKind::Project, started: true, attached: false, directory_bound: false,
         parent_present: true, panel_present: true, parent_references_panel: Some(false),
@@ -1522,14 +2886,23 @@ fn observer_data_checks() -> bool {
     }};
     for dismissed in [false, true] {
         let mut panel = fresh(); panel.native.dismissed = dismissed;
-        if panel_readiness(&panel, 1, false, false, false) != Ok(false) { return false; }
-        if panel_readiness(&panel, 1, false, true, false) != Err("native-attachment-lost") { return false; }
-        if panel_readiness(&panel, 1, false, false, true) != Err("native-preaction-history") { return false; }
+        if panel_readiness(&panel, 1, false, false, false, false) != Ok(false) { return false; }
+        if panel_readiness(&panel, 1, false, true, false, false) != Err("native-attachment-lost") { return false; }
+        if panel_readiness(&panel, 1, false, false, true, false) != Err("native-preaction-history") { return false; }
         panel.native.attached = true;
         panel.native.parent_references_panel = Some(true); panel.native.panel_references_parent = Some(true);
         panel.native.panel_visible = Some(true);
         let expected = if dismissed { Err("native-dismissed") } else { Ok(true) };
-        if panel_readiness(&panel, 1, false, false, false) != expected { return false; }
+        if panel_readiness(&panel, 1, false, false, false, false) != expected { return false; }
+    }
+    let mut preconfigured = fresh();
+    preconfigured.native.directory_bound = true; preconfigured.native.directory_returned = true;
+    for ready in [false, true] {
+        preconfigured.native.directory_ready = ready;
+        if panel_readiness(&preconfigured, 1, false, false, false, true) != Ok(false)
+            || panel_readiness(&preconfigured, 1, false, true, false, true) != Err("native-attachment-lost")
+            || panel_readiness(&preconfigured, 1, false, false, true, true) != Err("native-preaction-history")
+            || panel_readiness(&preconfigured, 1, false, false, false, false) != Err("native-preaction-history") { return false; }
     }
     let mutations: [fn(&mut ObservedPanel); 14] = [
         |p| p.id = 2, |p| p.native.kind = PanelKind::Quit, |p| p.native.started = false,
@@ -1541,17 +2914,16 @@ fn observer_data_checks() -> bool {
     ];
     for mutation in mutations {
         let mut panel = fresh(); mutation(&mut panel);
-        if panel_readiness(&panel, 1, false, false, false).is_ok() { return false; }
+        if panel_readiness(&panel, 1, false, false, false, false).is_ok() { return false; }
     }
-    for (step, original) in [(Step::CancelProject, 0), (Step::SetProject, 1), (Step::OpenProject, 2),
-        (Step::PickerPending, 1), (Step::QuitCancel, 3), (Step::Quit, 4)] {
-        let mut prior = [true; 5]; prior[original] = false;
-        if matches!(step, Step::SetProject | Step::OpenProject | Step::PickerPending) { prior[1] = false; prior[2] = false; }
+    for (step, original) in [(Step::CancelProject, 0), (Step::OpenProject, 1),
+        (Step::PickerPending, 1), (Step::QuitCancel, 2), (Step::Quit, 3)] {
+        let mut prior = [true; 4]; prior[original] = false;
         if same_panel_action_returned(step, &prior) != Ok(false) { return false; }
         prior[original] = true;
         if same_panel_action_returned(step, &prior) != Ok(true) { return false; }
     }
-    for pending in [None, Some(Pending::Native(Step::Quit)),
+    for pending in [None, Some(Pending::Native(Step::Quit)), Some(Pending::Accessibility(2)),
         Some(Pending::Dom(DomDispatch { step: Step::CancelProject, sequence: 1 })),
         Some(Pending::Close(Step::CancelProject)), Some(Pending::Reload), Some(Pending::FailureClose)] {
         let mut original = pending;
@@ -1573,7 +2945,7 @@ fn observer_data_checks() -> bool {
     }
     let first_dom = DomDispatch { step: Step::ChooseCancel, sequence: 1 };
     let next_dom = DomDispatch { sequence: 2, ..first_dom };
-    for pending in [None, Some(Pending::Native(first_dom.step)), Some(Pending::Close(first_dom.step)),
+    for pending in [None, Some(Pending::Native(first_dom.step)), Some(Pending::Close(first_dom.step)), Some(Pending::Accessibility(2)),
         Some(Pending::Reload), Some(Pending::FailureClose), Some(Pending::Dom(next_dom)),
         Some(Pending::Dom(DomDispatch { step: Step::ChooseProject, ..first_dom }))] {
         let mut unchanged = pending;
@@ -1606,7 +2978,7 @@ fn observer_data_checks() -> bool {
     let selected = Ok(Some(Project { id: "synthetic".into(), name: "synthetic".into(), path: "/synthetic".into() }));
     let error = Err(AssetError { code: "untrusted-supplied-code", message: "untrusted-supplied-message",
         retryable: true, ..AssetError::new(Reason::SourceRefused) });
-    for step in [Step::ChooseCancel, Step::ChooseProject, Step::SetProject] {
+    for step in [Step::ChooseCancel, Step::ChooseProject, Step::Snapshot] {
         if project_return_route(Case::FirstSave, step, false, false, false, &error) != Err("asset_source_refused") { return false; }
         for result in [&empty, &selected] {
             if project_return_route(Case::FirstSave, step, false, false, false, result) != Err("picker-unexpected-result") { return false; }
@@ -1635,6 +3007,8 @@ fn observer_data_checks() -> bool {
         || project_return_route(Case::PickerLoss, Step::PickerPending, false, false, false, &error) != Err("asset_source_refused")
         || project_return_route(Case::SaveLoss, Step::Lost, true, false, false, &error) != Err("asset_source_refused") { return false; }
 
+    if !project_selection_data_checks() { return false; }
+    if !project_snapshot_failure_data_checks() { return false; }
     // Every closed reason survives later generic cleanup/deadline failures.
     for reason in FAILURE_REASONS {
         if !reason.is_ascii() || reason.len() > 48 { return false; }
@@ -1653,6 +3027,21 @@ fn observer_data_checks() -> bool {
     }
     true
 }
+fn observe(q: &Arc<Observation>) -> Option<Vec<u8>> {
+    let trusted = mrk_macos_installed_native::installed_accessibility_trusted();
+    if trusted != Ok(true) {
+        q.fail_with(if trusted == Ok(false) { "native-ax-not-trusted" } else { "native-ax-trust" });
+        return None;
+    }
+    if let Some(mut r) = q.record() { r.ax_trusted = true; } else { return None; }
+    if !q.timely() { return None; }
+    // All original success/fixture validation and serialization finish BEFORE
+    // the idle diagnostic writer may be stopped at the common main exit.
+    let returned = super::run_builder(super::builder().manage(q.clone()));
+    let report = matches!(returned, Ok(0)).then(|| q.finish()).flatten()?;
+    let report = edit::bounded(&report, 16 * 1024 - 1).ok()?;
+    q.timely().then_some(report)
+}
 pub(crate) fn main() -> std::process::ExitCode {
     if !observer_data_checks() {
         super::diagnostic(b"MRK_MACOS_AQUA_FAILURE_REASON=observer-data-check\nMRK_MACOS_AQUA=failed\n");
@@ -1667,14 +3056,24 @@ pub(crate) fn main() -> std::process::ExitCode {
     let input = route().filter(|_| args.next().is_none()).and_then(|(root,uid)| Fixture::capture(root.join(case.name()),uid,case).ok())
         .and_then(|fixture| Observation::new(case,fixture).ok());
     let Some(q) = input.map(Arc::new) else { super::diagnostic(b"MRK_MACOS_AQUA=fixture-refused\n"); return std::process::ExitCode::FAILURE; };
-    // Routing is DATA only. The ordinary builder/core/installed selector still
-    // establish every runtime, native project, document and edit boundary.
-    let returned = super::run_builder(super::builder().manage(q.clone()));
-    let report = matches!(returned,Ok(0)).then(|| q.finish()).flatten();
-    let Some(report) = report.and_then(|v| edit::bounded(&v,16 * 1024 - 1).ok()) else {
-        q.fail(); q.report_failure(); super::diagnostic(b"MRK_MACOS_AQUA=failed\n"); return std::process::ExitCode::FAILURE;
-    };
-    if !q.timely() { q.report_failure(); return std::process::ExitCode::FAILURE; }
+    let report = observe(&q);
+    if report.is_none() { q.fail_with("observer-report-unavailable"); q.report_failure(); }
+    // One cleanup path for every post-construction return. Receipt submission
+    // never counts as writer return/join, nor does process containment.
+    let returned = q.diagnostic.finish(q.end);
+    let input_clear = q.open_custody.try_lock().map(|custody| custody.is_none()).unwrap_or(false);
+    if returned.is_none() || !input_clear {
+        // Even a JOINED diagnostic writer does not dispose of an unresolved
+        // input handle, queued-main receipt, native original or CF ledger.
+        // Preserve their exact common owner through process lifetime.
+        std::mem::forget(q);
+        return std::process::ExitCode::FAILURE;
+    }
+    let returned = returned.expect("diagnostic join observed above");
+    if returned != DiagnosticReturn::Stopped || !q.timely() { return std::process::ExitCode::FAILURE; }
+    let Some(report) = report else { return std::process::ExitCode::FAILURE; };
+    // A post-Stop deadline/output failure is truthfully unreported. No new
+    // writer, stderr fallback, receipt retry or success allowance is created.
     let mut out = std::io::stdout().lock();
     if out.write_all(b"MRK_MACOS_AQUA_RESULT=").and_then(|_| out.write_all(&report)).and_then(|_| out.write_all(b"\n"))
         .and_then(|_| out.flush()).is_ok() && q.timely() { std::process::ExitCode::SUCCESS } else { std::process::ExitCode::FAILURE }

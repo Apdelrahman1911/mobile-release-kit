@@ -100,9 +100,13 @@ validated final draft. It is not another file revision or mutation authority.
 
 ## Conservative ignore behavior
 
-The seven fixed `init_transaction.IGNORE_LINES` are the only permitted rules,
-including the three metadata-text transaction prerequisites. Configuration
-still has exactly its two writable destinations; metadata Save cannot add rules.
+The ten fixed `init_transaction.IGNORE_LINES` are the only permitted rules:
+the original evidence/init/metadata seven plus `.mobile-release-version-prepare/`,
+`.mobile-release-version/` and `.mobile-release-version-cleanup/`. Configuration
+still has exactly its two writable destinations; metadata or version Save cannot
+add rules. Metadata explicitly retains its original seven-rule proof; only the
+separate [saved-version VALUE writer](desktop-release-version-edit.md) requires
+all ten. These source changes do not enable that writer.
 Unprefixed or root-prefixed exact positive directory lines count as sufficient
 coverage. LF/optional preceding CR split patterns; leading spaces are meaningful.
 Any later syntactic negation (`!` in column zero) invalidates earlier proofs.

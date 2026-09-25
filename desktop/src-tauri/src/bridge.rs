@@ -3,7 +3,7 @@
 use std::{collections::BTreeMap, path::PathBuf, sync::{Arc, Mutex, atomic::{AtomicU32, Ordering}}};
 #[cfg(any(feature = "desktop-shell", all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
 use std::sync::atomic::AtomicU64;
-#[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos"))))]
+#[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos", target_os = "windows"))))]
 use std::path::Component;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -199,7 +199,7 @@ fn capabilities_cause_line(error: &BridgeError) -> &'static [u8] {
     }
 }
 
-struct RegisteredProject { view: Project, root: PathBuf, identity: Option<crate::asset_source::DirectoryIdentity> }
+struct RegisteredProject { view: Project, root: PathBuf, identity: Option<crate::asset_source::ProjectIdentity> }
 pub(crate) struct ProjectRoster { pub(crate) generation: u32, pub(crate) roots: Vec<crate::asset_source::RegisteredRoot> }
 
 pub struct DesktopBridge {
@@ -434,6 +434,24 @@ impl DesktopBridge {
         document.metadata_text_edit_admit(|bridge| bridge.edits.metadata_text_project(window, session_id), |bridge, registration|
             bridge.edits.apply_metadata_text(window, session_id, plan_token, registration))
     }
+    pub(crate) fn open_release_version_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::release_version_edit_commands::Open) -> Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus, BridgeError> {
+        let ticket = self.edits.release_version_open_ticket(window)?;
+        let selected = args.project_id.clone();
+        document.release_version_edit_admit(|_| Ok(selected), |bridge, registration|
+            bridge.edits.open_release_version(window, args.project_id, registration, ticket))
+    }
+    pub(crate) fn prepare_release_version_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::release_version_edit_protocol::PrepareReleaseVersionEdit) -> Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus, BridgeError> {
+        let session_id = args.session_id.clone();
+        document.release_version_edit_admit(|bridge| bridge.edits.release_version_project(window, &session_id), |bridge, registration|
+            bridge.edits.prepare_release_version(window, args, registration))
+    }
+    pub(crate) fn apply_release_version_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        session_id: &str, plan_token: &str) -> Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus, BridgeError> {
+        document.release_version_edit_admit(|bridge| bridge.edits.release_version_project(window, session_id), |bridge, registration|
+            bridge.edits.apply_release_version(window, session_id, plan_token, registration))
+    }
     /// Only called while the real DocumentBinding admission lock is held. No
     /// project method calls back into that lock. These are private native hints.
     pub(crate) fn native_roster(&self) -> Result<ProjectRoster, crate::asset_commands::AssetError> {
@@ -493,7 +511,7 @@ impl DesktopBridge {
         self.project_generation.store(next_generation, Ordering::SeqCst);
         Ok(project)
     }
-    #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos"))))]
+    #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos", target_os = "windows"))))]
     pub(crate) fn register_picked_project(&self, path: PathBuf) -> Result<Project, BridgeError> {
         self.preflight.ensure_idle()?;
         self.android_build.ensure_idle()?;

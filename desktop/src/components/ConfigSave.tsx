@@ -3,6 +3,7 @@ import { canApplyEdit, currentApplyBinding, editNotice, nativeReviewPath, native
 import type { ConfigEditState, EditApplyBinding } from '../configEdit.ts';
 import type { ProjectSession } from '../drafts.ts';
 import { valueSummary } from '../preparation.ts';
+import { savedSetupRevision } from '../setupGuidance.ts';
 import type { Catalog, HelpContent, PreparedConfigView } from '../types.ts';
 import { Badge, HelpButton, SectionHeading } from './Common.tsx';
 import { Icon } from './Icon.tsx';
@@ -62,10 +63,11 @@ interface SaveProps {
   onClose: () => void;
   onApply: (binding: EditApplyBinding) => boolean;
   onShowProject: (projectId: string) => void;
+  onReviewVersion: (projectId: string) => void;
   onHelp: (help: HelpContent) => void;
 }
 
-export function ConfigSave({ state, projects, catalog, selectedId, detailed, onCheck, onClose, onApply, onShowProject, onHelp }: SaveProps) {
+export function ConfigSave({ state, projects, catalog, selectedId, detailed, onCheck, onClose, onApply, onShowProject, onReviewVersion, onHelp }: SaveProps) {
   const [confirmation, setConfirmation] = useState<EditApplyBinding | null>(null);
   const attempt = state.attempt;
   const owner = state.unknownEvidence ?? attempt?.projection ?? state.status?.active ?? state.status?.lastTerminal ?? null;
@@ -81,6 +83,7 @@ export function ConfigSave({ state, projects, catalog, selectedId, detailed, onC
   const mayClose = state.mode === 'native' && attempt !== null && !attempt.handled && !attempt.closeRequested && !state.generationLost &&
     !state.nativeBlocked && (!attempt.projection || (owned && !terminal));
   const applyPending = Boolean(attempt?.applyClaimed || owner?.applySubmitted);
+  const setupRevision = savedSetupRevision(state, project, selectedId);
   useEffect(() => {
     if (confirmation && (!canApplyEdit(state, project, confirmation) || selectedId !== projectId || !detailed)) setConfirmation(null);
   }, [state, project, confirmation, selectedId, projectId, detailed]);
@@ -102,6 +105,10 @@ export function ConfigSave({ state, projects, catalog, selectedId, detailed, onC
       {project && (!detailed || selectedId !== projectId) && <button type="button" className="button secondary" onClick={() => onShowProject(project.project.id)}>View {terminal ? 'submitted review' : 'save session'}<Icon name="arrow" size={16} /></button>}
       {state.mode === 'native' && <button type="button" className="button small secondary" disabled={state.readPending} onClick={onCheck}><Icon name="refresh" size={15} className={state.readPending ? 'spin' : ''} />{state.readPending ? 'Checking status…' : 'Check native status'}</button>}
     </div>
+    {detailed && project && setupRevision !== null && <div className="review-basis"><Icon name="check" size={18} /><div>
+      <strong>Continue setup</strong><p>Configuration draft revision {setupRevision} was saved. Next, review version values in the separate editor. This link only opens the Dashboard; it does not read or change version files.</p>
+      <button type="button" className="button secondary" onClick={() => onReviewVersion(project.project.id)}>Next: review version values<Icon name="arrow" size={16} /></button>
+    </div></div>}
     {showReview && !terminal && <p className="save-note">Editing this draft before Apply invalidates this review and closes its session. Newer edits after submission remain in memory. The native absolute lifetime is nonrenewable; a timer or status read never grants more authority.</p>}
     {confirmation && owner?.prepared && <ApplyConfirmation view={owner.prepared.view} binding={confirmation} projectPath={project?.project.path ?? null} allowed={canApplyEdit(state, project, confirmation)} onCancel={() => setConfirmation(null)} onConfirm={() => { onApply(confirmation); setConfirmation(null); }} />}
   </section>;

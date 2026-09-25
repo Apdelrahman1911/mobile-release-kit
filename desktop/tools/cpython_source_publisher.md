@@ -11,11 +11,20 @@ independent bounded acceptance. The committed `conventional-review/` kit and
 literal pins admitted that exact result to offline DATA preparation A.
 A `35507734308/1` at `977c71d99821cd2ad2fe2c88173920492d4c5cfb` passed;
 its original 47-file artifact and prepared manifest/protocol have independent
-acceptance. B pins that exact prepared result. Original job `35509211634/1` at
+acceptance. Historical B pinned that exact prepared result. Original job `35509211634/1` at
 `dfb2b442c5f532b1551c392f7a6c1e2fc86f26bb` passed; its artifact acceptance and
 this successor's integrated owner-lifecycle verification are separate gates.
 Installed-runtime qualification and product gates remain closed. These bounded
 acceptances do not establish legal or release clearance.
+
+The current composed-source refresh V, 36074195702/1 at
+0deaed83c3038433926db6110271f845b72f5369, has separately accepted preparation
+DATA: artifact10839621457, all47 members,114 current source inputs and607
+runtime files. Current consumer pins use that actual manifest
+556b2ea59b4b3e9abb9d04a3d263e0fd420e8c44b3f71c478b1f71bdd21ec417;
+the protocol is unchanged. H remains supplier provenance, not current core
+source. This refresh and its consumer rebinding are not installed/native,
+version-edit, production or delivery qualification.
 Legacy/static semantics and selectors are unchanged. H/D4/D3 are not
 modified or reused as execution authority. No linker shim, maps, probe recorder,
 private-W adapter, new process owner or container/package installer is added.

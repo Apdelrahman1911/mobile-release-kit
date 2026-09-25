@@ -52,7 +52,7 @@ def capabilities() -> CapabilitiesResult:
                                            metadata_text_observation_available() if name == "metadata.text.observe" else
                                            release_version_observation_available() if name == "release.version.observe" else
                                            candidate_evidence_observation_available() if name == "artifacts.candidate.observe" else True),
-             "reason": ("Static snapshots are unavailable on this profile; the staged Windows reader awaits independent ABI/native qualification."
+             "reason": ("Static snapshots are unavailable on this platform/profile."
                         if name == "project.snapshot" and not snapshot_available()
                          else "Selected public text observation is unavailable on this platform."
                          if name == "metadata.text.observe" and not metadata_text_observation_available()
@@ -75,8 +75,8 @@ def capabilities() -> CapabilitiesResult:
             "No configuration is saved and no project, Git or native tool is executed.",
             "Credential assessment processes supplied scalars and file assertions only; no credential files, Store services, release evidence or recovery journals are inspected.",
             "Credential assessment does not enable renderer secret entry, native acquisition, storage or assignment.",
-            "The staged Windows original-parent snapshot reader remains disabled pending independent ABI/native W1-W6 qualification.",
-            "Windows build/process ownership, configuration writes and packaged-runtime custody have separate closed gates.",
+            "Windows static snapshots require the actual admitted x64 native ABI and a local fixed-drive NTFS project; reads are independent observations, not an atomic snapshot.",
+            "Windows project selection and in-memory drafts do not enable configuration writes, builds, credentials, evidence or Store operations.",
             "A native desktop bridge and packaged standalone runtime require their own verification.",
             "The candidate inspector reads three separately selected local documents only; artifact bytes, provenance and source-project association remain unverified.",
         ],

@@ -17,6 +17,7 @@ else:
     _OFFLINE_CLI11_STARTED_NS = None
 
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -263,10 +264,130 @@ CONVENTIONAL_PREPARE_INPUTS: dict | None = {
         "sourceSha": "37079ce7874bedc804f434f8f8851c3adf5333ac"
     }
 }
+# Current payload authority, separate from the unchanged H supplier admission above.
+# Current composed source:106 core leaves, six fixed bootstraps, CA and
+# the reviewed current preparer. Never replace this closed roster with
+# a discovered checkout inventory or H's historical core-source-files.json.
+CONVENTIONAL_CURRENT_SOURCE_FILES: list[dict] | None = [
+    {"path":"/work/inputs/core-source/desktop/android_build_bootstrap.py","size":1051,"sha256":"2cc8b02d24458f3e3e0b90a661765d8e2f97c884030bbeed2a37f587379975a7"},
+    {"path":"/work/inputs/core-source/desktop/config_edit_bootstrap.py","size":1163,"sha256":"927e52dc4e2bb77ce07b4fccdf29807f4fc51f750e53bc1e139719f419cef86f"},
+    {"path":"/work/inputs/core-source/desktop/engine_bootstrap.py","size":1187,"sha256":"fe90aa7f12192d7b94067a7774a7151b4f235a339b94881897e9120b0fe25c7c"},
+    {"path":"/work/inputs/core-source/desktop/environment_bootstrap.py","size":1077,"sha256":"e737c9bf570358025e17d4413f1a567d41b9132142855226572e8a06cd141965"},
+    {"path":"/work/inputs/core-source/desktop/github-ca.pem","size":240216,"sha256":"9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f"},
+    {"path":"/work/inputs/core-source/desktop/github_connection_bootstrap.py","size":1227,"sha256":"f484aa139d5e33dd1d27ccee790d2a4e1c90046064956de3699c6b2b89a7df79"},
+    {"path":"/work/inputs/core-source/desktop/offline_preflight_bootstrap.py","size":1081,"sha256":"0864d0d24de1d5be64781b7cb5378ebeb77c528352927f31609786fb12be8750"},
+    {"path":"/work/inputs/core-source/desktop/tools/prepare_runtime.py","size":12355,"sha256":"4d9f0e52b7cbe1f9d648a96512cf0c0ca5ab01b5b06738282133b57e1830e4f8"},
+    {"path":"/work/inputs/core-source/src/mobile_release/__init__.py","size":144,"sha256":"557bcb0cdcf7f7ef329f04f82cf388c746bb73eba34857b97782a8bcf2e596b2"},
+    {"path":"/work/inputs/core-source/src/mobile_release/__main__.py","size":115,"sha256":"50fd328dfe5b5339a9958444940e9ce45b9764dbb7b130cc25f3a966ccb706a8"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_command_process.py","size":170410,"sha256":"803226dd3252d97763758a20222ec41bdfc3f9a75021bf6412d1c5590eb1e75b"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_build_control.py","size":2363,"sha256":"45e1e84b7d8809963b914836d019f59553e2ba805e43a96d3c1bc9954594eae4"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_build_engine.py","size":509,"sha256":"acb8af725b5b77cdaaacbeabe193351498b5b9e1f828e6c7405dca67e0951c4a"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_build_files.py","size":53883,"sha256":"e71e867a8cc956227dcf5cf37962b8d4b891bd13c29867d5d36c98b015a0bf12"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_build_protocol.py","size":33376,"sha256":"a8053b6845677ddf6fb1ea7d3e4af90745c1b169c8f3cbcd03cbd9133459aca6"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_build_selection.py","size":6190,"sha256":"f1e4248d21a56d1dd1e72d85cba206b3958d800dc0d2b36cde930cc461155b08"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_edit_control.py","size":7712,"sha256":"a300db0df65418ac110399225312c117b0e1f1a43608f3259ea6044ab33341e7"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_edit_engine.py","size":17411,"sha256":"392d6e0e183c3127361ec1b7faeda9b14fc73173934899c109788eda017275e2"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_edit_protocol.py","size":11994,"sha256":"96751f97c443d7a3e31305f5d83183c27f4a2883e0a88df83bc5125bebe3303e"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_engine.py","size":9436,"sha256":"860d1cee0072730a487ac8e632206c69e3ba676cab849b144a61755c4b84e41e"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_environment_control.py","size":5794,"sha256":"b4d8fbe47b575faa8de2fc06854bb6863cd3e68fdb60473c8f5488ce70142771"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_environment_engine.py","size":6574,"sha256":"0f99c422928fd7aa955e5c6d63682ef29c0e226e09ce51d25141bee98d44e6bc"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_environment_protocol.py","size":19517,"sha256":"1316e980200e63741340c2545a2a6d93adf9cf4a8e2f37f379768f33d445f39b"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_github_engine.py","size":14149,"sha256":"a468ce5b3ccf18606a0968817299bebeaee63299268430f9a52a1de7bf02483c"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_preflight_budget.py","size":16253,"sha256":"391ef71136be104523e09b4c2da0967d04271fbbedf7ea04663649eeb82e02d4"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_preflight_control.py","size":938,"sha256":"7d867dfba27acd98333f3bb8477f1693e4ad93738a0273be4a4fa44108c438d9"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_preflight_engine.py","size":1199,"sha256":"ebd6e6e40b024724cb4659f51d200ec255f67fb2b97bd20ab41df8956038f444"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_preflight_protocol.py","size":13301,"sha256":"094b9259bf99b790d237b0e99c81401eb3839da5360985910b4a86182f542537"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_saved_command_control.py","size":9835,"sha256":"b12e9b8b8432de38c53aace533faa7993b987d50f6d86be963246ed95c7e5cc0"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_saved_command_engine.py","size":12814,"sha256":"063d8bfcc97f43862ace6adffac14c82db9146ae5927c123aae14d4749943b00"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_github_connection_transport.py","size":40759,"sha256":"f5e0b3e750b4ed0ff7753d2f8e9de9ba940e9db7eecbf314a1b9fe7ae8990e0a"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_lifetime_evidence.py","size":18536,"sha256":"d64948f26984ed692030834221f0cfd93b85117da89b4860f8b69a6f7919e1b3"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_native_process.py","size":62175,"sha256":"70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_profile_callers.py","size":8197,"sha256":"4c1374b6a738f027a3cdbbd4a778346a5ec5df889da9781f8d26b3f7ac688c75"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_profile_process.py","size":131940,"sha256":"be6442d5d2f5e777ed48e61a0151c50c4e9878c7c40fec8573af524511780613"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_store_lane_contract.py","size":9500,"sha256":"8726cf9bdb053b3d7f30eb9c8307c18239dc518476b2f895ef1610efa65e040e"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_store_lane_evidence.py","size":17638,"sha256":"bcea0084032ffbd43c15f5682f456965aff812e5007d3211a5afe605fc4d5872"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_store_lane_files.py","size":35156,"sha256":"880eb0cfa37c0c70eb089c6adbe333450af139f1d85c901e861c756057c7aac5"},
+    {"path":"/work/inputs/core-source/src/mobile_release/android.py","size":31112,"sha256":"18ae142af1ee48f9167f05d64403f3f0bcf8f0424ab8de14bf8ca5e770289543"},
+    {"path":"/work/inputs/core-source/src/mobile_release/android_build_operation.py","size":20200,"sha256":"8769dbb6796cd50346996d36750902ecc56ef1ea0538e47b043bb1c8f08da00e"},
+    {"path":"/work/inputs/core-source/src/mobile_release/android_build_tools.py","size":46054,"sha256":"9ff9e5e27ff47fc038bf4bd61ed5a51f9010b9d37e8f9f6c5675868ca72e9d54"},
+    {"path":"/work/inputs/core-source/src/mobile_release/android_manifest.py","size":9267,"sha256":"7fe056f442e239a8668a62d699f0b4c7f077de9b959d32fc4a2f8f770460bdd7"},
+    {"path":"/work/inputs/core-source/src/mobile_release/android_upload_validation.py","size":6295,"sha256":"5be3d74272ade8a30938d48e25ffe42a661ff3e142872c17b014dee1641cfd72"},
+    {"path":"/work/inputs/core-source/src/mobile_release/android_zip.py","size":15103,"sha256":"34391d082553f2b5168af71c275c743c00bd7982b719933183874ad8258ee15a"},
+    {"path":"/work/inputs/core-source/src/mobile_release/android_zip_integrity.py","size":15169,"sha256":"80bae3a6142f044643f7a1077b671f3ad105123fe1db55ac674d1b4eb0b1467f"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/__init__.py","size":8616,"sha256":"cf5f6fea61f9612e8b584d615fcf46ce4f498058592a3213d4e010c63835009f"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_candidate_evidence.py","size":16373,"sha256":"7918786377fdffdc7b0ce07ffcbb99fc75b9297d4ab1cdde40979ee0ee684f90"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_catalog.py","size":15772,"sha256":"72059524e4968b4769b5da7bcfb0dbeda121112ddbd04ffe0a20f2daeecf91b3"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_credential_assessment.py","size":19158,"sha256":"834e6a88a64cf491504e03e8e7026b70c693b37196c489bf3d6ebabdcb9bac92"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_credential_guide.py","size":7905,"sha256":"bd713a2150eb6b03ea2896ea98db27647146fd536f7a2d412a7f8ada7e98a3fb"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_environment.py","size":14236,"sha256":"4115d50e6ff1b2acb991b259a7f06443f234a07d4820167bc444aed916f5b0d4"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_github_connection.py","size":16515,"sha256":"a68974f2bf477cd5d3d4349398a3c7616ac3f47b8fd704a0fa356e3784d29a7b"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_github_setup.py","size":12630,"sha256":"87fa322b2fcd02e399eff4b49eb15ebc84864f1fdcd25b3f958944ea21f9f825"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_json.py","size":2851,"sha256":"84c90334c94b12877cc3dbcd9324bd80d78a2de9f54d64e30c771af06f719815"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_metadata_text.py","size":10878,"sha256":"759c3124d807fd768883c50b15e05b0040e114414ef5f92045a536d2aba4d8a7"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_preview.py","size":10213,"sha256":"ed5ea4c2777ea36b34816ec66603cf2453aeab22bf98764b82ea0db07ab6beae"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_release_version.py","size":8391,"sha256":"54706d38280f898d80418e9402038712e7f66610c6d64930286a8405e0e3370c"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_snapshot.py","size":33629,"sha256":"54a4872db61696c3312a30ef5d9ea539506bdd9a86718d7b2da6af89fe8d08ee"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_snapshot_windows.py","size":19049,"sha256":"c96e29786f986811f211ec8679336fc665a06fcb918c056260fa77ea2b0696a0"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_snapshot_windows_native.py","size":26733,"sha256":"a4b1303e6cdc73053a1c22dc109f9925d5babf612ec4041453dad876a5db4d17"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/contracts.py","size":27721,"sha256":"0594cbd14f91fb85a6d8d9769f294bc9f75b692e9cb2ff7fe363d4fb51efd5aa"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/data/credential-guide-v1.json","size":39128,"sha256":"7f9828720684a1b6d071df2a34d415feb8ff4552c89d8d6d42b19970d838d478"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/data/field-help.json","size":28837,"sha256":"890d9d1c22a4984bb60b0b503cf1106fe5b5f03ddf50614b5d00350ee510bb16"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/data/github-connection-v1.json","size":9225,"sha256":"75a635de5747c8e0773ec1ee996fff594f38e2a7f28d90099db86f56b4319714"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/data/github-setup-v1.json","size":16582,"sha256":"4d486fc24ebf24271dbb5227174df7c8f28a530a97011e004da643fdad7fe17c"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/data/metadata-text-help-v1.json","size":10495,"sha256":"08c4efac78ee2aabc75f6ece7f93010f34193bcb8c8304a742b9e0c7e940ccfb"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/data/project.schema.json","size":12407,"sha256":"2c59a6a3d0c90188db5800898db2c42612960616f30d84aecf25a4611ec5fbd7"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/data/release-version-help-v1.json","size":5157,"sha256":"d4ee75cba9accb83ce0982de1fbe4359e9744b38c40856831dea111c1739ff09"},
+    {"path":"/work/inputs/core-source/src/mobile_release/build_inputs.py","size":137984,"sha256":"f8fd2a9e90ac2e1d43b6664243e0250b982527de9283bf36d1832ff24f71221f"},
+    {"path":"/work/inputs/core-source/src/mobile_release/cancellation.py","size":29094,"sha256":"1840232213e877e26c4cebd1434b3b851f9fa4c6961baa26eeaae9fa1442db78"},
+    {"path":"/work/inputs/core-source/src/mobile_release/checked_files.py","size":22382,"sha256":"803b9a0767231426243c0be423a6eb94bcc512ada3bbc132f0798b76a0baedc3"},
+    {"path":"/work/inputs/core-source/src/mobile_release/cli.py","size":64644,"sha256":"9f1967be7552446ad2f4e5fd6b6f88666573eeb1e6077320deb13d1570e16de2"},
+    {"path":"/work/inputs/core-source/src/mobile_release/config.py","size":39869,"sha256":"1e7c192fb46d49bee34a316eb4714079b38aa68a1188462e612d815d8117e1ed"},
+    {"path":"/work/inputs/core-source/src/mobile_release/config_edit.py","size":24493,"sha256":"23ddff685ee6179f0a5b9c35d7b5706683f965c27438fd7b16539754d7779b83"},
+    {"path":"/work/inputs/core-source/src/mobile_release/config_payloads.py","size":4803,"sha256":"b7b9ca12f5c09595430b07bfcf8aed2b1b93f60230888721d1ab78199bc910c2"},
+    {"path":"/work/inputs/core-source/src/mobile_release/credential_policy.py","size":4714,"sha256":"384375dc92348ba2f25159241ae1c9e9711b5ff7c7d72c2fa230146846590805"},
+    {"path":"/work/inputs/core-source/src/mobile_release/credential_requirements.py","size":9503,"sha256":"2ee398a6b17a067977d4081b111ac72ef49d6876d8cddfa75bbaca60545e301f"},
+    {"path":"/work/inputs/core-source/src/mobile_release/credentials.py","size":103948,"sha256":"35031d83a550171faace632deb0bbe55ad87a988d62076db9be788bac22e4d56"},
+    {"path":"/work/inputs/core-source/src/mobile_release/data/apple-profile-roots.pem","size":4539,"sha256":"c704ce9bc7d65280e2893c2235c2434dba8cbce00f659787492714ca441b1e93"},
+    {"path":"/work/inputs/core-source/src/mobile_release/desktop_android_build.py","size":12767,"sha256":"4fd76c42b2297153ca408d6f2e6dc060c60352b60d8a58cde3b7c3d82e4d8eb3"},
+    {"path":"/work/inputs/core-source/src/mobile_release/desktop_preflight.py","size":8915,"sha256":"2f1b3fc4aae8c55e80954ff578cf97116bba246c759cf183bd13578fafc13581"},
+    {"path":"/work/inputs/core-source/src/mobile_release/discovery.py","size":27885,"sha256":"6802bd28bccf0c807ca67299c0cb94d2eab0158b44383aed167a42465b2608bd"},
+    {"path":"/work/inputs/core-source/src/mobile_release/environment_diagnostics.py","size":12025,"sha256":"db34c792e7097df8d9e0e52980486df450b1e6f9064027202987d99847ec67a1"},
+    {"path":"/work/inputs/core-source/src/mobile_release/environment_diagnostics_tools.py","size":24700,"sha256":"a45822d5d237c224164dcec35ff7a91703a49f032f3b4993d9bcdf9b90454da0"},
+    {"path":"/work/inputs/core-source/src/mobile_release/errors.py","size":749,"sha256":"26427cedbd05945c1a869af20228f9a04fe1e30d950a2dc246dd0795708a0853"},
+    {"path":"/work/inputs/core-source/src/mobile_release/github_workflow_edit.py","size":21086,"sha256":"cd059224ec5174ece0f0ddb5d74464a9df4497ac991bc3f86fa160f932d0dcaf"},
+    {"path":"/work/inputs/core-source/src/mobile_release/init_transaction.py","size":88826,"sha256":"b19ee28073fd59a6903414ee7429a64e0b9dcf17864d0428009be646e93dda9c"},
+    {"path":"/work/inputs/core-source/src/mobile_release/init_workspace_custody.py","size":33409,"sha256":"3a1ff617db9ecf54209e2b99daa5547b414b146a46bf8c655d0e5cdbb8b5296c"},
+    {"path":"/work/inputs/core-source/src/mobile_release/inspection.py","size":930,"sha256":"663d6d82261815cf044ecc96f19eb7252b54d224edbecd4641679b2a32fc920a"},
+    {"path":"/work/inputs/core-source/src/mobile_release/ios.py","size":59585,"sha256":"cb4665594bee73605f78acb57b1253ae088b987b51a752a970b7c65011108bbb"},
+    {"path":"/work/inputs/core-source/src/mobile_release/ios_artifacts.py","size":74171,"sha256":"102f6c444853958ca2c17698d7d67b56c0b321311bcccd2a999c52a1ca61c54a"},
+    {"path":"/work/inputs/core-source/src/mobile_release/ios_der.py","size":5132,"sha256":"9ad85b4f36c65d5dc1895fae45ffc3959f0e190e7b183615aa6c0714d8b38ab5"},
+    {"path":"/work/inputs/core-source/src/mobile_release/ios_entitlements.py","size":23224,"sha256":"3278efadeecbcc09187cc859c03e1e011a8bf2d8f22355f92c03ade140c4951f"},
+    {"path":"/work/inputs/core-source/src/mobile_release/ios_plist_binary.py","size":8499,"sha256":"1601d3e15467a95348bde537ec6da633c2b4b46e0f7803eb619622b3cab69b2b"},
+    {"path":"/work/inputs/core-source/src/mobile_release/ios_profile_auth.py","size":7972,"sha256":"143897fba6fcd6e8a6d3d8063425a3274643eca934da334ada795865c840014c"},
+    {"path":"/work/inputs/core-source/src/mobile_release/ios_profile_trust.py","size":9102,"sha256":"e813efc8e4218048bae71f04de942493e93e5880f095e5ae68f051d6cf176edf"},
+    {"path":"/work/inputs/core-source/src/mobile_release/ios_profiles.py","size":36397,"sha256":"ee19ada826cdd49da7ad8a4ad2b7a2f6bc82eedf9334507980c6c4b87853bb1f"},
+    {"path":"/work/inputs/core-source/src/mobile_release/ios_upload_validation.py","size":7171,"sha256":"2b914576fd795123bd6088711f19d1072801415736f266ebaf39c5d6d4446589"},
+    {"path":"/work/inputs/core-source/src/mobile_release/local_signing.py","size":97622,"sha256":"66d8eb8ae0873f852cdd6a9080aa837c3de3fcda307451cb14be92e81c0237f6"},
+    {"path":"/work/inputs/core-source/src/mobile_release/macho.py","size":23183,"sha256":"8fb561c41ca958ba9d1fc507b7aecae6a011aa2bb903ec472a80201a6b926d5d"},
+    {"path":"/work/inputs/core-source/src/mobile_release/metadata.py","size":27910,"sha256":"1aadff63995e2e705c21d5b5e30d8b4ba9f7c69035f32de39afada6d05c8dc2b"},
+    {"path":"/work/inputs/core-source/src/mobile_release/metadata_text.py","size":8246,"sha256":"207cde915a41c7ae026d2640d97464220bd7284c2de20ff3f366fb9fb0f4cb70"},
+    {"path":"/work/inputs/core-source/src/mobile_release/metadata_text_edit.py","size":16301,"sha256":"e6f76867b3605f72816f66e37a413d9ab1bc001790b8a0d8eff252d485280815"},
+    {"path":"/work/inputs/core-source/src/mobile_release/owned_process.py","size":7631,"sha256":"430a596c5069b7acf248334d1f60fdd12ad8212cf9c2e9dfef717c9ba2179c02"},
+    {"path":"/work/inputs/core-source/src/mobile_release/preflight.py","size":60891,"sha256":"d49e71ec66f149bab82ef4dcabf22db96fed61864a5540d48ae309183e25c173"},
+    {"path":"/work/inputs/core-source/src/mobile_release/provenance.py","size":202867,"sha256":"50933fa89350e46e267854750bbd45ae3afc4efb0546013366d881f63cc94830"},
+    {"path":"/work/inputs/core-source/src/mobile_release/release_version_edit.py","size":15399,"sha256":"2ba0d9f3cf99ebe77a06a1690d6f93755ce48af55ca20da9989fed5cd2eed167"},
+    {"path":"/work/inputs/core-source/src/mobile_release/reporting.py","size":7628,"sha256":"4bbed825e6f1098dd4a89d864002641a2c7ec13f183ac0e85d5de3cc38aab900"},
+    {"path":"/work/inputs/core-source/src/mobile_release/stores.py","size":51125,"sha256":"287135d7177200ada0ba0b64b71fa7ce5c533cb8d8b32af6ccfaaa3e2db28c53"},
+    {"path":"/work/inputs/core-source/src/mobile_release/toolchain_policy.py","size":517,"sha256":"1b48e5c7e08864ff8ee63bcb3a91bf6782259fbe91f413ba707510bc631f2f61"},
+    {"path":"/work/inputs/core-source/src/mobile_release/tooling.py","size":7495,"sha256":"3bc69d9522c563fa1cb7403976f1cf6c1c2b5ad3e042a4a88dfbc7db06932c4d"},
+    {"path":"/work/inputs/core-source/src/mobile_release/version_text.py","size":10275,"sha256":"408c9fbc1ba4b101230ff271050ef75ef2b34f2e7656869f88006f8101687eb1"},
+    {"path":"/work/inputs/core-source/src/mobile_release/workflow.py","size":129517,"sha256":"47cd5e408b42f67fe9ad43bb0c11f04c9b2a4b542304f55206bbfce4494f74eb"},
+    {"path":"/work/inputs/core-source/src/mobile_release/workflow_payloads.py","size":3228,"sha256":"5dbc513b408c0e5735ed67c00db1e3e92499461f307abd53307d493f0895201b"},
+]
 CONVENTIONAL_SMOKE_INPUTS: dict | None = {
-    "manifestSha256": "e3375ff140d69df54b2445f756711e0245d397ba6ded76e8559732ec2e4e3801",
+    "manifestSha256": "556b2ea59b4b3e9abb9d04a3d263e0fd420e8c44b3f71c478b1f71bdd21ec417",
     "preparedArtifact": {
-        "artifactId": "10604226841",
+        "artifactId": "10839621457",
         "attempt": 1,
         "files": [
             {
@@ -461,18 +582,18 @@ CONVENTIONAL_SMOKE_INPUTS: dict | None = {
             },
             {
                 "path": "outer.json",
-                "sha256": "0efbafa4931dbf97f5121ee848bd9abe79cff87ed91b924c74dab857ecd79dec",
+                "sha256": "0db5fec9210037429663643c09f86013e730c78548d4ab5ccc2b84183b906bba",
                 "size": 327
             },
             {
                 "path": "preparation.json",
-                "sha256": "96bc587e5b854b0799aa93bd81231377ad47aef96bc0f783f83aaab2c8bc750e",
+                "sha256": "10fac89bcc57732ef667703e2fb33b188c23352d9e5b9f214acf0f3b105876c3",
                 "size": 2539
             },
             {
                 "path": "prepared-runtime.tar",
-                "sha256": "5f4d0cbb99663961710886115287f152d90ca017bbc9b3bc068db34c37fd7640",
-                "size": 28805120
+                "sha256": "881edca0ee48e4aec909a3fdac35ed89b6c253daf303b48294ba028226bc9933",
+                "size": 28815360
             },
             {
                 "path": "reviews/configuration-review.txt",
@@ -486,8 +607,8 @@ CONVENTIONAL_SMOKE_INPUTS: dict | None = {
             },
             {
                 "path": "source-bindings.json",
-                "sha256": "45c9d818b267140de3bc1de5944775da21bccd019bcf45f056313a72ab6c689e",
-                "size": 18304
+                "sha256": "bd487a7103a29860fbccdabaf05ac34d8811d20da44fc1a878bbad4ce30d93d8",
+                "size": 18814
             },
             {
                 "path": "source-kit/hosted-evidence.tar",
@@ -506,8 +627,8 @@ CONVENTIONAL_SMOKE_INPUTS: dict | None = {
             }
         ],
         "repository": "Apdelrahman1911/mobile-release-kit",
-        "runId": "35507734308",
-        "sourceSha": "977c71d99821cd2ad2fe2c88173920492d4c5cfb"
+        "runId": "36074195702",
+        "sourceSha": "0deaed83c3038433926db6110271f845b72f5369"
     },
     "protocolSha256": "860d1cee0072730a487ac8e632206c69e3ba676cab849b144a61755c4b84e41e"
 }
@@ -613,6 +734,27 @@ METADATA_NATIVE_DIRECTORIES = ("home", "cargo", "rustup", "tmp", "target",
 METADATA_OWNER_TEST = "edit_owner::hosted_tests::hosted_metadata_text_edit_owner_original_resources"
 METADATA_TRANSACTION_EOF_TEST = "edit_owner::hosted_tests::hosted_metadata_text_transaction_eof_original_resources"
 METADATA_PARTITIONS = ("ordinary", "committed-fsync", "committed-close")
+VERSION_NATIVE_SCOPE = "release-version-apply-native-v1"
+VERSION_NATIVE_EVIDENCE_SCOPE = "desktop-release-version-apply-native-only-v1"
+VERSION_NATIVE_WORKFLOW = WORKFLOW_NATIVE_WORKFLOW
+VERSION_NATIVE_REF = "refs/heads/verify/desktop-release-version-apply-native"
+VERSION_NATIVE_PHASES = ("prepare", "acquire", "compile", "version-owner", "version-transaction-eof", "version-core", "clean")
+VERSION_NATIVE_CHECKS = {
+    "acquire": ("rust-toolchain-install", "rust-version-target", "version-locked-headless-metadata"),
+    "compile": ("rust-version-target", "headless-test-compile-only"),
+    "version-owner": ("rust-version-target", "version-owner-source-native-contract", "version-owner-source-receipt",
+                       "version-owner-zip-native-contract", "version-owner-zip-receipt"),
+    "version-transaction-eof": ("rust-version-target", "version-transaction-eof-native-contract", "version-eof-receipt"),
+    "version-core": ("version-core-ordinary", "version-core-ordinary-receipt",
+                      "version-core-committed-fsync", "version-core-committed-fsync-receipt",
+                      "version-core-committed-close", "version-core-committed-close-receipt"),
+}
+VERSION_NATIVE_DIRECTORIES = ("home", "cargo", "rustup", "tmp", "target",
+                               "version-owner-source", "version-owner-zip", "version-transaction-eof")
+VERSION_OWNER_TEST = "edit_owner::hosted_tests::hosted_release_version_edit_owner_original_resources"
+VERSION_TRANSACTION_EOF_TEST = "edit_owner::hosted_tests::hosted_release_version_transaction_eof_original_resources"
+VERSION_PARTITIONS = ("ordinary", "committed-fsync", "committed-close")
+
 ENVIRONMENT_NATIVE_SCOPE = "environment-diagnostics-native-v1"
 ENVIRONMENT_NATIVE_EVIDENCE_SCOPE = "desktop-environment-diagnostics-native-only-v1"
 ENVIRONMENT_NATIVE_WORKFLOW = ".github/workflows/desktop-environment-diagnostics-native.yml"
@@ -810,6 +952,7 @@ GTK_CORE_PATHS = (
     "mobile_release/api/data/github-setup-v1.json",
     "mobile_release/api/data/metadata-text-help-v1.json",
     "mobile_release/api/data/project.schema.json",
+    "mobile_release/api/data/release-version-help-v1.json",
     "mobile_release/build_inputs.py",
     "mobile_release/cancellation.py",
     "mobile_release/checked_files.py",
@@ -848,10 +991,12 @@ GTK_CORE_PATHS = (
     "mobile_release/owned_process.py",
     "mobile_release/preflight.py",
     "mobile_release/provenance.py",
+    "mobile_release/release_version_edit.py",
     "mobile_release/reporting.py",
     "mobile_release/stores.py",
     "mobile_release/toolchain_policy.py",
     "mobile_release/tooling.py",
+    "mobile_release/version_text.py",
     "mobile_release/workflow.py",
     "mobile_release/workflow_payloads.py",
 )
@@ -867,17 +1012,530 @@ WINDOWS_SNAPSHOT_TEST = "supervisor::hosted_tests::windows_static_snapshot_hoste
 FOUNDATION_SCOPE = "passive-v1"
 WINDOWS_SNAPSHOT_SCOPE = "windows-snapshot-v1"
 
-# Fixed headless reader/native facts only; no shell/core ZIP/runtime preparation.
+# Fixed headless reader/native facts; runtime preparation is fullwalk-profile-only.
 WINDOWS_INSTALLED_SCOPE = "windows-installed-native-v1"
 WINDOWS_INSTALLED_CRATE = "desktop/native/windows-installed-native"
 WINDOWS_INSTALLED_TEST = "hosted_tests::hosted_native_read_only_contract"
-WINDOWS_INSTALLED_PHASES = ("prepare", "acquire", "compile", "windows-installed-native", "windows-installed-runtime-data", "retain")
+WINDOWS_ORDINARY_OWNER = "ordinary_owner::hosted_ordinary_original_handle_contract"
+WINDOWS_FULLWALK_TEST = "installed_runtime_windows::tests::native_protected_version_walk_and_original_settlement"
+WINDOWS_FULLWALK_OWNER = "ordinary_owner::hosted_protected_version_fullwalk_contract"
+WINDOWS_INSTALLED_PASSIVE_TEST = "supervisor::windows_passive_tests::native_installed_passive_original_owner_contract"
+WINDOWS_INSTALLED_PASSIVE_OWNER = "ordinary_owner::hosted_installed_passive_original_handle_contract"
+WINDOWS_INSTALLED_PASSIVE_PROFILE = "windows-installed-passive-v1"
+WINDOWS_INSTALLED_PASSIVE_DISPATCH = "windows-installed-passive"
+WINDOWS_INSTALLED_PASSIVE_REF = "refs/heads/verify/desktop-windows-installed-passive"
+WINDOWS_INSTALLED_PASSIVE_STAGE = "qualification_fixture::hosted_stage_passive_runtime_input"
+WINDOWS_INSTALLED_PASSIVE_OBSERVER = "qualification_fixture::hosted_observe_passive_published_version"
+WINDOWS_FULLWALK_REQUEST_FIELDS = (
+    "role", "test", "sourceSha", "sourceTree", "runId", "attempt",
+    "appArtifact", "appArtifactBytes", "appArtifactSha256", "appArtifactIdentity", "appCommandSha256",
+    "appCompileMessagesBytes", "appCompileMessagesSha256", "appCompileArgvSha256",
+    "ownerArtifact", "ownerArtifactBytes", "ownerArtifactSha256", "ownerArtifactIdentity", "ownerCommandSha256",
+    "ownerCompileMessagesBytes", "ownerCompileMessagesSha256", "ownerCompileArgvSha256",
+    "manifestSha256", "protocolSha256", "inventorySha256", "coreSha256", "payloadFiles", "payloadBytes",
+    "publicationReceiptBytes", "publicationReceiptSha256", "versionIdentity", "selectedPythonIdentity",
+    "selectedBootstrapIdentity", "selectedCoreIdentity",
+)
+
+# Additive UI lane: the cheap probe uses the production inspector, but starts no
+# WebView/runtime and carries no historical headless/publication authorization.
+WINDOWS_NORMAL_UI_PROFILE = "windows-normal-project-ui-v1"
+WINDOWS_NORMAL_UI_DISPATCH = "windows-normal-project-ui"
+WINDOWS_NORMAL_UI_REF = "refs/heads/verify/desktop-windows-normal-project-ui"
+WINDOWS_NORMAL_UI_REQUEST_FIELDS = (*WINDOWS_FULLWALK_REQUEST_FIELDS, "appVersion")
+WINDOWS_NORMAL_UI_ROLES = {
+    "prerequisite": ("hosted_ui_tests::hosted_normal_ui_prerequisites_contract", "prerequisite"),
+    "normal-smoke": ("normal-process-main", "smoke"),
+    "project-draft": ("observer-process-main", "project"),
+    "quit-passive": ("observer-process-main", "quit"),
+    "document-loss": ("observer-process-main", "document"),
+}
+WINDOWS_NORMAL_UI_PROBE_REASONS = (
+    "ordinary-context", "interactive-desktop", "managed-webview2", "webview2-overrides",
+    "private-user-data-parent", "native-failure", "original-state",
+)
+WINDOWS_NORMAL_UI_CASE_CHECKS = {
+    "project-draft": ("native-picker-cancel", "native-project-selected", "draft-hydrated-edited",
+        "validate-suggest-preview", "refresh-draft-preserved", "source-change-observed", "only-labelled-fixture-mutation"),
+    "quit-passive": ("native-quit-cancel", "native-quit-confirm", "passive-original-outstanding", "original-owner-retired"),
+    "document-loss": ("native-picker-outstanding", "passive-original-outstanding", "original-document-loss", "no-late-publication", "no-rebind"),
+}
+WINDOWS_NATIVE_DECLARED_FEATURES = {
+    "qualification-result": [], "runtime-publication": [],
+    "desktop-ui": ["dep:windows", "dep:webview2-com", "dep:windows-core"],
+    "desktop-ui-dialogs": ["desktop-ui"], "windows-installed-observation": ["desktop-ui-dialogs"],
+}
+WINDOWS_NORMAL_UI_NATIVE_PACKAGES = frozenset((
+    ("mrk-windows-installed-native", "0.1.0"), ("proc-macro2", "1.0.107"), ("quote", "1.0.47"),
+    ("syn", "2.0.119"), ("syn", "3.0.6"), ("thiserror", "2.0.20"), ("thiserror-impl", "2.0.20"),
+    ("unicode-ident", "1.0.25"), ("webview2-com", "0.38.2"), ("webview2-com-macros", "0.8.1"),
+    ("webview2-com-sys", "0.38.2"), ("windows", "0.61.3"), ("windows-collections", "0.2.0"),
+    ("windows-core", "0.61.2"), ("windows-future", "0.2.1"), ("windows-implement", "0.60.2"),
+    ("windows-interface", "0.59.3"), ("windows-link", "0.1.3"), ("windows-link", "0.2.1"),
+    ("windows-numerics", "0.2.0"), ("windows-result", "0.3.4"), ("windows-strings", "0.4.2"),
+    ("windows-sys", "0.61.2"), ("windows-threading", "0.1.0"),
+))
+WINDOWS_NORMAL_UI_SETUP_STAGE = "qualification_fixture::hosted_stage_normal_ui_runtime_input"
+WINDOWS_NORMAL_UI_SETUP_OBSERVER = "qualification_fixture::hosted_observe_normal_ui_published_version"
+WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS = (
+    "ui::profile::tests::post_create_admission_failure_never_authorizes_profile_cleanup",
+    "ui::tests::managed_runtime_root_and_every_descendant_use_immutable_policy",
+    "project::tests::project_spelling_is_bounded_local_and_never_normalized",
+    "project::tests::project_identity_checks_full_ids_without_immutable_runtime_policy",
+    "project::tests::refused_spelling_and_early_stop_never_acquire_a_native_original",
+    "ordinary_owner::normal_ui::contract_tests::com_null_end_is_distinct_from_pending_failure_and_contradictory_output",
+    "ordinary_owner::normal_ui::contract_tests::unavailable_probe_is_completed_observation_not_gui_authorization",
+    "ordinary_owner::normal_ui::contract_tests::native_smoke_never_credits_posting_or_partial_release_as_finality",
+    "tests::normal_ui_setup_data_requires_distinct_runtime_only_role_and_positive_probe_finality",
+    "ordinary_owner::normal_ui::contract_tests::profile_absence_epochs_do_not_consume_the_single_binding_path",
+    "ordinary_owner::normal_ui::contract_tests::profile_absence_results_distinguish_missing_collision_and_unknown",
+    "ordinary_owner::normal_ui::contract_tests::profile_absence_dependents_settle_before_namespace_parents",
+)
+WINDOWS_NORMAL_UI_SCALAR_TESTS = (
+    "asset_session::tests::human_quit_stop_has_one_clock_without_inventing_a_work_endpoint",
+    "windows_startup::tests::controlled_reply_requires_original_registration_and_actual_hook",
+    "windows_startup::tests::real_reply_return_and_ordered_events_precede_one_packaged_navigation",
+    "windows_startup::tests::late_blank_replacement_or_unordered_callbacks_cannot_rearm",
+    "windows_startup::tests::original_reply_and_window_custody_gate_shutdown_finality",
+)
+WINDOWS_NORMAL_UI_SETUP_BUILD_PHASES = ("windows-normal-ui-setup-acquire", "windows-normal-ui-setup-compile")
+WINDOWS_NORMAL_UI_SETUP_DATA_PHASES = ("windows-normal-ui-setup-preflight", "windows-normal-ui-setup-stage-finalize",
+    "windows-normal-ui-setup-publish-finalize", "windows-normal-ui-setup-publication-finalize")
+WINDOWS_NORMAL_UI_GUI_ROLES = ("normal-smoke", "project-draft", "quit-passive", "document-loss")
+WINDOWS_NORMAL_UI_GUI_BUILD_PHASES = ("windows-normal-ui-gui-acquire", "windows-normal-ui-gui-compile")
+WINDOWS_NORMAL_UI_GUI_DATA_PHASES = tuple("windows-normal-ui-" + role + suffix
+    for role in WINDOWS_NORMAL_UI_GUI_ROLES for suffix in ("-preflight", "-finalize"))
+WINDOWS_NORMAL_UI_DATA_PHASES = ("windows-normal-ui-prerequisite-finalize", *WINDOWS_NORMAL_UI_SETUP_DATA_PHASES,
+    *WINDOWS_NORMAL_UI_GUI_DATA_PHASES)
+WINDOWS_NORMAL_UI_MATERIAL_PACKAGES = {
+    "tauri": "2.11.5", "tauri-build": "2.6.3", "tauri-runtime": "2.11.3", "tauri-runtime-wry": "2.11.4",
+    "tauri-winres": "0.3.6", "wry": "0.55.1", "tao": "0.35.3", "webview2-com": "0.38.2",
+    "webview2-com-sys": "0.38.2", "windows": "0.61.3",
+}
+WINDOWS_NORMAL_UI_COMMON_CONTROLS_MANIFEST_SHA256 = "4636f3ba46080315ac3277d473d433b79c00863c9cdca1c93c0c83554c6a3d43"
+WINDOWS_NORMAL_UI_NOT_VERIFIED = (
+    "normal-binary-bootstrap", "project-snapshot-and-draft", "quit-with-passive-work",
+    "native-document-loss", "configuration-save", "msi-assembly-installation-and-session",
+    "other-windows-images", "protected-main-delivery",
+)
+
+# One explicit synthetic fullwalk profile, never automatic on source pushes.
+WINDOWS_FULLWALK_PROFILE = "windows-installed-fullwalk-v1"
+WINDOWS_FULLWALK_DISPATCH = "windows-installed-fullwalk"
+WINDOWS_RUNTIME_PUBLICATION_PROFILE = "windows-runtime-publication-v1"
+WINDOWS_RUNTIME_PUBLICATION_DISPATCH = "windows-runtime-publication"
+WINDOWS_RUNTIME_PUBLICATION_REF = "refs/heads/verify/desktop-windows-runtime-publication"
+WINDOWS_RUNTIME_PUBLICATION_HELPER = "mrk-windows-runtime-publish"
+WINDOWS_RUNTIME_PUBLICATION_SCALAR = "publication::scalar_qualification::hosted_has_restrictions_false_only_contract"
+WINDOWS_RUNTIME_PUBLICATION_STAGE = "qualification_fixture::hosted_stage_fixed_runtime_input"
+WINDOWS_RUNTIME_PUBLICATION_BEFORE = "qualification_fixture::hosted_observe_produced_version_before_collision"
+WINDOWS_RUNTIME_PUBLICATION_AFTER = "qualification_fixture::hosted_compare_after_occupied_producer"
+WINDOWS_FULLWALK_PUBLISHER = "qualification_fixture::hosted_publish_protected_version_fixture"
+WINDOWS_FULLWALK_RETIRE = "qualification_fixture::hosted_retire_protected_version_fixture"
+WINDOWS_FULLWALK_AGGREGATE_MS = 210000
+WINDOWS_FULLWALK_SECOND_FLOOR_MS = 100000
+WINDOWS_FULLWALK_CURL_MAX_LINKS = 1024
+WINDOWS_FULLWALK_CURL_MAX_BYTES = 16 << 20
+WINDOWS_FULLWALK_ZIP = "python-3.14.7-embed-amd64.zip"
+WINDOWS_FULLWALK_URL = "https://www.python.org/ftp/python/3.14.7/" + WINDOWS_FULLWALK_ZIP
+WINDOWS_FULLWALK_ZIP_BYTES = 12673227
+WINDOWS_FULLWALK_ZIP_SHA256 = "d297e5ff019966817ad8502465176139f2d3d840fa4ed84b13bed399a6ab1f15"
+WINDOWS_FULLWALK_PINS = {
+    "desktop/tools/prepare_windows_embedded_payload.py": (17398, "79c9933b1bb273226ac4b893cd5a08d5ced752875a090d22385215518056a053"),
+    "desktop/tools/prepare_runtime.py": (12355, "4d9f0e52b7cbe1f9d648a96512cf0c0ca5ab01b5b06738282133b57e1830e4f8"),
+    "desktop/licenses/windows-embedded-runtime.txt": (240822, "6c814672403bec2064b22e54dbd028b055e0cacdc6837557a66cd5c0a04af360"),
+    "desktop/cpython-source-inputs/github-ca.pem": (240216, "9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f"),
+}
+WINDOWS_FULLWALK_BLOBS = {
+    "precheck": ("fullwalk-headless-precheck.private.txt", 16 << 10),
+    "roster": ("fullwalk-fixture-roster.private.txt", 16 << 10),
+    "publisherReceipt": ("fullwalk-publisher-result.private.txt", 64 << 10),
+    "publisherExit": ("fullwalk-publisher-exit.private.json", 4096),
+    "ordinaryRequest": ("ordinary-request.txt", 4096),
+    "ordinaryIntent": ("ordinary-owner-intent.private.json", 4096),
+    "ordinaryOwnerResult": ("ordinary-owner-result.private.json", 64 << 10),
+    "ordinaryChildResult": ("ordinary-output/native-result.json", 4096),
+    "ordinaryOwnerExit": ("ordinary-owner-exit.private.json", 4096),
+    "ordinaryFinality": ("fullwalk-ordinary-finality.private.txt", 16 << 10),
+}
+WINDOWS_FULLWALK_OUTCOMES = {
+    "publisherStepOutcome": "MRK_WINDOWS_PUBLISHER_STEP_OUTCOME",
+    "publisherFinalizeStepOutcome": "MRK_WINDOWS_FIXTURE_FINALIZE_STEP_OUTCOME",
+    "ordinaryOwnerStepOutcome": "MRK_WINDOWS_ORDINARY_OWNER_STEP_OUTCOME",
+    "ordinaryFinalizeStepOutcome": "MRK_WINDOWS_ORDINARY_FINALIZE_STEP_OUTCOME",
+}
+WINDOWS_FULLWALK_DIRECTORY_ROLES = ("suffix-mrk", "suffix-versions", "suffix-target", "version", "python")
+WINDOWS_FULLWALK_HEADLESS_SOURCES = {
+    "readerSourceSha256": "desktop/src-tauri/src/installed_runtime_windows.rs",
+    "runtimeSourceSha256": "desktop/src-tauri/src/runtime.rs",
+    "buildSourceSha256": "desktop/src-tauri/build.rs",
+    "nativeResultSourceSha256": "desktop/native/windows-installed-native/src/qualification_result.rs",
+}
+
+WINDOWS_FULLWALK_PAYLOAD_NAMES = (
+    "android_build_bootstrap.py",
+    "config_edit_bootstrap.py",
+    "core.zip",
+    "engine_bootstrap.py",
+    "environment_bootstrap.py",
+    "github-ca.pem",
+    "github_connection_bootstrap.py",
+    "manifest.json",
+    "offline_preflight_bootstrap.py",
+    "python/LICENSE.txt",
+    "python/MRK-EMBEDDED-NOTICES.txt",
+    "python/_asyncio.pyd",
+    "python/_bz2.pyd",
+    "python/_ctypes.pyd",
+    "python/_decimal.pyd",
+    "python/_elementtree.pyd",
+    "python/_hashlib.pyd",
+    "python/_lzma.pyd",
+    "python/_multiprocessing.pyd",
+    "python/_overlapped.pyd",
+    "python/_queue.pyd",
+    "python/_remote_debugging.pyd",
+    "python/_socket.pyd",
+    "python/_sqlite3.pyd",
+    "python/_ssl.pyd",
+    "python/_uuid.pyd",
+    "python/_wmi.pyd",
+    "python/_zoneinfo.pyd",
+    "python/_zstd.pyd",
+    "python/libcrypto-3.dll",
+    "python/libffi-8.dll",
+    "python/libssl-3.dll",
+    "python/libtommath.dll",
+    "python/pyexpat.pyd",
+    "python/python.cat",
+    "python/python.exe",
+    "python/python3.dll",
+    "python/python314._pth",
+    "python/python314.dll",
+    "python/python314.zip",
+    "python/pythonw.exe",
+    "python/select.pyd",
+    "python/sqlite3.dll",
+    "python/unicodedata.pyd",
+    "python/vcruntime140.dll",
+    "python/vcruntime140_1.dll",
+    "python/winsound.pyd",
+)
+
+WINDOWS_FULLWALK_PRECHECK_FIELDS = (
+    "profile",
+    "sourceSha",
+    "sourceTree",
+    "runId",
+    "attempt",
+    "sourceInventorySha256",
+    "readerSourceSha256",
+    "runtimeSourceSha256",
+    "buildSourceSha256",
+    "nativeResultSourceSha256",
+    "appTest",
+    "appArtifact",
+    "appArtifactBytes",
+    "appArtifactSha256",
+    "appArtifactIdentity",
+    "appCommandSha256",
+    "appCompileMessagesBytes",
+    "appCompileMessagesSha256",
+    "appCompileArgvSha256",
+    "ownerArtifact",
+    "ownerArtifactBytes",
+    "ownerArtifactSha256",
+    "ownerArtifactIdentity",
+    "ownerCompileMessagesBytes",
+    "ownerCompileMessagesSha256",
+    "ownerCompileArgvSha256",
+    "publisherTest",
+    "publisherCommandSha256",
+    "fullwalkOwnerTest",
+    "fullwalkOwnerCommandSha256",
+    "ordinaryOwnerTest",
+    "ordinaryOwnerCommandSha256",
+    "ordinaryChildCommandSha256",
+    "appRootFeatures",
+    "standaloneFeatures",
+    "appNativeDevFeatures",
+    "manifestSha256",
+    "protocolSha256",
+    "inventorySha256",
+    "coreSha256",
+    "payloadFiles",
+    "payloadBytes",
+    "preparedReceiptBytes",
+    "preparedReceiptSha256",
+    "rosterBytes",
+    "rosterSha256",
+    "headlessContract",
+)
+WINDOWS_FULLWALK_PRECHECK_HEADER = "MRK_WINDOWS_FULLWALK_HEADLESS_PRECHECK_V1"
+WINDOWS_RUNTIME_PUBLICATION_PRECHECK_FIELDS = (*WINDOWS_FULLWALK_PRECHECK_FIELDS,
+    "helperArtifact", "helperArtifactBytes", "helperArtifactSha256", "helperArtifactIdentity",
+    "helperCompileMessagesBytes", "helperCompileMessagesSha256", "helperCompileArgvSha256",
+    "helperCommandSha256", "helperNativeFeatures")
+WINDOWS_RUNTIME_PUBLICATION_PRECHECK_HEADER = "MRK_WINDOWS_RUNTIME_PUBLICATION_PRECHECK_V1"
+WINDOWS_INSTALLED_PASSIVE_PRECHECK_FIELDS = (
+    *WINDOWS_FULLWALK_PRECHECK_FIELDS[:26], "stageTest", "stageCommandSha256", "observerTest", "observerCommandSha256",
+    "ownerTest", "ownerCommandSha256", *WINDOWS_FULLWALK_PRECHECK_FIELDS[33:],
+    *WINDOWS_RUNTIME_PUBLICATION_PRECHECK_FIELDS[len(WINDOWS_FULLWALK_PRECHECK_FIELDS):],
+)
+WINDOWS_INSTALLED_PASSIVE_PROOFS = {
+    "stage": ("passive-stage-result.private.txt", 64 << 10),
+    "stageExit": ("passive-stage-exit.private.txt", 4096),
+    "helperSuccessExit": ("passive-publisher-exit.private.txt", 4096),
+}
+WINDOWS_NORMAL_UI_SETUP_PRECHECK_FIELDS = (
+    "profile", "sourceSha", "sourceTree", "runId", "attempt", "sourceInventorySha256",
+    "prerequisiteRequestSha256", "prerequisiteFinalizerSha256", "ownerArtifact", "ownerArtifactBytes",
+    "ownerArtifactSha256", "ownerArtifactIdentity", "ownerCompileMessagesBytes", "ownerCompileMessagesSha256",
+    "ownerCompileArgvSha256", "stageTest", "stageCommandSha256", "observerTest", "observerCommandSha256",
+    "standaloneFeatures", "helperArtifact", "helperArtifactBytes", "helperArtifactSha256", "helperArtifactIdentity",
+    "helperCompileMessagesBytes", "helperCompileMessagesSha256", "helperCompileArgvSha256", "helperCommandSha256",
+    "helperNativeFeatures", "manifestSha256", "protocolSha256", "inventorySha256", "coreSha256", "payloadFiles",
+    "payloadBytes", "preparedReceiptBytes", "preparedReceiptSha256", "rosterBytes", "rosterSha256", "setupContract",
+)
+WINDOWS_NORMAL_UI_SETUP_PROOFS = {
+    "stage": ("normal-ui-setup-stage-result.private.txt", 64 << 10),
+    "stageExit": ("normal-ui-setup-stage-exit.private.txt", 4096),
+    "helperSuccessExit": ("normal-ui-setup-publisher-exit.private.txt", 4096),
+}
+
+WINDOWS_FULLWALK_PUBLICATION_FIELDS = (
+    "profile",
+    "sourceSha",
+    "sourceTree",
+    "runId",
+    "attempt",
+    "publisherTest",
+    "artifactBytes",
+    "artifactSha256",
+    "artifactIdentity",
+    "precheckBytes",
+    "precheckSha256",
+    "rosterBytes",
+    "rosterSha256",
+    "manifestSha256",
+    "protocolSha256",
+    "inventorySha256",
+    "coreSha256",
+    "payloadFiles",
+    "payloadBytes",
+    "createdFiles",
+    "createdDirectories",
+    "sourceReaders",
+    "sourceReadersClosed",
+    "payloadWriters",
+    "payloadWritersClosed",
+    "postcheckReaders",
+    "postcheckReadersClosed",
+    "fileOriginals",
+    "fileOriginalsClosed",
+    "parentBookSettled",
+    "occupiedCreateCalls",
+    "occupiedCreateError",
+    "occupiedObjectsUnchanged",
+    "unknown",
+    "productionEnabled",
+    "resultCloseGate",
+    "objectCount",
+)
+WINDOWS_FULLWALK_PUBLICATION_HEADER = "MRK_WINDOWS_FULLWALK_PUBLISHER_RESULT_V1"
+
+WINDOWS_FULLWALK_FINALITY_FIELDS = (
+    "profile",
+    "sourceSha",
+    "sourceTree",
+    "runId",
+    "attempt",
+    "ordinaryOwnerTest",
+    "ordinaryChildTest",
+    "artifactBytes",
+    "artifactSha256",
+    "artifactBeforeIdentity",
+    "artifactAfterIdentity",
+    "ordinaryRequestBytes",
+    "ordinaryRequestSha256",
+    "ordinaryIntentBytes",
+    "ordinaryIntentSha256",
+    "ordinaryOwnerResultBytes",
+    "ordinaryOwnerResultSha256",
+    "ordinaryChildResultBytes",
+    "ordinaryChildResultSha256",
+    "ordinaryOwnerExitBytes",
+    "ordinaryOwnerExitSha256",
+    "ordinaryInvocationSha256",
+    "originTickMs",
+    "deadlineTickMs",
+    "aggregateBudgetMs",
+    "ordinaryResultPrewriteTickMs",
+    "originalInputCount",
+    "ownerStepOutcome",
+    "ownerOriginalExitCode",
+    "childOriginalExitCode",
+    "accountRemovedAfterSettlement",
+    "finalizerCloseGate",
+)
+WINDOWS_FULLWALK_FINALITY_HEADER = "MRK_WINDOWS_FULLWALK_ORDINARY_FINALITY_V1"
+
+WINDOWS_FULLWALK_PREREQUISITE_FIELDS = (
+    "profile",
+    "sourceSha",
+    "sourceTree",
+    "runId",
+    "attempt",
+    "precheckBytes",
+    "precheckSha256",
+    "rosterBytes",
+    "rosterSha256",
+    "publisherReceiptBytes",
+    "publisherReceiptSha256",
+    "publisherExitBytes",
+    "publisherExitSha256",
+    "ordinaryRequestBytes",
+    "ordinaryRequestSha256",
+    "ordinaryIntentBytes",
+    "ordinaryIntentSha256",
+    "ordinaryOwnerResultBytes",
+    "ordinaryOwnerResultSha256",
+    "ordinaryOwnerExitBytes",
+    "ordinaryOwnerExitSha256",
+    "ordinaryFinalityBytes",
+    "ordinaryFinalitySha256",
+    "ordinaryInvocationSha256",
+    "originTickMs",
+    "deadlineTickMs",
+    "aggregateBudgetMs",
+    "ownerArtifactAfterOrdinaryIdentity",
+    "manifestSha256",
+    "protocolSha256",
+    "inventorySha256",
+    "coreSha256",
+    "payloadFiles",
+    "payloadBytes",
+    "versionIdentity",
+    "selectedPythonIdentity",
+    "selectedBootstrapIdentity",
+    "selectedCoreIdentity",
+    "publisherStepOutcome",
+    "publisherFinalizeStepOutcome",
+    "ordinaryOwnerStepOutcome",
+    "ordinaryFinalizeStepOutcome",
+    "prerequisitesOnlyNotNativeWalk",
+    "envelopeCloseGate",
+)
+WINDOWS_FULLWALK_PREREQUISITE_HEADER = "MRK_WINDOWS_FULLWALK_PREREQUISITES_V1"
+WINDOWS_RUNTIME_PUBLICATION_PROOFS = {
+    "stage": ("producer-stage-result.private.txt", 64 << 10),
+    "stageExit": ("producer-stage-exit.private.txt", 4096),
+    "helperSuccessExit": ("producer-success-exit.private.txt", 4096),
+    "before": ("producer-before-result.private.txt", 64 << 10),
+    "beforeExit": ("producer-before-exit.private.txt", 4096),
+    "helperOccupiedExit": ("producer-occupied-exit.private.txt", 4096),
+}
+WINDOWS_RUNTIME_PUBLICATION_PREREQUISITE_FIELDS = (*WINDOWS_FULLWALK_PREREQUISITE_FIELDS,
+    *(role + suffix for role in WINDOWS_RUNTIME_PUBLICATION_PROOFS for suffix in ("Bytes", "Sha256")))
+WINDOWS_RUNTIME_PUBLICATION_PREREQUISITE_HEADER = "MRK_WINDOWS_RUNTIME_PUBLICATION_PREREQUISITES_V1"
+WINDOWS_RUNTIME_PUBLICATION_EXIT_FIELDS = ("profile", "sourceSha", "sourceTree", "runId", "attempt",
+    "role", "artifactSha256", "precheckSha256", "commandSha256", "originalWaitReturned", "exitCode", "writerCloseGate")
+WINDOWS_RUNTIME_PUBLICATION_EXIT_HEADER = "MRK_WINDOWS_RUNTIME_PUBLICATION_ORIGINAL_EXIT_V1"
+WINDOWS_RUNTIME_PUBLICATION_SCALAR_HEADER = "MRK_WINDOWS_HAS_RESTRICTIONS_QUALIFICATION_V1"
+WINDOWS_RUNTIME_PUBLICATION_SCALAR_FIELDS = ("profile", "sourceSha", "sourceTree", "runId", "attempt", "qualifierTest",
+    "artifactSha256", "precheckSha256", "commandSha256", "sourceReturn", "sourceCount", "sourceValue", "sourceAdmitted",
+    "derivedReturn", "derivedCount", "derivedValue", "derivedAdmitted", "createCalls", "filterFlags", "restrictingSidInputs",
+    "tokenOriginals", "tokenOriginalsClosed", "parentBookSettled", "unknown", "resultCloseGate")
+WINDOWS_RUNTIME_PUBLICATION_OBSERVATION_FIELDS = ("profile", "sourceSha", "sourceTree", "runId", "attempt",
+    "observerTest", "artifactBytes", "artifactSha256", "artifactIdentity", "precheckBytes", "precheckSha256",
+    "rosterBytes", "rosterSha256", "manifestSha256", "protocolSha256", "inventorySha256", "coreSha256",
+    "payloadFiles", "payloadBytes", "objectCount", "sourceReaders", "payloadWriters", "postcheckReaders",
+    "fileOriginals", "fileOriginalsClosed", "parentBookSettled", "unknown", "actualFixedProducerObserved",
+    "runtimeConsumerEnabled", "pythonExecuted", "appLaunched", "resultCloseGate", "proofCount")
+WINDOWS_RUNTIME_PUBLICATION_OBSERVATION_HEADER = "MRK_WINDOWS_RUNTIME_PUBLICATION_OBSERVATION_V1"
+WINDOWS_RUNTIME_PUBLICATION_STEPS = {
+    "stage": "STAGE", "helperSuccess": "SUCCESS", "before": "BEFORE", "helperOccupied": "OCCUPIED",
+}
+
+WINDOWS_FULLWALK_INVOCATION_FIELDS = (
+    "profile",
+    "sourceSha",
+    "sourceTree",
+    "runId",
+    "attempt",
+    "ordinaryOwnerTest",
+    "artifactBytes",
+    "artifactSha256",
+    "artifactBeforeIdentity",
+    "ordinaryChildCommandSha256",
+    "ordinaryRequestSha256",
+    "originTickMs",
+    "aggregateBudgetMs",
+    "deadlineTickMs",
+)
+WINDOWS_FULLWALK_INVOCATION_HEADER = "MRK_WINDOWS_FULLWALK_OWNER_INVOCATION_V1"
+
+WINDOWS_FULLWALK_SCHEMAS = {
+    "precheck": (WINDOWS_FULLWALK_PRECHECK_HEADER, WINDOWS_FULLWALK_PRECHECK_FIELDS, 16 << 10),
+    "publication": (WINDOWS_FULLWALK_PUBLICATION_HEADER, WINDOWS_FULLWALK_PUBLICATION_FIELDS, 64 << 10),
+    "finality": (WINDOWS_FULLWALK_FINALITY_HEADER, WINDOWS_FULLWALK_FINALITY_FIELDS, 16 << 10),
+    "prerequisite": (WINDOWS_FULLWALK_PREREQUISITE_HEADER, WINDOWS_FULLWALK_PREREQUISITE_FIELDS, 16 << 10),
+    "invocation": (WINDOWS_FULLWALK_INVOCATION_HEADER, WINDOWS_FULLWALK_INVOCATION_FIELDS, 4096),
+    "production-precheck": (WINDOWS_RUNTIME_PUBLICATION_PRECHECK_HEADER, WINDOWS_RUNTIME_PUBLICATION_PRECHECK_FIELDS, 16 << 10),
+    "production-prerequisite": (WINDOWS_RUNTIME_PUBLICATION_PREREQUISITE_HEADER, WINDOWS_RUNTIME_PUBLICATION_PREREQUISITE_FIELDS, 16 << 10),
+    "production-exit": (WINDOWS_RUNTIME_PUBLICATION_EXIT_HEADER, WINDOWS_RUNTIME_PUBLICATION_EXIT_FIELDS, 4096),
+    "production-scalar": (WINDOWS_RUNTIME_PUBLICATION_SCALAR_HEADER, WINDOWS_RUNTIME_PUBLICATION_SCALAR_FIELDS, 4096),
+    "production-observation": (WINDOWS_RUNTIME_PUBLICATION_OBSERVATION_HEADER, WINDOWS_RUNTIME_PUBLICATION_OBSERVATION_FIELDS, 64 << 10),
+    "passive-precheck": ("MRK_WINDOWS_INSTALLED_PASSIVE_PRECHECK_V1", WINDOWS_INSTALLED_PASSIVE_PRECHECK_FIELDS, 16 << 10),
+    "passive-exit": ("MRK_WINDOWS_INSTALLED_PASSIVE_SETUP_EXIT_V1", WINDOWS_RUNTIME_PUBLICATION_EXIT_FIELDS, 4096),
+    "passive-observation": ("MRK_WINDOWS_INSTALLED_PASSIVE_SETUP_OBSERVATION_V1", WINDOWS_RUNTIME_PUBLICATION_OBSERVATION_FIELDS, 64 << 10),
+    "normal-ui-setup-precheck": ("MRK_WINDOWS_NORMAL_UI_SETUP_PRECHECK_V1", WINDOWS_NORMAL_UI_SETUP_PRECHECK_FIELDS, 16 << 10),
+    "normal-ui-setup-exit": ("MRK_WINDOWS_NORMAL_UI_SETUP_EXIT_V1", WINDOWS_RUNTIME_PUBLICATION_EXIT_FIELDS, 4096),
+    "normal-ui-setup-observation": ("MRK_WINDOWS_NORMAL_UI_SETUP_OBSERVATION_V1", WINDOWS_RUNTIME_PUBLICATION_OBSERVATION_FIELDS, 64 << 10),
+}
+WINDOWS_FULLWALK_INVOCATION_NUMBERS = frozenset({"attempt", "artifactBytes", "originTickMs", "aggregateBudgetMs", "deadlineTickMs"})
+WINDOWS_FULLWALK_DATA_PHASES = (
+    "windows-installed-fixture-finalize", "windows-installed-fullwalk", "windows-installed-fullwalk-finalize",
+    "windows-runtime-publication-scalar-finalize",
+    "windows-runtime-publication-stage-finalize", "windows-runtime-publication-success-finalize",
+    "windows-runtime-publication-before-finalize", "windows-runtime-publication-occupied-finalize",
+)
+WINDOWS_INSTALLED_PASSIVE_DATA_PHASES = (
+    "windows-installed-passive-stage-finalize", "windows-installed-passive-publish-finalize", "windows-installed-passive-publication-finalize",
+    "windows-installed-passive", "windows-installed-passive-finalize",
+)
+
+
+WINDOWS_ORDINARY_ACLS = (
+    ("root", 0x20), ("target", 0x20), ("target/x86_64-pc-windows-msvc", 0x20),
+    ("target/x86_64-pc-windows-msvc/debug", 0x20), ("target/x86_64-pc-windows-msvc/debug/deps", 0x20),
+    ("artifact", 0x1200a9), ("ordinary-output", 0x1000a2),
+)
+WINDOWS_NORMAL_UI_PROBE_ACLS = (
+    *((role, 0x1200a9) for role, _ in WINDOWS_ORDINARY_ACLS[:-2]),
+    ("artifact", 0x1200a9), ("normal-ui-output", 0x1200af),
+)
+WINDOWS_INSTALLED_PHASES = ("prepare", "acquire", "compile", "windows-installed-native",
+                          "windows-installed-native-finalize", "windows-installed-runtime-data", *WINDOWS_FULLWALK_DATA_PHASES,
+                          *WINDOWS_INSTALLED_PASSIVE_DATA_PHASES, "windows-normal-ui-prerequisite",
+                          *WINDOWS_NORMAL_UI_DATA_PHASES, *WINDOWS_NORMAL_UI_SETUP_BUILD_PHASES,
+                          *WINDOWS_NORMAL_UI_GUI_BUILD_PHASES, "retain")
 WINDOWS_INSTALLED_APP = "desktop/src-tauri"
 WINDOWS_INSTALLED_APP_LOCALS = {
     "mobile-release-kit-desktop": "desktop/src-tauri/Cargo.toml",
     "mrk-linux-mount-observation": "desktop/native/linux-mount-observation/Cargo.toml",
     "mrk-macos-installed-native": "desktop/native/macos-installed-native/Cargo.toml",
     "mrk-windows-installed-native": "desktop/native/windows-installed-native/Cargo.toml",
+}
+# The complete cross-platform source lock is not the active Windows graph.
+# Linux vendors stay source-bound here but must never become Windows units.
+WINDOWS_INSTALLED_APP_LOCK_LOCALS = {
+    "mobile-release-kit-desktop": "0.1.0",
+    "mrk-linux-mount-observation": "0.1.0",
+    "mrk-macos-installed-native": "0.1.0",
+    "mrk-windows-installed-native": "0.1.0",
+    "secret-service": "5.2.0",
+    "zbus": "5.19.0",
 }
 WINDOWS_INSTALLED_APP_INERT = (
     "runtime::windows_version::tests::windows_manifest_and_observed_inventory_are_exact",
@@ -903,14 +1561,45 @@ WINDOWS_INSTALLED_INERT = tuple("tests::" + name for name in (
     "metadata_and_directory_keep_the_full_identity_not_a_low_half",
     "stream_and_component_refusals_cannot_be_treated_as_absence",
 ))
+WINDOWS_RUNTIME_PUBLICATION_NATIVE_INERT = tuple("publication::tests::" + name for name in (
+    "installer_admission_is_positive_bounded_and_not_ordinary_refusal",
+    "fixed_roster_and_production_masks",
+    "real_return_classification_never_repairs_a_write_or_invents_a_flush",
+    "collision_never_adopts_and_only_known_closed_originals_allow_later_roles",
+    "live_order_requires_all_original_closures_and_never_relabels_exposure",
+    "intentional_transitions_do_not_hide_identity_or_immutable_drift",
+    "original_unknown_retains_mutation_storage_without_close_retry",
+    "even_the_first_descendant_grant_is_possibly_exposed_on_failure",
+))
+WINDOWS_RUNTIME_PUBLICATION_APP_INERT = tuple("runtime_publication_windows::tests::" + name for name in (
+    "no_argument_entry_and_literal_release_shape",
+    "roster_refuses_extras_omissions_case_aliases_and_extra_directories",
+    "pair_read_budget_and_exact_digest_cannot_be_replaced_by_size",
+))
+WINDOWS_INSTALLED_PASSIVE_NATIVE_INERT = tuple("tests::" + name for name in (
+    "loader_roles_and_shared_cursor_cannot_be_retargeted",
+    "os_image_link_policy_never_weakens_payload_metadata_or_loader_acl",
+    "passive_request_and_result_preserve_roles_and_original_finality",
+    "passive_setup_profile_is_disjoint_from_publication_and_fullwalk",
+))
+WINDOWS_INSTALLED_PASSIVE_APP_INERT = (
+    "runtime::windows_version::loader_path_tests::windows_python_capacity_counts_utf16_nul_and_verbatim_prefix_before_creation",
+    "runtime::windows_version::loader_path_tests::windows_complete_layout_binds_the_longest_python_dlls_fallback",
+    "runtime::windows_version::tests::windows_passive_inventory_excludes_all_additional_startup_inputs",
+    "installed_runtime_windows::tests::passive_slots_cannot_transfer_partial_inspection_or_settled_books",
+    "supervisor::windows_passive_tests::fixed_probe_and_candidate_are_bounded_and_nonshipping",
+)
 WINDOWS_INSTALLED_SOURCES = tuple(sorted((
     ".github/workflows/desktop-foundation.yml", "desktop/tools/ci_foundation.py",
     "desktop/src-tauri/Cargo.toml", "desktop/src-tauri/Cargo.lock", "desktop/src-tauri/build.rs",
-    "desktop/src-tauri/src/lib.rs", "desktop/src-tauri/src/runtime.rs",
+    "desktop/src-tauri/src/lib.rs", "desktop/src-tauri/src/runtime.rs", "desktop/src-tauri/src/supervisor.rs",
+    "desktop/src-tauri/src/installed_windows_passive_tests.rs", "tests/native_desktop_installed_windows_probe.py",
     "desktop/src-tauri/src/installed_runtime_windows.rs", "tests/desktop/test_ci_foundation_contract.py",
+    "desktop/src-tauri/src/runtime_publication_windows.rs", "desktop/src-tauri/src/bin/windows_runtime_publish.rs",
     *(WINDOWS_INSTALLED_CRATE + "/" + name for name in (
         "Cargo.toml", "Cargo.lock", "README.md", "src/lib.rs", "src/decode.rs",
-        "src/security.rs", "src/tests.rs", "src/hosted_tests.rs")),
+        "src/security.rs", "src/tests.rs", "src/loader.rs", "src/hosted_tests.rs", "src/ordinary_owner.rs",
+        "src/qualification_result.rs", "src/qualification_fixture.rs", "src/publication.rs")),
 )))
 WINDOWS_INSTALLED_NOT_VERIFIED = (
     "rust-1.88-minimum", "parent-application-cargo-graph-or-build", "production-resources-worker-joins",
@@ -921,6 +1610,11 @@ WINDOWS_INSTALLED_NOT_VERIFIED = (
 WINDOWS_INSTALLED_COMBINED_NOT_VERIFIED = (
     "application-shell-featured-build-and-packaging",
     *(name for name in WINDOWS_INSTALLED_NOT_VERIFIED if name != "parent-application-cargo-graph-or-build"),
+)
+WINDOWS_INSTALLED_PASSIVE_NOT_VERIFIED = (
+    "normal-windows-profile-and-desktop-ui", "project-snapshot-and-native-document-loss",
+    "configuration-save", "msi-assembly-installation-and-session", "rust-1.88-minimum",
+    "other-windows-images", "protected-main-delivery",
 )
 WINDOWS_SNAPSHOT_PUBLIC_SCOPE = "windows-static-snapshot-native-only-not-desktop-enablement"
 WINDOWS_SNAPSHOT_PHASES = frozenset({"prepare", "acquire", "compile", "windows-snapshot", "clean"})
@@ -1351,7 +2045,10 @@ METADATA_CORE_SOURCES = {'apiContracts': 'src/mobile_release/api/contracts.py',
  'resource': 'src/mobile_release/api/data/metadata-text-help-v1.json',
  'rootCustody': 'src/mobile_release/init_workspace_custody.py',
  'snapshot': 'src/mobile_release/api/_snapshot.py',
- 'transaction': 'src/mobile_release/init_transaction.py'}
+ 'transaction': 'src/mobile_release/init_transaction.py',
+ 'versionEdit': 'src/mobile_release/release_version_edit.py',
+ 'versionResource': 'src/mobile_release/api/data/release-version-help-v1.json',
+ 'versionText': 'src/mobile_release/version_text.py'}
 METADATA_PAYLOAD_BINDINGS = {'configHashes': {'publicStore': '1b0b02e48d03cca36aaf36e5d8a8daf15f59924803bd4a5c0ec2e655828d3f94',
                   'releaseStore': 'caabad94b27c616e9deaf8570ded7edca9a41de86ca3e1982ab6e4a3f57073f1'},
  'ignoreSha256': 'e60087ecefac81e23666444e6aea9490b3fc42b2510f566cfd4aa5a36a35b7d4',
@@ -1466,6 +2163,12 @@ METADATA_OWNER_SOURCES = {
     'snapshot': 'src/mobile_release/api/_snapshot.py',
     'metadataResource': 'src/mobile_release/api/data/metadata-text-help-v1.json',
     'schemaResource': 'src/mobile_release/api/data/project.schema.json',
+    # Shared engine imports are current SOURCE bindings, not version-fixture authority.
+    'versionProtocol': 'desktop/src-tauri/src/release_version_edit_protocol.rs',
+    'versionCommands': 'desktop/src-tauri/src/release_version_edit_commands.rs',
+    'versionEdit': 'src/mobile_release/release_version_edit.py',
+    'versionText': 'src/mobile_release/version_text.py',
+    'versionResource': 'src/mobile_release/api/data/release-version-help-v1.json',
 }
 METADATA_TRANSACTION_EOF_SOURCES = {**METADATA_OWNER_SOURCES, "transactionEofShim": "tests/native_desktop_config_eof.py"}
 METADATA_OWNER_PAYLOAD_HASHES = {'configHashes': {'publicStore': '1b0b02e48d03cca36aaf36e5d8a8daf15f59924803bd4a5c0ec2e655828d3f94',
@@ -1493,6 +2196,364 @@ METADATA_NATIVE_SOURCES = tuple(sorted({
     METADATA_NATIVE_WORKFLOW,
 }))
 
+# Closed release-version DATA from the independent finite native contract; no core import.
+VERSION_CORE_SOURCES = {'apiContracts': 'src/mobile_release/api/contracts.py',
+ 'buildInputs': 'src/mobile_release/build_inputs.py',
+ 'cancellation': 'src/mobile_release/cancellation.py',
+ 'catalogue': 'src/mobile_release/api/_catalog.py',
+ 'configEdit': 'src/mobile_release/config_edit.py',
+ 'configPayloads': 'src/mobile_release/config_payloads.py',
+ 'configuration': 'src/mobile_release/config.py',
+ 'editControl': 'src/mobile_release/_desktop_edit_control.py',
+ 'editEngine': 'src/mobile_release/_desktop_edit_engine.py',
+ 'editProtocol': 'src/mobile_release/_desktop_edit_protocol.py',
+ 'errors': 'src/mobile_release/errors.py',
+ 'fixture': 'tests/native_desktop_config.py',
+ 'metadataEdit': 'src/mobile_release/metadata_text_edit.py',
+ 'metadataPolicy': 'src/mobile_release/metadata.py',
+ 'metadataText': 'src/mobile_release/metadata_text.py',
+ 'passiveEngine': 'src/mobile_release/_desktop_engine.py',
+ 'resource': 'src/mobile_release/api/data/release-version-help-v1.json',
+ 'rootCustody': 'src/mobile_release/init_workspace_custody.py',
+ 'snapshot': 'src/mobile_release/api/_snapshot.py',
+ 'transaction': 'src/mobile_release/init_transaction.py',
+ 'versionApi': 'src/mobile_release/api/_release_version.py',
+ 'versionEdit': 'src/mobile_release/release_version_edit.py',
+ 'versionText': 'src/mobile_release/version_text.py',
+ 'workflowEdit': 'src/mobile_release/github_workflow_edit.py',
+ 'workflowPayloads': 'src/mobile_release/workflow_payloads.py'}
+VERSION_PAYLOAD_BINDINGS = {'configHashes': {'nestedVersion': '8db69de9d4a3c83d312ee37e8952531f71b633f0f7f36b042b5d143cc2357de9',
+                  'publicVersion': '1dcd101a440da3c950903bca1b54f926aa63ce36ae5ed1eead5fb24f7813dfbd',
+                  'releaseVersion': '1b0b02e48d03cca36aaf36e5d8a8daf15f59924803bd4a5c0ec2e655828d3f94'},
+ 'ignoreSha256': 'cdf75f09188ea0e3712fcd26c9dbb42819dd467e9744676c6448b2a29a789c5b',
+ 'versionHashes': {'created': '3b8dbd6b58e9f42a0ed893e73020cf2f8ddde787e2b1a153da49d382b1e7a9d4',
+                   'edited': 'bc7f934bcf5f4fcf0b1b9c814613bd773ec4a9f579376f1dca01929d4e9e3732',
+                   'original': 'd8453785b2637e76d1b7456dd0e5ea0d343cfd5f7d409a06dc38ab791aa6334a'}}
+VERSION_CORE_ROWS = {'committed-close': (('version-committed-close-return-injection',
+                      'committed',
+                      'clean',
+                      'unknown',
+                      'cancelled',
+                      True,
+                      {'actualScopeCloseReturned': True,
+                       'afterUnknownProbes': 0,
+                       'cancelledAfterCommit': 1,
+                       'committedCarrier': True,
+                       'injections': 1,
+                       'scopesClosed': 3}),),
+ 'committed-fsync': (('version-committed-fsync-injection',
+                      'committed',
+                      'recovery_required',
+                      'settled',
+                      'filesystem_error',
+                      False,
+                      {'committedObserved': True,
+                       'dependenciesPreserved': True,
+                       'durabilityConfirmed': False,
+                       'injections': 1,
+                       'journalRetained': True,
+                       'rollbackCalls': 0,
+                       'scopesClosed': 3,
+                       'selectedPayloadInstalled': True}),),
+ 'ordinary': (('present-malformed-source-refused',
+               'not_started',
+               'not_created',
+               'settled',
+               'invalid_params',
+               False,
+               {'journalAbsent': True,
+                'presentSourcePreserved': True,
+                'revisionBound': True,
+                'scopesClosed': 1,
+                'snapshotUnchanged': True,
+                'targetDescriptorBound': True}),
+              ('present-nonregular-source-refused',
+               'not_started',
+               'not_created',
+               'settled',
+               'filesystem_error',
+               False,
+               {'journalAbsent': True,
+                'presentSourcePreserved': True,
+                'revisionBound': False,
+                'scopesClosed': 1,
+                'snapshotUnchanged': True,
+                'targetDescriptorBound': True}),
+              ('legacy-seven-ignore-rules-refused',
+               'not_started',
+               'not_created',
+               'settled',
+               'ignore_conflict',
+               False,
+               {'journalAbsent': True,
+                'revisionAbsent': True,
+                'scopesClosed': 1,
+                'snapshotUnchanged': True,
+                'targetDescriptorAbsent': True}),
+              ('config-retarget-before-prepare',
+               'not_started',
+               'not_created',
+               'settled',
+               'stale_revision',
+               False,
+               {'authorityRetired': True,
+                'changeObserved': True,
+                'journalAbsent': True,
+                'scopesClosed': 2,
+                'selectionNotRetargeted': True,
+                'snapshotUnchanged': True}),
+              ('ignore-bytes-before-apply',
+               'not_started',
+               'not_created',
+               'settled',
+               'stale_revision',
+               False,
+               {'authorityRetired': True,
+                'changeObserved': True,
+                'journalAbsent': True,
+                'scopesClosed': 3,
+                'selectionNotRetargeted': True,
+                'snapshotUnchanged': True}),
+              ('target-parent-inode-before-prepare',
+               'not_started',
+               'not_created',
+               'settled',
+               'stale_revision',
+               False,
+               {'authorityRetired': True,
+                'changeObserved': True,
+                'journalAbsent': True,
+                'scopesClosed': 2,
+                'selectionNotRetargeted': True,
+                'snapshotUnchanged': True}),
+              ('target-parent-mode-before-apply',
+               'not_started',
+               'not_created',
+               'settled',
+               'stale_revision',
+               False,
+               {'authorityRetired': True,
+                'changeObserved': True,
+                'journalAbsent': True,
+                'scopesClosed': 3,
+                'selectionNotRetargeted': True,
+                'snapshotUnchanged': True}),
+              ('missing-target-parent-appears-before-apply',
+               'not_started',
+               'not_created',
+               'settled',
+               'stale_revision',
+               False,
+               {'authorityRetired': True,
+                'changeObserved': True,
+                'journalAbsent': True,
+                'scopesClosed': 3,
+                'selectionNotRetargeted': True,
+                'snapshotUnchanged': True}),
+              ('noop-leaf-ctime-after-recheck',
+               'not_started',
+               'not_created',
+               'settled',
+               'stale_revision',
+               False,
+               {'changedOnlyDeclaredFacts': True,
+                'consumingTargetChecks': 1,
+                'injections': 1,
+                'journalAbsent': True,
+                'recheckReturns': 1,
+                'renameProbes': 0,
+                'scopesClosed': 3,
+                'snapshotUnchangedAfterInjection': True,
+                'unchangedMarked': False}),
+              ('noop-target-parent-mode-after-recheck',
+               'not_started',
+               'not_created',
+               'settled',
+               'stale_revision',
+               False,
+               {'changedOnlyDeclaredFacts': True,
+                'consumingTargetChecks': 1,
+                'injections': 1,
+                'journalAbsent': True,
+                'recheckReturns': 1,
+                'renameProbes': 0,
+                'scopesClosed': 3,
+                'snapshotUnchangedAfterInjection': True,
+                'unchangedMarked': False}),
+              ('unreadable-source-before-prepare',
+               'not_started',
+               'not_created',
+               'settled',
+               'filesystem_error',
+               False,
+               {'deniedOriginalReads': 1,
+                'journalAbsent': True,
+                'permissionErrorObserved': True,
+                'scopesClosed': 2,
+                'snapshotUnchanged': True}),
+              ('version-replacement-installed-rollback',
+               'rolled_back',
+               'clean',
+               'settled',
+               'filesystem_error',
+               False,
+               {'injections': 1,
+                'journalAbsent': True,
+                'originalBackupBound': True,
+                'recoveryAttempts': 1,
+                'rollbackReturned': True,
+                'scopesClosed': 3,
+                'secondApplyNoScope': True,
+                'secondApplyRefused': True,
+                'snapshotRestored': True,
+                'versionLeafInstalled': True}),
+              ('incomplete-version-preparing-retained',
+               'not_started',
+               'recovery_required',
+               'settled',
+               'filesystem_error',
+               False,
+               {'cleanupUnlinks': 0,
+                'completeProof': False,
+                'dependenciesPreserved': True,
+                'injections': 1,
+                'numberedSlotRetained': True,
+                'preparingRetained': True,
+                'recoverCalls': 0,
+                'scopesClosed': 3,
+                'targetPreserved': True}),
+              ('committed-version-backup-replaced-at-cleanup-entry',
+               'committed',
+               'recovery_required',
+               'settled',
+               'filesystem_error',
+               False,
+               {'cleanupUnlinks': 0,
+                'committedObserved': True,
+                'dependenciesPreserved': True,
+                'durabilityConfirmed': True,
+                'injections': 1,
+                'originalBackupRetained': True,
+                'proofRetained': True,
+                'sameBytesForeignInode': True,
+                'scopesClosed': 3,
+                'selectedPayloadInstalled': True}),
+              ('foreign-domains-refuse-version-prepare',
+               'not_started',
+               'not_created',
+               'settled',
+               'pending_state',
+               False,
+               {'allOwnersSettled': True,
+                'entrypoints': ['legacy', 'configuration', 'github_workflows', 'metadata_text'],
+                'legacyApplyRefused': True,
+                'legacyRecoverRefused': True,
+                'legacyWorkspaceClosed': True,
+                'originalOwners': 4,
+                'scopesClosed': 3,
+                'snapshotUnchanged': True,
+                'stateRetained': True,
+                'targetDescriptorsAbsent': True,
+                'typedRefusals': 3}),
+              ('foreign-domains-refuse-version-ready',
+               'not_started',
+               'not_created',
+               'settled',
+               'pending_state',
+               False,
+               {'allOwnersSettled': True,
+                'entrypoints': ['legacy', 'configuration', 'github_workflows', 'metadata_text'],
+                'legacyApplyRefused': True,
+                'legacyRecoverRefused': True,
+                'legacyWorkspaceClosed': True,
+                'originalOwners': 4,
+                'scopesClosed': 3,
+                'snapshotUnchanged': True,
+                'stateRetained': True,
+                'targetDescriptorsAbsent': True,
+                'typedRefusals': 3}),
+              ('foreign-domains-refuse-version-cleanup',
+               'not_started',
+               'not_created',
+               'settled',
+               'pending_state',
+               False,
+               {'allOwnersSettled': True,
+                'entrypoints': ['legacy', 'configuration', 'github_workflows', 'metadata_text'],
+                'legacyApplyRefused': True,
+                'legacyRecoverRefused': True,
+                'legacyWorkspaceClosed': True,
+                'originalOwners': 4,
+                'scopesClosed': 3,
+                'snapshotUnchanged': True,
+                'stateRetained': True,
+                'targetDescriptorsAbsent': True,
+                'typedRefusals': 3}),
+              ('version-refuses-foreign-ready',
+               'not_started',
+               'not_created',
+               'settled',
+               'pending_state',
+               False,
+               {'allOwnersSettled': True,
+                'bothRefused': True,
+                'foreignDomains': ['legacy', 'metadata_text'],
+                'foreignStateRetained': True,
+                'originalOwners': 2,
+                'scopesClosed': 2,
+                'snapshotUnchanged': True,
+                'targetDescriptorsAbsent': True,
+                'versionStateAbsent': True}),
+              ('dependency-drift-after-version-install',
+               'unknown',
+               'recovery_required',
+               'settled',
+               'stale_revision',
+               False,
+               {'afterUnknownProbes': 0,
+                'cleanupUnlinks': 0,
+                'conflictObservedInsideOriginal': True,
+                'dependencyChanged': True,
+                'injections': 1,
+                'laterInstallMoves': 0,
+                'originalBackupBound': True,
+                'recoverCalls': 0,
+                'retainedTreeInsideOriginal': True,
+                'scopesClosed': 3,
+                'versionLeafInstalled': True}))}
+VERSION_CORE_INJECTIONS = {'committed-close': 'postcommit-cancellation-and-positive-scope-close-return-loss',
+ 'committed-fsync': 'postdecision-pre-fsync',
+ 'ordinary': 'fixed-original-version-boundaries'}
+VERSION_OWNER_PAYLOAD_HASHES = {'configHashes': {'nestedVersion': '8db69de9d4a3c83d312ee37e8952531f71b633f0f7f36b042b5d143cc2357de9',
+                  'publicVersion': '1dcd101a440da3c950903bca1b54f926aa63ce36ae5ed1eead5fb24f7813dfbd',
+                  'releaseVersion': '1b0b02e48d03cca36aaf36e5d8a8daf15f59924803bd4a5c0ec2e655828d3f94'},
+ 'ignoreSha256': 'cdf75f09188ea0e3712fcd26c9dbb42819dd467e9744676c6448b2a29a789c5b',
+ 'versionHashes': {'created': '3b8dbd6b58e9f42a0ed893e73020cf2f8ddde787e2b1a153da49d382b1e7a9d4',
+                   'edited': 'bc7f934bcf5f4fcf0b1b9c814613bd773ec4a9f579376f1dca01929d4e9e3732',
+                   'original': 'd8453785b2637e76d1b7456dd0e5ea0d343cfd5f7d409a06dc38ab791aa6334a',
+                   'eofOriginal': '5d64d0003ef70a87ca42922bc20faf8c102a8d2dd1429c20c0a56904f53bfb3f',
+                   'eofEdited': '533c9829233f93176a5a29ac7202a5dabca359748931286e4385e21058a1dd43'},
+ 'unrelatedSha256': '0e4722e0ca13cfc08d5e8bd61c73d37c9880610e1723a8eb1c2363e92e2eebef',
+ 'umaskProbeSha256': '43d78b83e6fd6b81bba80df9e4c3657df4cfc3ef6c5acdc1ca055d45f9b46a4d'}
+
+VERSION_OWNER_CASES = ("explicit-absent-create", "observe-edit-two-spans-preserve", "observe-noop-original-leaf",
+    "stale-passive-baseline-refused", "four-domain-owner-and-token-isolation", "registration-changed-before-apply",
+    "version-terminal-held-after-stop", "version-document-loss-before-apply")
+VERSION_EOF_CASES = ("precommit-eof", "postcommit-eof", "precommit-conflict-eof")
+VERSION_NOT_VERIFIED = (
+    "production-runtime-custody", "production-version-save-enablement", "native-gui", "webview-callbacks-or-crash-hook",
+    "parent-death", "native-stuck-wait-close", "persisted-recovery", "macos-windows-version-writes",
+    "credentials", "remote-github", "stores", "mobile-builds", "installers",
+)
+# Shared SOURCE membership only, never metadata writer/receipt authority.
+VERSION_OWNER_SOURCES = {**METADATA_OWNER_SOURCES,
+    "versionObservation": "desktop/src-tauri/src/release_version_protocol.rs",
+    "versionObservationApi": "src/mobile_release/api/_release_version.py"}
+VERSION_TRANSACTION_EOF_SOURCES = {**VERSION_OWNER_SOURCES, "transactionEofShim": "tests/native_desktop_config_eof.py"}
+VERSION_NATIVE_SOURCES = tuple(sorted({
+    *GITHUB_TLS_SOURCES, *VERSION_TRANSACTION_EOF_SOURCES.values(), *VERSION_CORE_SOURCES.values(), VERSION_NATIVE_WORKFLOW,
+}))
+
 TOOL_CHECKS = frozenset({
     "source-head", "source-tree", "source-clean", "rust-toolchain-install",
     "cargo-selection", "rustc-selection", "rust-version-target", "locked-platform-metadata",
@@ -1511,11 +2572,22 @@ TOOL_CHECKS = frozenset({
     "metadata-locked-headless-metadata", "metadata-owner-source-native-contract", "metadata-owner-zip-native-contract",
     "metadata-transaction-eof-native-contract", "metadata-core-ordinary", "metadata-core-committed-fsync",
     "metadata-core-committed-close", "metadata-source-status",
+    "version-locked-headless-metadata", "version-owner-source-native-contract", "version-owner-zip-native-contract",
+    "version-transaction-eof-native-contract", "version-core-ordinary", "version-core-committed-fsync",
+    "version-core-committed-close", "version-source-status",
     "windows-snapshot-native-contract",
     "windows-installed-locked-metadata", "windows-installed-test-compile-only",
-    "windows-installed-inert-contracts", "windows-installed-native-contract",
+    "windows-installed-inert-contracts",
     "windows-installed-source-status", "windows-installed-source-inventory",
     "windows-installed-app-locked-metadata", "windows-installed-app-test-compile-only", "windows-installed-app-inert-contracts",
+    "windows-installed-helper-compile-only", "windows-installed-helper-locked-metadata",
+    "windows-normal-ui-native-metadata", "windows-normal-ui-native-compile-only",
+    "windows-normal-ui-native-policy", "windows-normal-ui-scalar-metadata",
+    "windows-normal-ui-scalar-compile-only", "windows-normal-ui-scalar-regression",
+    "windows-normal-ui-setup-native-metadata", "windows-normal-ui-setup-native-compile-only",
+    "windows-normal-ui-gui-metadata", "windows-normal-ui-gui-compile-only",
+    "windows-normal-ui-frontend-acquire", "windows-normal-ui-frontend-typecheck", "windows-normal-ui-frontend-assets",
+    "windows-fullwalk-fixed-supplier", "windows-fullwalk-fixed-offline-preparer",
     "github-locked-headless-metadata", "github-headless-test-compile-only", "github-owner-native-contract",
     "github-tls-locked-headless-metadata", "github-tls-headless-test-compile-only",
     "environment-source-status", "environment-source-inventory",
@@ -1534,13 +2606,15 @@ def require(condition: bool, message: str) -> None:
 
 def admit_phase(scope: str, phase: str) -> None:
     """Closed scope selection, before context, tools, or native dispatch."""
-    require(scope in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, *ENVIRONMENT_NATIVE_SCOPES, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES}, "Unknown desktop verification scope")
+    require(scope in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE, *ENVIRONMENT_NATIVE_SCOPES, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES}, "Unknown desktop verification scope")
     if scope in COMPILE_PROFILES:
         require(phase in COMPILE_PHASES, "Compiler-only scope cannot execute a native phase")
     elif scope == WORKFLOW_NATIVE_SCOPE:
         require(phase in WORKFLOW_NATIVE_PHASES, "Workflow-only scope cannot execute an unrelated native phase")
     elif scope == METADATA_NATIVE_SCOPE:
         require(phase in METADATA_NATIVE_PHASES, "Metadata-only scope cannot execute an unrelated native phase")
+    elif scope == VERSION_NATIVE_SCOPE:
+        require(phase in VERSION_NATIVE_PHASES, "Version-only scope cannot execute an unrelated native phase")
     elif scope in ENVIRONMENT_NATIVE_SCOPES:
         require(phase in environment_native_profile(scope)["phases"], "Environment-only scope cannot execute an unrelated phase")
     elif scope == WINDOWS_SNAPSHOT_SCOPE:
@@ -1558,6 +2632,7 @@ def admit_platform(scope: str, platform: str) -> None:
     require(scope != GTK_COMPILE_SCOPE or platform == "linux", "SG1 compilation requires Linux")
     require(scope != WORKFLOW_NATIVE_SCOPE or platform == "linux", "Workflow native verification requires Linux")
     require(scope != METADATA_NATIVE_SCOPE or platform == "linux", "Metadata native verification requires Linux")
+    require(scope != VERSION_NATIVE_SCOPE or platform == "linux", "Version native verification requires Linux")
     require(scope not in ENVIRONMENT_NATIVE_SCOPES or platform in {"linux", "macos"}, "Environment native verification requires its exact Linux or macOS host")
     require(scope != WINDOWS_SNAPSHOT_SCOPE or platform == "windows", "Windows snapshot verification requires Windows")
     require(scope != GITHUB_READONLY_SCOPE or platform == "linux", "G1 native verification requires Linux")
@@ -1635,6 +2710,32 @@ def metadata_native_binding(environment: dict[str, str]) -> dict[str, str]:
     return {"workflowPath": METADATA_NATIVE_WORKFLOW, "workflowSha": sha,
             "workflowRef": environment["GITHUB_WORKFLOW_REF"], "sourceSha": sha,
             "runId": run_id, "attempt": attempt, "repository": repository, "event": "push", "ref": METADATA_NATIVE_REF,
+            "pushEventAfter": sha}
+
+
+def version_native_binding(environment: dict[str, str]) -> dict[str, str]:
+    """Closed push-only version route; neither dispatch nor another lane can opt in."""
+    keys = ("GITHUB_SHA", "GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_REF",
+            "GITHUB_WORKFLOW_SHA", "GITHUB_WORKFLOW_REF", "GITHUB_EVENT_NAME", "MRK_PUSH_EVENT_AFTER",
+            "MRK_DESKTOP_HOSTED_CHECKS")
+    require(all(type(environment.get(key)) is str for key in keys), "Version native binding fields differ")
+    sha, repository = environment.get("GITHUB_SHA", ""), environment.get("GITHUB_REPOSITORY", "")
+    run_id, attempt = environment.get("GITHUB_RUN_ID", ""), environment.get("GITHUB_RUN_ATTEMPT", "")
+    require(re.fullmatch(r"[0-9a-f]{40}", sha) is not None and sha != "0" * 40
+            and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is not None,
+            "Version native source identity differs")
+    require(re.fullmatch(r"[1-9][0-9]{0,19}", run_id) is not None and attempt == "1",
+            "Version native original run identity differs")
+    require(environment.get("MRK_DESKTOP_HOSTED_CHECKS") == VERSION_NATIVE_SCOPE
+            and environment.get("GITHUB_REF") == VERSION_NATIVE_REF
+            and environment.get("GITHUB_WORKFLOW_SHA") == sha
+            and environment.get("GITHUB_WORKFLOW_REF") == f"{repository}/{VERSION_NATIVE_WORKFLOW}@{VERSION_NATIVE_REF}",
+            "Version native workflow/ref/scope binding differs")
+    require(environment.get("GITHUB_EVENT_NAME") == "push" and environment.get("MRK_PUSH_EVENT_AFTER") == sha,
+            "Version native push event/source differs")
+    return {"workflowPath": VERSION_NATIVE_WORKFLOW, "workflowSha": sha,
+            "workflowRef": environment["GITHUB_WORKFLOW_REF"], "sourceSha": sha,
+            "runId": run_id, "attempt": attempt, "repository": repository, "event": "push", "ref": VERSION_NATIVE_REF,
             "pushEventAfter": sha}
 
 
@@ -1759,8 +2860,16 @@ def run(argv: list[str], *, check: str, cwd: Path, env: dict[str, str], timeout:
         "github-tls-locked-headless-metadata", "github-tls-headless-test-compile-only",
         "environment-locked-headless-metadata", "environment-headless-test-compile-only",
         "windows-installed-locked-metadata", "windows-installed-test-compile-only",
-        "windows-installed-inert-contracts", "windows-installed-native-contract",
-        "windows-installed-app-locked-metadata", "windows-installed-app-test-compile-only", "windows-installed-app-inert-contracts"}),
+        "windows-installed-inert-contracts",
+        "windows-installed-app-locked-metadata", "windows-installed-app-test-compile-only", "windows-installed-app-inert-contracts",
+        "windows-installed-helper-compile-only", "windows-installed-helper-locked-metadata",
+        "windows-normal-ui-native-metadata", "windows-normal-ui-native-compile-only",
+        "windows-normal-ui-native-policy", "windows-normal-ui-scalar-metadata",
+        "windows-normal-ui-scalar-compile-only", "windows-normal-ui-scalar-regression",
+        "windows-normal-ui-setup-native-metadata", "windows-normal-ui-setup-native-compile-only",
+        "windows-normal-ui-gui-metadata", "windows-normal-ui-gui-compile-only",
+        "windows-normal-ui-frontend-acquire", "windows-normal-ui-frontend-typecheck", "windows-normal-ui-frontend-assets",
+        "windows-fullwalk-fixed-supplier", "windows-fullwalk-fixed-offline-preparer"}),
         "Unexpected private diagnostic destination")
     print(f"Fixed check: {check}", flush=True)
     try:
@@ -1783,9 +2892,9 @@ def run(argv: list[str], *, check: str, cwd: Path, env: dict[str, str], timeout:
 def admitted_host(*, retention_only: bool = False) -> str:
     require(os.environ.get("GITHUB_ACTIONS") == "true"
             and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
-            and os.environ.get("MRK_DESKTOP_HOSTED_CHECKS") in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, *ENVIRONMENT_NATIVE_SCOPES, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES},
+            and os.environ.get("MRK_DESKTOP_HOSTED_CHECKS") in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE, *ENVIRONMENT_NATIVE_SCOPES, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES},
             "This fixed check requires an explicitly admitted disposable hosted job")
-    require(not retention_only or os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {METADATA_NATIVE_SCOPE, *ENVIRONMENT_NATIVE_SCOPES},
+    require(not retention_only or os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE, *ENVIRONMENT_NATIVE_SCOPES},
             "DATA-only admission is restricted to fixed retention")
     platform = os.environ.get("MRK_DESKTOP_PLATFORM", "")
     require(platform in TARGETS and platform == {
@@ -1794,7 +2903,7 @@ def admitted_host(*, retention_only: bool = False) -> str:
     admit_platform(os.environ["MRK_DESKTOP_HOSTED_CHECKS"], platform)
     if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] == WINDOWS_SNAPSHOT_SCOPE:
         admitted_scope(platform)
-    if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE}:
+    if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE}:
         require(os.environ.get("RUNNER_OS") == "Linux" and os.environ.get("RUNNER_ARCH") == "X64"
                 and os.environ.get("ImageOS") == "ubuntu24" and (retention_only or os.uname().machine == "x86_64")
                 and os.geteuid() != 0, "Workflow native checks require the non-root Ubuntu 24 x86_64 runner")
@@ -2285,6 +3394,141 @@ def validate_metadata_owner_header(receipt: object, context: dict, mode: str, so
     return receipt["cases"]
 
 
+def version_context_binding(context: dict) -> dict:
+    """Recheck the closed original lane when constructing/consuming every phase."""
+    require(type(context) is dict and context.get("executionScope") == VERSION_NATIVE_SCOPE
+            and context.get("platform") == "linux", "Unexpected version native context scope")
+    binding = version_native_binding({
+        "MRK_DESKTOP_HOSTED_CHECKS": context["executionScope"],
+        "GITHUB_SHA": context.get("sourceSha"), "GITHUB_REPOSITORY": context.get("repository"),
+        "GITHUB_RUN_ID": context.get("runId"), "GITHUB_RUN_ATTEMPT": context.get("attempt"),
+        "GITHUB_WORKFLOW_SHA": context.get("workflowSha"), "GITHUB_WORKFLOW_REF": context.get("workflowRef"),
+        "GITHUB_REF": context.get("ref"), "GITHUB_EVENT_NAME": context.get("event"),
+        "MRK_PUSH_EVENT_AFTER": context.get("pushEventAfter"),
+    })
+    require(context.get("workflowPath") == VERSION_NATIVE_WORKFLOW
+            and type(context.get("sourceTree")) is str
+            and re.fullmatch(r"[0-9a-f]{40}", context["sourceTree"]) is not None
+            and context["sourceTree"] != "0" * 40 and sha256_value(context.get("workflowSha256")),
+            "Version native tree/workflow binding differs")
+    return {**binding, "sourceTree": context["sourceTree"], "workflowSha256": context["workflowSha256"],
+            "platform": "linux"}
+
+
+def version_source_files(source: Path) -> list[dict]:
+    files = []
+    for relative in VERSION_NATIVE_SOURCES:
+        path = source / relative
+        ordinary(path)
+        size = path.stat().st_size
+        require(0 < size <= 2 * 1024 * 1024, "Version native source exceeds its bound")
+        files.append({"path": relative, "size": size, "sha256": hash_file(path)})
+    return files
+
+
+def version_core_metadata(context: dict) -> dict:
+    version_context_binding(context)
+    return {**{key: context[key] for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt")},
+            "ref": VERSION_NATIVE_REF, "coreFiles": context["versionInputs"]["coreFiles"],
+            "coreZipSha256": context["versionInputs"]["coreZipSha256"]}
+
+
+def version_inputs_unchanged(context: dict) -> None:
+    """Bounded source/receipt DATA only, never a project probe or cleanup right."""
+    version_context_binding(context)
+    root, source = Path(context["root"]), Path(context["source"])
+    identities = {"root": workflow_directory_identity(root), "source": workflow_directory_identity(source),
+                  **{name: workflow_directory_identity(root / name) for name in VERSION_NATIVE_DIRECTORIES}}
+    require(same_compile_json(identities, context["originalDirectories"]), "Version original directory identity changed")
+    observed = {"sourceFiles": version_source_files(source), "coreFiles": workflow_core_inventory(source),
+                "coreZipSha256": hash_file(root / "core.zip"), "pythonSha256": hash_file(Path(context["python"]))}
+    require(same_compile_json(context["versionInputs"], observed), "Version original source/runtime inputs changed")
+    require(same_compile_json(read_bounded_json(root / "version.json", 128 * 1024), version_core_metadata(context)),
+            "Version source/ZIP metadata changed")
+
+
+def version_source_unchanged(context: dict) -> None:
+    source_unchanged(context)
+    require(run([context["git"], "status", "--porcelain=v1", "--untracked-files=all"], check="version-source-status",
+                cwd=Path(context["source"]), env=clean_environment(Path(context["root"])), timeout=15, capture=True) == "",
+            "Version source contains unreviewed or generated inputs")
+    version_inputs_unchanged(context)
+
+
+def validate_version_core_receipt(receipt: object, partition: str, *, source_sha: str,
+                                   source_hashes: dict[str, str], python_hash: str, host: dict) -> dict:
+    require(partition in VERSION_PARTITIONS and set(source_hashes) == set(VERSION_CORE_SOURCES),
+            "Unknown version core partition or source inventory")
+    validate_workflow_host(host)
+    rows = VERSION_CORE_ROWS[partition]
+    expected = {
+        "schemaVersion": 1, "suite": "desktop-release-version-native", "domain": "release_version",
+        "partition": partition, "status": "passed", "reason": "none", "failedAt": None,
+        "retained": True, "uncertaintyLatched": partition != "committed-fsync",
+        "injection": VERSION_CORE_INJECTIONS[partition], "host": host,
+        "bindings": {"sourceSha": source_sha, "sourceKind": "source", "sourceHashes": source_hashes,
+                     "pythonSha256": python_hash, **VERSION_PAYLOAD_BINDINGS},
+        "completed": [row[0] for row in rows],
+        "cases": [{"case": name, "outcome": {"effect": effect, "journal": journal, "resources": resources, "reason": reason},
+                   "owner": {"closed": True, "handlerRestored": True, "fatal": fatal}, "observed": observed}
+                  for name, effect, journal, resources, reason, fatal, observed in rows],
+    }
+    require(same_compile_json(receipt, expected),
+            "Version core original facts, source, retention or ordered case inventory differ")
+    return receipt
+
+
+def version_core_receipt(context: dict, partition: str) -> dict:
+    require(partition in VERSION_PARTITIONS, "Unknown version core partition")
+    return validate_version_core_receipt(read_bounded_json(Path(context["root"]) / f"version-{partition}.json", 32 * 1024), partition,
+        source_sha=context["sourceSha"], source_hashes=version_bound_source_hashes(context, VERSION_CORE_SOURCES),
+        python_hash=context["versionInputs"]["pythonSha256"], host=context["observedHost"])
+
+
+def version_bound_source_hashes(context: dict, sources: dict[str, str]) -> dict[str, str]:
+    """Original preparation DATA, reverified before native phases, never a post-last-close probe."""
+    version_context_binding(context)
+    rows = context["versionInputs"]["sourceFiles"]
+    require(type(rows) is list and len(rows) == len(VERSION_NATIVE_SOURCES), "Version bound source inventory differs")
+    hashes = {}
+    for row, path in zip(rows, VERSION_NATIVE_SOURCES, strict=True):
+        require(type(row) is dict and set(row) == {"path", "size", "sha256"} and row["path"] == path
+                and integer_between(row["size"], 1, 2 * 1024 * 1024) and sha256_value(row["sha256"]),
+                "Version bound original source entry differs")
+        hashes[path] = row["sha256"]
+    require(all(path in hashes for path in sources.values()), "Version receipt requires an unbound source")
+    return {name: hashes[path] for name, path in sources.items()}
+
+
+def version_owner_bindings(context: dict, mode: str, source_hashes: dict[str, str], *, eof: bool = False) -> dict:
+    version_context_binding(context)
+    require(mode in ("source", "zip") and (not eof or mode == "source")
+            and type(source_hashes) is dict
+            and set(source_hashes) == set(VERSION_TRANSACTION_EOF_SOURCES if eof else VERSION_OWNER_SOURCES)
+            and all(sha256_value(value) for value in source_hashes.values()),
+            "Version owner runtime choice or source inventory differs")
+    inputs = context["versionInputs"]
+    inventory = json.dumps(inputs["coreFiles"], sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    return {**{key: context[key] for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt")},
+            "ref": VERSION_NATIVE_REF, "domain": "release_version", "host": "linux", "target": TARGETS["linux"],
+            "runtimeMode": "trusted-development-only", "runtimeInput": mode, "pythonSha256": inputs["pythonSha256"],
+            "coreZipSha256": inputs["coreZipSha256"], "coreInventorySha256": hashlib.sha256(inventory).hexdigest(),
+            "sourceHashes": source_hashes, "payloadHashes": VERSION_OWNER_PAYLOAD_HASHES,
+            "versionResourceSha256": source_hashes["versionResource"], "schemaResourceSha256": source_hashes["schemaResource"],
+            "inheritedFileMaskObserved": True, "requestedCreateMode": 0o644, "observedCreateMode": 0o600, "newDirectoryMode": 0o755,
+            "documentEvidence": "controlled-original-lifetime-not-gui-callbacks"}
+
+
+def validate_version_owner_header(receipt: object, context: dict, mode: str, source_hashes: dict[str, str], *, eof: bool = False) -> list:
+    require(type(receipt) is dict and type(receipt.get("cases")) is list, "Unexpected version owner receipt")
+    expected = {"schemaVersion": 1, "scope": "release-version-transaction-eof-hosted-v1" if eof else "release-version-owner-hosted-v1",
+                "domain": "release_version", "status": "passed", "allOwnersSettled": not eof, "originalResourcesSettled": True,
+                "ownerDisabled": eof, "retainedEffectUnknown": eof, "failureCode": None, "cases": receipt["cases"],
+                "bindings": version_owner_bindings(context, mode, source_hashes, eof=eof), "notVerified": list(VERSION_NOT_VERIFIED)}
+    require(same_compile_json(receipt, expected), "Version owner source/runtime/retention or original resource header differs")
+    return receipt["cases"]
+
+
 def metadata_passive_values(values: object, methods: tuple[str, ...], previous: int, *, error: str | None = None) -> int:
     """Validate original observers in invocation order, not synthetic editor facts."""
     require(type(values) is list and len(values) == len(methods), "Metadata original passive roster differs")
@@ -2430,6 +3674,130 @@ def metadata_owner_receipt(context: dict, mode: str) -> dict:
 def metadata_transaction_eof_receipt(context: dict) -> dict:
     return validate_metadata_transaction_eof_receipt(read_bounded_json(Path(context["root"]) / "metadata-transaction-eof/receipt.json", 64 * 1024),
         context=context, source_hashes=metadata_bound_source_hashes(context, METADATA_TRANSACTION_EOF_SOURCES))
+
+
+def version_native_value(value: object, *, effect: str = "committed", journal: str = "clean", reason: tuple[str, ...] = ("none",),
+                          native_reason: str = "none", applying: bool = True, requests: int = 3, responses: int = 3, sequence: int = 2,
+                          checkout: bool = True, prepared: bool = True, domain: str = "release_version", unknown: bool = False, stderr: int = 0) -> dict:
+    require(type(value) is dict and integer_between(value.get("stdoutBytes"), 1, 12 * 1024 * 1024),
+            "Version original editor output accounting differs")
+    outcome = value.get("outcome")
+    require(type(outcome) is dict and type(outcome.get("reason")) is str and outcome["reason"] in reason,
+            "Version original core reason differs")
+    expected = {"domain": domain, "nativePhase": "unknown" if unknown else "final",
+                "nativeFinality": "unknown" if unknown else "settled", "nativeReason": native_reason,
+                "applySubmitted": applying, "lateSettled": unknown,
+                "outcome": {"effect": effect, "journal": journal, "resources": "settled", "reason": outcome["reason"]},
+                "terminalSeq": sequence, "requestFrames": requests, "responseFrames": responses,
+                "stdoutBytes": value["stdoutBytes"], "stderrBytes": stderr, "forceAttempted": False,
+                **dict.fromkeys(CONFIG_OWNER_FINALITY, True)}
+    if domain == "release_version":
+        expected.update(checkoutRetained=checkout, preparedRetained=prepared)
+    require(same_compile_json(value, expected), "Version original editor wait/streams/management/correlation differs")
+    return expected
+
+
+
+def validate_version_owner_receipt(receipt: object, mode: str, *, context: dict, source_hashes: dict[str, str]) -> dict:
+    cases = validate_version_owner_header(receipt, context, mode, source_hashes)
+    names = VERSION_OWNER_CASES if mode == "source" else (VERSION_OWNER_CASES[1],)
+    require(len(cases) == len(names), "Version source/ZIP case inventory differs")
+    previous = 0
+    for name, case in zip(names, cases, strict=True):
+        index = VERSION_OWNER_CASES.index(name)
+        require(type(case) is dict and type(case.get("observations")) is dict, f"Version owner {name} row differs")
+        source = "public/version-tree/version.properties" if index == 0 else "public/version.properties"
+        methods = ("release-version-observe",) * (1 if index in (0, 3, 5, 7) else 2)
+        previous = metadata_passive_values(case.get("passive"), methods, previous)
+        options = {}
+        if index == 3:
+            options = {"effect": "not_started", "journal": "not_created", "reason": ("stale_revision",),
+                       "applying": False, "requests": 2, "responses": 2, "sequence": 1, "prepared": False}
+            observations = {"olderPassiveBaselineRejected": True, "newerNativeCheckoutRetained": True, "noPlanOrRebase": True,
+                "externalChangeRetained": True, "treeUnchanged": True, "sourceProbesSettled": True, "passiveOriginalsSettled": True}
+        elif index in (5, 7):
+            options = {"effect": "not_started", "journal": "not_created", "reason": ("none", "cancelled"),
+                       "native_reason": "caller_lost" if index == 5 else "window_lost",
+                       "applying": False, "requests": 2, "responses": 3, "sequence": 1}
+            observations = {"preparedCorrelationRetained": True, "treeUnchanged": True, "staleCommandNotSent": True,
+                "newRegistrationPublishedUnderDocumentLock": index == 5, "controlledOriginalDocumentLoss": index == 7,
+                "replacementDocumentRefused": index == 7, "guiCallbacksNotClaimed": True,
+                "sourceProbesSettled": True, "passiveOriginalsSettled": True}
+        else:
+            noop = index == 2
+            options = {"effect": "unchanged" if noop else "committed", "journal": "not_created" if noop else "clean",
+                       "native_reason": "cancelled" if index == 6 else "none"}
+            domains = case["observations"].get("domains")
+            require(type(domains) is list and len(domains) == (3 if index == 4 else 0), "Version foreign-domain owner inventory differs")
+            for item, domain in zip(domains, ("configuration", "github_workflows", "metadata_text")):
+                version_native_value(item, effect="not_started", journal="not_created", reason=("none", "cancelled"),
+                    native_reason="discarded", applying=False, requests=1, responses=2, sequence=0, domain=domain)
+            spent_refusal = case["observations"].get("consumedPlanRefusal")
+            if index == 4:
+                version_native_value(spent_refusal, effect="not_started", journal="not_created", reason=("none", "cancelled"),
+                    native_reason="caller_lost", applying=False, requests=2, responses=3, sequence=1)
+            else:
+                require(spent_refusal is None, "Unexpected version consumed-token owner")
+            observations = {"action": "create" if index == 0 else "preserve" if noop else "replace",
+                "directoriesCreated": ["public", "public/version-tree"] if index == 0 else [],
+                "explicitAbsentCreate": index == 0, "completePreparedBytes": True, "passiveBaselineMatchedCheckout": index != 0,
+                "preparedCorrelationRetained": True, "capturePrepareRawFactsUnchanged": True,
+                "dependenciesAndUnrelatedPreserved": True, "existingModePreserved": True, "createModeMasked": True,
+                "directoryModesExact": True, "unicodeCommentsAndOnlyTwoSpansPreserved": index != 0,
+                "rawNoopUnchanged": noop, "duplicateApplyObservation": index == 0, "savedPairReadback": True,
+                "sharedStatusRevision": True, "sharedLastTerminalDomainCorrect": True, "fourDomainIsolation": index == 4,
+                "foreignOriginalTicketsRefused": index == 4, "consumedPlanRefused": index == 4,
+                "consumedPlanRefusal": spent_refusal, "domains": domains,
+                "heldBeforeAcceptance": index == 6, "realStopBeforeRelease": index == 6, "cancelledNotSaved": index == 6,
+                "sourceProbesSettled": True, "passiveOriginalsSettled": True}
+        native = version_native_value(case.get("native"), **options)
+        expected = {"name": name, "domain": "release_version", "source": source,
+                    "native": native, "passive": case["passive"], "observations": observations}
+        require(same_compile_json(case, expected), f"Version owner {name} original observations differ")
+    return receipt
+
+
+def validate_version_transaction_eof_receipt(receipt: object, *, context: dict, source_hashes: dict[str, str]) -> dict:
+    cases = validate_version_owner_header(receipt, context, "source", source_hashes, eof=True)
+    require(len(cases) == 3, "Version EOF case inventory differs")
+    previous = 0
+    for index, (name, case) in enumerate(zip(VERSION_EOF_CASES, cases, strict=True)):
+        require(type(case) is dict, f"Version EOF {name} row differs")
+        previous = metadata_passive_values(case.get("passive"), () if index == 2 else ("release-version-observe",), previous)
+        committed, unknown = index == 1, index == 2
+        boundary, checkpoint = ("after-durable-COMMITTED", "descriptor-close") if committed else ("before-COMMITTED", "publisher-entry")
+        terminal = "UNKNOWN" if unknown else "COMMITTED" if committed else "ROLLED_BACK"
+        records = (f"MRK_RELEASE_VERSION_EOF_V1 {name} boundary={boundary}\n"
+            f"MRK_RELEASE_VERSION_EOF_V1 {name} eof=1 nonempty=0 readErrors=0 checkpoint={checkpoint} "
+            f"applied=1 committed={int(committed)} rolledBack={int(not committed and not unknown)} terminal={terminal} "
+            f"durable={int(not unknown)} recovery=1 clean={int(not unknown)} settled=1 cancelled=1\n")
+        native = version_native_value(case.get("native"), effect="unknown" if unknown else "committed" if committed else "rolled_back",
+            journal="recovery_required" if unknown else "clean", reason=("cancelled",), native_reason="cancelled",
+            unknown=unknown, stderr=len(records.encode("ascii")))
+        observations = {"evidenceKind": "real-stdin-eof-at-controlled-transaction-boundary", "bootstrapMode": "instrumented-genuine-engine",
+            "boundary": boundary, "originalCheckpoint": checkpoint, "closeBeforeActiveDeadline": True, "controlRecords": 2,
+            "actualStdinEof": True, "eofReadCount": 1, "nonemptyReadCount": 0, "readErrorCount": 0, "preparedCorrelationRetained": True,
+            "versionProfileAndControlProof": True, "committedPublication": committed, "rolledBackPublication": not committed and not unknown,
+            "terminalDurable": not unknown, "fixedRecovery": True, "journalClean": not unknown, "journalAbsent": not unknown,
+            "originalTreeRestored": not committed and not unknown, "selectedPayloadsRemain": committed or unknown,
+            "unselectedAndDependenciesPreserved": True, "unrelatedIntroducedBeforeEof": unknown, "introducedOriginalPreserved": unknown,
+            "recoveryEvidenceRetained": unknown, "sharedBlockedProject": unknown, "allFourDomainsDisabled": unknown,
+            "noFurtherAdmission": unknown, "sourceProbesSettled": True, "passiveOriginalsSettled": True, "fixtureFilesSettled": True}
+        expected = {"name": name, "domain": "release_version", "source": "release/version.properties" if committed else "public/version.properties",
+                    "native": native, "passive": case["passive"], "observations": observations}
+        require(same_compile_json(case, expected), f"Version EOF {name} original observations differ")
+    return receipt
+
+
+def version_owner_receipt(context: dict, mode: str) -> dict:
+    require(mode in ("source", "zip"), "Unknown version owner runtime form")
+    return validate_version_owner_receipt(read_bounded_json(Path(context["root"]) / f"version-owner-{mode}/receipt.json", 64 * 1024), mode,
+        context=context, source_hashes=version_bound_source_hashes(context, VERSION_OWNER_SOURCES))
+
+
+def version_transaction_eof_receipt(context: dict) -> dict:
+    return validate_version_transaction_eof_receipt(read_bounded_json(Path(context["root"]) / "version-transaction-eof/receipt.json", 64 * 1024),
+        context=context, source_hashes=version_bound_source_hashes(context, VERSION_TRANSACTION_EOF_SOURCES))
 
 
 def canonical_json(value: object) -> bytes:
@@ -5500,6 +6868,11 @@ def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | No
                 "Metadata-only phase cannot produce compiler or product authority")
         value = metadata_phase_value(context, name, checks)
         validate_metadata_phase_receipt(value, context, name)
+    elif context.get("executionScope") == VERSION_NATIVE_SCOPE:
+        require(node is None and scope == "passive-development-foundation-only" and compiled is None,
+                "Version-only phase cannot produce compiler or product authority")
+        value = version_phase_value(context, name, checks)
+        validate_version_phase_receipt(value, context, name)
     elif context.get("executionScope") == GITHUB_READONLY_SCOPE:
         require(node is None and scope == "passive-development-foundation-only" and compiled is None,
                 "G1 phase cannot produce other native or product authority")
@@ -5559,6 +6932,28 @@ def metadata_public_bindings(context: dict) -> dict:
             "payloadBindings": METADATA_PAYLOAD_BINDINGS, "notVerified": list(METADATA_NOT_VERIFIED)}
 
 
+def prepare_version_native_context(context: dict, inventory: list[dict]) -> None:
+    root, source = Path(context["root"]), Path(context["source"])
+    context["versionInputs"] = {"sourceFiles": version_source_files(source), "coreFiles": inventory,
+                                 "coreZipSha256": hash_file(root / "core.zip"), "pythonSha256": hash_file(Path(context["python"]))}
+    context["originalDirectories"] = {"root": workflow_directory_identity(root), "source": workflow_directory_identity(source),
+                                      **{name: workflow_directory_identity(root / name) for name in VERSION_NATIVE_DIRECTORIES}}
+    context["observedHost"] = workflow_host(root)
+    context["versionInvocation"] = version_invocation()
+    # Bind the actual source/ZIP resource closure, not workflow template DATA or
+    # a renderer-supplied configuration/field roster.
+    write_json(root / "version.json", version_core_metadata(context))
+    version_source_unchanged(context)
+
+
+def version_public_bindings(context: dict) -> dict:
+    return {"schemaVersion": 1, "scope": VERSION_NATIVE_EVIDENCE_SCOPE,
+            **version_context_binding(context), "versionInputs": context["versionInputs"],
+            "python": PYTHON, "rust": {"release": RUST, "target": TARGETS["linux"]},
+            "features": ["development-runtime"], "testTarget": "lib", "host": context["observedHost"],
+            "payloadBindings": VERSION_PAYLOAD_BINDINGS, "notVerified": list(VERSION_NOT_VERIFIED)}
+
+
 def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     admit_phase(scope, "prepare")
     admit_platform(scope, platform)
@@ -5571,10 +6966,11 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     profile = compile_profile(scope) if scope in COMPILE_PROFILES else None
     native_workflow = scope == WORKFLOW_NATIVE_SCOPE
     native_metadata = scope == METADATA_NATIVE_SCOPE
-    native_edit = native_workflow or native_metadata
+    native_version = scope == VERSION_NATIVE_SCOPE
+    native_edit = native_workflow or native_metadata or native_version
     native_github = scope == GITHUB_READONLY_SCOPE
     native_tls = scope == GITHUB_TLS_SCOPE
-    binding = (metadata_native_binding(os.environ) if native_metadata else compile_workflow_binding(os.environ, scope) if profile else workflow_native_binding(os.environ)
+    binding = (version_native_binding(os.environ) if native_version else metadata_native_binding(os.environ) if native_metadata else compile_workflow_binding(os.environ, scope) if profile else workflow_native_binding(os.environ)
                if native_workflow else github_readonly_binding(os.environ) if native_github
                else github_tls_binding(os.environ) if native_tls else {})
     source = Path(os.environ["GITHUB_WORKSPACE"]).resolve(strict=True)
@@ -5591,13 +6987,13 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     if native_edit or native_github or native_tls:
         # One original root per actual job attempt. A second prepare must not
         # mint a fresh path to evade a failed/Unknown phase's retained claims.
-        label = "metadata" if native_metadata else "github-tls" if native_tls else "github" if native_github else "workflow"
+        label = "version" if native_version else "metadata" if native_metadata else "github-tls" if native_tls else "github" if native_github else "workflow"
         root = temp / f"mrk-desktop-foundation-{label}-{binding['runId']}-{binding['attempt']}"
         root.mkdir(mode=0o700)
     else:
         root = Path(tempfile.mkdtemp(prefix="mrk-desktop-foundation-", dir=temp))
     no_cargo_configuration((root,))
-    directories = METADATA_NATIVE_DIRECTORIES if native_metadata else GITHUB_TLS_DIRECTORIES if native_tls else GITHUB_READONLY_DIRECTORIES if native_github else WORKFLOW_NATIVE_DIRECTORIES if native_workflow else (
+    directories = VERSION_NATIVE_DIRECTORIES if native_version else METADATA_NATIVE_DIRECTORIES if native_metadata else GITHUB_TLS_DIRECTORIES if native_tls else GITHUB_READONLY_DIRECTORIES if native_github else WORKFLOW_NATIVE_DIRECTORIES if native_workflow else (
         "home", "cargo", "rustup", "tmp", "target", "windows-snapshot", "appdata", "localappdata") if windows else (
         "home", "cargo", "rustup", "tmp", "target", "native", "config-owner", "config-driver-loss", "config-watchdog-loss",
         "config-stop", "config-terminal-deadline", "config-startup-stop", "config-transaction-eof", "appdata", "localappdata", "npm-cache")
@@ -5652,7 +7048,9 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     if scope == GTK_COMPILE_SCOPE:
         validate_gtk_core_inventory(inventory)
         context["sg1"] = gtk_compile_binding(source)
-    if native_metadata:
+    if native_version:
+        prepare_version_native_context(context, inventory)
+    elif native_metadata:
         prepare_metadata_native_context(context, inventory)
     elif native_workflow:
         prepare_workflow_native_context(context, inventory)
@@ -5663,7 +7061,9 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     source_unchanged(context)
     if not windows:
         write_json(root / "context.json", context)
-    if native_metadata:
+    if native_version:
+        public = version_public_bindings(context)
+    elif native_metadata:
         public = metadata_public_bindings(context)
     elif native_workflow:
         public = workflow_public_bindings(context)
@@ -5716,12 +7116,23 @@ def metadata_invocation() -> dict:
     return values
 
 
+def version_invocation() -> dict:
+    # Exact original invocation strings are private context DATA. Reading them
+    # does not resolve/reopen source/runtime paths after lane-last uncertainty.
+    values = {key: os.environ[key] for key in ("GITHUB_WORKSPACE", "MRK_PYTHON", "RUNNER_TEMP")}
+    values["executable"] = sys.executable
+    require(all(type(value) is str and Path(value).is_absolute() for value in values.values()),
+            "Version invocation input is not absolute")
+    return values
+
+
 def load_context(platform: str, scope: str = BOUNDARY_SCOPE, *, retention_only: bool = False) -> dict:
     admit_platform(scope, platform)
     if scope in ENVIRONMENT_NATIVE_SCOPES:
         return load_environment_native_context(platform, retention_only=retention_only)
-    require(not retention_only or scope == METADATA_NATIVE_SCOPE, "Unexpected DATA-only context route")
+    require(not retention_only or scope in {METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE}, "Unexpected DATA-only context route")
     metadata_binding = metadata_native_binding(os.environ) if scope == METADATA_NATIVE_SCOPE else None
+    version_binding = version_native_binding(os.environ) if scope == VERSION_NATIVE_SCOPE else None
     if scope == WINDOWS_SNAPSHOT_SCOPE:
         require(admitted_scope(platform) == scope, "Windows context scope differs")
     root = Path(os.environ["MRK_DESKTOP_CI_ROOT"])
@@ -5729,7 +7140,7 @@ def load_context(platform: str, scope: str = BOUNDARY_SCOPE, *, retention_only: 
             and root.parent == (Path(os.environ["RUNNER_TEMP"]) if retention_only else Path(os.environ["RUNNER_TEMP"]).resolve(strict=True))
             and not root.is_symlink(), "Unrecognized task root")
     ordinary(root / "context.json")
-    context = (read_bounded_json(root / "context.json", 256 * 1024) if scope in {GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, METADATA_NATIVE_SCOPE}
+    context = (read_bounded_json(root / "context.json", 256 * 1024) if scope in {GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE}
                else workflow_json(root / "context.json") if scope == WORKFLOW_NATIVE_SCOPE
                else json.loads((root / "context.json").read_text(encoding="utf-8")))
     require(context["root"] == str(root) and context["platform"] == platform and context.get("executionScope") == scope
@@ -5781,6 +7192,23 @@ def load_context(platform: str, scope: str = BOUNDARY_SCOPE, *, retention_only: 
             metadata_bound_source_hashes(context, METADATA_TRANSACTION_EOF_SOURCES)
         require(same_compile_json(read_bounded_json(root / "public-bindings.json", 256 * 1024), metadata_public_bindings(context)),
                 "Metadata native public source binding changed")
+    elif scope == VERSION_NATIVE_SCOPE:
+        require(type(context) is dict and all(context.get(key) == value for key, value in version_binding.items())
+                and root.name == f"mrk-desktop-foundation-version-{version_binding['runId']}-{version_binding['attempt']}"
+                and same_compile_json(context.get("versionInvocation"), version_invocation()),
+                "Version native context/source binding changed")
+        version_context_binding(context)
+        validate_workflow_host(context.get("observedHost"))
+        if not retention_only:
+            require(context.get("source") == str(Path(os.environ["GITHUB_WORKSPACE"]).resolve(strict=True))
+                    and context.get("python") == str(Path(sys.executable).resolve(strict=True))
+                    and context.get("workflowSha256") == hash_file(Path(context["source"]) / VERSION_NATIVE_WORKFLOW),
+                    "Version original source/runtime binding changed")
+            version_inputs_unchanged(context)
+        else:
+            version_bound_source_hashes(context, VERSION_TRANSACTION_EOF_SOURCES)
+        require(same_compile_json(read_bounded_json(root / "public-bindings.json", 256 * 1024), version_public_bindings(context)),
+                "Version native public source binding changed")
     elif scope == GITHUB_READONLY_SCOPE:
         binding = github_readonly_binding(os.environ)
         require(type(context) is dict and all(context.get(key) == value for key, value in binding.items())
@@ -6149,6 +7577,159 @@ def phase_metadata_native(name: str, context: dict) -> None:
     phase_receipt(context, name, list(METADATA_NATIVE_CHECKS[name]))
 
 
+def version_phase_value(context: dict, name: str, checks: list[str]) -> dict:
+    require(name in VERSION_NATIVE_CHECKS, "Unexpected version-only phase receipt")
+    return {"schemaVersion": 1, "scope": VERSION_NATIVE_EVIDENCE_SCOPE, "phase": name, "status": "passed",
+            **version_context_binding(context), "versionInputs": context["versionInputs"],
+            "rust": {"release": RUST, "target": TARGETS["linux"]}, "python": PYTHON,
+            "features": ["development-runtime"], "testTarget": "lib",
+            "checks": [{"check": check, "exitCode": 0} for check in checks],
+            "notVerified": list(VERSION_NOT_VERIFIED)}
+
+
+def validate_version_phase_receipt(value: object, context: dict, name: str) -> dict:
+    require(name in VERSION_NATIVE_CHECKS, "Unknown version phase")
+    require(same_compile_json(value, version_phase_value(context, name, list(VERSION_NATIVE_CHECKS[name]))),
+            "Version phase receipt or original source/check inventory differs")
+    return value
+
+
+def version_phase_claim(context: dict, name: str) -> dict:
+    require(name in (*VERSION_NATIVE_CHECKS, "clean"), "Unknown version original phase claim")
+    return {"scope": VERSION_NATIVE_SCOPE, "phase": name, **version_context_binding(context)}
+
+
+def version_predecessors(context: dict, name: str) -> None:
+    """Original endpoints plus exact case/resource facts, never a reusable PASS file."""
+    version_context_binding(context)
+    require(name in (*VERSION_NATIVE_CHECKS, "clean"), "Unknown version successor")
+    phases, root = list(VERSION_NATIVE_CHECKS), Path(context["root"])
+    previous = phases if name == "clean" else phases[:phases.index(name)]
+    for prior in previous:
+        require(same_compile_json(read_bounded_json(root / f"{prior}-started.json", 4096), version_phase_claim(context, prior)),
+                "Version original phase claim differs")
+        validate_version_phase_receipt(read_bounded_json(root / f"{prior}-checks.json", 256 * 1024), context, prior)
+        if prior == "version-owner":
+            version_owner_receipt(context, "source")
+            version_owner_receipt(context, "zip")
+        elif prior == "version-transaction-eof":
+            version_transaction_eof_receipt(context)
+        elif prior == "version-core":
+            for partition in VERSION_PARTITIONS:
+                version_core_receipt(context, partition)
+    # Retention is one-use too. A new helper process or missing pass-shaped
+    # receipt cannot renew a spent invocation or authorize failed-root cleanup.
+    for later in (*phases[len(previous):], "clean"):
+        for suffix in ("started", "checks"):
+            require(not os.path.lexists(root / f"{later}-{suffix}.json"), "Version phase was already claimed; retain outputs")
+    require(not os.path.lexists(root / "retention-checks.json"), "Version retention was already recorded")
+
+
+def version_phase_start(context: dict, name: str) -> None:
+    version_predecessors(context, name)
+    write_json(Path(context["root"]) / f"{name}-started.json", version_phase_claim(context, name))
+
+
+def clean_version_native(context: dict) -> None:
+    """Lane-last resource Unknown licenses DATA retention, never another close."""
+    version_phase_start(context, "clean")
+    write_json(Path(context["root"]) / "retention-checks.json", {
+        "schemaVersion": 1, "scope": VERSION_NATIVE_EVIDENCE_SCOPE, "status": "retained",
+        **version_context_binding(context), "reason": "lane-last-committed-close-resources-unknown", "deleted": False,
+        "laterNativeWork": False, "projectProbes": False, "vmDisposalRequired": True,
+    })
+    print("Retained version roots and compiler/runtime outputs for hosted VM disposal; no Save or production qualification.")
+
+
+def phase_version_native(name: str, context: dict) -> None:
+    """Same finite headless runner; version never falls through to old native tests."""
+    version_context_binding(context)
+    admit_phase(VERSION_NATIVE_SCOPE, name)
+    require(name != "prepare", "Version preparation has a separate fixed entry")
+    if name == "clean":
+        clean_version_native(context)
+        return
+    version_phase_start(context, name)
+    version_source_unchanged(context)
+    root, source = Path(context["root"]), Path(context["source"])
+    no_cargo_configuration((root, *root.parents, source / "desktop/src-tauri", source / "desktop", source, *source.parents))
+    environment = clean_environment(root)
+    environment["GITHUB_SHA"] = context["sourceSha"]
+    manifest = source / "desktop/src-tauri/Cargo.toml"
+    if name == "acquire":
+        run([context["rustup"], "toolchain", "install", RUST, "--profile", "minimal", "--no-self-update"],
+            check="rust-toolchain-install", cwd=root, env=environment, timeout=600)
+        cargo, _ = tools(context, environment)
+        with (root / "cargo-metadata.json").open("x", encoding="utf-8") as output:
+            run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features",
+                 "--features", "development-runtime", "--filter-platform", TARGETS["linux"],
+                 "--manifest-path", str(manifest)], check="version-locked-headless-metadata", cwd=root,
+                env=environment, timeout=600, output=output)
+        ordinary(root / "cargo-metadata.json")
+        require(0 < (root / "cargo-metadata.json").stat().st_size <= 32 * 1024 * 1024, "Version compiler metadata exceeds its bound")
+    elif name == "version-core":
+        # V19's effect Unknown is invocation-last with distinct positive resource
+        # proof. V20 is resource-settled. V21 is the last native work of the lane.
+        environment.update(MRK_DESKTOP_RELEASE_VERSION_NATIVE="1", MRK_DESKTOP_RELEASE_VERSION_SOURCE_SHA=context["sourceSha"],
+                           GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted", RUNNER_OS="Linux", RUNNER_ARCH="X64",
+                           GITHUB_WORKSPACE=str(source), RUNNER_TEMP=str(Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)))
+        fixture = [context["python"], "-I", "-S", "-B", str(source / "tests/native_desktop_config.py"),
+                   "--task-root", str(root), "--domain", "release_version", "--case"]
+        with (root / "version-ordinary.json").open("x", encoding="utf-8") as output:
+            run([*fixture, "ordinary"], check="version-core-ordinary", cwd=root, env=environment, timeout=90, output=output)
+        version_core_receipt(context, "ordinary")
+        version_inputs_unchanged(context)
+        with (root / "version-committed-fsync.json").open("x", encoding="utf-8") as output:
+            run([*fixture, "committed-fsync"], check="version-core-committed-fsync", cwd=root, env=environment, timeout=45, output=output)
+        version_core_receipt(context, "committed-fsync")
+        version_source_unchanged(context)
+        with (root / "version-committed-close.json").open("x", encoding="utf-8") as output:
+            run([*fixture, "committed-close"], check="version-core-committed-close", cwd=root, env=environment, timeout=45, output=output)
+        version_core_receipt(context, "committed-close")
+        phase_receipt(context, name, list(VERSION_NATIVE_CHECKS[name]))
+        return
+    else:
+        cargo, _ = tools(context, environment)
+        common = ["--locked", "--offline", "--jobs", "1", "--no-default-features", "--target", TARGETS["linux"],
+                  "--manifest-path", str(manifest), "--target-dir", str(root / "target")]
+        if name == "compile":
+            run([cargo, "test", *common, "--lib", "--no-run", "--features", "development-runtime"],
+                check="headless-test-compile-only", cwd=root, env=environment, timeout=600)
+        else:
+            environment.update(MRK_DESKTOP_DEV_PYTHON=context["python"], MRK_DESKTOP_DEV_CORE=str(source / "src"),
+                               MRK_DESKTOP_RELEASE_VERSION_HOSTED_CHECKS="release-version-v1", MRK_DESKTOP_RELEASE_VERSION_INPUT="source",
+                               MRK_DESKTOP_RELEASE_VERSION_CORE_METADATA=str(root / "version.json"),
+                               MRK_DESKTOP_RELEASE_VERSION_CORE_ZIP=str(root / "core.zip"),
+                               MRK_DESKTOP_EDIT_SOURCE_SHA=context["sourceSha"], GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted",
+                               RUNNER_OS="Linux", RUNNER_ARCH="X64", GITHUB_RUN_ID=context["runId"], GITHUB_RUN_ATTEMPT=context["attempt"],
+                               GITHUB_REF=VERSION_NATIVE_REF, GITHUB_EVENT_NAME=context["event"], GITHUB_REPOSITORY=context["repository"],
+                               GITHUB_WORKFLOW_SHA=context["workflowSha"], GITHUB_WORKFLOW_REF=context["workflowRef"],
+                               MRK_PUSH_EVENT_AFTER=context["pushEventAfter"],
+                               RUNNER_TEMP=str(Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)))
+            if name == "version-owner":
+                environment["MRK_DESKTOP_EDIT_TEST_ROOT"] = str(root / "version-owner-source")
+                run([cargo, "test", *common, "--lib", "--features", "development-runtime", VERSION_OWNER_TEST,
+                     "--", "--exact", "--ignored", "--test-threads=1"], check="version-owner-source-native-contract",
+                    cwd=root, env=environment, timeout=180)
+                version_owner_receipt(context, "source")
+                version_inputs_unchanged(context)
+                environment.update(MRK_DESKTOP_EDIT_TEST_ROOT=str(root / "version-owner-zip"),
+                                   MRK_DESKTOP_DEV_CORE=str(root / "core.zip"), MRK_DESKTOP_RELEASE_VERSION_INPUT="zip")
+                run([cargo, "test", *common, "--lib", "--features", "development-runtime", VERSION_OWNER_TEST,
+                     "--", "--exact", "--ignored", "--test-threads=1"], check="version-owner-zip-native-contract",
+                    cwd=root, env=environment, timeout=60)
+                version_owner_receipt(context, "zip")
+            else:
+                require(name == "version-transaction-eof", "Unknown fixed version native phase")
+                environment["MRK_DESKTOP_EDIT_TEST_ROOT"] = str(root / "version-transaction-eof")
+                run([cargo, "test", *common, "--lib", "--features", "development-runtime", VERSION_TRANSACTION_EOF_TEST,
+                     "--", "--exact", "--ignored", "--test-threads=1"], check="version-transaction-eof-native-contract",
+                    cwd=root, env=environment, timeout=90)
+                version_transaction_eof_receipt(context)
+    version_source_unchanged(context)
+    phase_receipt(context, name, list(VERSION_NATIVE_CHECKS[name]))
+
+
 def clean_compile(context: dict) -> None:
     """Only positively completed compiler work; no fabricated native receipts."""
     profile = compile_profile(context.get("executionScope", ""))
@@ -6248,7 +7829,7 @@ def compile_gtk(context: dict, cargo: str, common: list[str], environment: dict[
 def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     admit_phase(scope, name)
     admit_platform(scope, platform)
-    context = (load_context(platform, scope, retention_only=True) if (scope == METADATA_NATIVE_SCOPE and name == "clean"
+    context = (load_context(platform, scope, retention_only=True) if (scope in {METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE} and name == "clean"
                or scope == ENVIRONMENT_NATIVE_SCOPE and name == "retain" or scope == OFFLINE_NATIVE_SCOPE)
                else load_context(platform, scope))
     if scope in ENVIRONMENT_NATIVE_SCOPES:
@@ -6256,6 +7837,9 @@ def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
         return
     if scope == METADATA_NATIVE_SCOPE:
         phase_metadata_native(name, context)
+        return
+    if scope == VERSION_NATIVE_SCOPE:
+        phase_version_native(name, context)
         return
     if scope == WORKFLOW_NATIVE_SCOPE:
         phase_workflow_native(name, context)
@@ -8150,8 +9734,9 @@ def conventional_admission(scope: str) -> tuple:
     require(scope in CONVENTIONAL_SCOPES, "Unknown conventional route")
     value = CONVENTIONAL_PREPARE_INPUTS if scope == CONVENTIONAL_PREPARE_SCOPE else CONVENTIONAL_SMOKE_INPUTS
     # Before artifact/output paths, imports of the copier/probe, tools or writes.
-    require(type(value) is dict and type(CONVENTIONAL_HOSTED_PYTHON) is dict,
-            "Conventional route closed: accepted artifacts and actual hosted DATA TCB missing")
+    require(type(value) is dict and type(CONVENTIONAL_HOSTED_PYTHON) is dict
+            and type(CONVENTIONAL_PREPARE_INPUTS) is dict and type(CONVENTIONAL_CURRENT_SOURCE_FILES) is list,
+            "Conventional route closed: supplier, current source, accepted artifacts or hosted DATA TCB missing")
     data = conventional_module("conventional_runtime_data")
     wanted = ({"sourceArtifact", "reviewFiles", "outputInventorySha256"} if scope == CONVENTIONAL_PREPARE_SCOPE
               else {"preparedArtifact", "manifestSha256", "protocolSha256"})
@@ -8290,30 +9875,51 @@ def conventional_files(data, path: Path, files: list[dict]) -> dict:
     return rows
 
 
-def conventional_core(data, source: Path, raw: bytes, *, retained_source: Path | None = None) -> list[dict]:
-    """Join existing H core-source-files DATA across producer/consumer commits."""
+def conventional_historical_core(data, source: Path, raw: bytes, retained_source: Path) -> None:
+    """Authenticate H's own retained core, never use it as the current payload."""
+    expected = data.decode(data.read(source / "desktop/cpython-source-inputs/core-source-files.json"))
     rows = data.decode(raw)
+    require(data.same(rows, expected), "Original H core source mapping differs from the retained supplier admission")
     originals = data.records(rows, absolute=True)
     prefix = "/work/inputs/core-source/"
+    require(all(name.startswith(prefix) for name in originals), "Original H core source path differs")
+    preparer = conventional_module("prepare_runtime")
+    require({path.relative_to(retained_source).as_posix() for path in preparer.files(retained_source)}
+            == {name.removeprefix(prefix) for name in originals}, "Retained H complete source roster differs")
+    for name, row in originals.items():
+        data.bound(retained_source / name.removeprefix(prefix), row)
+
+
+def conventional_core(data, source: Path, raw: bytes, *, staged_source: Path | None = None) -> list[dict]:
+    """Bind the closed current payload independently of H and the consumer commit."""
+    rows = data.decode(raw)
+    originals = data.records(rows, absolute=True)
+    require(type(CONVENTIONAL_CURRENT_SOURCE_FILES) is list
+            and data.same(rows, CONVENTIONAL_CURRENT_SOURCE_FILES), "Current payload source binding differs from the closed admission")
+    prefix = "/work/inputs/core-source/"
+    require(all(name.startswith(prefix) for name in originals), "Current payload source path differs")
+    expected = {name.removeprefix(prefix) for name in originals}
     preparer = conventional_module("prepare_runtime")
     fixed = {"desktop/" + name for name in (*preparer.BOOTSTRAPS, preparer.GITHUB_CA_NAME)}
     fixed.add("desktop/tools/prepare_runtime.py")
-    expected = fixed | {"src/mobile_release/" + path.relative_to(source / "src/mobile_release").as_posix()
-                        for path in preparer.files(source / "src/mobile_release")}
-    require(set(originals) == {prefix + name for name in expected}, "Original complete core/handoff roster differs")
+    core = {name for name in expected if name.startswith("src/mobile_release/")}
+    require(bool(core) and expected == fixed | core, "Current payload input roles differ")
+    # Discovery checks completeness against the admitted rows; it does not
+    # create authority for an added, removed or differently sourced member.
+    require({"src/mobile_release/" + path.relative_to(source / "src/mobile_release").as_posix()
+             for path in preparer.files(source / "src/mobile_release")} == core,
+            "Current complete core roster differs")
+    if staged_source is not None:
+        require({path.relative_to(staged_source).as_posix() for path in preparer.files(staged_source)} == expected,
+                "Staged current payload source roster differs")
     for name, row in originals.items():
         relative = name.removeprefix(prefix)
-        # H's fixed prepare maps this one logical resource from the committed
+        # The fixed prepare maps this one logical resource from the committed
         # controls path. Do not add a shadow/untracked desktop/github-ca.pem.
         checkout_name = "desktop/cpython-source-inputs/github-ca.pem" if relative == "desktop/github-ca.pem" else relative
         data.bound(source / checkout_name, row)
-        if retained_source is not None:
-            data.bound(retained_source / relative, row)
-    if retained_source is not None:
-        require({"src/mobile_release/" + path.relative_to(retained_source / "src/mobile_release").as_posix()
-                 for path in preparer.files(retained_source / "src/mobile_release")}
-                == {name for name in expected if name.startswith("src/mobile_release/")},
-                "Retained H complete core roster differs")
+        if staged_source is not None:
+            data.bound(staged_source / relative, row)
     return rows
 
 
@@ -8348,9 +9954,20 @@ def conventional_prepare(context: dict, data, admission: dict) -> None:
     data.unpack(h_artifact / "hosted-evidence.tar", h_rows["hosted-evidence.tar"], root / "h", retained=retained["files"])
     retained_rows = {row["path"]: row for row in retained["files"]}
     h_root = root / "h"
-    core_raw = data.read(h_root / "controls/core-source-files.json")
-    core_source = h_root / "inputs/core-source"
-    conventional_core(data, source, core_raw, retained_source=core_source)
+    historical_core_raw = data.read(h_root / "controls/core-source-files.json")
+    historical_core_source = h_root / "inputs/core-source"
+    conventional_historical_core(data, source, historical_core_raw, historical_core_source)
+    core_raw = data.canonical(CONVENTIONAL_CURRENT_SOURCE_FILES)
+    current_rows = conventional_core(data, source, core_raw)
+    core_source = root / "current-core-source"
+    core_source.mkdir(mode=0o700)
+    for row in current_rows:
+        relative = row["path"].removeprefix("/work/inputs/core-source/")
+        checkout_name = "desktop/cpython-source-inputs/github-ca.pem" if relative == "desktop/github-ca.pem" else relative
+        target = core_source / relative
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        data.copy(source / checkout_name, target, row)
+    conventional_core(data, source, core_raw, staged_source=core_source)
     evidence = root / "evidence"
     evidence.mkdir(mode=0o700)
     for name, row in retained_rows.items():
@@ -8380,7 +9997,8 @@ def conventional_prepare(context: dict, data, admission: dict) -> None:
     require({path.relative_to(root / "runtime").as_posix() for path in preparer.files(root / "runtime")}
             == {row["path"] for row in files}, "Prepared runtime has unlisted files")
     conventional_recheck(context, data)
-    conventional_core(data, source, core_raw, retained_source=core_source)
+    conventional_historical_core(data, source, historical_core_raw, historical_core_source)
+    conventional_core(data, source, core_raw, staged_source=core_source)
     conventional_files(data, h_artifact, admission["sourceArtifact"]["files"])
     conventional_files(data, kit, admission["reviewFiles"])
     public = root / "public"
@@ -8395,7 +10013,8 @@ def conventional_prepare(context: dict, data, admission: dict) -> None:
     data.copy(root / "copy-report.json", public / "copy-report.json", data.file_record(root / "copy-report.json", 8 << 20))
     require(data.file_record(public / "copy-report.json")["sha256"] == copied["reportSha256"], "Original COPY report differs")
     data.write(public / "copy-result.json", data.canonical(copied))
-    data.write(public / "source-bindings.json", core_raw)  # Unchanged existing H core DATA, not a new schema.
+    # Current payload mapping; H's historical mapping remains in its unchanged source kit.
+    data.write(public / "source-bindings.json", core_raw)
     conventional_recheck(context, data)
     data.write(public / "preparation.json", data.canonical({**prepared, "scope": CONVENTIONAL_PREPARE_SCOPE,
         "producer": conventional_producer(context), "archive": archive,
@@ -8410,10 +10029,17 @@ def conventional_prepared(context: dict, data, admission: dict, *, unpack: bool 
     rows = conventional_files(data, artifact, admission["preparedArtifact"]["files"])
     prepared = data.decode(data.read(artifact / "preparation.json", 64 << 10))
     producer = {key: admission["preparedArtifact"][key] for key in ("repository", "sourceSha", "runId", "attempt")}
+    require(type(CONVENTIONAL_PREPARE_INPUTS) is dict
+            and type(CONVENTIONAL_PREPARE_INPUTS.get("sourceArtifact")) is dict, "Original H supplier admission missing")
+    supplier = CONVENTIONAL_PREPARE_INPUTS["sourceArtifact"]
+    require(set(supplier) == {"repository", "sourceSha", "runId", "attempt", "artifactId", "files"}
+            and data.records(supplier["files"]).keys() == set(CONVENTIONAL_SOURCE_KIT), "Original H supplier admission differs")
     require(type(prepared) is dict and set(prepared) == {"manifestSha256", "protocolSha256", "qualification", "scope",
         "producer", "archive", "sourceArtifact", "helperFiles", "copyResult", "sourceKit", "notVerified"}
         and prepared["scope"] == CONVENTIONAL_PREPARE_SCOPE and prepared["qualification"] == "prepared-not-native-verified"
         and data.same(prepared["producer"], producer) and data.same(prepared["archive"], rows["prepared-runtime.tar"])
+        and data.same(prepared["sourceArtifact"], {key: supplier[key] for key in ("repository", "sourceSha", "runId", "attempt", "artifactId")})
+        and data.same(prepared["sourceKit"], supplier["files"])
         and data.same(prepared["sourceKit"], [{**rows["source-kit/" + name], "path": name} for name in CONVENTIONAL_SOURCE_KIT])
         and data.same(prepared["helperFiles"], fixed_file_inventory(source, CONVENTIONAL_SHARED_HELPERS))
         and all(prepared[key] == admission[key] for key in ("manifestSha256", "protocolSha256"))
@@ -8642,6 +10268,1628 @@ def conventional_phase(name: str, scope: str) -> None:
 
 
 
+def windows_fullwalk_curl_sha256(path: Path) -> str:
+    """Observe only the fixed hosted System32 tool, never admit linked payloads.
+
+    Stable servicing hardlinks are allowed for this role, not authenticated as
+    servicing provenance. Checked reads are not hostile-writer lifetime custody
+    or an atomic hash-to-exec guarantee for the subsequent pathname invocation.
+    """
+    root_text = os.environ.get("SystemRoot")
+    require(os.name == "nt" and type(root_text) is str and bool(root_text) and "\0" not in root_text,
+            "Windows fixed System32 curl root is unavailable")
+    system_root = PureWindowsPath(root_text)
+    require(system_root.is_absolute() and re.fullmatch(r"[A-Za-z]:", system_root.drive) is not None
+            and ".." not in system_root.parts,
+            "Windows fixed System32 curl requires a local absolute root")
+    require(PureWindowsPath(str(path)) == system_root / "System32" / "curl.exe",
+            "Windows fixed System32 curl path differs")
+
+    def non_reparse(details) -> bool:
+        attributes = getattr(details, "st_file_attributes", None)
+        tag = getattr(details, "st_reparse_tag", None)
+        return type(attributes) is int and not attributes & 0x400 and type(tag) is int and tag == 0
+
+    def ancestry() -> None:
+        for parent in reversed(path.parents):
+            details = parent.lstat()
+            require(stat.S_ISDIR(details.st_mode) and non_reparse(details),
+                    "Windows fixed System32 curl ancestry differs")
+
+    try:
+        ancestry()
+        before = path.lstat()
+        require(stat.S_ISREG(before.st_mode) and non_reparse(before)
+                and type(before.st_nlink) is int and 1 <= before.st_nlink <= WINDOWS_FULLWALK_CURL_MAX_LINKS,
+                "Windows fixed System32 curl file metadata differs")
+        require(type(before.st_size) is int and 1 <= before.st_size <= WINDOWS_FULLWALK_CURL_MAX_BYTES,
+                "Windows fixed System32 curl size is outside its bound")
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            opened = os.fstat(stream.fileno())
+            # Only this fixed .exe pathname has the CPython suffix decoration;
+            # preserve raw mode/ChangeTime in both later same-API comparisons.
+            require(stat.S_ISREG(opened.st_mode) and non_reparse(opened)
+                    and windows_installed_identity(before, before.st_mode & ~0o111)
+                    == windows_installed_identity(opened, opened.st_mode),
+                    "Windows fixed System32 curl changed before reading")
+            total = 0
+            while total <= before.st_size:
+                chunk = stream.read(min(64 * 1024, before.st_size + 1 - total))
+                if not chunk:
+                    break
+                total += len(chunk)
+                digest.update(chunk)
+            require(total == before.st_size, "Windows fixed System32 curl length changed")
+            require(windows_installed_state(os.fstat(stream.fileno())) == windows_installed_state(opened),
+                    "Windows fixed System32 curl descriptor changed")
+            require(windows_installed_state(path.lstat()) == windows_installed_state(before),
+                    "Windows fixed System32 curl pathname changed")
+            ancestry()
+    except (OSError, AttributeError):
+        raise CheckFailure("Windows fixed System32 curl metadata or read unavailable") from None
+    return digest.hexdigest()
+
+
+
+
+def windows_installed_prepared_profile(context: dict) -> bool:
+    require(type(context) is dict and ("qualificationProfile" not in context
+            or context["qualificationProfile"] in (WINDOWS_FULLWALK_PROFILE, WINDOWS_RUNTIME_PUBLICATION_PROFILE,
+                                                   WINDOWS_INSTALLED_PASSIVE_PROFILE, WINDOWS_NORMAL_UI_PROFILE)),
+            "Windows prepared profile marker differs")
+    # UI preparation is deliberately deferred until a separately closed cheap
+    # prerequisite observation. A profile name is not a prepared runtime.
+    return context.get("qualificationProfile") in (WINDOWS_FULLWALK_PROFILE, WINDOWS_RUNTIME_PUBLICATION_PROFILE,
+                                                    WINDOWS_INSTALLED_PASSIVE_PROFILE)
+
+
+def windows_normal_ui_profile(context: dict) -> bool:
+    windows_installed_prepared_profile(context)
+    return context.get("qualificationProfile") == WINDOWS_NORMAL_UI_PROFILE
+
+
+def windows_normal_ui_features(role: str) -> list[str]:
+    roles = {"native": ["desktop-ui"], "app": ["custom-protocol", "desktop-shell"],
+             "observer": ["custom-protocol", "desktop-shell", "windows-installed-observation"],
+             "helper": ["windows-runtime-publisher"]}
+    require(type(role) is str and role in roles, "Windows normal UI compile role differs")
+    return roles[role]
+
+
+def windows_fullwalk_profile(context: dict) -> bool:
+    windows_installed_prepared_profile(context)
+    return context.get("qualificationProfile") in (WINDOWS_FULLWALK_PROFILE, WINDOWS_RUNTIME_PUBLICATION_PROFILE)
+
+
+def windows_runtime_publication_profile(context: dict) -> bool:
+    windows_installed_prepared_profile(context)
+    return context.get("qualificationProfile") == WINDOWS_RUNTIME_PUBLICATION_PROFILE
+
+
+def windows_installed_passive_profile(context: dict) -> bool:
+    windows_installed_prepared_profile(context)
+    return context.get("qualificationProfile") == WINDOWS_INSTALLED_PASSIVE_PROFILE
+
+
+def windows_installed_publisher_required(context: dict) -> bool:
+    # UI needs only the separate normal setup helper, never a publisher-enabled
+    # app/observer. Its acquisition/compile route additionally requires the
+    # independently finalized positive cheap probe before any preparation.
+    return windows_runtime_publication_profile(context) or windows_installed_passive_profile(context) or windows_normal_ui_profile(context)
+
+
+def windows_installed_features(context: dict, role: str) -> list[str]:
+    require(role in ("native", "app", "helper"), "Unknown Windows compile role")
+    if windows_normal_ui_profile(context):
+        return windows_normal_ui_features(role)
+    production = windows_runtime_publication_profile(context)
+    require(role != "helper" or windows_installed_publisher_required(context),
+            "The normal helper requires an explicit publication setup profile")
+    if role == "helper":
+        return ["windows-runtime-publisher"]
+    # Installed-passive exercises a genuinely non-publisher app/native pair.
+    # Only its separate normal helper uses the already reviewed producer role.
+    return (["runtime-publication"] if role == "native" else ["windows-runtime-publisher"]) if production else []
+
+
+def windows_fullwalk_kind(context: dict, kind: str) -> str:
+    require(kind in ("precheck", "prerequisite"), "Windows paired schema role differs")
+    if windows_installed_passive_profile(context):
+        require(kind == "precheck", "Installed passive has no historical prerequisite envelope")
+        return "passive-precheck"
+    return "production-" + kind if windows_runtime_publication_profile(context) else kind
+
+
+def windows_fullwalk_number(value: object, maximum: int, *, minimum: int = 0) -> int:
+    require(type(value) is str and re.fullmatch(r"0|[1-9][0-9]{0,19}", value) is not None,
+            "Windows fullwalk canonical decimal differs")
+    result = int(value)
+    require(minimum <= result <= maximum, "Windows fullwalk decimal exceeds its bound")
+    return result
+
+
+def windows_fullwalk_wire(raw: bytes, kind: str) -> dict[str, str]:
+    require(kind in WINDOWS_FULLWALK_SCHEMAS, "Windows fullwalk closed text role differs")
+    header, keys, limit = WINDOWS_FULLWALK_SCHEMAS[kind]
+    require(type(raw) is bytes and 0 < len(raw) <= limit and raw.isascii() and raw.endswith(b"\n")
+            and all(byte == 10 or 32 <= byte <= 126 for byte in raw), "Windows fullwalk text envelope differs")
+    lines = raw[:-1].decode("ascii").split("\n")
+    require(len(lines) == len(keys) + 1 and lines[0] == header, "Windows fullwalk text header/count differs")
+    result = {}
+    for line, key in zip(lines[1:], keys, strict=True):
+        name, separator, value = line.partition("=")
+        require(name == key and separator == "=" and value and "=" not in value,
+                "Windows fullwalk text fields/order differ")
+        require(not key.endswith("Sha256") or sha256_value(value), "Windows fullwalk text digest differs")
+        if key in ("sourceSha", "sourceTree"):
+            require(re.fullmatch(r"[0-9a-f]{40}", value) is not None and value != "0" * 40,
+                    "Windows fullwalk source/tree differs")
+        result[key] = value
+    return result
+
+
+def windows_fullwalk_text(kind: str, values: dict) -> bytes:
+    require(kind in WINDOWS_FULLWALK_SCHEMAS, "Windows fullwalk text producer role differs")
+    header, keys, _ = WINDOWS_FULLWALK_SCHEMAS[kind]
+    closed_object(values, set(keys), "Windows fullwalk text producer fields differ")
+    require(all(type(value) in (str, int) for value in values.values()), "Windows fullwalk text producer types differ")
+    try:
+        raw = (header + "\n" + "".join(key + "=" + str(values[key]) + "\n" for key in keys)).encode("ascii")
+    except UnicodeError:
+        raise CheckFailure("Windows fullwalk text producer is not ASCII") from None
+    windows_fullwalk_wire(raw, kind)
+    return raw
+
+
+def windows_fullwalk_binding(row: dict, context: dict, *, normal_ui_setup: bool = False) -> None:
+    require(type(normal_ui_setup) is bool and (windows_normal_ui_profile(context) if normal_ui_setup
+            else windows_installed_prepared_profile(context))
+            and all(row.get(key) == str(context[key]) for key in ("sourceSha", "sourceTree", "runId", "attempt"))
+            and row.get("profile") == context["qualificationProfile"] and row.get("attempt") == "1",
+            "Windows fullwalk fixed invocation binding differs")
+
+
+def windows_fullwalk_blob(row: dict, role: str, raw: bytes) -> None:
+    require(type(raw) is bytes and windows_fullwalk_number(row.get(role + "Bytes"), 64 << 10, minimum=1) == len(raw)
+            and row.get(role + "Sha256") == hashlib.sha256(raw).hexdigest(),
+            "Windows fullwalk original DATA byte/digest binding differs")
+
+
+def windows_fullwalk_write(path: Path, raw: bytes, limit: int) -> None:
+    require(type(raw) is bytes and 0 < len(raw) <= limit, "Windows fullwalk original write bound differs")
+    with path.open("xb") as output:
+        require(output.write(raw) == len(raw), "Windows fullwalk original write was incomplete")
+    require(windows_installed_bytes(path, limit) == raw, "Windows fullwalk closed original readback differs")
+
+
+def windows_fullwalk_command_sha(path: str, test: str) -> str:
+    require(test in (WINDOWS_FULLWALK_TEST, WINDOWS_FULLWALK_OWNER, WINDOWS_ORDINARY_OWNER,
+                    WINDOWS_INSTALLED_TEST, WINDOWS_FULLWALK_PUBLISHER, WINDOWS_FULLWALK_RETIRE,
+                    WINDOWS_RUNTIME_PUBLICATION_STAGE, WINDOWS_RUNTIME_PUBLICATION_BEFORE, WINDOWS_RUNTIME_PUBLICATION_AFTER,
+                    WINDOWS_RUNTIME_PUBLICATION_SCALAR, WINDOWS_INSTALLED_PASSIVE_TEST, WINDOWS_INSTALLED_PASSIVE_OWNER,
+                    WINDOWS_INSTALLED_PASSIVE_STAGE, WINDOWS_INSTALLED_PASSIVE_OBSERVER,
+                    WINDOWS_NORMAL_UI_SETUP_STAGE, WINDOWS_NORMAL_UI_SETUP_OBSERVER),
+            "Windows fullwalk command role differs")
+    command = '"' + str(windows_ordinary_path(path)) + '" ' + test + " --exact --ignored --nocapture --test-threads=1"
+    raw = command.encode("utf-16-le")
+    require(len(raw) // 2 <= 1023, "Windows fullwalk original command exceeds its bound")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def windows_runtime_publication_helper_command_sha(path: str) -> str:
+    value = windows_ordinary_path(path)
+    require(value.name == WINDOWS_RUNTIME_PUBLICATION_HELPER + ".exe", "Windows normal publisher command role differs")
+    raw = ('"' + str(value) + '"').encode("utf-16-le")
+    require(len(raw) // 2 <= 1023, "Windows normal publisher command exceeds its bound")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def windows_fullwalk_roster(raw: bytes) -> list[dict]:
+    require(type(raw) is bytes and 0 < len(raw) <= 16 << 10 and raw.isascii()
+            and raw.endswith(b"\n") and b"\r" not in raw, "Windows fullwalk roster envelope differs")
+    lines = raw[:-1].decode("ascii").split("\n")
+    require(len(lines) == 48 and lines[0] == "MRK_WINDOWS_FULLWALK_ROSTER_V1", "Windows fullwalk roster count/header differs")
+    result, total = [], 0
+    for line, expected in zip(lines[1:], WINDOWS_FULLWALK_PAYLOAD_NAMES, strict=True):
+        columns = line.removeprefix("file=").split("|")
+        require(line.startswith("file=") and len(columns) == 3 and columns[0] == expected and sha256_value(columns[2]),
+                "Windows fullwalk exact physical roster differs")
+        size = windows_fullwalk_number(columns[1], 128 << 20, minimum=1)
+        total += size
+        require(total <= 1 << 30, "Windows fullwalk physical roster exceeds its total bound")
+        result.append({"path": expected, "size": size, "sha256": columns[2]})
+    return result
+
+
+def windows_fullwalk_stamp(value: str) -> dict:
+    require(type(value) is str and len(value) <= 256, "Windows fullwalk complete stamp exceeds its bound")
+    columns = value.split(":")
+    names = ("volume", "fileId", "creation", "write", "change", "size", "allocation", "links", "attributes")
+    require(len(columns) == len(names), "Windows fullwalk complete stamp fields differ")
+    row = {name: (text if name == "fileId" else windows_fullwalk_number(text, 2**64 - 1))
+           for name, text in zip(names, columns, strict=True)}
+    return windows_ordinary_stamp(row)
+
+
+def windows_fullwalk_precheck_data(context: dict, raw: bytes) -> dict:
+    if windows_normal_ui_profile(context):
+        return windows_normal_ui_setup_precheck_data(context, raw)
+    production = windows_runtime_publication_profile(context)
+    passive = windows_installed_passive_profile(context)
+    row = windows_fullwalk_wire(raw, windows_fullwalk_kind(context, "precheck"))
+    windows_fullwalk_binding(row, context)
+    publisher = WINDOWS_RUNTIME_PUBLICATION_AFTER if production else WINDOWS_FULLWALK_PUBLISHER
+    exact = {**({"appTest": WINDOWS_INSTALLED_PASSIVE_TEST, "stageTest": WINDOWS_INSTALLED_PASSIVE_STAGE,
+                "observerTest": WINDOWS_INSTALLED_PASSIVE_OBSERVER, "ownerTest": WINDOWS_INSTALLED_PASSIVE_OWNER}
+               if passive else {"appTest": WINDOWS_FULLWALK_TEST, "publisherTest": publisher,
+                "fullwalkOwnerTest": WINDOWS_FULLWALK_OWNER, "ordinaryOwnerTest": WINDOWS_ORDINARY_OWNER}),
+             "appRootFeatures": "windows-runtime-publisher" if production else "none",
+             "standaloneFeatures": "runtime-publication" if production else "none",
+             "appNativeDevFeatures": "qualification-result,runtime-publication" if production else "qualification-result",
+             "headlessContract": "fixed-installed-passive-original-owner-v1" if passive else "fixed-version-inspect-settle-no-descendants-v1",
+             "payloadFiles": "46"}
+    require(all(row[key] == value for key, value in exact.items()), "Windows fullwalk headless fixed body/features differ")
+    source_rows = validate_environment_inventory(context["sourceFiles"], maximum=64 << 20)
+    source_hashes = {item["path"]: item["sha256"] for item in source_rows}
+    require(row["sourceInventorySha256"] == hashlib.sha256(canonical_json(source_rows)).hexdigest()
+            and all(row[key] == source_hashes.get(path) for key, path in WINDOWS_FULLWALK_HEADLESS_SOURCES.items()),
+            "Windows fullwalk headless reviewed source identities differ")
+    root = windows_ordinary_path(context["root"])
+    require(len(root.parents) + 1 <= 19, "Windows fullwalk original ancestor envelope exceeds40 originals")
+    for role, stem, maximum in (("app", "mobile_release_desktop", 512 << 20), ("owner", "mrk_windows_installed_native", 128 << 20)):
+        path = windows_ordinary_path(row[role + "Artifact"])
+        require(str(path.parent) == str(root / "target/x86_64-pc-windows-msvc/debug/deps")
+                and re.fullmatch(stem + r"-[0-9a-f]{16}\.exe", path.name) is not None,
+                "Windows fullwalk headless original artifact role differs")
+        windows_ordinary_identity(row[role + "ArtifactIdentity"])
+        windows_fullwalk_number(row[role + "ArtifactBytes"], maximum, minimum=1)
+        windows_fullwalk_number(row[role + "CompileMessagesBytes"], 16 << 20, minimum=1)
+    commands = (
+        ("appCommandSha256", "appArtifact", WINDOWS_INSTALLED_PASSIVE_TEST),
+        ("stageCommandSha256", "ownerArtifact", WINDOWS_INSTALLED_PASSIVE_STAGE),
+        ("observerCommandSha256", "ownerArtifact", WINDOWS_INSTALLED_PASSIVE_OBSERVER),
+        ("ownerCommandSha256", "ownerArtifact", WINDOWS_INSTALLED_PASSIVE_OWNER),
+    ) if passive else (
+        ("appCommandSha256", "appArtifact", WINDOWS_FULLWALK_TEST),
+        ("publisherCommandSha256", "ownerArtifact", publisher),
+        ("fullwalkOwnerCommandSha256", "ownerArtifact", WINDOWS_FULLWALK_OWNER),
+        ("ordinaryOwnerCommandSha256", "ownerArtifact", WINDOWS_ORDINARY_OWNER),
+        ("ordinaryChildCommandSha256", "ownerArtifact", WINDOWS_INSTALLED_TEST),
+    )
+    for key, role, test in commands:
+        require(row[key] == windows_fullwalk_command_sha(row[role], test), "Windows fullwalk headless command binding differs")
+    if windows_installed_publisher_required(context):
+        require(windows_ordinary_path(row["helperArtifact"])
+                == root / (WINDOWS_RUNTIME_PUBLICATION_HELPER + ".exe")
+                and row["helperNativeFeatures"] == "runtime-publication"
+                and row["helperCommandSha256"] == windows_runtime_publication_helper_command_sha(row["helperArtifact"]),
+                "Windows normal helper path/features/command differs")
+        windows_ordinary_identity(row["helperArtifactIdentity"])
+        windows_fullwalk_number(row["helperArtifactBytes"], 128 << 20, minimum=1)
+        windows_fullwalk_number(row["helperCompileMessagesBytes"], 16 << 20, minimum=1)
+    windows_fullwalk_number(row["payloadBytes"], 1 << 30, minimum=1)
+    windows_fullwalk_number(row["preparedReceiptBytes"], 4096, minimum=1)
+    windows_fullwalk_number(row["rosterBytes"], 16 << 10, minimum=1)
+    return row
+
+
+def windows_fullwalk_publication_data(context: dict, raw: bytes, precheck_raw: bytes, roster_raw: bytes) -> dict:
+    require(not windows_runtime_publication_profile(context), "Synthetic publication cannot qualify the actual producer")
+    require(type(raw) is bytes and 0 < len(raw) <= 64 << 10 and raw.isascii()
+            and raw.endswith(b"\n") and b"\r" not in raw, "Windows fullwalk publisher envelope differs")
+    lines = raw.splitlines(keepends=True)
+    prefix = len(WINDOWS_FULLWALK_PUBLICATION_FIELDS) + 1
+    require(len(lines) == prefix + 52, "Windows fullwalk publisher object count differs")
+    row = windows_fullwalk_wire(b"".join(lines[:prefix]), "publication")
+    windows_fullwalk_binding(row, context)
+    pre = windows_fullwalk_precheck_data(context, precheck_raw)
+    items = windows_fullwalk_roster(roster_raw)
+    windows_fullwalk_blob(pre, "roster", roster_raw)
+    windows_fullwalk_blob(row, "precheck", precheck_raw)
+    windows_fullwalk_blob(row, "roster", roster_raw)
+    expected = {"publisherTest": WINDOWS_FULLWALK_PUBLISHER, "createdFiles": "47", "createdDirectories": "5",
+        "payloadFiles": "46", "sourceReaders": "47", "sourceReadersClosed": "47", "payloadWriters": "47",
+        "payloadWritersClosed": "47", "postcheckReaders": "94", "postcheckReadersClosed": "94",
+        "parentBookSettled": "true", "occupiedCreateCalls": "1", "occupiedCreateError": "183",
+        "occupiedObjectsUnchanged": "true", "unknown": "false", "productionEnabled": "false",
+        "resultCloseGate": "original-publisher-exit-zero-required", "objectCount": "52"}
+    require(all(row[key] == value for key, value in expected.items())
+            and row["fileOriginals"] == row["fileOriginalsClosed"]
+            and 198 <= windows_fullwalk_number(row["fileOriginals"], 256), "Windows fullwalk publisher original finality differs")
+    require(all(row[key] == pre[key] for key in ("manifestSha256", "protocolSha256", "inventorySha256", "coreSha256", "payloadBytes"))
+            and all(row[left] == pre[right] for left, right in (
+                ("artifactBytes", "ownerArtifactBytes"), ("artifactSha256", "ownerArtifactSha256"), ("artifactIdentity", "ownerArtifactIdentity"))),
+            "Windows fullwalk publisher binding differs from its original precheck")
+    objects, identities = [], set()
+    names = (*WINDOWS_FULLWALK_DIRECTORY_ROLES, *WINDOWS_FULLWALK_PAYLOAD_NAMES)
+    for ordinal, (line, name) in enumerate(zip(lines[prefix:], names, strict=True)):
+        text = line.decode("ascii")
+        columns = text[:-1].removeprefix("object=").split("|")
+        require(text.startswith("object=") and text.endswith("\n") and len(columns) == 7
+                and columns[0] == name and columns[1] == ("directory" if ordinal < 5 else "file")
+                and all(sha256_value(value) for value in columns[4:6]) and columns[4] != columns[5],
+                "Windows fullwalk publisher exact object row differs")
+        before, after = windows_fullwalk_stamp(columns[2]), windows_fullwalk_stamp(columns[3])
+        key = (after["volume"], after["fileId"])
+        require(key not in identities and all(before[field] == after[field] for field in ("volume", "fileId", "creation", "links", "attributes"))
+                and after["write"] >= before["write"] and after["change"] >= before["change"]
+                and bool(after["attributes"] & 0x10) == (ordinal < 5), "Windows fullwalk publisher object identity transition differs")
+        identities.add(key)
+        if ordinal < 5:
+            require(columns[6] == "-", "Windows fullwalk directory unexpectedly has payload DATA")
+        else:
+            require(columns[6] == items[ordinal - 5]["sha256"] and after["size"] == items[ordinal - 5]["size"],
+                    "Windows fullwalk publisher leaf bytes differ")
+        objects.append({"role": name, "before": before, "after": after, "securityBefore": columns[4],
+                        "securityAfter": columns[5], "sha256": columns[6]})
+    require(len({item["after"]["volume"] for item in objects}) == 1, "Windows fullwalk publication crossed volumes")
+    return {"fields": row, "objects": objects}
+
+
+def windows_fullwalk_publisher_exit(context: dict, raw: bytes, precheck_raw: bytes, outcome: str) -> dict:
+    require(not windows_runtime_publication_profile(context), "Synthetic publisher exit cannot qualify the actual producer")
+    require(outcome == "success", "Windows publisher original step has not closed successfully")
+    pre = windows_fullwalk_precheck_data(context, precheck_raw)
+    expected = {"schemaVersion": 1, **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")},
+        "artifactSha256": pre["ownerArtifactSha256"], "publisherTest": WINDOWS_FULLWALK_PUBLISHER,
+        "precheckSha256": hashlib.sha256(precheck_raw).hexdigest(), "originalWaitReturned": True, "exitCode": 0,
+        "writerCloseGate": "original-publisher-step-success-required"}
+    require(same_compile_json(bounded_json(raw, 4096), expected), "Windows publisher original exit/step-close differs")
+    return expected
+
+
+def windows_runtime_publication_exit(context: dict, raw: bytes, precheck_raw: bytes, role: str, outcome: str) -> dict:
+    passive = windows_installed_passive_profile(context)
+    normal_ui = windows_normal_ui_profile(context)
+    require(windows_installed_publisher_required(context) and outcome == "success",
+            "Windows actual producer original step has not returned and closed")
+    roles = ({"stage": ("owner", WINDOWS_NORMAL_UI_SETUP_STAGE, "0"), "helperSuccess": ("helper", None, "0"),
+              "observe": ("owner", WINDOWS_NORMAL_UI_SETUP_OBSERVER, "0")} if normal_ui else
+             {"stage": ("owner", WINDOWS_INSTALLED_PASSIVE_STAGE, "0"), "helperSuccess": ("helper", None, "0"),
+              "observe": ("owner", WINDOWS_INSTALLED_PASSIVE_OBSERVER, "0")} if passive else
+             {"scalar": ("owner", WINDOWS_RUNTIME_PUBLICATION_SCALAR, "0"), "stage": ("owner", WINDOWS_RUNTIME_PUBLICATION_STAGE, "0"),
+             "helperSuccess": ("helper", None, "0"), "before": ("owner", WINDOWS_RUNTIME_PUBLICATION_BEFORE, "0"),
+             "helperOccupied": ("helper", None, "2"), "after": ("owner", WINDOWS_RUNTIME_PUBLICATION_AFTER, "0")})
+    require(role in roles, "Windows actual producer original role differs")
+    artifact, test, code = roles[role]
+    pre = windows_fullwalk_precheck_data(context, precheck_raw)
+    row = windows_fullwalk_wire(raw, "normal-ui-setup-exit" if normal_ui else "passive-exit" if passive else "production-exit")
+    windows_fullwalk_binding(row, context, normal_ui_setup=normal_ui)
+    expected = {"role": role, "artifactSha256": pre[artifact + "ArtifactSha256"],
+        "precheckSha256": hashlib.sha256(precheck_raw).hexdigest(),
+        "commandSha256": (windows_fullwalk_command_sha(pre["ownerArtifact"], test)
+                          if test is not None else pre["helperCommandSha256"]),
+        "originalWaitReturned": "true", "exitCode": code,
+        "writerCloseGate": "original-" + role + "-step-success-required"}
+    require(all(row[key] == value for key, value in expected.items()), "Windows actual producer role/exit/command binding differs")
+    return row
+
+
+def windows_runtime_publication_scalar_data(context: dict, raw: bytes, exit_raw: bytes,
+                                            precheck_raw: bytes, outcome: str) -> dict:
+    """Closed same-call native facts, never an arbitrary query/acquisition refusal."""
+    windows_runtime_publication_exit(context, exit_raw, precheck_raw, "scalar", outcome)
+    pre = windows_fullwalk_precheck_data(context, precheck_raw)
+    row = windows_fullwalk_wire(raw, "production-scalar")
+    windows_fullwalk_binding(row, context)
+    require(row["derivedCount"] in {"one", "four"}, "Windows filtered-token needed-size is not admitted")
+    expected = {"profile": WINDOWS_RUNTIME_PUBLICATION_PROFILE,
+        **{key: str(context[key]) for key in ("sourceSha", "sourceTree", "runId", "attempt")},
+        "qualifierTest": WINDOWS_RUNTIME_PUBLICATION_SCALAR, "artifactSha256": pre["ownerArtifactSha256"],
+        "precheckSha256": hashlib.sha256(precheck_raw).hexdigest(),
+        "commandSha256": windows_fullwalk_command_sha(pre["ownerArtifact"], WINDOWS_RUNTIME_PUBLICATION_SCALAR),
+        "sourceReturn": "bool-nonzero", "sourceCount": "one", "sourceValue": "zero", "sourceAdmitted": "true",
+        "derivedReturn": "bool-nonzero", "derivedCount": row["derivedCount"], "derivedValue": "nonzero", "derivedAdmitted": "false",
+        "createCalls": "1", "filterFlags": "1", "restrictingSidInputs": "0", "tokenOriginals": "2", "tokenOriginalsClosed": "2",
+        "parentBookSettled": "true", "unknown": "false", "resultCloseGate": "original-scalar-exit-zero-required"}
+    require(row == expected, "Windows same-call scalar facts/source/creation/settlement differ")
+    return {"qualificationProfile": WINDOWS_RUNTIME_PUBLICATION_PROFILE, "qualifierTest": WINDOWS_RUNTIME_PUBLICATION_SCALAR,
+        "artifactSha256": expected["artifactSha256"], "commandSha256": expected["commandSha256"],
+        "precheckSha256": expected["precheckSha256"], "sourceCount": "one", "sourceZero": True, "sourceFalseOnlyAdmitted": True,
+        "derivedCount": row["derivedCount"], "derivedNonzero": True, "derivedFalseOnlyAdmitted": False,
+        "createCalls": 1, "filterFlags": 1, "restrictingSidInputs": 0, "tokenOriginals": 2, "tokenOriginalsClosed": 2,
+        "parentBookSettled": True, "unknown": False, "nativeOriginalExitCode": 0, "originalProcessWaitReturned": True,
+        "resultClosedBySeparateExitAndStepGates": True,
+        "result": {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()},
+        "exit": {"size": len(exit_raw), "sha256": hashlib.sha256(exit_raw).hexdigest()}}
+
+
+def windows_runtime_publication_scalar_evidence(context: dict, precheck_raw: bytes, *, finalized: bool) -> dict:
+    root = Path(context["root"])
+    facts = windows_runtime_publication_scalar_data(context,
+        windows_installed_bytes(root / "producer-scalar-result.private.txt", 4096),
+        windows_installed_bytes(root / "producer-scalar-exit.private.txt", 4096), precheck_raw,
+        os.environ.get("MRK_WINDOWS_PRODUCER_SCALAR_STEP_OUTCOME", "unavailable"))
+    if finalized:
+        require(os.environ.get("MRK_WINDOWS_PRODUCER_SCALAR_FINALIZE_STEP_OUTCOME") == "success",
+                "Windows scalar qualification finalizer has not closed")
+        expected = windows_installed_phase_receipt(context, "windows-runtime-publication-scalar-finalize", **facts)
+        require(same_compile_json(bounded_json(windows_installed_bytes(root / "producer-scalar-checks.json", 64 << 10), 64 << 10), expected),
+                "Windows scalar qualification original finalizer changed")
+    return facts
+
+
+def windows_runtime_publication_scalar_finalize(context: dict) -> None:
+    require(windows_runtime_publication_profile(context)
+            and os.environ.get("MRK_WINDOWS_ORDINARY_PREFLIGHT_STEP_OUTCOME") == "success",
+            "Windows scalar qualification requires the closed original preflight")
+    pre, pre_raw, _, owner, _, _, _ = windows_fullwalk_check_precheck(context)
+    require(windows_ordinary_original(owner) == pre["ownerArtifactIdentity"], "Windows scalar qualifier original artifact changed")
+    facts = windows_runtime_publication_scalar_evidence(context, pre_raw, finalized=False)
+    windows_installed_inputs(context, retention_only=True)
+    write_json(Path(context["root"]) / "producer-scalar-checks.json",
+        windows_installed_phase_receipt(context, "windows-runtime-publication-scalar-finalize", **facts))
+
+
+def windows_runtime_publication_observation(context: dict, raw: bytes, precheck_raw: bytes,
+                                            roster_raw: bytes, test: str) -> dict:
+    """Strict DATA from original independent readers; never synthesize creation/seal receipts."""
+    passive = windows_installed_passive_profile(context)
+    normal_ui = windows_normal_ui_profile(context)
+    roles = ((WINDOWS_NORMAL_UI_SETUP_STAGE, WINDOWS_NORMAL_UI_SETUP_OBSERVER) if normal_ui else
+             (WINDOWS_INSTALLED_PASSIVE_STAGE, WINDOWS_INSTALLED_PASSIVE_OBSERVER) if passive else
+             (WINDOWS_RUNTIME_PUBLICATION_STAGE, WINDOWS_RUNTIME_PUBLICATION_BEFORE, WINDOWS_RUNTIME_PUBLICATION_AFTER))
+    require(windows_installed_publisher_required(context) and test in roles,
+            "Windows producer observation profile/role differs")
+    require(type(raw) is bytes and 0 < len(raw) <= 64 << 10 and raw.isascii() and raw.endswith(b"\n")
+            and all(byte == 10 or 32 <= byte <= 126 for byte in raw), "Windows producer observation framing differs")
+    pre = windows_fullwalk_precheck_data(context, precheck_raw)
+    items = {row["path"]: row for row in windows_fullwalk_roster(roster_raw)}
+    stage = test == (WINDOWS_NORMAL_UI_SETUP_STAGE if normal_ui else WINDOWS_INSTALLED_PASSIVE_STAGE if passive else WINDOWS_RUNTIME_PUBLICATION_STAGE)
+    proof_count = 0 if stage else (3 if normal_ui or passive or test == WINDOWS_RUNTIME_PUBLICATION_BEFORE else 6)
+    directories = ("suffix-mrk", "source-input", "source-target", "source-version", "source-python",
+                   *(() if stage else WINDOWS_FULLWALK_DIRECTORY_ROLES[1:]))
+    roles = (*directories, *("source/" + name for name in WINDOWS_FULLWALK_PAYLOAD_NAMES),
+             *(() if stage else WINDOWS_FULLWALK_PAYLOAD_NAMES))
+    lines = raw.splitlines(keepends=True)
+    prefix = len(WINDOWS_RUNTIME_PUBLICATION_OBSERVATION_FIELDS) + 1
+    require(len(lines) == prefix + proof_count + len(roles), "Windows producer complete observation count differs")
+    row = windows_fullwalk_wire(b"".join(lines[:prefix]),
+        "normal-ui-setup-observation" if normal_ui else "passive-observation" if passive else "production-observation")
+    windows_fullwalk_binding(row, context, normal_ui_setup=normal_ui)
+    windows_fullwalk_blob(pre, "roster", roster_raw)
+    windows_fullwalk_blob(row, "precheck", precheck_raw)
+    windows_fullwalk_blob(row, "roster", roster_raw)
+    expected = {"observerTest": test, "payloadFiles": "46", "objectCount": str(len(roles)), "proofCount": str(proof_count),
+        "sourceReaders": "47" if stage else "0", "payloadWriters": "47" if stage else "0",
+        "postcheckReaders": "47" if stage else "94", "parentBookSettled": "true", "unknown": "false",
+        "actualFixedProducerObserved": "true" if (normal_ui or passive) and not stage or test == WINDOWS_RUNTIME_PUBLICATION_AFTER else "false",
+        "runtimeConsumerEnabled": "false", "pythonExecuted": "false", "appLaunched": "false",
+        "resultCloseGate": "original-observer-exit-zero-required"}
+    require(all(row[key] == value for key, value in expected.items())
+            and row["fileOriginals"] == row["fileOriginalsClosed"]
+            and windows_fullwalk_number(row["fileOriginals"], 256, minimum=146 if stage else 103),
+            "Windows producer original observation finality/counts differ")
+    require(all(row[key] == pre[key] for key in ("manifestSha256", "protocolSha256", "inventorySha256", "coreSha256", "payloadBytes"))
+            and all(row[key] == pre["owner" + key[0].upper() + key[1:]]
+                    for key in ("artifactBytes", "artifactSha256", "artifactIdentity")),
+            "Windows producer observation source/input/original compiler binding differs")
+    proofs = []
+    proof_roles = WINDOWS_NORMAL_UI_SETUP_PROOFS if normal_ui else WINDOWS_INSTALLED_PASSIVE_PROOFS if passive else WINDOWS_RUNTIME_PUBLICATION_PROOFS
+    for line, (role, (_, limit)) in zip(lines[prefix:prefix + proof_count], proof_roles.items()):
+        value = line.decode("ascii").removesuffix("\n")
+        parts = value.removeprefix("proof=").split("|")
+        require(value.startswith("proof=") and len(parts) == 3 and parts[0] == role and sha256_value(parts[2]),
+                "Windows producer original proof order/digest differs")
+        proofs.append({"role": role, "size": windows_fullwalk_number(parts[1], limit, minimum=1), "sha256": parts[2]})
+    objects, identities = [], set()
+    for ordinal, (line, role) in enumerate(zip(lines[prefix + proof_count:], roles, strict=True)):
+        value = line.decode("ascii").removesuffix("\n")
+        parts = value.removeprefix("observed=").split("|")
+        directory = ordinal < len(directories)
+        require(value.startswith("observed=") and len(parts) == 6 and parts[0] == role
+                and parts[1] == ("directory" if directory else "file") and sha256_value(parts[3]),
+                "Windows producer exact observed object role differs")
+        stamp = windows_fullwalk_stamp(parts[2])
+        identity = (stamp["volume"], stamp["fileId"])
+        require(identity not in identities and bool(stamp["attributes"] & 0x10) == directory,
+                "Windows producer object aliases another original or changes kind")
+        identities.add(identity)
+        if directory:
+            require(parts[4] == "-" and sha256_value(parts[5]), "Windows producer complete directory inventory is missing")
+        else:
+            item = items[role.removeprefix("source/")]
+            require(parts[4] == item["sha256"] and stamp["size"] == item["size"] and stamp["allocation"] >= stamp["size"]
+                    and parts[5] == "-", "Windows producer original payload bytes differ")
+        objects.append({"role": role, "directory": directory, "stamp": stamp,
+                        "securitySha256": parts[3], "sha256": parts[4], "inventorySha256": parts[5]})
+    require(len({item["stamp"]["volume"] for item in objects}) == 1, "Windows producer observation crossed volumes")
+    by_role = {item["role"]: item for item in objects}
+    for role in directories:
+        children = {}
+        if role == "suffix-mrk":
+            children = {"runtime-input": "source-input", **({} if stage else {"versions": "suffix-versions"})}
+        elif role in ("source-input", "suffix-versions"):
+            children = {TARGETS["windows"]: "source-target" if role == "source-input" else "suffix-target"}
+        elif role in ("source-target", "suffix-target"):
+            children = {pre["manifestSha256"]: "source-version" if role == "source-target" else "version"}
+        else:
+            source = role.startswith("source-")
+            python = role.endswith("python")
+            if not python:
+                children["python"] = "source-python" if source else "python"
+            for name in WINDOWS_FULLWALK_PAYLOAD_NAMES:
+                if python and name.startswith("python/") or not python and "/" not in name:
+                    children[name.removeprefix("python/")] = ("source/" if source else "") + name
+        inventory = ""
+        for name, child_role in sorted(children.items()):
+            child = by_role[child_role]
+            inventory += name + "|" + ("directory" if child["directory"] else "file") + "|" + child["stamp"]["fileId"] + "|" + str(child["stamp"]["attributes"]) + "\n"
+        require(hashlib.sha256(inventory.encode("ascii")).hexdigest() == by_role[role]["inventorySha256"],
+                "Windows producer complete original child inventory differs")
+    return {"fields": row, "objects": objects, "proofs": proofs}
+
+
+def windows_runtime_publication_source_unchanged(stage: dict, observed: dict) -> None:
+    require(len(stage["objects"]) == 52 and len(observed["objects"]) == 103, "Windows producer source comparison cardinality differs")
+    by_role = {item["role"]: item for item in observed["objects"]}
+    for before in stage["objects"]:
+        after = by_role.get(before["role"])
+        require(after is not None, "Windows producer original source object is missing")
+        if before["role"] == "suffix-mrk":
+            a, b = before["stamp"], after["stamp"]
+            require(before["directory"] and after["directory"]
+                    and all(a[key] == b[key] for key in ("volume", "fileId", "creation", "links", "attributes"))
+                    and b["write"] >= a["write"] and b["change"] >= a["change"]
+                    and before["securitySha256"] == after["securitySha256"] and before["sha256"] == after["sha256"] == "-"
+                    and before["inventorySha256"] != after["inventorySha256"],
+                    "Windows producer shared parent changed beyond its sole expected child addition")
+        else:
+            require(same_compile_json(before, after), "Windows producer changed an original staged source object")
+
+
+def windows_runtime_publication_postcollision_unchanged(observed: dict, after: dict) -> None:
+    """The exact typed baseline comparison, after independent observation admission."""
+    require(same_compile_json(observed["objects"], after["objects"]), "Windows occupied producer changed a source or published object")
+
+
+def windows_runtime_publication_blobs(context: dict, through: str) -> dict[str, bytes]:
+    counts = {"stage": 2, "helperSuccess": 3, "before": 5, "helperOccupied": 6, "after": 8}
+    require(through in counts, "Windows producer DATA phase differs")
+    files = {**WINDOWS_RUNTIME_PUBLICATION_PROOFS,
+        "publisherReceipt": ("fullwalk-publisher-result.private.txt", 64 << 10),
+        "publisherExit": ("fullwalk-publisher-exit.private.json", 4096)}
+    return {role: windows_installed_bytes(Path(context["root"]) / name, limit)
+            for role, (name, limit) in list(files.items())[:counts[through]]}
+
+
+def windows_runtime_publication_outcomes(through: str, *, finalized: bool = False) -> dict[str, str]:
+    roles = (*WINDOWS_RUNTIME_PUBLICATION_STEPS, "after")
+    require(through in roles and type(finalized) is bool, "Windows producer original phase differs")
+    index = roles.index(through)
+    observed = {}
+    for i, role in enumerate(roles[:index + 1]):
+        prefix = "MRK_WINDOWS_PRODUCER_" + WINDOWS_RUNTIME_PUBLICATION_STEPS[role] if role != "after" else None
+        step = prefix + "_STEP_OUTCOME" if prefix else "MRK_WINDOWS_PUBLISHER_STEP_OUTCOME"
+        observed[role] = os.environ.get(step, "unavailable")
+        require(observed[role] == "success", "Windows producer original step did not return and close")
+        if i < index or finalized:
+            finish = prefix + "_FINALIZE_STEP_OUTCOME" if prefix else "MRK_WINDOWS_FIXTURE_FINALIZE_STEP_OUTCOME"
+            require(os.environ.get(finish) == "success", "Windows producer original finalizer step did not close")
+    return observed
+
+
+def windows_runtime_publication_chain(context: dict, precheck_raw: bytes, roster_raw: bytes,
+                                      blobs: dict[str, bytes], outcomes: dict, *, through: str = "after") -> dict:
+    roles = (*WINDOWS_RUNTIME_PUBLICATION_STEPS, "after")
+    require(through in roles and set(outcomes) == set(roles[:roles.index(through) + 1])
+            and set(outcomes.values()) == {"success"}, "Windows producer serial original outcomes differ")
+    expected = list(WINDOWS_RUNTIME_PUBLICATION_PROOFS) + ["publisherReceipt", "publisherExit"]
+    count = {"stage": 2, "helperSuccess": 3, "before": 5, "helperOccupied": 6, "after": 8}[through]
+    require(set(blobs) == set(expected[:count]), "Windows producer complete serial proof set differs")
+    stage = windows_runtime_publication_observation(context, blobs["stage"], precheck_raw, roster_raw, WINDOWS_RUNTIME_PUBLICATION_STAGE)
+    windows_runtime_publication_exit(context, blobs["stageExit"], precheck_raw, "stage", outcomes["stage"])
+    observed = stage
+    if count >= 3:
+        windows_runtime_publication_exit(context, blobs["helperSuccessExit"], precheck_raw, "helperSuccess", outcomes["helperSuccess"])
+    if count >= 5:
+        observed = windows_runtime_publication_observation(context, blobs["before"], precheck_raw, roster_raw, WINDOWS_RUNTIME_PUBLICATION_BEFORE)
+        windows_runtime_publication_source_unchanged(stage, observed)
+        windows_runtime_publication_exit(context, blobs["beforeExit"], precheck_raw, "before", outcomes["before"])
+        for proof in observed["proofs"]:
+            raw = blobs[proof["role"]]
+            require(proof["size"] == len(raw) and proof["sha256"] == hashlib.sha256(raw).hexdigest(), "Windows producer baseline proof changed")
+    if count >= 6:
+        windows_runtime_publication_exit(context, blobs["helperOccupiedExit"], precheck_raw, "helperOccupied", outcomes["helperOccupied"])
+    if count == 8:
+        after = windows_runtime_publication_observation(context, blobs["publisherReceipt"], precheck_raw, roster_raw, WINDOWS_RUNTIME_PUBLICATION_AFTER)
+        windows_runtime_publication_exit(context, blobs["publisherExit"], precheck_raw, "after", outcomes["after"])
+        windows_runtime_publication_source_unchanged(stage, after)
+        windows_runtime_publication_postcollision_unchanged(observed, after)
+        for proof in after["proofs"]:
+            raw = blobs[proof["role"]]
+            require(proof["size"] == len(raw) and proof["sha256"] == hashlib.sha256(raw).hexdigest(), "Windows producer final proof changed")
+        observed = after
+    facts = {"qualificationProfile": WINDOWS_RUNTIME_PUBLICATION_PROFILE, "through": through,
+        "precheckSha256": hashlib.sha256(precheck_raw).hexdigest(), "rosterSha256": hashlib.sha256(roster_raw).hexdigest(),
+        "originalInputs": {role: {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()} for role, raw in blobs.items()},
+        "originalStepOutcomes": outcomes, "independentActualProducerComparison": count == 8,
+        "typedOccupiedExitObserved": count >= 6, "observedObjects": len(observed["objects"]),
+        "runtimeConsumerEnabled": False, "pythonExecuted": False, "appLaunched": False,
+        "protectedPublicationOnlyNotNativeWalk": True, "resultClosedBySeparateExitAndStepGates": True}
+    return {"publication": observed, "facts": facts}
+
+
+def windows_runtime_publication_finalize(context: dict, through: str) -> None:
+    require(windows_runtime_publication_profile(context)
+            and os.environ.get("MRK_WINDOWS_ORDINARY_PREFLIGHT_STEP_OUTCOME") == "success",
+            "Windows actual producer phase requires the original closed preflight")
+    pre, pre_raw, roster_raw, owner, app, compiled, _ = windows_fullwalk_check_precheck(context)
+    windows_runtime_publication_scalar_evidence(context, pre_raw, finalized=True)
+    require(windows_ordinary_original(owner) == pre["ownerArtifactIdentity"]
+            and windows_ordinary_original(app, app_role=True) == pre["appArtifactIdentity"]
+            and windows_ordinary_original(compiled["helperCompiledArtifact"]) == pre["helperArtifactIdentity"],
+            "Windows producer original executable changed")
+    facts = windows_runtime_publication_chain(context, pre_raw, roster_raw,
+        windows_runtime_publication_blobs(context, through), windows_runtime_publication_outcomes(through), through=through)["facts"]
+    windows_installed_inputs(context, retention_only=True)
+    phases = {"stage": "stage", "helperSuccess": "success", "before": "before", "helperOccupied": "occupied"}
+    phase = "windows-installed-fixture-finalize" if through == "after" else "windows-runtime-publication-" + phases[through] + "-finalize"
+    name = "windows-installed-fixture-checks.json" if through == "after" else "producer-" + through + "-checks.json"
+    write_json(Path(context["root"]) / name, windows_installed_phase_receipt(context, phase, **facts))
+
+
+def windows_fullwalk_pins(context: dict) -> list[dict]:
+    # Pure source DATA is shared; the UI's actual preparation entry below still
+    # requires independently finalized positive prerequisites, not this name.
+    require(windows_installed_prepared_profile(context) or windows_normal_ui_profile(context),
+            "Windows supplier preparation is profile-only")
+    source = Path(context["source"])
+    rows = {row["path"]: row for row in validate_environment_inventory(context["sourceFiles"], maximum=64 << 20)}
+    expected = []
+    for name, (size, digest) in WINDOWS_FULLWALK_PINS.items():
+        record = {"path": name, "size": size, "sha256": digest}
+        require(rows.get(name) == record and windows_installed_record(source / name, size) == {"size": size, "sha256": digest},
+                "Windows exact preparer/notice/CA source pin differs")
+        expected.append(record)
+    return expected
+
+
+def windows_fullwalk_prepare_outputs_absent(root: Path) -> None:
+    # lstat also sees dangling Windows reparse entries that exists()/is_symlink()
+    # may not identify. Only genuine absence permits creating either output.
+    for name in ("runtime", "fullwalk-source"):
+        try:
+            (root / name).lstat()
+        except FileNotFoundError:
+            continue
+        raise CheckFailure("Windows fullwalk runtime/source output is already occupied")
+
+
+def windows_fullwalk_prepare_inputs(context: dict) -> dict:
+    # All pin/tool checks precede even the private supplier staging directory.
+    if windows_normal_ui_profile(context):
+        windows_normal_ui_positive_probe(context)
+    pins = windows_fullwalk_pins(context)
+    root = Path(context["root"])
+    require(len(windows_ordinary_path(str(root)).parents) + 1 <= 19, "Windows fullwalk root exceeds its original-file envelope")
+    system_root = os.environ.get("SystemRoot", "")
+    require(system_root != "", "Windows fixed supplier tool root is absent")
+    curl = Path(system_root) / "System32" / "curl.exe"
+    digest = windows_fullwalk_curl_sha256(curl)
+    windows_fullwalk_prepare_outputs_absent(root)
+    (root / "inputs").mkdir(mode=0o700)
+    return {"pins": pins, "curl": {"path": str(curl), "sha256": digest}}
+
+
+def windows_fullwalk_curl_argv(context: dict, *, setup_inputs: dict | None = None) -> list[str]:
+    require((setup_inputs is not None) == windows_normal_ui_profile(context), "Windows supplier admission role differs")
+    admission = closed_object(setup_inputs if setup_inputs is not None else context["fullwalkInputs"],
+                              {"pins", "curl"}, "Windows supplier admission fields differ")
+    tool = closed_object(admission["curl"], {"path", "sha256"}, "Windows supplier tool fields differ")
+    require(sha256_value(tool["sha256"]), "Windows supplier tool digest differs")
+    return [tool["path"], "--disable", "--proto", "=https", "--tlsv1.2", "--noproxy", "*",
+        "--connect-timeout", "15", "--max-time", "120", "--max-filesize", "67108864",
+        "--retry", "0", "--max-redirs", "0", "--fail", "--silent", "--show-error",
+        "--output", str(Path(context["root"]) / "inputs" / WINDOWS_FULLWALK_ZIP),
+        "--write-out", "%{http_code}\n%{url_effective}\n%{num_redirects}\n%{size_download}\n", WINDOWS_FULLWALK_URL]
+
+
+def windows_fullwalk_supplier_status(raw: bytes) -> None:
+    expected = (b"200", WINDOWS_FULLWALK_URL.encode("ascii"), b"0",
+                str(WINDOWS_FULLWALK_ZIP_BYTES).encode("ascii"))
+    endings = (b"\n", b"\r\n")
+    if raw in tuple(ending.join(expected) + ending for ending in endings):
+        return
+    # Parsed fields select rejection diagnostics only; this path never admits bytes.
+    label = "framing"
+    for ending in endings:
+        if not raw.endswith(ending):
+            continue
+        fields = raw[:-len(ending)].split(ending)
+        if len(fields) != 4 or any(b"\r" in field or b"\n" in field for field in fields):
+            continue
+        for value, wanted, field_label in zip(fields, expected, ("http", "effective-url", "redirect", "byte-count")):
+            if value != wanted:
+                label = field_label
+                break
+        break
+    raise CheckFailure(f"Windows supplier {label} differs")
+
+
+def windows_fullwalk_preparer_argv(context: dict) -> list[str]:
+    return [context["python"], "-I", "-S", "-B", str(Path(context["source"]) / "desktop/tools/prepare_windows_embedded_payload.py"),
+        "--source", context["source"], "--archive", str(Path(context["root"]) / "inputs" / WINDOWS_FULLWALK_ZIP),
+        "--runtime-root", str(Path(context["root"]) / "runtime")]
+
+
+def windows_fullwalk_payload_rows(value: object, *, physical: bool) -> list[dict]:
+    expected = WINDOWS_FULLWALK_PAYLOAD_NAMES if physical else tuple(name for name in WINDOWS_FULLWALK_PAYLOAD_NAMES if name != "manifest.json")
+    require(type(physical) is bool and type(value) is list and len(value) == len(expected),
+            "Windows fixed payload inventory count differs")
+    total = 0
+    for row, name in zip(value, expected, strict=True):
+        row = closed_object(row, {"path", "size", "sha256"}, "Windows fixed payload inventory fields differ")
+        require(row["path"] == name and integer_between(row["size"], 1, 128 << 20) and sha256_value(row["sha256"]),
+                "Windows fixed payload member/name/bound differs")
+        total += row["size"]
+    require(total <= 1 << 30, "Windows fixed payload total bound differs")
+    return value
+
+
+def windows_fullwalk_prepared_data(context: dict, receipt_raw: bytes, manifest_raw: bytes, physical: list[dict]) -> dict:
+    """Strict fixed-profile DATA. The receipt does not claim native verification."""
+    require(windows_installed_prepared_profile(context) or windows_normal_ui_profile(context),
+            "Windows prepared DATA requires its explicit profile")
+    receipt = closed_object(bounded_json(receipt_raw, 4096), {"manifestSha256", "protocolSha256", "qualification",
+        "inputSha256", "supplierInventorySha256", "stdlibInventorySha256", "noticeSha256"},
+        "Windows fixed preparer receipt fields differ")
+    require(receipt["qualification"] == "prepared-not-native-verified" and receipt["inputSha256"] == WINDOWS_FULLWALK_ZIP_SHA256
+            and receipt["supplierInventorySha256"] == "172b1201a41ba5d9b2d3fa605426a6cac9f12aeaf23616665e4c70bf8caa6000"
+            and receipt["stdlibInventorySha256"] == "a36ba4a114629fb0d42a56f0449b5ce2f14381b8a2880d9fbe1ba6b77380fcc7"
+            and receipt["noticeSha256"] == WINDOWS_FULLWALK_PINS["desktop/licenses/windows-embedded-runtime.txt"][1]
+            and all(sha256_value(receipt[key]) for key in receipt if key != "qualification"),
+            "Windows fixed supplier/preparer/notice binding differs")
+    manifest = closed_object(bounded_json(manifest_raw, 1 << 20), {"schemaVersion", "protocol", "coreVersion", "target",
+        "coreSha256", "protocolSha256", "inventorySha256", "files"}, "Windows prepared manifest fields differ")
+    require(type(manifest["schemaVersion"]) is int and manifest["schemaVersion"] == 1
+            and type(manifest["protocol"]) is int and manifest["protocol"] == 1
+            and manifest["target"] == TARGETS["windows"] and type(manifest["coreVersion"]) is str
+            and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", manifest["coreVersion"]) is not None
+            and len(manifest["coreVersion"]) <= 64
+            and all(sha256_value(manifest[key]) for key in ("coreSha256", "protocolSha256", "inventorySha256"))
+            and canonical_json(manifest) + b"\n" == manifest_raw,
+            "Windows prepared manifest schema/canonical bytes differ")
+    rows = windows_fullwalk_payload_rows(manifest["files"], physical=False)
+    require(tuple(row["path"] for row in rows) == tuple(name for name in WINDOWS_FULLWALK_PAYLOAD_NAMES if name != "manifest.json")
+            and all(integer_between(row["size"], 1, 128 << 20) for row in rows)
+            and hashlib.sha256(canonical_json(rows)).hexdigest() == manifest["inventorySha256"],
+            "Windows prepared exact46 payload inventory differs")
+    observed = windows_fullwalk_payload_rows(physical, physical=True)
+    require(tuple(row["path"] for row in observed) == WINDOWS_FULLWALK_PAYLOAD_NAMES
+            and all(integer_between(row["size"], 1, 128 << 20) for row in observed)
+            and [row for row in observed if row["path"] != "manifest.json"] == rows
+            and next(row for row in observed if row["path"] == "manifest.json")
+                == {"path": "manifest.json", "size": len(manifest_raw), "sha256": hashlib.sha256(manifest_raw).hexdigest()},
+            "Windows prepared physical47 roster differs")
+    by_name = {row["path"]: row for row in rows}
+    source = {row["path"]: row for row in validate_environment_inventory(context["sourceFiles"], maximum=64 << 20)}
+    require(manifest["coreSha256"] == by_name["core.zip"]["sha256"]
+            and manifest["protocolSha256"] == source["src/mobile_release/_desktop_engine.py"]["sha256"]
+            and receipt["protocolSha256"] == manifest["protocolSha256"]
+            and receipt["manifestSha256"] == hashlib.sha256(manifest_raw).hexdigest(),
+            "Windows prepared core/protocol/manifest anchors differ")
+    for name in ("engine_bootstrap.py", "config_edit_bootstrap.py", "github_connection_bootstrap.py",
+                 "environment_bootstrap.py", "offline_preflight_bootstrap.py", "android_build_bootstrap.py"):
+        original = source["desktop/" + name]
+        require(by_name[name] == {**original, "path": name}, "Windows prepared bootstrap is not current source")
+    # The private source projection supplies the common preparer's logical CA
+    # path; evidence stays bound to the admitted original checkout controls leaf.
+    ca_source = "desktop/cpython-source-inputs/github-ca.pem"
+    size, digest = WINDOWS_FULLWALK_PINS[ca_source]
+    require(source.get(ca_source) == {"path": ca_source, "size": size, "sha256": digest}
+            and by_name["github-ca.pem"] == {"path": "github-ca.pem", "size": size, "sha256": digest},
+            "Windows prepared CA is not the fixed current controls source")
+    size, digest = WINDOWS_FULLWALK_PINS["desktop/licenses/windows-embedded-runtime.txt"]
+    require(by_name["python/MRK-EMBEDDED-NOTICES.txt"] == {"path": "python/MRK-EMBEDDED-NOTICES.txt", "size": size, "sha256": digest},
+            "Windows prepared recipient notice differs")
+    return {"manifestSha256": receipt["manifestSha256"], "protocolSha256": manifest["protocolSha256"],
+        "inventorySha256": manifest["inventorySha256"], "coreSha256": manifest["coreSha256"],
+        "payloadFiles": len(rows), "payloadBytes": sum(row["size"] for row in rows), "physical": observed,
+        "receipt": {"size": len(receipt_raw), "sha256": hashlib.sha256(receipt_raw).hexdigest()},
+        "manifest": {"size": len(manifest_raw), "sha256": hashlib.sha256(manifest_raw).hexdigest()}}
+
+
+def windows_fullwalk_prepared(context: dict) -> dict:
+    # Read the fixed two-directory physical shape; never import/execute prepared code.
+    root, source = Path(context["root"]), Path(context["source"])
+    runtime = root / "runtime"
+    windows_fullwalk_pins(context)
+    directories = (runtime, runtime / "python")
+    states = {}
+    for directory in directories:
+        windows_installed_directories(directory)
+        states[directory] = windows_installed_state(directory.lstat())
+        seen = []
+        with os.scandir(directory) as children:
+            for child in children:
+                require(len(seen) < 48, "Windows prepared directory exceeds its fixed count")
+                seen.append(child.name)
+        expected = (tuple(name for name in WINDOWS_FULLWALK_PAYLOAD_NAMES if "/" not in name) + ("python",)
+                    if directory == runtime else tuple(name.split("/", 1)[1] for name in WINDOWS_FULLWALK_PAYLOAD_NAMES if "/" in name))
+        require(sorted(seen) == sorted(expected), "Windows prepared directory gained/lost/aliased a member")
+    physical = [{"path": name, **windows_installed_record(runtime / name, 128 << 20)} for name in WINDOWS_FULLWALK_PAYLOAD_NAMES]
+    manifest_raw = windows_installed_bytes(runtime / "manifest.json", 1 << 20)
+    receipt_raw = windows_installed_bytes(root / "fullwalk-prepared-receipt.private.json", 4096)
+    prepared = windows_fullwalk_prepared_data(context, receipt_raw, manifest_raw, physical)
+    # Exact current-source core contents, not only an opaque manifest assertion.
+    import io
+    core_rows = [row for row in validate_environment_inventory(context["sourceFiles"], maximum=64 << 20)
+                 if row["path"].startswith("src/mobile_release/")]
+    require(core_rows and sum(row["size"] for row in core_rows) <= 32 << 20
+            and all(Path(row["path"]).suffix in {".py", ".json", ".pem"} for row in core_rows),
+            "Windows prepared core source envelope differs")
+    core_raw = windows_installed_bytes(runtime / "core.zip", 128 << 20)
+    with io.BytesIO(core_raw) as original, zipfile.ZipFile(original) as archive:
+        members = archive.infolist()
+        require(archive.comment == b"" and len(members) == len(core_rows)
+                and [member.filename for member in members] == [row["path"].removeprefix("src/") for row in core_rows],
+                "Windows prepared core exact source roster differs")
+        for member, row in zip(members, core_rows, strict=True):
+            require(member.filename == member.orig_filename and not member.is_dir()
+                    and member.create_system == 3 and member.external_attr == (stat.S_IFREG | 0o644) << 16
+                    and member.date_time == (1980, 1, 1, 0, 0, 0) and member.compress_type == zipfile.ZIP_DEFLATED
+                    and member.flag_bits == 0 and not member.extra and not member.comment
+                    and member.file_size == row["size"], "Windows prepared core member metadata differs")
+            with archive.open(member) as stream:
+                raw = stream.read(row["size"] + 1)
+            require(len(raw) == row["size"] and hashlib.sha256(raw).hexdigest() == row["sha256"]
+                    and raw == windows_installed_bytes(source / row["path"], 32 << 20),
+                    "Windows prepared core does not contain current admitted source")
+    version_raw = windows_installed_bytes(source / "src/mobile_release/__init__.py", 64 << 10)
+    version = re.search(rb'^__version__ = "([0-9]+\.[0-9]+\.[0-9]+)"$', version_raw, re.M)
+    require(version is not None and bounded_json(manifest_raw, 1 << 20)["coreVersion"] == version[1].decode("ascii"),
+            "Windows prepared current-source core version differs")
+    require(all(windows_installed_state(path.lstat()) == state for path, state in states.items()),
+            "Windows prepared directory changed during validation")
+    return prepared
+
+
+def windows_fullwalk_acquire(context: dict, environment: dict, deadline: float, *, setup_inputs: dict | None = None) -> dict:
+    root = Path(context["root"])
+    normal_ui = windows_normal_ui_profile(context)
+    require((setup_inputs is not None) == normal_ui, "Windows supplier acquisition role differs")
+    if normal_ui:
+        windows_normal_ui_positive_probe(context)
+    admission = setup_inputs if normal_ui else context["fullwalkInputs"]
+    require(admission["pins"] == windows_fullwalk_pins(context), "Windows supplier original source admission changed")
+    inputs, archive = root / "inputs", root / "inputs" / WINDOWS_FULLWALK_ZIP
+    windows_installed_directories(inputs)
+    require(not archive.exists() and not archive.is_symlink(),
+            "Windows supplier/preparation is one-use and output is occupied")
+    windows_fullwalk_prepare_outputs_absent(root)
+    argv = windows_fullwalk_curl_argv(context, setup_inputs=setup_inputs)
+    require(windows_fullwalk_curl_sha256(Path(argv[0])) == admission["curl"]["sha256"],
+            "Windows supplier original fixed tool changed immediately before invocation")
+    # This downloader/preparer route never owns a logon child. The SAME acquire
+    # deadline also covers the later locked metadata; no renewed840s subphase.
+    with (root / "fullwalk-supplier.stdout").open("x", encoding="utf-8", newline="\n") as output, \
+            (root / "fullwalk-supplier.stderr").open("x", encoding="utf-8") as diagnostics:
+        run(argv, check="windows-fullwalk-fixed-supplier", cwd=root, env=environment,
+            timeout=windows_installed_remaining(deadline, 135), output=output, diagnostics=diagnostics)
+    windows_fullwalk_supplier_status(windows_installed_bytes(root / "fullwalk-supplier.stdout", 4096))
+    require(windows_installed_record(archive, WINDOWS_FULLWALK_ZIP_BYTES)
+            == {"size": WINDOWS_FULLWALK_ZIP_BYTES, "sha256": WINDOWS_FULLWALK_ZIP_SHA256},
+            "Windows supplier whole ZIP differs before preparation")
+    require(windows_fullwalk_curl_sha256(Path(argv[0])) == admission["curl"]["sha256"]
+            and admission["pins"] == windows_fullwalk_pins(context), "Windows supplier original inputs changed")
+    prepare_argv = windows_fullwalk_preparer_argv(context)
+    with (root / "fullwalk-prepared-receipt.private.json").open("x", encoding="utf-8", newline="\n") as output, \
+            (root / "fullwalk-prepare.stderr").open("x", encoding="utf-8") as diagnostics:
+        run(prepare_argv, check="windows-fullwalk-fixed-offline-preparer", cwd=root, env=environment,
+            timeout=windows_installed_remaining(deadline, 180), output=output, diagnostics=diagnostics)
+    prepared = windows_fullwalk_prepared(context)
+    windows_installed_remaining(deadline, 1)
+    return {"supplier": {"size": WINDOWS_FULLWALK_ZIP_BYTES, "sha256": WINDOWS_FULLWALK_ZIP_SHA256},
+        "supplierInvocationSha256": hashlib.sha256(canonical_json(argv)).hexdigest(), "supplierOriginalExitCode": 0,
+        "prepareInvocationSha256": hashlib.sha256(canonical_json(prepare_argv)).hexdigest(), "prepareOriginalExitCode": 0,
+        "prepared": prepared}
+
+
+def windows_fullwalk_anchors(context: dict) -> dict:
+    acquired = read_bounded_json(Path(context["root"]) / "acquire-checks.json", 64 << 10)
+    binding = closed_object(acquired["fullwalk"], {"supplier", "supplierInvocationSha256", "supplierOriginalExitCode",
+        "prepareInvocationSha256", "prepareOriginalExitCode", "prepared"}, "Windows fullwalk acquisition fields differ")
+    require(same_compile_json(binding["supplier"], {"size": WINDOWS_FULLWALK_ZIP_BYTES, "sha256": WINDOWS_FULLWALK_ZIP_SHA256})
+            and type(binding["supplierOriginalExitCode"]) is int and binding["supplierOriginalExitCode"] == 0
+            and type(binding["prepareOriginalExitCode"]) is int and binding["prepareOriginalExitCode"] == 0
+            and binding["supplierInvocationSha256"] == hashlib.sha256(canonical_json(windows_fullwalk_curl_argv(context))).hexdigest()
+            and binding["prepareInvocationSha256"] == hashlib.sha256(canonical_json(windows_fullwalk_preparer_argv(context))).hexdigest(),
+            "Windows fullwalk original acquisition/preparer exit/argv differs")
+    prepared = windows_fullwalk_prepared(context)
+    require(same_compile_json(binding["prepared"], prepared), "Windows fullwalk original prepared bytes changed")
+    root = Path(context["root"])
+    packages = windows_installed_metadata(context)
+    graph = windows_installed_app_metadata(context)
+    expected = windows_installed_phase_receipt(context, "acquire", rust=RUST, target=TARGETS["windows"],
+        packages={name: package["version"] for name, package in packages.items()},
+        metadata=windows_installed_record(root / "metadata.json", 2 << 20), originalExitCode=0,
+        appMetadata=windows_installed_record(root / "app-metadata.json", 8 << 20), appOriginalExitCode=0,
+        appActivePackageIds=sorted(graph["nodes"]), compilerTools=windows_installed_record(root / "compiler-tools.json", 64 << 10),
+        fullwalk=binding)
+    if windows_installed_passive_profile(context):
+        helper_graph = windows_installed_helper_metadata(context)
+        expected.update(helperMetadata=windows_installed_record(root / "helper-metadata.json", 8 << 20),
+                        helperMetadataOriginalExitCode=0, helperActivePackageIds=sorted(helper_graph["nodes"]))
+    require(same_compile_json(acquired, expected)
+            and same_compile_json(read_bounded_json(root / "acquire-started.json", 64 << 10),
+                windows_installed_phase_receipt(context, "acquire", claimOnly=True)),
+            "Windows fullwalk original acquisition source/graph/exit/claim differs")
+    return prepared
+
+
+def windows_fullwalk_native_argv(cargo: str, context: dict) -> list[str]:
+    return [cargo, "test", "--locked", "--offline", "--jobs", "1", "--no-default-features", "--target", TARGETS["windows"],
+        "--manifest-path", str(Path(context["source"]) / WINDOWS_INSTALLED_CRATE / "Cargo.toml"),
+        "--target-dir", str(Path(context["root"]) / "target"),
+        *(["--features", ",".join(windows_installed_features(context, "native"))] if windows_installed_features(context, "native") else []),
+        "--lib", "--no-run", "--message-format=json"]
+
+
+def windows_fullwalk_compile_bindings(context: dict) -> tuple[dict, dict, dict, dict]:
+    """DATA revalidation only: original commands are not re-run here."""
+    require(windows_installed_prepared_profile(context), "Windows anchored compiler binding is profile-only")
+    root = Path(context["root"])
+    read = lambda name, limit=64 << 10: bounded_json(windows_installed_bytes(root / name, limit), limit)
+    prepared = windows_fullwalk_anchors(context)
+    acquired, compiled = read("acquire-checks.json"), read("compile-checks.json")
+    for name in ("acquire", "compile"):
+        require(same_compile_json(read(name + "-started.json"), windows_installed_phase_receipt(context, name, claimOnly=True)),
+                "Windows fullwalk original compiler/acquisition claim differs")
+    compiler = read("compiler-tools.json")
+    closed_object(compiler, {"cargo", "rustc"}, "Windows original compiler role set differs")
+    for role in ("cargo", "rustc"):
+        item = closed_object(compiler[role], {"path", "size", "sha256"}, "Windows original compiler identity fields differ")
+        require(type(item["path"]) is str and Path(item["path"]).is_absolute()
+                and windows_installed_record(Path(item["path"]), 128 << 20) == {key: item[key] for key in ("size", "sha256")},
+                "Windows fullwalk original compiler bytes changed")
+    require(acquired["metadata"] == windows_installed_record(root / "metadata.json", 2 << 20)
+            and acquired["appMetadata"] == windows_installed_record(root / "app-metadata.json", 8 << 20)
+            and acquired["compilerTools"] == windows_installed_record(root / "compiler-tools.json", 64 << 10),
+            "Windows fullwalk original acquired graph/tool records changed")
+    # These existing strict decoders validate the actual resolved edges/units.
+    windows_installed_metadata(context)
+    windows_installed_app_metadata(context)
+    owner, app = read("compiled-test.json"), read("app-compiled-test.json")
+    require(same_compile_json(owner, windows_installed_artifact(context))
+            and same_compile_json(app, windows_installed_app_artifact(context)), "Windows fullwalk original artifacts changed")
+    expected = windows_installed_phase_receipt(context, "compile", rust=RUST, target=TARGETS["windows"],
+        compiledTest=owner, originalExitCode=0,
+        invocationSha256=hashlib.sha256(canonical_json(windows_fullwalk_native_argv(compiler["cargo"]["path"], context))).hexdigest(),
+        standaloneOnly=False, appCompiledTest=app, appOriginalExitCode=0,
+        appInvocationSha256=hashlib.sha256(canonical_json(windows_installed_app_argv(compiler["cargo"]["path"], context))).hexdigest(),
+        fullwalk={"manifestSha256": prepared["manifestSha256"], "protocolSha256": prepared["protocolSha256"],
+            "preparedReceipt": prepared["receipt"], "anchoredNativeBuilds": 1, "anchoredAppBuilds": 1})
+    if windows_installed_publisher_required(context):
+        helper = read("helper-compiled-artifact.json")
+        require(same_compile_json(helper, windows_installed_helper_artifact(context)), "Windows normal helper original artifact changed")
+        expected.update(helperCompiledArtifact=helper, helperOriginalExitCode=0,
+            helperInvocationSha256=hashlib.sha256(canonical_json(windows_installed_helper_argv(compiler["cargo"]["path"], context))).hexdigest())
+        expected["fullwalk"]["anchoredHelperBuilds"] = 1
+    require(same_compile_json(compiled, expected), "Windows fullwalk single anchored compile/argv/source binding differs")
+    return owner, app, compiled, prepared
+
+
+def windows_fullwalk_roster_text(physical: list[dict]) -> bytes:
+    raw = ("MRK_WINDOWS_FULLWALK_ROSTER_V1\n" + "".join(
+        "file=" + row["path"] + "|" + str(row["size"]) + "|" + row["sha256"] + "\n" for row in physical)).encode("ascii")
+    require(windows_fullwalk_roster(raw) == physical, "Windows fullwalk producer physical roster differs")
+    return raw
+
+
+def windows_fullwalk_precheck_text(context: dict, owner: dict, app: dict, compiled: dict, prepared: dict,
+                                  owner_identity: str, app_identity: str, roster_raw: bytes, *, helper_identity: str | None = None) -> bytes:
+    rows = validate_environment_inventory(context["sourceFiles"], maximum=64 << 20)
+    by_name = {row["path"]: row["sha256"] for row in rows}
+    production = windows_runtime_publication_profile(context)
+    passive = windows_installed_passive_profile(context)
+    publisher = WINDOWS_RUNTIME_PUBLICATION_AFTER if production else WINDOWS_FULLWALK_PUBLISHER
+    values = {"profile": context["qualificationProfile"], **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")},
+        "sourceInventorySha256": hashlib.sha256(canonical_json(rows)).hexdigest(),
+        **{key: by_name[path] for key, path in WINDOWS_FULLWALK_HEADLESS_SOURCES.items()},
+        **({"appTest": WINDOWS_INSTALLED_PASSIVE_TEST, "stageTest": WINDOWS_INSTALLED_PASSIVE_STAGE,
+            "observerTest": WINDOWS_INSTALLED_PASSIVE_OBSERVER, "ownerTest": WINDOWS_INSTALLED_PASSIVE_OWNER}
+           if passive else {"appTest": WINDOWS_FULLWALK_TEST, "publisherTest": publisher,
+            "fullwalkOwnerTest": WINDOWS_FULLWALK_OWNER, "ordinaryOwnerTest": WINDOWS_ORDINARY_OWNER}),
+        "appRootFeatures": "windows-runtime-publisher" if production else "none",
+        "standaloneFeatures": "runtime-publication" if production else "none",
+        "appNativeDevFeatures": "qualification-result,runtime-publication" if production else "qualification-result",
+        **{key: prepared[key] for key in ("manifestSha256", "protocolSha256", "inventorySha256", "coreSha256", "payloadFiles", "payloadBytes")},
+        "preparedReceiptBytes": prepared["receipt"]["size"], "preparedReceiptSha256": prepared["receipt"]["sha256"],
+        "rosterBytes": len(roster_raw), "rosterSha256": hashlib.sha256(roster_raw).hexdigest(),
+        "headlessContract": "fixed-installed-passive-original-owner-v1" if passive else "fixed-version-inspect-settle-no-descendants-v1"}
+    for role, artifact, identity, argv_key in (("owner", owner, owner_identity, "invocationSha256"),
+                                              ("app", app, app_identity, "appInvocationSha256")):
+        values.update({role + "Artifact": artifact["path"], role + "ArtifactBytes": artifact["size"],
+            role + "ArtifactSha256": artifact["sha256"], role + "ArtifactIdentity": windows_ordinary_identity(identity),
+            role + "CompileMessagesBytes": artifact["messages"]["size"],
+            role + "CompileMessagesSha256": artifact["messages"]["sha256"], role + "CompileArgvSha256": compiled[argv_key]})
+    commands = (
+        ("appCommandSha256", app, WINDOWS_INSTALLED_PASSIVE_TEST), ("stageCommandSha256", owner, WINDOWS_INSTALLED_PASSIVE_STAGE),
+        ("observerCommandSha256", owner, WINDOWS_INSTALLED_PASSIVE_OBSERVER), ("ownerCommandSha256", owner, WINDOWS_INSTALLED_PASSIVE_OWNER),
+    ) if passive else (
+        ("appCommandSha256", app, WINDOWS_FULLWALK_TEST), ("publisherCommandSha256", owner, publisher),
+        ("fullwalkOwnerCommandSha256", owner, WINDOWS_FULLWALK_OWNER), ("ordinaryOwnerCommandSha256", owner, WINDOWS_ORDINARY_OWNER),
+        ("ordinaryChildCommandSha256", owner, WINDOWS_INSTALLED_TEST))
+    for key, artifact, test in commands:
+        values[key] = windows_fullwalk_command_sha(artifact["path"], test)
+    if windows_installed_publisher_required(context):
+        helper = compiled["helperCompiledArtifact"]
+        values.update(helperArtifact=helper["path"], helperArtifactBytes=helper["size"], helperArtifactSha256=helper["sha256"],
+            helperArtifactIdentity=windows_ordinary_identity(helper_identity), helperCompileMessagesBytes=helper["messages"]["size"],
+            helperCompileMessagesSha256=helper["messages"]["sha256"], helperCompileArgvSha256=compiled["helperInvocationSha256"],
+            helperCommandSha256=windows_runtime_publication_helper_command_sha(helper["path"]), helperNativeFeatures="runtime-publication")
+    else:
+        require(helper_identity is None, "A synthetic precheck cannot acquire a production helper")
+    raw = windows_fullwalk_text(windows_fullwalk_kind(context, "precheck"), values)
+    windows_fullwalk_precheck_data(context, raw)
+    return raw
+
+
+def windows_fullwalk_headless_precheck(context: dict, owner_identity: str) -> dict:
+    root = Path(context["root"])
+    owner, app, compiled, prepared = windows_fullwalk_compile_bindings(context)
+    require(windows_ordinary_original(owner) == owner_identity, "Windows headless owner original epoch differs")
+    app_identity = windows_ordinary_original(app, app_role=True)
+    helper_identity = (windows_ordinary_original(compiled["helperCompiledArtifact"])
+                       if windows_runtime_publication_profile(context) else None)
+    roster_raw = windows_fullwalk_roster_text(prepared["physical"])
+    precheck_raw = windows_fullwalk_precheck_text(context, owner, app, compiled, prepared, owner_identity, app_identity, roster_raw,
+                                                helper_identity=helper_identity)
+    for name in ("fullwalk-headless-precheck.private.txt", "fullwalk-fixture-roster.private.txt",
+                 "fullwalk-publisher-result.private.txt", "fullwalk-publisher-exit.private.json",
+                 "windows-installed-fixture-checks.json", "fullwalk-ordinary-finality.private.txt",
+                 "fullwalk-publication.private.txt", "fullwalk-request.txt", "fullwalk-output",
+                 "fullwalk-owner-intent.private.json", "fullwalk-owner-result.private.json", "fullwalk-owner-exit.private.json",
+                 "windows-installed-fullwalk-preflight-checks.json", "windows-installed-fullwalk-checks.json",
+                 "fullwalk-retirement-result.private.json", "fullwalk-retirement-exit.private.json"):
+        path = root / name
+        require(not path.exists() and not path.is_symlink(), "Windows fullwalk fixed one-use output is occupied")
+    if windows_runtime_publication_profile(context):
+        for name in (*[name for name, _ in WINDOWS_RUNTIME_PUBLICATION_PROOFS.values()],
+                     "producer-scalar-result.private.txt", "producer-scalar-exit.private.txt", "producer-scalar-checks.json",
+                     *("producer-" + role + "-checks.json" for role in WINDOWS_RUNTIME_PUBLICATION_STEPS)):
+            path = root / name
+            require(not path.exists() and not path.is_symlink(), "Windows production one-use output is occupied")
+    windows_fullwalk_write(root / "fullwalk-fixture-roster.private.txt", roster_raw, 16 << 10)
+    windows_fullwalk_write(root / "fullwalk-headless-precheck.private.txt", precheck_raw, 16 << 10)
+    return {"precheck": {"size": len(precheck_raw), "sha256": hashlib.sha256(precheck_raw).hexdigest()},
+        "roster": {"size": len(roster_raw), "sha256": hashlib.sha256(roster_raw).hexdigest()}}
+
+
+def windows_fullwalk_check_precheck(context: dict) -> tuple[dict, bytes, bytes, dict, dict, dict, dict]:
+    root = Path(context["root"])
+    owner, app, compiled, prepared = windows_fullwalk_compile_bindings(context)
+    precheck_raw = windows_installed_bytes(root / "fullwalk-headless-precheck.private.txt", 16 << 10)
+    pre = windows_fullwalk_precheck_data(context, precheck_raw)
+    roster_raw = windows_installed_bytes(root / "fullwalk-fixture-roster.private.txt", 16 << 10)
+    require(roster_raw == windows_fullwalk_roster_text(prepared["physical"])
+            and precheck_raw == windows_fullwalk_precheck_text(context, owner, app, compiled, prepared,
+                pre["ownerArtifactIdentity"], pre["appArtifactIdentity"], roster_raw,
+                helper_identity=pre.get("helperArtifactIdentity")),
+            "Windows headless original precheck/roster/prepared compiler binding changed")
+    preflight = bounded_json(windows_installed_bytes(root / "windows-installed-native-preflight-checks.json", 64 << 10), 64 << 10)
+    expected = {"precheck": {"size": len(precheck_raw), "sha256": hashlib.sha256(precheck_raw).hexdigest()},
+        "roster": {"size": len(roster_raw), "sha256": hashlib.sha256(roster_raw).hexdigest()}}
+    request = windows_ordinary_request(context, owner, pre["ownerArtifactIdentity"])
+    require(windows_installed_bytes(root / "ordinary-request.txt", 4096) == request,
+            "Windows original headless ordinary request changed")
+    outputs = {name: windows_installed_record(root / name, 64 << 10) for name in
+        ("app-inert.stdout", "app-inert.stderr", "inert.stdout", "inert.stderr")}
+    require(windows_installed_bytes(root / "inert.stderr", 64 << 10) == b""
+            and windows_installed_bytes(root / "app-inert.stderr", 64 << 10) == b"",
+            "Windows original headless inert diagnostic bytes differ")
+    native_names = windows_installed_native_inert(context)
+    windows_installed_libtest(windows_installed_bytes(root / "inert.stdout", 64 << 10), native_names,
+                              windows_installed_native_test_total(context) - len(native_names))
+    app_inert = windows_installed_app_libtest(windows_installed_bytes(root / "app-inert.stdout", 64 << 10),
+                                             production=windows_runtime_publication_profile(context))
+    expected = windows_installed_phase_receipt(context, "windows-installed-native-preflight",
+        compiledTest=owner, inertContracts={"passed": len(native_names), "failed": 0, "ignored": 0}, appCompiledTest=app,
+        appInertContracts=app_inert, appOriginalExitCode=0, originalOutputs=outputs, inertOriginalExitCode=0,
+        artifactNativeIdentity=pre["ownerArtifactIdentity"], request={"size": len(request), "sha256": hashlib.sha256(request).hexdigest()},
+        nativeNotStarted=True, notVerified=list(WINDOWS_INSTALLED_COMBINED_NOT_VERIFIED), fullwalk=expected)
+    require(same_compile_json(preflight, expected)
+            and same_compile_json(bounded_json(windows_installed_bytes(
+                root / "windows-installed-native-started.json", 64 << 10), 64 << 10),
+                windows_installed_phase_receipt(context, "windows-installed-native", claimOnly=True)),
+            "Windows original ordinary/headless preflight source/exit/claim correspondence differs")
+    return pre, precheck_raw, roster_raw, owner, app, compiled, prepared
+
+
+def windows_fullwalk_fixture_facts(context: dict, precheck_raw: bytes, roster_raw: bytes,
+                                   publisher_raw: bytes, exit_raw: bytes, outcome: str) -> dict:
+    publication = windows_fullwalk_publication_data(context, publisher_raw, precheck_raw, roster_raw)
+    windows_fullwalk_publisher_exit(context, exit_raw, precheck_raw, outcome)
+    row = publication["fields"]
+    return {"qualificationProfile": WINDOWS_FULLWALK_PROFILE, "publisherTest": WINDOWS_FULLWALK_PUBLISHER,
+        "precheckSha256": hashlib.sha256(precheck_raw).hexdigest(), "rosterSha256": hashlib.sha256(roster_raw).hexdigest(),
+        "publisherReceiptSha256": hashlib.sha256(publisher_raw).hexdigest(), "publisherExitSha256": hashlib.sha256(exit_raw).hexdigest(),
+        "createdFiles": 47, "createdDirectories": 5, "postcheckReadersClosed": 94,
+        "fileOriginalsClosed": windows_fullwalk_number(row["fileOriginalsClosed"], 256, minimum=198),
+        "occupiedCreateCalls": 1, "occupiedCreateError": 183, "occupiedObjectsUnchanged": True,
+        "parentBookSettled": True, "publisherOriginalExitCode": 0, "resultClosedBySeparateExitAndStepGates": True,
+        "protectedPublicationOnlyNotNativeWalk": True, "productionEnabled": False}
+
+
+def windows_fullwalk_fixture_finalize(context: dict) -> None:
+    if windows_runtime_publication_profile(context):
+        windows_runtime_publication_finalize(context, "after")
+        return
+    require(os.environ.get("MRK_WINDOWS_ORDINARY_PREFLIGHT_STEP_OUTCOME") == "success",
+            "Windows publisher original headless preflight did not close successfully")
+    pre, pre_raw, roster_raw, owner, app, _, _ = windows_fullwalk_check_precheck(context)
+    require(windows_ordinary_original(owner) == pre["ownerArtifactIdentity"]
+            and windows_ordinary_original(app, app_role=True) == pre["appArtifactIdentity"],
+            "Windows publisher original artifact epoch changed")
+    root = Path(context["root"])
+    facts = windows_fullwalk_fixture_facts(context, pre_raw, roster_raw,
+        windows_installed_bytes(root / "fullwalk-publisher-result.private.txt", 64 << 10),
+        windows_installed_bytes(root / "fullwalk-publisher-exit.private.json", 4096),
+        os.environ.get("MRK_WINDOWS_PUBLISHER_STEP_OUTCOME", "unavailable"))
+    windows_installed_inputs(context, retention_only=True)
+    write_json(root / "windows-installed-fixture-checks.json",
+        windows_installed_phase_receipt(context, "windows-installed-fixture-finalize", **facts))
+
+
+def windows_fullwalk_invocation(context: dict, artifact: dict, before_identity: str, request_raw: bytes, origin: int) -> dict:
+    require(windows_fullwalk_profile(context) and integer_between(origin, 0, 2**64 - 1 - WINDOWS_FULLWALK_AGGREGATE_MS),
+            "Windows ordinary original aggregate origin overflows")
+    values = {"profile": context["qualificationProfile"], **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")},
+        "ordinaryOwnerTest": WINDOWS_ORDINARY_OWNER, "artifactBytes": artifact["size"], "artifactSha256": artifact["sha256"],
+        "artifactBeforeIdentity": windows_ordinary_identity(before_identity),
+        "ordinaryChildCommandSha256": windows_fullwalk_command_sha(artifact["path"], WINDOWS_INSTALLED_TEST),
+        "ordinaryRequestSha256": hashlib.sha256(request_raw).hexdigest(), "originTickMs": origin,
+        "aggregateBudgetMs": WINDOWS_FULLWALK_AGGREGATE_MS, "deadlineTickMs": origin + WINDOWS_FULLWALK_AGGREGATE_MS}
+    require(request_raw == windows_ordinary_request(context, artifact, before_identity),
+            "Windows ordinary aggregate belongs to another original request")
+    raw = windows_fullwalk_text("invocation", values)
+    return {**values, "ordinaryInvocationSha256": hashlib.sha256(raw).hexdigest()}
+
+
+def windows_fullwalk_intent(value: object, context: dict, batch: dict, *, second: bool) -> dict:
+    role = "fixedFullwalkChildOnly" if second else "fixedNativeChildOnly"
+    intent = closed_object(value, {"schemaVersion", "sourceSha", "runId", "attempt", "accountName",
+        "freshAccountIntent", role, "fullwalkBatch"}, "Windows batch original account intent fields differ")
+    require(type(intent["accountName"]) is str and re.fullmatch(r"mrk[0-9a-f]{16}", intent["accountName"]) is not None,
+            "Windows batch original fresh account name differs")
+    expected = {"schemaVersion": 1, "sourceSha": context["sourceSha"], "runId": context["runId"], "attempt": 1,
+        "accountName": intent["accountName"], "freshAccountIntent": True, role: True, "fullwalkBatch": batch}
+    require(same_compile_json(intent, expected), "Windows batch original intent/binding differs")
+    return intent
+
+
+def windows_fullwalk_ordinary_aggregate(context: dict, artifact: dict, before_identity: str,
+                                       request_raw: bytes, intent_raw: bytes, owner: dict) -> dict:
+    require(type(intent_raw) is bytes and 0 < len(intent_raw) <= 4096, "Windows batch original intent is unavailable")
+    aggregate = closed_object(owner.get("aggregate"), {*WINDOWS_FULLWALK_INVOCATION_FIELDS, "ordinaryInvocationSha256",
+        "ordinaryIntentBytes", "ordinaryIntentSha256", "resultPrewriteTickMs"}, "Windows ordinary aggregate fields differ")
+    invocation = windows_fullwalk_invocation(context, artifact, before_identity, request_raw, aggregate["originTickMs"])
+    expected = {**invocation, "ordinaryIntentBytes": len(intent_raw), "ordinaryIntentSha256": hashlib.sha256(intent_raw).hexdigest(),
+        "resultPrewriteTickMs": aggregate["resultPrewriteTickMs"]}
+    require(integer_between(aggregate["resultPrewriteTickMs"], invocation["originTickMs"], invocation["deadlineTickMs"] - 1)
+            and same_compile_json(aggregate, expected), "Windows ordinary original aggregate clock/binding differs")
+    windows_fullwalk_intent(bounded_json(intent_raw, 4096), context, invocation, second=False)
+    return aggregate
+
+
+def windows_fullwalk_finality_text(context: dict, pre: dict, artifact: dict, after_identity: str,
+                                  blobs: dict[str, bytes], owner: dict) -> bytes:
+    aggregate = windows_fullwalk_ordinary_aggregate(context, artifact, pre["ownerArtifactIdentity"],
+        blobs["ordinaryRequest"], blobs["ordinaryIntent"], owner)
+    count = len(windows_ordinary_path(context["root"]).parents) + 1 + 8
+    values = {"profile": context["qualificationProfile"], **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")},
+        "ordinaryOwnerTest": WINDOWS_ORDINARY_OWNER, "ordinaryChildTest": WINDOWS_INSTALLED_TEST,
+        "artifactBytes": artifact["size"], "artifactSha256": artifact["sha256"],
+        "artifactBeforeIdentity": pre["ownerArtifactIdentity"], "artifactAfterIdentity": windows_ordinary_identity(after_identity),
+        "ordinaryInvocationSha256": aggregate["ordinaryInvocationSha256"], "originTickMs": aggregate["originTickMs"],
+        "deadlineTickMs": aggregate["deadlineTickMs"], "aggregateBudgetMs": WINDOWS_FULLWALK_AGGREGATE_MS,
+        "ordinaryResultPrewriteTickMs": aggregate["resultPrewriteTickMs"], "originalInputCount": count,
+        "ownerStepOutcome": "success", "ownerOriginalExitCode": "0", "childOriginalExitCode": "0",
+        "accountRemovedAfterSettlement": "true", "finalizerCloseGate": "original-ordinary-finalizer-step-success-required"}
+    for role in ("ordinaryRequest", "ordinaryIntent", "ordinaryOwnerResult", "ordinaryChildResult", "ordinaryOwnerExit"):
+        values[role + "Bytes"] = len(blobs[role])
+        values[role + "Sha256"] = hashlib.sha256(blobs[role]).hexdigest()
+    return windows_fullwalk_text("finality", values)
+
+
+def windows_fullwalk_ordinary_finality(context: dict, pre: dict, artifact: dict, after_identity: str,
+                                      blobs: dict[str, bytes], outcome: str) -> tuple[dict, dict]:
+    require(len(windows_ordinary_path(context["root"]).parents) + 1 <= 19, "Windows batch original bound differs")
+    require(blobs["ordinaryRequest"] == windows_ordinary_request(context, artifact, pre["ownerArtifactIdentity"]),
+            "Windows batch original ordinary request changed")
+    facts = windows_ordinary_records(context, artifact, pre["ownerArtifactIdentity"], after_identity,
+        blobs["ordinaryOwnerResult"], blobs["ordinaryChildResult"], blobs["ordinaryOwnerExit"], outcome,
+        intent_raw=blobs["ordinaryIntent"])
+    owner = bounded_json(blobs["ordinaryOwnerResult"], 64 << 10)
+    expected = windows_fullwalk_finality_text(context, pre, artifact, after_identity, blobs, owner)
+    require(blobs["ordinaryFinality"] == expected, "Windows separately closed ordinary finality differs")
+    row = windows_fullwalk_wire(expected, "finality")
+    windows_fullwalk_binding(row, context)
+    return row, facts
+
+
+def windows_fullwalk_ordinary_finalizer_data(context: dict, value: object, owner: dict, app: dict, facts: dict) -> None:
+    root = Path(context["root"])
+    app_inert = windows_installed_app_libtest(windows_installed_bytes(root / "app-inert.stdout", 64 << 10),
+                                             production=windows_runtime_publication_profile(context))
+    expected = windows_installed_phase_receipt(context, "windows-installed-native", compiledTest=owner, appCompiledTest=app,
+        inertContracts={"passed": len(windows_installed_native_inert(context)), "failed": 0, "ignored": 0}, appInertContracts=app_inert, appOriginalExitCode=0,
+        inertOriginalExitCode=0, nativeOriginalExitCode=0, originalProcessWaitReturned=True,
+        **facts, notVerified=list(WINDOWS_INSTALLED_COMBINED_NOT_VERIFIED))
+    require(same_compile_json(value, expected), "Windows separately closed ordinary finalizer source/exit/fields differ")
+
+
+def windows_fullwalk_blobs(context: dict) -> dict[str, bytes]:
+    root = Path(context["root"])
+    return {role: windows_installed_bytes(root / name, limit) for role, (name, limit) in WINDOWS_FULLWALK_BLOBS.items()}
+
+
+def windows_fullwalk_outcomes() -> dict:
+    observed = {key: os.environ.get(name, "unavailable") for key, name in WINDOWS_FULLWALK_OUTCOMES.items()}
+    require(set(observed.values()) == {"success"}, "Windows fullwalk prerequisite original steps did not all close successfully")
+    return observed
+
+
+def windows_fullwalk_envelope_data(context: dict, pre: dict, publication: dict, finality: dict,
+                                   blobs: dict[str, bytes], outcomes: dict) -> bytes:
+    require(set(outcomes) == set(WINDOWS_FULLWALK_OUTCOMES) and set(outcomes.values()) == {"success"},
+            "Windows fullwalk prerequisite outcome fields differ")
+    production = windows_runtime_publication_profile(context)
+    values = {"profile": context["qualificationProfile"], **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")},
+        **{key: finality[key] for key in ("ordinaryInvocationSha256", "originTickMs", "deadlineTickMs", "aggregateBudgetMs")},
+        "ownerArtifactAfterOrdinaryIdentity": finality["artifactAfterIdentity"],
+        **{key: pre[key] for key in ("manifestSha256", "protocolSha256", "inventorySha256", "coreSha256", "payloadFiles", "payloadBytes")},
+        **outcomes, "prerequisitesOnlyNotNativeWalk": "true", "envelopeCloseGate": "original-fullwalk-preflight-step-success-required"}
+    for role in ("precheck", "roster", "publisherReceipt", "publisherExit", "ordinaryRequest", "ordinaryIntent",
+                 "ordinaryOwnerResult", "ordinaryOwnerExit", "ordinaryFinality"):
+        values[role + "Bytes"] = len(blobs[role])
+        values[role + "Sha256"] = hashlib.sha256(blobs[role]).hexdigest()
+    if production:
+        for role in WINDOWS_RUNTIME_PUBLICATION_PROOFS:
+            values[role + "Bytes"] = len(blobs[role])
+            values[role + "Sha256"] = hashlib.sha256(blobs[role]).hexdigest()
+    objects = {item["role"]: item["stamp" if production else "after"] for item in publication["objects"]}
+    for key, name in (("versionIdentity", "version"), ("selectedPythonIdentity", "python/python.exe"),
+                      ("selectedBootstrapIdentity", "engine_bootstrap.py"), ("selectedCoreIdentity", "core.zip")):
+        values[key] = str(objects[name]["volume"]) + ":" + objects[name]["fileId"]
+    return windows_fullwalk_text(windows_fullwalk_kind(context, "prerequisite"), values)
+
+
+def windows_fullwalk_prerequisites(context: dict, *, envelope_raw: bytes | None = None) -> dict:
+    """Reconcile retained originals and their original before/after artifact epochs."""
+    outcomes = windows_fullwalk_outcomes()
+    pre, pre_raw, roster_raw, owner, app, compiled, prepared = windows_fullwalk_check_precheck(context)
+    blobs = windows_fullwalk_blobs(context)
+    require(blobs["precheck"] == pre_raw and blobs["roster"] == roster_raw, "Windows prerequisite original inputs changed")
+    if windows_runtime_publication_profile(context):
+        proof_blobs = windows_runtime_publication_blobs(context, "after")
+        require(all(proof_blobs[key] == blobs[key] for key in ("publisherReceipt", "publisherExit")),
+                "Windows producer original before/after records changed during admission")
+        chain = windows_runtime_publication_chain(context, pre_raw, roster_raw, proof_blobs,
+            windows_runtime_publication_outcomes("after", finalized=True))
+        publication, publisher = chain["publication"], chain["facts"]
+        blobs.update(proof_blobs)
+    else:
+        publication = windows_fullwalk_publication_data(context, blobs["publisherReceipt"], pre_raw, roster_raw)
+        publisher = windows_fullwalk_fixture_facts(context, pre_raw, roster_raw, blobs["publisherReceipt"], blobs["publisherExit"],
+            outcomes["publisherStepOutcome"])
+    root = Path(context["root"])
+    published = bounded_json(windows_installed_bytes(root / "windows-installed-fixture-checks.json", 64 << 10), 64 << 10)
+    require(same_compile_json(published, windows_installed_phase_receipt(context, "windows-installed-fixture-finalize", **publisher)),
+            "Windows separately closed publisher finalizer differs")
+    after = windows_ordinary_original(owner)
+    finality, ordinary_facts = windows_fullwalk_ordinary_finality(context, pre, owner, after, blobs, outcomes["ordinaryOwnerStepOutcome"])
+    ordinary_result = bounded_json(windows_installed_bytes(root / "windows-installed-native-checks.json", 64 << 10), 64 << 10)
+    windows_fullwalk_ordinary_finalizer_data(context, ordinary_result, owner, app, ordinary_facts)
+    expected = windows_fullwalk_envelope_data(context, pre, publication, finality, blobs, outcomes)
+    if envelope_raw is not None:
+        require(envelope_raw == expected, "Windows retained prerequisite envelope changed")
+    return {"pre": pre, "owner": owner, "app": app, "compiled": compiled, "prepared": prepared, "blobs": blobs,
+        "publication": publication, "finality": finality, "envelope": expected, "ownerAfterIdentity": after,
+        "ordinaryFacts": ordinary_facts}
+
+
+def windows_fullwalk_request_from_prerequisites(context: dict, admitted: dict) -> bytes:
+    row = windows_fullwalk_wire(admitted["envelope"], windows_fullwalk_kind(context, "prerequisite"))
+    fixture = {key: row[key] for key in ("manifestSha256", "protocolSha256", "inventorySha256", "coreSha256",
+        "versionIdentity", "selectedPythonIdentity", "selectedBootstrapIdentity", "selectedCoreIdentity")}
+    fixture.update(payloadFiles=windows_fullwalk_number(row["payloadFiles"], 46, minimum=46),
+        payloadBytes=windows_fullwalk_number(row["payloadBytes"], 1 << 30, minimum=1),
+        publicationReceiptBytes=len(admitted["envelope"]), publicationReceiptSha256=hashlib.sha256(admitted["envelope"]).hexdigest())
+    return windows_fullwalk_request(context, admitted["app"], admitted["owner"],
+        app_identity=admitted["pre"]["appArtifactIdentity"], owner_identity=admitted["ownerAfterIdentity"],
+        app_compile_argv_sha256=admitted["compiled"]["appInvocationSha256"],
+        owner_compile_argv_sha256=admitted["compiled"]["invocationSha256"], fixture=fixture)
+
+
+def windows_fullwalk_preflight(context: dict) -> None:
+    root = Path(context["root"])
+    admitted = windows_fullwalk_prerequisites(context)
+    require(windows_ordinary_original(admitted["app"], app_role=True) == admitted["pre"]["appArtifactIdentity"],
+            "Windows fullwalk preflight app original epoch changed")
+    request = windows_fullwalk_request_from_prerequisites(context, admitted)
+    windows_installed_inputs(context, retention_only=True)
+    # Non-circular: envelope's original checked close precedes the unchanged35-line request.
+    windows_fullwalk_write(root / "fullwalk-publication.private.txt", admitted["envelope"], 16 << 10)
+    windows_fullwalk_write(root / "fullwalk-request.txt", request, 4096)
+    facts = {"precheckSha256": hashlib.sha256(admitted["blobs"]["precheck"]).hexdigest(),
+        "prerequisiteSha256": hashlib.sha256(admitted["envelope"]).hexdigest(), "requestSha256": hashlib.sha256(request).hexdigest(),
+        "ordinaryInvocationSha256": admitted["finality"]["ordinaryInvocationSha256"], "nativeFullwalkNotStarted": True}
+    write_json(root / "windows-installed-fullwalk-preflight-checks.json",
+        windows_installed_phase_receipt(context, "windows-installed-fullwalk-preflight", **facts))
+    outputs = {"artifact": admitted["owner"]["path"], "artifactSha256": admitted["owner"]["sha256"],
+        "appArtifactSha256": admitted["app"]["sha256"], "sourceTree": context["sourceTree"],
+        "requestSha256": facts["requestSha256"], "publisherReceiptSha256": hashlib.sha256(admitted["blobs"]["publisherReceipt"]).hexdigest()}
+    with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8", newline="\n") as output:
+        text = "".join(key + "=" + value + "\n" for key, value in outputs.items())
+        require(output.write(text) == len(text), "Windows fullwalk preflight original handoff write is incomplete")
+
+
+def windows_fullwalk_aggregate(context: dict, request: dict, envelope_raw: bytes, intent_raw: bytes,
+                                owner: dict) -> dict:
+    production = windows_runtime_publication_profile(context)
+    envelope = windows_fullwalk_wire(envelope_raw, windows_fullwalk_kind(context, "prerequisite"))
+    windows_fullwalk_binding(envelope, context)
+    require(request["publicationReceiptBytes"] == len(envelope_raw)
+            and request["publicationReceiptSha256"] == hashlib.sha256(envelope_raw).hexdigest()
+            and request["ownerArtifactIdentity"] == envelope["ownerArtifactAfterOrdinaryIdentity"],
+            "Windows fullwalk owner admission does not match its original envelope")
+    for key in ("manifestSha256", "protocolSha256", "inventorySha256", "coreSha256", "versionIdentity",
+                "selectedPythonIdentity", "selectedBootstrapIdentity", "selectedCoreIdentity", "payloadFiles", "payloadBytes"):
+        require(str(request[key]) == envelope[key], "Windows fullwalk request/envelope fixture differs")
+    require(all(envelope[key] == "success" for key in WINDOWS_FULLWALK_OUTCOMES)
+            and envelope["prerequisitesOnlyNotNativeWalk"] == "true"
+            and envelope["envelopeCloseGate"] == "original-fullwalk-preflight-step-success-required",
+            "Windows fullwalk prerequisite close gates differ")
+    aggregate = closed_object(owner.get("aggregate"), {"profile", "ordinaryInvocationSha256", "prerequisiteBytes", "prerequisiteSha256",
+        "originTickMs", "deadlineTickMs", "aggregateBudgetMs", "entryTickMs", "ownerIntentBytes", "ownerIntentSha256",
+        "prelaunchTickMs", "resultPrewriteTickMs",
+        *({"serialPrerequisiteOriginals", "serialPrerequisiteOriginalsClosed"} if production else set())},
+        "Windows fullwalk owner aggregate fields differ")
+    origin = windows_fullwalk_number(envelope["originTickMs"], 2**64 - 1 - WINDOWS_FULLWALK_AGGREGATE_MS)
+    deadline = origin + WINDOWS_FULLWALK_AGGREGATE_MS
+    require(windows_fullwalk_number(envelope["deadlineTickMs"], 2**64 - 1) == deadline
+            and envelope["aggregateBudgetMs"] == str(WINDOWS_FULLWALK_AGGREGATE_MS)
+            and integer_between(aggregate["entryTickMs"], origin, deadline - WINDOWS_FULLWALK_SECOND_FLOOR_MS)
+            and integer_between(aggregate["prelaunchTickMs"], aggregate["entryTickMs"], deadline - WINDOWS_FULLWALK_SECOND_FLOOR_MS)
+            and integer_between(aggregate["resultPrewriteTickMs"], aggregate["prelaunchTickMs"], deadline - 1),
+            "Windows fullwalk retained original aggregate expired/backward/insufficient remaining")
+    batch = {"profile": context["qualificationProfile"], "ordinaryInvocationSha256": envelope["ordinaryInvocationSha256"],
+        "prerequisiteBytes": len(envelope_raw), "prerequisiteSha256": hashlib.sha256(envelope_raw).hexdigest(),
+        "originTickMs": origin, "deadlineTickMs": deadline, "aggregateBudgetMs": WINDOWS_FULLWALK_AGGREGATE_MS,
+        "entryTickMs": aggregate["entryTickMs"]}
+    if production:
+        batch.update(serialPrerequisiteOriginals=6, serialPrerequisiteOriginalsClosed=6)
+    require(type(intent_raw) is bytes and 0 < len(intent_raw) <= 4096, "Windows fullwalk original account intent is unavailable")
+    expected = {**batch, "ownerIntentBytes": len(intent_raw), "ownerIntentSha256": hashlib.sha256(intent_raw).hexdigest(),
+        "prelaunchTickMs": aggregate["prelaunchTickMs"], "resultPrewriteTickMs": aggregate["resultPrewriteTickMs"]}
+    require(same_compile_json(aggregate, expected), "Windows fullwalk original intent/envelope clock correspondence differs")
+    windows_fullwalk_intent(bounded_json(intent_raw, 4096), context, batch, second=True)
+    return aggregate
+
+
+def windows_fullwalk_observe_final(context: dict, admitted: dict) -> dict:
+    require(os.environ.get("MRK_WINDOWS_FULLWALK_PREFLIGHT_STEP_OUTCOME") == "success",
+            "Windows fullwalk original preflight step has not closed successfully")
+    root = Path(context["root"])
+    request_raw = windows_installed_bytes(root / "fullwalk-request.txt", 4096)
+    require(request_raw == windows_fullwalk_request_from_prerequisites(context, admitted),
+            "Windows fullwalk original request/after-ordinary artifact epoch changed")
+    expected = windows_installed_phase_receipt(context, "windows-installed-fullwalk-preflight",
+        precheckSha256=hashlib.sha256(admitted["blobs"]["precheck"]).hexdigest(),
+        prerequisiteSha256=hashlib.sha256(admitted["envelope"]).hexdigest(), requestSha256=hashlib.sha256(request_raw).hexdigest(),
+        ordinaryInvocationSha256=admitted["finality"]["ordinaryInvocationSha256"], nativeFullwalkNotStarted=True)
+    require(same_compile_json(bounded_json(windows_installed_bytes(
+        root / "windows-installed-fullwalk-preflight-checks.json", 64 << 10), 64 << 10), expected),
+        "Windows original fullwalk preflight/independent close binding differs")
+    intent_raw = windows_installed_bytes(root / "fullwalk-owner-intent.private.json", 4096)
+    ordinary_intent = bounded_json(admitted["blobs"]["ordinaryIntent"], 4096)
+    fullwalk_intent = bounded_json(intent_raw, 4096)
+    require(type(fullwalk_intent) is dict and fullwalk_intent.get("accountName") != ordinary_intent["accountName"],
+            "Windows second original fresh account was not distinct")
+    facts = windows_fullwalk_records(context, request_raw, windows_ordinary_original(admitted["app"], app_role=True),
+        windows_installed_bytes(root / "fullwalk-owner-result.private.json", 64 << 10),
+        windows_installed_bytes(root / "fullwalk-output/fullwalk-result.private.json", 4096),
+        windows_installed_bytes(root / "fullwalk-owner-exit.private.json", 4096),
+        os.environ.get("MRK_WINDOWS_FULLWALK_OWNER_STEP_OUTCOME", "unavailable"),
+        envelope_raw=admitted["envelope"], intent_raw=intent_raw,
+        ordinary_prewrite_tick=windows_fullwalk_number(admitted["finality"]["ordinaryResultPrewriteTickMs"], 2**64 - 1))
+    facts.update(prerequisiteSha256=hashlib.sha256(admitted["envelope"]).hexdigest(),
+        requestSha256=hashlib.sha256(request_raw).hexdigest(),
+        ordinaryInvocationSha256=admitted["finality"]["ordinaryInvocationSha256"],
+        originalOrdinaryThenFullwalkAggregateChecked=True)
+    return facts
+
+
+def windows_fullwalk_finalize(context: dict) -> None:
+    root = Path(context["root"])
+    admitted = windows_fullwalk_prerequisites(context,
+        envelope_raw=windows_installed_bytes(root / "fullwalk-publication.private.txt", 16 << 10))
+    facts = windows_fullwalk_observe_final(context, admitted)
+    windows_installed_inputs(context, retention_only=True)
+    require(context["sdk"] == {"version": WINDOWS_SDK_VERSION, "headers": fixed_file_inventory(windows_sdk_root(), WINDOWS_SDK_HEADERS)},
+            "Windows fullwalk original SDK/source DATA changed")
+    write_json(root / "windows-installed-fullwalk-checks.json", windows_installed_phase_receipt(
+        context, "windows-installed-fullwalk-finalize", **facts,
+        notVerified=["production-enablements", "real-installed-loaded-image-import-custody", "native-pending-failure-injection",
+                     "msi-ui-save-snapshots", "rust-1.88-minimum"]))
+
+
+def windows_fullwalk_retirement_data(context: dict, request_raw: bytes, publisher_raw: bytes,
+                                     result_raw: bytes, exit_raw: bytes, outcome: str) -> dict:
+    require(windows_fullwalk_profile(context) and not windows_runtime_publication_profile(context) and outcome == "success",
+            "Windows retirement is synthetic-only and requires its original step close")
+    request = windows_fullwalk_request_data(request_raw, root=context["root"])
+    require(request["payloadFiles"] == 46
+            and all(same_compile_json(request[key], context[key]) for key in ("sourceSha", "sourceTree", "runId", "attempt")),
+            "Windows retirement fixed request/source binding differs")
+    result = bounded_json(result_raw, 4096)
+    require(type(result) is dict and integer_between(result.get("fileOriginals"), 105, 256),
+            "Windows retirement original lifetime count differs")
+    base = {"schemaVersion": 1, "profile": WINDOWS_FULLWALK_PROFILE,
+        **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")},
+        "retirementTest": WINDOWS_FULLWALK_RETIRE, "artifactSha256": request["ownerArtifactSha256"],
+        "requestSha256": hashlib.sha256(request_raw).hexdigest(), "publisherReceiptSha256": hashlib.sha256(publisher_raw).hexdigest()}
+    expected = {**base, "deletedFiles": 47, "deletedDirectories": 5, "absentPostconditions": 52, "dispositionCalls": 52,
+        "fileOriginals": result["fileOriginals"], "fileOriginalsClosed": result["fileOriginals"], "parentBookSettled": True,
+        "unknown": False, "productionEnabled": False, "resultCloseGate": "original-retirement-exit-zero-required"}
+    require(same_compile_json(result, expected), "Windows retirement original disposition/close/absence finality differs")
+    exit_expected = {**base, "originalWaitReturned": True, "exitCode": 0,
+        "writerCloseGate": "original-retirement-step-success-required"}
+    require(same_compile_json(bounded_json(exit_raw, 4096), exit_expected),
+            "Windows retirement separate original exit/step-close differs")
+    return {"test": WINDOWS_FULLWALK_RETIRE, "deletedFiles": 47, "deletedDirectories": 5,
+        "absentPostconditions": 52, "dispositionCalls": 52, "fileOriginalsClosed": result["fileOriginals"],
+        "parentBookSettled": True, "originalExitCode": 0, "resultClosedBySeparateExitAndStepGates": True,
+        "resultSha256": hashlib.sha256(result_raw).hexdigest(), "exitSha256": hashlib.sha256(exit_raw).hexdigest(),
+        "identityScopedRetirementOnly": True, "productionEnabled": False}
+
+
+def windows_fullwalk_retain(context: dict) -> None:
+    # Profile-specific allowlist: never copy raw requests/intents/account names,
+    # full IDs/ACLs/private paths, compiler messages or any terminal transcript.
+    root = Path(context["root"])
+    production = windows_runtime_publication_profile(context)
+    outcome_names = {"publisher": "MRK_WINDOWS_PUBLISHER_STEP_OUTCOME", "ordinary": "MRK_WINDOWS_ORDINARY_OWNER_STEP_OUTCOME",
+        "fullwalk": "MRK_WINDOWS_FULLWALK_OWNER_STEP_OUTCOME"}
+    if production:
+        outcome_names = {"scalar": "MRK_WINDOWS_PRODUCER_SCALAR_STEP_OUTCOME",
+                        **{role: "MRK_WINDOWS_PRODUCER_" + suffix + "_STEP_OUTCOME"
+                           for role, suffix in WINDOWS_RUNTIME_PUBLICATION_STEPS.items()}, **outcome_names}
+    else:
+        outcome_names["retirement"] = "MRK_WINDOWS_RETIREMENT_STEP_OUTCOME"
+    outcomes = {key: os.environ.get(name, "unavailable") for key, name in outcome_names.items()}
+    require(all(value in {"success", "failure", "cancelled", "skipped", "unavailable"} for value in outcomes.values()),
+            "Windows fullwalk retained workflow outcome differs")
+    summary = {"scope": WINDOWS_INSTALLED_SCOPE, "qualificationProfile": context["qualificationProfile"],
+        **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")},
+        "sourceInventorySha256": hashlib.sha256(canonical_json(context["sourceFiles"])).hexdigest(),
+        "productionEnabled": False, "syntheticFixtureOnly": not production, "retentionOnlyNotNativeSuccess": True,
+        "results": {key: {"stepOutcome": value, "status": "failed" if value in {"success", "failure"} else "unavailable"}
+                    for key, value in outcomes.items()}}
+    if production:
+        summary.update(actualFixedProducerObserved=False, runtimeConsumerEnabled=False, pythonExecuted=False,
+                       appLaunched=False, msiQualified=False, saveQualified=False, publishedObjectRetirementEnabled=False)
+    admitted, prechecked = None, None
+    try:
+        prechecked = windows_fullwalk_check_precheck(context)
+    except (OSError, ValueError, TypeError, KeyError, UnicodeError, zipfile.BadZipFile):
+        pass
+    else:
+        pre, pre_raw, roster_raw, owner, app, compiled, prepared = prechecked
+        summary["buildBindings"] = {"ownerArtifactSha256": owner["sha256"], "appArtifactSha256": app["sha256"],
+            "ownerCompileMessagesSha256": owner["messages"]["sha256"], "appCompileMessagesSha256": app["messages"]["sha256"],
+            "ownerCompileArgvSha256": compiled["invocationSha256"], "appCompileArgvSha256": compiled["appInvocationSha256"],
+            **{key: prepared[key] for key in ("manifestSha256", "protocolSha256", "inventorySha256", "coreSha256", "payloadFiles", "payloadBytes")},
+            "preparedReceiptSha256": prepared["receipt"]["sha256"], "anchoredNativeBuilds": 1, "anchoredAppBuilds": 1}
+        if production:
+            helper = compiled["helperCompiledArtifact"]
+            summary["buildBindings"].update(helperArtifactSha256=helper["sha256"],
+                helperCompileMessagesSha256=helper["messages"]["sha256"], helperCompileArgvSha256=compiled["helperInvocationSha256"],
+                anchoredHelperBuilds=1, helperNativeFeatures=["runtime-publication"], normalHelperNotLibtest=True)
+            if outcomes["scalar"] == "success" and os.environ.get("MRK_WINDOWS_PRODUCER_SCALAR_FINALIZE_STEP_OUTCOME") == "success":
+                try:
+                    scalar = windows_runtime_publication_scalar_evidence(context, pre_raw, finalized=True)
+                except (OSError, ValueError, TypeError, KeyError):
+                    pass
+                else:
+                    summary["results"]["scalar"].update(status="passed", facts=scalar)
+            # Retain each positively finalized original even when a later role
+            # fails. Never project private paths, file IDs, ACLs or raw records.
+            for role, suffix in WINDOWS_RUNTIME_PUBLICATION_STEPS.items():
+                if outcomes[role] != "success" or os.environ.get("MRK_WINDOWS_PRODUCER_" + suffix + "_FINALIZE_STEP_OUTCOME") != "success":
+                    continue
+                try:
+                    facts = windows_runtime_publication_chain(context, pre_raw, roster_raw,
+                        windows_runtime_publication_blobs(context, role), windows_runtime_publication_outcomes(role, finalized=True),
+                        through=role)["facts"]
+                    phase = "windows-runtime-publication-" + suffix.lower() + "-finalize"
+                    require(same_compile_json(bounded_json(windows_installed_bytes(
+                        root / ("producer-" + role + "-checks.json"), 64 << 10), 64 << 10),
+                        windows_installed_phase_receipt(context, phase, **facts)),
+                        "Windows retained producer original finalizer differs")
+                except (OSError, ValueError, TypeError, KeyError):
+                    pass
+                else:
+                    summary["results"][role].update(status="passed", facts=facts)
+        if outcomes["publisher"] == "success" and os.environ.get("MRK_WINDOWS_FIXTURE_FINALIZE_STEP_OUTCOME") == "success":
+            try:
+                if production:
+                    publisher = windows_runtime_publication_chain(context, pre_raw, roster_raw,
+                        windows_runtime_publication_blobs(context, "after"),
+                        windows_runtime_publication_outcomes("after", finalized=True))["facts"]
+                else:
+                    publisher = windows_fullwalk_fixture_facts(context, pre_raw, roster_raw,
+                        windows_installed_bytes(root / "fullwalk-publisher-result.private.txt", 64 << 10),
+                        windows_installed_bytes(root / "fullwalk-publisher-exit.private.json", 4096), outcomes["publisher"])
+                require(same_compile_json(bounded_json(windows_installed_bytes(
+                    root / "windows-installed-fixture-checks.json", 64 << 10), 64 << 10),
+                    windows_installed_phase_receipt(context, "windows-installed-fixture-finalize", **publisher)),
+                    "Windows retained publisher finalizer differs")
+            except (OSError, ValueError, TypeError, KeyError):
+                pass
+            else:
+                summary["results"]["publisher"].update(status="passed", facts=publisher)
+        if outcomes["ordinary"] == "success" and os.environ.get("MRK_WINDOWS_ORDINARY_FINALIZE_STEP_OUTCOME") == "success":
+            try:
+                roles = ("ordinaryRequest", "ordinaryIntent", "ordinaryOwnerResult", "ordinaryChildResult", "ordinaryOwnerExit", "ordinaryFinality")
+                blobs = {role: windows_installed_bytes(root / WINDOWS_FULLWALK_BLOBS[role][0], WINDOWS_FULLWALK_BLOBS[role][1]) for role in roles}
+                _, ordinary_facts = windows_fullwalk_ordinary_finality(context, pre, owner,
+                    windows_ordinary_original(owner), blobs, outcomes["ordinary"])
+                ordinary_record = bounded_json(windows_installed_bytes(root / "windows-installed-native-checks.json", 64 << 10), 64 << 10)
+                windows_fullwalk_ordinary_finalizer_data(context, ordinary_record, owner, app, ordinary_facts)
+            except (OSError, ValueError, TypeError, KeyError):
+                pass
+            else:
+                # A later fullwalk failure cannot erase this distinct original pass.
+                summary["results"]["ordinary"].update(status="passed", facts=ordinary_facts)
+        if outcomes["fullwalk"] == "success" and os.environ.get("MRK_WINDOWS_FULLWALK_FINALIZE_STEP_OUTCOME") == "success":
+            try:
+                admitted = windows_fullwalk_prerequisites(context,
+                    envelope_raw=windows_installed_bytes(root / "fullwalk-publication.private.txt", 16 << 10))
+                facts = windows_fullwalk_observe_final(context, admitted)
+                row = bounded_json(windows_installed_bytes(root / "windows-installed-fullwalk-checks.json", 64 << 10), 64 << 10)
+                require(same_compile_json(row, windows_installed_phase_receipt(
+                    context, "windows-installed-fullwalk-finalize", **facts,
+                    notVerified=["production-enablements", "real-installed-loaded-image-import-custody", "native-pending-failure-injection",
+                                 "msi-ui-save-snapshots", "rust-1.88-minimum"])),
+                    "Windows retained fullwalk finalizer source/exit/fields differ")
+            except (OSError, ValueError, TypeError, KeyError, zipfile.BadZipFile):
+                admitted = None
+            else:
+                summary["results"]["fullwalk"].update(status="passed", facts=facts)
+        if not production and admitted is not None and outcomes["retirement"] == "success":
+            try:
+                retirement = windows_fullwalk_retirement_data(context,
+                    windows_installed_bytes(root / "fullwalk-request.txt", 4096), admitted["blobs"]["publisherReceipt"],
+                    windows_installed_bytes(root / "fullwalk-retirement-result.private.json", 4096),
+                    windows_installed_bytes(root / "fullwalk-retirement-exit.private.json", 4096), outcomes["retirement"])
+            except (OSError, ValueError, TypeError, KeyError):
+                pass
+            else:
+                summary["results"]["retirement"].update(status="passed", facts=retirement)
+    summary["combinedPassed"] = all(row["status"] == "passed" for row in summary["results"].values())
+    if production:
+        # A published version or typed collision alone does not qualify the
+        # complete actual-producer / ordinary-account / protected-walk chain.
+        summary["actualFixedProducerObserved"] = summary["combinedPassed"]
+    if prechecked is None:
+        diagnostics = []
+        for stage, filename in (("standalone", "compile-messages.jsonl"), ("app", "app-compile-messages.jsonl"),
+                                *((("helper", "helper-compile-messages.jsonl"),) if production else ())):
+            try:
+                raw = windows_installed_bytes(root / filename, 16 << 20)
+            except (OSError, ValueError):
+                raw = None
+            diagnostics.append(windows_installed_compile_failure_data(raw, context, stage))
+        summary["compileDiagnostics"] = diagnostics
+    runtime, _ = windows_installed_retain_runtime(context, os.environ.get("MRK_WINDOWS_RUNTIME_DATA_STEP_OUTCOME", "unavailable"))
+    summary["runtimeIdentity"] = runtime
+    write_json(root / "public" / "windows-fullwalk-qualification.json", summary)
+
+
 def windows_installed_identity(details, mode: int) -> tuple[int, ...]:
     return (details.st_dev, details.st_ino, mode, details.st_nlink, details.st_size,
             details.st_mtime_ns, details.st_birthtime_ns, details.st_file_attributes,
@@ -8688,6 +11936,103 @@ def windows_installed_record(path: Path, limit: int) -> dict:
     return {"size": len(value), "sha256": hashlib.sha256(value).hexdigest()}
 
 
+def windows_installed_compile_failure_data(raw: bytes | None, context: dict, stage: str) -> dict:
+    """Closed diagnostic DATA, never compiler success, finality or retention authority."""
+    require(type(stage) is str and stage in {"standalone", "app", "helper"}, "Unknown Windows compile diagnostic stage")
+    unavailable = {"stage": stage, "category": "unavailable", "diagnosticOnly": True, "errors": []}
+    try:
+        require(type(raw) is bytes and 0 < len(raw) <= 16 << 20, "Windows compile diagnostic exceeds its bound")
+        inventory = validate_environment_inventory(context["sourceFiles"], maximum=64 << 20)
+        source = context["source"]
+        require(type(source) is str and 0 < len(source) <= 16384, "Windows compile source spelling exceeds its bound")
+        source = source.replace("\\", "/")
+        require(re.fullmatch(r"(?:[A-Za-z]:)?/[^\x00-\x1f\x7f]+", source) is not None
+                and not any(part in {"", ".", ".."} for part in source.split("/")[1:]),
+                "Windows compile source spelling differs")
+        crate = WINDOWS_INSTALLED_CRATE if stage == "standalone" else WINDOWS_INSTALLED_APP
+        spellings: dict[str, str | None] = {}
+        crate_spellings, crate_targets = set(), set()
+        for row in inventory:
+            name = row["path"]
+            if not name.endswith(".rs") or len(name) > 512:
+                continue
+            names = [name, source + "/" + name]
+            if name.startswith(crate + "/"):
+                names.append(name[len(crate) + 1:])
+                crate_spellings.add(names[-1])
+                crate_targets.add(source + "/" + name)
+            for spelling in names:
+                # Ambiguous repository/crate-relative spellings admit neither
+                # source. Only separators vary; no resolve, case/suffix guessing
+                # or traversal normalization is permitted.
+                spellings[spelling] = name if spelling not in spellings or spellings[spelling] == name else None
+        lines = raw.split(b"\n", 4096)
+        if lines[-1] == b"":
+            lines.pop()
+        require(0 < len(lines) <= 4096, "Windows compile diagnostic message count exceeds its bound")
+        errors = []
+        for line in lines:
+            row = bounded_json(line, 2 << 20)
+            require(type(row) is dict and row.get("reason") in {
+                "compiler-artifact", "compiler-message", "build-script-executed", "build-finished"},
+                "Windows compile diagnostic framing differs")
+            if row["reason"] != "compiler-message":
+                continue
+            message = row.get("message")
+            require(type(message) is dict, "Windows compile diagnostic message differs")
+            if message.get("level") != "error":
+                continue
+            code = message.get("code")
+            code = code.get("code") if type(code) is dict else None
+            if type(code) is not str or re.fullmatch(r"E[0-9]{4}", code) is None:
+                code = None
+            spans = message.get("spans", [])
+            require(type(spans) is list and len(spans) <= 128, "Windows compile diagnostic span count exceeds its bound")
+            target = row.get("target")
+            target_source = target.get("src_path") if type(target) is dict else None
+            from_crate = (type(target_source) is str and len(target_source) <= 16384 + 513
+                          and target_source.replace("\\", "/") in crate_targets)
+            path, number = None, None
+            for span in spans:
+                if type(span) is not dict or span.get("is_primary") is not True:
+                    continue
+                name = span.get("file_name")
+                if type(name) is not str or len(name) > 16384 + 513:
+                    continue
+                spelling = name.replace("\\", "/")
+                # Dependency errors can also say src/lib.rs. Admit crate-relative
+                # names only for an exact admitted absolute target in this crate;
+                # do not recursively establish that origin from relative aliases.
+                if spelling in crate_spellings and not from_crate:
+                    continue
+                admitted = spellings.get(spelling)
+                if admitted is not None:
+                    path = admitted  # Inventory text, never compiler text.
+                    candidate = span.get("line_start")
+                    number = candidate if integer_between(candidate, 1, 1000000) else None
+                    break
+            if len(errors) < 8 and (code is not None or path is not None):
+                errors.append({"code": code, "path": path, "line": number})
+        return {**unavailable, "category": "admitted-errors" if errors else "no-admitted-error", "errors": errors}
+    except (CheckFailure, KeyError, TypeError, OverflowError):
+        # Malformed/over-bound DATA never exports a partial projection or raw
+        # exception. In particular, rendered/text/children/package IDs stay private.
+        return unavailable
+
+
+def windows_installed_compile_failure(context: dict, stage: str) -> None:
+    require(type(stage) is str and stage in {"standalone", "app", "helper"}, "Unknown Windows compile diagnostic stage")
+    filename = {"standalone": "compile-messages.jsonl", "app": "app-compile-messages.jsonl", "helper": "helper-compile-messages.jsonl"}[stage]
+    try:
+        raw = windows_installed_bytes(Path(context["root"]) / filename, 16 << 20)
+    except Exception:
+        raw = None
+    value = windows_installed_compile_failure_data(raw, context, stage)
+    marker = b"MRK_WINDOWS_COMPILE_FAILURE_DATA=" + canonical_json(value) + b"\n"
+    require(len(marker) <= 8192, "Windows compile diagnostic marker exceeds its bound")
+    print(marker.decode("ascii"), end="", flush=True)
+
+
 def windows_installed_directories(path: Path) -> None:
     require(path.is_absolute() and not any(part in {".", ".."} for part in path.parts), "Windows native root is not absolute")
     for directory in (path, *path.parents):
@@ -8707,18 +12052,36 @@ def windows_installed_binding() -> dict:
     sha, repository, ref = e.get("GITHUB_SHA", ""), e.get("GITHUB_REPOSITORY", ""), e.get("GITHUB_REF", "")
     require(re.fullmatch(r"[0-9a-f]{40}", sha) is not None and sha != "0" * 40
             and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is not None
-            and ref == "refs/heads/verify/desktop-windows-installed-native"
+            and ref in ("refs/heads/verify/desktop-windows-installed-native", WINDOWS_RUNTIME_PUBLICATION_REF,
+                        WINDOWS_INSTALLED_PASSIVE_REF, WINDOWS_NORMAL_UI_REF)
             and e.get("GITHUB_WORKFLOW_SHA") == sha
             and e.get("GITHUB_WORKFLOW_REF") == repository + "/.github/workflows/desktop-foundation.yml@" + ref
             and re.fullmatch(r"[1-9][0-9]{0,19}", e.get("GITHUB_RUN_ID", "")) is not None
             and re.fullmatch(r"[0-9]{8}\.[0-9]{1,6}\.[0-9]{1,6}", e.get("ImageVersion", "")) is not None,
             "Windows native workflow/source/image binding differs")
-    event = e.get("GITHUB_EVENT_NAME", "")
-    require(event == "push" or event == "workflow_dispatch" and e.get("MRK_DESKTOP_DISPATCH_SCOPE") == "windows-installed-native"
-            and e.get("MRK_DESKTOP_EXPECTED_SHA") == sha, "Windows native dispatch differs")
-    return {"scope": WINDOWS_INSTALLED_SCOPE, "sourceSha": sha, "repository": repository, "ref": ref,
-            "workflowSha": sha, "workflowRef": e["GITHUB_WORKFLOW_REF"], "runId": e["GITHUB_RUN_ID"], "attempt": 1,
-            "event": event, "imageOS": e["ImageOS"], "imageVersion": e["ImageVersion"]}
+    event, dispatch, expected = e.get("GITHUB_EVENT_NAME", ""), e.get("MRK_DESKTOP_DISPATCH_SCOPE", ""), e.get("MRK_DESKTOP_EXPECTED_SHA", "")
+    legacy_ref = ref == "refs/heads/verify/desktop-windows-installed-native"
+    require(legacy_ref and (event == "push" and dispatch == "" and expected == ""
+            or event == "workflow_dispatch" and dispatch in {"windows-installed-native", WINDOWS_FULLWALK_DISPATCH} and expected == sha)
+            or ref == WINDOWS_RUNTIME_PUBLICATION_REF and event == "workflow_dispatch"
+            and dispatch == WINDOWS_RUNTIME_PUBLICATION_DISPATCH and expected == sha
+            or ref == WINDOWS_INSTALLED_PASSIVE_REF and event == "workflow_dispatch"
+            and dispatch == WINDOWS_INSTALLED_PASSIVE_DISPATCH and expected == sha
+            or ref == WINDOWS_NORMAL_UI_REF and event == "workflow_dispatch"
+            and dispatch == WINDOWS_NORMAL_UI_DISPATCH and expected == sha,
+            "Windows native dispatch differs or has partial/conflicting selectors")
+    binding = {"scope": WINDOWS_INSTALLED_SCOPE, "sourceSha": sha, "repository": repository, "ref": ref,
+        "workflowSha": sha, "workflowRef": e["GITHUB_WORKFLOW_REF"], "runId": e["GITHUB_RUN_ID"], "attempt": 1,
+        "event": event, "imageOS": e["ImageOS"], "imageVersion": e["ImageVersion"]}
+    if event == "workflow_dispatch" and dispatch == WINDOWS_FULLWALK_DISPATCH:
+        binding["qualificationProfile"] = WINDOWS_FULLWALK_PROFILE
+    elif event == "workflow_dispatch" and dispatch == WINDOWS_RUNTIME_PUBLICATION_DISPATCH:
+        binding["qualificationProfile"] = WINDOWS_RUNTIME_PUBLICATION_PROFILE
+    elif event == "workflow_dispatch" and dispatch == WINDOWS_INSTALLED_PASSIVE_DISPATCH:
+        binding["qualificationProfile"] = WINDOWS_INSTALLED_PASSIVE_PROFILE
+    elif event == "workflow_dispatch" and dispatch == WINDOWS_NORMAL_UI_DISPATCH:
+        binding["qualificationProfile"] = WINDOWS_NORMAL_UI_PROFILE
+    return binding
 
 
 def windows_installed_source_files(source: Path, root: Path, git: str) -> list[dict]:
@@ -8803,9 +12166,12 @@ def windows_installed_context(*, create: bool, retention_only: bool = False) -> 
             "windowsVersion": list(sys.getwindowsversion()[:3])}
         windows_installed_inputs(context)
         source_unchanged(context)
+        if windows_installed_prepared_profile(context):
+            context["fullwalkInputs"] = windows_fullwalk_prepare_inputs(context)
         write_json(root / "context.json", context)
         public = {key: context[key] for key in (*binding, "sourceTree", "sourceFiles", "pythonIdentity", "sdk", "windowsVersion")}
-        public.update(rust=RUST, target=TARGETS["windows"], python=PYTHON, notVerified=list(WINDOWS_INSTALLED_NOT_VERIFIED))
+        public.update(rust=RUST, target=TARGETS["windows"], python=PYTHON,
+            notVerified=list(WINDOWS_NORMAL_UI_NOT_VERIFIED if windows_normal_ui_profile(context) else WINDOWS_INSTALLED_NOT_VERIFIED))
         write_json(root / "public-bindings.json", public)
         with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
             output.write("root=" + str(root) + "\n")
@@ -8813,7 +12179,9 @@ def windows_installed_context(*, create: bool, retention_only: bool = False) -> 
         require(os.environ.get("MRK_DESKTOP_CI_ROOT") == str(root), "Windows native original root changed")
         context = read_bounded_json(root / "context.json", 256 << 10)
         require(context.get("root") == str(root) and context.get("source") == str(source)
-                and context.get("python") == str(selected) and all(context.get(k) == v for k, v in binding.items()),
+                and context.get("python") == str(selected) and all(context.get(k) == v for k, v in binding.items())
+                and context.get("qualificationProfile") == binding.get("qualificationProfile")
+                and ("fullwalkInputs" in context) == windows_installed_prepared_profile(context),
                 "Windows native original context changed")
         windows_installed_inputs(context, retention_only=retention_only)
         require(windows_installed_record(selected, 32 << 20) == context["pythonIdentity"], "Windows native Python changed")
@@ -8822,6 +12190,12 @@ def windows_installed_context(*, create: bool, retention_only: bool = False) -> 
 
 def windows_installed_metadata(context: dict) -> dict:
     value = read_bounded_json(Path(context["root"]) / "metadata.json", 2 << 20)
+    return windows_installed_native_graph(value, source=Path(context["source"]), features=windows_installed_features(context, "native"))
+
+
+def windows_installed_native_graph(value: object, *, source: Path, features: list[str]) -> dict:
+    """The original three-package, lib-only native graph; never the UI graph."""
+    require(features in ([], ["runtime-publication"]), "Windows native runtime-only feature role differs")
     require(type(value) is dict and type(value.get("packages")) is list and len(value["packages"]) == 3,
             "Windows native standalone package graph differs")
     packages = {p["name"]: p for p in value["packages"]}
@@ -8829,7 +12203,7 @@ def windows_installed_metadata(context: dict) -> dict:
     require(set(packages) == set(expected) and all(p["version"] == expected[n] for n, p in packages.items()),
             "Windows native locked package identities differ")
     native = packages["mrk-windows-installed-native"]
-    require(native.get("source") is None and native.get("manifest_path") == str(Path(context["source"]) / WINDOWS_INSTALLED_CRATE / "Cargo.toml")
+    require(native.get("source") is None and native.get("manifest_path") == str(source / WINDOWS_INSTALLED_CRATE / "Cargo.toml")
             and all(packages[n].get("source") == "registry+https://github.com/rust-lang/crates.io-index" for n in ("windows-sys", "windows-link"))
             and all(p.get("targets") and all(t.get("kind") == ["lib"] for t in p["targets"]) for p in packages.values()),
             "Windows native graph has a foreign source, target or build script")
@@ -8838,14 +12212,659 @@ def windows_installed_metadata(context: dict) -> dict:
             and len(resolve["nodes"]) == 3, "Windows native original resolved root differs")
     nodes = {n["id"]: n for n in resolve["nodes"]}
     require(set(nodes) == {p["id"] for p in packages.values()}
-            and nodes[native["id"]].get("features") == []
+            and native.get("features") == WINDOWS_NATIVE_DECLARED_FEATURES
+            and nodes[native["id"]].get("features") == features
             and nodes[native["id"]].get("dependencies") == [packages["windows-sys"]["id"]]
             and nodes[packages["windows-sys"]["id"]].get("dependencies") == [packages["windows-link"]["id"]]
             and nodes[packages["windows-link"]["id"]].get("dependencies") == [], "Windows native resolved edges differ")
     return packages
 
 
-def windows_installed_app_graph(value: object, lock: object, *, source: Path, root: Path) -> dict:
+def windows_normal_ui_native_graph(value: object, lock: object, *, source: Path, root: Path) -> dict:
+    """The one cheap locked native graph, not a permissive app-graph variant."""
+    registry = "registry+https://github.com/rust-lang/crates.io-index"
+    require(type(lock) is dict and lock.get("version") == 4 and type(lock.get("package")) is list
+            and len(lock["package"]) == len(WINDOWS_NORMAL_UI_NATIVE_PACKAGES), "Windows UI native lock differs")
+    locked = {}
+    for item in lock["package"]:
+        require(type(item) is dict and type(item.get("name")) is str and type(item.get("version")) is str,
+                "Windows UI native lock identity differs")
+        key = (item["name"], item["version"])
+        require(key in WINDOWS_NORMAL_UI_NATIVE_PACKAGES and key not in locked
+                and (item.get("source") is None if key[0] == "mrk-windows-installed-native" else
+                     item.get("source") == registry and sha256_value(item.get("checksum"))),
+                "Windows UI native lock contains a foreign/duplicate package")
+        locked[key] = item
+    require(set(locked) == WINDOWS_NORMAL_UI_NATIVE_PACKAGES, "Windows UI native lock inventory is incomplete")
+    require(type(value) is dict and value.get("version") == 1 and type(value.get("packages")) is list
+            and len(value["packages"]) == len(locked), "Windows UI native metadata inventory differs")
+    packages, ids = {}, {}
+    for package in value["packages"]:
+        require(type(package) is dict and type(package.get("id")) is str and 0 < len(package["id"]) <= 4096
+                and type(package.get("name")) is str and type(package.get("version")) is str
+                and type(package.get("manifest_path")) is str and type(package.get("features")) is dict,
+                "Windows UI native package identity differs")
+        key = (package["name"], package["version"])
+        require(key in locked and key not in ids and package["id"] not in packages
+                and package.get("source") == locked[key].get("source"), "Windows UI native package is foreign/duplicated")
+        manifest = Path(package["manifest_path"])
+        if key[0] == "mrk-windows-installed-native":
+            require(manifest == source / WINDOWS_INSTALLED_CRATE / "Cargo.toml"
+                    and package["features"] == WINDOWS_NATIVE_DECLARED_FEATURES,
+                    "Windows UI native root declaration differs")
+        else:
+            registry_root = root / "cargo/registry/src"
+            require(manifest.is_absolute() and manifest.is_relative_to(registry_root)
+                    and len(manifest.relative_to(registry_root).parts) == 3
+                    and manifest.parent.name == key[0] + "-" + key[1] and manifest.name == "Cargo.toml",
+                    "Windows UI native dependency left private acquisition")
+        targets = package.get("targets")
+        require(type(targets) is list and 0 < len(targets) <= 512, "Windows UI native target inventory differs")
+        for target in targets:
+            require(type(target) is dict and type(target.get("name")) is str and type(target.get("kind")) is list
+                    and type(target.get("crate_types")) is list and type(target.get("src_path")) is str,
+                    "Windows UI native target declaration differs")
+            path = Path(target["src_path"])
+            require(path.is_absolute() and path.is_relative_to(manifest.parent)
+                    and not any(part in {".", ".."} for part in path.relative_to(manifest.parent).parts),
+                    "Windows UI native target source left package")
+        if key[0] == "mrk-windows-installed-native":
+            require(len(targets) == 1 and targets[0]["kind"] == ["lib"] and targets[0]["crate_types"] == ["lib"]
+                    and targets[0]["name"] == "mrk_windows_installed_native"
+                    and targets[0]["src_path"] == str(manifest.parent / "src/lib.rs"),
+                    "Windows UI cheap native root must be one libtest/no build script")
+        packages[package["id"]], ids[key] = package, package["id"]
+    native = ids[("mrk-windows-installed-native", "0.1.0")]
+    require(value.get("workspace_root") == str(source / WINDOWS_INSTALLED_CRATE)
+            and value.get("workspace_members") == [native] and value.get("workspace_default_members") == [native]
+            and value.get("target_directory") == str(root / "target"), "Windows UI native workspace/target differs")
+    resolve = value.get("resolve")
+    require(type(resolve) is dict and resolve.get("root") == native and type(resolve.get("nodes")) is list
+            and len(resolve["nodes"]) == len(packages), "Windows UI native resolution differs")
+    nodes = {}
+    for node in resolve["nodes"]:
+        require(type(node) is dict and type(node.get("id")) is str and node["id"] in packages and node["id"] not in nodes
+                and type(node.get("features")) is list and type(node.get("dependencies")) is list
+                and type(node.get("deps")) is list, "Windows UI native resolved node differs")
+        features = node["features"]
+        require(all(type(item) is str for item in features) and features == sorted(set(features))
+                and set(features) <= set(packages[node["id"]]["features"]), "Windows UI native active feature differs")
+        package = packages[node["id"]]
+        expected = set()
+        for declaration in locked[(package["name"], package["version"])].get("dependencies", []):
+            require(type(declaration) is str, "Windows UI native locked dependency differs")
+            pieces = declaration.split(" ")
+            require(len(pieces) in (1, 2), "Windows UI native locked dependency spelling differs")
+            candidates = [identity for key, identity in ids.items()
+                          if key[0] == pieces[0] and (len(pieces) == 1 or key[1] == pieces[1])]
+            require(len(candidates) == 1 and candidates[0] not in expected,
+                    "Windows UI native locked dependency is missing/ambiguous")
+            expected.add(candidates[0])
+        require(all(type(item) is str for item in node["dependencies"])
+                and len(node["dependencies"]) == len(expected) and set(node["dependencies"]) == expected,
+                "Windows UI native resolved edges differ from lock")
+        edges = []
+        for edge in node["deps"]:
+            require(type(edge) is dict and edge.get("pkg") in expected and type(edge.get("name")) is str
+                    and edge["name"] == packages[edge["pkg"]]["name"].replace("-", "_")
+                    and type(edge.get("dep_kinds")) is list and 0 < len(edge["dep_kinds"]) <= 2,
+                    "Windows UI native dependency role differs")
+            for kind in edge["dep_kinds"]:
+                require(type(kind) is dict and set(kind) == {"kind", "target"} and kind["kind"] in (None, "build")
+                        and (kind["target"] is None or type(kind["target"]) is str), "Windows UI native dependency kind differs")
+            edges.append(edge["pkg"])
+        require(len(edges) == len(expected) and set(edges) == expected, "Windows UI native edge tables differ")
+        nodes[node["id"]] = node
+    require(nodes[native]["features"] == ["desktop-ui"]
+            and {(packages[item]["name"], packages[item]["version"]) for item in nodes[native]["dependencies"]}
+                == {("windows-sys", "0.61.2"), ("windows", "0.61.3"), ("webview2-com", "0.38.2"), ("windows-core", "0.61.2")},
+            "Windows UI cheap probe selected additional features or a GUI graph")
+    seen, pending = set(), [native]
+    while pending:
+        item = pending.pop()
+        if item not in seen:
+            seen.add(item); pending.extend(nodes[item]["dependencies"])
+    require(seen == set(nodes), "Windows UI native graph has disconnected packages")
+    return {"packages": packages, "nodes": nodes, "nativeId": native}
+
+
+def windows_normal_ui_native_metadata(context: dict) -> dict:
+    require(windows_normal_ui_profile(context), "Windows UI native graph requires its explicit profile")
+    source, root = Path(context["source"]), Path(context["root"])
+    value = bounded_json(windows_installed_bytes(root / "metadata.json", 8 << 20), 8 << 20, max_nodes=200000)
+    try:
+        lock = tomllib.loads(windows_installed_bytes(source / WINDOWS_INSTALLED_CRATE / "Cargo.lock", 256 << 10).decode("utf-8"))
+    except (UnicodeError, tomllib.TOMLDecodeError):
+        raise CheckFailure("Windows UI native source lock is malformed") from None
+    return windows_normal_ui_native_graph(value, lock, source=source, root=root)
+
+
+def windows_normal_ui_native_test_path(raw: bytes, graph: dict, *, source: Path, root: Path) -> Path:
+    require(type(raw) is bytes and 0 < len(raw) <= 16 << 20, "Windows UI native compiler stream differs")
+    lines = raw.splitlines()
+    require(0 < len(lines) <= 4096, "Windows UI native compiler message count exceeds bound")
+    packages, nodes, native = graph["packages"], graph["nodes"], graph["nativeId"]
+    found, finished, compiled_packages = [], False, set()
+    for line in lines:
+        message = bounded_json(line, 2 << 20)
+        require(not finished and type(message) is dict and message.get("reason") in (
+            "compiler-artifact", "compiler-message", "build-script-executed", "build-finished"),
+            "Windows UI native compiler message/order differs")
+        reason = message["reason"]
+        if reason == "build-finished":
+            require(message.get("success") is True, "Windows UI native original build failed")
+            finished = True
+            continue
+        key = message.get("package_id")
+        require(type(key) is str and key in packages, "Windows UI native compiled a foreign package")
+        if reason == "compiler-message":
+            diagnostic = message.get("message")
+            require(type(diagnostic) is dict and diagnostic.get("level") != "error", "Windows UI native compiler error is not success")
+            continue
+        if reason == "build-script-executed":
+            require(key != native and any(target["kind"] == ["custom-build"] for target in packages[key]["targets"]),
+                    "Windows UI native build script is undeclared")
+            continue
+        target, profile = message.get("target"), message.get("profile")
+        require(type(target) is dict and type(profile) is dict and type(profile.get("test")) is bool
+                and any(all(same_compile_json(target.get(name), candidate.get(name))
+                            for name in ("name", "kind", "crate_types", "src_path")) for candidate in packages[key]["targets"])
+                and target.get("kind") in (["lib"], ["proc-macro"], ["custom-build"])
+                and message.get("manifest_path") == packages[key]["manifest_path"]
+                and message.get("features") == nodes[key]["features"], "Windows UI native selected unit/features differ")
+        compiled_packages.add(key)
+        executable = message.get("executable")
+        if executable is not None:
+            require(key == native and target["kind"] == ["lib"] and profile["test"] is True
+                    and message.get("fresh") is False, "Windows UI prerequisite must be the fresh original native libtest")
+            path = ordinary_windows_executable(executable, target_root=root / "target")
+            require(path.parent == root / "target/x86_64-pc-windows-msvc/debug/deps"
+                    and re.fullmatch(r"mrk_windows_installed_native-[0-9a-f]{16}\.exe", path.name) is not None,
+                    "Windows UI native artifact path differs")
+            found.append(path)
+        else:
+            require(profile["test"] is False, "Windows UI native unexpected test unit")
+    require(finished and len(found) == 1 and compiled_packages == set(nodes),
+            "Windows UI native compile did not produce its complete graph and one original libtest")
+    return found[0]
+
+
+def windows_normal_ui_native_artifact(context: dict) -> dict:
+    root, source = Path(context["root"]), Path(context["source"])
+    messages = root / "compile-messages.jsonl"
+    path = windows_normal_ui_native_test_path(windows_installed_bytes(messages, 16 << 20),
+        windows_normal_ui_native_metadata(context), source=source, root=root)
+    before = path.lstat()
+    record = windows_installed_record(path, 128 << 20)
+    require(windows_installed_state(before) == windows_installed_state(path.lstat()), "Windows UI native artifact changed")
+    return {"path": str(path), **record,
+            "identity": [before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns],
+            "messages": windows_installed_record(messages, 16 << 20)}
+
+
+def windows_normal_ui_graph_refusal(reason: str, *, observer: bool, parent: dict, child: dict,
+                                    edge: dict, kind: dict, count: int = 0) -> None:
+    """Finite public labels only; callers first bind packages to the source lock."""
+    require(reason in ("library-target-missing", "library-target-ambiguous", "library-target-malformed",
+                       "rename-malformed", "declaration-missing", "declaration-ambiguous"),
+            "Windows GUI declaration-join diagnostic reason differs")
+
+    def label(value: object) -> str:
+        return value if type(value) is str and re.fullmatch(r"[A-Za-z0-9_+.\-]{1,64}", value) else "omitted"
+
+    role = "observer" if observer else "normal"
+    dependency_kind = kind.get("kind")
+    kind_label = "normal" if dependency_kind is None else dependency_kind if dependency_kind in ("dev", "build") else "omitted"
+    target_label = "none" if kind.get("target") is None else "specified"
+    count_label = str(count) if type(count) is int and 0 <= count <= 512 else "omitted"
+    # Each label is at most 64 ASCII bytes; no paths, IDs, target expressions,
+    # renames or exception text are included. Even maximum labels fit 768 bytes.
+    raise CheckFailure("Windows GUI resolved edge lacks one original declaration: " + reason
+        + f"; role={role}; parent={label(parent.get('name'))}@{label(parent.get('version'))}"
+        + f"; child={label(child.get('name'))}@{label(child.get('version'))}; edge={label(edge.get('name'))}"
+        + f"; kind={kind_label}; target={target_label}; count={count_label}")
+
+
+def windows_normal_ui_dependency_library_name(package: dict, *, observer: bool, parent: dict,
+                                              edge: dict, kind: dict) -> str:
+    """Select Cargo's one original library target, not its package/bin name."""
+    libraries = []
+    ordinary = {"lib", "rlib", "dylib", "cdylib", "staticlib"}
+    for target in package["targets"]:
+        kinds, crate_types = target["kind"], target["crate_types"]
+        if not (1 <= len(kinds) <= 6 and 1 <= len(crate_types) <= 6
+                and all(type(item) is str for item in kinds + crate_types)
+                and len(set(kinds)) == len(kinds) and len(set(crate_types)) == len(crate_types)):
+            windows_normal_ui_graph_refusal("library-target-malformed", observer=observer, parent=parent,
+                child=package, edge=edge, kind=kind)
+        kinds_set = set(kinds)
+        if not kinds_set & (ordinary | {"proc-macro"}):
+            continue  # In particular, an example's crate_types may itself be lib.
+        if (not (kinds_set <= ordinary or kinds_set == {"proc-macro"})
+                or kinds_set != set(crate_types) or not target["name"]):
+            windows_normal_ui_graph_refusal("library-target-malformed", observer=observer, parent=parent,
+                child=package, edge=edge, kind=kind)
+        libraries.append(target["name"])
+    if len(libraries) != 1:
+        windows_normal_ui_graph_refusal("library-target-missing" if not libraries else "library-target-ambiguous",
+            observer=observer, parent=parent, child=package, edge=edge, kind=kind, count=len(libraries))
+    return libraries[0]
+
+
+def windows_normal_ui_app_graph(value: object, lock: object, *, source: Path, root: Path, observer: bool) -> dict:
+    """Source-locked GUI roles, separate from the historical headless graph.
+
+    Cargo remains the locked feature resolver. Metadata is its bounded union,
+    not permission to substitute that union for a host/target compiler unit.
+    The original stream below records each actual unit and checks exact material
+    app/native/browser roles; no second general Cargo resolver is introduced.
+    """
+    registry = "registry+https://github.com/rust-lang/crates.io-index"
+    require(type(observer) is bool and type(lock) is dict and type(lock.get("version")) is int and lock["version"] == 4
+            and type(lock.get("package")) is list and 4 <= len(lock["package"]) <= 2048,
+            "Windows GUI source-bound lock differs")
+    locked = {}
+    for row in lock["package"]:
+        require(type(row) is dict and type(row.get("name")) is str and type(row.get("version")) is str
+                and (row.get("source") is None or type(row["source"]) is str), "Windows GUI lock identity differs")
+        key = (row["name"], row["version"], row.get("source"))
+        require(key not in locked and (key[2] is None or key[2] == registry and sha256_value(row.get("checksum"))),
+                "Windows GUI lock source/checksum differs")
+        locked[key] = row
+    require({key[:2] for key in locked if key[2] is None} == set(WINDOWS_INSTALLED_APP_LOCK_LOCALS.items()),
+            "Windows GUI source lock local inventory differs")
+    require(type(value) is dict and type(value.get("version")) is int and value["version"] == 1 and type(value.get("packages")) is list
+            and 4 <= len(value["packages"]) <= 1024, "Windows GUI metadata inventory differs")
+    packages, local, identities = {}, {}, set()
+    for package in value["packages"]:
+        require(type(package) is dict and type(package.get("id")) is str and 0 < len(package["id"]) <= 4096
+                and type(package.get("name")) is str and type(package.get("version")) is str
+                and type(package.get("manifest_path")) is str and type(package.get("features")) is dict
+                and (package.get("source") is None or type(package["source"]) is str), "Windows GUI package identity differs")
+        key = (package["name"], package["version"], package.get("source"))
+        require(key in locked and key not in identities and package["id"] not in packages,
+                "Windows GUI package is duplicate/outside the source lock")
+        identities.add(key)
+        require(0 < len(package["manifest_path"]) <= 16384 and not any(part in {".", ".."}
+            for part in re.split(r"[\\/]", package["manifest_path"])), "Windows GUI package manifest spelling differs")
+        manifest = Path(package["manifest_path"])
+        if key[2] is None:
+            require(key[0] in ("mobile-release-kit-desktop", "mrk-windows-installed-native")
+                    and key[0] not in local and manifest == source / WINDOWS_INSTALLED_APP_LOCALS[key[0]],
+                    "Windows GUI selected a foreign local package")
+            local[key[0]] = package["id"]
+        else:
+            base = root / "cargo/registry/src"
+            require(manifest.is_absolute() and manifest.is_relative_to(base) and len(manifest.relative_to(base).parts) == 3
+                    and manifest.parent.name == key[0] + "-" + key[1] and manifest.name == "Cargo.toml",
+                    "Windows GUI package left its private locked acquisition")
+        require(type(package.get("targets")) is list and 0 < len(package["targets"]) <= 512,
+                "Windows GUI declared target inventory differs")
+        for target in package["targets"]:
+            require(type(target) is dict and type(target.get("name")) is str and type(target.get("kind")) is list
+                    and type(target.get("crate_types")) is list and type(target.get("src_path")) is str,
+                    "Windows GUI target declaration differs")
+            path = Path(target["src_path"])
+            require(path.is_absolute() and path.is_relative_to(manifest.parent)
+                    and not any(part in {".", ".."} for part in re.split(r"[\\/]", target["src_path"])),
+                    "Windows GUI target source left its original package")
+        packages[package["id"]] = package
+    require(set(local) == {"mobile-release-kit-desktop", "mrk-windows-installed-native"},
+            "Windows GUI needs exactly its two selected local packages")
+    app, native = local["mobile-release-kit-desktop"], local["mrk-windows-installed-native"]
+    require(value.get("workspace_root") == str(source / WINDOWS_INSTALLED_APP)
+            and value.get("workspace_members") == [app] and value.get("workspace_default_members") == [app]
+            and value.get("target_directory") == str(root / "target"), "Windows GUI workspace/target differs")
+    feature_map = packages[app]["features"]
+    require(feature_map.get("desktop-shell") == ["dep:tauri", "dep:tauri-build", "dep:rfd", "dep:webkit2gtk", "dep:gtk",
+                "mrk-windows-installed-native/desktop-ui-dialogs"]
+            and feature_map.get("custom-protocol") == ["tauri/custom-protocol"]
+            and feature_map.get("windows-installed-observation") == ["mrk-windows-installed-native/windows-installed-observation"]
+            and feature_map.get("default") == [] and packages[native]["features"] == WINDOWS_NATIVE_DECLARED_FEATURES,
+            "Windows GUI material feature forwarding differs")
+    resolve = value.get("resolve")
+    require(type(resolve) is dict and resolve.get("root") == app and type(resolve.get("nodes")) is list
+            and 4 <= len(resolve["nodes"]) <= 1024, "Windows GUI active resolution differs")
+    nodes = {}
+    for node in resolve["nodes"]:
+        require(type(node) is dict and type(node.get("id")) is str and node["id"] in packages and node["id"] not in nodes
+                and type(node.get("features")) is list and type(node.get("dependencies")) is list
+                and type(node.get("deps")) is list, "Windows GUI resolved node differs")
+        features = node["features"]
+        require(all(type(name) is str for name in features) and features == sorted(set(features))
+                and set(features) <= set(packages[node["id"]]["features"]), "Windows GUI active features differ")
+        nodes[node["id"]] = node
+    require(set(nodes) == set(packages), "Windows GUI package/active node inventory differs")
+    native_features = ["desktop-ui", "desktop-ui-dialogs", "qualification-result"]
+    if observer:
+        native_features.append("windows-installed-observation")
+    require(nodes[app]["features"] == windows_normal_ui_features("observer" if observer else "app")
+            and nodes[native]["features"] == native_features, "Windows GUI app/native selected features differ")
+    library_names = {}
+    for key, node in nodes.items():
+        edges = []
+        for edge in node["deps"]:
+            require(type(edge) is dict and type(edge.get("name")) is str and type(edge.get("pkg")) is str
+                    and edge["pkg"] in nodes and type(edge.get("dep_kinds")) is list and 0 < len(edge["dep_kinds"]) <= 3,
+                    "Windows GUI active dependency differs")
+            for kind in edge["dep_kinds"]:
+                require(type(kind) is dict and set(kind) == {"kind", "target"} and kind["kind"] in (None, "dev", "build")
+                        and (kind["target"] is None or type(kind["target"]) is str), "Windows GUI dependency role differs")
+                declarations = packages[key].get("dependencies")
+                require(type(declarations) is list and len(declarations) <= 512, "Windows GUI dependency declarations differ")
+                child = packages[edge["pkg"]]
+                if edge["pkg"] not in library_names:
+                    library_names[edge["pkg"]] = windows_normal_ui_dependency_library_name(child, observer=observer,
+                        parent=packages[key], edge=edge, kind=kind)
+                matches = []
+                for dep in declarations:
+                    if (type(dep) is not dict or dep.get("name") != child["name"] or dep.get("source") != child.get("source")
+                            or dep.get("kind") != kind["kind"] or dep.get("target") != kind["target"]):
+                        continue
+                    rename = dep.get("rename")
+                    if rename is not None and (type(rename) is not str or not rename):
+                        windows_normal_ui_graph_refusal("rename-malformed", observer=observer, parent=packages[key],
+                            child=child, edge=edge, kind=kind)
+                    name = library_names[edge["pkg"]] if rename is None else rename.replace("-", "_")
+                    if name == edge["name"]:
+                        matches.append(dep)
+                if len(matches) != 1:
+                    windows_normal_ui_graph_refusal("declaration-missing" if not matches else "declaration-ambiguous",
+                        observer=observer, parent=packages[key], child=child, edge=edge, kind=kind, count=len(matches))
+            edges.append(edge["pkg"])
+        require(all(type(item) is str for item in node["dependencies"]) and len(set(node["dependencies"])) == len(node["dependencies"])
+                and set(edges) == set(node["dependencies"]), "Windows GUI dependency edge tables differ")
+    seen, pending = set(), [app]
+    while pending:
+        key = pending.pop()
+        if key not in seen:
+            seen.add(key); pending.extend(nodes[key]["dependencies"])
+    require(seen == set(nodes), "Windows GUI contains disconnected resolved packages")
+    require({(packages[key]["name"], packages[key]["version"]) for key in nodes[app]["dependencies"]} == {
+        ("getrandom", "0.3.4"), ("serde", "1.0.228"), ("serde_json", "1.0.145"), ("sha2", "0.10.9"), ("tokio", "1.48.0"),
+        ("mrk-windows-installed-native", "0.1.0"), ("rfd", "0.15.4"), ("tauri", "2.11.5"), ("tauri-build", "2.6.3")},
+        "Windows GUI direct app roles differ")
+    material = {}
+    for name, version in WINDOWS_NORMAL_UI_MATERIAL_PACKAGES.items():
+        selected = [key for key in nodes if (packages[key]["name"], packages[key]["version"], packages[key].get("source"))
+                    == (name, version, registry)]
+        require(len(selected) == 1, "Windows GUI material package is absent/ambiguous")
+        material[name] = selected[0]
+    require(nodes[material["tauri"]]["features"] == sorted(("compression", "custom-protocol", "tauri-runtime-wry", "webview2-com", "webkit2gtk", "wry"))
+            and {"os-webview", "protocol"} <= set(nodes[material["wry"]]["features"])
+            and not {"devtools", "tracing", "mac-proxy", "fullscreen", "transparent"} & set(nodes[material["wry"]]["features"]),
+            "Windows GUI selected a different browser/configuration role")
+    return {"packages": packages, "nodes": nodes, "appId": app, "nativeId": native, "materialIds": material, "observer": observer}
+
+
+def windows_normal_ui_app_metadata(context: dict, *, observer: bool) -> dict:
+    require(windows_normal_ui_profile(context) and type(observer) is bool, "Windows GUI metadata requires its fixed profile")
+    source, root = Path(context["source"]), Path(context["root"])
+    name = "observer-metadata.json" if observer else "normal-app-metadata.json"
+    value = bounded_json(windows_installed_bytes(root / name, 16 << 20), 16 << 20, max_nodes=200000)
+    try:
+        lock = tomllib.loads(windows_installed_bytes(source / WINDOWS_INSTALLED_APP / "Cargo.lock", 8 << 20).decode("utf-8"))
+    except (ValueError, UnicodeError):
+        raise CheckFailure("Windows GUI source lock is malformed") from None
+    return windows_normal_ui_app_graph(value, lock, source=source, root=root, observer=observer)
+
+
+def windows_normal_ui_gui_argv(cargo: str, context: dict, *, observer: bool) -> list[str]:
+    require(type(observer) is bool and windows_normal_ui_profile(context), "Windows GUI compile role differs")
+    return [cargo, "test" if observer else "build", "--locked", "--offline", "--jobs", "1", "--no-default-features",
+        "--target", TARGETS["windows"], "--manifest-path", str(Path(context["source"]) / WINDOWS_INSTALLED_APP / "Cargo.toml"),
+        "--target-dir", str(Path(context["root"]) / "target"), "--features", ",".join(windows_normal_ui_features("observer" if observer else "app")),
+        *(["--test", "installed-shell-observation", "--no-run"] if observer else ["--bin", "mobile-release-kit-desktop"]),
+        "--message-format=json"]
+
+
+def windows_normal_ui_gui_compiler_data(raw: bytes, graph: dict, *, source: Path, root: Path) -> dict:
+    """Validate the complete original stream, including actual host/target units.
+
+    Nonmaterial registry units may use a proper metadata-union subset because
+    resolver2 separates host/build features. Their exact observed features are
+    retained, locally closed and source/lock bound; no host/target union is
+    credited as an actual compiler unit. Exact local/browser roles stay closed.
+    """
+    require(type(raw) is bytes and 0 < len(raw) <= 16 << 20, "Windows GUI compiler stream exceeds its bound")
+    lines = raw.splitlines()
+    require(0 < len(lines) <= 8192, "Windows GUI compiler message count exceeds its bound")
+    packages, nodes, app, native = graph["packages"], graph["nodes"], graph["appId"], graph["nativeId"]
+    units, scripts, script_outputs, found, auxiliary, finished = [], set(), {}, None, None, False
+    for line in lines:
+        row = bounded_json(line, 2 << 20)
+        require(not finished and type(row) is dict and row.get("reason") in (
+            "compiler-artifact", "compiler-message", "build-script-executed", "build-finished"), "Windows GUI compiler stream order differs")
+        reason = row["reason"]
+        if reason == "build-finished":
+            require(row.get("success") is True, "Windows GUI original compiler did not succeed")
+            finished = True; continue
+        key = row.get("package_id")
+        require(type(key) is str and key in nodes, "Windows GUI compiled outside its active locked graph")
+        package = packages[key]
+        if reason == "build-script-executed":
+            require(type(row.get("out_dir")) is str and len(row["out_dir"]) <= 16384,
+                    "Windows GUI original build output spelling differs")
+            path = Path(row["out_dir"])
+            require(key in scripts and path.is_absolute() and path.is_relative_to(root / "target")
+                    and path.name == "out" and not any(part in {".", ".."} for part in re.split(r"[\\/]", str(path)))
+                    and path.parent.parent in (root / "target/debug/build", root / "target" / TARGETS["windows"] / "debug/build")
+                    and re.fullmatch(re.escape(package["name"]) + r"-[0-9a-f]{16}", path.parent.name) is not None
+                    and type(row.get("linked_libs")) is list and all(type(item) is str for item in row["linked_libs"]),
+                    "Windows GUI original build-script output differs")
+            if key in (app, native, graph["materialIds"]["webview2-com-sys"]):
+                require(path.parent.parent == root / "target" / TARGETS["windows"] / "debug/build",
+                        "Windows GUI material build output is not target-bound")
+            script_outputs.setdefault(key, []).append(row)
+            continue
+        target, profile = row.get("target"), row.get("profile")
+        require(type(target) is dict and any(same_compile_json(target, declared) for declared in package["targets"])
+                and (row.get("manifest_path") is None or row["manifest_path"] == package["manifest_path"]),
+                "Windows GUI compiler target differs from original declarations")
+        if reason == "compiler-message":
+            require(type(row.get("message")) is dict and row["message"].get("level") != "error",
+                    "Windows GUI original stream contains a compiler error")
+            continue
+        kind = target.get("kind")
+        require(kind in (["lib"], ["rlib"], ["proc-macro"], ["custom-build"])
+                or key == app and (kind == ["bin"] or graph["observer"] and kind == ["test"]),
+                "Windows GUI compiler selected an unrelated executable/test")
+        features = row.get("features")
+        require(type(features) is list and all(type(name) is str for name in features) and features == sorted(set(features))
+                and set(features) <= set(nodes[key]["features"]) and row.get("manifest_path") == package["manifest_path"]
+                and type(profile) is dict and type(profile.get("test")) is bool, "Windows GUI actual unit features/source differ")
+        for name in features:
+            refs = package["features"][name]
+            require(type(refs) is list and len(refs) <= 512 and all(type(ref) is str for ref in refs)
+                    and all(ref in features for ref in refs if ref in package["features"]),
+                    "Windows GUI actual unit features are not locally closed")
+        expected = nodes[key]["features"]
+        if key == native and not graph["observer"]:
+            expected = ["desktop-ui", "desktop-ui-dialogs"]  # Normal build has no dev qualification seam.
+        if key in (app, native) or key in graph["materialIds"].values():
+            require(features == expected, "Windows GUI material host/target unit features differ")
+        filenames = row.get("filenames")
+        require(type(filenames) is list and 0 < len(filenames) <= 16 and all(type(name) is str for name in filenames),
+                "Windows GUI actual compiler output inventory differs")
+        scopes = set()
+        for name in filenames:
+            path = Path(name)
+            require(path.is_absolute() and not any(part in {".", ".."} for part in re.split(r"[\\/]", name)),
+                    "Windows GUI compiler output path differs")
+            if path.is_relative_to(root / "target" / TARGETS["windows"] / "debug"):
+                scopes.add("target")
+            elif path.is_relative_to(root / "target/debug"):
+                scopes.add("host")
+            else:
+                raise CheckFailure("Windows GUI compiler output left its original target")
+        require(len(scopes) == 1, "Windows GUI compiler unit mixed host and target outputs")
+        scope = next(iter(scopes))
+        require(scope == "host" if kind in (["proc-macro"], ["custom-build"]) else True,
+                "Windows GUI compiler proc-macro/build unit is not host-bound")
+        if key in (app, native) and kind != ["custom-build"]:
+            require(scope == "target", "Windows GUI actual app/native unit is not target-bound")
+        require(not profile["test"] or key == app and graph["observer"] and kind == ["test"],
+                "Windows GUI compiler selected an unrelated test-profile unit")
+        units.append({"packageId": key, "target": target["name"], "kind": kind, "scope": scope, "features": features,
+                      "testProfile": profile["test"], "filenames": filenames})
+        if kind == ["custom-build"]:
+            scripts.add(key)
+        executable = row.get("executable")
+        if executable is not None:
+            if graph["observer"] and key == app and kind == ["bin"]:
+                # Cargo may build this intermediate solely for CARGO_BIN_EXE.
+                # It has observer features and is NEVER normal-smoke evidence.
+                require(auxiliary is None and target.get("name") == "mobile-release-kit-desktop"
+                        and target.get("src_path") == str(source / WINDOWS_INSTALLED_APP / "src/main.rs")
+                        and profile["test"] is False and row.get("fresh") is False
+                        and executable == str(root / "target" / TARGETS["windows"] / "debug/mobile-release-kit-desktop.exe")
+                        and executable in filenames, "Windows GUI observer auxiliary package-bin differs")
+                auxiliary = executable
+                continue
+            require(found is None and key == app and target.get("kind") == (["test"] if graph["observer"] else ["bin"])
+                    and target.get("name") == ("installed-shell-observation" if graph["observer"] else "mobile-release-kit-desktop")
+                    and target.get("src_path") == str(source / WINDOWS_INSTALLED_APP /
+                        ("tests/installed_shell_observation.rs" if graph["observer"] else "src/main.rs"))
+                    and profile["debug_assertions"] is True and profile["test"] is graph["observer"] and row.get("fresh") is False,
+                    "Windows GUI original executable role/profile differs")
+            found = windows_executable_path(executable, target_root=root / "target")
+            if graph["observer"]:
+                require(found.parent == root / "target" / TARGETS["windows"] / "debug/deps"
+                        and re.fullmatch(r"installed_shell_observation-[0-9a-f]{16}\.exe", found.name) is not None,
+                        "Windows GUI observer must be its original harness=false compiler artifact")
+            else:
+                require(found == root / "target" / TARGETS["windows"] / "debug/mobile-release-kit-desktop.exe",
+                        "Windows GUI normal compiler artifact path differs")
+            require(executable in filenames, "Windows GUI compiler executable is missing from its original outputs")
+    require(finished and found is not None and sum(unit["packageId"] == native for unit in units) == 1,
+            "Windows GUI compiler did not produce its complete original app/native role")
+    require(all(any(unit["packageId"] == key and unit["kind"] not in (["custom-build"],) for unit in units)
+                for key in graph["materialIds"].values()), "Windows GUI compiler omitted a material locked unit")
+    require(app in script_outputs and graph["materialIds"]["webview2-com-sys"] in script_outputs,
+            "Windows GUI original app/loader build script output is absent")
+    return {"path": str(found), "units": units, "buildScripts": script_outputs, "auxiliaryPackageBinary": auxiliary}
+
+
+def windows_normal_ui_pe_data(raw: bytes, *, role: str) -> dict:
+    """Bounded PE DATA, never LoadLibrary or executable/native availability.
+
+    Inspect the actual linked manifest, not an adjacent XML template or copied
+    loader DLL. Original Windows startup/activation remains a separate GUI gate.
+    """
+    require(type(role) is str and role in ("normal", "observer"), "Windows GUI PE role differs")
+    require(type(raw) is bytes and 512 <= len(raw) <= 512 << 20 and raw[:2] == b"MZ", "Windows GUI PE input differs")
+    def number(at: int, count: int) -> int:
+        require(type(at) is int and 0 <= at <= len(raw) - count, "Windows GUI PE field exceeds file")
+        return int.from_bytes(raw[at:at + count], "little")
+    pe = number(0x3c, 4)
+    require(64 <= pe <= len(raw) - 24 and raw[pe:pe + 4] == b"PE\0\0" and number(pe + 4, 2) == 0x8664,
+            "Windows GUI binary is not native AMD64 PE")
+    count, optional_size = number(pe + 6, 2), number(pe + 20, 2)
+    optional = pe + 24
+    require(1 <= count <= 96 and 240 <= optional_size <= 4096 and optional + optional_size <= len(raw)
+            and number(optional, 2) == 0x20b and number(optional + 108, 4) >= 16,
+            "Windows GUI PE64 header/directory inventory differs")
+    sections = []
+    for index in range(count):
+        at = optional + optional_size + index * 40
+        require(at + 40 <= len(raw), "Windows GUI PE section table exceeds file")
+        virtual_size, address, size, offset = (number(at + field, 4) for field in (8, 12, 16, 20))
+        require(address > 0 and offset <= len(raw) and size <= len(raw) - offset and virtual_size < 2**31,
+                "Windows GUI PE section range differs")
+        sections.append((address, max(virtual_size, size), offset, size))
+    def address(value: int, length: int) -> int:
+        require(0 < value < 2**32 and 0 < length <= 16 << 20 and value + length <= 2**32,
+                "Windows GUI PE RVA range differs")
+        matches = [(offset + value - start, size - (value - start)) for start, extent, offset, size in sections
+                   if start <= value and value + length <= start + extent and value - start + length <= size]
+        require(len(matches) == 1, "Windows GUI PE RVA is unmapped/ambiguous")
+        return matches[0][0]
+    resource_rva, resource_size = number(optional + 112 + 16, 4), number(optional + 112 + 20, 4)
+    require(64 <= resource_size <= 4 << 20,
+            f"Windows GUI {role} resource size differs: rva={resource_rva} size={resource_size} allowed=64..4194304")
+    resource = address(resource_rva, resource_size)
+    visited = set()
+    def entries(relative: int) -> list[tuple[int, int]]:
+        require(relative not in visited and 0 <= relative <= resource_size - 16, "Windows GUI manifest resource cycle/range differs")
+        visited.add(relative)
+        at = resource + relative
+        named, ids = number(at + 12, 2), number(at + 14, 2)
+        total = named + ids
+        require(0 < total <= 512 and relative + 16 + total * 8 <= resource_size, "Windows GUI resource entries exceed bound")
+        rows = [(number(at + 16 + index * 8, 4), number(at + 20 + index * 8, 4)) for index in range(total)]
+        require(len({name for name, _ in rows}) == total, "Windows GUI resource identifiers are duplicated")
+        require(all(bool(name & 0x80000000) == (index < named) for index, (name, _) in enumerate(rows)),
+                "Windows GUI resource named and numeric entries disagree with their table")
+        return rows
+    manifests = [offset for name, offset in entries(0) if name == 24]
+    require(len(manifests) == 1 and manifests[0] & 0x80000000, "Windows GUI linked manifest resource is absent/ambiguous")
+    names = entries(manifests[0] & 0x7fffffff)
+    require(len(names) == 1 and names[0][0] == 1 and names[0][1] & 0x80000000,
+            "Windows GUI linked executable manifest ID differs")
+    languages = entries(names[0][1] & 0x7fffffff)
+    # VERSIONINFO's language is not the manifest resource LANGID. There is
+    # exactly one bounded numeric leaf, so no locale can select a different
+    # accepted body. Preserve its actual value; only native startup proves SxS.
+    require(len(languages) == 1 and 0 <= languages[0][0] <= 0xffff and not languages[0][1] & 0x80000000,
+            "Windows GUI linked manifest language/data role differs")
+    data = languages[0][1]
+    require(0 <= data <= resource_size - 16, "Windows GUI manifest resource DATA exceeds its table")
+    data += resource
+    manifest_rva, manifest_size, codepage, reserved = (number(data + field, 4) for field in (0, 4, 8, 12))
+    require(1 <= manifest_size <= 16 << 10 and codepage in (0, 65001) and reserved == 0, "Windows GUI manifest encoding/size differs")
+    at = address(manifest_rva, manifest_size)
+    manifest = raw[at:at + manifest_size]
+    xml = manifest.rstrip(b"\0")
+    require(len(manifest) - len(xml) <= 3 and b"<!" not in xml and b"\0" not in xml,
+            "Windows GUI manifest contains unsupported declaration/encoding")
+    from xml.etree import ElementTree
+    try:
+        element = ElementTree.fromstring(xml)
+    except (ElementTree.ParseError, UnicodeError, ValueError):
+        raise CheckFailure("Windows GUI linked manifest XML differs") from None
+    namespace = "{urn:schemas-microsoft-com:asm.v1}"
+    chain = ("assembly", "dependency", "dependentAssembly", "assemblyIdentity")
+    for index, tag in enumerate(chain):
+        attributes = ({"manifestVersion": "1.0"} if index == 0 else
+            {"type": "win32", "name": "Microsoft.Windows.Common-Controls", "version": "6.0.0.0",
+             "processorArchitecture": "*", "publicKeyToken": "6595b64144ccf1df", "language": "*"} if index == 3 else {})
+        require(element.tag == namespace + tag and element.attrib == attributes and not (element.text or "").strip()
+                and not (element.tail or "").strip() and len(element) == (0 if index == 3 else 1),
+                "Windows GUI linked manifest is not the exact Common Controls v6 activation contract")
+        if index != 3:
+            element = element[0]
+    imports = []
+    for directory, stride, name_field in ((1, 20, 12), (13, 32, 4)):
+        rva, size = number(optional + 112 + directory * 8, 4), number(optional + 116 + directory * 8, 4)
+        if rva == 0:
+            require(size == 0, "Windows GUI empty import directory has nonempty size")
+            continue
+        require(stride <= size <= stride * 512, "Windows GUI import descriptor count exceeds bound")
+        start = address(rva, size)
+        terminated = False
+        for offset in range(0, size - stride + 1, stride):
+            descriptor = raw[start + offset:start + offset + stride]
+            if descriptor == bytes(stride):
+                terminated = True; break
+            if directory == 13:
+                require(number(start + offset, 4) == 1, "Windows GUI delay import must use RVAs")
+            name_rva = number(start + offset + name_field, 4)
+            name_at = address(name_rva, 1)
+            end = raw.find(b"\0", name_at, min(len(raw), name_at + 129))
+            require(end > name_at and address(name_rva, end - name_at + 1) == name_at,
+                    "Windows GUI DLL import name exceeds its mapped bound")
+            name = raw[name_at:end]
+            require(re.fullmatch(rb"[A-Za-z0-9_.-]{1,128}", name) is not None
+                    and b"webview2loader" not in name.lower(), "Windows GUI imports an unadmitted dynamic WebView2 loader")
+            imports.append(name.decode("ascii").lower())
+        require(terminated, "Windows GUI import descriptors lack a bounded terminator")
+    return {"machine": "amd64", "manifestType": 24, "manifestId": 1, "manifestLanguage": languages[0][0],
+        "manifest": {"size": len(manifest), "sha256": hashlib.sha256(manifest).hexdigest()},
+        "commonControlsV6": True, "dynamicWebView2LoaderImport": False, "dllImports": sorted(set(imports))}
+
+
+def windows_installed_app_graph(value: object, lock: object, *, source: Path, root: Path, publication: bool = False) -> dict:
+    require(type(publication) is bool, "Windows app compile profile differs")
     require(type(value) is dict and type(value.get("version")) is int and value["version"] == 1 and type(value.get("packages")) is list
             and 4 <= len(value["packages"]) <= 512, "Windows app package inventory differs")
     require(type(lock) is dict and type(lock.get("version")) is int and lock["version"] == 4 and type(lock.get("package")) is list
@@ -8859,7 +12878,7 @@ def windows_installed_app_graph(value: object, lock: object, *, source: Path, ro
                 and sha256_value(row.get("checksum"))), "Windows app lock source/checksum differs")
         locked[key] = row
     require({key[:2] for key in locked if key[2] is None}
-            == {(name, "0.1.0") for name in WINDOWS_INSTALLED_APP_LOCALS}, "Windows app declared lock locals differ")
+            == set(WINDOWS_INSTALLED_APP_LOCK_LOCALS.items()), "Windows app declared lock locals differ")
     active_locals = {"mobile-release-kit-desktop", "mrk-windows-installed-native"}
     packages, local, identities = {}, {}, set()
     for package in value["packages"]:
@@ -8891,13 +12910,18 @@ def windows_installed_app_graph(value: object, lock: object, *, source: Path, ro
         packages[package["id"]] = package
     require(set(local) == active_locals, "Windows app target must contain exactly two local packages")
     app = local["mobile-release-kit-desktop"]
+    require(packages[app]["features"].get("windows-runtime-publisher") == ["mrk-windows-installed-native/runtime-publication"],
+            "Windows app publisher feature must forward only the production native feature")
     require(value.get("workspace_root") == str(source / WINDOWS_INSTALLED_APP)
             and value.get("workspace_members") == [app] and value.get("workspace_default_members") == [app]
             and value.get("target_directory") == str(root / "target"), "Windows app original workspace/target differs")
     # Cargo filters package/resolve rows, not the selected app's declarations.
-    # Keep the source lock's four locals separate from these exact three edges.
+    # Keep the source lock's six locals separate from actual Windows packages:
+    # three native normal declarations, the qualified Windows dev declaration,
+    # and two inactive Linux secret-service declarations. zbus is a registry
+    # dependency resolved through the source patch, not another path declaration.
     declarations = packages[app].get("dependencies")
-    require(type(declarations) is list and 3 <= len(declarations) <= 256
+    require(type(declarations) is list and 6 <= len(declarations) <= 256
             and all(type(dep) is dict and type(dep.get("name")) is str for dep in declarations),
             "Windows app dependency declarations differ")
     targets = {
@@ -8905,14 +12929,24 @@ def windows_installed_app_graph(value: object, lock: object, *, source: Path, ro
         "mrk-macos-installed-native": 'cfg(all(target_os = "macos", target_arch = "aarch64"))',
         "mrk-windows-installed-native": 'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))',
     }
-    expected = {name: {"name": name, "source": None, "req": "*", "kind": None, "rename": None,
+    normal = {name: {"name": name, "source": None, "req": "*", "kind": None, "rename": None,
         "optional": False, "uses_default_features": True, "features": [], "target": target,
         "registry": None, "path": str((source / WINDOWS_INSTALLED_APP_LOCALS[name]).parent)}
         for name, target in targets.items()}
+    secret_service = {"name": "secret-service", "source": None, "req": "=5.2.0", "kind": None,
+        "rename": None, "optional": False, "uses_default_features": False, "features": ["rt-tokio-crypto-rust"],
+        "target": targets["mrk-linux-mount-observation"], "registry": None,
+        "path": str(source / "desktop/vendor/secret-service-5.2.0")}
+    expected = [*normal.values(), {**normal["mrk-windows-installed-native"],
+                                  "kind": "dev", "features": ["qualification-result"]},
+        secret_service, {**secret_service, "kind": "dev", "features": ["rt-tokio-crypto-rust", "mrk-retrieval-test-support"]}]
     declared_locals = [dep for dep in declarations
-                       if dep.get("source") is None or "path" in dep or dep["name"] in targets]
-    require(len(declared_locals) == 3 and same_compile_json({dep["name"]: dep for dep in declared_locals}, expected),
-            "Windows app exact three local declarations differ")
+                       if dep.get("source") is None or "path" in dep or dep["name"] in {*targets, "secret-service"}]
+    # A map keyed only by name would collapse normal/dev or duplicate entries.
+    # Compare each complete declaration exactly once, independent of order.
+    require(len(declared_locals) == 6
+            and all(sum(same_compile_json(actual, wanted) for actual in declared_locals) == 1 for wanted in expected),
+            "Windows app exact normal and qualification-dev declarations differ")
     resolve = value.get("resolve")
     require(type(resolve) is dict and resolve.get("root") == app and type(resolve.get("nodes")) is list
             and 2 <= len(resolve["nodes"]) <= 256, "Windows app active resolution differs")
@@ -8926,7 +12960,10 @@ def windows_installed_app_graph(value: object, lock: object, *, source: Path, ro
                 and set(features) <= set(packages[node["id"]]["features"]), "Windows app resolved features differ")
         nodes[node["id"]] = node
     require(set(nodes) & set(local.values()) == {app, local["mrk-windows-installed-native"]}
-            and nodes[app]["features"] == [] and nodes[local["mrk-windows-installed-native"]]["features"] == [],
+            and nodes[app]["features"] == (["windows-runtime-publisher"] if publication else [])
+            and packages[local["mrk-windows-installed-native"]]["features"] == WINDOWS_NATIVE_DECLARED_FEATURES
+            and nodes[local["mrk-windows-installed-native"]]["features"]
+                == (["qualification-result", "runtime-publication"] if publication else ["qualification-result"]),
             "Windows app active locals/features differ")
     for node in nodes.values():
         edges = []
@@ -8942,6 +12979,12 @@ def windows_installed_app_graph(value: object, lock: object, *, source: Path, ro
         require(all(type(item) is str for item in node["dependencies"])
                 and len(set(node["dependencies"])) == len(node["dependencies"])
                 and set(node["dependencies"]) == set(edges), "Windows app original edge tables differ")
+    native_edges = [edge for edge in nodes[app]["deps"] if edge["pkg"] == local["mrk-windows-installed-native"]]
+    expected_kinds = [{"kind": kind, "target": targets["mrk-windows-installed-native"]} for kind in (None, "dev")]
+    require(len(native_edges) == 1 and native_edges[0]["name"] == "mrk_windows_installed_native"
+            and len(native_edges[0]["dep_kinds"]) == 2
+            and all(sum(same_compile_json(actual, wanted) for actual in native_edges[0]["dep_kinds"]) == 1
+                    for wanted in expected_kinds), "Windows app qualification dependency edge differs")
     seen, pending = set(), [app]
     while pending:
         current = pending.pop()
@@ -8955,7 +12998,7 @@ def windows_installed_app_graph(value: object, lock: object, *, source: Path, ro
             "Windows app selected direct dependencies differ")
     require({(packages[key]["name"], packages[key]["version"]) for key in nodes[local["mrk-windows-installed-native"]]["dependencies"]}
             == {("windows-sys", "0.61.2")}, "Windows app native dependency differs")
-    return {"packages": packages, "nodes": nodes, "appId": app, "localIds": local}
+    return {"packages": packages, "nodes": nodes, "appId": app, "localIds": local, "publication": publication}
 
 
 def windows_installed_app_metadata(context: dict) -> dict:
@@ -8965,10 +13008,25 @@ def windows_installed_app_metadata(context: dict) -> dict:
         lock = tomllib.loads(windows_installed_bytes(source / WINDOWS_INSTALLED_APP / "Cargo.lock", 8 << 20).decode("utf-8"))
     except (ValueError, UnicodeError):
         raise CheckFailure("Windows app source-bound lock is malformed") from None
-    return windows_installed_app_graph(value, lock, source=source, root=root)
+    return windows_installed_app_graph(value, lock, source=source, root=root,
+                                       publication=windows_runtime_publication_profile(context))
 
 
-def windows_installed_app_unit_features(graph: dict) -> dict:
+def windows_installed_helper_metadata(context: dict) -> dict:
+    """Keep the passive app's no-publisher graph separate from setup's helper."""
+    require(windows_installed_publisher_required(context), "Windows helper metadata is profile-only")
+    if windows_runtime_publication_profile(context):
+        return windows_installed_app_metadata(context)
+    root, source = Path(context["root"]), Path(context["source"])
+    value = bounded_json(windows_installed_bytes(root / "helper-metadata.json", 8 << 20), 8 << 20, max_nodes=200000)
+    try:
+        lock = tomllib.loads(windows_installed_bytes(source / WINDOWS_INSTALLED_APP / "Cargo.lock", 8 << 20).decode("utf-8"))
+    except (ValueError, UnicodeError):
+        raise CheckFailure("Windows helper source-bound lock is malformed") from None
+    return windows_installed_app_graph(value, lock, source=source, root=root, publication=True)
+
+
+def windows_installed_app_unit_features(graph: dict, *, helper: bool = False) -> dict:
     """One source-locked platform unit, not a general Cargo feature resolver.
 
     Filtered metadata can retain features unified through inactive platforms.
@@ -8977,6 +13035,12 @@ def windows_installed_app_unit_features(graph: dict) -> dict:
     """
     packages, nodes = graph["packages"], graph["nodes"]
     expected = {key: node["features"] for key, node in nodes.items()}
+    require(type(helper) is bool and (not helper or graph.get("publication") is True),
+            "Windows normal helper feature role differs")
+    if helper:
+        # Cargo metadata includes the app's dev edge. The normal helper MUST
+        # instead produce the exact normal native unit, without its test seam.
+        expected[graph["localIds"]["mrk-windows-installed-native"]] = ["runtime-publication"]
     selected = [key for key in nodes if (packages[key]["name"], packages[key]["version"], packages[key].get("source"))
                 == ("windows-sys", "0.61.2", "registry+https://github.com/rust-lang/crates.io-index")]
     require(len(selected) == 1, "Windows app platform feature package is missing/ambiguous")
@@ -9055,11 +13119,11 @@ def windows_installed_app_unit_features(graph: dict) -> dict:
     return expected
 
 
-def windows_installed_app_test_path(raw: bytes, graph: dict, *, source: Path, root: Path) -> Path:
+def windows_installed_app_test_path(raw: bytes, graph: dict, *, source: Path, root: Path, helper: bool = False) -> Path:
     require(type(raw) is bytes and 0 < len(raw) <= 16 << 20, "Windows app compiler output exceeds its bound")
-    found, finished, script_units = None, False, set()
+    found, finished, script_units, normal_native_units = None, False, set(), 0
     packages, nodes = graph["packages"], graph["nodes"]
-    unit_features = windows_installed_app_unit_features(graph)
+    unit_features = windows_installed_app_unit_features(graph, helper=helper)
     for line in raw.splitlines():
         require(not finished, "Windows app compiler output followed its final result")
         row = bounded_json(line, 2 << 20)
@@ -9082,7 +13146,8 @@ def windows_installed_app_test_path(raw: bytes, graph: dict, *, source: Path, ro
             continue
         target = row.get("target")
         require(type(target) is dict and any(same_compile_json(target, declared) for declared in package["targets"])
-                and target.get("kind") in (["lib"], ["proc-macro"], ["custom-build"])
+                and (target.get("kind") in (["lib"], ["proc-macro"], ["custom-build"])
+                     or helper and key == graph["appId"] and target.get("kind") == ["bin"])
                 and (row.get("manifest_path") is None or row["manifest_path"] == package["manifest_path"]),
                 "Windows app compiler target differs from its active declaration")
         if reason == "compiler-message":
@@ -9091,20 +13156,39 @@ def windows_installed_app_test_path(raw: bytes, graph: dict, *, source: Path, ro
         require(row.get("features") == unit_features[key] and row.get("manifest_path") == package["manifest_path"]
                 and type(profile) is dict and type(profile.get("test")) is bool,
                 "Windows app compiler unit features/source differ")
+        require(not helper or profile["test"] is False, "Windows normal helper contains a test-profile compiler unit")
+        if key == graph["localIds"]["mrk-windows-installed-native"]:
+            require(target.get("kind") == ["lib"] and target.get("crate_types") == ["lib"]
+                    and target.get("name") == "mrk_windows_installed_native"
+                    and target.get("src_path") == str(source / WINDOWS_INSTALLED_CRATE / "src/lib.rs")
+                    and profile["test"] is False, "Windows helper native compiler unit is not its normal library")
+            normal_native_units += 1
         if target["kind"] == ["custom-build"]:
             require(profile["test"] is False, "Windows app build script became a test unit")
             script_units.add(key)
         elif key != graph["appId"]:
             require(profile["test"] is False, "Windows app dependency became an unrelated test unit")
         if row.get("executable") is not None:
-            require(found is None and key == graph["appId"] and target.get("name") == "mobile_release_desktop"
-                    and target.get("kind") == ["lib"] and target.get("crate_types") == ["lib"]
-                    and target.get("src_path") == str(source / WINDOWS_INSTALLED_APP / "src/lib.rs")
-                    and type(profile) is dict and profile.get("test") is True and profile.get("debug_assertions") is True
-                    and row.get("features") == [] and row.get("fresh") is False,
-                    "Windows app original executable is not the one fresh no-feature libtest")
-            found = ordinary_windows_executable(row["executable"], target_root=root / "target")
-    require(finished and found is not None, "Windows app compilation did not identify one original libtest")
+            require(found is None and key == graph["appId"]
+                    and target.get("name") == (WINDOWS_RUNTIME_PUBLICATION_HELPER if helper else "mobile_release_desktop")
+                    and target.get("kind") == (["bin"] if helper else ["lib"])
+                    and target.get("crate_types") == (["bin"] if helper else ["lib"])
+                    and target.get("src_path") == str(source / WINDOWS_INSTALLED_APP /
+                        ("src/bin/windows_runtime_publish.rs" if helper else "src/lib.rs"))
+                    and profile.get("test") is (not helper) and profile.get("debug_assertions") is True
+                    and row.get("features") == unit_features[graph["appId"]] and row.get("fresh") is False,
+                    "Windows app original executable has the wrong fixed role, features or profile")
+            if helper:
+                # Cargo uplifts this normal binary using a hardlink or copy.
+                # Only derive its lexical DATA role here; no filesystem effect
+                # until the ENTIRE successful original stream is validated.
+                found = windows_executable_path(row["executable"], target_root=root / "target")
+                require(found == root / "target" / TARGETS["windows"] / "debug" / (WINDOWS_RUNTIME_PUBLICATION_HELPER + ".exe"),
+                        "Windows normal helper is not the fixed non-libtest artifact")
+            else:
+                found = ordinary_windows_executable(row["executable"], target_root=root / "target")
+    require(finished and found is not None and (not helper or normal_native_units == 1),
+            "Windows app compilation did not identify its original executable and normal native unit")
     return found
 
 
@@ -9123,20 +13207,290 @@ def windows_installed_app_artifact(context: dict) -> dict:
 def windows_installed_app_argv(cargo: str, context: dict) -> list[str]:
     return [cargo, "test", "--locked", "--offline", "--jobs", "1", "--no-default-features", "--target", TARGETS["windows"],
             "--manifest-path", str(Path(context["source"]) / WINDOWS_INSTALLED_APP / "Cargo.toml"),
-            "--target-dir", str(Path(context["root"]) / "target"), "--lib", "--no-run", "--message-format=json"]
+            "--target-dir", str(Path(context["root"]) / "target"),
+            *(["--features", ",".join(windows_installed_features(context, "app"))] if windows_runtime_publication_profile(context) else []),
+            "--lib", "--no-run", "--message-format=json"]
 
 
-def windows_installed_app_libtest(raw: bytes) -> dict:
+def windows_installed_helper_argv(cargo: str, context: dict) -> list[str]:
+    return [cargo, "build", "--locked", "--offline", "--jobs", "1", "--no-default-features", "--target", TARGETS["windows"],
+        "--manifest-path", str(Path(context["source"]) / WINDOWS_INSTALLED_APP / "Cargo.toml"),
+        "--target-dir", str(Path(context["root"]) / "target"), "--features", ",".join(windows_installed_features(context, "helper")),
+        "--bin", WINDOWS_RUNTIME_PUBLICATION_HELPER, "--message-format=json"]
+
+
+def windows_installed_helper_paths(context: dict) -> tuple[Path, Path, Path]:
+    require(windows_installed_publisher_required(context), "The helper artifact requires explicit publication setup")
+    root = Path(context["root"])
+    leaf = WINDOWS_RUNTIME_PUBLICATION_HELPER + ".exe"
+    raw = root / "target" / TARGETS["windows"] / "debug" / leaf
+    copy = root / leaf
+    require(root.is_absolute() and len(str(raw)) <= 1024, "Windows helper fixed root exceeds its bound")
+    windows_executable_path(str(raw), target_root=root / "target")
+    windows_executable_path(str(copy), target_root=root)
+    return raw, copy, root / "helper-compiled-artifact.json"
+
+
+def windows_installed_helper_outputs_absent(context: dict) -> None:
+    """Before the ONE original helper compile; never adopt a stale raw/copy/receipt."""
+    for role, path in zip(("compiler-source", "singleton-copy", "compiled-receipt"), windows_installed_helper_paths(context), strict=True):
+        try:
+            details = path.lstat()
+        except FileNotFoundError:
+            continue
+        except BaseException:
+            windows_installed_helper_refused(role, "outputs-absent")
+            raise
+        windows_installed_helper_refused(role, "outputs-absent", details)
+        raise CheckFailure("Windows helper original output already exists")
+
+
+def windows_installed_helper_messages(context: dict) -> tuple[Path, dict]:
+    raw_path, _, _ = windows_installed_helper_paths(context)
+    root, source = Path(context["root"]), Path(context["source"])
+    stage = "compiler-messages"
+    try:
+        raw = windows_installed_bytes(root / "helper-compile-messages.jsonl", 16 << 20)
+        stage = "compiler-graph"; graph = windows_installed_helper_metadata(context)
+        stage = "compiler-role"
+        path = windows_installed_app_test_path(raw, graph, source=source, root=root, helper=True)
+        require(path == raw_path, "Windows helper compiler DATA role differs")
+    except BaseException:
+        windows_installed_helper_refused("compiler-source", stage)
+        raise
+    return path, {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def windows_installed_helper_refused(role: str, stage: str, details=None) -> None:
+    """Fixed diagnostic projection of the failing observation, never authority."""
+    try:
+        row = {"role": role, "stage": stage, "diagnosticOnly": True}
+        if details is not None:
+            links = getattr(details, "st_nlink", None)
+            attributes = getattr(details, "st_file_attributes", 0 if os.name != "nt" else None)
+            tag = getattr(details, "st_reparse_tag", 0 if os.name != "nt" else None)
+            row.update(regular=stat.S_ISREG(details.st_mode),
+                linkClass=({0: "zero", 1: "one", 2: "two"}.get(links, "other")
+                    if type(links) is int else "unavailable"),
+                reparse=(bool(attributes & 0x400 or tag) if type(attributes) is int and type(tag) is int else None))
+        print("MRK_WINDOWS_HELPER_HANDOFF_REFUSED=" + canonical_json(row).decode("ascii"), flush=True)
+    except BaseException:
+        pass  # Even interrupted diagnostics cannot replace the original failure.
+
+
+def windows_installed_helper_shape(details, *, compiler_source: bool, empty: bool = False, normal_ui_app: bool = False) -> bool:
+    # Actual Windows fields are mandatory on Windows. The POSIX branch supports
+    # inert DATA file-copy contracts, never Windows/native qualification.
+    attributes = getattr(details, "st_file_attributes", 0 if os.name != "nt" else None)
+    tag = getattr(details, "st_reparse_tag", 0 if os.name != "nt" else None)
+    return (type(normal_ui_app) is bool and stat.S_ISREG(details.st_mode) and type(attributes) is int and not attributes & 0x400
+        and type(tag) is int and tag == 0 and type(details.st_nlink) is int
+        and details.st_nlink in ((1, 2) if compiler_source else (1,))
+        and integer_between(details.st_size, 0 if empty else 1, (512 if normal_ui_app else 128) << 20))
+
+
+def windows_installed_helper_open_matches(named, opened) -> bool:
+    if os.name == "nt":
+        # Both fixed leaves are .exe. Normalize ONLY this cross-API comparison;
+        # raw same-API snapshots retain original mode, link count and ChangeTime.
+        return (windows_installed_identity(named, named.st_mode & ~0o111)
+                == windows_installed_identity(opened, opened.st_mode))
+    return windows_installed_state(named) == windows_installed_state(opened)
+
+
+@contextmanager
+def windows_installed_helper_observation(path: Path, *, compiler_source: bool, deadline: float | None = None,
+                                       normal_ui_app: bool = False):
+    """Keep the single original DATA reader through its consumer and actual close."""
+    require(type(normal_ui_app) is bool and (not normal_ui_app or path.name == "mobile-release-kit-desktop.exe"),
+            "Windows normal app reader role differs")
+    role = "compiler-source" if compiler_source else "singleton-copy"
+    stream, failure, close_entered = None, None, False
+    stage, details = "deadline", None
+    gate = lambda: windows_installed_remaining(deadline, 1) if deadline is not None else None
+    try:
+        gate(); stage = "ancestry"; windows_installed_directories(path.parent)
+        stage = "shape"; before = path.lstat(); details = before
+        require(windows_installed_helper_shape(before, compiler_source=compiler_source, normal_ui_app=normal_ui_app), "Windows helper DATA file shape differs")
+        details = None; stage = "deadline"; gate(); stage = "open"; stream = path.open("rb")
+        stage = "opened-shape"; opened = os.fstat(stream.fileno()); details = opened
+        require(windows_installed_helper_shape(opened, compiler_source=compiler_source, normal_ui_app=normal_ui_app), "Windows helper opened DATA shape differs")
+        details = None; stage = "open-identity"
+        require(windows_installed_helper_open_matches(before, opened), "Windows helper DATA changed at open")
+        stage = "deadline"; gate(); stage = "read"; raw = stream.read(before.st_size + 1)
+        require(type(raw) is bytes and len(raw) == before.st_size, "Windows helper DATA length or EOF differs")
+        stage = "descriptor-stable"
+        require(windows_installed_state(os.fstat(stream.fileno())) == windows_installed_state(opened),
+                "Windows helper original DATA descriptor changed")
+        stage = "named-stable"
+        require(windows_installed_state(path.lstat()) == windows_installed_state(before), "Windows helper DATA pathname changed")
+        record = {"path": str(path), "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+            "named": list(windows_installed_state(before)), "descriptor": list(windows_installed_state(opened))}
+        stage = "deadline"; gate(); stage = "consumer"
+        yield raw, record
+        stage = "deadline"; gate(); stage = "descriptor-stable"
+        require(windows_installed_state(os.fstat(stream.fileno())) == windows_installed_state(opened),
+                "Windows helper original DATA descriptor changed after use")
+        stage = "named-stable"
+        require(windows_installed_state(path.lstat()) == windows_installed_state(before), "Windows helper DATA pathname changed after use")
+        stage = "ancestry"; windows_installed_directories(path.parent)
+        stage = "close"; close_entered = True; stream.close()
+        require(stream.closed, "Windows helper original DATA reader is not closed")
+        stage = "deadline"; gate(); stage = "closed-named"
+        require(windows_installed_state(path.lstat()) == windows_installed_state(before), "Windows helper closed DATA pathname changed")
+    except BaseException as error:
+        failure = error
+        if stage != "consumer":
+            windows_installed_helper_refused(role, stage, details)
+        raise
+    finally:
+        if stream is not None and not close_entered:
+            # An entered close is never retried. On an earlier failure, this is
+            # only the normal once-only close of the known original reader.
+            close_entered = True
+            try:
+                stream.close()
+                require(stream.closed, "Windows helper original DATA reader is not closed")
+            except BaseException:
+                windows_installed_helper_refused(role, "close")
+                if failure is None:
+                    raise
+
+
+def windows_installed_helper_copy(path: Path, raw: bytes, source: dict, deadline: float, *, normal_ui_app: bool = False) -> tuple[int, int]:
+    """Exclusive byte writer only; its immutable copy epoch starts AFTER close."""
+    require(type(normal_ui_app) is bool and (not normal_ui_app or path.name == "mobile-release-kit-desktop.exe"),
+            "Windows normal app writer role differs")
+    output, failure, close_entered = None, None, False
+    stage, details = "deadline", None
+    try:
+        windows_installed_remaining(deadline, 1)
+        stage = "ancestry"; windows_installed_directories(path.parent)
+        stage = "deadline"; windows_installed_remaining(deadline, 1)
+        stage = "create"; output = path.open("xb")  # Collision retains every existing object.
+        stage = "writer-shape"; created = os.fstat(output.fileno()); details = created
+        require(windows_installed_helper_shape(created, compiler_source=False, empty=True, normal_ui_app=normal_ui_app) and created.st_size == 0,
+                "Windows helper exclusive writer shape differs")
+        original = (created.st_dev, created.st_ino)
+        details = None; stage = "writer-identity"
+        require(original != tuple(source["descriptor"][:2])
+                and windows_installed_helper_open_matches(path.lstat(), created), "Windows helper writer is not its distinct original")
+        stage = "deadline"; windows_installed_remaining(deadline, 1); stage = "write"
+        written = output.write(raw)
+        require(type(written) is int and written == len(raw), "Windows helper original byte write was incomplete")
+        stage = "deadline"; windows_installed_remaining(deadline, 1)
+        stage = "flush"; output.flush(); stage = "deadline"; windows_installed_remaining(deadline, 1)
+        stage = "writer-shape"; after = os.fstat(output.fileno()); details = after
+        require(windows_installed_helper_shape(after, compiler_source=False, normal_ui_app=normal_ui_app) and after.st_size == len(raw),
+                "Windows helper writer shape changed")
+        details = None; stage = "writer-identity"
+        require((after.st_dev, after.st_ino) == original and windows_installed_helper_open_matches(path.lstat(), after),
+                "Windows helper writer pathname changed")
+        stage = "close"; close_entered = True; output.close()
+        require(output.closed, "Windows helper original copy writer is not closed")
+        stage = "deadline"; windows_installed_remaining(deadline, 1)
+        return original
+    except BaseException as error:
+        failure = error
+        windows_installed_helper_refused("singleton-copy", stage, details)
+        raise
+    finally:
+        if output is not None and not close_entered:
+            close_entered = True
+            try:
+                output.close()
+                require(output.closed, "Windows helper original copy writer is not closed")
+            except BaseException:
+                windows_installed_helper_refused("singleton-copy", "close")
+                if failure is None:
+                    raise
+
+
+def windows_installed_helper_record(source: dict, copy: dict, messages: dict) -> dict:
+    require(source["size"] == copy["size"] and source["sha256"] == copy["sha256"]
+            and source["descriptor"][:2] != copy["descriptor"][:2], "Windows helper source/copy provenance differs")
+    named = copy["named"]
+    return {"path": copy["path"], "size": copy["size"], "sha256": copy["sha256"],
+        # Compatibility only. Full named AND descriptor epochs below remain
+        # authoritative, including Windows ChangeTime absent from this format.
+        "identity": [named[0], named[1], named[4], named[5], named[-1]],
+        "messages": messages, "compilerSource": source,
+        "copySnapshot": {"named": named, "descriptor": copy["descriptor"]}}
+
+
+def windows_installed_helper_handoff(context: dict, deadline: float) -> dict:
+    """Sole creator, called only after original compiler0 and BOTH writers close."""
+    _, destination, _ = windows_installed_helper_paths(context)
+    windows_installed_remaining(deadline, 1)
+    path, messages = windows_installed_helper_messages(context)
+    with windows_installed_helper_observation(path, compiler_source=True, deadline=deadline) as (raw, source):
+        original = windows_installed_helper_copy(destination, raw, source, deadline)
+        with windows_installed_helper_observation(destination, compiler_source=False, deadline=deadline) as (copied, copy):
+            if tuple(copy["descriptor"][:2]) != original or copied != raw:
+                windows_installed_helper_refused("singleton-copy", "readback")
+                raise CheckFailure("Windows helper closed original copy differs")
+            result = windows_installed_helper_record(source, copy, messages)
+    windows_installed_remaining(deadline, 1)
+    return result
+
+
+def windows_installed_helper_artifact(context: dict) -> dict:
+    """Read-only revalidation of the SEALED original; never copy/repair/rebase."""
+    _, destination, receipt = windows_installed_helper_paths(context)
+    saved = closed_object(bounded_json(windows_installed_bytes(receipt, 64 << 10), 64 << 10),
+        {"path", "size", "sha256", "identity", "messages", "compilerSource", "copySnapshot"},
+        "Windows helper original provenance fields differ")
+    path, messages = windows_installed_helper_messages(context)
+    with windows_installed_helper_observation(path, compiler_source=True) as (_, source):
+        with windows_installed_helper_observation(destination, compiler_source=False) as (_, copy):
+            observed = windows_installed_helper_record(source, copy, messages)
+            if not same_compile_json(saved, observed):
+                windows_installed_helper_refused("handoff", "sealed-provenance")
+                raise CheckFailure("Windows helper sealed original source/copy epoch changed")
+    return observed
+
+
+def windows_installed_native_inert(context: dict) -> tuple[str, ...]:
+    return (*WINDOWS_INSTALLED_INERT, *(WINDOWS_RUNTIME_PUBLICATION_NATIVE_INERT if windows_runtime_publication_profile(context) else ()),
+            *(WINDOWS_INSTALLED_PASSIVE_NATIVE_INERT if windows_installed_passive_profile(context) else ()))
+
+
+def windows_installed_native_test_total(context: dict) -> int:
+    """Count the reviewed fixed Rust test sources, without launching/listing a native binary."""
+    require(not windows_normal_ui_profile(context), "UI prerequisite does not use the historical inert selector roster")
+    names = ("tests.rs", "hosted_tests.rs", "ordinary_owner.rs", "qualification_fixture.rs")
+    if windows_runtime_publication_profile(context):
+        names += ("publication.rs",)
+    total = 0
+    for name in names:
+        raw = windows_installed_bytes(Path(context["source"]) / WINDOWS_INSTALLED_CRATE / "src" / name, 512 << 10)
+        total += len(re.findall(rb"(?m)^\s*#\[test\]\s*$", raw))
+        if name == "ordinary_owner.rs":
+            # These exact five wrappers are declared in the shared test source
+            # but compiled only by the separate desktop-ui native profile.
+            ui = re.findall(rb'(?m)^#\[cfg\(feature = "desktop-ui"\)\]\n#\[test\]\n#\[ignore = "[^\n]+"\]\nfn (hosted_normal_ui_[a-z_]+)\(\) -> Result<\(\)> \{', raw)
+            expected = {windows_normal_ui_owner(role).split("::", 1)[1].encode("ascii") for role in WINDOWS_NORMAL_UI_ROLES}
+            require(len(ui) == 5 and set(ui) == expected, "Windows native exact UI-only selector gates differ")
+            total -= len(ui)
+    require(len(windows_installed_native_inert(context)) < total <= 256, "Windows native source-derived test count differs")
+    return total
+
+
+def windows_installed_app_libtest(raw: bytes, *, production: bool = False, passive: bool = False) -> dict:
     require(type(raw) is bytes and 0 < len(raw) <= 64 << 10, "Windows app inert output exceeds its bound")
     try:
         lines = [line.strip() for line in raw.decode("ascii").splitlines() if line.strip()]
     except UnicodeError:
         raise CheckFailure("Windows app inert output is not ASCII") from None
-    require(len(lines) == 13 and lines[0] == "running 11 tests", "Windows app inert selection count differs")
-    match = re.fullmatch(r"test result: ok\. 11 passed; 0 failed; 0 ignored; 0 measured; ([0-9]{1,6}) filtered out; finished in [0-9]+\.[0-9]+s", lines[-1])
+    require(type(production) is bool and type(passive) is bool and not (production and passive), "Windows app inert profile differs")
+    names = (*WINDOWS_INSTALLED_APP_INERT, *(WINDOWS_RUNTIME_PUBLICATION_APP_INERT if production else ()),
+             *(WINDOWS_INSTALLED_PASSIVE_APP_INERT if passive else ()))
+    count = len(names)
+    require(len(lines) == count + 2 and lines[0] == f"running {count} tests", "Windows app inert selection count differs")
+    match = re.fullmatch(r"test result: ok\. " + str(count) + r" passed; 0 failed; 0 ignored; 0 measured; ([0-9]{1,6}) filtered out; finished in [0-9]+\.[0-9]+s", lines[-1])
     require(match is not None, "Windows app inert result differs")
-    windows_installed_libtest(raw, WINDOWS_INSTALLED_APP_INERT, int(match.group(1)))
-    return {"names": list(WINDOWS_INSTALLED_APP_INERT), "passed": 11, "failed": 0, "ignored": 0, "measured": 0,
+    windows_installed_libtest(raw, names, int(match.group(1)))
+    return {"names": list(names), "passed": count, "failed": 0, "ignored": 0, "measured": 0,
             "filteredObserved": int(match.group(1))}
 
 
@@ -9211,7 +13565,8 @@ def windows_installed_artifact(context: dict) -> dict:
                         and type(target) is dict and target.get("name") == "mrk_windows_installed_native"
                         and target.get("kind") == ["lib"] and target.get("crate_types") == ["lib"]
                         and target.get("src_path") == str(source / WINDOWS_INSTALLED_CRATE / "src/lib.rs")
-                        and type(profile) is dict and profile.get("test") is True and message.get("features") == [],
+                        and type(profile) is dict and profile.get("test") is True and message.get("features") == windows_installed_features(context, "native")
+                        and (not windows_installed_prepared_profile(context) or message.get("fresh") is False),
                         "Windows native original test artifact differs")
                 found.append(ordinary_windows_executable(message["executable"], target_root=root / "target"))
     require(finished == 1 and len(found) == 1, "Windows native compilation did not produce exactly one original test")
@@ -9228,7 +13583,9 @@ def windows_installed_artifact(context: dict) -> dict:
 def windows_installed_phase_receipt(context: dict, phase: str, **facts) -> dict:
     return {"scope": WINDOWS_INSTALLED_SCOPE, "phase": phase, "status": "started" if facts.get("claimOnly") is True else "passed",
             "sourceSha": context["sourceSha"], "sourceTree": context["sourceTree"],
-            "runId": context["runId"], "attempt": 1, **facts}
+            "runId": context["runId"], "attempt": 1,
+            **({"qualificationProfile": context["qualificationProfile"]}
+               if windows_installed_prepared_profile(context) or windows_normal_ui_profile(context) else {}), **facts}
 
 
 def windows_installed_libtest(raw: bytes, names: tuple[str, ...], filtered: int, *, native: bool = False) -> dict | None:
@@ -9312,13 +13669,2724 @@ def windows_installed_retain_runtime(context: dict, outcome: str) -> tuple[dict,
     return summary, {"path": filename, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
 
 
+
+def windows_ordinary_path(value: object) -> PureWindowsPath:
+    require(type(value) is str and 0 < len(value) <= 1024 and value.isascii()
+            and not any(ord(char) < 32 or char in '"/%=' for char in value),
+            "Windows ordinary fixed path differs")
+    path = PureWindowsPath(value)
+    require(path.is_absolute() and re.fullmatch(r"[A-Za-z]:", path.drive) is not None
+            and str(path) == value and all(part not in {".", ".."} and ":" not in part
+            and not part.endswith((" ", ".")) for part in path.parts[1:]),
+            "Windows ordinary path is not an exact local spelling")
+    return path
+
+
+def windows_ordinary_wire(stamp: dict) -> str:
+    return ":".join(str(stamp[key]) for key in ("volume", "fileId", "creation", "write", "change", "attributes"))
+
+
+def windows_ordinary_identity(value: object) -> str:
+    require(type(value) is str and len(value) <= 160, "Windows ordinary native identity exceeds its bound")
+    fields = value.split(":")
+    require(len(fields) == 6 and re.fullmatch(r"[0-9a-f]{32}", fields[1]) is not None and fields[1] != "0" * 32
+            and all(re.fullmatch(r"[1-9][0-9]{0,19}", fields[index]) is not None for index in (0, 2, 3, 4, 5))
+            and int(fields[0]) < 2**64 and all(int(fields[index]) < 2**63 for index in (2, 3, 4))
+            and int(fields[5]) < 2**32, "Windows ordinary native identity differs")
+    return value
+
+
+def windows_ordinary_request(context: dict, artifact: dict, identity: str) -> bytes:
+    """Closed DATA binding, not launch authority or an account-operation adapter."""
+    path = windows_ordinary_path(artifact["path"])
+    require(path.parent == windows_ordinary_path(context["root"]) / "target/x86_64-pc-windows-msvc/debug/deps"
+            and re.fullmatch(r"mrk_windows_installed_native-[0-9a-f]{16}\.exe", path.name) is not None
+            and integer_between(artifact["size"], 1, 128 << 20) and sha256_value(artifact["sha256"])
+            and all(type(context[key]) is str and re.fullmatch(r"[0-9a-f]{40}", context[key]) is not None
+                    and context[key] != "0" * 40 for key in ("sourceSha", "sourceTree"))
+            and type(context["runId"]) is str and re.fullmatch(r"[1-9][0-9]{0,19}", context["runId"]) is not None
+            and type(context["attempt"]) is int and context["attempt"] == 1,
+            "Windows ordinary fixed artifact/source/run binding differs")
+    command = '"' + str(path) + '" ' + WINDOWS_INSTALLED_TEST + " --exact --ignored --nocapture --test-threads=1"
+    require(len(command.encode("utf-16-le")) // 2 <= 1023, "Windows original logon command exceeds its native bound")
+    command_sha = hashlib.sha256(command.encode("utf-16-le")).hexdigest()
+    text = ("MRK_WINDOWS_ORDINARY_REQUEST_V1\nsourceSha=" + context["sourceSha"]
+            + "\nsourceTree=" + context["sourceTree"] + "\nrunId=" + context["runId"]
+            + "\nattempt=1\nartifact=" + str(path) + "\nartifactBytes=" + str(artifact["size"])
+            + "\nartifactSha256=" + artifact["sha256"] + "\ncommandSha256=" + command_sha
+            + "\nartifactIdentity=" + windows_ordinary_identity(identity) + "\n")
+    raw = text.encode("ascii")
+    require(0 < len(raw) <= 4096, "Windows ordinary request exceeds its bound")
+    return raw
+
+
+def windows_fullwalk_file_identity(value: object) -> dict:
+    require(type(value) is str and len(value) <= 53, "Windows fullwalk original identity exceeds its bound")
+    fields = value.split(":")
+    require(len(fields) == 2 and re.fullmatch(r"[1-9][0-9]{0,19}", fields[0]) is not None
+            and int(fields[0]) < 2**64 and re.fullmatch(r"[0-9a-f]{32}", fields[1]) is not None
+            and fields[1] != "0" * 32, "Windows fullwalk full128 original identity differs")
+    return {"volume": int(fields[0]), "fileId": fields[1]}
+
+
+def windows_normal_ui_version(value: object) -> bool:
+    return (type(value) is str and 0 < len(value) <= 64
+            and re.fullmatch(r"[0-9]{1,10}(?:\.[0-9]{1,10}){1,5}", value) is not None)
+
+
+def windows_normal_ui_owner(role: str) -> str:
+    require(type(role) is str and role in WINDOWS_NORMAL_UI_ROLES, "Windows normal UI role differs")
+    return "ordinary_owner::hosted_normal_ui_" + WINDOWS_NORMAL_UI_ROLES[role][1] + "_original_handle_contract"
+
+
+def windows_normal_ui_request_data(raw: bytes, *, root: str) -> dict:
+    """Closed DATA only; neither a probe nor these fields transfer launch authority."""
+    require(type(raw) is bytes and 0 < len(raw) <= 4096 and raw.isascii() and raw.endswith(b"\n")
+            and all(byte == 10 or 32 <= byte <= 126 for byte in raw), "Windows normal UI request envelope differs")
+    lines = raw[:-1].decode("ascii").split("\n")
+    require(len(lines) == 36 and lines[0] == "MRK_WINDOWS_NORMAL_UI_REQUEST_V1", "Windows normal UI request header/count differs")
+    row = {}
+    for line, key in zip(lines[1:], WINDOWS_NORMAL_UI_REQUEST_FIELDS, strict=True):
+        name, separator, value = line.partition("=")
+        require(name == key and separator == "=" and value and "=" not in value, "Windows normal UI request field/order differs")
+        row[key] = value
+    role = row["role"]
+    require(role in WINDOWS_NORMAL_UI_ROLES and row["test"] == WINDOWS_NORMAL_UI_ROLES[role][0]
+            and row["attempt"] == "1" and windows_normal_ui_version(row["appVersion"])
+            and all(re.fullmatch(r"[0-9a-f]{40}", row[key]) is not None and row[key] != "0" * 40
+                    for key in ("sourceSha", "sourceTree")), "Windows normal UI request role/source/version differs")
+    windows_fullwalk_number(row["runId"], 2**64 - 1, minimum=1)
+    base = windows_ordinary_path(root)
+    require(base.name == "mrk-windows-installed-native-" + row["runId"] + "-1", "Windows normal UI request root differs")
+    probe = role == "prerequisite"
+    runtime_keys = WINDOWS_FULLWALK_REQUEST_FIELDS[22:34]
+    require(not probe or all(row[key] == "-" for key in runtime_keys), "Windows prerequisite cannot claim a prepared runtime")
+    for key, value in row.items():
+        if key.endswith("Sha256") and not (probe and key in runtime_keys):
+            require(sha256_value(value), "Windows normal UI request digest differs")
+    bounds = {"appArtifactBytes": (128 if probe else 512) << 20, "ownerArtifactBytes": 128 << 20,
+              "appCompileMessagesBytes": 16 << 20, "ownerCompileMessagesBytes": 16 << 20}
+    if not probe:
+        bounds.update(payloadFiles=2047, payloadBytes=1 << 30, publicationReceiptBytes=64 << 10)
+    for key, limit in bounds.items():
+        row[key] = windows_fullwalk_number(row[key], limit, minimum=1)
+    row["attempt"] = 1
+    identities = []
+    for selected in ("app", "owner"):
+        path = windows_ordinary_path(row[selected + "Artifact"])
+        prefix = ("mrk_windows_installed_native" if selected == "owner" or probe else "installed_shell_observation")
+        if selected == "app" and role == "normal-smoke":
+            require(path == base / "mobile-release-kit-desktop.exe",
+                    "Windows normal binary artifact path differs")
+        else:
+            require(path.parent == base / "target/x86_64-pc-windows-msvc/debug/deps"
+                    and re.fullmatch(prefix + r"-[0-9a-f]{16}\.exe", path.name) is not None,
+                    "Windows normal UI original artifact role/path differs")
+        identity = windows_ordinary_identity(row[selected + "ArtifactIdentity"])
+        identities.append(identity.split(":")[:2])
+        command = '"' + str(path) + '"'
+        if selected == "owner" or probe:
+            command += " " + (windows_normal_ui_owner(role) if selected == "owner" else row["test"])
+            command += " --exact --ignored --nocapture --test-threads=1"
+        encoded = command.encode("utf-16-le")
+        require(len(encoded) // 2 <= 1023 and hashlib.sha256(encoded).hexdigest() == row[selected + "CommandSha256"],
+                "Windows normal UI original command differs")
+    if probe:
+        require(all(row["app" + suffix] == row["owner" + suffix] for suffix in (
+            "Artifact", "ArtifactBytes", "ArtifactSha256", "ArtifactIdentity", "CompileMessagesBytes",
+            "CompileMessagesSha256", "CompileArgvSha256")), "Windows probe must use the same native artifact/compiler original")
+    else:
+        require(identities[0] != identities[1], "Windows UI app and owner alias one original")
+        originals = [windows_fullwalk_file_identity(row[key]) for key in WINDOWS_FULLWALK_REQUEST_FIELDS[-4:]]
+        require(len({item["volume"] for item in originals}) == 1 and len({item["fileId"] for item in originals}) == 4,
+                "Windows normal UI runtime originals alias/cross volumes")
+    return row
+
+
+def windows_normal_ui_probe_request(context: dict, artifact: dict, identity: str, argv_sha: str, version: str) -> bytes:
+    require(windows_normal_ui_profile(context), "Windows UI probe request requires its explicit profile")
+    role = "prerequisite"
+    values = {"role": role, "test": WINDOWS_NORMAL_UI_ROLES[role][0],
+              **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")},
+              **dict.fromkeys(WINDOWS_FULLWALK_REQUEST_FIELDS[22:34], "-"), "appVersion": version}
+    for selected, test in (("app", values["test"]), ("owner", windows_normal_ui_owner(role))):
+        command = '"' + artifact["path"] + '" ' + test + " --exact --ignored --nocapture --test-threads=1"
+        values.update({selected + "Artifact": artifact["path"], selected + "ArtifactBytes": artifact["size"],
+            selected + "ArtifactSha256": artifact["sha256"], selected + "ArtifactIdentity": identity,
+            selected + "CommandSha256": hashlib.sha256(command.encode("utf-16-le")).hexdigest(),
+            selected + "CompileMessagesBytes": artifact["messages"]["size"],
+            selected + "CompileMessagesSha256": artifact["messages"]["sha256"], selected + "CompileArgvSha256": argv_sha})
+    require(type(context["attempt"]) is int and type(context["runId"]) is str
+            and type(artifact["size"]) is int and type(artifact["messages"]["size"]) is int,
+            "Windows normal UI probe original scalar types differ")
+    raw = ("MRK_WINDOWS_NORMAL_UI_REQUEST_V1\n" + "".join(
+        key + "=" + str(values[key]) + "\n" for key in WINDOWS_NORMAL_UI_REQUEST_FIELDS)).encode("ascii")
+    windows_normal_ui_request_data(raw, root=context["root"])
+    return raw
+
+
+WINDOWS_NORMAL_UI_REFUSAL_STAGES = (
+    "version-getter", "version-text", "stable-version", "path-decode", "path-depth", "runtime-root-decode",
+    "runtime-ancestry", "mapping-before", "root-reserve", "root-open", "root-metadata", "child-open",
+    "child-metadata", "identity-alias", "local-ntfs", "alternate-streams", "runtime-security", "mapping-after",
+    "recheck-metadata", "recheck-identity", "recheck-security",
+)
+WINDOWS_NORMAL_UI_REFUSAL_OPERATIONS = {
+    "version-getter": {"webview-version"}, "mapping-before": {"dos-mapping"}, "mapping-after": {"dos-mapping"},
+    "root-open": {"open"}, "child-open": {"open", "handle-info"},
+    **dict.fromkeys(("root-metadata", "child-metadata", "recheck-metadata"), {
+        "metadata-basic", "metadata-standard", "metadata-tag", "metadata-id", "metadata-case", "final-name"}),
+    "local-ntfs": {"volume-name", "volume-device"}, "alternate-streams": {"streams"},
+    "runtime-security": {"security"}, "recheck-security": {"security"},
+}
+WINDOWS_NORMAL_UI_REFUSAL_ADMISSION = {
+    "mapping": {"output-bytes", "utf16-width", "utf16-encoding", "drive-shape", "drive-type", "mapping-count",
+                "mapping-size", "mapping-frame", "mapping-device", "mapping-digits"},
+    "directory": {"child-parent", "child-name"}, "handle-info": {"output-bytes", "span", "inherited"},
+    "metadata": {"output-bytes", "span", "text-count", "utf16-width", "utf16-encoding", "terminator", "text-length",
+        "attributes", "metadata-size", "attribute-agreement", "directory-boolean", "delete-pending", "object-kind",
+        "directory-attribute", "file-size", "allocation-size", "file-links", "file-id", "file-type", "case-sensitive", "canonical-name"},
+    "volume": {"output-bytes", "span", "utf16-width", "utf16-encoding", "terminator", "text-length", "volume-name",
+               "volume-device-size", "volume-device-type", "volume-remote"},
+    "streams": {"output-bytes", "span", "utf16-width", "utf16-encoding", "stream-missing", "stream-frame", "stream-name",
+                "stream-size", "stream-allocation", "stream-padding"},
+    **dict.fromkeys(("security-ancestor", "security-version"), {"output-bytes", "output-count", "span", "sid-revision",
+        "sid-count", "sid-extent", "descriptor-size", "descriptor-revision", "descriptor-reserved", "descriptor-control",
+        "descriptor-required", "descriptor-sacl", "owner-offset", "acl-offset", "owner-trust", "acl-revision", "acl-reserved",
+        "acl-size", "acl-count", "owner-acl-overlap", "group-offset", "group-overlap", "ace-type", "ace-size", "ace-sid-size",
+        "ace-flags", "ace-inheritance", "ace-mask", "ace-dangerous-rights"}),
+}
+
+
+def windows_normal_ui_managed_refusal(value: object) -> dict:
+    """Closed original-refusal DATA only; never runtime availability or finality."""
+    value = closed_object(value, {"schemaVersion", "stage", "pathIndex", "cause", "detail", "native", "admission"},
+                          "Windows UI managed refusal fields differ")
+    require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+            and len(canonical_json(value)) <= 768 and type(value["stage"]) is str
+            and value["stage"] in WINDOWS_NORMAL_UI_REFUSAL_STAGES
+            and type(value["cause"]) is str and value["cause"] in ("unavailable", "unsafe", "bounds", "state", "native-failure", "ui-policy")
+            and (value["detail"] is None or type(value["detail"]) is str), "Windows UI managed refusal shape differs")
+    stage, cause, detail = value["stage"], value["cause"], value["detail"]
+    bound = stage in ("local-ntfs", "alternate-streams", "runtime-security", "recheck-metadata", "recheck-identity", "recheck-security")
+    require(integer_between(value["pathIndex"], 0, 47) if bound else value["pathIndex"] is None,
+            "Windows UI managed refusal path original is not bound")
+    if stage == "version-getter":
+        compatible = cause == "native-failure" and detail is None and value["native"] is not None
+    elif stage == "version-text":
+        compatible = cause == "native-failure" and detail in ("text-state", "text-null", "text-empty", "text-utf16", "text-bound")
+    elif stage == "stable-version":
+        compatible = cause == "ui-policy" and detail in ("version-count", "version-empty", "version-width", "version-leading-zero",
+                                                         "version-digits", "version-range", "version-major")
+    elif stage in ("path-depth", "runtime-ancestry", "identity-alias"):
+        compatible = cause == "ui-policy" and detail is None
+    elif stage == "recheck-identity":
+        compatible = cause == "ui-policy" and detail in ("identity", "kind", "attributes", "creation", "file-metadata")
+    elif stage == "mapping-after" and cause == "ui-policy":
+        compatible = detail == "mapping-changed"
+    elif stage in ("path-decode", "runtime-root-decode"):
+        compatible = cause in ("unsafe", "bounds", "state") and detail is None
+    elif stage == "root-reserve":
+        compatible = cause in ("bounds", "state") and detail is None
+    else:
+        compatible = cause in ("unavailable", "unsafe", "bounds", "state") and detail is None
+    require(compatible, "Windows UI managed refusal stage/cause/detail conflict")
+    if value["native"] is not None:
+        native = closed_object(value["native"], {"operation", "domain", "code"}, "Windows UI original native refusal fields differ")
+        require((cause == "unavailable" or stage == "version-getter") and type(native["operation"]) is str
+                and native["operation"] in WINDOWS_NORMAL_UI_REFUSAL_OPERATIONS.get(stage, ()),
+                "Windows UI native refusal belongs to another operation")
+        operation, domain, code = native["operation"], native["domain"], native["code"]
+        if operation == "webview-version":
+            valid = domain == "hresult" and integer_between(code, -(2**31), -1) and code != -2147483638
+        elif operation in ("open", "volume-device", "streams"):
+            valid = domain == "ntstatus" and integer_between(code, -(2**31), 2**31 - 1) and ((code & 0xffffffff) >> 30) == 3
+        else:
+            valid = domain == "win32" and integer_between(code, 0, 2**32 - 1) and code != 997
+        require(valid, "Windows UI native refusal is not a definite original error")
+    if value["admission"] is not None:
+        admission = closed_object(value["admission"], {"operation", "check", "index"}, "Windows UI admission refusal fields differ")
+        allowed = {
+            "mapping-before": ("mapping",), "mapping-after": ("mapping",), "child-open": ("directory", "handle-info"),
+            "root-metadata": ("metadata",), "child-metadata": ("metadata",), "recheck-metadata": ("metadata",),
+            "local-ntfs": ("volume",), "alternate-streams": ("streams",),
+            "runtime-security": ("security-ancestor", "security-version"), "recheck-security": ("security-ancestor", "security-version"),
+        }
+        require(cause == "unsafe" and type(admission["operation"]) is str and admission["operation"] in allowed.get(stage, ())
+                and type(admission["check"]) is str and admission["check"] in WINDOWS_NORMAL_UI_REFUSAL_ADMISSION[admission["operation"]],
+                "Windows UI admission refusal belongs to another predicate")
+        require(admission["index"] is None or admission["operation"] in ("security-ancestor", "security-version")
+                and integer_between(admission["index"], 0, 2047), "Windows UI admission refusal index differs")
+    return dict(value)
+
+
+def windows_normal_ui_child_data(request_raw: bytes, child_raw: bytes, *, root: str, account_sid_sha256: str) -> dict:
+    """A child pre-close record is DATA, never child/owner exit or profile finality."""
+    request = windows_normal_ui_request_data(request_raw, root=root)
+    role = request["role"]
+    require(role != "normal-smoke" and sha256_value(account_sid_sha256), "Windows normal UI child/account role differs")
+    child = bounded_json(child_raw, 4096)
+    require(type(child) is dict and type(child.get("observation")) is dict, "Windows normal UI child observation is absent")
+    observation = child["observation"]
+    if role == "prerequisite":
+        available = observation.get("available")
+        require(type(available) is bool, "Windows UI prerequisite availability type differs")
+        reason, version = observation.get("reason"), observation.get("runtimeVersion")
+        require((available and reason is None and windows_normal_ui_version(version))
+                or (not available and reason in WINDOWS_NORMAL_UI_PROBE_REASONS and version is None),
+                "Windows UI prerequisite result/reason differs")
+        diagnostic = observation.get("managedRuntimeRefusal")
+        if reason == "managed-webview2":
+            diagnostic = windows_normal_ui_managed_refusal(diagnostic)
+            require(re.search(rb":\s*-0(?=\s*[,}])", child_raw) is None,
+                    "Windows UI refusal integer spelling is not canonical")
+        else:
+            require(diagnostic is None, "Windows UI refusal cannot accompany success or another reason")
+        observed = {"available": available, "reason": reason, "ordinaryAccountMatched": True,
+            **dict.fromkeys(("ordinaryContext", "interactiveDesktop", "managedRuntime", "overrideFree", "privateParent"), available),
+            "runtimeVersion": version, "managedRuntimeRefusal": diagnostic, "originalsSettled": True, "noWebviewCreated": True}
+    else:
+        observed = {"runtimeBindingMatched": True, "verifiedMethods": 6 if role == "project-draft" else 0,
+            "checks": list(WINDOWS_NORMAL_UI_CASE_CHECKS[role]), "finality": dict.fromkeys((
+                "dialogsSettled", "sourcesSettled", "passiveOwnersSettled", "documentHooksSettled", "relayJoined", "exitReady"), True)}
+    expected = {"schemaVersion": 1, **{key: request[key] for key in ("sourceSha", "sourceTree", "runId", "attempt", "role")},
+        "requestSha256": hashlib.sha256(request_raw).hexdigest(), "artifactBytes": request["appArtifactBytes"],
+        "artifactSha256": request["appArtifactSha256"], "commandSha256": request["appCommandSha256"],
+        "accountSidSha256": account_sid_sha256, "observation": observed,
+        "resultFile": {"createNew": True, "writeCalls": 1, "closeGate": "original-child-exit-zero-required"}}
+    require(same_compile_json(child, expected), "Windows normal UI child source/account/closed observation differs")
+    return expected
+
+
+def windows_fullwalk_request_data(raw: bytes, *, root: str, passive: bool = False) -> dict:
+    """Closed inert DATA only. A valid request is NOT protected-publication or launch authority."""
+    require(type(passive) is bool, "Windows request role differs")
+    header = "MRK_WINDOWS_INSTALLED_PASSIVE_REQUEST_V1" if passive else "MRK_WINDOWS_FULLWALK_REQUEST_V1"
+    child_test = WINDOWS_INSTALLED_PASSIVE_TEST if passive else WINDOWS_FULLWALK_TEST
+    owner_test = WINDOWS_INSTALLED_PASSIVE_OWNER if passive else WINDOWS_FULLWALK_OWNER
+    require(type(raw) is bytes and 0 < len(raw) <= 4096 and raw.isascii()
+            and raw.endswith(b"\n") and b"\r" not in raw, "Windows fullwalk request envelope differs")
+    lines = raw[:-1].decode("ascii").split("\n")
+    require(len(lines) == 35 and lines[0] == header,
+            "Windows fullwalk request header/count differs")
+    row = {}
+    for line, key in zip(lines[1:], WINDOWS_FULLWALK_REQUEST_FIELDS, strict=True):
+        name, separator, value = line.partition("=")
+        require(name == key and separator == "=" and value != "", "Windows fullwalk request field/order differs")
+        row[key] = value
+    require(row["role"] == ("installed-passive" if passive else "protected-version-fullwalk") and row["test"] == child_test
+            and row["attempt"] == "1" and re.fullmatch(r"[1-9][0-9]{0,19}", row["runId"]) is not None
+            and all(re.fullmatch(r"[0-9a-f]{40}", row[key]) is not None and row[key] != "0" * 40
+                    for key in ("sourceSha", "sourceTree")), "Windows fullwalk fixed source/role/run differs")
+    base = windows_ordinary_path(root)
+    require(base.name == "mrk-windows-installed-native-" + row["runId"] + "-1",
+            "Windows fullwalk request root belongs to another invocation")
+    bounds = {"appArtifactBytes": 512 << 20, "ownerArtifactBytes": 128 << 20,
+              "appCompileMessagesBytes": 16 << 20, "ownerCompileMessagesBytes": 16 << 20,
+              "payloadFiles": 2047, "payloadBytes": 1 << 30, "publicationReceiptBytes": 64 << 10}
+    for key, maximum in bounds.items():
+        require(re.fullmatch(r"[1-9][0-9]{0,19}", row[key]) is not None and int(row[key]) <= maximum,
+                "Windows fullwalk numeric binding exceeds its bound")
+        row[key] = int(row[key])
+    row["attempt"] = 1
+    require(all(sha256_value(value) for key, value in row.items() if key.endswith("Sha256")),
+            "Windows fullwalk digest binding differs")
+    artifact_ids = []
+    for role, basename, test in (("app", "mobile_release_desktop", child_test),
+                                 ("owner", "mrk_windows_installed_native", owner_test)):
+        path = windows_ordinary_path(row[role + "Artifact"])
+        require(str(path.parent) == str(base / "target/x86_64-pc-windows-msvc/debug/deps")
+                and re.fullmatch(basename + r"-[0-9a-f]{16}\.exe", path.name) is not None,
+                "Windows fullwalk original artifact role/path differs")
+        identity = windows_ordinary_identity(row[role + "ArtifactIdentity"])
+        artifact_ids.append(tuple(identity.split(":")[:2]))
+        command = '"' + str(path) + '" ' + test + " --exact --ignored --nocapture --test-threads=1"
+        encoded = command.encode("utf-16-le")
+        require(len(encoded) // 2 <= 1023 and hashlib.sha256(encoded).hexdigest() == row[role + "CommandSha256"],
+                "Windows fullwalk fixed original command differs")
+    require(artifact_ids[0] != artifact_ids[1], "Windows fullwalk app and owner alias one original")
+    identities = [windows_fullwalk_file_identity(row[key]) for key in WINDOWS_FULLWALK_REQUEST_FIELDS[-4:]]
+    require(len({identity["volume"] for identity in identities}) == 1
+            and len({identity["fileId"] for identity in identities}) == 4,
+            "Windows fullwalk version/selected originals alias or cross volumes")
+    return row
+
+
+def windows_fullwalk_request(context: dict, app: dict, owner: dict, *, app_identity: str, owner_identity: str,
+                             app_compile_argv_sha256: str, owner_compile_argv_sha256: str, fixture: dict,
+                             passive: bool = False) -> bytes:
+    """Format previously bound DATA; performs no I/O and cannot publish a fixture or start work."""
+    require(type(passive) is bool and windows_installed_passive_profile(context) == passive,
+            "Windows request formatter profile differs")
+    child_test = WINDOWS_INSTALLED_PASSIVE_TEST if passive else WINDOWS_FULLWALK_TEST
+    owner_test = WINDOWS_INSTALLED_PASSIVE_OWNER if passive else WINDOWS_FULLWALK_OWNER
+    closed_object(fixture, set(WINDOWS_FULLWALK_REQUEST_FIELDS[22:]), "Windows fullwalk fixture DATA fields differ")
+    row = {"role": "installed-passive" if passive else "protected-version-fullwalk", "test": child_test,
+           **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")}}
+    require(type(context["attempt"]) is int and type(context["runId"]) is str,
+            "Windows fullwalk original run types differ")
+    for role, artifact, identity, argv_sha, test in (
+        ("app", app, app_identity, app_compile_argv_sha256, child_test),
+        ("owner", owner, owner_identity, owner_compile_argv_sha256, owner_test),
+    ):
+        path = windows_ordinary_path(artifact["path"])
+        messages = closed_object(artifact["messages"], {"size", "sha256"}, "Windows fullwalk compiler binding fields differ")
+        require(type(artifact["size"]) is int and type(messages["size"]) is int,
+                "Windows fullwalk original byte-count types differ")
+        command = '"' + str(path) + '" ' + test + " --exact --ignored --nocapture --test-threads=1"
+        row.update({role + "Artifact": str(path), role + "ArtifactBytes": artifact["size"],
+            role + "ArtifactSha256": artifact["sha256"], role + "ArtifactIdentity": identity,
+            role + "CommandSha256": hashlib.sha256(command.encode("utf-16-le")).hexdigest(),
+            role + "CompileMessagesBytes": messages["size"], role + "CompileMessagesSha256": messages["sha256"],
+            role + "CompileArgvSha256": argv_sha})
+    require(all(type(fixture[key]) is int for key in ("payloadFiles", "payloadBytes", "publicationReceiptBytes")),
+            "Windows fullwalk fixture byte/count types differ")
+    row.update(fixture)
+    integer_fields = {"attempt", "payloadFiles", *(key for key in row if key.endswith("Bytes"))}
+    require(all(type(value) is (int if key in integer_fields else str) for key, value in row.items()),
+            "Windows fullwalk request scalar type differs")
+    try:
+        raw = (("MRK_WINDOWS_INSTALLED_PASSIVE_REQUEST_V1\n" if passive else "MRK_WINDOWS_FULLWALK_REQUEST_V1\n")
+               + "".join(key + "=" + str(row[key]) + "\n" for key in WINDOWS_FULLWALK_REQUEST_FIELDS)).encode("ascii")
+    except UnicodeError:
+        raise CheckFailure("Windows fullwalk request is not ASCII") from None
+    windows_fullwalk_request_data(raw, root=context["root"], passive=passive)
+    return raw
+
+
+def windows_fullwalk_child_result(request_raw: bytes, child_raw: bytes, *, root: str, account_sid_sha256: str,
+                                  passive: bool = False) -> dict:
+    """Validate private child DATA, NOT its future close/exit or the owner's finality."""
+    binding = windows_fullwalk_request_data(request_raw, root=root, passive=passive)
+    require(type(child_raw) is bytes and sha256_value(account_sid_sha256), "Windows fullwalk child/account DATA differs")
+    child = bounded_json(child_raw, 4096)
+    observation = child.get("observation") if type(child) is dict else None
+    require(type(observation) is dict and integer_between(observation.get("entries"), binding["payloadFiles"] + 1, 8192),
+            "Windows fullwalk actual aggregate entry count differs")
+    expected = {"schemaVersion": 1, **{key: binding[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")},
+        "requestSha256": hashlib.sha256(request_raw).hexdigest(), "artifactBytes": binding["appArtifactBytes"],
+        "artifactSha256": binding["appArtifactSha256"], "commandSha256": binding["appCommandSha256"],
+        "ownerArtifactSha256": binding["ownerArtifactSha256"], "accountSidSha256": account_sid_sha256,
+        "test": WINDOWS_INSTALLED_PASSIVE_TEST if passive else WINDOWS_FULLWALK_TEST, "observation": {"target": TARGETS["windows"],
+            **{key: binding[key] for key in ("manifestSha256", "protocolSha256", "inventorySha256", "coreSha256")},
+            "files": binding["payloadFiles"], "entries": observation["entries"], "payloadBytes": binding["payloadBytes"],
+            "versionIdentity": windows_fullwalk_file_identity(binding["versionIdentity"]),
+            "selectedIdentities": [windows_fullwalk_file_identity(binding[key]) for key in WINDOWS_FULLWALK_REQUEST_FIELDS[-3:]],
+            "inspectionComplete": True, "bookSettled": True},
+        "resultFile": {"createNew": True, "writeCalls": 1, "closeGate": "original-child-exit-zero-required"}}
+    if passive:
+        facts = closed_object(child.get("passive"), {"completedMethods", "settledOriginalOwners", "payloadImages", "systemImages",
+            "stoppedBeforeClaim", "stoppedOwnedChild", "productionEnabled"}, "Windows passive method/owner DATA differs")
+        require(integer_between(facts["payloadImages"], 22, 33) and integer_between(facts["systemImages"], 1, 31),
+                "Windows installed origin census count differs")
+        expected["passive"] = {"completedMethods": 5, "settledOriginalOwners": 9,
+            "payloadImages": facts["payloadImages"], "systemImages": facts["systemImages"],
+            "stoppedBeforeClaim": True, "stoppedOwnedChild": True, "productionEnabled": False}
+    require(same_compile_json(child, expected), "Windows fullwalk child observation/source/original binding differs")
+    return child
+
+
+def windows_ordinary_original(artifact: dict, *, app_role: bool = False, ui_role: str | None = None) -> str:
+    """Bind descriptor ChangeTime;512MiB only for explicitly fixed app roles."""
+    require(os.name == "nt", "Windows ordinary descriptor observation requires Windows")
+    path = Path(artifact["path"])
+    require(type(app_role) is bool and ui_role in (None, "normal", "observer") and not (app_role and ui_role is not None)
+            and (not app_role or re.fullmatch(r"mobile_release_desktop-[0-9a-f]{16}\.exe", path.name) is not None)
+            and (ui_role != "normal" or path.name == "mobile-release-kit-desktop.exe")
+            and (ui_role != "observer" or re.fullmatch(r"installed_shell_observation-[0-9a-f]{16}\.exe", path.name) is not None),
+            "Windows original app-only artifact role differs")
+    before = path.lstat()
+    identity = (list(windows_installed_state(before)) if app_role or ui_role == "observer"
+                else [before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns])
+    maximum = 512 << 20 if app_role or ui_role is not None else 128 << 20
+    require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and not before.st_file_attributes & 0x400
+            and identity == artifact["identity"] and 0 < before.st_size == artifact["size"] <= maximum,
+            "Windows ordinary original changed before open")
+    with path.open("rb") as stream:
+        original = os.fstat(stream.fileno())
+        # Exactly the existing named-executable/raw-descriptor cross-API rule.
+        # Named ctime is birthtime in this fixed CPython; descriptor ctime is the
+        # native ChangeTime. Both raw observations remain individually intact.
+        require(windows_installed_identity(before, before.st_mode & ~0o111)
+                == windows_installed_identity(original, original.st_mode), "Windows ordinary original changed at open")
+        raw = stream.read(before.st_size + 1)
+        require(windows_installed_state(original) == windows_installed_state(os.fstat(stream.fileno())),
+                "Windows ordinary original changed during read")
+    require(windows_installed_state(before) == windows_installed_state(path.lstat())
+            and len(raw) == artifact["size"] and hashlib.sha256(raw).hexdigest() == artifact["sha256"],
+            "Windows ordinary original byte or named identity changed")
+    ticks = lambda ns: ns // 100 + 116444736000000000
+    identity = windows_ordinary_wire({"volume": original.st_dev, "fileId": original.st_ino.to_bytes(16, "little").hex(),
+        "creation": ticks(original.st_birthtime_ns), "write": ticks(original.st_mtime_ns),
+        "change": ticks(original.st_ctime_ns), "attributes": original.st_file_attributes})
+    return windows_ordinary_identity(identity)
+
+
+def windows_ordinary_stamp(value: object) -> dict:
+    stamp = closed_object(value, {"volume", "fileId", "creation", "write", "change", "size", "allocation", "links", "attributes"},
+                          "Windows ordinary original stamp fields differ")
+    require(integer_between(stamp["volume"], 1, 2**64 - 1)
+            and type(stamp["fileId"]) is str and re.fullmatch(r"[0-9a-f]{32}", stamp["fileId"]) is not None
+            and stamp["fileId"] != "0" * 32
+            and all(integer_between(stamp[key], 1, 2**63 - 1) for key in ("creation", "write", "change"))
+            and all(integer_between(stamp[key], 0, 2**63 - 1) for key in ("size", "allocation"))
+            and type(stamp["links"]) is int and stamp["links"] == 1
+            and integer_between(stamp["attributes"], 1, 2**32 - 1) and not stamp["attributes"] & 0x400,
+            "Windows ordinary original stamp differs")
+    return stamp
+
+
+def windows_ordinary_transitions(value: object, artifact: dict, before_identity: str, after_identity: str,
+                                 *, fullwalk: bool = False, passive: bool = False) -> list[dict]:
+    require(type(fullwalk) is bool and type(passive) is bool and not (fullwalk and passive), "Windows original ACL route differs")
+    roles = ((*WINDOWS_ORDINARY_ACLS[:-1], ("passive-output" if passive else "fullwalk-output", 0x1000a2))
+             if fullwalk or passive else WINDOWS_ORDINARY_ACLS)
+    require(type(value) is list and len(value) == len(roles), "Windows ordinary ACL transition roster differs")
+    identities, public = set(), []
+    for row, (role, mask) in zip(value, roles, strict=True):
+        row = closed_object(row, {"role", "mask", "before", "after", "securityBefore", "securityAfter", "singleExplicitNoninheritingAce"},
+                            "Windows ordinary ACL transition fields differ")
+        before, after = windows_ordinary_stamp(row["before"]), windows_ordinary_stamp(row["after"])
+        require(row["role"] == role and type(row["mask"]) is int and row["mask"] == mask
+                and row["singleExplicitNoninheritingAce"] is True
+                and sha256_value(row["securityBefore"]) and sha256_value(row["securityAfter"])
+                and row["securityBefore"] != row["securityAfter"]
+                and same_compile_json({**before, "change": after["change"]}, after) and after["change"] >= before["change"]
+                and bool(before["attributes"] & 0x10) == (role != "artifact"),
+                "Windows ordinary ACL changed more than its explicit original transition")
+        key = (before["volume"], before["fileId"])
+        require(key not in identities, "Windows ordinary ACL roles aliased the same original")
+        identities.add(key)
+        if role == "artifact":
+            require(before["size"] == artifact["size"] and windows_ordinary_wire(before) == before_identity
+                    and windows_ordinary_wire(after) == after_identity,
+                    "Windows ordinary artifact ChangeTime is not the original authorized ACL transition")
+        public.append({"role": role, "mask": mask, "singleExplicitNoninheritingAce": True, "originalIdentityTransitionChecked": True})
+    return public
+
+
+def windows_ordinary_records(context: dict, artifact: dict, before_identity: str, after_identity: str,
+                             owner_raw: bytes, child_raw: bytes, exit_raw: bytes, outcome: str,
+                             *, intent_raw: bytes | None = None) -> dict:
+    """Only DATA. Original child/owner exits and the separate step close gate are mandatory."""
+    require(outcome == "success" and all(type(raw) is bytes for raw in (owner_raw, child_raw, exit_raw)),
+            "Windows ordinary original owner step or closed DATA differs")
+    request = windows_ordinary_request(context, artifact, before_identity)
+    command_sha = request.decode("ascii").split("\ncommandSha256=", 1)[1].split("\n", 1)[0]
+    binding = {"schemaVersion": 1, "sourceSha": context["sourceSha"], "sourceTree": context["sourceTree"],
+               "runId": context["runId"], "attempt": 1, "artifactBytes": artifact["size"],
+               "artifactSha256": artifact["sha256"], "commandSha256": command_sha}
+    native = {"context": "ordinary-admitted", "contextContracts": 1, "admitted": 1, "refused": 0,
+              "rootContracts": 1, "rootNotExecuted": 0, "primaryOriginals": 1, "absentThreadReceipts": 6,
+              "closedOriginals": 2, "unknown": 0, "bookSettled": True}
+    child = bounded_json(child_raw, 4096)
+    owner = bounded_json(owner_raw, 64 << 10)
+    original_exit = bounded_json(exit_raw, 4096)
+    require(type(owner) is dict and sha256_value(owner.get("accountSidSha256")), "Windows ordinary account binding is missing")
+    child_expected = {**binding, "accountSidSha256": owner["accountSidSha256"], "test": WINDOWS_INSTALLED_TEST,
+        "native": native, "resultFile": {"createNew": True, "writeCalls": 1, "closeGate": "original-child-exit-zero-required"}}
+    require(same_compile_json(child, child_expected), "Windows ordinary child result, counts or source binding differs")
+    exit_expected = {key: binding[key] for key in ("schemaVersion", "sourceSha", "sourceTree", "runId", "attempt", "artifactSha256")}
+    exit_expected.update(ownerTest=WINDOWS_ORDINARY_OWNER, originalWaitReturned=True, exitCode=0,
+                         writerCloseGate="original-owner-step-success-required")
+    require(same_compile_json(original_exit, exit_expected), "Windows ordinary original owner exit/step-close receipt differs")
+    batch = windows_fullwalk_profile(context)
+    require(batch or intent_raw is None, "Windows ordinary-only result has unexpected batch input")
+    aggregate = (windows_fullwalk_ordinary_aggregate(context, artifact, before_identity, request, intent_raw, owner)
+                 if batch else None)
+    ancestors = len(windows_ordinary_path(context["root"]).parents) + 1
+    require(ancestors <= (19 if batch else 24), "Windows ordinary original ancestor count differs")
+    count = ancestors + 8
+    fixed = {**binding, "accountSidSha256": owner["accountSidSha256"], "ownerTest": WINDOWS_ORDINARY_OWNER,
+        "childTest": WINDOWS_INSTALLED_TEST, "createCalls": 1, "createError": None, "firstWait": 0,
+        "originalExitCode": 0, "terminateCalls": 0, "deadlineLatched": False, "unknown": False,
+        "parentBookSettled": True, "inputOriginals": count, "inputOriginalsClosed": count, "freshAccountVerified": True,
+        "onlyUsersMembership": True, "accountRemovedAfterSettlement": True,
+        "nativeResultSha256": hashlib.sha256(child_raw).hexdigest(),
+        "ownerResult": {"createNew": True, "writeCalls": 1, "closeGate": "original-owner-exit-zero-required"},
+        "managedSourceMappingAuthenticated": False, "managedOrdinaryStartAuthorized": False,
+        "protectedFullwalk": False, "productionEnabled": False,
+        **({"aggregate": aggregate} if batch else {})}
+    scalar_keys = {"createReturn", "exitReturn", "processCloseReturn", "threadCloseReturn"}
+    closed_object(owner, {*fixed, *scalar_keys, "aclTransitions"}, "Windows ordinary owner fields differ")
+    require(same_compile_json({key: owner[key] for key in fixed}, fixed)
+            and all(integer_between(owner[key], 1, 2**31 - 1) for key in scalar_keys),
+            "Windows ordinary original create/wait/exit/close/cleanup did not settle successfully")
+    transitions = windows_ordinary_transitions(owner["aclTransitions"], artifact, before_identity, after_identity)
+    # Never publish private account names/SIDs, request/intent, raw handle IDs,
+    # complete native file IDs or ACL images. No captured-child stdout/EOF claim.
+    return {"native": {"sourceSha": context["sourceSha"], **native},
+        "ordinaryOwner": {"test": WINDOWS_ORDINARY_OWNER, "directCreateProcessWithLogonW": True,
+            "originalOwnerExitCode": 0, "originalChildExitCode": 0, "processAndThreadOriginalsClosed": True,
+            "parentBookSettled": True, "inputOriginalsClosed": count, "freshOrdinaryAccount": True,
+            "accountRemovedAfterSettlement": True, "resultFilesClosedBySeparateExitGates": True,
+            "nativeResultSha256": hashlib.sha256(child_raw).hexdigest(), "ownerResultSha256": hashlib.sha256(owner_raw).hexdigest(),
+            "nullDesktopInheritedNoGrant": True, "aclTransitions": transitions},
+        "managedSourceMappingAuthenticated": False, "managedOrdinaryStartAuthorized": False,
+        "protectedFullwalk": False, "productionEnabled": False,
+        **({"ordinaryBatch": {"ordinaryInvocationSha256": aggregate["ordinaryInvocationSha256"],
+            "aggregateBudgetMs": WINDOWS_FULLWALK_AGGREGATE_MS, "originalClockAndIntentBindingsChecked": True}} if batch else {})}
+
+
+def windows_fullwalk_records(context: dict, request_raw: bytes, app_after_identity: str,
+                             owner_raw: bytes, child_raw: bytes, exit_raw: bytes, outcome: str, *,
+                             envelope_raw: bytes, intent_raw: bytes, ordinary_prewrite_tick: int) -> dict:
+    """Closed DATA only; caller also revalidates original prepared/compiler/prerequisite bytes.
+
+    Child DATA, libtest ok-lines and producer pre-close claims cannot satisfy the
+    independent owner/step gates or replace the retained original aggregate.
+    """
+    require(windows_fullwalk_profile(context) and outcome == "success"
+            and all(type(raw) is bytes for raw in (owner_raw, child_raw, exit_raw, envelope_raw, intent_raw)),
+            "Windows fullwalk original owner step or closed DATA differs")
+    request = windows_fullwalk_request_data(request_raw, root=context["root"])
+    require(request["payloadFiles"] == 46
+            and all(same_compile_json(request[key], context[key]) for key in ("sourceSha", "sourceTree", "runId", "attempt")),
+            "Windows fullwalk request belongs to another original source/run/profile")
+    owner = bounded_json(owner_raw, 64 << 10)
+    require(type(owner) is dict and sha256_value(owner.get("accountSidSha256")), "Windows fullwalk account binding is missing")
+    child = windows_fullwalk_child_result(request_raw, child_raw, root=context["root"], account_sid_sha256=owner["accountSidSha256"])
+    binding = {"schemaVersion": 1, **{key: request[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")},
+        "artifactBytes": request["appArtifactBytes"], "artifactSha256": request["appArtifactSha256"],
+        "commandSha256": request["appCommandSha256"], "requestSha256": hashlib.sha256(request_raw).hexdigest(),
+        "ownerArtifactBytes": request["ownerArtifactBytes"], "ownerArtifactSha256": request["ownerArtifactSha256"],
+        "ownerCommandSha256": request["ownerCommandSha256"]}
+    original_exit = bounded_json(exit_raw, 4096)
+    exit_expected = {key: binding[key] for key in ("schemaVersion", "sourceSha", "sourceTree", "runId", "attempt",
+                                                    "artifactSha256", "ownerArtifactSha256", "requestSha256")}
+    exit_expected.update(ownerTest=WINDOWS_FULLWALK_OWNER, originalWaitReturned=True, exitCode=0,
+                         writerCloseGate="original-owner-step-success-required")
+    require(same_compile_json(original_exit, exit_expected), "Windows fullwalk separate original owner exit/step-close gate differs")
+    ancestors = len(windows_ordinary_path(context["root"]).parents) + 1
+    require(ancestors <= 19, "Windows fullwalk retained prerequisites exceed40 original inputs")
+    count = ancestors + 21
+    aggregate = windows_fullwalk_aggregate(context, request, envelope_raw, intent_raw, owner)
+    require(integer_between(ordinary_prewrite_tick, aggregate["originTickMs"], aggregate["entryTickMs"]),
+            "Windows fullwalk entry precedes the original ordinary result prewrite")
+    fixed = {**binding, "accountSidSha256": owner["accountSidSha256"], "ownerTest": WINDOWS_FULLWALK_OWNER,
+        "childTest": WINDOWS_FULLWALK_TEST, "fullwalkEntries": child["observation"]["entries"],
+        "createCalls": 1, "createError": None, "firstWait": 0, "originalExitCode": 0, "terminateCalls": 0,
+        "deadlineLatched": False, "unknown": False, "parentBookSettled": True,
+        "inputOriginals": count, "inputOriginalsClosed": count, "freshAccountVerified": True,
+        "onlyUsersMembership": True, "accountRemovedAfterSettlement": True,
+        "nativeResultSha256": hashlib.sha256(child_raw).hexdigest(),
+        "ownerResult": {"createNew": True, "writeCalls": 1, "closeGate": "original-owner-exit-zero-required"},
+        "managedSourceMappingAuthenticated": False, "managedOrdinaryStartAuthorized": False,
+        "protectedFullwalk": True, "productionEnabled": False, "aggregate": aggregate}
+    scalar_keys = {"createReturn", "exitReturn", "processCloseReturn", "threadCloseReturn"}
+    closed_object(owner, {*fixed, *scalar_keys, "aclTransitions"}, "Windows fullwalk original owner fields differ")
+    require(same_compile_json({key: owner[key] for key in fixed}, fixed)
+            and all(integer_between(owner[key], 1, 2**31 - 1) for key in scalar_keys),
+            "Windows fullwalk original create/wait/exit/close/cleanup did not settle successfully")
+    transitions = windows_ordinary_transitions(owner["aclTransitions"], {"size": request["appArtifactBytes"]},
+        request["appArtifactIdentity"], windows_ordinary_identity(app_after_identity), fullwalk=True)
+    # Export only bounded facts/digests. In particular, no private account,
+    # original file IDs, request paths, raw ACLs, intent or captured-child logs.
+    observed = child["observation"]
+    return {"protectedVersionWalk": {"sourceSha": context["sourceSha"], **{key: observed[key] for key in (
+                "target", "manifestSha256", "protocolSha256", "inventorySha256", "coreSha256", "files", "entries", "payloadBytes",
+                "inspectionComplete", "bookSettled")}, "originalVersionAndSelectedIdentitiesChecked": True},
+        "fullwalkOwner": {"test": WINDOWS_FULLWALK_OWNER, "directCreateProcessWithLogonW": True,
+            "originalOwnerExitCode": 0, "originalChildExitCode": 0, "distinctOriginalAppAndOwnerArtifacts": True,
+            "processAndThreadOriginalsClosed": True, "parentBookSettled": True, "inputOriginalsClosed": count,
+            "freshOrdinaryAccount": True, "accountRemovedAfterSettlement": True, "nullDesktopInheritedNoGrant": True,
+            "resultFilesClosedBySeparateExitGates": True, "aclTransitions": transitions,
+            "nativeResultSha256": hashlib.sha256(child_raw).hexdigest(), "ownerResultSha256": hashlib.sha256(owner_raw).hexdigest()},
+        "managedSourceMappingAuthenticated": False, "managedOrdinaryStartAuthorized": False,
+        "protectedFullwalk": True, "productionEnabled": False,
+        "aggregate": {"aggregateBudgetMs": WINDOWS_FULLWALK_AGGREGATE_MS, "minimumSecondOwnerReserveMs": WINDOWS_FULLWALK_SECOND_FLOOR_MS,
+                      "originalClockAndIntentBindingsChecked": True}}
+
+
+def windows_installed_passive_headless_precheck(context: dict, owner_identity: str) -> dict:
+    require(windows_installed_passive_profile(context), "Windows passive precheck is scope-only")
+    root = Path(context["root"])
+    owner, app, compiled, prepared = windows_fullwalk_compile_bindings(context)
+    require(windows_ordinary_original(owner) == owner_identity, "Windows passive owner original changed")
+    app_identity = windows_ordinary_original(app, app_role=True)
+    helper_identity = windows_ordinary_original(compiled["helperCompiledArtifact"])
+    roster_raw = windows_fullwalk_roster_text(prepared["physical"])
+    raw = windows_fullwalk_precheck_text(context, owner, app, compiled, prepared, owner_identity, app_identity,
+        roster_raw, helper_identity=helper_identity)
+    for name in ("passive-headless-precheck.private.txt", "fullwalk-fixture-roster.private.txt",
+                 *[name for name, _ in WINDOWS_INSTALLED_PASSIVE_PROOFS.values()], "passive-publication-observation.private.txt",
+                 "passive-observer-exit.private.txt", "passive-publication.private.json", "passive-request.txt", "passive-output",
+                 "passive-owner-intent.private.json", "passive-owner-result.private.json", "passive-owner-exit.private.json",
+                 "windows-installed-native-preflight-checks.json", "windows-installed-passive-preflight-checks.json",
+                 "windows-installed-passive-checks.json", *("passive-" + role + "-checks.json" for role in ("stage", "publish", "publication"))):
+        try:
+            (root / name).lstat()
+        except FileNotFoundError:
+            continue
+        raise CheckFailure("Windows passive one-use output is occupied")
+    windows_fullwalk_write(root / "fullwalk-fixture-roster.private.txt", roster_raw, 16 << 10)
+    windows_fullwalk_write(root / "passive-headless-precheck.private.txt", raw, 16 << 10)
+    return {"precheck": {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()},
+            "roster": {"size": len(roster_raw), "sha256": hashlib.sha256(roster_raw).hexdigest()}}
+
+
+def windows_installed_passive_check_precheck(context: dict) -> tuple:
+    require(windows_installed_passive_profile(context), "Windows passive precheck reader is scope-only")
+    root = Path(context["root"])
+    owner, app, compiled, prepared = windows_fullwalk_compile_bindings(context)
+    raw = windows_installed_bytes(root / "passive-headless-precheck.private.txt", 16 << 10)
+    pre = windows_fullwalk_precheck_data(context, raw)
+    roster = windows_installed_bytes(root / "fullwalk-fixture-roster.private.txt", 16 << 10)
+    require(roster == windows_fullwalk_roster_text(prepared["physical"])
+            and raw == windows_fullwalk_precheck_text(context, owner, app, compiled, prepared,
+                pre["ownerArtifactIdentity"], pre["appArtifactIdentity"], roster, helper_identity=pre["helperArtifactIdentity"])
+            and windows_ordinary_original(owner) == pre["ownerArtifactIdentity"]
+            and windows_ordinary_original(compiled["helperCompiledArtifact"]) == pre["helperArtifactIdentity"],
+            "Windows passive original prepared compiler/precheck identities changed")
+    names = windows_installed_native_inert(context)
+    require(windows_installed_bytes(root / "app-inert.stderr", 64 << 10) == b""
+            and windows_installed_bytes(root / "inert.stderr", 64 << 10) == b"", "Windows passive inert diagnostics differ")
+    windows_installed_libtest(windows_installed_bytes(root / "inert.stdout", 64 << 10), names,
+                              windows_installed_native_test_total(context) - len(names))
+    app_inert = windows_installed_app_libtest(windows_installed_bytes(root / "app-inert.stdout", 64 << 10), passive=True)
+    expected = windows_installed_phase_receipt(context, "windows-installed-native-preflight",
+        compiledTest=owner, appCompiledTest=app, inertContracts={"passed": len(names), "failed": 0, "ignored": 0},
+        appInertContracts=app_inert, appOriginalExitCode=0, inertOriginalExitCode=0,
+        originalOutputs={name: windows_installed_record(root / name, 64 << 10)
+            for name in ("app-inert.stdout", "app-inert.stderr", "inert.stdout", "inert.stderr")},
+        artifactNativeIdentity=pre["ownerArtifactIdentity"], nativeNotStarted=True,
+        notVerified=list(WINDOWS_INSTALLED_COMBINED_NOT_VERIFIED),
+        passive={"precheck": {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()},
+                 "roster": {"size": len(roster), "sha256": hashlib.sha256(roster).hexdigest()}})
+    require(same_compile_json(read_bounded_json(root / "windows-installed-native-preflight-checks.json", 64 << 10), expected)
+            and same_compile_json(read_bounded_json(root / "windows-installed-native-started.json", 64 << 10),
+                                  windows_installed_phase_receipt(context, "windows-installed-native", claimOnly=True)),
+            "Windows passive original compile/policy preflight correspondence differs")
+    return pre, raw, roster, owner, app, compiled, prepared
+
+
+def windows_installed_passive_setup_data(context: dict, pre_raw: bytes, roster_raw: bytes, blobs: dict[str, bytes],
+                                       outcomes: dict[str, str], through: str) -> tuple[dict, dict | None]:
+    """Compare original setup DATA; cannot publish, launch, settle or mint custody."""
+    steps = ("stage", "publish", "publication")
+    require(windows_installed_passive_profile(context) and through in steps, "Windows passive setup role differs")
+    index = steps.index(through)
+    keys = ("stage", "stageExit", "helperSuccessExit", "observation", "observerExit")[:(2, 3, 5)[index]]
+    closed_object(blobs, set(keys), "Windows passive original setup inventory differs")
+    require(all(type(raw) is bytes for raw in blobs.values()) and same_compile_json(outcomes, dict.fromkeys(steps[:index + 1], "success")),
+            "Windows passive setup requires each actual separately closed original")
+    pre = windows_fullwalk_precheck_data(context, pre_raw)
+    stage = windows_runtime_publication_observation(context, blobs["stage"], pre_raw, roster_raw, WINDOWS_INSTALLED_PASSIVE_STAGE)
+    windows_runtime_publication_exit(context, blobs["stageExit"], pre_raw, "stage", outcomes["stage"])
+    records = {key: {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()} for key, raw in blobs.items()}
+    facts = {"setupThrough": through, "originalExitCodes": dict.fromkeys(steps[:index + 1], 0),
+        "originalStepClosesChecked": True, "precheckSha256": hashlib.sha256(pre_raw).hexdigest(),
+        "setupEvidence": records, "ownerArtifactSha256": pre["ownerArtifactSha256"],
+        "helperArtifactSha256": pre["helperArtifactSha256"], "normalHelperNotLibtest": True,
+        "actualFixedProducerObserved": index == 2, "runtimeConsumerEnabled": False, "productionEnabled": False}
+    if index >= 1:
+        windows_runtime_publication_exit(context, blobs["helperSuccessExit"], pre_raw, "helperSuccess", outcomes["publish"])
+    if index != 2:
+        return facts, None
+    observed = windows_runtime_publication_observation(context, blobs["observation"], pre_raw, roster_raw, WINDOWS_INSTALLED_PASSIVE_OBSERVER)
+    windows_runtime_publication_exit(context, blobs["observerExit"], pre_raw, "observe", outcomes["publication"])
+    require(same_compile_json(observed["proofs"], [{"role": role, **records[role]} for role in WINDOWS_INSTALLED_PASSIVE_PROOFS]),
+            "Windows passive observer did not retain these original setup records")
+    windows_runtime_publication_source_unchanged(stage, observed)
+    selected = {item["role"]: item["stamp"] for item in observed["objects"]}
+    identities = {key: str(selected[role]["volume"]) + ":" + selected[role]["fileId"] for key, role in (
+        ("versionIdentity", "version"), ("selectedPythonIdentity", "python/python.exe"),
+        ("selectedBootstrapIdentity", "engine_bootstrap.py"), ("selectedCoreIdentity", "core.zip"))}
+    publication = {"schemaVersion": 1, "profile": WINDOWS_INSTALLED_PASSIVE_PROFILE,
+        **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")},
+        "precheck": {"size": len(pre_raw), "sha256": hashlib.sha256(pre_raw).hexdigest()},
+        "roster": {"size": len(roster_raw), "sha256": hashlib.sha256(roster_raw).hexdigest()},
+        **{key: pre[key] for key in ("manifestSha256", "protocolSha256", "inventorySha256", "coreSha256")},
+        "payloadFiles": 46, "payloadBytes": windows_fullwalk_number(pre["payloadBytes"], 1 << 30, minimum=1),
+        **identities, "setup": {**facts, "sourceObjectsUnchanged": True}, "comparisonDataOnly": True, "productionEnabled": False}
+    return {**facts, "sourceObjectsUnchanged": True, "observedObjects": 103}, publication
+
+
+def windows_installed_passive_setup_evidence(context: dict, through: str, *, finalized: bool) -> tuple:
+    steps = ("stage", "publish", "publication")
+    require(through in steps and type(finalized) is bool, "Windows passive setup evidence role differs")
+    index = steps.index(through)
+    prechecked = windows_installed_passive_check_precheck(context)
+    _, pre_raw, roster_raw, _, _, _, _ = prechecked
+    require(os.environ.get("MRK_WINDOWS_PASSIVE_PREFLIGHT_STEP_OUTCOME") == "success", "Windows passive original preflight did not close")
+    files = {**WINDOWS_INSTALLED_PASSIVE_PROOFS, "observation": ("passive-publication-observation.private.txt", 64 << 10),
+             "observerExit": ("passive-observer-exit.private.txt", 4096)}
+    blobs = {role: windows_installed_bytes(Path(context["root"]) / name, limit)
+             for role, (name, limit) in list(files.items())[:(2, 3, 5)[index]]}
+    outcomes = {role: os.environ.get("MRK_WINDOWS_PASSIVE_" + role.upper() + "_STEP_OUTCOME", "unavailable")
+                for role in steps[:index + 1]}
+    facts, publication = windows_installed_passive_setup_data(context, pre_raw, roster_raw, blobs, outcomes, through)
+    for prior_index, role in enumerate(steps[:index + int(finalized)]):
+        require(os.environ.get("MRK_WINDOWS_PASSIVE_" + role.upper() + "_FINALIZE_STEP_OUTCOME") == "success",
+                "Windows passive prior DATA finalizer did not close")
+        prior_facts, _ = windows_installed_passive_setup_data(context, pre_raw, roster_raw,
+            dict(list(blobs.items())[:(2, 3, 5)[prior_index]]), {step: outcomes[step] for step in steps[:prior_index + 1]}, role)
+        expected = windows_installed_phase_receipt(context, "windows-installed-passive-" + role + "-finalize", **prior_facts)
+        require(same_compile_json(read_bounded_json(Path(context["root"]) / ("passive-" + role + "-checks.json"), 64 << 10), expected),
+                "Windows passive original setup finalizer changed")
+    if finalized and publication is not None:
+        require(windows_installed_bytes(Path(context["root"]) / "passive-publication.private.json", 64 << 10) == canonical_json(publication),
+                "Windows passive fresh-publication comparison receipt changed")
+    return facts, publication, prechecked
+
+
+def windows_installed_passive_stage_finalize(context: dict) -> None:
+    facts, _, _ = windows_installed_passive_setup_evidence(context, "stage", finalized=False)
+    write_json(Path(context["root"]) / "passive-stage-checks.json",
+               windows_installed_phase_receipt(context, "windows-installed-passive-stage-finalize", **facts))
+
+
+def windows_installed_passive_publish_finalize(context: dict) -> None:
+    facts, _, _ = windows_installed_passive_setup_evidence(context, "publish", finalized=False)
+    write_json(Path(context["root"]) / "passive-publish-checks.json",
+               windows_installed_phase_receipt(context, "windows-installed-passive-publish-finalize", **facts))
+
+
+def windows_installed_passive_publication_finalize(context: dict) -> None:
+    facts, publication, _ = windows_installed_passive_setup_evidence(context, "publication", finalized=False)
+    windows_fullwalk_write(Path(context["root"]) / "passive-publication.private.json", canonical_json(publication), 64 << 10)
+    write_json(Path(context["root"]) / "passive-publication-checks.json",
+               windows_installed_phase_receipt(context, "windows-installed-passive-publication-finalize", **facts))
+
+
+def windows_installed_passive_request(context: dict, publication: dict, prechecked: tuple) -> bytes:
+    pre, _, _, owner, app, compiled, _ = prechecked
+    raw = canonical_json(publication)
+    fixture = {key: publication[key] for key in WINDOWS_FULLWALK_REQUEST_FIELDS[22:] if not key.startswith("publicationReceipt")}
+    fixture.update(publicationReceiptBytes=len(raw), publicationReceiptSha256=hashlib.sha256(raw).hexdigest())
+    return windows_fullwalk_request(context, app, owner, app_identity=pre["appArtifactIdentity"], owner_identity=pre["ownerArtifactIdentity"],
+        app_compile_argv_sha256=compiled["appInvocationSha256"], owner_compile_argv_sha256=compiled["invocationSha256"], fixture=fixture, passive=True)
+
+
+def windows_installed_passive_preflight(context: dict) -> None:
+    _, publication, prechecked = windows_installed_passive_setup_evidence(context, "publication", finalized=True)
+    pre, _, _, owner, app, _, _ = prechecked
+    require(windows_ordinary_original(app, app_role=True) == pre["appArtifactIdentity"], "Windows passive prelaunch app original changed")
+    request = windows_installed_passive_request(context, publication, prechecked)
+    root = Path(context["root"])
+    for name in ("passive-request.txt", "passive-output", "passive-owner-intent.private.json", "passive-owner-result.private.json",
+                 "passive-owner-exit.private.json", "windows-installed-passive-preflight-checks.json", "windows-installed-passive-checks.json"):
+        try:
+            (root / name).lstat()
+        except FileNotFoundError:
+            continue
+        raise CheckFailure("Windows passive original launch output is occupied")
+    windows_fullwalk_write(root / "passive-request.txt", request, 4096)
+    facts = {"request": {"size": len(request), "sha256": hashlib.sha256(request).hexdigest()},
+        "publication": windows_installed_record(root / "passive-publication.private.json", 64 << 10),
+        "appArtifactSha256": app["sha256"], "ownerArtifactSha256": owner["sha256"], "nativeNotStarted": True}
+    write_json(root / "windows-installed-passive-preflight-checks.json",
+               windows_installed_phase_receipt(context, "windows-installed-passive", **facts))
+    outputs = ("artifact=" + owner["path"] + "\nartifactSha256=" + owner["sha256"] + "\nappArtifactSha256=" + app["sha256"]
+               + "\nsourceTree=" + context["sourceTree"] + "\nrequestSha256=" + facts["request"]["sha256"] + "\n")
+    with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8", newline="\n") as output:
+        require(output.write(outputs) == len(outputs), "Windows passive direct-owner handoff write is incomplete")
+
+
+def windows_installed_passive_records(context: dict, request_raw: bytes, owner_raw: bytes, child_raw: bytes,
+                                     exit_raw: bytes, intent_raw: bytes, outcome: str, *, app_after_identity: str) -> dict:
+    """Closed DATA from the one actual ordinary owner; no second fullwalk batch."""
+    require(windows_installed_passive_profile(context) and outcome == "success"
+            and all(type(raw) is bytes for raw in (request_raw, owner_raw, child_raw, exit_raw, intent_raw)),
+            "Windows passive original owner/step close is unavailable")
+    request = windows_fullwalk_request_data(request_raw, root=context["root"], passive=True)
+    require(request["payloadFiles"] == 46 and all(same_compile_json(request[key], context[key])
+            for key in ("sourceSha", "sourceTree", "runId", "attempt")), "Windows passive request belongs to another original run")
+    owner = bounded_json(owner_raw, 64 << 10)
+    require(type(owner) is dict and sha256_value(owner.get("accountSidSha256")), "Windows passive account binding is missing")
+    child = windows_fullwalk_child_result(request_raw, child_raw, root=context["root"],
+        account_sid_sha256=owner["accountSidSha256"], passive=True)
+    intent = closed_object(bounded_json(intent_raw, 4096), {"schemaVersion", "sourceSha", "runId", "attempt", "accountName",
+        "freshAccountIntent", "fixedInstalledPassiveChildOnly"}, "Windows passive original intent differs")
+    require(type(intent["accountName"]) is str and re.fullmatch(r"mrk[0-9a-f]{16}", intent["accountName"]) is not None
+            and same_compile_json(intent, {"schemaVersion": 1, "sourceSha": context["sourceSha"],
+                "runId": context["runId"], "attempt": 1, "accountName": intent["accountName"],
+                "freshAccountIntent": True, "fixedInstalledPassiveChildOnly": True}),
+            "Windows passive original account intent is not bound")
+    binding = {"schemaVersion": 1, **{key: request[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")},
+        "artifactBytes": request["appArtifactBytes"], "artifactSha256": request["appArtifactSha256"],
+        "commandSha256": request["appCommandSha256"], "requestSha256": hashlib.sha256(request_raw).hexdigest(),
+        "ownerArtifactBytes": request["ownerArtifactBytes"], "ownerArtifactSha256": request["ownerArtifactSha256"],
+        "ownerCommandSha256": request["ownerCommandSha256"]}
+    exit_expected = {key: binding[key] for key in ("schemaVersion", "sourceSha", "sourceTree", "runId", "attempt",
+        "artifactSha256", "ownerArtifactSha256", "requestSha256")}
+    exit_expected.update(ownerTest=WINDOWS_INSTALLED_PASSIVE_OWNER, originalWaitReturned=True, exitCode=0,
+                         writerCloseGate="original-owner-step-success-required")
+    require(same_compile_json(bounded_json(exit_raw, 4096), exit_expected),
+            "Windows passive separate owner exit/step-close gate differs")
+    count = len(windows_ordinary_path(context["root"]).parents) + 1 + 12
+    require(count <= 40, "Windows passive input originals exceed their unchanged envelope")
+    fixed = {**binding, "accountSidSha256": owner["accountSidSha256"], "ownerTest": WINDOWS_INSTALLED_PASSIVE_OWNER,
+        "childTest": WINDOWS_INSTALLED_PASSIVE_TEST, "fullwalkEntries": child["observation"]["entries"],
+        "createCalls": 1, "createError": None, "firstWait": 0, "originalExitCode": 0, "terminateCalls": 0,
+        "deadlineLatched": False, "unknown": False, "parentBookSettled": True,
+        "inputOriginals": count, "inputOriginalsClosed": count, "freshAccountVerified": True,
+        "onlyUsersMembership": True, "accountRemovedAfterSettlement": True,
+        "nativeResultSha256": hashlib.sha256(child_raw).hexdigest(),
+        "ownerResult": {"createNew": True, "writeCalls": 1, "closeGate": "original-owner-exit-zero-required"},
+        "managedSourceMappingAuthenticated": False, "managedOrdinaryStartAuthorized": False,
+        "protectedFullwalk": False, "installedPassive": True, "ownerAggregateSeconds": 90,
+        "poisonedParentEnvironment": True, "productionEnabled": False}
+    scalars = {"createReturn", "exitReturn", "processCloseReturn", "threadCloseReturn"}
+    closed_object(owner, {*fixed, *scalars, "aclTransitions"}, "Windows passive original owner fields differ")
+    require(same_compile_json({key: owner[key] for key in fixed}, fixed)
+            and all(integer_between(owner[key], 1, 2**31 - 1) for key in scalars),
+            "Windows passive actual create/wait/exit/close/account settlement did not pass")
+    transitions = windows_ordinary_transitions(owner["aclTransitions"], {"size": request["appArtifactBytes"]},
+        request["appArtifactIdentity"], windows_ordinary_identity(app_after_identity), passive=True)
+    observed = child["observation"]
+    # No private paths, account identifiers, original file IDs, raw ACLs or logs.
+    return {"installedPassive": {**{key: observed[key] for key in (
+            "target", "manifestSha256", "protocolSha256", "inventorySha256", "coreSha256", "files", "entries", "payloadBytes",
+            "inspectionComplete", "bookSettled")}, **child["passive"], "originalVersionAndSelectedIdentitiesChecked": True},
+        "passiveOwner": {"test": WINDOWS_INSTALLED_PASSIVE_OWNER, "directCreateProcessWithLogonW": True,
+            "originalOwnerExitCode": 0, "originalChildExitCode": 0, "distinctOriginalAppAndOwnerArtifacts": True,
+            "processAndThreadOriginalsClosed": True, "parentBookSettled": True, "inputOriginalsClosed": count,
+            "freshOrdinaryAccount": True, "accountRemovedAfterSettlement": True, "nullDesktopInheritedNoGrant": True,
+            "resultFilesClosedBySeparateExitGates": True, "aclTransitions": transitions,
+            "ownerAggregateSeconds": 90, "poisonedParentEnvironment": True,
+            "nativeResultSha256": hashlib.sha256(child_raw).hexdigest(), "ownerResultSha256": hashlib.sha256(owner_raw).hexdigest()},
+        "productionEnabled": False, "managedSourceMappingAuthenticated": False, "managedOrdinaryStartAuthorized": False}
+
+
+def windows_installed_passive_observe_final(context: dict) -> dict:
+    _, publication, prechecked = windows_installed_passive_setup_evidence(context, "publication", finalized=True)
+    require(os.environ.get("MRK_WINDOWS_PASSIVE_OWNER_PREFLIGHT_STEP_OUTCOME") == "success",
+            "Windows passive original owner preflight did not close")
+    root = Path(context["root"])
+    _, _, _, owner, app, _, _ = prechecked
+    request = windows_installed_passive_request(context, publication, prechecked)
+    require(windows_installed_bytes(root / "passive-request.txt", 4096) == request, "Windows passive original request changed")
+    expected = windows_installed_phase_receipt(context, "windows-installed-passive",
+        request={"size": len(request), "sha256": hashlib.sha256(request).hexdigest()},
+        publication=windows_installed_record(root / "passive-publication.private.json", 64 << 10),
+        appArtifactSha256=app["sha256"], ownerArtifactSha256=owner["sha256"], nativeNotStarted=True)
+    require(same_compile_json(read_bounded_json(root / "windows-installed-passive-preflight-checks.json", 64 << 10), expected),
+            "Windows passive original request preflight differs")
+    return windows_installed_passive_records(context, request,
+        windows_installed_bytes(root / "passive-owner-result.private.json", 64 << 10),
+        windows_installed_bytes(root / "passive-output" / "passive-result.private.json", 4096),
+        windows_installed_bytes(root / "passive-owner-exit.private.json", 4096),
+        windows_installed_bytes(root / "passive-owner-intent.private.json", 4096),
+        os.environ.get("MRK_WINDOWS_PASSIVE_OWNER_STEP_OUTCOME", "unavailable"),
+        app_after_identity=windows_ordinary_original(app, app_role=True))
+
+
+def windows_installed_passive_finalize(context: dict) -> None:
+    facts = windows_installed_passive_observe_final(context)
+    write_json(Path(context["root"]) / "windows-installed-passive-checks.json",
+        windows_installed_phase_receipt(context, "windows-installed-passive-finalize", **facts,
+            notVerified=list(WINDOWS_INSTALLED_PASSIVE_NOT_VERIFIED)))
+
+
+def windows_installed_passive_retain(context: dict) -> None:
+    """Redacted bounded DATA only. Never run/retry originals, delete or copy private receipts."""
+    require(windows_installed_passive_profile(context), "Windows passive retention profile differs")
+    roles = ("stage", "publish", "publication", "owner")
+    outcomes = {role: os.environ.get("MRK_WINDOWS_PASSIVE_" + role.upper() + "_STEP_OUTCOME", "unavailable") for role in roles}
+    require(all(value in {"success", "failure", "cancelled", "skipped", "unavailable"} for value in outcomes.values()),
+            "Windows passive retained step outcome differs")
+    summary = {"scope": WINDOWS_INSTALLED_SCOPE, "qualificationProfile": WINDOWS_INSTALLED_PASSIVE_PROFILE,
+        **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt", "imageOS", "imageVersion")},
+        "sourceInventorySha256": hashlib.sha256(canonical_json(context["sourceFiles"])).hexdigest(),
+        "productionEnabled": False, "msiQualified": False, "saveQualified": False, "snapshotQualified": False,
+        "retentionOnlyNotNativeSuccess": True, "notVerified": list(WINDOWS_INSTALLED_PASSIVE_NOT_VERIFIED),
+        "results": {role: {"stepOutcome": value, "status": "failed" if value in {"success", "failure"} else "unavailable"}
+                    for role, value in outcomes.items()}}
+    root = Path(context["root"])
+    try:
+        owner, app, compiled, prepared = windows_fullwalk_compile_bindings(context)
+    except (OSError, ValueError, TypeError, KeyError, zipfile.BadZipFile):
+        pass
+    else:
+        summary["buildBindings"] = {"ownerArtifactSha256": owner["sha256"], "appArtifactSha256": app["sha256"],
+            "helperArtifactSha256": compiled["helperCompiledArtifact"]["sha256"],
+            "ownerCompileMessagesSha256": owner["messages"]["sha256"], "appCompileMessagesSha256": app["messages"]["sha256"],
+            "helperCompileMessagesSha256": compiled["helperCompiledArtifact"]["messages"]["sha256"],
+            "anchoredNativeBuilds": 1, "anchoredAppBuilds": 1, "anchoredHelperBuilds": 1,
+            "appFeatures": [], "ownerFeatures": [], "helperFeatures": ["windows-runtime-publisher"],
+            **{key: prepared[key] for key in ("manifestSha256", "protocolSha256", "inventorySha256", "coreSha256", "payloadFiles", "payloadBytes")}}
+    for role in roles:
+        if outcomes[role] != "success" or os.environ.get("MRK_WINDOWS_PASSIVE_" + role.upper() + "_FINALIZE_STEP_OUTCOME") != "success":
+            continue
+        try:
+            if role == "owner":
+                facts = windows_installed_passive_observe_final(context)
+                expected = windows_installed_phase_receipt(context, "windows-installed-passive-finalize", **facts,
+                    notVerified=list(WINDOWS_INSTALLED_PASSIVE_NOT_VERIFIED))
+                require(same_compile_json(read_bounded_json(root / "windows-installed-passive-checks.json", 64 << 10), expected),
+                        "Windows passive retained original finalizer differs")
+            else:
+                facts, _, _ = windows_installed_passive_setup_evidence(context, role, finalized=True)
+        except (OSError, ValueError, TypeError, KeyError, zipfile.BadZipFile):
+            continue
+        summary["results"][role].update(status="passed", facts=facts)
+    summary["combinedPassed"] = "buildBindings" in summary and all(row["status"] == "passed" for row in summary["results"].values())
+    # Fixed compiler labels/source names only; never retain raw compiler text,
+    # account/ACL/full-ID records, private logs, executables or the payload ZIP.
+    diagnostics = {}
+    for stage, filename in (("standalone", "compile-messages.jsonl"), ("app", "app-compile-messages.jsonl"),
+                            ("helper", "helper-compile-messages.jsonl")):
+        try:
+            raw = windows_installed_bytes(root / filename, 16 << 20)
+        except (OSError, ValueError, TypeError):
+            raw = None
+        diagnostics[stage] = windows_installed_compile_failure_data(raw, context, stage)
+    summary["compileDiagnostics"] = diagnostics
+    raw = canonical_json(summary)
+    windows_fullwalk_write(root / "public" / "windows-installed-passive.json", raw, 64 << 10)
+
+
+def windows_ordinary_finalize(context: dict) -> None:
+    # No tools(), source_unchanged(), run(), compiler, account operation or
+    # native worker here. Same-original ownership belongs solely to the ignored
+    # owner test, not to Python's subprocess.run(timeout=...).
+    root = Path(context["root"])
+    production = windows_runtime_publication_profile(context)
+    native_names = windows_installed_native_inert(context)
+    preflight = read_bounded_json(root / "windows-installed-native-preflight-checks.json", 64 << 10)
+    base = windows_installed_phase_receipt(context, "windows-installed-native-preflight")
+    closed_object(preflight, {*base, "compiledTest", "inertContracts", "appCompiledTest", "appInertContracts",
+        "appOriginalExitCode", "originalOutputs", "inertOriginalExitCode", "artifactNativeIdentity", "request",
+        "nativeNotStarted", "notVerified", *({"fullwalk"} if windows_fullwalk_profile(context) else set())},
+        "Windows ordinary preflight fields differ")
+    require(same_compile_json({key: preflight[key] for key in base}, base)
+            and preflight["nativeNotStarted"] is True
+            and same_compile_json(preflight["inertContracts"], {"passed": len(native_names), "failed": 0, "ignored": 0})
+            and type(preflight["appOriginalExitCode"]) is int and preflight["appOriginalExitCode"] == 0
+            and type(preflight["inertOriginalExitCode"]) is int and preflight["inertOriginalExitCode"] == 0
+            and same_compile_json(preflight["notVerified"], list(WINDOWS_INSTALLED_COMBINED_NOT_VERIFIED)),
+            "Windows ordinary original preflight did not pass")
+    require(read_bounded_json(root / "windows-installed-native-started.json", 64 << 10)
+            == windows_installed_phase_receipt(context, "windows-installed-native", claimOnly=True),
+            "Windows ordinary original preflight claim differs")
+    artifact = read_bounded_json(root / "compiled-test.json", 64 << 10)
+    compiled = read_bounded_json(root / "compile-checks.json", 64 << 10)
+    app_artifact = read_bounded_json(root / "app-compiled-test.json", 64 << 10)
+    require(same_compile_json(artifact, preflight["compiledTest"]) and same_compile_json(artifact, compiled["compiledTest"])
+            and type(compiled["originalExitCode"]) is int and compiled["originalExitCode"] == 0
+            and same_compile_json(app_artifact, preflight["appCompiledTest"])
+            and same_compile_json(app_artifact, compiled["appCompiledTest"])
+            and artifact == windows_installed_artifact(context) and app_artifact == windows_installed_app_artifact(context),
+            "Windows ordinary original compile receipts or compiled originals changed")
+    request = windows_ordinary_request(context, artifact, preflight["artifactNativeIdentity"])
+    require(windows_installed_bytes(root / "ordinary-request.txt", 4096) == request
+            and preflight["request"] == {"size": len(request), "sha256": hashlib.sha256(request).hexdigest()},
+            "Windows ordinary original request changed")
+    for filename, record in preflight["originalOutputs"].items():
+        require(filename in ("app-inert.stdout", "app-inert.stderr", "inert.stdout", "inert.stderr")
+                and record == windows_installed_record(root / filename, 64 << 10), "Windows ordinary original inert output changed")
+    require(set(preflight["originalOutputs"]) == {"app-inert.stdout", "app-inert.stderr", "inert.stdout", "inert.stderr"}
+            and windows_installed_bytes(root / "inert.stderr", 64 << 10) == b""
+            and windows_installed_bytes(root / "app-inert.stderr", 64 << 10) == b"", "Windows ordinary inert outputs differ")
+    windows_installed_libtest(windows_installed_bytes(root / "inert.stdout", 64 << 10), native_names,
+                              windows_installed_native_test_total(context) - len(native_names))
+    app_inert = windows_installed_app_libtest(windows_installed_bytes(root / "app-inert.stdout", 64 << 10),
+                                             production=production)
+    require(same_compile_json(app_inert, preflight["appInertContracts"]), "Windows ordinary original app inert counts changed")
+    after_identity = windows_ordinary_original(artifact)
+    batch = windows_fullwalk_profile(context)
+    blobs = {role: windows_installed_bytes(root / WINDOWS_FULLWALK_BLOBS[role][0], WINDOWS_FULLWALK_BLOBS[role][1])
+        for role in ("ordinaryRequest", "ordinaryOwnerResult", "ordinaryChildResult", "ordinaryOwnerExit")}
+    intent_raw = windows_installed_bytes(root / "ordinary-owner-intent.private.json", 4096) if batch else None
+    if batch:
+        require(os.environ.get("MRK_WINDOWS_PUBLISHER_STEP_OUTCOME") == "success"
+                and os.environ.get("MRK_WINDOWS_FIXTURE_FINALIZE_STEP_OUTCOME") == "success",
+                "Windows ordinary batch requires original protected publication finality")
+        pre, pre_raw, roster_raw, checked_owner, checked_app, checked_compile, _ = windows_fullwalk_check_precheck(context)
+        require(pre["ownerArtifactIdentity"] == preflight["artifactNativeIdentity"]
+                and checked_owner == artifact and checked_app == app_artifact
+                and windows_ordinary_original(app_artifact, app_role=True) == pre["appArtifactIdentity"],
+                "Windows ordinary batch precheck/artifact epoch differs")
+        if production:
+            require(windows_ordinary_original(checked_compile["helperCompiledArtifact"]) == pre["helperArtifactIdentity"],
+                    "Windows ordinary producer helper original epoch differs")
+            chain = windows_runtime_publication_chain(context, pre_raw, roster_raw,
+                windows_runtime_publication_blobs(context, "after"), windows_runtime_publication_outcomes("after", finalized=True))
+            require(same_compile_json(read_bounded_json(root / "windows-installed-fixture-checks.json", 64 << 10),
+                windows_installed_phase_receipt(context, "windows-installed-fixture-finalize", **chain["facts"])),
+                "Windows ordinary actual producer finalizer differs")
+        blobs["ordinaryIntent"] = intent_raw
+    facts = windows_ordinary_records(context, artifact, preflight["artifactNativeIdentity"], after_identity,
+        blobs["ordinaryOwnerResult"], blobs["ordinaryChildResult"], blobs["ordinaryOwnerExit"],
+        os.environ.get("MRK_WINDOWS_ORDINARY_OWNER_STEP_OUTCOME", "unavailable"), intent_raw=intent_raw)
+    windows_installed_inputs(context, retention_only=True)
+    require(context["sdk"] == {"version": WINDOWS_SDK_VERSION, "headers": fixed_file_inventory(windows_sdk_root(), WINDOWS_SDK_HEADERS)},
+            "Windows ordinary selected SDK DATA changed")
+    write_json(root / "windows-installed-native-checks.json", windows_installed_phase_receipt(context, "windows-installed-native",
+        compiledTest=artifact, appCompiledTest=app_artifact, inertContracts={"passed": len(native_names), "failed": 0, "ignored": 0},
+        appInertContracts=app_inert, appOriginalExitCode=0, inertOriginalExitCode=0,
+        nativeOriginalExitCode=0, originalProcessWaitReturned=True,
+        **facts, notVerified=list(WINDOWS_INSTALLED_COMBINED_NOT_VERIFIED)))
+    if batch:
+        finality_raw = windows_fullwalk_finality_text(context, pre, artifact, after_identity, blobs,
+            bounded_json(blobs["ordinaryOwnerResult"], 64 << 10))
+        windows_fullwalk_write(root / "fullwalk-ordinary-finality.private.txt", finality_raw, 16 << 10)
+
+
+def windows_normal_ui_app_version(context: dict) -> str:
+    try:
+        manifest = tomllib.loads(windows_installed_bytes(
+            Path(context["source"]) / WINDOWS_INSTALLED_APP / "Cargo.toml", 64 << 10).decode("utf-8"))
+        version = manifest["package"]["version"]
+    except (KeyError, UnicodeError, tomllib.TOMLDecodeError):
+        raise CheckFailure("Windows normal UI app version declaration differs") from None
+    require(windows_normal_ui_version(version), "Windows normal UI app version is not a fixed dotted value")
+    return version
+
+
+def windows_normal_ui_acquired(context: dict) -> tuple[dict, dict]:
+    """Rebind original compiler DATA only; never redo acquisition or execute tools."""
+    root = Path(context["root"])
+    graph = windows_normal_ui_native_metadata(context)
+    compiler = closed_object(read_bounded_json(root / "compiler-tools.json", 64 << 10), {"cargo", "rustc"},
+                             "Windows UI compiler role inventory differs")
+    for role in ("cargo", "rustc"):
+        item = closed_object(compiler[role], {"path", "size", "sha256"}, "Windows UI original compiler fields differ")
+        expected_path = root / "rustup/toolchains" / (RUST + "-" + TARGETS["windows"]) / "bin" / (role + ".exe")
+        require(item["path"] == str(expected_path) and integer_between(item["size"], 1, 128 << 20)
+                and {key: item[key] for key in ("size", "sha256")} == windows_installed_record(expected_path, 128 << 20),
+                "Windows UI original pinned compiler changed")
+    facts = {"rust": RUST, "target": TARGETS["windows"], "nativeFeatures": ["desktop-ui"],
+        "activePackageIds": sorted(graph["nodes"]), "metadata": windows_installed_record(root / "metadata.json", 8 << 20),
+        "compilerTools": windows_installed_record(root / "compiler-tools.json", 64 << 10),
+        "originalExitCode": 0, "nativePrerequisiteOnly": True, "appVersion": windows_normal_ui_app_version(context)}
+    require(same_compile_json(read_bounded_json(root / "acquire-checks.json", 64 << 10),
+                             windows_installed_phase_receipt(context, "acquire", **facts))
+            and same_compile_json(read_bounded_json(root / "acquire-started.json", 64 << 10),
+                                  windows_installed_phase_receipt(context, "acquire", claimOnly=True)),
+            "Windows UI native acquisition/source/original exit binding differs")
+    return compiler, facts
+
+
+def windows_normal_ui_inert_argv(artifact: dict, *, scalar: bool = False) -> list[str]:
+    require(type(scalar) is bool, "Windows UI inert selection role differs")
+    names = WINDOWS_NORMAL_UI_SCALAR_TESTS if scalar else WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS
+    return [artifact["path"], *names, "--exact", "--nocapture", "--test-threads=1"]
+
+
+def windows_normal_ui_inert_output(raw: bytes, *, scalar: bool = False) -> dict:
+    """Observe the real filtered count; never infer coverage from compilation."""
+    require(type(scalar) is bool and type(raw) is bytes and 0 < len(raw) <= 64 << 10 and raw.isascii(),
+            "Windows UI inert output shape differs")
+    names = WINDOWS_NORMAL_UI_SCALAR_TESTS if scalar else WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS
+    lines = [line.strip() for line in raw.decode("ascii").splitlines() if line.strip()]
+    match = re.fullmatch(r"test result: ok\. [0-9]+ passed; 0 failed; 0 ignored; 0 measured; "
+                         r"([0-9]{1,6}) filtered out; finished in [0-9]+\.[0-9]+s", lines[-1]) if lines else None
+    require(match is not None, "Windows UI inert original summary is absent or failed")
+    filtered = int(match.group(1))
+    windows_installed_libtest(raw, names, filtered)
+    return {"tests": list(names), "passed": len(names), "failed": 0, "ignored": 0, "measured": 0, "filtered": filtered}
+
+
+def windows_normal_ui_inert_facts(context: dict, artifact: dict, identity: str, *, scalar: bool = False) -> dict:
+    require(windows_normal_ui_profile(context) and type(scalar) is bool, "Windows UI inert evidence role differs")
+    root = Path(context["root"])
+    prefix = "normal-ui-scalar" if scalar else "normal-ui-native-policy"
+    records, blobs = {}, {}
+    for role in ("stdout", "stderr"):
+        path = root / (prefix + "." + role)
+        before = path.lstat()
+        raw = windows_installed_bytes(path, 64 << 10)
+        require(windows_installed_state(before) == windows_installed_state(path.lstat()),
+                "Windows UI inert original output identity changed")
+        records[role] = {"path": str(path), "identity": list(windows_installed_state(before)),
+                         "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+        blobs[role] = raw
+    require(blobs["stderr"] == b"", "Windows UI inert original emitted unexpected diagnostics")
+    argv = windows_normal_ui_inert_argv(artifact, scalar=scalar)
+    return {"compiledTest": artifact, "artifactNativeIdentity": windows_ordinary_identity(identity),
+        "invocation": argv, "invocationSha256": hashlib.sha256(canonical_json(argv)).hexdigest(),
+        "outputs": records, "result": windows_normal_ui_inert_output(blobs["stdout"], scalar=scalar),
+        "originalExitCode": 0, "originalWaitReturned": True, "originalWritersClosed": True,
+        "inertPolicyOnly": True, "nativeAvailabilityObserved": False, "guiNotStarted": True}
+
+
+def windows_normal_ui_compile_binding(context: dict) -> tuple[dict, dict]:
+    compiler, acquired = windows_normal_ui_acquired(context)
+    root = Path(context["root"])
+    artifact = windows_normal_ui_native_artifact(context)
+    saved = read_bounded_json(root / "compile-checks.json", 64 << 10)
+    require(type(saved) is dict and type(saved.get("inertPolicy")) is dict, "Windows UI original policy regression is absent")
+    # This is the original pre-probe epoch. The probe below separately joins
+    # it to the ONE authorized ACL transition; never adopt a new policy epoch.
+    policy = windows_normal_ui_inert_facts(context, artifact, saved["inertPolicy"].get("artifactNativeIdentity"))
+    facts = {"rust": RUST, "target": TARGETS["windows"], "nativeFeatures": ["desktop-ui"],
+        "compiledTest": artifact, "originalExitCode": 0, "nativePrerequisiteOnly": True,
+        "invocationSha256": hashlib.sha256(canonical_json(windows_fullwalk_native_argv(compiler["cargo"]["path"], context))).hexdigest(),
+        "appVersion": acquired["appVersion"], "inertPolicy": policy}
+    require(same_compile_json(read_bounded_json(root / "compiled-test.json", 64 << 10), artifact)
+            and same_compile_json(saved, windows_installed_phase_receipt(context, "compile", **facts))
+            and same_compile_json(read_bounded_json(root / "compile-started.json", 64 << 10),
+                                  windows_installed_phase_receipt(context, "compile", claimOnly=True)),
+            "Windows UI original native compile/artifact/messages binding differs")
+    return artifact, facts
+
+
+def windows_normal_ui_probe_preflight(context: dict) -> None:
+    root = Path(context["root"])
+    artifact, compiled = windows_normal_ui_compile_binding(context)
+    identity = windows_ordinary_original(artifact)
+    require(identity == compiled["inertPolicy"]["artifactNativeIdentity"],
+            "Windows UI original policy artifact changed before the prerequisite")
+    raw = windows_normal_ui_probe_request(context, artifact, identity, compiled["invocationSha256"], compiled["appVersion"])
+    for suffix in ("request.txt", "output", "owner-intent.private.json", "owner-result.private.json", "owner-exit.private.json"):
+        try:
+            (root / ("normal-ui-prerequisite-" + suffix)).lstat()
+        except FileNotFoundError:
+            continue
+        raise CheckFailure("Windows UI prerequisite original output is occupied")
+    for name in ("windows-normal-ui-prerequisite-checks.json", "windows-normal-ui-prerequisite-finalize-checks.json"):
+        require(not (root / name).exists() and not (root / name).is_symlink(), "Windows UI prerequisite phase output is occupied")
+    windows_fullwalk_write(root / "normal-ui-prerequisite-request.txt", raw, 4096)
+    record = {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+    write_json(root / "windows-normal-ui-prerequisite-checks.json", windows_installed_phase_receipt(context,
+        "windows-normal-ui-prerequisite", request=record, compiledTest=artifact,
+        artifactNativeIdentity=identity, appVersion=compiled["appVersion"], nativeNotStarted=True))
+    with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+        for key, value in (("artifact", artifact["path"]), ("artifactSha256", artifact["sha256"]),
+                           ("sourceTree", context["sourceTree"]), ("requestSha256", record["sha256"]),
+                           ("appVersion", compiled["appVersion"])):
+            output.write(key + "=" + str(value) + "\n")
+
+
+def windows_normal_ui_probe_transitions(value: object, request: dict, after_identity: str) -> list[dict]:
+    require(type(value) is list and len(value) == 7, "Windows UI probe ACL roster differs")
+    identities, public = set(), []
+    for row, (role, mask) in zip(value, WINDOWS_NORMAL_UI_PROBE_ACLS, strict=True):
+        row = closed_object(row, {"role", "mask", "before", "after", "securityBefore", "securityAfter", "singleExplicitNoninheritingAce"},
+                            "Windows UI probe ACL fields differ")
+        before, after = windows_ordinary_stamp(row["before"]), windows_ordinary_stamp(row["after"])
+        require(row["role"] == role and type(row["mask"]) is int and row["mask"] == mask
+                and row["singleExplicitNoninheritingAce"] is True
+                and sha256_value(row["securityBefore"]) and sha256_value(row["securityAfter"])
+                and row["securityBefore"] != row["securityAfter"]
+                and same_compile_json({**before, "change": after["change"]}, after) and after["change"] >= before["change"]
+                and bool(before["attributes"] & 0x10) == (role != "artifact"),
+                "Windows UI probe ACL changed outside the exact original transition")
+        identity = (before["volume"], before["fileId"])
+        require(identity not in identities, "Windows UI probe ACL originals alias")
+        identities.add(identity)
+        if role == "artifact":
+            require(before["size"] == request["appArtifactBytes"]
+                    and windows_ordinary_wire(before) == request["appArtifactIdentity"]
+                    and windows_ordinary_wire(after) == windows_ordinary_identity(after_identity),
+                    "Windows UI probe original artifact transition differs")
+        public.append({"role": role, "mask": mask, "singleExplicitNoninheritingAce": True,
+                       "originalIdentityTransitionChecked": True})
+    return public
+
+
+def windows_normal_ui_probe_records(context: dict, request_raw: bytes, owner_raw: bytes, child_raw: bytes,
+                                    exit_raw: bytes, intent_raw: bytes, outcome: str, *, after_identity: str) -> dict:
+    """Separate original child/owner/step finality. Negative availability remains negative."""
+    require(windows_normal_ui_profile(context) and outcome == "success"
+            and all(type(raw) is bytes for raw in (request_raw, owner_raw, child_raw, exit_raw, intent_raw)),
+            "Windows UI probe original owner/step close is unavailable")
+    request = windows_normal_ui_request_data(request_raw, root=context["root"])
+    require(request["role"] == "prerequisite" and all(same_compile_json(request[key], context[key])
+            for key in ("sourceSha", "sourceTree", "runId", "attempt")), "Windows UI probe belongs to another original run")
+    owner = bounded_json(owner_raw, 64 << 10)
+    require(type(owner) is dict and sha256_value(owner.get("accountSidSha256")), "Windows UI probe original account binding is absent")
+    child = windows_normal_ui_child_data(request_raw, child_raw, root=context["root"], account_sid_sha256=owner["accountSidSha256"])
+    observation = child["observation"]
+    binding = {"schemaVersion": 1, **{key: request[key] for key in ("sourceSha", "sourceTree", "runId", "attempt", "role")},
+               "requestSha256": hashlib.sha256(request_raw).hexdigest()}
+    intent = closed_object(bounded_json(intent_raw, 4096), {*binding, "accountName", "freshAccountIntent", "fixedNormalUiChildOnly"},
+                           "Windows UI probe account intent fields differ")
+    require(type(intent["accountName"] ) is str and re.fullmatch(r"mrk[0-9a-f]{16}", intent["accountName"]) is not None
+            and same_compile_json(intent, {**binding, "accountName": intent["accountName"],
+                                           "freshAccountIntent": True, "fixedNormalUiChildOnly": True}),
+            "Windows UI probe original account intent differs")
+    owner_test = windows_normal_ui_owner("prerequisite")
+    expected_exit = {**binding, "qualificationProfile": WINDOWS_NORMAL_UI_PROFILE,
+        "artifactSha256": request["appArtifactSha256"], "ownerArtifactSha256": request["ownerArtifactSha256"],
+        "ownerTest": owner_test, "originalWaitReturned": True, "exitCode": 0,
+        "writerCloseGate": "original-owner-step-success-required"}
+    require(same_compile_json(bounded_json(exit_raw, 4096), expected_exit), "Windows UI probe separate original owner exit differs")
+    ancestors = len(windows_ordinary_path(context["root"]).parents) + 1
+    require(ancestors <= 16, "Windows UI original ancestor count exceeds native bound")
+    count = ancestors + 9
+    fixed = {**binding, "qualificationProfile": WINDOWS_NORMAL_UI_PROFILE,
+        "artifactBytes": request["appArtifactBytes"], "artifactSha256": request["appArtifactSha256"],
+        "commandSha256": request["appCommandSha256"], "ownerArtifactBytes": request["ownerArtifactBytes"],
+        "ownerArtifactSha256": request["ownerArtifactSha256"], "ownerCommandSha256": request["ownerCommandSha256"],
+        "accountSidSha256": owner["accountSidSha256"], "ownerTest": owner_test, "childTest": request["test"],
+        "createCalls": 1, "createError": None, "firstWait": 0, "originalExitCode": 0, "terminateCalls": 0,
+        "deadlineLatched": False, "unknown": False, "parentBookSettled": True,
+        "inputOriginals": count, "inputOriginalsClosed": count, "freshAccountVerified": True, "onlyUsersMembership": True,
+        "profileAbsentBefore": True, "profileOriginalBound": True, "profileHivesUnloaded": True, "profileDeleteCalls": 1,
+        "profileAbsentAfter": True, "profileOriginalsSettled": True, "accountRemovedAfterProfileSettlement": True,
+        "outputInventoryVerified": True, "observationCompleted": True, "prerequisitesAvailable": observation["available"],
+        "verifiedMethods": 0, "nativeResultSha256": hashlib.sha256(child_raw).hexdigest(), "normalSmoke": None, "fixture": None,
+        "ownerResult": {"createNew": True, "writeCalls": 1, "closeGate": "original-owner-exit-zero-required"}}
+    returns = {"createReturn", "exitReturn", "processCloseReturn", "threadCloseReturn", "profileDeleteReturn"}
+    closed_object(owner, {*fixed, *returns, "aclTransitions"}, "Windows UI probe owner fields differ")
+    require(same_compile_json({key: owner[key] for key in fixed}, fixed)
+            and all(type(owner[key]) is int and -(2**31) <= owner[key] < 2**31 and owner[key] != 0 for key in returns),
+            "Windows UI probe create/wait/close/profile/account finality did not pass")
+    transitions = windows_normal_ui_probe_transitions(owner["aclTransitions"], request, after_identity)
+    return {"observationCompleted": True, "prerequisite": dict(observation), "verifiedMethods": 0,
+        "combinedPassed": False, "guiInstanceAuthorized": False,
+        "originalOwner": {"test": owner_test, "directCreateProcessWithLogonW": True, "logonWithProfile": True,
+            "originalOwnerExitCode": 0, "originalChildExitCode": 0, "processAndThreadOriginalsClosed": True,
+            "inputOriginalsClosed": count, "freshOrdinaryAccount": True, "profileAbsentBefore": True,
+            "profileOriginalBound": True, "profileHivesUnloaded": True, "profileDeleteCalls": 1,
+            "profileAbsentAfter": True, "profileOriginalsSettled": True, "accountRemovedAfterProfileSettlement": True,
+            "parentBookSettled": True, "outputInventoryVerified": True, "resultFilesClosedBySeparateExitGates": True,
+            "ownerAggregateSeconds": 90, "aclTransitions": transitions,
+            "nativeResultSha256": hashlib.sha256(child_raw).hexdigest(), "ownerResultSha256": hashlib.sha256(owner_raw).hexdigest()}}
+
+
+def windows_normal_ui_probe_observe_final(context: dict) -> dict:
+    root = Path(context["root"])
+    require(os.environ.get("MRK_WINDOWS_UI_PREREQUISITE_PREFLIGHT_STEP_OUTCOME") == "success"
+            and os.environ.get("MRK_WINDOWS_UI_PREREQUISITE_OWNER_STEP_OUTCOME") == "success",
+            "Windows UI probe requires its separately closed preflight and original owner step")
+    artifact, compiled = windows_normal_ui_compile_binding(context)
+    preflight = read_bounded_json(root / "windows-normal-ui-prerequisite-checks.json", 64 << 10)
+    require(type(preflight) is dict, "Windows UI probe preflight is absent")
+    identity = windows_ordinary_identity(preflight.get("artifactNativeIdentity"))
+    require(identity == compiled["inertPolicy"]["artifactNativeIdentity"],
+            "Windows UI prerequisite did not retain the original inert-policy epoch")
+    request = windows_normal_ui_probe_request(context, artifact, identity, compiled["invocationSha256"], compiled["appVersion"])
+    expected = windows_installed_phase_receipt(context, "windows-normal-ui-prerequisite",
+        request={"size": len(request), "sha256": hashlib.sha256(request).hexdigest()}, compiledTest=artifact,
+        artifactNativeIdentity=identity, appVersion=compiled["appVersion"], nativeNotStarted=True)
+    require(same_compile_json(preflight, expected)
+            and windows_installed_bytes(root / "normal-ui-prerequisite-request.txt", 4096) == request,
+            "Windows UI probe original request/preflight changed")
+    return windows_normal_ui_probe_records(context, request,
+        windows_installed_bytes(root / "normal-ui-prerequisite-owner-result.private.json", 64 << 10),
+        windows_installed_bytes(root / "normal-ui-prerequisite-output/normal-ui-prerequisite-result.private.json", 4096),
+        windows_installed_bytes(root / "normal-ui-prerequisite-owner-exit.private.json", 4096),
+        windows_installed_bytes(root / "normal-ui-prerequisite-owner-intent.private.json", 4096),
+        os.environ["MRK_WINDOWS_UI_PREREQUISITE_OWNER_STEP_OUTCOME"], after_identity=windows_ordinary_original(artifact))
+
+
+def windows_normal_ui_probe_finalize(context: dict) -> None:
+    facts = windows_normal_ui_probe_observe_final(context)
+    path = Path(context["root"]) / "windows-normal-ui-prerequisite-finalize-checks.json"
+    value = windows_installed_phase_receipt(context, "windows-normal-ui-prerequisite-finalize", status="observed", **facts)
+    write_json(path, value)
+    record = windows_installed_record(path, 64 << 10)
+    with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+        output.write("prerequisitesAvailable=" + ("true" if facts["prerequisite"]["available"] else "false") + "\n")
+        output.write("finalizerSha256=" + record["sha256"] + "\n")
+
+
+def windows_normal_ui_positive_probe(context: dict) -> dict:
+    """Authenticate the SAME cheap owner after its intentional original ACL change.
+
+    A compiler-time named snapshot does not contain descriptor ChangeTime. Keep
+    that original byte/compiler binding, but join its exact pre-probe request to
+    the separately finalized native transition and a freshly opened descriptor.
+    Neither a profile marker nor a current-state adoption authorizes setup.
+    """
+    require(windows_normal_ui_profile(context) and "fullwalkInputs" not in context
+            and os.environ.get("MRK_WINDOWS_UI_PREREQUISITES_AVAILABLE") == "true"
+            and os.environ.get("MRK_WINDOWS_UI_PREREQUISITE_FINALIZE_STEP_OUTCOME") == "success",
+            "Windows UI setup requires independently finalized positive prerequisites")
+    root = Path(context["root"])
+    facts = windows_normal_ui_probe_observe_final(context)
+    require(facts["prerequisite"]["available"] is True, "Windows UI unavailable prerequisites cannot prepare a runtime")
+    finalizer_raw = windows_installed_bytes(root / "windows-normal-ui-prerequisite-finalize-checks.json", 64 << 10)
+    expected = windows_installed_phase_receipt(context, "windows-normal-ui-prerequisite-finalize", status="observed", **facts)
+    require(same_compile_json(bounded_json(finalizer_raw, 64 << 10), expected), "Windows UI positive probe finalizer changed")
+    request_raw = windows_installed_bytes(root / "normal-ui-prerequisite-request.txt", 4096)
+    request = windows_normal_ui_request_data(request_raw, root=context["root"])
+    request_sha, finalizer_sha = hashlib.sha256(request_raw).hexdigest(), hashlib.sha256(finalizer_raw).hexdigest()
+    require(request_sha == os.environ.get("MRK_WINDOWS_UI_PREREQUISITE_REQUEST_SHA256")
+            and finalizer_sha == os.environ.get("MRK_WINDOWS_UI_PREREQUISITE_FINALIZER_SHA256"),
+            "Windows UI positive prerequisite original handoff changed")
+    artifact, compiled = windows_normal_ui_compile_binding(context)
+    owner_raw = windows_installed_bytes(root / "normal-ui-prerequisite-owner-result.private.json", 64 << 10)
+    require(hashlib.sha256(owner_raw).hexdigest() == facts["originalOwner"]["ownerResultSha256"],
+            "Windows UI finalized owner record changed")
+    owner = bounded_json(owner_raw, 64 << 10)
+    identity = windows_ordinary_original(artifact)
+    windows_normal_ui_probe_transitions(owner["aclTransitions"], request, identity)
+    return {"compiledTest": artifact, "artifactNativeIdentity": identity,
+        "artifactAclAfterSha256": owner["aclTransitions"][5]["securityAfter"],
+        "compileInvocationSha256": compiled["invocationSha256"], "appVersion": compiled["appVersion"],
+        "prerequisiteRequest": {"size": len(request_raw), "sha256": request_sha},
+        "prerequisiteFinalizer": {"size": len(finalizer_raw), "sha256": finalizer_sha}}
+
+
+def windows_normal_ui_gui_request(context: dict, role: str, app: dict, app_identity: str, probe: dict,
+                                  invocation_sha: str, publication: dict, publication_raw: bytes) -> bytes:
+    require(windows_normal_ui_profile(context) and role in WINDOWS_NORMAL_UI_GUI_ROLES
+            and canonical_json(publication) == publication_raw and publication.get("profile") == WINDOWS_NORMAL_UI_PROFILE
+            and all(same_compile_json(publication[key], context[key]) for key in ("sourceSha", "sourceTree", "runId", "attempt")),
+            "Windows GUI request requires its exact independently finalized publication")
+    values = {"role": role, "test": WINDOWS_NORMAL_UI_ROLES[role][0], "appVersion": probe["appVersion"],
+        **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")},
+        **{key: publication[key] for key in ("manifestSha256", "protocolSha256", "inventorySha256", "coreSha256",
+            "payloadFiles", "payloadBytes", "versionIdentity", "selectedPythonIdentity", "selectedBootstrapIdentity", "selectedCoreIdentity")},
+        "publicationReceiptBytes": len(publication_raw), "publicationReceiptSha256": hashlib.sha256(publication_raw).hexdigest()}
+    for selected, artifact, identity, argv_sha in (("app", app, app_identity, invocation_sha),
+        ("owner", probe["compiledTest"], probe["artifactNativeIdentity"], probe["compileInvocationSha256"])):
+        command = '"' + artifact["path"] + '"'
+        if selected == "owner":
+            command += " " + windows_normal_ui_owner(role) + " --exact --ignored --nocapture --test-threads=1"
+        values.update({selected + "Artifact": artifact["path"], selected + "ArtifactBytes": artifact["size"],
+            selected + "ArtifactSha256": artifact["sha256"], selected + "ArtifactIdentity": identity,
+            selected + "CommandSha256": hashlib.sha256(command.encode("utf-16-le")).hexdigest(),
+            selected + "CompileMessagesBytes": artifact["messages"]["size"], selected + "CompileMessagesSha256": artifact["messages"]["sha256"],
+            selected + "CompileArgvSha256": argv_sha})
+    raw = ("MRK_WINDOWS_NORMAL_UI_REQUEST_V1\n" + "".join(key + "=" + str(values[key]) + "\n"
+        for key in WINDOWS_NORMAL_UI_REQUEST_FIELDS)).encode("ascii")
+    windows_normal_ui_request_data(raw, root=context["root"])
+    return raw
+
+
+def windows_normal_ui_gui_transitions(value: object, request: dict, after_identity: str) -> list[dict]:
+    role = request["role"]
+    require(role in WINDOWS_NORMAL_UI_GUI_ROLES and type(value) is list, "Windows GUI ACL role differs")
+    extra = (() if role == "normal-smoke" else (("synthetic-project", 0x1200a9), ("synthetic-app", 0x1200a9),
+        ("synthetic-release", 0x1200ab if role == "project-draft" else 0x1200a9),
+        *(("synthetic-input", 0x120089),) * (3 if role == "project-draft" else 4)))
+    require(len(value) == 7 + len(extra), "Windows GUI exact ACL transition inventory differs")
+    public = windows_normal_ui_probe_transitions(value[:7], request, after_identity)
+    identities = {(row["before"]["volume"], row["before"]["fileId"]) for row in value[:7]}
+    for row, (name, mask) in zip(value[7:], extra, strict=True):
+        closed_object(row, {"role", "mask", "before", "after", "securityBefore", "securityAfter", "singleExplicitNoninheritingAce"},
+                      "Windows GUI fixture ACL fields differ")
+        before, after = windows_ordinary_stamp(row["before"]), windows_ordinary_stamp(row["after"])
+        identity = (before["volume"], before["fileId"])
+        require(row["role"] == name and type(row["mask"]) is int and row["mask"] == mask
+                and row["singleExplicitNoninheritingAce"] is True and sha256_value(row["securityBefore"])
+                and sha256_value(row["securityAfter"]) and row["securityBefore"] != row["securityAfter"]
+                and same_compile_json({**before, "change": after["change"]}, after) and after["change"] >= before["change"]
+                and bool(before["attributes"] & 0x10) is (name != "synthetic-input") and identity not in identities,
+                "Windows GUI fixture ACL changed outside its exact original transition")
+        identities.add(identity)
+        public.append({"role": name, "mask": mask, "singleExplicitNoninheritingAce": True, "originalIdentityTransitionChecked": True})
+    return public
+
+
+def windows_normal_ui_gui_records(context: dict, request_raw: bytes, owner_raw: bytes, child_raw: bytes | None,
+                                  exit_raw: bytes, intent_raw: bytes, outcome: str, *, after_identity: str) -> dict:
+    """Each actual account/application/owner closure; never a pre-close success."""
+    require(windows_normal_ui_profile(context) and outcome == "success"
+            and all(type(raw) is bytes for raw in (request_raw, owner_raw, exit_raw, intent_raw)),
+            "Windows GUI original owner step has not independently closed")
+    request = windows_normal_ui_request_data(request_raw, root=context["root"])
+    role = request["role"]
+    require(role in WINDOWS_NORMAL_UI_GUI_ROLES and all(same_compile_json(request[key], context[key])
+            for key in ("sourceSha", "sourceTree", "runId", "attempt")), "Windows GUI request belongs to another run")
+    owner = bounded_json(owner_raw, 64 << 10)
+    require(type(owner) is dict and sha256_value(owner.get("accountSidSha256")), "Windows GUI original account binding is absent")
+    if role == "normal-smoke":
+        require(child_raw is None, "Windows normal smoke cannot consume an app-written automation result")
+        observation = {"mainRootBound": True, "dashboardReady": True, "postCloseCalls": 1, "invokeCalls": 1,
+            "nativeQuitConfirmed": True, "comOriginalsSettled": True, "apartmentDecremented": True}
+        native_sha = None
+    else:
+        require(type(child_raw) is bytes, "Windows GUI original observer result is absent")
+        observation = windows_normal_ui_child_data(request_raw, child_raw, root=context["root"],
+            account_sid_sha256=owner["accountSidSha256"])["observation"]
+        native_sha = hashlib.sha256(child_raw).hexdigest()
+    binding = {"schemaVersion": 1, **{key: request[key] for key in ("sourceSha", "sourceTree", "runId", "attempt", "role")},
+               "requestSha256": hashlib.sha256(request_raw).hexdigest()}
+    intent = closed_object(bounded_json(intent_raw, 4096), {*binding, "accountName", "freshAccountIntent", "fixedNormalUiChildOnly"},
+                           "Windows GUI original account intent fields differ")
+    require(type(intent["accountName"]) is str and re.fullmatch(r"mrk[0-9a-f]{16}", intent["accountName"]) is not None
+            and same_compile_json(intent, {**binding, "accountName": intent["accountName"], "freshAccountIntent": True,
+                "fixedNormalUiChildOnly": True}), "Windows GUI original account intent differs")
+    owner_test = windows_normal_ui_owner(role)
+    expected_exit = {**binding, "qualificationProfile": WINDOWS_NORMAL_UI_PROFILE, "artifactSha256": request["appArtifactSha256"],
+        "ownerArtifactSha256": request["ownerArtifactSha256"], "ownerTest": owner_test, "originalWaitReturned": True, "exitCode": 0,
+        "writerCloseGate": "original-owner-step-success-required"}
+    require(same_compile_json(bounded_json(exit_raw, 4096), expected_exit), "Windows GUI separately closed original owner exit differs")
+    ancestors = len(windows_ordinary_path(context["root"]).parents) + 1
+    require(ancestors <= 16, "Windows GUI original ancestry exceeds its native bound")
+    # Every created fixture file retains BOTH its once-closed CREATE_NEW writer
+    # and its authenticated read original in the native files book. ProjectDraft
+    # also adds the later config reader; lifecycle fixtures start with config.
+    count = ancestors + {"normal-smoke": 11, "project-draft": 22, "quit-passive": 23, "document-loss": 23}[role]
+    fixture = (None if role == "normal-smoke" else {"initialFiles": 3 if role == "project-draft" else 4, "finalFiles": 4,
+        "immutableFilesVerified": 3 if role == "project-draft" else 4, "labelledCreateNew": role == "project-draft",
+        "completeInventoryVerified": True})
+    fixed = {**binding, "qualificationProfile": WINDOWS_NORMAL_UI_PROFILE,
+        "artifactBytes": request["appArtifactBytes"], "artifactSha256": request["appArtifactSha256"], "commandSha256": request["appCommandSha256"],
+        "ownerArtifactBytes": request["ownerArtifactBytes"], "ownerArtifactSha256": request["ownerArtifactSha256"],
+        "ownerCommandSha256": request["ownerCommandSha256"], "accountSidSha256": owner["accountSidSha256"],
+        "ownerTest": owner_test, "childTest": request["test"], "createCalls": 1, "createError": None, "firstWait": 0,
+        "originalExitCode": 0, "terminateCalls": 0, "deadlineLatched": False, "unknown": False, "parentBookSettled": True,
+        "inputOriginals": count, "inputOriginalsClosed": count, "freshAccountVerified": True, "onlyUsersMembership": True,
+        "profileAbsentBefore": True, "profileOriginalBound": True, "profileHivesUnloaded": True, "profileDeleteCalls": 1,
+        "profileAbsentAfter": True, "profileOriginalsSettled": True, "accountRemovedAfterProfileSettlement": True,
+        "outputInventoryVerified": True, "observationCompleted": True, "prerequisitesAvailable": None,
+        "verifiedMethods": 6 if role == "project-draft" else 0, "nativeResultSha256": native_sha,
+        "normalSmoke": observation if role == "normal-smoke" else None, "fixture": fixture,
+        "ownerResult": {"createNew": True, "writeCalls": 1, "closeGate": "original-owner-exit-zero-required"}}
+    returns = {"createReturn", "exitReturn", "processCloseReturn", "threadCloseReturn", "profileDeleteReturn"}
+    closed_object(owner, {*fixed, *returns, "aclTransitions"}, "Windows GUI owner original fields differ")
+    require(same_compile_json({key: owner[key] for key in fixed}, fixed)
+            and all(type(owner[key]) is int and -(2**31) <= owner[key] < 2**31 and owner[key] != 0 for key in returns),
+            "Windows GUI original create/wait/close/profile/account finality did not pass")
+    transitions = windows_normal_ui_gui_transitions(owner["aclTransitions"], request, after_identity)
+    records = {key: {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+        for key, raw in (("request", request_raw), ("owner", owner_raw), ("exit", exit_raw), ("intent", intent_raw))}
+    if child_raw is not None:
+        records["child"] = {"size": len(child_raw), "sha256": native_sha}
+    return {"role": role, "verifiedMethods": fixed["verifiedMethods"], "observation": observation,
+        "accountSidSha256": owner["accountSidSha256"], "accountNameSha256": hashlib.sha256(intent["accountName"].encode("ascii")).hexdigest(),
+        "beforeArtifactIdentity": request["appArtifactIdentity"], "afterArtifactIdentity": after_identity,
+        "artifactAclAfterSha256": owner["aclTransitions"][5]["securityAfter"], "evidence": records,
+        "originalOwner": {"test": owner_test, "directCreateProcessWithLogonW": True, "logonWithProfile": True,
+            "ownerAggregateSeconds": 90, "originalOwnerExitCode": 0, "originalChildExitCode": 0,
+            "processAndThreadOriginalsClosed": True, "inputOriginalsClosed": count, "freshOrdinaryAccount": True,
+            "profileOriginalBound": True, "profileHivesUnloaded": True, "profileDeleteCalls": 1, "profileAbsentAfter": True,
+            "profileOriginalsSettled": True, "accountRemovedAfterProfileSettlement": True,
+            "outputInventoryVerified": True, "resultFilesClosedBySeparateExitGates": True, "fixture": fixture, "aclTransitions": transitions}}
+
+
+def windows_normal_ui_setup_native_metadata(context: dict) -> dict:
+    require(windows_normal_ui_profile(context), "Windows UI runtime setup graph requires its exact profile")
+    root, source = Path(context["root"]), Path(context["source"])
+    value = bounded_json(windows_installed_bytes(root / "normal-ui-setup-metadata.json", 2 << 20), 2 << 20)
+    by_name = windows_installed_native_graph(value, source=source, features=["runtime-publication"])
+    packages = {package["id"]: package for package in by_name.values()}
+    native = by_name["mrk-windows-installed-native"]["id"]
+    require(value.get("workspace_root") == str(source / WINDOWS_INSTALLED_CRATE)
+            and value.get("workspace_members") == [native] and value.get("workspace_default_members") == [native]
+            and value.get("target_directory") == str(root / "target"), "Windows UI setup workspace/target differs")
+    nodes = {node["id"]: node for node in value["resolve"]["nodes"]}
+    for key, node in nodes.items():
+        package = packages[key]
+        require(type(package.get("features")) is dict and type(node.get("features")) is list
+                and all(type(item) is str for item in node["features"])
+                and node["features"] == sorted(set(node["features"]))
+                and set(node["features"]) <= set(package["features"]), "Windows UI setup resolved feature inventory differs")
+        if key != native:
+            manifest = Path(package["manifest_path"])
+            registry = root / "cargo/registry/src"
+            require(manifest.is_absolute() and manifest.is_relative_to(registry)
+                    and len(manifest.relative_to(registry).parts) == 3
+                    and manifest.parent.name == package["name"] + "-" + package["version"] and manifest.name == "Cargo.toml",
+                    "Windows UI setup dependency left private acquisition")
+    return {"packages": packages, "nodes": nodes, "nativeId": native}
+
+
+def windows_normal_ui_setup_native_argv(cargo: str, context: dict) -> list[str]:
+    require(windows_normal_ui_profile(context), "Windows UI setup compiler requires its exact profile")
+    return [cargo, "test", "--locked", "--offline", "--jobs", "1", "--no-default-features", "--target", TARGETS["windows"],
+        "--manifest-path", str(Path(context["source"]) / WINDOWS_INSTALLED_CRATE / "Cargo.toml"),
+        "--target-dir", str(Path(context["root"]) / "target"), "--features", "runtime-publication", "--lib", "--no-run", "--message-format=json"]
+
+
+def windows_normal_ui_setup_native_artifact(context: dict) -> dict:
+    root, source = Path(context["root"]), Path(context["source"])
+    messages = root / "normal-ui-setup-compile-messages.jsonl"
+    path = windows_normal_ui_native_test_path(windows_installed_bytes(messages, 16 << 20),
+        windows_normal_ui_setup_native_metadata(context), source=source, root=root)
+    before = path.lstat()
+    record = windows_installed_record(path, 128 << 20)
+    require(windows_installed_state(before) == windows_installed_state(path.lstat()), "Windows UI setup original artifact changed")
+    return {"path": str(path), **record,
+        "identity": [before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns],
+        "messages": windows_installed_record(messages, 16 << 20)}
+
+
+def windows_normal_ui_setup_distinct(probe: dict, artifact: dict, identity: str) -> None:
+    """Different features are not evidence of different original file objects."""
+    original = probe["compiledTest"]
+    require(windows_ordinary_path(artifact["path"]) != windows_ordinary_path(original["path"])
+            and windows_ordinary_identity(identity).split(":")[:2] != windows_ordinary_identity(probe["artifactNativeIdentity"]).split(":")[:2]
+            and artifact["messages"] != original["messages"], "Windows UI setup must retain a genuinely distinct original artifact/stream")
+
+
+def windows_normal_ui_setup_inputs(context: dict, probe: dict) -> dict:
+    """Separate fixed setup admission; never alter the original UI context."""
+    root = Path(context["root"])
+    value = closed_object(read_bounded_json(root / "normal-ui-setup-inputs.private.json", 64 << 10),
+        {"scope", "phase", "status", "sourceSha", "sourceTree", "runId", "attempt", "qualificationProfile", "retainedProbe", "inputs"},
+        "Windows UI setup original input admission fields differ")
+    inputs = closed_object(value["inputs"], {"pins", "curl"}, "Windows UI setup supplier fields differ")
+    system_root = os.environ.get("SystemRoot", "")
+    require(system_root != "", "Windows UI setup fixed supplier tool root is absent")
+    curl = Path(system_root) / "System32/curl.exe"
+    expected_inputs = {"pins": windows_fullwalk_pins(context), "curl": {"path": str(curl), "sha256": windows_fullwalk_curl_sha256(curl)}}
+    require(same_compile_json(inputs, expected_inputs)
+            and same_compile_json(value, windows_installed_phase_receipt(context, "windows-normal-ui-setup-inputs", retainedProbe=probe, inputs=inputs)),
+            "Windows UI original setup admission/probe/supplier changed")
+    return inputs
+
+
+def windows_normal_ui_setup_acquire_facts(context: dict, probe: dict, acquired: dict) -> dict:
+    root = Path(context["root"])
+    native = windows_normal_ui_setup_native_metadata(context)
+    helper_graph = windows_installed_helper_metadata(context)
+    return {"rust": RUST, "target": TARGETS["windows"], "standaloneFeatures": ["runtime-publication"],
+        "helperFeatures": ["windows-runtime-publisher"], "retainedProbe": probe,
+        "inputs": windows_installed_record(root / "normal-ui-setup-inputs.private.json", 64 << 10),
+        "metadata": windows_installed_record(root / "normal-ui-setup-metadata.json", 2 << 20),
+        "activePackageIds": sorted(native["nodes"]), "metadataOriginalExitCode": 0,
+        "helperMetadata": windows_installed_record(root / "helper-metadata.json", 8 << 20),
+        "helperActivePackageIds": sorted(helper_graph["nodes"]), "helperMetadataOriginalExitCode": 0,
+        "compilerTools": windows_installed_record(root / "compiler-tools.json", 64 << 10),
+        "fullwalk": acquired, "runtimeSetupOnly": True, "appCompiled": False, "guiCasesExecuted": 0}
+
+
+def windows_normal_ui_setup_acquired(context: dict) -> tuple[dict, dict, dict]:
+    require(os.environ.get("MRK_WINDOWS_UI_SETUP_ACQUIRE_STEP_OUTCOME") == "success",
+            "Windows UI setup acquisition step has not independently closed")
+    probe = windows_normal_ui_positive_probe(context)
+    root = Path(context["root"])
+    inputs = windows_normal_ui_setup_inputs(context, probe)
+    acquired = read_bounded_json(root / "windows-normal-ui-setup-acquire-checks.json", 64 << 10)
+    binding = closed_object(acquired["fullwalk"], {"supplier", "supplierInvocationSha256", "supplierOriginalExitCode",
+        "prepareInvocationSha256", "prepareOriginalExitCode", "prepared"}, "Windows UI setup acquired payload fields differ")
+    prepared = windows_fullwalk_prepared(context)
+    expected_binding = {"supplier": {"size": WINDOWS_FULLWALK_ZIP_BYTES, "sha256": WINDOWS_FULLWALK_ZIP_SHA256},
+        "supplierInvocationSha256": hashlib.sha256(canonical_json(windows_fullwalk_curl_argv(context, setup_inputs=inputs))).hexdigest(),
+        "supplierOriginalExitCode": 0, "prepareInvocationSha256": hashlib.sha256(canonical_json(windows_fullwalk_preparer_argv(context))).hexdigest(),
+        "prepareOriginalExitCode": 0, "prepared": prepared}
+    facts = windows_normal_ui_setup_acquire_facts(context, probe, binding)
+    require(same_compile_json(binding, expected_binding)
+            and same_compile_json(acquired, windows_installed_phase_receipt(context, "windows-normal-ui-setup-acquire", **facts))
+            and same_compile_json(read_bounded_json(root / "windows-normal-ui-setup-acquire-started.json", 64 << 10),
+                windows_installed_phase_receipt(context, "windows-normal-ui-setup-acquire", claimOnly=True)),
+            "Windows UI original setup acquisition/payload/graph/finality changed")
+    return probe, prepared, facts
+
+
+def windows_normal_ui_setup_compile_facts(context: dict, probe: dict, prepared: dict, owner: dict, helper: dict,
+                                        compiler: dict, owner_identity: str, helper_identity: str) -> dict:
+    windows_normal_ui_setup_distinct(probe, owner, owner_identity)
+    return {"rust": RUST, "target": TARGETS["windows"], "retainedProbe": probe,
+        "standaloneFeatures": ["runtime-publication"], "helperFeatures": ["windows-runtime-publisher"],
+        "compiledTest": owner, "artifactNativeIdentity": windows_ordinary_identity(owner_identity), "originalExitCode": 0,
+        "invocationSha256": hashlib.sha256(canonical_json(windows_normal_ui_setup_native_argv(compiler["cargo"]["path"], context))).hexdigest(),
+        "helperCompiledArtifact": helper, "helperArtifactNativeIdentity": windows_ordinary_identity(helper_identity), "helperOriginalExitCode": 0,
+        "helperInvocationSha256": hashlib.sha256(canonical_json(windows_installed_helper_argv(compiler["cargo"]["path"], context))).hexdigest(),
+        "manifestSha256": prepared["manifestSha256"], "protocolSha256": prepared["protocolSha256"], "preparedReceipt": prepared["receipt"],
+        "anchoredNativeBuilds": 1, "anchoredHelperBuilds": 1, "retainedUnanchoredCheapOwnerBuilds": 1,
+        "runtimeSetupOnly": True, "appCompiled": False, "guiCasesExecuted": 0}
+
+
+def windows_normal_ui_setup_compile_binding(context: dict) -> tuple[dict, dict, dict, dict]:
+    require(os.environ.get("MRK_WINDOWS_UI_SETUP_COMPILE_STEP_OUTCOME") == "success",
+            "Windows UI setup compiler step has not independently closed")
+    probe, prepared, _ = windows_normal_ui_setup_acquired(context)
+    root = Path(context["root"])
+    compiler, _ = windows_normal_ui_acquired(context)
+    owner, helper = windows_normal_ui_setup_native_artifact(context), windows_installed_helper_artifact(context)
+    facts = windows_normal_ui_setup_compile_facts(context, probe, prepared, owner, helper, compiler,
+        windows_ordinary_original(owner), windows_ordinary_original(helper))
+    require(same_compile_json(read_bounded_json(root / "normal-ui-setup-compiled-test.json", 64 << 10), owner)
+            and same_compile_json(read_bounded_json(root / "windows-normal-ui-setup-compile-checks.json", 64 << 10),
+                windows_installed_phase_receipt(context, "windows-normal-ui-setup-compile", **facts))
+            and same_compile_json(read_bounded_json(root / "windows-normal-ui-setup-compile-started.json", 64 << 10),
+                windows_installed_phase_receipt(context, "windows-normal-ui-setup-compile", claimOnly=True)),
+            "Windows UI original runtime-only setup compiler/artifact/anchor binding changed")
+    return owner, helper, prepared, facts
+
+
+def windows_normal_ui_setup_precheck_data(context: dict, raw: bytes) -> dict:
+    require(windows_normal_ui_profile(context), "Windows UI setup precheck has no historical role")
+    row = windows_fullwalk_wire(raw, "normal-ui-setup-precheck")
+    windows_fullwalk_binding(row, context, normal_ui_setup=True)
+    expected = {"stageTest": WINDOWS_NORMAL_UI_SETUP_STAGE, "observerTest": WINDOWS_NORMAL_UI_SETUP_OBSERVER,
+        "standaloneFeatures": "runtime-publication", "helperNativeFeatures": "runtime-publication", "payloadFiles": "46",
+        "setupContract": "fixed-normal-ui-fresh-runtime-only-v1"}
+    require(all(row[key] == value for key, value in expected.items())
+            and row["sourceInventorySha256"] == hashlib.sha256(canonical_json(
+                validate_environment_inventory(context["sourceFiles"], maximum=64 << 20))).hexdigest(),
+            "Windows UI setup source/features/selector contract differs")
+    root = windows_ordinary_path(context["root"])
+    owner = windows_ordinary_path(row["ownerArtifact"])
+    require(len(root.parents) + 1 <= 16 and owner.parent == root / "target/x86_64-pc-windows-msvc/debug/deps"
+            and re.fullmatch(r"mrk_windows_installed_native-[0-9a-f]{16}\.exe", owner.name) is not None
+            and windows_ordinary_path(row["helperArtifact"]) == root / (WINDOWS_RUNTIME_PUBLICATION_HELPER + ".exe"),
+            "Windows UI setup original path/role differs")
+    for role in ("owner", "helper"):
+        windows_ordinary_identity(row[role + "ArtifactIdentity"])
+        windows_fullwalk_number(row[role + "ArtifactBytes"], 128 << 20, minimum=1)
+        windows_fullwalk_number(row[role + "CompileMessagesBytes"], 16 << 20, minimum=1)
+    require(row["stageCommandSha256"] == windows_fullwalk_command_sha(row["ownerArtifact"], WINDOWS_NORMAL_UI_SETUP_STAGE)
+            and row["observerCommandSha256"] == windows_fullwalk_command_sha(row["ownerArtifact"], WINDOWS_NORMAL_UI_SETUP_OBSERVER)
+            and row["helperCommandSha256"] == windows_runtime_publication_helper_command_sha(row["helperArtifact"]),
+            "Windows UI setup exact original commands differ")
+    for key, limit in (("payloadBytes", 1 << 30), ("preparedReceiptBytes", 4096), ("rosterBytes", 16 << 10)):
+        windows_fullwalk_number(row[key], limit, minimum=1)
+    return row
+
+
+def windows_normal_ui_setup_precheck_text(context: dict, owner: dict, helper: dict, prepared: dict, compiled: dict, roster_raw: bytes) -> bytes:
+    probe = compiled["retainedProbe"]
+    values = {"profile": WINDOWS_NORMAL_UI_PROFILE, **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")},
+        "sourceInventorySha256": hashlib.sha256(canonical_json(validate_environment_inventory(context["sourceFiles"], maximum=64 << 20))).hexdigest(),
+        "prerequisiteRequestSha256": probe["prerequisiteRequest"]["sha256"], "prerequisiteFinalizerSha256": probe["prerequisiteFinalizer"]["sha256"],
+        "stageTest": WINDOWS_NORMAL_UI_SETUP_STAGE, "observerTest": WINDOWS_NORMAL_UI_SETUP_OBSERVER,
+        "stageCommandSha256": windows_fullwalk_command_sha(owner["path"], WINDOWS_NORMAL_UI_SETUP_STAGE),
+        "observerCommandSha256": windows_fullwalk_command_sha(owner["path"], WINDOWS_NORMAL_UI_SETUP_OBSERVER),
+        "standaloneFeatures": "runtime-publication", "helperNativeFeatures": "runtime-publication",
+        "helperCommandSha256": windows_runtime_publication_helper_command_sha(helper["path"]),
+        **{key: prepared[key] for key in ("manifestSha256", "protocolSha256", "inventorySha256", "coreSha256", "payloadFiles", "payloadBytes")},
+        "preparedReceiptBytes": prepared["receipt"]["size"], "preparedReceiptSha256": prepared["receipt"]["sha256"],
+        "rosterBytes": len(roster_raw), "rosterSha256": hashlib.sha256(roster_raw).hexdigest(),
+        "setupContract": "fixed-normal-ui-fresh-runtime-only-v1"}
+    for role, artifact, identity_key, invocation_key in (("owner", owner, "artifactNativeIdentity", "invocationSha256"),
+                                                       ("helper", helper, "helperArtifactNativeIdentity", "helperInvocationSha256")):
+        values.update({role + "Artifact": artifact["path"], role + "ArtifactBytes": artifact["size"], role + "ArtifactSha256": artifact["sha256"],
+            role + "ArtifactIdentity": compiled[identity_key], role + "CompileMessagesBytes": artifact["messages"]["size"],
+            role + "CompileMessagesSha256": artifact["messages"]["sha256"], role + "CompileArgvSha256": compiled[invocation_key]})
+    raw = windows_fullwalk_text("normal-ui-setup-precheck", values)
+    windows_normal_ui_setup_precheck_data(context, raw)
+    return raw
+
+
+def windows_normal_ui_setup_preflight_facts(raw: bytes, roster: bytes, compiled: dict) -> dict:
+    return {"precheck": {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()},
+        "roster": {"size": len(roster), "sha256": hashlib.sha256(roster).hexdigest()},
+        "retainedProbe": compiled["retainedProbe"], "artifactNativeIdentity": compiled["artifactNativeIdentity"],
+        "helperArtifactNativeIdentity": compiled["helperArtifactNativeIdentity"], "nativeNotStarted": True,
+        "runtimeSetupOnly": True, "appCompiled": False, "guiCasesExecuted": 0}
+
+
+def windows_normal_ui_setup_preflight(context: dict) -> None:
+    owner, helper, prepared, compiled = windows_normal_ui_setup_compile_binding(context)
+    root = Path(context["root"])
+    roster_raw = windows_fullwalk_roster_text(prepared["physical"])
+    raw = windows_normal_ui_setup_precheck_text(context, owner, helper, prepared, compiled, roster_raw)
+    for name in ("normal-ui-setup-precheck.private.txt", "fullwalk-fixture-roster.private.txt", "normal-ui-publication.private.json",
+                 *[name for name, _ in WINDOWS_NORMAL_UI_SETUP_PROOFS.values()], "normal-ui-setup-publication-observation.private.txt",
+                 "normal-ui-setup-observer-exit.private.txt", *(phase + "-checks.json" for phase in WINDOWS_NORMAL_UI_SETUP_DATA_PHASES)):
+        try:
+            (root / name).lstat()
+        except FileNotFoundError:
+            continue
+        raise CheckFailure("Windows UI setup one-use original output is occupied")
+    windows_fullwalk_write(root / "fullwalk-fixture-roster.private.txt", roster_raw, 16 << 10)
+    windows_fullwalk_write(root / "normal-ui-setup-precheck.private.txt", raw, 16 << 10)
+    facts = windows_normal_ui_setup_preflight_facts(raw, roster_raw, compiled)
+    write_json(root / "windows-normal-ui-setup-preflight-checks.json",
+               windows_installed_phase_receipt(context, "windows-normal-ui-setup-preflight", **facts))
+    with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8", newline="\n") as output:
+        values = {"artifact": owner["path"], "artifactSha256": owner["sha256"], "helperArtifact": helper["path"],
+            "helperArtifactSha256": helper["sha256"], "sourceTree": context["sourceTree"], "precheckSha256": facts["precheck"]["sha256"]}
+        text = "".join(key + "=" + value + "\n" for key, value in values.items())
+        require(output.write(text) == len(text), "Windows UI setup original handoff write is incomplete")
+
+
+def windows_normal_ui_setup_check_precheck(context: dict) -> tuple[dict, bytes, bytes, dict]:
+    owner, helper, prepared, compiled = windows_normal_ui_setup_compile_binding(context)
+    root = Path(context["root"])
+    raw = windows_installed_bytes(root / "normal-ui-setup-precheck.private.txt", 16 << 10)
+    roster = windows_installed_bytes(root / "fullwalk-fixture-roster.private.txt", 16 << 10)
+    pre = windows_normal_ui_setup_precheck_data(context, raw)
+    require(roster == windows_fullwalk_roster_text(prepared["physical"])
+            and raw == windows_normal_ui_setup_precheck_text(context, owner, helper, prepared, compiled, roster)
+            and os.environ.get("MRK_WINDOWS_UI_SETUP_PREFLIGHT_STEP_OUTCOME") == "success"
+            and os.environ.get("MRK_WINDOWS_UI_SETUP_PRECHECK_SHA256") == hashlib.sha256(raw).hexdigest()
+            and same_compile_json(read_bounded_json(root / "windows-normal-ui-setup-preflight-checks.json", 64 << 10),
+                windows_installed_phase_receipt(context, "windows-normal-ui-setup-preflight",
+                    **windows_normal_ui_setup_preflight_facts(raw, roster, compiled))),
+            "Windows UI setup original precheck/roster/compiler/finality changed")
+    return pre, raw, roster, compiled
+
+
+def windows_normal_ui_setup_data(context: dict, pre_raw: bytes, roster_raw: bytes, blobs: dict[str, bytes],
+                                 outcomes: dict[str, str], through: str) -> tuple[dict, dict | None]:
+    """Closed original setup DATA only, never ordinary-account or UI admission."""
+    steps = ("stage", "publish", "publication")
+    require(windows_normal_ui_profile(context) and through in steps, "Windows UI runtime setup role differs")
+    index = steps.index(through)
+    keys = ("stage", "stageExit", "helperSuccessExit", "observation", "observerExit")[:(2, 3, 5)[index]]
+    closed_object(blobs, set(keys), "Windows UI original setup inventory differs")
+    require(all(type(raw) is bytes for raw in blobs.values()) and same_compile_json(outcomes, dict.fromkeys(steps[:index + 1], "success")),
+            "Windows UI setup requires each actual separately closed original")
+    pre = windows_normal_ui_setup_precheck_data(context, pre_raw)
+    stage = windows_runtime_publication_observation(context, blobs["stage"], pre_raw, roster_raw, WINDOWS_NORMAL_UI_SETUP_STAGE)
+    windows_runtime_publication_exit(context, blobs["stageExit"], pre_raw, "stage", outcomes["stage"])
+    records = {key: {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()} for key, raw in blobs.items()}
+    facts = {"setupThrough": through, "originalExitCodes": dict.fromkeys(steps[:index + 1], 0),
+        "originalStepClosesChecked": True, "precheckSha256": hashlib.sha256(pre_raw).hexdigest(), "setupEvidence": records,
+        "prerequisiteRequestSha256": pre["prerequisiteRequestSha256"], "prerequisiteFinalizerSha256": pre["prerequisiteFinalizerSha256"],
+        "ownerArtifactSha256": pre["ownerArtifactSha256"], "helperArtifactSha256": pre["helperArtifactSha256"], "normalHelperNotLibtest": True,
+        "actualFixedProducerObserved": index == 2, "runtimeConsumerEnabled": False, "productionEnabled": False,
+        "combinedPassed": False, "guiCasesExecuted": 0, "verifiedMethods": 0}
+    if index >= 1:
+        windows_runtime_publication_exit(context, blobs["helperSuccessExit"], pre_raw, "helperSuccess", outcomes["publish"])
+    if index != 2:
+        return facts, None
+    observed = windows_runtime_publication_observation(context, blobs["observation"], pre_raw, roster_raw, WINDOWS_NORMAL_UI_SETUP_OBSERVER)
+    windows_runtime_publication_exit(context, blobs["observerExit"], pre_raw, "observe", outcomes["publication"])
+    require(same_compile_json(observed["proofs"], [{"role": role, **records[role]} for role in WINDOWS_NORMAL_UI_SETUP_PROOFS]),
+            "Windows UI observer did not retain these exact original setup records")
+    windows_runtime_publication_source_unchanged(stage, observed)
+    selected = {item["role"]: item["stamp"] for item in observed["objects"]}
+    identities = {key: str(selected[role]["volume"]) + ":" + selected[role]["fileId"] for key, role in (
+        ("versionIdentity", "version"), ("selectedPythonIdentity", "python/python.exe"),
+        ("selectedBootstrapIdentity", "engine_bootstrap.py"), ("selectedCoreIdentity", "core.zip"))}
+    facts.update(sourceObjectsUnchanged=True, observedObjects=103)
+    publication = {"schemaVersion": 1, "profile": WINDOWS_NORMAL_UI_PROFILE,
+        **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")},
+        "precheck": {"size": len(pre_raw), "sha256": hashlib.sha256(pre_raw).hexdigest()},
+        "roster": {"size": len(roster_raw), "sha256": hashlib.sha256(roster_raw).hexdigest()},
+        **{key: pre[key] for key in ("manifestSha256", "protocolSha256", "inventorySha256", "coreSha256")},
+        "payloadFiles": 46, "payloadBytes": windows_fullwalk_number(pre["payloadBytes"], 1 << 30, minimum=1),
+        **identities, "setup": facts, "comparisonDataOnly": True, "productionEnabled": False}
+    return facts, publication
+
+
+def windows_normal_ui_setup_evidence(context: dict, through: str, *, finalized: bool) -> tuple[dict, dict | None, tuple]:
+    steps = ("stage", "publish", "publication")
+    require(through in steps and type(finalized) is bool, "Windows UI setup evidence role differs")
+    index = steps.index(through)
+    prechecked = windows_normal_ui_setup_check_precheck(context)
+    _, pre_raw, roster_raw, _ = prechecked
+    root = Path(context["root"])
+    files = {**WINDOWS_NORMAL_UI_SETUP_PROOFS, "observation": ("normal-ui-setup-publication-observation.private.txt", 64 << 10),
+             "observerExit": ("normal-ui-setup-observer-exit.private.txt", 4096)}
+    blobs = {role: windows_installed_bytes(root / name, limit) for role, (name, limit) in list(files.items())[:(2, 3, 5)[index]]}
+    outcomes = {role: os.environ.get("MRK_WINDOWS_UI_SETUP_" + role.upper() + "_STEP_OUTCOME", "unavailable") for role in steps[:index + 1]}
+    facts, publication = windows_normal_ui_setup_data(context, pre_raw, roster_raw, blobs, outcomes, through)
+    for prior_index, role in enumerate(steps[:index + int(finalized)]):
+        require(os.environ.get("MRK_WINDOWS_UI_SETUP_" + role.upper() + "_FINALIZE_STEP_OUTCOME") == "success",
+                "Windows UI setup prior DATA finalizer did not close")
+        prior_facts, _ = windows_normal_ui_setup_data(context, pre_raw, roster_raw,
+            dict(list(blobs.items())[:(2, 3, 5)[prior_index]]), {step: outcomes[step] for step in steps[:prior_index + 1]}, role)
+        phase = "windows-normal-ui-setup-" + role + "-finalize"
+        require(same_compile_json(read_bounded_json(root / (phase + "-checks.json"), 64 << 10),
+            windows_installed_phase_receipt(context, phase, **prior_facts)), "Windows UI original setup finalizer changed")
+    if finalized and through == "publication":
+        require(windows_installed_bytes(root / "normal-ui-publication.private.json", 64 << 10) == canonical_json(publication),
+                "Windows UI original fresh-publication comparison receipt changed")
+    return facts, publication, prechecked
+
+
+def windows_normal_ui_setup_finalize(context: dict, through: str) -> None:
+    facts, publication, _ = windows_normal_ui_setup_evidence(context, through, finalized=False)
+    root = Path(context["root"])
+    if through == "publication":
+        windows_fullwalk_write(root / "normal-ui-publication.private.json", canonical_json(publication), 64 << 10)
+    phase = "windows-normal-ui-setup-" + through + "-finalize"
+    write_json(root / (phase + "-checks.json"), windows_installed_phase_receipt(context, phase, **facts))
+
+
+def windows_normal_ui_setup_build(name: str, context: dict, deadline: float) -> None:
+    require(windows_normal_ui_profile(context) and name in WINDOWS_NORMAL_UI_SETUP_BUILD_PHASES,
+            "Windows UI setup acquisition/compile phase differs")
+    probe = windows_normal_ui_positive_probe(context)
+    root, source = Path(context["root"]), Path(context["source"])
+    source_unchanged(context)
+    require(context["sdk"] == {"version": WINDOWS_SDK_VERSION, "headers": fixed_file_inventory(windows_sdk_root(), WINDOWS_SDK_HEADERS)},
+            "Windows UI setup original SDK changed")
+    environment = clean_environment(root)
+    environment.update(GITHUB_SHA=context["sourceSha"], GITHUB_RUN_ID=context["runId"],
+        MRK_WINDOWS_SOURCE_TREE=context["sourceTree"], CARGO_TARGET_DIR=str(root / "target"))
+    compiler, _ = windows_normal_ui_acquired(context)
+    cargo, rustc = tools(context, environment)
+    require(compiler == {role: {"path": path, **windows_installed_record(Path(path), 128 << 20)}
+                         for role, path in (("cargo", cargo), ("rustc", rustc))}, "Windows UI setup original selected compiler changed")
+    write_json(root / (name + "-started.json"), windows_installed_phase_receipt(context, name, claimOnly=True))
+    if name == "windows-normal-ui-setup-acquire":
+        inputs = windows_fullwalk_prepare_inputs(context)
+        write_json(root / "normal-ui-setup-inputs.private.json",
+            windows_installed_phase_receipt(context, "windows-normal-ui-setup-inputs", retainedProbe=probe, inputs=inputs))
+        acquired = windows_fullwalk_acquire(context, environment, deadline, setup_inputs=inputs)
+        # The runtime-only native graph is already contained in cheap native
+        # acquisition. Its new metadata/stream never overwrites the original24.
+        with (root / "normal-ui-setup-metadata.json").open("x", encoding="utf-8", newline="\n") as output, \
+                (root / "normal-ui-setup-acquire.stderr").open("x", encoding="utf-8") as diagnostics:
+            run([cargo, "metadata", "--locked", "--offline", "--format-version", "1", "--no-default-features",
+                 "--features", "runtime-publication", "--filter-platform", TARGETS["windows"],
+                 "--manifest-path", str(source / WINDOWS_INSTALLED_CRATE / "Cargo.toml")],
+                check="windows-normal-ui-setup-native-metadata", cwd=root, env=environment,
+                timeout=windows_installed_remaining(deadline, 180), output=output, diagnostics=diagnostics)
+        windows_normal_ui_setup_native_metadata(context)
+        with (root / "helper-metadata.json").open("x", encoding="utf-8", newline="\n") as output, \
+                (root / "helper-acquire.stderr").open("x", encoding="utf-8") as diagnostics:
+            run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features", "--filter-platform", TARGETS["windows"],
+                 "--features", "windows-runtime-publisher", "--manifest-path", str(source / WINDOWS_INSTALLED_APP / "Cargo.toml")],
+                check="windows-installed-helper-locked-metadata", cwd=root, env=environment,
+                timeout=windows_installed_remaining(deadline, 600), output=output, diagnostics=diagnostics)
+        require(same_compile_json(probe, windows_normal_ui_positive_probe(context))
+                and same_compile_json(acquired["prepared"], windows_fullwalk_prepared(context)),
+                "Windows UI original cheap probe or prepared input changed during acquisition")
+        facts = windows_normal_ui_setup_acquire_facts(context, probe, acquired)
+    else:
+        acquired_probe, prepared, _ = windows_normal_ui_setup_acquired(context)
+        require(same_compile_json(probe, acquired_probe), "Windows UI setup precompile probe original changed")
+        environment.update(MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=prepared["manifestSha256"],
+                           MRK_BUNDLED_PROTOCOL_SHA256=prepared["protocolSha256"])
+        argv = windows_normal_ui_setup_native_argv(cargo, context)
+        try:
+            with (root / "normal-ui-setup-compile-messages.jsonl").open("x", encoding="utf-8", newline="\n") as output, \
+                    (root / "normal-ui-setup-compile.stderr").open("x", encoding="utf-8") as diagnostics:
+                run(argv, check="windows-normal-ui-setup-native-compile-only", cwd=root, env=environment,
+                    timeout=windows_installed_remaining(deadline, 600), output=output, diagnostics=diagnostics)
+        except Exception:
+            try:
+                if output.closed and diagnostics.closed:
+                    detail = windows_installed_compile_failure_data(
+                        windows_installed_bytes(root / "normal-ui-setup-compile-messages.jsonl", 16 << 20), context, "standalone")
+                    print("MRK_WINDOWS_NORMAL_UI_SETUP_COMPILE_REFUSED=" + canonical_json(detail).decode("ascii"), flush=True)
+            except BaseException:
+                pass  # Fixed failure-only diagnostics cannot replace the original failure.
+            raise
+        owner = windows_normal_ui_setup_native_artifact(context)
+        owner_identity = windows_ordinary_original(owner)
+        windows_normal_ui_setup_distinct(probe, owner, owner_identity)
+        require(same_compile_json(probe, windows_normal_ui_positive_probe(context)),
+                "Windows UI cheap original artifact/messages changed during distinct setup compilation")
+        write_json(root / "normal-ui-setup-compiled-test.json", owner)
+        windows_installed_helper_outputs_absent(context)
+        helper_argv = windows_installed_helper_argv(cargo, context)
+        try:
+            with (root / "helper-compile-messages.jsonl").open("x", encoding="utf-8", newline="\n") as output, \
+                    (root / "helper-compile.stderr").open("x", encoding="utf-8") as diagnostics:
+                run(helper_argv, check="windows-installed-helper-compile-only", cwd=root, env=environment,
+                    timeout=windows_installed_remaining(deadline, 600), output=output, diagnostics=diagnostics)
+        except Exception:
+            try:
+                if output.closed and diagnostics.closed:
+                    windows_installed_compile_failure(context, "helper")
+            except BaseException:
+                pass
+            raise
+        require(output.closed and diagnostics.closed, "Windows UI setup helper original compiler writers are not closed")
+        helper = windows_installed_helper_handoff(context, deadline)
+        write_json(root / "helper-compiled-artifact.json", helper)
+        require(same_compile_json(probe, windows_normal_ui_positive_probe(context))
+                and same_compile_json(prepared, windows_fullwalk_prepared(context))
+                and same_compile_json(owner, windows_normal_ui_setup_native_artifact(context))
+                and owner_identity == windows_ordinary_original(owner),
+                "Windows UI original cheap/setup compiler or payload changed during helper build")
+        facts = windows_normal_ui_setup_compile_facts(context, probe, prepared, owner, helper, compiler,
+            owner_identity, windows_ordinary_original(helper))
+    windows_installed_inputs(context)
+    source_unchanged(context)
+    windows_installed_remaining(deadline, 1)
+    write_json(root / (name + "-checks.json"), windows_installed_phase_receipt(context, name, **facts))
+
+
+def windows_normal_ui_gui_messages(context: dict, *, observer: bool) -> tuple[dict, dict, dict]:
+    root = Path(context["root"])
+    path = root / ("observer-compile-messages.jsonl" if observer else "normal-app-compile-messages.jsonl")
+    graph = windows_normal_ui_app_metadata(context, observer=observer)
+    raw = windows_installed_bytes(path, 16 << 20)
+    parsed = windows_normal_ui_gui_compiler_data(raw, graph, source=Path(context["source"]), root=root)
+    return graph, parsed, {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def windows_normal_ui_normal_paths(context: dict) -> tuple[Path, Path, Path]:
+    require(windows_normal_ui_profile(context), "Windows normal singleton handoff requires its explicit profile")
+    root = Path(context["root"])
+    return (root / "target" / TARGETS["windows"] / "debug/mobile-release-kit-desktop.exe",
+            root / "mobile-release-kit-desktop.exe", root / "normal-app-compiled-artifact.json")
+
+
+def windows_normal_ui_absent(paths: tuple[Path, ...]) -> None:
+    for path in paths:
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            continue
+        raise CheckFailure("Windows GUI one-use original output is occupied")
+
+
+def windows_normal_ui_normal_handoff(context: dict, deadline: float) -> dict:
+    """One fixed normal app copy; raw compiler source/stream are never mutated."""
+    raw_path, destination, receipt = windows_normal_ui_normal_paths(context)
+    windows_normal_ui_absent((destination, receipt))
+    _, parsed, messages = windows_normal_ui_gui_messages(context, observer=False)
+    require(parsed["path"] == str(raw_path) and parsed["auxiliaryPackageBinary"] is None, "Windows normal app compiler role differs")
+    with windows_installed_helper_observation(raw_path, compiler_source=True, deadline=deadline, normal_ui_app=True) as (raw, source):
+        original = windows_installed_helper_copy(destination, raw, source, deadline, normal_ui_app=True)
+        with windows_installed_helper_observation(destination, compiler_source=False, deadline=deadline, normal_ui_app=True) as (copied, copy):
+            require(tuple(copy["descriptor"][:2]) == original and copied == raw, "Windows normal singleton closed readback differs")
+            result = windows_installed_helper_record(source, copy, messages)
+    windows_installed_remaining(deadline, 1)
+    return result
+
+
+def windows_normal_ui_normal_artifact(context: dict) -> dict:
+    """Read-only sealed lineage; the caller must also join current ChangeTime.
+
+    Byte/named/compiler-source epochs stay exact. The singleton descriptor may
+    differ ONLY in ChangeTime, which is NOT adopted here: preflight/finalizers
+    separately demand its exact native request/ACL transition chain.
+    """
+    raw_path, destination, receipt = windows_normal_ui_normal_paths(context)
+    saved = closed_object(read_bounded_json(receipt, 64 << 10),
+        {"path", "size", "sha256", "identity", "messages", "compilerSource", "copySnapshot"}, "Windows normal app handoff fields differ")
+    _, parsed, messages = windows_normal_ui_gui_messages(context, observer=False)
+    require(parsed["path"] == str(raw_path), "Windows normal original compiler path changed")
+    with windows_installed_helper_observation(raw_path, compiler_source=True, normal_ui_app=True) as (_, source):
+        with windows_installed_helper_observation(destination, compiler_source=False, normal_ui_app=True) as (_, copy):
+            observed = windows_installed_helper_record(source, copy, messages)
+            initial = closed_object(saved["copySnapshot"], {"named", "descriptor"}, "Windows normal singleton sealed epoch differs")
+            require(type(initial["descriptor"]) is list and len(initial["descriptor"]) == len(copy["descriptor"])
+                    and initial["descriptor"][:-1] == copy["descriptor"][:-1]
+                    and same_compile_json({**observed, "copySnapshot": initial}, saved)
+                    and initial["named"] == copy["named"], "Windows normal compiler source or singleton sealed identity changed")
+    return saved
+
+
+def windows_normal_ui_observer_artifact(context: dict) -> dict:
+    _, parsed, messages = windows_normal_ui_gui_messages(context, observer=True)
+    path = Path(parsed["path"])
+    before = path.lstat()
+    record = windows_installed_record(path, 512 << 20)
+    require(windows_installed_state(before) == windows_installed_state(path.lstat()), "Windows GUI original observer changed")
+    return {"path": str(path), **record, "identity": list(windows_installed_state(before)), "messages": messages}
+
+
+def windows_normal_ui_material_sources(graph: dict) -> dict:
+    packages, selected = graph["packages"], graph["materialIds"]
+    tauri = Path(packages[selected["tauri-build"]]["manifest_path"]).parent
+    webview = Path(packages[selected["webview2-com-sys"]]["manifest_path"]).parent
+    expected = {
+        "commonControlsTemplate": (tauri / "src/windows-app-manifest.xml", 392, WINDOWS_NORMAL_UI_COMMON_CONTROLS_MANIFEST_SHA256),
+        "webviewBuild": (webview / "build.rs", 2627, "ea73d2566f434a25e8172d0fb9eaad5fa29ee687a8f05b9c2be02b19e4366e16"),
+        "webviewLinkSelection": (webview / "src/lib.rs", 0, "bd953534fa9b15d39ac69c9afa82762adaaa81621a0adb687ba385327ee6689a"),
+        "webviewBindings": (webview / "src/bindings.rs", 0, "d47ecf982c4199d0a3b378caf66f076231af2b5b342497f7380630b22b29f917"),
+        "webviewX64StaticLibrary": (webview / "x64/WebView2LoaderStatic.lib", 10500016, "0659b741bde6348d4c4a6ec4ceb9af50e3d0048ed9cd3c8659bccbb61fde55ee"),
+    }
+    records = {}
+    for role, (path, size, digest) in expected.items():
+        record = windows_installed_record(path, 32 << 20)
+        require(record["sha256"] == digest and (size == 0 or record["size"] == size), "Windows GUI material source/library differs")
+        records[role] = record
+    return records
+
+
+def windows_normal_ui_link_inputs(graph: dict, parsed: dict) -> dict:
+    source = windows_normal_ui_material_sources(graph)
+    rows = parsed["buildScripts"].get(graph["materialIds"]["webview2-com-sys"])
+    require(type(rows) is list and len(rows) == 1, "Windows GUI original WebView2 build output is ambiguous")
+    row = rows[0]
+    require(row["linked_libs"] == ["advapi32"] and row.get("linked_paths") == ["native=" + str(Path(row["out_dir"]) / "x64")],
+            "Windows GUI original WebView2 target/search path differs")
+    library = windows_installed_record(Path(row["out_dir"]) / "x64/WebView2LoaderStatic.lib", 32 << 20)
+    require(library == source["webviewX64StaticLibrary"], "Windows GUI selected static loader bytes differ from source")
+    return {"materialSources": source, "actualTargetStaticLibrary": library, "targetEnvironment": "msvc",
+            "loaderSelection": "source-cfg-WebView2LoaderStatic", "loaderCargoFeature": None}
+
+
+def windows_normal_ui_frontend_files(context: dict) -> list[dict]:
+    base = Path(context["source"]) / "desktop/dist"
+    windows_installed_directories(base)
+    names, total, visited = [], 0, 0
+    for path in base.rglob("*"):
+        visited += 1
+        require(visited <= 128, "Windows GUI frontend path count exceeds bound")
+        details = path.lstat()
+        require(not stat.S_ISLNK(details.st_mode) and not getattr(details, "st_file_attributes", 0) & 0x400,
+                "Windows GUI frontend contains a redirected output")
+        if stat.S_ISDIR(details.st_mode):
+            continue
+        require(stat.S_ISREG(details.st_mode) and details.st_nlink == 1, "Windows GUI frontend output is not ordinary")
+        total += details.st_size
+        require(total <= 8 << 20, "Windows GUI frontend bytes exceed bound")
+        names.append(path.relative_to(base).as_posix())
+    require("index.html" in names and names, "Windows GUI packaged frontend entry is absent")
+    return fixed_file_inventory(base, tuple(sorted(names)))
+
+
+def windows_normal_ui_gui_base(context: dict) -> tuple[dict, dict, dict]:
+    probe = windows_normal_ui_positive_probe(context)
+    _, publication, checked = windows_normal_ui_setup_evidence(context, "publication", finalized=True)
+    require(type(publication) is dict and same_compile_json(checked[3]["retainedProbe"], probe),
+            "Windows GUI setup changed its original cheap prerequisite")
+    record = windows_installed_record(Path(context["root"]) / "normal-ui-publication.private.json", 64 << 10)
+    return probe, publication, record
+
+
+def windows_normal_ui_gui_acquire_facts(context: dict, probe: dict, publication: dict, frontend_tools: dict) -> dict:
+    root = Path(context["root"])
+    graphs = {role: windows_normal_ui_app_metadata(context, observer=role == "observer") for role in ("normal", "observer")}
+    material = windows_normal_ui_material_sources(graphs["normal"])
+    require(same_compile_json(material, windows_normal_ui_material_sources(graphs["observer"])),
+            "Windows GUI acquisition material sources differ by role")
+    return {"retainedProbe": probe, "publication": publication, "rust": RUST, "node": NODE, "target": TARGETS["windows"],
+        "frontendTools": frontend_tools, "materialSources": material,
+        "normalMetadata": windows_installed_record(root / "normal-app-metadata.json", 16 << 20),
+        "observerMetadata": windows_installed_record(root / "observer-metadata.json", 16 << 20),
+        "normalFeatures": windows_normal_ui_features("app"), "observerFeatures": windows_normal_ui_features("observer"),
+        "originalExitCodes": {"normalMetadata": 0, "observerMetadata": 0, "frontendAcquire": 0}, "guiNotStarted": True}
+
+
+def windows_normal_ui_gui_acquired(context: dict) -> tuple[dict, dict, dict, dict]:
+    require(os.environ.get("MRK_WINDOWS_UI_GUI_ACQUIRE_STEP_OUTCOME") == "success"
+            and os.environ.get("MRK_WINDOWS_UI_NODE_STEP_OUTCOME") == "success", "Windows GUI acquisition/Node step has not closed")
+    probe, publication, record = windows_normal_ui_gui_base(context)
+    root = Path(context["root"])
+    frontend = closed_object(read_bounded_json(root / "normal-ui-frontend-tools.json", 64 << 10), {"node", "npm"},
+                             "Windows GUI frontend compiler roles differ")
+    for role in ("node", "npm"):
+        item = closed_object(frontend[role], {"path", "size", "sha256"}, "Windows GUI frontend tool fields differ")
+        require(Path(item["path"]).is_absolute() and {key: item[key] for key in ("size", "sha256")}
+                == windows_installed_record(Path(item["path"]), 128 << 20), "Windows GUI frontend compiler changed")
+    require(frontend["npm"]["path"] == str(Path(frontend["node"]["path"]).parent / "node_modules/npm/bin/npm-cli.js"),
+            "Windows GUI npm is not part of the original selected Node")
+    facts = windows_normal_ui_gui_acquire_facts(context, probe, record, frontend)
+    phase = "windows-normal-ui-gui-acquire"
+    require(same_compile_json(read_bounded_json(root / (phase + "-checks.json"), 128 << 10), windows_installed_phase_receipt(context, phase, **facts))
+            and same_compile_json(read_bounded_json(root / (phase + "-started.json"), 64 << 10), windows_installed_phase_receipt(context, phase, claimOnly=True)),
+            "Windows GUI original acquisition/source/close record differs")
+    return probe, publication, record, frontend
+
+
+def windows_normal_ui_scalar_metadata(context: dict) -> dict:
+    require(windows_normal_ui_profile(context), "Windows UI scalar metadata requires its fixed profile")
+    root, source = Path(context["root"]), Path(context["source"])
+    value = bounded_json(windows_installed_bytes(root / "normal-ui-scalar-metadata.json", 8 << 20), 8 << 20, max_nodes=200000)
+    try:
+        lock = tomllib.loads(windows_installed_bytes(source / WINDOWS_INSTALLED_APP / "Cargo.lock", 8 << 20).decode("utf-8"))
+    except (ValueError, UnicodeError):
+        raise CheckFailure("Windows UI scalar source lock is malformed") from None
+    return windows_installed_app_graph(value, lock, source=source, root=root, publication=False)
+
+
+def windows_normal_ui_scalar_artifact(context: dict) -> dict:
+    root, source = Path(context["root"]), Path(context["source"])
+    messages = root / "normal-ui-scalar-compile-messages.jsonl"
+    path = windows_installed_app_test_path(windows_installed_bytes(messages, 16 << 20),
+        windows_normal_ui_scalar_metadata(context), source=source, root=root, helper=False)
+    require(path.parent == root / "target" / TARGETS["windows"] / "debug/deps"
+            and re.fullmatch(r"mobile_release_desktop-[0-9a-f]{16}\.exe", path.name) is not None,
+            "Windows UI scalar is not its original headless app libtest")
+    before = path.lstat()
+    record = windows_installed_record(path, 512 << 20)
+    require(windows_installed_state(before) == windows_installed_state(path.lstat()), "Windows UI scalar original artifact changed")
+    return {"path": str(path), **record, "identity": list(windows_installed_state(before)),
+            "messages": windows_installed_record(messages, 16 << 20)}
+
+
+def windows_normal_ui_scalar_facts(context: dict) -> dict:
+    root = Path(context["root"])
+    compiler, _ = windows_normal_ui_acquired(context)
+    artifact = windows_normal_ui_scalar_artifact(context)
+    identity = windows_ordinary_original(artifact, app_role=True)
+    return {"metadata": windows_installed_record(root / "normal-ui-scalar-metadata.json", 8 << 20),
+        "compilerInvocationSha256": hashlib.sha256(canonical_json(windows_installed_app_argv(compiler["cargo"]["path"], context))).hexdigest(),
+        "originalCompilerExitCode": 0, "appFeatures": [], "nativeFeatures": ["qualification-result"],
+        "regression": windows_normal_ui_inert_facts(context, artifact, identity, scalar=True)}
+
+
+def windows_normal_ui_scalar_build(context: dict, cargo: str, environment: dict, deadline: float) -> dict:
+    """One inert no-feature app libtest before either GUI artifact's final epoch."""
+    require(windows_normal_ui_profile(context), "Windows UI scalar build requires its fixed profile")
+    root, source = Path(context["root"]), Path(context["source"])
+    windows_normal_ui_absent((*windows_normal_ui_normal_paths(context), *(root / ("normal-ui-scalar" + suffix)
+        for suffix in ("-metadata.json", "-acquire.stderr", "-compile-messages.jsonl", "-compile.stderr", ".stdout", ".stderr"))))
+    with (root / "normal-ui-scalar-metadata.json").open("x", encoding="utf-8", newline="\n") as output, \
+            (root / "normal-ui-scalar-acquire.stderr").open("x", encoding="utf-8") as diagnostics:
+        run([cargo, "metadata", "--locked", "--offline", "--format-version", "1", "--no-default-features",
+             "--filter-platform", TARGETS["windows"], "--manifest-path", str(source / WINDOWS_INSTALLED_APP / "Cargo.toml")],
+            check="windows-normal-ui-scalar-metadata", cwd=root, env=environment,
+            timeout=windows_installed_remaining(deadline, 60), output=output, diagnostics=diagnostics)
+    require(output.closed and diagnostics.closed, "Windows UI scalar metadata original writers did not close")
+    windows_normal_ui_scalar_metadata(context)
+    argv = windows_installed_app_argv(cargo, context)
+    try:
+        with (root / "normal-ui-scalar-compile-messages.jsonl").open("x", encoding="utf-8", newline="\n") as output, \
+                (root / "normal-ui-scalar-compile.stderr").open("x", encoding="utf-8") as diagnostics:
+            run(argv, check="windows-normal-ui-scalar-compile-only", cwd=root, env=environment,
+                timeout=windows_installed_remaining(deadline, 600), output=output, diagnostics=diagnostics)
+    except Exception:
+        try:
+            if output.closed and diagnostics.closed:
+                detail = windows_installed_compile_failure_data(
+                    windows_installed_bytes(root / "normal-ui-scalar-compile-messages.jsonl", 16 << 20), context, "app")
+                print("MRK_WINDOWS_NORMAL_UI_SCALAR_COMPILE_REFUSED=" + canonical_json(detail).decode("ascii"), flush=True)
+        except BaseException:
+            pass
+        raise
+    require(output.closed and diagnostics.closed, "Windows UI scalar original compiler writers did not close")
+    artifact = windows_normal_ui_scalar_artifact(context)
+    identity = windows_ordinary_original(artifact, app_role=True)
+    argv = windows_normal_ui_inert_argv(artifact, scalar=True)
+    with (root / "normal-ui-scalar.stdout").open("x", encoding="utf-8", newline="\n") as output, \
+            (root / "normal-ui-scalar.stderr").open("x", encoding="utf-8") as diagnostics:
+        run(argv, check="windows-normal-ui-scalar-regression", cwd=root, env=environment,
+            timeout=windows_installed_remaining(deadline, 60), output=output, diagnostics=diagnostics)
+    require(output.closed and diagnostics.closed, "Windows UI scalar original regression writers did not close")
+    require(same_compile_json(artifact, windows_normal_ui_scalar_artifact(context))
+            and identity == windows_ordinary_original(artifact, app_role=True),
+            "Windows UI scalar regression changed its original artifact")
+    facts = windows_normal_ui_scalar_facts(context)
+    require(same_compile_json(facts["regression"]["compiledTest"], artifact)
+            and facts["regression"]["artifactNativeIdentity"] == identity, "Windows UI scalar original changed before its receipt")
+    return facts
+
+
+def windows_normal_ui_gui_compile_facts(context: dict, probe: dict, publication: dict, normal: dict, observer: dict,
+                                       normal_identity: str, observer_identity: str, auxiliary: dict, scalar: dict) -> dict:
+    root = Path(context["root"])
+    compiler, _ = windows_normal_ui_acquired(context)
+    require(same_compile_json(scalar, windows_normal_ui_scalar_facts(context)),
+            "Windows GUI compilation changed the original scalar regression or its outputs")
+    observations = {}
+    for role, artifact in (("normal", normal), ("observer", observer)):
+        graph, parsed, _ = windows_normal_ui_gui_messages(context, observer=role == "observer")
+        observations[role] = {"unitsSha256": hashlib.sha256(canonical_json(parsed["units"])).hexdigest(),
+            "hostUnits": sum(unit["scope"] == "host" for unit in parsed["units"]),
+            "targetUnits": sum(unit["scope"] == "target" for unit in parsed["units"]),
+            "linkInputs": windows_normal_ui_link_inputs(graph, parsed),
+            "pe": windows_normal_ui_pe_data(windows_installed_bytes(Path(artifact["path"]), 512 << 20), role=role)}
+    return {"retainedProbe": probe, "publication": publication, "rust": RUST, "node": NODE, "target": TARGETS["windows"],
+        "appVersion": probe["appVersion"], "frontend": windows_normal_ui_frontend_files(context),
+        "normalFeatures": windows_normal_ui_features("app"), "observerFeatures": windows_normal_ui_features("observer"),
+        "normalApp": normal, "observer": observer, "normalNativeIdentity": windows_ordinary_identity(normal_identity),
+        "observerNativeIdentity": windows_ordinary_identity(observer_identity), "compilerObservations": observations,
+        "observerAuxiliary": auxiliary, "inertScalar": scalar, "compileOrder": ["scalar", "observer", "normal"],
+        "normalInvocationSha256": hashlib.sha256(canonical_json(windows_normal_ui_gui_argv(compiler["cargo"]["path"], context, observer=False))).hexdigest(),
+        "observerInvocationSha256": hashlib.sha256(canonical_json(windows_normal_ui_gui_argv(compiler["cargo"]["path"], context, observer=True))).hexdigest(),
+        "originalExitCodes": {"frontendTypecheck": 0, "frontendAssets": 0, "scalarCompiler": 0, "scalarRegression": 0,
+                              "observer": 0, "normal": 0}, "guiNotStarted": True}
+
+
+def windows_normal_ui_gui_compiled(context: dict) -> tuple[dict, dict, dict, dict, dict]:
+    require(os.environ.get("MRK_WINDOWS_UI_GUI_COMPILE_STEP_OUTCOME") == "success", "Windows GUI compiler step has not closed")
+    probe, publication, record, _ = windows_normal_ui_gui_acquired(context)
+    root = Path(context["root"])
+    normal, observer = windows_normal_ui_normal_artifact(context), windows_normal_ui_observer_artifact(context)
+    auxiliary = windows_normal_ui_auxiliary(context, recheck_original=False)
+    saved = read_bounded_json(root / "windows-normal-ui-gui-compile-checks.json", 256 << 10)
+    require(type(saved) is dict, "Windows GUI original compiler receipt is absent")
+    facts = windows_normal_ui_gui_compile_facts(context, probe, record, normal, observer,
+        saved.get("normalNativeIdentity"), saved.get("observerNativeIdentity"), auxiliary, saved.get("inertScalar"))
+    require(same_compile_json(read_bounded_json(root / "observer-compiled-artifact.json", 64 << 10), observer)
+            and same_compile_json(saved, windows_installed_phase_receipt(context, "windows-normal-ui-gui-compile", **facts))
+            and same_compile_json(read_bounded_json(root / "windows-normal-ui-gui-compile-started.json", 64 << 10),
+                windows_installed_phase_receipt(context, "windows-normal-ui-gui-compile", claimOnly=True)),
+            "Windows GUI original compiler/source/artifacts changed")
+    windows_normal_ui_normal_compile_start(context, probe, observer, facts["observerNativeIdentity"], auxiliary, create=False)
+    return probe, publication, normal, observer, facts
+
+
+def windows_normal_ui_auxiliary(context: dict, *, recheck_original: bool, create: bool = False) -> dict:
+    """The observer-feature compiler intermediate, never a launchable normal app.
+
+    Before the normal compiler starts, re-open the exact retained full epoch.
+    Afterwards it is historical comparison DATA: Cargo was the sole allowed
+    writer, and the distinct normal stream starts the new normal-source epoch.
+    """
+    require(type(recheck_original) is bool and type(create) is bool and (not create or recheck_original),
+            "Windows GUI auxiliary observation role differs")
+    root = Path(context["root"])
+    path, _, _ = windows_normal_ui_normal_paths(context)
+    _, parsed, messages = windows_normal_ui_gui_messages(context, observer=True)
+    compiler, _ = windows_normal_ui_acquired(context)
+    invocation = hashlib.sha256(canonical_json(windows_normal_ui_gui_argv(compiler["cargo"]["path"], context, observer=True))).hexdigest()
+    receipt = root / "normal-ui-observer-auxiliary.private.json"
+    original = None
+    if recheck_original:
+        if parsed["auxiliaryPackageBinary"] is None:
+            windows_normal_ui_absent((path,))
+        else:
+            require(parsed["auxiliaryPackageBinary"] == str(path), "Windows GUI auxiliary compiler path differs")
+            with windows_installed_helper_observation(path, compiler_source=True, normal_ui_app=True) as (_, snapshot):
+                original = snapshot
+    if not create:
+        saved = closed_object(read_bounded_json(receipt, 64 << 10),
+            {"scope", "phase", "status", "qualificationProfile", "sourceSha", "sourceTree", "runId", "attempt",
+             "role", "messages", "invocationSha256", "original", "launchAuthority"}, "Windows GUI auxiliary receipt fields differ")
+        if not recheck_original:
+            original = saved["original"]
+    if original is not None:
+        closed_object(original, {"path", "size", "sha256", "named", "descriptor"}, "Windows GUI auxiliary original fields differ")
+        require(original["path"] == str(path) and parsed["auxiliaryPackageBinary"] == str(path)
+                and integer_between(original["size"], 1, 512 << 20) and sha256_value(original["sha256"]),
+                "Windows GUI auxiliary original role/content differs")
+        named, descriptor = original["named"], original["descriptor"]
+        require(all(type(row) is list and len(row) == 10 and all(type(value) is int for value in row)
+                    and row[0] > 0 and row[1] > 0 and stat.S_ISREG(row[2]) and row[3] in (1, 2)
+                    and row[4] == original["size"] and row[5] > 0 and row[6] > 0 and not row[7] & 0x400
+                    and row[8] == 0 and row[9] > 0 for row in (named, descriptor))
+                and [*named[:2], named[2] & ~0o111, *named[3:9]] == descriptor[:9],
+                "Windows GUI auxiliary full original epoch differs")
+    else:
+        require(parsed["auxiliaryPackageBinary"] is None, "Windows GUI emitted auxiliary lacks its original epoch")
+    expected = windows_installed_phase_receipt(context, "windows-normal-ui-observer-auxiliary",
+        role="observer-auxiliary-package-bin", messages=messages, invocationSha256=invocation,
+        original=original, launchAuthority=False)
+    if create:
+        write_json(receipt, expected)
+    else:
+        require(same_compile_json(saved, expected), "Windows GUI observer auxiliary epoch/stream changed")
+    return expected
+
+
+def windows_normal_ui_normal_compile_start(context: dict, probe: dict, observer: dict, identity: str,
+                                           auxiliary: dict, *, create: bool) -> None:
+    root = Path(context["root"])
+    expected = windows_installed_phase_receipt(context, "windows-normal-ui-normal-compile",
+        retainedProbe=probe, observer=observer, observerNativeIdentity=windows_ordinary_identity(identity),
+        auxiliary=auxiliary, normalOutputsAbsent=True, claimOnly=True)
+    path = root / "normal-ui-normal-compile-started.private.json"
+    if create:
+        _, singleton, receipt = windows_normal_ui_normal_paths(context)
+        windows_normal_ui_absent((singleton, receipt, root / "normal-app-compile-messages.jsonl", path))
+        require(same_compile_json(auxiliary, windows_normal_ui_auxiliary(context, recheck_original=True))
+                and same_compile_json(observer, windows_normal_ui_observer_artifact(context))
+                and identity == windows_ordinary_original(observer, ui_role="observer")
+                and same_compile_json(probe, windows_normal_ui_positive_probe(context)),
+                "Windows GUI originals changed immediately before the one normal compiler entry")
+        write_json(path, expected)
+    else:
+        require(same_compile_json(read_bounded_json(path, 128 << 10), expected),
+                "Windows GUI original normal compiler-start binding changed")
+
+
+def windows_normal_ui_gui_build(name: str, context: dict, deadline: float) -> None:
+    require(name in WINDOWS_NORMAL_UI_GUI_BUILD_PHASES and windows_normal_ui_profile(context),
+            "Windows GUI build role differs")
+    probe, publication, record = windows_normal_ui_gui_base(context)
+    root, source = Path(context["root"]), Path(context["source"])
+    desktop = source / "desktop"
+    source_unchanged(context)
+    require(context["sdk"] == {"version": WINDOWS_SDK_VERSION, "headers": fixed_file_inventory(windows_sdk_root(), WINDOWS_SDK_HEADERS)},
+            "Windows GUI original SDK changed")
+    environment = clean_environment(root)
+    environment.update(GITHUB_SHA=context["sourceSha"], GITHUB_RUN_ID=context["runId"], MRK_WINDOWS_SOURCE_TREE=context["sourceTree"],
+        MRK_WINDOWS_UI_APP_VERSION=probe["appVersion"], CARGO_TARGET_DIR=str(root / "target"),
+        MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=publication["manifestSha256"], MRK_BUNDLED_PROTOCOL_SHA256=publication["protocolSha256"])
+    compiler, _ = windows_normal_ui_acquired(context)
+    cargo, rustc = tools(context, environment)
+    require(compiler == {role: {"path": path, **windows_installed_record(Path(path), 128 << 20)}
+                         for role, path in (("cargo", cargo), ("rustc", rustc))}, "Windows GUI original selected compiler changed")
+    for ancestor in (desktop, source, *source.parents):
+        windows_normal_ui_absent((ancestor / ".npmrc",))
+    write_json(root / (name + "-started.json"), windows_installed_phase_receipt(context, name, claimOnly=True))
+    if name == "windows-normal-ui-gui-acquire":
+        require(os.environ.get("MRK_WINDOWS_UI_NODE_STEP_OUTCOME") == "success", "Windows GUI fixed Node setup has not closed")
+        windows_normal_ui_absent((desktop / "node_modules", desktop / "dist", root / "npm-cache", root / "npmrc-user", root / "npmrc-global"))
+        for leaf in ("npmrc-user", "npmrc-global"):
+            (root / leaf).touch(mode=0o600, exist_ok=False)
+        (root / "npm-cache").mkdir(mode=0o700)
+        node = shutil.which("node")
+        require(node is not None and Path(node).is_absolute(), "Windows GUI selected Node is unavailable")
+        npm = Path(node).parent / "node_modules/npm/bin/npm-cli.js"
+        frontend = {role: {"path": str(path), **windows_installed_record(Path(path), 128 << 20)}
+                    for role, path in (("node", node), ("npm", npm))}
+        require(run([node, "--version"], check="node-version", cwd=root, env=environment,
+                    timeout=windows_installed_remaining(deadline, 15), capture=True) == NODE, "Windows GUI selected Node version differs")
+        write_json(root / "normal-ui-frontend-tools.json", frontend)
+        for role, observer in (("observer", True), ("normal-app", False)):
+            with (root / (role + "-metadata.json")).open("x", encoding="utf-8", newline="\n") as output, \
+                    (root / (role + "-acquire.stderr")).open("x", encoding="utf-8") as diagnostics:
+                run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features",
+                     "--features", ",".join(windows_normal_ui_features("observer" if observer else "app")),
+                     "--filter-platform", TARGETS["windows"], "--manifest-path", str(source / WINDOWS_INSTALLED_APP / "Cargo.toml")],
+                    check="windows-normal-ui-gui-metadata", cwd=root, env=environment,
+                    timeout=windows_installed_remaining(deadline, 600), output=output, diagnostics=diagnostics)
+            require(output.closed and diagnostics.closed, "Windows GUI metadata original writers did not close")
+            windows_normal_ui_app_metadata(context, observer=observer)
+        with (root / "normal-ui-frontend-acquire.stdout").open("x", encoding="utf-8") as output, \
+                (root / "normal-ui-frontend-acquire.stderr").open("x", encoding="utf-8") as diagnostics:
+            run([node, "--max-old-space-size=768", str(npm), "ci", "--ignore-scripts", "--no-audit", "--no-fund",
+                 "--userconfig", str(root / "npmrc-user"), "--globalconfig", str(root / "npmrc-global"),
+                 "--cache", str(root / "npm-cache"), "--registry", "https://registry.npmjs.org/"],
+                check="windows-normal-ui-frontend-acquire", cwd=desktop, env=environment,
+                timeout=windows_installed_remaining(deadline, 300), output=output, diagnostics=diagnostics)
+        require(output.closed and diagnostics.closed, "Windows GUI frontend original acquisition writers did not close")
+        facts = windows_normal_ui_gui_acquire_facts(context, probe, record, frontend)
+    else:
+        acquired_probe, acquired_publication, acquired_record, frontend = windows_normal_ui_gui_acquired(context)
+        require(same_compile_json((probe, publication, record), (acquired_probe, acquired_publication, acquired_record)),
+                "Windows GUI acquired prerequisite/publication changed")
+        for leaf in ("npmrc-user", "npmrc-global"):
+            require(windows_installed_bytes(root / leaf, 1) == b"", "Windows GUI private npm configuration changed")
+        windows_normal_ui_absent((desktop / "dist", *windows_normal_ui_normal_paths(context),
+            root / "observer-compile-messages.jsonl", root / "normal-app-compile-messages.jsonl",
+            root / "observer-compiled-artifact.json", root / "normal-ui-observer-auxiliary.private.json",
+            root / "normal-ui-normal-compile-started.private.json"))
+        node = frontend["node"]["path"]
+        for role, argv, seconds in (("typecheck", [node, "--max-old-space-size=768", "node_modules/typescript/bin/tsc", "--noEmit", "-p", "tsconfig.json"], 60),
+            ("assets", [node, "--max-old-space-size=768", "node_modules/vite/bin/vite.js", "build", "--config", str(desktop / "vite.config.mjs"),
+                "--configLoader", "native", "--outDir", str(desktop / "dist")], 90)):
+            with (root / ("normal-ui-frontend-" + role + ".stdout")).open("x", encoding="utf-8") as output, \
+                    (root / ("normal-ui-frontend-" + role + ".stderr")).open("x", encoding="utf-8") as diagnostics:
+                if role == "typecheck":
+                    run(argv, check="windows-normal-ui-frontend-typecheck", cwd=desktop, env=environment,
+                        timeout=windows_installed_remaining(deadline, seconds), output=output, diagnostics=diagnostics)
+                else:
+                    run(argv, check="windows-normal-ui-frontend-assets", cwd=desktop, env=environment,
+                        timeout=windows_installed_remaining(deadline, seconds), output=output, diagnostics=diagnostics)
+            require(output.closed and diagnostics.closed, "Windows GUI frontend original compiler writers did not close")
+        windows_normal_ui_frontend_files(context)
+        scalar = windows_normal_ui_scalar_build(context, cargo, environment, deadline)
+        windows_normal_ui_absent(windows_normal_ui_normal_paths(context))
+        # Scalar -> observer -> normal share one target. The observer-feature
+        # auxiliary is never normal; only Cargo replaces that recorded interim.
+        for role, observer_selected in (("observer", True), ("normal-app", False)):
+            if not observer_selected:
+                windows_normal_ui_normal_compile_start(context, probe, observer, observer_identity, auxiliary, create=True)
+            argv = windows_normal_ui_gui_argv(cargo, context, observer=observer_selected)
+            try:
+                with (root / (role + "-compile-messages.jsonl")).open("x", encoding="utf-8", newline="\n") as output, \
+                        (root / (role + "-compile.stderr")).open("x", encoding="utf-8") as diagnostics:
+                    run(argv, check="windows-normal-ui-gui-compile-only", cwd=root, env=environment,
+                        timeout=windows_installed_remaining(deadline, 1800), output=output, diagnostics=diagnostics)
+            except Exception:
+                try:
+                    if output.closed and diagnostics.closed:
+                        detail = windows_installed_compile_failure_data(windows_installed_bytes(root / (role + "-compile-messages.jsonl"), 16 << 20), context, "app")
+                        print("MRK_WINDOWS_NORMAL_UI_GUI_COMPILE_REFUSED=" + canonical_json({"role": role, **detail}).decode("ascii"), flush=True)
+                except BaseException:
+                    pass
+                raise
+            require(output.closed and diagnostics.closed, "Windows GUI original compiler writers did not close")
+            windows_normal_ui_gui_messages(context, observer=observer_selected)
+            if observer_selected:
+                observer = windows_normal_ui_observer_artifact(context)
+                observer_identity = windows_ordinary_original(observer, ui_role="observer")
+                write_json(root / "observer-compiled-artifact.json", observer)
+                auxiliary = windows_normal_ui_auxiliary(context, recheck_original=True, create=True)
+            else:
+                normal = windows_normal_ui_normal_handoff(context, deadline)
+                write_json(root / "normal-app-compiled-artifact.json", normal)
+        require(same_compile_json(observer, windows_normal_ui_observer_artifact(context))
+                and observer_identity == windows_ordinary_original(observer, ui_role="observer"),
+                "Windows GUI normal compile changed the original observer")
+        facts = windows_normal_ui_gui_compile_facts(context, probe, record, normal, observer,
+            windows_ordinary_original(normal, ui_role="normal"), observer_identity, auxiliary, scalar)
+    require(same_compile_json((probe, publication, record), windows_normal_ui_gui_base(context)),
+            "Windows GUI build changed the original cheap owner or finalized runtime publication")
+    windows_installed_inputs(context)
+    source_unchanged(context)
+    windows_installed_remaining(deadline, 1)
+    write_json(root / (name + "-checks.json"), windows_installed_phase_receipt(context, name, **facts))
+
+
+def windows_normal_ui_case_paths(context: dict, role: str) -> dict[str, Path]:
+    require(role in WINDOWS_NORMAL_UI_GUI_ROLES, "Windows GUI case file role differs")
+    root, stem = Path(context["root"]), "normal-ui-" + role
+    return {"request": root / (stem + "-request.txt"), "owner": root / (stem + "-owner-result.private.json"),
+        "exit": root / (stem + "-owner-exit.private.json"), "intent": root / (stem + "-owner-intent.private.json"),
+        "output": root / (stem + "-output"), "child": root / (stem + "-output") / (stem + "-result.private.json"),
+        "preflight": root / ("windows-" + stem + "-preflight-checks.json"),
+        "finalize": root / ("windows-" + stem + "-finalize-checks.json")}
+
+
+def windows_normal_ui_case_preflight_facts(request: bytes, compiled: dict, previous: dict) -> dict:
+    return {"request": {"size": len(request), "sha256": hashlib.sha256(request).hexdigest()},
+            "originalCompile": compiled, "previousFinalizer": previous, "nativeNotStarted": True}
+
+
+def windows_normal_ui_case_data(context: dict, role: str, compiled: dict, publication_raw: bytes, before_identity: str,
+                               previous: dict, blobs: dict[str, bytes], outcomes: dict[str, str],
+                               used_accounts: set[tuple[str, str]], prior_security: str | None) -> dict:
+    """Closed DATA join for one owner; no current-identity adoption or execution."""
+    require(role in WINDOWS_NORMAL_UI_GUI_ROLES and outcomes.get("preflight") == "success"
+            and set(blobs) == {"request", "preflight", "owner", "exit", "intent", *( () if role == "normal-smoke" else ("child",))},
+            "Windows GUI case lacks independently closed preflight or original evidence")
+    normal = role == "normal-smoke"
+    app = compiled["normalApp" if normal else "observer"]
+    request = windows_normal_ui_gui_request(context, role, app, before_identity, compiled["retainedProbe"],
+        compiled["normalInvocationSha256" if normal else "observerInvocationSha256"],
+        bounded_json(publication_raw, 64 << 10), publication_raw)
+    preflight = windows_installed_phase_receipt(context, "windows-normal-ui-" + role + "-preflight",
+        **windows_normal_ui_case_preflight_facts(request, compiled["receipt"], previous))
+    require(request == blobs["request"] and same_compile_json(bounded_json(blobs["preflight"], 64 << 10), preflight),
+            "Windows GUI original request/preflight or preceding finalizer changed")
+    owner = bounded_json(blobs["owner"], 64 << 10)
+    require(type(owner) is dict and type(owner.get("aclTransitions")) is list and len(owner["aclTransitions"]) >= 7,
+            "Windows GUI original artifact transition is absent")
+    transition = owner["aclTransitions"][5]
+    require(type(transition) is dict and "after" in transition, "Windows GUI original artifact transition shape differs")
+    after_identity = windows_ordinary_wire(windows_ordinary_stamp(transition["after"]))
+    facts = windows_normal_ui_gui_records(context, request, blobs["owner"], blobs.get("child"), blobs["exit"], blobs["intent"],
+        outcomes.get("owner", "unavailable"), after_identity=after_identity)
+    require(prior_security is None or transition["securityBefore"] == prior_security,
+            "Windows GUI observer ACL did not continue the exact preceding finalized transition")
+    account = (facts["accountNameSha256"], facts["accountSidSha256"])
+    require(all(account[0] != prior[0] and account[1] != prior[1] for prior in used_accounts),
+            "Windows GUI reused a preceding account name or SID")
+    return {**facts, "originalCompile": compiled["receipt"], "previousFinalizer": previous,
+            "originalPreflight": {"size": len(blobs["preflight"]), "sha256": hashlib.sha256(blobs["preflight"]).hexdigest()}}
+
+
+def windows_normal_ui_case_chain(context: dict, through: str | None, *, finalized: bool) -> tuple[dict, list[dict], dict]:
+    """Reconstruct earlier ACL epochs from their CLOSED originals, then open latest.
+
+    The shared observer is intentionally granted to three distinct accounts.
+    Earlier finalizers must not reopen it expecting stale ChangeTime. Instead,
+    every original request/transition/finalizer forms one exact chain; only its
+    latest admitted post-transition epoch is compared to a fresh descriptor.
+    """
+    require((through is None or through in WINDOWS_NORMAL_UI_GUI_ROLES) and type(finalized) is bool,
+            "Windows GUI case chain role differs")
+    probe, publication, normal, observer, compiled = windows_normal_ui_gui_compiled(context)
+    root = Path(context["root"])
+    compiled = {**compiled, "receipt": windows_installed_record(root / "windows-normal-ui-gui-compile-checks.json", 256 << 10)}
+    publication_raw = windows_installed_bytes(root / "normal-ui-publication.private.json", 64 << 10)
+    require(publication_raw == canonical_json(publication), "Windows GUI publication original changed")
+    # The cheap prerequisite itself also consumed a fresh ordinary account.
+    probe_owner = read_bounded_json(root / "normal-ui-prerequisite-owner-result.private.json", 64 << 10)
+    probe_intent = read_bounded_json(root / "normal-ui-prerequisite-owner-intent.private.json", 4096)
+    used = {(hashlib.sha256(probe_intent["accountName"].encode("ascii")).hexdigest(), probe_owner["accountSidSha256"])}
+    identities = {"normal": compiled["normalNativeIdentity"], "observer": compiled["observerNativeIdentity"]}
+    previous = windows_installed_record(root / "windows-normal-ui-setup-publication-finalize-checks.json", 64 << 10)
+    security, cases = None, []
+    count = 0 if through is None else WINDOWS_NORMAL_UI_GUI_ROLES.index(through) + 1
+    for index, role in enumerate(WINDOWS_NORMAL_UI_GUI_ROLES[:count]):
+        paths = windows_normal_ui_case_paths(context, role)
+        prefix = "MRK_WINDOWS_UI_" + role.upper().replace("-", "_") + "_"
+        blobs = {key: windows_installed_bytes(paths[key], 64 << 10 if key in ("preflight", "owner") else 4096)
+            for key in ("request", "preflight", "owner", "exit", "intent", *( () if role == "normal-smoke" else ("child",)))}
+        selected = "normal" if role == "normal-smoke" else "observer"
+        facts = windows_normal_ui_case_data(context, role, compiled, publication_raw, identities[selected], previous, blobs,
+            {part: os.environ.get(prefix + part.upper() + "_STEP_OUTCOME", "unavailable") for part in ("preflight", "owner")},
+            used, None if role == "normal-smoke" else security)
+        if index < count - 1 or finalized:
+            require(os.environ.get(prefix + "FINALIZE_STEP_OUTCOME") == "success", "Windows GUI preceding DATA finalizer has not closed")
+            expected = windows_installed_phase_receipt(context, "windows-normal-ui-" + role + "-finalize", **facts)
+            require(same_compile_json(read_bounded_json(paths["finalize"], 64 << 10), expected),
+                    "Windows GUI original closed finalizer changed")
+            previous = windows_installed_record(paths["finalize"], 64 << 10)
+        used.add((facts["accountNameSha256"], facts["accountSidSha256"]))
+        identities[selected] = facts["afterArtifactIdentity"]
+        if role != "normal-smoke":
+            security = facts["artifactAclAfterSha256"]
+        cases.append(facts)
+    require(identities["normal"] == windows_ordinary_original(normal, ui_role="normal")
+            and identities["observer"] == windows_ordinary_original(observer, ui_role="observer"),
+            "Windows GUI latest original artifact/ACL epoch changed outside the finalized chain")
+    return compiled, cases, previous
+
+
+def windows_normal_ui_case_preflight(context: dict, role: str) -> None:
+    require(role in WINDOWS_NORMAL_UI_GUI_ROLES, "Windows GUI preflight role differs")
+    index = WINDOWS_NORMAL_UI_GUI_ROLES.index(role)
+    compiled, earlier, previous = windows_normal_ui_case_chain(context,
+        WINDOWS_NORMAL_UI_GUI_ROLES[index - 1] if index else None, finalized=True)
+    normal = role == "normal-smoke"
+    artifact = compiled["normalApp" if normal else "observer"]
+    identity = (earlier[-1]["afterArtifactIdentity"] if index > 1 else
+                compiled["normalNativeIdentity" if normal else "observerNativeIdentity"])
+    paths = windows_normal_ui_case_paths(context, role)
+    windows_normal_ui_absent(tuple(path for key, path in paths.items() if key != "child"))
+    publication_raw = windows_installed_bytes(Path(context["root"]) / "normal-ui-publication.private.json", 64 << 10)
+    request = windows_normal_ui_gui_request(context, role, artifact, identity, compiled["retainedProbe"],
+        compiled["normalInvocationSha256" if normal else "observerInvocationSha256"],
+        bounded_json(publication_raw, 64 << 10), publication_raw)
+    windows_fullwalk_write(paths["request"], request, 4096)
+    facts = windows_normal_ui_case_preflight_facts(request, compiled["receipt"], previous)
+    write_json(paths["preflight"], windows_installed_phase_receipt(context, "windows-normal-ui-" + role + "-preflight", **facts))
+    owner = compiled["retainedProbe"]["compiledTest"]
+    with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+        for key, value in (("artifact", owner["path"]), ("artifactSha256", owner["sha256"]),
+            ("appArtifactSha256", artifact["sha256"]), ("requestSha256", facts["request"]["sha256"]),
+            ("sourceTree", context["sourceTree"]), ("appVersion", compiled["appVersion"])):
+            output.write(key + "=" + str(value) + "\n")
+
+
+def windows_normal_ui_case_finalize(context: dict, role: str) -> None:
+    _, cases, _ = windows_normal_ui_case_chain(context, role, finalized=False)
+    write_json(windows_normal_ui_case_paths(context, role)["finalize"],
+        windows_installed_phase_receipt(context, "windows-normal-ui-" + role + "-finalize", **cases[-1]))
+
+
+def windows_normal_ui_retain(context: dict) -> None:
+    """Bounded public projection after success/failure; no repair or process action."""
+    root = Path(context["root"])
+    result = {"status": "unavailable", "facts": None}
+    if os.environ.get("MRK_WINDOWS_UI_PREREQUISITE_FINALIZE_STEP_OUTCOME") == "success":
+        try:
+            facts = windows_normal_ui_probe_observe_final(context)
+            expected = windows_installed_phase_receipt(context, "windows-normal-ui-prerequisite-finalize", status="observed", **facts)
+            require(same_compile_json(read_bounded_json(root / "windows-normal-ui-prerequisite-finalize-checks.json", 64 << 10), expected),
+                    "Windows UI probe original finalizer changed")
+            result = {"status": "available" if facts["prerequisite"]["available"] else "unavailable-observed", "facts": facts}
+        except (OSError, ValueError, CheckFailure, KeyError, TypeError):
+            result = {"status": "invalid", "facts": None}
+    try:
+        compile_raw = windows_installed_bytes(root / "compile-messages.jsonl", 16 << 20)
+    except (OSError, ValueError, CheckFailure):
+        compile_raw = None
+    setup = {"status": "unavailable", "facts": None}
+    for through in ("publication", "publish", "stage"):
+        if os.environ.get("MRK_WINDOWS_UI_SETUP_" + through.upper() + "_FINALIZE_STEP_OUTCOME") == "success":
+            try:
+                facts, _, _ = windows_normal_ui_setup_evidence(context, through, finalized=True)
+                setup = {"status": "observed", "facts": facts}
+            except (OSError, ValueError, CheckFailure, KeyError, TypeError):
+                setup = {"status": "invalid", "facts": None}
+            break  # A bad later original is never downgraded into an earlier success.
+    gui, cases = {"status": "unavailable", "facts": None}, []
+    for role in reversed(WINDOWS_NORMAL_UI_GUI_ROLES):
+        if os.environ.get("MRK_WINDOWS_UI_" + role.upper().replace("-", "_") + "_FINALIZE_STEP_OUTCOME") == "success":
+            try:
+                compiled, verified, _ = windows_normal_ui_case_chain(context, role, finalized=True)
+                cases = [{key: item[key] for key in ("role", "verifiedMethods", "observation", "evidence", "originalOwner")}
+                         for item in verified]
+                gui = {"status": "observed", "facts": {"originalCompile": compiled["receipt"],
+                    "normalArtifact": {key: compiled["normalApp"][key] for key in ("size", "sha256", "messages")},
+                    "observerArtifact": {key: compiled["observer"][key] for key in ("size", "sha256", "messages")},
+                    "compilerObservations": compiled["compilerObservations"], "normalFeatures": compiled["normalFeatures"],
+                    "observerFeatures": compiled["observerFeatures"], "compileOrder": compiled["compileOrder"]}}
+            except (OSError, ValueError, CheckFailure, KeyError, TypeError):
+                gui = {"status": "invalid", "facts": None}
+            break  # A failed later original is not relabeled as an earlier success.
+    complete = len(cases) == len(WINDOWS_NORMAL_UI_GUI_ROLES)
+    verified_names = dict(zip(WINDOWS_NORMAL_UI_GUI_ROLES, WINDOWS_NORMAL_UI_NOT_VERIFIED[:4], strict=True))
+    completed = {verified_names[item["role"]] for item in cases}
+    summary = {"schemaVersion": 1, "scope": WINDOWS_NORMAL_UI_PROFILE,
+        **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt", "imageOS", "imageVersion")},
+        "rust": RUST, "target": TARGETS["windows"], "nativeFeatures": ["desktop-ui"], "prerequisite": result,
+        "combinedPassed": complete, "verifiedMethods": sum(item["verifiedMethods"] for item in cases),
+        "guiCasesExecuted": len(cases), "runtimeSetup": setup, "guiCompilation": gui, "guiCases": cases,
+        "compileDiagnostic": windows_installed_compile_failure_data(compile_raw, context, "standalone"),
+        "notVerified": [name for name in WINDOWS_NORMAL_UI_NOT_VERIFIED if name not in completed]}
+    # Never publish raw native accounts/SIDs/paths/ACLs, compiler text, or a
+    # pre-close child/owner file. Existing public-bindings contains source DATA.
+    windows_fullwalk_write(root / "public/windows-normal-project-ui.json", canonical_json(summary), 64 << 10)
+
+
+def windows_normal_ui_phase(name: str, context: dict, deadline: float) -> None:
+    """Explicit UI stages. The historical raw app path is never a fallback."""
+    require(windows_normal_ui_profile(context) and name in ("acquire", "compile", "windows-normal-ui-prerequisite",
+        *WINDOWS_NORMAL_UI_DATA_PHASES, *WINDOWS_NORMAL_UI_SETUP_BUILD_PHASES, *WINDOWS_NORMAL_UI_GUI_BUILD_PHASES, "retain"), "Windows normal UI phase is unavailable in this profile")
+    root, source = Path(context["root"]), Path(context["source"])
+    if name in WINDOWS_NORMAL_UI_GUI_BUILD_PHASES:
+        windows_normal_ui_gui_build(name, context, deadline)
+        return
+    if name in WINDOWS_NORMAL_UI_GUI_DATA_PHASES:
+        role = name.removeprefix("windows-normal-ui-").removesuffix("-preflight").removesuffix("-finalize")
+        if name.endswith("-preflight"):
+            windows_normal_ui_case_preflight(context, role)
+        else:
+            windows_normal_ui_case_finalize(context, role)
+        return
+    if name in WINDOWS_NORMAL_UI_SETUP_BUILD_PHASES:
+        windows_normal_ui_setup_build(name, context, deadline)
+        return
+    if name in WINDOWS_NORMAL_UI_SETUP_DATA_PHASES:
+        if name == "windows-normal-ui-setup-preflight":
+            windows_normal_ui_setup_preflight(context)
+        else:
+            windows_normal_ui_setup_finalize(context, name.removeprefix("windows-normal-ui-setup-").removesuffix("-finalize"))
+        return
+    if name == "windows-normal-ui-prerequisite-finalize":
+        windows_normal_ui_probe_finalize(context)
+        return
+    if name == "retain":
+        windows_normal_ui_retain(context)
+        return
+    if name == "windows-normal-ui-prerequisite":
+        windows_normal_ui_probe_preflight(context)
+        return
+    source_unchanged(context)
+    require(context["sdk"] == {"version": WINDOWS_SDK_VERSION, "headers": fixed_file_inventory(windows_sdk_root(), WINDOWS_SDK_HEADERS)},
+            "Windows UI original SDK changed")
+    environment = clean_environment(root)
+    version = windows_normal_ui_app_version(context)
+    environment.update(GITHUB_SHA=context["sourceSha"], GITHUB_RUN_ID=context["runId"],
+        MRK_WINDOWS_SOURCE_TREE=context["sourceTree"], MRK_WINDOWS_UI_APP_VERSION=version, CARGO_TARGET_DIR=str(root / "target"))
+    write_json(root / (name + "-started.json"), windows_installed_phase_receipt(context, name, claimOnly=True))
+    if name == "acquire":
+        # No core ZIP, runtime supplier, frontend, Tauri graph or account exists
+        # during this native-only acquisition. The cheap owner is not held over
+        # any later build; its original artifact/messages remain unchanged.
+        run([context["rustup"], "toolchain", "install", RUST, "--profile", "minimal", "--no-self-update"],
+            check="rust-toolchain-install", cwd=root, env=environment, timeout=windows_installed_remaining(deadline, 600))
+        cargo, rustc = tools(context, environment)
+        with (root / "metadata.json").open("x", encoding="utf-8", newline="\n") as output, \
+                (root / "acquire.stderr").open("x", encoding="utf-8") as diagnostics:
+            run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features", "--features", "desktop-ui",
+                 "--filter-platform", TARGETS["windows"], "--manifest-path", str(source / WINDOWS_INSTALLED_CRATE / "Cargo.toml")],
+                check="windows-normal-ui-native-metadata", cwd=root, env=environment,
+                timeout=windows_installed_remaining(deadline, 600), output=output, diagnostics=diagnostics)
+        graph = windows_normal_ui_native_metadata(context)
+        compiler = {role: {"path": path, **windows_installed_record(Path(path), 128 << 20)}
+                    for role, path in (("cargo", cargo), ("rustc", rustc))}
+        write_json(root / "compiler-tools.json", compiler)
+        facts = {"rust": RUST, "target": TARGETS["windows"], "nativeFeatures": ["desktop-ui"],
+            "activePackageIds": sorted(graph["nodes"]), "metadata": windows_installed_record(root / "metadata.json", 8 << 20),
+            "compilerTools": windows_installed_record(root / "compiler-tools.json", 64 << 10),
+            "originalExitCode": 0, "nativePrerequisiteOnly": True, "appVersion": version}
+    else:
+        compiler, _ = windows_normal_ui_acquired(context)
+        cargo, rustc = tools(context, environment)
+        require(compiler == {role: {"path": path, **windows_installed_record(Path(path), 128 << 20)}
+                             for role, path in (("cargo", cargo), ("rustc", rustc))}, "Windows UI selected compiler changed")
+        argv = windows_fullwalk_native_argv(cargo, context)
+        try:
+            with (root / "compile-messages.jsonl").open("x", encoding="utf-8", newline="\n") as output, \
+                    (root / "compile.stderr").open("x", encoding="utf-8") as diagnostics:
+                run(argv, check="windows-normal-ui-native-compile-only", cwd=root, env=environment,
+                    timeout=windows_installed_remaining(deadline, 600), output=output, diagnostics=diagnostics)
+        except Exception:
+            # Source-bound fixed diagnostic only; do not mask the original error
+            # or run the executable following an unsuccessful compiler return.
+            try:
+                windows_installed_compile_failure(context, "standalone")
+            except Exception:
+                pass
+            raise
+        require(output.closed and diagnostics.closed, "Windows UI original native compiler writers did not close")
+        artifact = windows_normal_ui_native_artifact(context)
+        policy_identity = windows_ordinary_original(artifact)
+        policy_argv = windows_normal_ui_inert_argv(artifact)
+        with (root / "normal-ui-native-policy.stdout").open("x", encoding="utf-8", newline="\n") as output, \
+                (root / "normal-ui-native-policy.stderr").open("x", encoding="utf-8") as diagnostics:
+            run(policy_argv, check="windows-normal-ui-native-policy", cwd=root, env=environment,
+                timeout=windows_installed_remaining(deadline, 60), output=output, diagnostics=diagnostics)
+        require(output.closed and diagnostics.closed, "Windows UI original policy writers did not close")
+        require(same_compile_json(artifact, windows_normal_ui_native_artifact(context))
+                and policy_identity == windows_ordinary_original(artifact), "Windows UI policy execution changed its original artifact")
+        policy = windows_normal_ui_inert_facts(context, artifact, policy_identity)
+        write_json(root / "compiled-test.json", artifact)
+        facts = {"rust": RUST, "target": TARGETS["windows"], "nativeFeatures": ["desktop-ui"],
+            "compiledTest": artifact, "originalExitCode": 0, "nativePrerequisiteOnly": True,
+            "invocationSha256": hashlib.sha256(canonical_json(argv)).hexdigest(), "appVersion": version, "inertPolicy": policy}
+    windows_installed_inputs(context)
+    source_unchanged(context)
+    windows_installed_remaining(deadline, 1)
+    write_json(root / (name + "-checks.json"), windows_installed_phase_receipt(context, name, **facts))
+
+
 def windows_installed_phase(name: str, scope: str) -> None:
     require(scope == WINDOWS_INSTALLED_SCOPE and name in WINDOWS_INSTALLED_PHASES, "Unexpected fixed Windows headless phase")
     deadline = time.monotonic() + {"acquire": 840, "compile": 660, "windows-installed-native": 210,
-                                   "windows-installed-runtime-data": 40}.get(name, 60)
-    context = windows_installed_context(create=name == "prepare", retention_only=name == "retain")
+                                   "windows-installed-runtime-data": 40,
+                                   "windows-normal-ui-setup-acquire": 840, "windows-normal-ui-setup-compile": 660,
+                                   "windows-normal-ui-gui-acquire": 1200, "windows-normal-ui-gui-compile": 2400}.get(name, 60)
+    context = windows_installed_context(create=name == "prepare", retention_only=name in {
+        "retain", "windows-installed-native-finalize", *WINDOWS_FULLWALK_DATA_PHASES, *WINDOWS_INSTALLED_PASSIVE_DATA_PHASES,
+        *WINDOWS_NORMAL_UI_DATA_PHASES})
     root, source = Path(context["root"]), Path(context["source"])
+    production = windows_runtime_publication_profile(context)
+    passive = windows_installed_passive_profile(context)
+    publisher_required = windows_installed_publisher_required(context)
     if name == "prepare":
+        return
+    if windows_normal_ui_profile(context):
+        windows_normal_ui_phase(name, context, deadline)
+        return
+    require(name not in ("windows-normal-ui-prerequisite", *WINDOWS_NORMAL_UI_DATA_PHASES, *WINDOWS_NORMAL_UI_SETUP_BUILD_PHASES, *WINDOWS_NORMAL_UI_GUI_BUILD_PHASES),
+            "Windows UI phases require their explicit profile; no historical fallback is available")
+    if name in WINDOWS_FULLWALK_DATA_PHASES:
+        require(windows_fullwalk_profile(context), "Windows fullwalk DATA phases require the exact explicit dispatch")
+        {"windows-installed-fixture-finalize": windows_fullwalk_fixture_finalize,
+         "windows-installed-fullwalk": windows_fullwalk_preflight,
+         "windows-installed-fullwalk-finalize": windows_fullwalk_finalize,
+         "windows-runtime-publication-scalar-finalize": windows_runtime_publication_scalar_finalize,
+         "windows-runtime-publication-stage-finalize": lambda c: windows_runtime_publication_finalize(c, "stage"),
+         "windows-runtime-publication-success-finalize": lambda c: windows_runtime_publication_finalize(c, "helperSuccess"),
+         "windows-runtime-publication-before-finalize": lambda c: windows_runtime_publication_finalize(c, "before"),
+         "windows-runtime-publication-occupied-finalize": lambda c: windows_runtime_publication_finalize(c, "helperOccupied")}[name](context)
+        return
+    if name in WINDOWS_INSTALLED_PASSIVE_DATA_PHASES:
+        require(passive, "Windows passive DATA phases require the exact explicit dispatch")
+        {"windows-installed-passive-stage-finalize": windows_installed_passive_stage_finalize,
+         "windows-installed-passive-publish-finalize": windows_installed_passive_publish_finalize,
+         "windows-installed-passive-publication-finalize": windows_installed_passive_publication_finalize,
+         "windows-installed-passive": windows_installed_passive_preflight,
+         "windows-installed-passive-finalize": windows_installed_passive_finalize}[name](context)
+        return
+    if name == "windows-installed-native-finalize":
+        require(not passive, "The installed-passive scope has no historical ordinary-owner phase")
+        windows_ordinary_finalize(context)
         return
     if name == "windows-installed-runtime-data":
         # One live observer's DATA only; no acquire/compiler/test/account route.
@@ -9335,11 +16403,20 @@ def windows_installed_phase(name: str, scope: str) -> None:
         write_json(root / "runtime-data-checks.json", record)
         return
     if name == "retain":
+        if passive:
+            windows_installed_passive_retain(context)
+            return
+        if windows_fullwalk_profile(context):
+            windows_fullwalk_retain(context)
+            return
         # DATA-only after success/failure: no launch, retry, reset or cleanup.
+        # Original preflight contains full descriptor IDs and stays private for
+        # finalization. Only the redacted final result belongs in this whitelist.
         files = {"public-bindings.json": 256 << 10, "acquire-checks.json": 64 << 10, "compile-checks.json": 64 << 10,
-            "windows-installed-native-checks.json": 64 << 10, "metadata.json": 2 << 20, "acquire.stderr": 1 << 20,
+            "windows-installed-native-checks.json": 64 << 10,
+            "metadata.json": 2 << 20, "acquire.stderr": 1 << 20,
             "compile-messages.jsonl": 16 << 20, "compile.stderr": 1 << 20,
-            "inert.stdout": 64 << 10, "inert.stderr": 64 << 10, "native.stdout": 64 << 10, "native.stderr": 64 << 10,
+            "inert.stdout": 64 << 10, "inert.stderr": 64 << 10,
             "app-metadata.json": 8 << 20, "app-acquire.stderr": 1 << 20,
             "app-compile-messages.jsonl": 16 << 20, "app-compile.stderr": 1 << 20,
             "app-inert.stdout": 64 << 10, "app-inert.stderr": 64 << 10}
@@ -9382,23 +16459,36 @@ def windows_installed_phase(name: str, scope: str) -> None:
     require(context["sdk"] == {"version": WINDOWS_SDK_VERSION, "headers": fixed_file_inventory(windows_sdk_root(), WINDOWS_SDK_HEADERS)},
             "Windows native selected SDK context changed")
     environment = clean_environment(root)
-    environment["GITHUB_SHA"] = context["sourceSha"]
+    environment.update(GITHUB_SHA=context["sourceSha"], GITHUB_RUN_ID=context["runId"],
+                       MRK_WINDOWS_SOURCE_TREE=context["sourceTree"])
     manifest = source / WINDOWS_INSTALLED_CRATE / "Cargo.toml"
     if name == "acquire":
+        fullwalk_acquired = windows_fullwalk_acquire(context, environment, deadline) if windows_installed_prepared_profile(context) else None
         run([context["rustup"], "toolchain", "install", RUST, "--profile", "minimal", "--no-self-update"],
             check="rust-toolchain-install", cwd=root, env=environment, timeout=windows_installed_remaining(deadline, 600))
         cargo, rustc = tools(context, environment)
         with (root / "metadata.json").open("x", encoding="utf-8", newline="\n") as output, (root / "acquire.stderr").open("x", encoding="utf-8") as diagnostics:
             run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features", "--filter-platform", TARGETS["windows"],
+                *(["--features", ",".join(windows_installed_features(context, "native"))] if production else []),
                 "--manifest-path", str(manifest)], check="windows-installed-locked-metadata", cwd=root, env=environment,
                 timeout=windows_installed_remaining(deadline, 600), output=output, diagnostics=diagnostics)
         packages = windows_installed_metadata(context)
         app_environment = {**environment, "CARGO_TARGET_DIR": str(root / "target")}
         with (root / "app-metadata.json").open("x", encoding="utf-8", newline="\n") as output, (root / "app-acquire.stderr").open("x", encoding="utf-8") as diagnostics:
             run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features", "--filter-platform", TARGETS["windows"],
+                *(["--features", ",".join(windows_installed_features(context, "app"))] if production else []),
                 "--manifest-path", str(source / WINDOWS_INSTALLED_APP / "Cargo.toml")], check="windows-installed-app-locked-metadata", cwd=root,
                 env=app_environment, timeout=windows_installed_remaining(deadline, 600), output=output, diagnostics=diagnostics)
         graph = windows_installed_app_metadata(context)
+        if passive:
+            # Metadata is role-bound too: a publisher graph must not authorize
+            # the non-publisher candidate's compiler units through feature union.
+            with (root / "helper-metadata.json").open("x", encoding="utf-8", newline="\n") as output, (root / "helper-acquire.stderr").open("x", encoding="utf-8") as diagnostics:
+                run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features", "--filter-platform", TARGETS["windows"],
+                    "--features", ",".join(windows_installed_features(context, "helper")),
+                    "--manifest-path", str(source / WINDOWS_INSTALLED_APP / "Cargo.toml")], check="windows-installed-helper-locked-metadata",
+                    cwd=root, env=app_environment, timeout=windows_installed_remaining(deadline, 600), output=output, diagnostics=diagnostics)
+            helper_graph = windows_installed_helper_metadata(context)
         compiler = {"cargo": {"path": cargo, **windows_installed_record(Path(cargo), 128 << 20)},
                     "rustc": {"path": rustc, **windows_installed_record(Path(rustc), 128 << 20)}}
         write_json(root / "compiler-tools.json", compiler)
@@ -9406,98 +16496,199 @@ def windows_installed_phase(name: str, scope: str) -> None:
                  "metadata": windows_installed_record(root / "metadata.json", 2 << 20), "originalExitCode": 0,
                  "appMetadata": windows_installed_record(root / "app-metadata.json", 8 << 20), "appOriginalExitCode": 0,
                  "appActivePackageIds": sorted(graph["nodes"]), "compilerTools": windows_installed_record(root / "compiler-tools.json", 64 << 10)}
+        if passive:
+            facts.update(helperMetadata=windows_installed_record(root / "helper-metadata.json", 8 << 20),
+                         helperMetadataOriginalExitCode=0, helperActivePackageIds=sorted(helper_graph["nodes"]))
+        if fullwalk_acquired is not None:
+            facts["fullwalk"] = fullwalk_acquired
     elif name == "compile":
+        prepared = windows_fullwalk_anchors(context) if windows_installed_prepared_profile(context) else None
+        if prepared is not None:
+            environment.update(MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=prepared["manifestSha256"],
+                               MRK_BUNDLED_PROTOCOL_SHA256=prepared["protocolSha256"])
         cargo, rustc = tools(context, environment)
         compiler = read_bounded_json(root / "compiler-tools.json", 64 << 10)
         require(compiler == {"cargo": {"path": cargo, **windows_installed_record(Path(cargo), 128 << 20)},
             "rustc": {"path": rustc, **windows_installed_record(Path(rustc), 128 << 20)}}, "Windows native pinned compiler changed")
-        argv = [cargo, "test", "--locked", "--offline", "--jobs", "1", "--no-default-features", "--target", TARGETS["windows"],
-                "--manifest-path", str(manifest), "--target-dir", str(root / "target"), "--lib", "--no-run", "--message-format=json"]
-        with (root / "compile-messages.jsonl").open("x", encoding="utf-8", newline="\n") as output, (root / "compile.stderr").open("x", encoding="utf-8") as diagnostics:
-            run(argv, check="windows-installed-test-compile-only", cwd=root, env=environment,
-                timeout=windows_installed_remaining(deadline, 600), output=output, diagnostics=diagnostics)
+        argv = windows_fullwalk_native_argv(cargo, context)
+        compile_failure = None
+        try:
+            with (root / "compile-messages.jsonl").open("x", encoding="utf-8", newline="\n") as output, (root / "compile.stderr").open("x", encoding="utf-8") as diagnostics:
+                timeout = windows_installed_remaining(deadline, 600)
+                try:
+                    run(argv, check="windows-installed-test-compile-only", cwd=root, env=environment,
+                        timeout=timeout, output=output, diagnostics=diagnostics)
+                except CheckFailure as error:
+                    compile_failure = error
+                    raise
+        except CheckFailure as error:
+            try:
+                if error is compile_failure and output.closed and diagnostics.closed:
+                    windows_installed_compile_failure(context, "standalone")
+            except BaseException:
+                # A diagnostic cannot replace the ORIGINAL compile/close error,
+                # even if its own reader or stdout emission is interrupted.
+                pass
+            raise
         artifact = windows_installed_artifact(context)
         write_json(root / "compiled-test.json", artifact)
         app_argv = windows_installed_app_argv(cargo, context)
-        with (root / "app-compile-messages.jsonl").open("x", encoding="utf-8", newline="\n") as output, (root / "app-compile.stderr").open("x", encoding="utf-8") as diagnostics:
-            run(app_argv, check="windows-installed-app-test-compile-only", cwd=root, env=environment,
-                timeout=windows_installed_remaining(deadline, 600), output=output, diagnostics=diagnostics)
+        compile_failure = None
+        try:
+            with (root / "app-compile-messages.jsonl").open("x", encoding="utf-8", newline="\n") as output, (root / "app-compile.stderr").open("x", encoding="utf-8") as diagnostics:
+                timeout = windows_installed_remaining(deadline, 600)
+                try:
+                    run(app_argv, check="windows-installed-app-test-compile-only", cwd=root, env=environment,
+                        timeout=timeout, output=output, diagnostics=diagnostics)
+                except CheckFailure as error:
+                    compile_failure = error
+                    raise
+        except CheckFailure as error:
+            try:
+                if error is compile_failure and output.closed and diagnostics.closed:
+                    windows_installed_compile_failure(context, "app")
+            except BaseException:
+                pass  # Same failure-only, original-exception rule as above.
+            raise
         app_artifact = windows_installed_app_artifact(context)
         write_json(root / "app-compiled-test.json", app_artifact)
         facts = {"rust": RUST, "target": TARGETS["windows"], "compiledTest": artifact, "originalExitCode": 0,
                  "invocationSha256": hashlib.sha256(canonical_json(argv)).hexdigest(), "standaloneOnly": False,
                  "appCompiledTest": app_artifact, "appOriginalExitCode": 0,
                  "appInvocationSha256": hashlib.sha256(canonical_json(app_argv)).hexdigest()}
+        if publisher_required:
+            windows_installed_helper_outputs_absent(context)
+            helper_argv = windows_installed_helper_argv(cargo, context)
+            compile_failure = None
+            try:
+                with (root / "helper-compile-messages.jsonl").open("x", encoding="utf-8", newline="\n") as output, (root / "helper-compile.stderr").open("x", encoding="utf-8") as diagnostics:
+                    timeout = windows_installed_remaining(deadline, 600)
+                    try:
+                        run(helper_argv, check="windows-installed-helper-compile-only", cwd=root, env=environment,
+                            timeout=timeout, output=output, diagnostics=diagnostics)
+                    except CheckFailure as error:
+                        compile_failure = error
+                        raise
+            except CheckFailure as error:
+                try:
+                    if error is compile_failure and output.closed and diagnostics.closed:
+                        windows_installed_compile_failure(context, "helper")
+                except BaseException:
+                    pass  # Diagnostics cannot replace the original compiler/close failure.
+                raise
+            require(output.closed and diagnostics.closed, "Windows helper original compiler writers are not closed")
+            helper_artifact = windows_installed_helper_handoff(context, deadline)
+            write_json(root / "helper-compiled-artifact.json", helper_artifact)
+            facts.update(helperCompiledArtifact=helper_artifact, helperOriginalExitCode=0,
+                helperInvocationSha256=hashlib.sha256(canonical_json(helper_argv)).hexdigest())
+        if prepared is not None:
+            require(prepared == windows_fullwalk_anchors(context), "Windows prepared anchors changed during the original compile gate")
+            facts["fullwalk"] = {"manifestSha256": prepared["manifestSha256"], "protocolSha256": prepared["protocolSha256"],
+                "preparedReceipt": prepared["receipt"], "anchoredNativeBuilds": 1, "anchoredAppBuilds": 1}
+            if publisher_required:
+                facts["fullwalk"]["anchoredHelperBuilds"] = 1
     else:
         artifact = read_bounded_json(root / "compiled-test.json", 64 << 10)
         require(artifact == windows_installed_artifact(context), "Windows native original executable changed")
         app_artifact = read_bounded_json(root / "app-compiled-test.json", 64 << 10)
         compiled = read_bounded_json(root / "compile-checks.json", 64 << 10)
         compiler = read_bounded_json(root / "compiler-tools.json", 64 << 10)
-        require(type(compiled.get("appOriginalExitCode")) is int and compiled["appOriginalExitCode"] == 0
+        require(type(compiled.get("originalExitCode")) is int and compiled["originalExitCode"] == 0
+                and same_compile_json(compiled.get("compiledTest"), artifact)
+                and type(compiled.get("appOriginalExitCode")) is int and compiled["appOriginalExitCode"] == 0
                 and compiled.get("appCompiledTest") == app_artifact
                 and compiled.get("appInvocationSha256") == hashlib.sha256(canonical_json(
                     windows_installed_app_argv(compiler["cargo"]["path"], context))).hexdigest()
                 and app_artifact == windows_installed_app_artifact(context), "Windows app original executable/compilation changed")
+        if publisher_required:
+            helper_artifact = read_bounded_json(root / "helper-compiled-artifact.json", 64 << 10)
+            require(type(compiled.get("helperOriginalExitCode")) is int and compiled["helperOriginalExitCode"] == 0
+                    and same_compile_json(compiled.get("helperCompiledArtifact"), helper_artifact)
+                    and compiled.get("helperInvocationSha256") == hashlib.sha256(canonical_json(
+                        windows_installed_helper_argv(compiler["cargo"]["path"], context))).hexdigest()
+                    and helper_artifact == windows_installed_helper_artifact(context),
+                    "Windows normal helper original executable/compilation changed")
+        app_names = (*WINDOWS_INSTALLED_APP_INERT, *(WINDOWS_RUNTIME_PUBLICATION_APP_INERT if production else ()),
+                     *(WINDOWS_INSTALLED_PASSIVE_APP_INERT if passive else ()))
         with (root / "app-inert.stdout").open("x", encoding="utf-8") as output, (root / "app-inert.stderr").open("x", encoding="utf-8") as diagnostics:
-            run([app_artifact["path"], *WINDOWS_INSTALLED_APP_INERT, "--exact", "--test-threads=1"], check="windows-installed-app-inert-contracts",
+            run([app_artifact["path"], *app_names, "--exact", "--test-threads=1"], check="windows-installed-app-inert-contracts",
                 cwd=root, env=environment, timeout=windows_installed_remaining(deadline, 60), output=output, diagnostics=diagnostics)
         require(windows_installed_bytes(root / "app-inert.stderr", 64 << 10) == b"", "Windows app inert stderr is not empty")
-        app_inert = windows_installed_app_libtest(windows_installed_bytes(root / "app-inert.stdout", 64 << 10))
+        app_inert = windows_installed_app_libtest(windows_installed_bytes(root / "app-inert.stdout", 64 << 10), production=production, passive=passive)
         require(app_artifact == windows_installed_app_artifact(context), "Windows app original executable changed after inert controls")
         environment.update(MRK_DESKTOP_HOSTED_CHECKS=WINDOWS_INSTALLED_SCOPE, GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted",
             RUNNER_OS="Windows", RUNNER_ARCH="X64", ImageOS=context["imageOS"], GITHUB_RUN_ATTEMPT="1")
+        native_names = windows_installed_native_inert(context)
         with (root / "inert.stdout").open("x", encoding="utf-8") as output, (root / "inert.stderr").open("x", encoding="utf-8") as diagnostics:
-            run([artifact["path"], "--skip", WINDOWS_INSTALLED_TEST, "--test-threads=1"], check="windows-installed-inert-contracts",
+            run([artifact["path"], *native_names, "--exact", "--test-threads=1"], check="windows-installed-inert-contracts",
                 cwd=root, env=environment, timeout=windows_installed_remaining(deadline, 60), output=output, diagnostics=diagnostics)
         require(windows_installed_bytes(root / "inert.stderr", 64 << 10) == b"", "Windows native inert stderr is not empty")
-        windows_installed_libtest(windows_installed_bytes(root / "inert.stdout", 64 << 10), WINDOWS_INSTALLED_INERT, 1)
+        windows_installed_libtest(windows_installed_bytes(root / "inert.stdout", 64 << 10), native_names,
+                                  windows_installed_native_test_total(context) - len(native_names))
         source_unchanged(context)
         require(artifact == windows_installed_artifact(context), "Windows native original executable changed after inert controls")
-        with (root / "native.stdout").open("x", encoding="utf-8") as output, (root / "native.stderr").open("x", encoding="utf-8") as diagnostics:
-            run([artifact["path"], WINDOWS_INSTALLED_TEST, "--exact", "--ignored", "--nocapture", "--test-threads=1"],
-                check="windows-installed-native-contract", cwd=root, env=environment,
-                timeout=windows_installed_remaining(deadline, 90), output=output, diagnostics=diagnostics)
-        require(windows_installed_bytes(root / "native.stderr", 64 << 10) == b"", "Windows native stderr is not empty")
-        native = windows_installed_libtest(windows_installed_bytes(root / "native.stdout", 64 << 10), (WINDOWS_INSTALLED_TEST,), 9, native=True)
-        require(type(native) is dict and native.get("context") in {"ordinary-admitted", "elevated-primary-refused"}, "Windows native context outcome differs")
-        admitted = native["context"] == "ordinary-admitted"
-        expected = {"sourceSha": context["sourceSha"], "context": native["context"], "contextContracts": 1,
-            "admitted": int(admitted), "refused": int(not admitted), "rootContracts": int(admitted), "rootNotExecuted": int(not admitted),
-            "primaryOriginals": 1, "absentThreadReceipts": 6 if admitted else 4, "closedOriginals": 2 if admitted else 1,
-            "unknown": 0, "bookSettled": True}
-        require(canonical_json(native) == canonical_json(expected), "Windows native fact/refusal/settlement counts differ")
-        require(artifact == windows_installed_artifact(context), "Windows native original executable changed after native controls")
-        facts = {"compiledTest": artifact, "inertContracts": {"passed": 9, "failed": 0, "ignored": 0}, "native": native,
+        # Preflight only. The real logon owner is a separate direct workflow
+        # invocation, never a child of Python's timeout/kill subprocess wrapper.
+        identity = windows_ordinary_original(artifact)
+        facts = {"compiledTest": artifact, "inertContracts": {"passed": len(native_names), "failed": 0, "ignored": 0},
             "appCompiledTest": app_artifact, "appInertContracts": app_inert, "appOriginalExitCode": 0,
             "originalOutputs": {n: windows_installed_record(root / n, 64 << 10) for n in
-                ("app-inert.stdout", "app-inert.stderr", "inert.stdout", "inert.stderr", "native.stdout", "native.stderr")},
-            "inertOriginalExitCode": 0, "nativeOriginalExitCode": 0, "originalProcessWaitReturned": True,
-            "notVerified": list(WINDOWS_INSTALLED_COMBINED_NOT_VERIFIED)}
+                ("app-inert.stdout", "app-inert.stderr", "inert.stdout", "inert.stderr")},
+            "inertOriginalExitCode": 0, "artifactNativeIdentity": identity,
+            "nativeNotStarted": True, "notVerified": list(WINDOWS_INSTALLED_COMBINED_NOT_VERIFIED)}
+        if passive:
+            facts["passive"] = windows_installed_passive_headless_precheck(context, identity)
+        else:
+            for filename in ("ordinary-request.txt", "ordinary-owner-intent.private.json", "ordinary-output",
+                             "ordinary-owner-result.private.json", "ordinary-owner-exit.private.json",
+                             "windows-installed-native-preflight-checks.json", "windows-installed-native-checks.json"):
+                path = root / filename
+                require(not path.exists() and not path.is_symlink(), "Windows ordinary one-use output already exists")
+            request = windows_ordinary_request(context, artifact, identity)
+            with (root / "ordinary-request.txt").open("xb") as output:
+                require(output.write(request) == len(request), "Windows ordinary original request write is incomplete")
+            require(windows_installed_bytes(root / "ordinary-request.txt", 4096) == request, "Windows ordinary original request changed")
+            facts["request"] = {"size": len(request), "sha256": hashlib.sha256(request).hexdigest()}
+            if windows_fullwalk_profile(context):
+                facts["fullwalk"] = windows_fullwalk_headless_precheck(context, identity)
     windows_installed_inputs(context)
     source_unchanged(context)
     windows_installed_remaining(deadline, 1)
-    write_json(root / (name + "-checks.json"), windows_installed_phase_receipt(context, name, **facts))
+    phase = "windows-installed-native-preflight" if name == "windows-installed-native" else name
+    write_json(root / (phase + "-checks.json"), windows_installed_phase_receipt(context, phase, **facts))
+    if name == "windows-installed-native":
+        outputs = "artifact=" + artifact["path"] + "\nsourceTree=" + context["sourceTree"] + "\nartifactSha256=" + artifact["sha256"] + "\n"
+        if windows_installed_prepared_profile(context):
+            outputs += "precheckSha256=" + facts["passive" if passive else "fullwalk"]["precheck"]["sha256"] + "\n"
+        if publisher_required:
+            outputs += "helperArtifact=" + helper_artifact["path"] + "\nhelperArtifactSha256=" + helper_artifact["sha256"] + "\n"
+        with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8", newline="\n") as output:
+            require(output.write(outputs) == len(outputs), "Windows ordinary preflight handoff write is incomplete")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("phase", choices=(*BOUNDARY_PHASES, "workflow-owner", "workflow-transaction-eof", "workflow-core",
+                        "version-owner", "version-transaction-eof", "version-core",
                         "metadata-owner", "metadata-transaction-eof", "metadata-core", "windows-snapshot", "github-owner", "github-tls", "github-tls-deadline",
-                         "environment-native", "offline-cli11", "retain", "windows-installed-native", "windows-installed-runtime-data", *CONVENTIONAL_PHASES))
+                         "environment-native", "offline-cli11", "retain", "windows-installed-native", "windows-installed-native-finalize", "windows-installed-runtime-data", *WINDOWS_FULLWALK_DATA_PHASES,
+                         *WINDOWS_INSTALLED_PASSIVE_DATA_PHASES, "windows-normal-ui-prerequisite", *WINDOWS_NORMAL_UI_DATA_PHASES, *WINDOWS_NORMAL_UI_SETUP_BUILD_PHASES, *WINDOWS_NORMAL_UI_GUI_BUILD_PHASES,
+                         *CONVENTIONAL_PHASES))
     args = parser.parse_args()
     os.umask(0o077)
     print(f"Starting fixed desktop phase: {args.phase}", flush=True)
     try:
         scope = os.environ.get("MRK_DESKTOP_HOSTED_CHECKS", "")
-        if scope == WINDOWS_INSTALLED_SCOPE or args.phase in {"windows-installed-native", "windows-installed-runtime-data"}:
+        if scope == WINDOWS_INSTALLED_SCOPE or args.phase in {"windows-installed-native", "windows-installed-native-finalize", "windows-installed-runtime-data", *WINDOWS_FULLWALK_DATA_PHASES,
+                                                             *WINDOWS_INSTALLED_PASSIVE_DATA_PHASES,
+                                                             "windows-normal-ui-prerequisite", *WINDOWS_NORMAL_UI_DATA_PHASES, *WINDOWS_NORMAL_UI_SETUP_BUILD_PHASES, *WINDOWS_NORMAL_UI_GUI_BUILD_PHASES}:
             windows_installed_phase(args.phase, scope)
             return 0
         if scope in CONVENTIONAL_SCOPES or args.phase in CONVENTIONAL_PHASES:
             conventional_phase(args.phase, scope)
             return 0
         admit_phase(scope, args.phase)
-        platform = (admitted_host(retention_only=True) if (scope == METADATA_NATIVE_SCOPE and args.phase == "clean"
+        platform = (admitted_host(retention_only=True) if (scope in {METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE} and args.phase == "clean"
                     or scope == ENVIRONMENT_NATIVE_SCOPE and args.phase == "retain"
                     or scope == OFFLINE_NATIVE_SCOPE and args.phase != "prepare") else admitted_host())
         prepare(platform, scope) if args.phase == "prepare" else phase(args.phase, platform, scope)

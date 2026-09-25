@@ -9,19 +9,25 @@
 //! retained; late positive settlement cannot restore successful admission.
 use std::{collections::BTreeMap, future::pending, process::ExitStatus, sync::{Arc, Mutex, MutexGuard, atomic::{AtomicBool, AtomicU64, Ordering}}, time::{Duration, Instant}};
 #[cfg(any(all(feature = "development-runtime", debug_assertions),
-    all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")),
+    all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")),
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell"))))]
 use std::process::Stdio;
 use serde_json::Value;
 use tokio::{io::{AsyncRead, AsyncReadExt, AsyncWriteExt}, process::Child, sync::{mpsc, oneshot, watch, Mutex as AsyncMutex, Notify, OwnedSemaphorePermit, Semaphore}, task::JoinHandle};
 #[cfg(any(all(feature = "development-runtime", debug_assertions),
-    all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")),
+    all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")),
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell"))))]
 use tokio::process::Command;
 use crate::{error::BridgeError, github_connection_protocol::{self as github_protocol, GitHubReadOutcome},
     protocol::{self, Method}, runtime::{RuntimeConfig, VerifiedRuntime}};
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-use crate::installed_runtime::{CloseOutcome, PassiveInstalledRuntime, PassiveRuntimeSlots};
+use crate::installed_runtime::{AdmissionFailure as PassiveAdmissionFailure, CloseOutcome, PassiveInstalledRuntime, PassiveRuntimeSlots};
+#[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+use crate::installed_runtime_windows::{InspectionFailure as PassiveAdmissionFailure, CloseOutcome, PassiveInstalledRuntime, PassiveRuntimeSlots};
+
+#[cfg(all(test, target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+#[path = "installed_windows_passive_tests.rs"]
+mod windows_passive_tests;
 
 pub const OPERATION_TIME: Duration = Duration::from_secs(10);
 pub const CLEANUP_TIME: Duration = Duration::from_secs(2);
@@ -71,6 +77,16 @@ macro_rules! owner_unknown {
     ($owner:expr, $inner:expr, $resources:expr, $boundary:ident) => { ($owner).unknown($inner) };
 }
 
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
+    target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"),
+    not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+#[path = "installed_shell_shutdown_observation_windows.rs"]
+mod windows_shell_observation;
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
+    target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"),
+    not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+pub(crate) use windows_shell_observation::WindowsPassiveWitness;
+
 fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
     // No user callback/serialization runs while these small bookkeeping locks
     // are held. Retain the data even on poisoning; never drop the resource owner.
@@ -81,6 +97,12 @@ fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
 pub struct Supervisor { inner: Arc<Inner> }
 struct Inner {
     runtime: RuntimeConfig, permits: Arc<Semaphore>, next: AtomicU64,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
+        target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"),
+        not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+    windows_ui: windows_shell_observation::Hooks,
+    #[cfg(all(test, target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+    windows_test: windows_passive_tests::Hooks,
     stopping: AtomicBool, disabled: AtomicBool,
     owners: Mutex<BTreeMap<u64, Arc<Owner>>>, changed: Notify,
     #[cfg(all(test, feature = "development-runtime"))]
@@ -279,8 +301,8 @@ impl AcquisitionError {
     fn with_cause(mut self, cause: crate::error::LinuxPassiveCause) -> Self {
         self.cause = Some(cause); self
     }
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-    fn capability(failure: crate::installed_runtime::AdmissionFailure) -> Self {
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+    fn capability(failure: PassiveAdmissionFailure) -> Self {
         let error = Self::unsupported("passive installed custody is unavailable");
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         let error = error.with_cause(crate::error::LinuxPassiveCause::Capability(failure));
@@ -288,8 +310,8 @@ impl AcquisitionError {
         let _ = failure;
         error
     }
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-    fn preparation(failure: crate::installed_runtime::AdmissionFailure) -> Self {
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+    fn preparation(failure: PassiveAdmissionFailure) -> Self {
         let error = Self::unsupported("passive installed preparation refused");
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         let error = error.with_cause(crate::error::LinuxPassiveCause::Preparation(failure));
@@ -297,8 +319,8 @@ impl AcquisitionError {
         let _ = failure;
         error
     }
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-    fn final_claim(failure: crate::installed_runtime::AdmissionFailure) -> Self {
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+    fn final_claim(failure: PassiveAdmissionFailure) -> Self {
         let error = Self::unsupported("passive installed custody is unavailable");
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         let error = error.with_cause(crate::error::LinuxPassiveCause::FinalClaim(failure));
@@ -355,13 +377,13 @@ struct Resources {
     native_snapshots: Vec<installed_native_fixture::ChildObservation>,
     acquisition: Option<JoinHandle<Result<Child, AcquisitionError>>>, child: Option<Child>,
     acquisition_return: Option<ManagementJoin>, acquisition_error: Option<tokio::task::JoinError>,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     passive: Option<Arc<Mutex<PassiveRuntimeSlots>>>,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     native_settlement: Option<JoinHandle<CloseOutcome>>,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     native_return: Option<Result<CloseOutcome, tokio::task::JoinError>>,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     native_started: bool,
     writer: Option<JoinHandle<WriteEnd>>, stdout: Option<JoinHandle<ReadEnd>>, stderr: Option<JoinHandle<ReadEnd>>,
     failed_writer: Option<JoinHandle<WriteEnd>>, failed_stdout: Option<JoinHandle<ReadEnd>>, failed_stderr: Option<JoinHandle<ReadEnd>>,
@@ -526,6 +548,12 @@ impl Supervisor {
         runtime.claim_original_supervisor();
         Self { inner: Arc::new(Inner {
             runtime, permits: Arc::new(Semaphore::new(ACTIVE_LIMIT)), next: AtomicU64::new(1),
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
+                target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"),
+                not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+            windows_ui: windows_shell_observation::Hooks::default(),
+            #[cfg(all(test, target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+            windows_test: windows_passive_tests::Hooks::default(),
             stopping: AtomicBool::new(false), disabled: AtomicBool::new(false),
             owners: Mutex::new(BTreeMap::new()), changed: Notify::new(),
             #[cfg(all(test, feature = "development-runtime"))]
@@ -591,7 +619,7 @@ impl Supervisor {
         let owner = Arc::new(Owner {
             key, id, profile, github_receipt, state: Mutex::new(OwnerState::new(endpoint, reply)),
             resources: AsyncMutex::new(Resources {
-                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
                 passive: if passive_selected(profile) {
                     Some(Arc::new(Mutex::new(PassiveRuntimeSlots::new())))
                 } else { None },
@@ -613,6 +641,10 @@ impl Supervisor {
             if self.stopping() { return Err(BridgeError::shutdown()); }
             if self.disabled() { return Err(BridgeError::cleanup_unknown()); }
             owners.insert(key, owner.clone());
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
+                target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"),
+                not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+            windows_shell_observation::registered(&self.inner, &owner);
         }
         // Construct before spawning, not inside the observer's first poll. This
         // also covers partial registration and an unpolled observer's loss.
@@ -873,7 +905,7 @@ impl OriginalBorrow {
     fn positive(self) -> bool { matches!(self.returned, None | Some(ManagementJoin::Returned)) && self.returned() }
 }
 fn passive_selected(profile: Profile) -> bool {
-    cfg!(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")), not(all(feature = "development-runtime", debug_assertions))))
+    cfg!(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")), not(all(feature = "development-runtime", debug_assertions))))
         && matches!(profile, Profile::Passive(_))
 }
 fn passive_claim_clear(original: bool, profile: Profile, state: &OwnerState, now: Instant,
@@ -890,13 +922,13 @@ fn passive_never_started_clear(inspection: OriginalBorrow, acquisition: Original
     empty_unstarted_book && inspection.positive() && acquisition.returned.is_none() && acquisition.positive()
 }
 
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
 fn passive_borrows(resources: &Resources) -> (OriginalBorrow, OriginalBorrow) {
     (OriginalBorrow { returned: resources.inspection_return, handle: resources.inspection.is_some(), error: resources.inspection_error.is_some() },
      OriginalBorrow { returned: resources.acquisition_return, handle: resources.acquisition.is_some(), error: resources.acquisition_error.is_some() })
 }
 
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
 fn passive_worker_lost(resources: &Resources) {
     // Only called AFTER this original inspection/acquisition/settlement worker
     // returned JoinError. Never race a pending borrower because a clock expired.
@@ -905,7 +937,7 @@ fn passive_worker_lost(resources: &Resources) {
     }
 }
 
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
 fn transfer_passive(resources: &Resources, inner: &Inner, owner: &Arc<Owner>) -> Result<(), BridgeError> {
     let Some(native) = &resources.passive else {
         return if passive_selected(owner.profile) { Err(BridgeError::cleanup_unknown()) } else { Ok(()) };
@@ -923,16 +955,16 @@ fn transfer_passive(resources: &Resources, inner: &Inner, owner: &Arc<Owner>) ->
     slots.transfer_once().map_err(|_| BridgeError::cleanup_unknown())
 }
 
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
 struct PreparedPassiveSpawn<'a> {
     runtime: &'a mut PassiveInstalledRuntime,
     #[cfg(all(not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell")))]
     command: Command,
 }
 
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
 impl<'a> PreparedPassiveSpawn<'a> {
-    fn prepare(runtime: &'a mut PassiveInstalledRuntime, end: Instant, stop: &watch::Receiver<bool>) -> Result<Self, AcquisitionError> {
+    fn prepare(runtime: &'a mut PassiveInstalledRuntime, end: Instant, stop: &watch::Receiver<bool>, _inner: &Inner) -> Result<Self, AcquisitionError> {
         let selected = runtime.prepare_once(end, stop)
             .map_err(AcquisitionError::preparation)?;
         // All native checks and fixed argument/environment allocations precede
@@ -940,11 +972,18 @@ impl<'a> PreparedPassiveSpawn<'a> {
         #[cfg(all(not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell")))]
         let command = {
             let mut command = Command::new(&selected.python);
-            command.args(["-I", "-S", "-B"]).arg(&selected.bootstrap).arg(&selected.core)
-                .current_dir(&selected.cwd).env_clear().env("LC_ALL", "C").env("LANG", "C")
+            command.args(["-I", "-S", "-B"]);
+            #[cfg(all(test, target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+            windows_passive_tests::fixed_arguments(&mut command, selected, _inner)?;
+            #[cfg(not(all(test, target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"))))]
+            command.arg(&selected.bootstrap).arg(&selected.core);
+            command.current_dir(&selected.cwd).env_clear().env("LC_ALL", "C").env("LANG", "C")
                 .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             crate::runtime::macos_installed_environment(&mut command)?;
+            #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+            command.env("SystemRoot", runtime.system_root().map_err(|_| std::io::Error::new(
+                std::io::ErrorKind::Unsupported, "native Windows root custody unavailable"))?);
             command
         };
         #[cfg(not(all(not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell"))))]
@@ -956,7 +995,7 @@ impl<'a> PreparedPassiveSpawn<'a> {
     }
 }
 
-#[cfg(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")),
+#[cfg(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")),
     not(all(not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell")))))]
 fn spawn_passive_original(prepared: PreparedPassiveSpawn<'_>) -> Result<Child, AcquisitionError> {
     // Unsupported profiles remain unconditional. Only this no-effect stub has
@@ -965,7 +1004,7 @@ fn spawn_passive_original(prepared: PreparedPassiveSpawn<'_>) -> Result<Child, A
     Err(AcquisitionError::unsupported("packaged runtime execution is not qualified"))
 }
 
-#[cfg(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")),
+#[cfg(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")),
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell")))]
 fn spawn_passive_original(mut prepared: PreparedPassiveSpawn<'_>) -> Result<Child, AcquisitionError> {
     // Opaque creation errors provide NO no-child/pipe-close proof. The claimed
@@ -973,7 +1012,7 @@ fn spawn_passive_original(mut prepared: PreparedPassiveSpawn<'_>) -> Result<Chil
     prepared.command.spawn().map_err(AcquisitionError::returned_spawn)
 }
 
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
 fn acquire_passive_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mutex<PassiveRuntimeSlots>>) -> Result<Child, AcquisitionError> {
     let refused = || AcquisitionError::unsupported("passive installed custody is unavailable");
     let mut slots = native.lock().map_err(|_| {
@@ -984,7 +1023,9 @@ fn acquire_passive_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mute
     })?;
     let runtime = slots.capability().map_err(AcquisitionError::capability)?;
     let stop = owner.stop.subscribe();
-    let prepared = PreparedPassiveSpawn::prepare(runtime, owner.endpoint(), &stop)?;
+    let prepared = PreparedPassiveSpawn::prepare(runtime, owner.endpoint(), &stop, inner)?;
+    #[cfg(all(test, target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+    windows_passive_tests::before_claim(inner, owner);
     #[cfg(all(target_os = "linux", test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
     let mut limit = installed_native_fixture::before_claim(inner, owner, &stop)?;
     // All post-lowering ordinary returns, including a failed final claim, leave
@@ -1012,9 +1053,9 @@ fn acquire_passive_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mute
 }
 
 async fn settle_passive(resources: &mut Resources, inner: &Inner, owner: &Arc<Owner>) -> bool {
-    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
     { let _ = (resources, inner, owner); true }
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     {
         #[cfg(all(target_os = "linux", test, not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
         if resources.native_observation.is_some() { owner_unknown!(owner, inner, Some(&*resources), Settlement); return false; }
@@ -1084,9 +1125,9 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     let config = inner.runtime.clone();
     let endpoint = owner.endpoint();
     let profile = owner.profile;
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     let inspection_native = resources.passive.clone();
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     let inspection_stop = owner.stop.subscribe();
     #[cfg(all(test, feature = "development-runtime"))]
     let inspection_gate = inner.test.inspection.clone();
@@ -1104,7 +1145,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         inspection_gate.wait();
         let runtime = match profile {
             Profile::Passive(_method) => {
-                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
                 if passive_selected(profile) {
                     let native = inspection_native.ok_or_else(BridgeError::cleanup_unknown)?;
                     let mut originals = native.lock().map_err(|_| BridgeError::cleanup_unknown())?;
@@ -1154,7 +1195,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         }
         Err(error) => {
             resources.inspection_error = Some(error);
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
             passive_worker_lost(&resources);
             owner_unknown!(owner, &inner, Some(&resources), Inspection);
             let _ = settle_passive(&mut resources, &inner, &owner).await;
@@ -1165,7 +1206,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         owner.fail(BridgeError::timeout());
         return ready_after_custody(&mut resources, &inner, &owner, Err(BridgeError::timeout())).await;
     }
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     if let Err(error) = transfer_passive(&resources, &inner, &owner) {
         if error.code == "cleanup_unknown" { owner_unknown!(owner, &inner, Some(&resources), Transfer); }
         owner.fail(error.clone());
@@ -1174,9 +1215,9 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     // Blocking startup cannot starve the independent deadline watchdog. Its
     // original result/Child remains in this retained acquisition handle.
     let acquiring_owner = owner.clone();
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     let acquiring_inner = inner.clone();
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     let acquisition_native = resources.passive.clone();
     #[cfg(all(test, feature = "development-runtime"))]
     let acquisition_gate = inner.test.acquisition.clone();
@@ -1193,7 +1234,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         // before spawn_original's two final creation checks. No new deadline.
         #[cfg(all(test, feature = "development-runtime"))]
         acquisition_gate.wait();
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
         if passive_selected(acquiring_owner.profile) {
             let Some(native) = acquisition_native else {
                 owner_unknown!(acquiring_owner, &acquiring_inner, None, Acquisition);
@@ -1221,7 +1262,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         }
         Err(error) => {
             resources.acquisition_error = Some(error);
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
             passive_worker_lost(&resources);
             owner_unknown!(owner, &inner, Some(&resources), Acquisition);
             let _ = settle_passive(&mut resources, &inner, &owner).await;
@@ -1294,7 +1335,21 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         None => { owner_unknown!(owner, &inner, Some(&resources), ChildMissing); return DriverEnd::RetainedUnknown; }
     };
     let (faults, mut fault_rx) = mpsc::channel(4);
-    if let Some(stdin) = stdin { resources.writer = Some(tokio::spawn(write_request(stdin, bytes, owner.stop.subscribe(), faults.clone()))); }
+    if let Some(stdin) = stdin {
+        #[cfg(all(test, target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+        { resources.writer = Some(tokio::spawn(windows_passive_tests::write_request(stdin, bytes, owner.stop.subscribe(), faults.clone(), inner.windows_test.hold_writer()))); }
+        #[cfg(not(all(test, target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"))))]
+        {
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
+                target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"),
+                not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+            { resources.writer = Some(tokio::spawn(windows_shell_observation::write_request(stdin, bytes, owner.stop.subscribe(), faults.clone(), windows_shell_observation::writer_hold(&inner, &owner)))); }
+            #[cfg(not(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
+                target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"),
+                not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"))))]
+            { resources.writer = Some(tokio::spawn(write_request(stdin, bytes, owner.stop.subscribe(), faults.clone()))); }
+        }
+    }
     if let Some(stdout) = stdout {
         #[cfg(all(test, feature = "development-runtime"))]
         { resources.stdout = Some(tokio::spawn(hosted_tests::observed_read(stdout, profile.stdout_limit(), faults.clone(), owner.observation.clone(), Some(inner.test.stdout_join.clone()), false))); }
@@ -1307,6 +1362,12 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         #[cfg(not(all(test, feature = "development-runtime")))]
         { resources.stderr = Some(tokio::spawn(read_bounded(stderr, protocol::STDERR_LIMIT, faults.clone()))); }
     }
+    #[cfg(all(test, target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+    windows_passive_tests::after_io_registered(&inner, &owner, &mut resources);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
+        target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"),
+        not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+    windows_shell_observation::after_io_registered(&inner, &owner, &mut resources);
     drop(faults);
     if resources.writer.is_none() || resources.stdout.is_none() || resources.stderr.is_none() {
         owner.fail(BridgeError::cleanup_unknown());
@@ -1407,6 +1468,12 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     // Original child wait and IO/EOF evidence are still in Resources here.
     // Keep custody through them, then join its one explicit native settlement.
     if !settle_passive(&mut resources, &inner, &owner).await { return DriverEnd::RetainedUnknown; }
+    #[cfg(all(test, target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+    windows_passive_tests::observe_settled_io(&inner, &resources);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
+        target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"),
+        not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+    windows_shell_observation::settled_io(&inner, &owner, &resources);
     let output = resources.out_end.take();
     let diagnostics = resources.err_end.take();
     if output.as_ref().is_some_and(|end| end.overflow) || diagnostics.as_ref().is_some_and(|end| end.overflow) {
@@ -1431,7 +1498,7 @@ mod installed_native_fixture {
     use std::{fs, io::{Read, Write}, os::unix::fs::{MetadataExt, OpenOptionsExt}, path::{Path, PathBuf}};
     use rustix::process::{getrlimit, setrlimit, Resource, Rlimit};
 
-    const VERSION: &str = "/var/lib/mobile-release-kit/versions/x86_64-unknown-linux-gnu/e3375ff140d69df54b2445f756711e0245d397ba6ded76e8559732ec2e4e3801";
+    const VERSION: &str = "/var/lib/mobile-release-kit/versions/x86_64-unknown-linux-gnu/556b2ea59b4b3e9abb9d04a3d263e0fd420e8c44b3f71c478b1f71bdd21ec417";
     #[derive(Clone, Copy, Default, Eq, PartialEq)]
     pub(super) enum Case { #[default] None, Observe, Deadline, Shutdown, Emfile, Overlap,
         #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))] SessionObserve,
@@ -3203,7 +3270,7 @@ mod installed_native_fixture {
         let source = option_env!("GITHUB_SHA").expect("compiled original source binding");
         assert!(source.len() == 40 && source.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
         assert_eq!(std::env::var("GITHUB_SHA").ok().as_deref(), Some(source));
-        assert_eq!(option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"), Some("e3375ff140d69df54b2445f756711e0245d397ba6ded76e8559732ec2e4e3801"));
+        assert_eq!(option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"), Some("556b2ea59b4b3e9abb9d04a3d263e0fd420e8c44b3f71c478b1f71bdd21ec417"));
         assert_eq!(option_env!("MRK_BUNDLED_PROTOCOL_SHA256"), Some("860d1cee0072730a487ac8e632206c69e3ba676cab849b144a61755c4b84e41e"));
         assert_ne!(rustix::process::getuid().as_raw(), 0);
         assert_eq!(rustix::process::getuid(), rustix::process::geteuid());

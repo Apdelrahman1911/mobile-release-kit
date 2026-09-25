@@ -373,7 +373,7 @@ impl SessionRejection {
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum SessionWait { NotSampled, RequestNotSeen, ReplyPending, OwnerUnsettled, PhaseNotReady, DisplayMismatch, ControlsMismatch,
-    GtkDialogAbsent, GtkActionInsensitive }
+    GtkDialogAbsent, GtkActionInsensitive, GtkSelectionPending }
 impl SessionWait {
     fn token(self) -> &'static [u8] {
         match self {
@@ -386,6 +386,7 @@ impl SessionWait {
             Self::ControlsMismatch => b"rendered-control-mismatch",
             Self::GtkDialogAbsent => b"gtk-dialog-absent",
             Self::GtkActionInsensitive => b"gtk-action-insensitive",
+            Self::GtkSelectionPending => b"gtk-selection-pending",
         }
     }
 }
@@ -998,9 +999,10 @@ const METADATA_FIELDS: [(&str, &str, u32); 3] = [
     ("title.txt", "Public title", 30), ("short_description.txt", "Public summary", 80),
     ("full_description.txt", "Public description", 4000),
 ];
-const IGNORE_BYTES: u32 = 208;
-const IGNORE_LINES: [&str; 7] = [".mobile-release/", ".mobile-release-init-prepare/", ".mobile-release-init/", ".mobile-release-init-cleanup/",
-    ".mobile-release-metadata-text-prepare/", ".mobile-release-metadata-text/", ".mobile-release-metadata-text-cleanup/"];
+const IGNORE_BYTES: u32 = 299;
+const IGNORE_LINES: [&str; 10] = [".mobile-release/", ".mobile-release-init-prepare/", ".mobile-release-init/", ".mobile-release-init-cleanup/",
+    ".mobile-release-metadata-text-prepare/", ".mobile-release-metadata-text/", ".mobile-release-metadata-text-cleanup/",
+    ".mobile-release-version-prepare/", ".mobile-release-version/", ".mobile-release-version-cleanup/"];
 
 // Control and synthetic DATA have distinct protected parents. No environment,
 // renderer input or CLI option chooses either root.
