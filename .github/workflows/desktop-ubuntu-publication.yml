@@ -566,7 +566,7 @@ jobs:
           MRK_UBUNTU_PUBLICATION_PREPARATION_SHA256: ${{ steps.prepare.outputs.preparation_sha256 }}
           MRK_UBUNTU_PUBLICATION_DEADLINE: ${{ steps.prepare.outputs.deadline }}
           # Exact independently reviewed shell lifecycle; not product qualification.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '4e52df3b08618bef143ead1de40bb03d2d251d941e662a66e27087d264992af8'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'e494c2dd4c74547c25d3efc441309958dba66dfefb6cea755f1d441d94f56645'
         run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed-shell-compile
       - name: Retain original compiler evidence and shell outputs
         id: upload
@@ -645,8 +645,8 @@ jobs:
         with:
           repository: Apdelrahman1911/mobile-release-kit
           # Independently accepted U originals; full artifact membership is verified.
-          run-id: '35783044845'
-          artifact-ids: '10718458518'
+          run-id: '36109151701'
+          artifact-ids: '10852835550'
           github-token: ${{ github.token }}
           path: ${{ steps.prepare_native.outputs.root }}/work/admitted-u
           merge-multiple: true
@@ -663,7 +663,7 @@ jobs:
           MRK_INSTALLED_SHELL_ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
           MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT: ${{ steps.compile.outputs.shell_producer_attempt }}
           # Exact independently reviewed shell lifecycle; not product qualification.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '4e52df3b08618bef143ead1de40bb03d2d251d941e662a66e27087d264992af8'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'e494c2dd4c74547c25d3efc441309958dba66dfefb6cea755f1d441d94f56645'
           MRK_UBUNTU_LIFECYCLE_BOOTSTRAP: |
             import hashlib, os, re, stat, sys
             from pathlib import Path

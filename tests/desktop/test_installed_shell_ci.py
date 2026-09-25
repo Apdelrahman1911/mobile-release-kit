@@ -1363,6 +1363,37 @@ def closed_project_draft_data(lifecycle):
 
 
 class InstalledProjectDraftReceiptContracts(unittest.TestCase):
+    def test_review_ignore_bound_uses_the_exact_native_fixture_roster(self):
+        # Source/DATA regression only; real DOM execution remains a native gate.
+        observer = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text(encoding="utf-8")
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        expected = lifecycle.SHELL_PROJECT_IGNORE.decode("ascii").splitlines()
+        byte_count = re.search(r"const IGNORE_BYTES: u32 = ([0-9]+);", observer)
+        fixture = re.search(r"const IGNORE_LINES: \[&str; ([0-9]+)\] = \[(.*?)\];", observer, re.S)
+        self.assertIsNotNone(byte_count)
+        self.assertIsNotNone(fixture)
+        self.assertEqual(int(byte_count.group(1)), len(lifecycle.SHELL_PROJECT_IGNORE))
+        self.assertEqual(int(fixture.group(1)), len(expected))
+        self.assertEqual(re.findall(r'"([^"]+)"', fixture.group(2)), expected)
+        script = observer.split("fn script(step: Step, case: Case)", 1)[1].split(
+            "\nfn assert_recent_files_suppression_contract(", 1)[0]
+        self.assertEqual(script.count("if (ignore.length>{ignore_limit}) throw 0;"), 1,
+                         "review-ignore-count-bound")
+        self.assertEqual(script.count('Some(format!(r#"'), 1)
+        self.assertTrue(script.rstrip().endswith('"#, ignore_limit = IGNORE_LINES.len()))\n}'),
+                        "review-ignore-count-argument")
+        self.assertIn("for (const line of ignore) {{ line.scrollIntoView({{block:'center'}}); if (!visible(line)) throw 0; }}", script)
+        native = observer.split("\nfn review_sample(", 1)[1].split("\nfn phase_order(", 1)[0]
+        self.assertIn("if if no_op { !view.ignore_additions.is_empty() } else { !view.ignore_additions.iter().map(String::as_str).eq(IGNORE_LINES) }", native)
+        dom = observer.split("    fn dom(&self, step: Step, raw: &str)", 1)[1].split(
+            "\n    pub(super) fn close_prevented(", 1)[0]
+        self.assertIn("session.prepare_returned && session.live_review()", dom)
+        self.assertIn('session.review.as_ref() == value.get("review")', dom)
+        self.assertIn('value["projectPath"].as_str() == Some(project.path.as_str())', dom)
+        self.assertIn('session.review_visible && session.live_review()', dom)
+        self.assertIn('session.review.as_ref().is_some_and(|review| dialog["files"] == review["files"])', dom)
+        self.assertIn('dialog["projectPath"].as_str() == Some(project.path.as_str())', dom)
+
     def test_consumes_one_combined_positive_only_after_matching_closed_export_pins(self):
         lifecycle = S.local("ubuntu_publication_lifecycle")
         observed = closed_project_draft_data(lifecycle)

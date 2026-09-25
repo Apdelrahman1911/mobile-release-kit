@@ -143,23 +143,38 @@ class HostedGlibcPolicyContracts(unittest.TestCase):
         spec.loader.exec_module(observer)
         workflow = (SOURCE / ".github/workflows/desktop-ubuntu-publication.yml").read_text()
         publisher = "\n  publisher-helpers:\n" in workflow
+        observer_path = "desktop/tools/observe_hosted_python.py"
+        if publisher:
+            self.assertNotIn(observer_path, workflow)
+        else:
+            self.assertIn(observer_path, workflow)
+        # The observer is shell-only even when this source hosts the U producer.
         repository = "Apdelrahman1911/mobile-release-kit"
-        ref = "refs/heads/verify/desktop-ubuntu-publication" if publisher else "refs/heads/verify/desktop-installed-shell"
+        ref = "refs/heads/verify/desktop-installed-shell"
         env = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Linux",
                "RUNNER_ARCH": "X64", "GITHUB_EVENT_NAME": "push", "GITHUB_REPOSITORY": repository,
                "GITHUB_SHA": "a" * 40, "GITHUB_WORKFLOW_SHA": "a" * 40, "MRK_PUSH_EVENT_AFTER": "a" * 40,
                "GITHUB_RUN_ID": "10", "GITHUB_RUN_ATTEMPT": "1", "GITHUB_REF": ref,
-               "GITHUB_JOB": "publisher-helpers" if publisher else "compile", "ImageOS": "ubuntu24",
+               "GITHUB_JOB": "compile", "ImageOS": "ubuntu24",
                "ImageVersion": "20260920.314.1",
                "GITHUB_WORKFLOW_REF": repository + "/.github/workflows/desktop-ubuntu-publication.yml@" + ref}
-        for case in (None,) if publisher else ("compile", "observe"):
-            if case is not None:
-                env["MRK_INSTALLED_SHELL_CASE"] = case
+        for case in ("compile", "observe"):
+            env["MRK_INSTALLED_SHELL_CASE"] = case
             self.assertEqual(observer.context(env)["GITHUB_JOB"], env["GITHUB_JOB"])
             for change in ({"GITHUB_JOB": "native"}, {"GITHUB_REF": "refs/heads/main"},
                            {"GITHUB_WORKFLOW_SHA": "b" * 40}, {"RUNNER_ENVIRONMENT": "self-hosted"}):
                 with self.subTest(change=change), self.assertRaises(observer.Refused):
                     observer.context({**env, **change})
+        # A genuine U context, with or without a supplied shell case, is refused.
+        u_ref = "refs/heads/verify/desktop-ubuntu-publication"
+        u_env = {**env, "GITHUB_REF": u_ref, "GITHUB_JOB": "publisher-helpers",
+                 "GITHUB_WORKFLOW_REF": repository + "/.github/workflows/desktop-ubuntu-publication.yml@" + u_ref}
+        u_env.pop("MRK_INSTALLED_SHELL_CASE")
+        with self.assertRaises((KeyError, observer.Refused)):
+            observer.context(u_env)
+        for case in ("compile", "observe"):
+            with self.subTest(u_case=case), self.assertRaisesRegex(observer.Refused, "provider-route"):
+                observer.context({**u_env, "MRK_INSTALLED_SHELL_CASE": case})
 
 
 if __name__ == "__main__":

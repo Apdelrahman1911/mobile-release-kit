@@ -6790,7 +6790,7 @@ fn script(step: Step, case: Case) -> Option<String> {
             }});
         }};
         const reviewDisplay = review => {{
-            const files=inventory(review), ignore=[...review.querySelectorAll('.save-ignore li code')]; if (ignore.length>7) throw 0;
+            const files=inventory(review), ignore=[...review.querySelectorAll('.save-ignore li code')]; if (ignore.length>{ignore_limit}) throw 0;
             for (const line of ignore) {{ line.scrollIntoView({{block:'center'}}); if (!visible(line)) throw 0; }}
             const counts=[...review.querySelectorAll('.review-counts > span > strong')].map(e => {{ const t=text(e); if (!/^[0-9]{{1,2}}$/.test(t)) throw 0; return Number(t); }});
             if (counts.length!==3) throw 0;
@@ -6816,7 +6816,7 @@ fn script(step: Step, case: Case) -> Option<String> {
                 checked:c.check.checked,applyAvailable:!c.apply.disabled}};
         }};
         {body}
-    }} catch {{ return {{state:'error'}}; }} }})()"#))
+    }} catch {{ return {{state:'error'}}; }} }})()"#, ignore_limit = IGNORE_LINES.len()))
 }
 
 fn assert_recent_files_suppression_contract() {

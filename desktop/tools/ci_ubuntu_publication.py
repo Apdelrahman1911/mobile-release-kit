@@ -105,48 +105,48 @@ SHELL_TOOLS_NAMESPACE_FILES = {"namespace-before.json": 64 << 10, "namespace.std
                               "namespace.stderr": 4096, "namespace.exit": 4}
 SHELL_TOOLS_JDK_MISSING = (b"dpkg-query: no packages found matching openjdk-17-jdk-headless\n"
                          b"dpkg-query: no packages found matching openjdk-17-jre-headless\n")
-# Independently accepted U35783044845/1: original lifecycle and finality.
+# Independently accepted U36109151701/1: original lifecycle and finality.
 # Complete producer-bound roster; every downloaded member is checked before use.
 # This evidence qualifies neither the new installed candidate nor the product.
 INSTALLED_U_INPUTS = {
-    "sourceSha": "1ec7314cf7dd722eba4ad14257d2009c8dad488e",
-    "runId": "35783044845",
+    "sourceSha": "2103fea34995785b2e617c959a159b38e57e4327",
+    "runId": "36109151701",
     "attempt": "1",
-    "artifactId": "10718458518",
+    "artifactId": "10852835550",
     "files": [
-        {"path": "F1.deb", "sha256": "e17e6ce20b68922cf3a215094b92a59f3beb9745cb324e1403aa499bd30fd734", "size": 312412352},
-        {"path": "P0.deb", "sha256": "5c670a5edf0f29e69fd38dd97706a52f51e76b875f52bef5195dd14f438583c9", "size": 312412352},
+        {"path": "F1.deb", "sha256": "93d24b7393ce5166ce7970a43756e25b331c6f7c0d9878663b80e1ffb3a16a87", "size": 314255552},
+        {"path": "P0.deb", "sha256": "9df7adc7d7280e850dc6c1a3c06e48047ef79408a3a1892816bf6d67e2089171", "size": 314255552},
         {"path": "acquired-head.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "acquired-head.stdout", "sha256": "e8a0ab067206caccf82916da9b4b320ba192f276fd3d838e166d5fcd1e191851", "size": 41},
+        {"path": "acquired-head.stdout", "sha256": "92a901df7cfae82e03e4d346c88fc0594dea4e33086e5ee7f316189427268fcc", "size": 41},
         {"path": "acquired-status.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "acquired-status.stdout", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "after-head.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "after-head.stdout", "sha256": "e8a0ab067206caccf82916da9b4b320ba192f276fd3d838e166d5fcd1e191851", "size": 41},
+        {"path": "after-head.stdout", "sha256": "92a901df7cfae82e03e4d346c88fc0594dea4e33086e5ee7f316189427268fcc", "size": 41},
         {"path": "after-status.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "after-status.stdout", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "before-head.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "before-head.stdout", "sha256": "e8a0ab067206caccf82916da9b4b320ba192f276fd3d838e166d5fcd1e191851", "size": 41},
+        {"path": "before-head.stdout", "sha256": "92a901df7cfae82e03e4d346c88fc0594dea4e33086e5ee7f316189427268fcc", "size": 41},
         {"path": "before-root-head.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "before-root-head.stdout", "sha256": "e8a0ab067206caccf82916da9b4b320ba192f276fd3d838e166d5fcd1e191851", "size": 41},
+        {"path": "before-root-head.stdout", "sha256": "92a901df7cfae82e03e4d346c88fc0594dea4e33086e5ee7f316189427268fcc", "size": 41},
         {"path": "before-root-status.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "before-root-status.stdout", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "before-status.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "before-status.stdout", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "cargo-selection.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "cargo-selection.stdout", "sha256": "8bca4bde57cb4684b1ccce5e00f799ecb6c4f56112c724e1e5a88578db033e76", "size": 132},
+        {"path": "cargo-selection.stdout", "sha256": "435da0c12d1f087ddb9e1e3b1f2a8a193bb80e4ee7d3ed28b2ea0997fadb1202", "size": 132},
         {"path": "compiled-head.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "compiled-head.stdout", "sha256": "e8a0ab067206caccf82916da9b4b320ba192f276fd3d838e166d5fcd1e191851", "size": 41},
+        {"path": "compiled-head.stdout", "sha256": "92a901df7cfae82e03e4d346c88fc0594dea4e33086e5ee7f316189427268fcc", "size": 41},
         {"path": "compiled-status.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "compiled-status.stdout", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "compiler-F1.json", "sha256": "ac137f6d3b9b1447f5ea2c57043b553b4587371130b1bf04de0106114ac3a588", "size": 635},
-        {"path": "compiler-P0.json", "sha256": "c1ab70720602c655f4dfa45f718aef478a3c251793afc8f8369119ce13f34e70", "size": 632},
-        {"path": "compiler-fixture.json", "sha256": "eae8b890f243bfcd56ad01e62e74494d411ca41f266bf29c260ea67022a8d00f", "size": 580},
-        {"path": "compiler-libtest.json", "sha256": "6e679ef44689c0baf5b04e1fb62f18e456e96d2e63f270ee9d4195526ff05745", "size": 651},
-        {"path": "compiler.json", "sha256": "18aea8d036a83f29b0da00374f716573a46a1fd0c94ecd920d3ced70e10f0591", "size": 94666},
+        {"path": "compiler-F1.json", "sha256": "028c46c8aafd0fa6d78641bb46a86a0713f70213882ba427b80ea4344db87617", "size": 639},
+        {"path": "compiler-P0.json", "sha256": "c0b4562d584dfee5edb3da7cc3312e6676a438123751d8f68c8dc31e2b2917a8", "size": 636},
+        {"path": "compiler-fixture.json", "sha256": "d4f83afe61d950d31668c2fa443b7f1d931938014a5c3930683be11c3a57dcd8", "size": 580},
+        {"path": "compiler-libtest.json", "sha256": "897246b30fdf41de85c5e6f16cc6b9bb88cce2e8e387fd5fce282f42ce32aa6e", "size": 651},
+        {"path": "compiler.json", "sha256": "c0a81e21ef52f9b26f979ee4f4a3b263e473a61810efecf3e35978fe0ff2bb62", "size": 112840},
         {"path": "deb-build-F1.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "deb-build-F1.stdout", "sha256": "650e524496f4ca9698f925c538931d642cde09b6641a29a5b043fa40a78c7fcb", "size": 143},
+        {"path": "deb-build-F1.stdout", "sha256": "a8cf94882397d2a1d05e2e654ca5b2a21e73515352f11f29dab0cc36cbf5ce49", "size": 143},
         {"path": "deb-build-P0.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "deb-build-P0.stdout", "sha256": "9255479e81fd72d9443143f82a33ec30e3d9e938809d7fb68ecaff17c96cbc4d", "size": 143},
+        {"path": "deb-build-P0.stdout", "sha256": "d1814f5bc2c5c379824e4dccd7e832e5d72109d9c813094e50969ddee49d016b", "size": 143},
         {"path": "fixture-app", "sha256": "1035e72810205075e5dc5a7d4f238015eebcfb92981c16811be26d4b09725375", "size": 4501512},
         {"path": "fixture-compile.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "fixture-compile.stdout", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
@@ -154,56 +154,56 @@ INSTALLED_U_INPUTS = {
         {"path": "kernel-packages.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "kernel-packages.stdout", "sha256": "7eb291cfd444858529d37c0869507eeca8e235b938dad14f9fe7f830e192f09f", "size": 290},
         {"path": "kernel-selector.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "kernel-selector.stdout", "sha256": "82aa69c787d486c971aa0d018928eb8b03145e753fa2013f112c871f6c8448d3", "size": 189},
-        {"path": "libtest", "sha256": "7770abc5bc836bdaa309edc2a1aad729101c78f7833deda1f32241bca9a4738a", "size": 29018840},
-        {"path": "libtest-compile.stderr", "sha256": "18c310dbcf138a0a81b82e5c3fa974397a0df66e5d9d2109a80ed41ed14e441b", "size": 1362},
-        {"path": "libtest-compile.stdout", "sha256": "83019e7d05b8f94e27b4ed81204df0c84d8d238a2ef371122563eba830ea132d", "size": 411642},
-        {"path": "lifecycle-binaries-unpacked.json", "sha256": "dd7945a54dea853e7bb89a6988f2516741a02e08bf2018412dc2f68686a4fb62", "size": 473},
-        {"path": "lifecycle-binaries-upgrade.json", "sha256": "454d1e57ed7171e43691461e80214eaa38a5081b0c7aae4269308007b3385d58", "size": 473},
+        {"path": "kernel-selector.stdout", "sha256": "40330ddebb9207662363df02221b8dcc015e75e724df0412be5df2a4103ca157", "size": 189},
+        {"path": "libtest", "sha256": "62b5c285af6d05de2ffd654793c34ad4d20305e1f075ede650b8e6b2f2862a75", "size": 46041800},
+        {"path": "libtest-compile.stderr", "sha256": "389c7bae949e21c11934f1220b64e47ad6115584f17806c65bcaa7c361df1266", "size": 3741},
+        {"path": "libtest-compile.stdout", "sha256": "bb90fb77714d21e3f524425d674fcb85a3da0d1b1c05b0d7f992f48f6188aace", "size": 488317},
+        {"path": "lifecycle-binaries-unpacked.json", "sha256": "9a7894f06ace8e1af75376d1087b9c245577e463145c766c2dd802c16e4c5a4b", "size": 474},
+        {"path": "lifecycle-binaries-upgrade.json", "sha256": "7b1ba7015c5aed382845749f7d8a49c3d26d753f79c3dc674c87300aca48f231", "size": 475},
         {"path": "lifecycle-client.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "lifecycle-client.stdout", "sha256": "668e34f3b738ae5ca8af5d91743e6fe1d236c0c875a0b863df625e917110d5bf", "size": 109},
         {"path": "lifecycle-configure.stderr", "sha256": "cb9277feeaf7900ddc2fd0dbad25556ce5920f65a500038a9afe1616667d9397", "size": 89},
         {"path": "lifecycle-configure.stdout", "sha256": "4c3d415d83a0d67f6cc5de6d323083fb43e90cfa57e65f5f78c1377b724c45b5", "size": 142},
-        {"path": "lifecycle-dpkg-policy.json", "sha256": "b207246c1738a9fc9b9def6fa3775d985428eb48865ed025ef798ae12719ffc0", "size": 4585},
-        {"path": "lifecycle-duplicate.stderr", "sha256": "0ef25c1e2c33385e1b95c5e0c5c2d6e0eac6c53d58787bde8e62ca9869e73a69", "size": 1483},
-        {"path": "lifecycle-duplicate.stdout", "sha256": "6a0fae4b065fb455db10455f705bf17cfd87426cf29c21d5ebc0b4f21ee2797c", "size": 276},
-        {"path": "lifecycle-inputs.json", "sha256": "aaa34608146c75569e5652fe6b9dea3f587f680dc0575d7db693531d894f9473", "size": 95808},
+        {"path": "lifecycle-dpkg-policy.json", "sha256": "c0ba7f22a0ad66d4e00be98c1661e0e052172b061b31c45e4161720e72bb6e6f", "size": 4581},
+        {"path": "lifecycle-duplicate.stderr", "sha256": "0321112dac440f25bc464f5e74cf9fd3cb0ac4edfd0b874504c3767e82f227f9", "size": 1483},
+        {"path": "lifecycle-duplicate.stdout", "sha256": "21598c19d2a4e050caaafb23f1e62d4ee8a899f2bf465f199f59d081602b6312", "size": 276},
+        {"path": "lifecycle-inputs.json", "sha256": "732545cd55195ec72e6be5a37aebe73d1a0050b6b1f5d2e44f6ae6a8796ec3c2", "size": 113982},
         {"path": "lifecycle-mutation-denials.txt", "sha256": "d3900e18332f28f6f2dc07b287818220f6e16f499a4507f192733300d95895f9", "size": 1447},
         {"path": "lifecycle-native-root.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "lifecycle-native-root.stdout", "sha256": "8d9f0492793ae74300439d876019b62077154f1a008428e01a061b0790a83ce7", "size": 197},
+        {"path": "lifecycle-native-root.stdout", "sha256": "3a5e0dfd2c427b9c7b18799917cd1ce9a8368e978cd8e034b5c2e529fa04653d", "size": 197},
         {"path": "lifecycle-native-user.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "lifecycle-native-user.stdout", "sha256": "c364f073643918170cf144e671e3c5a18b94928d814431af7cbcf184839f16ab", "size": 198},
+        {"path": "lifecycle-native-user.stdout", "sha256": "6b71714b172f348732dce16945a6c47ff2d5343238332e75632376ceab22a41b", "size": 198},
         {"path": "lifecycle-nonroot-helper.stderr", "sha256": "a75fe26ceeebd7df5c4d046a02d306f04ea88d4a42ce345555433114675ebb4f", "size": 174},
         {"path": "lifecycle-nonroot-helper.stdout", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "lifecycle-observe-duplicate.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "lifecycle-observe-duplicate.stdout", "sha256": "08d04e0bd63321e49adfdceccc6f22fe3d370557c2c3776af459647837dbd89e", "size": 276296},
+        {"path": "lifecycle-observe-duplicate.stdout", "sha256": "f2a2d1ae8e83adda4b629f3cd03c459347343f79944f32f13e7415d9ce05a3f7", "size": 276296},
         {"path": "lifecycle-observe-p0.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "lifecycle-observe-p0.stdout", "sha256": "4afb0884d80528caf3d4a3e81d91fff8a1836c9e080f2348c91a6fcba92b5041", "size": 276136},
+        {"path": "lifecycle-observe-p0.stdout", "sha256": "ab61ca8f08a9937cf8df6e6073445bf364800729b2e43d2688028a188fbc0955", "size": 276136},
         {"path": "lifecycle-observe-purge.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "lifecycle-observe-purge.stdout", "sha256": "b588f6f3397cace1b83480ac9fa8e0aa848901d55434c28b8cb04804df5635e6", "size": 276292},
+        {"path": "lifecycle-observe-purge.stdout", "sha256": "2451d6dab7013c1502b275c64246ae14b4295f2c6d162171f2869ed6934b5c45", "size": 276292},
         {"path": "lifecycle-observe-remove.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "lifecycle-observe-remove.stdout", "sha256": "10d7f63536e4321001dc516417d03d0277e91fff4ad5d90532193461a97f3919", "size": 276293},
+        {"path": "lifecycle-observe-remove.stdout", "sha256": "ac460c24e5bd5e35ffe3af6dc2ca9e8e9e26ca4abcc54147824db947975bd098", "size": 276293},
         {"path": "lifecycle-observe-unpacked.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "lifecycle-observe-unpacked.stdout", "sha256": "b0a62353d2637be4e1643856a08b97174b57b2b299ecec7a8a98048a7b68fcf4", "size": 137859},
+        {"path": "lifecycle-observe-unpacked.stdout", "sha256": "bce737544b350cac3f24d406e99388ae03996fbc657980a8021f522808c1ad1b", "size": 137859},
         {"path": "lifecycle-observe-upgrade.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "lifecycle-observe-upgrade.stdout", "sha256": "6e1cf3097ac50c5870b241f723debef8780656bf66be4acc4d3b46f8518c7f56", "size": 414078},
-        {"path": "lifecycle-published-after-duplicate.txt", "sha256": "edf70ab82c8aa6579fd3786aa73e739b650dd1e9334c948fd593cee943267a00", "size": 275570},
-        {"path": "lifecycle-published-after-purge.txt", "sha256": "edf70ab82c8aa6579fd3786aa73e739b650dd1e9334c948fd593cee943267a00", "size": 275570},
-        {"path": "lifecycle-published-after-remove.txt", "sha256": "edf70ab82c8aa6579fd3786aa73e739b650dd1e9334c948fd593cee943267a00", "size": 275570},
-        {"path": "lifecycle-published-after-upgrade.txt", "sha256": "edf70ab82c8aa6579fd3786aa73e739b650dd1e9334c948fd593cee943267a00", "size": 275570},
-        {"path": "lifecycle-published-before-upgrade.txt", "sha256": "ef69a14656b18d9add2ab053dbd36ab371f10e6f0f1b20648130e0ddc336ec25", "size": 137786},
+        {"path": "lifecycle-observe-upgrade.stdout", "sha256": "68c9a4e4820a96065f322f8826362e7566e46fa9c3cfff67923fceb101100518", "size": 414078},
+        {"path": "lifecycle-published-after-duplicate.txt", "sha256": "a418dd1086abac8417a1fb3a8d57e458134c5bd1f1265eb688c282a3ddae1c24", "size": 275570},
+        {"path": "lifecycle-published-after-purge.txt", "sha256": "a418dd1086abac8417a1fb3a8d57e458134c5bd1f1265eb688c282a3ddae1c24", "size": 275570},
+        {"path": "lifecycle-published-after-remove.txt", "sha256": "a418dd1086abac8417a1fb3a8d57e458134c5bd1f1265eb688c282a3ddae1c24", "size": 275570},
+        {"path": "lifecycle-published-after-upgrade.txt", "sha256": "a418dd1086abac8417a1fb3a8d57e458134c5bd1f1265eb688c282a3ddae1c24", "size": 275570},
+        {"path": "lifecycle-published-before-upgrade.txt", "sha256": "7f88c3b09da8f53482d42bb327cef7b25c3ab2632f33b1a38be64b88c5e77aee", "size": 137786},
         {"path": "lifecycle-purge.stderr", "sha256": "8b6571b7c06cc6e2c89c1d4125d23aee98ac3ad846a2f2a4704ec0ea7e40d9ed", "size": 82},
-        {"path": "lifecycle-purge.stdout", "sha256": "e2734c29e4fb52bd84fd2f26f924f1999dceabf0bb376eca996287efa28bfd49", "size": 160},
+        {"path": "lifecycle-purge.stdout", "sha256": "dbe8beef1a4de8d6bb4f944ed619afa04cd1df8b96411d2fb4b7ca8b5b32ca6d", "size": 160},
         {"path": "lifecycle-remove.stderr", "sha256": "cd97eb555af1f9c7e0db23ed401483d9f3b88b6d8b40db0f1c662ee8e7c124db", "size": 434},
-        {"path": "lifecycle-remove.stdout", "sha256": "4973803ea17208a7fe1e9719ad59b32e1f533f5b312cc9a8e43f89191a64ad8b", "size": 137},
-        {"path": "lifecycle-scripts-before-upgrade.json", "sha256": "368949589a4f73a18551cee12e6049214cd5a2fa2b850f231a4667d4dadc48f4", "size": 730},
-        {"path": "lifecycle-scripts-duplicate.json", "sha256": "f058d29afdaf9a0dcb567e60df41dac8ee1dba888c03534d74cd88278c46d66a", "size": 730},
+        {"path": "lifecycle-remove.stdout", "sha256": "d5e8dcf0dbc68e67228d1da372960a0884d819e34e48fb96d72f3c9f8fe8e555", "size": 137},
+        {"path": "lifecycle-scripts-before-upgrade.json", "sha256": "9f51abde34c52c654b59b07cb26cd0046a75014a8c3c166c7577a12fc353509f", "size": 730},
+        {"path": "lifecycle-scripts-duplicate.json", "sha256": "45d5198c3d347bc30038f68a2af5081640d6b471ac8217bf38f46618363b657f", "size": 730},
         {"path": "lifecycle-scripts-purge.json", "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356", "size": 3},
-        {"path": "lifecycle-scripts-remove.json", "sha256": "f7c6cd3b5c66802a7e0b1842190baba1f33c8fa947c8a5f2062b16b960e1f1b7", "size": 244},
-        {"path": "lifecycle-scripts-unpacked.json", "sha256": "368949589a4f73a18551cee12e6049214cd5a2fa2b850f231a4667d4dadc48f4", "size": 730},
-        {"path": "lifecycle-scripts-upgrade.json", "sha256": "3bb2197988c8bd1f6f84094f8efb3417152a03ffcfd93d84f4f12cde72e215b2", "size": 730},
+        {"path": "lifecycle-scripts-remove.json", "sha256": "01f1f19dadff4efce09d2b21e25f28eae2f9cf41974b89719702d03ce0792c13", "size": 244},
+        {"path": "lifecycle-scripts-unpacked.json", "sha256": "9f51abde34c52c654b59b07cb26cd0046a75014a8c3c166c7577a12fc353509f", "size": 730},
+        {"path": "lifecycle-scripts-upgrade.json", "sha256": "bf68669ad9307aa2cbd62f64b54bbe7e0a96ca9f51a9e7602bdcb8c0b0cfb10c", "size": 730},
         {"path": "lifecycle-start-unit-show.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "lifecycle-start-unit-show.stdout", "sha256": "02579a19b9583d4a06eab456f6eb3fb63ec0a4310c049af9e6204e4c5427730c", "size": 578},
+        {"path": "lifecycle-start-unit-show.stdout", "sha256": "c7cf35df63994b038ac8ed5d1973fc24d66a8fe0153082e030f1e549e64282a2", "size": 578},
         {"path": "lifecycle-state-duplicate.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "lifecycle-state-duplicate.stdout", "sha256": "278598bf429592cb02fc8b25a9e69fee793c72ea27b364e3226d6252c7523794", "size": 49},
         {"path": "lifecycle-state-initial.stderr", "sha256": "01042c2b38915cf55a07ca91be671bf863ee638cc5974c9350091e541076bf8a", "size": 66},
@@ -219,18 +219,18 @@ INSTALLED_U_INPUTS = {
         {"path": "lifecycle-state-upgrade.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "lifecycle-state-upgrade.stdout", "sha256": "dde135efd3a6186b9d7a27a1a3bdd7d2cdc1bd9abdf11e35af8ec1fee8a3f6c2", "size": 43},
         {"path": "lifecycle-stop-unit-show.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "lifecycle-stop-unit-show.stdout", "sha256": "02579a19b9583d4a06eab456f6eb3fb63ec0a4310c049af9e6204e4c5427730c", "size": 578},
-        {"path": "lifecycle-unit-result.json", "sha256": "52a22f98fbee430787fa1519171a0a385fc7f3246871760da78c93871589fa33", "size": 19893},
-        {"path": "lifecycle-unit-start.json", "sha256": "3d1d751994f4e7caf22cc4eae74a79629ffc8dce942514a0d184ce2bf078f669", "size": 1354},
-        {"path": "lifecycle-unit-stop.json", "sha256": "3cc6bc9e775a4a7d70c17bbd6ca305e1d24898ae11caed0e806bf5d5444cdc58", "size": 2282},
-        {"path": "lifecycle-unpack.stderr", "sha256": "deff21ac2546a815780222cfb42f071efb719ed60c037139a28a53e8029714f2", "size": 713},
-        {"path": "lifecycle-unpack.stdout", "sha256": "102e930374ddfa07b114422741551fedeceaab467a06edde7cfd6710d8b873de", "size": 249},
-        {"path": "lifecycle-upgrade.stderr", "sha256": "5494c7f69d0db3faac28e811c4e6fb1434ce9309733ae0fecc52c7d6b1ee4bd5", "size": 1073},
-        {"path": "lifecycle-upgrade.stdout", "sha256": "deb86711f47c8d6473d02bdabb31e3d409110edefae508cbcddf432cf48c738f", "size": 352},
-        {"path": "locked-inputs.stderr", "sha256": "22866d80086feac269ee5209841d8a2f5b219cffc402bf399227ef50e42bd15f", "size": 1085},
-        {"path": "locked-inputs.stdout", "sha256": "0261d66f33b7eaf4fc1346758804173138fe35bc38a7d40251cd6394f7b6b9b1", "size": 221847},
-        {"path": "mrk-runtime-publish", "sha256": "c25eeeb7b6fe774b43d485aeaedeb38a3a1c29b8d003e73a3e128d069c8bde68", "size": 995168},
-        {"path": "mrk-runtime-publish-F1", "sha256": "b118fc4870f7987db8c696c324a36edc80fbe865ae613fa35cb7e8cda6089549", "size": 995168},
+        {"path": "lifecycle-stop-unit-show.stdout", "sha256": "c7cf35df63994b038ac8ed5d1973fc24d66a8fe0153082e030f1e549e64282a2", "size": 578},
+        {"path": "lifecycle-unit-result.json", "sha256": "3cc82f7dd04f790f925fbe935ced01cc54ab098e8642425b5c4b492828c71c61", "size": 19834},
+        {"path": "lifecycle-unit-start.json", "sha256": "b24918117b24e8d99ca1e2e52756e84ac534eee37c5a55912fd283a82f733dc8", "size": 1354},
+        {"path": "lifecycle-unit-stop.json", "sha256": "e82ad1ca6956eb7f3c218d37ba72827a5ed4cb417c228ee889d5351f45a37b2b", "size": 2282},
+        {"path": "lifecycle-unpack.stderr", "sha256": "b2205a3d8d284f1c76fc95f8263906f1ba4f29ac81788ed57548266214488269", "size": 713},
+        {"path": "lifecycle-unpack.stdout", "sha256": "44ffd25bc797611f9bb33b48ddd506a74380301d78e5718f483b8b6e7223cfb0", "size": 249},
+        {"path": "lifecycle-upgrade.stderr", "sha256": "8e05fb4936e637826e388766b859a23e3930629b99e84f2b6a0d0ad9e75536a2", "size": 1073},
+        {"path": "lifecycle-upgrade.stdout", "sha256": "ff61981263a229aab24304d9ae1c2918e78007a68df6cd44b29a37a84626a356", "size": 352},
+        {"path": "locked-inputs.stderr", "sha256": "252fdba4a80e1a26021ef5d3f392791a54fbc39a041cc5678a8505653e673fc0", "size": 3224},
+        {"path": "locked-inputs.stdout", "sha256": "071b1cf3cadd88ff68dfa96a475c24145e8a6c8d9aa024ba0f036e46df415f97", "size": 554740},
+        {"path": "mrk-runtime-publish", "sha256": "0752c86dfefbe5b9405cf1bdf085fa517b917253a318b9f2ac01d6dee7f6d200", "size": 1878576},
+        {"path": "mrk-runtime-publish-F1", "sha256": "b3be030e9992d9a1066732a7de3a91a0a1b55aa631f16d4cecc399df02cab4d6", "size": 1878056},
         {"path": "native-file-owner-1.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "native-file-owner-1.stdout", "sha256": "406ecb79cc447cf72749ab0591bc1aa03582603d084238183d667848ad135175", "size": 58},
         {"path": "native-file-owner-11.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
@@ -363,28 +363,28 @@ INSTALLED_U_INPUTS = {
         {"path": "native-package-recheck-8.stdout", "sha256": "67f8a4dad70880e873ea3464dbbfc27a6e7dd6bcedbac4527a9d0adbc5e108fc", "size": 87},
         {"path": "native-package-recheck-9.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "native-package-recheck-9.stdout", "sha256": "f2d0890fa73109b0bc2d1b661282b0dee93b34bd88928cf0a956a59664207af8", "size": 89},
-        {"path": "package-members.txt", "sha256": "a9d84ade35a0afc95f993f04fff17011acb22296296a2b0d7dd5663ea0a4867d", "size": 441502},
-        {"path": "publisher-F1-compile.stderr", "sha256": "82bbc036972f760a08ddf30faeb7df92f675530918b86b933a3e875d0a0b4f4e", "size": 186},
-        {"path": "publisher-F1-compile.stdout", "sha256": "7733080ce54913606d0557a12d2844bed71458d3c1e791f213875374b88680ea", "size": 1518440},
-        {"path": "publisher-compile.stderr", "sha256": "a5d6707f3f1e7f685a5cf14c9f9c7f849c42809d7e5ae6b9937a5777ac734b18", "size": 1363},
-        {"path": "publisher-compile.stdout", "sha256": "72a7e93d82d86602afeb47daae1a7685524b54ef7bbd605544858809d00ea062", "size": 1518486},
-        {"path": "result.json", "sha256": "592921fb21b31988733bd54091153a11ef90046988a292970a14e210a6f28f9f", "size": 36503},
+        {"path": "package-members.txt", "sha256": "475672f6da97e3519feca5e95c1cbb287881ab7e66ef59d7dad06b699dcb9f3c", "size": 511062},
+        {"path": "publisher-F1-compile.stderr", "sha256": "e510da175888ee0f243b2aa8ec2d6e0702c9bcfc60a583d7fa7e3c0ecfb547dd", "size": 186},
+        {"path": "publisher-F1-compile.stdout", "sha256": "6b318f6413336cd548aa39dd533ddc1cfe3a363303c36869258a8c9394320de3", "size": 2047897},
+        {"path": "publisher-compile.stderr", "sha256": "babd9ebf05d049c05ffe72a1249c709a691e500300d94645174cd95674979abe", "size": 3742},
+        {"path": "publisher-compile.stdout", "sha256": "f6bf24d4313942ccb38faa418ad9cd07d49ef2c06288d79c1f4d2508f405bdcc", "size": 2048028},
+        {"path": "result.json", "sha256": "6bd0c5894a4260120223d9c4e61aa6a3b16692b08dfac75cd6cd8471681c4583", "size": 36504},
         {"path": "root-lifecycle.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "root-lifecycle.stdout", "sha256": "668e34f3b738ae5ca8af5d91743e6fe1d236c0c875a0b863df625e917110d5bf", "size": 109},
-        {"path": "runtime-inputs.json", "sha256": "a1a9561db3def48996e1ff84db413189c2d1f4ec17b143b476ceea5b4506391f", "size": 6822},
+        {"path": "runtime-inputs.json", "sha256": "0d1ce91b0c04b50009357408644c6fb9ddf78b993412fcb5e868b9bec96866e9", "size": 6822},
         {"path": "rust-acquire.stderr", "sha256": "3c6a4fcab6187ee7881c52ec7ee91a2d4f0003c665973b190ec0fde5e0985c35", "size": 236},
         {"path": "rust-acquire.stdout", "sha256": "3d00ee031f9ca6c5c559d3cb02f8765b38c2df6afc15bb6f80de52687f2e6909", "size": 84},
         {"path": "rust-version.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
         {"path": "rust-version.stdout", "sha256": "3975d062e234a9f3921955bf6ae5b90f5819df94fa825d057f76b34a35ed0f4d", "size": 196},
         {"path": "rustc-selection.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "rustc-selection.stdout", "sha256": "fcf5016fe6903bffcfb485ee743846bba209964a26af3dfa2757d4afe1ec5a31", "size": 132},
+        {"path": "rustc-selection.stdout", "sha256": "1851dbf4ab06bd4948cb18f9173981b1879c81a1c45159c5eb4e7edce97face2", "size": 132},
         {"path": "source-tree.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "source-tree.stdout", "sha256": "5184f7a4bbf6465a38c7caa9fa4cabf97b145fb451e4a605deca6eebc19becdf", "size": 41},
-        {"path": "source.json", "sha256": "19fbf952d98c9a0efa8fcdf2deeb48000124a9acf000669d919f3388c9556784", "size": 794},
+        {"path": "source-tree.stdout", "sha256": "27e63e37b78962719ef591d1abd3b47797dc54b6cd4593ef7a42510162ca676e", "size": 41},
+        {"path": "source.json", "sha256": "d4785df0b16f724b1c8c6f107646bb139020b36633f292c78e746e94bc746ca5", "size": 793},
         {"path": "stage-F1.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "stage-F1.stdout", "sha256": "8d7084fca43e9ef3d3ba261fdf5e868137d7d12ca7090e86d7dd2ad560f4afe0", "size": 167},
+        {"path": "stage-F1.stdout", "sha256": "4b6478f3d5a5667814f7a9a62e41528b353862cc44a7ba62c2e8ad1079e77736", "size": 167},
         {"path": "stage-P0.stderr", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0},
-        {"path": "stage-P0.stdout", "sha256": "9f61d09db3ae0108eaf7981c62a80b67e95c008acab908bc607c3a55c63aabc0", "size": 167},
+        {"path": "stage-P0.stdout", "sha256": "ebeabf82a599471f76bcf2669f172135864a2d803f4e2f1c3d53803cafd0c95c", "size": 167},
         {"path": "version-signature.txt", "sha256": "df40e94048e7d33fe5eb703e6adf4f644a283079fd7acaf8d47d7447cdc5d7ea", "size": 36},
     ],
 }
@@ -407,7 +407,7 @@ MAX_DEB = 512 << 20
 KERNEL_SELECTOR = "installed_runtime::pure_tests::kernel_scope_is_reviewed_ubuntu"
 F1_MANIFEST_SHA256 = "1270d1d7d9427fff260bb1e79f51c1c3c14145651db87014b0ee9d08d601c112"
 FIXTURE_SOURCE = b"fn main() { std::process::exit(78); }\n"
-NOTICE_INPUTS_SHA256 = "3f20baf909689c105c5b09e19ec79e4e8f49fec33e75315ad44ee0ea134c9169"
+NOTICE_INPUTS_SHA256 = "88405397949e3528141d0b9adb5246b72e4d052e1e802df8855c8bc8c8adbe6c"
 SONAME_PACKAGES = {name: "libc6:amd64" for name in (
     "libc.so.6", "ld-linux-x86-64.so.2", "libm.so.6", "libmvec.so.1", "libdl.so.2",
     "libpthread.so.0", "librt.so.1", "libutil.so.1")}
@@ -1196,7 +1196,182 @@ def ubuntu_package_notice(admitted, rows, notices, actual, owned_files):
             "commonLicenseSource": admitted["ubuntu"]["commonLicenseSource"], "commonLicenses": selected}
 
 
-def native_inputs(check, source, work, environment, cargo, rustc, metadata_raw):
+def linux_local_cargo_sources(packages, nodes, root, source):
+    """The shared four-local/eight-declaration Linux source contract."""
+    # The Linux-filtered graph includes the two maintained SDK sources, not
+    # additional native platforms or arbitrary path/registry replacements.
+    local_paths = {
+        "mobile-release-kit-desktop": ("0.1.0", source / "desktop/src-tauri/Cargo.toml"),
+        "mrk-linux-mount-observation": ("0.1.0", source / "desktop/native/linux-mount-observation/Cargo.toml"),
+        "secret-service": ("5.2.0", source / "desktop/vendor/secret-service-5.2.0/Cargo.toml"),
+        "zbus": ("5.19.0", source / "desktop/vendor/zbus-5.19.0/Cargo.toml"),
+    }
+    local = [row for row in packages if row.get("source") is None]
+    D.need(len(local) == len(local_paths) and {row["name"] for row in local} == set(local_paths)
+           and all((row["version"], row["manifest_path"]) == (local_paths[row["name"]][0], str(local_paths[row["name"]][1]))
+                   for row in local),
+           "Linux Cargo local source roster differs")
+    D.need(all(row["id"] in nodes for row in local), "Linux Cargo active local graph differs")
+    # Other-target helpers remain root dependency declarations, not packages.
+    declarations = root.get("dependencies")
+    D.need(type(declarations) is list
+           and all(type(row) is dict and type(row.get("name")) is str for row in declarations),
+           "Linux Cargo root dependency declarations differ")
+    expected_declarations = [
+        {"name": name, "path": str(source / ("desktop/native/" + directory)), "target": cfg,
+         "source": None, "req": "*", "kind": None, "rename": None, "optional": False,
+         "uses_default_features": True, "features": [], "registry": None}
+        for name, directory, cfg in (
+            ("mrk-linux-mount-observation", "linux-mount-observation",
+             'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))'),
+            ("mrk-macos-installed-native", "macos-installed-native",
+             'cfg(all(target_os = "macos", target_arch = "aarch64"))'),
+            ("mrk-windows-installed-native", "windows-installed-native",
+             'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'),
+        )
+    ]
+    # Cargo retains the other-target dev declaration even in the filtered
+    # Linux graph. It is not an active Windows package or compiler unit.
+    expected_declarations.append({
+        "name": "mrk-windows-installed-native", "path": str(source / "desktop/native/windows-installed-native"),
+        "target": 'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))',
+        "source": None, "req": "*", "kind": "dev", "rename": None, "optional": False,
+        "uses_default_features": True, "features": ["qualification-result"], "registry": None,
+    })
+    for kind, support in ((None, []), ("dev", ["mrk-retrieval-test-support"])):
+        expected_declarations.append({
+            "name": "secret-service", "path": str(source / "desktop/vendor/secret-service-5.2.0"),
+            "target": 'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))',
+            "source": None, "req": "=5.2.0", "kind": kind, "rename": None, "optional": False,
+            "uses_default_features": False, "features": ["rt-tokio-crypto-rust", *support], "registry": None,
+        })
+    # Cargo retains registry declarations for the patched SDK. Both roles must
+    # resolve to the one exact local zbus above; a registry fallback is refused.
+    for kind, support in ((None, []), ("dev", ["mrk-owned-test-support"])):
+        expected_declarations.append({
+            "name": "zbus", "target": 'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))',
+            "source": "registry+https://github.com/rust-lang/crates.io-index", "req": "=5.19.0", "kind": kind,
+            "rename": None, "optional": False, "uses_default_features": False,
+            "features": ["tokio", *support], "registry": None,
+        })
+    local_names = {row["name"] for row in expected_declarations}
+    local_declarations = [row for row in declarations
+                          if row.get("source") is None or "path" in row or row["name"] in local_names]
+    D.need(len(local_declarations) == len(expected_declarations)
+           and sorted(D.canonical(row) for row in local_declarations)
+           == sorted(D.canonical(row) for row in expected_declarations),
+           "Linux Cargo local dependency declarations differ")
+    return local_paths
+
+
+def native_cargo_metadata(raw, source, target, notice_crates, locked, *, candidate=False):
+    """Bind one fixed Linux profile to its exact original-notice input set.
+
+    Package accounting is conservative: an admitted registry input need not
+    have an active resolve node. This is not compiled/linked-unit attribution.
+    """
+    D.need(type(candidate) is bool and type(notice_crates) is list and notice_crates
+           and all(type(row) is dict and all(type(row.get(key)) is str and row[key]
+                   for key in ("name", "version", "license", "archiveSha256"))
+                   and re.fullmatch(r"[0-9a-f]{64}", row["archiveSha256"]) is not None
+                   for row in notice_crates), "Native notice crate roster is invalid")
+    expected = {(row["name"], row["version"]): row for row in notice_crates}
+    D.need(len(expected) == len(notice_crates), "Duplicate native notice crate")
+    metadata = C.bounded_json(raw, LOG_LIMIT)
+    packages, resolve = metadata.get("packages"), metadata.get("resolve")
+    D.need(type(packages) is list and len(packages) == len(expected) + 4
+           and type(resolve) is dict and type(metadata.get("version")) is int and metadata["version"] == 1
+           and metadata.get("workspace_root") == str(source / "desktop/src-tauri")
+           and metadata.get("target_directory") == str(target)
+           and metadata.get("build_directory") == str(target), "Native Cargo roster/root/target differs")
+    D.need(all(type(row) is dict and all(type(row.get(key)) is str and row[key]
+                   for key in ("id", "name", "version", "manifest_path"))
+                   and "source" in row and (row["source"] is None or type(row["source"]) is str)
+                   for row in packages), "Native Cargo package identity is invalid")
+    node_rows = resolve.get("nodes")
+    D.need(type(node_rows) is list and all(type(row) is dict and type(row.get("id")) is str
+           and row["id"] for row in node_rows), "Native Cargo resolve nodes are invalid")
+    by_id = {row["id"]: row for row in packages}
+    nodes = {row["id"]: row for row in node_rows}
+    D.need(len(by_id) == len(packages) and len(nodes) == len(node_rows) and set(nodes) <= set(by_id),
+           "Native Cargo metadata IDs differ/duplicate")
+    roots = [row for row in packages if row["manifest_path"] == str(source / "desktop/src-tauri/Cargo.toml")]
+    D.need(len(roots) == 1 and roots[0]["name"] == "mobile-release-kit-desktop" and roots[0]["version"] == "0.1.0"
+           and resolve.get("root") == roots[0]["id"] and roots[0]["id"] in nodes
+           and metadata.get("workspace_members") == [roots[0]["id"]]
+           and metadata.get("workspace_default_members") == [roots[0]["id"]]
+           and nodes[roots[0]["id"]].get("features") == ([] if candidate else FEATURES),
+           "Native Cargo root/workspace/profile differs")
+    for row in nodes.values():
+        features, deps, dependencies = row.get("features"), row.get("deps"), row.get("dependencies")
+        D.need(type(features) is list and all(type(name) is str for name in features)
+               and len(features) == len(set(features)) and type(deps) is list
+               and all(type(dep) is dict and type(dep.get("name")) is str and dep["name"]
+                       and type(dep.get("pkg")) is str and dep["pkg"] in nodes for dep in deps)
+               and len(deps) == len({(dep["name"], dep["pkg"]) for dep in deps})
+               and type(dependencies) is list and all(type(item) is str for item in dependencies)
+               and len(dependencies) == len(set(dependencies))
+               and set(dependencies) == {dep["pkg"] for dep in deps}, "Native resolved Cargo edge/features differ")
+        for dep in deps:
+            kinds = dep.get("dep_kinds")
+            D.need(type(kinds) is list and kinds and all(type(kind) is dict
+                   and set(kind) == {"kind", "target"} and kind["kind"] in (None, "dev", "build")
+                   and (kind["target"] is None or type(kind["target"]) is str) for kind in kinds)
+                   and len(kinds) == len({D.canonical(kind) for kind in kinds}),
+                   "Native resolved Cargo dependency roles differ")
+    local_paths = linux_local_cargo_sources(packages, nodes, roots[0], source)
+    local_ids = {row["id"] for row in packages if row["source"] is None}
+    D.need(local_ids - {roots[0]["id"]} <= {dep["pkg"] for dep in nodes[roots[0]["id"]]["deps"]},
+           "Native Cargo root lost an active local dependency")
+    registry_rows = [row for row in packages if row["source"] is not None]
+    registry = {(row["name"], row["version"]): row for row in registry_rows}
+    D.need(len(registry) == len(registry_rows) and set(registry) == set(expected)
+           and all(row["name"] not in local_paths for row in registry_rows),
+           "Native Cargo source versions differ from original notices")
+    registry_source = "registry+https://github.com/rust-lang/crates.io-index"
+    D.need(type(locked) is dict and type(locked.get("package")) is list, "Native Cargo lock is invalid")
+    lock_rows = [row for row in locked["package"] if "source" in row]
+    lock = {(row["name"], row["version"]): row for row in lock_rows}
+    D.need(len(lock) == len(lock_rows), "Duplicate native Cargo lock source")
+    for key, row in expected.items():
+        D.need(key in lock and registry[key]["source"] == registry_source
+               and registry[key].get("license") == row["license"] and lock[key]["source"] == registry_source
+               and lock[key].get("checksum") == row["archiveSha256"],
+               "Cargo original notice/checksum correspondence differs")
+    for row in packages:
+        origin = registry_source if row["source"] is not None else "path+" + Path(row["manifest_path"]).parent.as_uri()
+        D.need(row["id"] == origin + "#" + row["name"] + "@" + row["version"],
+               "Native Cargo ID does not identify its exact source")
+    return metadata, by_id, nodes
+
+
+def native_source_notice_inputs(source, admitted, rows):
+    """Bind reviewed archive-member references and maintained local originals."""
+    for crate in admitted["crates"]:
+        for member in crate.get("noticeMembers", []):
+            prefix = crate["name"] + "-" + crate["version"] + "/"
+            path = member["noticePath"]
+            D.need(member["member"].startswith(prefix) and path == "notices/crates/" + member["member"]
+                   and rows.get(path) == {"path": path, "size": member["size"], "sha256": member["sha256"]},
+                   "Native original archive notice member differs")
+    originals = admitted["localSourceNotices"]
+    D.need(type(originals) is list and originals and all(type(row) is dict
+           and set(row) == {"sourcePath", "noticePath"} for row in originals),
+           "Native local source notice roster differs")
+    D.need(len({row["sourcePath"] for row in originals}) == len(originals)
+           and len({row["noticePath"] for row in originals}) == len(originals),
+           "Duplicate native local source notice")
+    inputs = []
+    for row in originals:
+        path = source / D.relative(row["sourcePath"])
+        notice = D.relative(row["noticePath"])
+        D.need(notice in rows, "Native local original notice is missing")
+        D.bound(path, rows[notice])
+        inputs.append({**D.file_record(path, 2 << 20), "path": str(path)})
+    return inputs
+
+
+def native_inputs(check, source, work, environment, cargo, rustc, metadata_raw, *, candidate=False):
     """Standard toolchain/support input provenance, not a linked-object census."""
     notice_source = source / "desktop/packaging/debian/native-notices"
     raw = D.read(notice_source / "inputs.json", 1 << 20)
@@ -1211,21 +1386,14 @@ def native_inputs(check, source, work, environment, cargo, rustc, metadata_raw):
         destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         D.copy(notice_source / name, destination, row, 0o644)
     D.copy(notice_source / "inputs.json", notices / "inputs.json", D.file_record(notice_source / "inputs.json"), 0o644)
-    D.bound(source / "LICENSE", rows["notices/mobile-release-kit/LICENSE"])
-    metadata = C.bounded_json(metadata_raw, LOG_LIMIT)
-    packages = metadata.get("packages")
-    D.need(type(packages) is list and len(packages) == 36, "Native Cargo roster differs")
-    registry = {(p["name"], p["version"]): p for p in packages if p["source"] is not None}
-    expected = {(p["name"], p["version"]): p for p in admitted["crates"]}
-    D.need(set(registry) == set(expected) and len([p for p in packages if p["source"] is None]) == 2,
-           "Native Cargo source versions differ from original notices")
     locked = tomllib.loads(D.read(source / "desktop/src-tauri/Cargo.lock", 256 << 10).decode("utf-8"))
-    lock = {(p["name"], p["version"]): p for p in locked["package"] if "source" in p}
-    inputs = []
-    for key, row in expected.items():
-        D.need(registry[key]["source"] == "registry+https://github.com/rust-lang/crates.io-index"
-               and registry[key]["license"] == row["license"] and lock[key]["checksum"] == row["archiveSha256"],
-               "Cargo original notice/checksum correspondence differs")
+    # Cargo metadata has its own target root. The later compilation command's
+    # private work/target output is a different path, not metadata authority.
+    native_cargo_metadata(metadata_raw, source, source / "desktop/src-tauri/target",
+                          admitted["crates"], locked, candidate=candidate)
+    inputs = native_source_notice_inputs(source, admitted, rows)
+    for row in admitted["crates"]:
+        key = (row["name"], row["version"])
         candidates = list((work / "cargo/registry/cache").glob("*/" + key[0] + "-" + key[1] + ".crate"))
         D.need(len(candidates) == 1, "Native locked crate cache is ambiguous")
         record = D.file_record(candidates[0], 8 << 20)
@@ -2144,69 +2312,7 @@ def shell_cargo_metadata(raw, source, target):
         D.need(type(row.get("features")) is list and all(type(name) is str for name in row["features"])
                and type(row.get("deps")) is list and all(dep.get("pkg") in nodes for dep in row["deps"]),
                "Shell resolved Cargo edge/features differ")
-    # The Linux-filtered graph includes the two maintained SDK sources, not
-    # additional native platforms or arbitrary path/registry replacements.
-    local_paths = {
-        "mobile-release-kit-desktop": ("0.1.0", source / "desktop/src-tauri/Cargo.toml"),
-        "mrk-linux-mount-observation": ("0.1.0", source / "desktop/native/linux-mount-observation/Cargo.toml"),
-        "secret-service": ("5.2.0", source / "desktop/vendor/secret-service-5.2.0/Cargo.toml"),
-        "zbus": ("5.19.0", source / "desktop/vendor/zbus-5.19.0/Cargo.toml"),
-    }
-    local = [row for row in packages if row.get("source") is None]
-    D.need(len(local) == len(local_paths) and {row["name"] for row in local} == set(local_paths)
-           and all((row["version"], row["manifest_path"]) == (local_paths[row["name"]][0], str(local_paths[row["name"]][1]))
-                   for row in local),
-           "Shell Cargo local source roster differs")
-    D.need(all(row["id"] in nodes for row in local), "Shell Cargo active local graph differs")
-    # Other-target helpers remain root dependency declarations, not packages.
-    declarations = roots[0].get("dependencies")
-    D.need(type(declarations) is list
-           and all(type(row) is dict and type(row.get("name")) is str for row in declarations),
-           "Shell Cargo root dependency declarations differ")
-    expected_declarations = [
-        {"name": name, "path": str(source / ("desktop/native/" + directory)), "target": cfg,
-         "source": None, "req": "*", "kind": None, "rename": None, "optional": False,
-         "uses_default_features": True, "features": [], "registry": None}
-        for name, directory, cfg in (
-            ("mrk-linux-mount-observation", "linux-mount-observation",
-             'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))'),
-            ("mrk-macos-installed-native", "macos-installed-native",
-             'cfg(all(target_os = "macos", target_arch = "aarch64"))'),
-            ("mrk-windows-installed-native", "windows-installed-native",
-             'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'),
-        )
-    ]
-    # Cargo retains the other-target dev declaration even in the filtered
-    # Linux graph. It is not an active Windows package or compiler unit.
-    expected_declarations.append({
-        "name": "mrk-windows-installed-native", "path": str(source / "desktop/native/windows-installed-native"),
-        "target": 'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))',
-        "source": None, "req": "*", "kind": "dev", "rename": None, "optional": False,
-        "uses_default_features": True, "features": ["qualification-result"], "registry": None,
-    })
-    for kind, support in ((None, []), ("dev", ["mrk-retrieval-test-support"])):
-        expected_declarations.append({
-            "name": "secret-service", "path": str(source / "desktop/vendor/secret-service-5.2.0"),
-            "target": 'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))',
-            "source": None, "req": "=5.2.0", "kind": kind, "rename": None, "optional": False,
-            "uses_default_features": False, "features": ["rt-tokio-crypto-rust", *support], "registry": None,
-        })
-    # Cargo retains registry declarations for the patched SDK. Both roles must
-    # resolve to the one exact local zbus above; a registry fallback is refused.
-    for kind, support in ((None, []), ("dev", ["mrk-owned-test-support"])):
-        expected_declarations.append({
-            "name": "zbus", "target": 'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))',
-            "source": "registry+https://github.com/rust-lang/crates.io-index", "req": "=5.19.0", "kind": kind,
-            "rename": None, "optional": False, "uses_default_features": False,
-            "features": ["tokio", *support], "registry": None,
-        })
-    local_names = {row["name"] for row in expected_declarations}
-    local_declarations = [row for row in declarations
-                          if row.get("source") is None or "path" in row or row["name"] in local_names]
-    D.need(len(local_declarations) == len(expected_declarations)
-           and sorted(D.canonical(row) for row in local_declarations)
-           == sorted(D.canonical(row) for row in expected_declarations),
-           "Shell Cargo local dependency declarations differ")
+    local_paths = linux_local_cargo_sources(packages, nodes, roots[0], source)
     registry = [row for row in packages if row.get("source") is not None]
     keys = {(row["name"], row["version"]) for row in registry}
     D.need(len(keys) == len(registry) and all(row["name"] not in local_paths
@@ -2822,6 +2928,7 @@ def verify_installed_shell_compile():
         entry_sha = D.sha(os.environ.get("MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256"))
         D.need(D.file_record(source / "desktop/tools/ubuntu_publication_lifecycle.py", 1 << 20)["sha256"] == entry_sha,
                "Workflow reviewed shell lifecycle entry differs")
+        local("ubuntu_publication_lifecycle").check_source_pins(source)
         source_record = {"sourceSha": sha, "sourceTree": tree, "sourceInputs": source_inputs,
                          "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
                          "workflow": D.file_record(source / WORKFLOW, 128 << 10), "features": SHELL_FEATURES,
@@ -3035,6 +3142,7 @@ def verify(*, installed_compile=False):
         entry_sha = D.sha(os.environ.get("MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256"))
         D.need(D.file_record(source / "desktop/tools/ubuntu_publication_lifecycle.py", 1 << 20)["sha256"] == entry_sha,
                "Workflow reviewed lifecycle entry differs")
+        local("ubuntu_publication_lifecycle").check_source_pins(source)
         kernel = os.uname()
         metadata = {"sourceSha": sha, "sourceTree": tree, "workflow": D.file_record(source / WORKFLOW, 64 << 10),
                     "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
@@ -3088,7 +3196,7 @@ def verify(*, installed_compile=False):
             "--manifest-path", str(source / "desktop/src-tauri/Cargo.toml")], environment, work).stdout
         source_check("acquired")
         check.phase = "native-input-provenance"
-        native = native_inputs(check, source, work, environment, cargo, rustc, metadata_raw)
+        native = native_inputs(check, source, work, environment, cargo, rustc, metadata_raw, candidate=installed_compile)
         environment.update(GITHUB_SHA=sha, MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=C.CONVENTIONAL_SMOKE_INPUTS["manifestSha256"],
                            MRK_BUNDLED_PROTOCOL_SHA256=C.CONVENTIONAL_SMOKE_INPUTS["protocolSha256"])
         originals, exports, export_identities = {}, {}, {}
@@ -3231,6 +3339,7 @@ def verify_installed():
         entry_sha = D.sha(os.environ.get("MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256"))
         D.need(D.file_record(source / "desktop/tools/ubuntu_publication_lifecycle.py", 1 << 20)["sha256"] == entry_sha,
                "Workflow reviewed installed lifecycle entry differs")
+        local("ubuntu_publication_lifecycle").check_source_pins(source)
         library, packages, old_compiler, accepted = installed_u_inputs(work)
         candidate, compiler, graph, roster_sha, producer_attempt, candidate_artifact_id = installed_candidate(work, sha)
         D.need(elf_dependencies(D.read(Path(library["path"]), MAX_BINARY)) == old_compiler["nativeInputs"]["outputs"]["libtest"]["elf"],
@@ -4012,6 +4121,7 @@ def verify_installed_shell():
         entry_sha = D.sha(os.environ.get("MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256"))
         D.need(D.file_record(source / "desktop/tools/ubuntu_publication_lifecycle.py", 1 << 20)["sha256"] == entry_sha,
                "Workflow reviewed shell lifecycle entry differs")
+        local("ubuntu_publication_lifecycle").check_source_pins(source)
         library, packages, old_compiler, accepted = installed_u_inputs(work)
         binaries, compiler, native, roster_sha, producer_attempt, artifact_id = installed_shell_candidate(work, sha)
         D.need(elf_dependencies(D.read(Path(library["path"]), MAX_BINARY)) == old_compiler["nativeInputs"]["outputs"]["libtest"]["elf"],
