@@ -848,6 +848,7 @@ smoke_labels!(SmokeCheck {
     ElementAcquireState => "element-from-window-acquire-state", ElementFromWindow => "element-from-window",
     InitialMainState => "initial-main-acquire-state", InitialMainTail => "initial-main-returned-tail",
     InitialMainTimeoutCount => "initial-main-timeout-count",
+    DashboardBindingState => "dashboard-binding-state", DashboardBindingTimeoutCount => "dashboard-binding-timeout-count",
     AdjacentAcquireState => "adjacent-element-acquire-state", FirstChild => "first-child-element",
     NextSibling => "next-sibling-element", NameOutputState => "name-output-state",
     NameContradiction => "name-contradictory-output", CurrentName => "current-name",
@@ -976,16 +977,16 @@ impl StartupSample {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SmokeFault {
     phase: SmokePhase, check: SmokeCheck, error: Error, status: Option<SmokeStatus>, dashboard: Option<DashboardProgress>,
-    main_binding_timeouts: Option<u16>, startup: StartupSample,
+    main_binding_timeouts: Option<u16>, dashboard_binding_timeouts: Option<u16>, startup: StartupSample,
 }
 struct SmokeTrace {
     phase: Cell<SmokePhase>, dashboard: Cell<Option<DashboardProgress>>, first: Cell<Option<SmokeFault>>, emitted: Cell<bool>,
-    main_binding_timeouts: Cell<u16>, startup: Cell<StartupSample>,
+    main_binding_timeouts: Cell<u16>, dashboard_binding_timeouts: Cell<u16>, startup: Cell<StartupSample>,
 }
 impl SmokeTrace {
     fn new() -> Self {
         Self { phase: Cell::new(SmokePhase::Setup), dashboard: Cell::new(None), first: Cell::new(None), emitted: Cell::new(false),
-            main_binding_timeouts: Cell::new(0), startup: Cell::new(StartupSample::new()) }
+            main_binding_timeouts: Cell::new(0), dashboard_binding_timeouts: Cell::new(0), startup: Cell::new(StartupSample::new()) }
     }
     // The real root() passes one USER32 read; scalar tests pass inert values.
     // Only original in-budget completions can update the sample. This helper
@@ -1027,7 +1028,9 @@ impl SmokeTrace {
                 let dashboard = if phase == SmokePhase::Dashboard { self.dashboard.get() } else { None };
                 let main_binding_timeouts = matches!(phase, SmokePhase::MainBinding | SmokePhase::Dashboard)
                     .then(|| self.main_binding_timeouts.get());
-                self.first.set(Some(SmokeFault { phase, check, error: *error, status, dashboard, main_binding_timeouts, startup: self.startup.get() }));
+                let dashboard_binding_timeouts = (phase == SmokePhase::Dashboard).then(|| self.dashboard_binding_timeouts.get());
+                self.first.set(Some(SmokeFault { phase, check, error: *error, status, dashboard,
+                    main_binding_timeouts, dashboard_binding_timeouts, startup: self.startup.get() }));
             }
         }
         result
@@ -1037,6 +1040,11 @@ impl SmokeTrace {
         let count = self.result(SmokeCheck::InitialMainTimeoutCount,
             self.main_binding_timeouts.get().checked_add(1).ok_or(Error::Bounds), None)?;
         self.main_binding_timeouts.set(count); Ok(())
+    }
+    fn dashboard_binding_timeout(&self) -> Result<()> {
+        let count = self.result(SmokeCheck::DashboardBindingTimeoutCount,
+            self.dashboard_binding_timeouts.get().checked_add(1).ok_or(Error::Bounds), None)?;
+        self.dashboard_binding_timeouts.set(count); Ok(())
     }
     fn admit_com(&self, unknown: bool, settled: bool, originals: usize, remaining: impl FnOnce() -> Result<u32>) -> Result<()> {
         self.need(SmokeCheck::ComReserveState, !unknown && !settled)?;
@@ -1087,6 +1095,7 @@ impl SmokeTrace {
             None => write!(output, "null")?,
         }
         if let Some(count) = fault.main_binding_timeouts { write!(output, ",\"mainBindingTimeouts\":{count}")?; }
+        if let Some(count) = fault.dashboard_binding_timeouts { write!(output, ",\"dashboardBindingTimeouts\":{count}")?; }
         Self::format_startup(&mut output, fault.startup)?;
         writeln!(output, "}}")?; Ok(output.position() as usize)
     }
@@ -1158,10 +1167,13 @@ impl UiQuery {
             destroy_entered: false, destroy_return: HRESULT_PENDING }
     }
     fn begin(&mut self, clock: &mut Clock, trace: &SmokeTrace) -> Result<()> {
+        self.begin_with_remaining(|| clock.remaining_ms(), trace)
+    }
+    fn begin_with_remaining(&mut self, remaining: impl FnOnce() -> Result<u32>, trace: &SmokeTrace) -> Result<()> {
         trace.need(SmokeCheck::QueryState, !self.active && !self.unknown)?;
         // The client transaction timeout is 1000ms. Refuse a new provider call
         // unless it fits under the original endpoint; never reset that clock.
-        trace.need(SmokeCheck::QueryBudget, trace.result(SmokeCheck::Clock, clock.remaining_ms(), None)? > 1000)?;
+        trace.need(SmokeCheck::QueryBudget, trace.result(SmokeCheck::Clock, remaining(), None)? > 1000)?;
         self.active = true; self.status = HRESULT_PENDING; Ok(())
     }
     fn returned(&mut self, status: i32, clock: &mut Clock, trace: &SmokeTrace, check: SmokeCheck) -> Result<()> {
@@ -1493,6 +1505,56 @@ impl Smoke {
         let status = unsafe { (table.CurrentNativeWindowHandle)(pointer, &mut self.query.hwnd) }.0;
         self.query.returned(status, clock, &self.trace, SmokeCheck::NativeWindowHandle)?; Ok(self.query.hwnd.0)
     }
+    fn dashboard_handle_admitted(&self, hwnd: F::HWND, element: usize) -> bool {
+        self.trace.phase.get() == SmokePhase::Dashboard
+            && self.trace.dashboard.get().is_some_and(|progress| progress.stage == DashboardStage::Bind)
+            && self.main.as_ref().is_some_and(|(main, index, id)| *main == hwnd && !hwnd.is_null() && *index == element && !id.is_empty())
+            && self.originals.get(element).is_some_and(|original| original.kind == ComKind::Element
+                && original.state == SlotState::Owned && !original.active && !original.pointer.is_null())
+            && self.initialized && !self.uninit_entered && !self.uninit_returned
+            && self.trace.first.get().is_none() && !self.unknown && !self.settled
+            && !self.dashboard_ready && !self.quit_confirmed && !self.windows.post_entered && !self.invoke_entered
+    }
+    fn complete_dashboard_handle_timeout(&mut self, hwnd: F::HWND, element: usize, status: i32,
+        after_return_clock: impl FnOnce() -> Result<()>) -> Result<bool> {
+        // Only a returned scalar read at the pre-action main bind is pending.
+        // A failed scalar is not an owned HWND/COM output and is never consumed,
+        // whether it remained zero or a provider wrote a different value.
+        if status != A::UIA_E_TIMEOUT as i32 || !self.dashboard_handle_admitted(hwnd, element)
+            || !self.query.active || self.query.unknown || self.query.status != HRESULT_PENDING
+            || !self.query.bstr.is_null() || !self.query.array.is_null() {
+            return Ok(false); // The caller retains the unchanged generic return path.
+        }
+        self.query.status = status; self.query.active = false;
+        let counted = self.trace.dashboard_binding_timeout();
+        // Always check the original clock, even when the counter refuses. A
+        // later clock/cleanup error cannot rewrite the first counter refusal.
+        self.trace.result(SmokeCheck::Clock, after_return_clock(), None)?;
+        counted?; Ok(true)
+    }
+    fn main_native_handle(&mut self, launch: &Launch, hwnd: F::HWND, element: usize, clock: &mut Clock) -> Result<F::HWND> {
+        if self.trace.phase.get() != SmokePhase::Dashboard { return self.native_handle(element, clock); }
+        loop {
+            self.trace.need(SmokeCheck::DashboardBindingState, self.dashboard_handle_admitted(hwnd, element))?;
+            let pointer = self.pointer(element, ComKind::Element)?;
+            let table = unsafe { &**pointer.cast::<*const A::IUIAutomationElement_Vtbl>() };
+            self.query.hwnd = HWND(null_mut()); self.query.begin(clock, &self.trace)?;
+            let status = unsafe { (table.CurrentNativeWindowHandle)(pointer, &mut self.query.hwnd) }.0;
+            if !self.complete_dashboard_handle_timeout(hwnd, element, status, || clock.effect())? {
+                self.query.returned(status, clock, &self.trace, SmokeCheck::NativeWindowHandle)?;
+                return Ok(self.query.hwnd.0);
+            }
+            // No reference is replaced or released. Reobserve the same live
+            // original process/thread and unique HWND around the bounded wait.
+            let same = self.windows.root(launch, Some(hwnd), clock, &self.trace)? == Some(hwnd);
+            self.trace.need(SmokeCheck::RootContinuity, same)?;
+            self.trace.result(SmokeCheck::Clock, clock.effect(), None)?;
+            std::thread::sleep(Duration::from_millis(100));
+            self.trace.result(SmokeCheck::Clock, clock.effect(), None)?;
+            let same = self.windows.root(launch, Some(hwnd), clock, &self.trace)? == Some(hwnd);
+            self.trace.need(SmokeCheck::RootContinuity, same)?;
+        }
+    }
     fn enabled_button(&mut self, element: usize, clock: &mut Clock) -> Result<bool> {
         let pointer = self.pointer(element, ComKind::Element)?;
         let table = unsafe { &**pointer.cast::<*const A::IUIAutomationElement_Vtbl>() };
@@ -1508,7 +1570,7 @@ impl Smoke {
         let (hwnd, index, expected) = self.trace.result(SmokeCheck::MainMissing, self.main.as_ref().ok_or(Error::State), None)?;
         let (hwnd, index, expected) = (*hwnd, *index, expected.clone());
         let bound = self.windows.root(launch, Some(hwnd), clock, &self.trace)? == Some(hwnd)
-            && self.native_handle(index, clock)? == hwnd && self.runtime_id(index, clock)? == expected;
+            && self.main_native_handle(launch, hwnd, index, clock)? == hwnd && self.runtime_id(index, clock)? == expected;
         self.trace.need(SmokeCheck::MainBinding, bound)?;
         let pointer = self.pointer(index, ComKind::Element)?;
         let table = unsafe { &**pointer.cast::<*const A::IUIAutomationElement_Vtbl>() };
@@ -2006,8 +2068,9 @@ fn run_prerequisite_traced(role: UiRole, entry_tick: u64, trace: &mut InputTrace
     let mut observation = trace.prerequisite_current(observation);
     if let Some(current) = account.as_mut() { current.zero(); }
     // Settle the actual original driver before any original process close.
-    // Only returned-NULL initial-main reads may wait for readiness above.
-    // All later/effectful UIA timeouts still fail even if a provider later acts.
+    // Only returned-NULL initial-main acquisition and the pre-action dashboard
+    // main-HWND scalar read may wait for readiness. Every other/later/effectful
+    // UIA timeout still fails even if a provider later acts.
     let smoke_settled = smoke.as_mut().is_none_or(|value| value.settle().is_ok());
     if !smoke_settled || matches!(observation, Err(Error::Unknown)) {
         trace.prerequisite_fault(PrerequisiteCheck::L04, Error::Unknown, None, None);
@@ -2850,7 +2913,7 @@ mod contract_tests {
             let trace = SmokeTrace::new(); trace.phase.set(SmokePhase::MainWindow);
             assert_eq!(windows(rows).select_root(bound.map(|hwnd| hwnd as F::HWND), &trace), Err(error));
             assert_eq!(trace.first.get(), Some(SmokeFault { phase: SmokePhase::MainWindow, check, error, status,
-                dashboard: None, main_binding_timeouts: None, startup: StartupSample::new() }));
+                dashboard: None, main_binding_timeouts: None, dashboard_binding_timeouts: None, startup: StartupSample::new() }));
         }
         let title = "Mobile Release Kit";
         accepts(vec![], None, None);
@@ -3041,6 +3104,156 @@ mod contract_tests {
         }
     }
 
+    fn dashboard_main_handle_readiness_contract() {
+        // Scalar/state DATA only. These fake original addresses are never
+        // dereferenced, released, queried or used to enter native settlement.
+        fn fixture() -> Smoke {
+            let mut smoke = Smoke::new(); smoke.initialized = true;
+            smoke.trace.phase.set(SmokePhase::Dashboard); smoke.trace.dashboard_begin_pass();
+            let mut original = Box::new(ComOriginal::new(ComKind::Element));
+            original.state = SlotState::Owned; original.pointer = 1usize as *mut c_void;
+            smoke.originals.push(original); smoke.main = Some((2usize as F::HWND, 0, vec![42, 1]));
+            smoke.query.active = true; smoke
+        }
+        let hwnd = 2usize as F::HWND; let timeout = A::UIA_E_TIMEOUT as i32;
+        let mut smoke = fixture(); let main = smoke.main.clone();
+        let original = &*smoke.originals[0] as *const ComOriginal;
+        let calls = Cell::new(0);
+        for (count, scalar) in [(1, 0), (2, 3)] {
+            smoke.query.active = true; smoke.query.status = HRESULT_PENDING; smoke.query.hwnd = HWND(scalar as *mut c_void);
+            assert_eq!(smoke.complete_dashboard_handle_timeout(hwnd, 0, timeout,
+                || { calls.set(calls.get() + 1); Ok(()) }), Ok(true));
+            assert!(!smoke.query.active && !smoke.query.unknown); assert_eq!(smoke.query.status, timeout);
+            assert_eq!(smoke.query.hwnd.0, scalar as *mut c_void); // Ignored scalar, not owned output.
+            assert_eq!(smoke.trace.dashboard_binding_timeouts.get(), count);
+            assert_eq!(smoke.main, main); assert_eq!(smoke.originals.len(), 1);
+            assert_eq!(&*smoke.originals[0] as *const ComOriginal, original);
+            assert!(smoke.trace.first.get().is_none() && !smoke.dashboard_ready && !smoke.quit_confirmed
+                && !smoke.windows.post_entered && !smoke.invoke_entered && !smoke.passed());
+        }
+        assert_eq!(calls.get(), 2); assert_eq!(smoke.trace.main_binding_timeouts.get(), 0);
+        // Success and all other results still require the original generic
+        // return/binding path. The completion helper cannot consume them.
+        for status in [0, 1, HRESULT_PENDING, 0x80004005u32 as i32, A::UIA_E_ELEMENTNOTAVAILABLE as i32] {
+            smoke.query.active = true; smoke.query.status = HRESULT_PENDING; smoke.query.hwnd = HWND(hwnd);
+            assert_eq!(smoke.complete_dashboard_handle_timeout(hwnd, 0, status,
+                || { calls.set(calls.get() + 1); Ok(()) }), Ok(false));
+            assert!(smoke.query.active); assert_eq!(smoke.query.status, HRESULT_PENDING);
+            assert_eq!(smoke.trace.dashboard_binding_timeouts.get(), 2); assert_eq!(calls.get(), 2);
+            assert!(!smoke.dashboard_ready && !smoke.passed());
+        }
+
+        for (remaining, expected, fault) in [
+            (Ok(999), Err(Error::Unsafe), Some(SmokeCheck::QueryBudget)),
+            (Ok(1000), Err(Error::Unsafe), Some(SmokeCheck::QueryBudget)),
+            (Err(Error::Unsafe), Err(Error::Unsafe), Some(SmokeCheck::Clock)),
+            (Ok(1001), Ok(()), None),
+        ] {
+            let mut smoke = fixture(); let calls = Cell::new(0);
+            assert_eq!(smoke.complete_dashboard_handle_timeout(hwnd, 0, timeout, || Ok(())), Ok(true));
+            assert_eq!(smoke.query.begin_with_remaining(|| { calls.set(calls.get() + 1); remaining }, &smoke.trace), expected);
+            assert_eq!(calls.get(), 1); assert_eq!(smoke.query.active, expected.is_ok());
+            assert_eq!(smoke.query.status, if expected.is_ok() { HRESULT_PENDING } else { timeout });
+            assert_eq!(smoke.trace.first.get().map(|first| first.check), fault);
+            assert_eq!(smoke.trace.dashboard_binding_timeouts.get(), 1); assert!(!smoke.dashboard_ready && !smoke.passed());
+        }
+
+        for denied in 0..28 {
+            let mut smoke = fixture(); let mut requested = hwnd; let mut element = 0;
+            match denied {
+                0 => smoke.trace.phase.set(SmokePhase::MainBinding),
+                1 => smoke.trace.phase.set(SmokePhase::QuitDialog),
+                2 => smoke.trace.phase.set(SmokePhase::QuitInvoke),
+                3 => smoke.dashboard_ready = true,
+                4 => smoke.windows.post_entered = true,
+                5 => smoke.invoke_entered = true,
+                6 => smoke.quit_confirmed = true,
+                7 => smoke.unknown = true,
+                8 => smoke.settled = true,
+                9 => { let _ = smoke.trace.result::<()>(SmokeCheck::Clock, Err(Error::Unsafe), None); },
+                10 => smoke.originals[0].state = SlotState::Unknown,
+                11 => smoke.originals[0].active = true,
+                12 => smoke.originals[0].kind = ComKind::Walker,
+                13 => smoke.originals[0].pointer = null_mut(),
+                14 => smoke.main = None,
+                15 => element = 1,
+                16 => requested = 3usize as F::HWND,
+                17 => smoke.main.as_mut().unwrap().2.clear(),
+                18 => smoke.initialized = false,
+                19 => smoke.uninit_entered = true,
+                20 => smoke.uninit_returned = true,
+                21 => smoke.query.active = false,
+                22 => smoke.query.unknown = true,
+                23 => smoke.query.bstr = 1usize as *mut c_void,
+                24 => smoke.query.array = 1usize as *mut CO::SAFEARRAY,
+                25 => smoke.query.status = 0,
+                26 => smoke.trace.dashboard_update(DashboardProgress::begin_walk),
+                27 => smoke.trace.dashboard.set(None),
+                _ => unreachable!(),
+            }
+            let first = smoke.trace.first.get(); let active = smoke.query.active; let status = smoke.query.status;
+            let calls = Cell::new(0);
+            assert_eq!(smoke.complete_dashboard_handle_timeout(requested, element, timeout,
+                || { calls.set(calls.get() + 1); Ok(()) }), Ok(false));
+            assert_eq!(calls.get(), 0); assert_eq!(smoke.query.active, active); assert_eq!(smoke.query.status, status);
+            assert_eq!(smoke.trace.first.get(), first); assert_eq!(smoke.trace.dashboard_binding_timeouts.get(), 0);
+            assert_eq!(smoke.originals.len(), 1); assert!(!smoke.passed());
+        }
+
+        let mut late = fixture(); let calls = Cell::new(0);
+        assert_eq!(late.complete_dashboard_handle_timeout(hwnd, 0, timeout,
+            || { calls.set(calls.get() + 1); Err(Error::Unsafe) }), Err(Error::Unsafe));
+        assert_eq!(calls.get(), 1); assert!(!late.query.active); assert_eq!(late.query.status, timeout);
+        let first = late.trace.first.get().unwrap(); assert_eq!(first.check, SmokeCheck::Clock);
+        assert_eq!(first.dashboard_binding_timeouts, Some(1)); assert_eq!(first.main_binding_timeouts, Some(0));
+        assert!(!late.dashboard_handle_admitted(hwnd, 0) && !late.passed());
+        late.trace.dashboard_binding_timeouts.set(8); late.trace.phase.set(SmokePhase::DriverSettle);
+        let _ = late.trace.result::<()>(SmokeCheck::ComRelease, Err(Error::Unknown), None);
+        assert_eq!(late.trace.first.get(), Some(first)); let mut output = Vec::new(); late.trace.emit_to(&mut output).unwrap();
+        assert!(std::str::from_utf8(&output).unwrap().contains("\"dashboardBindingTimeouts\":1"));
+        assert_eq!(late.trace.emit_to(&mut Vec::new()).unwrap(), None);
+
+        for clock_result in [Ok(()), Err(Error::Unsafe)] {
+            let mut overflow = fixture(); overflow.trace.dashboard_binding_timeouts.set(u16::MAX);
+            let calls = Cell::new(0);
+            assert_eq!(overflow.complete_dashboard_handle_timeout(hwnd, 0, timeout,
+                || { calls.set(calls.get() + 1); clock_result }), clock_result.and(Err(Error::Bounds)));
+            assert_eq!(calls.get(), 1); assert!(!overflow.query.active && !overflow.passed());
+            let first = overflow.trace.first.get().unwrap(); assert_eq!(first.check, SmokeCheck::DashboardBindingTimeoutCount);
+            assert_eq!(first.dashboard_binding_timeouts, Some(u16::MAX));
+            let mut raw = [0u8; 1024]; let size = SmokeTrace::format(first, &mut raw).unwrap(); assert!(size <= 1024);
+        }
+        let trace = SmokeTrace::new(); trace.phase.set(SmokePhase::QuitDialog); trace.dashboard_binding_timeouts.set(8);
+        let _ = trace.result::<()>(SmokeCheck::NativeWindowHandle, Err(Error::Unsafe), Some(SmokeStatus::Hresult(timeout)));
+        assert_eq!(trace.first.get().unwrap().dashboard_binding_timeouts, None);
+
+        // Bind the scalar pending->status0 cases above to the real caller's
+        // strict success path, not a second simulated identity oracle. Native
+        // API/provider/GUI success still requires the actual hosted UI run.
+        let source = include_str!("ordinary_owner_ui.rs");
+        fn block<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+            source.split_once(start).unwrap().1.split_once(end).unwrap().0
+        }
+        let main = block(source, "    fn main_native_handle(", "    fn enabled_button(");
+        assert!(main.contains("if self.trace.phase.get() != SmokePhase::Dashboard { return self.native_handle(element, clock); }"));
+        assert!(main.contains("if !self.complete_dashboard_handle_timeout(hwnd, element, status, || clock.effect())? {\n                self.query.returned(status, clock, &self.trace, SmokeCheck::NativeWindowHandle)?;\n                return Ok(self.query.hwnd.0);"));
+        assert!(main.contains("self.query.begin(clock, &self.trace)?;"));
+        assert_eq!(main.matches("self.windows.root(launch, Some(hwnd), clock, &self.trace)? == Some(hwnd)").count(), 2);
+        let bound = block(source, "    fn bound(", "    fn walk(");
+        assert!(bound.contains("self.windows.root(launch, Some(hwnd), clock, &self.trace)? == Some(hwnd)\n            && self.main_native_handle(launch, hwnd, index, clock)? == hwnd && self.runtime_id(index, clock)? == expected"));
+        assert!(bound.contains("self.trace.need(SmokeCheck::MainBinding, bound)?;"));
+        assert!(bound.contains("self.query.returned(status, clock, &self.trace, SmokeCheck::ProcessId)?;"));
+        assert!(bound.contains("self.trace.need(SmokeCheck::MainProcess, self.query.integer > 0 && self.query.integer as u32 == launch.outputs.dwProcessId)"));
+        let observe = block(source, "    fn observe(&mut self, launch:", "    fn settle(&mut self)");
+        assert!(observe.contains("self.bound(launch, clock)?; let keep = self.originals.len();"));
+        assert!(observe.contains("if found == [true; 5] { self.dashboard_ready = true; break; }"));
+        assert!(observe.contains("self.trace.phase.set(SmokePhase::CloseRequest);\n        self.bound(launch, clock)?;"));
+        let completion = block(source, "    fn complete_dashboard_handle_timeout(", "    fn main_native_handle(");
+        for forbidden in ["self.main =", "self.dashboard_ready =", "self.quit_confirmed =", "self.windows.post_entered =", "self.invoke_entered ="] {
+            assert!(!completion.contains(forbidden) && !main.contains(forbidden));
+        }
+    }
+
     fn dashboard_name_observation_contract() {
         for (name, mask) in [
             ("Mobile Release Kit", 1), ("about:blank", 2), ("http://tauri.localhost/", 4),
@@ -3140,7 +3353,8 @@ mod contract_tests {
 
     #[test]
     fn native_smoke_never_credits_posting_or_partial_release_as_finality() {
-        main_window_selection_contract(); initial_main_readiness_contract(); dashboard_name_observation_contract();
+        main_window_selection_contract(); initial_main_readiness_contract(); dashboard_main_handle_readiness_contract();
+        dashboard_name_observation_contract();
         startup_diagnostic_contract();
         // Actual admission helper, inert Results/counters only: no native clock,
         // output reservation, HWND/COM call or cleanup is entered by these cases.
@@ -3298,7 +3512,8 @@ mod contract_tests {
             let saved = Cell::new(i32::MIN);
             assert_eq!(trace.result::<u8>(SmokeCheck::CurrentName, Err(error), Some(SmokeStatus::Hresult(saved.get()))), Err(error));
             let first = SmokeFault { phase: SmokePhase::Dashboard, check: SmokeCheck::CurrentName,
-                error, status: Some(SmokeStatus::Hresult(i32::MIN)), dashboard: None, main_binding_timeouts: Some(0), startup: StartupSample::new() };
+                error, status: Some(SmokeStatus::Hresult(i32::MIN)), dashboard: None, main_binding_timeouts: Some(0),
+                dashboard_binding_timeouts: Some(0), startup: StartupSample::new() };
             saved.set(0); trace.phase.set(SmokePhase::DriverSettle);
             assert_eq!(trace.result(SmokeCheck::Clock, Ok(false), None), Ok(false));
             assert_eq!(trace.result::<()>(SmokeCheck::ArrayDestroy, Err(Error::Unknown), Some(SmokeStatus::Hresult(saved.get()))), Err(Error::Unknown));
@@ -3384,7 +3599,7 @@ mod contract_tests {
             for status in [None, Some(SmokeStatus::Hresult(i32::MIN)), Some(SmokeStatus::Hresult(i32::MAX)),
                 Some(SmokeStatus::Win32(u32::MAX))] {
                 let fault = SmokeFault { phase: longest_phase, check: longest_check, error: Error::Unavailable, status, dashboard,
-                    main_binding_timeouts: Some(u16::MAX), startup: StartupSample {
+                    main_binding_timeouts: Some(u16::MAX), dashboard_binding_timeouts: Some(u16::MAX), startup: StartupSample {
                         availability: StartupAvailability::Missing, last: Some((widest_word, longest_phase)) } };
                 let mut raw = [0u8; 1024]; let size = SmokeTrace::format(fault, &mut raw).unwrap();
                 let text = std::str::from_utf8(&raw[..size]).unwrap();
