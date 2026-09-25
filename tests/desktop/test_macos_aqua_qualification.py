@@ -416,6 +416,64 @@ class AquaDataTests(unittest.TestCase):
                 self.assertEqual(observed, rows)
                 self.assertEqual(M.parse_result(captured(report), b"", BINDING, case), report)
 
+    def test_review_ignore_lengths_match_the_complete_fixture(self):
+        initial = M.fixture_data("first-save", False)[0][".gitignore"]
+        saved = M.fixture_data("noop-stale", False)[0][".gitignore"]
+        self.assertEqual((len(initial), len(saved)), (40, 339))
+        self.assertEqual(saved, initial + M.IGNORE_RULES)
+        for case in M.CASES:
+            for session in M.expected_result(BINDING, case)["saveSessions"]:
+                with self.subTest(case=case, draft=session["draftRevision"], baseline=session["baselineGeneration"]):
+                    ignore = session["files"][1]
+                    self.assertEqual(ignore, {"path": ".gitignore",
+                        "action": "append" if session["createReleaseDirectory"] else "preserve",
+                        "beforeBytes": len(initial if session["createReleaseDirectory"] else saved),
+                        "afterBytes": len(saved)})
+
+    def test_result_diagnostic_locates_schema_field_without_exporting_values_or_unknown_keys(self):
+        good = M.expected_result(BINDING, "first-save")
+        wrong_value = deepcopy(good); wrong_value["saveSessions"][0]["files"][1]["afterBytes"] = 248
+        wrong_type = deepcopy(good); wrong_type["saveSessions"][0]["files"][1]["afterBytes"] = "PRIVATE_ACTUAL_VALUE"
+        extra_key = deepcopy(good); extra_key["saveSessions"][0]["files"][1]["PRIVATE_UNKNOWN_KEY"] = "PRIVATE_ACTUAL_VALUE"
+        wrong_count = deepcopy(good); wrong_count["saveSessions"].pop()
+        for value, label, location in (
+            (wrong_value, "result-value", "saveSessions[0].files[1].afterBytes"),
+            (wrong_type, "result-type", "saveSessions[0].files[1].afterBytes"),
+            (extra_key, "result-keys", "saveSessions[0].files[1]"),
+            (wrong_count, "result-count", "saveSessions"),
+        ):
+            fixtures, calls = InertFixtures(), []
+            def runner(argv, **kwargs):
+                calls.append(argv)
+                return CompletedProcess(args=argv, returncode=0, stdout=captured(value), stderr=b"")
+            with self.subTest(label=label), self.assertRaises(M.Refused) as caught:
+                M.run_cases(BINDING, fixtures, runner, UID, "runner", self.fail)
+            self.assertEqual((str(caught.exception), calls, fixtures.reads), (label, [[M.EXECUTABLE, "first-save"]], []))
+            output = io.StringIO()
+            M.emit_record(M.diagnostic(caught.exception, None, fixtures), output)
+            report = json.loads(output.getvalue())
+            self.assertEqual((report["reason"], report["resultLocation"]), (label, location))
+            self.assertEqual((report["stage"], report["originalCallReturned"], report["laterCasesStopped"]),
+                             ("result-validation", True, True))
+            self.assertNotIn("PRIVATE_", output.getvalue())
+            with patch.object(M, "_result_location", side_effect=RuntimeError("PRIVATE_DIAGNOSTIC_FAILURE")):
+                fallback = M.diagnostic(caught.exception, None, fixtures)
+            self.assertEqual(fallback["reason"], label)
+            self.assertNotIn("resultLocation", fallback)
+            self.assertNotIn("PRIVATE_", json.dumps(fallback))
+
+    def test_result_diagnostic_omits_unsafe_or_unbounded_locations(self):
+        for location in (None, (), ["saveSessions"], ("PRIVATE_KEY",), ("saveSessions", True),
+                         ("saveSessions", -1), ("saveSessions", 64), ("saveSessions",) * 13,
+                         ("staleMarkerWriterReturnedAndClosed",) * 12):
+            error = M.Refused("result-value")
+            error.result_location = location
+            report = M.diagnostic(error, None, None)
+            self.assertEqual(report["reason"], "result-value")
+            self.assertNotIn("resultLocation", report)
+        self.assertEqual(M._result_location(("saveSessions", 63, "files", 0, "beforeBytes")),
+                         "saveSessions[63].files[0].beforeBytes")
+
     def test_review_ignore_bound_uses_the_exact_native_fixture_roster(self):
         # Source/DATA regression only; real DOM execution remains a macOS gate.
         observer = (PATH.parents[1] / "src-tauri" / "src" / "installed_shell_observation_macos.rs").read_text(encoding="utf-8")
