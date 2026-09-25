@@ -3876,7 +3876,7 @@ def read_bounded_json(path: Path, limit: int) -> object:
 
 def fixed_file_inventory(root: Path, names: tuple[str, ...]) -> list[dict]:
     inventory = []
-    require(len(names) <= 2048 and all(type(name) is str and re.fullmatch(r"[A-Za-z0-9_./-]+", name) is not None
+    require(len(names) <= 2048 and all(type(name) is str and re.fullmatch(r"[A-Za-z0-9_./+-]+", name) is not None
             and not name.startswith("/") and not any(part in {"", ".", ".."} for part in name.split("/")) for name in names),
             "Fixed input roster contains an unsafe path")
     require(names == tuple(sorted(set(names))), "Fixed input roster is not unique and ordered")
@@ -8224,7 +8224,7 @@ def validate_environment_inventory(value: object, *, maximum: int) -> list[dict]
     for entry in value:
         row = closed_object(entry, {"path", "size", "sha256"}, "Environment input inventory fields differ")
         name = row["path"]
-        require(type(name) is str and re.fullmatch(r"[A-Za-z0-9_./-]+", name) is not None
+        require(type(name) is str and re.fullmatch(r"[A-Za-z0-9_./+-]+", name) is not None
                 and not name.startswith("/") and not any(part in {"", ".", ".."} for part in name.split("/"))
                 and integer_between(row["size"], 0, 8 * 1024 * 1024) and sha256_value(row["sha256"]),
                 "Environment input name/hash/size differs")

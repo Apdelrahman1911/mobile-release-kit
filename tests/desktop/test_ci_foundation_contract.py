@@ -7813,6 +7813,40 @@ class WindowsHelperHandoffTests(unittest.TestCase):
         self.assertIn("self.recheck(index)?;self.close(index)?;self.pop_closed(index)?;", native)
 
 
+class SourceInventoryPathTests(unittest.TestCase):
+    """Inert complete-source filename contracts shared by hosted consumers."""
+
+    def test_complete_source_inventory_preserves_literal_plus_and_refuses_unsafe_rosters(self):
+        names = tuple(sorted(
+            "desktop/packaging/debian/native-notices/notices/crates/" + package + "/" + license
+            for package in ("toml_datetime-1.1.1+spec-1.1.0", "toml_edit-0.25.15+spec-1.1.0",
+                            "toml_parser-1.1.3+spec-1.1.0")
+            for license in ("LICENSE-APACHE", "LICENSE-MIT")))
+        root, digest = Path("/inert/source"), "a" * 64
+        details = SimpleNamespace(st_dev=1, st_ino=2, st_size=7, st_mtime_ns=3)
+        with patch.object(helper, "ordinary") as ordinary, \
+             patch.object(helper.Path, "stat", return_value=details) as inspected, \
+             patch.object(helper, "hash_file", return_value=digest) as hashed:
+            rows = helper.fixed_file_inventory(root, names)
+            self.assertEqual(rows, [{"path": name, "size": 7, "sha256": digest} for name in names])
+            self.assertIs(helper.validate_environment_inventory(rows, maximum=64 << 20), rows)
+            self.assertEqual([call.args[0] for call in ordinary.call_args_list], [root / name for name in names])
+            self.assertEqual([call.args[0] for call in hashed.call_args_list], [root / name for name in names])
+            invalid = [(name,) for name in (
+                "/notice+spec", "notices/../notice+spec", "notices/./notice+spec", "notices//notice+spec",
+                "notices/notice+spec/", "C:/notice+spec", "notices\\notice+spec", "notices/notice +spec")]
+            invalid.extend(((names[0], names[0]), tuple(reversed(names))))
+            for roster in invalid:
+                with self.subTest(roster=roster):
+                    ordinary.reset_mock(); inspected.reset_mock(); hashed.reset_mock()
+                    with self.assertRaises(helper.CheckFailure):
+                        helper.fixed_file_inventory(root, roster)
+                    ordinary.assert_not_called(); inspected.assert_not_called(); hashed.assert_not_called()
+                    with self.assertRaises(helper.CheckFailure):
+                        helper.validate_environment_inventory(
+                            [{"path": name, "size": 7, "sha256": digest} for name in roster], maximum=64 << 20)
+
+
 class WindowsReaderGateTests(unittest.TestCase):
     """Inert DATA/source contracts only; these records are not native receipts."""
 
