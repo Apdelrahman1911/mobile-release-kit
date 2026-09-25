@@ -13742,7 +13742,7 @@ class WindowsNormalUiPrerequisiteTests(unittest.TestCase):
                         raw + b"extra\n", raw.replace(b"0 ignored", b"1 ignored")):
             with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_inert_output(changed)
         native = SOURCE / helper.WINDOWS_INSTALLED_CRATE
-        for leaf, expected_hash in (('Cargo.toml', '4b15cec0864795544fcca166c9c0537baf4ef26bdeaa39a5b10c10726a18ff53'), ('src/decode.rs', '40600d98709a0550e742701b2ede3378de8498ce561d32e3234c2c5b04db3eca'), ('src/security.rs', 'd28d42680c23ca389bfcc77d2d48457752f88919f6804f5f5e88966477e9acc6'), ('src/ui.rs', '238cda0b3d86469b413736271596ad4aac4804e2542ea0df166c95c8d14ccd07')):
+        for leaf, expected_hash in (('Cargo.toml', '4b15cec0864795544fcca166c9c0537baf4ef26bdeaa39a5b10c10726a18ff53'), ('src/decode.rs', '40600d98709a0550e742701b2ede3378de8498ce561d32e3234c2c5b04db3eca'), ('src/security.rs', 'd28d42680c23ca389bfcc77d2d48457752f88919f6804f5f5e88966477e9acc6'), ('src/ui.rs', '6a6cae890c813da16d0ebc0c1ebbda36baeaaebd95259ff567743729d4143ab3')):
             self.assertEqual(hashlib.sha256((native / leaf).read_bytes()).hexdigest(), expected_hash)
         text = (native / "src/ordinary_owner_ui.rs").read_text(encoding="utf-8")
         tests = text.split("mod contract_tests {", 1)[1]
@@ -13758,6 +13758,117 @@ class WindowsNormalUiPrerequisiteTests(unittest.TestCase):
         self.assertIn('"nativeAvailabilityObserved": False, "guiNotStarted": True', facts)
         self.assertNotIn("--ignored", helper.windows_normal_ui_inert_argv(artifact))
 
+
+
+class WindowsNormalUiPolicyDiagnosticTests(unittest.TestCase):
+    """Pure failed-libtest DATA; no policy binary, native call or process runs."""
+
+    @staticmethod
+    def fixture(*, failed=True):
+        names = helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS
+        name = names[7]
+        path = helper.WINDOWS_INSTALLED_CRATE + "/src/ordinary_owner_ui.rs"
+        context = {**WindowsNormalUiPrerequisiteTests.context(), "source": r"C:\private-checkout",
+                   "sourceFiles": [{"path": path, "size": 1, "sha256": "a" * 64}]}
+        rows = [f"running {len(names)} tests", *("test " + item + " ... " +
+                ("FAILED" if failed and item == name else "ok") for item in names)]
+        if failed:
+            rows += ["failures:", "    " + name]
+        rows += [f"test result: {'FAILED' if failed else 'ok'}. {len(names) - int(failed)} passed; "
+                 f"{int(failed)} failed; 0 ignored; 0 measured; 123 filtered out; finished in 0.01s"]
+        out = ("\n".join(rows) + "\n").encode()
+        err = (f"thread '{name}' (1234) panicked at src\\ordinary_owner_ui.rs:4076:13:\n"
+               "assertion failed: PRIVATE-POLICY-VALUE\n  left: PRIVATE-LEFT\n right: PRIVATE-RIGHT\n").encode() if failed else b""
+        return context, out, err, name, path
+
+    def test_complete_failure_projects_only_admitted_names_and_reported_source_positions(self):
+        context, out, err, name, path = self.fixture()
+        for spelling in ("src/ordinary_owner_ui.rs", "src\\ordinary_owner_ui.rs", path,
+                         path.replace("/", "\\"), context["source"] + "/" + path):
+            changed = err.replace(b"src\\ordinary_owner_ui.rs", spelling.encode())
+            result = helper.windows_normal_ui_policy_failure_data(out, changed, context)
+            self.assertEqual(result, {"diagnosticOnly": True, "category": "admitted-failures",
+                "failedTests": [name], "reportedLocations": [{"test": name, "path": path, "line": 4076, "column": 13}]})
+            for private in ("PRIVATE", "private-checkout", "1234", "panicked at"):
+                self.assertNotIn(private, json.dumps(result))
+
+    def test_selection_and_summary_must_be_complete_exact_and_unambiguous(self):
+        context, out, err, name, _ = self.fixture()
+        for changed in (out.replace(b"running 19", b"running 0"), out.replace(b"18 passed", b"19 passed"),
+                        out.replace(b"1 failed", b"0 failed"), out.replace(b"0 ignored", b"1 ignored"),
+                        out.replace(b"test result: FAILED", b"test result: ok"), out + b"extra\n",
+                        out.replace(name.encode(), (name + "_other").encode()),
+                        out.replace(("test " + name + " ... FAILED\n").encode(), b""),
+                        out.replace(("    " + name + "\n").encode(), b""),
+                        out.replace(("test " + name + " ... FAILED\n").encode(),
+                                    ("test " + name + " ... FAILED\n").encode() * 2)):
+            self.assertEqual(helper.windows_normal_ui_policy_failure_data(changed, err, context),
+                             {"diagnosticOnly": True, "category": "unavailable", "failedTests": [], "reportedLocations": []})
+
+    def test_private_or_ambiguous_locations_and_contradictory_headers_are_not_projected(self):
+        context, out, err, name, path = self.fixture()
+        for spelling in ("ordinary_owner_ui.rs", "src/../src/ordinary_owner_ui.rs", "SRC/ordinary_owner_ui.rs",
+                         "D:/foreign/src/ordinary_owner_ui.rs", "/private/" + path):
+            changed = err.replace(b"src\\ordinary_owner_ui.rs", spelling.encode())
+            self.assertEqual(helper.windows_normal_ui_policy_failure_data(out, changed, context)["category"], "unavailable")
+        ambiguous = deepcopy(context)
+        ambiguous["sourceFiles"].append({"path": "src/ordinary_owner_ui.rs", "size": 1, "sha256": "b" * 64})
+        self.assertEqual(helper.windows_normal_ui_policy_failure_data(out, err, ambiguous)["category"], "unavailable")
+        for changed in (err * 2, err.replace(b":4076:13:", b":0:13:"), err.replace(b":4076:13:", b":4076:1000001:"),
+                        err.replace(name.encode(), b"foreign::test"),
+                        err.replace(name.encode(), helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS[0].encode())):
+            self.assertEqual(helper.windows_normal_ui_policy_failure_data(out, changed, context)["category"], "unavailable")
+
+    def test_missing_malformed_or_unfinished_capture_never_exports_partial_diagnostics(self):
+        context, out, err, _, _ = self.fixture()
+        for output, errors in ((None, err), (out, None), (b"", err), (out[:-1], err), (out, err[:-1]),
+                               (out + b"\0\n", err), (out, err + b"\xff\n"), (out, b"x" * (65536 + 1)),
+                               (b"x" * (65536 + 1), err)):
+            self.assertEqual(helper.windows_normal_ui_policy_failure_data(output, errors, context),
+                             {"diagnosticOnly": True, "category": "unavailable", "failedTests": [], "reportedLocations": []})
+        self.assertEqual(helper.windows_normal_ui_policy_failure_data(out, err, {})["category"], "unavailable")
+
+    def test_no_panic_and_no_failure_categories_never_claim_native_or_test_success(self):
+        context, out, _, name, _ = self.fixture()
+        self.assertEqual(helper.windows_normal_ui_policy_failure_data(out, b"Error: PRIVATE-RETURNED-ERROR\n", context),
+                         {"diagnosticOnly": True, "category": "admitted-failures", "failedTests": [name], "reportedLocations": []})
+        context, out, err, _, _ = self.fixture(failed=False)
+        self.assertEqual(helper.windows_normal_ui_policy_failure_data(out, err, context),
+                         {"diagnosticOnly": True, "category": "no-admitted-failure", "failedTests": [], "reportedLocations": []})
+
+    def test_retention_uses_only_existing_bounded_outputs_without_authorizing_any_native_action(self):
+        context, out, err, _, _ = self.fixture()
+        for available in (True, False):
+            reads, writes = [], []
+            def read(path, limit):
+                name = Path(path).name; reads.append((name, limit))
+                self.assertIn(name, ("compile-messages.jsonl", "normal-ui-native-policy.stdout", "normal-ui-native-policy.stderr"))
+                if name == "compile-messages.jsonl" or not available:
+                    raise OSError("PRIVATE-MISSING-OUTPUT")
+                self.assertEqual(limit, 64 << 10)
+                return out if name.endswith(".stdout") else err
+            def write(path, raw, limit):
+                self.assertEqual(Path(path), Path(context["root"]) / "public/windows-normal-project-ui.json")
+                self.assertEqual(limit, 64 << 10); self.assertLessEqual(len(raw), limit)
+                writes.append(helper.bounded_json(raw, limit))
+            with ExitStack() as stack:
+                stack.enter_context(patch.dict(helper.os.environ, {}, clear=True))
+                stack.enter_context(patch.object(helper, "windows_installed_bytes", side_effect=read))
+                stack.enter_context(patch.object(helper, "windows_fullwalk_write", side_effect=write))
+                guards = [stack.enter_context(patch.object(helper, item, side_effect=AssertionError("no native authority")))
+                          for item in ("run", "source_unchanged", "windows_ordinary_original", "windows_normal_ui_compile_binding")]
+                helper.windows_normal_ui_retain(context)
+                for guard in guards: guard.assert_not_called()
+            self.assertEqual(len(writes), 1)
+            result = writes[0]
+            self.assertFalse(result["combinedPassed"])
+            self.assertEqual((result["guiCasesExecuted"], result["verifiedMethods"], result["guiCases"]), (0, 0, []))
+            self.assertEqual(result["notVerified"], list(helper.WINDOWS_NORMAL_UI_NOT_VERIFIED))
+            self.assertEqual(result["policyDiagnostic"]["category"], "admitted-failures" if available else "unavailable")
+            self.assertNotIn("PRIVATE", json.dumps(result))
+        _, _, blocks = WindowsNormalUiPrerequisiteTests.prerequisite_workflow_blocks()
+        self.assertIn('desktop/tools/ci_foundation.py retain', blocks["retain"])
+        self.assertIn("always()", blocks["retain"])
 
 
 class WindowsNormalUiSetupTests(unittest.TestCase):

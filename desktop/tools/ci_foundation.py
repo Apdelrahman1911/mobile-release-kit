@@ -15456,6 +15456,78 @@ def windows_normal_ui_inert_output(raw: bytes, *, scalar: bool = False) -> dict:
     return {"tests": list(names), "passed": len(names), "failed": 0, "ignored": 0, "measured": 0, "filtered": filtered}
 
 
+def windows_normal_ui_policy_failure_data(stdout: bytes | None, stderr: bytes | None, context: dict) -> dict:
+    """Closed failure diagnostics only; never native success or cleanup authority."""
+    unavailable = {"diagnosticOnly": True, "category": "unavailable", "failedTests": [], "reportedLocations": []}
+    try:
+        require(type(stdout) is bytes and 0 < len(stdout) <= 64 << 10
+                and type(stderr) is bytes and len(stderr) <= 64 << 10,
+                "Windows UI policy diagnostic size differs")
+        require(stdout.endswith(b"\n") and (not stderr or stderr.endswith(b"\n"))
+                and b"\x00" not in stdout + stderr, "Windows UI policy diagnostic is incomplete")
+        lines = [line.strip() for line in stdout.decode("utf-8").splitlines() if line.strip()]
+        errors = stderr.decode("utf-8").splitlines()
+        names = WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS
+        require(2 <= len(lines) <= 128 and len(errors) <= 4096
+                and lines[0] == f"running {len(names)} tests", "Windows UI policy selection differs")
+        summary = re.fullmatch(r"test result: (ok|FAILED)\. ([0-9]{1,3}) passed; ([0-9]{1,3}) failed; "
+            r"0 ignored; 0 measured; [0-9]{1,6} filtered out; finished in [0-9]+\.[0-9]+s", lines[-1])
+        require(summary is not None, "Windows UI policy summary is incomplete")
+        statuses, listed, headings = {}, set(), 0
+        for line in lines[1:-1]:
+            if line == "failures:":
+                headings += 1
+                require(headings <= 2, "Windows UI policy failure headings differ")
+            elif line in names:
+                require(headings > 0 and line not in listed, "Windows UI policy failure list differs")
+                listed.add(line)
+            else:
+                match = re.fullmatch(r"test ([A-Za-z0-9_:]+) \.\.\. (ok|FAILED)", line)
+                require(match is not None and match[1] in names and match[1] not in statuses,
+                        "Windows UI policy test row differs")
+                statuses[match[1]] = match[2]
+        failed = [name for name in names if statuses.get(name) == "FAILED"]
+        require(set(statuses) == set(names) and listed == set(failed)
+                and int(summary[2]) == len(names) - len(failed) and int(summary[3]) == len(failed)
+                and summary[1] == ("FAILED" if failed else "ok"), "Windows UI policy counts differ")
+        inventory = validate_environment_inventory(context["sourceFiles"], maximum=64 << 20)
+        source = context["source"]
+        require(type(source) is str and 0 < len(source) <= 16384, "Windows UI policy source differs")
+        source = source.replace("\\", "/")
+        require(re.fullmatch(r"(?:[A-Za-z]:)?/[^\x00-\x1f\x7f]+", source) is not None
+                and not any(part in {"", ".", ".."} for part in source.split("/")[1:]),
+                "Windows UI policy source spelling differs")
+        spellings: dict[str, str | None] = {}
+        for row in inventory:
+            name = row["path"]
+            if not name.endswith(".rs") or len(name) > 512:
+                continue
+            aliases = [name, source + "/" + name]
+            if name.startswith(WINDOWS_INSTALLED_CRATE + "/"):
+                aliases.append(name[len(WINDOWS_INSTALLED_CRATE) + 1:])
+            for alias in aliases:
+                spellings[alias] = name if alias not in spellings or spellings[alias] == name else None
+        locations, located = [], set()
+        for line in errors:
+            if "panicked at" not in line:
+                continue  # Private assertion values/backtraces are never projected.
+            match = re.fullmatch(r"thread '([A-Za-z0-9_:]+)'(?: \([0-9]{1,10}\))? panicked at "
+                                 r"([^\r\n]{1,17000}):([0-9]{1,7}):([0-9]{1,7}):", line)
+            require(match is not None and match[1] in failed and match[1] not in located,
+                    "Windows UI policy panic header differs")
+            path = spellings.get(match[2].replace("\\", "/"))
+            number, column = int(match[3]), int(match[4])
+            require(path is not None and integer_between(number, 1, 1000000)
+                    and integer_between(column, 1, 1000000), "Windows UI policy location differs")
+            located.add(match[1])
+            locations.append({"test": next(name for name in names if name == match[1]),
+                              "path": path, "line": number, "column": column})
+        return {**unavailable, "category": "admitted-failures" if failed else "no-admitted-failure",
+                "failedTests": failed, "reportedLocations": locations}
+    except (CheckFailure, KeyError, TypeError, UnicodeError, ValueError, OverflowError):
+        return unavailable
+
+
 def windows_normal_ui_inert_facts(context: dict, artifact: dict, identity: str, *, scalar: bool = False) -> dict:
     require(windows_normal_ui_profile(context) and type(scalar) is bool, "Windows UI inert evidence role differs")
     root = Path(context["root"])
@@ -16881,6 +16953,11 @@ def windows_normal_ui_retain(context: dict) -> None:
         compile_raw = windows_installed_bytes(root / "compile-messages.jsonl", 16 << 20)
     except (OSError, ValueError, CheckFailure):
         compile_raw = None
+    try:
+        policy_stdout = windows_installed_bytes(root / "normal-ui-native-policy.stdout", 64 << 10)
+        policy_stderr = windows_installed_bytes(root / "normal-ui-native-policy.stderr", 64 << 10)
+    except (OSError, ValueError, CheckFailure):
+        policy_stdout = policy_stderr = None
     setup = {"status": "unavailable", "facts": None}
     for through in ("publication", "publish", "stage"):
         if os.environ.get("MRK_WINDOWS_UI_SETUP_" + through.upper() + "_FINALIZE_STEP_OUTCOME") == "success":
@@ -16914,6 +16991,7 @@ def windows_normal_ui_retain(context: dict) -> None:
         "combinedPassed": complete, "verifiedMethods": sum(item["verifiedMethods"] for item in cases),
         "guiCasesExecuted": len(cases), "runtimeSetup": setup, "guiCompilation": gui, "guiCases": cases,
         "compileDiagnostic": windows_installed_compile_failure_data(compile_raw, context, "standalone"),
+        "policyDiagnostic": windows_normal_ui_policy_failure_data(policy_stdout, policy_stderr, context),
         "notVerified": [name for name in WINDOWS_NORMAL_UI_NOT_VERIFIED if name not in completed]}
     # Never publish raw native accounts/SIDs/paths/ACLs, compiler text, or a
     # pre-close child/owner file. Existing public-bindings contains source DATA.
