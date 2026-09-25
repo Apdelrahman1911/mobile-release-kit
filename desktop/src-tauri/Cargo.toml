@@ -64,7 +64,7 @@ serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.145"
 sha2 = "=0.10.9"
 getrandom = "=0.3.4"
-tokio = { version = "=1.48.0", features = ["io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "=1.48.0", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 tauri = { version = "=2.11.5", optional = true, default-features = false, features = ["wry", "compression"] }
 rfd = { version = "=0.15.4", optional = true, default-features = false, features = ["xdg-portal", "tokio"] }
 
@@ -78,6 +78,8 @@ mrk-macos-installed-native = { path = "../native/macos-installed-native" }
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))'.dev-dependencies]
 nix = { version = "=0.30.1", default-features = false, features = ["time"] }
+zbus = { version = "=5.19.0", default-features = false, features = ["tokio", "mrk-owned-test-support"] }
+secret-service = { version = "=5.2.0", path = "../vendor/secret-service-5.2.0", default-features = false, features = ["rt-tokio-crypto-rust", "mrk-retrieval-test-support"] }
 
 # Native facts only: this dependency does not enable a Windows runtime profile.
 [target.'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'.dependencies]
@@ -95,20 +97,28 @@ webkit2gtk = { version = "=2.0.2", optional = true, default-features = false, fe
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))'.dependencies]
 rustix = { version = "=1.1.5", default-features = false, features = ["std", "fs", "process", "thread", "system"] }
 mrk-linux-mount-observation = { path = "../native/linux-mount-observation" }
+secret-service = { version = "=5.2.0", path = "../vendor/secret-service-5.2.0", default-features = false, features = ["rt-tokio-crypto-rust"] }
+zbus = { version = "=5.19.0", default-features = false, features = ["tokio"] }
+ordered-stream = "=0.2.0"
+
+# One maintained zbus identity for both the application and secret-service.
+# Its additive owned client does not enable native qualification/persistence.
+[patch.crates-io]
+zbus = { path = "../vendor/zbus-5.19.0" }
 
 [build-dependencies]
 tauri-build = { version = "=2.6.3", optional = true, features = [] }
 
 # Keep complete runtime byte hashing inside the original test admission clocks:
 # optimize the existing hash implementation, never omit checks or widen deadlines.
-[profile.test.package.sha2]
+[profile.test.package."sha2:0.10.9"]
 opt-level = 3
 debug-assertions = true
 overflow-checks = true
 
 # The shared normal/observer connection build uses the dev profile. Preserve
 # complete byte hashing under the same original runtime admission deadlines.
-[profile.dev.package.sha2]
+[profile.dev.package."sha2:0.10.9"]
 opt-level = 3
 debug-assertions = true
 overflow-checks = true

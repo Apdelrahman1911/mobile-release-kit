@@ -82,6 +82,8 @@ def _ignore_facts(content: bytes, lines: tuple[str, ...]) -> tuple[frozenset[str
 def sufficient_ignore_rules(content: bytes, lines: tuple[str, ...] = IGNORE_LINES) -> bool:
     """Conservative existing suffix proof, never a general Gitignore parser.
 
+    The default is the ten-rule configuration/version vocabulary. Metadata
+    passes its fixed original-seven tuple explicitly; it is not migrated here.
     With ``('.mobile-release/',)`` this retains build_inputs' existing proof:
     leading spaces matter, only LF/CRLF split patterns, and any later negation
     invalidates earlier positive proof. Invalid UTF-8 has no sufficient proof.

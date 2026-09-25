@@ -264,10 +264,130 @@ CONVENTIONAL_PREPARE_INPUTS: dict | None = {
         "sourceSha": "37079ce7874bedc804f434f8f8851c3adf5333ac"
     }
 }
+# Current payload authority, separate from the unchanged H supplier admission above.
+# Current composed source:106 core leaves, six fixed bootstraps, CA and
+# the reviewed current preparer. Never replace this closed roster with
+# a discovered checkout inventory or H's historical core-source-files.json.
+CONVENTIONAL_CURRENT_SOURCE_FILES: list[dict] | None = [
+    {"path":"/work/inputs/core-source/desktop/android_build_bootstrap.py","size":1051,"sha256":"2cc8b02d24458f3e3e0b90a661765d8e2f97c884030bbeed2a37f587379975a7"},
+    {"path":"/work/inputs/core-source/desktop/config_edit_bootstrap.py","size":1163,"sha256":"927e52dc4e2bb77ce07b4fccdf29807f4fc51f750e53bc1e139719f419cef86f"},
+    {"path":"/work/inputs/core-source/desktop/engine_bootstrap.py","size":1187,"sha256":"fe90aa7f12192d7b94067a7774a7151b4f235a339b94881897e9120b0fe25c7c"},
+    {"path":"/work/inputs/core-source/desktop/environment_bootstrap.py","size":1077,"sha256":"e737c9bf570358025e17d4413f1a567d41b9132142855226572e8a06cd141965"},
+    {"path":"/work/inputs/core-source/desktop/github-ca.pem","size":240216,"sha256":"9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f"},
+    {"path":"/work/inputs/core-source/desktop/github_connection_bootstrap.py","size":1227,"sha256":"f484aa139d5e33dd1d27ccee790d2a4e1c90046064956de3699c6b2b89a7df79"},
+    {"path":"/work/inputs/core-source/desktop/offline_preflight_bootstrap.py","size":1081,"sha256":"0864d0d24de1d5be64781b7cb5378ebeb77c528352927f31609786fb12be8750"},
+    {"path":"/work/inputs/core-source/desktop/tools/prepare_runtime.py","size":12355,"sha256":"4d9f0e52b7cbe1f9d648a96512cf0c0ca5ab01b5b06738282133b57e1830e4f8"},
+    {"path":"/work/inputs/core-source/src/mobile_release/__init__.py","size":144,"sha256":"557bcb0cdcf7f7ef329f04f82cf388c746bb73eba34857b97782a8bcf2e596b2"},
+    {"path":"/work/inputs/core-source/src/mobile_release/__main__.py","size":115,"sha256":"50fd328dfe5b5339a9958444940e9ce45b9764dbb7b130cc25f3a966ccb706a8"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_command_process.py","size":170410,"sha256":"803226dd3252d97763758a20222ec41bdfc3f9a75021bf6412d1c5590eb1e75b"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_build_control.py","size":2363,"sha256":"45e1e84b7d8809963b914836d019f59553e2ba805e43a96d3c1bc9954594eae4"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_build_engine.py","size":509,"sha256":"acb8af725b5b77cdaaacbeabe193351498b5b9e1f828e6c7405dca67e0951c4a"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_build_files.py","size":53883,"sha256":"e71e867a8cc956227dcf5cf37962b8d4b891bd13c29867d5d36c98b015a0bf12"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_build_protocol.py","size":33376,"sha256":"a8053b6845677ddf6fb1ea7d3e4af90745c1b169c8f3cbcd03cbd9133459aca6"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_build_selection.py","size":6190,"sha256":"f1e4248d21a56d1dd1e72d85cba206b3958d800dc0d2b36cde930cc461155b08"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_edit_control.py","size":7712,"sha256":"a300db0df65418ac110399225312c117b0e1f1a43608f3259ea6044ab33341e7"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_edit_engine.py","size":17411,"sha256":"392d6e0e183c3127361ec1b7faeda9b14fc73173934899c109788eda017275e2"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_edit_protocol.py","size":11994,"sha256":"96751f97c443d7a3e31305f5d83183c27f4a2883e0a88df83bc5125bebe3303e"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_engine.py","size":9436,"sha256":"860d1cee0072730a487ac8e632206c69e3ba676cab849b144a61755c4b84e41e"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_environment_control.py","size":5794,"sha256":"b4d8fbe47b575faa8de2fc06854bb6863cd3e68fdb60473c8f5488ce70142771"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_environment_engine.py","size":6574,"sha256":"0f99c422928fd7aa955e5c6d63682ef29c0e226e09ce51d25141bee98d44e6bc"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_environment_protocol.py","size":19517,"sha256":"1316e980200e63741340c2545a2a6d93adf9cf4a8e2f37f379768f33d445f39b"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_github_engine.py","size":14149,"sha256":"a468ce5b3ccf18606a0968817299bebeaee63299268430f9a52a1de7bf02483c"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_preflight_budget.py","size":16253,"sha256":"391ef71136be104523e09b4c2da0967d04271fbbedf7ea04663649eeb82e02d4"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_preflight_control.py","size":938,"sha256":"7d867dfba27acd98333f3bb8477f1693e4ad93738a0273be4a4fa44108c438d9"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_preflight_engine.py","size":1199,"sha256":"ebd6e6e40b024724cb4659f51d200ec255f67fb2b97bd20ab41df8956038f444"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_preflight_protocol.py","size":13301,"sha256":"094b9259bf99b790d237b0e99c81401eb3839da5360985910b4a86182f542537"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_saved_command_control.py","size":9835,"sha256":"b12e9b8b8432de38c53aace533faa7993b987d50f6d86be963246ed95c7e5cc0"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_saved_command_engine.py","size":12814,"sha256":"063d8bfcc97f43862ace6adffac14c82db9146ae5927c123aae14d4749943b00"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_github_connection_transport.py","size":40759,"sha256":"f5e0b3e750b4ed0ff7753d2f8e9de9ba940e9db7eecbf314a1b9fe7ae8990e0a"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_lifetime_evidence.py","size":18536,"sha256":"d64948f26984ed692030834221f0cfd93b85117da89b4860f8b69a6f7919e1b3"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_native_process.py","size":62175,"sha256":"70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_profile_callers.py","size":8197,"sha256":"4c1374b6a738f027a3cdbbd4a778346a5ec5df889da9781f8d26b3f7ac688c75"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_profile_process.py","size":131940,"sha256":"be6442d5d2f5e777ed48e61a0151c50c4e9878c7c40fec8573af524511780613"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_store_lane_contract.py","size":9500,"sha256":"8726cf9bdb053b3d7f30eb9c8307c18239dc518476b2f895ef1610efa65e040e"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_store_lane_evidence.py","size":17638,"sha256":"bcea0084032ffbd43c15f5682f456965aff812e5007d3211a5afe605fc4d5872"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_store_lane_files.py","size":35156,"sha256":"880eb0cfa37c0c70eb089c6adbe333450af139f1d85c901e861c756057c7aac5"},
+    {"path":"/work/inputs/core-source/src/mobile_release/android.py","size":31112,"sha256":"18ae142af1ee48f9167f05d64403f3f0bcf8f0424ab8de14bf8ca5e770289543"},
+    {"path":"/work/inputs/core-source/src/mobile_release/android_build_operation.py","size":20200,"sha256":"8769dbb6796cd50346996d36750902ecc56ef1ea0538e47b043bb1c8f08da00e"},
+    {"path":"/work/inputs/core-source/src/mobile_release/android_build_tools.py","size":46054,"sha256":"9ff9e5e27ff47fc038bf4bd61ed5a51f9010b9d37e8f9f6c5675868ca72e9d54"},
+    {"path":"/work/inputs/core-source/src/mobile_release/android_manifest.py","size":9267,"sha256":"7fe056f442e239a8668a62d699f0b4c7f077de9b959d32fc4a2f8f770460bdd7"},
+    {"path":"/work/inputs/core-source/src/mobile_release/android_upload_validation.py","size":6295,"sha256":"5be3d74272ade8a30938d48e25ffe42a661ff3e142872c17b014dee1641cfd72"},
+    {"path":"/work/inputs/core-source/src/mobile_release/android_zip.py","size":15103,"sha256":"34391d082553f2b5168af71c275c743c00bd7982b719933183874ad8258ee15a"},
+    {"path":"/work/inputs/core-source/src/mobile_release/android_zip_integrity.py","size":15169,"sha256":"80bae3a6142f044643f7a1077b671f3ad105123fe1db55ac674d1b4eb0b1467f"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/__init__.py","size":8616,"sha256":"cf5f6fea61f9612e8b584d615fcf46ce4f498058592a3213d4e010c63835009f"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_candidate_evidence.py","size":16373,"sha256":"7918786377fdffdc7b0ce07ffcbb99fc75b9297d4ab1cdde40979ee0ee684f90"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_catalog.py","size":15772,"sha256":"72059524e4968b4769b5da7bcfb0dbeda121112ddbd04ffe0a20f2daeecf91b3"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_credential_assessment.py","size":19158,"sha256":"834e6a88a64cf491504e03e8e7026b70c693b37196c489bf3d6ebabdcb9bac92"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_credential_guide.py","size":7905,"sha256":"bd713a2150eb6b03ea2896ea98db27647146fd536f7a2d412a7f8ada7e98a3fb"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_environment.py","size":14236,"sha256":"4115d50e6ff1b2acb991b259a7f06443f234a07d4820167bc444aed916f5b0d4"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_github_connection.py","size":16515,"sha256":"a68974f2bf477cd5d3d4349398a3c7616ac3f47b8fd704a0fa356e3784d29a7b"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_github_setup.py","size":12630,"sha256":"87fa322b2fcd02e399eff4b49eb15ebc84864f1fdcd25b3f958944ea21f9f825"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_json.py","size":2851,"sha256":"84c90334c94b12877cc3dbcd9324bd80d78a2de9f54d64e30c771af06f719815"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_metadata_text.py","size":10878,"sha256":"759c3124d807fd768883c50b15e05b0040e114414ef5f92045a536d2aba4d8a7"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_preview.py","size":10213,"sha256":"ed5ea4c2777ea36b34816ec66603cf2453aeab22bf98764b82ea0db07ab6beae"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_release_version.py","size":8391,"sha256":"54706d38280f898d80418e9402038712e7f66610c6d64930286a8405e0e3370c"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_snapshot.py","size":33629,"sha256":"54a4872db61696c3312a30ef5d9ea539506bdd9a86718d7b2da6af89fe8d08ee"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_snapshot_windows.py","size":19049,"sha256":"c96e29786f986811f211ec8679336fc665a06fcb918c056260fa77ea2b0696a0"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_snapshot_windows_native.py","size":26733,"sha256":"a4b1303e6cdc73053a1c22dc109f9925d5babf612ec4041453dad876a5db4d17"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/contracts.py","size":27721,"sha256":"0594cbd14f91fb85a6d8d9769f294bc9f75b692e9cb2ff7fe363d4fb51efd5aa"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/data/credential-guide-v1.json","size":39128,"sha256":"7f9828720684a1b6d071df2a34d415feb8ff4552c89d8d6d42b19970d838d478"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/data/field-help.json","size":28837,"sha256":"890d9d1c22a4984bb60b0b503cf1106fe5b5f03ddf50614b5d00350ee510bb16"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/data/github-connection-v1.json","size":9225,"sha256":"75a635de5747c8e0773ec1ee996fff594f38e2a7f28d90099db86f56b4319714"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/data/github-setup-v1.json","size":16582,"sha256":"4d486fc24ebf24271dbb5227174df7c8f28a530a97011e004da643fdad7fe17c"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/data/metadata-text-help-v1.json","size":10495,"sha256":"08c4efac78ee2aabc75f6ece7f93010f34193bcb8c8304a742b9e0c7e940ccfb"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/data/project.schema.json","size":12407,"sha256":"2c59a6a3d0c90188db5800898db2c42612960616f30d84aecf25a4611ec5fbd7"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/data/release-version-help-v1.json","size":5157,"sha256":"d4ee75cba9accb83ce0982de1fbe4359e9744b38c40856831dea111c1739ff09"},
+    {"path":"/work/inputs/core-source/src/mobile_release/build_inputs.py","size":137984,"sha256":"f8fd2a9e90ac2e1d43b6664243e0250b982527de9283bf36d1832ff24f71221f"},
+    {"path":"/work/inputs/core-source/src/mobile_release/cancellation.py","size":29094,"sha256":"1840232213e877e26c4cebd1434b3b851f9fa4c6961baa26eeaae9fa1442db78"},
+    {"path":"/work/inputs/core-source/src/mobile_release/checked_files.py","size":22382,"sha256":"803b9a0767231426243c0be423a6eb94bcc512ada3bbc132f0798b76a0baedc3"},
+    {"path":"/work/inputs/core-source/src/mobile_release/cli.py","size":64644,"sha256":"9f1967be7552446ad2f4e5fd6b6f88666573eeb1e6077320deb13d1570e16de2"},
+    {"path":"/work/inputs/core-source/src/mobile_release/config.py","size":39869,"sha256":"1e7c192fb46d49bee34a316eb4714079b38aa68a1188462e612d815d8117e1ed"},
+    {"path":"/work/inputs/core-source/src/mobile_release/config_edit.py","size":24493,"sha256":"23ddff685ee6179f0a5b9c35d7b5706683f965c27438fd7b16539754d7779b83"},
+    {"path":"/work/inputs/core-source/src/mobile_release/config_payloads.py","size":4803,"sha256":"b7b9ca12f5c09595430b07bfcf8aed2b1b93f60230888721d1ab78199bc910c2"},
+    {"path":"/work/inputs/core-source/src/mobile_release/credential_policy.py","size":4714,"sha256":"384375dc92348ba2f25159241ae1c9e9711b5ff7c7d72c2fa230146846590805"},
+    {"path":"/work/inputs/core-source/src/mobile_release/credential_requirements.py","size":9503,"sha256":"2ee398a6b17a067977d4081b111ac72ef49d6876d8cddfa75bbaca60545e301f"},
+    {"path":"/work/inputs/core-source/src/mobile_release/credentials.py","size":103948,"sha256":"35031d83a550171faace632deb0bbe55ad87a988d62076db9be788bac22e4d56"},
+    {"path":"/work/inputs/core-source/src/mobile_release/data/apple-profile-roots.pem","size":4539,"sha256":"c704ce9bc7d65280e2893c2235c2434dba8cbce00f659787492714ca441b1e93"},
+    {"path":"/work/inputs/core-source/src/mobile_release/desktop_android_build.py","size":12767,"sha256":"4fd76c42b2297153ca408d6f2e6dc060c60352b60d8a58cde3b7c3d82e4d8eb3"},
+    {"path":"/work/inputs/core-source/src/mobile_release/desktop_preflight.py","size":8915,"sha256":"2f1b3fc4aae8c55e80954ff578cf97116bba246c759cf183bd13578fafc13581"},
+    {"path":"/work/inputs/core-source/src/mobile_release/discovery.py","size":27885,"sha256":"6802bd28bccf0c807ca67299c0cb94d2eab0158b44383aed167a42465b2608bd"},
+    {"path":"/work/inputs/core-source/src/mobile_release/environment_diagnostics.py","size":12025,"sha256":"db34c792e7097df8d9e0e52980486df450b1e6f9064027202987d99847ec67a1"},
+    {"path":"/work/inputs/core-source/src/mobile_release/environment_diagnostics_tools.py","size":24700,"sha256":"a45822d5d237c224164dcec35ff7a91703a49f032f3b4993d9bcdf9b90454da0"},
+    {"path":"/work/inputs/core-source/src/mobile_release/errors.py","size":749,"sha256":"26427cedbd05945c1a869af20228f9a04fe1e30d950a2dc246dd0795708a0853"},
+    {"path":"/work/inputs/core-source/src/mobile_release/github_workflow_edit.py","size":21086,"sha256":"cd059224ec5174ece0f0ddb5d74464a9df4497ac991bc3f86fa160f932d0dcaf"},
+    {"path":"/work/inputs/core-source/src/mobile_release/init_transaction.py","size":88826,"sha256":"b19ee28073fd59a6903414ee7429a64e0b9dcf17864d0428009be646e93dda9c"},
+    {"path":"/work/inputs/core-source/src/mobile_release/init_workspace_custody.py","size":33409,"sha256":"3a1ff617db9ecf54209e2b99daa5547b414b146a46bf8c655d0e5cdbb8b5296c"},
+    {"path":"/work/inputs/core-source/src/mobile_release/inspection.py","size":930,"sha256":"663d6d82261815cf044ecc96f19eb7252b54d224edbecd4641679b2a32fc920a"},
+    {"path":"/work/inputs/core-source/src/mobile_release/ios.py","size":59585,"sha256":"cb4665594bee73605f78acb57b1253ae088b987b51a752a970b7c65011108bbb"},
+    {"path":"/work/inputs/core-source/src/mobile_release/ios_artifacts.py","size":74171,"sha256":"102f6c444853958ca2c17698d7d67b56c0b321311bcccd2a999c52a1ca61c54a"},
+    {"path":"/work/inputs/core-source/src/mobile_release/ios_der.py","size":5132,"sha256":"9ad85b4f36c65d5dc1895fae45ffc3959f0e190e7b183615aa6c0714d8b38ab5"},
+    {"path":"/work/inputs/core-source/src/mobile_release/ios_entitlements.py","size":23224,"sha256":"3278efadeecbcc09187cc859c03e1e011a8bf2d8f22355f92c03ade140c4951f"},
+    {"path":"/work/inputs/core-source/src/mobile_release/ios_plist_binary.py","size":8499,"sha256":"1601d3e15467a95348bde537ec6da633c2b4b46e0f7803eb619622b3cab69b2b"},
+    {"path":"/work/inputs/core-source/src/mobile_release/ios_profile_auth.py","size":7972,"sha256":"143897fba6fcd6e8a6d3d8063425a3274643eca934da334ada795865c840014c"},
+    {"path":"/work/inputs/core-source/src/mobile_release/ios_profile_trust.py","size":9102,"sha256":"e813efc8e4218048bae71f04de942493e93e5880f095e5ae68f051d6cf176edf"},
+    {"path":"/work/inputs/core-source/src/mobile_release/ios_profiles.py","size":36397,"sha256":"ee19ada826cdd49da7ad8a4ad2b7a2f6bc82eedf9334507980c6c4b87853bb1f"},
+    {"path":"/work/inputs/core-source/src/mobile_release/ios_upload_validation.py","size":7171,"sha256":"2b914576fd795123bd6088711f19d1072801415736f266ebaf39c5d6d4446589"},
+    {"path":"/work/inputs/core-source/src/mobile_release/local_signing.py","size":97622,"sha256":"66d8eb8ae0873f852cdd6a9080aa837c3de3fcda307451cb14be92e81c0237f6"},
+    {"path":"/work/inputs/core-source/src/mobile_release/macho.py","size":23183,"sha256":"8fb561c41ca958ba9d1fc507b7aecae6a011aa2bb903ec472a80201a6b926d5d"},
+    {"path":"/work/inputs/core-source/src/mobile_release/metadata.py","size":27910,"sha256":"1aadff63995e2e705c21d5b5e30d8b4ba9f7c69035f32de39afada6d05c8dc2b"},
+    {"path":"/work/inputs/core-source/src/mobile_release/metadata_text.py","size":8246,"sha256":"207cde915a41c7ae026d2640d97464220bd7284c2de20ff3f366fb9fb0f4cb70"},
+    {"path":"/work/inputs/core-source/src/mobile_release/metadata_text_edit.py","size":16301,"sha256":"e6f76867b3605f72816f66e37a413d9ab1bc001790b8a0d8eff252d485280815"},
+    {"path":"/work/inputs/core-source/src/mobile_release/owned_process.py","size":7631,"sha256":"430a596c5069b7acf248334d1f60fdd12ad8212cf9c2e9dfef717c9ba2179c02"},
+    {"path":"/work/inputs/core-source/src/mobile_release/preflight.py","size":60891,"sha256":"d49e71ec66f149bab82ef4dcabf22db96fed61864a5540d48ae309183e25c173"},
+    {"path":"/work/inputs/core-source/src/mobile_release/provenance.py","size":202867,"sha256":"50933fa89350e46e267854750bbd45ae3afc4efb0546013366d881f63cc94830"},
+    {"path":"/work/inputs/core-source/src/mobile_release/release_version_edit.py","size":15399,"sha256":"2ba0d9f3cf99ebe77a06a1690d6f93755ce48af55ca20da9989fed5cd2eed167"},
+    {"path":"/work/inputs/core-source/src/mobile_release/reporting.py","size":7628,"sha256":"4bbed825e6f1098dd4a89d864002641a2c7ec13f183ac0e85d5de3cc38aab900"},
+    {"path":"/work/inputs/core-source/src/mobile_release/stores.py","size":51125,"sha256":"287135d7177200ada0ba0b64b71fa7ce5c533cb8d8b32af6ccfaaa3e2db28c53"},
+    {"path":"/work/inputs/core-source/src/mobile_release/toolchain_policy.py","size":517,"sha256":"1b48e5c7e08864ff8ee63bcb3a91bf6782259fbe91f413ba707510bc631f2f61"},
+    {"path":"/work/inputs/core-source/src/mobile_release/tooling.py","size":7495,"sha256":"3bc69d9522c563fa1cb7403976f1cf6c1c2b5ad3e042a4a88dfbc7db06932c4d"},
+    {"path":"/work/inputs/core-source/src/mobile_release/version_text.py","size":10275,"sha256":"408c9fbc1ba4b101230ff271050ef75ef2b34f2e7656869f88006f8101687eb1"},
+    {"path":"/work/inputs/core-source/src/mobile_release/workflow.py","size":129517,"sha256":"47cd5e408b42f67fe9ad43bb0c11f04c9b2a4b542304f55206bbfce4494f74eb"},
+    {"path":"/work/inputs/core-source/src/mobile_release/workflow_payloads.py","size":3228,"sha256":"5dbc513b408c0e5735ed67c00db1e3e92499461f307abd53307d493f0895201b"},
+]
 CONVENTIONAL_SMOKE_INPUTS: dict | None = {
-    "manifestSha256": "e3375ff140d69df54b2445f756711e0245d397ba6ded76e8559732ec2e4e3801",
+    "manifestSha256": "556b2ea59b4b3e9abb9d04a3d263e0fd420e8c44b3f71c478b1f71bdd21ec417",
     "preparedArtifact": {
-        "artifactId": "10604226841",
+        "artifactId": "10839621457",
         "attempt": 1,
         "files": [
             {
@@ -462,18 +582,18 @@ CONVENTIONAL_SMOKE_INPUTS: dict | None = {
             },
             {
                 "path": "outer.json",
-                "sha256": "0efbafa4931dbf97f5121ee848bd9abe79cff87ed91b924c74dab857ecd79dec",
+                "sha256": "0db5fec9210037429663643c09f86013e730c78548d4ab5ccc2b84183b906bba",
                 "size": 327
             },
             {
                 "path": "preparation.json",
-                "sha256": "96bc587e5b854b0799aa93bd81231377ad47aef96bc0f783f83aaab2c8bc750e",
+                "sha256": "10fac89bcc57732ef667703e2fb33b188c23352d9e5b9f214acf0f3b105876c3",
                 "size": 2539
             },
             {
                 "path": "prepared-runtime.tar",
-                "sha256": "5f4d0cbb99663961710886115287f152d90ca017bbc9b3bc068db34c37fd7640",
-                "size": 28805120
+                "sha256": "881edca0ee48e4aec909a3fdac35ed89b6c253daf303b48294ba028226bc9933",
+                "size": 28815360
             },
             {
                 "path": "reviews/configuration-review.txt",
@@ -487,8 +607,8 @@ CONVENTIONAL_SMOKE_INPUTS: dict | None = {
             },
             {
                 "path": "source-bindings.json",
-                "sha256": "45c9d818b267140de3bc1de5944775da21bccd019bcf45f056313a72ab6c689e",
-                "size": 18304
+                "sha256": "bd487a7103a29860fbccdabaf05ac34d8811d20da44fc1a878bbad4ce30d93d8",
+                "size": 18814
             },
             {
                 "path": "source-kit/hosted-evidence.tar",
@@ -507,22 +627,28 @@ CONVENTIONAL_SMOKE_INPUTS: dict | None = {
             }
         ],
         "repository": "Apdelrahman1911/mobile-release-kit",
-        "runId": "35507734308",
-        "sourceSha": "977c71d99821cd2ad2fe2c88173920492d4c5cfb"
+        "runId": "36074195702",
+        "sourceSha": "0deaed83c3038433926db6110271f845b72f5369"
     },
     "protocolSha256": "860d1cee0072730a487ac8e632206c69e3ba676cab849b144a61755c4b84e41e"
 }
 # H's explicit trusted GitHub-hosted platform boundary, not a claimed complete
-# interpreter closure. {trustModel,imageOS,imageVersion,python:{path,size,sha256}}.
+# interpreter closure. Each image selects its own exact {path,size,sha256} body.
 # Startup/stdlib/cached bytecode/loader remain trusted platform TCB; -B prevents
 # writes, not cache reads. No H isolated-root/local Python or image fallback.
 CONVENTIONAL_HOSTED_PYTHON: dict | None = {
     "imageOS": "ubuntu24",
-    "imageVersion": "20260907.300.1",
-    "python": {
-        "path": "/usr/bin/python3.12",
-        "sha256": "a92f0f95e883390c7256b2e441484aac06b1002dbe1d924141a77c8d82f96223",
-        "size": 8025024
+    "images": {
+        "20260907.300.1": {
+            "path": "/usr/bin/python3.12",
+            "sha256": "a92f0f95e883390c7256b2e441484aac06b1002dbe1d924141a77c8d82f96223",
+            "size": 8025024
+        },
+        "20260920.314.1": {
+            "path": "/usr/bin/python3.12",
+            "sha256": "e50d468e8b0adfb05733f5b87b3cff34829c4a8c1aea50c865aa8bdfe4bb150f",
+            "size": 8020928
+        }
     },
     "trustModel": "github-hosted-platform-tcb-v1"
 }
@@ -608,6 +734,27 @@ METADATA_NATIVE_DIRECTORIES = ("home", "cargo", "rustup", "tmp", "target",
 METADATA_OWNER_TEST = "edit_owner::hosted_tests::hosted_metadata_text_edit_owner_original_resources"
 METADATA_TRANSACTION_EOF_TEST = "edit_owner::hosted_tests::hosted_metadata_text_transaction_eof_original_resources"
 METADATA_PARTITIONS = ("ordinary", "committed-fsync", "committed-close")
+VERSION_NATIVE_SCOPE = "release-version-apply-native-v1"
+VERSION_NATIVE_EVIDENCE_SCOPE = "desktop-release-version-apply-native-only-v1"
+VERSION_NATIVE_WORKFLOW = WORKFLOW_NATIVE_WORKFLOW
+VERSION_NATIVE_REF = "refs/heads/verify/desktop-release-version-apply-native"
+VERSION_NATIVE_PHASES = ("prepare", "acquire", "compile", "version-owner", "version-transaction-eof", "version-core", "clean")
+VERSION_NATIVE_CHECKS = {
+    "acquire": ("rust-toolchain-install", "rust-version-target", "version-locked-headless-metadata"),
+    "compile": ("rust-version-target", "headless-test-compile-only"),
+    "version-owner": ("rust-version-target", "version-owner-source-native-contract", "version-owner-source-receipt",
+                       "version-owner-zip-native-contract", "version-owner-zip-receipt"),
+    "version-transaction-eof": ("rust-version-target", "version-transaction-eof-native-contract", "version-eof-receipt"),
+    "version-core": ("version-core-ordinary", "version-core-ordinary-receipt",
+                      "version-core-committed-fsync", "version-core-committed-fsync-receipt",
+                      "version-core-committed-close", "version-core-committed-close-receipt"),
+}
+VERSION_NATIVE_DIRECTORIES = ("home", "cargo", "rustup", "tmp", "target",
+                               "version-owner-source", "version-owner-zip", "version-transaction-eof")
+VERSION_OWNER_TEST = "edit_owner::hosted_tests::hosted_release_version_edit_owner_original_resources"
+VERSION_TRANSACTION_EOF_TEST = "edit_owner::hosted_tests::hosted_release_version_transaction_eof_original_resources"
+VERSION_PARTITIONS = ("ordinary", "committed-fsync", "committed-close")
+
 ENVIRONMENT_NATIVE_SCOPE = "environment-diagnostics-native-v1"
 ENVIRONMENT_NATIVE_EVIDENCE_SCOPE = "desktop-environment-diagnostics-native-only-v1"
 ENVIRONMENT_NATIVE_WORKFLOW = ".github/workflows/desktop-environment-diagnostics-native.yml"
@@ -805,6 +952,7 @@ GTK_CORE_PATHS = (
     "mobile_release/api/data/github-setup-v1.json",
     "mobile_release/api/data/metadata-text-help-v1.json",
     "mobile_release/api/data/project.schema.json",
+    "mobile_release/api/data/release-version-help-v1.json",
     "mobile_release/build_inputs.py",
     "mobile_release/cancellation.py",
     "mobile_release/checked_files.py",
@@ -843,10 +991,12 @@ GTK_CORE_PATHS = (
     "mobile_release/owned_process.py",
     "mobile_release/preflight.py",
     "mobile_release/provenance.py",
+    "mobile_release/release_version_edit.py",
     "mobile_release/reporting.py",
     "mobile_release/stores.py",
     "mobile_release/toolchain_policy.py",
     "mobile_release/tooling.py",
+    "mobile_release/version_text.py",
     "mobile_release/workflow.py",
     "mobile_release/workflow_payloads.py",
 )
@@ -1384,6 +1534,16 @@ WINDOWS_INSTALLED_APP_LOCALS = {
     "mrk-macos-installed-native": "desktop/native/macos-installed-native/Cargo.toml",
     "mrk-windows-installed-native": "desktop/native/windows-installed-native/Cargo.toml",
 }
+# The complete cross-platform source lock is not the active Windows graph.
+# Linux vendors stay source-bound here but must never become Windows units.
+WINDOWS_INSTALLED_APP_LOCK_LOCALS = {
+    "mobile-release-kit-desktop": "0.1.0",
+    "mrk-linux-mount-observation": "0.1.0",
+    "mrk-macos-installed-native": "0.1.0",
+    "mrk-windows-installed-native": "0.1.0",
+    "secret-service": "5.2.0",
+    "zbus": "5.19.0",
+}
 WINDOWS_INSTALLED_APP_INERT = (
     "runtime::windows_version::tests::windows_manifest_and_observed_inventory_are_exact",
     "runtime::windows_version::tests::windows_manifest_anchors_schema_and_inventory_are_bound_before_use",
@@ -1892,7 +2052,10 @@ METADATA_CORE_SOURCES = {'apiContracts': 'src/mobile_release/api/contracts.py',
  'resource': 'src/mobile_release/api/data/metadata-text-help-v1.json',
  'rootCustody': 'src/mobile_release/init_workspace_custody.py',
  'snapshot': 'src/mobile_release/api/_snapshot.py',
- 'transaction': 'src/mobile_release/init_transaction.py'}
+ 'transaction': 'src/mobile_release/init_transaction.py',
+ 'versionEdit': 'src/mobile_release/release_version_edit.py',
+ 'versionResource': 'src/mobile_release/api/data/release-version-help-v1.json',
+ 'versionText': 'src/mobile_release/version_text.py'}
 METADATA_PAYLOAD_BINDINGS = {'configHashes': {'publicStore': '1b0b02e48d03cca36aaf36e5d8a8daf15f59924803bd4a5c0ec2e655828d3f94',
                   'releaseStore': 'caabad94b27c616e9deaf8570ded7edca9a41de86ca3e1982ab6e4a3f57073f1'},
  'ignoreSha256': 'e60087ecefac81e23666444e6aea9490b3fc42b2510f566cfd4aa5a36a35b7d4',
@@ -2007,6 +2170,12 @@ METADATA_OWNER_SOURCES = {
     'snapshot': 'src/mobile_release/api/_snapshot.py',
     'metadataResource': 'src/mobile_release/api/data/metadata-text-help-v1.json',
     'schemaResource': 'src/mobile_release/api/data/project.schema.json',
+    # Shared engine imports are current SOURCE bindings, not version-fixture authority.
+    'versionProtocol': 'desktop/src-tauri/src/release_version_edit_protocol.rs',
+    'versionCommands': 'desktop/src-tauri/src/release_version_edit_commands.rs',
+    'versionEdit': 'src/mobile_release/release_version_edit.py',
+    'versionText': 'src/mobile_release/version_text.py',
+    'versionResource': 'src/mobile_release/api/data/release-version-help-v1.json',
 }
 METADATA_TRANSACTION_EOF_SOURCES = {**METADATA_OWNER_SOURCES, "transactionEofShim": "tests/native_desktop_config_eof.py"}
 METADATA_OWNER_PAYLOAD_HASHES = {'configHashes': {'publicStore': '1b0b02e48d03cca36aaf36e5d8a8daf15f59924803bd4a5c0ec2e655828d3f94',
@@ -2034,6 +2203,364 @@ METADATA_NATIVE_SOURCES = tuple(sorted({
     METADATA_NATIVE_WORKFLOW,
 }))
 
+# Closed release-version DATA from the independent finite native contract; no core import.
+VERSION_CORE_SOURCES = {'apiContracts': 'src/mobile_release/api/contracts.py',
+ 'buildInputs': 'src/mobile_release/build_inputs.py',
+ 'cancellation': 'src/mobile_release/cancellation.py',
+ 'catalogue': 'src/mobile_release/api/_catalog.py',
+ 'configEdit': 'src/mobile_release/config_edit.py',
+ 'configPayloads': 'src/mobile_release/config_payloads.py',
+ 'configuration': 'src/mobile_release/config.py',
+ 'editControl': 'src/mobile_release/_desktop_edit_control.py',
+ 'editEngine': 'src/mobile_release/_desktop_edit_engine.py',
+ 'editProtocol': 'src/mobile_release/_desktop_edit_protocol.py',
+ 'errors': 'src/mobile_release/errors.py',
+ 'fixture': 'tests/native_desktop_config.py',
+ 'metadataEdit': 'src/mobile_release/metadata_text_edit.py',
+ 'metadataPolicy': 'src/mobile_release/metadata.py',
+ 'metadataText': 'src/mobile_release/metadata_text.py',
+ 'passiveEngine': 'src/mobile_release/_desktop_engine.py',
+ 'resource': 'src/mobile_release/api/data/release-version-help-v1.json',
+ 'rootCustody': 'src/mobile_release/init_workspace_custody.py',
+ 'snapshot': 'src/mobile_release/api/_snapshot.py',
+ 'transaction': 'src/mobile_release/init_transaction.py',
+ 'versionApi': 'src/mobile_release/api/_release_version.py',
+ 'versionEdit': 'src/mobile_release/release_version_edit.py',
+ 'versionText': 'src/mobile_release/version_text.py',
+ 'workflowEdit': 'src/mobile_release/github_workflow_edit.py',
+ 'workflowPayloads': 'src/mobile_release/workflow_payloads.py'}
+VERSION_PAYLOAD_BINDINGS = {'configHashes': {'nestedVersion': '8db69de9d4a3c83d312ee37e8952531f71b633f0f7f36b042b5d143cc2357de9',
+                  'publicVersion': '1dcd101a440da3c950903bca1b54f926aa63ce36ae5ed1eead5fb24f7813dfbd',
+                  'releaseVersion': '1b0b02e48d03cca36aaf36e5d8a8daf15f59924803bd4a5c0ec2e655828d3f94'},
+ 'ignoreSha256': 'cdf75f09188ea0e3712fcd26c9dbb42819dd467e9744676c6448b2a29a789c5b',
+ 'versionHashes': {'created': '3b8dbd6b58e9f42a0ed893e73020cf2f8ddde787e2b1a153da49d382b1e7a9d4',
+                   'edited': 'bc7f934bcf5f4fcf0b1b9c814613bd773ec4a9f579376f1dca01929d4e9e3732',
+                   'original': 'd8453785b2637e76d1b7456dd0e5ea0d343cfd5f7d409a06dc38ab791aa6334a'}}
+VERSION_CORE_ROWS = {'committed-close': (('version-committed-close-return-injection',
+                      'committed',
+                      'clean',
+                      'unknown',
+                      'cancelled',
+                      True,
+                      {'actualScopeCloseReturned': True,
+                       'afterUnknownProbes': 0,
+                       'cancelledAfterCommit': 1,
+                       'committedCarrier': True,
+                       'injections': 1,
+                       'scopesClosed': 3}),),
+ 'committed-fsync': (('version-committed-fsync-injection',
+                      'committed',
+                      'recovery_required',
+                      'settled',
+                      'filesystem_error',
+                      False,
+                      {'committedObserved': True,
+                       'dependenciesPreserved': True,
+                       'durabilityConfirmed': False,
+                       'injections': 1,
+                       'journalRetained': True,
+                       'rollbackCalls': 0,
+                       'scopesClosed': 3,
+                       'selectedPayloadInstalled': True}),),
+ 'ordinary': (('present-malformed-source-refused',
+               'not_started',
+               'not_created',
+               'settled',
+               'invalid_params',
+               False,
+               {'journalAbsent': True,
+                'presentSourcePreserved': True,
+                'revisionBound': True,
+                'scopesClosed': 1,
+                'snapshotUnchanged': True,
+                'targetDescriptorBound': True}),
+              ('present-nonregular-source-refused',
+               'not_started',
+               'not_created',
+               'settled',
+               'filesystem_error',
+               False,
+               {'journalAbsent': True,
+                'presentSourcePreserved': True,
+                'revisionBound': False,
+                'scopesClosed': 1,
+                'snapshotUnchanged': True,
+                'targetDescriptorBound': True}),
+              ('legacy-seven-ignore-rules-refused',
+               'not_started',
+               'not_created',
+               'settled',
+               'ignore_conflict',
+               False,
+               {'journalAbsent': True,
+                'revisionAbsent': True,
+                'scopesClosed': 1,
+                'snapshotUnchanged': True,
+                'targetDescriptorAbsent': True}),
+              ('config-retarget-before-prepare',
+               'not_started',
+               'not_created',
+               'settled',
+               'stale_revision',
+               False,
+               {'authorityRetired': True,
+                'changeObserved': True,
+                'journalAbsent': True,
+                'scopesClosed': 2,
+                'selectionNotRetargeted': True,
+                'snapshotUnchanged': True}),
+              ('ignore-bytes-before-apply',
+               'not_started',
+               'not_created',
+               'settled',
+               'stale_revision',
+               False,
+               {'authorityRetired': True,
+                'changeObserved': True,
+                'journalAbsent': True,
+                'scopesClosed': 3,
+                'selectionNotRetargeted': True,
+                'snapshotUnchanged': True}),
+              ('target-parent-inode-before-prepare',
+               'not_started',
+               'not_created',
+               'settled',
+               'stale_revision',
+               False,
+               {'authorityRetired': True,
+                'changeObserved': True,
+                'journalAbsent': True,
+                'scopesClosed': 2,
+                'selectionNotRetargeted': True,
+                'snapshotUnchanged': True}),
+              ('target-parent-mode-before-apply',
+               'not_started',
+               'not_created',
+               'settled',
+               'stale_revision',
+               False,
+               {'authorityRetired': True,
+                'changeObserved': True,
+                'journalAbsent': True,
+                'scopesClosed': 3,
+                'selectionNotRetargeted': True,
+                'snapshotUnchanged': True}),
+              ('missing-target-parent-appears-before-apply',
+               'not_started',
+               'not_created',
+               'settled',
+               'stale_revision',
+               False,
+               {'authorityRetired': True,
+                'changeObserved': True,
+                'journalAbsent': True,
+                'scopesClosed': 3,
+                'selectionNotRetargeted': True,
+                'snapshotUnchanged': True}),
+              ('noop-leaf-ctime-after-recheck',
+               'not_started',
+               'not_created',
+               'settled',
+               'stale_revision',
+               False,
+               {'changedOnlyDeclaredFacts': True,
+                'consumingTargetChecks': 1,
+                'injections': 1,
+                'journalAbsent': True,
+                'recheckReturns': 1,
+                'renameProbes': 0,
+                'scopesClosed': 3,
+                'snapshotUnchangedAfterInjection': True,
+                'unchangedMarked': False}),
+              ('noop-target-parent-mode-after-recheck',
+               'not_started',
+               'not_created',
+               'settled',
+               'stale_revision',
+               False,
+               {'changedOnlyDeclaredFacts': True,
+                'consumingTargetChecks': 1,
+                'injections': 1,
+                'journalAbsent': True,
+                'recheckReturns': 1,
+                'renameProbes': 0,
+                'scopesClosed': 3,
+                'snapshotUnchangedAfterInjection': True,
+                'unchangedMarked': False}),
+              ('unreadable-source-before-prepare',
+               'not_started',
+               'not_created',
+               'settled',
+               'filesystem_error',
+               False,
+               {'deniedOriginalReads': 1,
+                'journalAbsent': True,
+                'permissionErrorObserved': True,
+                'scopesClosed': 2,
+                'snapshotUnchanged': True}),
+              ('version-replacement-installed-rollback',
+               'rolled_back',
+               'clean',
+               'settled',
+               'filesystem_error',
+               False,
+               {'injections': 1,
+                'journalAbsent': True,
+                'originalBackupBound': True,
+                'recoveryAttempts': 1,
+                'rollbackReturned': True,
+                'scopesClosed': 3,
+                'secondApplyNoScope': True,
+                'secondApplyRefused': True,
+                'snapshotRestored': True,
+                'versionLeafInstalled': True}),
+              ('incomplete-version-preparing-retained',
+               'not_started',
+               'recovery_required',
+               'settled',
+               'filesystem_error',
+               False,
+               {'cleanupUnlinks': 0,
+                'completeProof': False,
+                'dependenciesPreserved': True,
+                'injections': 1,
+                'numberedSlotRetained': True,
+                'preparingRetained': True,
+                'recoverCalls': 0,
+                'scopesClosed': 3,
+                'targetPreserved': True}),
+              ('committed-version-backup-replaced-at-cleanup-entry',
+               'committed',
+               'recovery_required',
+               'settled',
+               'filesystem_error',
+               False,
+               {'cleanupUnlinks': 0,
+                'committedObserved': True,
+                'dependenciesPreserved': True,
+                'durabilityConfirmed': True,
+                'injections': 1,
+                'originalBackupRetained': True,
+                'proofRetained': True,
+                'sameBytesForeignInode': True,
+                'scopesClosed': 3,
+                'selectedPayloadInstalled': True}),
+              ('foreign-domains-refuse-version-prepare',
+               'not_started',
+               'not_created',
+               'settled',
+               'pending_state',
+               False,
+               {'allOwnersSettled': True,
+                'entrypoints': ['legacy', 'configuration', 'github_workflows', 'metadata_text'],
+                'legacyApplyRefused': True,
+                'legacyRecoverRefused': True,
+                'legacyWorkspaceClosed': True,
+                'originalOwners': 4,
+                'scopesClosed': 3,
+                'snapshotUnchanged': True,
+                'stateRetained': True,
+                'targetDescriptorsAbsent': True,
+                'typedRefusals': 3}),
+              ('foreign-domains-refuse-version-ready',
+               'not_started',
+               'not_created',
+               'settled',
+               'pending_state',
+               False,
+               {'allOwnersSettled': True,
+                'entrypoints': ['legacy', 'configuration', 'github_workflows', 'metadata_text'],
+                'legacyApplyRefused': True,
+                'legacyRecoverRefused': True,
+                'legacyWorkspaceClosed': True,
+                'originalOwners': 4,
+                'scopesClosed': 3,
+                'snapshotUnchanged': True,
+                'stateRetained': True,
+                'targetDescriptorsAbsent': True,
+                'typedRefusals': 3}),
+              ('foreign-domains-refuse-version-cleanup',
+               'not_started',
+               'not_created',
+               'settled',
+               'pending_state',
+               False,
+               {'allOwnersSettled': True,
+                'entrypoints': ['legacy', 'configuration', 'github_workflows', 'metadata_text'],
+                'legacyApplyRefused': True,
+                'legacyRecoverRefused': True,
+                'legacyWorkspaceClosed': True,
+                'originalOwners': 4,
+                'scopesClosed': 3,
+                'snapshotUnchanged': True,
+                'stateRetained': True,
+                'targetDescriptorsAbsent': True,
+                'typedRefusals': 3}),
+              ('version-refuses-foreign-ready',
+               'not_started',
+               'not_created',
+               'settled',
+               'pending_state',
+               False,
+               {'allOwnersSettled': True,
+                'bothRefused': True,
+                'foreignDomains': ['legacy', 'metadata_text'],
+                'foreignStateRetained': True,
+                'originalOwners': 2,
+                'scopesClosed': 2,
+                'snapshotUnchanged': True,
+                'targetDescriptorsAbsent': True,
+                'versionStateAbsent': True}),
+              ('dependency-drift-after-version-install',
+               'unknown',
+               'recovery_required',
+               'settled',
+               'stale_revision',
+               False,
+               {'afterUnknownProbes': 0,
+                'cleanupUnlinks': 0,
+                'conflictObservedInsideOriginal': True,
+                'dependencyChanged': True,
+                'injections': 1,
+                'laterInstallMoves': 0,
+                'originalBackupBound': True,
+                'recoverCalls': 0,
+                'retainedTreeInsideOriginal': True,
+                'scopesClosed': 3,
+                'versionLeafInstalled': True}))}
+VERSION_CORE_INJECTIONS = {'committed-close': 'postcommit-cancellation-and-positive-scope-close-return-loss',
+ 'committed-fsync': 'postdecision-pre-fsync',
+ 'ordinary': 'fixed-original-version-boundaries'}
+VERSION_OWNER_PAYLOAD_HASHES = {'configHashes': {'nestedVersion': '8db69de9d4a3c83d312ee37e8952531f71b633f0f7f36b042b5d143cc2357de9',
+                  'publicVersion': '1dcd101a440da3c950903bca1b54f926aa63ce36ae5ed1eead5fb24f7813dfbd',
+                  'releaseVersion': '1b0b02e48d03cca36aaf36e5d8a8daf15f59924803bd4a5c0ec2e655828d3f94'},
+ 'ignoreSha256': 'cdf75f09188ea0e3712fcd26c9dbb42819dd467e9744676c6448b2a29a789c5b',
+ 'versionHashes': {'created': '3b8dbd6b58e9f42a0ed893e73020cf2f8ddde787e2b1a153da49d382b1e7a9d4',
+                   'edited': 'bc7f934bcf5f4fcf0b1b9c814613bd773ec4a9f579376f1dca01929d4e9e3732',
+                   'original': 'd8453785b2637e76d1b7456dd0e5ea0d343cfd5f7d409a06dc38ab791aa6334a',
+                   'eofOriginal': '5d64d0003ef70a87ca42922bc20faf8c102a8d2dd1429c20c0a56904f53bfb3f',
+                   'eofEdited': '533c9829233f93176a5a29ac7202a5dabca359748931286e4385e21058a1dd43'},
+ 'unrelatedSha256': '0e4722e0ca13cfc08d5e8bd61c73d37c9880610e1723a8eb1c2363e92e2eebef',
+ 'umaskProbeSha256': '43d78b83e6fd6b81bba80df9e4c3657df4cfc3ef6c5acdc1ca055d45f9b46a4d'}
+
+VERSION_OWNER_CASES = ("explicit-absent-create", "observe-edit-two-spans-preserve", "observe-noop-original-leaf",
+    "stale-passive-baseline-refused", "four-domain-owner-and-token-isolation", "registration-changed-before-apply",
+    "version-terminal-held-after-stop", "version-document-loss-before-apply")
+VERSION_EOF_CASES = ("precommit-eof", "postcommit-eof", "precommit-conflict-eof")
+VERSION_NOT_VERIFIED = (
+    "production-runtime-custody", "production-version-save-enablement", "native-gui", "webview-callbacks-or-crash-hook",
+    "parent-death", "native-stuck-wait-close", "persisted-recovery", "macos-windows-version-writes",
+    "credentials", "remote-github", "stores", "mobile-builds", "installers",
+)
+# Shared SOURCE membership only, never metadata writer/receipt authority.
+VERSION_OWNER_SOURCES = {**METADATA_OWNER_SOURCES,
+    "versionObservation": "desktop/src-tauri/src/release_version_protocol.rs",
+    "versionObservationApi": "src/mobile_release/api/_release_version.py"}
+VERSION_TRANSACTION_EOF_SOURCES = {**VERSION_OWNER_SOURCES, "transactionEofShim": "tests/native_desktop_config_eof.py"}
+VERSION_NATIVE_SOURCES = tuple(sorted({
+    *GITHUB_TLS_SOURCES, *VERSION_TRANSACTION_EOF_SOURCES.values(), *VERSION_CORE_SOURCES.values(), VERSION_NATIVE_WORKFLOW,
+}))
+
 TOOL_CHECKS = frozenset({
     "source-head", "source-tree", "source-clean", "rust-toolchain-install",
     "cargo-selection", "rustc-selection", "rust-version-target", "locked-platform-metadata",
@@ -2052,6 +2579,9 @@ TOOL_CHECKS = frozenset({
     "metadata-locked-headless-metadata", "metadata-owner-source-native-contract", "metadata-owner-zip-native-contract",
     "metadata-transaction-eof-native-contract", "metadata-core-ordinary", "metadata-core-committed-fsync",
     "metadata-core-committed-close", "metadata-source-status",
+    "version-locked-headless-metadata", "version-owner-source-native-contract", "version-owner-zip-native-contract",
+    "version-transaction-eof-native-contract", "version-core-ordinary", "version-core-committed-fsync",
+    "version-core-committed-close", "version-source-status",
     "windows-snapshot-native-contract",
     "windows-installed-locked-metadata", "windows-installed-test-compile-only",
     "windows-installed-inert-contracts",
@@ -2083,13 +2613,15 @@ def require(condition: bool, message: str) -> None:
 
 def admit_phase(scope: str, phase: str) -> None:
     """Closed scope selection, before context, tools, or native dispatch."""
-    require(scope in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, *ENVIRONMENT_NATIVE_SCOPES, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES}, "Unknown desktop verification scope")
+    require(scope in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE, *ENVIRONMENT_NATIVE_SCOPES, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES}, "Unknown desktop verification scope")
     if scope in COMPILE_PROFILES:
         require(phase in COMPILE_PHASES, "Compiler-only scope cannot execute a native phase")
     elif scope == WORKFLOW_NATIVE_SCOPE:
         require(phase in WORKFLOW_NATIVE_PHASES, "Workflow-only scope cannot execute an unrelated native phase")
     elif scope == METADATA_NATIVE_SCOPE:
         require(phase in METADATA_NATIVE_PHASES, "Metadata-only scope cannot execute an unrelated native phase")
+    elif scope == VERSION_NATIVE_SCOPE:
+        require(phase in VERSION_NATIVE_PHASES, "Version-only scope cannot execute an unrelated native phase")
     elif scope in ENVIRONMENT_NATIVE_SCOPES:
         require(phase in environment_native_profile(scope)["phases"], "Environment-only scope cannot execute an unrelated phase")
     elif scope == WINDOWS_SNAPSHOT_SCOPE:
@@ -2107,6 +2639,7 @@ def admit_platform(scope: str, platform: str) -> None:
     require(scope != GTK_COMPILE_SCOPE or platform == "linux", "SG1 compilation requires Linux")
     require(scope != WORKFLOW_NATIVE_SCOPE or platform == "linux", "Workflow native verification requires Linux")
     require(scope != METADATA_NATIVE_SCOPE or platform == "linux", "Metadata native verification requires Linux")
+    require(scope != VERSION_NATIVE_SCOPE or platform == "linux", "Version native verification requires Linux")
     require(scope not in ENVIRONMENT_NATIVE_SCOPES or platform in {"linux", "macos"}, "Environment native verification requires its exact Linux or macOS host")
     require(scope != WINDOWS_SNAPSHOT_SCOPE or platform == "windows", "Windows snapshot verification requires Windows")
     require(scope != GITHUB_READONLY_SCOPE or platform == "linux", "G1 native verification requires Linux")
@@ -2184,6 +2717,32 @@ def metadata_native_binding(environment: dict[str, str]) -> dict[str, str]:
     return {"workflowPath": METADATA_NATIVE_WORKFLOW, "workflowSha": sha,
             "workflowRef": environment["GITHUB_WORKFLOW_REF"], "sourceSha": sha,
             "runId": run_id, "attempt": attempt, "repository": repository, "event": "push", "ref": METADATA_NATIVE_REF,
+            "pushEventAfter": sha}
+
+
+def version_native_binding(environment: dict[str, str]) -> dict[str, str]:
+    """Closed push-only version route; neither dispatch nor another lane can opt in."""
+    keys = ("GITHUB_SHA", "GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_REF",
+            "GITHUB_WORKFLOW_SHA", "GITHUB_WORKFLOW_REF", "GITHUB_EVENT_NAME", "MRK_PUSH_EVENT_AFTER",
+            "MRK_DESKTOP_HOSTED_CHECKS")
+    require(all(type(environment.get(key)) is str for key in keys), "Version native binding fields differ")
+    sha, repository = environment.get("GITHUB_SHA", ""), environment.get("GITHUB_REPOSITORY", "")
+    run_id, attempt = environment.get("GITHUB_RUN_ID", ""), environment.get("GITHUB_RUN_ATTEMPT", "")
+    require(re.fullmatch(r"[0-9a-f]{40}", sha) is not None and sha != "0" * 40
+            and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is not None,
+            "Version native source identity differs")
+    require(re.fullmatch(r"[1-9][0-9]{0,19}", run_id) is not None and attempt == "1",
+            "Version native original run identity differs")
+    require(environment.get("MRK_DESKTOP_HOSTED_CHECKS") == VERSION_NATIVE_SCOPE
+            and environment.get("GITHUB_REF") == VERSION_NATIVE_REF
+            and environment.get("GITHUB_WORKFLOW_SHA") == sha
+            and environment.get("GITHUB_WORKFLOW_REF") == f"{repository}/{VERSION_NATIVE_WORKFLOW}@{VERSION_NATIVE_REF}",
+            "Version native workflow/ref/scope binding differs")
+    require(environment.get("GITHUB_EVENT_NAME") == "push" and environment.get("MRK_PUSH_EVENT_AFTER") == sha,
+            "Version native push event/source differs")
+    return {"workflowPath": VERSION_NATIVE_WORKFLOW, "workflowSha": sha,
+            "workflowRef": environment["GITHUB_WORKFLOW_REF"], "sourceSha": sha,
+            "runId": run_id, "attempt": attempt, "repository": repository, "event": "push", "ref": VERSION_NATIVE_REF,
             "pushEventAfter": sha}
 
 
@@ -2340,9 +2899,9 @@ def run(argv: list[str], *, check: str, cwd: Path, env: dict[str, str], timeout:
 def admitted_host(*, retention_only: bool = False) -> str:
     require(os.environ.get("GITHUB_ACTIONS") == "true"
             and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
-            and os.environ.get("MRK_DESKTOP_HOSTED_CHECKS") in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, *ENVIRONMENT_NATIVE_SCOPES, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES},
+            and os.environ.get("MRK_DESKTOP_HOSTED_CHECKS") in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE, *ENVIRONMENT_NATIVE_SCOPES, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES},
             "This fixed check requires an explicitly admitted disposable hosted job")
-    require(not retention_only or os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {METADATA_NATIVE_SCOPE, *ENVIRONMENT_NATIVE_SCOPES},
+    require(not retention_only or os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE, *ENVIRONMENT_NATIVE_SCOPES},
             "DATA-only admission is restricted to fixed retention")
     platform = os.environ.get("MRK_DESKTOP_PLATFORM", "")
     require(platform in TARGETS and platform == {
@@ -2351,7 +2910,7 @@ def admitted_host(*, retention_only: bool = False) -> str:
     admit_platform(os.environ["MRK_DESKTOP_HOSTED_CHECKS"], platform)
     if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] == WINDOWS_SNAPSHOT_SCOPE:
         admitted_scope(platform)
-    if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE}:
+    if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE}:
         require(os.environ.get("RUNNER_OS") == "Linux" and os.environ.get("RUNNER_ARCH") == "X64"
                 and os.environ.get("ImageOS") == "ubuntu24" and (retention_only or os.uname().machine == "x86_64")
                 and os.geteuid() != 0, "Workflow native checks require the non-root Ubuntu 24 x86_64 runner")
@@ -2842,6 +3401,141 @@ def validate_metadata_owner_header(receipt: object, context: dict, mode: str, so
     return receipt["cases"]
 
 
+def version_context_binding(context: dict) -> dict:
+    """Recheck the closed original lane when constructing/consuming every phase."""
+    require(type(context) is dict and context.get("executionScope") == VERSION_NATIVE_SCOPE
+            and context.get("platform") == "linux", "Unexpected version native context scope")
+    binding = version_native_binding({
+        "MRK_DESKTOP_HOSTED_CHECKS": context["executionScope"],
+        "GITHUB_SHA": context.get("sourceSha"), "GITHUB_REPOSITORY": context.get("repository"),
+        "GITHUB_RUN_ID": context.get("runId"), "GITHUB_RUN_ATTEMPT": context.get("attempt"),
+        "GITHUB_WORKFLOW_SHA": context.get("workflowSha"), "GITHUB_WORKFLOW_REF": context.get("workflowRef"),
+        "GITHUB_REF": context.get("ref"), "GITHUB_EVENT_NAME": context.get("event"),
+        "MRK_PUSH_EVENT_AFTER": context.get("pushEventAfter"),
+    })
+    require(context.get("workflowPath") == VERSION_NATIVE_WORKFLOW
+            and type(context.get("sourceTree")) is str
+            and re.fullmatch(r"[0-9a-f]{40}", context["sourceTree"]) is not None
+            and context["sourceTree"] != "0" * 40 and sha256_value(context.get("workflowSha256")),
+            "Version native tree/workflow binding differs")
+    return {**binding, "sourceTree": context["sourceTree"], "workflowSha256": context["workflowSha256"],
+            "platform": "linux"}
+
+
+def version_source_files(source: Path) -> list[dict]:
+    files = []
+    for relative in VERSION_NATIVE_SOURCES:
+        path = source / relative
+        ordinary(path)
+        size = path.stat().st_size
+        require(0 < size <= 2 * 1024 * 1024, "Version native source exceeds its bound")
+        files.append({"path": relative, "size": size, "sha256": hash_file(path)})
+    return files
+
+
+def version_core_metadata(context: dict) -> dict:
+    version_context_binding(context)
+    return {**{key: context[key] for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt")},
+            "ref": VERSION_NATIVE_REF, "coreFiles": context["versionInputs"]["coreFiles"],
+            "coreZipSha256": context["versionInputs"]["coreZipSha256"]}
+
+
+def version_inputs_unchanged(context: dict) -> None:
+    """Bounded source/receipt DATA only, never a project probe or cleanup right."""
+    version_context_binding(context)
+    root, source = Path(context["root"]), Path(context["source"])
+    identities = {"root": workflow_directory_identity(root), "source": workflow_directory_identity(source),
+                  **{name: workflow_directory_identity(root / name) for name in VERSION_NATIVE_DIRECTORIES}}
+    require(same_compile_json(identities, context["originalDirectories"]), "Version original directory identity changed")
+    observed = {"sourceFiles": version_source_files(source), "coreFiles": workflow_core_inventory(source),
+                "coreZipSha256": hash_file(root / "core.zip"), "pythonSha256": hash_file(Path(context["python"]))}
+    require(same_compile_json(context["versionInputs"], observed), "Version original source/runtime inputs changed")
+    require(same_compile_json(read_bounded_json(root / "version.json", 128 * 1024), version_core_metadata(context)),
+            "Version source/ZIP metadata changed")
+
+
+def version_source_unchanged(context: dict) -> None:
+    source_unchanged(context)
+    require(run([context["git"], "status", "--porcelain=v1", "--untracked-files=all"], check="version-source-status",
+                cwd=Path(context["source"]), env=clean_environment(Path(context["root"])), timeout=15, capture=True) == "",
+            "Version source contains unreviewed or generated inputs")
+    version_inputs_unchanged(context)
+
+
+def validate_version_core_receipt(receipt: object, partition: str, *, source_sha: str,
+                                   source_hashes: dict[str, str], python_hash: str, host: dict) -> dict:
+    require(partition in VERSION_PARTITIONS and set(source_hashes) == set(VERSION_CORE_SOURCES),
+            "Unknown version core partition or source inventory")
+    validate_workflow_host(host)
+    rows = VERSION_CORE_ROWS[partition]
+    expected = {
+        "schemaVersion": 1, "suite": "desktop-release-version-native", "domain": "release_version",
+        "partition": partition, "status": "passed", "reason": "none", "failedAt": None,
+        "retained": True, "uncertaintyLatched": partition != "committed-fsync",
+        "injection": VERSION_CORE_INJECTIONS[partition], "host": host,
+        "bindings": {"sourceSha": source_sha, "sourceKind": "source", "sourceHashes": source_hashes,
+                     "pythonSha256": python_hash, **VERSION_PAYLOAD_BINDINGS},
+        "completed": [row[0] for row in rows],
+        "cases": [{"case": name, "outcome": {"effect": effect, "journal": journal, "resources": resources, "reason": reason},
+                   "owner": {"closed": True, "handlerRestored": True, "fatal": fatal}, "observed": observed}
+                  for name, effect, journal, resources, reason, fatal, observed in rows],
+    }
+    require(same_compile_json(receipt, expected),
+            "Version core original facts, source, retention or ordered case inventory differ")
+    return receipt
+
+
+def version_core_receipt(context: dict, partition: str) -> dict:
+    require(partition in VERSION_PARTITIONS, "Unknown version core partition")
+    return validate_version_core_receipt(read_bounded_json(Path(context["root"]) / f"version-{partition}.json", 32 * 1024), partition,
+        source_sha=context["sourceSha"], source_hashes=version_bound_source_hashes(context, VERSION_CORE_SOURCES),
+        python_hash=context["versionInputs"]["pythonSha256"], host=context["observedHost"])
+
+
+def version_bound_source_hashes(context: dict, sources: dict[str, str]) -> dict[str, str]:
+    """Original preparation DATA, reverified before native phases, never a post-last-close probe."""
+    version_context_binding(context)
+    rows = context["versionInputs"]["sourceFiles"]
+    require(type(rows) is list and len(rows) == len(VERSION_NATIVE_SOURCES), "Version bound source inventory differs")
+    hashes = {}
+    for row, path in zip(rows, VERSION_NATIVE_SOURCES, strict=True):
+        require(type(row) is dict and set(row) == {"path", "size", "sha256"} and row["path"] == path
+                and integer_between(row["size"], 1, 2 * 1024 * 1024) and sha256_value(row["sha256"]),
+                "Version bound original source entry differs")
+        hashes[path] = row["sha256"]
+    require(all(path in hashes for path in sources.values()), "Version receipt requires an unbound source")
+    return {name: hashes[path] for name, path in sources.items()}
+
+
+def version_owner_bindings(context: dict, mode: str, source_hashes: dict[str, str], *, eof: bool = False) -> dict:
+    version_context_binding(context)
+    require(mode in ("source", "zip") and (not eof or mode == "source")
+            and type(source_hashes) is dict
+            and set(source_hashes) == set(VERSION_TRANSACTION_EOF_SOURCES if eof else VERSION_OWNER_SOURCES)
+            and all(sha256_value(value) for value in source_hashes.values()),
+            "Version owner runtime choice or source inventory differs")
+    inputs = context["versionInputs"]
+    inventory = json.dumps(inputs["coreFiles"], sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    return {**{key: context[key] for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt")},
+            "ref": VERSION_NATIVE_REF, "domain": "release_version", "host": "linux", "target": TARGETS["linux"],
+            "runtimeMode": "trusted-development-only", "runtimeInput": mode, "pythonSha256": inputs["pythonSha256"],
+            "coreZipSha256": inputs["coreZipSha256"], "coreInventorySha256": hashlib.sha256(inventory).hexdigest(),
+            "sourceHashes": source_hashes, "payloadHashes": VERSION_OWNER_PAYLOAD_HASHES,
+            "versionResourceSha256": source_hashes["versionResource"], "schemaResourceSha256": source_hashes["schemaResource"],
+            "inheritedFileMaskObserved": True, "requestedCreateMode": 0o644, "observedCreateMode": 0o600, "newDirectoryMode": 0o755,
+            "documentEvidence": "controlled-original-lifetime-not-gui-callbacks"}
+
+
+def validate_version_owner_header(receipt: object, context: dict, mode: str, source_hashes: dict[str, str], *, eof: bool = False) -> list:
+    require(type(receipt) is dict and type(receipt.get("cases")) is list, "Unexpected version owner receipt")
+    expected = {"schemaVersion": 1, "scope": "release-version-transaction-eof-hosted-v1" if eof else "release-version-owner-hosted-v1",
+                "domain": "release_version", "status": "passed", "allOwnersSettled": not eof, "originalResourcesSettled": True,
+                "ownerDisabled": eof, "retainedEffectUnknown": eof, "failureCode": None, "cases": receipt["cases"],
+                "bindings": version_owner_bindings(context, mode, source_hashes, eof=eof), "notVerified": list(VERSION_NOT_VERIFIED)}
+    require(same_compile_json(receipt, expected), "Version owner source/runtime/retention or original resource header differs")
+    return receipt["cases"]
+
+
 def metadata_passive_values(values: object, methods: tuple[str, ...], previous: int, *, error: str | None = None) -> int:
     """Validate original observers in invocation order, not synthetic editor facts."""
     require(type(values) is list and len(values) == len(methods), "Metadata original passive roster differs")
@@ -2987,6 +3681,130 @@ def metadata_owner_receipt(context: dict, mode: str) -> dict:
 def metadata_transaction_eof_receipt(context: dict) -> dict:
     return validate_metadata_transaction_eof_receipt(read_bounded_json(Path(context["root"]) / "metadata-transaction-eof/receipt.json", 64 * 1024),
         context=context, source_hashes=metadata_bound_source_hashes(context, METADATA_TRANSACTION_EOF_SOURCES))
+
+
+def version_native_value(value: object, *, effect: str = "committed", journal: str = "clean", reason: tuple[str, ...] = ("none",),
+                          native_reason: str = "none", applying: bool = True, requests: int = 3, responses: int = 3, sequence: int = 2,
+                          checkout: bool = True, prepared: bool = True, domain: str = "release_version", unknown: bool = False, stderr: int = 0) -> dict:
+    require(type(value) is dict and integer_between(value.get("stdoutBytes"), 1, 12 * 1024 * 1024),
+            "Version original editor output accounting differs")
+    outcome = value.get("outcome")
+    require(type(outcome) is dict and type(outcome.get("reason")) is str and outcome["reason"] in reason,
+            "Version original core reason differs")
+    expected = {"domain": domain, "nativePhase": "unknown" if unknown else "final",
+                "nativeFinality": "unknown" if unknown else "settled", "nativeReason": native_reason,
+                "applySubmitted": applying, "lateSettled": unknown,
+                "outcome": {"effect": effect, "journal": journal, "resources": "settled", "reason": outcome["reason"]},
+                "terminalSeq": sequence, "requestFrames": requests, "responseFrames": responses,
+                "stdoutBytes": value["stdoutBytes"], "stderrBytes": stderr, "forceAttempted": False,
+                **dict.fromkeys(CONFIG_OWNER_FINALITY, True)}
+    if domain == "release_version":
+        expected.update(checkoutRetained=checkout, preparedRetained=prepared)
+    require(same_compile_json(value, expected), "Version original editor wait/streams/management/correlation differs")
+    return expected
+
+
+
+def validate_version_owner_receipt(receipt: object, mode: str, *, context: dict, source_hashes: dict[str, str]) -> dict:
+    cases = validate_version_owner_header(receipt, context, mode, source_hashes)
+    names = VERSION_OWNER_CASES if mode == "source" else (VERSION_OWNER_CASES[1],)
+    require(len(cases) == len(names), "Version source/ZIP case inventory differs")
+    previous = 0
+    for name, case in zip(names, cases, strict=True):
+        index = VERSION_OWNER_CASES.index(name)
+        require(type(case) is dict and type(case.get("observations")) is dict, f"Version owner {name} row differs")
+        source = "public/version-tree/version.properties" if index == 0 else "public/version.properties"
+        methods = ("release-version-observe",) * (1 if index in (0, 3, 5, 7) else 2)
+        previous = metadata_passive_values(case.get("passive"), methods, previous)
+        options = {}
+        if index == 3:
+            options = {"effect": "not_started", "journal": "not_created", "reason": ("stale_revision",),
+                       "applying": False, "requests": 2, "responses": 2, "sequence": 1, "prepared": False}
+            observations = {"olderPassiveBaselineRejected": True, "newerNativeCheckoutRetained": True, "noPlanOrRebase": True,
+                "externalChangeRetained": True, "treeUnchanged": True, "sourceProbesSettled": True, "passiveOriginalsSettled": True}
+        elif index in (5, 7):
+            options = {"effect": "not_started", "journal": "not_created", "reason": ("none", "cancelled"),
+                       "native_reason": "caller_lost" if index == 5 else "window_lost",
+                       "applying": False, "requests": 2, "responses": 3, "sequence": 1}
+            observations = {"preparedCorrelationRetained": True, "treeUnchanged": True, "staleCommandNotSent": True,
+                "newRegistrationPublishedUnderDocumentLock": index == 5, "controlledOriginalDocumentLoss": index == 7,
+                "replacementDocumentRefused": index == 7, "guiCallbacksNotClaimed": True,
+                "sourceProbesSettled": True, "passiveOriginalsSettled": True}
+        else:
+            noop = index == 2
+            options = {"effect": "unchanged" if noop else "committed", "journal": "not_created" if noop else "clean",
+                       "native_reason": "cancelled" if index == 6 else "none"}
+            domains = case["observations"].get("domains")
+            require(type(domains) is list and len(domains) == (3 if index == 4 else 0), "Version foreign-domain owner inventory differs")
+            for item, domain in zip(domains, ("configuration", "github_workflows", "metadata_text")):
+                version_native_value(item, effect="not_started", journal="not_created", reason=("none", "cancelled"),
+                    native_reason="discarded", applying=False, requests=1, responses=2, sequence=0, domain=domain)
+            spent_refusal = case["observations"].get("consumedPlanRefusal")
+            if index == 4:
+                version_native_value(spent_refusal, effect="not_started", journal="not_created", reason=("none", "cancelled"),
+                    native_reason="caller_lost", applying=False, requests=2, responses=3, sequence=1)
+            else:
+                require(spent_refusal is None, "Unexpected version consumed-token owner")
+            observations = {"action": "create" if index == 0 else "preserve" if noop else "replace",
+                "directoriesCreated": ["public", "public/version-tree"] if index == 0 else [],
+                "explicitAbsentCreate": index == 0, "completePreparedBytes": True, "passiveBaselineMatchedCheckout": index != 0,
+                "preparedCorrelationRetained": True, "capturePrepareRawFactsUnchanged": True,
+                "dependenciesAndUnrelatedPreserved": True, "existingModePreserved": True, "createModeMasked": True,
+                "directoryModesExact": True, "unicodeCommentsAndOnlyTwoSpansPreserved": index != 0,
+                "rawNoopUnchanged": noop, "duplicateApplyObservation": index == 0, "savedPairReadback": True,
+                "sharedStatusRevision": True, "sharedLastTerminalDomainCorrect": True, "fourDomainIsolation": index == 4,
+                "foreignOriginalTicketsRefused": index == 4, "consumedPlanRefused": index == 4,
+                "consumedPlanRefusal": spent_refusal, "domains": domains,
+                "heldBeforeAcceptance": index == 6, "realStopBeforeRelease": index == 6, "cancelledNotSaved": index == 6,
+                "sourceProbesSettled": True, "passiveOriginalsSettled": True}
+        native = version_native_value(case.get("native"), **options)
+        expected = {"name": name, "domain": "release_version", "source": source,
+                    "native": native, "passive": case["passive"], "observations": observations}
+        require(same_compile_json(case, expected), f"Version owner {name} original observations differ")
+    return receipt
+
+
+def validate_version_transaction_eof_receipt(receipt: object, *, context: dict, source_hashes: dict[str, str]) -> dict:
+    cases = validate_version_owner_header(receipt, context, "source", source_hashes, eof=True)
+    require(len(cases) == 3, "Version EOF case inventory differs")
+    previous = 0
+    for index, (name, case) in enumerate(zip(VERSION_EOF_CASES, cases, strict=True)):
+        require(type(case) is dict, f"Version EOF {name} row differs")
+        previous = metadata_passive_values(case.get("passive"), () if index == 2 else ("release-version-observe",), previous)
+        committed, unknown = index == 1, index == 2
+        boundary, checkpoint = ("after-durable-COMMITTED", "descriptor-close") if committed else ("before-COMMITTED", "publisher-entry")
+        terminal = "UNKNOWN" if unknown else "COMMITTED" if committed else "ROLLED_BACK"
+        records = (f"MRK_RELEASE_VERSION_EOF_V1 {name} boundary={boundary}\n"
+            f"MRK_RELEASE_VERSION_EOF_V1 {name} eof=1 nonempty=0 readErrors=0 checkpoint={checkpoint} "
+            f"applied=1 committed={int(committed)} rolledBack={int(not committed and not unknown)} terminal={terminal} "
+            f"durable={int(not unknown)} recovery=1 clean={int(not unknown)} settled=1 cancelled=1\n")
+        native = version_native_value(case.get("native"), effect="unknown" if unknown else "committed" if committed else "rolled_back",
+            journal="recovery_required" if unknown else "clean", reason=("cancelled",), native_reason="cancelled",
+            unknown=unknown, stderr=len(records.encode("ascii")))
+        observations = {"evidenceKind": "real-stdin-eof-at-controlled-transaction-boundary", "bootstrapMode": "instrumented-genuine-engine",
+            "boundary": boundary, "originalCheckpoint": checkpoint, "closeBeforeActiveDeadline": True, "controlRecords": 2,
+            "actualStdinEof": True, "eofReadCount": 1, "nonemptyReadCount": 0, "readErrorCount": 0, "preparedCorrelationRetained": True,
+            "versionProfileAndControlProof": True, "committedPublication": committed, "rolledBackPublication": not committed and not unknown,
+            "terminalDurable": not unknown, "fixedRecovery": True, "journalClean": not unknown, "journalAbsent": not unknown,
+            "originalTreeRestored": not committed and not unknown, "selectedPayloadsRemain": committed or unknown,
+            "unselectedAndDependenciesPreserved": True, "unrelatedIntroducedBeforeEof": unknown, "introducedOriginalPreserved": unknown,
+            "recoveryEvidenceRetained": unknown, "sharedBlockedProject": unknown, "allFourDomainsDisabled": unknown,
+            "noFurtherAdmission": unknown, "sourceProbesSettled": True, "passiveOriginalsSettled": True, "fixtureFilesSettled": True}
+        expected = {"name": name, "domain": "release_version", "source": "release/version.properties" if committed else "public/version.properties",
+                    "native": native, "passive": case["passive"], "observations": observations}
+        require(same_compile_json(case, expected), f"Version EOF {name} original observations differ")
+    return receipt
+
+
+def version_owner_receipt(context: dict, mode: str) -> dict:
+    require(mode in ("source", "zip"), "Unknown version owner runtime form")
+    return validate_version_owner_receipt(read_bounded_json(Path(context["root"]) / f"version-owner-{mode}/receipt.json", 64 * 1024), mode,
+        context=context, source_hashes=version_bound_source_hashes(context, VERSION_OWNER_SOURCES))
+
+
+def version_transaction_eof_receipt(context: dict) -> dict:
+    return validate_version_transaction_eof_receipt(read_bounded_json(Path(context["root"]) / "version-transaction-eof/receipt.json", 64 * 1024),
+        context=context, source_hashes=version_bound_source_hashes(context, VERSION_TRANSACTION_EOF_SOURCES))
 
 
 def canonical_json(value: object) -> bytes:
@@ -6057,6 +6875,11 @@ def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | No
                 "Metadata-only phase cannot produce compiler or product authority")
         value = metadata_phase_value(context, name, checks)
         validate_metadata_phase_receipt(value, context, name)
+    elif context.get("executionScope") == VERSION_NATIVE_SCOPE:
+        require(node is None and scope == "passive-development-foundation-only" and compiled is None,
+                "Version-only phase cannot produce compiler or product authority")
+        value = version_phase_value(context, name, checks)
+        validate_version_phase_receipt(value, context, name)
     elif context.get("executionScope") == GITHUB_READONLY_SCOPE:
         require(node is None and scope == "passive-development-foundation-only" and compiled is None,
                 "G1 phase cannot produce other native or product authority")
@@ -6116,6 +6939,28 @@ def metadata_public_bindings(context: dict) -> dict:
             "payloadBindings": METADATA_PAYLOAD_BINDINGS, "notVerified": list(METADATA_NOT_VERIFIED)}
 
 
+def prepare_version_native_context(context: dict, inventory: list[dict]) -> None:
+    root, source = Path(context["root"]), Path(context["source"])
+    context["versionInputs"] = {"sourceFiles": version_source_files(source), "coreFiles": inventory,
+                                 "coreZipSha256": hash_file(root / "core.zip"), "pythonSha256": hash_file(Path(context["python"]))}
+    context["originalDirectories"] = {"root": workflow_directory_identity(root), "source": workflow_directory_identity(source),
+                                      **{name: workflow_directory_identity(root / name) for name in VERSION_NATIVE_DIRECTORIES}}
+    context["observedHost"] = workflow_host(root)
+    context["versionInvocation"] = version_invocation()
+    # Bind the actual source/ZIP resource closure, not workflow template DATA or
+    # a renderer-supplied configuration/field roster.
+    write_json(root / "version.json", version_core_metadata(context))
+    version_source_unchanged(context)
+
+
+def version_public_bindings(context: dict) -> dict:
+    return {"schemaVersion": 1, "scope": VERSION_NATIVE_EVIDENCE_SCOPE,
+            **version_context_binding(context), "versionInputs": context["versionInputs"],
+            "python": PYTHON, "rust": {"release": RUST, "target": TARGETS["linux"]},
+            "features": ["development-runtime"], "testTarget": "lib", "host": context["observedHost"],
+            "payloadBindings": VERSION_PAYLOAD_BINDINGS, "notVerified": list(VERSION_NOT_VERIFIED)}
+
+
 def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     admit_phase(scope, "prepare")
     admit_platform(scope, platform)
@@ -6128,10 +6973,11 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     profile = compile_profile(scope) if scope in COMPILE_PROFILES else None
     native_workflow = scope == WORKFLOW_NATIVE_SCOPE
     native_metadata = scope == METADATA_NATIVE_SCOPE
-    native_edit = native_workflow or native_metadata
+    native_version = scope == VERSION_NATIVE_SCOPE
+    native_edit = native_workflow or native_metadata or native_version
     native_github = scope == GITHUB_READONLY_SCOPE
     native_tls = scope == GITHUB_TLS_SCOPE
-    binding = (metadata_native_binding(os.environ) if native_metadata else compile_workflow_binding(os.environ, scope) if profile else workflow_native_binding(os.environ)
+    binding = (version_native_binding(os.environ) if native_version else metadata_native_binding(os.environ) if native_metadata else compile_workflow_binding(os.environ, scope) if profile else workflow_native_binding(os.environ)
                if native_workflow else github_readonly_binding(os.environ) if native_github
                else github_tls_binding(os.environ) if native_tls else {})
     source = Path(os.environ["GITHUB_WORKSPACE"]).resolve(strict=True)
@@ -6148,13 +6994,13 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     if native_edit or native_github or native_tls:
         # One original root per actual job attempt. A second prepare must not
         # mint a fresh path to evade a failed/Unknown phase's retained claims.
-        label = "metadata" if native_metadata else "github-tls" if native_tls else "github" if native_github else "workflow"
+        label = "version" if native_version else "metadata" if native_metadata else "github-tls" if native_tls else "github" if native_github else "workflow"
         root = temp / f"mrk-desktop-foundation-{label}-{binding['runId']}-{binding['attempt']}"
         root.mkdir(mode=0o700)
     else:
         root = Path(tempfile.mkdtemp(prefix="mrk-desktop-foundation-", dir=temp))
     no_cargo_configuration((root,))
-    directories = METADATA_NATIVE_DIRECTORIES if native_metadata else GITHUB_TLS_DIRECTORIES if native_tls else GITHUB_READONLY_DIRECTORIES if native_github else WORKFLOW_NATIVE_DIRECTORIES if native_workflow else (
+    directories = VERSION_NATIVE_DIRECTORIES if native_version else METADATA_NATIVE_DIRECTORIES if native_metadata else GITHUB_TLS_DIRECTORIES if native_tls else GITHUB_READONLY_DIRECTORIES if native_github else WORKFLOW_NATIVE_DIRECTORIES if native_workflow else (
         "home", "cargo", "rustup", "tmp", "target", "windows-snapshot", "appdata", "localappdata") if windows else (
         "home", "cargo", "rustup", "tmp", "target", "native", "config-owner", "config-driver-loss", "config-watchdog-loss",
         "config-stop", "config-terminal-deadline", "config-startup-stop", "config-transaction-eof", "appdata", "localappdata", "npm-cache")
@@ -6209,7 +7055,9 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     if scope == GTK_COMPILE_SCOPE:
         validate_gtk_core_inventory(inventory)
         context["sg1"] = gtk_compile_binding(source)
-    if native_metadata:
+    if native_version:
+        prepare_version_native_context(context, inventory)
+    elif native_metadata:
         prepare_metadata_native_context(context, inventory)
     elif native_workflow:
         prepare_workflow_native_context(context, inventory)
@@ -6220,7 +7068,9 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     source_unchanged(context)
     if not windows:
         write_json(root / "context.json", context)
-    if native_metadata:
+    if native_version:
+        public = version_public_bindings(context)
+    elif native_metadata:
         public = metadata_public_bindings(context)
     elif native_workflow:
         public = workflow_public_bindings(context)
@@ -6273,12 +7123,23 @@ def metadata_invocation() -> dict:
     return values
 
 
+def version_invocation() -> dict:
+    # Exact original invocation strings are private context DATA. Reading them
+    # does not resolve/reopen source/runtime paths after lane-last uncertainty.
+    values = {key: os.environ[key] for key in ("GITHUB_WORKSPACE", "MRK_PYTHON", "RUNNER_TEMP")}
+    values["executable"] = sys.executable
+    require(all(type(value) is str and Path(value).is_absolute() for value in values.values()),
+            "Version invocation input is not absolute")
+    return values
+
+
 def load_context(platform: str, scope: str = BOUNDARY_SCOPE, *, retention_only: bool = False) -> dict:
     admit_platform(scope, platform)
     if scope in ENVIRONMENT_NATIVE_SCOPES:
         return load_environment_native_context(platform, retention_only=retention_only)
-    require(not retention_only or scope == METADATA_NATIVE_SCOPE, "Unexpected DATA-only context route")
+    require(not retention_only or scope in {METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE}, "Unexpected DATA-only context route")
     metadata_binding = metadata_native_binding(os.environ) if scope == METADATA_NATIVE_SCOPE else None
+    version_binding = version_native_binding(os.environ) if scope == VERSION_NATIVE_SCOPE else None
     if scope == WINDOWS_SNAPSHOT_SCOPE:
         require(admitted_scope(platform) == scope, "Windows context scope differs")
     root = Path(os.environ["MRK_DESKTOP_CI_ROOT"])
@@ -6286,7 +7147,7 @@ def load_context(platform: str, scope: str = BOUNDARY_SCOPE, *, retention_only: 
             and root.parent == (Path(os.environ["RUNNER_TEMP"]) if retention_only else Path(os.environ["RUNNER_TEMP"]).resolve(strict=True))
             and not root.is_symlink(), "Unrecognized task root")
     ordinary(root / "context.json")
-    context = (read_bounded_json(root / "context.json", 256 * 1024) if scope in {GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, METADATA_NATIVE_SCOPE}
+    context = (read_bounded_json(root / "context.json", 256 * 1024) if scope in {GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE}
                else workflow_json(root / "context.json") if scope == WORKFLOW_NATIVE_SCOPE
                else json.loads((root / "context.json").read_text(encoding="utf-8")))
     require(context["root"] == str(root) and context["platform"] == platform and context.get("executionScope") == scope
@@ -6338,6 +7199,23 @@ def load_context(platform: str, scope: str = BOUNDARY_SCOPE, *, retention_only: 
             metadata_bound_source_hashes(context, METADATA_TRANSACTION_EOF_SOURCES)
         require(same_compile_json(read_bounded_json(root / "public-bindings.json", 256 * 1024), metadata_public_bindings(context)),
                 "Metadata native public source binding changed")
+    elif scope == VERSION_NATIVE_SCOPE:
+        require(type(context) is dict and all(context.get(key) == value for key, value in version_binding.items())
+                and root.name == f"mrk-desktop-foundation-version-{version_binding['runId']}-{version_binding['attempt']}"
+                and same_compile_json(context.get("versionInvocation"), version_invocation()),
+                "Version native context/source binding changed")
+        version_context_binding(context)
+        validate_workflow_host(context.get("observedHost"))
+        if not retention_only:
+            require(context.get("source") == str(Path(os.environ["GITHUB_WORKSPACE"]).resolve(strict=True))
+                    and context.get("python") == str(Path(sys.executable).resolve(strict=True))
+                    and context.get("workflowSha256") == hash_file(Path(context["source"]) / VERSION_NATIVE_WORKFLOW),
+                    "Version original source/runtime binding changed")
+            version_inputs_unchanged(context)
+        else:
+            version_bound_source_hashes(context, VERSION_TRANSACTION_EOF_SOURCES)
+        require(same_compile_json(read_bounded_json(root / "public-bindings.json", 256 * 1024), version_public_bindings(context)),
+                "Version native public source binding changed")
     elif scope == GITHUB_READONLY_SCOPE:
         binding = github_readonly_binding(os.environ)
         require(type(context) is dict and all(context.get(key) == value for key, value in binding.items())
@@ -6706,6 +7584,159 @@ def phase_metadata_native(name: str, context: dict) -> None:
     phase_receipt(context, name, list(METADATA_NATIVE_CHECKS[name]))
 
 
+def version_phase_value(context: dict, name: str, checks: list[str]) -> dict:
+    require(name in VERSION_NATIVE_CHECKS, "Unexpected version-only phase receipt")
+    return {"schemaVersion": 1, "scope": VERSION_NATIVE_EVIDENCE_SCOPE, "phase": name, "status": "passed",
+            **version_context_binding(context), "versionInputs": context["versionInputs"],
+            "rust": {"release": RUST, "target": TARGETS["linux"]}, "python": PYTHON,
+            "features": ["development-runtime"], "testTarget": "lib",
+            "checks": [{"check": check, "exitCode": 0} for check in checks],
+            "notVerified": list(VERSION_NOT_VERIFIED)}
+
+
+def validate_version_phase_receipt(value: object, context: dict, name: str) -> dict:
+    require(name in VERSION_NATIVE_CHECKS, "Unknown version phase")
+    require(same_compile_json(value, version_phase_value(context, name, list(VERSION_NATIVE_CHECKS[name]))),
+            "Version phase receipt or original source/check inventory differs")
+    return value
+
+
+def version_phase_claim(context: dict, name: str) -> dict:
+    require(name in (*VERSION_NATIVE_CHECKS, "clean"), "Unknown version original phase claim")
+    return {"scope": VERSION_NATIVE_SCOPE, "phase": name, **version_context_binding(context)}
+
+
+def version_predecessors(context: dict, name: str) -> None:
+    """Original endpoints plus exact case/resource facts, never a reusable PASS file."""
+    version_context_binding(context)
+    require(name in (*VERSION_NATIVE_CHECKS, "clean"), "Unknown version successor")
+    phases, root = list(VERSION_NATIVE_CHECKS), Path(context["root"])
+    previous = phases if name == "clean" else phases[:phases.index(name)]
+    for prior in previous:
+        require(same_compile_json(read_bounded_json(root / f"{prior}-started.json", 4096), version_phase_claim(context, prior)),
+                "Version original phase claim differs")
+        validate_version_phase_receipt(read_bounded_json(root / f"{prior}-checks.json", 256 * 1024), context, prior)
+        if prior == "version-owner":
+            version_owner_receipt(context, "source")
+            version_owner_receipt(context, "zip")
+        elif prior == "version-transaction-eof":
+            version_transaction_eof_receipt(context)
+        elif prior == "version-core":
+            for partition in VERSION_PARTITIONS:
+                version_core_receipt(context, partition)
+    # Retention is one-use too. A new helper process or missing pass-shaped
+    # receipt cannot renew a spent invocation or authorize failed-root cleanup.
+    for later in (*phases[len(previous):], "clean"):
+        for suffix in ("started", "checks"):
+            require(not os.path.lexists(root / f"{later}-{suffix}.json"), "Version phase was already claimed; retain outputs")
+    require(not os.path.lexists(root / "retention-checks.json"), "Version retention was already recorded")
+
+
+def version_phase_start(context: dict, name: str) -> None:
+    version_predecessors(context, name)
+    write_json(Path(context["root"]) / f"{name}-started.json", version_phase_claim(context, name))
+
+
+def clean_version_native(context: dict) -> None:
+    """Lane-last resource Unknown licenses DATA retention, never another close."""
+    version_phase_start(context, "clean")
+    write_json(Path(context["root"]) / "retention-checks.json", {
+        "schemaVersion": 1, "scope": VERSION_NATIVE_EVIDENCE_SCOPE, "status": "retained",
+        **version_context_binding(context), "reason": "lane-last-committed-close-resources-unknown", "deleted": False,
+        "laterNativeWork": False, "projectProbes": False, "vmDisposalRequired": True,
+    })
+    print("Retained version roots and compiler/runtime outputs for hosted VM disposal; no Save or production qualification.")
+
+
+def phase_version_native(name: str, context: dict) -> None:
+    """Same finite headless runner; version never falls through to old native tests."""
+    version_context_binding(context)
+    admit_phase(VERSION_NATIVE_SCOPE, name)
+    require(name != "prepare", "Version preparation has a separate fixed entry")
+    if name == "clean":
+        clean_version_native(context)
+        return
+    version_phase_start(context, name)
+    version_source_unchanged(context)
+    root, source = Path(context["root"]), Path(context["source"])
+    no_cargo_configuration((root, *root.parents, source / "desktop/src-tauri", source / "desktop", source, *source.parents))
+    environment = clean_environment(root)
+    environment["GITHUB_SHA"] = context["sourceSha"]
+    manifest = source / "desktop/src-tauri/Cargo.toml"
+    if name == "acquire":
+        run([context["rustup"], "toolchain", "install", RUST, "--profile", "minimal", "--no-self-update"],
+            check="rust-toolchain-install", cwd=root, env=environment, timeout=600)
+        cargo, _ = tools(context, environment)
+        with (root / "cargo-metadata.json").open("x", encoding="utf-8") as output:
+            run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features",
+                 "--features", "development-runtime", "--filter-platform", TARGETS["linux"],
+                 "--manifest-path", str(manifest)], check="version-locked-headless-metadata", cwd=root,
+                env=environment, timeout=600, output=output)
+        ordinary(root / "cargo-metadata.json")
+        require(0 < (root / "cargo-metadata.json").stat().st_size <= 32 * 1024 * 1024, "Version compiler metadata exceeds its bound")
+    elif name == "version-core":
+        # V19's effect Unknown is invocation-last with distinct positive resource
+        # proof. V20 is resource-settled. V21 is the last native work of the lane.
+        environment.update(MRK_DESKTOP_RELEASE_VERSION_NATIVE="1", MRK_DESKTOP_RELEASE_VERSION_SOURCE_SHA=context["sourceSha"],
+                           GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted", RUNNER_OS="Linux", RUNNER_ARCH="X64",
+                           GITHUB_WORKSPACE=str(source), RUNNER_TEMP=str(Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)))
+        fixture = [context["python"], "-I", "-S", "-B", str(source / "tests/native_desktop_config.py"),
+                   "--task-root", str(root), "--domain", "release_version", "--case"]
+        with (root / "version-ordinary.json").open("x", encoding="utf-8") as output:
+            run([*fixture, "ordinary"], check="version-core-ordinary", cwd=root, env=environment, timeout=90, output=output)
+        version_core_receipt(context, "ordinary")
+        version_inputs_unchanged(context)
+        with (root / "version-committed-fsync.json").open("x", encoding="utf-8") as output:
+            run([*fixture, "committed-fsync"], check="version-core-committed-fsync", cwd=root, env=environment, timeout=45, output=output)
+        version_core_receipt(context, "committed-fsync")
+        version_source_unchanged(context)
+        with (root / "version-committed-close.json").open("x", encoding="utf-8") as output:
+            run([*fixture, "committed-close"], check="version-core-committed-close", cwd=root, env=environment, timeout=45, output=output)
+        version_core_receipt(context, "committed-close")
+        phase_receipt(context, name, list(VERSION_NATIVE_CHECKS[name]))
+        return
+    else:
+        cargo, _ = tools(context, environment)
+        common = ["--locked", "--offline", "--jobs", "1", "--no-default-features", "--target", TARGETS["linux"],
+                  "--manifest-path", str(manifest), "--target-dir", str(root / "target")]
+        if name == "compile":
+            run([cargo, "test", *common, "--lib", "--no-run", "--features", "development-runtime"],
+                check="headless-test-compile-only", cwd=root, env=environment, timeout=600)
+        else:
+            environment.update(MRK_DESKTOP_DEV_PYTHON=context["python"], MRK_DESKTOP_DEV_CORE=str(source / "src"),
+                               MRK_DESKTOP_RELEASE_VERSION_HOSTED_CHECKS="release-version-v1", MRK_DESKTOP_RELEASE_VERSION_INPUT="source",
+                               MRK_DESKTOP_RELEASE_VERSION_CORE_METADATA=str(root / "version.json"),
+                               MRK_DESKTOP_RELEASE_VERSION_CORE_ZIP=str(root / "core.zip"),
+                               MRK_DESKTOP_EDIT_SOURCE_SHA=context["sourceSha"], GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted",
+                               RUNNER_OS="Linux", RUNNER_ARCH="X64", GITHUB_RUN_ID=context["runId"], GITHUB_RUN_ATTEMPT=context["attempt"],
+                               GITHUB_REF=VERSION_NATIVE_REF, GITHUB_EVENT_NAME=context["event"], GITHUB_REPOSITORY=context["repository"],
+                               GITHUB_WORKFLOW_SHA=context["workflowSha"], GITHUB_WORKFLOW_REF=context["workflowRef"],
+                               MRK_PUSH_EVENT_AFTER=context["pushEventAfter"],
+                               RUNNER_TEMP=str(Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)))
+            if name == "version-owner":
+                environment["MRK_DESKTOP_EDIT_TEST_ROOT"] = str(root / "version-owner-source")
+                run([cargo, "test", *common, "--lib", "--features", "development-runtime", VERSION_OWNER_TEST,
+                     "--", "--exact", "--ignored", "--test-threads=1"], check="version-owner-source-native-contract",
+                    cwd=root, env=environment, timeout=180)
+                version_owner_receipt(context, "source")
+                version_inputs_unchanged(context)
+                environment.update(MRK_DESKTOP_EDIT_TEST_ROOT=str(root / "version-owner-zip"),
+                                   MRK_DESKTOP_DEV_CORE=str(root / "core.zip"), MRK_DESKTOP_RELEASE_VERSION_INPUT="zip")
+                run([cargo, "test", *common, "--lib", "--features", "development-runtime", VERSION_OWNER_TEST,
+                     "--", "--exact", "--ignored", "--test-threads=1"], check="version-owner-zip-native-contract",
+                    cwd=root, env=environment, timeout=60)
+                version_owner_receipt(context, "zip")
+            else:
+                require(name == "version-transaction-eof", "Unknown fixed version native phase")
+                environment["MRK_DESKTOP_EDIT_TEST_ROOT"] = str(root / "version-transaction-eof")
+                run([cargo, "test", *common, "--lib", "--features", "development-runtime", VERSION_TRANSACTION_EOF_TEST,
+                     "--", "--exact", "--ignored", "--test-threads=1"], check="version-transaction-eof-native-contract",
+                    cwd=root, env=environment, timeout=90)
+                version_transaction_eof_receipt(context)
+    version_source_unchanged(context)
+    phase_receipt(context, name, list(VERSION_NATIVE_CHECKS[name]))
+
+
 def clean_compile(context: dict) -> None:
     """Only positively completed compiler work; no fabricated native receipts."""
     profile = compile_profile(context.get("executionScope", ""))
@@ -6805,7 +7836,7 @@ def compile_gtk(context: dict, cargo: str, common: list[str], environment: dict[
 def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     admit_phase(scope, name)
     admit_platform(scope, platform)
-    context = (load_context(platform, scope, retention_only=True) if (scope == METADATA_NATIVE_SCOPE and name == "clean"
+    context = (load_context(platform, scope, retention_only=True) if (scope in {METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE} and name == "clean"
                or scope == ENVIRONMENT_NATIVE_SCOPE and name == "retain" or scope == OFFLINE_NATIVE_SCOPE)
                else load_context(platform, scope))
     if scope in ENVIRONMENT_NATIVE_SCOPES:
@@ -6813,6 +7844,9 @@ def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
         return
     if scope == METADATA_NATIVE_SCOPE:
         phase_metadata_native(name, context)
+        return
+    if scope == VERSION_NATIVE_SCOPE:
+        phase_version_native(name, context)
         return
     if scope == WORKFLOW_NATIVE_SCOPE:
         phase_workflow_native(name, context)
@@ -7793,11 +8827,12 @@ def environment_core_settled(projection: dict) -> None:
 
 
 def validate_environment_native_resources(value: object, case: str, projection: dict, *, exercised: bool = True) -> dict:
-    """Every actual acquired resource, and the deliberate last failed task."""
+    """Every actual resource, late-finality original, and last failed task."""
     native = closed_object(value, {"startup", "inspection", "acquisition", "child", "input", "output", "error",
         "writer", "stdout", "stderr", "driver", "manager", "observer", "watchdog", "outputBytes",
         "resourceUnknown", "activeRetained", "disabled", "canExit"}, "Environment original native resource fields differ")
     absent, negative = case in {"L1", "L2"}, case == "L7"
+    late = case in {"L5", "L6a", "L6b", "L6c"}
     startup = {"attempted": not absent, "returned": not absent, "failed": False}
     require(same_compile_json(native["startup"], startup), "Environment original acquisition did not return as expected")
     for role in ("inspection", "acquisition"):
@@ -7816,18 +8851,18 @@ def validate_environment_native_resources(value: object, case: str, projection: 
                 "Environment original reader EOF/close/join receipt differs")
     for role in ("driver", "manager", "observer", "watchdog"):
         receipt = "panic" if negative and role == "driver" else (
-            "ok-false" if negative and role in {"observer", "watchdog"} else "ok-true" if role in {"observer", "watchdog"} else "ok-unit")
-        retained = negative and role != "manager"
+            "ok-false" if negative and role in {"observer", "watchdog"} or late and role == "watchdog"
+            else "ok-true" if role in {"observer", "watchdog"} else "ok-unit")
+        retained = negative and role != "manager" or late and role in {"observer", "watchdog"}
         require(same_compile_json(native[role], {"receipt": receipt, "retained": retained}),
                 "Environment original task result, retention or final observer receipt differs")
     # An admitted L5 still holds its original decoded terminal across H when
     # the current Git prerequisite is refused. Its ordinary failure stimulus
     # remains unexecuted; do not erase the actual late native custody either.
-    late = case in {"L5", "L6a", "L6b", "L6c"}
     require(integer_between(native["outputBytes"], 0 if absent else 1, 64 * 1024)
             and (not absent or native["outputBytes"] == 0)
-            and native["resourceUnknown"] is negative and native["activeRetained"] is negative
-            and native["disabled"] is (late or negative) and native["canExit"] is (not negative),
+            and native["resourceUnknown"] is (late or negative) and native["activeRetained"] is (late or negative)
+            and native["disabled"] is (late or negative) and native["canExit"] is (not (late or negative)),
             "Environment original physical finality or retained Unknown facts differ")
     if not absent:
         environment_core_settled(projection)
@@ -8686,12 +9721,29 @@ def conventional_module(name: str):
     return module
 
 
+def conventional_hosted_python_profile(data) -> dict:
+    """Validate the complete literal profile, including direct publisher callers."""
+    host = CONVENTIONAL_HOSTED_PYTHON
+    require(type(host) is dict and set(host) == {"trustModel", "imageOS", "images"}
+            and host["trustModel"] == "github-hosted-platform-tcb-v1" and host["imageOS"] == "ubuntu24"
+            and type(host["images"]) is dict and 1 <= len(host["images"]) <= 2,
+            "Conventional trusted platform admission differs")
+    for version, body in host["images"].items():
+        require(type(version) is str and re.fullmatch(r"[0-9]{8}\.[0-9]{1,6}\.[0-9]{1,6}", version) is not None,
+                "Conventional trusted platform image differs")
+        records = data.records([body], absolute=True)
+        require(set(records) == {"/usr/bin/python3.12"} and 0 < body["size"] <= 16 << 20,
+                "Conventional actual hosted Python differs")
+    return host
+
+
 def conventional_admission(scope: str) -> tuple:
     require(scope in CONVENTIONAL_SCOPES, "Unknown conventional route")
     value = CONVENTIONAL_PREPARE_INPUTS if scope == CONVENTIONAL_PREPARE_SCOPE else CONVENTIONAL_SMOKE_INPUTS
     # Before artifact/output paths, imports of the copier/probe, tools or writes.
-    require(type(value) is dict and type(CONVENTIONAL_HOSTED_PYTHON) is dict,
-            "Conventional route closed: accepted artifacts and actual hosted DATA TCB missing")
+    require(type(value) is dict and type(CONVENTIONAL_HOSTED_PYTHON) is dict
+            and type(CONVENTIONAL_PREPARE_INPUTS) is dict and type(CONVENTIONAL_CURRENT_SOURCE_FILES) is list,
+            "Conventional route closed: supplier, current source, accepted artifacts or hosted DATA TCB missing")
     data = conventional_module("conventional_runtime_data")
     wanted = ({"sourceArtifact", "reviewFiles", "outputInventorySha256"} if scope == CONVENTIONAL_PREPARE_SCOPE
               else {"preparedArtifact", "manifestSha256", "protocolSha256"})
@@ -8727,22 +9779,16 @@ def conventional_admission(scope: str) -> tuple:
             require(bool(notices) and rows.keys() == required | notices
                     and all(rows[name]["size"] > 0 for name in required),
                     "Conventional public kit is missing, empty or has foreign members")
-    host = CONVENTIONAL_HOSTED_PYTHON
-    require(set(host) == {"trustModel", "imageOS", "imageVersion", "python"}
-            and host["trustModel"] == "github-hosted-platform-tcb-v1" and host["imageOS"] == "ubuntu24"
-            and type(host["imageVersion"]) is str
-            and re.fullmatch(r"[0-9]{8}\.[0-9]{1,6}\.[0-9]{1,6}", host["imageVersion"]) is not None,
-            "Conventional trusted platform admission differs")
-    body = data.records([host["python"]], absolute=True)
-    require(set(body) == {"/usr/bin/python3.12"} and 0 < host["python"]["size"] <= 16 << 20,
-            "Conventional actual hosted Python differs")
+    host = conventional_hosted_python_profile(data)
     if scope == CONVENTIONAL_PREPARE_SCOPE:
         copier = conventional_module("prepare_cpython_source_payload").P
         review = {row["path"]: row for row in value["reviewFiles"]}
         require((copier.APPROVED_SOURCE_OUTPUT_SHA256, copier.APPROVED_SOURCE_COMPONENTS_SHA256,
-                 copier.APPROVED_SOURCE_NOTICES_SHA256, copier.APPROVED_SOURCE_COPIER_PYTHON_SHA256)
+                 copier.APPROVED_SOURCE_NOTICES_SHA256)
                 == (value["outputInventorySha256"], review["components.json"]["sha256"],
-                    review["notice-inventory.json"]["sha256"], host["python"]["sha256"]),
+                    review["notice-inventory.json"]["sha256"])
+                and data.same(copier.APPROVED_SOURCE_COPIER_PYTHONS,
+                              {"imageOS": host["imageOS"], "images": host["images"]}),
                 "Accepted COPY public pins are closed or differ")
     else:
         probe = conventional_module("probe_cpython_source_runtime")
@@ -8752,21 +9798,24 @@ def conventional_admission(scope: str) -> tuple:
 
 
 def conventional_host(data) -> None:
-    host = CONVENTIONAL_HOSTED_PYTHON
+    host = conventional_hosted_python_profile(data)
+    version = os.environ.get("ImageVersion")
     # Image/body correspondence and drift guards under the declared platform
     # trust assumption; neither these hashes nor provider variables attest a
     # complete startup/import/cache/loader closure.
+    require(os.environ.get("ImageOS") == host["imageOS"] and type(version) is str and version in host["images"],
+            "Conventional route requires the admitted isolated hosted DATA Python")
     require(sys.platform == "linux" and os.geteuid() != 0 and os.uname().machine == "x86_64"
             and os.path.realpath(sys.executable) == "/usr/bin/python3.12" and sys.version_info[:2] == (3, 12)
-            and sys.flags.isolated == sys.flags.no_site == sys.flags.dont_write_bytecode == 1
-            and os.environ.get("ImageOS") == host["imageOS"] and os.environ.get("ImageVersion") == host["imageVersion"],
+            and sys.flags.isolated == sys.flags.no_site == sys.flags.dont_write_bytecode == 1,
             "Conventional route requires the admitted isolated hosted DATA Python")
-    path = Path(host["python"]["path"])
+    body = host["images"][version]
+    path = Path(body["path"])
     before = path.lstat()
     require(stat.S_ISREG(before.st_mode) and stat.S_IMODE(before.st_mode) == 0o755
             and before.st_uid == before.st_gid == 0 and before.st_nlink == 1,
             "Conventional actual hosted Python metadata differs")
-    data.bound(path, host["python"])
+    data.bound(path, body)
     require(data.state(path.lstat()) == data.state(before), "Conventional actual hosted Python changed during binding")
 
 
@@ -8833,30 +9882,51 @@ def conventional_files(data, path: Path, files: list[dict]) -> dict:
     return rows
 
 
-def conventional_core(data, source: Path, raw: bytes, *, retained_source: Path | None = None) -> list[dict]:
-    """Join existing H core-source-files DATA across producer/consumer commits."""
+def conventional_historical_core(data, source: Path, raw: bytes, retained_source: Path) -> None:
+    """Authenticate H's own retained core, never use it as the current payload."""
+    expected = data.decode(data.read(source / "desktop/cpython-source-inputs/core-source-files.json"))
     rows = data.decode(raw)
+    require(data.same(rows, expected), "Original H core source mapping differs from the retained supplier admission")
     originals = data.records(rows, absolute=True)
     prefix = "/work/inputs/core-source/"
+    require(all(name.startswith(prefix) for name in originals), "Original H core source path differs")
+    preparer = conventional_module("prepare_runtime")
+    require({path.relative_to(retained_source).as_posix() for path in preparer.files(retained_source)}
+            == {name.removeprefix(prefix) for name in originals}, "Retained H complete source roster differs")
+    for name, row in originals.items():
+        data.bound(retained_source / name.removeprefix(prefix), row)
+
+
+def conventional_core(data, source: Path, raw: bytes, *, staged_source: Path | None = None) -> list[dict]:
+    """Bind the closed current payload independently of H and the consumer commit."""
+    rows = data.decode(raw)
+    originals = data.records(rows, absolute=True)
+    require(type(CONVENTIONAL_CURRENT_SOURCE_FILES) is list
+            and data.same(rows, CONVENTIONAL_CURRENT_SOURCE_FILES), "Current payload source binding differs from the closed admission")
+    prefix = "/work/inputs/core-source/"
+    require(all(name.startswith(prefix) for name in originals), "Current payload source path differs")
+    expected = {name.removeprefix(prefix) for name in originals}
     preparer = conventional_module("prepare_runtime")
     fixed = {"desktop/" + name for name in (*preparer.BOOTSTRAPS, preparer.GITHUB_CA_NAME)}
     fixed.add("desktop/tools/prepare_runtime.py")
-    expected = fixed | {"src/mobile_release/" + path.relative_to(source / "src/mobile_release").as_posix()
-                        for path in preparer.files(source / "src/mobile_release")}
-    require(set(originals) == {prefix + name for name in expected}, "Original complete core/handoff roster differs")
+    core = {name for name in expected if name.startswith("src/mobile_release/")}
+    require(bool(core) and expected == fixed | core, "Current payload input roles differ")
+    # Discovery checks completeness against the admitted rows; it does not
+    # create authority for an added, removed or differently sourced member.
+    require({"src/mobile_release/" + path.relative_to(source / "src/mobile_release").as_posix()
+             for path in preparer.files(source / "src/mobile_release")} == core,
+            "Current complete core roster differs")
+    if staged_source is not None:
+        require({path.relative_to(staged_source).as_posix() for path in preparer.files(staged_source)} == expected,
+                "Staged current payload source roster differs")
     for name, row in originals.items():
         relative = name.removeprefix(prefix)
-        # H's fixed prepare maps this one logical resource from the committed
+        # The fixed prepare maps this one logical resource from the committed
         # controls path. Do not add a shadow/untracked desktop/github-ca.pem.
         checkout_name = "desktop/cpython-source-inputs/github-ca.pem" if relative == "desktop/github-ca.pem" else relative
         data.bound(source / checkout_name, row)
-        if retained_source is not None:
-            data.bound(retained_source / relative, row)
-    if retained_source is not None:
-        require({"src/mobile_release/" + path.relative_to(retained_source / "src/mobile_release").as_posix()
-                 for path in preparer.files(retained_source / "src/mobile_release")}
-                == {name for name in expected if name.startswith("src/mobile_release/")},
-                "Retained H complete core roster differs")
+        if staged_source is not None:
+            data.bound(staged_source / relative, row)
     return rows
 
 
@@ -8891,9 +9961,20 @@ def conventional_prepare(context: dict, data, admission: dict) -> None:
     data.unpack(h_artifact / "hosted-evidence.tar", h_rows["hosted-evidence.tar"], root / "h", retained=retained["files"])
     retained_rows = {row["path"]: row for row in retained["files"]}
     h_root = root / "h"
-    core_raw = data.read(h_root / "controls/core-source-files.json")
-    core_source = h_root / "inputs/core-source"
-    conventional_core(data, source, core_raw, retained_source=core_source)
+    historical_core_raw = data.read(h_root / "controls/core-source-files.json")
+    historical_core_source = h_root / "inputs/core-source"
+    conventional_historical_core(data, source, historical_core_raw, historical_core_source)
+    core_raw = data.canonical(CONVENTIONAL_CURRENT_SOURCE_FILES)
+    current_rows = conventional_core(data, source, core_raw)
+    core_source = root / "current-core-source"
+    core_source.mkdir(mode=0o700)
+    for row in current_rows:
+        relative = row["path"].removeprefix("/work/inputs/core-source/")
+        checkout_name = "desktop/cpython-source-inputs/github-ca.pem" if relative == "desktop/github-ca.pem" else relative
+        target = core_source / relative
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        data.copy(source / checkout_name, target, row)
+    conventional_core(data, source, core_raw, staged_source=core_source)
     evidence = root / "evidence"
     evidence.mkdir(mode=0o700)
     for name, row in retained_rows.items():
@@ -8923,7 +10004,8 @@ def conventional_prepare(context: dict, data, admission: dict) -> None:
     require({path.relative_to(root / "runtime").as_posix() for path in preparer.files(root / "runtime")}
             == {row["path"] for row in files}, "Prepared runtime has unlisted files")
     conventional_recheck(context, data)
-    conventional_core(data, source, core_raw, retained_source=core_source)
+    conventional_historical_core(data, source, historical_core_raw, historical_core_source)
+    conventional_core(data, source, core_raw, staged_source=core_source)
     conventional_files(data, h_artifact, admission["sourceArtifact"]["files"])
     conventional_files(data, kit, admission["reviewFiles"])
     public = root / "public"
@@ -8938,7 +10020,8 @@ def conventional_prepare(context: dict, data, admission: dict) -> None:
     data.copy(root / "copy-report.json", public / "copy-report.json", data.file_record(root / "copy-report.json", 8 << 20))
     require(data.file_record(public / "copy-report.json")["sha256"] == copied["reportSha256"], "Original COPY report differs")
     data.write(public / "copy-result.json", data.canonical(copied))
-    data.write(public / "source-bindings.json", core_raw)  # Unchanged existing H core DATA, not a new schema.
+    # Current payload mapping; H's historical mapping remains in its unchanged source kit.
+    data.write(public / "source-bindings.json", core_raw)
     conventional_recheck(context, data)
     data.write(public / "preparation.json", data.canonical({**prepared, "scope": CONVENTIONAL_PREPARE_SCOPE,
         "producer": conventional_producer(context), "archive": archive,
@@ -8953,10 +10036,17 @@ def conventional_prepared(context: dict, data, admission: dict, *, unpack: bool 
     rows = conventional_files(data, artifact, admission["preparedArtifact"]["files"])
     prepared = data.decode(data.read(artifact / "preparation.json", 64 << 10))
     producer = {key: admission["preparedArtifact"][key] for key in ("repository", "sourceSha", "runId", "attempt")}
+    require(type(CONVENTIONAL_PREPARE_INPUTS) is dict
+            and type(CONVENTIONAL_PREPARE_INPUTS.get("sourceArtifact")) is dict, "Original H supplier admission missing")
+    supplier = CONVENTIONAL_PREPARE_INPUTS["sourceArtifact"]
+    require(set(supplier) == {"repository", "sourceSha", "runId", "attempt", "artifactId", "files"}
+            and data.records(supplier["files"]).keys() == set(CONVENTIONAL_SOURCE_KIT), "Original H supplier admission differs")
     require(type(prepared) is dict and set(prepared) == {"manifestSha256", "protocolSha256", "qualification", "scope",
         "producer", "archive", "sourceArtifact", "helperFiles", "copyResult", "sourceKit", "notVerified"}
         and prepared["scope"] == CONVENTIONAL_PREPARE_SCOPE and prepared["qualification"] == "prepared-not-native-verified"
         and data.same(prepared["producer"], producer) and data.same(prepared["archive"], rows["prepared-runtime.tar"])
+        and data.same(prepared["sourceArtifact"], {key: supplier[key] for key in ("repository", "sourceSha", "runId", "attempt", "artifactId")})
+        and data.same(prepared["sourceKit"], supplier["files"])
         and data.same(prepared["sourceKit"], [{**rows["source-kit/" + name], "path": name} for name in CONVENTIONAL_SOURCE_KIT])
         and data.same(prepared["helperFiles"], fixed_file_inventory(source, CONVENTIONAL_SHARED_HELPERS))
         and all(prepared[key] == admission[key] for key in ("manifestSha256", "protocolSha256"))
@@ -11388,7 +12478,7 @@ def windows_normal_ui_app_graph(value: object, lock: object, *, source: Path, ro
         require(key not in locked and (key[2] is None or key[2] == registry and sha256_value(row.get("checksum"))),
                 "Windows GUI lock source/checksum differs")
         locked[key] = row
-    require({key[:2] for key in locked if key[2] is None} == {(name, "0.1.0") for name in WINDOWS_INSTALLED_APP_LOCALS},
+    require({key[:2] for key in locked if key[2] is None} == set(WINDOWS_INSTALLED_APP_LOCK_LOCALS.items()),
             "Windows GUI source lock local inventory differs")
     require(type(value) is dict and type(value.get("version")) is int and value["version"] == 1 and type(value.get("packages")) is list
             and 4 <= len(value["packages"]) <= 1024, "Windows GUI metadata inventory differs")
@@ -11795,7 +12885,7 @@ def windows_installed_app_graph(value: object, lock: object, *, source: Path, ro
                 and sha256_value(row.get("checksum"))), "Windows app lock source/checksum differs")
         locked[key] = row
     require({key[:2] for key in locked if key[2] is None}
-            == {(name, "0.1.0") for name in WINDOWS_INSTALLED_APP_LOCALS}, "Windows app declared lock locals differ")
+            == set(WINDOWS_INSTALLED_APP_LOCK_LOCALS.items()), "Windows app declared lock locals differ")
     active_locals = {"mobile-release-kit-desktop", "mrk-windows-installed-native"}
     packages, local, identities = {}, {}, set()
     for package in value["packages"]:
@@ -11833,10 +12923,12 @@ def windows_installed_app_graph(value: object, lock: object, *, source: Path, ro
             and value.get("workspace_members") == [app] and value.get("workspace_default_members") == [app]
             and value.get("target_directory") == str(root / "target"), "Windows app original workspace/target differs")
     # Cargo filters package/resolve rows, not the selected app's declarations.
-    # Keep the source lock's four locals separate from three normal declarations
-    # and the one explicitly qualified Windows app-test dev declaration.
+    # Keep the source lock's six locals separate from actual Windows packages:
+    # three native normal declarations, the qualified Windows dev declaration,
+    # and two inactive Linux secret-service declarations. zbus is a registry
+    # dependency resolved through the source patch, not another path declaration.
     declarations = packages[app].get("dependencies")
-    require(type(declarations) is list and 3 <= len(declarations) <= 256
+    require(type(declarations) is list and 6 <= len(declarations) <= 256
             and all(type(dep) is dict and type(dep.get("name")) is str for dep in declarations),
             "Windows app dependency declarations differ")
     targets = {
@@ -11848,13 +12940,18 @@ def windows_installed_app_graph(value: object, lock: object, *, source: Path, ro
         "optional": False, "uses_default_features": True, "features": [], "target": target,
         "registry": None, "path": str((source / WINDOWS_INSTALLED_APP_LOCALS[name]).parent)}
         for name, target in targets.items()}
+    secret_service = {"name": "secret-service", "source": None, "req": "=5.2.0", "kind": None,
+        "rename": None, "optional": False, "uses_default_features": False, "features": ["rt-tokio-crypto-rust"],
+        "target": targets["mrk-linux-mount-observation"], "registry": None,
+        "path": str(source / "desktop/vendor/secret-service-5.2.0")}
     expected = [*normal.values(), {**normal["mrk-windows-installed-native"],
-                                  "kind": "dev", "features": ["qualification-result"]}]
+                                  "kind": "dev", "features": ["qualification-result"]},
+        secret_service, {**secret_service, "kind": "dev", "features": ["rt-tokio-crypto-rust", "mrk-retrieval-test-support"]}]
     declared_locals = [dep for dep in declarations
-                       if dep.get("source") is None or "path" in dep or dep["name"] in targets]
+                       if dep.get("source") is None or "path" in dep or dep["name"] in {*targets, "secret-service"}]
     # A map keyed only by name would collapse normal/dev or duplicate entries.
     # Compare each complete declaration exactly once, independent of order.
-    require(len(declared_locals) == 4
+    require(len(declared_locals) == 6
             and all(sum(same_compile_json(actual, wanted) for actual in declared_locals) == 1 for wanted in expected),
             "Windows app exact normal and qualification-dev declarations differ")
     resolve = value.get("resolve")
@@ -16029,6 +17126,7 @@ def windows_installed_phase(name: str, scope: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("phase", choices=(*BOUNDARY_PHASES, "workflow-owner", "workflow-transaction-eof", "workflow-core",
+                        "version-owner", "version-transaction-eof", "version-core",
                         "metadata-owner", "metadata-transaction-eof", "metadata-core", "windows-snapshot", "github-owner", "github-tls", "github-tls-deadline",
                          "environment-native", "offline-cli11", "retain", "windows-installed-native", "windows-installed-native-finalize", "windows-installed-runtime-data", *WINDOWS_FULLWALK_DATA_PHASES,
                          *WINDOWS_INSTALLED_PASSIVE_DATA_PHASES, "windows-normal-ui-prerequisite", *WINDOWS_NORMAL_UI_DATA_PHASES, *WINDOWS_NORMAL_UI_SETUP_BUILD_PHASES, *WINDOWS_NORMAL_UI_GUI_BUILD_PHASES,
@@ -16047,7 +17145,7 @@ def main() -> int:
             conventional_phase(args.phase, scope)
             return 0
         admit_phase(scope, args.phase)
-        platform = (admitted_host(retention_only=True) if (scope == METADATA_NATIVE_SCOPE and args.phase == "clean"
+        platform = (admitted_host(retention_only=True) if (scope in {METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE} and args.phase == "clean"
                     or scope == ENVIRONMENT_NATIVE_SCOPE and args.phase == "retain"
                     or scope == OFFLINE_NATIVE_SCOPE and args.phase != "prepare") else admitted_host())
         prepare(platform, scope) if args.phase == "prepare" else phase(args.phase, platform, scope)

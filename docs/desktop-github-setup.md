@@ -44,6 +44,13 @@ claim that GitHub secrets, reviewers, protection or runners were inspected.
 Local `_PATH` alternatives are not additional GitHub secret names. Candidate
 build inputs remain separate from external-testing/production credentials.
 
+**Open Credentials & Signing**, beside **Review project settings**, opens the
+separate local-input guides and current native availability/scope. Navigation
+selects no file and enters no private value; use those private controls only when
+available. Local session assets are not GitHub secrets, and this page never
+uploads assets or provisions secrets. Local caller installation still requires
+its own fresh native review and explicit confirmation.
+
 ## Closed core contract
 
 Method: `github.setup.propose`. Required parameters are exactly:

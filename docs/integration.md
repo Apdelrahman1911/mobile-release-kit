@@ -141,9 +141,11 @@ content intentionally fails metadata preflight until the product owner completes
 regular metadata files are preserved even with `--force`; a symlink or non-file at a required
 destination aborts installation. The root `.gitignore` is created when missing or receives missing
 exact lines for `.mobile-release/`, `.mobile-release-init-prepare/`, `.mobile-release-init/`,
-`.mobile-release-init-cleanup/` and the desktop's three
+`.mobile-release-init-cleanup/`, the desktop metadata directories
 `.mobile-release-metadata-text-prepare/`, `.mobile-release-metadata-text/`,
-`.mobile-release-metadata-text-cleanup/` directories. Existing bytes (including CRLF) are preserved; a symlink, non-file,
+`.mobile-release-metadata-text-cleanup/`, and the separately gated version directories
+`.mobile-release-version-prepare/`, `.mobile-release-version/`,
+`.mobile-release-version-cleanup/` (ten fixed lines in total). Existing bytes (including CRLF) are preserved; a symlink, non-file,
 non-UTF-8 file, or ignore file exceeding 1 MiB before or after the append fails before any
 destination write. Special permission bits on the project root or destination ancestors are
 unsupported and rejected before staging.
@@ -156,6 +158,9 @@ state. After cancellation, termination or an incomplete-recovery error, run:
 ```bash
 mobile-release init --root /path/to/application --recover
 ```
+
+The command above recovers only legacy initialization state, never the separate
+desktop metadata/version namespaces; see [saved-version VALUE editing](desktop-release-version-edit.md).
 
 Do not commit/upload any private init-state directory: backups can contain original configuration,
 and interruption can happen before `.gitignore` is updated. Do not discard those directories to

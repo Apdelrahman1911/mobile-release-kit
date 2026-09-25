@@ -13,8 +13,9 @@ pub const STDERR_LIMIT: usize = 64 * 1024;
 pub const STATUS_LIMIT: usize = 2 * 1024 * 1024;
 const CONFIG_LIMIT: usize = 512 * 1024;
 const IGNORE_LIMIT: u32 = 1024 * 1024;
-const IGNORE_LINES: [&str; 7] = [".mobile-release/", ".mobile-release-init-prepare/", ".mobile-release-init/", ".mobile-release-init-cleanup/",
-    ".mobile-release-metadata-text-prepare/", ".mobile-release-metadata-text/", ".mobile-release-metadata-text-cleanup/"];
+const IGNORE_LINES: [&str; 10] = [".mobile-release/", ".mobile-release-init-prepare/", ".mobile-release-init/", ".mobile-release-init-cleanup/",
+    ".mobile-release-metadata-text-prepare/", ".mobile-release-metadata-text/", ".mobile-release-metadata-text-cleanup/",
+    ".mobile-release-version-prepare/", ".mobile-release-version/", ".mobile-release-version-cleanup/"];
 
 pub fn token(value: &str) -> bool {
     value.len() == 32 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
@@ -75,7 +76,7 @@ pub enum NativeFinality { Pending, Settled, Unknown }
 pub enum EditAvailability { Available, UnsupportedPlatform, RuntimeUnqualified, CleanupUnknown, Shutdown, OtherEditActive }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum EditDomain { Configuration, GitHubWorkflows, MetadataText }
+pub(crate) enum EditDomain { Configuration, GitHubWorkflows, MetadataText, ReleaseVersion }
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -97,6 +98,8 @@ pub struct EditProjection {
     pub(crate) workflow: Option<crate::github_workflow_edit_protocol::Details>,
     #[serde(skip)]
     pub(crate) metadata_text: Option<crate::metadata_text_edit_protocol::Details>,
+    #[serde(skip)]
+    pub(crate) release_version: Option<crate::release_version_edit_protocol::Details>,
     pub project_id: String, pub session_id: String, pub owner_generation: String,
     pub phase: Phase, pub review_remaining_ms: u32, pub checkout: Option<Checkout>,
     pub prepared: Option<Prepared>, pub apply_submitted: bool, pub core_outcome: Option<CoreEditOutcome>,
@@ -108,6 +111,7 @@ impl EditProjection {
             EditDomain::Configuration => self.checkout.as_ref().map(|c| c.revision.as_str()),
             EditDomain::GitHubWorkflows => self.workflow.as_ref()?.checkout.as_ref().map(|c| c.revision.as_str()),
             EditDomain::MetadataText => self.metadata_text.as_ref()?.checkout.as_ref().map(|c| c.revision.as_str()),
+            EditDomain::ReleaseVersion => self.release_version.as_ref()?.checkout.as_ref().map(|c| c.revision.as_str()),
         }
     }
     pub(crate) fn plan_token(&self) -> Option<&str> {
@@ -115,11 +119,12 @@ impl EditProjection {
             EditDomain::Configuration => self.prepared.as_ref().map(|p| p.plan_token.as_str()),
             EditDomain::GitHubWorkflows => self.workflow.as_ref()?.prepared.as_ref().map(|p| p.plan_token.as_str()),
             EditDomain::MetadataText => self.metadata_text.as_ref()?.prepared.as_ref().map(|p| p.plan_token.as_str()),
+            EditDomain::ReleaseVersion => self.release_version.as_ref()?.prepared.as_ref().map(|p| p.plan_token.as_str()),
         }
     }
     pub(crate) fn workflow_projection(&self) -> Result<crate::github_workflow_edit_protocol::Projection, BridgeError> {
         use crate::github_workflow_edit_protocol::{DOMAIN, Projection};
-        if self.domain != EditDomain::GitHubWorkflows || self.metadata_text.is_some() || self.checkout.is_some() || self.prepared.is_some() { return Err(BridgeError::protocol()); }
+        if self.domain != EditDomain::GitHubWorkflows || self.metadata_text.is_some() || self.release_version.is_some() || self.checkout.is_some() || self.prepared.is_some() { return Err(BridgeError::protocol()); }
         let detail = self.workflow.as_ref().ok_or_else(BridgeError::protocol)?;
         Ok(Projection { domain: DOMAIN, project_id: self.project_id.clone(), session_id: self.session_id.clone(),
             owner_generation: self.owner_generation.clone(), phase: self.phase, review_remaining_ms: self.review_remaining_ms,
@@ -129,7 +134,7 @@ impl EditProjection {
     }
     pub(crate) fn metadata_text_projection(&self) -> Result<crate::metadata_text_edit_protocol::Projection, BridgeError> {
         use crate::metadata_text_edit_protocol::{DOMAIN, Projection};
-        if self.domain != EditDomain::MetadataText || self.workflow.is_some() || self.checkout.is_some() || self.prepared.is_some() {
+        if self.domain != EditDomain::MetadataText || self.workflow.is_some() || self.release_version.is_some() || self.checkout.is_some() || self.prepared.is_some() {
             return Err(BridgeError::protocol());
         }
         let detail = self.metadata_text.as_ref().ok_or_else(BridgeError::protocol)?;
@@ -138,6 +143,17 @@ impl EditProjection {
             phase: self.phase, review_remaining_ms: self.review_remaining_ms, checkout: detail.checkout.clone(),
             prepared: detail.prepared.clone(), apply_submitted: self.apply_submitted, core_outcome: self.core_outcome.clone(),
             native_reason: self.native_reason, native_finality: self.native_finality, late_settled: self.late_settled })
+    }
+    pub(crate) fn release_version_projection(&self) -> Result<crate::release_version_edit_protocol::Projection, BridgeError> {
+        use crate::release_version_edit_protocol::{DOMAIN, Projection};
+        if self.domain != EditDomain::ReleaseVersion || self.workflow.is_some() || self.metadata_text.is_some()
+            || self.checkout.is_some() || self.prepared.is_some() { return Err(BridgeError::protocol()); }
+        let detail = self.release_version.as_ref().ok_or_else(BridgeError::protocol)?;
+        Ok(Projection { domain: DOMAIN, project_id: self.project_id.clone(), session_id: self.session_id.clone(),
+            owner_generation: self.owner_generation.clone(), phase: self.phase, review_remaining_ms: self.review_remaining_ms,
+            checkout: detail.checkout.clone(), prepared: detail.prepared.clone(), apply_submitted: self.apply_submitted,
+            core_outcome: self.core_outcome.clone(), native_reason: self.native_reason, native_finality: self.native_finality,
+            late_settled: self.late_settled })
     }
 }
 #[derive(Clone, Serialize)]
@@ -262,6 +278,9 @@ pub enum ChildFrame {
     MetadataTextOpened(crate::metadata_text_edit_protocol::Opened),
     MetadataTextPrepared(crate::metadata_text_edit_protocol::PreparedReply),
     MetadataTextTerminal(u32, crate::metadata_text_edit_protocol::TerminalReply),
+    ReleaseVersionOpened(crate::release_version_edit_protocol::Opened),
+    ReleaseVersionPrepared(crate::release_version_edit_protocol::PreparedReply),
+    ReleaseVersionTerminal(u32, crate::release_version_edit_protocol::TerminalReply),
 }
 impl ChildFrame {
     pub(crate) fn domain(&self) -> EditDomain {
@@ -269,6 +288,7 @@ impl ChildFrame {
             Self::Opened(_) | Self::Prepared(_) | Self::Terminal(..) => EditDomain::Configuration,
             Self::WorkflowOpened(_) | Self::WorkflowPrepared(_) | Self::WorkflowTerminal(..) => EditDomain::GitHubWorkflows,
             Self::MetadataTextOpened(_) | Self::MetadataTextPrepared(_) | Self::MetadataTextTerminal(..) => EditDomain::MetadataText,
+            Self::ReleaseVersionOpened(_) | Self::ReleaseVersionPrepared(_) | Self::ReleaseVersionTerminal(..) => EditDomain::ReleaseVersion,
         }
     }
 }
@@ -346,9 +366,11 @@ mod ignore_vocabulary_tests {
                 "fields":[],"assurance":assurance}) }
     }
     #[test]
-    fn metadata_ignore_prerequisites_extend_only_the_fixed_seven_rule_vocabulary() {
+    fn version_ignore_prerequisites_extend_only_the_fixed_ten_rule_vocabulary() {
         let original = proposed(); assert!(original.valid());
-        assert_eq!(&IGNORE_LINES[4..],&[".mobile-release-metadata-text-prepare/",".mobile-release-metadata-text/",".mobile-release-metadata-text-cleanup/"]);
+        assert_eq!(&IGNORE_LINES[4..7],&[".mobile-release-metadata-text-prepare/",".mobile-release-metadata-text/",".mobile-release-metadata-text-cleanup/"]);
+        assert_eq!(&IGNORE_LINES[7..], &[".mobile-release-version-prepare/", ".mobile-release-version/", ".mobile-release-version-cleanup/"]);
+        let mut stale = original.clone(); stale.ignore_additions.truncate(7); assert!(!stale.valid());
         for rule in ["metadata/", "!release/private/", ".mobile-release-other/"] {
             let mut bad = original.clone(); bad.ignore_additions[4] = rule.into(); assert!(!bad.valid());
         }

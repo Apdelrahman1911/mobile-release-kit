@@ -9,6 +9,7 @@ use crate::{
     edit_commands, edit_owner::EditOwner, edit_protocol::ConfigEditStatus,
     github_workflow_edit_protocol::WorkflowEditStatus,
     metadata_text_commands, metadata_text_edit_protocol::{self as metadata_text_wire, MetadataTextEditStatus},
+    release_version_edit_commands, release_version_edit_protocol::{self as release_version_wire, ReleaseVersionEditStatus},
     github_connection_protocol::{self as github_connection_wire, Status as GitHubConnectionStatus, Reason as GitHubConnectionReason},
     github_connection_session,
     error::BridgeError,
@@ -22,6 +23,20 @@ pub(crate) mod qualification;
 #[cfg_attr(target_os = "macos", path = "installed_shell_observation_macos.rs")]
 #[cfg_attr(target_os = "windows", path = "installed_shell_observation_windows.rs")]
 pub(crate) mod installed_observation;
+// Only the installed Linux observer sees these calls. Ordinary builds retain
+// the same typed IPC and original document owners, with no qualification token.
+macro_rules! installed_command_request {
+    ($state:expr, $kind:ident, $value:expr) => {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(q) = &$state.observation { q.commands_request(installed_observation::commands::Command::$kind, $value); }
+    };
+}
+macro_rules! installed_command_result {
+    ($state:expr, $kind:ident, $value:expr) => {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(q) = &$state.observation { q.commands_result(installed_observation::commands::Command::$kind, $value); }
+    };
+}
 macro_rules! fixture_command {
     ($state:expr, $kind:ident, $observed:ident, $error:expr) => {
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -41,6 +56,30 @@ macro_rules! gtk_fixture {
     ($call:expr, $kind:ident, $detail:expr) => {
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         $call.fixture_event(qualification::EventKind::$kind, $detail);
+    };
+}
+macro_rules! installed_session_command {
+    ($state:expr, $kind:ident, $observed:ident) => {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let $observed = $state.observation.clone();
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(q) = &$observed { q.session_request(installed_observation::SessionCommand::$kind); }
+    };
+}
+macro_rules! installed_session_result {
+    ($observed:ident, Prepare, $result:expr) => {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(q) = &$observed { q.session_prepare_result($result); }
+    };
+    ($observed:ident, $kind:ident, $result:expr) => {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(q) = &$observed { q.session_result(installed_observation::SessionCommand::$kind,$result); }
+    };
+}
+macro_rules! installed_session_input {
+    ($observed:ident, $method:ident, $($arg:expr),+) => {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(q) = &$observed { q.$method($($arg),+); }
     };
 }
 
@@ -115,8 +154,12 @@ async fn environment_requirements(webview: Webview, request: tauri::ipc::Request
 async fn start_environment_diagnostics(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::environment_diagnostics_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview)?;
-    let args = crate::environment_diagnostics_protocol::start(request_body(&request)?)?;
-    state.document.start_environment_diagnostics(args)
+    let value = request_body(&request)?;
+    let args = crate::environment_diagnostics_protocol::start(value)?;
+    installed_command_request!(state, ToolsStart, value);
+    let result = state.document.start_environment_diagnostics(args);
+    installed_command_result!(state, ToolsStart, &result);
+    result
 }
 #[tauri::command]
 async fn environment_diagnostics_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::environment_diagnostics_protocol::Status, BridgeError> {
@@ -130,22 +173,34 @@ async fn environment_diagnostics_status(webview: Webview, request: tauri::ipc::R
 async fn cancel_environment_diagnostics(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::environment_diagnostics_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview)?;
-    let args = crate::environment_diagnostics_protocol::cancel(request_body(&request)?)?;
-    state.document.cancel_environment_diagnostics(args)
+    let value = request_body(&request)?;
+    let args = crate::environment_diagnostics_protocol::cancel(value)?;
+    installed_command_request!(state, ToolsCancel, value);
+    let result = state.document.cancel_environment_diagnostics(args);
+    installed_command_result!(state, ToolsCancel, &result);
+    result
 }
 #[tauri::command]
 async fn prepare_offline_preflight(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::offline_preflight_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview).map_err(|_| crate::offline_preflight_protocol::invalid())?;
     let value = preflight_request_body(request.body())?;
-    state.document.prepare_offline_preflight(crate::offline_preflight_protocol::prepare(&value)?)
+    let args = crate::offline_preflight_protocol::prepare(&value)?;
+    installed_command_request!(state, OfflinePrepare, &value);
+    let result = state.document.prepare_offline_preflight(args);
+    installed_command_result!(state, OfflinePrepare, &result);
+    result
 }
 #[tauri::command]
 async fn start_offline_preflight(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::offline_preflight_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview).map_err(|_| crate::offline_preflight_protocol::invalid())?;
     let value = preflight_request_body(request.body())?;
-    state.document.start_offline_preflight(crate::offline_preflight_protocol::start(&value)?)
+    let args = crate::offline_preflight_protocol::start(&value)?;
+    installed_command_request!(state, OfflineStart, &value);
+    let result = state.document.start_offline_preflight(args);
+    installed_command_result!(state, OfflineStart, &result);
+    result
 }
 #[tauri::command]
 async fn offline_preflight_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::offline_preflight_protocol::Status, BridgeError> {
@@ -160,7 +215,11 @@ async fn cancel_offline_preflight(webview: Webview, request: tauri::ipc::Request
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview).map_err(|_| crate::offline_preflight_protocol::invalid())?;
     let value = preflight_request_body(request.body())?;
-    state.document.cancel_offline_preflight(crate::offline_preflight_protocol::cancel(&value)?)
+    let args = crate::offline_preflight_protocol::cancel(&value)?;
+    installed_command_request!(state, OfflineCancel, &value);
+    let result = state.document.cancel_offline_preflight(args);
+    installed_command_result!(state, OfflineCancel, &result);
+    result
 }
 #[tauri::command]
 async fn prepare_android_build(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::android_build_protocol::Status, BridgeError> {
@@ -507,36 +566,100 @@ async fn metadata_text_edit_open(webview: Webview, request: tauri::ipc::Request<
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
     let args = metadata_text_commands::open(request_body(&request)?)?;
-    state.bridge.open_metadata_text_edit(&state.document, window, args)
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.metadata_open_request(&args); }
+    let result = state.bridge.open_metadata_text_edit(&state.document, window, args);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.metadata_open_result(&result, &state.bridge.edits); }
+    result
 }
 #[tauri::command]
 async fn metadata_text_edit_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<MetadataTextEditStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
     let args = metadata_text_commands::prepare(request_body(&request)?)?;
-    state.bridge.prepare_metadata_text_edit(&state.document, window, args)
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.metadata_prepare_request(&args); }
+    let result = state.bridge.prepare_metadata_text_edit(&state.document, window, args);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.metadata_prepare_result(&result, &state.bridge.edits); }
+    result
 }
 #[tauri::command]
 async fn metadata_text_edit_apply(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<MetadataTextEditStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
     let args = edit_commands::apply(request_body(&request)?)?;
-    state.bridge.apply_metadata_text_edit(&state.document, window, &args.session_id, &args.plan_token)
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.metadata_apply_request(&args.session_id, &args.plan_token); }
+    let result = state.bridge.apply_metadata_text_edit(&state.document, window, &args.session_id, &args.plan_token);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.metadata_apply_result(&result, &state.bridge.edits); }
+    result
 }
 #[tauri::command]
 async fn metadata_text_edit_close(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<MetadataTextEditStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
     let args = edit_commands::close(request_body(&request)?)?;
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.metadata_close_request(&args.session_id); }
     // Original STOP remains available during quit without a new root lookup.
-    state.bridge.edits.close_metadata_text(window, &args.session_id)
+    let result = state.bridge.edits.close_metadata_text(window, &args.session_id);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.metadata_close_result(&result, &state.bridge.edits); }
+    result
 }
 #[tauri::command]
 async fn metadata_text_edit_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<MetadataTextEditStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview)?;
     edit_commands::status(request_body(&request)?)?;
-    state.bridge.edits.metadata_text_status()
+    let result = state.bridge.edits.metadata_text_status();
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let (Some(q), Ok(status)) = (&state.observation, &result) { q.metadata_edit_status(status, &state.bridge.edits); }
+    result
+}
+
+#[tauri::command]
+async fn release_version_edit_open(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<ReleaseVersionEditStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    let args = release_version_edit_commands::open(request_body(&request)?)?;
+    state.bridge.open_release_version_edit(&state.document, window, args)
+}
+#[tauri::command]
+async fn release_version_edit_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<ReleaseVersionEditStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    let result = request_body(&request).and_then(release_version_edit_commands::prepare)
+        .and_then(|args| state.bridge.prepare_release_version_edit(&state.document, window, args));
+    if result.is_err() { state.bridge.edits.retire_release_version_request(window); }
+    result
+}
+#[tauri::command]
+async fn release_version_edit_apply(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<ReleaseVersionEditStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    let result = request_body(&request).and_then(edit_commands::apply)
+        .and_then(|args| state.bridge.apply_release_version_edit(&state.document, window, &args.session_id, &args.plan_token));
+    if result.is_err() { state.bridge.edits.retire_release_version_request(window); }
+    result
+}
+#[tauri::command]
+async fn release_version_edit_close(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<ReleaseVersionEditStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    let args = edit_commands::close(request_body(&request)?)?;
+    // Original STOP stays available during quit without another root lookup.
+    state.bridge.edits.close_release_version(window, &args.session_id)
+}
+#[tauri::command]
+async fn release_version_edit_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<ReleaseVersionEditStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview)?;
+    edit_commands::status(request_body(&request)?)?;
+    state.bridge.edits.release_version_status()
 }
 
 fn github_connection_body<'a>(webview: &Webview, request: &'a tauri::ipc::Request<'_>) -> Result<&'a Value, BridgeError> {
@@ -579,73 +702,103 @@ fn asset_body<'a>(request: &'a tauri::ipc::Request<'_>) -> Result<&'a Value, Ass
 #[tauri::command]
 async fn vault_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
     fixture_command!(state, AssetStatus, observed, AssetError::new(Reason::Unqualified));
+    installed_session_command!(state, Status, session_observed);
     let result = async {
         asset_window(&webview)?; asset_commands::status(asset_body(&request)?)?; Ok(state.document.status())
     }.await;
     fixture_result!(observed, asset, &result);
+    installed_session_result!(session_observed, Status, &result);
     result
 }
 #[tauri::command]
 async fn vault_open(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
     fixture_command!(state, Open, observed, AssetError::new(Reason::Unqualified));
+    installed_session_command!(state, Open, session_observed);
     let result = async {
         asset_window(&webview)?; asset_commands::open(asset_body(&request)?)?; state.document.open_session()
     }.await;
     fixture_result!(observed, asset, &result);
+    installed_session_result!(session_observed, Open, &result);
     result
 }
 #[tauri::command]
 async fn asset_context(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
     fixture_command!(state, Context, observed, AssetError::new(Reason::Unqualified));
+    installed_session_command!(state, Context, session_observed);
     let result = async {
-        asset_window(&webview)?; let args = asset_commands::context(asset_body(&request)?)?; state.document.context(args)
+        asset_window(&webview)?; let args = asset_commands::context(asset_body(&request)?)?;
+        installed_session_input!(session_observed,session_context_input,&args);
+        state.document.context(args)
     }.await;
     fixture_result!(observed, asset, &result);
+    installed_session_result!(session_observed, Context, &result);
     result
 }
 #[tauri::command]
 async fn asset_choose(webview: Webview, app: tauri::AppHandle, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
     fixture_command!(state, Choose, observed, AssetError::new(Reason::Unqualified));
+    installed_session_command!(state, Choose, session_observed);
     let result = async {
-        asset_window(&webview)?; let args = asset_commands::choose(asset_body(&request)?)?; state.document.choose(app, args)
+        asset_window(&webview)?; let args = asset_commands::choose(asset_body(&request)?)?;
+        installed_session_input!(session_observed,session_choose_input,&args);
+        state.document.choose(app, args)
     }.await;
     fixture_result!(observed, asset, &result);
+    installed_session_result!(session_observed, Choose, &result);
     result
 }
 #[tauri::command]
 async fn credential_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, CommandError> {
     fixture_command!(state, Forbidden, observed, CommandError::from(AssetError::new(Reason::Unqualified)));
-    asset_window(&webview)?; let args = asset_commands::prepare(asset_body(&request)?)?;
-    let id = state.document.prepare(args)?;
-    let document = state.document.clone(); drop(state); drop(request);
-    // This waiter owns neither Fields nor an original operation handle. Tauri
-    // may still retain its admitted IPC body; no prompt physical-erasure claim.
-    document.prepared(id).await
+    installed_session_command!(state, Prepare, session_observed);
+    let result = async {
+        asset_window(&webview)?; let args = asset_commands::prepare(asset_body(&request)?)?;
+        installed_session_input!(session_observed,session_prepare_input,&args);
+        let id = state.document.prepare(args)?;
+        let document = state.document.clone(); drop(state); drop(request);
+        // This waiter owns neither Fields nor an original operation handle.
+        // Keep request-drop-before-await; Tauri may still retain its admitted
+        // IPC body, so this is not a prompt physical-erasure claim.
+        document.prepared(id).await
+    }.await;
+    installed_session_result!(session_observed, Prepare, &result); result
 }
 #[tauri::command]
 async fn vault_prepare_delete(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
     fixture_command!(state, Forbidden, observed, AssetError::new(Reason::Unqualified));
-    asset_window(&webview)?; let args = asset_commands::delete(asset_body(&request)?)?; state.document.prepare_delete(args)
+    installed_session_command!(state, Delete, session_observed);
+    let result=async { asset_window(&webview)?; let args = asset_commands::delete(asset_body(&request)?)?; state.document.prepare_delete(args) }.await;
+    installed_session_result!(session_observed, Delete, &result); result
 }
 #[tauri::command]
 async fn vault_commit(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
     fixture_command!(state, Forbidden, observed, AssetError::new(Reason::Unqualified));
-    asset_window(&webview)?; let token = asset_commands::preview_token(asset_body(&request)?)?; state.document.commit(token)
+    installed_session_command!(state, Commit, session_observed);
+    let result=async { asset_window(&webview)?; let token = asset_commands::preview_token(asset_body(&request)?)?;
+        installed_session_input!(session_observed,session_confirmation_input,token,false); state.document.commit(token) }.await;
+    installed_session_result!(session_observed, Commit, &result); result
 }
 #[tauri::command]
 async fn vault_bind(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
     fixture_command!(state, Forbidden, observed, AssetError::new(Reason::Unqualified));
-    asset_window(&webview)?; let token = asset_commands::preview_token(asset_body(&request)?)?; state.document.bind(token)
+    installed_session_command!(state, Bind, session_observed);
+    let result=async { asset_window(&webview)?; let token = asset_commands::preview_token(asset_body(&request)?)?;
+        installed_session_input!(session_observed,session_confirmation_input,token,true); state.document.bind(token) }.await;
+    installed_session_result!(session_observed, Bind, &result); result
 }
 #[tauri::command]
 async fn vault_discard(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
     fixture_command!(state, Forbidden, observed, AssetError::new(Reason::Unqualified));
-    asset_window(&webview)?; let id = asset_commands::discard(asset_body(&request)?)?; state.document.discard(id)
+    installed_session_command!(state, Discard, session_observed);
+    let result=async { asset_window(&webview)?; let id = asset_commands::discard(asset_body(&request)?)?; state.document.discard(id) }.await;
+    installed_session_result!(session_observed, Discard, &result); result
 }
 #[tauri::command]
 async fn vault_lock(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
     fixture_command!(state, Forbidden, observed, AssetError::new(Reason::Unqualified));
-    asset_window(&webview)?; asset_commands::lock(asset_body(&request)?)?; state.document.lock_session()
+    installed_session_command!(state, Lock, session_observed);
+    let result=async { asset_window(&webview)?; asset_commands::lock(asset_body(&request)?)?; state.document.lock_session() }.await;
+    installed_session_result!(session_observed, Lock, &result); result
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -679,16 +832,33 @@ async fn choose_project(state: State<'_, ShellState>) -> Result<Option<Project>,
 #[tauri::command]
 async fn choose_project(webview: Webview, app: tauri::AppHandle, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Option<Project>, AssetError> {
     fixture_command!(state, Project, observed, AssetError::new(Reason::Unqualified));
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+        target_os = "macos", target_arch = "aarch64"))]
+    let mut selection = None;
     let result = async {
         asset_window(&webview)?; asset_commands::status(asset_body(&request)?)?;
         let id = state.document.choose_project(app)?;
         // Only an observer of the retained original operation; no path or native
         // handle belongs to this invoke future, even if the renderer disappears.
-        state.document.project_result(id).await
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+            target_os = "macos", target_arch = "aarch64"))]
+        { state.document.installed_macos_project_result(id, &mut selection).await }
+        #[cfg(not(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+            target_os = "macos", target_arch = "aarch64")))]
+        { state.document.project_result(id).await }
     }.await;
     fixture_result!(observed, project, &result);
-    #[cfg(any(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))), all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+    #[cfg(any(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     if let Some(q) = &state.observation { q.project_result(&result); }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+        target_os = "macos", target_arch = "aarch64"))]
+    // The original result released its document guard before this Record
+    // callback. Never look up a possibly replaced slot from the observer.
+    if let Some(q) = &state.observation { q.project_result(&result, selection.as_ref()); }
     result
 }
 
@@ -744,6 +914,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         let mut android_build_guard = android_build_guard;
         if enter.await.is_err() { return; }
         let mut metadata_revision = None;
+        let mut release_version_revision = None;
         let mut diagnostics_revision = None;
         let mut preflight_revision = None;
         let mut preflight_relay_failed = false;
@@ -773,8 +944,16 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             let revision = *revisions.borrow();
             if metadata_revision != Some(revision) {
                 if let Ok(status) = edits.metadata_text_status() {
+                    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() { q.metadata_edit_status(&status, &edits); }
                     metadata_revision = Some(status.status_revision);
                     let _ = app.emit_to(MAIN_WINDOW, metadata_text_wire::EVENT, &status);
+                }
+            }
+            if release_version_revision != Some(revision) {
+                if let Ok(status) = edits.release_version_status() {
+                    release_version_revision = Some(status.status_revision);
+                    let _ = app.emit_to(MAIN_WINDOW, release_version_wire::EVENT, &status);
                 }
             }
             let status = document.status();
@@ -1053,6 +1232,7 @@ mod owned_gtk {
             if matches!(choice, DialogChoice::Project) { q.project_created(owner.id); }
             else if matches!(choice, DialogChoice::EvidenceFolder) { q.evidence_created(owner.id); }
             else if let DialogChoice::ProjectPath(field) = choice { q.path_created(owner.id,field); }
+            else if let DialogChoice::File(kind) = choice { q.session_file_created(owner.id,kind); }
             else { q.native_created(owner.id, matches!(choice, DialogChoice::Quit)); }
         }
         gtk_fixture!(call, Adopted, 1);
@@ -1110,6 +1290,7 @@ mod owned_gtk {
                                     DialogChoice::Project => q.project_filename(observed_id, path.as_ref().ok().map(PathBuf::as_path)),
                                     DialogChoice::EvidenceFolder => q.evidence_filename(observed_id, path.as_ref().ok().map(PathBuf::as_path)),
                                     DialogChoice::ProjectPath(field) => q.path_filename(observed_id,field,path.as_ref().ok().map(PathBuf::as_path)),
+                                    DialogChoice::File(_) => q.session_file_filename(observed_id,path.as_ref().ok().map(PathBuf::as_path)),
                                     _ => q.unexpected(),
                                 }
                             }
@@ -1130,6 +1311,7 @@ mod owned_gtk {
                                 DialogChoice::Project => q.project_response(observed_id, accepted, cancelled, disposal),
                                 DialogChoice::EvidenceFolder => q.evidence_response(observed_id, accepted, cancelled, disposal),
                                 DialogChoice::ProjectPath(_) => q.path_response(observed_id,accepted,cancelled,disposal),
+                                DialogChoice::File(_) => q.session_file_response(observed_id,accepted,cancelled,disposal),
                                 _ => q.unexpected(),
                             }
                         }
@@ -1152,7 +1334,8 @@ mod owned_gtk {
                     entry.response = Some(dialog.connect_response(move |_, response| {
                         if let Some(call) = response_call.upgrade() {
                             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-                            let (observed_ok, observed_delete) = (response == gtk::ResponseType::Ok, response == gtk::ResponseType::DeleteEvent);
+                            let (observed_ok, observed_cancel, observed_delete) = (response == gtk::ResponseType::Ok,
+                                response == gtk::ResponseType::Cancel, response == gtk::ResponseType::DeleteEvent);
                             gtk_fixture!(call, ResponseEnter, match response { gtk::ResponseType::Ok => 1,
                                 gtk::ResponseType::Cancel => 2, gtk::ResponseType::DeleteEvent => 3, _ => 4 });
                             let response = match response {
@@ -1166,12 +1349,14 @@ mod owned_gtk {
                                 // begin_response returns filename-read permission,
                                 // NOT consent. A first Quit decision returns false;
                                 // acceptance is in the original call's facts.
-                                let (accepted, disposal) = call.facts().map_or((false, false), |facts| {
-                                    let accepted = facts.response && facts.accepted && !facts.declined && !facts.destroyed && !facts.released;
-                                    (observed_ok && _read_one_path == Some(false) && accepted && !facts.close_ack,
-                                     observed_delete && _read_one_path.is_none() && accepted && facts.close_ack)
+                                let (accepted, declined, disposal) = call.facts().map_or((false, false, false), |facts| {
+                                    let response = facts.response && facts.accepted != facts.declined && !facts.destroyed && !facts.released
+                                        && facts.refusal.is_none() && facts.selected.is_none();
+                                    (observed_ok && _read_one_path == Some(false) && response && facts.accepted && !facts.close_ack,
+                                     observed_cancel && _read_one_path == Some(false) && response && facts.declined && !facts.close_ack,
+                                     observed_delete && _read_one_path.is_none() && response && facts.close_ack)
                                 });
-                                q.native_response(observed_id, accepted, disposal);
+                                q.native_response(observed_id, accepted, declined, disposal);
                             }
                             gtk_fixture!(call, ResponseLeave, 1);
                         }
@@ -1180,7 +1365,8 @@ mod owned_gtk {
                         destroyed(&destroy_call);
                         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
                         if let Some(q) = destroy_observation.as_ref().and_then(Weak::upgrade) {
-                            let seen = destroy_call.upgrade().is_some_and(|call| call.facts().is_some_and(|facts| facts.destroyed && facts.response && facts.accepted));
+                            let seen = destroy_call.upgrade().is_some_and(|call| call.facts().is_some_and(|facts|
+                                facts.destroyed && facts.response && facts.accepted != facts.declined && facts.refusal.is_none()));
                             q.native_destroyed(observed_id, seen);
                         }
                     }));
@@ -1311,20 +1497,30 @@ mod owned_gtk {
 
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fn observed_path_dialog(app: &tauri::AppHandle, q: &Arc<installed_observation::Observation>, index: u8) -> Result<Option<(u32,gtk::FileChooserDialog)>,()> {
-        if !gtk::is_initialized_main_thread() { return Err(()); }
+        use installed_observation::PathRejection as R;
+        if !gtk::is_initialized_main_thread() { q.path_failed(R::GtkThread); return Err(()); }
         let original = DIALOG.with(|book| {
-            let book = book.try_borrow().map_err(|_| ())?;
+            let book = book.try_borrow().map_err(|_| R::GtkDialogBook)?;
             let Some(entry) = book.as_ref() else { return Ok(None); };
-            let Object::File(dialog) = &entry.object else { return Err(()); };
-            let (context,call) = entry.observation.as_ref().ok_or(())?;
+            let Object::File(dialog) = &entry.object else { return Err(R::GtkDialogOriginal); };
+            let (context,call) = entry.observation.as_ref().ok_or(R::GtkDialogOriginal)?;
             Ok(Some((entry.id,dialog.clone(),context.clone(),call.clone())))
-        })?;
+        });
+        // Only a closed reason crosses the DIALOG borrow; release it before
+        // taking the observation's Record, as in the session-file observer.
+        let original = match original {
+            Ok(original) => original,
+            Err(reason) => { q.path_failed(reason); return Err(()); },
+        };
         let Some((id,dialog,context,call)) = original else { return Ok(None); };
-        if !context.upgrade().is_some_and(|actual| Arc::ptr_eq(&actual,q)) { return Err(()); }
-        let call = call.upgrade().ok_or(())?; let owner = call.owner().ok_or(())?;
-        if owner.id != id || !Arc::ptr_eq(&owner.gui,&call) || owner.interrupted()
-            || !call.facts().is_some_and(|f| f.created && f.showing && !f.constructing && !f.not_created
-                && !f.response && !f.destroyed && !f.released && f.refusal.is_none()) { return Err(()); }
+        if !context.upgrade().is_some_and(|actual| Arc::ptr_eq(&actual,q)) { q.path_failed(R::GtkDialogOriginal); return Err(()); }
+        let Some(call) = call.upgrade() else { q.path_failed(R::GtkDialogOriginal); return Err(()); };
+        let Some(owner) = call.owner() else { q.path_failed(R::GtkOwnerBinding); return Err(()); };
+        if owner.id != id || !Arc::ptr_eq(&owner.gui,&call) { q.path_failed(R::GtkOwnerBinding); return Err(()); }
+        if owner.interrupted() { q.path_failed(R::GtkOwnerInterrupted); return Err(()); }
+        let original_facts = call.facts().is_some_and(|f| f.created && f.showing && !f.constructing && !f.not_created
+            && !f.response && !f.destroyed && !f.released && f.refusal.is_none());
+        if !original_facts { q.path_failed(R::GtkOwnerFacts); return Err(()); }
         let (field,initial) = q.path_dialog(id,index)?;
         let title = match field {
             asset_commands::ProjectPathField::VersionSource => "Choose an existing version source inside the project",
@@ -1332,36 +1528,136 @@ mod owned_gtk {
             asset_commands::ProjectPathField::IosWorkspace => "Choose an existing Xcode workspace directory",
             asset_commands::ProjectPathField::MetadataRoot => "Choose an existing metadata directory inside the project",
         };
-        let parent: gtk::Window = app.get_webview_window(MAIN_WINDOW).ok_or(())?.gtk_window().map_err(|_| ())?.upcast();
+        let Some(main) = app.get_webview_window(MAIN_WINDOW) else { q.path_failed(R::GtkDialogProperties); return Err(()); };
+        let parent: gtk::Window = match main.gtk_window() {
+            Ok(window) => window.upcast(),
+            Err(_) => { q.path_failed(R::GtkDialogProperties); return Err(()); },
+        };
         if dialog.title().as_deref() != Some(title) || !dialog.is_visible() || !dialog.is_modal()
             || dialog.transient_for().as_ref() != Some(&parent) || !dialog.property::<bool>("destroy-with-parent")
             || dialog.property::<gtk::FileChooserAction>("action") != (if field.directory() { gtk::FileChooserAction::SelectFolder } else { gtk::FileChooserAction::Open })
             || !dialog.property::<bool>("local-only") || dialog.property::<bool>("select-multiple") || dialog.property::<bool>("create-folders")
-            || gtk::Settings::default().is_none_or(|settings| settings.is_gtk_recent_files_enabled()) { return Err(()); }
+            || gtk::Settings::default().is_none_or(|settings| settings.is_gtk_recent_files_enabled()) { q.path_failed(R::GtkDialogProperties); return Err(()); }
         if initial {
             let Some(folder) = dialog.current_folder() else { return Ok(None); };
-            if Some(folder.as_path()) != q.project_path() { return Err(()); }
+            if Some(folder.as_path()) != q.project_path() { q.path_failed(R::GtkInitialFolder); return Err(()); }
         }
         Ok(Some((id,dialog)))
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(super) fn select_observed_path(app: &tauri::AppHandle, q: &Arc<installed_observation::Observation>, index: u8) -> Result<bool,()> {
+        use installed_observation::PathRejection as R;
         let Some((id,dialog)) = observed_path_dialog(app,q,index)? else { return Ok(false); };
-        let path = q.path_target(index).ok_or(())?;
+        let Some(path) = q.path_target(index) else { q.path_failed(R::GtkTarget); return Err(()); };
         q.path_selection(id,index)?;
-        if !dialog.set_filename(path) { return Err(()); }
+        if !dialog.set_filename(path) { q.path_failed(R::GtkSelectionSetter); return Err(()); }
         Ok(true)
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(super) fn activate_observed_path(app: &tauri::AppHandle, q: &Arc<installed_observation::Observation>, index: u8) -> Result<bool,()> {
+        use installed_observation::PathRejection as R;
         let Some((id,dialog)) = observed_path_dialog(app,q,index)? else { return Ok(false); };
-        let select = q.path_target(index).is_some();
+        let target = q.path_target(index);
+        let select = target.is_some();
+        if let Some(path) = target {
+            // Observer-only readiness, not a filename transfer or identity proof.
+            // A setter return or sensitive button can precede GTK's selection.
+            if !dialog.file().is_some_and(|file| file.equal(&gtk::gio::File::for_path(&path))) { return Ok(false); }
+        }
         let response = if select { gtk::ResponseType::Accept } else { gtk::ResponseType::Cancel };
-        let button = dialog.widget_for_response(response).ok_or(())?.downcast::<gtk::Button>().map_err(|_| ())?;
+        let button = match dialog.widget_for_response(response).and_then(|widget| widget.downcast::<gtk::Button>().ok()) {
+            Some(button) => button,
+            None => { q.path_failed(R::GtkResponseWidget); return Err(()); },
+        };
         if !button.is_visible() || dialog.response_for_widget(&button) != response
-            || button.label().as_deref() != Some(if select { "Select" } else { "Cancel" }) { return Err(()); }
+            || button.label().as_deref() != Some(if select { "Select" } else { "Cancel" }) { q.path_failed(R::GtkActionWidget); return Err(()); }
         if !button.is_sensitive() { return Ok(false); }
         q.path_activation(id,index)?;
+        button.emit_clicked(); Ok(true)
+    }
+
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn observed_session_file(app: &tauri::AppHandle, q: &Arc<installed_observation::Observation>, index: u8, activating: bool) -> Result<Option<(u32, gtk::FileChooserDialog, bool)>, ()> {
+        use installed_observation::{SessionRejection as R, SessionWait as W};
+        if !gtk::is_initialized_main_thread() { q.session_file_failed(R::GtkThread); return Err(()); }
+        let original = DIALOG.with(|book| {
+            let book = book.try_borrow().map_err(|_| R::GtkDialogBook)?;
+            let Some(entry) = book.as_ref() else { return Ok(None); };
+            let Object::File(dialog) = &entry.object else { return Err(R::GtkDialogOriginal); };
+            let (context, call) = entry.observation.as_ref().ok_or(R::GtkDialogOriginal)?;
+            Ok(Some((entry.id, dialog.clone(), context.clone(), call.clone())))
+        });
+        // Only closed DATA crosses the DIALOG borrow; record after it is gone.
+        let original = match original {
+            Ok(original) => original,
+            Err(reason) => { q.session_file_failed(reason); return Err(()); },
+        };
+        let Some((id, dialog, context, call)) = original else {
+            q.session_file_wait(index, activating, W::GtkDialogAbsent); return Ok(None);
+        };
+        if !context.upgrade().is_some_and(|actual| Arc::ptr_eq(&actual, q)) { q.session_file_failed(R::GtkDialogOriginal); return Err(()); }
+        let Some(call) = call.upgrade() else { q.session_file_failed(R::GtkDialogOriginal); return Err(()); };
+        let Some(owner) = call.owner() else { q.session_file_failed(R::GtkOwnerBinding); return Err(()); };
+        if owner.id != id || !Arc::ptr_eq(&owner.gui, &call) { q.session_file_failed(R::GtkOwnerBinding); return Err(()); }
+        if owner.interrupted() { q.session_file_failed(R::GtkOwnerInterrupted); return Err(()); }
+        let original_facts = call.facts().is_some_and(|facts| facts.created && facts.showing && !facts.constructing
+            && !facts.not_created && !facts.response && !facts.destroyed && !facts.released && facts.refusal.is_none());
+        if !original_facts { q.session_file_failed(R::GtkOwnerFacts); return Err(()); }
+        let (kind, select) = q.session_file_dialog(id, index)?;
+        let title = match kind {
+            "android-keystore" => "Choose an Android JKS keystore",
+            "android-firebase" => "Choose Android Firebase JSON",
+            _ => { q.session_file_failed(R::GtkDialogProperties); return Err(()); },
+        };
+        let Some(main) = app.get_webview_window(MAIN_WINDOW) else { q.session_file_failed(R::GtkDialogProperties); return Err(()); };
+        let parent: gtk::Window = match main.gtk_window() {
+            Ok(window) => window.upcast(),
+            Err(_) => { q.session_file_failed(R::GtkDialogProperties); return Err(()); },
+        };
+        if dialog.title().as_deref() != Some(title) || !dialog.is_visible() || !dialog.is_modal()
+            || dialog.transient_for().as_ref() != Some(&parent) || !dialog.property::<bool>("destroy-with-parent")
+            || dialog.property::<gtk::FileChooserAction>("action") != gtk::FileChooserAction::Open
+            || !dialog.property::<bool>("local-only") || dialog.property::<bool>("select-multiple") || dialog.property::<bool>("create-folders")
+            || gtk::Settings::default().is_none_or(|settings| settings.is_gtk_recent_files_enabled()) { q.session_file_failed(R::GtkDialogProperties); return Err(()); }
+        Ok(Some((id, dialog, select)))
+    }
+
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(super) fn select_observed_session_file(app: &tauri::AppHandle, q: &Arc<installed_observation::Observation>, index: u8) -> Result<bool, ()> {
+        use installed_observation::SessionRejection as R;
+        let Some((id, dialog, select)) = observed_session_file(app, q, index, false)? else { return Ok(false); };
+        if !select { q.session_file_failed(R::GtkSelectionState); return Err(()); }
+        let Some(path) = q.session_file_target(index) else { q.session_file_failed(R::GtkSelectionState); return Err(()); };
+        q.session_file_selection(id, index)?;
+        // One setter on the real chooser, not a selection receipt. Its actual
+        // accepted callback alone performs the original filename() transfer.
+        if !dialog.set_filename(&path) { q.session_file_failed(R::GtkSelectionSetter); return Err(()); }
+        Ok(true)
+    }
+
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(super) fn activate_observed_session_file(app: &tauri::AppHandle, q: &Arc<installed_observation::Observation>, index: u8) -> Result<bool, ()> {
+        use installed_observation::{SessionRejection as R, SessionWait as W};
+        let Some((id, dialog, select)) = observed_session_file(app, q, index, true)? else { return Ok(false); };
+        if select {
+            let Some(path) = q.session_file_target(index) else { q.session_file_failed(R::GtkSelectionState); return Err(()); };
+            // Observe only readiness on the original chooser. The accepted
+            // production callback still owns the sole native_path transfer.
+            if !dialog.file().is_some_and(|file| file.equal(&gtk::gio::File::for_path(&path))) {
+                q.session_file_wait(index, true, W::GtkSelectionPending); return Ok(false);
+            }
+        }
+        let response = if select { gtk::ResponseType::Accept } else { gtk::ResponseType::Cancel };
+        let button = match dialog.widget_for_response(response).and_then(|widget| widget.downcast::<gtk::Button>().ok()) {
+            Some(button) => button,
+            None => { q.session_file_failed(R::GtkResponseWidget); return Err(()); },
+        };
+        if !button.is_visible() || dialog.response_for_widget(&button) != response
+            || button.label().as_deref() != Some(if select { "Select" } else { "Cancel" }) { q.session_file_failed(R::GtkActionWidget); return Err(()); }
+        if !button.is_sensitive() { q.session_file_wait(index, true, W::GtkActionInsensitive); return Ok(false); }
+        q.session_file_activation(id, index)?;
+        // The existing GtkDialog handler emits the response. No direct
+        // response/begin_response call or second filename read is permitted.
         button.emit_clicked(); Ok(true)
     }
 
@@ -1389,10 +1685,11 @@ mod owned_gtk {
         if dialog.title().as_deref() != Some("Quit and discard unsaved drafts?")
             || !dialog.is_visible() || !dialog.is_modal()
             || dialog.transient_for().as_ref() != Some(&parent) { return Err(()); }
-        let button = dialog.widget_for_response(gtk::ResponseType::Ok).ok_or(())?.downcast::<gtk::Button>().map_err(|_| ())?;
-        if !button.is_visible() || !button.is_sensitive() || dialog.response_for_widget(&button) != gtk::ResponseType::Ok { return Err(()); }
+        let response = if q.quit_selects_ok(id)? { gtk::ResponseType::Ok } else { gtk::ResponseType::Cancel };
+        let button = dialog.widget_for_response(response).ok_or(())?.downcast::<gtk::Button>().map_err(|_| ())?;
+        if !button.is_visible() || !button.is_sensitive() || dialog.response_for_widget(&button) != response { return Err(()); }
         q.native_activation(id)?;
-        // Activate the actual OK action widget. GtkDialog's original clicked
+        // Activate the actual selected action widget. GtkDialog's original clicked
         // handler emits the response; never call response/begin_response here.
         button.emit_clicked();
         // These temporary GTK refs leave before the queued native close/release
@@ -1725,6 +2022,8 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             } else { DocumentBinding::new(bridge.clone()) };
             #[cfg(not(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
             let document = DocumentBinding::new(bridge.clone());
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            if let Some(q) = &observation { q.attach_session(&document)?; q.attach_commands(&document)?; }
             let (relay_stop, stop_receiver) = watch::channel(false);
             app.manage(ShellState {
                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1743,7 +2042,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             let page_fixture = fixture.clone();
             #[cfg(any(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))), all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
             let page_observation = observation.clone();
-            #[cfg(any(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"), all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+            #[cfg(any(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))), all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
             let navigation_observation = observation.clone();
             #[cfg(not(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
             let navigation = document.clone();
@@ -1782,7 +2081,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
                     let _observed = (true, _trusted);
                     #[cfg(not(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
                     let allowed = navigation.navigation(_trusted);
-                    #[cfg(any(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"), all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+                    #[cfg(any(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))), all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
                     if let Some(q) = &navigation_observation {
                         if _observed.0 { q.navigation(_observed.1, allowed); }
                     }
@@ -1926,6 +2225,8 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             github_workflow_edit_close, github_workflow_edit_status,
             metadata_text_observe, metadata_text_validate, metadata_text_edit_open, metadata_text_edit_prepare,
             metadata_text_edit_apply, metadata_text_edit_close, metadata_text_edit_status,
+            release_version_edit_open, release_version_edit_prepare, release_version_edit_apply,
+            release_version_edit_close, release_version_edit_status,
             github_connection_status, github_connection_connect_token, github_connection_refresh, github_connection_disconnect,
             vault_status, vault_open, asset_context, asset_choose, credential_prepare,
             vault_prepare_delete, vault_commit, vault_bind, vault_discard, vault_lock,
@@ -1934,6 +2235,14 @@ fn builder() -> tauri::Builder<tauri::Wry> {
         })
         .on_window_event(|window, event| {
             if window.label() != MAIN_WINDOW { return; }
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+            if !matches!(event, tauri::WindowEvent::Destroyed | tauri::WindowEvent::CloseRequested { .. }) {
+                // Tauri supplies its captured ORIGINAL Window here. The label
+                // only routes; missing pre-setup observer state remains inert.
+                if let Some(state) = window.try_state::<ShellState>() {
+                    if let Some(q) = &state.observation { q.observe_original_window(window); }
+                }
+            }
             if let tauri::WindowEvent::Destroyed = event {
                 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
                 if let Some(startup) = window.try_state::<Arc<owned_windows::Startup>>() { startup.destroyed(); }

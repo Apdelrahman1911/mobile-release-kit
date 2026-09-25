@@ -384,4 +384,3 @@ class WindowsEmbeddedPayloadDataTests(unittest.TestCase):
             self.assertEqual(archive.read_bytes(), raw)
             self.assertTrue((runtime / "python/LICENSE.txt").is_file())
             self.assertFalse((runtime / "manifest.json").exists())
-

@@ -26,6 +26,12 @@ const RECORD_METADATA_BYTES: usize = 1024 * 1024;
 // Never inferred from crate presence, a renderer boolean, or R1 DTO passes.
 const NATIVE_QUALIFIED: bool = false;
 
+// Explicitly ignored component fixture only: no installed window, persistent
+// provider admission or renderer command is enabled by compiling this module.
+#[cfg(all(test, debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[path = "asset_session_gnome_transport_fixture.rs"]
+mod gnome_transport_fixture;
+
 fn installed_evidence_profile(evidence_selection: bool, candidate_method: bool) -> bool {
     // An advertised development method or broad asset fixture is not authority
     // for this separate installed, documents-only picker.
@@ -44,6 +50,26 @@ macro_rules! fixture_event {
     ($owner:expr, $kind:ident, $detail:expr) => {
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         $owner.fixture_event(FixtureEvent::$kind, $detail);
+    };
+}
+
+// Private transition labels, not public errors or new lifecycle authority.
+// Unrelated/unsupported transitions deliberately keep NotRecorded provenance.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UnknownOrigin {
+    NotRecorded, OperationCleanup(Reason), Registry, CoordinatorLock, CoordinatorJoin,
+    SupervisorDisabled, StagedCollision, InstallRetirement, RetirementRetain, RetirementDrain,
+    StagedRefusal, GatePoisoned, Exhausted,
+}
+macro_rules! first_unknown_origin {
+    ($state:ident, $origin:expr, $owner:expr) => {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if !$state.unknown && !$state.exhausted && $state.first_origin.is_none() {
+            // Split fields rather than borrowing the whole state: a caller may
+            // still hold the exact slot at its fresh transition. Never recover
+            // an association later from a restored/current slot or public DTO.
+            $state.first_origin = installed_session_observation::FirstOrigin::at_transition($origin, $owner);
+        }
     };
 }
 
@@ -176,6 +202,14 @@ pub(crate) struct OriginalWork {
     pub(crate) wake: Notify, coordinator: Mutex<CoordinatorBook>, child: AsyncMutex<ChildBook>,
     source: Arc<Mutex<SourceBook>>, pub(crate) gui: Arc<GuiCall>,
     retirement: Mutex<Retirement>, retired: AtomicBool,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    keyring: Mutex<crate::vault_keyring_linux::LookupBook>,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    large_work_started: AtomicBool,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    installed_capture: Mutex<Option<Arc<asset_source::InstalledCaptureCheckpoint>>>,
+    #[cfg(all(test, debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    gnome_transport_gate: Mutex<Option<Arc<gnome_transport_fixture::BoundaryGate>>>,
 }
 impl OriginalWork {
     fn new(id: u32, gui_needed: bool, document: Weak<Inner>) -> Arc<Self> {
@@ -183,6 +217,14 @@ impl OriginalWork {
             wake: Notify::new(), coordinator: Mutex::new(CoordinatorBook { handle: None, receipt: JoinReceipt::New }),
             child: AsyncMutex::new(ChildBook { handle: None, receipt: JoinReceipt::New }), source: Arc::new(Mutex::new(SourceBook::new())),
             retirement: Mutex::new(Retirement::default()), retired: AtomicBool::new(true),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            keyring: Mutex::new(crate::vault_keyring_linux::LookupBook::new()),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            large_work_started: AtomicBool::new(false),
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            installed_capture: Mutex::new(None),
+            #[cfg(all(test, debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            gnome_transport_gate: Mutex::new(None),
             gui: Arc::new(GuiCall { owner: owner.clone(), document, facts: Mutex::new(GuiFacts { dispatched: false, constructing: false,
                 created: false, showing: false, response: false, accepted: false, declined: false, accepted_at: None,
                 destroyed: false, released: !gui_needed, not_created: !gui_needed, close_queued: false, close_ack: false, release_queued: false,
@@ -226,9 +268,33 @@ impl OriginalWork {
         let coordinator = self.coordinator.try_lock().is_ok_and(|book| matches!(book.receipt, JoinReceipt::Returned | JoinReceipt::Failed) && book.handle.is_none());
         let child = self.child.try_lock().is_ok_and(|book| matches!(book.receipt, JoinReceipt::New | JoinReceipt::Returned | JoinReceipt::Failed) && book.handle.is_none());
         let source = self.source.try_lock().is_ok_and(|book| book.not_started() || book.settled());
-        coordinator && child && source && self.gui.settled()
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let keyring = self.keyring.try_lock().is_ok_and(|book| book.resources_settled());
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        let keyring = true;
+        coordinator && child && source && self.gui.settled() && keyring
     }
-    fn resources_settled(&self) -> bool { self.original_resources_settled() && self.retired.load(Ordering::SeqCst) }
+    fn resources_settled(&self) -> bool {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let allocations = self.keyring.try_lock().is_ok_and(|book| book.allocations_released());
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        let allocations = true;
+        self.original_resources_settled() && self.retired.load(Ordering::SeqCst) && allocations
+    }
+    fn lookup_allocations_allowed(&self) -> bool {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        { self.keyring.try_lock().is_ok_and(|book| !book.memory_held()) }
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        { true }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn dispose_keyring_storage(&self) -> bool {
+        let Ok(retirement) = self.retirement.try_lock() else { return false; };
+        if !self.retired.load(Ordering::SeqCst) || !lookup_memory::retirement_empty(&retirement)
+            || !self.original_resources_settled() { return false; }
+        let Ok(mut book) = self.keyring.try_lock() else { return false; };
+        book.dispose_settled_storage()
+    }
     fn normally_declined(&self) -> bool {
         // A normal body may also return after refusal/not-created. Neither that
         // nor a failed join is evidence of a genuine native Cancel response.
@@ -260,8 +326,12 @@ impl OriginalWork {
         *holding = retirement; Ok(())
     }
     fn release_retirement(&self) -> bool {
-        let retirement = match self.retirement.try_lock() { Ok(mut holding) => std::mem::take(&mut *holding), Err(_) => return false };
-        drop(retirement); // No admission lock, native handle or await here.
+        let Ok(mut holding) = self.retirement.try_lock() else { return false; };
+        let retirement = std::mem::take(&mut *holding);
+        // Still off the document/admission lock, but retain THIS custody mutex
+        // through the actual drop and receipt. A census cannot see empty data
+        // while an off-lock drain is merely scheduled or still in progress.
+        drop(retirement);
         self.retired.store(true, Ordering::SeqCst); true
     }
 }
@@ -343,15 +413,17 @@ impl GuiCall {
         self.changed();
     }
     pub(crate) fn failed(&self, reason: Reason) {
+        self.failed_at(reason, Instant::now());
+    }
+    pub(crate) fn failed_at(&self, reason: Reason, at: Instant) {
+        // The original failure time precedes lock acquisition. A delayed
+        // observer cannot grant this same operation another cleanup allowance.
         let Some(inner) = self.document.upgrade() else { return; };
         let document = DocumentBinding { inner };
         let Some(owner) = self.owner() else { return; };
         let mut state = document.lock();
-        if let Some(mut facts) = self.facts() { if facts.refusal.is_none() { facts.refusal = Some(reason); } }
-        let now = Instant::now();
-        if let Some(slot) = state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, &owner)) { slot.stop(reason, now); }
-        if state.quit.as_ref().is_some_and(|quit| Arc::ptr_eq(quit, &owner)) { stop_quit(&mut state, now); }
-        owner.stop(); document.bump(&mut state); self.changed();
+        fail_gui_original_locked(&mut state, self, &owner, reason, at);
+        document.bump(&mut state); self.changed();
     }
     pub(crate) fn begin_response(&self, response: NativeResponse, quit: bool) -> Option<bool> {
         let Some(inner) = self.document.upgrade() else { return None; };
@@ -390,6 +462,15 @@ impl GuiCall {
     }
 }
 
+fn fail_gui_original_locked(state: &mut DocumentState, call: &GuiCall, owner: &Arc<OriginalWork>, reason: Reason, at: Instant) {
+    // Same transition and notification order as the ordinary native failure
+    // path. This only requests STOP; it supplies no response or settlement.
+    if let Some(mut facts) = call.facts() { if facts.refusal.is_none() { facts.refusal = Some(reason); } }
+    if let Some(slot) = state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, owner)) { slot.stop(reason, at); }
+    if state.quit.as_ref().is_some_and(|quit| Arc::ptr_eq(quit, owner)) { stop_quit(state, at); }
+    owner.stop();
+}
+
 struct Slot {
     owner: Arc<OriginalWork>, operation: Operation, phase: Phase, reason: Reason, source: SourceState, settlement: Settlement,
     context: Option<Arc<NativeContext>>, target: Option<RecordKey>, review_end: Option<Instant>, cleanup_end: Option<Instant>,
@@ -412,6 +493,9 @@ struct DocumentState {
     lifetime: DocumentLifetime, revision: u32, next_operation: u32, next_context: u32, exhausted: bool, lost_observed: bool,
     session: bool, stopping: bool, unknown: bool, quit_pending: bool, retiring: bool, lock_pending: bool,
     compatibility_picker_pending: bool,
+    session_owner_reason: Option<Reason>,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    first_origin: Option<installed_session_observation::FirstOrigin>,
     context: Option<Arc<NativeContext>>, slot: Option<Slot>, records: Vec<Record>, assignments: Vec<Assignment>,
     quit: Option<Arc<OriginalWork>>, quit_accepted: bool, quit_cleanup_end: Option<Instant>,
     github: ConnectionState,
@@ -588,6 +672,9 @@ fn quit_question_admitted(state: &DocumentState) -> bool {
 }
 struct Inner {
     state: Mutex<DocumentState>, bridge: Arc<DesktopBridge>, changes: watch::Sender<u32>,
+    session_identity: Arc<()>,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    installed_session: Mutex<Option<installed_session_observation::Book>>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fixture: Option<Weak<Qualification>>,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -596,6 +683,614 @@ struct Inner {
 #[derive(Clone)]
 pub(crate) struct DocumentBinding { inner: Arc<Inner> }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn keyring_slot_gate(state: &DocumentState, owner: &Arc<OriginalWork>, step: Option<crate::vault_keyring_linux::Step>, now: Instant)
+    -> Result<Instant, crate::vault_keyring_linux::Problem> {
+    use crate::vault_keyring_linux::Problem;
+    let slot = state.slot.as_ref().filter(|slot| Arc::ptr_eq(&slot.owner, owner) && slot.operation == Operation::Prepare)
+        .ok_or(Problem::Interrupted)?;
+    // Fixed own-session close/subscription removal may pass after STOP/loss.
+    // It still belongs to this exact current OriginalWork; no public Boolean
+    // can substitute for the book's expected step or real slot identity.
+    if step.is_some_and(crate::vault_keyring_linux::Step::cleanup) {
+        return keyring_cleanup_endpoint(state, owner, now);
+    }
+    if !state.lifetime.original_bound() || state.lost_observed || state.exhausted || state.unknown || state.stopping
+        || state.quit_pending || state.retiring || state.lock_pending || owner.interrupted()
+        || slot.phase != Phase::Assessing || slot.cleanup_end.is_some()
+    { return Err(Problem::Interrupted); }
+    owner.endpoint().filter(|end| now < *end).ok_or(Problem::Interrupted)
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn keyring_cleanup_endpoint(state: &DocumentState, owner: &Arc<OriginalWork>, now: Instant)
+    -> Result<Instant, crate::vault_keyring_linux::Problem> {
+    use crate::vault_keyring_linux::Problem;
+    let slot = state.slot.as_ref().filter(|slot| Arc::ptr_eq(&slot.owner, owner) && slot.operation == Operation::Prepare)
+        .ok_or(Problem::Interrupted)?;
+    // STOP/loss never grants a new lease. This same endpoint guards both remote
+    // session close/removal and DISTINCT local shutdown, including first poll.
+    let end = slot.cleanup_end.or_else(|| owner.endpoint()).ok_or(Problem::CleanupUnknown)?;
+    if now >= end || state.unknown || state.exhausted || slot.phase == Phase::Unknown
+        || matches!(slot.settlement, Settlement::Unknown | Settlement::LateKnown)
+    { return Err(Problem::CleanupUnknown); }
+    Ok(end)
+}
+
+// Only the actual document/current-slot gate can construct this non-Clone
+// token. It is consumed immediately under the same locked original book; it is
+// neither a caller Boolean nor a fake Step::RemoveMatch.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) struct KeyringShutdownAdmission { endpoint: Instant }
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl KeyringShutdownAdmission {
+    pub(crate) fn into_endpoint(self) -> Instant { self.endpoint }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn keyring_shutdown_gate(state: &DocumentState, owner: &Arc<OriginalWork>, book: &crate::vault_keyring_linux::LookupBook, now: Instant)
+    -> Result<KeyringShutdownAdmission, crate::vault_keyring_linux::Problem> {
+    if !book.shutdown_waiting_first_poll() { return Err(crate::vault_keyring_linux::Problem::CleanupUnknown); }
+    Ok(KeyringShutdownAdmission { endpoint: keyring_cleanup_endpoint(state, owner, now)? })
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn keyring_poll_gate(state: &DocumentState, owner: &Arc<OriginalWork>, book: &crate::vault_keyring_linux::LookupBook, now: Instant)
+    -> Result<Instant, crate::vault_keyring_linux::Problem> {
+    keyring_slot_gate(state, owner, book.current_step(), now)
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn keyring_problem_stop(state: &mut DocumentState, owner: &Arc<OriginalWork>,
+    problem: Option<(crate::vault_keyring_linux::Problem, Instant)>) -> bool {
+    use crate::vault_keyring_linux::Problem;
+    if let (Some((problem, at)), Some(slot)) = (problem,
+        state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, owner))) {
+        let reason = match problem {
+            Problem::Interrupted => Reason::UserCancelled,
+            Problem::CleanupUnknown => Reason::CleanupUnknown,
+            Problem::Capacity => Reason::Capacity,
+            _ => Reason::SourceRefused,
+        };
+        if slot.cleanup_end.is_none() { slot.stop(reason, at); return true; }
+    }
+    false
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn keyring_constrain_cleanup(state: &DocumentState, owner: &Arc<OriginalWork>, book: &mut crate::vault_keyring_linux::LookupBook) {
+    if let Some(end) = state.slot.as_ref().filter(|slot| Arc::ptr_eq(&slot.owner, owner)
+        && slot.operation == Operation::Prepare).and_then(|slot| slot.cleanup_end) {
+        // Slot::stop is the sole writer: first_cleanup_end always adds CLEANUP
+        // to the first stop/due timestamp. Never derive this from observer-now.
+        book.constrain_cleanup_endpoint(end - CLEANUP, end);
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl DocumentBinding {
+    // Deliberately PRIVATE and UNCALLED by renderer/session prepare/bind. A later
+    // native profile must integrate this into the already-registered coordinator;
+    // no second task or alternate owner is created by this source-only phase.
+    fn enter_keyring_lookup(&self, owner: &Arc<OriginalWork>, input: crate::vault_keyring_linux::LookupInput)
+        -> Result<(), crate::vault_keyring_linux::Problem> {
+        let mut state = self.lock(); let now = Instant::now(); self.expire(&mut state, now);
+        let dispatch_end = keyring_slot_gate(&state, owner, None, now)?;
+        lookup_memory::enter(&state, owner, input, dispatch_end)
+        // No IO is polled while the document/registry mutex is held.
+    }
+    fn admit_keyring_step(&self, owner: &Arc<OriginalWork>, step: crate::vault_keyring_linux::Step)
+        -> Result<(), crate::vault_keyring_linux::Problem> {
+        use crate::vault_keyring_linux::Problem;
+        let mut state = self.lock(); let now = Instant::now(); self.expire(&mut state, now);
+        let dispatch_end = keyring_slot_gate(&state, owner, Some(step), now)?;
+        let mut book = owner.keyring.lock().map_err(|_| Problem::CleanupUnknown)?;
+        if !book.expected(step) { return Err(Problem::CleanupUnknown); }
+        book.admit(step, dispatch_end)
+    }
+    fn admit_keyring_shutdown(&self, owner: &Arc<OriginalWork>)
+        -> Result<(), crate::vault_keyring_linux::Problem> {
+        use crate::vault_keyring_linux::Problem;
+        let mut state = self.lock(); let now = Instant::now(); self.expire(&mut state, now);
+        let mut book = owner.keyring.lock().map_err(|_| Problem::CleanupUnknown)?;
+        self.record_keyring_problem(&mut state, owner, book.problem().zip(book.problem_at()), book.document_cleanup_unknown());
+        let end = keyring_cleanup_endpoint(&state, owner, Instant::now())?;
+        book.admit_shutdown(end)
+    }
+    fn report_keyring_problem(&self, owner: &Arc<OriginalWork>) {
+        // Read and RELEASE the backend mutex before acquiring the document gate.
+        let (problem, cleanup_unknown) = match owner.keyring.lock() {
+            Ok(book) => (book.problem().zip(book.problem_at()), book.document_cleanup_unknown()),
+            Err(error) => { drop(error); let mut state = self.lock(); self.coordinator_failed(&mut state, UnknownOrigin::NotRecorded, None); return; }
+        };
+        let mut state = self.lock();
+        self.record_keyring_problem(&mut state, owner, problem, cleanup_unknown);
+    }
+    fn record_keyring_problem(&self, state: &mut DocumentState, owner: &Arc<OriginalWork>,
+        problem: Option<(crate::vault_keyring_linux::Problem, Instant)>, cleanup_unknown: bool) {
+        // The first failure time, not this later observer tick, owns cleanup.
+        if keyring_problem_stop(state, owner, problem) { self.bump(state); }
+        // Record the real first failure clock BEFORE generic Unknown handling,
+        // whose fallback timestamp must not accidentally renew cleanup.
+        // The installed-session diagnostic vocabulary does not describe this
+        // private keyring path; never invent a session/query association.
+        if cleanup_unknown && !state.unknown { self.coordinator_failed(state, UnknownOrigin::NotRecorded, None); }
+    }
+    async fn drive_keyring_lookup(&self, owner: &Arc<OriginalWork>, input: crate::vault_keyring_linux::LookupInput)
+        -> Result<(), crate::vault_keyring_linux::Problem> {
+        use crate::vault_keyring_linux::{Next, Problem};
+        self.enter_keyring_lookup(owner, input)?;
+        loop {
+            let next = std::future::poll_fn(|cx| {
+                let turn = {
+                    let mut state = self.lock(); self.expire(&mut state, Instant::now());
+                    let mut book = match owner.keyring.lock() { Ok(book) => book, Err(_) => return Poll::Ready(Err(Problem::CleanupUnknown)) };
+                    if owner.interrupted() { book.interrupt(); }
+                    self.record_keyring_problem(&mut state, owner, book.problem().zip(book.problem_at()), book.document_cleanup_unknown());
+                    keyring_constrain_cleanup(&state, owner, &mut book);
+                    drop(state); // Never poll native work under the document mutex.
+                    book.poll(cx)
+                }; // Release book BEFORE acquiring document: never inverted locks.
+                match turn {
+                    Poll::Pending => Poll::Pending,
+                    Poll::Ready(next @ (Next::Admit(_) | Next::AdmitShutdown | Next::Settled)) => Poll::Ready(Ok(next)),
+                    Poll::Ready(Next::FirstPoll) => {
+                        // FINAL admission after bounded stream work. The current
+                        // exact slot/Unknown/effective cutoff is read under the
+                        // original document -> book order. This is the local
+                        // linearization point: later cancellation cannot revoke
+                        // an already-consumed admission retroactively. It is not
+                        // an instantaneous-stop/no-later-native-poll guarantee.
+                        let mut state = self.lock(); self.expire(&mut state, Instant::now());
+                        let mut book = match owner.keyring.lock() { Ok(book) => book, Err(_) => return Poll::Ready(Err(Problem::CleanupUnknown)) };
+                        if owner.interrupted() { book.interrupt(); }
+                        self.record_keyring_problem(&mut state, owner, book.problem().zip(book.problem_at()), book.document_cleanup_unknown());
+                        keyring_constrain_cleanup(&state, owner, &mut book);
+                        let current_gate = keyring_poll_gate(&state, owner, &book, Instant::now());
+                        drop(state);
+                        // No stream turn, await, lock or fallible setup here.
+                        book.first_poll(cx, current_gate);
+                        Poll::Pending
+                    }
+                    Poll::Ready(Next::FirstPollShutdown) => {
+                        let mut state = self.lock(); self.expire(&mut state, Instant::now());
+                        let mut book = match owner.keyring.lock() { Ok(book) => book, Err(_) => return Poll::Ready(Err(Problem::CleanupUnknown)) };
+                        if owner.interrupted() { book.interrupt(); }
+                        self.record_keyring_problem(&mut state, owner, book.problem().zip(book.problem_at()), book.document_cleanup_unknown());
+                        keyring_constrain_cleanup(&state, owner, &mut book);
+                        let admission = keyring_shutdown_gate(&state, owner, &book, Instant::now());
+                        drop(state);
+                        // The typed grant is consumed now: no await, new lock,
+                        // stream work or successor setup can intervene.
+                        book.first_poll_shutdown(cx, admission);
+                        Poll::Pending
+                    }
+                }
+            });
+            tokio::pin!(next);
+            let next = tokio::select! {
+                next = &mut next => Some(next),
+                _ = owner.wake.notified() => None,
+                _ = tokio::time::sleep(Duration::from_millis(25)) => None,
+            };
+            self.report_keyring_problem(owner);
+            match next {
+                Some(Ok(Next::Admit(step))) => {
+                    // The ignored headless fixture may defer only this fixed
+                    // successor. Re-enter THIS driver to keep pumping its real
+                    // owner stream/deadline; no alternate IO loop or grant.
+                    #[cfg(all(test, debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    if gnome_transport_fixture::hold_successor(owner, step).await { continue; }
+                    // Prepare fallible RNG/DH outside the document lock, under
+                    // this same already-charged original coordinator. The real
+                    // document/slot gate still must admit and first-poll the RPC.
+                    let prepared = if step == crate::vault_keyring_linux::Step::OpenSession {
+                        match owner.keyring.lock() {
+                            Ok(mut book) => { if owner.interrupted() { book.interrupt(); } book.prepare_exchange() }
+                            Err(error) => { drop(error); let mut state = self.lock(); self.coordinator_failed(&mut state, UnknownOrigin::NotRecorded, None); return Err(Problem::CleanupUnknown); }
+                        }
+                    } else { Ok(()) };
+                    if let Err(problem) = prepared.and_then(|()| self.admit_keyring_step(owner, step)) {
+                        match owner.keyring.lock() {
+                            Ok(mut book) => book.admission_refused(step, problem),
+                            Err(error) => { drop(error); let mut state = self.lock(); self.coordinator_failed(&mut state, UnknownOrigin::NotRecorded, None); return Err(Problem::CleanupUnknown); }
+                        }
+                    }
+                },
+                Some(Ok(Next::AdmitShutdown)) => if let Err(problem) = self.admit_keyring_shutdown(owner) {
+                    match owner.keyring.lock() {
+                        Ok(mut book) => book.shutdown_admission_refused(problem),
+                        Err(error) => { drop(error); let mut state = self.lock(); self.coordinator_failed(&mut state, UnknownOrigin::NotRecorded, None); return Err(Problem::CleanupUnknown); }
+                    }
+                },
+                Some(Ok(Next::Settled)) => {
+                    let book = owner.keyring.lock().map_err(|_| Problem::CleanupUnknown)?;
+                    if !book.resources_settled() { return Err(Problem::CleanupUnknown); }
+                    // This settles only this local child phase. The original
+                    // coordinator join/stage and Unknown/LateKnown gates still
+                    // decide retirement and any operation/result authority.
+                    return book.problem().map_or(Ok(()), Err);
+                },
+                Some(Ok(Next::FirstPoll | Next::FirstPollShutdown)) => {
+                    let mut state = self.lock(); self.coordinator_failed(&mut state, UnknownOrigin::NotRecorded, None);
+                    return Err(Problem::CleanupUnknown);
+                },
+                Some(Err(problem)) => {
+                    let mut state = self.lock(); self.coordinator_failed(&mut state, UnknownOrigin::NotRecorded, None);
+                    // Failed coordinator cannot continue polling. Its actual
+                    // poisoned book/resources remain retained and unfinal.
+                    return Err(problem);
+                }
+                None => self.tick(),
+            }
+            // Candidate/Absent or RemoveMatch alone cannot return/stage. All
+            // retained originals continue until the SDK's real local finality.
+        }
+    }
+}
+
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+mod lookup_memory {
+    use super::*;
+    use crate::vault_keyring_linux::Problem;
+
+    const WORKING_BYTES: usize = 96 * 1024 * 1024;
+    const IDENTITIES: usize = 128;
+    const ARC_CELLS: usize = 2 * std::mem::size_of::<usize>();
+
+    const FIXED_CONTROL_BYTES: usize = crate::vault_keyring_linux::LOOKUP_CONTROL_BYTES
+        + std::mem::size_of::<OriginalWork>() + std::mem::size_of::<GuiCall>() + std::mem::size_of::<Slot>()
+        + std::mem::size_of::<Mutex<SourceBook>>() + 16 * std::mem::size_of::<usize>();
+    // SDK futures <=32KiB and other SDK cells <=16KiB leave THIS app share
+    // <=16KiB, not another control allowance on top of the fixed 64KiB row.
+    const _: () = assert!(FIXED_CONTROL_BYTES <= 16 * 1024);
+
+    // Constructible only by this document's locked census. It is not Clone,
+    // configurable wire credit, a global allocator or a process-RSS promise.
+    pub(crate) struct Admission { _private: () }
+    impl Admission {
+        fn checked(live: usize, scratch: usize) -> Result<Self, Problem> {
+            let total = live.checked_add(scratch)
+                .and_then(|bytes| bytes.checked_add(zbus::connection::OwnedConnectionAttempt::KEYRING_WIRE_BYTES))
+                // Explicit additional crypto row, not spent wire headroom.
+                // The total working/resident limits remain unchanged.
+                .and_then(|bytes| bytes.checked_add(secret_service::checked_lookup::RETRIEVAL_CRYPTO_BYTES))
+                .ok_or(Problem::Capacity)?;
+            if total > WORKING_BYTES { return Err(Problem::Capacity); }
+            Ok(Self { _private: () })
+        }
+        #[cfg(test)]
+        pub(crate) fn data(live: usize, scratch: usize) -> Result<Self, Problem> { Self::checked(live, scratch) }
+    }
+
+    struct Seen { ids: [usize; IDENTITIES], used: usize }
+    impl Seen {
+        fn new() -> Self { Self { ids: [0; IDENTITIES], used: 0 } }
+        fn insert<T>(&mut self, value: &Arc<T>) -> Result<bool, Problem> {
+            let id = Arc::as_ptr(value) as usize;
+            if self.ids[..self.used].contains(&id) { return Ok(false); }
+            if self.used == self.ids.len() { return Err(Problem::Capacity); }
+            self.ids[self.used] = id; self.used += 1; Ok(true)
+        }
+    }
+
+    pub(super) fn retirement_empty(value: &Retirement) -> bool {
+        value.old_slot.is_none() && value.candidate.is_none() && value.staged.is_none() && value.payload.is_none()
+            && value.context.is_none() && value.slot_context.is_none() && value.assessment.is_none()
+            && value.records.capacity() == 0 && value.assignments.capacity() == 0
+    }
+    fn retirement_known(owner: &OriginalWork, value: &Retirement) -> Result<(), Problem> {
+        // Empty + no positive drain receipt is NOT zero live bytes. The actual
+        // off-document drop now retains this same retirement mutex throughout.
+        if owner.retired.load(Ordering::SeqCst) != retirement_empty(value) { return Err(Problem::CleanupUnknown); }
+        Ok(())
+    }
+    fn child_joined(book: &ChildBook) -> bool {
+        book.handle.is_none() && matches!(book.receipt, JoinReceipt::New | JoinReceipt::Returned)
+    }
+
+    struct Census<'a> {
+        current: &'a Arc<OriginalWork>, current_source: &'a SourceBook, current_retirement: &'a Retirement,
+        bytes: usize, payloads: Seen, materials: Seen, contexts: Seen, sources: Seen, owners: Seen,
+    }
+    impl<'a> Census<'a> {
+        fn new(current: &'a Arc<OriginalWork>, source: &'a SourceBook, retirement: &'a Retirement) -> Self {
+            Self { current, current_source: source, current_retirement: retirement, bytes: 0,
+                payloads: Seen::new(), materials: Seen::new(), contexts: Seen::new(), sources: Seen::new(), owners: Seen::new() }
+        }
+        fn add(&mut self, bytes: usize) -> Result<(), Problem> {
+            self.bytes = self.bytes.checked_add(bytes).ok_or(Problem::Capacity)?; Ok(())
+        }
+        fn cells<T>(&mut self, count: usize) -> Result<(), Problem> {
+            self.add(count.checked_mul(std::mem::size_of::<T>()).ok_or(Problem::Capacity)?)
+        }
+        fn arc_cells<T>(&mut self) -> Result<(), Problem> { self.add(std::mem::size_of::<T>())?; self.add(ARC_CELLS) }
+        fn token(&mut self, token: &Token) -> Result<(), Problem> { self.add(token.0.capacity()) }
+        fn key(&mut self, key: &RecordKey) -> Result<(), Problem> { self.token(&key.id) }
+        fn context(&mut self, context: &Arc<NativeContext>) -> Result<(), Problem> {
+            if !self.contexts.insert(context)? { return Ok(()); }
+            self.arc_cells::<NativeContext>()?;
+            self.add(context.draft.capacity())?; self.add(context.project_id.capacity())?; self.add(context.project.path.capacity())
+        }
+        fn payload(&mut self, payload: &Arc<Payload>) -> Result<(), Problem> {
+            if !self.payloads.insert(payload)? { return Ok(()); }
+            // This unchanged per-payload metadata allowance includes the native
+            // FileObservation projection: one exact-capacity 256-cell vector
+            // plus <=64KiB exact-capacity strings, not a retained parser arena.
+            self.add(RECORD_METADATA_BYTES)?;
+            if let Some(fields) = &payload.fields { self.add(fields.retained_bytes().ok_or(Problem::Capacity)?)?; }
+            if let Some(material) = &payload.material {
+                if self.materials.insert(material)? {
+                    self.arc_cells::<Material>()?; self.add(material.captured.bytes.capacity())?;
+                    self.add(material.captured.origin.retained_bytes().ok_or(Problem::Capacity)?)?; self.add(ARC_CELLS)?;
+                }
+            }
+            Ok(())
+        }
+        fn source(&mut self, source: &Arc<Mutex<SourceBook>>, book: &SourceBook) -> Result<(), Problem> {
+            if !self.sources.insert(source)? { return Ok(()); }
+            self.arc_cells::<Mutex<SourceBook>>()?; self.add(book.retained_bytes().ok_or(Problem::Capacity)?)
+        }
+        fn records(&mut self, records: &Vec<Record>) -> Result<(), Problem> {
+            self.cells::<Record>(records.capacity())?;
+            for record in records { self.key(&record.key)?; self.payload(&record.payload)?; } Ok(())
+        }
+        fn assignments(&mut self, values: &Vec<Assignment>) -> Result<(), Problem> {
+            self.cells::<Assignment>(values.capacity())?;
+            for value in values { self.token(&value.record_id)?; } Ok(())
+        }
+        fn candidate(&mut self, candidate: &Candidate) -> Result<(), Problem> {
+            self.payload(&candidate.payload)?; self.token(&candidate.record_id)?;
+            if let Some(key) = &candidate.existing { self.key(key)?; } Ok(())
+        }
+        fn tokens(&mut self, tokens: &TokenBatch) -> Result<(), Problem> {
+            for token in [&tokens.selection, &tokens.record, &tokens.preview, &tokens.bind] { self.token(token)?; } Ok(())
+        }
+        fn command_error(&mut self) -> Result<(), Problem> {
+            // CommandError is an Arc of a two-variant enum whose two payloads
+            // contain static strings/scalars only; sum both alternatives plus
+            // tag/alignment and Arc cells rather than inspect/private-clone it.
+            self.add(std::mem::size_of::<AssetError>())?;
+            self.add(std::mem::size_of::<crate::credential_assessment::AssessmentError>())?;
+            self.add(2 * ARC_CELLS)
+        }
+        fn staged(&mut self, staged: &Staged) -> Result<(), Problem> {
+            match staged {
+                Staged::Selected { payload, tokens } => { self.payload(payload)?; self.tokens(tokens) },
+                Staged::Prepared { result: Err(_), tokens } => { self.command_error()?; self.tokens(tokens) },
+                Staged::Delete(tokens) => self.tokens(tokens),
+                Staged::Committed { bind } => { if let Some(token) = bind { self.token(token)?; } Ok(()) },
+                Staged::Bound(value) => self.token(&value.record_id),
+                Staged::Refused(_) => Ok(()),
+                // No invented census for opaque AssessmentResult vectors or
+                // unrelated project/evidence/path DTOs in this closed slice.
+                _ => Err(Problem::Unavailable),
+            }
+        }
+        fn slot(&mut self, slot: &Slot) -> Result<(), Problem> {
+            if slot.assessment.is_some() || slot.project.is_some() || slot.evidence.is_some()
+                || slot.project_path.is_some() || slot.path_result.is_some() { return Err(Problem::Unavailable); }
+            self.add(std::mem::size_of::<Slot>())?;
+            if let Some(context) = &slot.context { self.context(context)?; }
+            if let Some(key) = &slot.target { self.key(key)?; }
+            if let Some(candidate) = &slot.candidate { self.candidate(candidate)?; }
+            if let Some(token) = &slot.selection { self.token(token)?; }
+            if let Some(preview) = &slot.preview {
+                self.token(&preview.token)?;
+                if let Some(token) = &preview.bind_token { self.token(token)?; }
+                if let Some(key) = &preview.record { self.key(key)?; }
+                if let Some(token) = &preview.subject.record_id { self.token(token)?; }
+            }
+            if let Some(staged) = &slot.staged { self.staged(staged)?; }
+            if slot.error.is_some() { self.command_error()?; }
+            if let Some(key) = &slot.result_record { self.key(key)?; }
+            if let Some(payload) = &slot.retired_payload { self.payload(payload)?; }
+            self.owner(&slot.owner)
+        }
+        fn retirement(&mut self, retirement: &Retirement) -> Result<(), Problem> {
+            if retirement.assessment.is_some() { return Err(Problem::Unavailable); }
+            if let Some(candidate) = &retirement.candidate { self.candidate(candidate)?; }
+            if let Some(staged) = &retirement.staged { self.staged(staged)?; }
+            if let Some(payload) = &retirement.payload { self.payload(payload)?; }
+            if let Some(context) = &retirement.context { self.context(context)?; }
+            if let Some(context) = &retirement.slot_context { self.context(context)?; }
+            self.records(&retirement.records)?; self.assignments(&retirement.assignments)?;
+            if let Some(slot) = &retirement.old_slot { self.slot(slot)?; } Ok(())
+        }
+        fn owner(&mut self, owner: &Arc<OriginalWork>) -> Result<(), Problem> {
+            if !self.owners.insert(owner)? { return Ok(()); }
+            self.arc_cells::<OriginalWork>()?; self.arc_cells::<GuiCall>()?;
+            let gui = owner.gui.facts.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+            if !(gui.not_created || gui.destroyed && gui.released) { return Err(Problem::CleanupUnknown); }
+            if let Some(path) = &gui.selected { self.add(path.capacity())?; }
+            if Arc::ptr_eq(owner, self.current) {
+                retirement_known(owner, self.current_retirement)?;
+                self.source(&owner.source, self.current_source)?; self.retirement(self.current_retirement)
+            } else {
+                // A retained old/quit owner has no remaining original which may
+                // allocate after this snapshot. Busy/failed/ambiguous is refusal.
+                let coordinator = owner.coordinator.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+                let child = owner.child.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+                let source = owner.source.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+                let retirement = owner.retirement.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+                let keyring = owner.keyring.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+                if coordinator.receipt != JoinReceipt::Returned || coordinator.handle.is_some() || !child_joined(&child)
+                    || !(source.not_started() || source.settled()) || !keyring.resources_settled() || !keyring.allocations_released()
+                { return Err(Problem::CleanupUnknown); }
+                retirement_known(owner, &retirement)?;
+                self.source(&owner.source, &source)?; self.retirement(&retirement)
+            }
+        }
+        fn document(&mut self, state: &DocumentState) -> Result<(), Problem> {
+            if state.retiring { return Err(Problem::CleanupUnknown); }
+            self.add(std::mem::size_of::<DocumentState>())?;
+            self.records(&state.records)?; self.assignments(&state.assignments)?;
+            if let Some(context) = &state.context { self.context(context)?; }
+            if let Some(slot) = &state.slot { self.slot(slot)?; }
+            if let Some(quit) = &state.quit { self.owner(quit)?; } Ok(())
+        }
+    }
+
+    pub(super) fn live_bytes(state: &DocumentState, owner: &Arc<OriginalWork>, source: &SourceBook, retirement: &Retirement) -> Result<usize, Problem> {
+        let mut census = Census::new(owner, source, retirement); census.document(state)?; Ok(census.bytes)
+    }
+    pub(super) fn enter(state: &DocumentState, owner: &Arc<OriginalWork>,
+        input: crate::vault_keyring_linux::LookupInput, end: Instant) -> Result<(), Problem> {
+        let coordinator = owner.coordinator.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+        let child = owner.child.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+        let source = owner.source.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+        let retirement = owner.retirement.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+        let mut book = owner.keyring.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+        if coordinator.receipt != JoinReceipt::Pending || coordinator.handle.is_none() || !child_joined(&child)
+            || !(source.not_started() || source.settled()) || owner.large_work_started.load(Ordering::SeqCst)
+            || !book.can_begin() { return Err(Problem::CleanupUnknown); }
+        let live = live_bytes(state, owner, &source, &retirement)?;
+        // Child/parser originals are positively joined; credential_format drops
+        // arenas before ChildEnd. Non-Token child/R1/Value work has NEVER
+        // started in this owner; no caller-local Captured result is omitted.
+        // Thus no parser/request scratch is silently presumed inside 6MiB.
+        let charge = Admission::checked(live, 0)?;
+        let result = book.begin(input, end, charge);
+        // These are the ACTUAL child/source/retirement dispatch locks; none is
+        // released between the census and publishing the one nonduplicable charge.
+        drop((book, retirement, source, child, coordinator)); result
+    }
+
+    #[cfg(test)]
+    mod tests {
+        // Fixed-census DATA only. Synthetic bookkeeping below is never a native
+        // source/SDK/coordinator receipt, allocation measurement or provider test.
+        use super::*;
+
+        fn empty_payload() -> Arc<Payload> { Arc::new(Payload { kind: Kind::GoogleWif, material: None, fields: None }) }
+        fn material(capacity: usize) -> Arc<Material> {
+            let observation = credential_format::inspect(credential_format::FileKind::AndroidKeystore, &[], &mut || false)
+                .ok().expect("inert empty observation");
+            Arc::new(Material { captured: asset_source::CapturedSource::memory_data(Vec::with_capacity(capacity)), observation })
+        }
+        fn data_context() -> Arc<NativeContext> {
+            Arc::new(NativeContext { revision: 1, project_id: "data-project".into(),
+                project: asset_source::RegisteredRoot { path: "/inert/project".into(), identity: asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity()) },
+                registry_generation: 1, draft: Vec::with_capacity(97), platform: Platform::Android, stage: Stage::Candidate, purpose: Purpose::Signing })
+        }
+        fn tokens() -> TokenBatch {
+            TokenBatch { selection: Token(String::new()), record: Token(String::new()), preview: Token(String::new()), bind: Token(String::new()) }
+        }
+        fn live(state: &DocumentState, owner: &Arc<OriginalWork>) -> Result<usize, Problem> {
+            let source = owner.source.lock().unwrap(); let retirement = owner.retirement.lock().unwrap();
+            live_bytes(state, owner, &source, &retirement)
+        }
+
+        #[test]
+        fn app_control_cells_fit_the_shared_sixteen_kib_row() {
+            assert!(FIXED_CONTROL_BYTES <= 16 * 1024);
+            assert_eq!(zbus::connection::OwnedConnectionAttempt::KEYRING_WIRE_BYTES, 1024 * 1024);
+        }
+        #[test]
+        fn lookup_allowance_checks_boundary_overflow_and_capture_overlap() {
+            let reserved = zbus::connection::OwnedConnectionAttempt::KEYRING_WIRE_BYTES
+                + secret_service::checked_lookup::RETRIEVAL_CRYPTO_BYTES;
+            assert_eq!(secret_service::checked_lookup::RETRIEVAL_CRYPTO_BYTES, 32 * 1024);
+            assert!(Admission::checked(WORKING_BYTES - reserved, 0).is_ok());
+            assert!(matches!(Admission::checked(WORKING_BYTES - reserved + 1, 0), Err(Problem::Capacity)));
+            assert!(matches!(Admission::checked(usize::MAX, 1), Err(Problem::Capacity)));
+            assert!(matches!(Admission::checked(1, usize::MAX), Err(Problem::Capacity)));
+            assert!(matches!(Admission::checked(SESSION_BYTES, 32 * 1024 * 1024 + 1), Err(Problem::Capacity)));
+            assert_eq!(SESSION_BYTES, 64 * 1024 * 1024); // The committed quota is independent and unchanged.
+            let owner = OriginalWork::new(1, false, Weak::new()); let source = SourceBook::new(); let retirement = Retirement::default();
+            let mut census = Census::new(&owner, &source, &retirement);
+            assert_eq!(census.cells::<Record>(usize::MAX), Err(Problem::Capacity));
+        }
+        #[test]
+        fn lookup_identity_census_is_fixed_and_duplicate_arcs_spend_no_slot() {
+            let values: Vec<_> = (0..IDENTITIES + 1).map(Arc::new).collect();
+            let mut seen = Seen::new();
+            for value in &values[..IDENTITIES] { assert_eq!(seen.insert(value), Ok(true)); }
+            assert_eq!(seen.insert(&values[0].clone()), Ok(false));
+            assert_eq!(seen.insert(&values[IDENTITIES]), Err(Problem::Capacity));
+            assert_eq!(seen.used, IDENTITIES);
+        }
+        #[test]
+        fn lookup_payload_material_context_and_source_arcs_deduplicate_separately() {
+            let owner = OriginalWork::new(1, false, Weak::new()); let source = SourceBook::new(); let retirement = Retirement::default();
+            let mut census = Census::new(&owner, &source, &retirement);
+            let captured = material(29);
+            let first = Arc::new(Payload { kind: Kind::AndroidKeystore, material: Some(captured.clone()), fields: None });
+            census.payload(&first).unwrap(); let once = census.bytes;
+            census.payload(&first.clone()).unwrap(); assert_eq!(census.bytes, once);
+            let second = Arc::new(Payload { kind: Kind::AndroidKeystore, material: Some(captured), fields: None });
+            census.payload(&second).unwrap(); assert_eq!(census.bytes, once + RECORD_METADATA_BYTES);
+            let distinct = material(29);
+            let extra = RECORD_METADATA_BYTES + std::mem::size_of::<Material>() + ARC_CELLS
+                + distinct.captured.bytes.capacity() + distinct.captured.origin.retained_bytes().unwrap() + ARC_CELLS;
+            let third = Arc::new(Payload { kind: Kind::AndroidKeystore, material: Some(distinct), fields: None });
+            let before = census.bytes; census.payload(&third).unwrap(); assert_eq!(census.bytes, before + extra);
+
+            let context = data_context(); census.context(&context).unwrap(); let once = census.bytes;
+            census.context(&context.clone()).unwrap(); assert_eq!(census.bytes, once);
+            let extra = std::mem::size_of::<NativeContext>() + ARC_CELLS + context.draft.capacity()
+                + context.project_id.capacity() + context.project.path.capacity();
+            let other = data_context(); census.context(&other).unwrap(); assert_eq!(census.bytes, once + extra);
+
+            let source = Arc::new(Mutex::new(SourceBook::unstarted_backing_data()));
+            let book = source.lock().unwrap(); census.source(&source, &book).unwrap(); let once = census.bytes;
+            census.source(&source.clone(), &book).unwrap(); assert_eq!(census.bytes, once);
+            let other = Arc::new(Mutex::new(SourceBook::unstarted_backing_data()));
+            let other_book = other.lock().unwrap(); let extra = std::mem::size_of::<Mutex<SourceBook>>() + ARC_CELLS + other_book.retained_bytes().unwrap();
+            census.source(&other, &other_book).unwrap(); assert_eq!(census.bytes, once + extra);
+        }
+        #[test]
+        fn lookup_census_counts_retained_old_slots_records_contexts_and_refused_source_backing() {
+            let owner = OriginalWork::new(1, false, Weak::new()); let mut state = crate::asset_session::tests::empty_state();
+            state.slot = Some(Slot::new(owner.clone(), Operation::Prepare, None, None, None));
+            let baseline = live(&state, &owner).unwrap();
+            let old = OriginalWork::new(2, false, Weak::new());
+            old.coordinator.lock().unwrap().receipt = JoinReceipt::Returned; // Model only, no claimed original task.
+            *old.source.lock().unwrap() = SourceBook::unstarted_backing_data();
+            let retained_source = old.source.lock().unwrap().retained_bytes().unwrap();
+            let shared = empty_payload(); let old_payload = empty_payload(); let retained_record = empty_payload(); let context = data_context();
+            let mut old_slot = Slot::new(old, Operation::ChooseFile, Some(context.clone()), None, None);
+            old_slot.candidate = Some(Candidate { payload: old_payload.clone(), record_id: Token(String::new()), existing: None });
+            old_slot.staged = Some(Staged::Selected { payload: old_payload, tokens: tokens() });
+            let retirement = Retirement { old_slot: Some(Box::new(old_slot)), payload: Some(shared.clone()), context: Some(context),
+                records: vec![Record { key: RecordKey { id: Token(String::new()), revision: 1 }, payload: retained_record, mutation_pending: false }],
+                ..Retirement::default() };
+            assert!(owner.retain_retirement(retirement).is_ok());
+            state.slot.as_mut().unwrap().candidate = Some(Candidate { payload: shared.clone(), record_id: Token(String::new()), existing: None });
+            state.slot.as_mut().unwrap().retired_payload = Some(shared);
+            let total = live(&state, &owner).unwrap();
+            assert!(total >= baseline + 3 * RECORD_METADATA_BYTES + retained_source + 97);
+            state.retiring = true; assert_eq!(live(&state, &owner), Err(Problem::CleanupUnknown)); state.retiring = false;
+            assert!(owner.release_retirement()); // DATA-only drop, no original resource to settle.
+            state.slot.as_mut().unwrap().candidate = None; state.slot.as_mut().unwrap().retired_payload = None;
+            assert_eq!(live(&state, &owner), Ok(baseline));
+            owner.retired.store(false, Ordering::SeqCst);
+            assert_eq!(live(&state, &owner), Err(Problem::CleanupUnknown)); // Empty in-flight holding is not zero.
+        }
+        #[test]
+        fn lookup_census_refuses_unsupported_retained_dto_shapes() {
+            let owner = OriginalWork::new(1, false, Weak::new()); let mut state = crate::asset_session::tests::empty_state();
+            let mut slot = Slot::new(owner.clone(), Operation::Prepare, None, None, None);
+            slot.evidence = Some(EvidenceBinding { operation_id: 1, kind: evidence_wire::OperationKind::Observe, selection_id: None, epoch: 1 });
+            state.slot = Some(slot);
+            assert_eq!(live(&state, &owner), Err(Problem::Unavailable));
+            state.slot.as_mut().unwrap().evidence = None;
+            assert!(live(&state, &owner).is_ok());
+        }
+    }
+}
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) use lookup_memory::Admission as KeyringMemoryAdmission;
+
+fn lookup_allocation_gate(state: &DocumentState) -> Result<(), AssetError> {
+    // All large/copy admissions share the current document mutex. STOP, status,
+    // lock/loss and reconciliation intentionally do not call this predicate.
+    if state.slot.as_ref().is_some_and(|slot| !slot.owner.lookup_allocations_allowed()) {
+        return Err(AssetError::new(Reason::Busy));
+    }
+    Ok(())
+}
 fn passive_document_gate(state: &DocumentState) -> Result<(), BridgeError> {
     // Existing passive services do not require editing/crash-hook qualification.
     // The caller still holds this same document mutex through Supervisor claim.
@@ -617,7 +1312,15 @@ fn common_document_gate(state: &DocumentState, session: bool, owner_gate: impl F
     if session && state.slot.as_ref().is_some_and(|slot| (slot.operation.evidence() || slot.operation.project_path())
         && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) { return Err(AssetError::new(Reason::Busy)); }
     if state.quit_pending || state.retiring || state.lock_pending { return Err(AssetError::new(Reason::Busy)); }
-    Ok(())
+    lookup_allocation_gate(state)
+}
+fn session_owner_reason(supervisor_disabled: bool, edit_disabled: bool, supervisor_stopping: bool, edit_stopping: bool) -> Option<Reason> {
+    if supervisor_disabled || edit_disabled { Some(Reason::CleanupUnknown) }
+    else if supervisor_stopping || edit_stopping { Some(Reason::Shutdown) } else { None }
+}
+fn observe_session_owner_reason(state: &mut DocumentState, reason: Option<Reason>) -> bool {
+    if state.session_owner_reason == reason { return false; }
+    state.session_owner_reason = reason; true
 }
 fn ordinary_asset_platform_gate() -> Result<(), AssetError> {
     // Private asset custody is separate from the installed project-only
@@ -649,16 +1352,24 @@ fn android_build_document_gate(state: &DocumentState, profile: Option<crate::and
 impl DocumentBinding {
     pub(crate) fn new(bridge: Arc<DesktopBridge>) -> Self {
         let (changes, _) = watch::channel(0);
-        Self { inner: Arc::new(Inner { bridge, changes,
+        let document = Self { inner: Arc::new(Inner { bridge, changes, session_identity: Arc::new(()),
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            installed_session: Mutex::new(None),
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             fixture: None,
             #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             github_fixture: None,
             state: Mutex::new(DocumentState { lifetime: DocumentLifetime::default(), revision: 0,
             next_operation: 0, next_context: 0, exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
-            compatibility_picker_pending: false,
+            compatibility_picker_pending: false, session_owner_reason: None,
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
-            github: ConnectionState::new(), evidence: EvidenceRegistry::new() }) }) }
+            github: ConnectionState::new(), evidence: EvidenceRegistry::new(),
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            first_origin: None }) }) };
+        // One memory-only binding to the Supervisor created in the ordinary
+        // DesktopBridge constructor. A later document cannot rebind its lease.
+        document.inner.bridge.supervisor.bind_original_session_document(&document.inner.session_identity);
+        document
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(crate) fn for_fixture(bridge: Arc<DesktopBridge>, permit: FixtureAdmission) -> Result<Self, &'static str> {
@@ -689,9 +1400,37 @@ impl DocumentBinding {
     }
     fn native_qualified(&self) -> bool {
         if NATIVE_QUALIFIED { return true; }
+        if self.inner.bridge.installed_session_available(&self.inner.session_identity) { return true; }
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         if let Some(context) = self.inner.fixture.as_ref().and_then(Weak::upgrade) { return context.permits(self); }
         false
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn admit_installed_session(&self, permit: crate::shell::installed_observation::SessionAdmission) -> Result<(), BridgeError> {
+        // Setup only, before original navigation/IPC. The ordinary constructor
+        // has already bound this exact identity to its one Supervisor.
+        let state = self.lock();
+        if state.next_operation != 0 || state.next_context != 0 || state.session || state.slot.is_some()
+            || state.context.is_some() || state.quit.is_some() || state.lost_observed || state.stopping || state.unknown
+            || self.live_session_owner_reason().is_some() { return Err(BridgeError::invalid()); }
+        let case = permit.consume()?;
+        self.inner.bridge.supervisor.admit_installed_session_once(&self.inner.session_identity)?;
+        let mut observation = self.inner.installed_session.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+        if observation.is_some() { return Err(BridgeError::invalid()); }
+        *observation = Some(installed_session_observation::Book::new(case)); Ok(())
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn admit_installed_commands(&self, tools: crate::shell::installed_observation::commands::ToolsAdmission,
+        offline: crate::shell::installed_observation::commands::OfflineAdmission) -> Result<(), BridgeError> {
+        let state = self.lock();
+        if state.next_operation != 0 || state.next_context != 0 || state.session || state.slot.is_some() || state.context.is_some()
+            || state.quit.is_some() || state.lost_observed || state.stopping || state.unknown || self.live_session_owner_reason().is_some() {
+            return Err(BridgeError::invalid());
+        }
+        self.inner.bridge.diagnostics.admit_installed_observation(tools)?;
+        self.inner.bridge.preflight.admit_installed_observation(offline)
     }
     fn project_selection_qualified(&self) -> bool {
         if self.inner.bridge.installed_project_selection_available() { return true; }
@@ -725,7 +1464,7 @@ impl DocumentBinding {
                 // A poisoned gate cannot emit differing DTOs at one ordinary
                 // revision. Freeze the same final redacted authority while
                 // retaining all originals for conservative settlement/exit.
-                if !state.exhausted { self.exhaust(&mut state); }
+                if !state.exhausted { self.exhaust(&mut state, UnknownOrigin::GatePoisoned); }
                 state
             }
         }
@@ -733,14 +1472,15 @@ impl DocumentBinding {
     fn bump(&self, state: &mut DocumentState) {
         if state.exhausted { return; }
         if state.unknown { state.github.unknown(); state.evidence.revoke(true); }
-        let Some(revision) = state.evidence.revision.checked_add(1) else { self.exhaust(state); return; };
+        let Some(revision) = state.evidence.revision.checked_add(1) else { self.exhaust(state, UnknownOrigin::Exhausted); return; };
         state.evidence.revision = revision;
         match status_successor(state.revision) {
             Some(next) => { state.revision = next; self.inner.changes.send_replace(next); }
-            None => self.exhaust(state),
+            None => self.exhaust(state, UnknownOrigin::Exhausted),
         }
     }
-    fn exhaust(&self, state: &mut DocumentState) {
+    fn exhaust(&self, state: &mut DocumentState, _origin: UnknownOrigin) {
+        first_unknown_origin!(state, _origin, None);
         state.exhausted = true; state.unknown = true; state.stopping = true; state.lost_observed = true;
         state.github.exhaust();
         state.evidence.revision = u64::MAX; state.evidence.revoke(true);
@@ -754,7 +1494,7 @@ impl DocumentBinding {
         state.revision = u32::MAX; self.inner.changes.send_replace(u32::MAX);
     }
     fn next_operation(&self, state: &mut DocumentState) -> Result<u32, AssetError> {
-        let Some(next) = state.next_operation.checked_add(1) else { self.exhaust(state); return Err(AssetError::new(Reason::CleanupUnknown)); };
+        let Some(next) = state.next_operation.checked_add(1) else { self.exhaust(state, UnknownOrigin::Exhausted); return Err(AssetError::new(Reason::CleanupUnknown)); };
         state.next_operation = next; Ok(next)
     }
     pub(crate) fn subscribe(&self) -> watch::Receiver<u32> { self.inner.changes.subscribe() }
@@ -847,7 +1587,7 @@ impl DocumentBinding {
                 BridgeError::new("offline_preflight_busy", "Finish or cancel the original operation before reviewing saved offline checks.")
             } else { crate::offline_preflight_owner::unavailable() });
         }
-        let selected = self.registry_result(&mut state, self.inner.bridge.native_project(&args.project_id));
+        let selected = self.registry_result(&mut state, self.inner.bridge.native_project(&args.project_id), None);
         let (generation, root) = selected.map_err(|_| crate::offline_preflight_owner::unavailable())?;
         self.inner.bridge.preflight.prepare(args, generation, root, gate)
     }
@@ -855,7 +1595,7 @@ impl DocumentBinding {
         let admitted_at = Instant::now(); // Native T before lock/lookup/executor/runtime/enqueue/await.
         let mut state = self.lock();
         let project = self.inner.bridge.preflight.prepared_project(&args.operation_id, &args.owner_generation)?;
-        let selected = self.registry_result(&mut state, self.inner.bridge.native_project(&project)).ok();
+        let selected = self.registry_result(&mut state, self.inner.bridge.native_project(&project), None).ok();
         let admitted = self.inner.bridge.preflight.start(args, admitted_at, selected, self.preflight_gate(&state))?;
         // Real document/context/quit decisions cannot interleave registration,
         // one-use consent consumption, original roster claim and release.
@@ -904,7 +1644,7 @@ impl DocumentBinding {
         }
         // Only the existing native root identity/generation, never a renderer
         // path or a diagnostics/offline fixture permit, reaches this owner.
-        let selected = self.registry_result(&mut state, self.inner.bridge.native_project(&args.project_id));
+        let selected = self.registry_result(&mut state, self.inner.bridge.native_project(&args.project_id), None);
         let (generation, root) = selected.map_err(|_| crate::android_build_owner::unavailable())?;
         self.inner.bridge.android_build.prepare(args, generation, root, gate)
     }
@@ -912,7 +1652,7 @@ impl DocumentBinding {
         let admitted_at = Instant::now(); // Original T before the document lock, lookup, executor or await.
         let mut state = self.lock();
         let project = self.inner.bridge.android_build.prepared_project(&args.operation_id, &args.owner_generation)?;
-        let selected = self.registry_result(&mut state, self.inner.bridge.native_project(&project)).ok();
+        let selected = self.registry_result(&mut state, self.inner.bridge.native_project(&project), None).ok();
         let admitted = self.inner.bridge.android_build.start(args, admitted_at, selected, self.android_build_gate(&state))?;
         // Gate/root/generation, one-use consent and the original roster claim
         // share this document mutex. GO is released only after unlocking it.
@@ -1107,9 +1847,14 @@ impl DocumentBinding {
     }
     fn gate(&self, state: &DocumentState, session: bool) -> Result<(), AssetError> {
         self.common_gate(state, session)?;
+        if let Some(reason) = self.live_session_owner_reason() { return Err(AssetError::new(reason)); }
         ordinary_asset_platform_gate()?;
         if !self.native_qualified() { return Err(AssetError::new(Reason::Unqualified)); }
         if session && !state.session { return Err(AssetError::new(Reason::Closed)); } Ok(())
+    }
+    fn live_session_owner_reason(&self) -> Option<Reason> {
+        session_owner_reason(self.inner.bridge.supervisor.disabled(), self.inner.bridge.edits.disabled(),
+            self.inner.bridge.supervisor.stopping(), self.inner.bridge.edits.stopping())
     }
     fn project_path_gate(&self, state: &DocumentState) -> Result<(), AssetError> {
         self.common_gate(state, false)?;
@@ -1153,12 +1898,16 @@ impl DocumentBinding {
         let mut state = self.lock();
         if record_evidence_failure(&mut state, owner, problem, Instant::now()) { self.bump(&mut state); }
     }
-    fn registry_result<T>(&self, state: &mut DocumentState, result: Result<T, AssetError>) -> Result<T, AssetError> {
-        if result.as_ref().is_err_and(|error| error.reason == Reason::CleanupUnknown) { self.coordinator_failed(state); }
+    fn registry_result<T>(&self, state: &mut DocumentState, result: Result<T, AssetError>, original: Option<&Arc<OriginalWork>>) -> Result<T, AssetError> {
+        // Admission/context callers without an explicit original pass None.
+        // In particular, state.slot is not a diagnostic association fallback.
+        if result.as_ref().is_err_and(|error| error.reason == Reason::CleanupUnknown) {
+            self.coordinator_failed(state, UnknownOrigin::Registry, original);
+        }
         result
     }
     fn project_path_registration(&self, state: &mut DocumentState, binding: &ProjectPathBinding) -> Result<(), AssetError> {
-        let (generation, root) = self.registry_result(state, self.inner.bridge.native_project(&binding.project_id))?;
+        let (generation, root) = self.registry_result(state, self.inner.bridge.native_project(&binding.project_id), None)?;
         if !binding.registration_matches(generation, &root) { return Err(AssetError::new(Reason::ContextStale)); }
         Ok(())
     }
@@ -1186,7 +1935,7 @@ impl DocumentBinding {
             || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping() { state.github.retire(GitHubReason::Cancelled); }
         let registration = state.github.registration().map(|(id, generation)| (id.to_owned(), generation));
         if let Some((id, original)) = registration {
-            match self.registry_result(state, self.inner.bridge.github_registration(&id)) {
+            match self.registry_result(state, self.inner.bridge.github_registration(&id), None) {
                 Ok(generation) if generation == original => {},
                 Err(error) if error.reason == Reason::CleanupUnknown => state.github.unknown(),
                 _ => state.github.retire(GitHubReason::TargetChanged),
@@ -1206,7 +1955,7 @@ impl DocumentBinding {
         if gate != GitHubReason::None { return Err(github_session::refused(gate)); }
         let github_wire::Command::ConnectToken(args) = github_wire::decode_command_value("github_connection_connect_token", value)
             .map_err(|_| github_session::refused(GitHubReason::InvalidInput))? else { return Err(github_session::refused(GitHubReason::InvalidInput)); };
-        let generation = self.registry_result(&mut state, self.inner.bridge.github_registration(&args.project_id))
+        let generation = self.registry_result(&mut state, self.inner.bridge.github_registration(&args.project_id), None)
             .map_err(|error| github_session::refused(if error.reason == Reason::CleanupUnknown { GitHubReason::CleanupUnknown } else { GitHubReason::TargetChanged }))?;
         let now = Instant::now(); let wall = std::time::SystemTime::now();
         state.github.connect(args, generation, &self.inner.bridge.supervisor, now, wall)
@@ -1248,7 +1997,7 @@ impl DocumentBinding {
         // This supplied event is not native picker-admission/callback evidence.
         self.inner.bridge.android_build.context_changed();
         self.inner.bridge.android_build.ensure_idle().map_err(|_| AssetError::new(Reason::Unqualified))?;
-        let published = self.registry_result(&mut state, self.inner.bridge.publish_checked_project(proof, generation))?;
+        let published = self.registry_result(&mut state, self.inner.bridge.publish_checked_project(proof, generation), None)?;
         self.bump(&mut state);
         Ok(published)
     }
@@ -1278,14 +2027,21 @@ impl DocumentBinding {
     ) -> Result<T, BridgeError> {
         self.registered_edit_admit(crate::edit_protocol::EditDomain::MetadataText, project_id, enqueue)
     }
-    // Only the two explicitly registered-root domains use this same mutex and
+    pub(crate) fn release_version_edit_admit<T>(
+        &self,
+        project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
+        enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot) -> Result<T, BridgeError>,
+    ) -> Result<T, BridgeError> {
+        self.registered_edit_admit(crate::edit_protocol::EditDomain::ReleaseVersion, project_id, enqueue)
+    }
+    // Only the three explicitly registered-root domains use this same mutex and
     // proof. A proof never qualifies a writer or changes configuration custody.
     fn registered_edit_admit<T>(
         &self, domain: crate::edit_protocol::EditDomain,
         project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
         enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot) -> Result<T, BridgeError>,
     ) -> Result<T, BridgeError> {
-        if !matches!(domain, crate::edit_protocol::EditDomain::GitHubWorkflows | crate::edit_protocol::EditDomain::MetadataText) {
+        if !matches!(domain, crate::edit_protocol::EditDomain::GitHubWorkflows | crate::edit_protocol::EditDomain::MetadataText | crate::edit_protocol::EditDomain::ReleaseVersion) {
             return Err(BridgeError::invalid());
         }
         let mut state = self.lock();
@@ -1310,7 +2066,7 @@ impl DocumentBinding {
         // Selection admission/publication and document loss cannot interleave
         // this native lookup with the original owner's claim and enqueue. The
         // registry guard is released before taking EditOwner's lock.
-        let selected = self.registry_result(&mut state, self.inner.bridge.native_project(&id));
+        let selected = self.registry_result(&mut state, self.inner.bridge.native_project(&id), None);
         let (generation, root) = selected.map_err(|error| match error.reason {
             Reason::CleanupUnknown => {
                 // Registry poison is sticky and revokes the original edit;
@@ -1335,6 +2091,10 @@ impl DocumentBinding {
         self.registered_fixture_publish(proof, generation, crate::edit_protocol::EditDomain::MetadataText)
     }
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn version_fixture_publish(&self, proof: crate::asset_source::ProjectProbe, generation: u32) -> Result<Project, AssetError> {
+        self.registered_fixture_publish(proof, generation, crate::edit_protocol::EditDomain::ReleaseVersion)
+    }
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fn registered_fixture_publish(&self, proof: crate::asset_source::ProjectProbe, generation: u32,
         domain: crate::edit_protocol::EditDomain) -> Result<Project, AssetError> {
         let mut state = self.lock();
@@ -1344,6 +2104,7 @@ impl DocumentBinding {
         let permitted = match domain {
             crate::edit_protocol::EditDomain::GitHubWorkflows => self.inner.bridge.edits.workflow_fixture_registration_permitted(proof.path()),
             crate::edit_protocol::EditDomain::MetadataText => self.inner.bridge.edits.metadata_fixture_registration_permitted(proof.path()),
+            crate::edit_protocol::EditDomain::ReleaseVersion => self.inner.bridge.edits.version_fixture_registration_permitted(proof.path()),
             crate::edit_protocol::EditDomain::Configuration => false,
         };
         if state.stopping || state.quit_pending || state.retiring || state.lock_pending || state.slot.is_some()
@@ -1354,14 +2115,14 @@ impl DocumentBinding {
         }
         self.inner.bridge.android_build.context_changed();
         self.inner.bridge.android_build.ensure_idle().map_err(|_| AssetError::new(Reason::Unqualified))?;
-        let published = self.registry_result(&mut state, self.inner.bridge.publish_checked_project(proof, generation))?;
+        let published = self.registry_result(&mut state, self.inner.bridge.publish_checked_project(proof, generation), None)?;
         self.bump(&mut state);
         Ok(published)
     }
     fn current_context(&self, state: &mut DocumentState, revision: u32) -> Result<Arc<NativeContext>, AssetError> {
         let context = state.context.as_ref().filter(|context| context.revision == revision).cloned().ok_or_else(|| AssetError::new(Reason::ContextStale))?;
         let matches = self.context_matches(state, &context);
-        if !self.registry_result(state, matches)? { return Err(AssetError::new(Reason::ContextStale)); } Ok(context)
+        if !self.registry_result(state, matches, None)? { return Err(AssetError::new(Reason::ContextStale)); } Ok(context)
     }
     fn context_matches(&self, state: &DocumentState, context: &Arc<NativeContext>) -> Result<bool, AssetError> {
         if !state.lifetime.original_bound() || state.stopping || state.unknown { return Ok(false); }
@@ -1371,7 +2132,11 @@ impl DocumentBinding {
         Ok(generation == context.registry_generation && root.identity == context.project.identity && root.path == context.project.path)
     }
     fn expire(&self, state: &mut DocumentState, now: Instant) {
-        let mut changed = false;
+        let owner_reason = self.live_session_owner_reason();
+        // Display changes advance the existing native revision. This is
+        // capability DATA, not a fabricated asset cleanup result, and does
+        // not block original discard/retirement/quit behind new admission.
+        let mut changed = observe_session_owner_reason(state, owner_reason);
         if let Some(slot) = state.slot.as_mut() {
             if slot.cleanup_end.is_none() && slot.phase != Phase::Idle {
                 let work = slot.owner.endpoint();
@@ -1384,6 +2149,7 @@ impl DocumentBinding {
                 if let Some((end, reason)) = due.filter(|(end, _)| now >= *end) { slot.stop(reason, end); changed = true; }
             }
             if slot.phase != Phase::Unknown && slot.cleanup_end.is_some_and(|end| now >= end) && !slot.owner.resources_settled() {
+                first_unknown_origin!(state, UnknownOrigin::OperationCleanup(slot.reason), Some(&slot.owner));
                 slot.phase = Phase::Unknown; slot.source = SourceState::Unknown; slot.settlement = Settlement::Unknown; state.unknown = true;
                 changed = true;
             }
@@ -1418,6 +2184,7 @@ impl DocumentBinding {
         let redacted = !state.lifetime.original_bound();
         let capability_reason = if state.unknown { Reason::CleanupUnknown } else if state.stopping { Reason::Shutdown }
             else if state.lost_observed { Reason::DocumentLost }
+            else if let Some(reason) = state.session_owner_reason { reason }
             else if !cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")) { Reason::UnsupportedPlatform }
             else if !self.native_qualified() { Reason::Unqualified } else if redacted { Reason::Closed } else { Reason::None };
         let operation = state.slot.as_ref().map(|slot| OperationStatus { operation_id: slot.owner.id, operation: slot.operation,
@@ -1460,10 +2227,11 @@ impl DocumentBinding {
             }
         }
         let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        lookup_allocation_gate(&state)?; // Before draft/project/field backing copies.
         self.inner.bridge.diagnostics.context_changed(); self.inner.bridge.preflight.context_changed();
         self.inner.bridge.android_build.context_changed(); self.gate(&state, true)?;
-        let (registry_generation, project) = self.registry_result(&mut state, self.inner.bridge.native_project(args.project_id))?;
-        let Some(revision) = state.next_context.checked_add(1) else { self.exhaust(&mut state); return Err(AssetError::new(Reason::CleanupUnknown)); };
+        let (registry_generation, project) = self.registry_result(&mut state, self.inner.bridge.native_project(args.project_id), None)?;
+        let Some(revision) = state.next_context.checked_add(1) else { self.exhaust(&mut state, UnknownOrigin::Exhausted); return Err(AssetError::new(Reason::CleanupUnknown)); };
         // Bounded, already-admitted Value serialization, not source parsing or
         // external IO. Keep only exact bytes, never another long-lived Value.
         let draft = commands::draft_bytes(args.draft)?;
@@ -1558,6 +2326,16 @@ async fn child(owner: &Arc<OriginalWork>, job: ChildJob) -> Result<ChildEnd, Rea
     let mut book = owner.child.lock().await;
     if book.handle.is_some() || !matches!(book.receipt, JoinReceipt::New | JoinReceipt::Returned) { return Err(Reason::CleanupUnknown); }
     if owner.interrupted() { return Err(Reason::UserCancelled); }
+    // Reciprocal to lookup_memory::enter: retain this exact child mutex while
+    // checking the charge and registering the original blocking dispatch.
+    if !owner.lookup_allocations_allowed() { return Err(Reason::Busy); }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if !matches!(&job, ChildJob::Tokens) {
+        // A joined Captured ChildEnd may still be a caller-local large holding.
+        // This closed slice refuses later lookup in that same owner rather than
+        // presume that Returned means the result was published/disposed.
+        owner.large_work_started.store(true, Ordering::SeqCst);
+    }
     book.receipt = JoinReceipt::Pending;
     let (start, enter) = oneshot::channel();
     let worker = owner.clone();
@@ -1615,6 +2393,20 @@ fn random_tokens(stop: &mut dyn FnMut() -> bool) -> Result<TokenBatch, Reason> {
         bytes.fill(0); Ok(Token(token)) // Best effort only, not an erasure claim.
     }
     Ok(TokenBatch { selection: one(stop)?, record: one(stop)?, preview: one(stop)?, bind: one(stop)? })
+}
+
+fn prepare_copy_start(state: &mut DocumentState, owner: &Arc<OriginalWork>) -> Result<bool, Reason> {
+    if state.stopping || state.unknown || !state.lifetime.original_bound() || owner.interrupted() { return Err(Reason::UserCancelled); }
+    if state.retiring || state.quit_pending || state.lock_pending || !owner.lookup_allocations_allowed() { return Err(Reason::Busy); }
+    let slot = state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, owner) && slot.operation == Operation::Prepare)
+        .ok_or(Reason::ContextStale)?;
+    if slot.cleanup_end.is_some() { return Err(slot.reason); }
+    // Sticky, conservative boundary: this slice refuses lookup after ANY R1
+    // request/Value or non-Token child work started in this owner, even after a later phase change.
+    // Its memory is not the native parser's 6MiB arena and is not in the census.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    owner.large_work_started.store(true, Ordering::SeqCst);
+    let changed = slot.phase != Phase::Assessing; slot.phase = Phase::Assessing; Ok(changed)
 }
 
 fn assemble_request(payload: &Payload, context: &NativeContext) -> Result<AssessmentRequest, CommandError> {
@@ -1704,6 +2496,10 @@ impl DocumentBinding {
         if slot.cleanup_end.is_some() { return Err(slot.reason); }
         if slot.phase != phase { slot.phase = phase; self.bump(&mut state); } Ok(())
     }
+    fn begin_prepare_copy(&self, owner: &Arc<OriginalWork>) -> Result<(), Reason> {
+        let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        if prepare_copy_start(&mut state, owner)? { self.bump(&mut state); } Ok(())
+    }
     fn tick(&self) { let mut state = self.lock(); self.expire(&mut state, Instant::now()); }
     fn stage(&self, owner: &Arc<OriginalWork>, staged: Staged) {
         let mut state = self.lock(); self.expire(&mut state, Instant::now());
@@ -1711,11 +2507,14 @@ impl DocumentBinding {
             // Exactly one original coordinator stages once. Never overwrite a
             // possibly secret-bearing result or publish before its normal join.
             if slot.staged.is_none() { slot.staged = Some(staged); self.bump(&mut state); return; }
-            slot.stop(Reason::CleanupUnknown, Instant::now()); state.unknown = true; self.bump(&mut state);
+            slot.stop(Reason::CleanupUnknown, Instant::now());
+            first_unknown_origin!(state, UnknownOrigin::StagedCollision, Some(owner));
+            state.unknown = true; self.bump(&mut state);
         }
         drop(state); drop(staged);
     }
-    fn coordinator_failed(&self, state: &mut DocumentState) {
+    fn coordinator_failed(&self, state: &mut DocumentState, _origin: UnknownOrigin, _original: Option<&Arc<OriginalWork>>) {
+        first_unknown_origin!(state, _origin, _original);
         state.unknown = true; invalidate_all(state);
         if let Some(slot) = state.slot.as_mut() {
             slot.stop(Reason::CleanupUnknown, Instant::now()); slot.phase = Phase::Unknown;
@@ -1761,6 +2560,7 @@ impl DocumentBinding {
         };
         let joined = slot.owner.join_if_ended();
         if joined == Some(false) && slot.settlement != Settlement::LateKnown {
+            first_unknown_origin!(state, UnknownOrigin::CoordinatorJoin, Some(&slot.owner));
             slot.stop(Reason::CleanupUnknown, Instant::now()); slot.phase = Phase::Unknown;
             slot.reason = Reason::CleanupUnknown; slot.settlement = Settlement::Unknown;
             if !state.unknown { state.unknown = true; self.bump(&mut state); }
@@ -1782,9 +2582,27 @@ impl DocumentBinding {
             }
         }
 
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if slot.owner.original_resources_settled() && slot.owner.retired.load(Ordering::SeqCst)
+            && slot.owner.keyring.try_lock().is_ok_and(|book| book.memory_held()) {
+            // A settled SDK/book still owns its charged backing. Register this
+            // disposal before releasing the actual document gate. In particular
+            // dispose a just-consumed orphan ChildEnd BEFORE refunding anything.
+            let owner = slot.owner.clone(); state.slot = Some(slot); state.retiring = true;
+            drop(state); drop(orphan_result);
+            let disposed = owner.dispose_keyring_storage();
+            let mut state = self.lock(); state.retiring = false;
+            if !disposed { self.coordinator_failed(&mut state, UnknownOrigin::NotRecorded, None); return; }
+            self.bump(&mut state); drop(state);
+            // At most one such pass for this one-shot owner: storage is gone,
+            // entered/error/Unknown facts are untouched. Continue ordinary
+            // publication/retirement now instead of waiting for slot replacement.
+            self.reconcile(); return;
+        }
+
         let resources = slot.owner.resources_settled();
         let tuple_result = slot.context.as_ref().map_or(Ok(true), |context| self.context_matches(&state, context));
-        let tuple_ok = self.registry_result(&mut state, tuple_result).unwrap_or(false);
+        let tuple_ok = self.registry_result(&mut state, tuple_result, Some(&slot.owner)).unwrap_or(false);
         if !tuple_ok && slot.cleanup_end.is_none() {
             slot.error = Some(AssetError::new(Reason::ContextStale).into());
             slot.stop(Reason::ContextStale, Instant::now()); self.bump(&mut state);
@@ -1842,6 +2660,7 @@ impl DocumentBinding {
                         if !retirement.records.is_empty() { state.records = retirement.records; }
                         if !retirement.assignments.is_empty() { state.assignments = retirement.assignments; }
                         if retirement.context.is_some() { state.context = retirement.context; }
+                        first_unknown_origin!(state, UnknownOrigin::RetirementRetain, Some(&slot.owner));
                         state.unknown = true; slot.phase = Phase::Unknown; slot.settlement = Settlement::Unknown;
                         self.bump(&mut state);
                     }
@@ -1859,7 +2678,7 @@ impl DocumentBinding {
             let disposed = owner.release_retirement();
             let mut state = self.lock();
             state.retiring = false;
-            if !disposed { self.coordinator_failed(&mut state); return; }
+            if !disposed { self.coordinator_failed(&mut state, UnknownOrigin::RetirementDrain, Some(&owner)); return; }
             let unknown = state.unknown;
             if let Some(slot) = state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, &owner)) {
                 slot.owner.set_endpoint(None); slot.selection = None; slot.preview = None;
@@ -2008,7 +2827,7 @@ impl DocumentBinding {
                 let context_result = slot.context.as_ref().map_or(Ok(false), |context| {
                     if context.revision != assignment.context_revision { Ok(false) } else { self.context_matches(state, context) }
                 });
-                let context_ok = self.registry_result(state, context_result).unwrap_or(false);
+                let context_ok = self.registry_result(state, context_result, Some(&slot.owner)).unwrap_or(false);
                 if !state.records.iter().any(|record| record.key.id == assignment.record_id && record.key.revision == assignment.record_revision
                     && record.payload.kind == assignment.kind && !record.mutation_pending && record.payload.usable_source())
                     || !slot.assessment.as_ref().is_some_and(SafeAssessment::permits)
@@ -2023,7 +2842,11 @@ impl DocumentBinding {
             Staged::Refused(reason) => {
                 slot.error = Some(AssetError::new(reason).into());
                 if slot.source == SourceState::Pending { slot.source = SourceState::Refused; }
-                slot.stop(reason, Instant::now()); if reason == Reason::CleanupUnknown { state.unknown = true; }
+                slot.stop(reason, Instant::now());
+                if reason == Reason::CleanupUnknown {
+                    first_unknown_origin!(state, UnknownOrigin::StagedRefusal, Some(&slot.owner));
+                    state.unknown = true;
+                }
             }
         }
     }
@@ -2067,21 +2890,33 @@ fn offer_preview(state: &DocumentState, slot: &mut Slot, preview: Preview) {
 }
 
 #[cfg(feature = "desktop-shell")]
+fn restore_failed_install_retirement(state: &mut DocumentState, _owner: &Arc<OriginalWork>, retirement: Retirement) {
+    // The failure belongs to the NEW owner, before the old slot is restored.
+    first_unknown_origin!(state, UnknownOrigin::InstallRetirement, Some(_owner));
+    state.slot = retirement.old_slot.map(|slot| *slot); state.unknown = true;
+}
+
+#[cfg(feature = "desktop-shell")]
 impl DocumentBinding {
     fn install(&self, state: &mut DocumentState, slot: Slot, job: Job) -> Result<oneshot::Sender<()>, AssetError> {
         // Every caller also has its real reciprocal admission check. Keep the
         // path original nonreplaceable here even if a future caller omits one;
         // an absent path slot in its invoke waiter then implies known settlement.
         if project_path_pending(state) { return Err(AssetError::new(Reason::Busy)); }
+        lookup_allocation_gate(state)?;
         settle_evidence_status(state);
         let owner = slot.owner.clone();
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        self.installed_record_original(&owner, Some(slot.operation))?;
         let old_slot = state.slot.take().map(Box::new);
         if let Err(retirement) = owner.retain_retirement(Retirement { old_slot, ..Retirement::default() }) {
-            state.slot = retirement.old_slot.map(|slot| *slot); state.unknown = true;
+            restore_failed_install_retirement(state, &owner, retirement);
             return Err(AssetError::new(Reason::CleanupUnknown));
         }
         state.slot = Some(slot);
-        let mut book = match owner.coordinator.lock() { Ok(book) => book, Err(_) => { self.coordinator_failed(state); return Err(AssetError::new(Reason::CleanupUnknown)); } };
+        let mut book = match owner.coordinator.lock() { Ok(book) => book, Err(_) => {
+            self.coordinator_failed(state, UnknownOrigin::CoordinatorLock, Some(&owner)); return Err(AssetError::new(Reason::CleanupUnknown));
+        } };
         book.receipt = JoinReceipt::Pending;
         let (start, enter) = oneshot::channel();
         let document = self.clone(); let worker = owner.clone(); let end = CoordinatorEnd(owner.clone());
@@ -2110,7 +2945,7 @@ impl DocumentBinding {
         if args.kind.file().is_none() { return Err(AssetError::new(Reason::UnsupportedFormat)); }
         let context = self.current_context(&mut state, args.context_revision)?;
         let target = target(&state, args.replacement, args.kind)?;
-        let roster = self.registry_result(&mut state, self.inner.bridge.native_roster())?;
+        let roster = self.registry_result(&mut state, self.inner.bridge.native_roster(), None)?;
         if roster.generation != context.registry_generation { return Err(AssetError::new(Reason::ContextStale)); }
         let id = self.next_operation(&mut state)?;
         let owner = OriginalWork::new(id, true, Arc::downgrade(&self.inner));
@@ -2249,7 +3084,7 @@ async fn execute_job(document: &DocumentBinding, owner: &Arc<OriginalWork>, job:
             // Keep the same query/coordinator if its Supervisor reported
             // unknown cleanup. No new wait lease, global cancel or clock.
             if document.inner.bridge.supervisor.disabled() {
-                { let mut state = document.lock(); document.coordinator_failed(&mut state); }
+                { let mut state = document.lock(); document.coordinator_failed(&mut state, UnknownOrigin::NotRecorded, None); }
                 while !document.inner.bridge.supervisor.can_exit() { tokio::time::sleep(Duration::from_millis(50)).await; }
             }
             if owner.interrupted() { return Staged::Refused(Reason::UserCancelled); }
@@ -2276,11 +3111,14 @@ async fn execute_job(document: &DocumentBinding, owner: &Arc<OriginalWork>, job:
                 Ok(ChildEnd::Tokens(tokens)) => tokens,
                 Ok(ChildEnd::Refused(reason)) | Err(reason) => return Staged::Refused(reason), _ => return Staged::Refused(Reason::CleanupUnknown),
             };
-            if let Err(reason) = document.phase(owner, Phase::Assessing) { return Staged::Refused(reason); }
+            if let Err(reason) = document.begin_prepare_copy(owner) { return Staged::Refused(reason); }
             let result = match assemble_request(&payload, &context) {
                 Ok(request) => {
                     if owner.interrupted() { return Staged::Refused(Reason::UserCancelled); }
-                    assess_supplied(&document.inner.bridge.supervisor, request).await.map(|result| SafeAssessment(Arc::new(result))).map_err(CommandError::from)
+                    let assessor = assess_supplied(&document.inner.bridge.supervisor, request);
+                    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    let assessor = document.inner.bridge.supervisor.observe_installed_session_query(owner, assessor);
+                    assessor.await.map(|result| SafeAssessment(Arc::new(result))).map_err(CommandError::from)
                 }
                 Err(error) => Err(error),
             };
@@ -2290,7 +3128,7 @@ async fn execute_job(document: &DocumentBinding, owner: &Arc<OriginalWork>, job:
             // view settles; do not cancel unrelated queries or fabricate a new
             // per-query lease. Unknown remains sticky even on late settlement.
             if document.inner.bridge.supervisor.disabled() {
-                { let mut state = document.lock(); document.coordinator_failed(&mut state); }
+                { let mut state = document.lock(); document.coordinator_failed(&mut state, UnknownOrigin::SupervisorDisabled, Some(owner)); }
                 while !document.inner.bridge.supervisor.can_exit() { tokio::time::sleep(Duration::from_millis(50)).await; }
             }
             if owner.interrupted() { return Staged::Refused(Reason::UserCancelled); }
@@ -2327,9 +3165,9 @@ async fn execute_job(document: &DocumentBinding, owner: &Arc<OriginalWork>, job:
 impl DocumentBinding {
     pub(crate) fn artifact_evidence_choose(&self, app: tauri::AppHandle) -> Result<evidence_wire::Status, BridgeError> {
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.evidence_gate(&state)?;
-        let Some(epoch) = state.evidence.epoch.checked_add(1) else { self.exhaust(&mut state); return Err(evidence_wire::refused(EvidenceProblem::CleanupUnknown)); };
+        let Some(epoch) = state.evidence.epoch.checked_add(1) else { self.exhaust(&mut state, UnknownOrigin::Exhausted); return Err(evidence_wire::refused(EvidenceProblem::CleanupUnknown)); };
         let id = self.next_operation(&mut state).map_err(|e| evidence_wire::refused(evidence_reason(e.reason)))?;
-        if id == u32::MAX { self.exhaust(&mut state); return Err(evidence_wire::refused(EvidenceProblem::CleanupUnknown)); }
+        if id == u32::MAX { self.exhaust(&mut state, UnknownOrigin::Exhausted); return Err(evidence_wire::refused(EvidenceProblem::CleanupUnknown)); }
         let owner = OriginalWork::new(id, true, Arc::downgrade(&self.inner));
         let binding = EvidenceBinding { operation_id: id, kind: evidence_wire::OperationKind::Choose, selection_id: None, epoch };
         let mut slot = Slot::new(owner, Operation::ChooseEvidenceFolder, None, None, None); slot.evidence = Some(binding.clone());
@@ -2346,7 +3184,7 @@ impl DocumentBinding {
             && selection.epoch == state.evidence.epoch).ok_or_else(|| evidence_wire::refused(EvidenceProblem::StaleSelection))?;
         let root = selected.root.clone(); let epoch = selected.epoch;
         let id = self.next_operation(&mut state).map_err(|e| evidence_wire::refused(evidence_reason(e.reason)))?;
-        if id == u32::MAX { self.exhaust(&mut state); return Err(evidence_wire::refused(EvidenceProblem::CleanupUnknown)); }
+        if id == u32::MAX { self.exhaust(&mut state, UnknownOrigin::Exhausted); return Err(evidence_wire::refused(EvidenceProblem::CleanupUnknown)); }
         let owner = OriginalWork::new(id, false, Arc::downgrade(&self.inner));
         let binding = EvidenceBinding { operation_id: id, kind: evidence_wire::OperationKind::Observe, selection_id: Some(args.selection_id), epoch };
         let mut slot = Slot::new(owner, Operation::InspectEvidence, None, None, None); slot.evidence = Some(binding.clone());
@@ -2418,7 +3256,7 @@ impl DocumentBinding {
         let (key, payload, bind, kind) = match decision {
             Ok(decision) => decision,
             Err(error) => {
-                if error.reason == Reason::CleanupUnknown { self.exhaust(&mut state); }
+                if error.reason == Reason::CleanupUnknown { self.exhaust(&mut state, UnknownOrigin::NotRecorded); }
                 return Err(self.refuse_consumed(&mut state, error));
             }
         };
@@ -2480,7 +3318,7 @@ impl DocumentBinding {
         idle(&state)?;
         // Acquire the registry's checked generation before any native work;
         // poison is sticky document Unknown, never merely a later picker error.
-        let generation = self.registry_result(&mut state, self.inner.bridge.native_generation())?;
+        let generation = self.registry_result(&mut state, self.inner.bridge.native_generation(), None)?;
         let mut origins = Vec::new(); origins.try_reserve_exact(state.records.len()).map_err(|_| AssetError::new(Reason::Capacity))?;
         for record in &state.records { if let Some(material) = &record.payload.material { origins.push(material.captured.origin.clone()); } }
         let id = self.next_operation(&mut state)?;
@@ -2494,6 +3332,21 @@ impl DocumentBinding {
         drop(state); let _ = start.send(()); Ok(id)
     }
     pub(crate) async fn project_result(&self, id: u32) -> Result<Option<Project>, AssetError> {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+            target_os = "macos", target_arch = "aarch64"))]
+        { self.project_result_original(id, None).await }
+        #[cfg(not(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+            target_os = "macos", target_arch = "aarch64")))]
+        { self.project_result_original(id).await }
+    }
+    async fn project_result_original(&self, id: u32,
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+            target_os = "macos", target_arch = "aarch64"))]
+        mut selection: Option<&mut Option<InstalledMacProjectSelectionData>>,
+    ) -> Result<Option<Project>, AssetError> {
         loop {
             self.reconcile();
             {
@@ -2501,7 +3354,18 @@ impl DocumentBinding {
                 let slot = state.slot.as_ref().filter(|slot| slot.owner.id == id).ok_or_else(|| AssetError::new(Reason::ContextStale))?;
                 if state.unknown { return Err(AssetError::new(Reason::CleanupUnknown)); }
                 if slot.phase == Phase::Idle && slot.owner.resources_settled() {
-                    if slot.reason == Reason::None || slot.reason == Reason::UserCancelled { return Ok(slot.project.clone()); }
+                    if slot.reason == Reason::None || slot.reason == Reason::UserCancelled {
+                        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+                            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+                            target_os = "macos", target_arch = "aarch64"))]
+                        if let (Some(companion), Some(project)) = (selection.as_deref_mut(), slot.project.as_ref()) {
+                            // This guard still binds the original id/slot. Only
+                            // saved DATA crosses the return, never an observer
+                            // callback/Record lock or a later success witness.
+                            *companion = Some(installed_macos_observation::capture_project_selection(&self.inner, id, slot, project));
+                        }
+                        return Ok(slot.project.clone());
+                    }
                     return Err(AssetError::new(slot.reason));
                 }
             }
@@ -2511,10 +3375,10 @@ impl DocumentBinding {
 
     pub(crate) fn choose_project_path(&self, app: tauri::AppHandle, args: commands::ChooseProjectPath<'_>) -> Result<Arc<OriginalWork>, AssetError> {
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.project_path_gate(&state)?;
-        let (generation, root) = self.registry_result(&mut state, self.inner.bridge.native_project(args.project_id))?;
+        let (generation, root) = self.registry_result(&mut state, self.inner.bridge.native_project(args.project_id), None)?;
         let project_id = commands::copy_text(args.project_id)?;
         let id = self.next_operation(&mut state)?;
-        if id == u32::MAX { self.exhaust(&mut state); return Err(AssetError::new(Reason::CleanupUnknown)); }
+        if id == u32::MAX { self.exhaust(&mut state, UnknownOrigin::Exhausted); return Err(AssetError::new(Reason::CleanupUnknown)); }
         let binding = Arc::new(ProjectPathBinding { project_id, field: args.field, root, generation });
         let owner = OriginalWork::new(id, true, Arc::downgrade(&self.inner));
         let mut slot = Slot::new(owner.clone(), Operation::ChooseProjectPath, None, None, None);
@@ -2537,7 +3401,7 @@ impl DocumentBinding {
                     if owner.resources_settled() { return Err(AssetError::new(Reason::ContextStale)); }
                     // Not expected: install refuses to remove an unresolved
                     // path original. Never turn missing ownership into Cancel.
-                    self.coordinator_failed(&mut state); return Err(AssetError::new(Reason::CleanupUnknown));
+                    self.coordinator_failed(&mut state, UnknownOrigin::NotRecorded, None); return Err(AssetError::new(Reason::CleanupUnknown));
                 };
                 if !state.quit_pending && slot.phase == Phase::Idle && owner.resources_settled() {
                     if !state.lifetime.original_bound() || state.lost_observed { return Err(AssetError::new(Reason::DocumentLost)); }
@@ -2551,7 +3415,7 @@ impl DocumentBinding {
                     if owner.project_path_settled(true) {
                         if let Some(result) = result { return Ok(Some(result)); }
                     }
-                    self.coordinator_failed(&mut state); return Err(AssetError::new(Reason::CleanupUnknown));
+                    self.coordinator_failed(&mut state, UnknownOrigin::NotRecorded, None); return Err(AssetError::new(Reason::CleanupUnknown));
                 }
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -2614,6 +3478,8 @@ impl DocumentBinding {
         }
         let id = match self.next_operation(&mut state) { Ok(id) => id, Err(_) => return };
         let owner = OriginalWork::new(id, true, Arc::downgrade(&self.inner));
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if self.installed_record_original(&owner, None).is_err() { state.unknown = true; self.bump(&mut state); return; }
         let previous = state.quit.replace(owner.clone());
         state.quit_pending = true; state.quit_accepted = false; state.quit_cleanup_end = None;
         let (start, enter) = oneshot::channel();
@@ -2684,6 +3550,141 @@ async fn run_quit(document: DocumentBinding, owner: Arc<OriginalWork>, app: taur
     target_os = "macos", target_arch = "aarch64"))]
 mod installed_macos_observation {
     use super::*;
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum SelectionCustody { Bound, Unavailable, Inconsistent }
+    impl SelectionCustody {
+        pub(crate) fn label(self) -> &'static str { match self {
+            Self::Bound => "bound-original-data", Self::Unavailable => "unavailable-original-data",
+            Self::Inconsistent => "inconsistent-original-data",
+        }}
+    }
+    // Short-lived, bounded return companion, not a ProjectWitness, native
+    // owner or serializable DTO. Only fixed relational labels may be exported.
+    pub(crate) struct ProjectSelectionData {
+        operation_id: u32, returned: Option<Project>, custody: SelectionCustody,
+        selected: Option<std::path::PathBuf>, identity: Option<[u64; 5]>,
+    }
+    pub(crate) fn selection_path_bounded(path: &std::path::Path) -> bool {
+        path.to_str().is_some_and(|text| text.len() <= asset_source::PATH_LIMIT && text.starts_with('/')
+            && !text.as_bytes().contains(&0) && (text == "/" || text[1..].split('/').all(|part|
+                !part.is_empty() && part != "." && part != ".." && part.len() <= 255)))
+    }
+    fn selection_project_bounded(project: &Project) -> bool {
+        crate::protocol::valid_id(&project.id) && project.name.len() <= 255
+            && selection_path_bounded(std::path::Path::new(&project.path))
+    }
+    fn recorded_identity(root: &asset_source::RegisteredRoot) -> Option<[u64; 5]> {
+        // Pure projection of stored scalars. Fixture index5/nlink is NOT part
+        // of RegisteredRoot; dev/ino stay lossless u64s, never JSON numbers.
+        let identity = root.identity.posix().ok()?.preflight_identity();
+        Some([identity.device.parse().ok()?, identity.inode.parse().ok()?,
+            u64::from(identity.mode), u64::from(identity.uid), u64::from(identity.gid)])
+    }
+    fn saved_project_selection(id: u32, original_bound: bool, project: &Project,
+        response: Option<&InstalledNativeResponseWitness>, registration: Option<&(u32, asset_source::RegisteredRoot)>) -> ProjectSelectionData {
+        let mut data = ProjectSelectionData { operation_id: id, returned: None, custody: SelectionCustody::Inconsistent,
+            selected: None, identity: None };
+        if !original_bound || id == 0 || !selection_project_bounded(project) { return data; }
+        data.returned = Some(project.clone());
+        // These independent axes describe saved response/registry facts, even
+        // if their transfer is inconsistent. A foreign response id never
+        // supplies a selected path; an absent registration supplies no inode.
+        data.selected = response.filter(|saved| saved.operation_id == id && saved.response == NativeResponse::Accept)
+            .and_then(|saved| saved.selected.as_deref()).filter(|path| selection_path_bounded(path))
+            .map(std::path::Path::to_path_buf);
+        data.identity = registration.and_then(|(_, root)| recorded_identity(root));
+        let inconsistent = response.is_some_and(|saved| saved.operation_id != id || saved.response != NativeResponse::Accept
+                || !saved.callback_returned || saved.selected.as_deref().and_then(std::path::Path::to_str) != Some(project.path.as_str()))
+            || registration.is_some_and(|(generation, root)| *generation != 2 || root.path.to_str() != Some(project.path.as_str()));
+        data.custody = if inconsistent { SelectionCustody::Inconsistent }
+            else if response.is_none() || registration.is_none() || data.identity.is_none() { SelectionCustody::Unavailable }
+            else { SelectionCustody::Bound };
+        data
+    }
+    impl ProjectSelectionData {
+        pub(crate) fn for_result(&self, id: u32, returned: &Project) -> (SelectionCustody, Option<[u64; 5]>, Option<&std::path::Path>) {
+            // The shell must carry this companion with that SAME public
+            // result. Neither a replaced slot nor renderer id is queried here.
+            if self.operation_id != id || !self.returned.as_ref().is_some_and(|project| same_project(project, returned)) {
+                return (SelectionCustody::Inconsistent, None, None);
+            }
+            (self.custody, self.identity, self.selected.as_deref())
+        }
+    }
+    pub(super) fn capture_project_selection(document: &Arc<Inner>, id: u32, slot: &Slot, project: &Project) -> ProjectSelectionData {
+        // Called only under project_result_original's existing document guard,
+        // immediately before its selected return. No extra lifecycle gate:
+        // later owner.ended/joins/edit readiness cannot hide these saved facts.
+        let original_bound = slot.operation == Operation::ChooseProject && slot.owner.id == id && original_call(document, &slot.owner)
+            && slot.project.as_ref().is_some_and(|saved| same_project(saved, project));
+        if !original_bound { return saved_project_selection(id, false, project, None, None); }
+        let response = slot.owner.gui.installed_native_response().ok().flatten();
+        let registration = if selection_project_bounded(project) { document.bridge.native_project(&project.id).ok() } else { None };
+        saved_project_selection(id, original_bound, project, response.as_ref(), registration.as_ref())
+    }
+    pub(crate) fn selection_saved_data_checks() -> bool {
+        // Synthetic stored DATA only. No document/bridge, native object, task,
+        // probe, ProjectWitness or runtime is made. These are not receipts.
+        let owner = OriginalWork::new(2, false, Weak::new());
+        let Ok(mut coordinator) = owner.coordinator.lock() else { return false; };
+        coordinator.receipt = JoinReceipt::Returned; drop(coordinator);
+        let project = Project { id: "project-1".into(), name: "other".into(), path: "/synthetic/other".into() };
+        let root = asset_source::RegisteredRoot { path: project.path.clone().into(), identity: asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity()) };
+        let registration = (2, root);
+        let response = InstalledNativeResponseWitness { operation_id: 2, response: NativeResponse::Accept,
+            selected: Some(project.path.clone().into()), callback_returned: true };
+        let Ok(mut saved) = owner.gui.installed_native_response_witness.lock() else { return false; };
+        *saved = Some(response.clone()); drop(saved);
+        let Ok(saved) = owner.gui.installed_native_response() else { return false; };
+        // The immediate resources_settled predicate can be true while the
+        // unchanged completed() predicate's ended/probed-child requirements
+        // are false. A synthetic positive binding tests only DATA reduction.
+        if !owner.resources_settled() || owner.ended.load(Ordering::SeqCst)
+            || !owner.child.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::New) { return false; }
+        let data = saved_project_selection(2, true, &project, saved.as_ref(), Some(&registration));
+        if data.for_result(2, &project) != (SelectionCustody::Bound, Some([1, 2, 0o40700, 123, 123]), Some(std::path::Path::new(&project.path)))
+            || owner.ended.load(Ordering::SeqCst) || owner.project_path_settled(true) { return false; }
+        for (native, registered, custody, has_identity, has_path) in [
+            (None, Some(&registration), SelectionCustody::Unavailable, true, false),
+            (Some(&response), None, SelectionCustody::Unavailable, false, true),
+            (None, None, SelectionCustody::Unavailable, false, false),
+        ] {
+            let data = saved_project_selection(2, true, &project, native, registered);
+            let (actual, identity, path) = data.for_result(2, &project);
+            if actual != custody || identity.is_some() != has_identity || path.is_some() != has_path { return false; }
+        }
+        for (response, expected_path) in [
+            (InstalledNativeResponseWitness { operation_id: 3, ..response.clone() }, None),
+            (InstalledNativeResponseWitness { response: NativeResponse::Decline, ..response.clone() }, None),
+            (InstalledNativeResponseWitness { selected: None, ..response.clone() }, None),
+            (InstalledNativeResponseWitness { selected: Some("/synthetic/first-save".into()), ..response.clone() }, Some(std::path::Path::new("/synthetic/first-save"))),
+            (InstalledNativeResponseWitness { callback_returned: false, ..response.clone() }, Some(std::path::Path::new("/synthetic/other"))),
+        ] {
+            let data = saved_project_selection(2, true, &project, Some(&response), Some(&registration));
+            if data.for_result(2, &project) != (SelectionCustody::Inconsistent, Some([1, 2, 0o40700, 123, 123]), expected_path) { return false; }
+        }
+        for registration in [(3, registration.1.clone()), (2, asset_source::RegisteredRoot { path: "/synthetic/unrelated".into(), ..registration.1.clone() })] {
+            if saved_project_selection(2, true, &project, Some(&response), Some(&registration)).for_result(2, &project).0
+                != SelectionCustody::Inconsistent { return false; }
+        }
+        let foreign = saved_project_selection(2, false, &project, Some(&response), Some(&registration));
+        if foreign.for_result(2, &project) != (SelectionCustody::Inconsistent, None, None)
+            || data.for_result(1, &project) != (SelectionCustody::Inconsistent, None, None) { return false; }
+        for changed in [Project { id: "project-2".into(), ..project.clone() }, Project { name: "changed".into(), ..project.clone() },
+            Project { path: "/synthetic/changed".into(), ..project.clone() }] {
+            if data.for_result(2, &changed) != (SelectionCustody::Inconsistent, None, None) { return false; }
+        }
+        let maximum = format!("/{}", vec!["x".repeat(255); 16].join("/"));
+        if maximum.len() != asset_source::PATH_LIMIT || !selection_path_bounded(std::path::Path::new(&maximum))
+            || selection_path_bounded(std::path::Path::new(&(maximum + "/x"))) { return false; }
+        for path in ["relative", "/bad/../path", "/bad//path", "/bad/path/", "/bad/\0path"] {
+            let malformed = Project { path: path.into(), ..project.clone() };
+            if selection_path_bounded(std::path::Path::new(path))
+                || saved_project_selection(2, true, &malformed, Some(&response), Some(&registration)).for_result(2, &malformed)
+                    != (SelectionCustody::Inconsistent, None, None) { return false; }
+        }
+        true
+    }
     pub(crate) struct ProjectWitness {
         document: Weak<Inner>, owner: Weak<OriginalWork>, project: Project,
         generation: u32, root: asset_source::RegisteredRoot, edit: crate::edit_owner::InstalledMacDocumentWitness,
@@ -2748,6 +3749,10 @@ mod installed_macos_observation {
         left.id == right.id && left.name == right.name && left.path == right.path
     }
     impl DocumentBinding {
+        pub(crate) async fn installed_macos_project_result(&self, id: u32, selection: &mut Option<ProjectSelectionData>) -> Result<Option<Project>, AssetError> {
+            *selection = None;
+            self.project_result_original(id, Some(selection)).await
+        }
         fn macos_registered(&self, witness: &ProjectWitness) -> bool {
             // Call only under this actual document's admission mutex.
             let Ok(roster) = self.inner.bridge.native_roster() else { return false; };
@@ -2884,7 +3889,9 @@ mod installed_macos_observation {
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
     target_os = "macos", target_arch = "aarch64"))]
-pub(crate) use installed_macos_observation::{ProjectWitness as InstalledMacProjectWitness, PickerWitness as InstalledMacPickerWitness};
+pub(crate) use installed_macos_observation::{ProjectWitness as InstalledMacProjectWitness, PickerWitness as InstalledMacPickerWitness,
+    ProjectSelectionData as InstalledMacProjectSelectionData, SelectionCustody as InstalledMacSelectionCustody,
+    selection_path_bounded as installed_macos_selection_path_bounded, selection_saved_data_checks as installed_macos_selection_saved_data_checks};
 
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
@@ -2944,7 +3951,7 @@ mod installed_project_observation {
             && slot.project.is_none() && slot.evidence.is_none() && slot.kind.is_none()
     }
     impl DocumentBinding {
-        fn observed_source_unchanged(&self, witness: &ProjectWitness) -> bool {
+        pub(super) fn observed_source_unchanged(&self, witness: &ProjectWitness) -> bool {
             let Ok(roster) = self.inner.bridge.native_roster() else { return false; };
             let Ok((generation, root)) = self.inner.bridge.native_project(&witness.project_id) else { return false; };
             generation == witness.generation && roster.generation == witness.generation
@@ -3111,6 +4118,315 @@ mod installed_project_observation {
     target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 pub(crate) use installed_project_observation::{ProjectWitness as InstalledProjectWitness, EvidenceWitness as InstalledEvidenceWitness};
 
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+mod installed_session_observation {
+    use super::*;
+    use crate::{shell::installed_observation::SessionCase, supervisor::{InstalledSessionQueryDiagnostic, SessionQueryHold}};
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum OriginDetail { None, Deadline, ReviewExpired, ContextStale, CleanupUnknown, UserCancelled, Shutdown,
+        DocumentLost, Other, New, Pending, Returned, Failed, Unavailable }
+    impl OriginDetail {
+        fn reason(reason: Reason) -> Self {
+            match reason {
+                Reason::Deadline => Self::Deadline, Reason::ReviewExpired => Self::ReviewExpired,
+                Reason::ContextStale => Self::ContextStale, Reason::CleanupUnknown => Self::CleanupUnknown,
+                Reason::UserCancelled => Self::UserCancelled, Reason::Shutdown => Self::Shutdown,
+                Reason::DocumentLost => Self::DocumentLost, _ => Self::Other,
+            }
+        }
+        fn child(receipt: Option<JoinReceipt>) -> Self {
+            match receipt {
+                Some(JoinReceipt::New) => Self::New, Some(JoinReceipt::Pending) => Self::Pending,
+                Some(JoinReceipt::Returned) => Self::Returned, Some(JoinReceipt::Failed) => Self::Failed,
+                None => Self::Unavailable,
+            }
+        }
+        fn token(self) -> &'static [u8] {
+            match self {
+                Self::None => b"none", Self::Deadline => b"deadline", Self::ReviewExpired => b"review-expired",
+                Self::ContextStale => b"context-stale", Self::CleanupUnknown => b"cleanup-unknown",
+                Self::UserCancelled => b"user-cancelled", Self::Shutdown => b"shutdown", Self::DocumentLost => b"document-lost",
+                Self::Other => b"other", Self::New => b"new", Self::Pending => b"pending", Self::Returned => b"returned",
+                Self::Failed => b"failed", Self::Unavailable => b"unavailable",
+            }
+        }
+    }
+    impl UnknownOrigin {
+        fn token(self) -> &'static [u8] {
+            match self {
+                Self::NotRecorded => b"not-recorded", Self::OperationCleanup(_) => b"op-cleanup", Self::Registry => b"registry",
+                Self::CoordinatorLock => b"coord-lock", Self::CoordinatorJoin => b"coord-join",
+                Self::SupervisorDisabled => b"supervisor-disabled", Self::StagedCollision => b"staged-collision",
+                Self::InstallRetirement => b"install-retire", Self::RetirementRetain => b"retain-retire",
+                Self::RetirementDrain => b"drain-retire", Self::StagedRefusal => b"staged-refusal",
+                Self::GatePoisoned => b"gate-poisoned", Self::Exhausted => b"exhausted",
+            }
+        }
+    }
+    pub(super) struct FirstOrigin {
+        origin: UnknownOrigin, detail: OriginDetail, original: Option<Weak<OriginalWork>>,
+    }
+    impl FirstOrigin {
+        pub(super) fn at_transition(origin: UnknownOrigin, original: Option<&Arc<OriginalWork>>) -> Option<Self> {
+            if origin == UnknownOrigin::NotRecorded { return None; }
+            let detail = match origin {
+                UnknownOrigin::OperationCleanup(reason) => OriginDetail::reason(reason),
+                UnknownOrigin::CoordinatorJoin => OriginDetail::Failed,
+                UnknownOrigin::StagedRefusal => OriginDetail::child(original.and_then(|owner|
+                    owner.child.try_lock().ok().map(|book| book.receipt))),
+                _ => OriginDetail::None,
+            };
+            // Correlation only, not ownership or proof of the source of a
+            // Supervisor-wide disablement. Never serialized or backfilled.
+            Some(Self { origin, detail, original: original.map(Arc::downgrade) })
+        }
+    }
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct Failure {
+        origin: UnknownOrigin, detail: OriginDetail, bound: bool, query: InstalledSessionQueryDiagnostic,
+    }
+    impl Failure {
+        pub(crate) const fn not_recorded() -> Self {
+            Self { origin: UnknownOrigin::NotRecorded, detail: OriginDetail::None, bound: false,
+                query: InstalledSessionQueryDiagnostic::not_applicable() }
+        }
+        pub(crate) fn origin_token(self) -> &'static [u8] { self.origin.token() }
+        pub(crate) fn detail_token(self) -> &'static [u8] { self.detail.token() }
+        pub(crate) fn association_token(self) -> &'static [u8] { if self.bound { b"bound" } else { b"unassociated" } }
+        pub(crate) fn query_token(self) -> ([u8; 26], usize) { self.query.query_token() }
+        pub(crate) fn worker_token(self) -> &'static [u8] { self.query.worker_token() }
+        pub(crate) fn unknown_boundary_token(self) -> &'static [u8] { self.query.unknown_boundary_token() }
+        // Pure closed-value example for the existing frame contract, never a
+        // native receipt. These types exist only in the installed test build.
+        pub(crate) fn contract_sample() -> Self {
+            Self { origin: UnknownOrigin::SupervisorDisabled, detail: OriginDetail::None, bound: true,
+                query: InstalledSessionQueryDiagnostic::contract_sample() }
+        }
+    }
+
+    pub(super) struct Book {
+        case: SessionCase, originals: Vec<(Arc<OriginalWork>, Option<Operation>)>, choose: u8, assess: u8,
+        failure: Option<Failure>,
+    }
+    impl Book {
+        pub(super) fn new(case: SessionCase) -> Self { Self { case, originals: Vec::new(), choose: 0, assess: 0, failure: None } }
+        fn first_failure(&mut self, first: Option<&FirstOrigin>, query: impl FnOnce(&Weak<OriginalWork>) -> InstalledSessionQueryDiagnostic) -> Failure {
+            if let Some(failure) = self.failure { return failure; }
+            let failure = match first {
+                Some(first) => Failure { origin: first.origin, detail: first.detail, bound: first.original.is_some(),
+                    query: match &first.original { Some(original) => query(original), None => InstalledSessionQueryDiagnostic::not_applicable() } },
+                None => Failure::not_recorded(),
+            };
+            // One projection at the existing first Unknown snapshot. Even
+            // unavailable DATA is final here: no retry, wait or latest-owner
+            // fallback if a book subsequently becomes accessible.
+            self.failure = Some(failure); failure
+        }
+    }
+    // No private material is copied. Native pointer/opaque-token equality is
+    // private comparison DATA and must never enter an exported receipt.
+    #[derive(Clone)]
+    pub(crate) struct Snapshot {
+        pub(crate) status: Value, pub(crate) owner: Option<Arc<OriginalWork>>,
+        pub(crate) review_end: Option<Instant>, pub(crate) cleanup_end: Option<Instant>, pub(crate) work_end: Option<Instant>,
+        pub(crate) payloads: Vec<(String, u32, usize)>, pub(crate) sources: Vec<(u32, asset_source::InstalledSourceFacts)>,
+        pub(crate) settled: bool, pub(crate) lost: bool, pub(crate) bound: bool, pub(crate) unknown: bool,
+        pub(crate) quit_pending: bool, pub(crate) quit_declined: bool, pub(crate) empty: bool,
+        pub(crate) first_failure: Option<Failure>,
+    }
+    impl Snapshot {
+        pub(crate) fn same_payloads(&self, other: &Self) -> bool { self.payloads == other.payloads }
+        pub(crate) fn same_review(&self, other: &Self) -> bool {
+            self.status["operation"]["preview"]["token"] == other.status["operation"]["preview"]["token"]
+                && self.status["context"] == other.status["context"] && self.review_end == other.review_end
+                && self.work_end == other.work_end && self.cleanup_end == other.cleanup_end
+                && self.owner.as_ref().zip(other.owner.as_ref()).is_some_and(|(a,b)| Arc::ptr_eq(a,b))
+        }
+    }
+    pub(super) fn assert_first_origin_contract() {
+        // Inert association/formatting models under the existing selector.
+        // No task, native source, query, GUI or original settlement is made.
+        fn query(failure: Failure) -> Vec<u8> { let (bytes, length) = failure.query_token(); bytes[..length].to_vec() }
+        let old = OriginalWork::new(1, false, Weak::new());
+        let new = OriginalWork::new(2, false, Weak::new());
+        let same_id = OriginalWork::new(2, false, Weak::new());
+        let mut restored = super::tests::empty_state();
+        restored.slot = Some(Slot::new(old.clone(), Operation::Prepare, None, None, None));
+        let holding = new.retirement.try_lock().unwrap();
+        let old_slot = restored.slot.take().map(Box::new);
+        let retirement = match new.retain_retirement(Retirement { old_slot, ..Retirement::default() }) {
+            Err(retirement) => retirement, Ok(()) => panic!("contended original holding was not refused"),
+        };
+        restore_failed_install_retirement(&mut restored, &new, retirement);
+        drop(holding);
+        assert!(restored.unknown && restored.slot.as_ref().is_some_and(|slot| Arc::ptr_eq(&slot.owner, &old)));
+        first_unknown_origin!(restored, UnknownOrigin::Registry, Some(&old));
+        let first = restored.first_origin.as_ref().unwrap();
+        assert!(first.origin == UnknownOrigin::InstallRetirement
+            && first.original.as_ref().is_some_and(|original| Weak::ptr_eq(original, &Arc::downgrade(&new))));
+
+        let mut taken = super::tests::empty_state();
+        taken.slot = Some(Slot::new(new.clone(), Operation::Prepare, None, None, None));
+        let local = taken.slot.take().unwrap();
+        first_unknown_origin!(taken, UnknownOrigin::CoordinatorJoin, Some(&local.owner));
+        taken.unknown = true;
+        assert!(taken.slot.is_none() && taken.first_origin.as_ref().is_some_and(|first|
+            first.origin == UnknownOrigin::CoordinatorJoin && first.detail == OriginDetail::Failed
+                && first.original.as_ref().is_some_and(|original| Weak::ptr_eq(original, &Arc::downgrade(&new)))));
+
+        let mut admission = super::tests::empty_state();
+        admission.slot = Some(Slot::new(old.clone(), Operation::Prepare, None, None, None));
+        first_unknown_origin!(admission, UnknownOrigin::Registry, None);
+        admission.unknown = true;
+        let unassociated = Book::new(SessionCase::Inputs).first_failure(admission.first_origin.as_ref(), |_| panic!("pre-admission query lookup"));
+        assert!(unassociated.origin_token() == b"registry" && unassociated.detail_token() == b"none"
+            && unassociated.association_token() == b"unassociated" && query(unassociated) == b"na" && unassociated.worker_token() == b"na"
+            && unassociated.unknown_boundary_token() == b"na");
+        let mut unsupported = super::tests::empty_state(); unsupported.unknown = true;
+        first_unknown_origin!(unsupported, UnknownOrigin::SupervisorDisabled, Some(&new));
+        assert!(unsupported.first_origin.is_none());
+        unsupported.unknown = false; unsupported.exhausted = true;
+        first_unknown_origin!(unsupported, UnknownOrigin::Exhausted, Some(&new));
+        assert!(unsupported.first_origin.is_none());
+        let mut absent = Book::new(SessionCase::Inputs);
+        let unavailable_origin = absent.first_failure(None, |_| panic!("absent-origin query lookup"));
+        assert!(unavailable_origin == Failure::not_recorded());
+        assert!(unavailable_origin.unknown_boundary_token() == b"na");
+        assert!(absent.first_failure(restored.first_origin.as_ref(), |_| panic!("late origin backfill")) == unavailable_origin);
+
+        let unavailable_query = crate::supervisor::assert_installed_session_query_diagnostic_contract(&new, &same_id);
+        let mut book = Book::new(SessionCase::Inputs);
+        let failure = book.first_failure(restored.first_origin.as_ref(), |original| {
+            assert!(Weak::ptr_eq(original, &Arc::downgrade(&new))); unavailable_query
+        });
+        assert!(failure.association_token() == b"bound" && query(failure) == b"unavailable" && failure.worker_token() == b"unavailable"
+            && failure.unknown_boundary_token() == b"unavailable");
+        assert!(book.first_failure(taken.first_origin.as_ref(), |_| panic!("first failure was resampled")) == failure);
+        let mut known_book = Book::new(SessionCase::Inputs);
+        let known = known_book.first_failure(restored.first_origin.as_ref(), |_| InstalledSessionQueryDiagnostic::contract_sample());
+        assert!(known.unknown_boundary_token() == b"settlement" && Failure::contract_sample().unknown_boundary_token() == b"settlement");
+        assert!(known_book.first_failure(taken.first_origin.as_ref(), |_| panic!("known boundary was resampled")) == known);
+
+        let mut expiry = super::tests::empty_state();
+        expiry.slot = Some(Slot::new(new.clone(), Operation::Prepare, None, None, None));
+        let slot = expiry.slot.as_mut().unwrap();
+        let at = Instant::now(); slot.stop(Reason::ReviewExpired, at); let cleanup = slot.cleanup_end;
+        slot.stop(Reason::Deadline, at + Duration::from_secs(1));
+        first_unknown_origin!(expiry, UnknownOrigin::OperationCleanup(slot.reason), Some(&slot.owner));
+        assert!(slot.reason == Reason::ReviewExpired && slot.cleanup_end == cleanup);
+        assert!(expiry.first_origin.as_ref().is_some_and(|first| first.detail == OriginDetail::ReviewExpired));
+        for (reason, token) in [(Reason::Deadline,b"deadline".as_slice()), (Reason::ReviewExpired,b"review-expired"),
+            (Reason::ContextStale,b"context-stale"), (Reason::CleanupUnknown,b"cleanup-unknown"), (Reason::UserCancelled,b"user-cancelled"),
+            (Reason::Shutdown,b"shutdown"), (Reason::DocumentLost,b"document-lost"), (Reason::None,b"other")] {
+            assert!(OriginDetail::reason(reason).token() == token && token.len() <= 15);
+        }
+        for (receipt, token) in [(JoinReceipt::New,b"new".as_slice()), (JoinReceipt::Pending,b"pending"),
+            (JoinReceipt::Returned,b"returned"), (JoinReceipt::Failed,b"failed")] {
+            new.child.try_lock().unwrap().receipt = receipt;
+            assert!(FirstOrigin::at_transition(UnknownOrigin::StagedRefusal, Some(&new)).unwrap().detail.token() == token);
+        }
+        let child = new.child.try_lock().unwrap();
+        assert!(FirstOrigin::at_transition(UnknownOrigin::StagedRefusal, Some(&new)).unwrap().detail == OriginDetail::Unavailable);
+        drop(child);
+        for origin in [UnknownOrigin::NotRecorded, UnknownOrigin::OperationCleanup(Reason::Deadline), UnknownOrigin::Registry,
+            UnknownOrigin::CoordinatorLock, UnknownOrigin::CoordinatorJoin, UnknownOrigin::SupervisorDisabled,
+            UnknownOrigin::StagedCollision, UnknownOrigin::InstallRetirement, UnknownOrigin::RetirementRetain,
+            UnknownOrigin::RetirementDrain, UnknownOrigin::StagedRefusal, UnknownOrigin::GatePoisoned, UnknownOrigin::Exhausted] {
+            assert!(origin.token().len() <= 19 && origin.token().is_ascii());
+        }
+        assert!(FirstOrigin::at_transition(UnknownOrigin::NotRecorded, Some(&new)).is_none());
+    }
+    fn joined(owner: &OriginalWork) -> bool {
+        owner.resources_settled() && owner.retired.load(Ordering::SeqCst)
+            && owner.coordinator.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none())
+            && owner.child.try_lock().is_ok_and(|book| matches!(book.receipt, JoinReceipt::New | JoinReceipt::Returned) && book.handle.is_none())
+            && owner.source.try_lock().is_ok_and(|book| book.not_started() || book.settled())
+            && owner.gui.facts().is_some_and(|facts| facts.selected.is_none() && facts.released
+                && (facts.not_created || facts.created && facts.response && facts.destroyed && facts.close_ack && facts.refusal.is_none()))
+    }
+    impl DocumentBinding {
+        pub(super) fn installed_record_original(&self, owner: &Arc<OriginalWork>, operation: Option<Operation>) -> Result<(), AssetError> {
+            let mut book = self.inner.installed_session.lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?;
+            let Some(book) = book.as_mut() else { return Ok(()); };
+            if book.originals.len() >= 128 || book.originals.iter().any(|(old,_)| old.id == owner.id) { return Err(AssetError::new(Reason::Capacity)); }
+            book.originals.try_reserve(1).map_err(|_| AssetError::new(Reason::Capacity))?;
+            if operation == Some(Operation::ChooseFile) {
+                book.choose = book.choose.checked_add(1).ok_or_else(AssetError::invalid)?;
+                if book.case == SessionCase::Refusals && book.choose == 4 {
+                    let checkpoint = Arc::new(asset_source::InstalledCaptureCheckpoint::default());
+                    if !owner.source.lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?.installed_checkpoint(checkpoint.clone()) {
+                        return Err(AssetError::new(Reason::CleanupUnknown));
+                    }
+                    *owner.installed_capture.lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))? = Some(checkpoint);
+                }
+            }
+            if operation == Some(Operation::Prepare) {
+                book.assess = book.assess.checked_add(1).ok_or_else(AssetError::invalid)?;
+                let hold = match (book.case, book.assess) {
+                    (SessionCase::Loss,1) => SessionQueryHold::Loss, (SessionCase::Deadline,1) => SessionQueryHold::Deadline,
+                    _ => SessionQueryHold::Observe,
+                };
+                self.inner.bridge.supervisor.arm_installed_session_query(owner, hold).map_err(|_| AssetError::new(Reason::CleanupUnknown))?;
+            }
+            book.originals.push((owner.clone(),operation)); Ok(())
+        }
+        pub(crate) fn installed_session_snapshot(&self) -> Option<Snapshot> {
+            self.reconcile(); let state = self.lock();
+            let mut book = self.inner.installed_session.lock().ok()?; let book = book.as_mut()?;
+            let mut sources = Vec::new();
+            for (owner,kind) in &book.originals {
+                if *kind == Some(Operation::ChooseFile) {
+                    if let Ok(source) = owner.source.try_lock() { sources.push((owner.id,source.installed_facts())); }
+                }
+            }
+            let status = serde_json::to_value(self.snapshot(&state)).ok()?;
+            let first_failure = (state.unknown || state.exhausted).then(|| book.first_failure(state.first_origin.as_ref(),
+                |original| self.inner.bridge.supervisor.installed_session_query_diagnostic(original)));
+            Some(Snapshot { status, owner: state.slot.as_ref().map(|slot| slot.owner.clone()),
+                review_end: state.slot.as_ref().and_then(|slot| slot.review_end), cleanup_end: state.slot.as_ref().and_then(|slot| slot.cleanup_end),
+                work_end: state.slot.as_ref().and_then(|slot| slot.owner.endpoint()),
+                payloads: state.records.iter().map(|r| (r.key.id.0.clone(),r.key.revision,Arc::as_ptr(&r.payload) as usize)).collect(), sources,
+                settled: state.slot.as_ref().is_none_or(|slot| joined(&slot.owner)),
+                lost: state.lost_observed, bound: state.lifetime.original_bound(), unknown: state.unknown || state.exhausted,
+                quit_pending: state.quit_pending, quit_declined: state.quit.as_ref().is_some_and(|owner| owner.normally_declined()),
+                empty: session_data_empty(&state) && !state.session && !state.lock_pending && !state.retiring,
+                first_failure,
+            })
+        }
+        pub(crate) fn installed_session_capture_checkpoint(&self) -> Option<Arc<asset_source::InstalledCaptureCheckpoint>> {
+            let state = self.lock();
+            let checkpoint = state.slot.as_ref()?.owner.installed_capture.lock().ok()?.clone();
+            checkpoint
+        }
+        pub(crate) fn take_installed_session_queries(&self) -> Result<crate::supervisor::InstalledSessionQueries, BridgeError> {
+            // Forward only the original document's original Supervisor; no
+            // RuntimeConfig/owner clone can issue an observation of another R1.
+            self.inner.bridge.supervisor.take_installed_session_queries()
+        }
+        pub(crate) fn installed_session_final(&self, project: &super::installed_project_observation::ProjectWitness, loss: bool) -> bool {
+            let state = self.lock();
+            let Ok(book) = self.inner.installed_session.lock() else { return false; }; let Some(book) = book.as_ref() else { return false; };
+            !state.unknown && !state.exhausted && state.lost_observed == loss && state.lifetime.original_bound() != loss
+                // can_exit joins the original quit before the relay may clear
+                // quit_pending. The same positive originals below, not that UI
+                // admission flag's scheduling, establish finality.
+                && state.stopping && state.quit_accepted && !state.session && !state.lock_pending
+                && state.context.is_none() && state.records.is_empty() && state.assignments.is_empty() && assets_can_exit_locked(&state)
+                && state.evidence.revoked && state.evidence.selection.is_none() && state.evidence.result.is_none()
+                && !state.github.native_work_pending() && state.github.material_settled()
+                && !self.inner.bridge.supervisor.disabled() && self.inner.bridge.supervisor.stopping() && self.inner.bridge.supervisor.can_exit()
+                && !self.inner.bridge.edits.disabled() && self.inner.bridge.edits.stopping() && self.inner.bridge.edits.can_exit()
+                && self.observed_source_unchanged(project) && book.originals.len() == state.next_operation as usize
+                && book.originals.iter().enumerate().all(|(i,(owner,_))| owner.id == i as u32 + 1 && joined(owner))
+                && state.quit_cleanup_end.is_some() && state.quit.as_ref().is_some_and(|quit| joined(quit) && quit.stopped()
+                    && quit.gui.facts().is_some_and(|facts| facts.accepted && !facts.declined))
+        }
+    }
+}
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) use installed_session_observation::{Snapshot as InstalledSessionSnapshot, Failure as InstalledSessionFailure};
+
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 mod fixture_observation {
     use super::*;
@@ -3189,6 +4505,9 @@ pub(crate) use fixture_observation::Selection as FixtureSelection;
 mod android_build_wiring_tests;
 
 #[cfg(test)]
+pub(crate) fn assert_installed_session_owner_contract() { tests::live_session_owner_contract(); }
+
+#[cfg(test)]
 pub(crate) fn assert_project_path_document_contracts() {
     // Explicit-call DATA predicates/models only. No DesktopBridge/runtime,
     // task, real GUI/source original, RNG or registered project is fabricated.
@@ -3197,8 +4516,10 @@ pub(crate) fn assert_project_path_document_contracts() {
         if bound { lifetime.crash_hook_installed(); lifetime.started(true); lifetime.finished(true); }
         DocumentState { lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
-            compatibility_picker_pending: false, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
-            quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new() }
+            compatibility_picker_pending: false, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+            quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new(),
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            first_origin: None }
     }
     fn gui(selected: bool) -> GuiFacts {
         GuiFacts { dispatched: true, constructing: false, created: true, showing: false, response: true,
@@ -3326,8 +4647,10 @@ pub(crate) fn assert_project_selection_gate_contract() {
         if bound { lifetime.crash_hook_installed(); lifetime.started(true); lifetime.finished(true); }
         DocumentState { lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
-            compatibility_picker_pending: false, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
-            quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new() }
+            compatibility_picker_pending: false, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+            quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new(),
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            first_origin: None }
     }
     let reason = |state: &DocumentState| common_document_gate(state, false, || Ok(())).err().map(|error| error.reason);
     assert!(!NATIVE_QUALIFIED, "Project profile admission cannot open the broad asset gate.");
@@ -3406,8 +4729,9 @@ pub(crate) fn assert_installed_evidence_gate_contract() {
 
 #[cfg(test)]
 mod tests {
-    // Synthetic in-memory predicates only. No DesktopBridge constructor/RNG,
-    // runtime, task spawn, dialog, fd, source path access or native receipts.
+    // Synthetic in-memory predicates. No DesktopBridge constructor/RNG, dialog,
+    // source path access or native receipts. One explicit Tokio test stages
+    // (but NEVER polls) the owned startup; it does not start an SDK task or I/O.
     use super::*;
     #[test]
     fn project_path_shares_exclusions_but_not_asset_authority_or_synthetic_finality() { assert_project_path_document_contracts(); }
@@ -3415,10 +4739,40 @@ mod tests {
     pub(super) fn empty_state() -> DocumentState {
         DocumentState { lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: true, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
-            compatibility_picker_pending: false,
+            compatibility_picker_pending: false, session_owner_reason: None,
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
-            github: ConnectionState::new(), evidence: EvidenceRegistry::new() }
+            github: ConnectionState::new(), evidence: EvidenceRegistry::new(),
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            first_origin: None }
     }
+
+    pub(super) fn live_session_owner_contract() {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        installed_session_observation::assert_first_origin_contract();
+        for sd in [false,true] { for ed in [false,true] { for ss in [false,true] { for es in [false,true] {
+            let reason = session_owner_reason(sd,ed,ss,es);
+            let expected = if sd || ed { Some(Reason::CleanupUnknown) } else if ss || es { Some(Reason::Shutdown) } else { None };
+            assert_eq!(reason,expected);
+            let mut state = empty_state();
+            state.lifetime.crash_hook_installed(); state.lifetime.started(true); state.lifetime.finished(true);
+            let before = state.revision;
+            let changed = observe_session_owner_reason(&mut state,reason);
+            assert_eq!(changed,reason.is_some());
+            if changed { state.revision = state.revision.checked_add(1).unwrap(); }
+            assert_eq!(state.session_owner_reason,reason);
+            assert!(!observe_session_owner_reason(&mut state,reason));
+            assert_eq!(state.revision,before + u32::from(reason.is_some()));
+            assert_eq!(common_document_gate(&state,true,|| reason.map_or(Ok(()),|r| Err(AssetError::new(r)))).err().map(|e|e.reason),reason);
+            // Display observation cannot fabricate local Unknown/STOP or
+            // prevent teardown. These unchanged original predicates ignore it.
+            assert!(!state.unknown && !state.stopping && state.slot.is_none());
+            assert!(quit_question_admitted(&state));
+            state.session = false;
+            assert!(assets_can_exit_locked(&state));
+        } } } }
+    }
+    #[test]
+    fn actual_owner_reason_blocks_new_session_work_not_retirement() { live_session_owner_contract(); }
 
     #[test]
     fn project_selection_shares_lifecycle_checks_without_granting_an_asset_session() {
@@ -3592,6 +4946,62 @@ mod tests {
         assert_eq!(slot.cleanup_end, Some(start + WORK + CLEANUP));
         assert_eq!(slot.review_end, Some(review)); assert!(slot.owner.stopped());
         assert_eq!(first_cleanup_end(review + WORK, Some(review + WORK), Some(review)), review + CLEANUP);
+    }
+
+    #[test]
+    fn gui_failure_stops_exact_original_without_response_or_settlement() {
+        // Actual state transition, closed DATA only: no bridge, native panel,
+        // worker, callback or purported execution/settlement receipt.
+        let at = Instant::now(); let mut state = empty_state();
+        let owner = OriginalWork::new(7, true, Weak::new()); owner.set_endpoint(None);
+        owner.coordinator.lock().unwrap().receipt = JoinReceipt::Pending;
+        {
+            let mut facts = owner.gui.facts().unwrap();
+            facts.dispatched = true; facts.created = true; facts.showing = true;
+        }
+        let mut work = Slot::new(owner.clone(), Operation::ChooseProject, None, None, None);
+        work.phase = Phase::Picking; state.slot = Some(work);
+        assert!(!quit_question_admitted(&state));
+
+        fail_gui_original_locked(&mut state, &owner.gui, &owner, Reason::SourceRefused, at);
+        let work = state.slot.as_ref().unwrap();
+        assert!(Arc::ptr_eq(&work.owner, &owner) && owner.stopped() && work.discard);
+        assert!(work.operation == Operation::ChooseProject && work.phase == Phase::Stopping);
+        assert_eq!(work.reason, Reason::SourceRefused);
+        assert_eq!(work.cleanup_end, Some(at + CLEANUP));
+        assert_eq!((work.review_end, owner.endpoint()), (None, None));
+        {
+            let facts = owner.gui.facts().unwrap();
+            assert_eq!(facts.refusal, Some(Reason::SourceRefused));
+            assert!(facts.dispatched && facts.created && facts.showing);
+            assert!(!facts.response && !facts.accepted && !facts.declined && facts.accepted_at.is_none());
+            assert!(!facts.not_created && !facts.destroyed && !facts.released && !facts.close_queued
+                && !facts.close_ack && !facts.release_queued && facts.selected.is_none());
+        }
+        assert!(!owner.resources_settled() && !quit_question_admitted(&state));
+        assert!(owner.coordinator.lock().unwrap().receipt == JoinReceipt::Pending);
+
+        // Later receipt/lock delay does not choose a fresh cleanup endpoint;
+        // an existing Unknown or first reason cannot be repaired by STOP.
+        state.slot.as_mut().unwrap().phase = Phase::Unknown;
+        state.slot.as_mut().unwrap().settlement = Settlement::Unknown; state.unknown = true;
+        fail_gui_original_locked(&mut state, &owner.gui, &owner, Reason::Deadline, at + WORK);
+        let work = state.slot.as_ref().unwrap();
+        assert!(state.unknown && work.phase == Phase::Unknown && work.settlement == Settlement::Unknown);
+        assert_eq!((work.reason, work.cleanup_end), (Reason::SourceRefused, Some(at + CLEANUP)));
+        assert_eq!(owner.gui.facts().unwrap().refusal, Some(Reason::SourceRefused));
+
+        // A reused numeric operation ID is never authority over a successor's
+        // Slot/quit, GUI facts, clocks or STOP bit. Only the old original stops.
+        let other = OriginalWork::new(owner.id, true, Weak::new()); other.set_endpoint(None);
+        let mut foreign = Slot::new(other.clone(), Operation::ChooseProject, None, None, None);
+        foreign.phase = Phase::Picking; state.slot = Some(foreign); state.quit = Some(other.clone());
+        fail_gui_original_locked(&mut state, &owner.gui, &owner, Reason::Deadline, at + WORK + CLEANUP);
+        let work = state.slot.as_ref().unwrap();
+        assert!(Arc::ptr_eq(&work.owner, &other) && work.phase == Phase::Picking && !other.stopped());
+        assert_eq!((work.reason, work.cleanup_end, state.quit_cleanup_end), (Reason::None, None, None));
+        assert_eq!(other.gui.facts().unwrap().refusal, None);
+        assert!(!owner.resources_settled() && !quit_question_admitted(&state));
     }
 
     #[test]
@@ -3781,5 +5191,378 @@ mod tests {
         let original = state.slot.as_ref().unwrap();
         assert_eq!(endpoints, (original.cleanup_end, original.review_end, original.owner.endpoint()));
         assert!(!complete_empty_session_lock(&mut state));
+    }
+
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn keyring_memory_model() -> (DocumentState, Arc<OriginalWork>) {
+        let mut state = empty_state();
+        state.lifetime.crash_hook_installed(); state.lifetime.started(true); state.lifetime.finished(true);
+        let owner = OriginalWork::new(1, false, Weak::new());
+        let mut slot = Slot::new(owner.clone(), Operation::Prepare, None, None, None); slot.phase = Phase::Assessing;
+        state.slot = Some(slot); (state, owner)
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn lookup_charge_blocks_context_copy_and_same_owner_child_before_dispatch() {
+        let (mut state, owner) = keyring_memory_model();
+        *owner.keyring.lock().unwrap() = crate::vault_keyring_linux::LookupBook::constructor_refusal_data();
+        let copied = std::cell::Cell::new(false);
+        let context_copy = (|| -> Result<(), AssetError> {
+            lookup_allocation_gate(&state)?; // Same predicate, before context() allocates a draft.
+            copied.set(true); let _ = commands::draft_bytes(&Value::Object(Map::new()))?; Ok(())
+        })();
+        assert_eq!(context_copy.err().map(|error| error.reason), Some(Reason::Busy)); assert!(!copied.get());
+        assert_eq!(common_document_gate(&state, true, || Ok(())).err().map(|error| error.reason), Some(Reason::Busy));
+        assert_eq!(prepare_copy_start(&mut state, &owner), Err(Reason::Busy));
+        assert!(!owner.large_work_started.load(Ordering::SeqCst));
+        let mut original = Box::pin(child(&owner, ChildJob::Tokens));
+        let mut cx = TaskContext::from_waker(Waker::noop());
+        assert!(matches!(original.as_mut().poll(&mut cx), Poll::Ready(Err(Reason::Busy))));
+        drop(original);
+        let book = owner.child.try_lock().unwrap();
+        assert!(book.handle.is_none() && book.receipt == JoinReceipt::New); drop(book);
+        // STOP still works and cannot refund or relax the reciprocal predicate.
+        state.slot.as_mut().unwrap().stop(Reason::UserCancelled, Instant::now());
+        assert!(owner.stopped() && owner.keyring.lock().unwrap().memory_held());
+        assert_eq!(lookup_allocation_gate(&state).err().map(|error| error.reason), Some(Reason::Busy));
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn lookup_request_copy_start_is_sticky_and_busy_books_never_enter() {
+        use crate::vault_keyring_linux::{LookupInput, Problem};
+        let (mut state, owner) = keyring_memory_model();
+        assert!(prepare_copy_start(&mut state, &owner).is_ok());
+        assert!(owner.large_work_started.load(Ordering::SeqCst));
+        state.slot.as_mut().unwrap().phase = Phase::Admitting;
+        assert!(prepare_copy_start(&mut state, &owner).is_ok());
+        assert!(owner.large_work_started.load(Ordering::SeqCst));
+        let enter = || lookup_memory::enter(&state, &owner,
+            LookupInput::new(std::path::Path::new("/inert/not-opened"), "/collection", "data-vault", "data-generation").unwrap(),
+            Instant::now() + WORK);
+        // Exercise the actual nonblocking custody-lock seams before any SDK
+        // construction; these model owners have no original coordinator handle.
+        {
+            let _held = owner.child.try_lock().unwrap();
+            assert_eq!(enter(), Err(Problem::CleanupUnknown));
+        }
+        {
+            let _held = owner.source.lock().unwrap();
+            assert_eq!(enter(), Err(Problem::CleanupUnknown));
+        }
+        {
+            let _held = owner.retirement.lock().unwrap();
+            assert_eq!(enter(), Err(Problem::CleanupUnknown));
+        }
+        {
+            let _held = owner.keyring.lock().unwrap();
+            assert_eq!(enter(), Err(Problem::CleanupUnknown));
+        }
+        assert!(!owner.keyring.lock().unwrap().started());
+        assert!(!owner.keyring.lock().unwrap().memory_held());
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn lookup_refund_requires_join_predicates_disposal_and_keeps_unknown_started_facts() {
+        let (mut state, owner) = keyring_memory_model();
+        *owner.keyring.lock().unwrap() = crate::vault_keyring_linux::LookupBook::constructor_refusal_data();
+        assert!(!owner.dispose_keyring_storage());
+        owner.coordinator.lock().unwrap().receipt = JoinReceipt::Pending;
+        assert!(!owner.dispose_keyring_storage());
+        // These are explicit predicate DATA inputs, not fabricated native joins.
+        // Constructor refusal has positively created NO original SDK resource.
+        owner.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+        assert!(owner.original_resources_settled() && !owner.resources_settled());
+        owner.retired.store(false, Ordering::SeqCst); assert!(!owner.dispose_keyring_storage());
+        owner.retired.store(true, Ordering::SeqCst);
+        {
+            let _draining = owner.retirement.lock().unwrap();
+            assert!(!owner.dispose_keyring_storage());
+        }
+        state.unknown = true;
+        let slot = state.slot.as_mut().unwrap(); slot.phase = Phase::Unknown; slot.settlement = Settlement::Unknown;
+        owner.stop(); let at = owner.keyring.lock().unwrap().problem_at();
+        assert!(owner.keyring.lock().unwrap().memory_held());
+        assert!(owner.dispose_keyring_storage()); assert!(!owner.dispose_keyring_storage());
+        assert!(owner.resources_settled());
+        let book = owner.keyring.lock().unwrap();
+        assert!(book.started() && book.allocations_released() && !book.memory_held() && !book.can_begin());
+        assert_eq!(book.problem_at(), at); drop(book);
+        assert!(state.unknown && state.slot.as_ref().unwrap().phase == Phase::Unknown
+            && state.slot.as_ref().unwrap().settlement == Settlement::Unknown);
+        let other = OriginalWork::new(2, false, Weak::new());
+        other.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+        *other.keyring.lock().unwrap() = crate::vault_keyring_linux::LookupBook::shutdown_gate_data(Instant::now() + WORK);
+        assert!(!other.dispose_keyring_storage());
+        let held = other.keyring.lock().unwrap().memory_held();
+        assert!(held && !other.resources_settled());
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn keyring_gate_requires_current_original_and_never_renews_cleanup_cutoff() {
+        use crate::vault_keyring_linux::{Problem, Step};
+        let mut state = empty_state();
+        state.lifetime.crash_hook_installed(); state.lifetime.started(true); state.lifetime.finished(true);
+        let owner = OriginalWork::new(1, false, Weak::new()); let now = Instant::now();
+        owner.set_endpoint(Some(now + WORK));
+        let mut slot = Slot::new(owner.clone(), Operation::Prepare, None, None, None); slot.phase = Phase::Assessing;
+        state.slot = Some(slot);
+        assert_eq!(keyring_slot_gate(&state, &owner, None, now), Ok(now + WORK));
+        let other = OriginalWork::new(1, false, Weak::new()); // even the same numeric ID is not this original
+        assert_eq!(keyring_slot_gate(&state, &other, Some(Step::RemoveMatch), now), Err(Problem::Interrupted));
+        state.slot.as_mut().unwrap().operation = Operation::InspectEvidence;
+        assert!(keyring_slot_gate(&state, &owner, Some(Step::RemoveMatch), now).is_err());
+        state.slot.as_mut().unwrap().operation = Operation::Prepare;
+        assert!(keyring_slot_gate(&state, &owner, Some(Step::SearchItems), now + WORK).is_err());
+        state.slot.as_mut().unwrap().stop(Reason::UserCancelled, now);
+        state.lifetime.invalidate(); state.lost_observed = true; state.stopping = true;
+        let cleanup_end = state.slot.as_ref().unwrap().cleanup_end.unwrap();
+        assert_eq!(cleanup_end, now + CLEANUP);
+        assert!(keyring_slot_gate(&state, &owner, Some(Step::SearchItems), now).is_err());
+        assert_eq!(keyring_slot_gate(&state, &owner, Some(Step::RemoveMatch), cleanup_end - Duration::from_nanos(1)), Ok(cleanup_end));
+        assert_eq!(keyring_slot_gate(&state, &owner, Some(Step::RemoveMatch), cleanup_end), Err(Problem::CleanupUnknown));
+        assert_eq!(keyring_slot_gate(&state, &owner, Some(Step::RemoveMatch), cleanup_end + Duration::from_nanos(1)), Err(Problem::CleanupUnknown));
+        state.slot.as_mut().unwrap().phase = Phase::Unknown;
+        assert_eq!(keyring_slot_gate(&state, &owner, Some(Step::RemoveMatch), now), Err(Problem::CleanupUnknown));
+        assert_eq!(state.slot.as_ref().unwrap().cleanup_end, Some(cleanup_end));
+        assert_eq!(owner.endpoint(), Some(now + WORK)); // checks never create/extend a lease
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn keyring_final_gate_rechecks_changes_after_stream_readiness() {
+        use crate::vault_keyring_linux::{LookupBook, Next, Problem, Step};
+        use std::sync::atomic::AtomicUsize;
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum Change { Cutoff, SlotUnknown, DocumentUnknown, OtherOriginal, AlreadyPolled }
+        struct DataCall { polls: Arc<AtomicUsize>, drops: Arc<AtomicUsize>, ready: Arc<AtomicBool> }
+        impl Future for DataCall {
+            type Output = zbus::Result<zbus::Message>;
+            fn poll(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<Self::Output> {
+                self.polls.fetch_add(1, Ordering::SeqCst);
+                if self.ready.load(Ordering::SeqCst) { Poll::Ready(Err(zbus::Error::InvalidReply)) } else { Poll::Pending }
+            }
+        }
+        impl Drop for DataCall { fn drop(&mut self) { self.drops.fetch_add(1, Ordering::SeqCst); } }
+        for step in [Step::CloseSession, Step::RemoveMatch] {
+        for change in [Change::Cutoff, Change::SlotUnknown, Change::DocumentUnknown, Change::OtherOriginal, Change::AlreadyPolled] {
+            let mut state = empty_state();
+            state.lifetime.crash_hook_installed(); state.lifetime.started(true); state.lifetime.finished(true);
+            let now = Instant::now(); let work_end = now + WORK;
+            let owner = OriginalWork::new(1, false, Weak::new()); owner.set_endpoint(Some(work_end));
+            let mut slot = Slot::new(owner.clone(), Operation::Prepare, None, None, None); slot.phase = Phase::Assessing;
+            state.slot = Some(slot);
+            let admitted_end = keyring_slot_gate(&state, &owner, Some(step), now).unwrap();
+            assert_eq!(admitted_end, work_end);
+            let polls = Arc::new(AtomicUsize::new(0)); let drops = Arc::new(AtomicUsize::new(0));
+            let ready = Arc::new(AtomicBool::new(false));
+            *owner.keyring.lock().unwrap() = LookupBook::cleanup_step_data(step, admitted_end,
+                DataCall { polls: polls.clone(), drops: drops.clone(), ready: ready.clone() });
+            let mut cx = TaskContext::from_waker(Waker::noop());
+            {
+                let mut book = owner.keyring.lock().unwrap();
+                assert!(matches!(book.idle_data_turn(&mut cx), Poll::Ready(Next::FirstPoll)));
+                assert_eq!(polls.load(Ordering::SeqCst), 0); // Stream readiness is NOT permission to send.
+                if change == Change::AlreadyPolled {
+                    let gate = keyring_poll_gate(&state, &owner, &book, now);
+                    book.first_poll(&mut cx, gate);
+                    assert_eq!(polls.load(Ordering::SeqCst), 1);
+                }
+            }
+            // Change the ACTUAL slot after stream readiness, before final gate.
+            // This is the rejected SOURCE01 interleaving, not a replacement gate
+            // model or a fake live DBus/SDK task-settlement receipt.
+            let mut gate_at = now;
+            match change {
+                Change::Cutoff => {
+                    state.slot.as_mut().unwrap().stop(Reason::UserCancelled, now);
+                    gate_at = state.slot.as_ref().unwrap().cleanup_end.unwrap();
+                    assert_eq!(gate_at, now + CLEANUP); assert!(gate_at < admitted_end);
+                }
+                Change::SlotUnknown | Change::AlreadyPolled => {
+                    let slot = state.slot.as_mut().unwrap(); slot.stop(Reason::UserCancelled, now);
+                    slot.phase = Phase::Unknown; slot.settlement = Settlement::Unknown;
+                }
+                Change::DocumentUnknown => state.unknown = true,
+                Change::OtherOriginal => {
+                    // Same numeric ID cannot stand in for the original Arc.
+                    state.slot.as_mut().unwrap().owner = OriginalWork::new(owner.id, false, Weak::new());
+                }
+            }
+            let mut book = owner.keyring.lock().unwrap();
+            let gate = keyring_poll_gate(&state, &owner, &book, gate_at);
+            assert_eq!(gate, Err(if change == Change::OtherOriginal { Problem::Interrupted } else { Problem::CleanupUnknown }));
+            if change == Change::AlreadyPolled {
+                // The final gate now denies every NEW call, but an already-polled
+                // original bypasses re-admission and remains owned until Ready.
+                book.interrupt();
+                assert!(book.idle_data_turn(&mut cx).is_pending());
+                assert_eq!(polls.load(Ordering::SeqCst), 2); assert_eq!(drops.load(Ordering::SeqCst), 0);
+                ready.store(true, Ordering::SeqCst);
+                assert!(book.idle_data_turn(&mut cx).is_pending());
+                assert_eq!(polls.load(Ordering::SeqCst), 3); assert_eq!(drops.load(Ordering::SeqCst), 1);
+                assert!(book.idle_data_turn(&mut cx).is_pending()); // Keep the original failure, not success.
+                book.shutdown_admission_refused(Problem::CleanupUnknown); // Existing Unknown also denies NEW local shutdown.
+            } else {
+                book.first_poll(&mut cx, gate);
+                assert_eq!(polls.load(Ordering::SeqCst), 0); assert_eq!(drops.load(Ordering::SeqCst), 1);
+            }
+            assert!(book.cleanup_unknown() && !book.resources_settled());
+            assert_eq!(owner.endpoint(), Some(work_end));
+        }
+        }
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn keyring_pending_cleanup_contracts_to_first_stop_without_losing_original() {
+        use crate::vault_keyring_linux::{LookupBook, Next, Problem, Step};
+        use std::sync::atomic::AtomicUsize;
+        struct DataCall { ready: bool, polls: Arc<AtomicUsize>, drops: Arc<AtomicUsize> }
+        impl Future for DataCall {
+            type Output = zbus::Result<zbus::Message>;
+            fn poll(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<Self::Output> {
+                self.polls.fetch_add(1, Ordering::SeqCst);
+                if self.ready {
+                    let call = zbus::Message::method_call("/", "Test").unwrap().build(&()).unwrap();
+                    Poll::Ready(Ok(zbus::Message::method_return(&call.header()).unwrap().sender(":1.23").unwrap().build(&()).unwrap()))
+                } else { Poll::Pending }
+            }
+        }
+        impl Drop for DataCall { fn drop(&mut self) { self.drops.fetch_add(1, Ordering::SeqCst); } }
+        for step in [Step::CloseSession, Step::RemoveMatch] {
+            for raw_boundary in [false, true] {
+                let (mut state, owner) = keyring_memory_model();
+                let work_end = Instant::now() + WORK; owner.set_endpoint(Some(work_end));
+                let polls = Arc::new(AtomicUsize::new(0)); let drops = Arc::new(AtomicUsize::new(0));
+                let mut book = LookupBook::cleanup_step_data(step, work_end,
+                    DataCall { ready: raw_boundary, polls: polls.clone(), drops: drops.clone() });
+                let mut cx = TaskContext::from_waker(Waker::noop());
+                assert!(matches!(book.idle_data_turn(&mut cx), Poll::Ready(Next::FirstPoll)));
+                book.first_poll(&mut cx, keyring_poll_gate(&state, &owner, &book, Instant::now()));
+                assert_eq!(polls.load(Ordering::SeqCst), 1);
+                assert_eq!(drops.load(Ordering::SeqCst), usize::from(raw_boundary));
+
+                // The real original slot changes AFTER first poll; no sleep,
+                // alternate lifecycle model or fabricated SDK join is involved.
+                let stop_at = Instant::now();
+                assert!(keyring_problem_stop(&mut state, &owner, Some((Problem::Interrupted, stop_at))));
+                let end = state.slot.as_ref().unwrap().cleanup_end.unwrap();
+                assert_eq!(end, stop_at + CLEANUP); assert!(end < work_end);
+                book.interrupt(); let first_failure = book.problem_at();
+                keyring_constrain_cleanup(&state, &owner, &mut book);
+                let midpoint = stop_at + CLEANUP / 2;
+                assert_eq!(book.cleanup_progress_data(midpoint), (Some(midpoint), true, !raw_boundary, raw_boundary));
+                assert!(!book.cleanup_progress_data(midpoint - Duration::from_nanos(1)).1);
+                assert!(keyring_slot_gate(&state, &owner, Some(step), midpoint).is_ok());
+                assert!(keyring_slot_gate(&state, &owner, Some(Step::GetSecret), midpoint).is_err());
+                assert_eq!(keyring_slot_gate(&state, &owner, Some(step), end), Err(Problem::CleanupUnknown));
+                assert!(!state.unknown && !book.document_cleanup_unknown());
+
+                // Repeated/later failures cannot extend either clock or consume
+                // the original future/raw boundary. Another equal-ID owner is
+                // not the same slot; existing Unknown still denies new work.
+                assert!(!keyring_problem_stop(&mut state, &owner, Some((Problem::Crypto, end))));
+                keyring_constrain_cleanup(&state, &owner, &mut book);
+                assert_eq!(book.cleanup_progress_data(midpoint), (Some(midpoint), true, !raw_boundary, raw_boundary));
+                assert_eq!(book.problem_at(), first_failure);
+                assert_eq!(state.slot.as_ref().unwrap().cleanup_end, Some(end));
+                assert_eq!(owner.endpoint(), Some(work_end));
+                assert_eq!(polls.load(Ordering::SeqCst), 1);
+                assert_eq!(drops.load(Ordering::SeqCst), usize::from(raw_boundary));
+                assert!(!book.resources_settled() && book.memory_held());
+                let other = OriginalWork::new(owner.id, false, Weak::new());
+                assert!(keyring_slot_gate(&state, &other, Some(step), midpoint).is_err());
+                state.unknown = true;
+                assert_eq!(keyring_slot_gate(&state, &owner, Some(step), midpoint), Err(Problem::CleanupUnknown));
+            }
+        }
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn keyring_local_shutdown_has_its_own_current_slot_cutoff_and_one_use_grant() {
+        use crate::vault_keyring_linux::{LookupBook, Next, Problem};
+        let mut state = empty_state();
+        let owner = OriginalWork::new(1, false, Weak::new());
+        let now = Instant::now(); let end = now + WORK;
+        owner.set_endpoint(Some(end));
+        let mut slot = Slot::new(owner.clone(), Operation::Prepare, None, None, None);
+        slot.phase = Phase::Assessing; state.slot = Some(slot);
+        let mut book = LookupBook::shutdown_gate_data(end);
+        let original_failure_at = book.problem_at();
+        assert!(original_failure_at.is_some() && !book.cleanup_unknown());
+        let mut cx = TaskContext::from_waker(Waker::noop());
+        assert!(book.current_step().is_none()); // It never impersonates RemoveMatch.
+        assert!(keyring_shutdown_gate(&state, &owner, &book, now).is_err());
+        assert!(matches!(book.idle_data_turn(&mut cx), Poll::Ready(Next::FirstPollShutdown)));
+        let grant = keyring_shutdown_gate(&state, &owner, &book, now).unwrap();
+        assert_eq!(grant.into_endpoint(), end);
+        let other = OriginalWork::new(owner.id, false, Weak::new());
+        assert!(matches!(keyring_shutdown_gate(&state, &other, &book, now), Err(Problem::Interrupted)));
+
+        state.slot.as_mut().unwrap().stop(Reason::UserCancelled, now);
+        state.stopping = true; state.lost_observed = true;
+        let cleanup_end = state.slot.as_ref().unwrap().cleanup_end.unwrap();
+        assert!(cleanup_end < end);
+        assert_eq!(keyring_shutdown_gate(&state, &owner, &book, now).unwrap().into_endpoint(), cleanup_end);
+        assert!(matches!(keyring_shutdown_gate(&state, &owner, &book, cleanup_end), Err(Problem::CleanupUnknown)));
+        state.unknown = true;
+        let denied = keyring_shutdown_gate(&state, &owner, &book, now);
+        assert!(matches!(denied, Err(Problem::CleanupUnknown)));
+        book.first_poll_shutdown(&mut cx, denied);
+        assert!(!book.shutdown_waiting_first_poll() && !book.resources_settled());
+        assert!(book.cleanup_unknown());
+        assert_eq!(book.problem_at(), original_failure_at);
+        assert_eq!(state.slot.as_ref().unwrap().cleanup_end, Some(cleanup_end));
+        assert_eq!(owner.endpoint(), Some(end));
+
+        // Even an earlier, valid typed grant cannot outlive the original
+        // staged endpoint when the consumer finally reaches its first poll.
+        let mut expired = LookupBook::shutdown_gate_data(Instant::now());
+        let expired_failure_at = expired.problem_at();
+        assert!(matches!(expired.idle_data_turn(&mut cx), Poll::Ready(Next::FirstPollShutdown)));
+        state.unknown = false;
+        let earlier_grant = keyring_shutdown_gate(&state, &owner, &expired, now).unwrap();
+        expired.first_poll_shutdown(&mut cx, Ok(earlier_grant));
+        assert_eq!(expired.problem(), Some(Problem::CleanupUnknown));
+        assert!(!expired.shutdown_waiting_first_poll() && !expired.resources_settled());
+        assert!(expired.cleanup_unknown());
+        assert_eq!(expired.problem_at(), expired_failure_at);
+
+        // A real typed grant cannot manufacture an absent SDK attempt or hide
+        // the already-reconciled failed removal on that impossible path.
+        let mut absent = LookupBook::shutdown_gate_data(end);
+        let absent_failure_at = absent.problem_at();
+        assert!(matches!(absent.idle_data_turn(&mut cx), Poll::Ready(Next::FirstPollShutdown)));
+        let grant = keyring_shutdown_gate(&state, &owner, &absent, now).unwrap();
+        absent.first_poll_shutdown(&mut cx, Ok(grant));
+        assert!(absent.cleanup_unknown() && !absent.resources_settled());
+        assert!(!absent.shutdown_waiting_first_poll());
+        assert_eq!(absent.problem_at(), absent_failure_at);
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[tokio::test]
+    async fn unstarted_keyring_preserves_session_predicate_but_entered_sdk_never_grants_finality() {
+        // Existing DATA-only receipts exercise the predicate, not native joins.
+        // The newly retained Builder future is NEVER polled or connected here.
+        let owner = OriginalWork::new(1, false, Weak::new());
+        owner.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+        assert!(owner.original_resources_settled());
+        let input = crate::vault_keyring_linux::LookupInput::new(std::path::Path::new("/synthetic/never-opened/bus"),
+            "/collection", "reserved-vault", "reserved-generation").unwrap();
+        owner.keyring.lock().unwrap().begin(input, Instant::now() + WORK, KeyringMemoryAdmission::data(0, 0).unwrap()).unwrap();
+        assert!(!owner.original_resources_settled());
+        owner.stop(); owner.set_endpoint(Some(Instant::now()));
+        owner.coordinator.lock().unwrap().receipt = JoinReceipt::Failed;
+        assert!(!owner.original_resources_settled());
+        assert!(owner.keyring.lock().unwrap().started());
+        assert!(owner.keyring.lock().unwrap().memory_held());
+        assert!(!owner.dispose_keyring_storage());
     }
 }

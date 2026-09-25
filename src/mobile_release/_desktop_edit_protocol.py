@@ -9,10 +9,14 @@ from typing import Any
 from ._desktop_engine import ProtocolError, _check_depth, _check_values, _pairs, _constant
 from .metadata_text import (MAX_PREPARED_BYTES, MetadataTextInputError, admit_baseline,
                              locale_value, platform_value, text_fields)
+from .version_text import (MAX_REQUEST_BYTES as VERSION_REQUEST_LIMIT, MAX_OPENED_BYTES as VERSION_OPENED_LIMIT,
+                           MAX_PREPARED_BYTES as VERSION_PREPARED_LIMIT, MAX_RESULT_BYTES as VERSION_RESPONSE_LIMIT,
+                           VersionTextInputError, admit_baseline as version_baseline, values_input)
 
 PROTOCOL = "mrk-config-edit/1"
 WORKFLOW_PROTOCOL = "mrk-github-workflows/1"
 METADATA_PROTOCOL = "mrk-metadata-text/1"
+VERSION_PROTOCOL = "mrk-release-version/1"
 REQUEST_LIMIT = 1024 * 1024
 RESPONSE_LIMIT = 4 * 1024 * 1024
 WORKFLOW_RESPONSE_LIMIT = 256 * 1024
@@ -75,8 +79,8 @@ def _workflow_value(value: object, *, depth_limit: int, byte_limit: int) -> None
 
 def parse_request(raw: bytes, *, sequence: int, session: str | None,
                   protocol: str = PROTOCOL) -> EditRequest:
-    if (type(protocol) is not str or protocol not in {PROTOCOL, WORKFLOW_PROTOCOL, METADATA_PROTOCOL}
-            or type(raw) is not bytes or not 2 <= len(raw) <= REQUEST_LIMIT
+    if (type(protocol) is not str or protocol not in {PROTOCOL, WORKFLOW_PROTOCOL, METADATA_PROTOCOL, VERSION_PROTOCOL}
+            or type(raw) is not bytes or not 2 <= len(raw) <= (VERSION_REQUEST_LIMIT if protocol == VERSION_PROTOCOL else REQUEST_LIMIT)
             or not raw.endswith(b"\n") or raw[:1] != b"{" or raw[-2:-1] != b"}"
             or b"\r" in raw or b"\n" in raw[:-1]):
         raise ProtocolError("Invalid edit frame")
@@ -103,12 +107,12 @@ def parse_request(raw: bytes, *, sequence: int, session: str | None,
     if sequence == 0:
         if protocol == METADATA_PROTOCOL:
             names = {"root", "registeredIdentity", "platform", "locale"}
-        elif protocol == WORKFLOW_PROTOCOL:
+        elif protocol in {WORKFLOW_PROTOCOL, VERSION_PROTOCOL}:
             names = {"root", "registeredIdentity"}
         else:
             names = {"root"}
         valid = op == "open" and set(params) == names and type(params["root"]) is str
-        if valid and protocol in {WORKFLOW_PROTOCOL, METADATA_PROTOCOL}:
+        if valid and protocol in {WORKFLOW_PROTOCOL, METADATA_PROTOCOL, VERSION_PROTOCOL}:
             registered_identity(params["registeredIdentity"])
         if valid and protocol == METADATA_PROTOCOL:
             try:
@@ -118,6 +122,17 @@ def parse_request(raw: bytes, *, sequence: int, session: str | None,
                 valid = False
     elif op == "discard":
         valid = not params
+    elif sequence == 1 and protocol == VERSION_PROTOCOL:
+        valid = (op == "prepare" and set(params) == {"revision", "expectedBaseline", "intent", "values"}
+                 and type(params["revision"]) is str and TOKEN.fullmatch(params["revision"]) is not None
+                 and type(params["intent"]) is str and params["intent"] in {"edit", "create"})
+        if valid:
+            try:
+                values_input(params["values"])
+                expected = version_baseline(params["expectedBaseline"])
+                valid = params["intent"] == ("create" if expected["savedVersion"]["state"] == "absent" else "edit")
+            except VersionTextInputError:
+                valid = False
     elif sequence == 1 and protocol == METADATA_PROTOCOL:
         valid = (op == "prepare" and set(params) == {"revision", "expectedBaseline", "fields"}
                  and type(params["revision"]) is str and TOKEN.fullmatch(params["revision"]) is not None
@@ -153,8 +168,16 @@ def parse_request(raw: bytes, *, sequence: int, session: str | None,
 
 
 def response(request: EditRequest, kind: str, result: dict[str, Any]) -> bytes:
-    if kind not in {"opened", "prepared", "terminal"} or request.protocol not in {PROTOCOL, WORKFLOW_PROTOCOL, METADATA_PROTOCOL}:
+    if kind not in {"opened", "prepared", "terminal"} or request.protocol not in {PROTOCOL, WORKFLOW_PROTOCOL, METADATA_PROTOCOL, VERSION_PROTOCOL}:
         raise ProtocolError("Invalid edit response")
+    if request.protocol == VERSION_PROTOCOL:
+        keys = ({"revision", "source", "nameKey", "buildKey", "iosEnabled", "values", "baseline", "scopeResources"}
+                if kind == "opened" else {"revision", "planToken", "view", "scopeResources"} if kind == "prepared" else
+                {"kind", "planToken", "effect", "journal", "resources", "reason"})
+        if (type(result) is not dict or set(result) != keys
+                or kind == "terminal" and result["kind"] != "outcome"
+                or kind != "terminal" and result["scopeResources"] != "settled"):
+            raise ProtocolError("Invalid saved-version edit response")
     if request.protocol == METADATA_PROTOCOL:
         keys = ({"revision", "metadataRoot", "baseline", "scopeResources"} if kind == "opened" else
                 {"revision", "planToken", "view", "scopeResources"} if kind == "prepared" else
@@ -169,6 +192,10 @@ def response(request: EditRequest, kind: str, result: dict[str, Any]) -> bytes:
     try:
         if request.protocol == WORKFLOW_PROTOCOL:
             _workflow_value(result, depth_limit=16, byte_limit=WORKFLOW_RESPONSE_LIMIT)
+        elif request.protocol == VERSION_PROTOCOL:
+            _workflow_value(result, depth_limit=16, byte_limit=VERSION_OPENED_LIMIT if kind == "opened" else VERSION_RESPONSE_LIMIT)
+            if kind == "prepared":
+                _workflow_value(result["view"], depth_limit=16, byte_limit=VERSION_PREPARED_LIMIT)
         elif request.protocol == METADATA_PROTOCOL:
             _workflow_value(result, depth_limit=16, byte_limit=METADATA_RESPONSE_LIMIT)
             if kind == "prepared":
@@ -177,7 +204,8 @@ def response(request: EditRequest, kind: str, result: dict[str, Any]) -> bytes:
     except (ValueError, UnicodeError, RecursionError, OverflowError):
         raise ProtocolError("Invalid edit response JSON") from None
     limit = (WORKFLOW_RESPONSE_LIMIT if request.protocol == WORKFLOW_PROTOCOL else
-             METADATA_RESPONSE_LIMIT if request.protocol == METADATA_PROTOCOL else RESPONSE_LIMIT)
+             METADATA_RESPONSE_LIMIT if request.protocol == METADATA_PROTOCOL else
+             VERSION_RESPONSE_LIMIT if request.protocol == VERSION_PROTOCOL else RESPONSE_LIMIT)
     if len(raw) > (TERMINAL_LIMIT if kind == "terminal" else limit):
         raise ProtocolError("Edit response exceeded its bound")
     return raw
