@@ -43,16 +43,23 @@ def artifact(names):
 SOURCE_KIT = ("hosted-evidence.tar", "hosted-summary.json", "retained-files.json")
 REVIEW_NAMES = ("components.json", "notice-inventory.json", "notices/NOTICE.txt",
                 "reviews/configuration-review.txt", "reviews/obligation-review.txt")
-PREPARE = {"sourceArtifact": artifact(SOURCE_KIT),
+PREPARE = {"sourceArtifact": {**artifact(SOURCE_KIT), "sourceSha": "f" * 40, "runId": "9", "artifactId": "10"},
            "reviewFiles": [record(name) for name in REVIEW_NAMES], "outputInventorySha256": "a" * 64}
 SMOKE = {"preparedArtifact": artifact((*REVIEW_NAMES, *("source-kit/" + name for name in SOURCE_KIT),
                                      "prepared-runtime.tar", "preparation.json", "copy-result.json",
                                      "copy-report.json", "source-bindings.json", "outer.json")),
          "manifestSha256": "c" * 64, "protocolSha256": "d" * 64}
-HOST = {"trustModel": "github-hosted-platform-tcb-v1", "imageOS": "ubuntu24", "imageVersion": "20260907.300.1",
-        "python": record("/usr/bin/python3.12")}
+HOST = {"trustModel": "github-hosted-platform-tcb-v1", "imageOS": "ubuntu24", "images": {
+    "20260907.300.1": record("/usr/bin/python3.12"),
+    "20260920.314.1": {**record("/usr/bin/python3.12", "b"), "size": 7}}}
 CONTEXT = {"source": "/inert-source", "root": "/inert-root", "sourceSha": "b" * 40, "sourceTree": "e" * 40,
            "repository": "inert/repository", "runId": "1", "attempt": 1, "platform": "linux"}
+BOOTSTRAPS = ("engine_bootstrap.py", "config_edit_bootstrap.py", "github_connection_bootstrap.py",
+              "environment_bootstrap.py", "offline_preflight_bootstrap.py", "android_build_bootstrap.py")
+CORE_NAMES = sorted([*("desktop/" + name for name in (*BOOTSTRAPS, "github-ca.pem")),
+                     "desktop/tools/prepare_runtime.py", "src/mobile_release/__init__.py"])
+CURRENT_CORE = [record("/work/inputs/core-source/" + name) for name in CORE_NAMES]
+HISTORICAL_CORE = [record("/work/inputs/core-source/" + name, "b") for name in CORE_NAMES]
 
 
 def prepared():
@@ -93,9 +100,9 @@ class AdmissionContracts(unittest.TestCase):
     def test_missing_admissions_refuse_before_helper_import_paths_or_output(self):
         for scope, gate in ((helper.CONVENTIONAL_PREPARE_SCOPE, "CONVENTIONAL_PREPARE_INPUTS"),
                             (helper.CONVENTIONAL_SMOKE_SCOPE, "CONVENTIONAL_SMOKE_INPUTS")):
-            for missing in (gate, "CONVENTIONAL_HOSTED_PYTHON"):
+            for missing in dict.fromkeys((gate, "CONVENTIONAL_PREPARE_INPUTS", "CONVENTIONAL_CURRENT_SOURCE_FILES", "CONVENTIONAL_HOSTED_PYTHON")):
                 literals = {"CONVENTIONAL_PREPARE_INPUTS": PREPARE, "CONVENTIONAL_SMOKE_INPUTS": SMOKE,
-                            "CONVENTIONAL_HOSTED_PYTHON": HOST, missing: None}
+                            "CONVENTIONAL_HOSTED_PYTHON": HOST, "CONVENTIONAL_CURRENT_SOURCE_FILES": CURRENT_CORE, missing: None}
                 with self.subTest(scope=scope, missing=missing), patch.multiple(helper, **literals), \
                         patch.object(helper, "conventional_module") as modules, \
                         patch.object(helper, "conventional_context") as context, self.assertRaises(helper.CheckFailure):
@@ -116,7 +123,8 @@ class AdmissionContracts(unittest.TestCase):
 
     def test_literal_contract_and_copier_or_probe_pins_are_separate(self):
         copier = SimpleNamespace(APPROVED_SOURCE_OUTPUT_SHA256="a" * 64, APPROVED_SOURCE_COMPONENTS_SHA256="a" * 64,
-            APPROVED_SOURCE_NOTICES_SHA256="a" * 64, APPROVED_SOURCE_COPIER_PYTHON_SHA256="a" * 64)
+            APPROVED_SOURCE_NOTICES_SHA256="a" * 64,
+            APPROVED_SOURCE_COPIER_PYTHONS={"imageOS": HOST["imageOS"], "images": deepcopy(HOST["images"])})
         probe = SimpleNamespace(APPROVED_PREPARED_MANIFEST_SHA256="c" * 64, APPROVED_PROTOCOL_SHA256="d" * 64)
         modules = {"conventional_runtime_data": data, "prepare_cpython_source_payload": SimpleNamespace(P=copier),
                    "probe_cpython_source_runtime": probe}
@@ -124,12 +132,18 @@ class AdmissionContracts(unittest.TestCase):
                 patch.object(helper, "CONVENTIONAL_HOSTED_PYTHON", HOST), patch.object(helper, "conventional_module", side_effect=modules.__getitem__):
             self.assertIs(helper.conventional_admission(helper.CONVENTIONAL_PREPARE_SCOPE)[1], PREPARE)
             self.assertIs(helper.conventional_admission(helper.CONVENTIONAL_SMOKE_SCOPE)[1], SMOKE)
-            bad_hosts = [{"python": HOST["python"], "supportFiles": []},
-                         {"python": HOST["python"], "supportFiles": [record("/usr/lib/inert-support")]},
+            bad_hosts = [{"images": HOST["images"], "supportFiles": []},
+                         {"images": HOST["images"], "supportFiles": [record("/usr/lib/inert-support")]},
                          {**HOST, "supportFiles": []}, {**HOST, "trustModel": "complete-interpreter-closure"},
-                         {**HOST, "imageOS": "ubuntu22"}, {**HOST, "imageVersion": ""}, {**HOST, "imageVersion": True},
-                         {**HOST, "python": record("/usr/local/bin/python3.12")},
-                         {**HOST, "python": {**HOST["python"], "size": 0}}]
+                         {**HOST, "imageOS": "ubuntu22"}, {**HOST, "images": {}}, {**HOST, "images": []},
+                         {**HOST, "images": {"": record("/usr/bin/python3.12")}},
+                         {**HOST, "images": {True: record("/usr/bin/python3.12")}},
+                         {**HOST, "images": {**HOST["images"], "20260921.1.1": record("/usr/bin/python3.12")}}]
+            for field, wrong in (("path", "/usr/local/bin/python3.12"), ("size", 0), ("size", True),
+                                 ("size", (16 << 20) + 1), ("sha256", "not-a-digest")):
+                host = deepcopy(HOST)
+                host["images"]["20260920.314.1"][field] = wrong
+                bad_hosts.append(host)
             for host in bad_hosts:
                 for scope in helper.CONVENTIONAL_SCOPES:
                     with self.subTest(host=host, scope=scope), patch.object(helper, "CONVENTIONAL_HOSTED_PYTHON", host), \
@@ -156,9 +170,14 @@ class AdmissionContracts(unittest.TestCase):
                 with self.subTest(missing=leaf), patch.object(helper, "CONVENTIONAL_SMOKE_INPUTS", bad), \
                         self.assertRaises(helper.CheckFailure):
                     helper.conventional_admission(helper.CONVENTIONAL_SMOKE_SCOPE)
-            copier.APPROVED_SOURCE_COPIER_PYTHON_SHA256 = None
-            with self.assertRaises(helper.CheckFailure):
-                helper.conventional_admission(helper.CONVENTIONAL_PREPARE_SCOPE)
+            mismatched = deepcopy(copier.APPROVED_SOURCE_COPIER_PYTHONS)
+            mismatched["images"]["20260920.314.1"] = dict(HOST["images"]["20260907.300.1"])
+            crossed = {"imageOS": HOST["imageOS"], "images": dict(zip(HOST["images"], reversed(list(HOST["images"].values()))))}
+            for copy_profile in (mismatched, crossed, {"imageOS": HOST["imageOS"], "images": {
+                    "20260907.300.1": HOST["images"]["20260907.300.1"]}}, None):
+                copier.APPROVED_SOURCE_COPIER_PYTHONS = copy_profile
+                with self.subTest(copy_profile=copy_profile), self.assertRaises(helper.CheckFailure):
+                    helper.conventional_admission(helper.CONVENTIONAL_PREPARE_SCOPE)
             # A's missing copier admission does not silently authorize/close B.
             self.assertIs(helper.conventional_admission(helper.CONVENTIONAL_SMOKE_SCOPE)[1], SMOKE)
             probe.APPROVED_PROTOCOL_SHA256 = "e" * 64
@@ -180,7 +199,7 @@ class AdmissionContracts(unittest.TestCase):
                              (helper.CONVENTIONAL_SMOKE_SCOPE, "conventional-smoke")):
             ref = "refs/heads/verify/desktop-" + route
             base = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Linux",
-                    "RUNNER_ARCH": "X64", "ImageOS": "ubuntu24", "ImageVersion": HOST["imageVersion"],
+                    "RUNNER_ARCH": "X64", "ImageOS": "ubuntu24", "ImageVersion": "20260907.300.1",
                     "MRK_DESKTOP_HOSTED_CHECKS": scope,
                     "GITHUB_SHA": CONTEXT["sourceSha"], "GITHUB_REPOSITORY": CONTEXT["repository"],
                     "GITHUB_RUN_ID": "1", "GITHUB_RUN_ATTEMPT": "1", "GITHUB_WORKFLOW_SHA": CONTEXT["sourceSha"],
@@ -223,21 +242,78 @@ class AdmissionContracts(unittest.TestCase):
 
 class DataContracts(unittest.TestCase):
     def test_only_logical_ca_uses_fixed_checkout_controls_path(self):
-        bootstraps = ("engine_bootstrap.py", "config_edit_bootstrap.py", "github_connection_bootstrap.py",
-                      "environment_bootstrap.py", "offline_preflight_bootstrap.py", "android_build_bootstrap.py")
-        preparer = SimpleNamespace(BOOTSTRAPS=bootstraps, GITHUB_CA_NAME="github-ca.pem",
-                                  files=lambda root: [root / "__init__.py"])
-        names = sorted([*("desktop/" + name for name in (*bootstraps, "github-ca.pem")),
-                        "desktop/tools/prepare_runtime.py", "src/mobile_release/__init__.py"])
-        rows = [record("/work/inputs/core-source/" + name) for name in names]
-        inert = SimpleNamespace(decode=data.decode, records=data.records, bound=Mock())
-        with patch.object(helper, "conventional_module", return_value=preparer):
-            helper.conventional_core(inert, Path("/inert-checkout"), data.canonical(rows),
-                                     retained_source=Path("/inert-h/inputs/core-source"))
+        source, staged = Path("/inert-checkout"), Path("/inert-current-core")
+        preparer = SimpleNamespace(BOOTSTRAPS=BOOTSTRAPS, GITHUB_CA_NAME="github-ca.pem",
+            files=lambda root: [root / name for name in (CORE_NAMES if root == staged else ["__init__.py"])])
+        inert = SimpleNamespace(decode=data.decode, records=data.records, same=data.same, bound=Mock())
+        with patch.object(helper, "CONVENTIONAL_CURRENT_SOURCE_FILES", CURRENT_CORE), \
+                patch.object(helper, "conventional_module", return_value=preparer):
+            self.assertEqual(helper.conventional_core(inert, source, data.canonical(CURRENT_CORE), staged_source=staged), CURRENT_CORE)
         checked = [call.args[0] for call in inert.bound.call_args_list]
         self.assertIn(Path("/inert-checkout/desktop/cpython-source-inputs/github-ca.pem"), checked)
         self.assertNotIn(Path("/inert-checkout/desktop/github-ca.pem"), checked)
-        self.assertIn(Path("/inert-h/inputs/core-source/desktop/github-ca.pem"), checked)
+        self.assertIn(staged / "desktop/github-ca.pem", checked)
+        self.assertEqual(len(checked), 2 * len(CURRENT_CORE))
+
+    def test_current_roster_is_closed_not_historical_or_discovered_authority(self):
+        admitted = data.records(helper.CONVENTIONAL_CURRENT_SOURCE_FILES, absolute=True)
+        self.assertEqual(len(admitted), 114)
+        self.assertEqual(sum(name.startswith("/work/inputs/core-source/src/mobile_release/") for name in admitted), 106)
+        variants = [CURRENT_CORE[:-1], HISTORICAL_CORE, list(reversed(CURRENT_CORE)), [*CURRENT_CORE, CURRENT_CORE[-1]],
+            sorted([*CURRENT_CORE, record("/work/inputs/core-source/src/mobile_release/new.py")], key=lambda row: row["path"])]
+        for key, wrong in (("sha256", "f" * 64), ("size", 6), ("size", True), ("path", "/other/core.py")):
+            variant = deepcopy(CURRENT_CORE)
+            variant[-1][key] = wrong
+            variants.append(variant)
+        inert = SimpleNamespace(decode=data.decode, records=data.records, same=data.same, bound=Mock())
+        for rows in variants:
+            with self.subTest(rows=rows), patch.object(helper, "CONVENTIONAL_CURRENT_SOURCE_FILES", CURRENT_CORE), \
+                    patch.object(helper, "conventional_module") as modules, self.assertRaises((helper.CheckFailure, data.Refused)):
+                helper.conventional_core(inert, Path("/inert-checkout"), data.canonical(rows))
+            modules.assert_not_called()
+            inert.bound.assert_not_called()
+
+    def test_current_source_and_staged_copy_require_complete_unchanged_bytes(self):
+        source, staged = Path("/inert-checkout"), Path("/inert-current-core")
+        bindings = {}
+        for name, row in zip(CORE_NAMES, CURRENT_CORE):
+            checkout = "desktop/cpython-source-inputs/github-ca.pem" if name == "desktop/github-ca.pem" else name
+            bindings[source / checkout] = bindings[staged / name] = row
+        for location in (source, staged):
+            for failure in ("missing", "extra", "changed"):
+                def files(root):
+                    names = list(CORE_NAMES) if root == staged else ["__init__.py"]
+                    if root == (staged if location == staged else source / "src/mobile_release"):
+                        if failure == "missing": names.pop()
+                        if failure == "extra": names.append("unadmitted.py")
+                    return [root / name for name in names]
+                def record_for(path, limit):
+                    row = {**bindings[path], "path": path.name}
+                    if failure == "changed" and path == location / "src/mobile_release/__init__.py":
+                        row["sha256"] = "f" * 64
+                    return row
+                preparer = SimpleNamespace(BOOTSTRAPS=BOOTSTRAPS, GITHUB_CA_NAME="github-ca.pem", files=files)
+                with self.subTest(location=location, failure=failure), patch.object(helper, "CONVENTIONAL_CURRENT_SOURCE_FILES", CURRENT_CORE), \
+                        patch.object(helper, "conventional_module", return_value=preparer), patch.object(data, "file_record", side_effect=record_for) as reads, \
+                        self.assertRaises((helper.CheckFailure, data.Refused)):
+                    helper.conventional_core(data, source, data.canonical(CURRENT_CORE), staged_source=staged)
+                if failure != "changed": reads.assert_not_called()
+
+    def test_historical_core_binds_only_original_supplier_mapping_and_retained_bytes(self):
+        source, retained = Path("/inert-checkout"), Path("/inert-h/inputs/core-source")
+        preparer = SimpleNamespace(files=Mock(return_value=[retained / name for name in CORE_NAMES]))
+        for rows in (HISTORICAL_CORE, CURRENT_CORE, HISTORICAL_CORE[:-1]):
+            inert = SimpleNamespace(decode=data.decode, records=data.records, same=data.same,
+                                    read=Mock(return_value=data.canonical(HISTORICAL_CORE)), bound=Mock())
+            with self.subTest(rows=rows), patch.object(helper, "conventional_module", return_value=preparer):
+                if rows == HISTORICAL_CORE:
+                    helper.conventional_historical_core(inert, source, data.canonical(rows), retained)
+                    self.assertEqual([call.args[0] for call in inert.bound.call_args_list], [retained / name for name in CORE_NAMES])
+                else:
+                    with self.assertRaises(helper.CheckFailure):
+                        helper.conventional_historical_core(inert, source, data.canonical(rows), retained)
+                    inert.bound.assert_not_called()
+                inert.read.assert_called_once_with(source / "desktop/cpython-source-inputs/core-source-files.json")
 
     def test_changed_artifact_and_unsafe_or_duplicate_records_refuse(self):
         with patch.object(data, "file_record", return_value=record("x", "b")), self.assertRaises(data.Refused):
@@ -346,16 +422,26 @@ class ProgressionContracts(unittest.TestCase):
                    "retained": {field: {**h_rows[leaf], "path": "/var/tmp/mrk-cpython-source-public-v1/" + leaf}
                                 for field, leaf in (("archive", "hosted-evidence.tar"), ("inventory", "retained-files.json"))}}
         bodies = {"hosted-summary.json": data.canonical(summary), "manifest.json": manifest_raw,
-                  "core-source-files.json": b"[]\n", "retained-files.json": data.canonical({
+                  "core-source-files.json": data.canonical(HISTORICAL_CORE), "retained-files.json": data.canonical({
                       "schema": "mrk-cpython-source-retention-1", "profile": data.PROFILE,
                       "coverage": "conservative-component-review-required", "files": receipts})}
-        for failure in ("before", "after", None):
+        for failure in ("before", "after", "current-before", "current-stage", "current-after", "historical-before", "historical-after", None):
             checked = []
+            core_checks, historical_checks = [], []
             def inventory(_data, path, files):
                 checked.append(path)
-                if path == kit and checked.count(kit) == (1 if failure == "before" else 2) and failure:
+                if failure in {"before", "after"} and path == kit and checked.count(kit) == (1 if failure == "before" else 2):
                     raise helper.CheckFailure("inert changed committed review")
                 return data.records(files)
+            def current(_data, checkout, raw, **kwargs):
+                core_checks.append((checkout, raw, kwargs))
+                if len(core_checks) == {"current-before": 1, "current-stage": 2, "current-after": 3}.get(failure):
+                    raise helper.CheckFailure("inert changed current source")
+                return CURRENT_CORE
+            def historical(_data, checkout, raw, retained):
+                historical_checks.append((checkout, raw, retained))
+                if len(historical_checks) == {"historical-before": 1, "historical-after": 2}.get(failure):
+                    raise helper.CheckFailure("inert changed historical supplier")
             copier = SimpleNamespace(prepare_source=Mock(return_value=copied))
             preparer = SimpleNamespace(prepare=Mock(return_value=result), files=Mock(return_value=[
                 root / "runtime/core.zip", root / "runtime/manifest.json"]))
@@ -368,7 +454,9 @@ class ProgressionContracts(unittest.TestCase):
                 pack_runtime=Mock(return_value=record("prepared-runtime.tar")))
             with self.subTest(failure=failure), patch.object(helper, "conventional_files", side_effect=inventory) as inputs, \
                     patch.object(helper, "conventional_module", side_effect=modules.__getitem__), \
-                    patch.object(helper, "conventional_core"), patch.object(helper, "conventional_recheck"), \
+                    patch.object(helper, "CONVENTIONAL_CURRENT_SOURCE_FILES", CURRENT_CORE), \
+                    patch.object(helper, "conventional_core", side_effect=current), \
+                    patch.object(helper, "conventional_historical_core", side_effect=historical), patch.object(helper, "conventional_recheck"), \
                     patch.object(helper, "fixed_file_inventory", return_value=[record("inert-helper")]), patch.object(Path, "mkdir"):
                 if failure:
                     with self.assertRaises(helper.CheckFailure):
@@ -376,14 +464,16 @@ class ProgressionContracts(unittest.TestCase):
                 else:
                     helper.conventional_prepare(CONTEXT, inert, PREPARE)
             self.assertEqual(inputs.call_args_list[1].args, (inert, kit, PREPARE["reviewFiles"]))
-            if failure == "before":
+            if failure in {"before", "current-before", "current-stage", "historical-before"}:
                 copier.prepare_source.assert_not_called()
                 preparer.prepare.assert_not_called()
             else:
                 copier.prepare_source.assert_called_once()
+                preparer.prepare.assert_called_once_with(root / "current-core-source", root / "runtime", helper.TARGETS["linux"])
                 self.assertEqual(copier.prepare_source.call_args.args[2:6],
                                  (root / "evidence", kit / "components.json", kit / "notices", kit / "notice-inventory.json"))
-                self.assertEqual(checked, [root / "source-artifact", kit, root / "source-artifact", kit])
+                if failure in {"after", None}:
+                    self.assertEqual(checked, [root / "source-artifact", kit, root / "source-artifact", kit])
             if failure:
                 inert.pack_runtime.assert_not_called()
                 self.assertFalse(any(call.args[0].name == "preparation.json" for call in inert.write.call_args_list))
@@ -400,6 +490,20 @@ class ProgressionContracts(unittest.TestCase):
                 publication = data.decode(next(call.args[1] for call in inert.write.call_args_list
                                               if call.args[0].name == "preparation.json"))
                 self.assertTrue(data.same(publication["sourceKit"], h["files"]))
+                self.assertEqual(publication["producer"], helper.conventional_producer(CONTEXT))
+                self.assertEqual(publication["sourceArtifact"], {key: h[key] for key in ("repository", "sourceSha", "runId", "attempt", "artifactId")})
+                self.assertNotEqual(publication["producer"]["sourceSha"], publication["sourceArtifact"]["sourceSha"])
+                binding = next(call.args[1] for call in inert.write.call_args_list if call.args[0].name == "source-bindings.json")
+                self.assertEqual(data.decode(binding), CURRENT_CORE)
+                self.assertNotEqual(data.decode(binding), HISTORICAL_CORE)
+                staged = root / "current-core-source"
+                current_copies = [call.args for call in inert.copy.call_args_list if staged in call.args[1].parents]
+                self.assertEqual(current_copies, [(Path(CONTEXT["source"]) /
+                    ("desktop/cpython-source-inputs/github-ca.pem" if name == "desktop/github-ca.pem" else name), staged / name, row)
+                    for name, row in zip(CORE_NAMES, CURRENT_CORE)])
+                self.assertEqual(core_checks, [(Path(CONTEXT["source"]), data.canonical(CURRENT_CORE), kwargs)
+                    for kwargs in ({}, {"staged_source": staged}, {"staged_source": staged})])
+                self.assertEqual(historical_checks, [(Path(CONTEXT["source"]), data.canonical(HISTORICAL_CORE), root / "h/inputs/core-source")] * 2)
 
     def test_exact_original_h_triple_join_precedes_unpack_and_probe(self):
         rows = data.records(SMOKE["preparedArtifact"]["files"])
@@ -418,18 +522,38 @@ class ProgressionContracts(unittest.TestCase):
                       [*original, record("source-kit.tar")], original[0]]
         candidates += [[{**row, key: wrong} if index == 0 else row for index, row in enumerate(original)]
                        for key, wrong in (("path", "source-kit/hosted-evidence.tar"), ("size", True), ("sha256", "f" * 64))]
-        for index, candidate in enumerate(candidates):
-            bodies = {"preparation.json": {**value, "sourceKit": candidate}, "copy-result.json": copied, "source-bindings.json": [],
+        cases = [("source-kit-" + str(index), {**value, "sourceKit": candidate}, rows, index == 0)
+                 for index, candidate in enumerate(candidates)]
+        for field, wrong in (("repository", "other/repository"), ("sourceSha", "e" * 40), ("runId", "7"),
+                             ("attempt", True), ("artifactId", "6")):
+            candidate = deepcopy(value)
+            candidate["sourceArtifact"][field] = wrong
+            cases.append(("supplier-" + field, candidate, rows, False))
+        candidate = deepcopy(value)
+        candidate["producer"] = {key: PREPARE["sourceArtifact"][key] for key in producer}
+        cases.append(("supplier-used-as-current-producer", candidate, rows, False))
+        candidate = deepcopy(value)
+        candidate["sourceArtifact"] = {**producer, "artifactId": SMOKE["preparedArtifact"]["artifactId"]}
+        cases.append(("current-producer-used-as-supplier", candidate, rows, False))
+        # Internal agreement in a newly admitted artifact cannot relabel H's
+        # historical source kit. It must also agree with H's unchanged admission.
+        candidate, forged_rows = deepcopy(value), deepcopy(rows)
+        candidate["sourceKit"][0]["sha256"] = "e" * 64
+        forged_rows["source-kit/" + candidate["sourceKit"][0]["path"]]["sha256"] = "e" * 64
+        cases.append(("self-consistent-foreign-supplier-kit", candidate, forged_rows, False))
+        for label, candidate, admitted_rows, valid in cases:
+            bodies = {"preparation.json": candidate, "copy-result.json": copied, "source-bindings.json": [],
                       "outer.json": {"schemaVersion": 1, "scope": data.PREPARE_SCOPE, **producer, "originalWait": True,
                           "exitCode": 0, "outputWritersClosed": True, "statusWriterCloseGate": "original-step-success-required"}}
             inert = SimpleNamespace(read=Mock(side_effect=lambda path, limit=0: data.canonical(bodies[path.name])),
                                     NOT_VERIFIED=data.NOT_VERIFIED,
-                                    decode=data.decode, same=data.same, outer=data.outer, unpack=Mock())
+                                    decode=data.decode, records=data.records, same=data.same, outer=data.outer, unpack=Mock())
             probe = SimpleNamespace(inspect_prepared=Mock(return_value=prepared()))
-            with self.subTest(sourceKit=candidate), patch.object(helper, "conventional_files", return_value=rows), \
+            with self.subTest(case=label), patch.object(helper, "CONVENTIONAL_PREPARE_INPUTS", PREPARE), \
+                    patch.object(helper, "conventional_files", return_value=admitted_rows), \
                     patch.object(helper, "fixed_file_inventory", return_value=shared), \
                     patch.object(helper, "conventional_core") as core, patch.object(helper, "conventional_module", return_value=probe) as modules:
-                if index:
+                if not valid:
                     with self.assertRaises(helper.CheckFailure):
                         helper.conventional_prepared(CONTEXT, inert, SMOKE, unpack=True)
                     inert.unpack.assert_not_called()
@@ -449,35 +573,46 @@ class ProgressionContracts(unittest.TestCase):
                     self.assertRaises(helper.CheckFailure):
                 helper.conventional_recheck(CONTEXT, data)
             if failure == "host": source.assert_not_called()
-        metadata = {"st_mode": 0o100755, "st_uid": 0, "st_gid": 0, "st_nlink": 1, "st_size": 5,
-                    "st_dev": 1, "st_ino": 2, "st_mtime_ns": 1, "st_ctime_ns": 1}
-        for failure in (None, "image-os", "image-version", "image-missing", "root", "architecture", "executable", "flags",
-                        "mode", "symlink", "uid", "gid", "nlink", "bytes", "drift"):
-            fields = dict(metadata)
-            for label, key, wrong in (("mode", "st_mode", 0o100775), ("symlink", "st_mode", 0o120755),
-                                      ("uid", "st_uid", 1001), ("gid", "st_gid", 1001), ("nlink", "st_nlink", 2)):
-                if failure == label: fields[key] = wrong
-            before = SimpleNamespace(**fields)
-            after = SimpleNamespace(**{**fields, "st_ctime_ns": 2}) if failure == "drift" else before
-            environment = {"ImageOS": "ubuntu22" if failure == "image-os" else HOST["imageOS"],
-                           "ImageVersion": "20260908.1.1" if failure == "image-version" else HOST["imageVersion"]}
-            if failure == "image-missing": environment.pop("ImageVersion")
-            flags = SimpleNamespace(isolated=1, no_site=1, dont_write_bytecode=0 if failure == "flags" else 1)
-            host_sys = SimpleNamespace(platform="linux", version_info=(3, 12, 0), flags=flags, executable="/usr/bin/python3.12")
-            with self.subTest(failure=failure), patch.object(helper, "CONVENTIONAL_HOSTED_PYTHON", HOST), \
-                    patch.dict(helper.os.environ, environment, clear=True), patch.object(helper, "sys", host_sys), \
-                    patch.object(helper.os, "geteuid", return_value=0 if failure == "root" else 1001), \
-                    patch.object(helper.os, "uname", return_value=SimpleNamespace(machine="arm64" if failure == "architecture" else "x86_64")), \
-                    patch.object(helper.os.path, "realpath", return_value="/inert/python" if failure == "executable" else "/usr/bin/python3.12"), \
-                    patch.object(Path, "lstat", side_effect=[before, after]), \
-                    patch.object(data, "file_record", return_value=record("python3.12", "b" if failure == "bytes" else "a")) as body:
-                if failure:
-                    with self.assertRaises((helper.CheckFailure, data.Refused)):
+        for version, expected in HOST["images"].items():
+            other_version = next(image for image in HOST["images"] if image != version)
+            other = HOST["images"][other_version]
+            metadata = {"st_mode": 0o100755, "st_uid": 0, "st_gid": 0, "st_nlink": 1, "st_size": expected["size"],
+                        "st_dev": 1, "st_ino": 2, "st_mtime_ns": 1, "st_ctime_ns": 1}
+            for failure in (None, "image-os", "image-version", "image-missing", "other-record", "root", "architecture",
+                            "executable", "flags", "mode", "symlink", "uid", "gid", "nlink", "bytes", "size", "crossed", "drift"):
+                fields = dict(metadata)
+                for label, key, wrong in (("mode", "st_mode", 0o100775), ("symlink", "st_mode", 0o120755),
+                                          ("uid", "st_uid", 1001), ("gid", "st_gid", 1001), ("nlink", "st_nlink", 2)):
+                    if failure == label: fields[key] = wrong
+                before = SimpleNamespace(**fields)
+                after = SimpleNamespace(**{**fields, "st_ctime_ns": 2}) if failure == "drift" else before
+                environment = {"ImageOS": "ubuntu22" if failure == "image-os" else HOST["imageOS"],
+                               "ImageVersion": "20260908.1.1" if failure == "image-version" else version}
+                if failure == "image-missing": environment.pop("ImageVersion")
+                profile = deepcopy(HOST)
+                if failure == "other-record": profile["images"][other_version]["size"] = True
+                actual = {**expected, "path": "python3.12"}
+                if failure in {"bytes", "crossed"}: actual["sha256"] = other["sha256"]
+                if failure in {"size", "crossed"}: actual["size"] = other["size"]
+                flags = SimpleNamespace(isolated=1, no_site=1, dont_write_bytecode=0 if failure == "flags" else 1)
+                host_sys = SimpleNamespace(platform="linux", version_info=(3, 12, 0), flags=flags, executable="/usr/bin/python3.12")
+                with self.subTest(image=version, failure=failure), patch.object(helper, "CONVENTIONAL_HOSTED_PYTHON", profile), \
+                        patch.dict(helper.os.environ, environment, clear=True), patch.object(helper, "sys", host_sys), \
+                        patch.object(helper.os, "geteuid", return_value=0 if failure == "root" else 1001), \
+                        patch.object(helper.os, "uname", return_value=SimpleNamespace(machine="arm64" if failure == "architecture" else "x86_64")), \
+                        patch.object(helper.os.path, "realpath", return_value="/inert/python" if failure == "executable" else "/usr/bin/python3.12") as host_path, \
+                        patch.object(Path, "lstat", side_effect=[before, after]) as metadata_read, \
+                        patch.object(data, "file_record", return_value=actual) as body:
+                    if failure:
+                        with self.assertRaises((helper.CheckFailure, data.Refused)):
+                            helper.conventional_host(data)
+                        if failure not in {"bytes", "size", "crossed", "drift"}: body.assert_not_called()
+                        if failure in {"image-os", "image-version", "image-missing", "other-record"}:
+                            host_path.assert_not_called()
+                            metadata_read.assert_not_called()
+                    else:
                         helper.conventional_host(data)
-                    if failure not in {"bytes", "drift"}: body.assert_not_called()
-                else:
-                    helper.conventional_host(data)
-                    body.assert_called_once_with(Path("/usr/bin/python3.12"), HOST["python"]["size"])
+                        body.assert_called_once_with(Path("/usr/bin/python3.12"), expected["size"])
 
     def test_probe_errors_or_changed_inputs_cannot_launch_libtest(self):
         messages = b"inert-cargo-messages"

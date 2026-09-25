@@ -61,7 +61,8 @@ pub(super) fn write_unavailable(book: &NativeBook, observation: &Result<bool>, o
         }
         Call::Read(_) => ("ReadFile", "null", "boolean"),
         Call::Entries => ("GetFileInformationByHandleEx", r#""FileIdExtdDirectoryInfo""#, "boolean"),
-        Call::DriveType | Call::ThreadToken(_) | Call::Close(_) | Call::FileType => return,
+        Call::DriveType | Call::ThreadToken(_) | Call::Close(_) | Call::FileType
+            | Call::QualificationSourceToken(_) | Call::QualificationRestrictedToken(_) => return,
     };
     // Pair the original API with its actual return class. A malformed synthetic
     // pair, pending result or permitted EOF is not a printable terminal failure.
@@ -83,7 +84,7 @@ pub(super) fn write_unavailable(book: &NativeBook, observation: &Result<bool>, o
 fn require_fact(value: bool) -> Result<()> {
     if value { Ok(()) } else { Err(Error::Unsafe) }
 }
-fn hosted_source() -> Result<&'static str> {
+pub(super) fn hosted_source() -> Result<&'static str> {
     let source = option_env!("GITHUB_SHA").ok_or(Error::State)?;
     require_fact(source.len() == 40 && source.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))?;
     for (name, expected) in [
@@ -105,7 +106,7 @@ fn statistics(book: &mut NativeBook, index: usize) -> Result<TokenIdentity> {
     let completed = book.token(index, S::TokenStatistics)?;
     security::statistics(completed.bytes(completed.count()?)?)
 }
-fn actual_elevated_primary_refusal(book: &mut NativeBook, index: usize) -> Result<()> {
+pub(super) fn actual_elevated_primary_refusal(book: &mut NativeBook, index: usize) -> Result<()> {
     // These are actual, bounded, completed observations of the SAME original
     // opened by observe_user_once, not fixture values or another token handle.
     book.absent_thread_token()?;
@@ -182,6 +183,13 @@ fn hosted_native_read_only_contract() -> Result<()> {
     require_fact(exact_slots && primary == 1 && owned == closed
         && closed == if admitted { 2 } else { 1 }
         && absent == if admitted { 6 } else { 4 })?;
+    if std::env::var_os("MRK_WINDOWS_ORDINARY_OUTPUT").is_some() {
+        // A result-file route never accepts the legacy elevated negative case.
+        // Every unchanged native observation/count/settlement gate is above.
+        require_fact(admitted)?;
+        let user = book.user.as_ref().ok_or(Error::State)?.user.bytes();
+        return super::ordinary_owner::write_native_result(user);
+    }
     let outcome = if admitted { "ordinary-admitted" } else { "elevated-primary-refused" };
     // Deliberately only public predicates/counts; never token/SID/account names,
     // paths, security descriptors, identifiers, privilege lists or raw handles.

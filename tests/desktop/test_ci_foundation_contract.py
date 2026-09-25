@@ -8,7 +8,7 @@ from __future__ import annotations
 import ast
 import __future__
 from copy import deepcopy
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 import importlib.util
 import io
 import hashlib
@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 import stat
 import subprocess
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -726,6 +727,20 @@ class FixedCompilerHelperTests(unittest.TestCase):
             self.assertIs(called.call_args.kwargs["stdout"], destination)
             self.assertTrue(called.call_args.kwargs["check"])
             self.assertEqual(called.call_args.kwargs["timeout"], 600)
+        for label in ("windows-installed-helper-locked-metadata", "windows-normal-ui-native-metadata", "windows-normal-ui-native-compile-only",
+                      "windows-normal-ui-native-policy", "windows-normal-ui-scalar-metadata",
+                      "windows-normal-ui-scalar-compile-only", "windows-normal-ui-scalar-regression",
+                      "windows-normal-ui-setup-native-metadata", "windows-normal-ui-setup-native-compile-only",
+                      "windows-normal-ui-gui-metadata", "windows-normal-ui-gui-compile-only",
+                      "windows-normal-ui-frontend-acquire", "windows-normal-ui-frontend-typecheck", "windows-normal-ui-frontend-assets"):
+            with self.subTest(label=label), patch.object(helper.subprocess, "run", return_value=completed) as called, redirect_stdout(io.StringIO()) as logs:
+                destination, diagnostics = io.StringIO(), io.StringIO()
+                self.assertEqual(helper.run(argv, check=label, cwd=Path("/unused"),
+                    env=environment, timeout=600, output=destination, diagnostics=diagnostics), "")
+                called.assert_called_once_with(argv, cwd=Path("/unused"), env=environment, check=True, timeout=600,
+                                               text=True, stdout=destination, stderr=diagnostics)
+                self.assertEqual(logs.getvalue(), "Fixed check: " + label + "\n")
+                for private in (*argv, *environment, *environment.values()): self.assertNotIn(private, logs.getvalue())
 
     def test_failure_diagnostics_never_include_command_paths_or_captured_values(self):
         private = "PRIVATE-CANARY-NOT-FOR-OUTPUT"
@@ -1397,9 +1412,9 @@ class WorkflowNativeHelperTests(unittest.TestCase):
             self.assertNotIn(forbidden, workflow)
         positions = [workflow.index(f"ci_foundation.py {phase}'") for phase in helper.WORKFLOW_NATIVE_PHASES]
         self.assertEqual(positions, sorted(positions))
-        self.assertEqual(workflow.count("ci_foundation.py "), len(helper.WORKFLOW_NATIVE_PHASES) + 3)
-        # The new push-only metadata selection shares this compile, not the old
-        # workflow-domain native sequence. Keep the original upload unchanged.
+        self.assertEqual(workflow.count("ci_foundation.py "), len(helper.WORKFLOW_NATIVE_PHASES) + 6)
+        # The push-only metadata and version selections share this compile, not
+        # the workflow-domain native sequence. Keep the original upload unchanged.
         workflow_upload = workflow.split("      - name: Retain only allowlisted synthetic receipts\n", 1)[1].split(
             "      - name: Retain only allowlisted synthetic metadata receipts\n", 1)[0]
         allowlist = [line.strip().split("${{ steps.prepare.outputs.root }}/", 1)[1]
@@ -1600,16 +1615,31 @@ class MetadataNativeHelperTests(unittest.TestCase):
         cases = [case for partition in ("ordinary", "committed-fsync", "committed-close") for case in metadata_core_report(partition)["cases"]]
         self.assertEqual(len(cases), 22)
         self.assertEqual(canonical(cases), "1adb3df36daed910279f776cf1683367b0b85c73cba13057fa1e7967b18b2601")
-        self.assertEqual(canonical(helper.METADATA_CORE_SOURCES), "d812ffa8c1a5e9a0798dd3736572ad16ba435dd62d9a5af07c8c74c9c66b9c2b")
+        # Keep the accepted historical source-map oracle unchanged. The new
+        # shared imports extend SOURCE closure only, never metadata fixture or
+        # version-writer permission, and the explicit additions are closed.
+        version_core_sources = {
+            "versionEdit": "src/mobile_release/release_version_edit.py",
+            "versionText": "src/mobile_release/version_text.py",
+            "versionResource": "src/mobile_release/api/data/release-version-help-v1.json",
+        }
+        version_owner_sources = {**version_core_sources,
+            "versionProtocol": "desktop/src-tauri/src/release_version_edit_protocol.rs",
+            "versionCommands": "desktop/src-tauri/src/release_version_edit_commands.rs"}
+        self.assertEqual({key: helper.METADATA_CORE_SOURCES[key] for key in version_core_sources}, version_core_sources)
+        historical_core = {key: value for key, value in helper.METADATA_CORE_SOURCES.items() if key not in version_core_sources}
+        self.assertEqual(canonical(historical_core), "d812ffa8c1a5e9a0798dd3736572ad16ba435dd62d9a5af07c8c74c9c66b9c2b")
         self.assertEqual(canonical(helper.METADATA_PAYLOAD_BINDINGS), "a0d9844865eed8a49f98ddbc640a9ebcb04c9c31e48774a83281dad5c45beb92")
         # Independent author oracle: literal seed bytes and the actual Rust
-        # SOURCES26/EXTRA23 map, not this helper's receipt constructor.
+        # historical SOURCES26/EXTRA23 map, not this helper's receipt constructor.
         self.assertEqual(canonical(helper.METADATA_OWNER_PAYLOAD_HASHES), "3ab3654346ac8bc3d740c77e51e6313bce70cc2dbb2dc1817a2f552c669f05aa")
-        self.assertEqual(canonical(helper.METADATA_OWNER_SOURCES), "0e18075b26b15a528a8f283ced045a0292252d5289ac60307d151a18502930e1")
+        self.assertEqual({key: helper.METADATA_OWNER_SOURCES[key] for key in version_owner_sources}, version_owner_sources)
+        historical_owner = {key: value for key, value in helper.METADATA_OWNER_SOURCES.items() if key not in version_owner_sources}
+        self.assertEqual(canonical(historical_owner), "0e18075b26b15a528a8f283ced045a0292252d5289ac60307d151a18502930e1")
         self.assertEqual(set(helper.METADATA_PAYLOAD_BINDINGS), {"configHashes", "ignoreSha256", "fieldHashes"})
-        self.assertEqual(len(helper.METADATA_CORE_SOURCES), 20)
-        self.assertEqual(len(helper.METADATA_OWNER_SOURCES), 49)
-        self.assertEqual(len(helper.METADATA_TRANSACTION_EOF_SOURCES), 50)
+        self.assertEqual(len(helper.METADATA_CORE_SOURCES), 23)
+        self.assertEqual(len(helper.METADATA_OWNER_SOURCES), 54)
+        self.assertEqual(len(helper.METADATA_TRANSACTION_EOF_SOURCES), 55)
         self.assertEqual(helper.METADATA_NATIVE_SOURCES, tuple(sorted(set(helper.METADATA_NATIVE_SOURCES))))
         for path in (*helper.METADATA_CORE_SOURCES.values(), *helper.METADATA_TRANSACTION_EOF_SOURCES.values(),
                      helper.METADATA_NATIVE_WORKFLOW, "desktop/tools/ci_foundation.py"):
@@ -2034,14 +2064,15 @@ class MetadataNativeHelperTests(unittest.TestCase):
 
     def test_workflow_selects_one_domain_before_checkout_and_compiles_only_once(self):
         workflow = (SOURCE / helper.METADATA_NATIVE_WORKFLOW).read_text(encoding="utf-8")
-        self.assertIn("branches: [verify/desktop-github-workflow-apply-native, verify/desktop-metadata-text-apply-native]", workflow)
+        self.assertIn("branches: [verify/desktop-github-workflow-apply-native, verify/desktop-metadata-text-apply-native, verify/desktop-release-version-apply-native]", workflow)
         self.assertNotIn("qualification_domain", workflow)
         guard = workflow.split("        run: |\n", 1)[1].split("      - name:", 1)[0]
         for pair in ("push:refs/heads/verify/desktop-github-workflow-apply-native)",
                      "workflow_dispatch:refs/heads/verify/desktop-github-workflow-apply-native)",
-                     "push:refs/heads/verify/desktop-metadata-text-apply-native)"):
+                     "push:refs/heads/verify/desktop-metadata-text-apply-native)",
+                     "push:refs/heads/verify/desktop-release-version-apply-native)"):
             self.assertIn(pair, guard)
-        self.assertEqual(guard.count("scope="), 4)  # Three assignments plus one fixed output line.
+        self.assertEqual(guard.count("scope="), 5)  # Four assignments plus one fixed output line.
         for exact in ('[[ "$GITHUB_RUN_ATTEMPT" == 1 && "$MRK_PUSH_EVENT_AFTER" == "$GITHUB_SHA" ]]',
                       '[[ "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" ]]', '*) exit 1 ;;',
                       '[[ "$GITHUB_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]',
@@ -2053,7 +2084,8 @@ class MetadataNativeHelperTests(unittest.TestCase):
             self.assertEqual(workflow.count(f"ci_foundation.py {phase}'"), 1)
         steps = workflow.split("      - name: ")
         for scope, phases in (("github-workflow-apply-native-v1", ("workflow-owner", "workflow-transaction-eof", "workflow-core")),
-                              ("metadata-text-apply-native-v1", ("metadata-owner", "metadata-transaction-eof", "metadata-core"))):
+                              ("metadata-text-apply-native-v1", ("metadata-owner", "metadata-transaction-eof", "metadata-core")),
+                              ("release-version-apply-native-v1", ("version-owner", "version-transaction-eof", "version-core"))):
             for phase in phases:
                 matching = [step for step in steps if f"ci_foundation.py {phase}'" in step]
                 self.assertEqual(len(matching), 1)
@@ -2061,7 +2093,7 @@ class MetadataNativeHelperTests(unittest.TestCase):
         self.assertEqual(workflow.count("runs-on:"), 1)
         for forbidden in ("strategy:", "matrix:", "continue-on-error", "secrets.", "workflow_dispatch:refs/heads/verify/desktop-metadata"):
             self.assertNotIn(forbidden, workflow)
-        upload = workflow.split("      - name: Retain only allowlisted synthetic metadata receipts\n", 1)[1]
+        upload = workflow.split("      - name: Retain only allowlisted synthetic metadata receipts\n", 1)[1].split("      - name: ", 1)[0]
         self.assertIn("if: always() && steps.prepare.outcome == 'success' && steps.lane.outputs.scope == 'metadata-text-apply-native-v1'", upload)
         files = [line.strip().split("${{ steps.prepare.outputs.root }}/", 1)[1]
                  for line in upload.splitlines() if line.strip().startswith("${{ steps.prepare.outputs.root }}/")]
@@ -2069,6 +2101,614 @@ class MetadataNativeHelperTests(unittest.TestCase):
             "metadata-owner-source/receipt.json", "metadata-owner-zip/receipt.json", "metadata-transaction-eof-checks.json",
             "metadata-transaction-eof/receipt.json", "metadata-core-checks.json", "metadata-ordinary.json",
             "metadata-committed-fsync.json", "metadata-committed-close.json", "retention-checks.json"])
+
+
+def version_environment() -> dict[str, str]:
+    """Inert route data, not GitHub admission or an executed job."""
+    return {"GITHUB_SHA": "1" * 40, "GITHUB_REPOSITORY": "Example/project", "GITHUB_RUN_ID": "123",
+            "GITHUB_RUN_ATTEMPT": "1", "GITHUB_EVENT_NAME": "push", "MRK_PUSH_EVENT_AFTER": "1" * 40,
+            "MRK_DESKTOP_HOSTED_CHECKS": "release-version-apply-native-v1",
+            "GITHUB_REF": "refs/heads/verify/desktop-release-version-apply-native", "GITHUB_WORKFLOW_SHA": "1" * 40,
+            "GITHUB_WORKFLOW_REF": "Example/project/.github/workflows/desktop-github-workflow-apply-native.yml@refs/heads/verify/desktop-release-version-apply-native"}
+
+
+def version_context() -> dict:
+    return {"root": "/never-opened/task", "source": "/never-opened/source", "sourceSha": "1" * 40, "sourceTree": "3" * 40,
+            "platform": "linux", "executionScope": "release-version-apply-native-v1", "workflowSha": "1" * 40,
+            "workflowPath": ".github/workflows/desktop-github-workflow-apply-native.yml", "workflowSha256": "4" * 64,
+            "workflowRef": version_environment()["GITHUB_WORKFLOW_REF"], "repository": "Example/project",
+            "runId": "123", "attempt": "1", "event": "push", "ref": "refs/heads/verify/desktop-release-version-apply-native",
+            "pushEventAfter": "1" * 40, "observedHost": workflow_host_report(),
+            "versionInputs": {"sourceFiles": [{"path": path, "size": 123, "sha256": "3" * 64} for path in helper.VERSION_NATIVE_SOURCES],
+                               "coreFiles": [{"path": "mobile_release/release_version_edit.py", "size": 10, "sha256": "6" * 64}],
+                               "coreZipSha256": "7" * 64, "pythonSha256": "2" * 64}}
+
+
+def version_core_report(partition: str) -> dict:
+    """Consumer test data only. The separately fixed oracle hash is checked below."""
+    rows = helper.VERSION_CORE_ROWS[partition]
+    return {"schemaVersion": 1, "suite": "desktop-release-version-native", "domain": "release_version",
+            "partition": partition, "status": "passed", "reason": "none", "failedAt": None,
+            "retained": True, "uncertaintyLatched": partition != "committed-fsync",
+            "injection": helper.VERSION_CORE_INJECTIONS[partition], "host": workflow_host_report(),
+            "bindings": {"sourceSha": "1" * 40, "sourceKind": "source", "sourceHashes": dict.fromkeys(helper.VERSION_CORE_SOURCES, "3" * 64),
+                         "pythonSha256": "2" * 64, **deepcopy(helper.VERSION_PAYLOAD_BINDINGS)},
+            "completed": [row[0] for row in rows],
+            "cases": [{"case": name, "outcome": {"effect": effect, "journal": journal, "resources": resources, "reason": reason},
+                       "owner": {"closed": True, "handlerRestored": True, "fatal": fatal}, "observed": deepcopy(observed)}
+                      for name, effect, journal, resources, reason, fatal, observed in rows]}
+
+
+def validate_version_core(report: object, partition: str) -> dict:
+    return helper.validate_version_core_receipt(report, partition, source_sha="1" * 40,
+        source_hashes=dict.fromkeys(helper.VERSION_CORE_SOURCES, "3" * 64), python_hash="2" * 64, host=workflow_host_report())
+
+
+def version_phase_report(name: str) -> dict:
+    context = version_context()
+    return {"schemaVersion": 1, "scope": "desktop-release-version-apply-native-only-v1", "phase": name, "status": "passed",
+            **{key: context[key] for key in ("sourceSha", "sourceTree", "platform", "workflowPath", "workflowSha", "workflowRef",
+                "workflowSha256", "repository", "runId", "attempt", "event", "ref", "pushEventAfter", "versionInputs")},
+            "rust": {"release": helper.RUST, "target": "x86_64-unknown-linux-gnu"}, "python": helper.PYTHON,
+            "features": ["development-runtime"], "testTarget": "lib",
+            "checks": [{"check": key, "exitCode": 0} for key in helper.VERSION_NATIVE_CHECKS[name]],
+            "notVerified": list(helper.VERSION_NOT_VERIFIED)}
+
+
+def version_native_facts(*, domain="release_version", effect="committed", journal="clean", reason="none", native_reason="none",
+                          applied=True, requests=3, responses=3, sequence=2, checkout=True, prepared=True, unknown=False, stderr=0):
+    """Independent inert wire DATA; never an original resource/native receipt."""
+    facts = {"originalWait": True, "stdoutEof": True, "stderrEof": True, "stdinClosed": True, "stdoutClosed": True,
+             "stderrClosed": True, "startupJoined": True, "ioJoined": True, "driverJoined": True, "watchdogJoined": True,
+             "managerJoined": True, "requestFrames": requests, "responseFrames": responses, "stdoutBytes": 100,
+             "stderrBytes": stderr, "forceAttempted": False, "domain": domain, "nativePhase": "unknown" if unknown else "final",
+             "nativeFinality": "unknown" if unknown else "settled", "nativeReason": native_reason, "applySubmitted": applied,
+             "lateSettled": unknown, "outcome": {"effect": effect, "journal": journal, "resources": "settled", "reason": reason},
+             "terminalSeq": sequence}
+    if domain == "release_version":
+        facts.update(checkoutRetained=checkout, preparedRetained=prepared)
+    return facts
+
+
+def version_owner_report(mode="source", *, eof=False):
+    """Handwritten consumer examples following the independently fixed Rust wire contract."""
+    context = version_context()
+    inputs = context["versionInputs"]
+    source_hashes = dict.fromkeys(helper.VERSION_TRANSACTION_EOF_SOURCES if eof else helper.VERSION_OWNER_SOURCES, "3" * 64)
+    bindings = {"sourceSha": "1" * 40, "sourceTree": "3" * 40, "workflowSha256": "4" * 64, "runId": "123", "attempt": "1",
+        "ref": "refs/heads/verify/desktop-release-version-apply-native", "coreZipSha256": "7" * 64,
+        "coreInventorySha256": hashlib.sha256(json.dumps(inputs["coreFiles"], sort_keys=True, separators=(",", ":")).encode("ascii")).hexdigest(),
+        "domain": "release_version", "host": "linux", "target": "x86_64-unknown-linux-gnu", "runtimeMode": "trusted-development-only",
+        "runtimeInput": mode, "pythonSha256": "2" * 64, "sourceHashes": source_hashes, "payloadHashes": deepcopy(helper.VERSION_OWNER_PAYLOAD_HASHES),
+        "versionResourceSha256": "3" * 64, "schemaResourceSha256": "3" * 64, "inheritedFileMaskObserved": True,
+        "requestedCreateMode": 420, "observedCreateMode": 384, "newDirectoryMode": 493,
+        "documentEvidence": "controlled-original-lifetime-not-gui-callbacks"}
+    report = {"schemaVersion": 1, "scope": "release-version-transaction-eof-hosted-v1" if eof else "release-version-owner-hosted-v1",
+        "domain": "release_version", "status": "passed", "allOwnersSettled": not eof, "originalResourcesSettled": True,
+        "ownerDisabled": eof, "retainedEffectUnknown": eof, "failureCode": None, "bindings": bindings, "cases": [],
+        "notVerified": ["production-runtime-custody", "production-version-save-enablement", "native-gui", "webview-callbacks-or-crash-hook",
+            "parent-death", "native-stuck-wait-close", "persisted-recovery", "macos-windows-version-writes", "credentials", "remote-github",
+            "stores", "mobile-builds", "installers"]}
+
+    names = ("explicit-absent-create", "observe-edit-two-spans-preserve", "observe-noop-original-leaf",
+             "stale-passive-baseline-refused", "four-domain-owner-and-token-isolation", "registration-changed-before-apply",
+             "version-terminal-held-after-stop", "version-document-loss-before-apply")
+    if eof:
+        names = ("precommit-eof", "postcommit-eof", "precommit-conflict-eof")
+    start = 1
+    for index, name in enumerate(names):
+        if mode == "zip" and index != 1:
+            continue
+        source = ("release/version.properties" if index == 1 else "public/version.properties") if eof else (
+            "public/version-tree/version.properties" if index == 0 else "public/version.properties")
+        count = (0 if index == 2 else 1) if eof else (1 if index in (0, 3, 5, 7) else 2)
+        passive = metadata_passive_facts(["release-version-observe"] * count, start)
+        start += count
+        common = {"sourceProbesSettled": True, "passiveOriginalsSettled": True}
+        if eof:
+            committed, unknown = index == 1, index == 2
+            boundary, checkpoint = ("after-durable-COMMITTED", "descriptor-close") if committed else ("before-COMMITTED", "publisher-entry")
+            # Inert exact two-record wire data; no child/process execution here.
+            records = [f"MRK_RELEASE_VERSION_EOF_V1 {name} boundary={boundary}\n",
+                f"MRK_RELEASE_VERSION_EOF_V1 {name} eof=1 nonempty=0 readErrors=0 checkpoint={checkpoint} applied=1 "
+                + ("committed=0 rolledBack=1 terminal=ROLLED_BACK durable=1 recovery=1 clean=1 settled=1 cancelled=1\n",
+                   "committed=1 rolledBack=0 terminal=COMMITTED durable=1 recovery=1 clean=1 settled=1 cancelled=1\n",
+                   "committed=0 rolledBack=0 terminal=UNKNOWN durable=0 recovery=1 clean=0 settled=1 cancelled=1\n")[index]]
+            native = version_native_facts(effect=("rolled_back", "committed", "unknown")[index],
+                journal="recovery_required" if unknown else "clean", reason="cancelled", native_reason="cancelled",
+                unknown=unknown, stderr=len("".join(records).encode("ascii")))
+            observed = {"evidenceKind": "real-stdin-eof-at-controlled-transaction-boundary", "bootstrapMode": "instrumented-genuine-engine",
+                "boundary": boundary, "originalCheckpoint": checkpoint, "closeBeforeActiveDeadline": True, "controlRecords": 2,
+                "actualStdinEof": True, "eofReadCount": 1, "nonemptyReadCount": 0, "readErrorCount": 0, "preparedCorrelationRetained": True,
+                "versionProfileAndControlProof": True, "committedPublication": committed, "rolledBackPublication": index == 0,
+                "terminalDurable": not unknown, "fixedRecovery": True, "journalClean": not unknown, "journalAbsent": not unknown,
+                "originalTreeRestored": index == 0, "selectedPayloadsRemain": index != 0, "unselectedAndDependenciesPreserved": True,
+                "unrelatedIntroducedBeforeEof": unknown, "introducedOriginalPreserved": unknown, "recoveryEvidenceRetained": unknown,
+                "sharedBlockedProject": unknown, "allFourDomainsDisabled": unknown, "noFurtherAdmission": unknown,
+                "fixtureFilesSettled": True, **common}
+        elif index == 3:
+            native = version_native_facts(effect="not_started", journal="not_created", reason="stale_revision", applied=False,
+                requests=2, responses=2, sequence=1, prepared=False)
+            observed = {"olderPassiveBaselineRejected": True, "newerNativeCheckoutRetained": True, "noPlanOrRebase": True,
+                        "externalChangeRetained": True, "treeUnchanged": True, **common}
+        elif index in (5, 7):
+            native = version_native_facts(effect="not_started", journal="not_created", reason="cancelled", applied=False,
+                native_reason="caller_lost" if index == 5 else "window_lost", requests=2, responses=3, sequence=1)
+            observed = {"preparedCorrelationRetained": True, "treeUnchanged": True, "staleCommandNotSent": True,
+                "newRegistrationPublishedUnderDocumentLock": index == 5, "controlledOriginalDocumentLoss": index == 7,
+                "replacementDocumentRefused": index == 7, "guiCallbacksNotClaimed": True, **common}
+        else:
+            noop = index == 2
+            native = version_native_facts(effect="unchanged" if noop else "committed", journal="not_created" if noop else "clean",
+                                          native_reason="cancelled" if index == 6 else "none")
+            domains = [version_native_facts(domain=domain, effect="not_started", journal="not_created", reason="cancelled",
+                native_reason="discarded", applied=False, requests=1, responses=2, sequence=0)
+                for domain in ("configuration", "github_workflows", "metadata_text")] if index == 4 else []
+            spent_refusal = version_native_facts(effect="not_started", journal="not_created", reason="cancelled",
+                native_reason="caller_lost", applied=False, requests=2, responses=3, sequence=1) if index == 4 else None
+            observed = {"action": "create" if index == 0 else "preserve" if noop else "replace",
+                "directoriesCreated": ["public", "public/version-tree"] if index == 0 else [],
+                "explicitAbsentCreate": index == 0, "completePreparedBytes": True, "passiveBaselineMatchedCheckout": index != 0,
+                "preparedCorrelationRetained": True, "capturePrepareRawFactsUnchanged": True, "dependenciesAndUnrelatedPreserved": True,
+                "existingModePreserved": True, "createModeMasked": True, "directoryModesExact": True,
+                "unicodeCommentsAndOnlyTwoSpansPreserved": index != 0, "rawNoopUnchanged": noop,
+                "duplicateApplyObservation": index == 0, "savedPairReadback": True, "sharedStatusRevision": True,
+                "sharedLastTerminalDomainCorrect": True, "fourDomainIsolation": index == 4, "foreignOriginalTicketsRefused": index == 4,
+                "consumedPlanRefused": index == 4, "consumedPlanRefusal": spent_refusal, "domains": domains, "heldBeforeAcceptance": index == 6,
+                "realStopBeforeRelease": index == 6, "cancelledNotSaved": index == 6, **common}
+        report["cases"].append({"name": name, "domain": "release_version", "source": source,
+                                "native": native, "passive": passive, "observations": observed})
+    return report
+
+
+def validate_version_owner(report, mode="source", *, eof=False):
+    sources = dict.fromkeys(helper.VERSION_TRANSACTION_EOF_SOURCES if eof else helper.VERSION_OWNER_SOURCES, "3" * 64)
+    if eof:
+        return helper.validate_version_transaction_eof_receipt(report, context=version_context(), source_hashes=sources)
+    return helper.validate_version_owner_receipt(report, mode, context=version_context(), source_hashes=sources)
+
+
+
+
+
+class VersionNativeHelperTests(unittest.TestCase):
+    """Version lane DATA consumers; these examples grant no execution/native authority."""
+
+    def test_core21_and_owner_source_maps_bind_the_fixed_cross_language_contract(self):
+        canonical = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")).hexdigest()
+        cases = [row for part in ("ordinary", "committed-fsync", "committed-close") for row in version_core_report(part)["cases"]]
+        self.assertEqual(len(cases), 21)
+        # Independent Python-author contract, frozen before these consumer tests.
+        self.assertEqual(canonical(cases), "b61f71e6958be58ea9d5aa2d88182a46c15d76fe281bcf693e5a5d0e2cbc9ef5")
+        self.assertEqual(canonical(helper.VERSION_CORE_SOURCES), "392b28ccf2f320147df73bb533ca2bb4d46da4e3456607fb33146d38434e5cda")
+        self.assertEqual(canonical(helper.VERSION_PAYLOAD_BINDINGS), "84d6b88ae14990611a537111cea2687791f1f92cb4a0b935f5fb3731c5ec65a8")
+        self.assertEqual(canonical(helper.VERSION_OWNER_PAYLOAD_HASHES), "6347bfd1a969f33491f12da2919375d55d2ed97e37dd842496c8bcd01020b9da")
+        self.assertEqual(helper.VERSION_OWNER_SOURCES, {**helper.METADATA_OWNER_SOURCES,
+            "versionObservation": "desktop/src-tauri/src/release_version_protocol.rs",
+            "versionObservationApi": "src/mobile_release/api/_release_version.py"})
+        self.assertEqual((len(helper.VERSION_CORE_SOURCES), len(helper.VERSION_OWNER_SOURCES), len(helper.VERSION_TRANSACTION_EOF_SOURCES)),
+                         (25, 56, 57))
+        self.assertEqual(set(helper.VERSION_PAYLOAD_BINDINGS), {"configHashes", "ignoreSha256", "versionHashes"})
+        self.assertEqual(helper.VERSION_NATIVE_SOURCES, tuple(sorted(set(helper.VERSION_NATIVE_SOURCES))))
+        for path in (*helper.VERSION_CORE_SOURCES.values(), *helper.VERSION_TRANSACTION_EOF_SOURCES.values(),
+                     helper.VERSION_NATIVE_WORKFLOW, "desktop/tools/ci_foundation.py"):
+            self.assertIn(path, helper.VERSION_NATIVE_SOURCES)
+        for path in ("desktop/package-lock.json", "desktop/src-tauri/src/shell.rs", "desktop/src-tauri/tests/session_gtk_qualification.rs"):
+            self.assertNotIn(path, helper.VERSION_NATIVE_SOURCES)
+        original = "# Café\r\n VERSION_NAME = '1.2.3' \nBUILD_NUMBER = \"7\"\r\nOTHER = keep"
+        edited = "# Café\r\n VERSION_NAME = '2.3.4' \nBUILD_NUMBER = \"8\"\r\nOTHER = keep"
+        created = "VERSION_NAME=2.3.4\nBUILD_NUMBER=8\n"
+        for key, text in (("original", original), ("edited", edited), ("created", created)):
+            self.assertEqual(hashlib.sha256(text.encode("utf-8")).hexdigest(), helper.VERSION_PAYLOAD_BINDINGS["versionHashes"][key])
+
+    def test_core_partitions_refuse_changed_native_boundaries_and_unknown_conflation(self):
+        for partition in ("ordinary", "committed-fsync", "committed-close"):
+            report = version_core_report(partition)
+            with patch.object(helper, "run", side_effect=AssertionError("no subprocess")), \
+                    patch.object(helper, "hash_file", side_effect=AssertionError("no subject probe")):
+                self.assertIs(validate_version_core(report, partition), report)
+            for change in ({"schemaVersion": True}, {"suite": "desktop-metadata-text-native"}, {"domain": "metadata_text"},
+                           {"status": "failed"}, {"retained": False}, {"completed": []}, {"cases": []}, {"extra": True}):
+                with self.subTest(partition=partition, change=change), self.assertRaises(helper.CheckFailure):
+                    validate_version_core({**report, **change}, partition)
+            for index, row in enumerate(report["cases"]):
+                changed = deepcopy(report)
+                changed["cases"][index]["owner"]["fatal"] = not row["owner"]["fatal"]
+                with self.subTest(partition=partition, case=index), self.assertRaises(helper.CheckFailure):
+                    validate_version_core(changed, partition)
+            for field in ("sourceSha", "sourceHashes", "pythonSha256", "configHashes", "ignoreSha256", "versionHashes"):
+                changed = deepcopy(report)
+                changed["bindings"][field] = None
+                with self.subTest(partition=partition, binding=field), self.assertRaises(helper.CheckFailure):
+                    validate_version_core(changed, partition)
+        ordinary = version_core_report("ordinary")
+        self.assertEqual(ordinary["completed"][-1], "dependency-drift-after-version-install")
+        self.assertEqual(ordinary["cases"][-1]["outcome"],
+            {"effect": "unknown", "journal": "recovery_required", "resources": "settled", "reason": "stale_revision"})
+        for rows in (ordinary["cases"][:-1], list(reversed(ordinary["cases"])), [*ordinary["cases"], ordinary["cases"][-1]]):
+            with self.assertRaises(helper.CheckFailure):
+                validate_version_core({**ordinary, "cases": rows}, "ordinary")
+        for index, field in ((8, "unchangedMarked"), (11, "rollbackReturned"), (12, "cleanupUnlinks"),
+                             (13, "sameBytesForeignInode"), (14, "typedRefusals"), (18, "afterUnknownProbes"),
+                             (18, "conflictObservedInsideOriginal")):
+            changed = deepcopy(ordinary)
+            changed["cases"][index]["observed"][field] = None
+            with self.subTest(case=index, field=field), self.assertRaises(helper.CheckFailure):
+                validate_version_core(changed, "ordinary")
+        last = version_core_report("committed-close")
+        self.assertEqual(last["cases"][0]["outcome"],
+            {"effect": "committed", "journal": "clean", "resources": "unknown", "reason": "cancelled"})
+        self.assertIs(last["cases"][0]["owner"]["fatal"], True)
+        for report, partition, index, resources in ((ordinary, "ordinary", -1, "unknown"), (last, "committed-close", 0, "settled")):
+            changed = deepcopy(report)
+            changed["cases"][index]["outcome"]["resources"] = resources
+            with self.assertRaises(helper.CheckFailure):
+                validate_version_core(changed, partition)
+
+    def test_source8_zip1_eof3_shapes_do_not_fabricate_an_absent_passive_baseline(self):
+        counts = []
+        for mode, eof, total, passive_count in (("source", False, 8, 12), ("zip", False, 1, 2), ("source", True, 3, 2)):
+            report = version_owner_report(mode, eof=eof)
+            with patch.object(helper, "run", side_effect=AssertionError("no process")), \
+                    patch.object(helper, "hash_file", side_effect=AssertionError("no source/runtime probe")):
+                self.assertIs(validate_version_owner(report, mode, eof=eof), report)
+            self.assertEqual(len(report["cases"]), total)
+            counts.append(total)
+            self.assertEqual(sum(len(row["passive"]) for row in report["cases"]), passive_count)
+            self.assertLess(len(json.dumps(report, separators=(",", ":")).encode("ascii")), 64 * 1024)
+        self.assertEqual(sum(counts) + 21, 33)
+        source = version_owner_report()
+        self.assertEqual(source["cases"][0]["source"], "public/version-tree/version.properties")
+        self.assertTrue(source["cases"][0]["observations"]["explicitAbsentCreate"])
+        self.assertFalse(source["cases"][0]["observations"]["passiveBaselineMatchedCheckout"])
+        self.assertEqual([len(row) for row in source["cases"][4]["observations"]["domains"]], [24, 24, 24])
+        self.assertEqual(version_owner_report("zip")["cases"][0]["name"], "observe-edit-two-spans-preserve")
+        self.assertEqual(source["cases"][2]["native"]["outcome"], {"effect": "unchanged", "journal": "not_created", "resources": "settled", "reason": "none"})
+        self.assertEqual([row["native"]["nativeReason"] for row in (source["cases"][5], source["cases"][7])], ["caller_lost", "window_lost"])
+
+    def test_version_receipts_cannot_borrow_metadata_authority_source_or_production_claims(self):
+        report = version_owner_report()
+        for key, value in (("schemaVersion", True), ("scope", "metadata-text-owner-hosted-v1"), ("domain", "metadata_text"),
+                           ("originalResourcesSettled", False), ("allOwnersSettled", False), ("ownerDisabled", True),
+                           ("retainedEffectUnknown", True), ("notVerified", [])):
+            with self.subTest(key=key), self.assertRaises(helper.CheckFailure):
+                validate_version_owner({**report, key: value})
+        for key, value in (("ref", helper.METADATA_NATIVE_REF), ("runtimeInput", "zip"), ("runtimeMode", "packaged"),
+                           ("sourceSha", "2" * 40), ("sourceTree", "2" * 40), ("workflowSha256", "0" * 64), ("attempt", "2"),
+                           ("sourceHashes", {}), ("payloadHashes", {}), ("pythonSha256", "0" * 64), ("coreZipSha256", "0" * 64),
+                           ("coreInventorySha256", "0" * 64), ("versionResourceSha256", "0" * 64),
+                           ("requestedCreateMode", 384), ("observedCreateMode", 420), ("newDirectoryMode", 448),
+                           ("inheritedFileMaskObserved", 1), ("documentEvidence", "native-gui")):
+            changed = deepcopy(report)
+            changed["bindings"][key] = value
+            with self.subTest(binding=key), self.assertRaises(helper.CheckFailure):
+                validate_version_owner(changed)
+        for rows in (report["cases"][:-1], list(reversed(report["cases"])), [*report["cases"], report["cases"][-1]]):
+            with self.assertRaises(helper.CheckFailure):
+                validate_version_owner({**report, "cases": rows})
+        with self.assertRaises(helper.CheckFailure):
+            validate_version_owner(metadata_owner_report())
+        with self.assertRaises(helper.CheckFailure):
+            validate_metadata_owner(report)
+        for mode in ("zip", "packaged", "other"):
+            with self.assertRaises(helper.CheckFailure):
+                validate_version_owner(report, mode)
+
+    def test_owner_lifecycle_correlations_and_original_passive_resources_are_required(self):
+        report = version_owner_report()
+        for index, field in ((0, "explicitAbsentCreate"), (0, "duplicateApplyObservation"),
+                             (1, "unicodeCommentsAndOnlyTwoSpansPreserved"), (2, "rawNoopUnchanged"),
+                             (3, "olderPassiveBaselineRejected"), (4, "foreignOriginalTicketsRefused"), (4, "consumedPlanRefused"),
+                             (5, "newRegistrationPublishedUnderDocumentLock"), (6, "heldBeforeAcceptance"),
+                             (6, "realStopBeforeRelease"), (6, "cancelledNotSaved"), (7, "replacementDocumentRefused")):
+            changed = deepcopy(report)
+            changed["cases"][index]["observations"][field] = False
+            with self.subTest(case=index, field=field), self.assertRaises(helper.CheckFailure):
+                validate_version_owner(changed)
+        for key in (*helper.CONFIG_OWNER_FINALITY, "checkoutRetained", "preparedRetained"):
+            changed = deepcopy(report)
+            changed["cases"][1]["native"][key] = False
+            with self.subTest(native_fact=key), self.assertRaises(helper.CheckFailure):
+                validate_version_owner(changed)
+        for key, value in (("nativeReason", "none"), ("applySubmitted", True), ("terminalSeq", 2)):
+            changed = deepcopy(report)
+            changed["cases"][5]["native"][key] = value
+            with self.subTest(loss_field=key), self.assertRaises(helper.CheckFailure):
+                validate_version_owner(changed)
+        changed = deepcopy(report)
+        changed["cases"][4]["observations"]["domains"][2]["domain"] = "release_version"
+        with self.assertRaises(helper.CheckFailure):
+            validate_version_owner(changed)
+        for key, value in (("nativeReason", "none"), ("applySubmitted", True), ("originalWait", False), ("preparedRetained", False)):
+            changed = deepcopy(report)
+            changed["cases"][4]["observations"]["consumedPlanRefusal"][key] = value
+            with self.subTest(consumed_token_fact=key), self.assertRaises(helper.CheckFailure):
+                validate_version_owner(changed)
+        for key, value in (("method", "observe"), ("key", "0"), ("observerJoin", "missing"),
+                           ("permitRetired", False), ("resourceBookRetired", False), ("error", "release_version_source")):
+            changed = deepcopy(report)
+            changed["cases"][0]["passive"][0][key] = value
+            with self.subTest(passive_field=key), self.assertRaises(helper.CheckFailure):
+                validate_version_owner(changed)
+        for key, value in (("stdout_bytes", 2 * 1024 * 1024 + 1), ("waited", False), ("watchdog_joined", False)):
+            changed = deepcopy(report)
+            changed["cases"][0]["passive"][0]["native"][key] = value
+            with self.subTest(passive_native=key), self.assertRaises(helper.CheckFailure):
+                validate_version_owner(changed)
+        changed = deepcopy(report)
+        changed["cases"][1]["passive"][0]["key"] = changed["cases"][0]["passive"][0]["key"]
+        with self.assertRaises(helper.CheckFailure):
+            validate_version_owner(changed)
+
+    def test_eof_effect_unknown_stays_last_disabled_with_separate_original_resource_proof(self):
+        report = version_owner_report(eof=True)
+        for key in ("allOwnersSettled", "originalResourcesSettled", "ownerDisabled", "retainedEffectUnknown"):
+            with self.subTest(key=key), self.assertRaises(helper.CheckFailure):
+                validate_version_owner({**report, key: not report[key]}, eof=True)
+        for index, row in enumerate(report["cases"]):
+            for key, original in row["observations"].items():
+                changed = deepcopy(report)
+                changed["cases"][index]["observations"][key] = int(original) if type(original) is bool else None
+                with self.subTest(case=index, field=key), self.assertRaises(helper.CheckFailure):
+                    validate_version_owner(changed, eof=True)
+            changed = deepcopy(report)
+            changed["cases"][index]["native"]["stderrBytes"] -= 1
+            with self.assertRaises(helper.CheckFailure):
+                validate_version_owner(changed, eof=True)
+        for key, value in (("nativePhase", "final"), ("nativeFinality", "settled"), ("lateSettled", False), ("managerJoined", False)):
+            changed = deepcopy(report)
+            changed["cases"][-1]["native"][key] = value
+            with self.subTest(key=key), self.assertRaises(helper.CheckFailure):
+                validate_version_owner(changed, eof=True)
+        changed = deepcopy(report)
+        changed["cases"][-1]["native"]["outcome"]["resources"] = "unknown"
+        with self.assertRaises(helper.CheckFailure):
+            validate_version_owner(changed, eof=True)
+        for rows in (report["cases"][:-1], list(reversed(report["cases"]))):
+            with self.assertRaises(helper.CheckFailure):
+                validate_version_owner({**report, "cases": rows}, eof=True)
+
+    def test_push_only_binding_rejects_rerun_dispatch_cross_domain_and_source_mismatch(self):
+        environment = version_environment()
+        expected = helper.version_native_binding(environment)
+        self.assertEqual((expected["ref"], expected["event"], expected["attempt"], expected["sourceSha"], expected["pushEventAfter"]),
+                         ("refs/heads/verify/desktop-release-version-apply-native", "push", "1", "1" * 40, "1" * 40))
+        for key, value in (("GITHUB_SHA", "0" * 40), ("GITHUB_SHA", "A" * 40), ("GITHUB_SHA", "1" * 39),
+                           ("GITHUB_WORKFLOW_SHA", "2" * 40), ("GITHUB_REF", helper.WORKFLOW_NATIVE_REF), ("GITHUB_REF", helper.METADATA_NATIVE_REF),
+                           ("MRK_DESKTOP_HOSTED_CHECKS", helper.WORKFLOW_NATIVE_SCOPE), ("MRK_DESKTOP_HOSTED_CHECKS", helper.METADATA_NATIVE_SCOPE), ("GITHUB_REF", "refs/heads/main"),
+                           ("GITHUB_WORKFLOW_REF", "other/workflow"), ("GITHUB_REPOSITORY", "other/project"),
+                           ("GITHUB_REPOSITORY", "invalid"), ("GITHUB_RUN_ID", "0"), ("GITHUB_RUN_ID", "1" * 21),
+                           ("GITHUB_RUN_ATTEMPT", "2"), ("GITHUB_RUN_ATTEMPT", "01"), ("GITHUB_EVENT_NAME", "pull_request"),
+                           ("MRK_PUSH_EVENT_AFTER", "2" * 40), ("MRK_PUSH_EVENT_AFTER", "0" * 40),
+                           ("GITHUB_EVENT_NAME", "workflow_dispatch")):
+            with self.subTest(key=key, value=value), self.assertRaises(helper.CheckFailure):
+                helper.version_native_binding({**environment, key: value, "MRK_EXPECTED_SHA": "1" * 40})
+        for key in environment:
+            for value in (None, True):
+                with self.subTest(key=key, value=value), self.assertRaises(helper.CheckFailure):
+                    helper.version_native_binding({**environment, key: value})
+        with self.assertRaises(helper.CheckFailure):
+            helper.workflow_native_binding(environment)
+        for scope in helper.COMPILE_PROFILES:
+            with self.assertRaises(helper.CheckFailure):
+                helper.compile_workflow_binding(environment, scope)
+
+    def test_version_scope_refuses_foreign_phases_platforms_and_compiler_profiles_before_io(self):
+        self.assertNotIn(helper.VERSION_NATIVE_SCOPE, helper.COMPILE_PROFILES)
+        with patch.object(helper, "load_context", side_effect=AssertionError("no context IO")), \
+                patch.object(helper, "tools", side_effect=AssertionError("no compiler selection")):
+            for name in ("native", "config-owner", "config-core", "workflow-owner", "workflow-transaction-eof", "workflow-core",
+                         "github-owner", "github-tls", "github-tls-deadline", "windows-snapshot", "unknown",
+                         "metadata-owner", "metadata-transaction-eof", "metadata-core"):
+                with self.subTest(phase=name), self.assertRaises(helper.CheckFailure):
+                    helper.phase(name, "linux", helper.VERSION_NATIVE_SCOPE)
+            for scope in (*helper.COMPILE_PROFILES, helper.BOUNDARY_SCOPE, helper.WORKFLOW_NATIVE_SCOPE,
+                          helper.WINDOWS_SNAPSHOT_SCOPE, helper.GITHUB_READONLY_SCOPE, helper.GITHUB_TLS_SCOPE, helper.METADATA_NATIVE_SCOPE):
+                for name in ("version-owner", "version-transaction-eof", "version-core"):
+                    with self.subTest(scope=scope, phase=name), self.assertRaises(helper.CheckFailure):
+                        helper.phase(name, "linux", scope)
+            for platform in ("macos", "windows", "unexpected"):
+                with self.subTest(platform=platform), self.assertRaises(helper.CheckFailure):
+                    helper.prepare(platform, helper.VERSION_NATIVE_SCOPE)
+        for name in ("prepare", "acquire", "compile", "version-owner", "version-transaction-eof", "version-core", "clean"):
+            helper.admit_phase(helper.VERSION_NATIVE_SCOPE, name)
+        with patch.object(helper.Path, "resolve", side_effect=AssertionError("bad route must refuse before IO")), \
+                patch.dict(helper.os.environ, {**version_environment(), "GITHUB_EVENT_NAME": "workflow_dispatch"}, clear=True):
+            with self.assertRaises(helper.CheckFailure):
+                helper.load_context("linux", helper.VERSION_NATIVE_SCOPE)
+
+    def test_phase_and_claim_repeat_original_event_source_and_scope_binding(self):
+        context = version_context()
+        for name in helper.VERSION_NATIVE_CHECKS:
+            report = version_phase_report(name)
+            self.assertIs(helper.validate_version_phase_receipt(report, context, name), report)
+            for key, value in (("scope", helper.WORKFLOW_NATIVE_EVIDENCE_SCOPE), ("schemaVersion", True), ("status", "failed"),
+                               ("sourceTree", "0" * 40), ("attempt", "2"), ("event", "workflow_dispatch"), ("ref", helper.WORKFLOW_NATIVE_REF),
+                               ("pushEventAfter", "2" * 40), ("versionInputs", {}), ("checks", []), ("extra", True)):
+                with self.subTest(phase=name, key=key), self.assertRaises(helper.CheckFailure):
+                    helper.validate_version_phase_receipt({**report, key: value}, context, name)
+            wrong_type = deepcopy(report)
+            wrong_type["checks"][0]["exitCode"] = False
+            with self.assertRaises(helper.CheckFailure):
+                helper.validate_version_phase_receipt(wrong_type, context, name)
+            for key, value in (("executionScope", helper.WORKFLOW_NATIVE_SCOPE), ("ref", helper.WORKFLOW_NATIVE_REF),
+                               ("event", "workflow_dispatch"), ("attempt", "2"), ("pushEventAfter", "2" * 40),
+                               ("workflowPath", helper.COMPILE_WORKFLOW), ("platform", "macos"), ("sourceTree", "0" * 40)):
+                with self.subTest(context_key=key), self.assertRaises(helper.CheckFailure):
+                    helper.validate_version_phase_receipt(report, {**context, key: value}, name)
+        claim = helper.version_phase_claim(context, "version-core")
+        for key in ("event", "ref", "pushEventAfter", "workflowSha256", "sourceTree", "sourceSha", "runId", "attempt"):
+            self.assertEqual(claim[key], context[key])
+        metadata = helper.version_core_metadata(context)
+        self.assertEqual(set(metadata), {"sourceSha", "sourceTree", "workflowSha256", "runId", "attempt", "ref", "coreFiles", "coreZipSha256"})
+        self.assertEqual(metadata["ref"], "refs/heads/verify/desktop-release-version-apply-native")
+        self.assertEqual(metadata["coreFiles"], context["versionInputs"]["coreFiles"])
+
+    def test_predecessors_require_original_source_zip_eof_before_core_and_refuse_replay(self):
+        context, observed = version_context(), []
+        def data(path, _limit):
+            if path.name.endswith("-started.json"):
+                return helper.version_phase_claim(context, path.name.removesuffix("-started.json"))
+            return version_phase_report(path.name.removesuffix("-checks.json"))
+        with patch.object(helper, "read_bounded_json", side_effect=data), patch.object(helper.os.path, "lexists", return_value=False), \
+                patch.object(helper, "version_owner_receipt", side_effect=lambda _, mode: observed.append(mode)), \
+                patch.object(helper, "version_transaction_eof_receipt", side_effect=lambda _: observed.append("eof")), \
+                patch.object(helper, "version_core_receipt", side_effect=AssertionError("core has not run")), \
+                patch.object(helper, "run", side_effect=AssertionError("no subprocess")):
+            helper.version_predecessors(context, "version-core")
+        self.assertEqual(observed, ["source", "zip", "eof"])
+        def wrong_claim(path, limit):
+            value = data(path, limit)
+            if path.name == "compile-started.json":
+                value["scope"] = helper.WORKFLOW_NATIVE_SCOPE
+            return value
+        with patch.object(helper, "read_bounded_json", side_effect=wrong_claim), \
+                patch.object(helper, "version_owner_receipt", side_effect=AssertionError("no owner after foreign claim")):
+            with self.assertRaises(helper.CheckFailure):
+                helper.version_predecessors(context, "version-core")
+        with patch.object(helper, "read_bounded_json", side_effect=data), \
+                patch.object(helper, "version_owner_receipt", side_effect=helper.CheckFailure("unsettled original")), \
+                patch.object(helper, "version_transaction_eof_receipt", side_effect=AssertionError("no EOF after unsettled owner")):
+            with self.assertRaises(helper.CheckFailure):
+                helper.version_predecessors(context, "version-core")
+        with patch.object(helper.os.path, "lexists", return_value=True), patch.object(helper, "write_json") as emit:
+            with self.assertRaises(helper.CheckFailure):
+                helper.version_phase_start(context, "acquire")
+        emit.assert_not_called()
+
+    def test_fixed_version_sequence_has_no_unrelated_native_invocation_or_new_clock(self):
+        source = HELPER.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        phase = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "phase_version_native")
+        calls = [node for node in ast.walk(phase) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "run"]
+        by_label = {next(keyword.value.value for keyword in call.keywords if keyword.arg == "check"): call for call in calls}
+        bounds = {"rust-toolchain-install": 600, "version-locked-headless-metadata": 600, "headless-test-compile-only": 600,
+                  "version-owner-source-native-contract": 180, "version-owner-zip-native-contract": 60,
+                  "version-transaction-eof-native-contract": 90, "version-core-ordinary": 90,
+                  "version-core-committed-fsync": 45, "version-core-committed-close": 45}
+        self.assertEqual(set(by_label), set(bounds))
+        self.assertEqual(len(calls), len(bounds))
+        for label, timeout in bounds.items():
+            self.assertEqual(next(keyword.value.value for keyword in by_label[label].keywords if keyword.arg == "timeout"), timeout)
+        text = ast.get_source_segment(source, phase)
+        for forbidden in ("npm", "vite", "desktop-shell", "WORKFLOW_OWNER_TEST", "CONFIG_OWNER_TEST", "GITHUB_TLS_TEST", "NATIVE_TEST",
+                          "MRK_DESKTOP_WORKFLOW_NATIVE", "MRK_DESKTOP_CONFIG_NATIVE", "MRK_DESKTOP_EDIT_HOSTED_CHECKS",
+                          "METADATA_OWNER_TEST", "MRK_DESKTOP_METADATA_TEXT_NATIVE", "MRK_DESKTOP_METADATA_TEXT_HOSTED_CHECKS"):
+            self.assertNotIn(forbidden, text)
+        self.assertIn('"--domain", "release_version", "--case"', text)
+        self.assertIn('"--locked", "--offline", "--jobs", "1", "--no-default-features"', text)
+        for label in ("version-owner-source-native-contract", "version-owner-zip-native-contract", "version-transaction-eof-native-contract"):
+            constants = [node.value for node in by_label[label].args[0].elts if isinstance(node, ast.Constant)]
+            self.assertEqual(constants, ["test", "--lib", "--features", "development-runtime", "--", "--exact", "--ignored", "--test-threads=1"])
+        core = text.split('elif name == "version-core":', 1)[1].split('    else:', 1)[0]
+        self.assertLess(core.index('check="version-core-ordinary"'), core.index('check="version-core-committed-fsync"'))
+        self.assertLess(core.index('check="version-core-committed-fsync"'), core.index('check="version-core-committed-close"'))
+        tail = core.split('check="version-core-committed-close"', 1)[1]
+        for forbidden in ("run(", "source_unchanged(", "version_inputs_unchanged(", "hash_file(", "tools(", "rmtree", "unlink"):
+            self.assertNotIn(forbidden, tail)
+        self.assertIn('version_core_receipt(context, "committed-close")', tail)
+
+    def test_retention_only_finish_never_probes_project_deletes_or_selects_tools(self):
+        context = version_context()
+        with patch.object(helper, "version_phase_start") as start, \
+                patch.object(helper, "version_inputs_unchanged", side_effect=AssertionError("no source/runtime probes")), \
+                patch.object(helper, "write_json") as emit, patch.object(helper, "run", side_effect=AssertionError("no subprocess")), \
+                patch.object(helper, "tools", side_effect=AssertionError("no tools")), \
+                patch.object(helper.shutil, "rmtree", side_effect=AssertionError("no deletion")), redirect_stdout(io.StringIO()):
+            helper.clean_version_native(context)
+        start.assert_called_once_with(context, "clean")
+        receipt = emit.call_args.args[1]
+        self.assertEqual(receipt["status"], "retained")
+        self.assertEqual(receipt["reason"], "lane-last-committed-close-resources-unknown")
+        for key in ("deleted", "laterNativeWork", "projectProbes"):
+            self.assertIs(receipt[key], False)
+        self.assertIs(receipt["vmDisposalRequired"], True)
+
+    def test_receipt_wrappers_use_previously_bound_data_without_rehashing_subjects(self):
+        context, reads = version_context(), []
+        reports = {"version-owner-source/receipt.json": version_owner_report(),
+                   "version-owner-zip/receipt.json": version_owner_report("zip"),
+                   "version-transaction-eof/receipt.json": version_owner_report(eof=True),
+                   **{f"version-{part}.json": version_core_report(part) for part in ("ordinary", "committed-fsync", "committed-close")}}
+        def read(path, maximum):
+            relative = path.relative_to(Path(context["root"])).as_posix()
+            self.assertEqual(maximum, 64 * 1024 if relative.endswith("/receipt.json") else 32 * 1024)
+            reads.append(relative)
+            return reports[relative]
+        with patch.object(helper, "read_bounded_json", side_effect=read), \
+                patch.object(helper, "hash_file", side_effect=AssertionError("no source/runtime rehash")), \
+                patch.object(helper, "version_inputs_unchanged", side_effect=AssertionError("no original input re-probe")), \
+                patch.object(helper, "run", side_effect=AssertionError("no process")):
+            helper.version_owner_receipt(context, "source")
+            helper.version_owner_receipt(context, "zip")
+            helper.version_transaction_eof_receipt(context)
+            for partition in ("ordinary", "committed-fsync", "committed-close"):
+                helper.version_core_receipt(context, partition)
+        self.assertEqual(set(reads), set(reports))
+        for rows in ([], context["versionInputs"]["sourceFiles"][:-1], list(reversed(context["versionInputs"]["sourceFiles"]))):
+            changed = deepcopy(context)
+            changed["versionInputs"]["sourceFiles"] = rows
+            with self.assertRaises(helper.CheckFailure):
+                helper.version_bound_source_hashes(changed, helper.VERSION_CORE_SOURCES)
+
+    def test_retention_entry_uses_original_invocation_and_receipt_data_not_source_or_tool_probes(self):
+        context = version_context()
+        context["root"] = "/never-opened/runner-temp/mrk-desktop-foundation-version-123-1"
+        environment = {**version_environment(), "GITHUB_WORKSPACE": "/never-opened/source", "MRK_PYTHON": "/never-opened/setup-python",
+            "RUNNER_TEMP": "/never-opened/runner-temp", "MRK_DESKTOP_CI_ROOT": context["root"], "GITHUB_ACTIONS": "true",
+            "RUNNER_ENVIRONMENT": "github-hosted", "MRK_DESKTOP_PLATFORM": "linux", "RUNNER_OS": "Linux", "RUNNER_ARCH": "X64", "ImageOS": "ubuntu24"}
+        context["versionInvocation"] = {key: environment[key] for key in ("GITHUB_WORKSPACE", "MRK_PYTHON", "RUNNER_TEMP")}
+        context["versionInvocation"]["executable"] = "/never-opened/python-executable"
+        public = helper.version_public_bindings(context)
+        reads = []
+        def read(path, maximum):
+            self.assertEqual(path.parent, Path(context["root"]))
+            self.assertEqual(maximum, 256 * 1024)
+            reads.append(path.name)
+            return context if path.name == "context.json" else public if path.name == "public-bindings.json" else self.fail("unexpected receipt")
+        with patch.dict(helper.os.environ, environment, clear=True), patch.object(helper.sys, "executable", "/never-opened/python-executable"), \
+                patch.object(helper.sys, "version", helper.PYTHON + " inert"), patch.object(helper.sys, "platform", "linux"), \
+                patch.object(helper.os, "geteuid", return_value=1000), patch.object(helper.os, "uname", side_effect=AssertionError("no new host probe")), \
+                patch.object(Path, "resolve", side_effect=AssertionError("no source/runtime resolution")), patch.object(Path, "is_symlink", return_value=False), \
+                patch.object(helper, "ordinary"), patch.object(helper, "read_bounded_json", side_effect=read), \
+                patch.object(helper, "version_inputs_unchanged", side_effect=AssertionError("no inputs re-probe")), \
+                patch.object(helper, "hash_file", side_effect=AssertionError("no rehash")), patch.object(helper, "run", side_effect=AssertionError("no tool")):
+            self.assertEqual(helper.admitted_host(retention_only=True), "linux")
+            self.assertIs(helper.load_context("linux", helper.VERSION_NATIVE_SCOPE, retention_only=True), context)
+            with patch.object(helper, "phase_version_native") as execute:
+                helper.phase("clean", "linux", helper.VERSION_NATIVE_SCOPE)
+                execute.assert_called_once_with("clean", context)
+            for key in ("GITHUB_WORKSPACE", "MRK_PYTHON", "RUNNER_TEMP"):
+                with patch.dict(helper.os.environ, {key: "/never-opened/changed"}), self.assertRaises(helper.CheckFailure):
+                    helper.load_context("linux", helper.VERSION_NATIVE_SCOPE, retention_only=True)
+            with self.assertRaises(helper.CheckFailure):
+                helper.load_context("linux", helper.WORKFLOW_NATIVE_SCOPE, retention_only=True)
+        self.assertEqual(reads[:4], ["context.json", "public-bindings.json", "context.json", "public-bindings.json"])
+
+
+    def test_version_workflow_has_one_push_only_route_and_an_exact_receipt_allowlist(self):
+        workflow = (SOURCE / helper.VERSION_NATIVE_WORKFLOW).read_text(encoding="utf-8")
+        guard = workflow.split("        run: |\n", 1)[1].split("      - name:", 1)[0]
+        route = guard.split("push:refs/heads/verify/desktop-release-version-apply-native)", 1)[1].split(";;", 1)[0]
+        self.assertIn('[[ "$GITHUB_RUN_ATTEMPT" == 1 && "$MRK_PUSH_EVENT_AFTER" == "$GITHUB_SHA" ]]', route)
+        self.assertIn("scope=release-version-apply-native-v1", route)
+        self.assertNotIn("workflow_dispatch:refs/heads/verify/desktop-release-version-apply-native", workflow)
+        positions = [workflow.index(f"ci_foundation.py {phase}'") for phase in helper.VERSION_NATIVE_PHASES]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(workflow.count("ci_foundation.py compile'"), 1)
+        self.assertEqual(workflow.count("runs-on:"), 1)
+        upload = workflow.split("      - name: Retain only allowlisted synthetic release-version receipts\n", 1)[1].split("      - name: ", 1)[0]
+        self.assertIn("if: always() && steps.prepare.outcome == 'success' && steps.lane.outputs.scope == 'release-version-apply-native-v1'", upload)
+        files = [line.strip().split("${{ steps.prepare.outputs.root }}/", 1)[1]
+                 for line in upload.splitlines() if line.strip().startswith("${{ steps.prepare.outputs.root }}/")]
+        self.assertEqual(files, ["public-bindings.json", "acquire-checks.json", "compile-checks.json", "version-owner-checks.json",
+            "version-owner-source/receipt.json", "version-owner-zip/receipt.json", "version-transaction-eof-checks.json",
+            "version-transaction-eof/receipt.json", "version-core-checks.json", "version-ordinary.json",
+            "version-committed-fsync.json", "version-committed-close.json", "retention-checks.json"])
+        for forbidden in ("matrix:", "continue-on-error", "secrets.", "*.json", "context.json", "core.zip"):
+            self.assertNotIn(forbidden, workflow)
+
+
 
 
 def windows_test_checks(name: str) -> dict:
@@ -3314,6 +3954,9 @@ class WindowsCompositionRoutingTests(unittest.TestCase):
             helper.COMPILE_SCOPE: (set(helper.COMPILE_PHASES), platforms),
             helper.GTK_COMPILE_SCOPE: (set(helper.COMPILE_PHASES), {"linux"}),
             helper.WORKFLOW_NATIVE_SCOPE: (set(helper.WORKFLOW_NATIVE_PHASES), {"linux"}),
+            helper.METADATA_NATIVE_SCOPE: (set(helper.METADATA_NATIVE_PHASES), {"linux"}),
+            helper.ENVIRONMENT_NATIVE_SCOPE: (set(helper.ENVIRONMENT_NATIVE_PHASES), {"linux", "macos"}),
+            helper.OFFLINE_NATIVE_SCOPE: (set(helper.OFFLINE_NATIVE_PHASES), {"linux", "macos"}),
             helper.GITHUB_READONLY_SCOPE: (set(helper.GITHUB_READONLY_PHASES), {"linux"}),
             helper.GITHUB_TLS_SCOPE: (set(helper.GITHUB_TLS_PHASES), {"linux"}),
             helper.WINDOWS_SNAPSHOT_SCOPE: ({"prepare", "acquire", "compile", "windows-snapshot", "clean"}, {"windows"}),
@@ -3367,25 +4010,51 @@ class WindowsCompositionRoutingTests(unittest.TestCase):
                 with self.assertRaises(helper.CheckFailure):
                     helper.prepare("windows", scope)
 
-        # Fixed bounded SOURCE reads only: main and real hosted admission are never called.
+        # Same finite8MiB per-source bound as the admitted source inventory;
+        # main and real hosted admission are never called by this DATA check.
         with HELPER.open("rb") as stream:
-            raw = stream.read(512 * 1024 + 1)
-        self.assertLessEqual(len(raw), 512 * 1024)
+            raw = stream.read(8 * 1024 * 1024 + 1)
+        self.assertLessEqual(len(raw), 8 * 1024 * 1024)
         source = raw.decode("utf-8")
         main = source.split("def main() -> int:\n", 1)[1].split('\n\nif __name__ == "__main__":', 1)[0]
-        self.assertIn('"workflow-core", "windows-snapshot", "github-owner", "github-tls", "github-tls-deadline"))', main)
+        main_ast = next(node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef) and node.name == "main")
+        argument = [node for node in ast.walk(main_ast) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name) and node.func.value.id == "parser" and node.func.attr == "add_argument"
+            and node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value == "phase"]
+        self.assertEqual(len(argument), 1)
+        choices = next(keyword.value for keyword in argument[0].keywords if keyword.arg == "choices")
+        self.assertIsInstance(choices, ast.Tuple)
+        self.assertEqual(["*" + node.value.id if isinstance(node, ast.Starred) else node.value for node in choices.elts],
+            ["*BOUNDARY_PHASES", "workflow-owner", "workflow-transaction-eof", "workflow-core", "metadata-owner",
+             "metadata-transaction-eof", "metadata-core", "windows-snapshot", "github-owner", "github-tls", "github-tls-deadline",
+             "environment-native", "offline-cli11", "retain", "windows-installed-native", "windows-installed-native-finalize",
+             "windows-installed-runtime-data", "*WINDOWS_FULLWALK_DATA_PHASES", "*WINDOWS_INSTALLED_PASSIVE_DATA_PHASES",
+             "windows-normal-ui-prerequisite", "*WINDOWS_NORMAL_UI_DATA_PHASES", "*WINDOWS_NORMAL_UI_SETUP_BUILD_PHASES", "*WINDOWS_NORMAL_UI_GUI_BUILD_PHASES", "*CONVENTIONAL_PHASES"])
         self.assertIn('scope = os.environ.get("MRK_DESKTOP_HOSTED_CHECKS", "")', main)
-        self.assertLess(main.index("admit_phase(scope, args.phase)"), main.index("platform = admitted_host()"))
-        self.assertLess(main.index("platform = admitted_host()"), main.index("prepare(platform, scope)"))
+        installed = main.split("if scope == WINDOWS_INSTALLED_SCOPE", 1)[1].split("if scope in CONVENTIONAL_SCOPES", 1)[0]
+        self.assertEqual(" ".join(installed.split()),
+            'or args.phase in {"windows-installed-native", "windows-installed-native-finalize", "windows-installed-runtime-data", '
+            '*WINDOWS_FULLWALK_DATA_PHASES, *WINDOWS_INSTALLED_PASSIVE_DATA_PHASES, "windows-normal-ui-prerequisite", '
+            '*WINDOWS_NORMAL_UI_DATA_PHASES, *WINDOWS_NORMAL_UI_SETUP_BUILD_PHASES, *WINDOWS_NORMAL_UI_GUI_BUILD_PHASES}: windows_installed_phase(args.phase, scope) return 0')
+        self.assertLess(main.index("windows_installed_phase(args.phase, scope)"), main.index("admit_phase(scope, args.phase)"))
+        self.assertLess(main.index("admit_phase(scope, args.phase)"), main.index("platform = (admitted_host("))
+        self.assertLess(main.index("platform = (admitted_host("), main.index("prepare(platform, scope)"))
+        self.assertIn('platform = (admitted_host(retention_only=True) if (scope == METADATA_NATIVE_SCOPE and args.phase == "clean"\n'
+                      '                    or scope == ENVIRONMENT_NATIVE_SCOPE and args.phase == "retain"\n'
+                      '                    or scope == OFFLINE_NATIVE_SCOPE and args.phase != "prepare") else admitted_host())', main)
         self.assertIn('prepare(platform, scope) if args.phase == "prepare" else phase(args.phase, platform, scope)', main)
         self.assertNotIn("--scope", main)
         self.assertIn("def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:", source)
         self.assertIn("def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:", source)
-        host = source.split("def admitted_host() -> str:\n", 1)[1].split("\n\ndef admitted_scope(", 1)[0]
+        host = source.split("def admitted_host(*, retention_only: bool = False) -> str:\n", 1)[1].split("\n\ndef admitted_scope(", 1)[0]
         self.assertEqual(host.count("admitted_scope(platform)"), 1)
+        self.assertIn('os.environ.get("MRK_DESKTOP_HOSTED_CHECKS") in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, '
+                      '*ENVIRONMENT_NATIVE_SCOPES, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES}', host)
+        self.assertIn('require(not retention_only or os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {METADATA_NATIVE_SCOPE, *ENVIRONMENT_NATIVE_SCOPES}', host)
         self.assertIn('if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] == WINDOWS_SNAPSHOT_SCOPE:\n        admitted_scope(platform)', host)
-        self.assertIn('if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {WORKFLOW_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE}:', host)
-        self.assertIn('os.environ.get("ImageOS") == "ubuntu24" and os.uname().machine == "x86_64"', host)
+        self.assertIn('if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE}:', host)
+        self.assertIn('os.environ.get("RUNNER_OS") == "Linux" and os.environ.get("RUNNER_ARCH") == "X64"', host)
+        self.assertIn('os.environ.get("ImageOS") == "ubuntu24" and (retention_only or os.uname().machine == "x86_64")', host)
         self.assertIn('os.geteuid() != 0', host)
 
     def test_windows_context_requires_both_scopes_and_original_event_binding(self):
@@ -3513,15 +4182,16 @@ class WindowsCompositionRoutingTests(unittest.TestCase):
                 helper.load_context("windows", helper.WINDOWS_SNAPSHOT_SCOPE)
 
         with HELPER.open("rb") as stream:
-            raw = stream.read(512 * 1024 + 1)
-        self.assertLessEqual(len(raw), 512 * 1024)
+            raw = stream.read(8 * 1024 * 1024 + 1)
+        self.assertLessEqual(len(raw), 8 * 1024 * 1024)
         source = raw.decode("utf-8")
         prepare = source.split("def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:\n", 1)[1].split("\n\ndef load_context(", 1)[0]
         self.assertTrue(prepare.startswith('    admit_phase(scope, "prepare")\n    admit_platform(scope, platform)\n'))
         self.assertLess(prepare.index('require(admitted_scope(platform) == scope'), prepare.index('source = Path('))
-        self.assertIn('directories = GITHUB_TLS_DIRECTORIES if native_tls else GITHUB_READONLY_DIRECTORIES if native_github else WORKFLOW_NATIVE_DIRECTORIES if native_workflow else (\n'
+        self.assertIn('native_metadata = scope == METADATA_NATIVE_SCOPE\n    native_edit = native_workflow or native_metadata', prepare)
+        self.assertIn('directories = METADATA_NATIVE_DIRECTORIES if native_metadata else GITHUB_TLS_DIRECTORIES if native_tls else GITHUB_READONLY_DIRECTORIES if native_github else WORKFLOW_NATIVE_DIRECTORIES if native_workflow else (\n'
                       '        "home", "cargo", "rustup", "tmp", "target", "windows-snapshot", "appdata", "localappdata") if windows else (', prepare)
-        self.assertIn('empty_files = ("gitconfig-empty",) if native_workflow or native_github or native_tls or windows else ("npmrc-user", "npmrc-global", "gitconfig-empty")', prepare)
+        self.assertIn('empty_files = ("gitconfig-empty",) if native_edit or native_github or native_tls or windows else ("npmrc-user", "npmrc-global", "gitconfig-empty")', prepare)
         self.assertIn('"executionScope": scope,', prepare)
         self.assertIn('if windows:\n        context.update(scope=scope, event=os.environ["GITHUB_EVENT_NAME"], ref=os.environ["GITHUB_REF"])', prepare)
         self.assertEqual(prepare.count('write_json(root / "context.json", context)'), 2)
@@ -5253,14 +5923,16 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                     "mobile_release/api/_environment.py", "mobile_release/toolchain_policy.py",
                     "mobile_release/_desktop_environment_protocol.py", "mobile_release/_desktop_environment_control.py",
                     "mobile_release/_desktop_environment_engine.py", "mobile_release/environment_diagnostics.py",
-                    "mobile_release/environment_diagnostics_tools.py"}
+                    "mobile_release/environment_diagnostics_tools.py",
+                    "mobile_release/release_version_edit.py", "mobile_release/version_text.py",
+                    "mobile_release/api/data/release-version-help-v1.json"}
         context, forbidden = self.context(), self.forbidden
         with patch.multiple(helper, github_tls_runtime=forbidden, github_tls_file=forbidden,
                 read_bounded_json=forbidden, write_json=forbidden, run=forbidden, tools=forbidden), \
                 patch.object(helper.subprocess, "run", side_effect=forbidden), \
                 patch.object(helper.subprocess, "Popen", side_effect=forbidden):
             inventory = helper.workflow_core_inventory(SOURCE)
-            self.assertEqual(len(inventory), 85)
+            self.assertEqual(len(inventory), 106)
             self.assertTrue(metadata <= {row["path"] for row in inventory})
             helper.validate_gtk_core_inventory(inventory)
             with patch.multiple(helper, Path=PurePosixPath, ordinary=forbidden, hash_file=forbidden,
@@ -5292,19 +5964,37 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                         "mobile_release/environment_diagnostics_tools.py"}
         release_version = {"mobile_release/api/_release_version.py"}
         candidate_evidence = {"mobile_release/api/_candidate_evidence.py"}
+        version_edit = {"mobile_release/release_version_edit.py", "mobile_release/version_text.py",
+                        "mobile_release/api/data/release-version-help-v1.json"}
+        saved_commands = {
+            "mobile_release/_command_process.py",
+            "mobile_release/_desktop_android_build_control.py", "mobile_release/_desktop_android_build_engine.py",
+            "mobile_release/_desktop_android_build_files.py", "mobile_release/_desktop_android_build_protocol.py",
+            "mobile_release/_desktop_android_build_selection.py", "mobile_release/_desktop_preflight_budget.py",
+            "mobile_release/_desktop_preflight_control.py", "mobile_release/_desktop_preflight_engine.py",
+            "mobile_release/_desktop_preflight_protocol.py", "mobile_release/_desktop_saved_command_control.py",
+            "mobile_release/_desktop_saved_command_engine.py", "mobile_release/android_build_operation.py",
+            "mobile_release/android_build_tools.py", "mobile_release/android_manifest.py",
+            "mobile_release/android_zip_integrity.py", "mobile_release/desktop_android_build.py",
+            "mobile_release/desktop_preflight.py",
+        }
         inventory = [{"path": name, "size": 1, "sha256": "4" * 64} for name in helper.GTK_CORE_PATHS]
         # Historical snapshots exclude every later addition; do not relabel
-        # their original72/76/78/83-file coverage as a new larger inventory.
-        stale = [row for row in inventory if row["path"] not in metadata | environment | diagnostics | release_version | candidate_evidence]
-        pre_environment = [row for row in inventory if row["path"] not in environment | diagnostics | release_version | candidate_evidence]
-        pre_diagnostics = [row for row in inventory if row["path"] not in diagnostics | release_version | candidate_evidence]
-        pre_version = [row for row in inventory if row["path"] not in release_version | candidate_evidence]
-        pre_candidate = [row for row in inventory if row["path"] not in candidate_evidence]
+        # their original72/76/78/83/84/85/103-file coverage as a new larger inventory.
+        stale = [row for row in inventory if row["path"] not in metadata | environment | diagnostics | release_version | candidate_evidence | version_edit | saved_commands]
+        pre_environment = [row for row in inventory if row["path"] not in environment | diagnostics | release_version | candidate_evidence | version_edit | saved_commands]
+        pre_diagnostics = [row for row in inventory if row["path"] not in diagnostics | release_version | candidate_evidence | version_edit | saved_commands]
+        pre_version = [row for row in inventory if row["path"] not in release_version | candidate_evidence | version_edit | saved_commands]
+        pre_candidate = [row for row in inventory if row["path"] not in candidate_evidence | version_edit | saved_commands]
+        pre_saved_commands = [row for row in inventory if row["path"] not in version_edit | saved_commands]
+        pre_version_edit = [row for row in inventory if row["path"] not in version_edit]
         self.assertEqual(len(stale), 72)
         self.assertEqual(len(pre_environment), 76)
         self.assertEqual(len(pre_diagnostics), 78)
         self.assertEqual(len(pre_version), 83)
         self.assertEqual(len(pre_candidate), 84)
+        self.assertEqual(len(pre_saved_commands), 85)
+        self.assertEqual(len(pre_version_edit), 103)
         extra = [*inventory, {"path": "mobile_release/unreviewed.py", "size": 1, "sha256": "4" * 64}]
         context, forbidden = self.context(), self.forbidden
         before = deepcopy(context)
@@ -5314,11 +6004,11 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                 run=forbidden, tools=forbidden), \
                 patch.object(helper.subprocess, "run", side_effect=forbidden), \
                 patch.object(helper.subprocess, "Popen", side_effect=forbidden):
-            for value, count in ((stale, 72), (pre_environment, 76), (pre_diagnostics, 78), (pre_version, 83), (pre_candidate, 84), (extra, 86)):
+            for value, count in ((stale, 72), (pre_environment, 76), (pre_diagnostics, 78), (pre_version, 83), (pre_candidate, 84), (pre_saved_commands, 85), (pre_version_edit, 103), (extra, 107)):
                 with self.subTest(count=count), self.assertRaises(helper.CheckFailure) as refused:
                     helper.prepare_github_tls_context(context, value)
                 self.assertEqual(str(refused.exception),
-                    f"Reviewed core inventory count differs: expected 85 files, observed {count}")
+                    f"Reviewed core inventory count differs: expected 106 files, observed {count}")
                 self.assertEqual(context, before)
 
     def test_tls_manifest_roles_source_ca_ssl_and_file_bounds_are_closed_data(self):
@@ -6855,6 +7545,274 @@ class GitHubTLSWorkflowContractTests(unittest.TestCase):
             self.assertNotIn(dynamic, build)
 
 
+class WindowsHelperHandoffTests(unittest.TestCase):
+    """DATA-only compiler handoff contracts; selected bytes are never executed."""
+
+    @staticmethod
+    def fixture(root):
+        context = {"root": str(root), "source": "/unused-source",
+                   "qualificationProfile": helper.WINDOWS_RUNTIME_PUBLICATION_PROFILE}
+        raw, copy, receipt = helper.windows_installed_helper_paths(context)
+        messages = {"size": 17, "sha256": "9" * 64}
+        return context, raw, copy, receipt, messages
+
+    def test_one_and_two_link_compiler_data_make_one_distinct_singleton_without_changing_originals(self):
+        for links in (1, 2):
+            with self.subTest(links=links), tempfile.TemporaryDirectory() as directory:
+                context, raw, copy, receipt, messages = self.fixture(Path(directory))
+                helper.windows_installed_helper_outputs_absent(context)
+                raw.parent.mkdir(parents=True)
+                payload = b"inert helper bytes; never a runnable fixture"
+                raw.write_bytes(payload)
+                alias = raw.parent / "compiler-alias.data"
+                if links == 2:
+                    helper.os.link(raw, alias)
+                before = helper.windows_installed_state(raw.lstat())
+                with patch.object(helper, "windows_installed_helper_messages", return_value=(raw, messages)):
+                    artifact = helper.windows_installed_helper_handoff(context, helper.time.monotonic() + 30)
+                    self.assertEqual(copy.read_bytes(), payload)
+                    self.assertEqual(copy.lstat().st_nlink, 1)
+                    self.assertNotEqual((copy.lstat().st_dev, copy.lstat().st_ino), before[:2])
+                    self.assertEqual(helper.windows_installed_state(raw.lstat()), before)
+                    self.assertEqual(artifact["compilerSource"]["named"], list(before))
+                    self.assertEqual(artifact["copySnapshot"]["named"], list(helper.windows_installed_state(copy.lstat())))
+                    self.assertEqual(artifact["messages"], messages)
+                    helper.write_json(receipt, artifact)
+                    with patch.object(helper, "windows_installed_helper_copy", side_effect=AssertionError("no recopy")), \
+                         patch.object(helper, "windows_installed_helper_handoff", side_effect=AssertionError("no creator")), \
+                         redirect_stdout(io.StringIO()):
+                        self.assertEqual(helper.windows_installed_helper_artifact(context), artifact)
+                        if links == 1:
+                            helper.os.link(raw, alias)
+                            self.assertEqual(raw.lstat().st_nlink, 2)  # Both shapes are admissible only at FIRST admission.
+                            with self.assertRaises(helper.CheckFailure): helper.windows_installed_helper_artifact(context)
+                    if links == 2:
+                        self.assertEqual(alias.read_bytes(), payload)
+                        self.assertEqual(helper.windows_installed_state(alias.lstat()), before)
+                        with self.assertRaises(helper.CheckFailure): helper.ordinary(raw)
+                        with self.assertRaises(helper.CheckFailure): helper.windows_installed_bytes(raw, 1024)
+
+    def test_windows_raw_observation_preserves_both_api_epochs_and_original_failure(self):
+        raw = b"inert"
+        named = SimpleNamespace(st_dev=77, st_ino=2**100 + 7, st_mode=stat.S_IFREG | 0o755, st_nlink=2,
+            st_size=len(raw), st_mtime_ns=200, st_birthtime_ns=100, st_ctime_ns=100, st_file_attributes=128, st_reparse_tag=0)
+        opened = SimpleNamespace(**{**vars(named), "st_mode": stat.S_IFREG | 0o644, "st_ctime_ns": 700})
+        original = OSError("PRIVATE-ORIGINAL-READ-FAILURE")
+
+        def observe(*, first=named, descriptor=opened, named_change=None, descriptor_change=None,
+                    read_error=False, close_error=False, diagnostic_error=False, as_copy=False, data=raw):
+            counts = {"named": 0, "descriptor": 0, "close": 0}
+            class Input(io.BytesIO):
+                def fileno(self): return 91
+                def read(self, size=-1):
+                    if read_error: raise original
+                    return super().read(size)
+                def close(self):
+                    counts["close"] += 1
+                    super().close()
+                    if close_error: raise OSError("PRIVATE-CLOSE-FAILURE")
+            stream = Input(data)
+            class Named:
+                parent = Path("/inert-parent")
+                def __str__(self): return "C:\\private\\mrk-windows-runtime-publish.exe"
+                def lstat(self):
+                    counts["named"] += 1
+                    return named_change if named_change is not None and counts["named"] == 2 else first
+                def open(self, mode):
+                    self_outer.assertEqual(mode, "rb")
+                    return stream
+            def fstat(_):
+                counts["descriptor"] += 1
+                return descriptor_change if descriptor_change is not None and counts["descriptor"] == 2 else descriptor
+            self_outer, capture = self, io.StringIO()
+            try:
+                with patch.object(helper, "os", SimpleNamespace(name="nt", fstat=fstat)), \
+                     patch.object(helper, "windows_installed_directories"), redirect_stdout(capture), \
+                     (patch("builtins.print", side_effect=KeyboardInterrupt()) if diagnostic_error else ExitStack()):
+                    with helper.windows_installed_helper_observation(Named(), compiler_source=not as_copy) as value:
+                        result = value
+                self.assertEqual(counts["close"], 1)
+                return result
+            except BaseException:
+                self.assertLessEqual(counts["close"], 1)
+                if read_error:
+                    self.assertEqual(counts["close"], 1)
+                if counts["descriptor"] == 0:
+                    self.assertEqual(counts["named"], 1)  # Diagnostic must not re-stat.
+                    if not diagnostic_error:
+                        row = json.loads(capture.getvalue().split("=", 1)[1])
+                        self.assertEqual(set(row), {"role", "stage", "diagnosticOnly", "regular", "linkClass", "reparse"})
+                        self.assertEqual(row["stage"], "shape")
+                        self.assertNotIn("private", capture.getvalue().lower())
+                raise
+            finally:
+                if not stream.closed:
+                    io.BytesIO.close(stream)
+
+        _, record = observe()
+        self.assertEqual(record["named"], [77, named.st_ino, named.st_mode, 2, 5, 200, 100, 128, 0, 100])
+        self.assertEqual(record["descriptor"], [77, named.st_ino, opened.st_mode, 2, 5, 200, 100, 128, 0, 700])
+        for field, value in (("st_nlink", 0), ("st_nlink", 3), ("st_nlink", True), ("st_size", 0),
+                ("st_size", (128 << 20) + 1), ("st_mode", stat.S_IFDIR | 0o700),
+                ("st_file_attributes", 0x400), ("st_reparse_tag", 1), ("st_file_attributes", None)):
+            with self.subTest(shape=field, value=value), self.assertRaises(helper.CheckFailure):
+                observe(first=SimpleNamespace(**{**vars(named), field: value}))
+        with self.assertRaises(helper.CheckFailure): observe(as_copy=True)
+        with self.assertRaises(helper.CheckFailure): observe(descriptor=SimpleNamespace(**{**vars(opened), "st_ino": 9}))
+        for data in (b"in", b"inert+"):
+            with self.subTest(read_length=len(data)), self.assertRaises(helper.CheckFailure): observe(data=data)
+        for api, state in (("named_change", named), ("descriptor_change", opened)):
+            for field in ("st_nlink", "st_mode", "st_ino", "st_size", "st_mtime_ns", "st_birthtime_ns", "st_ctime_ns", "st_file_attributes", "st_reparse_tag"):
+                changed = SimpleNamespace(**{**vars(state), field: getattr(state, field) + 1})
+                with self.subTest(api=api, field=field), self.assertRaises(helper.CheckFailure): observe(**{api: changed})
+        with self.assertRaises(OSError): observe(close_error=True)
+        with self.assertRaises(OSError) as caught:
+            observe(read_error=True, close_error=True, diagnostic_error=True)
+        self.assertIs(caught.exception, original)
+
+    def test_revalidation_rejects_full_saved_epochs_including_changes_hidden_by_legacy_identity(self):
+        context, raw, copy, receipt, messages = self.fixture(Path("/inert-ci-root"))
+        source = {"path": str(raw), "size": 5, "sha256": "a" * 64,
+            "named": [77, 8, 33261, 2, 5, 200, 100, 128, 0, 100],
+            "descriptor": [77, 8, 33188, 2, 5, 200, 100, 128, 0, 700]}
+        singleton = {**deepcopy(source), "path": str(copy),
+            "named": [77, 9, 33261, 1, 5, 400, 300, 128, 0, 300],
+            "descriptor": [77, 9, 33188, 1, 5, 400, 300, 128, 0, 800]}
+        saved = helper.windows_installed_helper_record(source, singleton, messages)
+        def revalidate(actual_source=source, actual_copy=singleton, claimed=saved, message_record=messages):
+            class Observation:
+                def __init__(self, row): self.row = row
+                def __enter__(self): return b"inert", self.row
+                def __exit__(self, *_): return False
+            def read(path, limit):
+                self.assertEqual((path, limit), (receipt, 64 << 10))
+                return helper.canonical_json(claimed)
+            def observe(path, *, compiler_source):
+                self.assertEqual(path, raw if compiler_source else copy)
+                return Observation(actual_source if compiler_source else actual_copy)
+            with patch.object(helper, "windows_installed_bytes", side_effect=read), \
+                 patch.object(helper, "windows_installed_helper_messages", return_value=(raw, message_record)), \
+                 patch.object(helper, "windows_installed_helper_observation", side_effect=observe), \
+                 patch.object(helper, "windows_installed_helper_copy", side_effect=AssertionError("no repair")) as writer, \
+                 patch.object(helper, "windows_installed_helper_handoff", side_effect=AssertionError("no creator")) as creator, \
+                 patch.object(helper.Path, "open", side_effect=AssertionError("no filesystem effect")), redirect_stdout(io.StringIO()):
+                try:
+                    return helper.windows_installed_helper_artifact(context)
+                finally:
+                    writer.assert_not_called(); creator.assert_not_called()
+        self.assertEqual(revalidate(), saved)
+        for role, key in (("actual_source", source), ("actual_copy", singleton)):
+            for api, index in (("descriptor", 9), ("descriptor", 6), ("named", 3), ("descriptor", 3), ("named", 7), ("named", 8)):
+                changed = deepcopy(key)
+                changed[api][index] += 1 if index != 3 else -1
+                with self.subTest(role=role, api=api, index=index), self.assertRaises(helper.CheckFailure):
+                    revalidate(**{role: changed})
+        for key in ("compilerSource", "copySnapshot"):
+            changed = deepcopy(saved); del changed[key]
+            with self.subTest(missing=key), self.assertRaises(helper.CheckFailure): revalidate(claimed=changed)
+        for changed in ({**saved, "extra": True}, {**saved, "path": str(raw)}, {**saved, "size": True}):
+            with self.subTest(record=changed), self.assertRaises(helper.CheckFailure): revalidate(claimed=changed)
+        with self.assertRaises(helper.CheckFailure): revalidate(message_record={**messages, "sha256": "0" * 64})
+
+    def test_conflicts_and_write_flush_close_readback_source_change_or_expiry_never_publish(self):
+        for edge in ("collision", "writer-hardlink", "short-write", "write-error", "flush", "close", "unclosed",
+                     "readback", "copy-replaced", "copy-hardlink", "source-change", "precreate-expiry", "expiry"):
+            with self.subTest(edge=edge), tempfile.TemporaryDirectory() as directory:
+                context, raw, copy, receipt, messages = self.fixture(Path(directory))
+                raw.parent.mkdir(parents=True); payload = b"inert"; raw.write_bytes(payload)
+                before = helper.windows_installed_state(raw.lstat())
+                if edge == "collision": copy.write_bytes(b"occupied")
+                open_original, writers, calls, walked = Path.open, [], [], []
+                directories_original = helper.windows_installed_directories
+                original = OSError("PRIVATE-WRITER-FAILURE")
+                class Writer:
+                    def __init__(self, actual): self.actual = actual; self.closes = 0
+                    @property
+                    def closed(self): return self.actual.closed
+                    def fileno(self): return self.actual.fileno()
+                    def write(self, value):
+                        calls.append("write")
+                        if edge == "write-error": raise original
+                        if edge == "source-change":
+                            with open_original(raw, "wb") as changed: changed.write(b"other")
+                            helper.os.utime(raw, ns=(before[5], before[5] + 1_000_000))
+                        return self.actual.write(value[:-1] if edge == "short-write" else value)
+                    def flush(self):
+                        if edge == "flush": raise original
+                        self.actual.flush()
+                    def close(self):
+                        self.closes += 1
+                        if edge == "unclosed": return
+                        self.actual.close()
+                        if edge == "close": raise original
+                        if edge == "readback":
+                            with open_original(copy, "wb") as changed: changed.write(b"other")
+                        if edge == "copy-replaced":
+                            helper.os.rename(copy, copy.with_suffix(".retained"))
+                            with open_original(copy, "wb") as changed: changed.write(payload)
+                        if edge == "copy-hardlink": helper.os.link(copy, copy.with_suffix(".alias"))
+                def open_file(path, mode="r", *args, **kwargs):
+                    actual = open_original(path, mode, *args, **kwargs)
+                    if path == copy and mode == "xb":
+                        wrapper = Writer(actual); writers.append(wrapper)
+                        if edge == "writer-hardlink": helper.os.link(copy, copy.with_suffix(".alias"))
+                        return wrapper
+                    return actual
+                def directories(path):
+                    directories_original(path); walked.append(path)
+                def remaining(*_):
+                    if edge == "expiry" and calls or edge == "precreate-expiry" and copy.parent in walked:
+                        raise helper.CheckFailure("original deadline expired")
+                    return 1
+                try:
+                    with patch.object(helper, "windows_installed_helper_messages", return_value=(raw, messages)), \
+                         patch.object(helper.Path, "open", autospec=True, side_effect=open_file), \
+                         patch.object(helper, "windows_installed_directories", side_effect=directories), \
+                         patch.object(helper, "windows_installed_remaining", side_effect=remaining), redirect_stdout(io.StringIO()):
+                        with self.assertRaises((helper.CheckFailure, OSError)) as caught:
+                            helper.windows_installed_helper_handoff(context, 1000.0)
+                    if edge in ("write-error", "flush", "close"): self.assertIs(caught.exception, original)
+                    self.assertFalse(receipt.exists())
+                    self.assertEqual(copy.exists(), edge != "precreate-expiry")  # Never delete/reset/retry a partial copy.
+                    self.assertLessEqual(len(writers), 1)
+                    self.assertTrue(all(writer.closes == 1 for writer in writers))
+                    if edge == "collision": self.assertEqual(copy.read_bytes(), b"occupied")
+                    if edge != "source-change":
+                        self.assertEqual(raw.read_bytes(), payload)
+                        self.assertEqual(helper.windows_installed_state(raw.lstat()), before)
+                finally:
+                    # Only this synthetic test's still-open underlying stream;
+                    # no retry of the application's entered Writer.close.
+                    for writer in writers:
+                        if not writer.actual.closed: writer.actual.close()
+
+    def test_precompile_absence_is_nonfollowing_and_creator_stays_out_of_readonly_or_retention_paths(self):
+        for index in range(3):
+            with self.subTest(role=index), tempfile.TemporaryDirectory() as directory:
+                context, raw, copy, receipt, _ = self.fixture(Path(directory))
+                helper.windows_installed_helper_outputs_absent(context)
+                occupied = (raw, copy, receipt)[index]; occupied.parent.mkdir(parents=True, exist_ok=True)
+                occupied.symlink_to(Path(directory) / "absent-target")
+                with redirect_stdout(io.StringIO()), self.assertRaises(helper.CheckFailure):
+                    helper.windows_installed_helper_outputs_absent(context)
+                self.assertTrue(occupied.is_symlink())
+        source = HELPER.read_text()
+        phase = source.split("def windows_installed_phase(", 1)[1].split("\ndef main(", 1)[0]
+        self.assertEqual(phase.count("windows_installed_helper_handoff(context, deadline)"), 1)
+        self.assertLess(phase.index("windows_installed_helper_outputs_absent(context)"),
+                        phase.index('check="windows-installed-helper-compile-only"'))
+        self.assertLess(phase.index("require(output.closed and diagnostics.closed"),
+                        phase.index("windows_installed_helper_handoff(context, deadline)"))
+        for begin, end in (("def windows_installed_helper_artifact(", "def windows_installed_native_inert("),
+                           ("def windows_fullwalk_retain(", "def windows_installed_identity(")):
+            body = source.split(begin, 1)[1].split(end, 1)[0]
+            self.assertNotIn("windows_installed_helper_handoff(", body)
+            self.assertNotIn("windows_installed_helper_copy(", body)
+        native = (SOURCE / "desktop/native/windows-installed-native/src/qualification_fixture.rs").read_text()
+        self.assertIn('need(helper == root.join("mrk-windows-runtime-publish.exe"))?', native)
+        self.assertIn("self.recheck(index)?;self.close(index)?;self.pop_closed(index)?;", native)
+
+
 class WindowsReaderGateTests(unittest.TestCase):
     """Inert DATA/source contracts only; these records are not native receipts."""
 
@@ -6864,9 +7822,132 @@ class WindowsReaderGateTests(unittest.TestCase):
                 "sourceTree": "2" * 40, "runId": "123456", "attempt": 1,
                 "imageOS": "win25-vs2026", "imageVersion": "20260920.1.0", "git": "/fixed-git"}
 
+    @staticmethod
+    def compile_failure_data():
+        native = helper.WINDOWS_INSTALLED_CRATE + "/src/qualification_fixture.rs"
+        names = sorted((native, helper.WINDOWS_INSTALLED_CRATE + "/src/lib.rs", helper.WINDOWS_INSTALLED_APP + "/src/lib.rs",
+                        helper.WINDOWS_INSTALLED_APP + "/src/bin/windows_runtime_publish.rs"))
+        context = {"source": r"C:\private-checkout", "root": "/private-run",
+            "sourceFiles": [{"path": name, "size": 1, "sha256": "a" * 64} for name in names]}
+        private = "PRIVATE-COMPILER-TEXT"
+        row = {"reason": "compiler-message", "package_id": private,
+            "target": {"src_path": context["source"] + "/" + helper.WINDOWS_INSTALLED_CRATE + "/src/lib.rs"},
+            "message": {"level": "error", "message": private, "rendered": private,
+                "code": {"code": "E0499", "explanation": private}, "children": [{"message": private}],
+                "spans": [{"is_primary": True, "file_name": native, "line_start": 607,
+                           "text": [{"text": private}], "label": private}]}}
+        return context, row
+
+    def test_windows_compile_diagnostic_projects_only_inventory_names_codes_and_primary_lines(self):
+        context, original = self.compile_failure_data()
+        for stage, name, crate in (("standalone", helper.WINDOWS_INSTALLED_CRATE + "/src/qualification_fixture.rs", helper.WINDOWS_INSTALLED_CRATE),
+                                   ("app", helper.WINDOWS_INSTALLED_APP + "/src/lib.rs", helper.WINDOWS_INSTALLED_APP),
+                                   ("helper", helper.WINDOWS_INSTALLED_APP + "/src/bin/windows_runtime_publish.rs", helper.WINDOWS_INSTALLED_APP)):
+            absolute = context["source"].replace("\\", "/") + "/" + name
+            spellings = (name, name.replace("/", "\\"), absolute, absolute.replace("/", "\\"), name[len(crate) + 1:])
+            for spelling in spellings:
+                row = deepcopy(original)
+                row["target"]["src_path"] = context["source"] + "/" + crate + "/src/lib.rs"
+                row["message"]["spans"][0]["file_name"] = spelling
+                row["message"]["spans"][:0] = [
+                    {"is_primary": False, "file_name": name, "line_start": 1},
+                    {"is_primary": True, "file_name": "/private/unadmitted.rs", "line_start": 2}]
+                warning = deepcopy(row); warning["message"]["level"] = "warning"
+                raw = b"\n".join(helper.canonical_json(value) for value in (warning, row, {"reason": "build-finished", "success": False})) + b"\n"
+                with self.subTest(stage=stage, spelling=spelling):
+                    result = helper.windows_installed_compile_failure_data(raw, context, stage)
+                    self.assertEqual(result, {"stage": stage, "category": "admitted-errors", "diagnosticOnly": True,
+                        "errors": [{"code": "E0499", "path": name, "line": 607}]})
+                    public = helper.canonical_json(result)
+                    for private in (b"PRIVATE-COMPILER-TEXT", b"private-checkout", b"private-run", b"unadmitted", b"rendered", b"package_id"):
+                        self.assertNotIn(private, public)
+
+    def test_windows_compile_diagnostic_rejects_unknown_traversal_ambiguity_and_invalid_coordinates(self):
+        context, original = self.compile_failure_data()
+        native = original["message"]["spans"][0]["file_name"]
+        for spelling in ("qualification_fixture.rs", "./" + native, native + "/../lib.rs", native.replace("/src/", "//src/"),
+                         native.upper(), "C:/foreign/" + native, "../src/lib.rs", "/PRIVATE-COMPILER-TEXT.rs", "Cargo.toml"):
+            row = deepcopy(original); row["message"]["spans"][0]["file_name"] = spelling
+            result = helper.windows_installed_compile_failure_data(helper.canonical_json(row), context, "standalone")
+            self.assertEqual(result["errors"], [{"code": "E0499", "path": None, "line": None}])
+        ambiguous = deepcopy(context)
+        ambiguous["sourceFiles"].append({"path": "src/lib.rs", "size": 1, "sha256": "b" * 64})
+        ambiguous["sourceFiles"].sort(key=lambda row: row["path"])
+        row = deepcopy(original); row["message"]["spans"][0]["file_name"] = "src/lib.rs"
+        self.assertEqual(helper.windows_installed_compile_failure_data(helper.canonical_json(row), ambiguous, "standalone")["errors"],
+                         [{"code": "E0499", "path": None, "line": None}])
+        for target in ("src/lib.rs", "/foreign/src/lib.rs", context["source"] + "/" + helper.WINDOWS_INSTALLED_APP + "/src/lib.rs"):
+            row = deepcopy(original); row["message"]["spans"][0]["file_name"] = "src/lib.rs"
+            row["target"]["src_path"] = target
+            self.assertEqual(helper.windows_installed_compile_failure_data(helper.canonical_json(row), context, "standalone")["errors"],
+                             [{"code": "E0499", "path": None, "line": None}])
+        for coordinate in (True, 0, -1, 1000001, "607", None):
+            row = deepcopy(original); row["message"]["spans"][0]["line_start"] = coordinate
+            result = helper.windows_installed_compile_failure_data(helper.canonical_json(row), context, "standalone")
+            self.assertEqual(result["errors"], [{"code": "E0499", "path": native, "line": None}])
+        for code in (None, True, 499, "E499", "e0499", "E04990", "E0499\nPRIVATE-COMPILER-TEXT", {"nested": "E0499"}):
+            row = deepcopy(original); row["message"]["code"] = {"code": code}
+            result = helper.windows_installed_compile_failure_data(helper.canonical_json(row), context, "standalone")
+            self.assertEqual(result["errors"], [{"code": None, "path": native, "line": 607}])
+        row["message"]["spans"][0]["is_primary"] = 1  # Truthy is not a primary-span Boolean.
+        result = helper.windows_installed_compile_failure_data(helper.canonical_json(row), context, "standalone")
+        self.assertEqual((result["category"], result["errors"]), ("no-admitted-error", []))
+        context["sourceFiles"].append(context["sourceFiles"][0])
+        self.assertEqual(helper.windows_installed_compile_failure_data(helper.canonical_json(original), context, "standalone")["category"], "unavailable")
+
+    def test_windows_compile_diagnostic_bounds_and_malformed_input_never_publish_partial_data(self):
+        context, row = self.compile_failure_data()
+        raw = helper.canonical_json(row) + b"\n"
+        result = helper.windows_installed_compile_failure_data(raw * 9, context, "standalone")
+        self.assertEqual(len(result["errors"]), 8)
+        longest = "a" * 509 + ".rs"
+        long_context = {**context, "sourceFiles": [{"path": longest, "size": 1, "sha256": "a" * 64}]}
+        long_row = deepcopy(row); long_row["message"]["spans"][0]["file_name"] = longest
+        result = helper.windows_installed_compile_failure_data((helper.canonical_json(long_row) + b"\n") * 9, long_context, "app")
+        self.assertEqual([item["path"] for item in result["errors"]], [longest] * 8)
+        self.assertLessEqual(len(helper.canonical_json(result)) + len(b"MRK_WINDOWS_COMPILE_FAILURE_DATA=\n"), 8192)
+        long_context["sourceFiles"][0]["path"] += "x.rs"
+        long_row["message"]["spans"][0]["file_name"] = long_context["sourceFiles"][0]["path"]
+        self.assertIsNone(helper.windows_installed_compile_failure_data(helper.canonical_json(long_row), long_context, "app")["errors"][0]["path"])
+        too_many_spans = deepcopy(row); too_many_spans["message"]["spans"] *= 129
+        malformed = (None, b"", b"\xff", b"{", b"{}", b'{"reason":"compiler-message","reason":"compiler-message"}',
+                     b'{"reason":"compiler-message","message":null}', b" " * ((16 << 20) + 1),
+                     b" " * ((2 << 20) + 1), b'{"reason":"compiler-artifact"}\n' * 4097,
+                     helper.canonical_json(too_many_spans), raw * 8 + b"PRIVATE-COMPILER-TEXT")
+        for value in malformed:
+            result = helper.windows_installed_compile_failure_data(value, context, "standalone")
+            self.assertEqual(result, {"stage": "standalone", "category": "unavailable", "diagnosticOnly": True, "errors": []})
+        row["message"]["level"] = "warning"
+        self.assertEqual(helper.windows_installed_compile_failure_data(helper.canonical_json(row), context, "app")["category"], "no-admitted-error")
+        with self.assertRaises(helper.CheckFailure): helper.windows_installed_compile_failure_data(raw, context, "PRIVATE-COMPILER-TEXT")
+
+    def test_windows_compile_diagnostic_emitter_reads_only_fixed_stream_and_never_stderr(self):
+        context, row = self.compile_failure_data()
+        for stage, filename in (("standalone", "compile-messages.jsonl"), ("app", "app-compile-messages.jsonl"),
+                                ("helper", "helper-compile-messages.jsonl")):
+            for missing in (False, True):
+                output = io.StringIO()
+                with patch.object(helper, "windows_installed_bytes",
+                        side_effect=OSError("PRIVATE-COMPILER-TEXT") if missing else None,
+                        return_value=helper.canonical_json(row)) as read, \
+                     patch.object(helper, "run") as command, redirect_stdout(output):
+                    helper.windows_installed_compile_failure(context, stage)
+                read.assert_called_once_with(Path(context["root"]) / filename, 16 << 20)
+                command.assert_not_called()
+                marker = output.getvalue()
+                self.assertLessEqual(len(marker.encode("ascii")), 8192)
+                self.assertEqual(marker.count("\n"), 1)
+                self.assertTrue(marker.startswith("MRK_WINDOWS_COMPILE_FAILURE_DATA="))
+                self.assertNotIn("PRIVATE-COMPILER-TEXT", marker)
+                result = json.loads(marker.split("=", 1)[1])
+                self.assertEqual((result["stage"], result["diagnosticOnly"], result["category"]),
+                                 (stage, True, "unavailable" if missing else "admitted-errors"))
+
     @classmethod
-    def graph_data(cls):
+    def graph_data(cls, publication=False):
         context = cls.context()
+        if publication:
+            context["qualificationProfile"] = helper.WINDOWS_RUNTIME_PUBLICATION_PROFILE
         source, root = Path(context["source"]), Path(context["root"])
         registry = "registry+https://github.com/rust-lang/crates.io-index"
         versions = {"getrandom": "0.3.4", "serde": "1.0.228", "serde_json": "1.0.145", "sha2": "0.10.9",
@@ -6884,6 +7965,13 @@ class WindowsReaderGateTests(unittest.TestCase):
         dependencies = [{"name": name, "source": None, "req": "*", "kind": None, "rename": None,
             "optional": False, "uses_default_features": True, "features": [], "target": target,
             "registry": None, "path": str((source / declared[name]).parent)} for name, target in targets.items()]
+        dependencies.append({**deepcopy(dependencies[2]), "kind": "dev", "features": ["qualification-result"]})
+        secret_service = {"name": "secret-service", "source": None, "req": "=5.2.0", "kind": None,
+            "rename": None, "optional": False, "uses_default_features": False, "features": ["rt-tokio-crypto-rust"],
+            "target": targets["mrk-linux-mount-observation"], "registry": None,
+            "path": str(source / "desktop/vendor/secret-service-5.2.0")}
+        dependencies.extend([secret_service, {**deepcopy(secret_service), "kind": "dev",
+            "features": ["rt-tokio-crypto-rust", "mrk-retrieval-test-support"]}])
         for name, manifest in declared.items():
             ids[name] = name + "@0.1.0"
             locked.append({"name": name, "version": "0.1.0"})
@@ -6896,9 +7984,14 @@ class WindowsReaderGateTests(unittest.TestCase):
             if name == "mobile-release-kit-desktop":
                 units.append({"name": "build-script-build", "kind": ["custom-build"], "crate_types": ["bin"],
                               "src_path": str(path.parent / "build.rs")})
+                units.append({"name": "mrk-windows-runtime-publish", "kind": ["bin"], "crate_types": ["bin"],
+                              "src_path": str(path.parent / "src/bin/windows_runtime_publish.rs")})
             packages.append({"id": ids[name], "name": name, "version": "0.1.0", "source": None,
-                             "manifest_path": str(path), "features": {"allowed": []}, "targets": units,
+                             "manifest_path": str(path), "features": deepcopy(helper.WINDOWS_NATIVE_DECLARED_FEATURES)
+                                 if name == "mrk-windows-installed-native" else {"allowed": [],
+                                     "windows-runtime-publisher": ["mrk-windows-installed-native/runtime-publication"]}, "targets": units,
                              "dependencies": deepcopy(dependencies) if name == "mobile-release-kit-desktop" else []})
+        locked.extend([{"name": "secret-service", "version": "5.2.0"}, {"name": "zbus", "version": "5.19.0"}])
         for name, version in versions.items():
             ids[name] = name + "@" + version
             directory = root / "cargo/registry/src/index.crates.io-fixed" / (name + "-" + version)
@@ -6925,8 +8018,14 @@ class WindowsReaderGateTests(unittest.TestCase):
         nodes = []
         for name in ["mobile-release-kit-desktop", "mrk-windows-installed-native", *versions]:
             dependencies = edges.get(name, [])
-            nodes.append({"id": ids[name], "features": [], "dependencies": [ids[item] for item in dependencies],
-                "deps": [{"name": item.replace("-", "_"), "pkg": ids[item], "dep_kinds": [{"kind": None, "target": None}]}
+            features = (["qualification-result", "runtime-publication"] if publication else ["qualification-result"]) if name == "mrk-windows-installed-native" else (
+                ["windows-runtime-publisher"] if publication and name == "mobile-release-kit-desktop" else [])
+            nodes.append({"id": ids[name], "features": features,
+                "dependencies": [ids[item] for item in dependencies],
+                "deps": [{"name": item.replace("-", "_"), "pkg": ids[item], "dep_kinds":
+                    [{"kind": kind, "target": targets[item]} for kind in (None, "dev")]
+                    if name == "mobile-release-kit-desktop" and item == "mrk-windows-installed-native"
+                    else [{"kind": None, "target": None}]}
                          for item in dependencies]})
         app = ids["mobile-release-kit-desktop"]
         value = {"version": 1, "packages": packages, "workspace_root": str(source / "desktop/src-tauri"),
@@ -6940,6 +8039,12 @@ class WindowsReaderGateTests(unittest.TestCase):
         graph = helper.windows_installed_app_graph(value, lock, **arguments)
         self.assertEqual(set(graph["localIds"]), {"mobile-release-kit-desktop", "mrk-windows-installed-native"})
         self.assertEqual(set(graph["nodes"]) & set(graph["localIds"].values()), set(graph["localIds"].values()))
+        native = graph["localIds"]["mrk-windows-installed-native"]
+        self.assertEqual(graph["nodes"][native]["features"], ["qualification-result"])
+        reordered = deepcopy(value)
+        reordered["packages"][0]["dependencies"].reverse()
+        reordered["resolve"]["nodes"][0]["deps"][-1]["dep_kinds"].reverse()
+        helper.windows_installed_app_graph(reordered, lock, **arguments)
         mutations = {
             "missing-inactive-declaration": lambda row: row["packages"][0]["dependencies"].pop(1),
             "duplicate-local-declaration": lambda row: row["packages"][0]["dependencies"].append(deepcopy(row["packages"][0]["dependencies"][0])),
@@ -6947,6 +8052,15 @@ class WindowsReaderGateTests(unittest.TestCase):
                 {"name": "mrk-macos-installed-native", "source": "registry+https://github.com/rust-lang/crates.io-index"}),
             "reserved-name-git-alias": lambda row: row["packages"][0]["dependencies"].append(
                 {"name": "mrk-linux-mount-observation", "source": "git+https://example.invalid/other"}),
+            "reserved-vendor-registry-alias": lambda row: row["packages"][0]["dependencies"].append(
+                {"name": "secret-service", "source": "registry+https://github.com/rust-lang/crates.io-index"}),
+            "missing-linux-vendor-normal": lambda row: row["packages"][0]["dependencies"].pop(4),
+            "missing-linux-vendor-dev": lambda row: row["packages"][0]["dependencies"].pop(5),
+            "linux-vendor-version": lambda row: row["packages"][0]["dependencies"][4].update(req="^5.2"),
+            "linux-vendor-features": lambda row: row["packages"][0]["dependencies"][5].update(features=["rt-tokio-crypto-rust"]),
+            "linux-vendor-default-features": lambda row: row["packages"][0]["dependencies"][4].update(uses_default_features=True),
+            "linux-vendor-path": lambda row: row["packages"][0]["dependencies"][4].update(path="/other/vendor"),
+            "linux-vendor-target": lambda row: row["packages"][0]["dependencies"][5].update(target="cfg(windows)"),
             "unrelated-path-key": lambda row: row["packages"][0]["dependencies"].append(
                 {"name": "other-local", "source": "registry+https://github.com/rust-lang/crates.io-index", "path": None}),
             "active-inactive-local": lambda row: row["resolve"]["nodes"].append({"id": "mrk-macos-installed-native@0.1.0",
@@ -6956,6 +8070,17 @@ class WindowsReaderGateTests(unittest.TestCase):
                 "manifest_path": str(Path(context["source"]) / "desktop/native/macos-installed-native/Cargo.toml")}),
             "missing-edge": lambda row: row["resolve"]["nodes"][0]["deps"][0].update(pkg="absent"),
             "root-feature": lambda row: row["resolve"]["nodes"][0].update(features=["allowed"]),
+            "missing-qualification-dev": lambda row: row["packages"][0]["dependencies"].pop(3),
+            "feature-on-normal-declaration": lambda row: row["packages"][0]["dependencies"][2].update(features=["qualification-result"]),
+            "missing-qualification-feature": lambda row: row["packages"][0]["dependencies"][3].update(features=[]),
+            "duplicate-qualification-dev": lambda row: row["packages"][0]["dependencies"].append(deepcopy(row["packages"][0]["dependencies"][3])),
+            "wrong-dev-kind": lambda row: row["packages"][0]["dependencies"][3].update(kind="build"),
+            "wrong-dev-target": lambda row: row["packages"][0]["dependencies"][3].update(target="cfg(windows)"),
+            "native-feature-not-active": lambda row: row["resolve"]["nodes"][1].update(features=[]),
+            "native-default-feature": lambda row: row["packages"][1]["features"].update(default=["qualification-result"]),
+            "dev-edge-missing": lambda row: row["resolve"]["nodes"][0]["deps"][-1]["dep_kinds"].pop(),
+            "dev-edge-duplicate": lambda row: row["resolve"]["nodes"][0]["deps"][-1]["dep_kinds"].__setitem__(1, {"kind": None, "target": 'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'}),
+            "dev-edge-wrong-target": lambda row: row["resolve"]["nodes"][0]["deps"][-1]["dep_kinds"][1].update(target=None),
             "unknown-feature": lambda row: row["resolve"]["nodes"][2].update(features=["unknown"]),
             "registry-path": lambda row: row["packages"][2].update(manifest_path="/other/registry/Cargo.toml"),
             "local-path": lambda row: row["packages"][0].update(manifest_path="/other/Cargo.toml"),
@@ -6982,6 +8107,21 @@ class WindowsReaderGateTests(unittest.TestCase):
         with self.assertRaises(helper.CheckFailure): helper.windows_installed_app_graph(value, wrong_lock, **arguments)
         wrong_lock = deepcopy(lock); wrong_lock["package"].pop(2)  # Inactive Mac still belongs to the complete source lock.
         with self.assertRaises(helper.CheckFailure): helper.windows_installed_app_graph(value, wrong_lock, **arguments)
+        for name, version in (("secret-service", "5.2.0"), ("zbus", "5.19.0")):
+            for change in ("missing", "version", "duplicate"):
+                wrong_lock = deepcopy(lock)
+                row = next(row for row in wrong_lock["package"] if row["name"] == name)
+                if change == "missing": wrong_lock["package"].remove(row)
+                elif change == "version": row["version"] = "0.1.0"
+                else: wrong_lock["package"].append(deepcopy(row))
+                with self.subTest(vendor=name, lock=change), self.assertRaises(helper.CheckFailure):
+                    helper.windows_installed_app_graph(value, wrong_lock, **arguments)
+            altered = deepcopy(value)
+            altered["packages"].append({**deepcopy(value["packages"][1]), "id": name + "@" + version,
+                "name": name, "version": version,
+                "manifest_path": str(Path(context["source"]) / "desktop/vendor" / (name + "-" + version) / "Cargo.toml")})
+            with self.subTest(active_vendor=name), self.assertRaises(helper.CheckFailure):
+                helper.windows_installed_app_graph(altered, lock, **arguments)
 
     def test_windows_reader_declared_target_inventory_is_bounded_not_compiler_permission(self):
         value, lock, context = self.graph_data()
@@ -7019,6 +8159,13 @@ class WindowsReaderGateTests(unittest.TestCase):
             with patch.object(helper, "ordinary_windows_executable", side_effect=lambda path, **_: Path(path)):
                 return helper.windows_installed_app_test_path(raw, graph, source=source, root=root)
         self.assertEqual(parse(rows), executable)
+        native = graph["packages"][graph["localIds"]["mrk-windows-installed-native"]]
+        native_unit = {**compiled, "package_id": native["id"], "manifest_path": native["manifest_path"],
+                       "target": native["targets"][0], "profile": {"test": False}, "features": ["qualification-result"]}
+        self.assertEqual(parse([native_unit, *rows]), executable)
+        for features in ([], ["default"], ["qualification-result", "other"]):
+            with self.subTest(native_features=features), self.assertRaises(helper.CheckFailure):
+                parse([{**native_unit, "features": features}, *rows])
         dependency = next(package for package in graph["packages"].values() if package["name"] == "tokio")
         dependency_unit = {**compiled, "package_id": dependency["id"], "manifest_path": dependency["manifest_path"],
                            "target": dependency["targets"][1], "profile": {"test": True, "debug_assertions": True}}
@@ -7043,6 +8190,86 @@ class WindowsReaderGateTests(unittest.TestCase):
             with self.subTest(case=label):
                 altered = deepcopy(rows); change(altered)
                 with self.assertRaises(helper.CheckFailure): parse(altered)
+
+    def test_windows_reader_publication_graph_and_three_compile_roles_never_select_a_helper_libtest(self):
+        value, lock, context = self.graph_data(publication=True)
+        source, root = Path(context["source"]), Path(context["root"])
+        graph = helper.windows_installed_app_graph(value, lock, source=source, root=root, publication=True)
+        app, native = (graph["packages"][graph["localIds"][name]] for name in
+                       ("mobile-release-kit-desktop", "mrk-windows-installed-native"))
+        self.assertEqual(helper.windows_installed_features(context, "native"), ["runtime-publication"])
+        for role in ("app", "helper"):
+            self.assertEqual(helper.windows_installed_features(context, role), ["windows-runtime-publisher"])
+        self.assertEqual(helper.windows_installed_app_unit_features(graph)[native["id"]],
+                         ["qualification-result", "runtime-publication"])
+        self.assertEqual(helper.windows_installed_app_unit_features(graph, helper=True)[native["id"]], ["runtime-publication"])
+        for marker in (False, 0, "true"):
+            with self.subTest(marker=marker), self.assertRaises(helper.CheckFailure):
+                helper.windows_installed_app_graph(value, lock, source=source, root=root, publication=marker)
+        for role in ("helper", "other", None):
+            with self.subTest(role=role), self.assertRaises(helper.CheckFailure):
+                helper.windows_installed_features(self.context(), role)
+        for name in ("native", "app"):
+            self.assertEqual(helper.windows_installed_features(self.context(), name), [])
+        for field, replacement in (("windows-runtime-publisher", []), ("windows-runtime-publisher", ["mrk-windows-installed-native/qualification-result"])):
+            altered = deepcopy(value); altered["packages"][0]["features"][field] = replacement
+            with self.subTest(forwarding=replacement), self.assertRaises(helper.CheckFailure):
+                helper.windows_installed_app_graph(altered, lock, source=source, root=root, publication=True)
+        cargo = "/fixed-cargo"
+        common = ["--locked", "--offline", "--jobs", "1", "--no-default-features", "--target", "x86_64-pc-windows-msvc",
+                  "--manifest-path", str(source / "desktop/src-tauri/Cargo.toml"), "--target-dir", str(root / "target")]
+        self.assertEqual(helper.windows_installed_app_argv(cargo, context),
+                         [cargo, "test", *common, "--features", "windows-runtime-publisher", "--lib", "--no-run", "--message-format=json"])
+        self.assertEqual(helper.windows_installed_helper_argv(cargo, context),
+                         [cargo, "build", *common, "--features", "windows-runtime-publisher", "--bin", "mrk-windows-runtime-publish", "--message-format=json"])
+        native_argv = helper.windows_fullwalk_native_argv(cargo, context)
+        self.assertEqual(native_argv[native_argv.index("--features") + 1], "runtime-publication")
+        self.assertIn("--lib", native_argv); self.assertIn("--no-run", native_argv)
+        self.assertNotIn("qualification-result", native_argv)
+        executable = root / "target/x86_64-pc-windows-msvc/debug/mrk-windows-runtime-publish.exe"
+        unit = {"reason": "compiler-artifact", "package_id": native["id"], "manifest_path": native["manifest_path"],
+                "target": native["targets"][0], "profile": {"test": False, "debug_assertions": True},
+                "features": ["runtime-publication"], "executable": None, "fresh": False}
+        library = {**unit, "package_id": app["id"], "manifest_path": app["manifest_path"], "target": app["targets"][0],
+                   "features": ["windows-runtime-publisher"], "profile": dict(unit["profile"])}
+        binary = {**library, "target": app["targets"][2], "executable": str(executable), "profile": dict(library["profile"])}
+        rows = [unit, library, binary, {"reason": "build-finished", "success": True}]
+        def parse(items, helper_role=True):
+            raw = b"\n".join(helper.canonical_json(row) for row in items)
+            def ordinary(path, **_):
+                self.assertFalse(helper_role, "The whole helper JSON stream must remain lexical DATA")
+                return Path(path)
+            with patch.object(helper, "ordinary_windows_executable", side_effect=ordinary), \
+                 patch.object(helper.Path, "lstat", side_effect=AssertionError("no filesystem admission while parsing")), \
+                 patch.object(helper.Path, "open", side_effect=AssertionError("no filesystem effect while parsing")):
+                return helper.windows_installed_app_test_path(raw, graph, source=source, root=root, helper=helper_role)
+        self.assertEqual(parse(rows), executable)
+        libtest = {**library, "profile": {"test": True, "debug_assertions": True},
+                   "executable": str(executable.parent / "deps/mobile_release_desktop-bbbbbbbbbbbbbbbb.exe")}
+        app_rows = [{**unit, "features": ["qualification-result", "runtime-publication"]}, libtest, rows[-1]]
+        self.assertEqual(parse(app_rows, False), Path(libtest["executable"]))
+        cases = {
+            "missing-normal-native": lambda data: data.pop(0),
+            "duplicate-normal-native": lambda data: data.insert(0, deepcopy(data[0])),
+            "native-test-seam-leak": lambda data: data[0].update(features=["qualification-result", "runtime-publication"]),
+            "native-test-unit": lambda data: data[0]["profile"].update(test=True),
+            "app-test-unit": lambda data: data[1]["profile"].update(test=True),
+            "helper-is-libtest": lambda data: data.__setitem__(2, deepcopy(libtest)),
+            "fresh-not-original-build": lambda data: data[2].update(fresh=True),
+            "missing-helper-feature": lambda data: data[2].update(features=[]),
+            "hashed-helper-test-directory": lambda data: data[2].update(executable=str(executable.parent / "deps/mrk-windows-runtime-publish.exe")),
+            "release-helper": lambda data: data[2].update(executable=str(executable.parent.parent / "release/mrk-windows-runtime-publish.exe")),
+            "duplicate-helper": lambda data: data.insert(3, deepcopy(data[2])),
+            "typed-test-profile": lambda data: data[2]["profile"].update(test=0),
+            "missing-final": lambda data: data.pop(),
+            "failed-final": lambda data: data[-1].update(success=False),
+            "after-final": lambda data: data.append(deepcopy(data[2])),
+        }
+        for label, change in cases.items():
+            altered = deepcopy(rows); change(altered)
+            with self.subTest(case=label), self.assertRaises(helper.CheckFailure): parse(altered)
+        with self.assertRaises(helper.CheckFailure): parse(rows, False)
+        with self.assertRaises(helper.CheckFailure): parse(app_rows)
 
     @classmethod
     def feature_graph_data(cls):
@@ -7301,7 +8528,8 @@ class WindowsReaderGateTests(unittest.TestCase):
     def test_windows_reader_existing_job_and_phase_routes_remain_narrow(self):
         text = HELPER.read_text(encoding="utf-8")
         phase = text.split("def windows_installed_phase(", 1)[1].split("def main(", 1)[0]
-        self.assertIn('retention_only=name == "retain"', phase)
+        self.assertIn('retention_only=name in {\n        "retain", "windows-installed-native-finalize", *WINDOWS_FULLWALK_DATA_PHASES, *WINDOWS_INSTALLED_PASSIVE_DATA_PHASES,\n        *WINDOWS_NORMAL_UI_DATA_PHASES}', phase)
+        self.assertLess(phase.index('if name == "windows-installed-native-finalize"'), phase.index('phases = ("acquire", "compile", "windows-installed-native")'))
         self.assertLess(phase.index('if name == "windows-installed-runtime-data"'), phase.index('phases = ("acquire", "compile", "windows-installed-native")'))
         retained = phase.split('if name == "retain":', 1)[1].split('phases = ("acquire", "compile", "windows-installed-native")', 1)[0]
         for unavailable in ('run(', 'tools(', 'runtime-identity.private.json', 'source_unchanged('): self.assertNotIn(unavailable, retained)
@@ -7310,19 +8538,4913 @@ class WindowsReaderGateTests(unittest.TestCase):
                         retained.index('windows_installed_retain_runtime(context, outcome)'))
         self.assertIn('"runtimeIdentity": runtime', retained)
         self.assertEqual(phase.count('app_argv = windows_installed_app_argv(cargo, context)'), 1)
-        self.assertIn('[app_artifact["path"], *WINDOWS_INSTALLED_APP_INERT, "--exact", "--test-threads=1"]', phase)
-        self.assertIn('[artifact["path"], "--skip", WINDOWS_INSTALLED_TEST, "--test-threads=1"]', phase)
-        self.assertIn('[artifact["path"], WINDOWS_INSTALLED_TEST, "--exact", "--ignored", "--nocapture", "--test-threads=1"]', phase)
-        self.assertNotIn('native_protected_version_walk_and_original_settlement', phase)
+        self.assertIn('[app_artifact["path"], *app_names, "--exact", "--test-threads=1"]', phase)
+        self.assertIn('[artifact["path"], *native_names, "--exact", "--test-threads=1"]', phase)
+        self.assertNotIn('[artifact["path"], WINDOWS_INSTALLED_TEST,', phase)
+        self.assertNotIn('"native.stdout"', phase)
+        self.assertNotIn('"native.stderr"', phase)
+        self.assertIn('windows_installed_native_test_total(context) - len(native_names)', phase)
+        self.assertNotIn('WINDOWS_INSTALLED_INERT, 5)', phase)
+        self.assertNotIn('[app_artifact["path"], WINDOWS_FULLWALK_TEST,', phase)
         workflow = (SOURCE / ".github/workflows/desktop-foundation.yml").read_text(encoding="utf-8").split("  windows-installed-native:\n", 1)[1]
         self.assertIn("runs-on: windows-2025-vs2026", workflow)
         self.assertEqual(workflow.count("continue-on-error: true"), 1)
         self.assertIn("MRK_WINDOWS_RUNTIME_DATA_STEP_OUTCOME: ${{ steps.runtime-data.outcome }}", workflow)
-        self.assertLess(workflow.index('ci_foundation.py windows-installed-native'), workflow.index('id: runtime-data'))
+        self.assertLess(workflow.index('id: ordinary-preflight'), workflow.index('id: ordinary-owner'))
+        self.assertLess(workflow.index('id: ordinary-owner'), workflow.index('ci_foundation.py windows-installed-native-finalize'))
+        self.assertLess(workflow.index('ci_foundation.py windows-installed-native-finalize'), workflow.index('id: runtime-data'))
+        self.assertIn('MRK_WINDOWS_ORDINARY_OWNER_STEP_OUTCOME: ${{ steps.ordinary-owner.outcome }}', workflow)
+        self.assertIn('& $env:MRK_WINDOWS_NATIVE_ARTIFACT ordinary_owner::hosted_ordinary_original_handle_contract --exact --ignored --nocapture --test-threads=1', workflow)
+        direct = workflow.split('id: ordinary-owner', 1)[1].split('      - name: Validate separately', 1)[0]
+        self.assertIn('timeout-minutes: 4', direct)
+        self.assertIn('$originalExitCode = $LASTEXITCODE', direct)
+        self.assertNotIn('MRK_PYTHON', direct)
+        self.assertIn('[System.IO.FileMode]::CreateNew', direct)
+        self.assertNotIn('ordinary-owner-intent.private.json', retained)
+        self.assertNotIn('ordinary-request.txt', retained)
+        self.assertNotIn('ordinary-owner-result.private.json', retained)
+        self.assertNotIn('ordinary-owner-exit.private.json', retained)
+        self.assertNotIn('windows-installed-native-preflight-checks.json', retained)
+        self.assertNotIn('ordinary-output', retained)
         self.assertLess(workflow.index('id: runtime-data'), workflow.index('id: retain'))
         self.assertIn('[System.Diagnostics.Process].Assembly', workflow)
         for unavailable in ('Process.Start', 'New-LocalUser', 'Set-Acl', 'Add-Type', 'Start-Process', 'Get-Process'):
             self.assertNotIn(unavailable, workflow)
+
+
+    @classmethod
+    def ordinary_data(cls):
+        context = {**cls.context(), "root": r"C:\runner\_temp\mrk-windows-installed-native-123456-1"}
+        artifact = {"path": context["root"] + r"\target\x86_64-pc-windows-msvc\debug\deps\mrk_windows_installed_native-aaaaaaaaaaaaaaaa.exe",
+                    "size": 37, "sha256": "3" * 64}
+        stamp = {"volume": 77, "fileId": "11" * 16, "creation": 100, "write": 200, "change": 300,
+                 "size": 37, "allocation": 4096, "links": 1, "attributes": 128}
+        transitions = []
+        for number, (role, mask) in enumerate(helper.WINDOWS_ORDINARY_ACLS, 1):
+            before = (dict(stamp) if role == "artifact" else
+                      {**stamp, "fileId": f"{number:032x}", "size": 0, "allocation": 0, "attributes": 16})
+            transitions.append({"role": role, "mask": mask, "before": before, "after": {**before, "change": before["change"] + 1},
+                "securityBefore": "4" * 64, "securityAfter": "5" * 64, "singleExplicitNoninheritingAce": True})
+        before, after = (helper.windows_ordinary_wire(transitions[5][key]) for key in ("before", "after"))
+        request = helper.windows_ordinary_request(context, artifact, before)
+        command_sha = request.decode("ascii").split("\ncommandSha256=", 1)[1].split("\n", 1)[0]
+        binding = {"schemaVersion": 1, "sourceSha": context["sourceSha"], "sourceTree": context["sourceTree"],
+                   "runId": context["runId"], "attempt": 1, "artifactBytes": artifact["size"],
+                   "artifactSha256": artifact["sha256"], "commandSha256": command_sha}
+        native = {"context": "ordinary-admitted", "contextContracts": 1, "admitted": 1, "refused": 0,
+                  "rootContracts": 1, "rootNotExecuted": 0, "primaryOriginals": 1, "absentThreadReceipts": 6,
+                  "closedOriginals": 2, "unknown": 0, "bookSettled": True}
+        child = {**binding, "accountSidSha256": "6" * 64, "test": helper.WINDOWS_INSTALLED_TEST, "native": native,
+                 "resultFile": {"createNew": True, "writeCalls": 1, "closeGate": "original-child-exit-zero-required"}}
+        count = len(helper.PureWindowsPath(context["root"]).parents) + 1 + 8
+        owner = {**binding, "accountSidSha256": "6" * 64, "ownerTest": helper.WINDOWS_ORDINARY_OWNER,
+            "childTest": helper.WINDOWS_INSTALLED_TEST, "createCalls": 1, "createReturn": 1, "createError": None, "firstWait": 0,
+            "exitReturn": 1, "originalExitCode": 0, "terminateCalls": 0, "processCloseReturn": 1, "threadCloseReturn": 1,
+            "deadlineLatched": False, "unknown": False, "parentBookSettled": True, "inputOriginals": count,
+            "inputOriginalsClosed": count, "freshAccountVerified": True, "onlyUsersMembership": True,
+            "accountRemovedAfterSettlement": True, "nativeResultSha256": hashlib.sha256(helper.canonical_json(child)).hexdigest(),
+            "aclTransitions": transitions, "ownerResult": {"createNew": True, "writeCalls": 1,
+            "closeGate": "original-owner-exit-zero-required"}, "managedSourceMappingAuthenticated": False,
+            "managedOrdinaryStartAuthorized": False, "protectedFullwalk": False, "productionEnabled": False}
+        original_exit = {key: binding[key] for key in ("schemaVersion", "sourceSha", "sourceTree", "runId", "attempt", "artifactSha256")}
+        original_exit.update(ownerTest=helper.WINDOWS_ORDINARY_OWNER, originalWaitReturned=True, exitCode=0,
+                             writerCloseGate="original-owner-step-success-required")
+        return context, artifact, before, after, owner, child, original_exit
+
+    @staticmethod
+    def ordinary_accept(data, outcome="success"):
+        context, artifact, before, after, owner, child, original_exit = data
+        return helper.windows_ordinary_records(context, artifact, before, after,
+            helper.canonical_json(owner), helper.canonical_json(child), helper.canonical_json(original_exit), outcome)
+
+    @classmethod
+    def fullwalk_prepared_fixture(cls):
+        # Synthetic current-source/payload records only. No preparer or runtime is executed.
+        context = {**cls.ordinary_data()[0], "qualificationProfile": helper.WINDOWS_FULLWALK_PROFILE,
+                   "python": "/inert-host-python", "platform": "windows",
+                   "fullwalkInputs": {"pins": [{"path": name, "size": size, "sha256": sha}
+                       for name, (size, sha) in helper.WINDOWS_FULLWALK_PINS.items()],
+                       "curl": {"path": r"C:\Windows\System32\curl.exe", "sha256": "e" * 64}}}
+        bootstrap_names = ("engine_bootstrap.py", "config_edit_bootstrap.py", "github_connection_bootstrap.py",
+            "environment_bootstrap.py", "offline_preflight_bootstrap.py", "android_build_bootstrap.py")
+        names = set(helper.WINDOWS_INSTALLED_SOURCES) | set(helper.WINDOWS_FULLWALK_PINS) | {
+            "src/mobile_release/__init__.py", "src/mobile_release/_desktop_engine.py",
+            *("desktop/" + name for name in bootstrap_names), *helper.WINDOWS_FULLWALK_HEADLESS_SOURCES.values()}
+        sources = {name: ("INERT SOURCE " + name + "\n").encode("ascii") for name in names}
+        sources["src/mobile_release/__init__.py"] = b'__version__ = "0.1.0"\n'
+        source_rows = {name: {"path": name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+                       for name, raw in sources.items()}
+        for name, (size, digest) in helper.WINDOWS_FULLWALK_PINS.items():
+            source_rows[name] = {"path": name, "size": size, "sha256": digest}
+        context["sourceFiles"] = [source_rows[name] for name in sorted(source_rows)]
+        payload = {name: {"path": name, "size": len(name), "sha256": hashlib.sha256(name.encode("ascii")).hexdigest()}
+                   for name in helper.WINDOWS_FULLWALK_PAYLOAD_NAMES if name != "manifest.json"}
+        for name in bootstrap_names:
+            payload[name] = {**source_rows["desktop/" + name], "path": name}
+        payload["github-ca.pem"] = {**source_rows["desktop/cpython-source-inputs/github-ca.pem"], "path": "github-ca.pem"}
+        size, digest = helper.WINDOWS_FULLWALK_PINS["desktop/licenses/windows-embedded-runtime.txt"]
+        payload["python/MRK-EMBEDDED-NOTICES.txt"] = {"path": "python/MRK-EMBEDDED-NOTICES.txt", "size": size, "sha256": digest}
+        rows = [payload[name] for name in sorted(payload)]
+        manifest = {"schemaVersion": 1, "protocol": 1, "coreVersion": "0.1.0", "target": helper.TARGETS["windows"],
+            "coreSha256": payload["core.zip"]["sha256"], "protocolSha256": source_rows["src/mobile_release/_desktop_engine.py"]["sha256"],
+            "inventorySha256": hashlib.sha256(helper.canonical_json(rows)).hexdigest(), "files": rows}
+        manifest_raw = helper.canonical_json(manifest) + b"\n"
+        receipt = {"manifestSha256": hashlib.sha256(manifest_raw).hexdigest(), "protocolSha256": manifest["protocolSha256"],
+            "qualification": "prepared-not-native-verified", "inputSha256": helper.WINDOWS_FULLWALK_ZIP_SHA256,
+            "supplierInventorySha256": "172b1201a41ba5d9b2d3fa605426a6cac9f12aeaf23616665e4c70bf8caa6000",
+            "stdlibInventorySha256": "a36ba4a114629fb0d42a56f0449b5ce2f14381b8a2880d9fbe1ba6b77380fcc7",
+            "noticeSha256": digest}
+        receipt_raw = helper.canonical_json(receipt) + b"\n"
+        physical = [{**payload[name]} if name != "manifest.json" else
+                    {"path": name, "size": len(manifest_raw), "sha256": hashlib.sha256(manifest_raw).hexdigest()}
+                    for name in helper.WINDOWS_FULLWALK_PAYLOAD_NAMES]
+        prepared = helper.windows_fullwalk_prepared_data(context, receipt_raw, manifest_raw, physical)
+        return {"context": context, "sources": sources, "manifest": manifest, "manifest_raw": manifest_raw,
+                "receipt": receipt, "receipt_raw": receipt_raw, "physical": physical, "prepared": prepared}
+
+    @classmethod
+    def fullwalk_data(cls):
+        # Entirely synthetic DATA; neither this chain nor its assertions are native evidence.
+        prepared_case = cls.fullwalk_prepared_fixture()
+        context = prepared_case["context"]
+        _, standalone, before, ordinary_after, ordinary_owner, ordinary_child, ordinary_exit = cls.ordinary_data()
+        standalone["messages"] = {"size": 987, "sha256": "c" * 64}
+        app = {"path": standalone["path"].replace("mrk_windows_installed_native-aaaaaaaaaaaaaaaa", "mobile_release_desktop-bbbbbbbbbbbbbbbb"),
+               "size": 73, "sha256": "7" * 64, "messages": {"size": 1234, "sha256": "b" * 64}}
+        app_before = before.replace("11" * 16, "22" * 16)
+        app_after = ordinary_after.replace("11" * 16, "22" * 16)
+        compiled = {"invocationSha256": hashlib.sha256(helper.canonical_json(
+            helper.windows_fullwalk_native_argv("/inert-compiler/cargo.exe", context))).hexdigest(),
+            "appInvocationSha256": hashlib.sha256(helper.canonical_json(
+                helper.windows_installed_app_argv("/inert-compiler/cargo.exe", context))).hexdigest()}
+        prepared = prepared_case["prepared"]
+        roster_raw = helper.windows_fullwalk_roster_text(prepared["physical"])
+        precheck_raw = helper.windows_fullwalk_precheck_text(context, standalone, app, compiled, prepared, before, app_before, roster_raw)
+        pre = helper.windows_fullwalk_precheck_data(context, precheck_raw)
+        publication_fields = {"profile": helper.WINDOWS_FULLWALK_PROFILE,
+            **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")},
+            "publisherTest": helper.WINDOWS_FULLWALK_PUBLISHER, "artifactBytes": standalone["size"],
+            "artifactSha256": standalone["sha256"], "artifactIdentity": before,
+            "precheckBytes": len(precheck_raw), "precheckSha256": hashlib.sha256(precheck_raw).hexdigest(),
+            "rosterBytes": len(roster_raw), "rosterSha256": hashlib.sha256(roster_raw).hexdigest(),
+            **{key: prepared[key] for key in ("manifestSha256", "protocolSha256", "inventorySha256", "coreSha256", "payloadFiles", "payloadBytes")},
+            "createdFiles": 47, "createdDirectories": 5, "sourceReaders": 47, "sourceReadersClosed": 47,
+            "payloadWriters": 47, "payloadWritersClosed": 47, "postcheckReaders": 94, "postcheckReadersClosed": 94,
+            "fileOriginals": 214, "fileOriginalsClosed": 214, "parentBookSettled": "true",
+            "occupiedCreateCalls": 1, "occupiedCreateError": 183, "occupiedObjectsUnchanged": "true",
+            "unknown": "false", "productionEnabled": "false", "resultCloseGate": "original-publisher-exit-zero-required", "objectCount": 52}
+        selected = {"version": "44" * 16, "python/python.exe": "55" * 16, "engine_bootstrap.py": "66" * 16, "core.zip": "77" * 16}
+        wire_stamp = lambda row: ":".join(str(row[key]) for key in
+            ("volume", "fileId", "creation", "write", "change", "size", "allocation", "links", "attributes"))
+        object_lines = []
+        for index, name in enumerate((*helper.WINDOWS_FULLWALK_DIRECTORY_ROLES, *helper.WINDOWS_FULLWALK_PAYLOAD_NAMES)):
+            directory = index < 5
+            original = {"volume": 77, "fileId": selected.get(name, f"{2**120 + index:032x}"), "creation": 100,
+                        "write": 200, "change": 300, "size": 0, "allocation": 0, "links": 1, "attributes": 16 if directory else 128}
+            size = 0 if directory else prepared["physical"][index - 5]["size"]
+            sealed = {**original, "write": 201, "change": 301, "size": size, "allocation": (size + 4095) // 4096 * 4096}
+            digest = "-" if directory else prepared["physical"][index - 5]["sha256"]
+            object_lines.append("object=" + "|".join((name, "directory" if directory else "file",
+                wire_stamp(original), wire_stamp(sealed), "4" * 64, "5" * 64, digest)) + "\n")
+        publisher_raw = helper.windows_fullwalk_text("publication", publication_fields) + "".join(object_lines).encode("ascii")
+        publication = helper.windows_fullwalk_publication_data(context, publisher_raw, precheck_raw, roster_raw)
+        publisher_exit = {"schemaVersion": 1, **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")},
+            "artifactSha256": standalone["sha256"], "publisherTest": helper.WINDOWS_FULLWALK_PUBLISHER,
+            "precheckSha256": hashlib.sha256(precheck_raw).hexdigest(), "originalWaitReturned": True, "exitCode": 0,
+            "writerCloseGate": "original-publisher-step-success-required"}
+        ordinary_request = helper.windows_ordinary_request(context, standalone, before)
+        invocation = helper.windows_fullwalk_invocation(context, standalone, before, ordinary_request, 1000)
+        ordinary_intent = {"schemaVersion": 1, "sourceSha": context["sourceSha"], "runId": context["runId"], "attempt": 1,
+            "accountName": "mrk0123456789abcdef", "freshAccountIntent": True, "fixedNativeChildOnly": True, "fullwalkBatch": invocation}
+        ordinary_intent_raw = helper.canonical_json(ordinary_intent)
+        ordinary_prewrite = 5000
+        ordinary_owner["aggregate"] = {**invocation, "ordinaryIntentBytes": len(ordinary_intent_raw),
+            "ordinaryIntentSha256": hashlib.sha256(ordinary_intent_raw).hexdigest(), "resultPrewriteTickMs": ordinary_prewrite}
+        blobs = {"precheck": precheck_raw, "roster": roster_raw, "publisherReceipt": publisher_raw,
+            "publisherExit": helper.canonical_json(publisher_exit), "ordinaryRequest": ordinary_request,
+            "ordinaryIntent": ordinary_intent_raw, "ordinaryOwnerResult": helper.canonical_json(ordinary_owner),
+            "ordinaryChildResult": helper.canonical_json(ordinary_child), "ordinaryOwnerExit": helper.canonical_json(ordinary_exit)}
+        blobs["ordinaryFinality"] = helper.windows_fullwalk_finality_text(context, pre, standalone, ordinary_after, blobs, ordinary_owner)
+        finality, ordinary_facts = helper.windows_fullwalk_ordinary_finality(context, pre, standalone, ordinary_after, blobs, "success")
+        envelope_raw = helper.windows_fullwalk_envelope_data(context, pre, publication, finality, blobs,
+            {key: "success" for key in helper.WINDOWS_FULLWALK_OUTCOMES})
+        admitted = {"pre": pre, "owner": standalone, "app": app, "compiled": compiled, "prepared": prepared,
+            "blobs": blobs, "publication": publication, "finality": finality, "envelope": envelope_raw,
+            "ownerAfterIdentity": ordinary_after, "ordinaryFacts": ordinary_facts}
+        request = helper.windows_fullwalk_request_from_prerequisites(context, admitted)
+        request_data = helper.windows_fullwalk_request_data(request, root=context["root"])
+        fixture = {key: request_data[key] for key in helper.WINDOWS_FULLWALK_REQUEST_FIELDS[22:]}
+        arguments = {"app_identity": app_before, "owner_identity": ordinary_after,
+                    "app_compile_argv_sha256": compiled["appInvocationSha256"], "owner_compile_argv_sha256": compiled["invocationSha256"], "fixture": fixture}
+        binding = {"schemaVersion": 1, **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")},
+            "requestSha256": hashlib.sha256(request).hexdigest(), "artifactBytes": app["size"], "artifactSha256": app["sha256"],
+            "commandSha256": request_data["appCommandSha256"], "ownerArtifactSha256": standalone["sha256"]}
+        identity = lambda byte: {"volume": 77, "fileId": byte * 16}
+        entries = 61  # Synthetic observed count, deliberately neither47 nor52; admission never invents this count.
+        child = {**binding, "accountSidSha256": "6" * 64, "test": helper.WINDOWS_FULLWALK_TEST,
+            "observation": {"target": helper.TARGETS["windows"],
+                **{key: fixture[key] for key in ("manifestSha256", "protocolSha256", "inventorySha256", "coreSha256")},
+                "files": 46, "entries": entries, "payloadBytes": prepared["payloadBytes"], "versionIdentity": identity("44"),
+                "selectedIdentities": [identity(byte) for byte in ("55", "66", "77")], "inspectionComplete": True, "bookSettled": True},
+            "resultFile": {"createNew": True, "writeCalls": 1, "closeGate": "original-child-exit-zero-required"}}
+        batch = {"profile": helper.WINDOWS_FULLWALK_PROFILE, "ordinaryInvocationSha256": invocation["ordinaryInvocationSha256"],
+            "prerequisiteBytes": len(envelope_raw), "prerequisiteSha256": hashlib.sha256(envelope_raw).hexdigest(),
+            "originTickMs": invocation["originTickMs"], "deadlineTickMs": invocation["deadlineTickMs"],
+            "aggregateBudgetMs": helper.WINDOWS_FULLWALK_AGGREGATE_MS, "entryTickMs": 6000}
+        intent = {"schemaVersion": 1, "sourceSha": context["sourceSha"], "runId": context["runId"], "attempt": 1,
+            "accountName": "mrkfedcba9876543210", "freshAccountIntent": True, "fixedFullwalkChildOnly": True, "fullwalkBatch": batch}
+        intent_raw = helper.canonical_json(intent)
+        count = len(helper.PureWindowsPath(context["root"]).parents) + 1 + 21
+        owner = deepcopy(ordinary_owner)
+        owner.update({**binding, "ownerArtifactBytes": standalone["size"], "ownerCommandSha256": request_data["ownerCommandSha256"],
+            "fullwalkEntries": entries, "ownerTest": helper.WINDOWS_FULLWALK_OWNER, "childTest": helper.WINDOWS_FULLWALK_TEST,
+            "inputOriginals": count, "inputOriginalsClosed": count, "protectedFullwalk": True,
+            "nativeResultSha256": hashlib.sha256(helper.canonical_json(child)).hexdigest(),
+            "aggregate": {**batch, "ownerIntentBytes": len(intent_raw), "ownerIntentSha256": hashlib.sha256(intent_raw).hexdigest(),
+                          "prelaunchTickMs": 6500, "resultPrewriteTickMs": 9000}})
+        owner["aclTransitions"][-1]["role"] = "fullwalk-output"
+        for key in ("before", "after"):
+            owner["aclTransitions"][5][key].update(size=app["size"], fileId="22" * 16)
+        original_exit = {key: binding[key] for key in ("schemaVersion", "sourceSha", "sourceTree", "runId", "attempt",
+                                                       "artifactSha256", "ownerArtifactSha256", "requestSha256")}
+        original_exit.update(ownerTest=helper.WINDOWS_FULLWALK_OWNER, originalWaitReturned=True, exitCode=0,
+                             writerCloseGate="original-owner-step-success-required")
+        return {"context": context, "app": app, "standalone": standalone, "arguments": arguments, "request": request,
+            "after": app_after, "owner": owner, "child": child, "exit": original_exit, "entries": entries,
+            "ordinary": (context, standalone, before, ordinary_after, ordinary_owner, ordinary_child, ordinary_exit),
+            "pre": pre, "precheck_raw": precheck_raw, "roster_raw": roster_raw, "publication": publication,
+            "publication_fields": publication_fields, "publisher_exit": publisher_exit, "blobs": blobs,
+            "envelope": envelope_raw, "intent": intent, "intent_raw": intent_raw, "ordinary_prewrite": ordinary_prewrite,
+            "admitted": admitted, "prepared_case": prepared_case}
+
+    @staticmethod
+    def fullwalk_accept(data, outcome="success"):
+        return helper.windows_fullwalk_records(data["context"], data["request"], data["after"],
+            *(helper.canonical_json(data[key]) for key in ("owner", "child", "exit")), outcome,
+            envelope_raw=data["envelope"], intent_raw=data["intent_raw"], ordinary_prewrite_tick=data["ordinary_prewrite"])
+
+    @staticmethod
+    def publication_inventory(objects, manifest):
+        """Independent closed-tree DATA encoder; no directory or payload is created."""
+        by_role = {row["role"]: row for row in objects}
+        stage = len(objects) == 52
+        for row in objects:
+            if not row["directory"]: continue
+            role = row["role"]
+            fixed = {"suffix-mrk": [("runtime-input", "source-input")] + ([] if stage else [("versions", "suffix-versions")]),
+                "source-input": [("x86_64-pc-windows-msvc", "source-target")],
+                "source-target": [(manifest, "source-version")],
+                "suffix-versions": [("x86_64-pc-windows-msvc", "suffix-target")],
+                "suffix-target": [(manifest, "version")]}
+            if role in fixed:
+                children = fixed[role]
+            else:
+                source, python = role.startswith("source-"), role.endswith("python")
+                children = [] if python else [("python", "source-python" if source else "python")]
+                for name in helper.WINDOWS_FULLWALK_PAYLOAD_NAMES:
+                    if python and name.startswith("python/") or not python and "/" not in name:
+                        children.append((name.removeprefix("python/"), ("source/" if source else "") + name))
+            raw = "".join(name + "|" + ("directory" if by_role[child]["directory"] else "file") + "|" +
+                by_role[child]["stamp"]["fileId"] + "|" + str(by_role[child]["stamp"]["attributes"]) + "\n"
+                for name, child in sorted(children))
+            row["inventorySha256"] = hashlib.sha256(raw.encode("ascii")).hexdigest()
+
+    @staticmethod
+    def publication_observation_raw(fields, objects, proofs, *, kind="production-observation"):
+        raw = helper.windows_fullwalk_text(kind, fields)
+        raw += "".join("proof=" + row["role"] + "|" + str(row["size"]) + "|" + row["sha256"] + "\n"
+                       for row in proofs).encode("ascii")
+        names = ("volume", "fileId", "creation", "write", "change", "size", "allocation", "links", "attributes")
+        for row in objects:
+            stamp = ":".join(str(row["stamp"][name]) for name in names)
+            raw += ("observed=" + "|".join((row["role"], "directory" if row["directory"] else "file", stamp,
+                row["securitySha256"], row["sha256"], row["inventorySha256"])) + "\n").encode("ascii")
+        return raw
+
+    @classmethod
+    def publication_data(cls):
+        # Supplied synthetic DATA ONLY. These 52/103 rows do not claim an OS
+        # observation, producer execution, prepared payload or helper return.
+        legacy = cls.fullwalk_data()
+        context = {**legacy["context"], "qualificationProfile": helper.WINDOWS_RUNTIME_PUBLICATION_PROFILE}
+        helper_path = str(helper.PureWindowsPath(context["root"]) / "mrk-windows-runtime-publish.exe")
+        helper_identity = helper.windows_ordinary_wire({**legacy["ordinary"][4]["aclTransitions"][5]["before"],
+                                                       "fileId": "99" * 16, "size": 97})
+        pre = {**legacy["pre"], "profile": helper.WINDOWS_RUNTIME_PUBLICATION_PROFILE,
+            "appRootFeatures": "windows-runtime-publisher", "standaloneFeatures": "runtime-publication",
+            "appNativeDevFeatures": "qualification-result,runtime-publication", "publisherTest": helper.WINDOWS_RUNTIME_PUBLICATION_AFTER,
+            "publisherCommandSha256": helper.windows_fullwalk_command_sha(legacy["standalone"]["path"], helper.WINDOWS_RUNTIME_PUBLICATION_AFTER),
+            "appCompileArgvSha256": hashlib.sha256(helper.canonical_json(helper.windows_installed_app_argv("/inert-compiler/cargo.exe", context))).hexdigest(),
+            "ownerCompileArgvSha256": hashlib.sha256(helper.canonical_json(helper.windows_fullwalk_native_argv("/inert-compiler/cargo.exe", context))).hexdigest(),
+            "helperArtifact": helper_path, "helperArtifactBytes": "97", "helperArtifactSha256": "8" * 64,
+            "helperArtifactIdentity": helper_identity, "helperCompileMessagesBytes": "17", "helperCompileMessagesSha256": "9" * 64,
+            "helperCompileArgvSha256": hashlib.sha256(helper.canonical_json(helper.windows_installed_helper_argv("/inert-compiler/cargo.exe", context))).hexdigest(),
+            "helperCommandSha256": hashlib.sha256(('"' + helper_path + '"').encode("utf-16-le")).hexdigest(),
+            "helperNativeFeatures": "runtime-publication"}
+        precheck_raw = helper.windows_fullwalk_text("production-precheck", pre)
+        roster_raw = legacy["roster_raw"]
+        directory_roles = ("suffix-mrk", "source-input", "source-target", "source-version", "source-python",
+                           "suffix-versions", "suffix-target", "version", "python")
+        roles = (*directory_roles, *("source/" + name for name in helper.WINDOWS_FULLWALK_PAYLOAD_NAMES), *helper.WINDOWS_FULLWALK_PAYLOAD_NAMES)
+        physical = {row["path"]: row for row in legacy["prepared_case"]["physical"]}
+        objects = []
+        for ordinal, role in enumerate(roles):
+            directory = ordinal < 9
+            item = None if directory else physical[role.removeprefix("source/")]
+            size = 0 if directory else item["size"]
+            objects.append({"role": role, "directory": directory,
+                "stamp": {"volume": 77, "fileId": f"{2**120 + ordinal:032x}", "creation": 100, "write": 200, "change": 300,
+                          "size": size, "allocation": (size + 4095) // 4096 * 4096, "links": 1, "attributes": 16 if directory else 128},
+                "securitySha256": ("4" if role.startswith("source") else "5") * 64,
+                "sha256": "-" if directory else item["sha256"], "inventorySha256": "-"})
+        cls.publication_inventory(objects, pre["manifestSha256"])
+        staged = deepcopy([row for row in objects if row["role"] == "suffix-mrk" or row["role"].startswith("source")])
+        cls.publication_inventory(staged, pre["manifestSha256"])
+        objects[0]["stamp"].update(write=201, change=301, allocation=4096)
+        observation_fields, observation_objects, observation_proofs, blobs = {}, {}, {}, {}
+        tests = {"stage": helper.WINDOWS_RUNTIME_PUBLICATION_STAGE, "before": helper.WINDOWS_RUNTIME_PUBLICATION_BEFORE,
+                 "after": helper.WINDOWS_RUNTIME_PUBLICATION_AFTER}
+        def observe(role):
+            stage, final = role == "stage", role == "after"
+            selected = deepcopy(staged if stage else objects)
+            proofs = [{"role": name, "size": len(blobs[name]), "sha256": hashlib.sha256(blobs[name]).hexdigest()}
+                      for name in list(helper.WINDOWS_RUNTIME_PUBLICATION_PROOFS)[:0 if stage else 6 if final else 3]]
+            fields = {key: pre[key] for key in ("profile", "sourceSha", "sourceTree", "runId", "attempt",
+                "manifestSha256", "protocolSha256", "inventorySha256", "coreSha256", "payloadFiles", "payloadBytes")}
+            fields.update(observerTest=tests[role], artifactBytes=pre["ownerArtifactBytes"], artifactSha256=pre["ownerArtifactSha256"],
+                artifactIdentity=pre["ownerArtifactIdentity"], precheckBytes=len(precheck_raw), precheckSha256=hashlib.sha256(precheck_raw).hexdigest(),
+                rosterBytes=len(roster_raw), rosterSha256=hashlib.sha256(roster_raw).hexdigest(), objectCount=len(selected), proofCount=len(proofs),
+                sourceReaders=47 if stage else 0, payloadWriters=47 if stage else 0, postcheckReaders=47 if stage else 94,
+                fileOriginals=160 if stage else 123 if final else 120, fileOriginalsClosed=160 if stage else 123 if final else 120,
+                parentBookSettled="true", unknown="false", actualFixedProducerObserved="true" if final else "false",
+                runtimeConsumerEnabled="false", pythonExecuted="false", appLaunched="false", resultCloseGate="original-observer-exit-zero-required")
+            observation_fields[role], observation_objects[role], observation_proofs[role] = fields, selected, proofs
+            return cls.publication_observation_raw(fields, selected, proofs)
+        def exited(role):
+            artifact = "helper" if role.startswith("helper") else "owner"
+            return helper.windows_fullwalk_text("production-exit", {key: pre[key] for key in
+                ("profile", "sourceSha", "sourceTree", "runId", "attempt")} | {"role": role,
+                "artifactSha256": pre[artifact + "ArtifactSha256"], "precheckSha256": hashlib.sha256(precheck_raw).hexdigest(),
+                "commandSha256": pre["helperCommandSha256"] if artifact == "helper" else helper.windows_fullwalk_command_sha(pre["ownerArtifact"], tests[role]),
+                "originalWaitReturned": "true", "exitCode": "2" if role == "helperOccupied" else "0",
+                "writerCloseGate": "original-" + role + "-step-success-required"})
+        blobs["stage"] = observe("stage"); blobs["stageExit"] = exited("stage")
+        blobs["helperSuccessExit"] = exited("helperSuccess")
+        blobs["before"] = observe("before"); blobs["beforeExit"] = exited("before")
+        blobs["helperOccupiedExit"] = exited("helperOccupied")
+        blobs["publisherReceipt"] = observe("after"); blobs["publisherExit"] = exited("after")
+        return {"context": context, "pre": pre, "precheck_raw": precheck_raw, "roster_raw": roster_raw, "blobs": blobs,
+            "fields": observation_fields, "objects": observation_objects, "proofs": observation_proofs, "tests": tests,
+            "outcomes": dict.fromkeys(("stage", "helperSuccess", "before", "helperOccupied", "after"), "success"), "legacy": legacy}
+
+    @classmethod
+    def publication_fullwalk_data(cls):
+        # Complete synthetic original-chain DATA, not native/helper evidence.
+        # Recompute production epochs and all dependent hashes; never relabel
+        # a legacy publisher result or reuse its selected object identities.
+        production = cls.publication_data()
+        legacy, context = production["legacy"], production["context"]
+        pre, pre_raw, roster_raw = production["pre"], production["precheck_raw"], production["roster_raw"]
+        standalone, app = legacy["standalone"], legacy["app"]
+        normal_helper = {"path": pre["helperArtifact"], "size": int(pre["helperArtifactBytes"]), "sha256": pre["helperArtifactSha256"],
+            "messages": {"size": int(pre["helperCompileMessagesBytes"]), "sha256": pre["helperCompileMessagesSha256"]}}
+        compiled = {"invocationSha256": pre["ownerCompileArgvSha256"], "appInvocationSha256": pre["appCompileArgvSha256"],
+            "helperCompiledArtifact": normal_helper, "helperOriginalExitCode": 0, "helperInvocationSha256": pre["helperCompileArgvSha256"]}
+        publication = helper.windows_runtime_publication_chain(context, pre_raw, roster_raw,
+            production["blobs"], production["outcomes"])["publication"]
+        ordinary_request = helper.windows_ordinary_request(context, standalone, pre["ownerArtifactIdentity"])
+        invocation = helper.windows_fullwalk_invocation(context, standalone, pre["ownerArtifactIdentity"], ordinary_request, 1000)
+        ordinary_intent = helper.bounded_json(legacy["blobs"]["ordinaryIntent"], 4096)
+        ordinary_intent["fullwalkBatch"] = invocation
+        ordinary_intent_raw = helper.canonical_json(ordinary_intent)
+        ordinary_owner, ordinary_child, ordinary_exit = deepcopy(legacy["ordinary"][4:])
+        ordinary_owner["aggregate"] = {**invocation, "ordinaryIntentBytes": len(ordinary_intent_raw),
+            "ordinaryIntentSha256": hashlib.sha256(ordinary_intent_raw).hexdigest(), "resultPrewriteTickMs": legacy["ordinary_prewrite"]}
+        blobs = {"precheck": pre_raw, "roster": roster_raw, **production["blobs"], "ordinaryRequest": ordinary_request,
+            "ordinaryIntent": ordinary_intent_raw, "ordinaryOwnerResult": helper.canonical_json(ordinary_owner),
+            "ordinaryChildResult": helper.canonical_json(ordinary_child), "ordinaryOwnerExit": helper.canonical_json(ordinary_exit)}
+        after = legacy["ordinary"][3]
+        blobs["ordinaryFinality"] = helper.windows_fullwalk_finality_text(context, pre, standalone, after, blobs, ordinary_owner)
+        finality, ordinary_facts = helper.windows_fullwalk_ordinary_finality(context, pre, standalone, after, blobs, "success")
+        envelope_raw = helper.windows_fullwalk_envelope_data(context, pre, publication, finality, blobs,
+            dict.fromkeys(helper.WINDOWS_FULLWALK_OUTCOMES, "success"))
+        admitted = {"pre": pre, "owner": standalone, "app": app, "compiled": compiled, "prepared": legacy["prepared_case"]["prepared"],
+            "blobs": blobs, "publication": publication, "finality": finality, "envelope": envelope_raw,
+            "ownerAfterIdentity": after, "ordinaryFacts": ordinary_facts}
+        request_raw = helper.windows_fullwalk_request_from_prerequisites(context, admitted)
+        request = helper.windows_fullwalk_request_data(request_raw, root=context["root"])
+        binding = {"requestSha256": hashlib.sha256(request_raw).hexdigest(), "artifactBytes": app["size"],
+            "artifactSha256": app["sha256"], "commandSha256": request["appCommandSha256"], "ownerArtifactSha256": standalone["sha256"]}
+        child = deepcopy(legacy["child"]); child.update(binding)
+        def identity(value):
+            volume, file_id = value.split(":")
+            return {"volume": int(volume), "fileId": file_id}
+        child["observation"].update(versionIdentity=identity(request["versionIdentity"]),
+            selectedIdentities=[identity(request[key]) for key in ("selectedPythonIdentity", "selectedBootstrapIdentity", "selectedCoreIdentity")])
+        batch = {"profile": helper.WINDOWS_RUNTIME_PUBLICATION_PROFILE, "ordinaryInvocationSha256": invocation["ordinaryInvocationSha256"],
+            "prerequisiteBytes": len(envelope_raw), "prerequisiteSha256": hashlib.sha256(envelope_raw).hexdigest(),
+            "originTickMs": invocation["originTickMs"], "deadlineTickMs": invocation["deadlineTickMs"],
+            "aggregateBudgetMs": helper.WINDOWS_FULLWALK_AGGREGATE_MS, "entryTickMs": 6000,
+            "serialPrerequisiteOriginals": 6, "serialPrerequisiteOriginalsClosed": 6}
+        intent = {**legacy["intent"], "fullwalkBatch": batch}
+        intent_raw = helper.canonical_json(intent)
+        owner = deepcopy(legacy["owner"])
+        owner.update(binding, ownerCommandSha256=request["ownerCommandSha256"],
+            nativeResultSha256=hashlib.sha256(helper.canonical_json(child)).hexdigest(),
+            aggregate={**batch, "ownerIntentBytes": len(intent_raw), "ownerIntentSha256": hashlib.sha256(intent_raw).hexdigest(),
+                "prelaunchTickMs": 6500, "resultPrewriteTickMs": 9000})
+        original_exit = {**legacy["exit"], "requestSha256": binding["requestSha256"]}
+        fixture = {key: request[key] for key in helper.WINDOWS_FULLWALK_REQUEST_FIELDS[22:]}
+        arguments = {**legacy["arguments"], "app_compile_argv_sha256": compiled["appInvocationSha256"],
+            "owner_compile_argv_sha256": compiled["invocationSha256"], "fixture": fixture}
+        return {**legacy, "context": context, "helper": normal_helper, "production": production, "arguments": arguments,
+            "request": request_raw, "owner": owner, "child": child, "exit": original_exit,
+            "ordinary": (context, standalone, pre["ownerArtifactIdentity"], after, ordinary_owner, ordinary_child, ordinary_exit),
+            "pre": pre, "precheck_raw": pre_raw, "roster_raw": roster_raw, "publication": publication,
+            "publication_fields": production["fields"]["after"], "publisher_exit": production["blobs"]["publisherExit"],
+            "blobs": blobs, "envelope": envelope_raw, "intent": intent, "intent_raw": intent_raw, "admitted": admitted}
+
+    @staticmethod
+    def publication_environment():
+        environment = dict.fromkeys((*helper.WINDOWS_FULLWALK_OUTCOMES.values(),
+            "MRK_WINDOWS_ORDINARY_PREFLIGHT_STEP_OUTCOME", "MRK_WINDOWS_FULLWALK_PREFLIGHT_STEP_OUTCOME",
+            "MRK_WINDOWS_FULLWALK_OWNER_STEP_OUTCOME", "MRK_WINDOWS_FULLWALK_FINALIZE_STEP_OUTCOME",
+            "MRK_WINDOWS_PRODUCER_SCALAR_STEP_OUTCOME", "MRK_WINDOWS_PRODUCER_SCALAR_FINALIZE_STEP_OUTCOME"), "success")
+        for suffix in helper.WINDOWS_RUNTIME_PUBLICATION_STEPS.values():
+            for ending in ("_STEP_OUTCOME", "_FINALIZE_STEP_OUTCOME"):
+                environment["MRK_WINDOWS_PRODUCER_" + suffix + ending] = "success"
+        return environment
+
+    @staticmethod
+    def publication_scalar_originals(data, derived_count="one"):
+        # Synthetic parser DATA only, never native scalar/filtered-token evidence.
+        pre = data["pre"]
+        binding = {key: pre[key] for key in ("profile", "sourceSha", "sourceTree", "runId", "attempt")}
+        binding.update(artifactSha256=pre["ownerArtifactSha256"],
+            precheckSha256=hashlib.sha256(data["precheck_raw"]).hexdigest(),
+            commandSha256=helper.windows_fullwalk_command_sha(pre["ownerArtifact"], helper.WINDOWS_RUNTIME_PUBLICATION_SCALAR))
+        scalar = {**binding, "qualifierTest": helper.WINDOWS_RUNTIME_PUBLICATION_SCALAR,
+            "sourceReturn": "bool-nonzero", "sourceCount": "one", "sourceValue": "zero", "sourceAdmitted": "true",
+            "derivedReturn": "bool-nonzero", "derivedCount": derived_count, "derivedValue": "nonzero", "derivedAdmitted": "false",
+            "createCalls": "1", "filterFlags": "1", "restrictingSidInputs": "0", "tokenOriginals": "2", "tokenOriginalsClosed": "2",
+            "parentBookSettled": "true", "unknown": "false", "resultCloseGate": "original-scalar-exit-zero-required"}
+        exited = {**binding, "role": "scalar", "originalWaitReturned": "true", "exitCode": "0",
+            "writerCloseGate": "original-scalar-step-success-required"}
+        return helper.windows_fullwalk_text("production-scalar", scalar), helper.windows_fullwalk_text("production-exit", exited)
+
+    @staticmethod
+    def native_source_blobs(context):
+        names = ["tests.rs", "hosted_tests.rs", "ordinary_owner.rs", "qualification_fixture.rs"]
+        if context.get("qualificationProfile") == helper.WINDOWS_RUNTIME_PUBLICATION_PROFILE:
+            names.append("publication.rs")
+        base = helper.WINDOWS_INSTALLED_CRATE + "/src"
+        return {Path(context["source"]) / base / name: (SOURCE / base / name).read_bytes() for name in names}
+
+    @staticmethod
+    def fullwalk_originals(data):
+        """Original DATA at inert I/O edges; changed chain validators are NOT replaced."""
+        context, root = data["context"], Path(data["context"]["root"])
+        production = context["qualificationProfile"] == helper.WINDOWS_RUNTIME_PUBLICATION_PROFILE
+        record = lambda raw: {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+        encode = helper.canonical_json
+        files = {root / name: data["blobs"][role] for role, (name, _) in helper.WINDOWS_FULLWALK_BLOBS.items()}
+        if production:
+            files.update({root / name: data["blobs"][role] for role, (name, _) in helper.WINDOWS_RUNTIME_PUBLICATION_PROOFS.items()})
+            scalar_raw, scalar_exit = WindowsReaderGateTests.publication_scalar_originals(data)
+            scalar = helper.windows_runtime_publication_scalar_data(context, scalar_raw, scalar_exit, data["precheck_raw"], "success")
+            files[root / "producer-scalar-result.private.txt"] = scalar_raw
+            files[root / "producer-scalar-exit.private.txt"] = scalar_exit
+            files[root / "producer-scalar-checks.json"] = encode(helper.windows_installed_phase_receipt(
+                context, "windows-runtime-publication-scalar-finalize", **scalar))
+        files.update({root / "metadata.json": b"INERT existing native metadata boundary",
+                      root / "app-metadata.json": b"INERT existing app metadata boundary"})
+        native_sources = WindowsReaderGateTests.native_source_blobs(context)
+        files.update(native_sources)
+        with patch.object(helper, "windows_installed_bytes", side_effect=lambda path, limit: native_sources[path]):
+            native_names = helper.windows_installed_native_inert(context)
+            native_filtered = helper.windows_installed_native_test_total(context) - len(native_names)
+        compiler = {role: {"path": "/inert-compiler/" + role + ".exe", **record(role.encode("ascii"))}
+                    for role in ("cargo", "rustc")}
+        files.update({Path(row["path"]): role.encode("ascii") for role, row in compiler.items()})
+        files[root / "compiler-tools.json"] = encode(compiler)
+        native_packages = {name: {"version": version} for name, version in
+            (("mrk-windows-installed-native", "0.1.0"), ("windows-sys", "0.61.2"), ("windows-link", "0.2.1"))}
+        graph = {"nodes": {"app@0.1.0": {}, "native@0.1.0": {}, "registry@1.0.0": {}}}
+        acquisition = {"supplier": {"size": helper.WINDOWS_FULLWALK_ZIP_BYTES, "sha256": helper.WINDOWS_FULLWALK_ZIP_SHA256},
+            "supplierInvocationSha256": hashlib.sha256(encode(helper.windows_fullwalk_curl_argv(context))).hexdigest(),
+            "supplierOriginalExitCode": 0,
+            "prepareInvocationSha256": hashlib.sha256(encode(helper.windows_fullwalk_preparer_argv(context))).hexdigest(),
+            "prepareOriginalExitCode": 0, "prepared": data["prepared_case"]["prepared"]}
+        acquired = helper.windows_installed_phase_receipt(context, "acquire", rust=helper.RUST, target=helper.TARGETS["windows"],
+            packages={name: row["version"] for name, row in native_packages.items()},
+            metadata=record(files[root / "metadata.json"]), appMetadata=record(files[root / "app-metadata.json"]),
+            compilerTools=record(files[root / "compiler-tools.json"]), originalExitCode=0, appOriginalExitCode=0,
+            appActivePackageIds=sorted(graph["nodes"]), fullwalk=acquisition)
+        prepared = data["prepared_case"]["prepared"]
+        compiled = helper.windows_installed_phase_receipt(context, "compile", rust=helper.RUST, target=helper.TARGETS["windows"],
+            compiledTest=data["standalone"], originalExitCode=0, standaloneOnly=False,
+            appCompiledTest=data["app"], appOriginalExitCode=0, **data["admitted"]["compiled"],
+            fullwalk={"manifestSha256": prepared["manifestSha256"], "protocolSha256": prepared["protocolSha256"],
+                "preparedReceipt": prepared["receipt"], "anchoredNativeBuilds": 1, "anchoredAppBuilds": 1,
+                **({"anchoredHelperBuilds": 1} if production else {})})
+        files.update({root / "acquire-checks.json": encode(acquired), root / "compile-checks.json": encode(compiled),
+                      root / "compiled-test.json": encode(data["standalone"]), root / "app-compiled-test.json": encode(data["app"])})
+        if production:
+            files[root / "helper-compiled-artifact.json"] = encode(data["helper"])
+        for name in ("acquire", "compile", "windows-installed-native"):
+            files[root / (name + "-started.json")] = encode(helper.windows_installed_phase_receipt(context, name, claimOnly=True))
+        app_names = (*helper.WINDOWS_INSTALLED_APP_INERT, *(helper.WINDOWS_RUNTIME_PUBLICATION_APP_INERT if production else ()))
+        for prefix, names, filtered in (("app-inert", app_names, 173), ("inert", native_names, native_filtered)):
+            files[root / (prefix + ".stdout")] = ("running " + str(len(names)) + " tests\n"
+                + "".join("test " + name + " ... ok\n" for name in names)
+                + "test result: ok. " + str(len(names)) + " passed; 0 failed; 0 ignored; 0 measured; "
+                + str(filtered) + " filtered out; finished in 0.01s\n").encode("ascii")
+            files[root / (prefix + ".stderr")] = b""
+        app_inert = helper.windows_installed_app_libtest(files[root / "app-inert.stdout"], production=production)
+        preflight = helper.windows_installed_phase_receipt(context, "windows-installed-native-preflight",
+            compiledTest=data["standalone"], inertContracts={"passed": len(native_names), "failed": 0, "ignored": 0}, appCompiledTest=data["app"],
+            appInertContracts=app_inert, appOriginalExitCode=0, inertOriginalExitCode=0,
+            originalOutputs={name: record(files[root / name]) for name in ("app-inert.stdout", "app-inert.stderr", "inert.stdout", "inert.stderr")},
+            artifactNativeIdentity=data["pre"]["ownerArtifactIdentity"], request=record(data["blobs"]["ordinaryRequest"]),
+            nativeNotStarted=True, notVerified=list(helper.WINDOWS_INSTALLED_COMBINED_NOT_VERIFIED),
+            fullwalk={"precheck": record(data["precheck_raw"]), "roster": record(data["roster_raw"])})
+        files[root / "windows-installed-native-preflight-checks.json"] = encode(preflight)
+        if production:
+            source = data["production"]
+            for index, (role, suffix) in enumerate(helper.WINDOWS_RUNTIME_PUBLICATION_STEPS.items()):
+                count = {"stage": 2, "helperSuccess": 3, "before": 5, "helperOccupied": 6}[role]
+                facts = helper.windows_runtime_publication_chain(context, data["precheck_raw"], data["roster_raw"],
+                    dict(list(source["blobs"].items())[:count]), dict(list(source["outcomes"].items())[:index + 1]), through=role)["facts"]
+                files[root / ("producer-" + role + "-checks.json")] = encode(helper.windows_installed_phase_receipt(
+                    context, "windows-runtime-publication-" + suffix.lower() + "-finalize", **facts))
+            publisher = helper.windows_runtime_publication_chain(context, data["precheck_raw"], data["roster_raw"],
+                source["blobs"], source["outcomes"])["facts"]
+        else:
+            publisher = helper.windows_fullwalk_fixture_facts(context, data["precheck_raw"], data["roster_raw"],
+                data["blobs"]["publisherReceipt"], data["blobs"]["publisherExit"], "success")
+        files[root / "windows-installed-fixture-checks.json"] = encode(helper.windows_installed_phase_receipt(
+            context, "windows-installed-fixture-finalize", **publisher))
+        files[root / "windows-installed-native-checks.json"] = encode(helper.windows_installed_phase_receipt(
+            context, "windows-installed-native", compiledTest=data["standalone"], appCompiledTest=data["app"],
+            inertContracts={"passed": len(native_names), "failed": 0, "ignored": 0}, appInertContracts=app_inert, appOriginalExitCode=0,
+            inertOriginalExitCode=0, nativeOriginalExitCode=0, originalProcessWaitReturned=True,
+            **data["admitted"]["ordinaryFacts"], notVerified=list(helper.WINDOWS_INSTALLED_COMBINED_NOT_VERIFIED)))
+        files[root / "fullwalk-publication.private.txt"] = data["envelope"]
+        files[root / "fullwalk-request.txt"] = data["request"]
+        files[root / "fullwalk-owner-intent.private.json"] = data["intent_raw"]
+        files[root / "fullwalk-owner-result.private.json"] = encode(data["owner"])
+        files[root / "fullwalk-owner-exit.private.json"] = encode(data["exit"])
+        files[root / "fullwalk-output/fullwalk-result.private.json"] = encode(data["child"])
+        files[root / "windows-installed-fullwalk-preflight-checks.json"] = encode(helper.windows_installed_phase_receipt(
+            context, "windows-installed-fullwalk-preflight", precheckSha256=hashlib.sha256(data["precheck_raw"]).hexdigest(),
+            prerequisiteSha256=hashlib.sha256(data["envelope"]).hexdigest(), requestSha256=hashlib.sha256(data["request"]).hexdigest(),
+            ordinaryInvocationSha256=data["admitted"]["finality"]["ordinaryInvocationSha256"], nativeFullwalkNotStarted=True))
+        facts = WindowsReaderGateTests.fullwalk_accept(data)
+        facts.update(prerequisiteSha256=hashlib.sha256(data["envelope"]).hexdigest(),
+            requestSha256=hashlib.sha256(data["request"]).hexdigest(),
+            ordinaryInvocationSha256=data["admitted"]["finality"]["ordinaryInvocationSha256"], originalOrdinaryThenFullwalkAggregateChecked=True)
+        files[root / "windows-installed-fullwalk-checks.json"] = encode(helper.windows_installed_phase_receipt(
+            context, "windows-installed-fullwalk-finalize", **facts,
+            notVerified=["production-enablements", "real-installed-loaded-image-import-custody", "native-pending-failure-injection",
+                         "msi-ui-save-snapshots", "rust-1.88-minimum"]))
+        return files, native_packages, graph
+
+    def fullwalk_edges(self, data, files, native_packages, graph):
+        # Only OS DATA/unchanged graph and artifact decoder edges are inert.
+        # Existing graph/artifact cases above exercise those strict decoders.
+        stack = ExitStack()
+        def read(path, limit):
+            raw = files[Path(path)]
+            self.assertLessEqual(len(raw), limit)
+            return raw
+        def record(path, limit):
+            raw = read(path, limit)
+            return {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+        for name, value in (("windows_installed_bytes", read),
+                            ("read_bounded_json", lambda path, limit: helper.bounded_json(read(path, limit), limit)),
+                            ("windows_installed_record", record)):
+            stack.enter_context(patch.object(helper, name, side_effect=value))
+        for name, value in (("windows_fullwalk_prepared", data["prepared_case"]["prepared"]),
+                            ("windows_installed_metadata", native_packages), ("windows_installed_app_metadata", graph),
+                            ("windows_installed_artifact", data["standalone"]), ("windows_installed_app_artifact", data["app"])):
+            stack.enter_context(patch.object(helper, name, return_value=value))
+        if "helper" in data:
+            stack.enter_context(patch.object(helper, "windows_installed_helper_artifact", return_value=data["helper"]))
+            stack.enter_context(patch.object(helper, "windows_installed_helper_outputs_absent"))
+            stack.enter_context(patch.object(helper, "windows_installed_helper_handoff",
+                side_effect=AssertionError("Read-only DATA chain cannot recreate the helper")))
+        stack.enter_context(patch.object(helper, "windows_ordinary_original",
+            side_effect=lambda artifact, **kw: (data["pre"]["helperArtifactIdentity"] if artifact == data.get("helper") else
+                data["after"] if kw.get("app_role") else data["ordinary"][3])))
+        for name in ("run", "tools", "source_unchanged"):
+            stack.enter_context(patch.object(helper, name, side_effect=AssertionError("DATA chain cannot run tools or commands")))
+        return stack
+
+    def test_windows_fullwalk_profile_is_explicit_and_data_routes_cannot_launch(self):
+        context = self.context()
+        sha, repository, ref = context["sourceSha"], "inert/repository", "refs/heads/verify/desktop-windows-installed-native"
+        environment = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Windows",
+            "RUNNER_ARCH": "X64", "ImageOS": context["imageOS"], "ImageVersion": context["imageVersion"],
+            "GITHUB_JOB": "windows-installed-native", "GITHUB_RUN_ATTEMPT": "1", "MRK_DESKTOP_HOSTED_CHECKS": helper.WINDOWS_INSTALLED_SCOPE,
+            "GITHUB_SHA": sha, "GITHUB_REPOSITORY": repository, "GITHUB_REF": ref, "GITHUB_WORKFLOW_SHA": sha,
+            "GITHUB_WORKFLOW_REF": repository + "/.github/workflows/desktop-foundation.yml@" + ref, "GITHUB_RUN_ID": context["runId"]}
+        def bind(event, dispatch, expected, reference=ref):
+            with patch.object(helper, "sys", SimpleNamespace(platform="win32", maxsize=2**63 - 1, version=helper.PYTHON)), \
+                 patch.dict(helper.os.environ, {**environment, "GITHUB_EVENT_NAME": event,
+                    "GITHUB_REF": reference, "GITHUB_WORKFLOW_REF": repository + "/.github/workflows/desktop-foundation.yml@" + reference,
+                    "MRK_DESKTOP_DISPATCH_SCOPE": dispatch, "MRK_DESKTOP_EXPECTED_SHA": expected}, clear=True):
+                return helper.windows_installed_binding()
+        self.assertNotIn("qualificationProfile", bind("push", "", ""))
+        self.assertNotIn("qualificationProfile", bind("workflow_dispatch", "windows-installed-native", sha))
+        self.assertEqual(bind("workflow_dispatch", helper.WINDOWS_FULLWALK_DISPATCH, sha)["qualificationProfile"], helper.WINDOWS_FULLWALK_PROFILE)
+        self.assertEqual(bind("workflow_dispatch", helper.WINDOWS_RUNTIME_PUBLICATION_DISPATCH, sha,
+                              helper.WINDOWS_RUNTIME_PUBLICATION_REF)["qualificationProfile"], helper.WINDOWS_RUNTIME_PUBLICATION_PROFILE)
+        for reference in (ref, helper.WINDOWS_RUNTIME_PUBLICATION_REF, "refs/heads/main"):
+            for event in ("push", "workflow_dispatch", "pull_request"):
+                for dispatch in ("", "foundation", "windows-installed-native", helper.WINDOWS_FULLWALK_DISPATCH,
+                                 helper.WINDOWS_RUNTIME_PUBLICATION_DISPATCH, helper.WINDOWS_RUNTIME_PUBLICATION_PROFILE):
+                    expected = "" if event == "push" else sha
+                    accepted = (reference == ref and (event == "push" and dispatch == "" or event == "workflow_dispatch"
+                        and dispatch in ("windows-installed-native", helper.WINDOWS_FULLWALK_DISPATCH)) or
+                        reference == helper.WINDOWS_RUNTIME_PUBLICATION_REF and event == "workflow_dispatch"
+                        and dispatch == helper.WINDOWS_RUNTIME_PUBLICATION_DISPATCH)
+                    with self.subTest(reference=reference, event=event, scope=dispatch):
+                        if accepted: bind(event, dispatch, expected, reference)
+                        else:
+                            with self.assertRaises(helper.CheckFailure): bind(event, dispatch, expected, reference)
+        for expected in ("", "f" * 40):
+            with self.subTest(production_expected=expected), self.assertRaises(helper.CheckFailure):
+                bind("workflow_dispatch", helper.WINDOWS_RUNTIME_PUBLICATION_DISPATCH, expected, helper.WINDOWS_RUNTIME_PUBLICATION_REF)
+        for event, dispatch, expected in (("push", helper.WINDOWS_FULLWALK_DISPATCH, ""), ("push", "", sha),
+                ("push", "windows-installed-native", sha), ("workflow_dispatch", "", sha),
+                ("workflow_dispatch", helper.WINDOWS_FULLWALK_DISPATCH, ""), ("workflow_dispatch", helper.WINDOWS_FULLWALK_DISPATCH, "f" * 40),
+                ("pull_request", helper.WINDOWS_FULLWALK_DISPATCH, sha), ("workflow_dispatch", helper.WINDOWS_FULLWALK_PROFILE, sha)):
+            with self.subTest(event=event, selector=dispatch, expected=expected), self.assertRaises(helper.CheckFailure):
+                bind(event, dispatch, expected)
+        self.assertFalse(helper.windows_fullwalk_profile(context))
+        for value in (None, True, False, "", "windows-installed-native", {"profile": helper.WINDOWS_FULLWALK_PROFILE}):
+            with self.subTest(marker=value), self.assertRaises(helper.CheckFailure):
+                helper.windows_fullwalk_profile({**context, "qualificationProfile": value})
+        for phase, target in (("windows-installed-fixture-finalize", "windows_fullwalk_fixture_finalize"),
+                              ("windows-installed-fullwalk", "windows_fullwalk_preflight"),
+                              ("windows-installed-fullwalk-finalize", "windows_fullwalk_finalize")):
+            for profile in (None, helper.WINDOWS_FULLWALK_PROFILE, helper.WINDOWS_RUNTIME_PUBLICATION_PROFILE):
+                chosen = {**context, **({"qualificationProfile": profile} if profile else {})}
+                with self.subTest(phase=phase, profile=profile), patch.object(helper, "windows_installed_context", return_value=chosen) as admission, \
+                     patch.object(helper, target) as selected, patch.object(helper, "run", side_effect=AssertionError("DATA route command")), \
+                     patch.object(helper, "tools", side_effect=AssertionError("DATA route compiler")):
+                    if profile:
+                        helper.windows_installed_phase(phase, helper.WINDOWS_INSTALLED_SCOPE)
+                        selected.assert_called_once_with(chosen)
+                    else:
+                        with self.assertRaises(helper.CheckFailure):
+                            helper.windows_installed_phase(phase, helper.WINDOWS_INSTALLED_SCOPE)
+                        selected.assert_not_called()
+                    admission.assert_called_once_with(create=False, retention_only=True)
+
+    def test_windows_fullwalk_supplier_source_pins_and_fixed_invocations(self):
+        data = self.fullwalk_prepared_fixture()
+        context = data["context"]
+        pins = [{"path": name, "size": size, "sha256": digest} for name, (size, digest) in helper.WINDOWS_FULLWALK_PINS.items()]
+        current = {Path(context["source"]) / row["path"]: {"size": row["size"], "sha256": row["sha256"]} for row in pins}
+        ca_source = "desktop/cpython-source-inputs/github-ca.pem"
+        self.assertIn(ca_source, helper.WINDOWS_FULLWALK_PINS)
+        self.assertNotIn(Path(context["source"]) / "desktop/github-ca.pem", current)
+        with patch.object(helper, "windows_installed_record", side_effect=lambda path, _: current.get(path)):
+            self.assertEqual(helper.windows_fullwalk_pins(context), pins)
+            for name in (pins[0]["path"], ca_source):
+                for key, wrong in (("size", 1), ("sha256", "0" * 64)):
+                    changed = deepcopy(context)
+                    next(row for row in changed["sourceFiles"] if row["path"] == name)[key] = wrong
+                    with self.subTest(pin=name, field=key), self.assertRaises(helper.CheckFailure):
+                        helper.windows_fullwalk_pins(changed)
+                changed = deepcopy(context)
+                changed["sourceFiles"] = [row for row in changed["sourceFiles"] if row["path"] != name]
+                with self.subTest(missing_pin=name), self.assertRaises(helper.CheckFailure):
+                    helper.windows_fullwalk_pins(changed)
+                path = Path(context["source"]) / name
+                saved = current.pop(path)
+                with self.subTest(missing_physical=name), self.assertRaises(helper.CheckFailure):
+                    helper.windows_fullwalk_pins(context)
+                current[path] = {**saved, "sha256": "0" * 64}
+                with self.subTest(changed_physical=name), self.assertRaises(helper.CheckFailure):
+                    helper.windows_fullwalk_pins(context)
+                current[path] = saved
+        # The one-use source projection is reserved before acquisition just like
+        # runtime. These are only inert paths; neither tool probe nor run executes.
+        for kind in ("file", "directory", "dangling-link"):
+            with self.subTest(occupied_projection=kind), tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                occupied = root / "fullwalk-source"
+                if kind == "file": occupied.write_bytes(b"UNRELATED DATA")
+                elif kind == "directory": occupied.mkdir()
+                else: occupied.symlink_to(root / "absent")
+                chosen = {**context, "root": str(root)}
+                with patch.object(helper, "windows_fullwalk_pins", return_value=pins), \
+                     patch.object(helper, "windows_ordinary_path", return_value=helper.PureWindowsPath(r"C:\Fixture")), \
+                     patch.object(helper, "windows_fullwalk_curl_sha256", return_value="e" * 64), \
+                     patch.object(helper, "windows_installed_directories"), \
+                     patch.dict(helper.os.environ, {"SystemRoot": r"C:\Windows"}), \
+                     patch.object(helper, "run", side_effect=AssertionError("Occupied DATA cannot acquire")) as run:
+                    with self.assertRaises(helper.CheckFailure): helper.windows_fullwalk_prepare_inputs(chosen)
+                    with self.assertRaises(helper.CheckFailure): helper.windows_fullwalk_acquire(chosen, {}, 1.0)
+                    run.assert_not_called()
+                self.assertEqual([path.name for path in root.iterdir()], ["fullwalk-source"])
+                if kind == "file": self.assertEqual(occupied.read_bytes(), b"UNRELATED DATA")
+                elif kind == "directory": self.assertEqual(list(occupied.iterdir()), [])
+                else: self.assertEqual(occupied.readlink(), root / "absent")
+        # Any observed object (including a non-symlink reparse point), and any
+        # inspection error other than absence, refuses without changing it.
+        with patch.object(helper.Path, "lstat", return_value=SimpleNamespace(st_file_attributes=0x400)):
+            with self.assertRaises(helper.CheckFailure): helper.windows_fullwalk_prepare_outputs_absent(Path("/inert"))
+        with patch.object(helper.Path, "lstat", side_effect=PermissionError("inert refusal")):
+            with self.assertRaises(PermissionError): helper.windows_fullwalk_prepare_outputs_absent(Path("/inert"))
+        argv = helper.windows_fullwalk_curl_argv(context)
+        self.assertEqual(argv[:8], [r"C:\Windows\System32\curl.exe", "--disable", "--proto", "=https", "--tlsv1.2", "--noproxy", "*", "--connect-timeout"])
+        self.assertEqual(argv[argv.index("--retry") + 1], "0")
+        self.assertEqual(argv[argv.index("--max-redirs") + 1], "0")
+        self.assertEqual(argv[-1], "https://www.python.org/ftp/python/3.14.7/python-3.14.7-embed-amd64.zip")
+        self.assertEqual(helper.WINDOWS_FULLWALK_ZIP_BYTES, 12673227)
+        self.assertEqual(helper.WINDOWS_FULLWALK_ZIP_SHA256, "d297e5ff019966817ad8502465176139f2d3d840fa4ed84b13bed399a6ab1f15")
+        self.assertEqual(argv[argv.index("--write-out") + 1],
+                         "%{http_code}\n%{url_effective}\n%{num_redirects}\n%{size_download}\n")
+        fields = (b"200", helper.WINDOWS_FULLWALK_URL.encode("ascii"), b"0", b"12673227")
+        labels = ("http", "effective-url", "redirect", "byte-count")
+        cases = []
+        for framing, ending in (("lf", b"\n"), ("crlf", b"\r\n")):
+            status = ending.join(fields) + ending
+            with self.subTest(framing=framing, case="exact-frame"):
+                self.assertIsNone(helper.windows_fullwalk_supplier_status(status))
+            changes = [
+                (0, "wrong-http", b"302"),
+                (1, "wrong-scheme", fields[1].replace(b"https:", b"http:")),
+                (1, "wrong-url-case", fields[1].replace(b"www.python.org", b"WWW.PYTHON.ORG")),
+                (1, "wrong-url-suffix", fields[1] + b"?unexpected=1"),
+                (2, "wrong-redirect", b"1"), (3, "wrong-byte-count", b"12673228"),
+            ]
+            for index, value in enumerate(fields):
+                changes.extend((index, case, wrong) for case, wrong in (
+                    ("leading-space", b" " + value), ("trailing-space", value + b" "),
+                    ("leading-tab", b"\t" + value), ("trailing-tab", value + b"\t"),
+                    ("non-ascii", value + b"\x80"), ("nul", value + b"\x00"), ("empty", b"")))
+                if index != 1:
+                    changes.extend((index, case, wrong) for case, wrong in (
+                        ("leading-zero", b"0" + value), ("plus", b"+" + value),
+                        ("decimal", value + b".0"), ("exponent", value + b"e0")))
+            for index, case, wrong in changes:
+                bad = ending.join(fields[:index] + (wrong,) + fields[index + 1:]) + ending
+                cases.append((framing + "-" + labels[index] + "-" + case, bad, labels[index]))
+            for first in range(3):
+                bad_fields = fields[:first] + (b"different",) * (4 - first)
+                cases.append((framing + "-first-field-" + str(first), ending.join(bad_fields) + ending, labels[first]))
+            malformed = [
+                ("missing-final", status[:-len(ending)]),
+                ("extra-final", status + ending),
+                ("missing-record", ending.join(fields[:-1]) + ending),
+                ("extra-record", status + b"extra" + ending),
+                ("extra-blank-record", ending.join(fields[:1] + (b"",) + fields[1:]) + ending),
+                ("trailing-space", status + b" "), ("trailing-tab", status + b"\t"),
+                ("trailing-nul", status + b"\x00"), ("trailing-data", status + b"extra"),
+                ("embedded-cr", ending.join((fields[0] + b"\rX",) + fields[1:]) + ending),
+                ("embedded-lf", ending.join((fields[0] + b"\nX",) + fields[1:]) + ending),
+                ("doubled-cr", fields[0] + b"\r\r\n" + ending.join(fields[1:]) + ending),
+                ("framing-before-http", ending.join((b"302",) + fields[1:]) + ending + b"\x00"),
+            ]
+            cases.extend((framing + "-" + case, bad, "framing") for case, bad in malformed)
+        cases.append(("bare-cr", b"\r".join(fields) + b"\r", "framing"))
+        for mask in range(1, 15):
+            mixed = b"".join(value + (b"\r\n" if mask & (1 << index) else b"\n")
+                             for index, value in enumerate(fields))
+            cases.append(("mixed-terminators-" + str(mask), mixed, "framing"))
+        for case, bad, label in cases:
+            with self.subTest(case=case):
+                with self.assertRaises(helper.CheckFailure) as caught:
+                    helper.windows_fullwalk_supplier_status(bad)
+                self.assertEqual(str(caught.exception), "Windows supplier " + label + " differs")
+        self.assertEqual(helper.windows_fullwalk_preparer_argv(context), [context["python"], "-I", "-S", "-B",
+            str(Path(context["source"]) / "desktop/tools/prepare_windows_embedded_payload.py"), "--source", context["source"],
+            "--archive", str(Path(context["root"]) / "inputs" / helper.WINDOWS_FULLWALK_ZIP),
+            "--runtime-root", str(Path(context["root"]) / "runtime")])
+        source = HELPER.read_text(encoding="utf-8")
+        prepare = source.split("def windows_fullwalk_prepare_inputs(", 1)[1].split("\ndef ", 1)[0]
+        self.assertLess(prepare.index("windows_fullwalk_pins(context)"), prepare.index('.mkdir(mode=0o700)'))
+        self.assertLess(prepare.index("windows_fullwalk_curl_sha256(curl)"), prepare.index('.mkdir(mode=0o700)'))
+        self.assertLess(prepare.index("windows_fullwalk_prepare_outputs_absent(root)"), prepare.index('.mkdir(mode=0o700)'))
+        acquire = source.split("def windows_fullwalk_acquire(", 1)[1].split("\ndef ", 1)[0]
+        self.assertLess(acquire.index("windows_fullwalk_prepare_outputs_absent(root)"), acquire.index("run("))
+        self.assertEqual(acquire.count("run("), 2)
+        self.assertNotIn("time.monotonic()", acquire)
+        self.assertIn("windows_installed_remaining(deadline, 135)", acquire)
+        self.assertIn("windows_installed_remaining(deadline, 180)", acquire)
+        self.assertIn("windows_installed_remaining(deadline, 1)", acquire)
+        self.assertLess(acquire.index("== {\"size\": WINDOWS_FULLWALK_ZIP_BYTES"), acquire.index('check="windows-fullwalk-fixed-offline-preparer"'))
+        for forbidden in ("--location", "--insecure", "python/python.exe", "core.zip", "Start-Process", "retry("):
+            self.assertNotIn(forbidden, acquire)
+
+    def test_windows_fullwalk_fixed_system_curl_preserves_generic_single_link_policy(self):
+        # These Windows names/stat results and >one-chunk bytes are inert DATA.
+        # Exercise real role/path/hash/state predicates, not a Windows tool.
+        system_root = r"C:\Windows"
+        fixed = helper.PureWindowsPath(system_root) / "System32" / "curl.exe"
+        content = b"INERT fixed-System32 curl DATA; never executed.\n" + b"x" * (64 * 1024)
+        case = self
+
+        def exercise(changes=None, *, refused=False, before_open=False, no_metadata=False, generic=None):
+            changes = {} if changes is None else changes
+            selected = helper.PureWindowsPath(changes.get("path", fixed))
+            common = {"st_dev": 7, "st_ino": 13, "st_nlink": changes.get("links", 2),
+                      "st_size": len(content), "st_mtime_ns": 10000, "st_birthtime_ns": 2000,
+                      "st_file_attributes": 0x20, "st_reparse_tag": 0}
+            named = SimpleNamespace(**{**common, "st_mode": stat.S_IFREG | 0o777, "st_ctime_ns": 2000,
+                                       **changes.get("named", {})})
+            opened = SimpleNamespace(**{**common, "st_mode": stat.S_IFREG | 0o666, "st_ctime_ns": 3000,
+                                        **changes.get("opened", {})})
+            after = SimpleNamespace(**{**vars(opened), **changes.get("after", {})})
+            last = SimpleNamespace(**{**vars(named), **changes.get("last", {})})
+            calls = {"open": 0, "leaf": 0, "parent": 0, "fstat": 0, "bytes": 0, "reads": []}
+
+            class Stream(io.BytesIO):
+                def fileno(self):
+                    case.assertFalse(self.closed)
+                    return 73
+
+                def read(self, size=-1):
+                    case.assertGreater(size, 0)
+                    case.assertLessEqual(size, 64 * 1024)
+                    calls["reads"].append(size)
+                    if changes.get("read_error"):
+                        raise OSError("INERT read boundary refusal")
+                    block = super().read(size)
+                    calls["bytes"] += len(block)
+                    return block
+
+            stream = Stream(changes.get("body", content))
+
+            class NamedPath:
+                def __init__(self, value):
+                    self.value = value
+
+                def __str__(self):
+                    return str(self.value)
+
+                @property
+                def parents(self):
+                    return tuple(NamedPath(parent) for parent in self.value.parents)
+
+                def lstat(self):
+                    if self.value == selected:
+                        calls["leaf"] += 1
+                        if calls["leaf"] > 1:
+                            case.assertFalse(stream.closed)
+                        return named if calls["leaf"] == 1 else last
+                    calls["parent"] += 1
+                    later = calls["parent"] > len(selected.parents)
+                    if later:
+                        case.assertFalse(stream.closed)
+                    altered = changes.get("parent_after" if later else "parent", {}) if self.value == selected.parent else {}
+                    return SimpleNamespace(**{"st_mode": stat.S_IFDIR | 0o777,
+                                              "st_file_attributes": 0x10, "st_reparse_tag": 0, **altered})
+
+                def open(self, mode):
+                    case.assertEqual(self.value, selected)
+                    case.assertEqual(mode, "rb")
+                    calls["open"] += 1
+                    case.assertEqual(calls["open"], 1)
+                    return stream
+
+            def descriptor(fd):
+                case.assertEqual(fd, 73)
+                case.assertFalse(stream.closed)
+                calls["fstat"] += 1
+                case.assertLessEqual(calls["fstat"], 2)
+                return opened if calls["fstat"] == 1 else after
+
+            root_value = changes.get("root", system_root)
+            environment = {} if root_value is None else {"SystemRoot": root_value}
+            reader = helper.windows_fullwalk_curl_sha256 if generic is None else generic
+            try:
+                with patch.object(helper, "os", SimpleNamespace(name="nt", environ=environment, fstat=descriptor)), \
+                        patch.object(helper, "run", side_effect=AssertionError("Curl DATA must not run a tool")):
+                    if refused:
+                        label = "Windows fixed System32 curl" if generic is None else "ordinary, single-link"
+                        with self.assertRaisesRegex(helper.CheckFailure, label):
+                            reader(NamedPath(selected))
+                    else:
+                        self.assertEqual(reader(NamedPath(selected)), hashlib.sha256(content).hexdigest())
+                        self.assertEqual((calls["open"], calls["leaf"], calls["fstat"]), (1, 2, 2))
+                        self.assertEqual(calls["parent"], 2 * len(selected.parents))
+                        self.assertGreaterEqual(len(calls["reads"]), 2)
+                if before_open:
+                    self.assertEqual((calls["open"], calls["fstat"], calls["reads"]), (0, 0, []))
+                if no_metadata:
+                    self.assertEqual((calls["leaf"], calls["parent"]), (0, 0))
+                self.assertLessEqual(calls["bytes"], max(0, named.st_size + 1))
+                if calls["open"]:
+                    self.assertTrue(stream.closed)
+            finally:
+                # Only this in-memory fixture is ours; unopened fixtures need no
+                # product cleanup, and an opened descriptor had to close above.
+                stream.close()
+
+        for links in (1, 2, 1024):
+            with self.subTest(accepted_links=links):
+                exercise({"links": links})
+        for root in (None, "", "Windows", r"C:Windows", r"\Windows", r"\\host\share\Windows",
+                     r"\\?\C:\Windows", r"C:\Windows\..\Other", r"C:\OtherWindows", system_root + "\0"):
+            with self.subTest(root=root):
+                exercise({"root": root}, refused=True, before_open=True, no_metadata=True)
+        for wrong in (r"C:\Windows\SysWOW64\curl.exe", r"C:\Windows\System32\other.exe",
+                      r"C:\Windows\System32\curl.exe:other", r"C:\Windows\System32\..\System32\curl.exe"):
+            with self.subTest(path=wrong):
+                exercise({"path": wrong}, refused=True, before_open=True, no_metadata=True)
+        for changed in ({"links": 0}, {"links": -1}, {"links": 1025}, {"links": True},
+                        {"named": {"st_size": 0}}, {"named": {"st_size": 16 * 1024 * 1024 + 1}},
+                        {"named": {"st_mode": stat.S_IFDIR | 0o777}},
+                        {"named": {"st_file_attributes": 0x420}}, {"named": {"st_reparse_tag": 1}},
+                        {"parent": {"st_mode": stat.S_IFREG | 0o777}},
+                        {"parent": {"st_file_attributes": 0x410}}, {"parent": {"st_reparse_tag": 1}}):
+            with self.subTest(before_open=changed):
+                exercise(changed, refused=True, before_open=True)
+        for changed in ({"opened": {"st_ino": 14}}, {"opened": {"st_birthtime_ns": 2001}},
+                        {"after": {"st_ctime_ns": 3001}}, {"after": {"st_nlink": 3}},
+                        {"last": {"st_ino": 14}}, {"last": {"st_file_attributes": 0x420}},
+                        {"parent_after": {"st_reparse_tag": 1}}, {"body": content[:-1]},
+                        {"body": content + b"x"}, {"read_error": True}):
+            with self.subTest(drift=tuple(changed)):
+                exercise(changed, refused=True)
+        for generic in (helper.ordinary, helper.hash_file, lambda path: helper.windows_installed_bytes(path, 1 << 20)):
+            with self.subTest(unchanged_generic=generic.__name__):
+                exercise({"links": 2}, refused=True, before_open=True, generic=generic)
+
+    def test_windows_fullwalk_prepared_data_is_closed_canonical_and_current_source_bound(self):
+        data = self.fullwalk_prepared_fixture()
+        context, receipt, manifest, physical = (data[key] for key in ("context", "receipt", "manifest", "physical"))
+        def accept(r=receipt, m=manifest, p=physical, c=context, raw=None):
+            return helper.windows_fullwalk_prepared_data(c, helper.canonical_json(r) + b"\n",
+                helper.canonical_json(m) + b"\n" if raw is None else raw, p)
+        accepted = accept()
+        self.assertEqual((accepted["payloadFiles"], len(accepted["physical"])), (46, 47))
+        self.assertEqual(accepted["payloadBytes"], sum(row["size"] for row in manifest["files"]))
+        for key in receipt:
+            for value in ("native-verified" if key == "qualification" else "0" * 64, None, True):
+                with self.subTest(receipt=key, value=value), self.assertRaises(helper.CheckFailure):
+                    accept(r={**receipt, key: value})
+        for r in ({key: value for key, value in receipt.items() if key != "noticeSha256"}, {**receipt, "nativeVerified": True}):
+            with self.assertRaises(helper.CheckFailure): accept(r=r)
+        for key, value in (("schemaVersion", True), ("protocol", True), ("target", "x86_64-unknown-linux-gnu"),
+                ("coreVersion", "native"), ("coreSha256", "0" * 64), ("protocolSha256", "0" * 64),
+                ("inventorySha256", "0" * 64), ("extra", False)):
+            with self.subTest(manifest=key), self.assertRaises(helper.CheckFailure): accept(m={**manifest, key: value})
+        for invalid in (data["manifest_raw"][:-1], b" " + data["manifest_raw"], data["manifest_raw"] + b"\n",
+                        data["manifest_raw"].replace(b'"protocol":1', b'"protocol":1,"protocol":1')):
+            with self.subTest(canonical=len(invalid)), self.assertRaises(helper.CheckFailure): accept(raw=invalid)
+        for number in (0, 7, 11, 46):
+            for key, value in (("path", "alias"), ("size", True), ("size", 0), ("size", (128 << 20) + 1),
+                               ("sha256", "F" * 64), ("extra", 0)):
+                changed = deepcopy(physical); changed[number][key] = value
+                with self.subTest(physical=number, field=key), self.assertRaises(helper.CheckFailure): accept(p=changed)
+        for invalid in (physical[:-1], physical + [physical[-1]], list(reversed(physical)), tuple(physical)):
+            with self.subTest(physical_type=type(invalid).__name__), self.assertRaises(helper.CheckFailure): accept(p=invalid)
+        ca_source = "desktop/cpython-source-inputs/github-ca.pem"
+        self.assertNotIn("desktop/github-ca.pem", {row["path"] for row in context["sourceFiles"]})
+        for path in ("desktop/engine_bootstrap.py", ca_source, "src/mobile_release/_desktop_engine.py"):
+            changed = deepcopy(context)
+            next(row for row in changed["sourceFiles"] if row["path"] == path)["sha256"] = "0" * 64
+            with self.subTest(current_source=path), self.assertRaises(helper.CheckFailure): accept(c=changed)
+        # A correctly hashed logical shadow cannot replace the original controls
+        # row, even though the prepared CA's logical name is github-ca.pem.
+        ca_original = next(row for row in context["sourceFiles"] if row["path"] == ca_source)
+        for shadow in (False, True):
+            changed = deepcopy(context)
+            changed["sourceFiles"] = [row for row in changed["sourceFiles"] if row["path"] != ca_source]
+            if shadow:
+                changed["sourceFiles"].append({**ca_original, "path": "desktop/github-ca.pem"})
+                changed["sourceFiles"].sort(key=lambda row: row["path"])
+            with self.subTest(missing_controls_with_shadow=shadow), self.assertRaisesRegex(helper.CheckFailure, "fixed current controls"):
+                accept(c=changed)
+        # Rehash every dependent record consistently so rejection specifically
+        # proves the fixed CA tuple, not an unrelated stale manifest hash.
+        changed, m, r = deepcopy(context), deepcopy(manifest), deepcopy(receipt)
+        alternative = {"size": ca_original["size"], "sha256": "0" * 64}
+        next(row for row in changed["sourceFiles"] if row["path"] == ca_source).update(alternative)
+        next(row for row in m["files"] if row["path"] == "github-ca.pem").update(alternative)
+        m["inventorySha256"] = hashlib.sha256(helper.canonical_json(m["files"])).hexdigest()
+        raw = helper.canonical_json(m) + b"\n"
+        r["manifestSha256"] = hashlib.sha256(raw).hexdigest()
+        p = sorted([*deepcopy(m["files"]), {"path": "manifest.json", "size": len(raw), "sha256": r["manifestSha256"]}],
+                   key=lambda row: row["path"])
+        with self.assertRaisesRegex(helper.CheckFailure, "fixed current controls"):
+            accept(c=changed, m=m, r=r, p=p)
+        # Purpose bound only. Generic source inventories remain at8MiB/member.
+        large = deepcopy(physical); large[0]["size"] = 128 << 20
+        self.assertEqual(helper.windows_fullwalk_payload_rows(large, physical=True), large)
+        with self.assertRaises(helper.CheckFailure): helper.validate_environment_inventory(large, maximum=1 << 30)
+        large[0]["size"] += 1
+        with self.assertRaises(helper.CheckFailure): helper.windows_fullwalk_payload_rows(large, physical=True)
+        with self.assertRaises(helper.CheckFailure):
+            accept(c={key: value for key, value in context.items() if key != "qualificationProfile"})
+
+    def test_windows_fullwalk_prepared_reader_checks_core_members_and_fixed_two_directory_shape(self):
+        # Memory ZIP bytes and inert lstat/scandir/read edges; no candidate import,
+        # supplier fetch, archive extraction, runtime launch or filesystem write.
+        def exercise(mutation=None):
+            data = self.fullwalk_prepared_fixture()
+            context, sources = data["context"], data["sources"]
+            root, source = Path(context["root"]), Path(context["source"])
+            core_rows = [row for row in context["sourceFiles"] if row["path"].startswith("src/mobile_release/")]
+            with io.BytesIO() as original:
+                with helper.zipfile.ZipFile(original, "w", compression=helper.zipfile.ZIP_DEFLATED) as archive:
+                    for index, row in enumerate(core_rows):
+                        name = row["path"].removeprefix("src/")
+                        info = helper.zipfile.ZipInfo(name.upper() if mutation == "member-case" and index == 0 else name, (1980, 1, 1, 0, 0, 0))
+                        info.create_system = 3
+                        info.external_attr = (stat.S_IFREG | (0o600 if mutation == "member-mode" and index == 0 else 0o644)) << 16
+                        info.compress_type = helper.zipfile.ZIP_DEFLATED
+                        raw = sources[row["path"]]
+                        archive.writestr(info, raw + b"x" if mutation == "member-bytes" and index == 0 else raw)
+                    if mutation == "member-extra": archive.writestr("mobile_release/unlisted.py", b"inert")
+                core = original.getvalue()
+            manifest = data["manifest"]
+            core_row = next(row for row in manifest["files"] if row["path"] == "core.zip")
+            core_row.update(size=len(core), sha256=hashlib.sha256(core).hexdigest())
+            manifest["coreSha256"] = core_row["sha256"]
+            manifest["inventorySha256"] = hashlib.sha256(helper.canonical_json(manifest["files"])).hexdigest()
+            if mutation == "version": manifest["coreVersion"] = "99.99.99"
+            manifest_raw = helper.canonical_json(manifest) + b"\n"
+            data["receipt"]["manifestSha256"] = hashlib.sha256(manifest_raw).hexdigest()
+            physical = {row["path"]: row for row in manifest["files"]}
+            physical["manifest.json"] = {"path": "manifest.json", "size": len(manifest_raw), "sha256": hashlib.sha256(manifest_raw).hexdigest()}
+            records = {root / "runtime" / name: {key: row[key] for key in ("size", "sha256")} for name, row in physical.items()}
+            records.update({source / name: {"size": size, "sha256": sha} for name, (size, sha) in helper.WINDOWS_FULLWALK_PINS.items()})
+            originals = {root / "runtime/manifest.json": manifest_raw, root / "runtime/core.zip": core,
+                root / "fullwalk-prepared-receipt.private.json": helper.canonical_json(data["receipt"]) + b"\n",
+                **{source / name: raw for name, raw in sources.items()}}
+            directories = {root / "runtime": [name for name in helper.WINDOWS_FULLWALK_PAYLOAD_NAMES if "/" not in name] + ["python"],
+                           root / "runtime/python": [name.split("/", 1)[1] for name in helper.WINDOWS_FULLWALK_PAYLOAD_NAMES if "/" in name]}
+            if mutation == "directory-extra": directories[root / "runtime"].append("unlisted")
+            if mutation == "directory-missing": directories[root / "runtime/python"].pop()
+            if mutation == "directory-case": directories[root / "runtime/python"][0] = directories[root / "runtime/python"][0].upper()
+            class Entries:
+                def __init__(self, path): self.path = path
+                def __enter__(self): return iter(SimpleNamespace(name=name) for name in directories[self.path])
+                def __exit__(self, *_): pass
+            state = SimpleNamespace(st_dev=77, st_ino=99, st_mode=stat.S_IFDIR | 0o755, st_nlink=1,
+                st_size=0, st_mtime_ns=100, st_ctime_ns=100, st_birthtime_ns=100, st_file_attributes=16, st_reparse_tag=0)
+            def read(path, limit):
+                raw = originals[path]; self.assertLessEqual(len(raw), limit); return raw
+            with patch.object(helper, "windows_installed_record", side_effect=lambda path, _: records[path]), \
+                 patch.object(helper, "windows_installed_bytes", side_effect=read), \
+                 patch.object(helper, "windows_installed_directories", side_effect=lambda path: self.assertIn(path, directories)), \
+                 patch.object(helper.Path, "lstat", return_value=state), patch.object(helper.os, "scandir", side_effect=Entries), \
+                 patch.object(helper, "run", side_effect=AssertionError("Prepared DATA cannot run anything")):
+                return helper.windows_fullwalk_prepared(context)
+        self.assertEqual(exercise()["payloadFiles"], 46)
+        for mutation in ("member-case", "member-mode", "member-bytes", "member-extra", "version",
+                         "directory-extra", "directory-missing", "directory-case"):
+            with self.subTest(mutation=mutation), self.assertRaises(helper.CheckFailure): exercise(mutation)
+
+    def test_windows_fullwalk_precheck_publication_and_separate_exit_are_closed(self):
+        data = self.fullwalk_data()
+        context, pre = data["context"], data["pre"]
+        self.assertEqual(len(data["publication"]["objects"]), 52)
+        self.assertEqual(len(helper.windows_fullwalk_roster(data["roster_raw"])), 47)
+        helper.windows_fullwalk_publisher_exit(context, data["blobs"]["publisherExit"], data["precheck_raw"], "success")
+        for key, value in (("profile", "ordinary"), ("sourceSha", "f" * 40), ("attempt", "2"),
+                ("sourceInventorySha256", "0" * 64), ("readerSourceSha256", "0" * 64),
+                ("appTest", helper.WINDOWS_INSTALLED_TEST), ("appArtifact", data["standalone"]["path"]),
+                ("appCommandSha256", "0" * 64), ("appRootFeatures", "default"), ("standaloneFeatures", "qualification-result"),
+                ("appNativeDevFeatures", "none"), ("headlessContract", "desktop-probe"), ("payloadFiles", "45"),
+                ("payloadBytes", "0"), ("preparedReceiptBytes", "4097")):
+            altered = helper.windows_fullwalk_text("precheck", {**pre, key: value})
+            with self.subTest(precheck=key), self.assertRaises(helper.CheckFailure):
+                helper.windows_fullwalk_precheck_data(context, altered)
+        for kind, raw in (("precheck", data["precheck_raw"]), ("prerequisite", data["envelope"]),
+                          ("finality", data["blobs"]["ordinaryFinality"])):
+            lines = raw.splitlines()
+            for invalid in (raw[:-1], raw + b"\n", raw.replace(b"\n", b"\r\n"), raw + b"x=1\n",
+                    b"\n".join([lines[0], *reversed(lines[1:])]) + b"\n", raw.replace(b"profile=", b"unknown=", 1)):
+                with self.subTest(schema=kind, bad=invalid[:40]), self.assertRaises(helper.CheckFailure):
+                    helper.windows_fullwalk_wire(invalid, kind)
+        prefix = len(helper.WINDOWS_FULLWALK_PUBLICATION_FIELDS) + 1
+        suffix = b"".join(data["blobs"]["publisherReceipt"].splitlines(keepends=True)[prefix:])
+        for key, value in (("artifactIdentity", data["ordinary"][3]), ("artifactSha256", data["app"]["sha256"]),
+                ("precheckSha256", "0" * 64), ("createdFiles", 46), ("createdDirectories", 4),
+                ("sourceReadersClosed", 46), ("payloadWritersClosed", 46), ("postcheckReadersClosed", 93),
+                ("fileOriginalsClosed", 213), ("fileOriginals", 197), ("parentBookSettled", "false"),
+                ("occupiedCreateCalls", 0), ("occupiedCreateError", 5), ("occupiedObjectsUnchanged", "false"),
+                ("unknown", "true"), ("productionEnabled", "true"), ("resultCloseGate", "self-certified"), ("objectCount", 51)):
+            raw = helper.windows_fullwalk_text("publication", {**data["publication_fields"], key: value}) + suffix
+            with self.subTest(publication=key), self.assertRaises(helper.CheckFailure):
+                helper.windows_fullwalk_publication_data(context, raw, data["precheck_raw"], data["roster_raw"])
+        lines = data["blobs"]["publisherReceipt"].decode("ascii").splitlines()
+        for row, column, replacement in ((0, 0, "foreign"), (0, 1, "file"), (0, 6, "a" * 64),
+                (5, 6, "0" * 64), (5, 4, "5" * 64)):
+            changed = list(lines); fields = changed[prefix + row].removeprefix("object=").split("|"); fields[column] = replacement
+            changed[prefix + row] = "object=" + "|".join(fields)
+            with self.subTest(object=row, field=column), self.assertRaises(helper.CheckFailure):
+                helper.windows_fullwalk_publication_data(context, ("\n".join(changed) + "\n").encode(), data["precheck_raw"], data["roster_raw"])
+        for field, value in ((0, "78"), (1, "01" + "0" * 30), (2, "101"), (5, "999"), (7, "2"), (8, "1024")):
+            changed = list(lines); columns = changed[prefix + 5].removeprefix("object=").split("|")
+            stamp = columns[3].split(":"); stamp[field] = value; columns[3] = ":".join(stamp)
+            changed[prefix + 5] = "object=" + "|".join(columns)
+            with self.subTest(full_stamp=field), self.assertRaises(helper.CheckFailure):
+                helper.windows_fullwalk_publication_data(context, ("\n".join(changed) + "\n").encode(), data["precheck_raw"], data["roster_raw"])
+        for outcome in ("failure", "cancelled", "skipped", "unavailable"):
+            with self.subTest(outcome=outcome), self.assertRaises(helper.CheckFailure):
+                helper.windows_fullwalk_publisher_exit(context, data["blobs"]["publisherExit"], data["precheck_raw"], outcome)
+        for key, value in (("exitCode", True), ("exitCode", 1), ("originalWaitReturned", False), ("writerCloseGate", "self-certified"),
+                           ("precheckSha256", "0" * 64), ("extra", False)):
+            with self.subTest(exit_field=key), self.assertRaises(helper.CheckFailure):
+                helper.windows_fullwalk_publisher_exit(context, helper.canonical_json({**data["publisher_exit"], key: value}), data["precheck_raw"], "success")
+
+    def test_windows_fullwalk_actual_producer_precheck_and_five_original_exits_are_closed(self):
+        data = self.publication_data()
+        context, pre_raw, pre = data["context"], data["precheck_raw"], data["pre"]
+        self.assertEqual(len(helper.windows_fullwalk_precheck_data(context, pre_raw)), 56)
+        self.assertEqual(helper.windows_fullwalk_kind(context, "precheck"), "production-precheck")
+        self.assertEqual(helper.windows_fullwalk_kind(context, "prerequisite"), "production-prerequisite")
+        for key, value in (("profile", helper.WINDOWS_FULLWALK_PROFILE), ("publisherTest", helper.WINDOWS_FULLWALK_PUBLISHER),
+                ("appRootFeatures", "none"), ("standaloneFeatures", "none"), ("appNativeDevFeatures", "qualification-result"),
+                ("helperNativeFeatures", "qualification-result,runtime-publication"), ("helperArtifact", pre["ownerArtifact"]),
+                ("helperCommandSha256", hashlib.sha256(('"' + pre["helperArtifact"] + '" --ignored').encode("utf-16-le")).hexdigest()),
+                ("sourceInventorySha256", "f" * 64)):
+            changed = helper.windows_fullwalk_text("production-precheck", {**pre, key: value})
+            with self.subTest(precheck=key), self.assertRaises(helper.CheckFailure):
+                helper.windows_fullwalk_precheck_data(context, changed)
+        for c, raw in ((context, data["legacy"]["precheck_raw"]), (data["legacy"]["context"], pre_raw)):
+            with self.assertRaises(helper.CheckFailure): helper.windows_fullwalk_precheck_data(c, raw)
+        for kind in ("publication", "finality", "unknown"):
+            with self.assertRaises(helper.CheckFailure): helper.windows_fullwalk_kind(context, kind)
+        scalar_raw, scalar_exit = self.publication_scalar_originals(data)
+        roles = {"scalar": None, "stage": "stageExit", "helperSuccess": "helperSuccessExit", "before": "beforeExit",
+                 "helperOccupied": "helperOccupiedExit", "after": "publisherExit"}
+        exits = {}
+        for role, blob in roles.items():
+            raw = scalar_exit if role == "scalar" else data["blobs"][blob]
+            parsed = helper.windows_runtime_publication_exit(context, raw, pre_raw, role, "success")
+            exits[role] = parsed
+            self.assertEqual(parsed["exitCode"], "2" if role == "helperOccupied" else "0")
+            for outcome in (None, "failure", "skipped", "cancelled", "unavailable"):
+                with self.subTest(role=role, outcome=outcome), self.assertRaises(helper.CheckFailure):
+                    helper.windows_runtime_publication_exit(context, raw, pre_raw, role, outcome)
+            for key, value in (("profile", helper.WINDOWS_FULLWALK_PROFILE), ("sourceSha", "f" * 40), ("sourceTree", "f" * 40),
+                    ("runId", "654321"), ("attempt", "2"), ("role", "unknown"), ("artifactSha256", "f" * 64),
+                    ("precheckSha256", "f" * 64), ("commandSha256", "f" * 64), ("originalWaitReturned", "false"),
+                    ("exitCode", "1"), ("exitCode", "02"), ("exitCode", "-1"), ("writerCloseGate", "self-closed")):
+                changed = helper.windows_fullwalk_text("production-exit", {**parsed, key: value})
+                with self.subTest(role=role, field=key, value=value), self.assertRaises(helper.CheckFailure):
+                    helper.windows_runtime_publication_exit(context, changed, pre_raw, role, "success")
+            for malformed in (b"", raw[:-1], raw + b"\n", raw.replace(b"\n", b"\r\n"),
+                              raw.replace(b"role=", b"other=", 1), b"x" * 4097):
+                with self.subTest(role=role, malformed=len(malformed)), self.assertRaises(helper.CheckFailure):
+                    helper.windows_runtime_publication_exit(context, malformed, pre_raw, role, "success")
+        self.assertEqual(exits["helperSuccess"]["artifactSha256"], exits["helperOccupied"]["artifactSha256"])
+        self.assertEqual(exits["helperSuccess"]["commandSha256"], exits["helperOccupied"]["commandSha256"])
+        self.assertEqual(exits["helperSuccess"]["commandSha256"],
+                         hashlib.sha256(('"' + pre["helperArtifact"] + '"').encode("utf-16-le")).hexdigest())
+        self.assertNotEqual(exits["stage"]["artifactSha256"], exits["helperSuccess"]["artifactSha256"])
+        for role in ("scalar", "stage", "helperSuccess", "before", "helperOccupied", "after", "other"):
+            if role != "helperOccupied":
+                with self.subTest(wrong_original_role=role), self.assertRaises(helper.CheckFailure):
+                    helper.windows_runtime_publication_exit(context, data["blobs"]["helperOccupiedExit"], pre_raw, role, "success")
+        with self.assertRaises(helper.CheckFailure):
+            helper.windows_fullwalk_publication_data(context, data["legacy"]["blobs"]["publisherReceipt"], pre_raw, data["roster_raw"])
+        with self.assertRaises(helper.CheckFailure):
+            helper.windows_fullwalk_publisher_exit(context, data["legacy"]["blobs"]["publisherExit"], pre_raw, "success")
+        # Both queries must have succeeded on their original calls. An arbitrary
+        # failed/ambiguous query or acquisition is never the negative proof.
+        for count in ("one", "four"):
+            raw, exited = self.publication_scalar_originals(data, count)
+            facts = helper.windows_runtime_publication_scalar_data(context, raw, exited, pre_raw, "success")
+            self.assertEqual((facts["sourceCount"], facts["derivedCount"]), ("one", count))
+            self.assertTrue(facts["sourceZero"] and facts["sourceFalseOnlyAdmitted"] and facts["derivedNonzero"])
+            self.assertFalse(facts["derivedFalseOnlyAdmitted"])
+            self.assertEqual((facts["createCalls"], facts["tokenOriginals"], facts["tokenOriginalsClosed"]), (1, 2, 2))
+            self.assertTrue(facts["parentBookSettled"] and facts["originalProcessWaitReturned"])
+            self.assertFalse(facts["unknown"])
+        scalar = helper.windows_fullwalk_wire(scalar_raw, "production-scalar")
+        for key, value in (("profile", helper.WINDOWS_FULLWALK_PROFILE), ("sourceSha", "f" * 40), ("sourceTree", "f" * 40),
+                ("runId", "654321"), ("attempt", "2"), ("qualifierTest", helper.WINDOWS_RUNTIME_PUBLICATION_STAGE),
+                ("artifactSha256", "f" * 64), ("precheckSha256", "f" * 64), ("commandSha256", "f" * 64),
+                *(("sourceCount", value) for value in ("none", "zero", "two", "three", "four", "over4", "sentinel")),
+                *(("derivedCount", value) for value in ("none", "zero", "two", "three", "over4", "sentinel")),
+                ("sourceReturn", "bool-zero"), ("sourceReturn", "unknown"), ("sourceValue", "nonzero"), ("sourceAdmitted", "false"),
+                ("derivedReturn", "bool-zero"), ("derivedReturn", "unknown"), ("derivedValue", "zero"), ("derivedValue", "unobserved"),
+                ("derivedAdmitted", "true"), ("createCalls", "0"), ("createCalls", "2"), ("filterFlags", "0"),
+                ("restrictingSidInputs", "1"), ("tokenOriginals", "1"), ("tokenOriginalsClosed", "0"), ("tokenOriginalsClosed", "1"),
+                ("parentBookSettled", "false"), ("unknown", "true"), ("resultCloseGate", "self-closed")):
+            changed = helper.windows_fullwalk_text("production-scalar", {**scalar, key: value})
+            with self.subTest(scalar_field=key, value=value), self.assertRaises(helper.CheckFailure):
+                helper.windows_runtime_publication_scalar_data(context, changed, scalar_exit, pre_raw, "success")
+        failed_query = helper.windows_fullwalk_text("production-scalar", {**scalar, "derivedReturn": "bool-zero",
+            "derivedCount": "none", "derivedValue": "unobserved", "derivedAdmitted": "false"})
+        for malformed in (b"", scalar_raw[:-1], scalar_raw + b"\n", scalar_raw.replace(b"\n", b"\r\n"),
+                scalar_raw.replace(b"sourceCount=one\n", b"", 1), scalar_raw + b"extra=false\n",
+                scalar_raw.replace(b"sourceValue=zero", b"derivedValue=nonzero", 1), b"x" * 4097, failed_query):
+            with self.subTest(scalar_malformed=len(malformed)), self.assertRaises(helper.CheckFailure):
+                helper.windows_runtime_publication_scalar_data(context, malformed, scalar_exit, pre_raw, "success")
+        for outcome in (None, "failure", "skipped", "cancelled", "unavailable"):
+            with self.subTest(scalar_step=outcome), self.assertRaises(helper.CheckFailure):
+                helper.windows_runtime_publication_scalar_data(context, scalar_raw, scalar_exit, pre_raw, outcome)
+        for key, value in (("role", "stage"), ("originalWaitReturned", "false"), ("exitCode", "1"),
+                           ("writerCloseGate", "self-closed"), ("commandSha256", "f" * 64)):
+            changed = helper.windows_fullwalk_text("production-exit", {**exits["scalar"], key: value})
+            with self.subTest(scalar_exit=key), self.assertRaises(helper.CheckFailure):
+                helper.windows_runtime_publication_scalar_data(context, scalar_raw, changed, pre_raw, "success")
+
+    def test_windows_fullwalk_actual_producer_observation_wire_requires_complete_independent_rows(self):
+        data = self.publication_data()
+        context, pre_raw, roster = data["context"], data["precheck_raw"], data["roster_raw"]
+        for role, blob, count, readers, proofs in (("stage", "stage", 52, 47, 0), ("before", "before", 103, 94, 3),
+                                                  ("after", "publisherReceipt", 103, 94, 6)):
+            raw, test = data["blobs"][blob], data["tests"][role]
+            result = helper.windows_runtime_publication_observation(context, raw, pre_raw, roster, test)
+            self.assertEqual(result["objects"], data["objects"][role])
+            self.assertEqual(result["proofs"], data["proofs"][role])
+            self.assertEqual((len(result["objects"]), len(result["proofs"])), (count, proofs))
+            self.assertEqual(result["fields"]["postcheckReaders"], str(readers))
+            self.assertEqual(result["fields"]["actualFixedProducerObserved"], "true" if role == "after" else "false")
+            self.assertEqual(len({(row["stamp"]["volume"], row["stamp"]["fileId"]) for row in result["objects"]}), count)
+            for name in ("runtimeConsumerEnabled", "pythonExecuted", "appLaunched"):
+                self.assertEqual(result["fields"][name], "false")
+            for key, value in (("observerTest", helper.WINDOWS_FULLWALK_PUBLISHER), ("objectCount", "51"),
+                    ("sourceReaders", "99"), ("payloadWriters", "99"), ("postcheckReaders", "0"), ("proofCount", "7"),
+                    ("fileOriginals", "0"), ("fileOriginalsClosed", "0"), ("parentBookSettled", "false"), ("unknown", "true"),
+                    ("runtimeConsumerEnabled", "true"), ("pythonExecuted", "true"), ("appLaunched", "true"),
+                    ("resultCloseGate", "self-closed"), ("artifactSha256", "f" * 64), ("manifestSha256", "f" * 64)):
+                changed = self.publication_observation_raw({**data["fields"][role], key: value},
+                    data["objects"][role], data["proofs"][role])
+                with self.subTest(role=role, field=key), self.assertRaises(helper.CheckFailure):
+                    helper.windows_runtime_publication_observation(context, changed, pre_raw, roster, test)
+            for malformed in (b"", raw[:-1], raw + b"\n", raw.replace(b"\n", b"\r\n"), raw + raw.splitlines(keepends=True)[-1],
+                              b"x" * (65536 + 1), raw.replace(b"observed=", b"object=", 1)):
+                with self.subTest(role=role, malformed=len(malformed)), self.assertRaises(helper.CheckFailure):
+                    helper.windows_runtime_publication_observation(context, malformed, pre_raw, roster, test)
+            for label, change in (
+                    ("duplicate-id", lambda rows: rows[-1]["stamp"].update(fileId=rows[-2]["stamp"]["fileId"])),
+                    ("high-half-id", lambda rows: rows[-1]["stamp"].update(fileId=rows[-1]["stamp"]["fileId"][:-2] + "ff")),
+                    ("payload-hash", lambda rows: rows[-1].update(sha256="f" * 64)),
+                    ("payload-size", lambda rows: rows[-1]["stamp"].update(size=1)),
+                    ("extra-stream-kind", lambda rows: rows[-1].update(role=rows[-1]["role"] + ":other")),
+                    ("directory-inventory", lambda rows: rows[0].update(inventorySha256="f" * 64)),
+                    ("kind", lambda rows: rows[0].update(directory=False)),
+                    ("reparse", lambda rows: rows[-1]["stamp"].update(attributes=1024))):
+                rows = deepcopy(data["objects"][role]); change(rows)
+                changed = self.publication_observation_raw(data["fields"][role], rows, data["proofs"][role])
+                with self.subTest(role=role, row=label), self.assertRaises(helper.CheckFailure):
+                    helper.windows_runtime_publication_observation(context, changed, pre_raw, roster, test)
+        self.assertEqual(tuple(helper.WINDOWS_RUNTIME_PUBLICATION_PROOFS), ("stage", "stageExit", "helperSuccessExit",
+                                                                          "before", "beforeExit", "helperOccupiedExit"))
+        self.assertEqual([limit for _, limit in helper.WINDOWS_RUNTIME_PUBLICATION_PROOFS.values()], [65536, 4096, 4096, 65536, 4096, 4096])
+
+    def test_windows_fullwalk_actual_producer_chain_never_rebaselines_or_excuses_postcollision_metadata(self):
+        data = self.publication_data()
+        context, pre_raw, roster = data["context"], data["precheck_raw"], data["roster_raw"]
+        def accept(blobs=None, outcomes=None, through="after"):
+            with patch.object(helper, "run", side_effect=AssertionError("DATA chain cannot launch")), \
+                 patch.object(helper, "tools", side_effect=AssertionError("DATA chain cannot compile")), \
+                 patch.object(helper, "windows_installed_bytes", side_effect=AssertionError("Supplied DATA chain cannot reopen an original")):
+                return helper.windows_runtime_publication_chain(context, pre_raw, roster,
+                    data["blobs"] if blobs is None else blobs, data["outcomes"] if outcomes is None else outcomes, through=through)
+        self.assertTrue(accept()["facts"]["independentActualProducerComparison"])
+        for ordinal, (through, count) in enumerate((("stage", 2), ("helperSuccess", 3), ("before", 5), ("helperOccupied", 6), ("after", 8))):
+            blobs = dict(list(data["blobs"].items())[:count])
+            outcomes = dict(list(data["outcomes"].items())[:ordinal + 1])
+            result = accept(blobs, outcomes, through)
+            self.assertEqual(result["facts"]["independentActualProducerComparison"], through == "after")
+            self.assertEqual(result["facts"]["typedOccupiedExitObserved"], count >= 6)
+            for role in blobs:
+                altered = {**blobs, role: blobs[role] + b" "}
+                with self.subTest(through=through, changed_original=role), self.assertRaises(helper.CheckFailure):
+                    accept(altered, outcomes, through)
+            for role in outcomes:
+                with self.subTest(through=through, missing_original_step=role), self.assertRaises(helper.CheckFailure):
+                    accept(blobs, {key: value for key, value in outcomes.items() if key != role}, through)
+                with self.subTest(through=through, failed_original_step=role), self.assertRaises(helper.CheckFailure):
+                    accept(blobs, {**outcomes, role: "failure"}, through)
+        # Parse each golden epoch independently. The exhaustive matrix tests the
+        # actual production predicate without decoding the unchanged prefix1339 times.
+        golden_before = helper.windows_runtime_publication_observation(context, data["blobs"]["before"],
+            pre_raw, roster, helper.WINDOWS_RUNTIME_PUBLICATION_BEFORE)
+        golden_after = helper.windows_runtime_publication_observation(context, data["blobs"]["publisherReceipt"],
+            pre_raw, roster, helper.WINDOWS_RUNTIME_PUBLICATION_AFTER)
+        pristine = tuple(helper.canonical_json(value) for value in (golden_before, golden_after))
+        self.assertEqual((len(golden_before["objects"]), len(golden_after["objects"])), (103, 103))
+        self.assertIsNot(golden_before, golden_after)
+        for before, after in zip(golden_before["objects"], golden_after["objects"], strict=True):
+            self.assertIsNot(before, after)
+            self.assertIsNot(before["stamp"], after["stamp"])
+        helper.windows_runtime_publication_postcollision_unchanged(golden_before, golden_after)
+        fields = ("volume", "fileId", "creation", "write", "change", "size", "allocation", "links", "attributes",
+                  "securitySha256", "sha256", "inventorySha256", "directory")
+        self.assertEqual((len(fields), len(set(fields))), (13, 13))
+        directories = ("suffix-mrk", "source-input", "source-target", "source-version", "source-python",
+                       "suffix-versions", "suffix-target", "version", "python")
+        self.assertEqual(tuple(row["role"] for row in golden_after["objects"] if row["directory"]), directories)
+        roles = {row["role"]: ordinal for ordinal, row in enumerate(golden_after["objects"])}
+        self.assertEqual(len(roles), 103)
+        directory_indices = tuple(roles[role] for role in directories)
+        # Preserve every wire-field category and every directory inventory role,
+        # plus source/root/nested leaf paths and P's nontransferable staging exception.
+        wire_groups = (
+            {(roles["python/python.exe"], field) for field in fields},
+            {(ordinal, field) for ordinal in directory_indices for field in ("fileId", "attributes")},
+            {(roles[role], "write") for role in ("source/core.zip", "source/python/python.exe", "core.zip")},
+            {(roles["suffix-mrk"], field) for field in ("write", "change", "allocation")},
+        )
+        self.assertEqual(tuple(len(group) for group in wire_groups), (13, 18, 3, 3))
+        wire_cases = set().union(*wire_groups)
+        self.assertEqual(len(wire_cases), 37)
+        covered, rehashed, wired = set(), set(), set()
+        for ordinal in range(103):
+            for field in fields:
+                case = (ordinal, field)
+                rows = list(golden_after["objects"])
+                row = {**rows[ordinal], "stamp": dict(rows[ordinal]["stamp"])}
+                rows[ordinal] = row
+                if field == "fileId":
+                    row["stamp"][field] = f'{int(row["stamp"][field], 16) ^ (1 << 127):032x}'
+                elif field == "attributes":
+                    row["stamp"][field] ^= 32
+                elif field in row["stamp"]:
+                    row["stamp"][field] += 4096 if field == "allocation" else 1
+                elif field == "directory":
+                    row[field] = not row[field]
+                else:
+                    row[field] = "f" * 64
+                if field in ("fileId", "attributes"):
+                    # The encoder writes each directory's inventory field: copy
+                    # those records too, never an alias into either golden epoch.
+                    for index in directory_indices:
+                        if index != ordinal:
+                            rows[index] = dict(rows[index])
+                    self.publication_inventory(rows, data["pre"]["manifestSha256"])
+                    rehashed.add(case)
+                with self.subTest(ordinal=ordinal, field=field):
+                    self.assertFalse(helper.same_compile_json(row, golden_after["objects"][ordinal]))
+                    with self.assertRaises(helper.CheckFailure) as refused:
+                        helper.windows_runtime_publication_postcollision_unchanged(
+                            golden_before, {**golden_after, "objects": rows})
+                    self.assertEqual(str(refused.exception), "Windows occupied producer changed a source or published object")
+                    covered.add(case)
+                    if case in wire_cases:
+                        changed = self.publication_observation_raw(golden_after["fields"], rows, golden_after["proofs"])
+                        with self.assertRaises(helper.CheckFailure):
+                            accept({**data["blobs"], "publisherReceipt": changed})
+                        wired.add(case)
+        self.assertEqual(covered, {(ordinal, field) for ordinal in range(103) for field in fields})
+        self.assertEqual(rehashed, {(ordinal, field) for ordinal in range(103) for field in ("fileId", "attributes")})
+        self.assertEqual(wired, wire_cases)
+        self.assertEqual((len(covered), len(rehashed), len(wired)), (1339, 206, 37))
+        # Rehash all dependent proofs and give before/after identical changed
+        # source DATA: staging still forbids that source drift independently.
+        for ordinal in (1, 4, 9, 55):
+            before = deepcopy(data["objects"]["before"]); before[ordinal]["stamp"]["write"] += 1
+            before_raw = self.publication_observation_raw(data["fields"]["before"], before, data["proofs"]["before"])
+            proofs = deepcopy(data["proofs"]["after"])
+            next(row for row in proofs if row["role"] == "before").update(size=len(before_raw), sha256=hashlib.sha256(before_raw).hexdigest())
+            after_raw = self.publication_observation_raw(data["fields"]["after"], before, proofs)
+            with self.subTest(rehashed_changed_source=ordinal), self.assertRaises(helper.CheckFailure):
+                accept({**data["blobs"], "before": before_raw, "publisherReceipt": after_raw})
+        self.assertEqual(tuple(helper.canonical_json(value) for value in (golden_before, golden_after)), pristine)
+
+    def test_windows_fullwalk_actual_producer_original_step_and_finalizer_gates_cannot_self_certify(self):
+        phases = (("stage", "stage"), ("helperSuccess", "success"), ("before", "before"), ("helperOccupied", "occupied"))
+        environment = {"MRK_WINDOWS_ORDINARY_PREFLIGHT_STEP_OUTCOME": "success",
+            "MRK_WINDOWS_PUBLISHER_STEP_OUTCOME": "success", "MRK_WINDOWS_FIXTURE_FINALIZE_STEP_OUTCOME": "success"}
+        for role, name in phases:
+            prefix = "MRK_WINDOWS_PRODUCER_" + name.upper()
+            environment[prefix + "_STEP_OUTCOME"] = environment[prefix + "_FINALIZE_STEP_OUTCOME"] = "success"
+        roles = (*helper.WINDOWS_RUNTIME_PUBLICATION_STEPS, "after")
+        for index, through in enumerate(roles):
+            with patch.dict(helper.os.environ, environment, clear=True):
+                self.assertEqual(helper.windows_runtime_publication_outcomes(through, finalized=True),
+                                 dict.fromkeys(roles[:index + 1], "success"))
+            required = []
+            for role in roles[:index + 1]:
+                prefix = "MRK_WINDOWS_PRODUCER_" + helper.WINDOWS_RUNTIME_PUBLICATION_STEPS[role] if role != "after" else None
+                required.extend((prefix + "_STEP_OUTCOME", prefix + "_FINALIZE_STEP_OUTCOME") if prefix else
+                                ("MRK_WINDOWS_PUBLISHER_STEP_OUTCOME", "MRK_WINDOWS_FIXTURE_FINALIZE_STEP_OUTCOME"))
+            for key in required:
+                for outcome in ("failure", "skipped", "cancelled", "unavailable"):
+                    with self.subTest(through=through, original=key, outcome=outcome), \
+                         patch.dict(helper.os.environ, {**environment, key: outcome}, clear=True), self.assertRaises(helper.CheckFailure):
+                        helper.windows_runtime_publication_outcomes(through, finalized=True)
+        context = {**self.context(), "qualificationProfile": helper.WINDOWS_RUNTIME_PUBLICATION_PROFILE}
+        for role, name in phases:
+            phase = "windows-runtime-publication-" + name + "-finalize"
+            with patch.object(helper, "windows_installed_context", return_value=context) as admission, \
+                 patch.object(helper, "windows_runtime_publication_finalize") as finalize, \
+                 patch.object(helper, "run", side_effect=AssertionError("DATA route command")), \
+                 patch.object(helper, "tools", side_effect=AssertionError("DATA route compiler")):
+                helper.windows_installed_phase(phase, helper.WINDOWS_INSTALLED_SCOPE)
+                finalize.assert_called_once_with(context, role)
+                admission.assert_called_once_with(create=False, retention_only=True)
+            for profile in (None, helper.WINDOWS_FULLWALK_PROFILE):
+                chosen = {**self.context(), **({"qualificationProfile": profile} if profile else {})}
+                with patch.object(helper, "windows_fullwalk_check_precheck", side_effect=AssertionError("Wrong profile reached precheck")), \
+                     patch.dict(helper.os.environ, environment, clear=True), self.assertRaises(helper.CheckFailure):
+                    helper.windows_runtime_publication_finalize(chosen, role)
+        with patch.dict(helper.os.environ, {}, clear=True), self.assertRaises(helper.CheckFailure):
+            helper.windows_runtime_publication_finalize(context, "stage")
+        with patch.object(helper, "windows_installed_context", return_value=context) as admission, \
+             patch.object(helper, "windows_runtime_publication_scalar_finalize") as finalize, \
+             patch.object(helper, "run", side_effect=AssertionError("Scalar DATA route command")), \
+             patch.object(helper, "tools", side_effect=AssertionError("Scalar DATA route compiler")):
+            helper.windows_installed_phase("windows-runtime-publication-scalar-finalize", helper.WINDOWS_INSTALLED_SCOPE)
+            finalize.assert_called_once_with(context)
+            admission.assert_called_once_with(create=False, retention_only=True)
+        for profile in (None, helper.WINDOWS_FULLWALK_PROFILE):
+            chosen = {**self.context(), **({"qualificationProfile": profile} if profile else {})}
+            with patch.object(helper, "windows_fullwalk_check_precheck", side_effect=AssertionError("Wrong scalar profile reached precheck")), \
+                 patch.dict(helper.os.environ, environment, clear=True), self.assertRaises(helper.CheckFailure):
+                helper.windows_runtime_publication_scalar_finalize(chosen)
+        with patch.dict(helper.os.environ, {}, clear=True), self.assertRaises(helper.CheckFailure):
+            helper.windows_runtime_publication_scalar_finalize(context)
+        data = self.publication_data()
+        context, pre_raw, root = data["context"], data["precheck_raw"], Path(data["context"]["root"])
+        raw, exited = self.publication_scalar_originals(data)
+        facts = helper.windows_runtime_publication_scalar_data(context, raw, exited, pre_raw, "success")
+        record = helper.windows_installed_phase_receipt(context, "windows-runtime-publication-scalar-finalize", **facts)
+        files = {root / "producer-scalar-result.private.txt": raw, root / "producer-scalar-exit.private.txt": exited,
+                 root / "producer-scalar-checks.json": helper.canonical_json(record)}
+        environment = self.publication_environment()
+        def evidence(originals, outcomes, finalized=True):
+            with patch.dict(helper.os.environ, outcomes, clear=True), \
+                 patch.object(helper, "windows_installed_bytes", side_effect=lambda path, limit: originals[path]), \
+                 patch.object(helper, "run", side_effect=AssertionError("Scalar DATA evidence cannot launch")), \
+                 patch.object(helper, "tools", side_effect=AssertionError("Scalar DATA evidence cannot compile")):
+                return helper.windows_runtime_publication_scalar_evidence(context, pre_raw, finalized=finalized)
+        self.assertEqual(evidence(files, environment), facts)
+        self.assertEqual(evidence(files, {"MRK_WINDOWS_PRODUCER_SCALAR_STEP_OUTCOME": "success"}, finalized=False), facts)
+        for key in ("MRK_WINDOWS_PRODUCER_SCALAR_STEP_OUTCOME", "MRK_WINDOWS_PRODUCER_SCALAR_FINALIZE_STEP_OUTCOME"):
+            for outcome in (None, "failure", "skipped", "cancelled", "unavailable"):
+                outcomes = dict(environment)
+                if outcome is None: del outcomes[key]
+                else: outcomes[key] = outcome
+                with self.subTest(scalar_gate=key, outcome=outcome), self.assertRaises(helper.CheckFailure):
+                    evidence(files, outcomes)
+        for key, value in (("extra", False), ("sourceSha", "f" * 40), ("sourceTree", "f" * 40),
+                           ("tokenOriginalsClosed", 1), ("derivedNonzero", False), ("unknown", True)):
+            changed = {**files, root / "producer-scalar-checks.json": helper.canonical_json({**record, key: value})}
+            with self.subTest(scalar_finalizer=key), self.assertRaises(helper.CheckFailure):
+                evidence(changed, environment)
+
+    def test_windows_fullwalk_actual_producer_six_serial_originals_do_not_enlarge_or_renew_the_owner_budget(self):
+        # Aggregate DATA only. Complete production proof validation is exercised
+        # above; this fixture isolates its two actual known-close counters.
+        data = self.publication_data()
+        legacy, context = data["legacy"], data["context"]
+        envelope = {**helper.windows_fullwalk_wire(legacy["envelope"], "prerequisite"),
+                    "profile": helper.WINDOWS_RUNTIME_PUBLICATION_PROFILE}
+        for role in helper.WINDOWS_RUNTIME_PUBLICATION_PROOFS:
+            envelope[role + "Bytes"] = len(data["blobs"][role])
+            envelope[role + "Sha256"] = hashlib.sha256(data["blobs"][role]).hexdigest()
+        envelope_raw = helper.windows_fullwalk_text("production-prerequisite", envelope)
+        self.assertLessEqual(len(envelope_raw), 16384)
+        self.assertEqual(len(helper.windows_fullwalk_wire(envelope_raw, "production-prerequisite")), 56)
+        request = helper.windows_fullwalk_request_data(legacy["request"], root=context["root"])
+        request.update(publicationReceiptBytes=len(envelope_raw), publicationReceiptSha256=hashlib.sha256(envelope_raw).hexdigest())
+        intent = deepcopy(legacy["intent"])
+        intent["fullwalkBatch"].update(profile=helper.WINDOWS_RUNTIME_PUBLICATION_PROFILE,
+            prerequisiteBytes=len(envelope_raw), prerequisiteSha256=hashlib.sha256(envelope_raw).hexdigest(),
+            serialPrerequisiteOriginals=6, serialPrerequisiteOriginalsClosed=6)
+        intent_raw = helper.canonical_json(intent)
+        owner = deepcopy(legacy["owner"])
+        owner["aggregate"].update(intent["fullwalkBatch"])
+        owner["aggregate"].update(ownerIntentBytes=len(intent_raw), ownerIntentSha256=hashlib.sha256(intent_raw).hexdigest())
+        aggregate = helper.windows_fullwalk_aggregate(context, request, envelope_raw, intent_raw, owner)
+        self.assertEqual((aggregate["serialPrerequisiteOriginals"], aggregate["serialPrerequisiteOriginalsClosed"]), (6, 6))
+        self.assertEqual((aggregate["originTickMs"], aggregate["deadlineTickMs"], aggregate["aggregateBudgetMs"]), (1000, 211000, 210000))
+        self.assertEqual(legacy["owner"]["inputOriginals"], len(helper.PureWindowsPath(context["root"]).parents) + 1 + 21)
+        self.assertLessEqual(legacy["owner"]["inputOriginals"], 40)
+        for key in ("serialPrerequisiteOriginals", "serialPrerequisiteOriginalsClosed"):
+            for value in (None, True, 0, 5, 7, "6"):
+                altered = deepcopy(owner); altered["aggregate"][key] = value
+                with self.subTest(counter=key, value=value), self.assertRaises(helper.CheckFailure):
+                    helper.windows_fullwalk_aggregate(context, request, envelope_raw, intent_raw, altered)
+            altered = deepcopy(intent); del altered["fullwalkBatch"][key]
+            raw = helper.canonical_json(altered)
+            changed_owner = deepcopy(owner)
+            changed_owner["aggregate"].update(ownerIntentBytes=len(raw), ownerIntentSha256=hashlib.sha256(raw).hexdigest())
+            with self.subTest(missing_intent_counter=key), self.assertRaises(helper.CheckFailure):
+                helper.windows_fullwalk_aggregate(context, request, envelope_raw, raw, changed_owner)
+        for key, value in (("originTickMs", 1001), ("deadlineTickMs", 211001), ("aggregateBudgetMs", 210001),
+                           ("entryTickMs", 111001), ("prelaunchTickMs", 111001), ("resultPrewriteTickMs", 211000)):
+            changed_owner = deepcopy(owner); changed_owner["aggregate"][key] = value
+            with self.subTest(nonrenewable=key), self.assertRaises(helper.CheckFailure):
+                helper.windows_fullwalk_aggregate(context, request, envelope_raw, intent_raw, changed_owner)
+        with self.assertRaises(helper.CheckFailure):
+            helper.windows_fullwalk_aggregate(legacy["context"], request, envelope_raw, intent_raw, owner)
+        legacy_owner = deepcopy(legacy["owner"])
+        legacy_owner["aggregate"].update(serialPrerequisiteOriginals=6, serialPrerequisiteOriginalsClosed=6)
+        with self.assertRaises(helper.CheckFailure):
+            helper.windows_fullwalk_aggregate(legacy["context"],
+                helper.windows_fullwalk_request_data(legacy["request"], root=context["root"]),
+                legacy["envelope"], legacy["intent_raw"], legacy_owner)
+
+    def test_windows_fullwalk_ordinary_batch_preserves_legacy_originals_and_first_clock(self):
+        data = self.fullwalk_data()
+        context, artifact, before, after, owner, child, original_exit = data["ordinary"]
+        def accept(o=owner, intent=data["blobs"]["ordinaryIntent"], c=context):
+            return helper.windows_ordinary_records(c, artifact, before, after, helper.canonical_json(o),
+                helper.canonical_json(child), helper.canonical_json(original_exit), "success", intent_raw=intent)
+        public = accept()
+        self.assertEqual(public["ordinaryOwner"]["inputOriginalsClosed"], len(helper.PureWindowsPath(context["root"]).parents) + 1 + 8)
+        self.assertEqual(public["ordinaryBatch"]["aggregateBudgetMs"], 210000)
+        self.assertNotIn("ordinaryBatch", self.ordinary_accept(self.ordinary_data()))
+        with self.assertRaises(helper.CheckFailure): self.ordinary_accept(data["ordinary"])  # Batch intent cannot be omitted.
+        legacy = {key: value for key, value in context.items() if key != "qualificationProfile"}
+        with self.assertRaises(helper.CheckFailure): accept(c=legacy)  # No silent ordinary-only admission of batch fields.
+        for key in owner["aggregate"]:
+            changed = deepcopy(owner); changed["aggregate"][key] = None
+            with self.subTest(aggregate_field=key), self.assertRaises(helper.CheckFailure): accept(o=changed)
+        for tick in (999, 211000, True, "5000"):
+            changed = deepcopy(owner); changed["aggregate"]["resultPrewriteTickMs"] = tick
+            with self.subTest(prewrite=tick), self.assertRaises(helper.CheckFailure): accept(o=changed)
+        changed = deepcopy(owner); changed["aggregate"]["extra"] = False
+        with self.assertRaises(helper.CheckFailure): accept(o=changed)
+        intent = helper.bounded_json(data["blobs"]["ordinaryIntent"], 4096)
+        for key, value in (("accountName", "foreign"), ("fixedNativeChildOnly", False), ("freshAccountIntent", False),
+                           ("sourceSha", "f" * 40), ("attempt", True), ("extra", False)):
+            raw = helper.canonical_json({**intent, key: value})
+            changed = deepcopy(owner); changed["aggregate"].update(ordinaryIntentBytes=len(raw), ordinaryIntentSha256=hashlib.sha256(raw).hexdigest())
+            with self.subTest(intent=key), self.assertRaises(helper.CheckFailure): accept(o=changed, intent=raw)
+        with patch.object(helper.time, "monotonic", side_effect=AssertionError("DATA cannot resample an origin")):
+            invocation = helper.windows_fullwalk_invocation(context, artifact, before, data["blobs"]["ordinaryRequest"], 1000)
+        self.assertEqual((invocation["originTickMs"], invocation["deadlineTickMs"]), (1000, 211000))
+        for origin in (-1, True, "1000", 2**64 - 210000):
+            with self.subTest(origin=origin), self.assertRaises(helper.CheckFailure):
+                helper.windows_fullwalk_invocation(context, artifact, before, data["blobs"]["ordinaryRequest"], origin)
+        for request in (data["blobs"]["ordinaryRequest"][:-1], data["blobs"]["ordinaryRequest"].replace(b"runId=123456", b"runId=123457")):
+            with self.assertRaises(helper.CheckFailure): helper.windows_fullwalk_invocation(context, artifact, before, request, 1000)
+
+    def test_windows_fullwalk_original_acquire_compile_preflight_and_finality_chain(self):
+        data = self.fullwalk_data()
+        originals, packages, graph = self.fullwalk_originals(data)
+        context, root = data["context"], Path(data["context"]["root"])
+        environment = {name: "success" for name in (*helper.WINDOWS_FULLWALK_OUTCOMES.values(),
+            "MRK_WINDOWS_FULLWALK_PREFLIGHT_STEP_OUTCOME", "MRK_WINDOWS_FULLWALK_OWNER_STEP_OUTCOME")}
+        with patch.dict(helper.os.environ, environment, clear=True), self.fullwalk_edges(data, originals, packages, graph):
+            owner, app, compiled, prepared = helper.windows_fullwalk_compile_bindings(context)
+            self.assertEqual((owner, app, prepared), (data["standalone"], data["app"], data["prepared_case"]["prepared"]))
+            self.assertEqual(compiled["fullwalk"]["anchoredNativeBuilds"], 1)
+            admitted = helper.windows_fullwalk_prerequisites(context, envelope_raw=data["envelope"])
+            self.assertEqual(admitted["ownerAfterIdentity"], data["ordinary"][3])
+            self.assertNotEqual(admitted["ownerAfterIdentity"], admitted["pre"]["ownerArtifactIdentity"])
+            self.assertEqual(helper.windows_fullwalk_request_from_prerequisites(context, admitted), data["request"])
+            self.assertTrue(helper.windows_fullwalk_observe_final(context, admitted)["protectedFullwalk"])
+        for name, key, value in (("acquire-checks.json", "sourceSha", "f" * 40), ("acquire-checks.json", "originalExitCode", True),
+                ("acquire-checks.json", "appOriginalExitCode", 1), ("acquire-checks.json", "extra", False),
+                ("compile-checks.json", "appOriginalExitCode", 1), ("compile-checks.json", "invocationSha256", "0" * 64),
+                ("compile-checks.json", "standaloneOnly", True), ("compile-started.json", "claimOnly", 1),
+                ("windows-installed-native-preflight-checks.json", "inertOriginalExitCode", True),
+                ("windows-installed-native-preflight-checks.json", "nativeNotStarted", False),
+                ("windows-installed-native-preflight-checks.json", "extra", "not-admitted"),
+                ("windows-installed-fixture-checks.json", "publisherOriginalExitCode", 1),
+                ("windows-installed-native-checks.json", "nativeOriginalExitCode", True),
+                ("windows-installed-native-checks.json", "extra", "not-admitted")):
+            files = dict(originals); row = helper.bounded_json(files[root / name], 64 << 10)
+            row[key] = value; files[root / name] = helper.canonical_json(row)
+            with self.subTest(original=name, field=key), patch.dict(helper.os.environ, environment, clear=True), \
+                 self.fullwalk_edges(data, files, packages, graph), self.assertRaises(helper.CheckFailure):
+                helper.windows_fullwalk_prerequisites(context, envelope_raw=data["envelope"])
+        for name, parent, key, value in (("acquire-checks.json", "fullwalk", "supplierOriginalExitCode", True),
+                ("acquire-checks.json", "fullwalk", "prepareInvocationSha256", "0" * 64),
+                ("compile-checks.json", "fullwalk", "anchoredAppBuilds", 2),
+                ("compile-checks.json", "fullwalk", "anchoredNativeBuilds", 0),
+                ("compile-checks.json", "fullwalk", "manifestSha256", "0" * 64)):
+            files = dict(originals); row = helper.bounded_json(files[root / name], 64 << 10)
+            row[parent][key] = value; files[root / name] = helper.canonical_json(row)
+            with self.subTest(binding=key), self.fullwalk_edges(data, files, packages, graph), self.assertRaises(helper.CheckFailure):
+                helper.windows_fullwalk_compile_bindings(context)
+        for name in helper.WINDOWS_FULLWALK_OUTCOMES.values():
+            with self.subTest(original_step=name), patch.dict(helper.os.environ, {**environment, name: "skipped"}, clear=True), \
+                 self.fullwalk_edges(data, originals, packages, graph), self.assertRaises(helper.CheckFailure):
+                helper.windows_fullwalk_prerequisites(context)
+        for role in ("ordinaryRequest", "ordinaryIntent", "ordinaryOwnerResult", "ordinaryChildResult", "ordinaryOwnerExit", "ordinaryFinality"):
+            files = dict(originals); name, _ = helper.WINDOWS_FULLWALK_BLOBS[role]; files[root / name] += b" "
+            with self.subTest(retained_original=role), patch.dict(helper.os.environ, environment, clear=True), \
+                 self.fullwalk_edges(data, files, packages, graph), self.assertRaises(helper.CheckFailure):
+                helper.windows_fullwalk_prerequisites(context, envelope_raw=data["envelope"])
+        with patch.dict(helper.os.environ, environment, clear=True), self.fullwalk_edges(data, originals, packages, graph), \
+             patch.object(helper, "windows_ordinary_original", return_value=data["ordinary"][2]), self.assertRaises(helper.CheckFailure):
+            helper.windows_fullwalk_prerequisites(context)  # Publisher-before epoch is not ordinary-after.
+        with patch.dict(helper.os.environ, environment, clear=True), self.fullwalk_edges(data, originals, packages, graph), \
+             self.assertRaises(helper.CheckFailure):
+            helper.windows_fullwalk_prerequisites(context, envelope_raw=data["envelope"] + b"\n")
+
+    def test_windows_fullwalk_actual_producer_complete_original_data_chain_binds_all_three_compiles_and_six_proofs(self):
+        data = self.publication_fullwalk_data()
+        files, packages, graph = self.fullwalk_originals(data)
+        context, root = data["context"], Path(data["context"]["root"])
+        environment = self.publication_environment()
+        with patch.dict(helper.os.environ, environment, clear=True), self.fullwalk_edges(data, files, packages, graph):
+            owner, app, compiled, prepared = helper.windows_fullwalk_compile_bindings(context)
+            self.assertEqual((owner, app, prepared), (data["standalone"], data["app"], data["prepared_case"]["prepared"]))
+            self.assertEqual(compiled["helperCompiledArtifact"], data["helper"])
+            self.assertEqual([compiled["fullwalk"][key] for key in ("anchoredNativeBuilds", "anchoredAppBuilds", "anchoredHelperBuilds")], [1, 1, 1])
+            self.assertEqual(helper.windows_fullwalk_check_precheck(context)[1], data["precheck_raw"])
+            admitted = helper.windows_fullwalk_prerequisites(context, envelope_raw=data["envelope"])
+            self.assertEqual(admitted["publication"]["objects"], data["production"]["objects"]["after"])
+            self.assertEqual(admitted["ownerAfterIdentity"], data["ordinary"][3])
+            self.assertNotEqual(admitted["ownerAfterIdentity"], data["pre"]["ownerArtifactIdentity"])
+            self.assertEqual(helper.windows_fullwalk_request_from_prerequisites(context, admitted), data["request"])
+            result = helper.windows_fullwalk_observe_final(context, admitted)
+            self.assertTrue(result["protectedFullwalk"])
+            self.assertEqual(result["aggregate"], {"aggregateBudgetMs": 210000, "minimumSecondOwnerReserveMs": 100000,
+                                                 "originalClockAndIntentBindingsChecked": True})
+        for name, key, value in (("compile-checks.json", "helperOriginalExitCode", True),
+                ("compile-checks.json", "helperInvocationSha256", "0" * 64),
+                ("helper-compiled-artifact.json", "sha256", "f" * 64),
+                ("compile-checks.json", "helperCompiledArtifact", data["app"])):
+            altered = dict(files); row = helper.bounded_json(files[root / name], 64 << 10)
+            row[key] = value; altered[root / name] = helper.canonical_json(row)
+            with self.subTest(original=name, field=key), patch.dict(helper.os.environ, environment, clear=True), \
+                 self.fullwalk_edges(data, altered, packages, graph), self.assertRaises(helper.CheckFailure):
+                helper.windows_fullwalk_prerequisites(context, envelope_raw=data["envelope"])
+        for role, (name, _) in helper.WINDOWS_RUNTIME_PUBLICATION_PROOFS.items():
+            changed = {**files, root / name: files[root / name] + b" "}
+            with self.subTest(changed_original=role), patch.dict(helper.os.environ, environment, clear=True), \
+                 self.fullwalk_edges(data, changed, packages, graph), self.assertRaises(helper.CheckFailure):
+                helper.windows_fullwalk_prerequisites(context, envelope_raw=data["envelope"])
+        for suffix in helper.WINDOWS_RUNTIME_PUBLICATION_STEPS.values():
+            for ending in ("_STEP_OUTCOME", "_FINALIZE_STEP_OUTCOME"):
+                key = "MRK_WINDOWS_PRODUCER_" + suffix + ending
+                with self.subTest(original_gate=key), patch.dict(helper.os.environ, {**environment, key: "skipped"}, clear=True), \
+                     self.fullwalk_edges(data, files, packages, graph), self.assertRaises(helper.CheckFailure):
+                    helper.windows_fullwalk_prerequisites(context, envelope_raw=data["envelope"])
+
+    def test_windows_fullwalk_second_clock_and_intent_cannot_renew_or_overtake_ordinary(self):
+        data = self.fullwalk_data()
+        def changed(**ticks):
+            item = deepcopy(data); item["owner"]["aggregate"].update(ticks)
+            if "entryTickMs" in ticks:
+                item["intent"]["fullwalkBatch"]["entryTickMs"] = ticks["entryTickMs"]
+                item["intent_raw"] = helper.canonical_json(item["intent"])
+                item["owner"]["aggregate"].update(ownerIntentBytes=len(item["intent_raw"]), ownerIntentSha256=hashlib.sha256(item["intent_raw"]).hexdigest())
+            return item
+        boundary = changed(prelaunchTickMs=111000, resultPrewriteTickMs=111001)
+        self.assertTrue(self.fullwalk_accept(boundary)["aggregate"]["originalClockAndIntentBindingsChecked"])
+        for ticks in ({"entryTickMs": 4999}, {"entryTickMs": 111001}, {"prelaunchTickMs": 5999},
+                {"prelaunchTickMs": 111001, "resultPrewriteTickMs": 111002}, {"resultPrewriteTickMs": 6499},
+                {"resultPrewriteTickMs": 211000}, {"originTickMs": 1001}, {"deadlineTickMs": 211001},
+                {"aggregateBudgetMs": 210001}, {"entryTickMs": True}, {"prelaunchTickMs": True}):
+            with self.subTest(ticks=ticks), self.assertRaises(helper.CheckFailure): self.fullwalk_accept(changed(**ticks))
+        for key in data["owner"]["aggregate"]:
+            item = deepcopy(data); item["owner"]["aggregate"][key] = None
+            with self.subTest(aggregate_field=key), self.assertRaises(helper.CheckFailure): self.fullwalk_accept(item)
+        for tick in (True, 999, 6001):
+            item = deepcopy(data); item["ordinary_prewrite"] = tick
+            with self.subTest(ordinary_prewrite=tick), self.assertRaises(helper.CheckFailure): self.fullwalk_accept(item)
+        for extra in ("owner", "intent"):
+            item = deepcopy(data)
+            if extra == "owner": item["owner"]["aggregate"]["extra"] = False
+            else:
+                item["intent"]["fullwalkBatch"]["extra"] = False; item["intent_raw"] = helper.canonical_json(item["intent"])
+                item["owner"]["aggregate"].update(ownerIntentBytes=len(item["intent_raw"]), ownerIntentSha256=hashlib.sha256(item["intent_raw"]).hexdigest())
+            with self.subTest(extra=extra), self.assertRaises(helper.CheckFailure): self.fullwalk_accept(item)
+        item = deepcopy(data); item["owner"]["inputOriginals"] -= 10; item["owner"]["inputOriginalsClosed"] -= 10
+        with self.assertRaises(helper.CheckFailure): self.fullwalk_accept(item)  # Stale seam A+11 cannot pass.
+        envelope = helper.windows_fullwalk_wire(data["envelope"], "prerequisite")
+        for key, value in (("ownerArtifactAfterOrdinaryIdentity", data["ordinary"][2]),
+                           ("publisherFinalizeStepOutcome", "skipped"), ("envelopeCloseGate", "self-certified")):
+            item = deepcopy(data); item["envelope"] = helper.windows_fullwalk_text("prerequisite", {**envelope, key: value})
+            with self.subTest(envelope=key), self.assertRaises(helper.CheckFailure): self.fullwalk_accept(item)
+
+    def test_windows_fullwalk_phase_uses_only_two_original_anchored_compiles(self):
+        data = self.fullwalk_data()
+        files, packages, graph = self.fullwalk_originals(data)
+        context = {**data["context"], "sdk": {"version": helper.WINDOWS_SDK_VERSION, "headers": []}}
+        root = Path(context["root"])
+        opened = []
+        class Output:
+            def __enter__(self): return self
+            def __exit__(self, *_): pass
+        def open_output(path, mode, **_):
+            self.assertEqual(mode, "x"); self.assertEqual(path.parent, root)
+            self.assertIn(path.name, ("compile-messages.jsonl", "compile.stderr", "app-compile-messages.jsonl", "app-compile.stderr"))
+            self.assertNotIn(path, opened); opened.append(path)
+            return Output()
+        with self.fullwalk_edges(data, files, packages, graph), \
+             patch.object(helper, "windows_installed_context", return_value=context), \
+             patch.object(helper, "source_unchanged"), patch.object(helper, "windows_installed_inputs"), \
+             patch.object(helper, "clean_environment", return_value={}), \
+             patch.object(helper, "windows_sdk_root", return_value=Path("/inert-sdk")), \
+             patch.object(helper, "fixed_file_inventory", return_value=[]), \
+             patch.object(helper, "tools", return_value=("/inert-compiler/cargo.exe", "/inert-compiler/rustc.exe")), \
+             patch.object(helper.Path, "open", autospec=True, side_effect=open_output), \
+             patch.object(helper.time, "monotonic", return_value=100.0), \
+             patch.object(helper, "windows_installed_compile_failure") as diagnostic, \
+             patch.object(helper, "write_json") as written, patch.object(helper, "run", return_value=None) as run:
+            helper.windows_installed_phase("compile", helper.WINDOWS_INSTALLED_SCOPE)
+        diagnostic.assert_not_called()
+        self.assertEqual(len(run.call_args_list), 2)
+        self.assertEqual([call.args[0] for call in run.call_args_list], [
+            helper.windows_fullwalk_native_argv("/inert-compiler/cargo.exe", context),
+            helper.windows_installed_app_argv("/inert-compiler/cargo.exe", context)])
+        self.assertEqual([call.kwargs["check"] for call in run.call_args_list],
+                         ["windows-installed-test-compile-only", "windows-installed-app-test-compile-only"])
+        for call in run.call_args_list:
+            self.assertEqual(call.kwargs["timeout"], 600)
+            self.assertEqual(call.kwargs["env"]["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"], data["prepared_case"]["prepared"]["manifestSha256"])
+            self.assertEqual(call.kwargs["env"]["MRK_BUNDLED_PROTOCOL_SHA256"], data["prepared_case"]["prepared"]["protocolSha256"])
+            self.assertIn("--offline", call.args[0]); self.assertIn("--no-default-features", call.args[0])
+            self.assertNotIn("--features", call.args[0])
+        results = {call.args[0].name: call.args[1] for call in written.call_args_list}
+        self.assertEqual(set(results), {"compile-started.json", "compiled-test.json", "app-compiled-test.json", "compile-checks.json"})
+        self.assertEqual((results["compile-checks.json"]["fullwalk"]["anchoredNativeBuilds"],
+                          results["compile-checks.json"]["fullwalk"]["anchoredAppBuilds"]), (1, 1))
+        self.assertEqual(len(opened), 4)
+        source = HELPER.read_text(encoding="utf-8")
+        phase = source.split("def windows_installed_phase(", 1)[1].split("\ndef main(", 1)[0]
+        self.assertEqual(phase.count('check="windows-installed-test-compile-only"'), 1)
+        self.assertEqual(phase.count('check="windows-installed-app-test-compile-only"'), 1)
+        self.assertLess(phase.index("environment.update(MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"), phase.index('check="windows-installed-test-compile-only"'))
+        self.assertLess(phase.index('check="windows-installed-test-compile-only"'), phase.index('check="windows-installed-app-test-compile-only"'))
+        self.assertLess(phase.index('windows_fullwalk_acquire(context, environment, deadline)'), phase.index('check="windows-installed-locked-metadata"'))
+
+    def test_windows_fullwalk_actual_producer_phase_uses_three_original_builds_under_one_anchored_deadline(self):
+        data = self.publication_fullwalk_data()
+        files, packages, graph = self.fullwalk_originals(data)
+        context = {**data["context"], "sdk": {"version": helper.WINDOWS_SDK_VERSION, "headers": []}}
+        root, opened, streams = Path(context["root"]), [], {}
+        class Output:
+            closed = False
+            def __enter__(self): return self
+            def __exit__(self, *_): self.closed = True
+        def open_output(path, mode, **_):
+            self.assertEqual((mode, path.parent), ("x", root))
+            self.assertIn(path.name, ("compile-messages.jsonl", "compile.stderr", "app-compile-messages.jsonl", "app-compile.stderr",
+                                     "helper-compile-messages.jsonl", "helper-compile.stderr"))
+            self.assertNotIn(path, opened); opened.append(path)
+            streams[path.name] = Output()
+            return streams[path.name]
+        def remaining(deadline, maximum):
+            self.assertEqual(deadline, 760.0)  # Original phase origin100 +660; never a per-role replacement.
+            self.assertIn(maximum, (1, 600))
+            return maximum
+        def finish_handoff(received, deadline):
+            self.assertIs(received, context); self.assertEqual(deadline, 760.0)
+            self.assertEqual(len(streams), 6)
+            self.assertTrue(all(stream.closed for stream in streams.values()))
+            return data["helper"]
+        with self.fullwalk_edges(data, files, packages, graph), \
+             patch.object(helper, "windows_installed_context", return_value=context), \
+             patch.object(helper, "source_unchanged"), patch.object(helper, "windows_installed_inputs"), \
+             patch.object(helper, "clean_environment", return_value={}), \
+             patch.object(helper, "windows_sdk_root", return_value=Path("/inert-sdk")), \
+             patch.object(helper, "fixed_file_inventory", return_value=[]), \
+             patch.object(helper, "tools", return_value=("/inert-compiler/cargo.exe", "/inert-compiler/rustc.exe")), \
+             patch.object(helper.Path, "open", autospec=True, side_effect=open_output), \
+             patch.object(helper.time, "monotonic", return_value=100.0), \
+             patch.object(helper, "windows_installed_remaining", side_effect=remaining) as clock, \
+             patch.object(helper, "windows_installed_helper_handoff", side_effect=finish_handoff) as handoff, \
+             patch.object(helper, "windows_installed_compile_failure") as diagnostic, \
+             patch.object(helper, "write_json") as written, patch.object(helper, "run", return_value=None) as run:
+            helper.windows_installed_phase("compile", helper.WINDOWS_INSTALLED_SCOPE)
+        diagnostic.assert_not_called()
+        handoff.assert_called_once_with(context, 760.0)
+        expected = [helper.windows_fullwalk_native_argv("/inert-compiler/cargo.exe", context),
+                    helper.windows_installed_app_argv("/inert-compiler/cargo.exe", context),
+                    helper.windows_installed_helper_argv("/inert-compiler/cargo.exe", context)]
+        self.assertEqual([call.args[0] for call in run.call_args_list], expected)
+        self.assertEqual([call.kwargs["check"] for call in run.call_args_list], ["windows-installed-test-compile-only",
+            "windows-installed-app-test-compile-only", "windows-installed-helper-compile-only"])
+        for call in run.call_args_list:
+            self.assertEqual(call.kwargs["timeout"], 600)
+            self.assertEqual(call.kwargs["env"]["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"], data["prepared_case"]["prepared"]["manifestSha256"])
+            self.assertEqual(call.kwargs["env"]["MRK_BUNDLED_PROTOCOL_SHA256"], data["prepared_case"]["prepared"]["protocolSha256"])
+        self.assertEqual(clock.call_count, 4)
+        self.assertEqual(len(opened), 6)
+        results = {call.args[0].name: call.args[1] for call in written.call_args_list}
+        self.assertEqual(set(results), {"compile-started.json", "compiled-test.json", "app-compiled-test.json",
+                                      "helper-compiled-artifact.json", "compile-checks.json"})
+        self.assertEqual(results["helper-compiled-artifact.json"], data["helper"])
+        compiled = results["compile-checks.json"]
+        self.assertEqual(compiled["helperCompiledArtifact"], data["helper"])
+        self.assertEqual(compiled["helperOriginalExitCode"], 0)
+        self.assertEqual(compiled["helperInvocationSha256"], hashlib.sha256(helper.canonical_json(expected[2])).hexdigest())
+        self.assertEqual([compiled["fullwalk"][key] for key in ("anchoredNativeBuilds", "anchoredAppBuilds", "anchoredHelperBuilds")], [1, 1, 1])
+        self.assertEqual(expected[2][1], "build")
+        self.assertNotIn("--lib", expected[2]); self.assertNotIn("--no-run", expected[2]); self.assertNotIn("qualification-result", expected[2])
+
+    def test_windows_compile_failure_diagnostic_preserves_original_errors_and_closed_stream_boundary(self):
+        for stage, prefix, check in (("standalone", "", "windows-installed-test-compile-only"),
+                                     ("app", "app-", "windows-installed-app-test-compile-only"),
+                                     ("helper", "helper-", "windows-installed-helper-compile-only")):
+            data = self.publication_fullwalk_data() if stage == "helper" else self.fullwalk_data()
+            files, packages, graph = self.fullwalk_originals(data)
+            context = {**data["context"], "sdk": {"version": helper.WINDOWS_SDK_VERSION, "headers": []}}
+            root = Path(context["root"])
+            for edge in ("compile", "diagnostic-error", "diagnostic-interrupt", "compile-interrupt", "open", "deadline", "close", "unclosed",
+                         *(("success-unclosed",) if stage == "helper" else ())):
+                original = helper.CheckFailure("Fixed original compile failure")
+                boundary = KeyboardInterrupt() if edge == "compile-interrupt" else helper.CheckFailure("Fixed stream/deadline failure")
+                expected = boundary if edge in {"compile-interrupt", "open", "deadline", "close"} else original
+                streams = {}
+                class Output:
+                    def __init__(self, name): self.name, self.closed = name, False
+                    def __enter__(self): return self
+                    def __exit__(self, *_):
+                        self.closed = not (edge in {"unclosed", "success-unclosed"} and self.name == prefix + "compile.stderr")
+                        if edge == "close" and self.name == prefix + "compile.stderr": raise boundary
+                def open_output(path, mode, **_):
+                    self.assertEqual((path.parent, mode), (root, "x"))
+                    self.assertIn(path.name, ("compile-messages.jsonl", "compile.stderr", "app-compile-messages.jsonl", "app-compile.stderr",
+                                             "helper-compile-messages.jsonl", "helper-compile.stderr"))
+                    if edge == "open" and path.name == prefix + "compile.stderr": raise boundary
+                    self.assertNotIn(path.name, streams)
+                    streams[path.name] = Output(path.name)
+                    return streams[path.name]
+                def run_compile(_, **kw):
+                    self.assertFalse(kw["output"].closed or kw["diagnostics"].closed)
+                    if kw["check"] == check and edge != "success-unclosed": raise expected if edge == "compile-interrupt" else original
+                def remaining(*_):
+                    if edge == "deadline" and prefix + "compile.stderr" in streams: raise boundary
+                    return 600
+                def emit(received, selected):
+                    self.assertIs(received, context); self.assertEqual(selected, stage)
+                    self.assertTrue(all(stream.closed for stream in streams.values()))
+                    if edge == "diagnostic-error": raise OSError("PRIVATE-COMPILER-TEXT")
+                    if edge == "diagnostic-interrupt": raise KeyboardInterrupt()
+                with self.subTest(stage=stage, edge=edge), self.fullwalk_edges(data, files, packages, graph), \
+                     patch.object(helper, "windows_installed_context", return_value=context), \
+                     patch.object(helper, "source_unchanged"), patch.object(helper, "windows_installed_inputs"), \
+                     patch.object(helper, "clean_environment", return_value={}), \
+                     patch.object(helper, "windows_sdk_root", return_value=Path("/inert-sdk")), \
+                     patch.object(helper, "fixed_file_inventory", return_value=[]), \
+                     patch.object(helper, "tools", return_value=("/inert-compiler/cargo.exe", "/inert-compiler/rustc.exe")), \
+                     patch.object(helper.Path, "open", autospec=True, side_effect=open_output), \
+                     patch.object(helper.time, "monotonic", return_value=100.0), \
+                     patch.object(helper, "windows_installed_remaining", side_effect=remaining), \
+                     patch.object(helper, "windows_installed_compile_failure", side_effect=emit) as diagnostic, \
+                     patch.object(helper, "write_json") as written, patch.object(helper, "run", side_effect=run_compile) as run:
+                    with self.assertRaises(type(expected)) as caught: helper.windows_installed_phase("compile", helper.WINDOWS_INSTALLED_SCOPE)
+                    if edge == "success-unclosed": self.assertIn("writers are not closed", str(caught.exception))
+                    else: self.assertIs(caught.exception, expected)
+                    if edge in {"compile", "diagnostic-error", "diagnostic-interrupt"}:
+                        diagnostic.assert_called_once_with(context, stage)
+                        self.assertIsNone(original.__context__)  # Private diagnostic errors do not replace or chain onto it.
+                    else: diagnostic.assert_not_called()
+                    self.assertEqual(len(run.call_args_list), {"standalone": 1, "app": 2, "helper": 3}[stage] - (edge in {"open", "deadline"}))
+                    outputs = {call.args[0].name for call in written.call_args_list}
+                    self.assertEqual(outputs, {"compile-started.json"} | ({"compiled-test.json"} if stage != "standalone" else set())
+                        | ({"app-compiled-test.json"} if stage == "helper" else set()))
+                if edge not in {"unclosed", "success-unclosed"}: self.assertTrue(all(stream.closed for stream in streams.values()))
+
+    def test_windows_fullwalk_app_original_role_keeps_512mib_and_raw_same_api_state_narrow(self):
+        raw = b"exe"
+        before = SimpleNamespace(st_dev=77, st_ino=2**100 + 7, st_mode=stat.S_IFREG | 0o755, st_nlink=1, st_size=len(raw),
+            st_mtime_ns=200, st_birthtime_ns=100, st_ctime_ns=100, st_file_attributes=128, st_reparse_tag=0)
+        opened = SimpleNamespace(**{**vars(before), "st_mode": stat.S_IFREG | 0o644, "st_ctime_ns": 700})
+        name = "mobile_release_desktop-bbbbbbbbbbbbbbbb.exe"
+        identity = [before.st_dev, before.st_ino, before.st_mode, before.st_nlink, before.st_size, before.st_mtime_ns,
+                    before.st_birthtime_ns, before.st_file_attributes, before.st_reparse_tag, before.st_ctime_ns]
+        artifact = {"path": "C:\\owned\\" + name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(), "identity": identity}
+        class Input(io.BytesIO):
+            def fileno(self): return 91
+        def observe(*, last=None, end=None, role=True, selected=name, claimed=None, details=before):
+            stream = Input(raw)
+            named = SimpleNamespace(name=selected, lstat=lambda: details, open=lambda *_: stream)
+            count = [details, details if last is None else last]
+            named.lstat = lambda: count.pop(0)
+            try:
+                with patch.object(helper, "Path", return_value=named), patch.object(helper.os, "name", "nt"), \
+                     patch.object(helper.os, "fstat", side_effect=[opened, opened if end is None else end]):
+                    value = helper.windows_ordinary_original(artifact if claimed is None else claimed, app_role=role)
+                self.assertTrue(stream.closed)
+                return value
+            finally:
+                stream.close()
+        expected = "77:" + before.st_ino.to_bytes(16, "little").hex() + ":116444736000000001:116444736000000002:116444736000000007:128"
+        self.assertEqual(observe(), expected)
+        for field in ("st_ctime_ns", "st_birthtime_ns", "st_mode", "st_ino", "st_file_attributes", "st_mtime_ns", "st_size", "st_nlink"):
+            for edge in ("last", "end"):
+                state = before if edge == "last" else opened
+                changed = SimpleNamespace(**{**vars(state), field: getattr(state, field) + 1})
+                with self.subTest(api=edge, field=field), self.assertRaises(helper.CheckFailure): observe(**{edge: changed})
+        for options in ({"role": False}, {"role": 1}, {"selected": "mrk_windows_installed_native-aaaaaaaaaaaaaaaa.exe"},
+                        {"claimed": {**artifact, "identity": [77, before.st_ino, 3, 200, 100]}}):
+            with self.subTest(role=options), self.assertRaises(helper.CheckFailure): observe(**options)
+        too_large = SimpleNamespace(**{**vars(before), "st_size": (512 << 20) + 1})
+        with self.assertRaises(helper.CheckFailure):
+            observe(details=too_large, claimed={**artifact, "size": too_large.st_size, "identity": [*identity[:4], too_large.st_size, *identity[5:]]})
+        helper_name = "mrk-windows-runtime-publish.exe"
+        helper_artifact = {**artifact, "path": "C:\\owned\\" + helper_name,
+            "identity": [before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns]}
+        self.assertEqual(observe(role=False, selected=helper_name, claimed=helper_artifact), expected)
+        with self.assertRaises(helper.CheckFailure): observe(role=True, selected=helper_name, claimed=helper_artifact)
+        helper_large = SimpleNamespace(**{**vars(before), "st_size": (128 << 20) + 1})
+        with self.assertRaisesRegex(helper.CheckFailure, "original changed before open"):
+            observe(role=False, selected=helper_name, details=helper_large, claimed={**helper_artifact,
+                "size": helper_large.st_size, "identity": [before.st_dev, before.st_ino, helper_large.st_size, before.st_mtime_ns, before.st_ctime_ns]})
+
+    def test_windows_fullwalk_retirement_and_redacted_retention_keep_distinct_ordinary_pass(self):
+        data = self.fullwalk_data()
+        context, request = data["context"], helper.windows_fullwalk_request_data(data["request"], root=data["context"]["root"])
+        base = {"schemaVersion": 1, "profile": helper.WINDOWS_FULLWALK_PROFILE,
+            **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")},
+            "retirementTest": helper.WINDOWS_FULLWALK_RETIRE, "artifactSha256": request["ownerArtifactSha256"],
+            "requestSha256": hashlib.sha256(data["request"]).hexdigest(), "publisherReceiptSha256": hashlib.sha256(data["blobs"]["publisherReceipt"]).hexdigest()}
+        result = {**base, "deletedFiles": 47, "deletedDirectories": 5, "absentPostconditions": 52, "dispositionCalls": 52,
+            "fileOriginals": 111, "fileOriginalsClosed": 111, "parentBookSettled": True, "unknown": False,
+            "productionEnabled": False, "resultCloseGate": "original-retirement-exit-zero-required"}
+        original_exit = {**base, "originalWaitReturned": True, "exitCode": 0, "writerCloseGate": "original-retirement-step-success-required"}
+        def accept(row=result, exited=original_exit, outcome="success"):
+            return helper.windows_fullwalk_retirement_data(context, data["request"], data["blobs"]["publisherReceipt"],
+                helper.canonical_json(row), helper.canonical_json(exited), outcome)
+        self.assertEqual(accept()["absentPostconditions"], 52)
+        for key, value in (("fileOriginals", True), ("fileOriginals", 104), ("fileOriginalsClosed", 110), ("deletedFiles", 46),
+                ("deletedDirectories", 4), ("absentPostconditions", 51), ("dispositionCalls", 53), ("parentBookSettled", False),
+                ("unknown", True), ("productionEnabled", True), ("resultCloseGate", "self-certified"), ("extra", False)):
+            with self.subTest(retirement=key), self.assertRaises(helper.CheckFailure): accept(row={**result, key: value})
+        for key, value in (("exitCode", 1), ("exitCode", True), ("originalWaitReturned", False),
+                           ("writerCloseGate", "self-certified"), ("publisherReceiptSha256", "0" * 64), ("extra", False)):
+            with self.subTest(exit=key), self.assertRaises(helper.CheckFailure): accept(exited={**original_exit, key: value})
+        for outcome in ("failure", "cancelled", "skipped", "unavailable"):
+            with self.subTest(outcome=outcome), self.assertRaises(helper.CheckFailure): accept(outcome=outcome)
+        files, packages, graph = self.fullwalk_originals(data)
+        root = Path(context["root"])
+        files[root / "fullwalk-retirement-result.private.json"] = helper.canonical_json(result)
+        files[root / "fullwalk-retirement-exit.private.json"] = helper.canonical_json(original_exit)
+        environment = {name: "success" for name in (*helper.WINDOWS_FULLWALK_OUTCOMES.values(),
+            "MRK_WINDOWS_FULLWALK_PREFLIGHT_STEP_OUTCOME", "MRK_WINDOWS_FULLWALK_OWNER_STEP_OUTCOME",
+            "MRK_WINDOWS_FULLWALK_FINALIZE_STEP_OUTCOME", "MRK_WINDOWS_RETIREMENT_STEP_OUTCOME")}
+        for fullwalk_passed in (True, False):
+            outcomes = {**environment, **({} if fullwalk_passed else {
+                "MRK_WINDOWS_FULLWALK_OWNER_STEP_OUTCOME": "failure", "MRK_WINDOWS_FULLWALK_FINALIZE_STEP_OUTCOME": "skipped",
+                "MRK_WINDOWS_RETIREMENT_STEP_OUTCOME": "skipped"})}
+            with self.subTest(fullwalk=fullwalk_passed), patch.dict(helper.os.environ, outcomes, clear=True), \
+                 self.fullwalk_edges(data, files, packages, graph), \
+                 patch.object(helper, "windows_installed_retain_runtime", return_value=({"status": "unavailable"}, None)), \
+                 patch.object(helper, "write_json") as publication:
+                helper.windows_fullwalk_retain(context)
+            publication.assert_called_once()
+            destination, public = publication.call_args.args
+            self.assertEqual(destination, root / "public/windows-fullwalk-qualification.json")
+            self.assertEqual(public["results"]["ordinary"]["status"], "passed")
+            self.assertEqual(public["results"]["publisher"]["status"], "passed")
+            self.assertEqual(public["results"]["fullwalk"]["status"], "passed" if fullwalk_passed else "failed")
+            self.assertEqual(public["results"]["retirement"]["status"], "passed" if fullwalk_passed else "unavailable")
+            self.assertIs(public["combinedPassed"], fullwalk_passed)
+            exported = helper.canonical_json(public)
+            for private in (context["root"].encode(), data["app"]["path"].encode(), b"accountName", b"accountSidSha256",
+                            b"fileId", b"securityBefore", b"ordinary-owner-intent", b"fullwalk-request", b"stdout", b"stderr",
+                            b"mrk0123456789abcdef", b"mrkfedcba9876543210"):
+                self.assertNotIn(private, exported)
+        # A successful step cannot bless an extra/missing/renewed finalizer field.
+        # Its failure must still leave the distinct, closed ordinary pass intact.
+        final = root / "windows-installed-fullwalk-checks.json"
+        for key, value in (("extra", False), ("notVerified", []), ("requestSha256", "0" * 64), ("protectedFullwalk", 1)):
+            originals = dict(files)
+            row = helper.bounded_json(files[final], 64 << 10)
+            row[key] = value
+            originals[final] = helper.canonical_json(row)
+            with self.subTest(finalizer=key), patch.dict(helper.os.environ, environment, clear=True), \
+                 self.fullwalk_edges(data, originals, packages, graph), \
+                 patch.object(helper, "windows_installed_retain_runtime", return_value=({"status": "unavailable"}, None)), \
+                 patch.object(helper, "write_json") as publication:
+                helper.windows_fullwalk_retain(context)
+            public = publication.call_args.args[1]
+            self.assertEqual(public["results"]["ordinary"]["status"], "passed")
+            self.assertEqual(public["results"]["fullwalk"]["status"], "failed")
+            self.assertNotEqual(public["results"]["retirement"]["status"], "passed")
+            self.assertFalse(public["combinedPassed"])
+
+    def test_windows_fullwalk_actual_producer_retention_has_seven_results_and_no_retirement_or_consumer_claim(self):
+        data = self.publication_fullwalk_data()
+        files, packages, graph = self.fullwalk_originals(data)
+        context, root = data["context"], Path(data["context"]["root"])
+        environment = {**self.publication_environment(), "MRK_WINDOWS_RETIREMENT_STEP_OUTCOME": "must-not-be-read"}
+        # Preserve the existing selector name; scalar is a distinct eighth result.
+        roles = ("scalar", "stage", "helperSuccess", "before", "helperOccupied", "publisher", "ordinary", "fullwalk")
+        finalizers = {role: "MRK_WINDOWS_PRODUCER_" + suffix + "_FINALIZE_STEP_OUTCOME"
+                      for role, suffix in helper.WINDOWS_RUNTIME_PUBLICATION_STEPS.items()}
+        finalizers.update(scalar="MRK_WINDOWS_PRODUCER_SCALAR_FINALIZE_STEP_OUTCOME", publisher="MRK_WINDOWS_FIXTURE_FINALIZE_STEP_OUTCOME",
+            ordinary="MRK_WINDOWS_ORDINARY_FINALIZE_STEP_OUTCOME", fullwalk="MRK_WINDOWS_FULLWALK_FINALIZE_STEP_OUTCOME")
+        def retain(originals, outcomes):
+            with patch.dict(helper.os.environ, outcomes, clear=True), self.fullwalk_edges(data, originals, packages, graph), \
+                 patch.object(helper, "windows_fullwalk_retirement_data", side_effect=AssertionError("Production cannot retire")), \
+                 patch.object(helper, "windows_installed_retain_runtime", return_value=({"status": "unavailable"}, None)), \
+                 patch.object(helper, "write_json") as publication:
+                helper.windows_fullwalk_retain(context)
+            publication.assert_called_once()
+            destination, public = publication.call_args.args
+            self.assertEqual(destination, root / "public/windows-fullwalk-qualification.json")
+            self.assertEqual(tuple(public["results"]), roles)
+            self.assertFalse(public["syntheticFixtureOnly"])
+            self.assertTrue(public["retentionOnlyNotNativeSuccess"])
+            for name in ("productionEnabled", "runtimeConsumerEnabled", "pythonExecuted", "appLaunched", "msiQualified",
+                         "saveQualified", "publishedObjectRetirementEnabled"):
+                self.assertIs(public[name], False)
+            exported = helper.canonical_json(public)
+            for private in (context["root"].encode(), data["app"]["path"].encode(), data["helper"]["path"].encode(),
+                            b"accountName", b"accountSidSha256", b"fileId", b"securityBefore", b"securitySha256",
+                            b"ordinary-owner-intent", b"fullwalk-request", b"stdout", b"stderr",
+                            b"mrk0123456789abcdef", b"mrkfedcba9876543210"):
+                self.assertNotIn(private, exported)
+            return public
+        for failed in (None, *roles):
+            outcomes = environment if failed is None else {**environment, finalizers[failed]: "failure"}
+            with self.subTest(finalizer=failed):
+                public = retain(files, outcomes)
+            self.assertIs(public["combinedPassed"], failed is None)
+            self.assertIs(public["actualFixedProducerObserved"], failed is None)
+            if failed is None:
+                self.assertTrue(all(row["status"] == "passed" for row in public["results"].values()))
+                self.assertEqual(public["buildBindings"]["anchoredHelperBuilds"], 1)
+                self.assertEqual(public["buildBindings"]["helperNativeFeatures"], ["runtime-publication"])
+                self.assertTrue(public["buildBindings"]["normalHelperNotLibtest"])
+                self.assertTrue(public["results"]["scalar"]["facts"]["derivedNonzero"])
+            else:
+                self.assertNotEqual(public["results"][failed]["status"], "passed")
+                if failed != "ordinary":
+                    self.assertEqual(public["results"]["ordinary"]["status"], "passed")
+                if failed != "scalar":
+                    self.assertEqual(public["results"]["scalar"]["status"], "passed")
+        names = {role: "producer-" + role + "-checks.json" for role in helper.WINDOWS_RUNTIME_PUBLICATION_STEPS}
+        names.update(scalar="producer-scalar-checks.json", publisher="windows-installed-fixture-checks.json", ordinary="windows-installed-native-checks.json",
+                     fullwalk="windows-installed-fullwalk-checks.json")
+        for role, name in names.items():
+            row = helper.bounded_json(files[root / name], 64 << 10)
+            originals = {**files, root / name: helper.canonical_json({**row, "extra": False})}
+            with self.subTest(changed_finalizer_original=role):
+                public = retain(originals, environment)
+            self.assertFalse(public["combinedPassed"]); self.assertFalse(public["actualFixedProducerObserved"])
+            self.assertNotEqual(public["results"][role]["status"], "passed")
+            if role != "ordinary": self.assertEqual(public["results"]["ordinary"]["status"], "passed")
+        with patch.object(helper, "windows_fullwalk_request_data", side_effect=AssertionError("No production retirement parser")), \
+             self.assertRaises(helper.CheckFailure):
+            helper.windows_fullwalk_retirement_data(context, b"not a request", b"not a publisher", b"not a result", b"not an exit", "success")
+        body = HELPER.read_text(encoding="utf-8").split("def windows_fullwalk_retain(", 1)[1].split("\ndef ", 1)[0]
+        self.assertIn('if not production and admitted is not None and outcomes["retirement"] == "success":', body)
+        for forbidden in ("run(", "tools(", "unlink(", "rmtree(", "SetFileInformationByHandle", "disposition("):
+            self.assertNotIn(forbidden, body)
+
+    def test_windows_fullwalk_native_schema_custody_and_reviewed_gate_source_parity(self):
+        # SOURCE parity only, never a claim that a Linux check exercised an OS call.
+        import re
+        base = SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src"
+        fixture = (base / "qualification_fixture.rs").read_text(encoding="utf-8")
+        shared = (base / "qualification_result.rs").read_text(encoding="utf-8")
+        owner = (base / "ordinary_owner.rs").read_text(encoding="utf-8")
+        library = (base / "lib.rs").read_text(encoding="utf-8")
+        publication = (base / "publication.rs").read_text(encoding="utf-8")
+        self.assertIn("#[cfg(test)]\nmod qualification_fixture;", library)
+        scalar = publication.split("#[cfg(test)]\nmod scalar_qualification {", 1)[1]
+        fields = helper.WINDOWS_RUNTIME_PUBLICATION_SCALAR_FIELDS
+        block = scalar.split("const FIELDS: [&str; " + str(len(fields)) + "] = [", 1)[1].split("];", 1)[0]
+        self.assertEqual(tuple(re.findall(r'"([^"]+)"', block)), fields)
+        self.assertIn('const HEADER: &str = "' + helper.WINDOWS_RUNTIME_PUBLICATION_SCALAR_HEADER + '";', scalar)
+        self.assertIn('const TEST: &str = "' + helper.WINDOWS_RUNTIME_PUBLICATION_SCALAR + '";', scalar)
+        self.assertEqual(scalar.count("#[test]"), 1)
+        self.assertEqual(scalar.count("#[ignore = "), 1)
+        for variant in ("QualificationSourceToken", "QualificationRestrictedToken"):
+            self.assertIn("#[cfg(test)]\n    " + variant + "(usize)", library)
+        self.assertIn("Call::QualificationSourceToken(source.index)", scalar)
+        self.assertIn("Call::QualificationRestrictedToken(derived.index)", scalar)
+        self.assertIn('reserve(Kind::ProcessToken, Some(source.index), "", String::new())', scalar)
+        self.assertIn("source_fact.length == ObservedScalarLength::One && source_fact.zero && source_fact.admitted", scalar)
+        self.assertIn("&& !derived_fact.zero && !derived_fact.admitted", scalar)
+        self.assertIn("let value = complete.scalar()?;", scalar)
+        self.assertIn("match scalar_value(value)", scalar)
+        self.assertIn("Err(Error::Unsafe) if value > 1 => false", scalar)
+        self.assertIn("Some(Returned::Boolean(v, 0)) if v != 0", scalar)
+        self.assertIn("complete.frame.length_observation.get()", scalar)
+        self.assertEqual(scalar.count("original.fail_and_settle_once()"), 1)
+        self.assertEqual(scalar.count("std::panic::catch_unwind("), 2)
+        self.assertIn("std::hint::black_box(&mut original)", scalar)
+        self.assertIn("create_calls == 1 && owned == 2 && closed == owned && original.book.slots.len() == 2", scalar)
+        self.assertLess(scalar.index("original.fail_and_settle_once()"), scalar.index("let (source, derived) = observed?;"))
+        self.assertLess(scalar.index("let (source, derived) = observed?;"), scalar.index("write_fixture_record("))
+        self.assertIn("write_fixture_record(&root.join(RESULT), &raw, LIMIT, original.end)?;", scalar)
+        for forbidden in ("GetTokenInformation(", "IsTokenRestricted(", "CreateRestrictedToken(", "CloseHandle(",
+                          "scalar.get()", "count.get()", "Impersonate", "SetThreadToken", "CreateProcess"):
+            self.assertNotIn(forbidden, scalar)
+        self.assertIn("S::TOKEN_QUERY | S::TOKEN_DUPLICATE, a.output_handle", library)
+        self.assertIn("S::DISABLE_MAX_PRIVILEGE, 0, null(), 0, null(), 0, null(), a.output_handle", library)
+        for kind in ("precheck", "publication", "finality", "prerequisite", "invocation"):
+            header, fields, _ = helper.WINDOWS_FULLWALK_SCHEMAS[kind]
+            name = kind.upper()
+            prefix = "pub(super) const " + name + "_FIELDS: [&str; " + str(len(fields)) + "] = [\n"
+            block = fixture.split(prefix, 1)[1].split("\n];", 1)[0]
+            self.assertEqual(tuple(line.strip()[1:-2] for line in block.splitlines()), fields)
+            self.assertIn('pub(super) const ' + name + '_HEADER: &str = "' + header + '";', fixture)
+        for name, fields in (("HELPER_FIELDS", helper.WINDOWS_RUNTIME_PUBLICATION_PRECHECK_FIELDS[len(helper.WINDOWS_FULLWALK_PRECHECK_FIELDS):]),
+                            ("PRODUCER_EXIT_FIELDS", helper.WINDOWS_RUNTIME_PUBLICATION_EXIT_FIELDS),
+                            ("OBSERVATION_FIELDS", helper.WINDOWS_RUNTIME_PUBLICATION_OBSERVATION_FIELDS)):
+            prefix = "pub(super) const " + name + ": [&str; " + str(len(fields)) + "] = ["
+            block = fixture.split(prefix, 1)[1].split("];", 1)[0]
+            self.assertEqual(tuple(re.findall(r'"([^"]+)"', block)), fields)
+        for name, header in (("PRODUCTION_PRECHECK_HEADER", helper.WINDOWS_RUNTIME_PUBLICATION_PRECHECK_HEADER),
+                             ("PRODUCER_EXIT_HEADER", helper.WINDOWS_RUNTIME_PUBLICATION_EXIT_HEADER),
+                             ("OBSERVATION_HEADER", helper.WINDOWS_RUNTIME_PUBLICATION_OBSERVATION_HEADER),
+                             ("PRODUCTION_PREREQUISITE_HEADER", helper.WINDOWS_RUNTIME_PUBLICATION_PREREQUISITE_HEADER)):
+            self.assertIn('pub(super) const ' + name + ': &str = "' + header + '";', fixture)
+        self.assertEqual(helper.WINDOWS_RUNTIME_PUBLICATION_PREREQUISITE_FIELDS[len(helper.WINDOWS_FULLWALK_PREREQUISITE_FIELDS):],
+            tuple(role + suffix for role in helper.WINDOWS_RUNTIME_PUBLICATION_PROOFS for suffix in ("Bytes", "Sha256")))
+        self.assertIn('fields.push(format!("{role}Bytes")); fields.push(format!("{role}Sha256"));', fixture)
+        self.assertIn('need(active_profile()? == PROFILE)?;', fixture)
+        production = fixture.split("fn producer_observation_run(", 1)[1]
+        self.assertNotIn("original.publish()", production); self.assertNotIn("original.retire()", production)
+        self.assertLess(production.index("original.settle()"), production.index('record.put("fileOriginalsClosed"'))
+        self.assertLess(production.index("observation(&raw,&items,test)?;"), production.index("write_fixture_record("))
+        self.assertIn("original.end)?;original.gate()", production)
+        observer = fixture.split("    fn observe_producer(", 1)[1].split("    fn publish(", 1)[0]
+        self.assertLess(observer.index("self.observe_branch(&source_paths,true"), observer.index("self.observe_branch(&output_paths,false"))
+        self.assertIn("observations_unchanged(before.as_deref()", observer)
+        for forbidden in ("self.mutate(", "self.seal(", "self.dispose(", "self.create_file("):
+            self.assertNotIn(forbidden, observer)
+        stage = fixture.split("    fn stage_source(", 1)[1].split("    fn read_producer_proofs(", 1)[0]
+        self.assertEqual(stage.count("self.seal("), 1)
+        self.assertIn("self.seal(directories[0])", stage)
+        self.assertNotIn("fixture_paths", stage); self.assertNotIn("self.publish()", stage)
+        self.assertIn("production_descriptor(&sd,false,Some(&item.path))?", fixture)
+        self.assertIn('n.ends_with(".exe")||n.ends_with(".dll")||n.ends_with(".pyd")', fixture)
+        admit = fixture.split("pub(super) fn admit(", 1)[1].split("pub(super) fn mutation_return(", 1)[0]
+        self.assertIn("original_end: Instant", admit)
+        self.assertIn("reporting_effect(Instant::now(),original_end,&mut late)", admit)
+        self.assertLess(admit.index("files[owned].close()?;"), admit.index("files.pop();serial_originals+=1"))
+        self.assertIn("serialPrerequisiteOriginals", fixture); self.assertIn("serialPrerequisiteOriginalsClosed", fixture)
+        self.assertIn("start.checked_add(Duration::from_secs(NATIVE_SECONDS)).ok_or(Error::Bounds)?", owner)
+        block = fixture.split("pub(super) const PAYLOAD_NAMES: [&str; 47] = [\n", 1)[1].split("\n];", 1)[0]
+        self.assertEqual(tuple(line.strip()[1:-2] for line in block.splitlines()), helper.WINDOWS_FULLWALK_PAYLOAD_NAMES)
+        self.assertIn("FULLWALK_PREREQUISITES_REVIEWED: bool = true;", owner)
+        driver = fixture.split("fn fixture_run(", 1)[1].split("fn producer_observation_run(", 1)[0]
+        self.assertLess(driver.index("need(super::ordinary_owner::FULLWALK_PREREQUISITES_REVIEWED)?;"),
+                        driver.index("profile()?;"))
+        self.assertEqual(driver.count("std::panic::catch_unwind("), 2)
+        self.assertEqual(driver.count("std::hint::black_box(&mut original)"), 2)
+        restart = fixture.split("fn borrowed_restart(", 1)[1].split("    fn stamp(", 1)[0]
+        self.assertIn("Call::Info(FS::FileIdExtdDirectoryRestartInfo,BUFFER)", restart)
+        self.assertIn("self.book.mark_entered(call)?;", restart)
+        self.assertEqual(restart.count("invoke(frame)"), 1)
+        self.assertIn("frame.returned.set(Some(returned));frame.phase.set(Phase::Returned);", restart)
+        for duplicate in ("CreateFileW(", "GetFileInformationByHandleEx(", "CloseHandle(", "owned_file("):
+            self.assertNotIn(duplicate, restart)
+        cursor = fixture.split("pub(super) struct CursorEpoch", 1)[1].split("\nstruct Fixture", 1)[0]
+        self.assertIn("need(epoch <= 52 && !self.entered)?;", cursor)
+        self.assertIn("need(self.eof && epoch > previous)?;", cursor)
+        self.assertIn("need(self.entered && !self.eof)?;", cursor)
+        dispose = fixture.split("fn dispose(", 1)[1].split("\n    fn ", 1)[0]
+        self.assertLess(dispose.index("self.close(index)?;"), dispose.index("self.absent(parent,&name)?;"))
+        self.assertEqual(shared.count("FS::WriteFile("), 1)
+        self.assertNotIn("FS::WriteFile(", fixture)
+        self.assertIn("complete_write_bounded(ok,actual,expected,closed,OWNER_LIMIT)", shared)
+        self.assertIn("complete_write_bounded(ok,actual,expected,closed,ORDINARY_ARTIFACT_LIMIT)", shared)
+        self.assertIn("complete_write_bounded(ok != 0, b.count, value.len(), true, limit)", shared)
+        for body in (fixture, shared, scalar):
+            for forbidden in ("std::thread::spawn", "std::process::Command", "SetNamedSecurityInfoW(", "RemoveDirectoryW("):
+                self.assertNotIn(forbidden, body)
+
+    def test_windows_fullwalk_source_derived_selectors_include_only_eight_existing_producer_policies(self):
+        for profile, selected in ((helper.WINDOWS_FULLWALK_PROFILE, 9),
+                                  (helper.WINDOWS_RUNTIME_PUBLICATION_PROFILE, 17)):
+            context = {**self.context(), "qualificationProfile": profile}
+            sources = self.native_source_blobs(context)
+            # New ignored/nonselected contracts still belong to the compiled
+            # source total. Do not fossilize a historical filtered-out count.
+            total = sum(len(helper.re.findall(rb"(?m)^\s*#\[test\]\s*$", raw)) for raw in sources.values()) - 5
+            # The exact five UI wrappers are source declarations, not compiled
+            # tests in these historical feature selections.
+            with patch.object(helper, "windows_installed_bytes", side_effect=lambda path, limit: sources[path]), \
+                 patch.object(helper, "run", side_effect=AssertionError("Source count cannot list a libtest")):
+                self.assertEqual(helper.windows_installed_native_test_total(context), total)
+                names = helper.windows_installed_native_inert(context)
+                self.assertEqual(len(names), selected)
+                self.assertGreater(total - len(names), 0)
+                self.assertNotIn(helper.WINDOWS_RUNTIME_PUBLICATION_SCALAR, names)
+                self.assertFalse(set(names) & set(helper.WINDOWS_INSTALLED_PASSIVE_NATIVE_INERT))
+            self.assertEqual(names[:9], helper.WINDOWS_INSTALLED_INERT)
+        self.assertEqual(len(helper.WINDOWS_RUNTIME_PUBLICATION_NATIVE_INERT), 8)
+        self.assertEqual(len(helper.WINDOWS_RUNTIME_PUBLICATION_APP_INERT), 3)
+        app_names = (*helper.WINDOWS_INSTALLED_APP_INERT, *helper.WINDOWS_RUNTIME_PUBLICATION_APP_INERT)
+        raw = ("running 14 tests\n" + "".join("test " + name + " ... ok\n" for name in app_names)
+            + "test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 173 filtered out; finished in 0.01s\n").encode("ascii")
+        self.assertEqual(helper.windows_installed_app_libtest(raw, production=True)["passed"], 14)
+        with self.assertRaises(helper.CheckFailure): helper.windows_installed_app_libtest(raw)
+        source = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/publication.rs").read_text(encoding="utf-8")
+        bridge = (SOURCE / "desktop/src-tauri/src/runtime_publication_windows.rs").read_text(encoding="utf-8")
+        binary = (SOURCE / "desktop/src-tauri/src/bin/windows_runtime_publish.rs").read_text(encoding="utf-8")
+        predicate = source.split("pub fn occupied_target_and_settled(", 1)[1].split("pub fn fail_and_settle_once(", 1)[0]
+        for guard in ("!self.settlement_attempted", "!self.book.settled()", "self.book.is_unknown()", "self.mutation.is_some()",
+                "Instant::now() >= self.end", "self.order.stage != Stage::Manifest", "self.possibly_exposed()", "self.transfer.is_some()",
+                "role.intent != 0", "self.creations.len() != 1", "creation.entered",
+                "creation.returned == Some((0, F::ERROR_ALREADY_EXISTS))", 'self.child_path(mrk, "versions")',
+                "self.child_path(role.versions, TARGET)", "self.child_path(role.parent, &self.digest)"):
+            self.assertIn(guard, predicate)
+        self.assertIn("for case in 0..37", source)
+        self.assertEqual(bridge.count("original.fail_and_settle_once()"), 1)
+        self.assertLess(bridge.index("original.fail_and_settle_once()"), bridge.index("original.occupied_target_and_settled()"))
+        self.assertIn("settlement == CloseOutcome::Settled", bridge)
+        self.assertIn("Err(PublicationError::OccupiedTargetSettled)", bridge)
+        self.assertIn("PublicationError::OccupiedTargetSettled", binary)
+        self.assertIn("Ok(()) => std::process::ExitCode::SUCCESS", binary)
+        self.assertIn("std::process::ExitCode::from(2)", binary)
+        failure = binary.split("Err(error) => {", 1)[1]
+        self.assertIn("if let Some(line) = error.diagnostic_line() {", failure)
+        self.assertIn("let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());", failure)
+        self.assertIn("\n            std::process::ExitCode::FAILURE\n", failure)
+        self.assertEqual(binary.count("error.diagnostic_line()"), 1)
+        self.assertEqual(binary.count("error.frame_diagnostic_line()"), 1)
+        self.assertEqual(binary.count("error.admission_diagnostic_line()"), 1)
+        self.assertEqual(binary.count("error.copy_diagnostic_line()"), 1)
+        self.assertIn("error.frame_diagnostic_line().or_else(|| error.admission_diagnostic_line()).or_else(|| error.copy_diagnostic_line())", failure)
+        self.assertLess(failure.index("line.as_bytes()"), failure.index("error.frame_diagnostic_line()"))
+        self.assertIn("if line.len() + frame.len() <= 512", failure)
+        self.assertIn("let _ = std::io::Write::write_all(&mut std::io::stderr(), frame.as_bytes());", failure)
+        self.assertEqual(binary.count("std::io::Write::write_all"), 2)  # one attempt per line, not an atomic combined write
+        producer = bridge.split("fn produce(", 1)[1].split("\n/// No arguments", 1)[0]
+        entry = bridge.split("pub fn publish_fixed()", 1)[1].split("\n#[cfg(test)]", 1)[0]
+        self.assertEqual(producer.count("owner.published_and_settled()"), 1)
+        self.assertEqual(entry.count("original.published_and_settled()"), 1)
+        self.assertIn("require(owner.published_and_settled()).map_err(|_| PublicationFailure::policy(FailurePhase::FinalPostcondition, None))", producer)
+        self.assertIn("let cause = match produce(&mut original, &spec) {\n"
+                      "        Ok(()) if original.published_and_settled() => return Ok(()),\n"
+                      "        Ok(()) => PublicationFailure::policy(FailurePhase::FinalPostcondition, None),\n"
+                      "        Err(first) => first,", entry)
+        ordered = [entry.index(part) for part in ("let cause = match produce(",
+            "let frame = if cause.phase == FailurePhase::Admit && cause.native == Some(NativeError::Unknown)",
+            "Some(original.retained_frame_observation())",
+            "let admission = if cause.admission_observation_allowed()",
+            "original.retained_admission_observation()",
+            "let copy = if cause.copy_observation_allowed()",
+            "original.retained_copy_observation()",
+            "let possibly_exposed = original.possibly_exposed();", "let settlement = original.fail_and_settle_once();",
+            "if settlement == CloseOutcome::Settled && original.occupied_target_and_settled()",
+            "let originals_unknown = settlement == CloseOutcome::Unknown;",
+            "Err(PublicationError::Failed { cause, possibly_exposed, originals_unknown, frame, admission, copy })")]
+        self.assertEqual(ordered, sorted(ordered))
+        self.assertEqual(entry.count("original.retained_frame_observation()"), 1)
+        self.assertEqual(entry.count("original.retained_admission_observation()"), 1)
+        self.assertEqual(entry.count("original.retained_copy_observation()"), 1)
+        self.assertIn("self.phase == FailurePhase::Admit && self.native == Some(NativeError::Unsafe)", bridge)
+        copy_gate = bridge.split("fn copy_observation_allowed(self)", 1)[1].split("    fn class(self)", 1)[0]
+        self.assertIn("self.phase == FailurePhase::FinishCopy && self.native == Some(NativeError::Unsafe)", copy_gate)
+        self.assertIn("&& self.ordinal.is_some_and(|index| index < 47)", copy_gate)
+        self.assertIn("copy: Option<PublicationCopyObservation>", bridge)
+        formatter = bridge.split("pub fn diagnostic_line(self)", 1)[1].split("type Checked<T>", 1)[0]
+        self.assertIn('"MRK_WINDOWS_RUNTIME_PUBLISH_FAILURE_V1=phase="', formatter)
+        self.assertIn("ordinal.filter(|index| *index < 47)", formatter)
+        self.assertIn("if line.len() <= 256 { Some(line) } else { None }", formatter)
+        self.assertIn("Self::OccupiedTargetSettled => return None", formatter)
+        self.assertIn("Self::Failed { cause, copy: Some(copy), .. }", formatter)
+        self.assertIn("if cause.copy_observation_allowed() => copy.diagnostic_line()", formatter)
+        for forbidden in ("OWNER", "owner.", "original.", "format!", "format_args!", "write!", "writeln!",
+                          "panic!", "unwrap(", "expect(", "{:?}", "{:#?}", ".to_string("):
+            self.assertNotIn(forbidden, formatter + binary)
+        snapshot = source.split("pub fn retained_frame_observation(&self)", 1)[1].split("/// No native effect.", 1)[0]
+        for retained in ("self.book.active.as_ref()", "self.mutation.as_ref()", "frame.call", "frame.effect",
+                         "frame.phase.get()", "frame.returned.get()", "frame.completion_refusal.get()", "frame.length_observation.get()"):
+            self.assertIn(retained, snapshot)
+        for forbidden in ("unsafe {", "frame.handle", "frame.output", "frame.iosb", "frame.count", "frame.scalar",
+                          "frame.bytes", "frame.input", "frame.path", "Instant::", ".tick(", ".clone("):
+            self.assertNotIn(forbidden, snapshot)
+        copy_snapshot = source.split("pub fn retained_copy_observation(&self)", 1)[1].split("    fn with_role", 1)[0]
+        self.assertEqual(copy_snapshot.strip(), "-> Option<PublicationCopyObservation> { self.copy_failure.get() }")
+        self.assertEqual(source.count("copy_failure: Cell<Option<PublicationCopyObservation>>"), 1)
+        self.assertEqual(source.count("copy_failure: Cell::new(None)"), 1)
+        copy_recorder = source.split("impl CopyRefusal<'_> {", 1)[1].split("fn copy_result<T>", 1)[0]
+        self.assertIn("if self.first.get().is_none()", copy_recorder)
+        self.assertIn("self.first.set(Some(PublicationCopyObservation { edge: self.edge, member, allocation: allocation() }))", copy_recorder)
+        copy_result = source.split("fn copy_result<T>", 1)[1].split("fn copy_guard(", 1)[0]
+        self.assertIn("if matches!(result.as_ref(), Err(Error::Unsafe))", copy_result)
+        self.assertIn("CopyRefusal { first, edge }.record(CopyMember::None, || CopyAllocation::None)", copy_result)
+        self.assertTrue(copy_result.rstrip().endswith("result\n}"))
+        for forbidden in ("unsafe", "Instant::", ".tick(", ".clone(", "self.book", "self.mutation", "println!", "eprintln!"):
+            self.assertNotIn(forbidden, copy_snapshot + copy_recorder + copy_result)
+        copy_companion = source.split("impl PublicationCopyObservation {", 1)[1].split("#[derive(Clone, Copy)]\nstruct CopyRefusal", 1)[0]
+        self.assertIn("if !self.legal() { return None; }", copy_companion)
+        self.assertIn('"MRK_WINDOWS_RUNTIME_PUBLISH_COPY_V1=edge="', copy_companion)
+        self.assertIn('line.push_str(";member="); line.push_str(self.member.label());', copy_companion)
+        self.assertIn('line.push_str(";allocation="); line.push_str(self.allocation.label()); line.push(\'\\n\');', copy_companion)
+        self.assertIn("if line.len() <= 256 { Some(line) } else { None }", copy_companion)
+        finish_copy = source.split("pub fn finish_copy(", 1)[1].split("    pub fn readback_next(", 1)[0]
+        copy_edges = ("this.order.live(Stage::Copying)", "t.stage == TransferStage::SourceEof && t.proof.source_eof",
+            "this.recheck_installer()", 'this.mutate(Effect::Flush, Some(writer), "", &[], Vec::new())',
+            "proof.flushed = true", "this.checked(writer, AuthorityScope::ImmutableVersion)",
+            "write_transition_observed(&before.metadata, &written.metadata, this.sizes.as_ref().ok_or(Error::State)?[index], trace)",
+            "before.security == written.security", "this.close(writer)", "proof.writer_closed = true",
+            "this.checked(source, AuthorityScope::ImmutableVersion)", "source_unchanged_observed(&source_now, &source_before,",
+            "this.close(source)", "proof.source_closed = true", "this.ready()", "this.payload_parent(index, false)",
+            "this.recheck_dir(parent)", "this.reserve_later(parent, name, FileKind::File, writer)",
+            "this.book.call(Call::Open(readback), null_mut(), Vec::new())", "this.book.noninherited(readback)",
+            "this.checked(readback, AuthorityScope::ImmutableVersion)",
+            "writer_close_transition_observed(&written.metadata, &observed.metadata, trace)",
+            "written.security == observed.security", "t.readback = Some(readback)", "t.readback_facts = Some(observed)",
+            "t.stage = TransferStage::Readback")
+        offsets = [finish_copy.index(part) for part in copy_edges]
+        self.assertEqual(offsets, sorted(offsets))
+        for part in copy_edges: self.assertEqual(finish_copy.count(part), 1)
+        self.assertIn("Some(CopyRefusal { first: &this.copy_failure, edge: CopyEdge::SourceUnchanged })))?;\n"
+                      "            }\n            copy_result(this.close(source)", finish_copy)
+        source_same = source.split("fn source_unchanged_observed(", 1)[1].split("fn acl_transition(", 1)[0]
+        same_order = ("a.identity == b.identity", "a.kind == b.kind", "a.attributes == b.attributes", "(a.size, b.size)",
+            "new_size == old_size", "(a.allocation_size, b.allocation_size)", "new_allocation == old_allocation",
+            "changed_allocation(new_allocation, old_allocation, new_size)", "a.links == b.links", "a.creation == b.creation",
+            "a.write == b.write", "a.change == b.change", "new.security == old.security")
+        offsets = [source_same.index(part) for part in same_order]
+        self.assertEqual(offsets, sorted(offsets))
+        for part in same_order: self.assertEqual(source_same.count(part), 1)
+        companion = source.split("pub fn diagnostic_line(self)", 1)[1].split("struct Mutation {", 1)[0]
+        self.assertIn('"MRK_WINDOWS_RUNTIME_PUBLISH_FRAME_V2=qcall="', companion)
+        self.assertIn('";qrefusal="', companion)
+        self.assertIn('line.push_str(";mcount="); line.push_str(self.mcount.label());', companion)
+        self.assertIn("if line.len() <= 256 { Some(line) } else { None }", companion)
+        self.assertEqual(source.count("length_observation: Cell::new(ObservedScalarLength::Unobserved)"), 3)
+        scalar_branch = source.split("} else if matches!(effect, Effect::Scalar(_)) && outcome.is_ok() {", 1)[1].split("} else { outcome };", 1)[0]
+        self.assertEqual(scalar_branch.count("unsafe { *frame.count.get() }"), 1)
+        self.assertIn("let count = unsafe { *frame.count.get() };", scalar_branch)
+        self.assertIn("scalar_count_return(effect, count, &frame.length_observation)", scalar_branch)
+        scalar_return = source.split("fn scalar_count_return(", 1)[1].split("fn later_originals_closed(", 1)[0]
+        self.assertIn("if observed.get() == ObservedScalarLength::Unobserved {", scalar_return)
+        self.assertIn("observed.set(ObservedScalarLength::from_count(count));", scalar_return)
+        self.assertIn("Effect::Scalar(S::TokenHasRestrictions) => matches!(count, 1 | 4)", scalar_return)
+        self.assertIn("Effect::Scalar(S::TokenIsAppContainer) => count == 4", scalar_return)
+        self.assertIn("_ => false", scalar_return)
+        self.assertIn("if accepted { Ok(()) } else { Err(Error::Unknown) }", scalar_return)
+        for forbidden in ("unsafe", "frame.", "Instant::", ".tick(", "GetTokenInformation"):
+            self.assertNotIn(forbidden, scalar_return)
+        seed = source.split("fn scalar_initial(", 1)[1].split("fn scalar_value(", 1)[0]
+        self.assertIn("Effect::Scalar(S::TokenHasRestrictions)", seed)
+        self.assertIn("u32::from_ne_bytes([0xff, 0, 0, 0])", seed)
+        self.assertIn("else { u32::MAX }", seed)
+        self.assertEqual(source.count("scalar: UnsafeCell::new(scalar_initial("), 3)
+        consumer = source.split("impl MutationComplete {", 1)[1].split("fn mutation_return(", 1)[0]
+        self.assertIn("self.frame.phase.get() == Phase::Complete", consumer)
+        self.assertIn("Effect::Scalar(S::TokenHasRestrictions | S::TokenIsAppContainer)", consumer)
+        self.assertIn("Ok(unsafe { *self.frame.scalar.get() })", consumer)
+        self.assertEqual(source.count("unsafe { *self.frame.scalar.get() }"), 1)
+        scalar = source.split("    fn scalar(&mut self,", 1)[1].split("    fn add_directory(", 1)[0]
+        self.assertIn('let complete = self.mutate(Effect::Scalar(class), Some(index), "", &[], Vec::new())?;', scalar)
+        self.assertEqual(scalar.count("self.mutate("), 1)
+        self.assertEqual(scalar.count("complete.scalar()"), 1)
+        self.assertIn("trace.result(scalar_value(trace.result(complete.scalar(), C::ScalarCompletion)?), C::ScalarCanonical)", scalar)
+        for forbidden in ("count.get()", "scalar.get()", "GetTokenInformation(", "invoke_mutation("):
+            self.assertNotIn(forbidden, scalar)
+        self.assertIn("fn scalar_value(value: u32) -> Result<u32> { need(value <= 1)?; Ok(value) }", source)
+        self.assertIn("restricted == 0", source)
+        self.assertIn("frame.scalar.get().cast(), 4, frame.count.get()", source)
+        query = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/lib.rs").read_text(encoding="utf-8")
+        self.assertIn("pub use publication::{Publication, PublicationFrameObservation, PublicationCopyObservation, PUBLICATION_PAYLOADS};", query)
+        self.assertEqual(query.count("self.completion_unknown("), 6)
+        ordered_open = (
+            "if !valid_handle(handle) { return self.completion_unknown(CompletionRefusal::OpenInvalidHandle); }",
+            "if io != F::STATUS_SUCCESS { return self.completion_unknown(CompletionRefusal::OpenIoStatus); }",
+            "if info != WP::FILE_OPENED as usize { return self.completion_unknown(CompletionRefusal::OpenNotOpened); }",
+            "if self.duplicate_live(index, handle) { return self.completion_unknown(CompletionRefusal::OpenDuplicate); }",
+        )
+        offsets = [query.index(part) for part in ordered_open]
+        self.assertEqual(offsets, sorted(offsets))  # early returns retain lazy predicate order
+        self.assertLess(query.index("if !valid_handle(handle) { return self.completion_unknown(CompletionRefusal::TokenInvalidHandle); }"),
+                        query.index("if self.duplicate_live(index, handle) { return self.completion_unknown(CompletionRefusal::TokenDuplicate); }"))
+        recorder = query.split("fn completion_unknown<T>", 1)[1].split("fn take_complete", 1)[0]
+        self.assertIn("if saved.get().is_none() { saved.set(Some(refusal)); }", recorder)
+        self.assertIn("self.unknown()", recorder)
+        for forbidden in ("unsafe", "output", "iosb", "duplicate_live", "Instant::", ".tick("):
+            self.assertNotIn(forbidden, recorder.split("if let Some(frame)", 1)[1])
+        self.assertEqual(bridge.count("#[test]"), 3)
+        for forbidden in ("std::process::Command", "std::env::args", "std::fs::", "print!", "println!"):
+            self.assertNotIn(forbidden, binary)
+
+    def test_windows_fullwalk_workflow_is_serial_direct_and_never_protected_always_cleanup(self):
+        source = (SOURCE / ".github/workflows/desktop-foundation.yml").read_text(encoding="utf-8")
+        workflow = source.split("  windows-installed-native:\n", 1)[1]
+        self.assertIn("options: [foundation, windows-snapshot, windows-installed-native, windows-installed-fullwalk,", source)
+        ordered = ("ordinary-preflight", "fixture-publisher", "producer-scalar", "producer-scalar-finalize", "producer-stage", "producer-stage-finalize",
+                   "producer-success", "producer-success-finalize", "producer-before", "producer-before-finalize",
+                   "producer-occupied", "producer-occupied-finalize", "producer-after", "fixture-finalize", "ordinary-owner", "ordinary-finalize",
+                   "fullwalk-preflight", "fullwalk-owner", "fullwalk-finalize", "fixture-retirement", "runtime-data", "retain")
+        offsets = [workflow.index("        id: " + name + "\n") for name in ordered]
+        self.assertEqual(offsets, sorted(offsets))
+        for name, test, gate in (("fixture-publisher", helper.WINDOWS_FULLWALK_PUBLISHER, "ordinary-preflight"),
+                ("ordinary-owner", helper.WINDOWS_ORDINARY_OWNER, "fixture-finalize"),
+                ("fullwalk-owner", helper.WINDOWS_FULLWALK_OWNER, "fullwalk-preflight"),
+                ("fixture-retirement", helper.WINDOWS_FULLWALK_RETIRE, "fullwalk-finalize")):
+            step = workflow.split("        id: " + name + "\n", 1)[1].split("      - name:", 1)[0]
+            command = "& $env:MRK_WINDOWS_NATIVE_ARTIFACT " + test + " --exact --ignored --nocapture --test-threads=1"
+            self.assertEqual(step.count(command), 1)
+            self.assertIn("if: success()", step); self.assertIn("steps." + gate + ".outcome == 'success'", step)
+            self.assertIn("timeout-minutes: 4", step)
+            self.assertIn(command + "\n            $originalExitCode = $LASTEXITCODE", step)
+            self.assertIn("[System.IO.FileMode]::CreateNew", step)
+            self.assertIn("finally { $stream.Dispose() }", step)
+            self.assertLess(step.index("$stream.Dispose()"), step.index("exit $originalExitCode"))
+            self.assertNotIn(command + " |", step)
+            for forbidden in ("MRK_PYTHON", "always()", "Start-Process", "Process.Start", "Remove-Item", "Set-Acl", "icacls", "Wait-Process", "Stop-Process"):
+                self.assertNotIn(forbidden, step)
+        self.assertNotIn(helper.WINDOWS_FULLWALK_TEST, workflow)
+        for name in helper.WINDOWS_FULLWALK_OUTCOMES.values():
+            self.assertIn(name + ": " + "$" + ("{{ inputs.scope == 'windows-runtime-publication' && steps.producer-after.outcome || steps.fixture-publisher.outcome }}"
+                if name == "MRK_WINDOWS_PUBLISHER_STEP_OUTCOME" else "{{ steps."), workflow)
+        for command in ("acquire", "compile", "windows-installed-native", "windows-installed-fixture-finalize",
+                        "windows-installed-native-finalize", "windows-installed-fullwalk", "windows-installed-fullwalk-finalize"):
+            self.assertEqual(workflow.count("ci_foundation.py " + command + "\'"), 1)
+        retirement = workflow.split("        id: fixture-retirement\n", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("steps.ordinary-finalize.outcome == 'success'", retirement)
+        self.assertIn("steps.fullwalk-finalize.outcome == 'success'", retirement)
+        self.assertIn("inputs.scope == 'windows-installed-fullwalk'", retirement)
+        self.assertNotIn("windows-runtime-publication", retirement)
+        legacy_publisher = workflow.split("        id: fixture-publisher\n", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("inputs.scope == 'windows-installed-fullwalk'", legacy_publisher)
+        self.assertNotIn("windows-runtime-publication", legacy_publisher)
+        self.assertNotIn("verify/desktop-windows-runtime-publication", source.split("  workflow_dispatch:", 1)[0])
+        for job, end in (("passive-native", "windows-snapshot"), ("windows-snapshot", "conventional-prepare")):
+            block = source.split("  " + job + ":\n", 1)[1].split("  " + end + ":\n", 1)[0]
+            self.assertIn("github.ref != 'refs/heads/verify/desktop-windows-runtime-publication'", block)
+        self.assertIn("github.ref == 'refs/heads/verify/desktop-windows-runtime-publication' &&\n"
+                      "       github.event_name == 'workflow_dispatch' && inputs.scope == 'windows-runtime-publication'", workflow)
+        self.assertEqual(workflow.count("& $env:MRK_WINDOWS_HELPER_ARTIFACT\n"), 2)
+        for step_id, role, test, code, gate, filename in (
+                ("producer-scalar", "scalar", helper.WINDOWS_RUNTIME_PUBLICATION_SCALAR, 0, "ordinary-preflight", "producer-scalar-exit.private.txt"),
+                ("producer-stage", "stage", helper.WINDOWS_RUNTIME_PUBLICATION_STAGE, 0, "producer-scalar-finalize", "producer-stage-exit.private.txt"),
+                ("producer-success", "helperSuccess", None, 0, "producer-stage-finalize", "producer-success-exit.private.txt"),
+                ("producer-before", "before", helper.WINDOWS_RUNTIME_PUBLICATION_BEFORE, 0, "producer-success-finalize", "producer-before-exit.private.txt"),
+                ("producer-occupied", "helperOccupied", None, 2, "producer-before-finalize", "producer-occupied-exit.private.txt"),
+                ("producer-after", "after", helper.WINDOWS_RUNTIME_PUBLICATION_AFTER, 0, "producer-occupied-finalize", "fullwalk-publisher-exit.private.json")):
+            step = workflow.split("        id: " + step_id + "\n", 1)[1].split("      - name:", 1)[0]
+            command = "& $env:MRK_WINDOWS_HELPER_ARTIFACT" if test is None else "& $env:MRK_WINDOWS_NATIVE_ARTIFACT " + test + " --exact --ignored --nocapture --test-threads=1"
+            self.assertEqual(step.count(command + "\n"), 1)
+            self.assertIn("if: success() && inputs.scope == 'windows-runtime-publication'", step)
+            self.assertIn("steps." + gate + ".outcome == 'success'", step)
+            self.assertIn("timeout-minutes: 4", step)
+            self.assertIn("$env:GITHUB_REF -cne 'refs/heads/verify/desktop-windows-runtime-publication'", step)
+            self.assertIn(command + "\n            $originalExitCode = $LASTEXITCODE", step)
+            self.assertIn("if ($originalExitCode -isnot [int])", step)
+            self.assertIn("[System.Text.Encoding]::Unicode.GetBytes($command)", step)
+            self.assertIn("'MRK_WINDOWS_RUNTIME_PUBLICATION_ORIGINAL_EXIT_V1'", step)
+            self.assertIn("'role=" + role + "'", step)
+            self.assertIn("'writerCloseGate=original-" + role + "-step-success-required'", step)
+            self.assertIn("'originalWaitReturned=true'", step)
+            self.assertIn("'profile=windows-runtime-publication-v1'", step)
+            self.assertIn("'"+ filename + "'", step)
+            self.assertIn("[System.IO.FileMode]::CreateNew", step)
+            self.assertLess(step.index("$originalExitCode = $LASTEXITCODE"), step.index("[System.IO.File]::Open("))
+            self.assertLess(step.index("$stream.Dispose()"), step.index("if ($originalExitCode -ne " + str(code) + ")"))
+            self.assertLess(step.index("if ($originalExitCode -ne " + str(code) + ")"), step.index("exit 0"))
+            self.assertEqual(step.count("exit 0"), 1)
+            self.assertNotIn(command + " |", step)
+            if test is not None:
+                self.assertIn("MRK_WINDOWS_NATIVE_ARTIFACT: ${{ steps.ordinary-preflight.outputs.artifact }}", step)
+                self.assertIn("MRK_WINDOWS_NATIVE_ARTIFACT_SHA256: ${{ steps.ordinary-preflight.outputs.artifactSha256 }}", step)
+            if test is None:
+                self.assertIn("$command = '\"' + $env:MRK_WINDOWS_HELPER_ARTIFACT + '\"'", step)
+                self.assertIn("::Combine($expectedRoot, 'mrk-windows-runtime-publish.exe')", step)
+                self.assertNotIn("--ignored", step); self.assertNotIn("--test-threads", step)
+                phases = [line.strip() for line in step.splitlines() if line.strip().startswith("$diagnosticPhase = ")]
+                self.assertEqual(phases, ["$diagnosticPhase = '" + phase + "'" for phase in
+                    ("binding", "artifact", "prior", "invoke", "returned-code", "exit-record", "expected-exit")])
+                initialization = step.split("          try {", 1)[0]
+                for initial in ("$diagnosticPhase = 'binding'", "$diagnosticReturned = $false", "$diagnosticExit = 'unobserved'"):
+                    self.assertIn(initial, initialization)
+                self.assertEqual(step.count("$LASTEXITCODE"), 1)
+                self.assertEqual([line.strip() for line in step.splitlines() if line.strip().startswith("$diagnosticReturned = ")],
+                    ["$diagnosticReturned = $false", "$diagnosticReturned = $true"])
+                canonical = "$diagnosticExit = $originalExitCode.ToString([System.Globalization.CultureInfo]::InvariantCulture)"
+                self.assertIn("$originalExitCode = $LASTEXITCODE\n"
+                              "            $diagnosticReturned = $true\n"
+                              "            $diagnosticPhase = 'returned-code'\n"
+                              "            if ($originalExitCode -isnot [int]) { throw 'original-exit' }\n"
+                              "            " + canonical, step)
+                self.assertEqual([line.strip() for line in step.splitlines() if line.strip().startswith("$diagnosticExit = ")],
+                    ["$diagnosticExit = 'unobserved'", canonical])
+                ordered_phases = [step.index(part) for part in ("$diagnosticPhase = 'artifact'", "$expectedHelper = ",
+                    "$diagnosticPhase = 'prior'", "if ($env:MRK_WINDOWS_PRODUCER_STAGE_STEP_OUTCOME",
+                    "$diagnosticPhase = 'invoke'", "Set-Location -LiteralPath $expectedRoot", command,
+                    canonical, "$diagnosticPhase = 'exit-record'", "$command = ", "$stream.Dispose()",
+                    "$diagnosticPhase = 'expected-exit'", "if ($originalExitCode -ne " + str(code) + ")")]
+                self.assertEqual(ordered_phases, sorted(ordered_phases))
+                # No phase change during disposal: a second failure cannot hide the exit-record phase.
+                self.assertIn("try { $stream.Write($raw, 0, $raw.Length); $stream.Flush() } finally { $stream.Dispose() }", step)
+                diagnostic = step.split("          } catch {\n", 1)[1]
+                self.assertIn("$returnedText = if ($diagnosticReturned) { 'true' } else { 'false' }", diagnostic)
+                self.assertIn('$diagnosticLine = "MRK_WINDOWS_PRODUCER_FAILURE_V1=role=' + role
+                    + ';phase=$diagnosticPhase;returned=$returnedText;exit=$diagnosticExit"', diagnostic)
+                self.assertIn("if ($diagnosticLine.Length -le 254) { [Console]::Error.WriteLine($diagnosticLine) }", diagnostic)
+                self.assertIn("            try {\n", diagnostic)
+                self.assertIn("            } catch { }\n            exit 1", diagnostic)
+                self.assertEqual(diagnostic.count("[Console]::Error.WriteLine("), 1)
+                for private in ("$_", "Exception", "$env:", "$command", "$path", "$stream", "throw", "exit 0"):
+                    self.assertNotIn(private, diagnostic)
+            for forbidden in ("MRK_PYTHON", "always()", "continue-on-error", "Start-Process", "Process.Start", "Copy-Item", "Remove-Item",
+                              "Set-Acl", "icacls", "Wait-Process", "Stop-Process", "ConvertTo-Json"):
+                self.assertNotIn(forbidden, step)
+        for name in ("scalar", "stage", "success", "before", "occupied"):
+            step = workflow.split("        id: producer-" + name + "-finalize\n", 1)[1].split("      - name:", 1)[0]
+            self.assertIn("steps.producer-" + name + ".outcome == 'success'", step)
+            self.assertIn("inputs.scope == 'windows-runtime-publication'", step)
+            self.assertEqual(workflow.count("ci_foundation.py windows-runtime-publication-" + name + "-finalize'"), 1)
+            self.assertNotIn("always()", step); self.assertNotIn("MRK_WINDOWS_HELPER_ARTIFACT", step)
+        for step_id in ("producer-stage-finalize", "producer-success-finalize", "producer-before-finalize",
+                        "producer-occupied-finalize", "fixture-finalize", "retain"):
+            step = workflow.split("        id: " + step_id + "\n", 1)[1].split("      - name:", 1)[0]
+            for suffix in ("_STEP_OUTCOME", "_FINALIZE_STEP_OUTCOME"):
+                self.assertIn("MRK_WINDOWS_PRODUCER_SCALAR" + suffix + ":", step)
+        for step_id in ("fixture-finalize", "ordinary-owner", "ordinary-finalize", "fullwalk-preflight", "fullwalk-owner", "fullwalk-finalize", "retain"):
+            step = workflow.split("        id: " + step_id + "\n", 1)[1].split("      - name:", 1)[0]
+            for name in ("STAGE", "SUCCESS", "BEFORE", "OCCUPIED"):
+                for suffix in ("_STEP_OUTCOME", "_FINALIZE_STEP_OUTCOME"):
+                    self.assertIn("MRK_WINDOWS_PRODUCER_" + name + suffix + ":", step)
+        ordinary_to_fullwalk = workflow.split("        id: ordinary-owner\n", 1)[1].split("        id: fullwalk-owner\n", 1)[0]
+        self.assertNotIn("& $env:MRK_WINDOWS_HELPER_ARTIFACT", ordinary_to_fullwalk)
+        for test in (helper.WINDOWS_RUNTIME_PUBLICATION_SCALAR, helper.WINDOWS_RUNTIME_PUBLICATION_STAGE,
+                     helper.WINDOWS_RUNTIME_PUBLICATION_BEFORE, helper.WINDOWS_RUNTIME_PUBLICATION_AFTER):
+            self.assertNotIn(test, ordinary_to_fullwalk)
+        self.assertNotIn("Remove-Item", workflow)
+        self.assertIn("timeout-minutes: ${{ inputs.scope == 'windows-normal-project-ui' && 100 || 35 }}", workflow)
+        self.assertEqual(workflow.count("runs-on:"), 1)
+
+    def test_windows_reader_fullwalk_request_binds_both_originals_and_complete_inventory(self):
+        data = self.fullwalk_data()
+        context, app, standalone, arguments, raw = (data[key] for key in ("context", "app", "standalone", "arguments", "request"))
+        self.assertTrue(raw.isascii() and raw.endswith(b"\n"))
+        self.assertEqual(len(raw.splitlines()), 35)
+        self.assertEqual(raw.splitlines()[0], b"MRK_WINDOWS_FULLWALK_REQUEST_V1")
+        self.assertEqual([line.split(b"=", 1)[0].decode() for line in raw.splitlines()[1:]], list(helper.WINDOWS_FULLWALK_REQUEST_FIELDS))
+        parsed = helper.windows_fullwalk_request_data(raw, root=context["root"])
+        self.assertEqual((parsed["appArtifactBytes"], parsed["ownerArtifactBytes"]), (73, 37))
+        self.assertEqual(parsed["selectedCoreIdentity"], "77:" + "77" * 16)
+        for role, artifact, test in (("app", app, helper.WINDOWS_FULLWALK_TEST), ("owner", standalone, helper.WINDOWS_FULLWALK_OWNER)):
+            command = '"' + artifact["path"] + '" ' + test + " --exact --ignored --nocapture --test-threads=1"
+            self.assertEqual(parsed[role + "CommandSha256"], hashlib.sha256(command.encode("utf-16-le")).hexdigest())
+        for role, limit in (("app", 512 << 20), ("standalone", 128 << 20)):
+            for key, value in (("size", 0), ("size", True), ("size", limit + 1), ("sha256", "X" * 64),
+                               ("sha256", int("3" * 64)), ("path", standalone["path"] if role == "app" else app["path"]),
+                               ("messages", {"size": True, "sha256": "b" * 64}),
+                               ("messages", {"size": (16 << 20) + 1, "sha256": "b" * 64})):
+                changed = deepcopy(data); changed[role][key] = value
+                with self.subTest(role=role, field=key), self.assertRaises(helper.CheckFailure):
+                    helper.windows_fullwalk_request(changed["context"], changed["app"], changed["standalone"], **changed["arguments"])
+            changed = deepcopy(data)
+            changed[role]["path"] = changed[role]["path"].replace("\\target\\", "\\TARGET\\")
+            self.assertNotEqual(changed[role]["path"], data[role]["path"])
+            # The formatter recomputes commandSha256: reject spelling parity,
+            # not an unrelated stale command digest.
+            with self.subTest(case_alias=role), self.assertRaises(helper.CheckFailure):
+                helper.windows_fullwalk_request(changed["context"], changed["app"], changed["standalone"], **changed["arguments"])
+        for key, value in (("attempt", True), ("attempt", 2), ("runId", "0"), ("runId", 123456),
+                           ("sourceSha", "0" * 40), ("sourceTree", "z" * 40)):
+            with self.subTest(context=key), self.assertRaises(helper.CheckFailure):
+                helper.windows_fullwalk_request({**context, key: value}, app, standalone, **arguments)
+        for key, value in (("payloadFiles", 2048), ("payloadFiles", True), ("payloadFiles", 0),
+                           ("payloadBytes", (1 << 30) + 1), ("publicationReceiptBytes", (64 << 10) + 1),
+                           ("publicationReceiptSha256", ""), ("manifestSha256", "F" * 64),
+                           ("versionIdentity", "0:" + "44" * 16), ("versionIdentity", "77:" + "0" * 32),
+                           ("versionIdentity", "77:" + "44" * 8), ("selectedPythonIdentity", "77:" + "44" * 16),
+                           ("selectedCoreIdentity", "78:" + "77" * 16), ("extra", "unreviewed")):
+            altered = {**arguments, "fixture": {**arguments["fixture"], key: value}}
+            with self.subTest(fixture=key, value=value), self.assertRaises(helper.CheckFailure):
+                helper.windows_fullwalk_request(context, app, standalone, **altered)
+        with self.assertRaises(helper.CheckFailure):
+            helper.windows_fullwalk_request(context, app, standalone, **{**arguments, "owner_identity": arguments["app_identity"]})
+        bad_frames = (raw[:-1], raw + b"\n", raw.replace(b"\n", b"\r\n"), raw + b"x" * 4096,
+            raw.replace(b"role=protected-version-fullwalk", b"role=ordinary"), raw.replace(b"test=", b"unknown=", 1),
+            raw.replace(b"runId=123456", b"runId=123457"), raw.replace(b"coreSha256=", b"inventorySha256=", 1),
+            raw.replace(b"payloadFiles=46", b"payloadFiles=046"), raw.replace(b"sourceSha=", b"sourceSha=\xff", 1),
+            raw.replace(parsed["appCommandSha256"].encode(), b"0" * 64, 1),
+            b"\n".join([raw.splitlines()[0], *reversed(raw.splitlines()[1:])]) + b"\n")
+        for malformed in bad_frames:
+            with self.subTest(frame=malformed[:64]), self.assertRaises(helper.CheckFailure):
+                helper.windows_fullwalk_request_data(malformed, root=context["root"])
+
+    def test_windows_reader_fullwalk_records_require_original_finality_and_redact_private_data(self):
+        data = self.fullwalk_data()
+        public = self.fullwalk_accept(data)
+        self.assertIs(public["protectedFullwalk"], True)
+        self.assertIs(public["productionEnabled"], False)
+        self.assertEqual(public["protectedVersionWalk"]["entries"], data["entries"])
+        self.assertTrue(public["fullwalkOwner"]["distinctOriginalAppAndOwnerArtifacts"])
+        self.assertTrue(public["fullwalkOwner"]["resultFilesClosedBySeparateExitGates"])
+        exported = helper.canonical_json(public)
+        for private in (b"accountSidSha256", b"fileId", b"versionIdentity", b"selectedIdentities", b"securityBefore",
+                        data["app"]["path"].encode(), data["standalone"]["path"].encode(), b"stdout", b"EOF"):
+            self.assertNotIn(private, exported)
+        for outcome in ("failure", "cancelled", "skipped", "unavailable", "queued"):
+            with self.subTest(outcome=outcome), self.assertRaises(helper.CheckFailure): self.fullwalk_accept(data, outcome)
+        for record in ("owner", "child", "exit"):
+            for key, value in (("sourceSha", "f" * 40), ("runId", "123457"), ("attempt", True),
+                               ("requestSha256", "0" * 64), ("ownerArtifactSha256", data["app"]["sha256"]), ("extra", False)):
+                altered = deepcopy(data); altered[record][key] = value
+                with self.subTest(record=record, field=key), self.assertRaises(helper.CheckFailure): self.fullwalk_accept(altered)
+        for key, value in (("entries", 12), ("entries", 8193), ("entries", True), ("files", 13), ("payloadBytes", 4097),
+                           ("manifestSha256", "f" * 64), ("inspectionComplete", False), ("bookSettled", False),
+                           ("versionIdentity", {"volume": 77, "fileId": "44" * 8}),
+                           ("selectedIdentities", list(reversed(data["child"]["observation"]["selectedIdentities"])))):
+            altered = deepcopy(data); altered["child"]["observation"][key] = value
+            altered["owner"]["nativeResultSha256"] = hashlib.sha256(helper.canonical_json(altered["child"])).hexdigest()
+            with self.subTest(observation=key), self.assertRaises(helper.CheckFailure): self.fullwalk_accept(altered)
+        failures = {"createCalls": 0, "createReturn": True, "createError": 5, "firstWait": 258, "exitReturn": 0,
+            "originalExitCode": 259, "terminateCalls": 1, "processCloseReturn": 0, "threadCloseReturn": 0,
+            "deadlineLatched": True, "unknown": True, "parentBookSettled": False, "inputOriginalsClosed": 0,
+            "freshAccountVerified": False, "onlyUsersMembership": False, "accountRemovedAfterSettlement": False,
+            "managedSourceMappingAuthenticated": True, "managedOrdinaryStartAuthorized": True,
+            "productionEnabled": True, "fullwalkEntries": 28, "ownerArtifactBytes": data["app"]["size"],
+            "ownerCommandSha256": "0" * 64, "nativeResultSha256": "0" * 64}
+        for key, value in failures.items():
+            altered = deepcopy(data); altered["owner"][key] = value
+            with self.subTest(owner=key), self.assertRaises(helper.CheckFailure): self.fullwalk_accept(altered)
+        for record, key, value in (("child", "resultFile", {"createNew": True, "writeCalls": 1, "closed": True}),
+            ("owner", "ownerResult", {"createNew": True, "writeCalls": 1, "closed": True}),
+            ("exit", "exitCode", 1), ("exit", "originalWaitReturned", False), ("exit", "writerCloseGate", "self-certified")):
+            altered = deepcopy(data); altered[record][key] = value
+            with self.subTest(record=record, field=key), self.assertRaises(helper.CheckFailure): self.fullwalk_accept(altered)
+        altered = deepcopy(data); altered["owner"]["aclTransitions"][-1]["role"] = "ordinary-output"
+        with self.assertRaises(helper.CheckFailure): self.fullwalk_accept(altered)
+        altered = deepcopy(data); altered["after"] = data["arguments"]["app_identity"]
+        with self.assertRaises(helper.CheckFailure): self.fullwalk_accept(altered)
+        raw = [helper.canonical_json(data[key]) for key in ("owner", "child", "exit")]
+        for number, limit in ((0, 64 << 10), (1, 4096), (2, 4096)):
+            for malformed in (b"{}", b"not-json", b"x" * (limit + 1), raw[number][:-1],
+                              b'{"schemaVersion":1,' + raw[number][1:]):
+                changed = list(raw); changed[number] = malformed
+                with self.subTest(record=number, size=len(malformed)), self.assertRaises(helper.CheckFailure):
+                    helper.windows_fullwalk_records(data["context"], data["request"], data["after"], *changed, "success",
+                        envelope_raw=data["envelope"], intent_raw=data["intent_raw"], ordinary_prewrite_tick=data["ordinary_prewrite"])
+
+    def test_windows_reader_ordinary_request_is_fixed_bounded_data(self):
+        context, artifact, before, *_ = self.ordinary_data()
+        raw = helper.windows_ordinary_request(context, artifact, before)
+        self.assertEqual(len(raw.splitlines()), 10)
+        self.assertTrue(raw.startswith(b"MRK_WINDOWS_ORDINARY_REQUEST_V1\n") and raw.endswith(b"\n"))
+        command = '"' + artifact["path"] + '" ' + helper.WINDOWS_INSTALLED_TEST + " --exact --ignored --nocapture --test-threads=1"
+        self.assertIn(b"\ncommandSha256=" + hashlib.sha256(command.encode("utf-16-le")).hexdigest().encode("ascii") + b"\n", raw)
+        for key, value in (("size", 0), ("size", True), ("size", 128 * 1024 * 1024 + 1), ("sha256", "X" * 64),
+                           ("path", artifact["path"].replace("aaaaaaaaaaaaaaaa", "bbbb")),
+                           ("path", artifact["path"].replace("debug\\deps", "release\\deps")),
+                           ("path", artifact["path"] + "\ncommand=other"), ("path", r"\\host\share\fake.exe")):
+            with self.subTest(artifact=key, value=value), self.assertRaises(helper.CheckFailure):
+                helper.windows_ordinary_request(context, {**artifact, key: value}, before)
+        for key, value in (("attempt", True), ("attempt", 2), ("runId", "0"), ("sourceSha", "0" * 40), ("sourceTree", "z" * 40)):
+            with self.subTest(binding=key), self.assertRaises(helper.CheckFailure):
+                helper.windows_ordinary_request({**context, key: value}, artifact, before)
+        for identity in ("", before + ":extra", before.replace(":300:", ":-1:"), before.replace("77:", "0:", 1),
+                         before.replace("11" * 16, "0" * 32), before.replace(":128", ":" + str(2**32))):
+            with self.subTest(identity=identity), self.assertRaises(helper.CheckFailure):
+                helper.windows_ordinary_request(context, artifact, identity)
+        long_root = r"C:\runner" + r"\abcdefghij" * 80
+        long_context = {**context, "root": long_root}
+        long_artifact = {**artifact, "path": long_root + artifact["path"][len(context["root"]):]}
+        with self.assertRaises(helper.CheckFailure): helper.windows_ordinary_request(long_context, long_artifact, before)
+
+    def test_windows_reader_ordinary_acl_transition_is_exact_not_ctime_exemption(self):
+        context, artifact, before, after, owner, *_ = self.ordinary_data()
+        rows = owner["aclTransitions"]
+        public = helper.windows_ordinary_transitions(rows, artifact, before, after)
+        self.assertEqual([row["role"] for row in public], [role for role, _ in helper.WINDOWS_ORDINARY_ACLS])
+        for key in ("volume", "creation", "write", "size", "allocation", "links", "attributes"):
+            altered = deepcopy(rows); altered[5]["after"][key] += 1
+            with self.subTest(drift=key), self.assertRaises(helper.CheckFailure):
+                helper.windows_ordinary_transitions(altered, artifact, before, after)
+        changes = [
+            (5, "role", "other"), (5, "mask", 0x1f01ff), (5, "mask", True),
+            (5, "singleExplicitNoninheritingAce", False), (5, "securityAfter", "4" * 64),
+        ]
+        for index, key, value in changes:
+            altered = deepcopy(rows); altered[index][key] = value
+            with self.subTest(transition=key), self.assertRaises(helper.CheckFailure):
+                helper.windows_ordinary_transitions(altered, artifact, before, after)
+        for altered in (rows[:-1], rows + [rows[0]], list(reversed(rows))):
+            with self.assertRaises(helper.CheckFailure): helper.windows_ordinary_transitions(altered, artifact, before, after)
+        for identity in (before, after.replace("11" * 16, "12" * 16), after.replace(":301:", ":302:")):
+            with self.assertRaises(helper.CheckFailure): helper.windows_ordinary_transitions(rows, artifact, before, identity)
+        altered = deepcopy(rows); altered[1]["before"]["fileId"] = altered[0]["before"]["fileId"]
+        altered[1]["after"]["fileId"] = altered[0]["after"]["fileId"]
+        with self.assertRaises(helper.CheckFailure): helper.windows_ordinary_transitions(altered, artifact, before, after)
+
+    def test_windows_reader_ordinary_records_require_closed_exact_source_bound_schema(self):
+        data = self.ordinary_data()
+        public = self.ordinary_accept(data)
+        self.assertEqual(public["native"]["admitted"], 1)
+        self.assertEqual(public["native"]["rootContracts"], 1)
+        self.assertTrue(public["ordinaryOwner"]["resultFilesClosedBySeparateExitGates"])
+        self.assertIs(public["managedOrdinaryStartAuthorized"], False)
+        self.assertIs(public["managedSourceMappingAuthenticated"], False)
+        self.assertIs(public["protectedFullwalk"], False)
+        text = helper.canonical_json(public).decode()
+        for absent in ("accountName", "accountSidSha256", "fileId", "securityBefore", "stdout", "EOF"):
+            self.assertNotIn(absent, text)
+        for number in (4, 5, 6):
+            for key, value in (("sourceSha", "f" * 40), ("sourceTree", "e" * 40),
+                               ("runId", "123457"), ("attempt", True), ("extra", "not-admitted")):
+                altered = deepcopy(data); altered[number][key] = value
+                with self.subTest(record=number, field=key), self.assertRaises(helper.CheckFailure):
+                    self.ordinary_accept(altered)
+        context, artifact, before, after, owner, child, original_exit = data
+        good = [helper.canonical_json(row) for row in (owner, child, original_exit)]
+        for number, limit in ((0, 64 << 10), (1, 4096), (2, 4096)):
+            for bad in (b"{}", b"not-json", b"x" * (limit + 1), good[number][:-1],
+                        b'{"schemaVersion":1,' + good[number][1:]):
+                values = list(good); values[number] = bad
+                with self.subTest(record=number, bytes=len(bad)), self.assertRaises(helper.CheckFailure):
+                    helper.windows_ordinary_records(context, artifact, before, after, *values, "success")
+
+        # Exercise the actual retain selection/copy loop, not just the redacted
+        # record return above. All filesystem/context/runtime edges are inert.
+        root = Path(context["root"])
+        private_names = ("windows-installed-native-preflight-checks.json", "ordinary-request.txt",
+            "ordinary-owner-intent.private.json", "ordinary-owner-result.private.json",
+            "ordinary-owner-exit.private.json", "ordinary-output/native-result.json")
+        private_raw = helper.canonical_json({"artifactNativeIdentity": before,
+            "accountName": "inert-private-account", "privateMarker": "never-publish-this-original"})
+        originals = {root / name: private_raw for name in private_names}
+        public_name = "windows-installed-native-checks.json"
+        originals[root / public_name] = helper.canonical_json(public)
+        original_bytes = dict(originals)
+        written, closed = {}, set()
+
+        def info(path):
+            if path not in originals: raise FileNotFoundError("inert absent retained input")
+            return SimpleNamespace(st_size=len(originals[path]))
+
+        def read(path, limit):
+            if path in originals:
+                raw = originals[path]
+            else:
+                self.assertIn(path, closed)
+                raw = written[path]
+            self.assertLessEqual(len(raw), limit)
+            return raw
+
+        class Output:
+            def __init__(self, path): self.path = path
+            def __enter__(self): return self
+            def write(self, raw):
+                written[self.path] = raw
+                return len(raw)
+            def __exit__(self, *_): closed.add(self.path)
+
+        def open_public(path, mode):
+            self.assertEqual((path.parent, mode), (root / "public", "xb"))
+            self.assertNotIn(path, written)
+            return Output(path)
+
+        with patch.object(helper, "windows_installed_context", return_value=context) as selected_context, \
+             patch.object(helper.Path, "lstat", autospec=True, side_effect=info), \
+             patch.object(helper.Path, "open", autospec=True, side_effect=open_public), \
+             patch.object(helper, "ordinary", side_effect=lambda path: self.assertIn(path, originals)), \
+             patch.object(helper, "windows_installed_bytes", side_effect=read), \
+             patch.object(helper, "windows_installed_retain_runtime", return_value=({"status": "unavailable"}, None)), \
+             patch.object(helper, "write_json") as retention, \
+             patch.object(helper, "run", side_effect=AssertionError("retention must not launch a tool")):
+            helper.windows_installed_phase("retain", helper.WINDOWS_INSTALLED_SCOPE)
+        selected_context.assert_called_once_with(create=False, retention_only=True)
+        retention.assert_called_once()
+        destination, summary = retention.call_args.args
+        self.assertEqual(destination, root / "public/retention.json")
+        self.assertEqual(set(written), {root / "public" / public_name})
+        self.assertEqual(closed, set(written))
+        self.assertEqual(written[root / "public" / public_name], originals[root / public_name])
+        self.assertEqual([row["path"] for row in summary["files"]], [public_name])
+        self.assertEqual(originals, original_bytes)  # Authoritative private bytes are never rewritten.
+        exported = b"\n".join(written.values()) + helper.canonical_json(summary)
+        for forbidden in (before.encode("ascii"), b"artifactNativeIdentity", b"inert-private-account",
+                          b"never-publish-this-original", *(name.encode("ascii") for name in private_names)):
+            self.assertNotIn(forbidden, exported)
+
+    def test_windows_reader_ordinary_failures_and_late_success_are_not_receipts(self):
+        for outcome in ("failure", "cancelled", "skipped", "unavailable", "queued"):
+            with self.subTest(outcome=outcome), self.assertRaises(helper.CheckFailure):
+                self.ordinary_accept(self.ordinary_data(), outcome)
+        failures = {"createCalls": 0, "createReturn": 0, "createError": 5, "firstWait": 258, "exitReturn": 0,
+            "originalExitCode": 259, "terminateCalls": 1, "processCloseReturn": 0, "threadCloseReturn": 0,
+            "deadlineLatched": True, "unknown": True, "parentBookSettled": False, "inputOriginalsClosed": 0,
+            "freshAccountVerified": False, "onlyUsersMembership": False, "accountRemovedAfterSettlement": False,
+            "managedSourceMappingAuthenticated": True, "managedOrdinaryStartAuthorized": True,
+            "protectedFullwalk": True, "productionEnabled": True}
+        for key, value in failures.items():
+            data = self.ordinary_data(); data[4][key] = value
+            with self.subTest(owner=key), self.assertRaises(helper.CheckFailure): self.ordinary_accept(data)
+        for key in ("createCalls", "createReturn", "exitReturn", "processCloseReturn", "threadCloseReturn"):
+            data = self.ordinary_data(); data[4][key] = True
+            with self.subTest(boolean=key), self.assertRaises(helper.CheckFailure): self.ordinary_accept(data)
+        for key, value in (("context", "elevated-primary-refused"), ("admitted", 0), ("refused", 1),
+                           ("rootContracts", 0), ("rootNotExecuted", 1), ("absentThreadReceipts", 4),
+                           ("closedOriginals", 1), ("unknown", 1), ("bookSettled", False)):
+            data = self.ordinary_data(); data[5]["native"][key] = value
+            data[4]["nativeResultSha256"] = hashlib.sha256(helper.canonical_json(data[5])).hexdigest()
+            with self.subTest(child=key), self.assertRaises(helper.CheckFailure): self.ordinary_accept(data)
+        for record, key, value in ((4, "ownerResult", {"createNew": True, "writeCalls": 1, "closed": True}),
+            (5, "resultFile", {"createNew": True, "writeCalls": 1, "closed": True}),
+            (6, "exitCode", 1), (6, "originalWaitReturned", False), (6, "writerCloseGate", "self-certified")):
+            data = self.ordinary_data(); data[record][key] = value
+            with self.subTest(record=record, field=key), self.assertRaises(helper.CheckFailure): self.ordinary_accept(data)
+
+    def test_windows_reader_ordinary_original_keeps_raw_descriptor_change_time(self):
+        raw = b"exe"
+        before = SimpleNamespace(st_dev=77, st_ino=1, st_mode=stat.S_IFREG | 0o755, st_nlink=1, st_size=len(raw),
+            st_mtime_ns=200, st_birthtime_ns=100, st_ctime_ns=100, st_file_attributes=128, st_reparse_tag=0)
+        opened = SimpleNamespace(**{**vars(before), "st_mode": stat.S_IFREG | 0o644, "st_ctime_ns": 700})
+        artifact = {"path": r"C:\owned\native.exe", "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+                    "identity": [77, 1, len(raw), 200, 100]}
+        class Input:
+            closed = False
+            def __enter__(self): return self
+            def __exit__(self, *_): self.closed = True
+            def fileno(self): return 91
+            def read(self, limit):
+                if limit != len(raw) + 1: raise AssertionError("unbounded original read")
+                return raw
+        stream = Input()
+        path = SimpleNamespace(lstat=lambda: before, open=lambda *_: stream)
+        with patch.object(helper, "Path", return_value=path), patch.object(helper.os, "name", "nt"), \
+             patch.object(helper.os, "fstat", side_effect=[opened, opened]):
+            identity = helper.windows_ordinary_original(artifact)
+        self.assertTrue(stream.closed)
+        self.assertEqual(identity, "77:" + (1).to_bytes(16, "little").hex() + ":116444736000000001:116444736000000002:116444736000000007:128")
+        self.assertEqual(artifact["identity"], [77, 1, len(raw), 200, 100])  # Compile receipt not rewritten.
+        for key in ("st_ctime_ns", "st_birthtime_ns", "st_ino", "st_file_attributes", "st_mtime_ns"):
+            changed = SimpleNamespace(**{**vars(opened), key: getattr(opened, key) + 1})
+            with self.subTest(raw_descriptor_drift=key), patch.object(helper, "Path", return_value=path), \
+                 patch.object(helper.os, "name", "nt"), patch.object(helper.os, "fstat", side_effect=[opened, changed]), \
+                 self.assertRaises(helper.CheckFailure):
+                helper.windows_ordinary_original(artifact)
+
+    def test_windows_reader_ordinary_native_source_has_one_retained_original_owner(self):
+        native = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/ordinary_owner.rs").read_text(encoding="utf-8")
+        shared = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/qualification_result.rs").read_text(encoding="utf-8")
+        self.assertIn(helper.WINDOWS_INSTALLED_CRATE + "/src/ordinary_owner.rs", helper.WINDOWS_INSTALLED_SOURCES)
+        self.assertIn(helper.WINDOWS_INSTALLED_CRATE + "/src/qualification_result.rs", helper.WINDOWS_INSTALLED_SOURCES)
+        for api in ("T::CreateProcessWithLogonW(", "T::TerminateProcess(",
+                    "F::CloseHandle(this.outputs.hProcess)", "F::CloseHandle(this.outputs.hThread)"):
+            self.assertEqual(native.count(api), 1)
+        enter = native.split("    fn enter(self:", 1)[1].split("    fn finish(self:", 1)[0]
+        self.assertLess(enter.index("this.facts.begin()?"), enter.index("T::CreateProcessWithLogonW("))
+        self.assertLess(enter.index("this.error ="), enter.index("account.zero()"))
+        self.assertIn("this.domain.as_ptr()", enter)
+        self.assertIn("domain: [u16; 2]", native)
+        self.assertIn("startup: T::STARTUPINFOW, outputs: T::PROCESS_INFORMATION", native)
+        self.assertIn("Pin<Box<Self>>", native)
+        self.assertIn("std::thread::park()", native)
+        self.assertIn("if file.close().is_err() { return false; }", shared)
+        self.assertIn("pub(super) use super::qualification_result::*;", native)
+        for api in ("FS::CreateFileW(", "FS::ReadFile(", "FS::WriteFile(", "F::CloseHandle(", "BC::BCryptHash("):
+            self.assertEqual(shared.count(api), 1)
+            self.assertEqual(native.count(api), 2 if api == "F::CloseHandle(" else 0)
+        self.assertIn("const NATIVE_SECONDS: u64 = 90;", native)
+        self.assertIn("const SETTLE_MS: u32 = 10_000;", native)
+        deadline = native.split("pub(super) fn next_effect(", 1)[1].split("fn command(", 1)[0]
+        self.assertIn("*deadline_latched |= elapsed >= Duration::from_secs(NATIVE_SECONDS)", deadline)
+        self.assertIn("need(!*deadline_latched)", deadline)
+        self.assertNotIn("Instant::now()", deadline)
+        effect = native.split("fn owner_effect(", 1)[1].split("fn batch_return(", 1)[0]
+        self.assertIn("next_effect(start.elapsed(), latched)", effect)
+        self.assertIn("clock.sample(false)", effect)
+        self.assertIn("None => Ok(())", effect)  # Legacy ordinary remains the original90s guard.
+        guard = "owner_effect(start, deadline_latched, aggregate)?;"
+        self.assertLess(enter.index(guard), enter.index("this.facts.begin()?"))
+        # Bind the guard after the last prerequisite observation, not merely at
+        # helper entry or at the later successful-result check.
+        for start, end, observation, mutation in (
+            ("    fn create(", "    fn retire(", "self.query()?.is_none()", "NM::NetUserAdd("),
+            ("    fn create(", "    fn retire(", "if self.groups()?.is_empty()", "NM::NetLocalGroupAddMembers("),
+            ("    fn retire(", "impl Drop for Account", "self.query()?.as_deref()", "NM::NetUserDel("),
+            ("fn grant(", "// NetAPI allocation", "file.descriptor_traced(trace)?", "S::SetKernelObjectSecurity("),
+        ):
+            body = native.split(start, 1)[1].split(end, 1)[0]
+            before_mutation = body.split(mutation, 1)[0]
+            effect_guard = ("trace.observed(owner_effect(start, deadline_latched, aggregate), InputCheck::AclDeadline)?;"
+                            if start == "fn grant(" else guard)
+            self.assertGreater(before_mutation.rindex(effect_guard), before_mutation.index(observation))
+        driver = native.split("fn run_owner(variant: OwnerVariant, entry_tick: u64)", 1)[1]
+        before_output = driver.split("FS::CreateDirectoryW(", 1)[0]
+        self.assertGreater(before_output.rindex("input_trace.observed(owner_effect(start, &mut deadline_latched, &mut aggregate), InputCheck::AclDeadline)?;"),
+                           before_output.index("let output_name ="))
+        self.assertIn("current.create(&parent, start, &mut deadline_latched, &mut aggregate)?", driver)
+        self.assertIn("current.retire(start, &mut deadline_latched, &mut aggregate)", driver)
+        self.assertIn("start, &mut deadline_latched, &mut aggregate, &mut input_trace)?",
+                      driver.split("for ((index, role), acl_role) in directories.into_iter().zip([", 1)[1])
+        self.assertEqual(native.count("let start = Instant::now();"), 1)
+        for unavailable in ("std::thread::spawn", "std::process::Command", "LogonUserW(", "ImpersonateLoggedOnUser(",
+                            "AdjustTokenPrivileges(", "CreateProcessAsUserW(", "AuthzAccessCheck(", "SetNamedSecurityInfoW("):
+            self.assertNotIn(unavailable, native)
+            self.assertNotIn(unavailable, shared)
+        # These are SOURCE guards, not a claim Linux executed the Rust refusal.
+        self.assertIn("FULLWALK_PREREQUISITES_REVIEWED: bool = true;", native)
+        closed = ("need(variant != OwnerVariant::Fullwalk || FULLWALK_PREREQUISITES_REVIEWED)?;",
+                  "need(!batch || FULLWALK_PREREQUISITES_REVIEWED)?;",
+                  "need(variant != OwnerVariant::Fullwalk || batch)?;")
+        passive_start = driver.index("if variant == OwnerVariant::Passive {")
+        passive_end = driver.index("\n    }", passive_start) + len("\n    }")
+        passive = driver[passive_start:passive_end]
+        self.assertEqual(passive.count("need("), 1)
+        self.assertIn('need(!batch && std::env::var("MRK_DESKTOP_DISPATCH_SCOPE").as_deref() == Ok("windows-installed-passive")', passive)
+        self.assertLess(passive.index("fixture::profile()?;"), passive.index("need(!batch"))
+        for variable, value, ending in (
+            ("GITHUB_REF", "refs/heads/verify/desktop-windows-installed-passive", ""),
+            ("GITHUB_EVENT_NAME", "workflow_dispatch", ""),
+            ("MRK_WINDOWS_PASSIVE_PUBLICATION_STEP_OUTCOME", "success", ""),
+            ("MRK_WINDOWS_PASSIVE_PUBLICATION_FINALIZE_STEP_OUTCOME", "success", ")?;"),
+        ):
+            self.assertIn('&& std::env::var("' + variable + '").as_deref() == Ok("' + value + '")' + ending, passive)
+        for first_effect in ("super::hosted_tests::hosted_source()?", 'std::env::var("MRK_DESKTOP_CI_ROOT")',
+                             "NativeBook::new()", "owned_file_traced(", "current.create(", "grant(", "Launch::"):
+            for guard in closed:
+                self.assertLess(driver.index(guard), driver.index(first_effect))
+            self.assertLess(passive_end, driver.index(first_effect))
+        for entry, variant in (("hosted_ordinary_original_handle_contract", "Ordinary"),
+                               ("hosted_protected_version_fullwalk_contract", "Fullwalk"),
+                               ("hosted_installed_passive_original_handle_contract", "Passive")):
+            body = native.split("fn " + entry + "() -> Result<()> {", 1)[1].split("\n}", 1)[0]
+            self.assertTrue(body.lstrip().startswith("let entry_tick = unsafe { SI::GetTickCount64() };"))
+            self.assertIn("run_owner(OwnerVariant::" + variant + ", entry_tick)", body)
+        lib = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/lib.rs").read_text(encoding="utf-8")
+        self.assertIn('#[cfg(any(test, feature = "qualification-result"))]\nmod qualification_result;', lib)
+        self.assertIn('#[cfg(feature = "qualification-result")]\npub use qualification_result::{write_fullwalk_result_once, write_passive_result_once, require_passive_qualification, FullwalkFacts, PassiveFacts};', lib)
+        self.assertIn("#[cfg(test)]\nmod ordinary_owner;", lib)
+        for test_only in ("struct Account", "struct Launch", "fn run_owner", "mod hosted_tests", "T::CreateProcessWithLogonW("):
+            self.assertNotIn(test_only, shared)
+        native_manifest = helper.tomllib.loads((SOURCE / helper.WINDOWS_INSTALLED_CRATE / "Cargo.toml").read_text(encoding="utf-8"))
+        self.assertEqual(native_manifest["features"], helper.WINDOWS_NATIVE_DECLARED_FEATURES)
+        app_manifest = helper.tomllib.loads((SOURCE / "desktop/src-tauri/Cargo.toml").read_text(encoding="utf-8"))
+        windows = app_manifest["target"]['cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))']
+        self.assertEqual(windows["dependencies"]["mrk-windows-installed-native"], {"path": "../native/windows-installed-native"})
+        self.assertEqual(windows["dev-dependencies"]["mrk-windows-installed-native"],
+                         {"path": "../native/windows-installed-native", "features": ["qualification-result"]})
+        app = (SOURCE / "desktop/src-tauri/src/installed_runtime_windows.rs").read_text(encoding="utf-8")
+        walk = app.split("fn native_protected_version_walk_and_original_settlement()", 1)[1].split("    #[test]", 1)[0]
+        self.assertIn("let original_end = Instant::now() + Duration::from_secs(10);", walk)
+        self.assertIn("let reporting_end = original_end + Duration::from_secs(2);", walk)
+        self.assertLess(walk.index("book.settle_originals()"), walk.index("assert!"))
+        self.assertLess(walk.index("book.settle_originals()"), walk.index("native::write_fullwalk_result_once(&actual, reporting_end)"))
+        phase = HELPER.read_text(encoding="utf-8").split("def windows_installed_phase(", 1)[1].split("\ndef ", 1)[0]
+        self.assertIn("windows_fullwalk_preflight", phase)
+        self.assertNotIn("[app_artifact[\"path\"], WINDOWS_FULLWALK_TEST,", phase)
+        self.assertIn("windows_installed_native_test_total(context) - len(native_names)", phase)
+        workflow = (SOURCE / ".github/workflows/desktop-foundation.yml").read_text(encoding="utf-8")
+        self.assertEqual(workflow.count("& $env:MRK_WINDOWS_NATIVE_ARTIFACT " + helper.WINDOWS_FULLWALK_OWNER + " --exact --ignored --nocapture --test-threads=1"), 1)
+        self.assertNotIn(helper.WINDOWS_FULLWALK_TEST, workflow)  # Only the native owner launches the app child.
+        child = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/hosted_tests.rs").read_text(encoding="utf-8")
+        self.assertLess(child.index("let settlement = book.settle_once()"), child.index("ordinary_owner::write_native_result"))
+        self.assertLess(child.index("&& absent == if admitted { 6 } else { 4 }"), child.index("ordinary_owner::write_native_result"))
+        self.assertIn("require_fact(admitted)?;", child)
+
+
+
+class WindowsInstalledPassiveGateTests(unittest.TestCase):
+    """Inert DATA/source checks, never publisher, loader, account or native evidence."""
+
+    @classmethod
+    def fixture(cls):
+        previous = WindowsReaderGateTests.publication_data()
+        legacy = previous["legacy"]
+        context = {**legacy["context"], "qualificationProfile": helper.WINDOWS_INSTALLED_PASSIVE_PROFILE}
+        owner, app, prepared = legacy["standalone"], legacy["app"], legacy["prepared_case"]["prepared"]
+        normal_helper = {"path": previous["pre"]["helperArtifact"], "size": 97, "sha256": "8" * 64,
+                         "messages": {"size": 17, "sha256": "9" * 64}}
+        argv_hash = lambda argv: hashlib.sha256(helper.canonical_json(argv)).hexdigest()
+        compiled = {"invocationSha256": argv_hash(helper.windows_fullwalk_native_argv("/inert-compiler/cargo.exe", context)),
+            "appInvocationSha256": argv_hash(helper.windows_installed_app_argv("/inert-compiler/cargo.exe", context)),
+            "helperInvocationSha256": argv_hash(helper.windows_installed_helper_argv("/inert-compiler/cargo.exe", context)),
+            "helperCompiledArtifact": normal_helper, "helperOriginalExitCode": 0}
+        roster_raw = legacy["roster_raw"]
+        pre_raw = helper.windows_fullwalk_precheck_text(context, owner, app, compiled, prepared,
+            legacy["pre"]["ownerArtifactIdentity"], legacy["pre"]["appArtifactIdentity"], roster_raw,
+            helper_identity=previous["pre"]["helperArtifactIdentity"])
+        pre = helper.windows_fullwalk_precheck_data(context, pre_raw)
+        prechecked = pre, pre_raw, roster_raw, owner, app, compiled, prepared
+        fields, objects, proofs, blobs = {}, {}, {}, {}
+        tests = {"stage": helper.WINDOWS_INSTALLED_PASSIVE_STAGE, "observation": helper.WINDOWS_INSTALLED_PASSIVE_OBSERVER}
+        def observe(role):
+            fields[role] = {**previous["fields"]["stage" if role == "stage" else "before"],
+                "profile": helper.WINDOWS_INSTALLED_PASSIVE_PROFILE, "observerTest": tests[role],
+                "precheckBytes": len(pre_raw), "precheckSha256": hashlib.sha256(pre_raw).hexdigest(),
+                "actualFixedProducerObserved": "false" if role == "stage" else "true"}
+            objects[role] = deepcopy(previous["objects"]["stage" if role == "stage" else "before"])
+            proofs[role] = ([] if role == "stage" else [{"role": name, "size": len(blobs[name]),
+                "sha256": hashlib.sha256(blobs[name]).hexdigest()} for name in helper.WINDOWS_INSTALLED_PASSIVE_PROOFS])
+            return WindowsReaderGateTests.publication_observation_raw(fields[role], objects[role], proofs[role], kind="passive-observation")
+        def exited(role):
+            selected = "helper" if role == "helperSuccess" else "owner"
+            command = (pre["helperCommandSha256"] if selected == "helper" else
+                helper.windows_fullwalk_command_sha(pre["ownerArtifact"], tests["stage" if role == "stage" else "observation"]))
+            return helper.windows_fullwalk_text("passive-exit", {key: pre[key] for key in
+                ("profile", "sourceSha", "sourceTree", "runId", "attempt")} | {"role": role,
+                "artifactSha256": pre[selected + "ArtifactSha256"], "precheckSha256": hashlib.sha256(pre_raw).hexdigest(),
+                "commandSha256": command, "originalWaitReturned": "true", "exitCode": "0",
+                "writerCloseGate": "original-" + role + "-step-success-required"})
+        blobs["stage"] = observe("stage"); blobs["stageExit"] = exited("stage")
+        blobs["helperSuccessExit"] = exited("helperSuccess")
+        blobs["observation"] = observe("observation"); blobs["observerExit"] = exited("observe")
+        outcomes = dict.fromkeys(("stage", "publish", "publication"), "success")
+        _, publication = helper.windows_installed_passive_setup_data(context, pre_raw, roster_raw, blobs, outcomes, "publication")
+        request = helper.windows_installed_passive_request(context, publication, prechecked)
+        binding = helper.windows_fullwalk_request_data(request, root=context["root"], passive=True)
+        child = deepcopy(legacy["child"])
+        child.update(requestSha256=hashlib.sha256(request).hexdigest(), commandSha256=binding["appCommandSha256"],
+            test=helper.WINDOWS_INSTALLED_PASSIVE_TEST, passive={"completedMethods": 5, "settledOriginalOwners": 9,
+                "payloadImages": 23, "systemImages": 23, "stoppedBeforeClaim": True, "stoppedOwnedChild": True, "productionEnabled": False})
+        child["observation"].update(versionIdentity=helper.windows_fullwalk_file_identity(binding["versionIdentity"]),
+            selectedIdentities=[helper.windows_fullwalk_file_identity(binding[key]) for key in helper.WINDOWS_FULLWALK_REQUEST_FIELDS[-3:]])
+        result = deepcopy(legacy["owner"]); result.pop("aggregate")
+        count = len(helper.PureWindowsPath(context["root"]).parents) + 1 + 12
+        result.update(requestSha256=child["requestSha256"], commandSha256=binding["appCommandSha256"],
+            ownerCommandSha256=binding["ownerCommandSha256"], ownerTest=helper.WINDOWS_INSTALLED_PASSIVE_OWNER,
+            childTest=helper.WINDOWS_INSTALLED_PASSIVE_TEST, nativeResultSha256=hashlib.sha256(helper.canonical_json(child)).hexdigest(),
+            inputOriginals=count, inputOriginalsClosed=count, protectedFullwalk=False, installedPassive=True,
+            ownerAggregateSeconds=90, poisonedParentEnvironment=True)
+        result["aclTransitions"][-1]["role"] = "passive-output"
+        original_exit = {**legacy["exit"], "requestSha256": child["requestSha256"], "ownerTest": helper.WINDOWS_INSTALLED_PASSIVE_OWNER}
+        intent = {key: value for key, value in legacy["intent"].items() if key not in {"fullwalkBatch", "fixedFullwalkChildOnly"}}
+        intent["fixedInstalledPassiveChildOnly"] = True
+        return {"context": context, "pre": pre, "precheck_raw": pre_raw, "roster_raw": roster_raw, "prechecked": prechecked,
+            "fields": fields, "objects": objects, "proofs": proofs, "blobs": blobs, "outcomes": outcomes,
+            "publication": publication, "request": request, "owner": result, "child": child, "exit": original_exit,
+            "intent": intent, "after": legacy["after"]}
+
+    @staticmethod
+    def accept(data, outcome="success"):
+        return helper.windows_installed_passive_records(data["context"], data["request"],
+            *(helper.canonical_json(data[key]) for key in ("owner", "child", "exit", "intent")), outcome,
+            app_after_identity=data["after"])
+
+    @staticmethod
+    def setup(data, through="publication"):
+        index = ("stage", "publish", "publication").index(through)
+        return helper.windows_installed_passive_setup_data(data["context"], data["precheck_raw"], data["roster_raw"],
+            dict(list(data["blobs"].items())[:(2, 3, 5)[index]]), dict(list(data["outcomes"].items())[:index + 1]), through)
+
+    @classmethod
+    def originals(cls, data):
+        """Memory-only original DATA; native/compile I/O admission is a separate check."""
+        root, context = Path(data["context"]["root"]), data["context"]
+        names = {**helper.WINDOWS_INSTALLED_PASSIVE_PROOFS,
+            "observation": ("passive-publication-observation.private.txt", 64 << 10),
+            "observerExit": ("passive-observer-exit.private.txt", 4096)}
+        files = {root / name: data["blobs"][role] for role, (name, _) in names.items()}
+        for role in ("stage", "publish", "publication"):
+            facts, _ = cls.setup(data, role)
+            files[root / ("passive-" + role + "-checks.json")] = helper.canonical_json(helper.windows_installed_phase_receipt(
+                context, "windows-installed-passive-" + role + "-finalize", **facts))
+        files[root / "passive-publication.private.json"] = helper.canonical_json(data["publication"])
+        files[root / "passive-request.txt"] = data["request"]
+        for key, name in (("owner", "passive-owner-result.private.json"), ("child", "passive-output/passive-result.private.json"),
+                          ("exit", "passive-owner-exit.private.json"), ("intent", "passive-owner-intent.private.json")):
+            files[root / name] = helper.canonical_json(data[key])
+        record = lambda raw: {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+        files[root / "windows-installed-passive-preflight-checks.json"] = helper.canonical_json(helper.windows_installed_phase_receipt(
+            context, "windows-installed-passive", request=record(data["request"]),
+            publication=record(files[root / "passive-publication.private.json"]),
+            appArtifactSha256=data["pre"]["appArtifactSha256"], ownerArtifactSha256=data["pre"]["ownerArtifactSha256"], nativeNotStarted=True))
+        files[root / "windows-installed-passive-checks.json"] = helper.canonical_json(helper.windows_installed_phase_receipt(
+            context, "windows-installed-passive-finalize", **cls.accept(data), notVerified=list(helper.WINDOWS_INSTALLED_PASSIVE_NOT_VERIFIED)))
+        environment = dict.fromkeys(("MRK_WINDOWS_PASSIVE_PREFLIGHT_STEP_OUTCOME", "MRK_WINDOWS_PASSIVE_OWNER_PREFLIGHT_STEP_OUTCOME",
+            *("MRK_WINDOWS_PASSIVE_" + role + suffix for role in ("STAGE", "PUBLISH", "PUBLICATION", "OWNER")
+                for suffix in ("_STEP_OUTCOME", "_FINALIZE_STEP_OUTCOME"))), "success")
+        return files, environment
+
+    def inert_io(self, data, files, environment):
+        def read(path, limit):
+            if path not in files:
+                raise FileNotFoundError("Missing synthetic DATA")
+            raw = files[path]
+            self.assertLessEqual(len(raw), limit)
+            return raw
+        stack = ExitStack()
+        stack.enter_context(patch.dict(helper.os.environ, environment, clear=True))
+        stack.enter_context(patch.object(helper, "windows_installed_passive_check_precheck", return_value=data["prechecked"]))
+        stack.enter_context(patch.object(helper, "windows_fullwalk_compile_bindings", return_value=data["prechecked"][3:]))
+        stack.enter_context(patch.object(helper, "windows_installed_bytes", side_effect=read))
+        stack.enter_context(patch.object(helper, "read_bounded_json", side_effect=lambda path, limit: helper.bounded_json(read(path, limit), limit)))
+        stack.enter_context(patch.object(helper, "windows_installed_record", side_effect=lambda path, limit:
+            {"size": len(read(path, limit)), "sha256": hashlib.sha256(read(path, limit)).hexdigest()}))
+        stack.enter_context(patch.object(helper, "windows_ordinary_original", return_value=data["after"]))
+        stack.enter_context(patch.object(helper, "run", side_effect=AssertionError("DATA must not launch")))
+        stack.enter_context(patch.object(helper, "tools", side_effect=AssertionError("DATA must not acquire tools")))
+        return stack
+
+    def test_dispatch_is_one_fixed_ref_attempt_and_data_routes_are_disjoint(self):
+        sha, repository, ref = "1" * 40, "inert/repository", helper.WINDOWS_INSTALLED_PASSIVE_REF
+        environment = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Windows", "RUNNER_ARCH": "X64",
+            "ImageOS": "win25-vs2026", "ImageVersion": "20260920.1.0", "GITHUB_JOB": "windows-installed-native",
+            "GITHUB_RUN_ATTEMPT": "1", "MRK_DESKTOP_HOSTED_CHECKS": helper.WINDOWS_INSTALLED_SCOPE,
+            "GITHUB_SHA": sha, "GITHUB_WORKFLOW_SHA": sha, "GITHUB_REPOSITORY": repository, "GITHUB_REF": ref,
+            "GITHUB_WORKFLOW_REF": repository + "/.github/workflows/desktop-foundation.yml@" + ref, "GITHUB_RUN_ID": "123456",
+            "GITHUB_EVENT_NAME": "workflow_dispatch", "MRK_DESKTOP_DISPATCH_SCOPE": helper.WINDOWS_INSTALLED_PASSIVE_DISPATCH,
+            "MRK_DESKTOP_EXPECTED_SHA": sha}
+        with patch.object(helper, "sys", SimpleNamespace(platform="win32", maxsize=2**63 - 1, version=helper.PYTHON)):
+            with patch.dict(helper.os.environ, environment, clear=True):
+                self.assertEqual(helper.windows_installed_binding()["qualificationProfile"], helper.WINDOWS_INSTALLED_PASSIVE_PROFILE)
+            for key, value in (("GITHUB_EVENT_NAME", "push"), ("GITHUB_REF", helper.WINDOWS_RUNTIME_PUBLICATION_REF),
+                    ("GITHUB_RUN_ATTEMPT", "2"), ("MRK_DESKTOP_EXPECTED_SHA", ""), ("GITHUB_WORKFLOW_SHA", "f" * 40),
+                    ("MRK_DESKTOP_DISPATCH_SCOPE", helper.WINDOWS_FULLWALK_DISPATCH), ("RUNNER_ENVIRONMENT", "self-hosted")):
+                with self.subTest(field=key), patch.dict(helper.os.environ, {**environment, key: value}, clear=True), self.assertRaises(helper.CheckFailure):
+                    helper.windows_installed_binding()
+        context = {**WindowsReaderGateTests.context(), "qualificationProfile": helper.WINDOWS_INSTALLED_PASSIVE_PROFILE}
+        self.assertTrue(helper.windows_installed_prepared_profile(context))
+        self.assertFalse(helper.windows_fullwalk_profile(context))
+        self.assertFalse(helper.windows_runtime_publication_profile(context))
+        targets = ("windows_installed_passive_stage_finalize", "windows_installed_passive_publish_finalize",
+            "windows_installed_passive_publication_finalize", "windows_installed_passive_preflight", "windows_installed_passive_finalize")
+        for phase, target in zip(helper.WINDOWS_INSTALLED_PASSIVE_DATA_PHASES, targets, strict=True):
+            for profile in (helper.WINDOWS_INSTALLED_PASSIVE_PROFILE, helper.WINDOWS_FULLWALK_PROFILE, helper.WINDOWS_RUNTIME_PUBLICATION_PROFILE):
+                chosen = {**context, "qualificationProfile": profile}
+                with self.subTest(phase=phase, profile=profile), patch.object(helper, "windows_installed_context", return_value=chosen) as admission, \
+                     patch.object(helper, target) as selected, patch.object(helper, "run", side_effect=AssertionError("DATA launch")), \
+                     patch.object(helper, "tools", side_effect=AssertionError("DATA compiler")):
+                    if profile == helper.WINDOWS_INSTALLED_PASSIVE_PROFILE:
+                        helper.windows_installed_phase(phase, helper.WINDOWS_INSTALLED_SCOPE)
+                        selected.assert_called_once_with(chosen)
+                    else:
+                        with self.assertRaises(helper.CheckFailure): helper.windows_installed_phase(phase, helper.WINDOWS_INSTALLED_SCOPE)
+                        selected.assert_not_called()
+                    admission.assert_called_once_with(create=False, retention_only=True)
+        for phase in (*helper.WINDOWS_FULLWALK_DATA_PHASES, "windows-installed-native-finalize"):
+            with self.subTest(old_phase=phase), patch.object(helper, "windows_installed_context", return_value=context), \
+                 patch.object(helper, "run", side_effect=AssertionError("old route launch")), self.assertRaises(helper.CheckFailure):
+                helper.windows_installed_phase(phase, helper.WINDOWS_INSTALLED_SCOPE)
+
+    def test_nonpublisher_candidate_and_normal_helper_have_distinct_metadata_and_commands(self):
+        value, lock, base = WindowsReaderGateTests.graph_data()
+        publisher, _, _ = WindowsReaderGateTests.graph_data(publication=True)
+        context = {**base, "qualificationProfile": helper.WINDOWS_INSTALLED_PASSIVE_PROFILE}
+        for role, argv in (("native", helper.windows_fullwalk_native_argv), ("app", helper.windows_installed_app_argv)):
+            self.assertEqual(helper.windows_installed_features(context, role), [])
+            command = argv("/fixed-cargo", context)
+            for fixed in ("--locked", "--offline", "--no-default-features", "--lib", "--no-run"): self.assertIn(fixed, command)
+            self.assertNotIn("--features", command)
+        command = helper.windows_installed_helper_argv("/fixed-cargo", context)
+        self.assertEqual(command[1], "build")
+        self.assertEqual(command[command.index("--features") + 1], "windows-runtime-publisher")
+        self.assertNotIn("--lib", command); self.assertNotIn("--no-run", command)
+        root, source = Path(context["root"]), Path(context["source"])
+        files = {root / "app-metadata.json": helper.canonical_json(value), root / "helper-metadata.json": helper.canonical_json(publisher),
+                 source / helper.WINDOWS_INSTALLED_APP / "Cargo.lock": b"inert parsed lock boundary"}
+        with patch.object(helper, "windows_installed_bytes", side_effect=lambda path, limit: files[path]), \
+             patch.object(helper.tomllib, "loads", return_value=lock), patch.object(helper, "run", side_effect=AssertionError("metadata must be DATA")):
+            app_graph, helper_graph = helper.windows_installed_app_metadata(context), helper.windows_installed_helper_metadata(context)
+            self.assertFalse(app_graph["publication"]); self.assertTrue(helper_graph["publication"])
+            native = app_graph["localIds"]["mrk-windows-installed-native"]
+            self.assertEqual(helper.windows_installed_app_unit_features(app_graph)[native], ["qualification-result"])
+            self.assertEqual(helper.windows_installed_app_unit_features(helper_graph, helper=True)[native], ["runtime-publication"])
+            files[root / "helper-metadata.json"] = files[root / "app-metadata.json"]
+            with self.assertRaises(helper.CheckFailure): helper.windows_installed_helper_metadata(context)
+        phase = HELPER.read_text(encoding="utf-8").split("def windows_installed_phase(", 1)[1].split("def main(", 1)[0]
+        self.assertEqual(phase.count("time.monotonic()"), 1)
+        self.assertIn('"acquire": 840, "compile": 660', phase)
+        self.assertIn('check="windows-installed-helper-locked-metadata"', phase)
+        self.assertIn("helperMetadataOriginalExitCode=0", phase)
+        self.assertIn("windows_installed_helper_handoff(context, deadline)", phase)
+
+    def test_precheck_source_selectors_and_counts_match_the_nonshipping_native_profile(self):
+        data = self.fixture(); context, pre = data["context"], data["pre"]
+        self.assertEqual(len(helper.WINDOWS_INSTALLED_PASSIVE_PRECHECK_FIELDS), 55)
+        self.assertEqual(tuple(pre), helper.WINDOWS_INSTALLED_PASSIVE_PRECHECK_FIELDS)
+        self.assertEqual(pre["headlessContract"], "fixed-installed-passive-original-owner-v1")
+        self.assertEqual((pre["appRootFeatures"], pre["standaloneFeatures"], pre["appNativeDevFeatures"], pre["helperNativeFeatures"]),
+                         ("none", "none", "qualification-result", "runtime-publication"))
+        for key, value in (("appRootFeatures", "windows-runtime-publisher"), ("standaloneFeatures", "runtime-publication"),
+                ("ownerTest", helper.WINDOWS_FULLWALK_OWNER), ("appTest", helper.WINDOWS_FULLWALK_TEST), ("attempt", "2")):
+            raw = helper.windows_fullwalk_text("passive-precheck", {**pre, key: value})
+            with self.subTest(field=key), self.assertRaises(helper.CheckFailure): helper.windows_fullwalk_precheck_data(context, raw)
+        with self.assertRaises(helper.CheckFailure): helper.windows_fullwalk_kind(context, "prerequisite")
+        native_sources = WindowsReaderGateTests.native_source_blobs(context)
+        with patch.object(helper, "windows_installed_bytes", side_effect=lambda path, limit: native_sources[path]), \
+             patch.object(helper, "run", side_effect=AssertionError("source count cannot list binaries")):
+            names = helper.windows_installed_native_inert(context)
+            self.assertEqual(names, (*helper.WINDOWS_INSTALLED_INERT, *helper.WINDOWS_INSTALLED_PASSIVE_NATIVE_INERT))
+            self.assertEqual(helper.windows_installed_native_test_total(context),
+                sum(len(helper.re.findall(rb"(?m)^\s*#\[test\]\s*$", raw)) for raw in native_sources.values()))
+        fixtures = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/qualification_fixture.rs").read_text(encoding="utf-8")
+        fields = fixtures.split("fn passive_precheck_fields()", 1)[1].split("\n}", 1)[0]
+        self.assertIn("PRECHECK_FIELDS[..26]", fields); self.assertIn("PRECHECK_FIELDS[33..]", fields)
+        self.assertIn("fields.extend(HELPER_FIELDS)", fields)
+        self.assertEqual(tuple(helper.re.findall(r'"([^"]+)"', fields)), helper.WINDOWS_INSTALLED_PASSIVE_PRECHECK_FIELDS[26:32])
+        for kind in ("passive-precheck", "passive-observation", "passive-exit"):
+            self.assertIn('"' + helper.WINDOWS_FULLWALK_SCHEMAS[kind][0] + '"', fixtures)
+        self.assertIn('("helperSuccessExit", "passive-publisher-exit.private.txt", LIMIT)', fixtures)
+        for name in helper.WINDOWS_INSTALLED_PASSIVE_NATIVE_INERT:
+            self.assertIn("fn " + name.split("::")[-1] + "(", native_sources[Path(context["source"]) / helper.WINDOWS_INSTALLED_CRATE / "src/tests.rs"].decode("utf-8"))
+        app_sources = "\n".join((SOURCE / name).read_text(encoding="utf-8") for name in (
+            "desktop/src-tauri/src/runtime.rs", "desktop/src-tauri/src/installed_runtime_windows.rs", "desktop/src-tauri/src/installed_windows_passive_tests.rs"))
+        for name in helper.WINDOWS_INSTALLED_PASSIVE_APP_INERT: self.assertIn("fn " + name.split("::")[-1] + "(", app_sources)
+        self.assertNotIn("#[test]", (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/loader.rs").read_text(encoding="utf-8"))
+        app_names = (*helper.WINDOWS_INSTALLED_APP_INERT, *helper.WINDOWS_INSTALLED_PASSIVE_APP_INERT)
+        raw = (f"running {len(app_names)} tests\n" + "".join("test " + name + " ... ok\n" for name in app_names)
+            + f"test result: ok. {len(app_names)} passed; 0 failed; 0 ignored; 0 measured; 181 filtered out; finished in 0.01s\n").encode("ascii")
+        self.assertEqual(helper.windows_installed_app_libtest(raw, passive=True)["names"], list(app_names))
+        for arguments in ({}, {"production": True}, {"production": True, "passive": True}):
+            with self.assertRaises(helper.CheckFailure): helper.windows_installed_app_libtest(raw, **arguments)
+
+    def test_setup_requires_three_actual_original_returns_and_exact_proof_correspondence(self):
+        data = self.fixture()
+        for through, count in (("stage", 2), ("publish", 3), ("publication", 5)):
+            facts, publication = self.setup(data, through)
+            self.assertEqual(len(facts["setupEvidence"]), count)
+            self.assertEqual(publication is not None, through == "publication")
+        facts, publication = self.setup(data)
+        self.assertEqual(facts["observedObjects"], 103)
+        self.assertTrue(publication["comparisonDataOnly"])
+        self.assertFalse(publication["productionEnabled"])
+        for role in data["outcomes"]:
+            changed = deepcopy(data); changed["outcomes"][role] = "failure"
+            with self.subTest(outcome=role), self.assertRaises(helper.CheckFailure): self.setup(changed)
+        for name in ("stageExit", "helperSuccessExit", "observerExit"):
+            for key, value in (("exitCode", "2"), ("originalWaitReturned", "false"), ("writerCloseGate", "unclosed")):
+                changed = deepcopy(data)
+                row = helper.windows_fullwalk_wire(changed["blobs"][name], "passive-exit")
+                changed["blobs"][name] = helper.windows_fullwalk_text("passive-exit", {**row, key: value})
+                with self.subTest(original=name, field=key), self.assertRaises(helper.CheckFailure): self.setup(changed)
+        for role in ("scalar", "helperOccupied", "before", "after"):
+            with self.subTest(old_role=role), self.assertRaises(helper.CheckFailure):
+                helper.windows_runtime_publication_exit(data["context"], data["blobs"]["helperSuccessExit"], data["precheck_raw"], role, "success")
+        mutations = {
+            "missing-object": lambda d: d["objects"]["observation"].pop(),
+            "aliased-full-id": lambda d: d["objects"]["observation"][5]["stamp"].update(fileId=d["objects"]["observation"][0]["stamp"]["fileId"]),
+            "changed-source-stamp": lambda d: d["objects"]["observation"][10]["stamp"].update(change=302),
+            "payload-digest": lambda d: d["objects"]["observation"][-1].update(sha256="f" * 64),
+            "proof-digest": lambda d: d["proofs"]["observation"][2].update(sha256="f" * 64),
+            "proof-role": lambda d: d["proofs"]["observation"][2].update(role="helperSuccess"),
+            "unsettled": lambda d: d["fields"]["observation"].update(parentBookSettled="false"),
+            "open-original": lambda d: d["fields"]["observation"].update(fileOriginalsClosed=119),
+            "producer-not-observed": lambda d: d["fields"]["observation"].update(actualFixedProducerObserved="false"),
+        }
+        for label, mutate in mutations.items():
+            changed = deepcopy(data); mutate(changed)
+            changed["blobs"]["observation"] = WindowsReaderGateTests.publication_observation_raw(
+                changed["fields"]["observation"], changed["objects"]["observation"], changed["proofs"]["observation"], kind="passive-observation")
+            with self.subTest(case=label), self.assertRaises(helper.CheckFailure): self.setup(changed)
+
+    def test_setup_finalizers_cannot_self_certify_or_accept_changed_originals(self):
+        data = self.fixture(); files, environment = self.originals(data)
+        with self.inert_io(data, files, environment):
+            self.assertEqual(helper.windows_installed_passive_setup_evidence(data["context"], "publication", finalized=True)[1], data["publication"])
+        for key in environment:
+            if "OWNER" in key: continue
+            with self.subTest(gate=key), self.inert_io(data, files, {**environment, key: "skipped"}), self.assertRaises(helper.CheckFailure):
+                helper.windows_installed_passive_setup_evidence(data["context"], "publication", finalized=True)
+        for filename in ("passive-publisher-exit.private.txt", "passive-stage-checks.json", "passive-publish-checks.json",
+                         "passive-publication-checks.json", "passive-publication.private.json"):
+            changed = dict(files); path = Path(data["context"]["root"]) / filename
+            changed[path] = changed[path] + b"\n"
+            if filename.endswith("checks.json"):
+                changed[path] = helper.canonical_json({**helper.bounded_json(files[path], 64 << 10), "unreviewed": True})
+            with self.subTest(file=filename), self.inert_io(data, changed, environment), self.assertRaises(helper.CheckFailure):
+                helper.windows_installed_passive_setup_evidence(data["context"], "publication", finalized=True)
+
+    def test_request_role_inventory_and_comparison_receipt_are_closed_data(self):
+        data = self.fixture(); raw = data["request"]
+        request = helper.windows_fullwalk_request_data(raw, root=data["context"]["root"], passive=True)
+        self.assertEqual(tuple(request), helper.WINDOWS_FULLWALK_REQUEST_FIELDS)
+        self.assertEqual(request["publicationReceiptBytes"], len(helper.canonical_json(data["publication"])))
+        self.assertEqual(request["publicationReceiptSha256"], hashlib.sha256(helper.canonical_json(data["publication"])).hexdigest())
+        self.assertEqual(request["role"], "installed-passive")
+        with self.assertRaises(helper.CheckFailure): helper.windows_fullwalk_request_data(raw, root=data["context"]["root"])
+        for original, replacement in ((b"MRK_WINDOWS_INSTALLED_PASSIVE_REQUEST_V1", b"MRK_WINDOWS_FULLWALK_REQUEST_V1"),
+                (b"role=installed-passive", b"role=protected-version-fullwalk"),
+                (helper.WINDOWS_INSTALLED_PASSIVE_TEST.encode("ascii"), helper.WINDOWS_FULLWALK_TEST.encode("ascii")),
+                (request["selectedCoreIdentity"].encode("ascii"), request["selectedPythonIdentity"].encode("ascii")),
+                (("appCommandSha256=" + request["appCommandSha256"]).encode("ascii"), b"appCommandSha256=" + b"f" * 64)):
+            with self.subTest(replacement=replacement[:40]), self.assertRaises(helper.CheckFailure):
+                helper.windows_fullwalk_request_data(raw.replace(original, replacement), root=data["context"]["root"], passive=True)
+
+    def test_owner_child_unknown_original_close_acl_and_single_deadline_fail_closed(self):
+        data = self.fixture(); accepted = self.accept(data)
+        self.assertEqual(accepted["installedPassive"]["completedMethods"], 5)
+        self.assertEqual(accepted["installedPassive"]["settledOriginalOwners"], 9)
+        self.assertEqual(accepted["passiveOwner"]["ownerAggregateSeconds"], 90)
+        self.assertFalse(accepted["productionEnabled"])
+        mutations = {
+            "unknown": lambda d: d["owner"].update(unknown=True),
+            "deadline": lambda d: d["owner"].update(deadlineLatched=True),
+            "missing-original-close": lambda d: d["owner"].update(processCloseReturn=0),
+            "bool-not-native-scalar": lambda d: d["owner"].update(threadCloseReturn=True),
+            "unclosed-input": lambda d: d["owner"].update(inputOriginalsClosed=d["owner"]["inputOriginals"] - 1),
+            "account-unsettled": lambda d: d["owner"].update(accountRemovedAfterSettlement=False),
+            "renewed-endpoint": lambda d: d["owner"].update(ownerAggregateSeconds=91),
+            "historical-envelope": lambda d: d["owner"].update(aggregate={}),
+            "production": lambda d: d["owner"].update(productionEnabled=True),
+            "wrong-exit": lambda d: d["exit"].update(exitCode=1),
+            "owner-no-return": lambda d: d["exit"].update(originalWaitReturned=False),
+            "child-incomplete": lambda d: d["child"]["passive"].update(completedMethods=4),
+            "borrower-open": lambda d: d["child"]["passive"].update(settledOriginalOwners=8),
+            "claim-stop": lambda d: d["child"]["passive"].update(stoppedBeforeClaim=False),
+            "child-stop": lambda d: d["child"]["passive"].update(stoppedOwnedChild=False),
+            "unadmitted-image-count": lambda d: d["child"]["passive"].update(systemImages=32),
+            "snapshot-included": lambda d: d["child"]["passive"].update(snapshot=True),
+            "intent-unbound": lambda d: d["intent"].update(sourceSha="f" * 40),
+            "old-intent": lambda d: d["intent"].update(fullwalkBatch={}),
+            "wrong-output-acl": lambda d: d["owner"]["aclTransitions"][-1].update(role="fullwalk-output"),
+            "excessive-mask": lambda d: d["owner"]["aclTransitions"][-1].update(mask=0x1f01ff),
+            "changed-artifact": lambda d: d["owner"]["aclTransitions"][5]["after"].update(write=201),
+        }
+        for label, mutate in mutations.items():
+            changed = deepcopy(data); mutate(changed)
+            with self.subTest(case=label), self.assertRaises(helper.CheckFailure): self.accept(changed)
+        for outcome in ("failure", "cancelled", "skipped", "unavailable"):
+            with self.subTest(outcome=outcome), self.assertRaises(helper.CheckFailure): self.accept(data, outcome)
+
+    def test_preflight_checks_every_output_before_any_write_and_propagates_access_failure(self):
+        data = self.fixture(); context = data["context"]
+        names = ("passive-request.txt", "passive-output", "passive-owner-intent.private.json", "passive-owner-result.private.json",
+                 "passive-owner-exit.private.json", "windows-installed-passive-preflight-checks.json", "windows-installed-passive-checks.json")
+        for name, error in ((*[(name, helper.CheckFailure) for name in names], (None, PermissionError))):
+            def state(path):
+                if name is None: raise PermissionError("inert denied output")
+                if path.name == name: return SimpleNamespace(st_mode=stat.S_IFLNK)
+                raise FileNotFoundError("inert absent output")
+            with self.subTest(occupied=name), patch.object(helper, "windows_installed_passive_setup_evidence", return_value=(None, data["publication"], data["prechecked"])), \
+                 patch.object(helper, "windows_ordinary_original", return_value=data["pre"]["appArtifactIdentity"]), \
+                 patch.object(helper.Path, "lstat", state), patch.object(helper, "windows_fullwalk_write") as write, \
+                 patch.object(helper, "write_json") as receipt, self.assertRaises(error):
+                try: helper.windows_installed_passive_preflight(context)
+                finally: write.assert_not_called(); receipt.assert_not_called()
+
+    def test_retention_rechecks_originals_and_exposes_only_one_bounded_redacted_result(self):
+        data = self.fixture(); files, environment = self.originals(data)
+        def retain(selected_files, selected_environment):
+            writes = []
+            with self.inert_io(data, selected_files, selected_environment), \
+                 patch.object(helper, "windows_fullwalk_write", side_effect=lambda *args: writes.append(args)):
+                helper.windows_installed_passive_retain(data["context"])
+            self.assertEqual(len(writes), 1)
+            path, raw, limit = writes[0]
+            self.assertEqual(path, Path(data["context"]["root"]) / "public/windows-installed-passive.json")
+            self.assertEqual(limit, 64 << 10); self.assertLess(len(raw), limit)
+            for secret in (b"accountSidSha256", b"accountName", b"fileId", b"securityBefore", b"securityAfter",
+                           b"passive-request.txt", b"passive-output/", b"compiler-message", data["intent"]["accountName"].encode("ascii")):
+                self.assertNotIn(secret, raw)
+            return helper.bounded_json(raw, limit)
+        accepted = retain(files, environment)
+        self.assertTrue(accepted["combinedPassed"])
+        self.assertTrue(all(row["status"] == "passed" for row in accepted["results"].values()))
+        for field in ("productionEnabled", "msiQualified", "saveQualified", "snapshotQualified"): self.assertFalse(accepted[field])
+        self.assertEqual(accepted["notVerified"], list(helper.WINDOWS_INSTALLED_PASSIVE_NOT_VERIFIED))
+        for key in ("MRK_WINDOWS_PASSIVE_OWNER_STEP_OUTCOME", "MRK_WINDOWS_PASSIVE_OWNER_FINALIZE_STEP_OUTCOME"):
+            with self.subTest(gate=key):
+                result = retain(files, {**environment, key: "failure"})
+                self.assertFalse(result["combinedPassed"]); self.assertEqual(result["results"]["owner"]["status"], "failed")
+        for name in ("passive-owner-exit.private.json", "passive-owner-intent.private.json", "windows-installed-passive-checks.json",
+                     "passive-publisher-exit.private.txt"):
+            changed = dict(files); del changed[Path(data["context"]["root"]) / name]
+            with self.subTest(missing=name):
+                result = retain(changed, environment)
+                self.assertFalse(result["combinedPassed"]); self.assertNotEqual(result["results"]["owner"]["status"], "passed")
+
+    def test_workflow_has_only_four_fixed_foreground_originals_and_no_historical_role_replay(self):
+        workflow = (SOURCE / ".github/workflows/desktop-foundation.yml").read_text(encoding="utf-8")
+        self.assertNotIn("verify/desktop-windows-installed-passive", workflow.split("  workflow_dispatch:", 1)[0])
+        self.assertIn("windows-installed-passive", workflow.split("        options:", 1)[1].split("\n", 1)[0])
+        self.assertIn("permissions:\n  contents: read", workflow)
+        job = workflow.split("  windows-installed-native:\n", 1)[1]
+        self.assertIn("runs-on: windows-2025-vs2026", job)
+        self.assertIn("timeout-minutes: ${{ inputs.scope == 'windows-normal-project-ui' && 100 || 35 }}", job)
+        blocks = {}
+        for block in job.split("      - name:")[1:]:
+            match = helper.re.search(r"(?m)^        id: ([a-z-]+)$", block)
+            if match: blocks[match.group(1)] = block
+        ordered = ("passive-stage", "passive-stage-finalize", "passive-publish", "passive-publish-finalize",
+            "passive-publication", "passive-publication-finalize", "passive-owner-preflight", "passive-owner", "passive-owner-finalize")
+        self.assertEqual(tuple(name for name in blocks if name.startswith("passive-")), ordered)
+        for previous, current in zip(("ordinary-preflight", *ordered[:-1]), ordered, strict=True):
+            condition = blocks[current].split("        if: ", 1)[1].split("\n", 1)[0]
+            self.assertIn("success() && inputs.scope == 'windows-installed-passive'", condition)
+            self.assertIn("steps." + previous + ".outcome == 'success'", condition)
+        commands = (("passive-stage", "MRK_WINDOWS_SETUP_ARTIFACT", helper.WINDOWS_INSTALLED_PASSIVE_STAGE),
+            ("passive-publish", "MRK_WINDOWS_SETUP_ARTIFACT", None),
+            ("passive-publication", "MRK_WINDOWS_SETUP_ARTIFACT", helper.WINDOWS_INSTALLED_PASSIVE_OBSERVER),
+            ("passive-owner", "MRK_WINDOWS_PASSIVE_OWNER_ARTIFACT", helper.WINDOWS_INSTALLED_PASSIVE_OWNER))
+        for step, variable, test in commands:
+            body = blocks[step]
+            line = "& $env:" + variable + (" " + test + " --exact --ignored --nocapture --test-threads=1" if test else "")
+            self.assertEqual([line.strip() for line in body.splitlines() if line.strip().startswith("& ")], [line])
+            self.assertIn("$originalExitCode = $LASTEXITCODE", body)
+            self.assertIn("[System.IO.FileMode]::CreateNew", body)
+            self.assertLess(body.index("$stream.Dispose()"), body.index("if ($originalExitCode -ne 0)"))
+            self.assertNotIn("MRK_PYTHON", body)
+            for forbidden in ("Start-Process", "Stop-Process", "System.Diagnostics.Process", "Task.Run", "-Redirect", "retry("):
+                self.assertNotIn(forbidden, body)
+        combined = "\n".join(blocks[name] for name in ordered)
+        for forbidden in (helper.WINDOWS_FULLWALK_OWNER, helper.WINDOWS_FULLWALK_PUBLISHER, helper.WINDOWS_FULLWALK_RETIRE,
+                          helper.WINDOWS_RUNTIME_PUBLICATION_SCALAR, "helperOccupied", "producer-before", "producer-occupied"):
+            self.assertNotIn(forbidden, combined)
+        self.assertNotIn(helper.WINDOWS_INSTALLED_PASSIVE_TEST, workflow)  # The original native owner alone launches the app child.
+        self.assertIn("inputs.scope != 'windows-installed-passive'", blocks["ordinary-owner"].split("        run:", 1)[0])
+        self.assertIn("inputs.scope != 'windows-installed-passive'", blocks["runtime-data"].split("        run:", 1)[0])
+        self.assertIn("steps.ordinary-preflight.outputs.helperArtifact", blocks["passive-publish"])
+        for phase in helper.WINDOWS_INSTALLED_PASSIVE_DATA_PHASES:
+            self.assertEqual(combined.count("ci_foundation.py " + phase + "'"), 1)
+
+
+class WindowsNormalUiPrerequisiteTests(unittest.TestCase):
+    """Synthetic DATA/source tests; never native profile, account, or GUI evidence."""
+
+    @staticmethod
+    def context():
+        return {**WindowsReaderGateTests.context(), "qualificationProfile": helper.WINDOWS_NORMAL_UI_PROFILE,
+                "root": r"C:\runner\_temp\mrk-windows-installed-native-123456-1"}
+
+    @staticmethod
+    def refusal_data(stage="version-getter"):
+        value = {"schemaVersion": 1, "stage": stage, "pathIndex": None, "cause": "unsafe", "detail": None,
+                 "native": None, "admission": None}
+        if stage == "version-getter":
+            value.update(cause="native-failure", native={"operation": "webview-version", "domain": "hresult", "code": -2147024894})
+        elif stage == "version-text": value.update(cause="native-failure", detail="text-null")
+        elif stage == "stable-version": value.update(cause="ui-policy", detail="version-major")
+        elif stage in ("path-depth", "runtime-ancestry", "identity-alias"): value["cause"] = "ui-policy"
+        elif stage == "root-reserve": value["cause"] = "state"
+        elif stage in ("local-ntfs", "alternate-streams", "runtime-security", "recheck-metadata", "recheck-security"): value["pathIndex"] = 0
+        elif stage == "recheck-identity": value.update(pathIndex=0, cause="ui-policy", detail="identity")
+        return value
+
+    @classmethod
+    def probe_data(cls, reason=None):
+        context = cls.context()
+        artifact = {"path": context["root"] + r"\target\x86_64-pc-windows-msvc\debug\deps\mrk_windows_installed_native-aaaaaaaaaaaaaaaa.exe",
+            "size": 37, "sha256": "3" * 64, "messages": {"size": 128, "sha256": "4" * 64}}
+        stamp = {"volume": 77, "fileId": "11" * 16, "creation": 100, "write": 200, "change": 300,
+                 "size": 37, "allocation": 4096, "links": 1, "attributes": 128}
+        transitions = []
+        for index, (role, mask) in enumerate(helper.WINDOWS_NORMAL_UI_PROBE_ACLS, 1):
+            before = dict(stamp) if role == "artifact" else {
+                **stamp, "fileId": f"{index:032x}", "size": 0, "allocation": 0, "attributes": 16}
+            transitions.append({"role": role, "mask": mask, "before": before, "after": {**before, "change": 301},
+                "securityBefore": "5" * 64, "securityAfter": "6" * 64, "singleExplicitNoninheritingAce": True})
+        identity = helper.windows_ordinary_wire(stamp)
+        request_raw = helper.windows_normal_ui_probe_request(context, artifact, identity, "7" * 64, "0.1.0")
+        request = helper.windows_normal_ui_request_data(request_raw, root=context["root"])
+        common = {"schemaVersion": 1, **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")},
+                  "role": "prerequisite", "requestSha256": hashlib.sha256(request_raw).hexdigest()}
+        available = reason is None
+        observation = {"available": available, "reason": reason, "ordinaryAccountMatched": True,
+            **dict.fromkeys(("ordinaryContext", "interactiveDesktop", "managedRuntime", "overrideFree", "privateParent"), available),
+            "runtimeVersion": "141.0.1.2" if available else None,
+            "managedRuntimeRefusal": cls.refusal_data() if reason == "managed-webview2" else None,
+            "originalsSettled": True, "noWebviewCreated": True}
+        child = {**common, "artifactBytes": artifact["size"], "artifactSha256": artifact["sha256"],
+            "commandSha256": request["appCommandSha256"], "accountSidSha256": "8" * 64, "observation": observation,
+            "resultFile": {"createNew": True, "writeCalls": 1, "closeGate": "original-child-exit-zero-required"}}
+        child_raw = helper.canonical_json(child)
+        count = len(helper.windows_ordinary_path(context["root"]).parents) + 1 + 9
+        owner = {**common, "qualificationProfile": helper.WINDOWS_NORMAL_UI_PROFILE,
+            "artifactBytes": artifact["size"], "artifactSha256": artifact["sha256"], "commandSha256": request["appCommandSha256"],
+            "ownerArtifactBytes": artifact["size"], "ownerArtifactSha256": artifact["sha256"], "ownerCommandSha256": request["ownerCommandSha256"],
+            "accountSidSha256": "8" * 64, "ownerTest": helper.windows_normal_ui_owner("prerequisite"), "childTest": request["test"],
+            "createCalls": 1, "createReturn": 2, "createError": None, "firstWait": 0, "exitReturn": 1, "originalExitCode": 0,
+            "terminateCalls": 0, "processCloseReturn": 1, "threadCloseReturn": 1, "deadlineLatched": False, "unknown": False,
+            "parentBookSettled": True, "inputOriginals": count, "inputOriginalsClosed": count,
+            "freshAccountVerified": True, "onlyUsersMembership": True, "profileAbsentBefore": True, "profileOriginalBound": True,
+            "profileHivesUnloaded": True, "profileDeleteCalls": 1, "profileDeleteReturn": -1, "profileAbsentAfter": True,
+            "profileOriginalsSettled": True, "accountRemovedAfterProfileSettlement": True, "outputInventoryVerified": True,
+            "observationCompleted": True, "prerequisitesAvailable": available, "verifiedMethods": 0,
+            "nativeResultSha256": hashlib.sha256(child_raw).hexdigest(), "normalSmoke": None, "fixture": None,
+            "aclTransitions": transitions,
+            "ownerResult": {"createNew": True, "writeCalls": 1, "closeGate": "original-owner-exit-zero-required"}}
+        exit_record = {**common, "qualificationProfile": helper.WINDOWS_NORMAL_UI_PROFILE,
+            "artifactSha256": artifact["sha256"], "ownerArtifactSha256": artifact["sha256"],
+            "ownerTest": helper.windows_normal_ui_owner("prerequisite"), "originalWaitReturned": True, "exitCode": 0,
+            "writerCloseGate": "original-owner-step-success-required"}
+        intent = {**common, "accountName": "mrk" + "a" * 16, "freshAccountIntent": True, "fixedNormalUiChildOnly": True}
+        return {"context": context, "artifact": artifact, "identity": identity, "request": request_raw,
+                "child": child, "owner": owner, "exit": exit_record, "intent": intent,
+                "after": helper.windows_ordinary_wire(transitions[5]["after"])}
+
+    @staticmethod
+    def accept(data, outcome="success"):
+        return helper.windows_normal_ui_probe_records(data["context"], data["request"], helper.canonical_json(data["owner"]),
+            helper.canonical_json(data["child"]), helper.canonical_json(data["exit"]), helper.canonical_json(data["intent"]),
+            outcome, after_identity=data["after"])
+
+    @staticmethod
+    def graph_data():
+        # Exact declared lock DATA with synthetic metadata paths; no Cargo is run.
+        lock = helper.tomllib.loads((SOURCE / helper.WINDOWS_INSTALLED_CRATE / "Cargo.lock").read_text(encoding="utf-8"))
+        source, root = Path("/reviewed-source"), Path("/private-ui-compiler")
+        ids = {(row["name"], row["version"]): row["name"] + "@" + row["version"] for row in lock["package"]}
+        packages, nodes = [], []
+        native = ids[("mrk-windows-installed-native", "0.1.0")]
+        for row in lock["package"]:
+            key = (row["name"], row["version"])
+            path = (source / helper.WINDOWS_INSTALLED_CRATE if ids[key] == native else
+                    root / "cargo/registry/src/index.crates.io-fixed" / (key[0] + "-" + key[1]))
+            features = deepcopy(helper.WINDOWS_NATIVE_DECLARED_FEATURES) if ids[key] == native else {}
+            target = {"name": key[0].replace("-", "_"), "kind": ["lib"], "crate_types": ["lib"], "src_path": str(path / "src/lib.rs")}
+            packages.append({"id": ids[key], "name": key[0], "version": key[1], "source": row.get("source"),
+                "manifest_path": str(path / "Cargo.toml"), "features": features, "targets": [target]})
+            dependencies = []
+            for spelling in row.get("dependencies", []):
+                pieces = spelling.split(" ")
+                matched = [value for pair, value in ids.items() if pair[0] == pieces[0] and (len(pieces) == 1 or pair[1] == pieces[1])]
+                assert len(matched) == 1
+                dependencies.append(matched[0])
+            nodes.append({"id": ids[key], "features": ["desktop-ui"] if ids[key] == native else [], "dependencies": dependencies,
+                "deps": [{"name": item.split("@", 1)[0].replace("-", "_"), "pkg": item,
+                          "dep_kinds": [{"kind": None, "target": None}]} for item in dependencies]})
+        value = {"version": 1, "packages": packages, "workspace_root": str(source / helper.WINDOWS_INSTALLED_CRATE),
+                 "workspace_members": [native], "workspace_default_members": [native], "target_directory": str(root / "target"),
+                 "resolve": {"root": native, "nodes": nodes}}
+        return value, lock, source, root
+
+    def test_profile_is_explicit_unprepared_and_old_feature_selection_stays_closed(self):
+        context = self.context()
+        self.assertTrue(helper.windows_normal_ui_profile(context))
+        self.assertFalse(helper.windows_installed_prepared_profile(context))
+        self.assertFalse(helper.windows_fullwalk_profile(context))
+        self.assertFalse(helper.windows_installed_passive_profile(context))
+        self.assertEqual(helper.windows_installed_features(context, "native"), ["desktop-ui"])
+        self.assertEqual(helper.windows_normal_ui_features("app"), ["custom-protocol", "desktop-shell"])
+        self.assertEqual(helper.windows_normal_ui_features("observer"), ["custom-protocol", "desktop-shell", "windows-installed-observation"])
+        argv = helper.windows_fullwalk_native_argv("/fixed/cargo", context)
+        self.assertEqual(argv[argv.index("--features") + 1], "desktop-ui")
+        self.assertIn("--offline", argv); self.assertIn("--no-run", argv)
+        self.assertEqual(helper.WINDOWS_NATIVE_DECLARED_FEATURES, {
+            "qualification-result": [], "runtime-publication": [], "desktop-ui": ["dep:windows", "dep:webview2-com", "dep:windows-core"],
+            "desktop-ui-dialogs": ["desktop-ui"], "windows-installed-observation": ["desktop-ui-dialogs"]})
+        manifest = helper.tomllib.loads((SOURCE / helper.WINDOWS_INSTALLED_CRATE / "Cargo.toml").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["features"], helper.WINDOWS_NATIVE_DECLARED_FEATURES)
+        target = 'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'
+        self.assertEqual(manifest["target"][target]["dependencies"]["windows-core"],
+                         {"version": "=0.61.2", "optional": True, "default-features": False})
+        self.assertNotIn("windows-core", manifest.get("dependencies", {}))
+        for name, table in manifest["target"].items():
+            if name != target:
+                self.assertNotIn("windows-core", table.get("dependencies", {}))
+        for directory, spelling in ((helper.WINDOWS_INSTALLED_CRATE, "windows-core"),
+                                    (helper.WINDOWS_INSTALLED_APP, "windows-core 0.61.2")):
+            lock = helper.tomllib.loads((SOURCE / directory / "Cargo.lock").read_text(encoding="utf-8"))
+            native = [row for row in lock["package"] if row["name"] == "mrk-windows-installed-native"]
+            self.assertEqual(len(native), 1)
+            self.assertEqual([edge for edge in native[0]["dependencies"] if edge.split(" ")[0] == "windows-core"], [spelling])
+            core = [row for row in lock["package"] if (row["name"], row["version"]) == ("windows-core", "0.61.2")]
+            self.assertEqual(len(core), 1)
+            self.assertEqual(core[0]["source"], "registry+https://github.com/rust-lang/crates.io-index")
+            self.assertEqual(core[0]["checksum"], "c0fdd3ddb90610c7638aa2b3a3ab2904fb9e5cdbecc643ddb3647212781c4ae3")
+        for profile, features in ((helper.WINDOWS_INSTALLED_PASSIVE_PROFILE, []), (helper.WINDOWS_FULLWALK_PROFILE, []),
+                                  (helper.WINDOWS_RUNTIME_PUBLICATION_PROFILE, ["runtime-publication"])):
+            self.assertEqual(helper.windows_installed_features({**context, "qualificationProfile": profile}, "native"), features)
+        environment = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Windows", "RUNNER_ARCH": "X64",
+            "ImageOS": context["imageOS"], "ImageVersion": context["imageVersion"], "GITHUB_JOB": "windows-installed-native",
+            "GITHUB_RUN_ATTEMPT": "1", "MRK_DESKTOP_HOSTED_CHECKS": helper.WINDOWS_INSTALLED_SCOPE,
+            "GITHUB_SHA": context["sourceSha"], "GITHUB_REPOSITORY": "inert/repository", "GITHUB_REF": helper.WINDOWS_NORMAL_UI_REF,
+            "GITHUB_WORKFLOW_SHA": context["sourceSha"], "GITHUB_RUN_ID": context["runId"], "GITHUB_EVENT_NAME": "workflow_dispatch",
+            "MRK_DESKTOP_EXPECTED_SHA": context["sourceSha"], "MRK_DESKTOP_DISPATCH_SCOPE": helper.WINDOWS_NORMAL_UI_DISPATCH,
+            "GITHUB_WORKFLOW_REF": "inert/repository/.github/workflows/desktop-foundation.yml@" + helper.WINDOWS_NORMAL_UI_REF}
+        with patch.object(helper, "sys", SimpleNamespace(platform="win32", maxsize=2**63 - 1, version=helper.PYTHON)):
+            with patch.dict(helper.os.environ, environment, clear=True):
+                self.assertEqual(helper.windows_installed_binding()["qualificationProfile"], helper.WINDOWS_NORMAL_UI_PROFILE)
+            for key, value in (("GITHUB_EVENT_NAME", "push"), ("GITHUB_RUN_ATTEMPT", "2"), ("MRK_DESKTOP_DISPATCH_SCOPE", "foundation"),
+                               ("GITHUB_REF", helper.WINDOWS_INSTALLED_PASSIVE_REF), ("MRK_DESKTOP_EXPECTED_SHA", "f" * 40)):
+                with self.subTest(key=key), patch.dict(helper.os.environ, {**environment, key: value}, clear=True), self.assertRaises(helper.CheckFailure):
+                    helper.windows_installed_binding()
+        with patch.object(helper, "windows_installed_context", return_value=context), patch.object(helper, "windows_normal_ui_phase") as selected, \
+             patch.object(helper, "run", side_effect=AssertionError("Route must not enter old native/producer phases")):
+            helper.windows_installed_phase("compile", helper.WINDOWS_INSTALLED_SCOPE)
+            self.assertEqual(selected.call_args.args[:2], ("compile", context))
+    def test_probe_wire_has_no_runtime_claim_and_cannot_switch_original_or_process_role(self):
+        data = self.probe_data()
+        raw = data["request"]
+        self.assertEqual(len(raw.splitlines()), 36)
+        self.assertEqual(len(helper.WINDOWS_NORMAL_UI_REQUEST_FIELDS), 35)
+        parsed = helper.windows_normal_ui_request_data(raw, root=data["context"]["root"])
+        self.assertTrue(all(parsed[key] == "-" for key in helper.WINDOWS_FULLWALK_REQUEST_FIELDS[22:34]))
+        self.assertEqual(parsed["appArtifact"], parsed["ownerArtifact"])
+        self.assertNotEqual(parsed["appCommandSha256"], parsed["ownerCommandSha256"])
+        edits = ((b"MRK_WINDOWS_NORMAL_UI_REQUEST_V1", b"MRK_WINDOWS_INSTALLED_PASSIVE_REQUEST_V1"),
+            (b"role=prerequisite", b"role=normal-smoke"), (b"manifestSha256=-", b"manifestSha256=" + b"a" * 64),
+            (b"payloadFiles=-", b"payloadFiles=46"), (b"appVersion=0.1.0", b"appVersion=latest"),
+            (b"attempt=1", b"attempt=2"), (b"appCompileMessagesSha256=" + b"4" * 64, b"appCompileMessagesSha256=" + b"c" * 64))
+        for old, new in edits:
+            with self.subTest(change=old), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_request_data(raw.replace(old, new), root=data["context"]["root"])
+        for changed in (raw.replace(b"\n", b"\r\n"), raw + b"extra=value\n", raw[:-1], raw.replace(b"\nrole=", b"\nextra=x\nrole=")):
+            with self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_request_data(changed, root=data["context"]["root"])
+
+    def test_probe_observation_and_actual_finality_do_not_claim_gui_or_methods(self):
+        positive = self.accept(self.probe_data())
+        self.assertTrue(positive["prerequisite"]["available"])
+        self.assertFalse(positive["combinedPassed"]); self.assertFalse(positive["guiInstanceAuthorized"])
+        self.assertEqual(positive["verifiedMethods"], 0)
+        self.assertTrue(positive["originalOwner"]["accountRemovedAfterProfileSettlement"])
+        for reason in helper.WINDOWS_NORMAL_UI_PROBE_REASONS:
+            with self.subTest(reason=reason):
+                result = self.accept(self.probe_data(reason))
+                self.assertTrue(result["observationCompleted"])
+                self.assertFalse(result["prerequisite"]["available"]); self.assertFalse(result["combinedPassed"])
+                self.assertEqual(result["prerequisite"]["reason"], reason)
+        raw = helper.canonical_json(positive).decode("ascii")
+        for private in ("accountSidSha256", "accountName", "fileId", "C:\\\\runner", "securityBefore", "creation"):
+            self.assertNotIn(private, raw)
+
+    def test_managed_refusal_full_stage_roster_stays_negative_after_original_finality(self):
+        expected = ("version-getter", "version-text", "stable-version", "path-decode", "path-depth", "runtime-root-decode",
+            "runtime-ancestry", "mapping-before", "root-reserve", "root-open", "root-metadata", "child-open", "child-metadata",
+            "identity-alias", "local-ntfs", "alternate-streams", "runtime-security", "mapping-after",
+            "recheck-metadata", "recheck-identity", "recheck-security")
+        self.assertEqual(helper.WINDOWS_NORMAL_UI_REFUSAL_STAGES, expected)
+        for stage in expected:
+            with self.subTest(stage=stage):
+                data = self.probe_data("managed-webview2")
+                diagnostic = self.refusal_data(stage)
+                data["child"]["observation"]["managedRuntimeRefusal"] = diagnostic
+                data["owner"]["nativeResultSha256"] = hashlib.sha256(helper.canonical_json(data["child"])).hexdigest()
+                result = self.accept(data)
+                self.assertEqual(result["prerequisite"]["managedRuntimeRefusal"], diagnostic)
+                self.assertTrue(result["observationCompleted"])
+                self.assertFalse(result["prerequisite"]["available"])
+                self.assertFalse(result["combinedPassed"]); self.assertFalse(result["guiInstanceAuthorized"])
+                self.assertEqual(result["verifiedMethods"], 0)
+                self.assertTrue(result["originalOwner"]["accountRemovedAfterProfileSettlement"])
+                self.assertLessEqual(len(helper.canonical_json(diagnostic)), 768)
+                self.assertLessEqual(len(helper.canonical_json(data["child"])), 4096)
+                changed = deepcopy(diagnostic)
+                changed["pathIndex"] = 0 if diagnostic["pathIndex"] is None else None
+                with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_managed_refusal(changed)
+        self.assertIsNone(self.accept(self.probe_data())["prerequisite"]["managedRuntimeRefusal"])
+
+    def test_managed_refusal_rejects_forged_shape_cause_status_and_diagnostic_role(self):
+        for key, value in (("schemaVersion", True), ("schemaVersion", 2), ("stage", "unknown"), ("stage", []),
+            ("pathIndex", 0), ("cause", "unavailable"), ("detail", "text-null"), ("native", None),
+            ("admission", {"operation": "security-version", "check": "owner-trust", "index": None}), ("extra", 0)):
+            with self.subTest(key=key, value=value):
+                changed = self.refusal_data(); changed[key] = value
+                with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_managed_refusal(changed)
+        for code in (True, 0, 1, -2147483638, -(2**31)-1, 2**31, "-2147024894", 1.5):
+            changed = self.refusal_data(); changed["native"]["code"] = code
+            with self.subTest(code=code), self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_managed_refusal(changed)
+        for key, value in (("domain", "ntstatus"), ("domain", "win32"), ("operation", "open"), ("extra", 0)):
+            changed = self.refusal_data(); changed["native"][key] = value
+            with self.subTest(native=key), self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_managed_refusal(changed)
+        for stage in ("version-text", "stable-version", "path-depth", "runtime-ancestry", "recheck-identity"):
+            changed = self.refusal_data(stage); changed["native"] = self.refusal_data()["native"]
+            with self.subTest(stage=stage), self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_managed_refusal(changed)
+        for reason in (None, "interactive-desktop", "managed-webview2"):
+            data = self.probe_data(reason)
+            if reason == "managed-webview2": del data["child"]["observation"]["managedRuntimeRefusal"]
+            else: data["child"]["observation"]["managedRuntimeRefusal"] = self.refusal_data()
+            data["owner"]["nativeResultSha256"] = hashlib.sha256(helper.canonical_json(data["child"])).hexdigest()
+            with self.subTest(reason=reason), self.assertRaises(helper.CheckFailure): self.accept(data)
+        data = self.probe_data("managed-webview2")
+        child = helper.canonical_json(data["child"])
+        for raw in (child.replace(b'"schemaVersion":1', b'"schemaVersion":1,"schemaVersion":1'),
+                    child.replace(b'"managedRuntimeRefusal":{', b'"managedRuntimeRefusal":null,"managedRuntimeRefusal":{')):
+            with self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_child_data(data["request"], raw, root=data["context"]["root"], account_sid_sha256="8"*64)
+        data["child"]["observation"]["managedRuntimeRefusal"] = self.refusal_data("runtime-security")
+        child = helper.canonical_json(data["child"]).replace(b'"pathIndex":0', b'"pathIndex":-0')
+        with self.assertRaises(helper.CheckFailure):
+            helper.windows_normal_ui_child_data(data["request"], child, root=data["context"]["root"], account_sid_sha256="8"*64)
+
+    def test_managed_refusal_native_and_admission_detail_are_exact_stage_bound_data(self):
+        for stage, operations in helper.WINDOWS_NORMAL_UI_REFUSAL_OPERATIONS.items():
+            for operation in operations:
+                value = self.refusal_data(stage)
+                value.update(cause="native-failure" if stage == "version-getter" else "unavailable", detail=None)
+                domain, code = (("hresult", -(2**31)) if operation == "webview-version" else
+                    ("ntstatus", -1073741790) if operation in ("open", "volume-device", "streams") else ("win32", 2**32-1))
+                value["native"] = {"operation": operation, "domain": domain, "code": code}
+                self.assertEqual(helper.windows_normal_ui_managed_refusal(value), value)
+                for wrong in ("webview-version", "open", "security"):
+                    if wrong in operations: continue
+                    changed = deepcopy(value); changed["native"]["operation"] = wrong
+                    with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_managed_refusal(changed)
+                for bad in ([0, 259, -2147483643] if domain == "ntstatus" else [997] if domain == "win32" else [-2147483638]):
+                    changed = deepcopy(value); changed["native"]["code"] = bad
+                    with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_managed_refusal(changed)
+        rich = self.refusal_data("recheck-security")
+        rich.update(pathIndex=47, admission={"operation": "security-ancestor", "check": "ace-dangerous-rights", "index": 2047})
+        self.assertEqual(helper.windows_normal_ui_managed_refusal(rich), rich)
+        self.assertLessEqual(len(helper.canonical_json(rich)), 768)
+        for key, value in (("operation", "metadata"), ("check", "token-primary"), ("index", True), ("index", 2048), ("extra", 0)):
+            changed = deepcopy(rich); changed["admission"][key] = value
+            with self.subTest(key=key), self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_managed_refusal(changed)
+        for index in (-1, True, 48):
+            changed = deepcopy(rich); changed["pathIndex"] = index
+            with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_managed_refusal(changed)
+        for cause in ("unavailable", "ui-policy", "bounds", "state"):
+            changed = deepcopy(rich); changed["cause"] = cause
+            with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_managed_refusal(changed)
+        native = SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src"
+        self.assertIn("crate::ui::prerequisite_refusal_contract(&request);", (native / "ordinary_owner_ui.rs").read_text())
+        self.assertIn("fn prerequisite_refusal_contract(request:", (native / "ui.rs").read_text())
+
+    def test_missing_late_mixed_or_unsettled_probe_originals_never_authorize_progress(self):
+        for key, value in (("profileAbsentBefore", False), ("profileOriginalBound", False), ("profileHivesUnloaded", False),
+            ("profileDeleteCalls", 2), ("profileDeleteReturn", 0), ("profileAbsentAfter", False), ("profileOriginalsSettled", False),
+            ("accountRemovedAfterProfileSettlement", False), ("outputInventoryVerified", False), ("observationCompleted", False),
+            ("verifiedMethods", 6), ("prerequisitesAvailable", False), ("unknown", True), ("deadlineLatched", True),
+            ("originalExitCode", 1), ("processCloseReturn", 0), ("createReturn", True), ("inputOriginalsClosed", 0),
+            ("sourceTree", "f" * 40), ("nativeResultSha256", "c" * 64), ("accountSidSha256", "d" * 64)):
+            data = self.probe_data(); data["owner"][key] = value
+            with self.subTest(key=key), self.assertRaises(helper.CheckFailure): self.accept(data)
+        for outcome in ("failure", "cancelled", "skipped", "unavailable"):
+            with self.subTest(outcome=outcome), self.assertRaises(helper.CheckFailure): self.accept(self.probe_data(), outcome)
+        for part, key, value in (("exit", "exitCode", 1), ("exit", "originalWaitReturned", False),
+            ("exit", "writerCloseGate", "original-owner-exit-zero-required"), ("intent", "freshAccountIntent", False),
+            ("intent", "role", "project-draft"), ("child", "requestSha256", "9" * 64)):
+            data = self.probe_data(); data[part][key] = value
+            with self.subTest(part=part, key=key), self.assertRaises(helper.CheckFailure): self.accept(data)
+        for change in ("mask", "size", "identity", "change"):
+            data = self.probe_data(); transition = data["owner"]["aclTransitions"][5]
+            if change == "mask": transition["mask"] |= 2
+            elif change == "identity": transition["after"]["fileId"] = "c" * 32
+            elif change == "change": data["after"] = data["identity"]
+            else: transition["after"]["size"] += 1
+            with self.subTest(acl=change), self.assertRaises(helper.CheckFailure): self.accept(data)
+
+    def test_native_only_graph_and_actual_compiler_units_are_exact(self):
+        value, lock, source, root = self.graph_data()
+        graph = helper.windows_normal_ui_native_graph(value, lock, source=source, root=root)
+        self.assertEqual(len(graph["nodes"]), 24)
+        native = graph["nativeId"]
+        executable = root / "target/x86_64-pc-windows-msvc/debug/deps/mrk_windows_installed_native-aaaaaaaaaaaaaaaa.exe"
+        units = [{"reason": "compiler-artifact", "package_id": key, "manifest_path": package["manifest_path"],
+                  "target": package["targets"][0], "features": graph["nodes"][key]["features"],
+                  "profile": {"test": key == native}, "fresh": False,
+                  "executable": str(executable) if key == native else None} for key, package in graph["packages"].items()]
+        rows = [*units, {"reason": "build-finished", "success": True}]
+        encode = lambda items: b"\n".join(helper.canonical_json(item) for item in items)
+        with patch.object(helper, "ordinary_windows_executable", side_effect=lambda path, **_: Path(path)):
+            self.assertEqual(helper.windows_normal_ui_native_test_path(encode(rows), graph, source=source, root=root), executable)
+            for malformed in (rows[:-1], rows[1:], rows + [rows[-1]], [*rows[:-1], {"reason": "build-finished", "success": False}]):
+                with self.assertRaises(helper.CheckFailure):
+                    helper.windows_normal_ui_native_test_path(encode(malformed), graph, source=source, root=root)
+            changed = deepcopy(rows); changed[0]["features"] = ["desktop-ui", "desktop-ui-dialogs"]
+            with self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_native_test_path(encode(changed), graph, source=source, root=root)
+        # Removing only the consumer's macro dependency must fail even though
+        # the same core package remains reachable through windows/webview2.
+        core = next(key for key, package in graph["packages"].items()
+                    if (package["name"], package["version"]) == ("windows-core", "0.61.2"))
+        changed = deepcopy(value)
+        native_node = next(node for node in changed["resolve"]["nodes"] if node["id"] == native)
+        native_node["dependencies"].remove(core)
+        self.assertEqual(sum(edge["pkg"] == core for edge in native_node["deps"]), 1)
+        native_node["deps"] = [edge for edge in native_node["deps"] if edge["pkg"] != core]
+        with self.assertRaises(helper.CheckFailure):
+            helper.windows_normal_ui_native_graph(changed, lock, source=source, root=root)
+        for change in ("root-features", "declaration", "package", "edge", "foreign-path", "workspace"):
+            changed = deepcopy(value)
+            if change == "root-features": changed["resolve"]["nodes"][0]["features"].append("desktop-ui-dialogs")
+            elif change == "declaration": changed["packages"][0]["features"]["desktop-ui"].append("runtime-publication")
+            elif change == "package": changed["packages"][-1]["version"] = "9.0.0"
+            elif change == "edge": changed["resolve"]["nodes"][0]["dependencies"].pop()
+            elif change == "foreign-path": changed["packages"][-1]["manifest_path"] = "/shared/foreign/Cargo.toml"
+            else: changed["workspace_root"] = str(source / helper.WINDOWS_INSTALLED_APP)
+            with self.subTest(change=change), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_native_graph(changed, lock, source=source, root=root)
+
+    def test_workflow_and_retention_cannot_fall_back_or_claim_gui_without_closed_case_chain(self):
+        source = HELPER.read_text(encoding="utf-8")
+        phase = source.split("def windows_normal_ui_phase(", 1)[1].split("\ndef ", 1)[0]
+        for forbidden in ("windows_fullwalk_acquire(", "windows_installed_app_argv(", "windows_installed_helper_argv(", "npm", "rustup update"):
+            self.assertNotIn(forbidden, phase)
+        retained = source.split("def windows_normal_ui_retain(", 1)[1].split("\ndef ", 1)[0]
+        for forbidden in ("run(", "tools(", "shutil", "unlink(", "rmtree(", "kill("):
+            self.assertNotIn(forbidden, retained)
+        self.assertIn('complete = len(cases) == len(WINDOWS_NORMAL_UI_GUI_ROLES)', retained)
+        self.assertIn('"guiCasesExecuted": len(cases)', retained)
+        self.assertIn("windows_normal_ui_case_chain(context, role, finalized=True)", retained)
+        workflow = (SOURCE / ".github/workflows/desktop-foundation.yml").read_text(encoding="utf-8")
+        self.assertNotIn("verify/desktop-windows-normal-project-ui", workflow.split("  workflow_dispatch:", 1)[0])
+        self.assertIn("windows-normal-project-ui", workflow.split("        options:", 1)[1].split("\n", 1)[0])
+        job = workflow.split("  windows-installed-native:\n", 1)[1]
+        blocks = {}
+        for block in job.split("      - name:")[1:]:
+            match = helper.re.search(r"(?m)^        id: ([a-z-]+)$", block)
+            if match: blocks[match.group(1)] = block
+        selected = tuple(name for name in blocks if name.startswith("ui-prerequisite-"))
+        self.assertEqual(selected, ("ui-prerequisite-preflight", "ui-prerequisite-owner", "ui-prerequisite-finalize"))
+        owner = blocks["ui-prerequisite-owner"]
+        command = "& $env:MRK_WINDOWS_UI_OWNER_ARTIFACT " + helper.windows_normal_ui_owner("prerequisite") + " --exact --ignored --nocapture --test-threads=1"
+        self.assertEqual([line.strip() for line in owner.splitlines() if line.strip().startswith("& ")], [command])
+        for forbidden in ("Start-Process", "System.Diagnostics.Process", "Task.Run", "Stop-Process", "MRK_PYTHON", "-Redirect"):
+            self.assertNotIn(forbidden, owner)
+        self.assertIn("$originalExitCode = $LASTEXITCODE", owner)
+        self.assertIn("[System.IO.FileMode]::CreateNew", owner)
+        self.assertLess(owner.index("$stream.Dispose()"), owner.index("if ($originalExitCode -ne 0)"))
+        self.assertIn("steps.ui-prerequisite-owner.outcome == 'success'", blocks["ui-prerequisite-finalize"])
+        for name in ("ordinary-preflight", "ordinary-owner", "runtime-data"):
+            self.assertIn("inputs.scope != 'windows-normal-project-ui'", blocks[name].split("        run:", 1)[0])
+        self.assertIn("MRK_WINDOWS_UI_PREREQUISITE_FINALIZE_STEP_OUTCOME", blocks["retain"])
+        self.assertIn("steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable != 'true'", job)
+
+
+class WindowsNormalUiSetupTests(unittest.TestCase):
+    """Synthetic DATA/source only; cannot publish a runtime or launch any owner."""
+
+    @classmethod
+    def fixture(cls):
+        previous = WindowsReaderGateTests.publication_data()
+        legacy = previous["legacy"]
+        context = {**legacy["context"], "qualificationProfile": helper.WINDOWS_NORMAL_UI_PROFILE}
+        owner, prepared = legacy["standalone"], legacy["prepared_case"]["prepared"]
+        publisher = {"path": previous["pre"]["helperArtifact"], "size": 97, "sha256": "8" * 64,
+                     "messages": {"size": 17, "sha256": "9" * 64}}
+        argv_hash = lambda argv: hashlib.sha256(helper.canonical_json(argv)).hexdigest()
+        compiled = {"retainedProbe": {"prerequisiteRequest": {"size": 100, "sha256": "a" * 64},
+                                      "prerequisiteFinalizer": {"size": 200, "sha256": "b" * 64}},
+            "invocationSha256": argv_hash(helper.windows_normal_ui_setup_native_argv("/inert/cargo.exe", context)),
+            "helperInvocationSha256": argv_hash(helper.windows_installed_helper_argv("/inert/cargo.exe", context)),
+            "artifactNativeIdentity": legacy["pre"]["ownerArtifactIdentity"],
+            "helperArtifactNativeIdentity": previous["pre"]["helperArtifactIdentity"]}
+        roster = legacy["roster_raw"]
+        raw = helper.windows_normal_ui_setup_precheck_text(context, owner, publisher, prepared, compiled, roster)
+        pre = helper.windows_normal_ui_setup_precheck_data(context, raw)
+        fields, objects, proofs, blobs = {}, {}, {}, {}
+        tests = {"stage": helper.WINDOWS_NORMAL_UI_SETUP_STAGE, "observation": helper.WINDOWS_NORMAL_UI_SETUP_OBSERVER}
+
+        def observe(role):
+            fields[role] = {**previous["fields"]["stage" if role == "stage" else "before"],
+                "profile": helper.WINDOWS_NORMAL_UI_PROFILE, "observerTest": tests[role], "precheckBytes": len(raw),
+                "precheckSha256": hashlib.sha256(raw).hexdigest(), "actualFixedProducerObserved": "false" if role == "stage" else "true"}
+            objects[role] = deepcopy(previous["objects"]["stage" if role == "stage" else "before"])
+            proofs[role] = ([] if role == "stage" else [{"role": name, "size": len(blobs[name]),
+                "sha256": hashlib.sha256(blobs[name]).hexdigest()} for name in helper.WINDOWS_NORMAL_UI_SETUP_PROOFS])
+            return WindowsReaderGateTests.publication_observation_raw(fields[role], objects[role], proofs[role], kind="normal-ui-setup-observation")
+
+        def exited(role):
+            selected = "helper" if role == "helperSuccess" else "owner"
+            command = pre["helperCommandSha256"] if selected == "helper" else helper.windows_fullwalk_command_sha(
+                pre["ownerArtifact"], tests["stage" if role == "stage" else "observation"])
+            return helper.windows_fullwalk_text("normal-ui-setup-exit", {key: pre[key] for key in
+                ("profile", "sourceSha", "sourceTree", "runId", "attempt")} | {"role": role,
+                "artifactSha256": pre[selected + "ArtifactSha256"], "precheckSha256": hashlib.sha256(raw).hexdigest(),
+                "commandSha256": command, "originalWaitReturned": "true", "exitCode": "0",
+                "writerCloseGate": "original-" + role + "-step-success-required"})
+
+        blobs["stage"] = observe("stage"); blobs["stageExit"] = exited("stage")
+        blobs["helperSuccessExit"] = exited("helperSuccess")
+        blobs["observation"] = observe("observation"); blobs["observerExit"] = exited("observe")
+        return {"context": context, "precheck": raw, "pre": pre, "roster": roster, "blobs": blobs,
+            "outcomes": dict.fromkeys(("stage", "publish", "publication"), "success"), "fields": fields, "objects": objects,
+            "proofs": proofs, "compiled": compiled, "owner": owner, "publisher": publisher, "prepared": prepared}
+
+    @staticmethod
+    def setup(data, through="publication"):
+        index = ("stage", "publish", "publication").index(through)
+        return helper.windows_normal_ui_setup_data(data["context"], data["precheck"], data["roster"],
+            dict(list(data["blobs"].items())[:(2, 3, 5)[index]]), dict(list(data["outcomes"].items())[:index + 1]), through)
+
+    def test_runtime_only_precheck_is_exact_and_cannot_claim_an_app_or_old_role(self):
+        data = self.fixture()
+        self.assertEqual(len(data["precheck"].splitlines()), 41)
+        self.assertEqual(tuple(data["pre"]), helper.WINDOWS_NORMAL_UI_SETUP_PRECHECK_FIELDS)
+        self.assertNotIn("appTest", data["pre"]); self.assertNotIn("headlessContract", data["pre"])
+        self.assertEqual(data["pre"]["standaloneFeatures"], "runtime-publication")
+        self.assertEqual(data["pre"]["helperNativeFeatures"], "runtime-publication")
+        self.assertFalse(helper.windows_installed_prepared_profile(data["context"]))
+        self.assertEqual(helper.windows_installed_features(data["context"], "native"), ["desktop-ui"])
+        self.assertEqual(helper.windows_installed_features(data["context"], "app"), ["custom-protocol", "desktop-shell"])
+        for key, value in (("standaloneFeatures", "desktop-ui"), ("helperNativeFeatures", "qualification-result,runtime-publication"),
+            ("stageTest", helper.WINDOWS_INSTALLED_PASSIVE_STAGE), ("observerTest", helper.WINDOWS_RUNTIME_PUBLICATION_AFTER),
+            ("sourceInventorySha256", "c" * 64), ("payloadFiles", "47"), ("setupContract", "fixed-installed-passive-original-owner-v1")):
+            with self.subTest(field=key), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_setup_precheck_data(data["context"], helper.windows_fullwalk_text(
+                    "normal-ui-setup-precheck", {**data["pre"], key: value}))
+        for raw in (data["precheck"] + b"appTest=normal-process-main\n", data["precheck"].replace(b"\n", b"\r\n"),
+                    data["precheck"].replace(b"MRK_WINDOWS_NORMAL_UI_SETUP_PRECHECK_V1", b"MRK_WINDOWS_INSTALLED_PASSIVE_PRECHECK_V1")):
+            with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_setup_precheck_data(data["context"], raw)
+        for profile in (helper.WINDOWS_INSTALLED_PASSIVE_PROFILE, helper.WINDOWS_RUNTIME_PUBLICATION_PROFILE, helper.WINDOWS_FULLWALK_PROFILE):
+            with self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_setup_precheck_data({**data["context"], "qualificationProfile": profile}, data["precheck"])
+        native = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/qualification_fixture.rs").read_text(encoding="utf-8")
+        declaration = native.split("const NORMAL_UI_PRECHECK_FIELDS:", 1)[1].split("];", 1)[0]
+        self.assertEqual(tuple(helper.re.findall(r'"([A-Za-z][A-Za-z0-9]*)"', declaration)), helper.WINDOWS_NORMAL_UI_SETUP_PRECHECK_FIELDS)
+
+    def test_positive_probe_requires_closed_finalizer_and_exact_post_transition_original(self):
+        data = WindowsNormalUiPrerequisiteTests.probe_data()
+        facts = WindowsNormalUiPrerequisiteTests.accept(data)
+        root = Path(data["context"]["root"])
+        finalizer = helper.canonical_json(helper.windows_installed_phase_receipt(data["context"],
+            "windows-normal-ui-prerequisite-finalize", status="observed", **facts)) + b"\n"
+        files = {root / "windows-normal-ui-prerequisite-finalize-checks.json": finalizer,
+            root / "normal-ui-prerequisite-request.txt": data["request"],
+            root / "normal-ui-prerequisite-owner-result.private.json": helper.canonical_json(data["owner"])}
+        environment = {"MRK_WINDOWS_UI_PREREQUISITES_AVAILABLE": "true", "MRK_WINDOWS_UI_PREREQUISITE_FINALIZE_STEP_OUTCOME": "success",
+            "MRK_WINDOWS_UI_PREREQUISITE_REQUEST_SHA256": hashlib.sha256(data["request"]).hexdigest(),
+            "MRK_WINDOWS_UI_PREREQUISITE_FINALIZER_SHA256": hashlib.sha256(finalizer).hexdigest()}
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(helper, "windows_normal_ui_probe_observe_final", return_value=facts))
+            stack.enter_context(patch.object(helper, "windows_normal_ui_compile_binding",
+                return_value=(data["artifact"], {"invocationSha256": "7" * 64, "appVersion": "0.1.0"})))
+            stack.enter_context(patch.object(helper, "windows_installed_bytes", side_effect=lambda path, limit: files[path]))
+            opened = stack.enter_context(patch.object(helper, "windows_ordinary_original", return_value=data["after"]))
+            stack.enter_context(patch.object(helper, "run", side_effect=AssertionError("DATA must not launch")))
+            with patch.dict(helper.os.environ, environment, clear=True):
+                retained = helper.windows_normal_ui_positive_probe(data["context"])
+                self.assertEqual(retained["artifactNativeIdentity"], data["after"])
+                self.assertNotEqual(retained["artifactNativeIdentity"], data["identity"])
+                self.assertIs(retained["compiledTest"], data["artifact"])
+                self.assertEqual(retained["artifactAclAfterSha256"], data["owner"]["aclTransitions"][5]["securityAfter"])
+                opened.return_value = data["identity"]
+                with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_positive_probe(data["context"])
+                opened.return_value = data["after"]
+                with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_positive_probe({**data["context"], "fullwalkInputs": {}})
+            for key, value in (("MRK_WINDOWS_UI_PREREQUISITES_AVAILABLE", "false"),
+                ("MRK_WINDOWS_UI_PREREQUISITE_FINALIZE_STEP_OUTCOME", "skipped"),
+                ("MRK_WINDOWS_UI_PREREQUISITE_REQUEST_SHA256", "c" * 64), ("MRK_WINDOWS_UI_PREREQUISITE_FINALIZER_SHA256", "d" * 64)):
+                with self.subTest(field=key), patch.dict(helper.os.environ, {**environment, key: value}, clear=True), self.assertRaises(helper.CheckFailure):
+                    helper.windows_normal_ui_positive_probe(data["context"])
+            changed = {**data["owner"], "ownerTest": "unclosed-owner"}
+            files[root / "normal-ui-prerequisite-owner-result.private.json"] = helper.canonical_json(changed)
+            with patch.dict(helper.os.environ, environment, clear=True), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_positive_probe(data["context"])
+
+    def test_distinct_setup_graph_artifact_and_stream_do_not_relabel_cheap_owner(self):
+        value, _, source, root = WindowsNormalUiPrerequisiteTests.graph_data()
+        wanted = {"mrk-windows-installed-native", "windows-sys", "windows-link"}
+        value["packages"] = [package for package in value["packages"] if package["name"] in wanted and package["version"] != "0.1.3"]
+        ids = {package["name"]: package["id"] for package in value["packages"]}
+        value["resolve"]["nodes"] = [node for node in value["resolve"]["nodes"] if node["id"] in ids.values()]
+        native = ids["mrk-windows-installed-native"]
+        native_node = next(node for node in value["resolve"]["nodes"] if node["id"] == native)
+        native_node.update(features=["runtime-publication"], dependencies=[ids["windows-sys"]])
+        native_node["deps"] = [edge for edge in native_node["deps"] if edge["pkg"] == ids["windows-sys"]]
+        context = {**WindowsNormalUiPrerequisiteTests.context(), "source": str(source), "root": str(root)}
+        with patch.object(helper, "windows_installed_bytes", return_value=helper.canonical_json(value)):
+            graph = helper.windows_normal_ui_setup_native_metadata(context)
+        self.assertEqual(len(graph["nodes"]), 3)
+        self.assertEqual(graph["nodes"][native]["features"], ["runtime-publication"])
+        argv = helper.windows_normal_ui_setup_native_argv("/never-run/cargo", context)
+        self.assertEqual(argv[argv.index("--features") + 1], "runtime-publication")
+        self.assertIn("--offline", argv); self.assertIn("--no-run", argv)
+        executable = root / "target/x86_64-pc-windows-msvc/debug/deps/mrk_windows_installed_native-bbbbbbbbbbbbbbbb.exe"
+        units = [{"reason": "compiler-artifact", "package_id": key, "manifest_path": package["manifest_path"],
+            "target": package["targets"][0], "features": graph["nodes"][key]["features"], "profile": {"test": key == native},
+            "fresh": False, "executable": str(executable) if key == native else None} for key, package in graph["packages"].items()]
+        rows = [*units, {"reason": "build-finished", "success": True}]
+        encode = lambda items: b"\n".join(helper.canonical_json(item) for item in items)
+        with patch.object(helper, "ordinary_windows_executable", side_effect=lambda path, **_: Path(path)):
+            self.assertEqual(helper.windows_normal_ui_native_test_path(encode(rows), graph, source=source, root=root), executable)
+            bad = deepcopy(rows); next(item for item in bad if item.get("package_id") == native)["features"] = ["desktop-ui"]
+            with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_native_test_path(encode(bad), graph, source=source, root=root)
+        wrong = deepcopy(value); next(node for node in wrong["resolve"]["nodes"] if node["id"] == native)["features"] = ["desktop-ui"]
+        with patch.object(helper, "windows_installed_bytes", return_value=helper.canonical_json(wrong)), self.assertRaises(helper.CheckFailure):
+            helper.windows_normal_ui_setup_native_metadata(context)
+        probe = WindowsNormalUiPrerequisiteTests.probe_data()
+        retained = {"compiledTest": probe["artifact"], "artifactNativeIdentity": probe["after"]}
+        setup = {**probe["artifact"], "path": probe["artifact"]["path"].replace("a" * 16 + ".exe", "b" * 16 + ".exe"),
+                 "messages": {"size": 200, "sha256": "e" * 64}}
+        identity = probe["after"].replace("11" * 16, "22" * 16)
+        helper.windows_normal_ui_setup_distinct(retained, setup, identity)
+        for changed, original_identity in (({**setup, "path": probe["artifact"]["path"]}, identity), (setup, probe["after"]),
+                                           ({**setup, "messages": probe["artifact"]["messages"]}, identity)):
+            with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_setup_distinct(retained, changed, original_identity)
+
+    def test_setup_finality_preserves_47_writes_103_objects_and_never_claims_gui(self):
+        data = self.fixture()
+        for through in ("stage", "publish", "publication"):
+            facts, publication = self.setup(data, through)
+            self.assertFalse(facts["combinedPassed"]); self.assertEqual(facts["verifiedMethods"], 0)
+            self.assertEqual(facts["guiCasesExecuted"], 0); self.assertFalse(facts["runtimeConsumerEnabled"])
+            self.assertEqual(facts["actualFixedProducerObserved"], through == "publication")
+            self.assertEqual(publication is not None, through == "publication")
+        self.assertEqual(data["fields"]["stage"]["payloadWriters"], 47)
+        self.assertEqual(len(data["objects"]["observation"]), 103)
+        self.assertEqual(data["fields"]["observation"]["postcheckReaders"], 94)
+        for role in ("stage", "publish", "publication"):
+            for outcome in ("failure", "cancelled", "skipped", "unavailable"):
+                changed = deepcopy(data); changed["outcomes"][role] = outcome
+                with self.subTest(role=role, outcome=outcome), self.assertRaises(helper.CheckFailure): self.setup(changed)
+        for role, before, after in (("stageExit", b"exitCode=0", b"exitCode=1"),
+            ("helperSuccessExit", b"role=helperSuccess", b"role=helperOccupied"),
+            ("observerExit", b"originalWaitReturned=true", b"originalWaitReturned=false"),
+            ("observation", b"actualFixedProducerObserved=true", b"actualFixedProducerObserved=false"),
+            ("stage", b"payloadWriters=47", b"payloadWriters=46"),
+            ("observation", b"proofCount=3", b"proofCount=6")):
+            changed = deepcopy(data); changed["blobs"][role] = changed["blobs"][role].replace(before, after)
+            with self.subTest(original=role, field=before), self.assertRaises(helper.CheckFailure): self.setup(changed)
+        changed = deepcopy(data); changed["blobs"]["extra"] = b"not-an-original"
+        with self.assertRaises(helper.CheckFailure):
+            helper.windows_normal_ui_setup_data(data["context"], data["precheck"], data["roster"], changed["blobs"], data["outcomes"], "publication")
+
+    def test_later_setup_consumers_require_prior_finalizer_step_close_and_exact_receipts(self):
+        data = self.fixture(); root = Path(data["context"]["root"])
+        files = {root / name: data["blobs"][role] for role, (name, _) in {**helper.WINDOWS_NORMAL_UI_SETUP_PROOFS,
+            "observation": ("normal-ui-setup-publication-observation.private.txt", 64 << 10),
+            "observerExit": ("normal-ui-setup-observer-exit.private.txt", 4096)}.items()}
+        for role in ("stage", "publish", "publication"):
+            facts, publication = self.setup(data, role)
+            phase = "windows-normal-ui-setup-" + role + "-finalize"
+            files[root / (phase + "-checks.json")] = helper.canonical_json(helper.windows_installed_phase_receipt(data["context"], phase, **facts))
+        files[root / "normal-ui-publication.private.json"] = helper.canonical_json(publication)
+        environment = dict.fromkeys(("MRK_WINDOWS_UI_SETUP_" + role + suffix for role in ("STAGE", "PUBLISH", "PUBLICATION")
+            for suffix in ("_STEP_OUTCOME", "_FINALIZE_STEP_OUTCOME")), "success")
+        prechecked = data["pre"], data["precheck"], data["roster"], data["compiled"]
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(helper, "windows_normal_ui_setup_check_precheck", return_value=prechecked))
+            stack.enter_context(patch.object(helper, "windows_installed_bytes", side_effect=lambda path, limit: files[path]))
+            stack.enter_context(patch.object(helper, "read_bounded_json", side_effect=lambda path, limit: helper.bounded_json(files[path], limit)))
+            stack.enter_context(patch.object(helper, "run", side_effect=AssertionError("DATA must not launch")))
+            with patch.dict(helper.os.environ, environment, clear=True):
+                actual, observed, _ = helper.windows_normal_ui_setup_evidence(data["context"], "publication", finalized=True)
+                self.assertTrue(actual["actualFixedProducerObserved"]); self.assertEqual(observed, publication)
+            for role in ("STAGE", "PUBLISH", "PUBLICATION"):
+                key = "MRK_WINDOWS_UI_SETUP_" + role + "_FINALIZE_STEP_OUTCOME"
+                with self.subTest(finalizer=role), patch.dict(helper.os.environ, {**environment, key: "unavailable"}, clear=True), self.assertRaises(helper.CheckFailure):
+                    helper.windows_normal_ui_setup_evidence(data["context"], "publication", finalized=True)
+            files[root / "windows-normal-ui-setup-publish-finalize-checks.json"] = helper.canonical_json({"status": "passed"})
+            with patch.dict(helper.os.environ, environment, clear=True), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_setup_evidence(data["context"], "publication", finalized=True)
+
+    def test_workflow_setup_is_positive_probe_gated_and_uses_separate_original_exits(self):
+        workflow = (SOURCE / ".github/workflows/desktop-foundation.yml").read_text(encoding="utf-8")
+        job = workflow.split("  windows-installed-native:\n", 1)[1]
+        blocks = {}
+        for block in job.split("      - name:")[1:]:
+            match = helper.re.search(r"(?m)^        id: ([a-z-]+)$", block)
+            if match: blocks[match.group(1)] = block
+        self.assertEqual(tuple(name for name in blocks if name.startswith("ui-setup-")),
+            ("ui-setup-acquire", "ui-setup-compile", "ui-setup-preflight", "ui-setup-stage", "ui-setup-stage-finalize",
+             "ui-setup-publish", "ui-setup-publish-finalize", "ui-setup-publication", "ui-setup-publication-finalize"))
+        self.assertLess(job.index("id: ui-prerequisite-finalize"), job.index("id: ui-setup-acquire"))
+        self.assertIn("steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable == 'true'", blocks["ui-setup-acquire"])
+        for step, selector in (("stage", helper.WINDOWS_NORMAL_UI_SETUP_STAGE), ("publish", None), ("publication", helper.WINDOWS_NORMAL_UI_SETUP_OBSERVER)):
+            original, finalizer = blocks["ui-setup-" + step], blocks["ui-setup-" + step + "-finalize"]
+            command = "& $env:MRK_WINDOWS_SETUP_ARTIFACT" + (" " + selector + " --exact --ignored --nocapture --test-threads=1" if selector else "")
+            self.assertEqual([line.strip() for line in original.splitlines() if line.strip().startswith("& ")], [command])
+            for forbidden in ("Start-Process", "System.Diagnostics.Process", "Task.Run", "Stop-Process", "MRK_PYTHON", "ordinary-preflight"):
+                self.assertNotIn(forbidden, original)
+            self.assertIn("MRK_WINDOWS_UI_PREREQUISITE_FINALIZE_STEP_OUTCOME", original)
+            self.assertIn("MRK_WINDOWS_UI_SETUP_PRECHECK_SHA256", original)
+            self.assertIn("[System.IO.FileMode]::CreateNew", original)
+            self.assertLess(original.index("$stream.Dispose()"), original.index("if ($originalExitCode -ne 0)"))
+            self.assertIn("steps.ui-setup-" + step + ".outcome == 'success'", finalizer)
+            self.assertIn("MRK_WINDOWS_UI_SETUP_ACQUIRE_STEP_OUTCOME", finalizer)
+            self.assertIn("MRK_WINDOWS_UI_SETUP_COMPILE_STEP_OUTCOME", finalizer)
+        self.assertIn("steps.ui-setup-preflight.outputs.helperArtifact", blocks["ui-setup-publish"])
+        self.assertNotIn("steps.ui-prerequisite-preflight.outputs.artifact", blocks["ui-setup-stage"])
+        for phase in (*helper.WINDOWS_NORMAL_UI_SETUP_BUILD_PHASES, *helper.WINDOWS_NORMAL_UI_SETUP_DATA_PHASES):
+            self.assertEqual(job.count("ci_foundation.py " + phase + "'"), 1)
+        self.assertIn("MRK_WINDOWS_UI_SETUP_PUBLICATION_FINALIZE_STEP_OUTCOME", blocks["retain"])
+
+
+class WindowsNormalUiGuiTests(unittest.TestCase):
+    """Synthetic compiler/PE/wire DATA only; never a native or GUI receipt."""
+
+    @staticmethod
+    def graph_fixture(observer=False):
+        source, root = Path("/reviewed-ui-source"), Path("/private-ui-compiler")
+        lock = helper.tomllib.loads((SOURCE / helper.WINDOWS_INSTALLED_APP / "Cargo.lock").read_text(encoding="utf-8"))
+        registry = "registry+https://github.com/rust-lang/crates.io-index"
+        direct = {"getrandom": "0.3.4", "serde": "1.0.228", "serde_json": "1.0.145", "sha2": "0.10.9", "tokio": "1.48.0",
+            "mrk-windows-installed-native": "0.1.0", "rfd": "0.15.4", "tauri": "2.11.5", "tauri-build": "2.6.3"}
+        selected = {"mobile-release-kit-desktop": "0.1.0", **direct, **helper.WINDOWS_NORMAL_UI_MATERIAL_PACKAGES}
+        ids = {name: name + "@" + version for name, version in selected.items()}
+        app, native = ids["mobile-release-kit-desktop"], ids["mrk-windows-installed-native"]
+        packages, nodes = [], []
+        app_features = helper.tomllib.loads((SOURCE / helper.WINDOWS_INSTALLED_APP / "Cargo.toml").read_text(encoding="utf-8"))["features"]
+        for name, version in selected.items():
+            local = name in ("mobile-release-kit-desktop", "mrk-windows-installed-native")
+            manifest = source / helper.WINDOWS_INSTALLED_APP_LOCALS[name] if local else root / "cargo/registry/src/index-fixed" / (name + "-" + version) / "Cargo.toml"
+            active = (helper.windows_normal_ui_features("observer" if observer else "app") if ids[name] == app else
+                ["desktop-ui", "desktop-ui-dialogs", "qualification-result", *(["windows-installed-observation"] if observer else [])] if ids[name] == native else
+                sorted(("compression", "custom-protocol", "tauri-runtime-wry", "webview2-com", "webkit2gtk", "wry")) if name == "tauri" else
+                ["os-webview", "protocol"] if name == "wry" else [])
+            declarations = app_features if ids[name] == app else deepcopy(helper.WINDOWS_NATIVE_DECLARED_FEATURES) if ids[name] == native else {feature: [] for feature in active}
+            dependencies = list(direct) if ids[name] == app else [item for item in selected if item not in direct and item != "mobile-release-kit-desktop"] if name == "tauri" else []
+            targets = [{"name": name.replace("-", "_"), "kind": ["lib"], "crate_types": ["lib"], "src_path": str(manifest.parent / "src/lib.rs")}]
+            if name in ("mobile-release-kit-desktop", "webview2-com-sys"):
+                targets.append({"name": "build-script-build", "kind": ["custom-build"], "crate_types": ["bin"], "src_path": str(manifest.parent / "build.rs")})
+            if ids[name] == app:
+                targets.extend([{"name": "mobile-release-kit-desktop", "kind": ["bin"], "crate_types": ["bin"], "src_path": str(manifest.parent / "src/main.rs")},
+                    {"name": "installed-shell-observation", "kind": ["test"], "crate_types": ["bin"], "src_path": str(manifest.parent / "tests/installed_shell_observation.rs")}])
+            packages.append({"id": ids[name], "name": name, "version": version, "source": None if local else registry,
+                "manifest_path": str(manifest), "features": declarations, "targets": targets,
+                "dependencies": [{"name": dependency, "source": None if dependency == "mrk-windows-installed-native" else registry,
+                    "kind": None, "target": None} for dependency in dependencies]})
+            nodes.append({"id": ids[name], "features": active, "dependencies": [ids[dependency] for dependency in dependencies],
+                "deps": [{"name": dependency.replace("-", "_"), "pkg": ids[dependency], "dep_kinds": [{"kind": None, "target": None}]} for dependency in dependencies]})
+        metadata = {"version": 1, "packages": packages, "workspace_root": str(source / helper.WINDOWS_INSTALLED_APP), "workspace_members": [app],
+            "workspace_default_members": [app], "target_directory": str(root / "target"), "resolve": {"root": app, "nodes": nodes}}
+        return metadata, lock, source, root
+
+    @classmethod
+    def custom_library_graph_fixture(cls, observer=False):
+        """Locked selectors -> debug_unreachable shape inside synthetic closure DATA."""
+        metadata, lock, source, root = cls.graph_fixture(observer)
+        registry = "registry+https://github.com/rust-lang/crates.io-index"
+        for name, version, library in (("selectors", "0.36.1", "selectors"),
+                                       ("new_debug_unreachable", "1.0.6", "debug_unreachable")):
+            manifest = root / "cargo/registry/src/index-fixed" / (name + "-" + version) / "Cargo.toml"
+            metadata["packages"].append({"id": name + "@" + version, "name": name, "version": version, "source": registry,
+                "manifest_path": str(manifest), "features": {}, "dependencies": [],
+                "targets": [{"name": library, "kind": ["lib"], "crate_types": ["lib"], "src_path": str(manifest.parent / "src/lib.rs")}]})
+            metadata["resolve"]["nodes"].append({"id": name + "@" + version, "features": [], "dependencies": [], "deps": []})
+        packages = {package["name"]: package for package in metadata["packages"]}
+        nodes = {node["id"]: node for node in metadata["resolve"]["nodes"]}
+        # The outer tauri closure is synthetic, as in graph_fixture. Only the
+        # inner unrenamed selectors -> new_debug_unreachable shape is the witness.
+        for parent, child, requirement, library in (("tauri", "selectors", "^0.36", "selectors"),
+                                                   ("selectors", "new_debug_unreachable", "^1", "debug_unreachable")):
+            packages[parent]["dependencies"].append({"name": child, "source": registry, "req": requirement,
+                "kind": None, "rename": None, "optional": False, "uses_default_features": True, "features": [],
+                "target": None, "registry": None})
+            node = nodes[packages[parent]["id"]]
+            node["dependencies"].append(packages[child]["id"])
+            node["deps"].append({"name": library, "pkg": packages[child]["id"], "dep_kinds": [{"kind": None, "target": None}]})
+        return metadata, lock, source, root
+
+    @classmethod
+    def compiler_fixture(cls, observer=False):
+        metadata, lock, source, root = cls.graph_fixture(observer)
+        graph = helper.windows_normal_ui_app_graph(metadata, lock, source=source, root=root, observer=observer)
+        rows = []
+        def artifact(key, target, executable=None):
+            features = graph["nodes"][key]["features"]
+            if key == graph["nativeId"] and not observer:
+                features = ["desktop-ui", "desktop-ui-dialogs"]
+            base = root / "target" / ("debug" if target["kind"] == ["custom-build"] else "x86_64-pc-windows-msvc/debug")
+            return {"reason": "compiler-artifact", "package_id": key, "manifest_path": graph["packages"][key]["manifest_path"], "target": target,
+                "features": features, "profile": {"test": target["kind"] == ["test"], "debug_assertions": True}, "fresh": False,
+                "filenames": [executable or str(base / "deps" / (target["name"] + ".rlib"))], "executable": executable}
+        for key, package in graph["packages"].items():
+            rows.append(artifact(key, package["targets"][0]))
+            if len(package["targets"]) > 1:
+                rows.append(artifact(key, package["targets"][1]))
+                rows.append({"reason": "build-script-executed", "package_id": key, "out_dir": str(root / "target/x86_64-pc-windows-msvc/debug/build" / (package["name"]+"-aaaaaaaaaaaaaaaa") / "out"),
+                    "linked_libs": [], "linked_paths": []})
+        app = graph["appId"]
+        raw = str(root / "target/x86_64-pc-windows-msvc/debug/mobile-release-kit-desktop.exe")
+        if observer:
+            rows.append(artifact(app, graph["packages"][app]["targets"][2], raw))
+            path = str(root / "target/x86_64-pc-windows-msvc/debug/deps/installed_shell_observation-aaaaaaaaaaaaaaaa.exe")
+            rows.append(artifact(app, graph["packages"][app]["targets"][3], path))
+        else:
+            path = raw
+            rows.append(artifact(app, graph["packages"][app]["targets"][2], path))
+        rows.append({"reason": "build-finished", "success": True})
+        return graph, rows, source, root, path
+
+    def test_gui_graph_roles_are_locked_and_native_normal_excludes_dev_qualification(self):
+        for observer in (False, True):
+            metadata, lock, source, root = self.graph_fixture(observer)
+            graph = helper.windows_normal_ui_app_graph(metadata, lock, source=source, root=root, observer=observer)
+            self.assertEqual(graph["observer"], observer)
+            self.assertEqual(len(graph["materialIds"]), 10)
+            self.assertEqual({(row["name"], row["version"]) for row in lock["package"] if row.get("source") is None},
+                {("mobile-release-kit-desktop", "0.1.0"), ("mrk-linux-mount-observation", "0.1.0"),
+                 ("mrk-macos-installed-native", "0.1.0"), ("mrk-windows-installed-native", "0.1.0"),
+                 ("secret-service", "5.2.0"), ("zbus", "5.19.0")})
+            self.assertFalse({"secret-service", "zbus"} & {row["name"] for row in graph["packages"].values()})
+            for name, version in (("secret-service", "5.2.0"), ("zbus", "5.19.0")):
+                for change in ("missing", "version"):
+                    wrong_lock = deepcopy(lock)
+                    row = next(row for row in wrong_lock["package"] if row["name"] == name)
+                    if change == "missing": wrong_lock["package"].remove(row)
+                    else: row["version"] = "0.1.0"
+                    with self.subTest(observer=observer, vendor=name, lock=change), self.assertRaises(helper.CheckFailure):
+                        helper.windows_normal_ui_app_graph(metadata, wrong_lock, source=source, root=root, observer=observer)
+                changed = deepcopy(metadata)
+                changed["packages"].append({**deepcopy(metadata["packages"][1]), "id": name + "@" + version,
+                    "name": name, "version": version, "source": None,
+                    "manifest_path": str(source / "desktop/vendor" / (name + "-" + version) / "Cargo.toml")})
+                with self.subTest(observer=observer, active_vendor=name), self.assertRaises(helper.CheckFailure):
+                    helper.windows_normal_ui_app_graph(changed, lock, source=source, root=root, observer=observer)
+            for change in ("native-forwarding", "normal-feature", "foreign-source", "material-version", "edge", "disconnected"):
+                changed = deepcopy(metadata)
+                if change == "native-forwarding": changed["packages"][0]["features"]["desktop-shell"].pop()
+                elif change == "normal-feature": changed["resolve"]["nodes"][0]["features"].append("runtime-publication")
+                elif change == "foreign-source": changed["packages"][-1]["manifest_path"] = "/shared/windows/Cargo.toml"
+                elif change == "material-version": changed["packages"][-1]["version"] = "9.9.9"
+                elif change == "edge": changed["resolve"]["nodes"][0]["deps"].pop()
+                else: changed["resolve"]["nodes"][0]["dependencies"] = []; changed["resolve"]["nodes"][0]["deps"] = []
+                with self.subTest(observer=observer, change=change), self.assertRaises(helper.CheckFailure):
+                    helper.windows_normal_ui_app_graph(changed, lock, source=source, root=root, observer=observer)
+
+    def test_gui_graph_custom_library_names_and_renames_are_exact(self):
+        for observer in (False, True):
+            metadata, lock, source, root = self.custom_library_graph_fixture(observer)
+            for spelling, rename, name in (("absent", None, "debug_unreachable"), ("null", None, "debug_unreachable"),
+                                           ("explicit", "debug-alias", "debug_alias")):
+                changed = deepcopy(metadata)
+                parent = next(package for package in changed["packages"] if package["name"] == "selectors")
+                node = next(node for node in changed["resolve"]["nodes"] if node["id"] == parent["id"])
+                if spelling == "absent": parent["dependencies"][0].pop("rename")
+                else: parent["dependencies"][0]["rename"] = rename
+                node["deps"][0]["name"] = name
+                with self.subTest(observer=observer, spelling=spelling):
+                    graph = helper.windows_normal_ui_app_graph(changed, lock, source=source, root=root, observer=observer)
+                    self.assertEqual(set(graph), {"packages", "nodes", "appId", "nativeId", "materialIds", "observer"})
+                    self.assertEqual(graph["observer"], observer)
+                    self.assertEqual(graph["packages"]["new_debug_unreachable@1.0.6"]["targets"][0]["name"], "debug_unreachable")
+            for rename, name in ((None, "new_debug_unreachable"), ("debug-alias", "debug_unreachable"),
+                                 ("debug-alias", "debug-alias"), ("debug-alias", "wrong_alias"),
+                                 ("", "debug_unreachable"), (False, "debug_unreachable"), (0, "debug_unreachable"),
+                                 ([], "debug_unreachable"), ({}, "debug_unreachable")):
+                changed = deepcopy(metadata)
+                parent = next(package for package in changed["packages"] if package["name"] == "selectors")
+                node = next(node for node in changed["resolve"]["nodes"] if node["id"] == parent["id"])
+                parent["dependencies"][0]["rename"] = rename
+                node["deps"][0]["name"] = name
+                with self.subTest(observer=observer, rename=rename, name=name), self.assertRaises(helper.CheckFailure):
+                    helper.windows_normal_ui_app_graph(changed, lock, source=source, root=root, observer=observer)
+
+    def test_gui_graph_library_target_roles_are_unique_and_source_bound(self):
+        for observer in (False, True):
+            metadata, lock, source, root = self.custom_library_graph_fixture(observer)
+            for kinds in (["lib"], ["rlib"], ["dylib"], ["cdylib"], ["staticlib"], ["rlib", "cdylib"], ["proc-macro"]):
+                changed = deepcopy(metadata)
+                child = next(package for package in changed["packages"] if package["name"] == "new_debug_unreachable")
+                library = {**child["targets"][0], "kind": kinds, "crate_types": list(reversed(kinds))}
+                decoys = [{"name": "debug_unreachable", "kind": [role], "crate_types": ["lib" if role == "example" else "bin"],
+                    "src_path": str(Path(child["manifest_path"]).parent / (role + ".rs"))}
+                    for role in ("bin", "example", "test", "bench", "custom-build")]
+                child["targets"] = decoys + [library]
+                with self.subTest(observer=observer, kinds=kinds):
+                    helper.windows_normal_ui_app_graph(changed, lock, source=source, root=root, observer=observer)
+            for rename in (None, "debug-alias"):
+                for change in ("bin", "example", "test", "bench", "custom-build", "duplicate", "ambiguous", "mixed-kind",
+                               "mixed-proc-macro", "wrong-crate-type", "duplicate-kind", "duplicate-crate-type", "empty-kind",
+                               "empty-crate-types", "malformed-kind", "empty-name", "foreign-source"):
+                    changed = deepcopy(metadata)
+                    parent = next(package for package in changed["packages"] if package["name"] == "selectors")
+                    node = next(node for node in changed["resolve"]["nodes"] if node["id"] == parent["id"])
+                    parent["dependencies"][0]["rename"] = rename
+                    node["deps"][0]["name"] = "debug_unreachable" if rename is None else "debug_alias"
+                    child = next(package for package in changed["packages"] if package["name"] == "new_debug_unreachable")
+                    target = child["targets"][0]
+                    if change in ("bin", "example", "test", "bench", "custom-build"):
+                        target["kind"] = [change]; target["crate_types"] = ["lib" if change == "example" else "bin"]
+                    elif change == "duplicate": child["targets"].append(deepcopy(target))
+                    elif change == "ambiguous": child["targets"].append({**target, "name": "other_library"})
+                    elif change == "mixed-kind": target["kind"] = ["lib", "bin"]; target["crate_types"] = ["lib", "bin"]
+                    elif change == "mixed-proc-macro": target["kind"] = ["lib", "proc-macro"]; target["crate_types"] = ["lib", "proc-macro"]
+                    elif change == "wrong-crate-type": target["crate_types"] = ["bin"]
+                    elif change == "duplicate-kind": target["kind"] = ["lib", "lib"]
+                    elif change == "duplicate-crate-type": target["crate_types"] = ["lib", "lib"]
+                    elif change == "empty-kind": target["kind"] = []
+                    elif change == "empty-crate-types": target["crate_types"] = []
+                    elif change == "malformed-kind": target["kind"] = [{}]
+                    elif change == "empty-name": target["name"] = ""
+                    else: target["src_path"] = str(root / "foreign/lib.rs")
+                    with self.subTest(observer=observer, rename=rename, change=change), self.assertRaises(helper.CheckFailure):
+                        helper.windows_normal_ui_app_graph(changed, lock, source=source, root=root, observer=observer)
+
+    def test_gui_graph_declaration_join_preserves_identity_and_cardinality(self):
+        for observer in (False, True):
+            metadata, lock, source, root = self.custom_library_graph_fixture(observer)
+            for dependency_kind, target in ((None, None), ("build", None), ("dev", "cfg(windows)"),
+                                            (None, 'cfg(all(windows, target_arch = "x86_64"))')):
+                changed = deepcopy(metadata)
+                parent = next(package for package in changed["packages"] if package["name"] == "selectors")
+                node = next(node for node in changed["resolve"]["nodes"] if node["id"] == parent["id"])
+                parent["dependencies"][0].update({"kind": dependency_kind, "target": target})
+                node["deps"][0]["dep_kinds"] = [{"kind": dependency_kind, "target": target}]
+                with self.subTest(observer=observer, kind=dependency_kind, target=target):
+                    helper.windows_normal_ui_app_graph(changed, lock, source=source, root=root, observer=observer)
+            for change in ("name", "source", "child", "kind", "target", "edge-kind", "edge-target", "missing", "duplicate",
+                           "alias-collision", "unrenamed-alias-collision", "missing-pkg", "edge-table"):
+                changed = deepcopy(metadata)
+                parent = next(package for package in changed["packages"] if package["name"] == "selectors")
+                node = next(node for node in changed["resolve"]["nodes"] if node["id"] == parent["id"])
+                declaration, edge = parent["dependencies"][0], node["deps"][0]
+                if change == "name": declaration["name"] = "other_dependency"
+                elif change == "source": declaration["source"] = "registry+https://foreign.invalid/index"
+                elif change == "child": edge["pkg"] = "serde@1.0.228"; node["dependencies"] = [edge["pkg"]]
+                elif change == "kind": declaration["kind"] = "build"
+                elif change == "target": declaration["target"] = "cfg(windows)"
+                elif change == "edge-kind": edge["dep_kinds"][0]["kind"] = "dev"
+                elif change == "edge-target": edge["dep_kinds"][0]["target"] = "cfg(windows)"
+                elif change == "missing": parent["dependencies"] = []
+                elif change == "duplicate": parent["dependencies"].append(deepcopy(declaration))
+                elif change == "alias-collision":
+                    declaration["rename"] = "debug-alias"; edge["name"] = "debug_alias"
+                    parent["dependencies"].append({**declaration, "rename": "debug_alias"})
+                elif change == "unrenamed-alias-collision": parent["dependencies"].append({**declaration, "rename": "debug_unreachable"})
+                elif change == "missing-pkg": edge["pkg"] = "missing@1.0.0"
+                else: node["dependencies"] = []
+                with self.subTest(observer=observer, change=change), self.assertRaises(helper.CheckFailure):
+                    helper.windows_normal_ui_app_graph(changed, lock, source=source, root=root, observer=observer)
+
+    def test_gui_graph_join_refusals_are_finite_and_sanitized(self):
+        for observer in (False, True):
+            metadata, lock, source, root = self.custom_library_graph_fixture(observer)
+            for reason in ("declaration-missing", "declaration-ambiguous", "library-target-missing", "library-target-ambiguous",
+                           "library-target-malformed", "rename-malformed"):
+                changed = deepcopy(metadata)
+                parent = next(package for package in changed["packages"] if package["name"] == "selectors")
+                node = next(node for node in changed["resolve"]["nodes"] if node["id"] == parent["id"])
+                child = next(package for package in changed["packages"] if package["name"] == "new_debug_unreachable")
+                if reason == "declaration-missing": node["deps"][0]["name"] = "wrong_alias"
+                elif reason == "declaration-ambiguous": parent["dependencies"].append(deepcopy(parent["dependencies"][0]))
+                elif reason == "library-target-missing": child["targets"][0].update({"kind": ["bin"], "crate_types": ["bin"]})
+                elif reason == "library-target-ambiguous": child["targets"].append(deepcopy(child["targets"][0]))
+                elif reason == "library-target-malformed": child["targets"][0]["kind"] = []
+                else: parent["dependencies"][0]["rename"] = False
+                with self.subTest(observer=observer, reason=reason), self.assertRaises(helper.CheckFailure) as caught:
+                    helper.windows_normal_ui_app_graph(changed, lock, source=source, root=root, observer=observer)
+                diagnostic = str(caught.exception)
+                self.assertIn(": " + reason + ";", diagnostic)
+                self.assertIn("; role=" + ("observer" if observer else "normal") + ";", diagnostic)
+                self.assertIn("; parent=selectors@0.36.1; child=new_debug_unreachable@1.0.6;", diagnostic)
+                self.assertIn("; kind=normal; target=none;", diagnostic)
+                self.assertNotIn(str(root), diagnostic)
+                self.assertNotIn("registry+", diagnostic)
+                self.assertLessEqual(len(diagnostic.encode("utf-8")), 768)
+                self.assertEqual(diagnostic.splitlines(), [diagnostic])
+            private_text = "C:\\private-ui-compiler\\account-secret\nregistry+https://private.invalid/\x00"
+            for field in ("edge", "rename", "target"):
+                changed = deepcopy(metadata)
+                parent = next(package for package in changed["packages"] if package["name"] == "selectors")
+                node = next(node for node in changed["resolve"]["nodes"] if node["id"] == parent["id"])
+                if field == "edge": node["deps"][0]["name"] = private_text
+                elif field == "rename": parent["dependencies"][0]["rename"] = private_text
+                else: node["deps"][0]["dep_kinds"][0]["target"] = private_text
+                with self.subTest(observer=observer, field=field), self.assertRaises(helper.CheckFailure) as caught:
+                    helper.windows_normal_ui_app_graph(changed, lock, source=source, root=root, observer=observer)
+                diagnostic = str(caught.exception)
+                self.assertNotIn("account-secret", diagnostic)
+                self.assertNotIn("private.invalid", diagnostic)
+                self.assertNotIn("\x00", diagnostic)
+                self.assertLessEqual(len(diagnostic.encode("utf-8")), 768)
+                self.assertEqual(diagnostic.splitlines(), [diagnostic])
+            # Formatter-only DATA, not a claim that hostile package coordinates
+            # passed the source-lock/provenance gates before this helper.
+            for value in (private_text, "x" * 65, "nonascii-\u2603", "x" * 64):
+                with self.subTest(observer=observer, label=value), self.assertRaises(helper.CheckFailure) as caught:
+                    helper.windows_normal_ui_graph_refusal("declaration-missing", observer=observer,
+                        parent={"name": value, "version": value}, child={"name": value, "version": value},
+                        edge={"name": value}, kind={"kind": "build", "target": private_text}, count=513)
+                diagnostic = str(caught.exception)
+                if value == "x" * 64: self.assertIn("; parent=" + value + "@" + value + ";", diagnostic)
+                else: self.assertIn("; parent=omitted@omitted; child=omitted@omitted; edge=omitted;", diagnostic)
+                self.assertIn("; kind=build; target=specified; count=omitted", diagnostic)
+                self.assertNotIn("account-secret", diagnostic)
+                self.assertLessEqual(len(diagnostic.encode("utf-8")), 768)
+                self.assertEqual(diagnostic.splitlines(), [diagnostic])
+
+    def test_original_compiler_stream_binds_host_target_features_and_nonlaunch_auxiliary(self):
+        encode = lambda rows: b"\n".join(helper.canonical_json(row) for row in rows)
+        for observer in (False, True):
+            graph, rows, source, root, path = self.compiler_fixture(observer)
+            actual = helper.windows_normal_ui_gui_compiler_data(encode(rows), graph, source=source, root=root)
+            self.assertEqual(actual["path"], path)
+            self.assertEqual(actual["auxiliaryPackageBinary"], str(root / "target/x86_64-pc-windows-msvc/debug/mobile-release-kit-desktop.exe") if observer else None)
+            for change in ("incomplete", "failure", "native-features", "native-host", "missing-native", "duplicate-executable", "wrong-path"):
+                changed = deepcopy(rows)
+                native = next(row for row in changed if row.get("package_id") == graph["nativeId"])
+                if change == "incomplete": changed.pop()
+                elif change == "failure": changed[-1]["success"] = False
+                elif change == "native-features": native["features"] = ["desktop-ui"]
+                elif change == "native-host": native["filenames"] = [str(root / "target/debug/deps/native.rlib")]
+                elif change == "missing-native": changed.remove(native)
+                elif change == "duplicate-executable": changed.insert(-1, deepcopy(changed[-2]))
+                else: changed[-2]["executable"] = str(root / "target/debug/foreign.exe")
+                with self.subTest(observer=observer, change=change), self.assertRaises(helper.CheckFailure):
+                    helper.windows_normal_ui_gui_compiler_data(encode(changed), graph, source=source, root=root)
+            if observer:
+                changed = deepcopy(rows); changed[-3]["features"] = helper.windows_normal_ui_features("app")
+                with self.assertRaises(helper.CheckFailure):
+                    helper.windows_normal_ui_gui_compiler_data(encode(changed), graph, source=source, root=root)
+                no_aux = rows[:-3] + rows[-2:]
+                self.assertIsNone(helper.windows_normal_ui_gui_compiler_data(encode(no_aux), graph, source=source, root=root)["auxiliaryPackageBinary"])
+
+    @staticmethod
+    def pe_fixture(import_name=None, delay=False, language=0):
+        raw = bytearray(4096)
+        def put(offset, value, size=4): raw[offset:offset+size] = value.to_bytes(size, "little")
+        raw[:2] = b"MZ"; put(0x3c, 0x80); raw[0x80:0x84] = b"PE\0\0"; put(0x84, 0x8664, 2); put(0x86, 1, 2); put(0x94, 240, 2)
+        optional = 0x98; put(optional, 0x20b, 2); put(optional+108, 16)
+        section = optional+240
+        for offset, value in ((8, 3584), (12, 0x1000), (16, 3584), (20, 0x200)): put(section+offset, value)
+        put(optional+128, 0x1000); put(optional+132, 1024)
+        for base, name, target in ((0, 24, 0x80000018), (24, 1, 0x80000030), (48, language, 72)):
+            put(0x200+base+14, 1, 2); put(0x200+base+16, name); put(0x200+base+20, target)
+        manifest = (b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+            b'<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0"><dependency><dependentAssembly>'
+            b'<assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" '
+            b'processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*" />'
+            b'</dependentAssembly></dependency></assembly>')
+        put(0x248, 0x1080); put(0x24c, len(manifest)); raw[0x280:0x280+len(manifest)] = manifest
+        if import_name is not None:
+            index, stride, field = (13, 32, 4) if delay else (1, 20, 12)
+            put(optional+112+index*8, 0x1500); put(optional+116+index*8, 2*stride)
+            if delay: put(0x700, 1)
+            put(0x700+field, 0x1580)
+            name = import_name.encode("ascii")+b"\0"; raw[0x780:0x780+len(name)] = name
+        return bytes(raw)
+
+    def test_observer_resource_link_reuses_guarded_tauri_output_for_tests_only(self):
+        # One bounded SOURCE read; neither Tauri nor a resource compiler runs.
+        with (SOURCE / "desktop/src-tauri/build.rs").open("rb") as stream:
+            raw = stream.read(8192 + 1)
+        self.assertLessEqual(len(raw), 8192)
+        build = raw.decode("utf-8")
+        shell = build[build.index('    #[cfg(feature = "desktop-shell")]\n    {\n'):]
+        generated = ('        if let Err(error) = tauri_build::try_build(attributes) {\n'
+                     '            panic!("Tauri context generation failed: {error}");\n'
+                     '        }\n')
+        guarded = ('        if target == "x86_64-pc-windows-msvc" && cfg!(feature = "windows-installed-observation") {\n'
+                   '            let out_dir = env::var_os("OUT_DIR").expect("Windows observation resource linking requires OUT_DIR");\n'
+                   '            let resource = std::path::PathBuf::from(out_dir).join("resource.lib");\n'
+                   '            println!("cargo:rustc-link-arg-tests={}", resource.display());\n'
+                   '        }\n')
+        self.assertEqual(build.count("tauri_build::try_build(attributes)"), 1)
+        self.assertEqual(build.count("cargo:rustc-link-arg-tests="), 1)
+        self.assertEqual(build.count('env::var_os("OUT_DIR")'), 1)
+        self.assertIn(generated, shell); self.assertIn(guarded, shell)
+        self.assertLess(shell.index(generated), shell.index(guarded))
+        self.assertTrue(shell.endswith(guarded + "    }\n}\n"))
+        for broad in ("cargo:rustc-link-arg=", "cargo:rustc-link-arg-bins=", "compile_for_tests", "set_manifest(",
+                      "std::fs", "read_to_string", "std::process", "Command::new", "resource.rc", "include_str!"):
+            self.assertNotIn(broad, build)
+
+    def test_pe_data_requires_exact_manifest_and_refuses_dynamic_loader_or_ambiguous_rva(self):
+        for role in ("normal", "observer"):
+            for delay in (False, True):
+                raw = self.pe_fixture("KERNEL32.dll", delay)
+                facts = helper.windows_normal_ui_pe_data(raw, role=role)
+                self.assertTrue(facts["commonControlsV6"]); self.assertFalse(facts["dynamicWebView2LoaderImport"])
+                self.assertEqual(facts["dllImports"], ["kernel32.dll"])
+                with self.assertRaises(helper.CheckFailure):
+                    helper.windows_normal_ui_pe_data(self.pe_fixture("WebView2Loader.dll", delay), role=role)
+            for language in (0, 1033):
+                facts = helper.windows_normal_ui_pe_data(self.pe_fixture(language=language), role=role)
+                self.assertEqual(facts["manifestLanguage"], language)
+            raw = self.pe_fixture()
+            mutations = [raw[:511], raw.replace(b"6.0.0.0", b"5.0.0.0"), raw.replace(b"6595b64144ccf1df", b"1595b64144ccf1df")]
+            for offset, value, size in ((0x84, 0x14c, 2), (0x230+16, 65536, 4), (0x230+16, 0x80000000, 4),
+                                      (0x218+16, 2, 4), (0x214, 0x80000000, 4), (0x24c, 0x7fffffff, 4)):
+                changed = bytearray(raw); changed[offset:offset+size] = value.to_bytes(size, "little"); mutations.append(bytes(changed))
+            for second_language in (0, 1033):
+                changed = bytearray(raw); changed[0x23e:0x240] = (2).to_bytes(2, "little")
+                changed[0x248:0x24c] = second_language.to_bytes(4, "little"); changed[0x24c:0x250] = (72).to_bytes(4, "little")
+                mutations.append(bytes(changed))
+            changed = bytearray(raw); changed[0x23c:0x240] = b"\x01\x00\x00\x00"; mutations.append(bytes(changed))
+            changed = bytearray(raw); changed[0x86:0x88] = (2).to_bytes(2,"little"); changed[0x1b0:0x1d8] = changed[0x188:0x1b0]; mutations.append(bytes(changed))
+            for malformed in mutations:
+                with self.subTest(role=role, prefix=hashlib.sha256(malformed).hexdigest()[:8]), self.assertRaises(helper.CheckFailure):
+                    helper.windows_normal_ui_pe_data(malformed, role=role)
+            for rva, size in ((0, 0), (0x1000, 0), (0x1000, 1), (0x1000, 63),
+                              (0x1000, (4 << 20) + 1), (0xffffffff, 0xffffffff)):
+                malformed = bytearray(raw)
+                malformed[0x98+128:0x98+132] = rva.to_bytes(4, "little")
+                malformed[0x98+132:0x98+136] = size.to_bytes(4, "little")
+                with self.subTest(role=role, rva=rva, size=size), self.assertRaises(helper.CheckFailure) as caught:
+                    helper.windows_normal_ui_pe_data(bytes(malformed), role=role)
+                message = str(caught.exception)
+                self.assertEqual(message, f"Windows GUI {role} resource size differs: rva={rva} size={size} allowed=64..4194304")
+                self.assertLessEqual(len(message.encode("ascii")), 128)
+                self.assertEqual(message.splitlines(), [message])
+        for role in (None, False, 1, b"normal", [], {}, "app", "normal-smoke", "observer\nPRIVATE", "C:/PRIVATE/app.exe"):
+            with self.assertRaisesRegex(helper.CheckFailure, "^Windows GUI PE role differs$"):
+                helper.windows_normal_ui_pe_data(raw, role=role)
+
+    def test_normal_singleton_uses_shared_closed_copy_and_never_adopts_collision_or_changed_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            context = {"root": directory, "qualificationProfile": helper.WINDOWS_NORMAL_UI_PROFILE}
+            raw, copy, receipt = helper.windows_normal_ui_normal_paths(context)
+            raw.parent.mkdir(parents=True); raw.write_bytes(b"MZ-inert-NOT-executable-test-DATA")
+            alias = raw.parent / "compiler-alias.data"; helper.os.link(raw, alias)
+            messages = {"size": 10, "sha256": "1"*64}
+            with patch.object(helper, "windows_normal_ui_gui_messages", return_value=({}, {"path": str(raw), "auxiliaryPackageBinary": None}, messages)), \
+                 patch.object(helper, "run", side_effect=AssertionError("DATA copy must not launch")):
+                artifact = helper.windows_normal_ui_normal_handoff(context, helper.time.monotonic()+30)
+                self.assertEqual(raw.stat().st_nlink, 2); self.assertEqual(copy.stat().st_nlink, 1)
+                self.assertNotEqual(raw.stat().st_ino, copy.stat().st_ino)
+                self.assertEqual(raw.read_bytes(), copy.read_bytes()); self.assertFalse(receipt.exists())
+                receipt.write_bytes(helper.canonical_json(artifact))
+                self.assertEqual(helper.windows_normal_ui_normal_artifact(context), artifact)
+                with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_normal_handoff(context, helper.time.monotonic()+30)
+                self.assertEqual(copy.read_bytes(), raw.read_bytes())
+                raw.write_bytes(b"MZ-changed-source-after-original-copy")
+                with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_normal_artifact(context)
+            ordinary = SimpleNamespace(st_mode=stat.S_IFREG|0o600, st_nlink=1, st_size=129<<20)
+            self.assertFalse(helper.windows_installed_helper_shape(ordinary, compiler_source=False))
+            self.assertTrue(helper.windows_installed_helper_shape(ordinary, compiler_source=False, normal_ui_app=True))
+
+    @classmethod
+    def case_fixture(cls, role, before=None, prior_security=None, account_index=1):
+        probe = WindowsNormalUiPrerequisiteTests.probe_data()
+        context = probe["context"]; root = context["root"]
+        publication = {"schemaVersion": 1, "profile": helper.WINDOWS_NORMAL_UI_PROFILE,
+            **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")},
+            **dict.fromkeys(("manifestSha256", "protocolSha256", "inventorySha256", "coreSha256"), "2"*64),
+            "payloadFiles": 46, "payloadBytes": 1024,
+            **{key: "77:" + f"{index:032x}" for index,key in enumerate(("versionIdentity", "selectedPythonIdentity", "selectedBootstrapIdentity", "selectedCoreIdentity"), 30)}}
+        publication_raw = helper.canonical_json(publication)
+        stamp = {**probe["owner"]["aclTransitions"][5]["before"], "fileId": ("22" if role=="normal-smoke" else "33")*16}
+        identity = before or helper.windows_ordinary_wire(stamp)
+        fields = identity.split(":")
+        stamp.update(volume=int(fields[0]), fileId=fields[1], creation=int(fields[2]), write=int(fields[3]), change=int(fields[4]), attributes=int(fields[5]))
+        app = {**probe["artifact"], "path": root + (r"\mobile-release-kit-desktop.exe" if role == "normal-smoke" else
+            r"\target\x86_64-pc-windows-msvc\debug\deps\installed_shell_observation-bbbbbbbbbbbbbbbb.exe")}
+        retained = {"compiledTest": probe["artifact"], "artifactNativeIdentity": probe["after"], "compileInvocationSha256": "7"*64, "appVersion": "0.1.0"}
+        compiled = {"normalApp": app, "observer": app, "retainedProbe": retained, "normalInvocationSha256": "9"*64,
+            "observerInvocationSha256": "9"*64, "receipt": {"size": 100, "sha256": "a"*64}}
+        previous = {"size": 200, "sha256": "b"*64}
+        request_raw = helper.windows_normal_ui_gui_request(context, role, app, identity, retained, "9"*64, publication, publication_raw)
+        request = helper.windows_normal_ui_request_data(request_raw, root=root)
+        common = {"schemaVersion": 1, **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")},
+            "role": role, "requestSha256": hashlib.sha256(request_raw).hexdigest()}
+        sid = f"{account_index+8:064x}"
+        native_smoke = {"mainRootBound": True, "dashboardReady": True, "postCloseCalls": 1, "invokeCalls": 1,
+            "nativeQuitConfirmed": True, "comOriginalsSettled": True, "apartmentDecremented": True}
+        child = None if role == "normal-smoke" else {**common, "artifactBytes": app["size"], "artifactSha256": app["sha256"],
+            "commandSha256": request["appCommandSha256"], "accountSidSha256": sid,
+            "observation": {"runtimeBindingMatched": True, "verifiedMethods": 6 if role == "project-draft" else 0,
+                "checks": list(helper.WINDOWS_NORMAL_UI_CASE_CHECKS[role]), "finality": dict.fromkeys(("dialogsSettled", "sourcesSettled", "passiveOwnersSettled", "documentHooksSettled", "relayJoined", "exitReady"), True)},
+            "resultFile": {"createNew": True, "writeCalls": 1, "closeGate": "original-child-exit-zero-required"}}
+        owner = {**deepcopy(probe["owner"]), **common, "commandSha256": request["appCommandSha256"], "ownerCommandSha256": request["ownerCommandSha256"],
+            "ownerTest": helper.windows_normal_ui_owner(role), "childTest": request["test"], "accountSidSha256": sid, "prerequisitesAvailable": None,
+            "verifiedMethods": 6 if role=="project-draft" else 0, "normalSmoke": native_smoke if role=="normal-smoke" else None,
+            "nativeResultSha256": None if child is None else hashlib.sha256(helper.canonical_json(child)).hexdigest(),
+            "fixture": None if role=="normal-smoke" else {"initialFiles": 3 if role=="project-draft" else 4, "finalFiles": 4,
+                "immutableFilesVerified": 3 if role=="project-draft" else 4, "labelledCreateNew": role=="project-draft", "completeInventoryVerified": True}}
+        count = len(helper.windows_ordinary_path(root).parents)+1+{"normal-smoke":11,"project-draft":22,"quit-passive":23,"document-loss":23}[role]
+        owner.update(inputOriginals=count, inputOriginalsClosed=count)
+        artifact_acl = owner["aclTransitions"][5]
+        artifact_acl.update(before=stamp, after={**stamp,"change":stamp["change"]+1}, securityBefore=prior_security or "5"*64,
+            securityAfter=f"{account_index+20:064x}")
+        if role != "normal-smoke":
+            extras = [("synthetic-project",0x1200a9),("synthetic-app",0x1200a9),("synthetic-release",0x1200ab if role=="project-draft" else 0x1200a9),
+                *[("synthetic-input",0x120089)]*(3 if role=="project-draft" else 4)]
+            for index,(label,mask) in enumerate(extras,100):
+                value = {**stamp,"fileId":f"{index:032x}", "attributes":128 if label=="synthetic-input" else 16}
+                owner["aclTransitions"].append({"role":label,"mask":mask,"before":value,"after":{**value,"change":value["change"]+1},
+                    "securityBefore":"5"*64,"securityAfter":"6"*64,"singleExplicitNoninheritingAce":True})
+        intent = {**common,"accountName":"mrk"+f"{account_index:016x}","freshAccountIntent":True,"fixedNormalUiChildOnly":True}
+        exited = {**probe["exit"],**common,"ownerTest":helper.windows_normal_ui_owner(role)}
+        preflight = helper.windows_installed_phase_receipt(context,"windows-normal-ui-"+role+"-preflight",
+            **helper.windows_normal_ui_case_preflight_facts(request_raw,compiled["receipt"],previous))
+        blobs = {"request":request_raw,"preflight":helper.canonical_json(preflight),"owner":helper.canonical_json(owner),
+            "exit":helper.canonical_json(exited),"intent":helper.canonical_json(intent)}
+        if child is not None: blobs["child"]=helper.canonical_json(child)
+        return {"context":context,"role":role,"compiled":compiled,"publication":publication_raw,"before":identity,"previous":previous,
+            "blobs":blobs,"owner":owner,"child":child,"intent":intent,"exit":exited,"priorSecurity":prior_security}
+
+    @staticmethod
+    def accept_case(data, used=None, outcomes=None):
+        return helper.windows_normal_ui_case_data(data["context"],data["role"],data["compiled"],data["publication"],data["before"],
+            data["previous"],data["blobs"],outcomes or {"preflight":"success","owner":"success"},used or set(),data["priorSecurity"])
+
+    def test_normal_request_uses_singleton_and_other_original_roles_are_unchanged(self):
+        data=self.case_fixture("normal-smoke")
+        request=helper.windows_normal_ui_request_data(data["blobs"]["request"],root=data["context"]["root"])
+        self.assertTrue(request["appArtifact"].endswith(r"\mobile-release-kit-desktop.exe"))
+        self.assertEqual(request["appCommandSha256"],hashlib.sha256(('"'+request["appArtifact"]+'"').encode("utf-16-le")).hexdigest())
+        wrong={**data["compiled"]["normalApp"],"path":data["context"]["root"]+r"\target\x86_64-pc-windows-msvc\debug\mobile-release-kit-desktop.exe"}
+        with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_gui_request(data["context"],"normal-smoke",wrong,data["before"],
+            data["compiled"]["retainedProbe"],"9"*64,helper.bounded_json(data["publication"],65536),data["publication"])
+        source=(SOURCE/helper.WINDOWS_INSTALLED_CRATE/"src/qualification_result.rs").read_text()
+        self.assertIn('UiRole::NormalSmoke => need(Path::new(&self.app.path) == root.join("mobile-release-kit-desktop.exe"))',source)
+        self.assertIn('UiRole::Prerequisite => need(self.app.path == self.owner.path)',source)
+
+    def test_gui_owner_finality_and_shared_observer_acl_account_chain(self):
+        used=set(); identity=None; security=None
+        for index,role in enumerate(helper.WINDOWS_NORMAL_UI_GUI_ROLES,1):
+            data=self.case_fixture(role,identity if index>2 else None,security if index>2 else None,index)
+            result=self.accept_case(data,used)
+            self.assertEqual(result["verifiedMethods"],6 if role=="project-draft" else 0)
+            ancestors = len(helper.windows_ordinary_path(data["context"]["root"]).parents)+1
+            extra = 0 if role=="normal-smoke" else 3+2*(3 if role=="project-draft" else 4)+1+(role=="project-draft")
+            self.assertEqual(result["originalOwner"]["inputOriginalsClosed"], ancestors+11+extra)
+            if role != "normal-smoke": identity=result["afterArtifactIdentity"]; security=result["artifactAclAfterSha256"]
+            used.add((result["accountNameSha256"],result["accountSidSha256"]))
+            with self.assertRaises(helper.CheckFailure): self.accept_case(data,used)
+            for change in ("owner-step", "preflight-step", "exit", "unknown", "close", "inventory", "acl-before", "request", "child-finality", "collapsed-writer-count", "other-observer-role-count"):
+                changed=deepcopy(data)
+                outcomes={"preflight":"success","owner":"success"}
+                if change=="owner-step": outcomes["owner"]="skipped"
+                elif change=="preflight-step": outcomes["preflight"]="unavailable"
+                elif change=="exit": changed["exit"]["exitCode"]=1; changed["blobs"]["exit"]=helper.canonical_json(changed["exit"])
+                elif change=="request": changed["previous"]["sha256"]="f"*64
+                elif change=="child-finality":
+                    if changed["child"] is None: changed["blobs"]["child"]=b"{}"
+                    else:
+                        changed["child"]["observation"]["finality"]["relayJoined"]=False
+                        changed["blobs"]["child"]=helper.canonical_json(changed["child"])
+                else:
+                    if change=="unknown": changed["owner"]["unknown"]=True
+                    elif change=="close": changed["owner"]["inputOriginalsClosed"]-=1
+                    elif change=="collapsed-writer-count":
+                        changed["owner"]["inputOriginals"]=ancestors+19
+                        changed["owner"]["inputOriginalsClosed"]=ancestors+19
+                    elif change=="other-observer-role-count":
+                        changed["owner"]["inputOriginals"]=ancestors+(23 if role=="project-draft" else 22)
+                        changed["owner"]["inputOriginalsClosed"]=changed["owner"]["inputOriginals"]
+                    elif change=="inventory": changed["owner"]["outputInventoryVerified"]=False
+                    else: changed["owner"]["aclTransitions"][5]["before"]["change"]+=1
+                    changed["blobs"]["owner"]=helper.canonical_json(changed["owner"])
+                with self.subTest(role=role,change=change),self.assertRaises(helper.CheckFailure): self.accept_case(changed,outcomes=outcomes)
+        data=self.case_fixture("quit-passive",identity,security,10)
+        data["priorSecurity"]="f"*64
+        with self.assertRaises(helper.CheckFailure): self.accept_case(data)
+        source=(SOURCE/helper.WINDOWS_INSTALLED_CRATE/"src/ordinary_owner_ui.rs").read_text()
+        fixture=source.split("fn create_fixture_file(",1)[1].split("impl Fixture",1)[0]
+        self.assertIn("let writer = files.len(); files.push(",fixture)
+        self.assertLess(fixture.index("files[writer].close()?"),fixture.index("let index = input(files,"))
+        self.assertNotIn("files.pop(",fixture)
+        self.assertIn("original.process_close, original.thread_close, files.len(), files.len(), profile.delete_return",source)
+
+    def test_auxiliary_recheck_is_full_original_epoch_not_normal_launch_authority(self):
+        with tempfile.TemporaryDirectory() as directory:
+            context={"root":directory,"source":"/inert-source","qualificationProfile":helper.WINDOWS_NORMAL_UI_PROFILE,
+                **{key:value for key,value in WindowsNormalUiPrerequisiteTests.context().items() if key not in ("root","source","qualificationProfile")}}
+            raw,_,_=helper.windows_normal_ui_normal_paths(context)
+            named=[77,123,stat.S_IFREG|0o755,2,37,200,100,128,0,100]
+            descriptor=[77,123,stat.S_IFREG|0o644,2,37,200,100,128,0,300]
+            original={"path":str(raw),"size":37,"sha256":"a"*64,"named":named,"descriptor":descriptor}
+            parsed={"auxiliaryPackageBinary":str(raw)}; saved={}
+            @helper.contextmanager
+            def observation(*args,**kwargs):
+                self.assertIs(kwargs["normal_ui_app"],True)
+                yield b"inert",deepcopy(original)
+            with patch.object(helper,"windows_normal_ui_gui_messages",return_value=({},parsed,{"size":10,"sha256":"b"*64})), \
+                 patch.object(helper,"windows_normal_ui_acquired",return_value=({"cargo":{"path":"/fixed/cargo"}},{})), \
+                 patch.object(helper,"windows_installed_helper_observation",side_effect=observation), \
+                 patch.object(helper,"write_json",side_effect=lambda path,value:saved.update(value)), \
+                 patch.object(helper,"read_bounded_json",side_effect=lambda path,limit:deepcopy(saved)), \
+                 patch.object(helper,"run",side_effect=AssertionError("DATA must not launch")):
+                first=helper.windows_normal_ui_auxiliary(context,recheck_original=True,create=True)
+                self.assertFalse(first["launchAuthority"])
+                self.assertEqual(helper.windows_normal_ui_auxiliary(context,recheck_original=True),first)
+                original["descriptor"][-1]+=1
+                with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_auxiliary(context,recheck_original=True)
+                # After the normal compiler, retain the authenticated historical
+                # intermediate, never adopt its now-replaced raw path identity.
+                self.assertEqual(helper.windows_normal_ui_auxiliary(context,recheck_original=False),first)
+                saved["launchAuthority"]=True
+                with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_auxiliary(context,recheck_original=False)
+
+    def test_complete_case_chain_requires_every_closed_finalizer_and_only_current_descriptor(self):
+        all_data=[]; previous={"size":200,"sha256":"b"*64}; identity=None; security=None
+        normal=self.case_fixture("normal-smoke")
+        observer=self.case_fixture("project-draft",account_index=2)
+        context=normal["context"]; root=Path(context["root"])
+        compiled={**normal["compiled"],"observer":observer["compiled"]["observer"],
+            "normalNativeIdentity":normal["before"],"observerNativeIdentity":observer["before"],"appVersion":"0.1.0"}
+        files={}; outcomes={}; used=set()
+        for index,role in enumerate(helper.WINDOWS_NORMAL_UI_GUI_ROLES,1):
+            data=self.case_fixture(role,identity if index>2 else None,security if index>2 else None,index)
+            data["compiled"]=compiled; data["previous"]=previous
+            data["blobs"]["preflight"]=helper.canonical_json(helper.windows_installed_phase_receipt(context,"windows-normal-ui-"+role+"-preflight",
+                **helper.windows_normal_ui_case_preflight_facts(data["blobs"]["request"],compiled["receipt"],previous)))
+            facts=self.accept_case(data,used)
+            paths=helper.windows_normal_ui_case_paths(context,role)
+            for key,raw in data["blobs"].items(): files[paths[key]]=raw
+            final=helper.canonical_json(helper.windows_installed_phase_receipt(context,"windows-normal-ui-"+role+"-finalize",**facts))
+            files[paths["finalize"]]=final; previous={"size":len(final),"sha256":hashlib.sha256(final).hexdigest()}
+            used.add((facts["accountNameSha256"],facts["accountSidSha256"]))
+            if role!="normal-smoke": identity=facts["afterArtifactIdentity"]; security=facts["artifactAclAfterSha256"]
+            for part in ("PREFLIGHT","OWNER","FINALIZE"):
+                outcomes["MRK_WINDOWS_UI_"+role.upper().replace("-","_")+"_"+part+"_STEP_OUTCOME"]="success"
+            all_data.append(facts)
+        files[root/"normal-ui-publication.private.json"]=normal["publication"]
+        probe=WindowsNormalUiPrerequisiteTests.probe_data()
+        files[root/"normal-ui-prerequisite-owner-result.private.json"]=helper.canonical_json(probe["owner"])
+        files[root/"normal-ui-prerequisite-owner-intent.private.json"]=helper.canonical_json(probe["intent"])
+        def record(path,limit):
+            if path.name=="windows-normal-ui-gui-compile-checks.json": return compiled["receipt"]
+            if path.name=="windows-normal-ui-setup-publication-finalize-checks.json": return {"size":200,"sha256":"b"*64}
+            raw=files[path]; return {"size":len(raw),"sha256":hashlib.sha256(raw).hexdigest()}
+        current={"normal":all_data[0]["afterArtifactIdentity"],"observer":all_data[-1]["afterArtifactIdentity"]}
+        with patch.object(helper,"windows_normal_ui_gui_compiled",return_value=(compiled["retainedProbe"],helper.bounded_json(normal["publication"],65536),
+                compiled["normalApp"],compiled["observer"],compiled)), \
+             patch.object(helper,"windows_installed_bytes",side_effect=lambda path,limit:files[path]), \
+             patch.object(helper,"read_bounded_json",side_effect=lambda path,limit:helper.bounded_json(files[path],limit)), \
+             patch.object(helper,"windows_installed_record",side_effect=record), \
+             patch.object(helper,"windows_ordinary_original",side_effect=lambda artifact,ui_role:current[ui_role]) as original, \
+             patch.object(helper,"run",side_effect=AssertionError("DATA chain must not launch")),patch.dict(helper.os.environ,outcomes,clear=True):
+            _,facts,_=helper.windows_normal_ui_case_chain(context,"document-loss",finalized=True)
+            self.assertEqual(facts,all_data); self.assertEqual(original.call_count,2)
+            for role in helper.WINDOWS_NORMAL_UI_GUI_ROLES:
+                key="MRK_WINDOWS_UI_"+role.upper().replace("-","_")+"_FINALIZE_STEP_OUTCOME"
+                with patch.dict(helper.os.environ,{key:"unavailable"}),self.assertRaises(helper.CheckFailure):
+                    helper.windows_normal_ui_case_chain(context,"document-loss",finalized=True)
+            current["observer"]=compiled["observerNativeIdentity"]
+            with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_case_chain(context,"document-loss",finalized=True)
+            current["observer"]=all_data[-1]["afterArtifactIdentity"]
+            files[helper.windows_normal_ui_case_paths(context,"project-draft")["finalize"]]=b'{"status":"passed"}'
+            with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_case_chain(context,"document-loss",finalized=True)
+
+    def test_workflow_gui_order_direct_originals_and_separate_finalizers(self):
+        source=HELPER.read_text(encoding="utf-8")
+        build=source.split("def windows_normal_ui_gui_build(",1)[1].split("\ndef ",1)[0]
+        self.assertIn('(("observer", True), ("normal-app", False))',build)
+        self.assertLess(build.index("windows_normal_ui_scalar_build("),build.index('for role, observer_selected in'))
+        between=build.split("scalar = windows_normal_ui_scalar_build(",1)[1].split("for role, observer_selected in",1)[0]
+        self.assertIn("windows_normal_ui_absent(windows_normal_ui_normal_paths(context))",between)
+        self.assertLess(build.index("windows_normal_ui_normal_compile_start("),build.index('check="windows-normal-ui-gui-compile-only"'))
+        for forbidden in ("unlink(","rename(","replace(","rmtree(","--release","--no-default-features=", "--all-features"):
+            self.assertNotIn(forbidden,build)
+        self.assertIn('"--ignore-scripts", "--no-audit", "--no-fund"',build)
+        self.assertIn("windows_installed_remaining(deadline, 1800)",build)
+        chain=source.split("def windows_normal_ui_case_chain(",1)[1].split("\ndef ",1)[0]
+        self.assertIn('index < count - 1 or finalized',chain)
+        self.assertIn('identities["observer"] == windows_ordinary_original(observer, ui_role="observer")',chain)
+        workflow=(SOURCE/".github/workflows/desktop-foundation.yml").read_text()
+        job=workflow.split("  windows-installed-native:\n",1)[1]
+        blocks={}
+        for block in job.split("      - name:")[1:]:
+            match=helper.re.search(r"(?m)^        id: ([a-z-]+)$",block)
+            if match: blocks[match.group(1)]=block
+        ordered=["ui-node","ui-gui-acquire","ui-gui-compile",*["ui-"+role+"-"+part for role in helper.WINDOWS_NORMAL_UI_GUI_ROLES for part in ("preflight","owner","finalize")]]
+        self.assertEqual([key for key in blocks if key in ordered],ordered)
+        self.assertIn("steps.ui-setup-publication-finalize.outcome == 'success'",blocks["ui-node"])
+        self.assertIn("node-version: '24.20.0'",blocks["ui-node"])
+        self.assertIn("Run inert scalar then build observer and normal last",blocks["ui-gui-compile"])
+        for role in helper.WINDOWS_NORMAL_UI_GUI_ROLES:
+            owner=blocks["ui-"+role+"-owner"]; finalizer=blocks["ui-"+role+"-finalize"]
+            command="& $env:MRK_WINDOWS_UI_OWNER_ARTIFACT "+helper.windows_normal_ui_owner(role)+" --exact --ignored --nocapture --test-threads=1"
+            self.assertEqual([line.strip() for line in owner.splitlines() if line.strip().startswith("& ")],[command])
+            for forbidden in ("Start-Process","System.Diagnostics.Process","Task.Run","Stop-Process","MRK_PYTHON"):
+                self.assertNotIn(forbidden,owner)
+            self.assertIn("[System.IO.FileMode]::CreateNew",owner)
+            self.assertLess(owner.index("$stream.Dispose()"),owner.index("if ($originalExitCode -ne 0)"))
+            self.assertIn("steps.ui-"+role+"-owner.outcome == 'success'",finalizer)
+            for part in ("PREFLIGHT","OWNER","FINALIZE"):
+                self.assertIn("MRK_WINDOWS_UI_"+role.upper().replace("-","_")+"_"+part+"_STEP_OUTCOME",blocks["retain"])
+        for phase in (*helper.WINDOWS_NORMAL_UI_GUI_BUILD_PHASES,*helper.WINDOWS_NORMAL_UI_GUI_DATA_PHASES):
+            self.assertEqual(job.count("ci_foundation.py "+phase+"'"),1)
+
+
+class WindowsNormalUiInertRegressionTests(unittest.TestCase):
+    """Bounded policy-output and source routing DATA; no native execution."""
+
+    @staticmethod
+    def output(scalar=False, filtered=317):
+        names = helper.WINDOWS_NORMAL_UI_SCALAR_TESTS if scalar else helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS
+        return ("\nrunning " + str(len(names)) + (" test\n" if len(names) == 1 else " tests\n")
+            + "".join("test " + name + " ... ok\n" for name in names)
+            + f"\ntest result: ok. {len(names)} passed; 0 failed; 0 ignored; 0 measured; {filtered} filtered out; finished in 0.01s\n\n").encode("ascii")
+
+    def test_exact_module_selectors_and_real_output_counts_refuse_zero_extra_or_failed_selection(self):
+        native = ("ui::profile::tests::post_create_admission_failure_never_authorizes_profile_cleanup",
+                  "ui::tests::managed_runtime_root_and_every_descendant_use_immutable_policy",
+                  "project::tests::project_spelling_is_bounded_local_and_never_normalized",
+                  "project::tests::project_identity_checks_full_ids_without_immutable_runtime_policy",
+                  "project::tests::refused_spelling_and_early_stop_never_acquire_a_native_original",
+                  "ordinary_owner::normal_ui::contract_tests::com_null_end_is_distinct_from_pending_failure_and_contradictory_output",
+                  "ordinary_owner::normal_ui::contract_tests::unavailable_probe_is_completed_observation_not_gui_authorization",
+                  "ordinary_owner::normal_ui::contract_tests::native_smoke_never_credits_posting_or_partial_release_as_finality",
+                  "tests::normal_ui_setup_data_requires_distinct_runtime_only_role_and_positive_probe_finality",
+                  "ordinary_owner::normal_ui::contract_tests::profile_absence_epochs_do_not_consume_the_single_binding_path",
+                  "ordinary_owner::normal_ui::contract_tests::profile_absence_results_distinguish_missing_collision_and_unknown",
+                  "ordinary_owner::normal_ui::contract_tests::profile_absence_dependents_settle_before_namespace_parents")
+        scalar_name = "asset_session::tests::human_quit_stop_has_one_clock_without_inventing_a_work_endpoint"
+        self.assertEqual(helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS, native)
+        startup = (
+            "windows_startup::tests::controlled_reply_requires_original_registration_and_actual_hook",
+            "windows_startup::tests::real_reply_return_and_ordered_events_precede_one_packaged_navigation",
+            "windows_startup::tests::late_blank_replacement_or_unordered_callbacks_cannot_rearm",
+            "windows_startup::tests::original_reply_and_window_custody_gate_shutdown_finality")
+        scalar_names = (scalar_name, *startup)
+        self.assertEqual(helper.WINDOWS_NORMAL_UI_SCALAR_TESTS, scalar_names)
+        crate = SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src"
+        library = (crate / "lib.rs").read_text()
+        for declaration in ("pub mod ui;", "mod project;", "mod tests;", "mod ordinary_owner;"):
+            self.assertIn(declaration, library)
+        self.assertIn('#[path = "ui_profile.rs"]\nmod profile;', (crate / "ui.rs").read_text())
+        self.assertIn('#[path = "ordinary_owner_ui.rs"]\nmod normal_ui;', (crate / "ordinary_owner.rs").read_text())
+        for indices, filename, module in (((0,), "ui_profile.rs", "tests"), ((1,), "ui.rs", "tests"),
+                ((2,3,4), "project.rs", "tests"), ((5,6,7,9,10,11), "ordinary_owner_ui.rs", "contract_tests"),
+                ((8,), "tests.rs", None)):
+            source = (crate / filename).read_text()
+            if module is not None: self.assertIn("mod " + module + " {", source)
+            for index in indices:
+                self.assertIn("fn " + native[index].rsplit("::",1)[-1] + "()", source)
+        app = SOURCE / helper.WINDOWS_INSTALLED_APP / "src"
+        self.assertIn("mod asset_session;", (app / "lib.rs").read_text())
+        self.assertIn("fn " + scalar_name.rsplit("::",1)[-1] + "()", (app / "asset_session.rs").read_text())
+        self.assertIn('#[cfg(any(test, all(feature = "desktop-shell", target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]\nmod windows_startup;',
+                      (app / "lib.rs").read_text())
+        self.assertIn('#[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]\n'
+                      '#[path = "../src/windows_startup.rs"] mod windows_startup;',
+                      (app.parent / "tests/installed_shell_observation.rs").read_text())
+        startup_source = (app / "windows_startup.rs").read_text()
+        self.assertIn("mod tests {", startup_source)
+        self.assertIn("StartupOrder", (app / "shell_windows.rs").read_text())
+        for name in startup:
+            self.assertIn("fn " + name.rsplit("::", 1)[-1] + "()", startup_source)
+        legacy_scalar = ("\nrunning 1 test\ntest " + scalar_name + " ... ok\n"
+            + "\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 317 filtered out; finished in 0.01s\n\n").encode("ascii")
+        with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_inert_output(legacy_scalar, scalar=True)
+        # Neither former selection proves the new profile-epoch regressions ran.
+        for count in (2, 9):
+            legacy = (f"\nrunning {count} tests\n" + "".join("test " + name + " ... ok\n" for name in native[:count])
+                + f"\ntest result: ok. {count} passed; 0 failed; 0 ignored; 0 measured; 317 filtered out; finished in 0.01s\n\n").encode("ascii")
+            with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_inert_output(legacy)
+        for scalar, names in ((False,native),(True,scalar_names)):
+            argv=helper.windows_normal_ui_inert_argv({"path":"/inert-never-run/original.exe"},scalar=scalar)
+            self.assertEqual(argv,["/inert-never-run/original.exe",*names,"--exact","--nocapture","--test-threads=1"])
+            for filtered in (0,317):
+                result=helper.windows_normal_ui_inert_output(self.output(scalar,filtered),scalar=scalar)
+                self.assertEqual(result,{"tests":list(names),"passed":len(names),"failed":0,"ignored":0,"measured":0,"filtered":filtered})
+            raw=self.output(scalar); row=("test "+names[0]+" ... ok\n").encode("ascii")
+            last=("test "+names[-1]+" ... ok\n").encode("ascii")
+            malformed=(b"",raw.replace(b"0 failed",b"1 failed"),raw.replace(b"0 ignored",b"1 ignored"),
+                raw.replace(b" ... ok",b" ... ignored"),raw.replace(row,b""),raw.replace(row,row+row),
+                raw.replace(last,b""),raw.replace(last,b"test unselected::native ... ok\n"),
+                raw.replace(names[0].encode("ascii"),b"ui_profile::tests::wrong_module"),raw+b"trailing-output\n",
+                raw.replace(b"test result: ok.",b"test result: FAILED."),
+                raw.replace(("running "+str(len(names))).encode(),b"running 0"),
+                b"running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 319 filtered out; finished in 0.01s\n")
+            for index,bad in enumerate(malformed):
+                with self.subTest(scalar=scalar,mutation=index),self.assertRaises(helper.CheckFailure):
+                    helper.windows_normal_ui_inert_output(bad,scalar=scalar)
+
+    def test_inert_receipt_binds_original_outputs_and_does_not_claim_native_availability(self):
+        data=WindowsNormalUiPrerequisiteTests.probe_data()
+        with tempfile.TemporaryDirectory() as directory:
+            context={**data["context"],"root":directory}; root=Path(directory)
+            for scalar in (False,True):
+                prefix="normal-ui-scalar" if scalar else "normal-ui-native-policy"
+                stdout=root/(prefix+".stdout"); stderr=root/(prefix+".stderr")
+                stdout.write_bytes(self.output(scalar)); stderr.write_bytes(b"")
+                with patch.object(helper,"run",side_effect=AssertionError("DATA receipt must not launch")):
+                    facts=helper.windows_normal_ui_inert_facts(context,data["artifact"],data["identity"],scalar=scalar)
+                    self.assertEqual(facts["compiledTest"],data["artifact"])
+                    self.assertEqual(facts["artifactNativeIdentity"],data["identity"])
+                    self.assertEqual(facts["outputs"]["stdout"]["identity"],list(helper.windows_installed_state(stdout.stat())))
+                    self.assertEqual(facts["outputs"]["stdout"]["sha256"],hashlib.sha256(self.output(scalar)).hexdigest())
+                    self.assertTrue(facts["originalWritersClosed"]); self.assertEqual(facts["originalExitCode"],0)
+                    self.assertFalse(facts["nativeAvailabilityObserved"]); self.assertTrue(facts["inertPolicyOnly"])
+                    stderr.write_bytes(b"unexpected native diagnostic")
+                    with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_inert_facts(context,data["artifact"],data["identity"],scalar=scalar)
+                    stderr.write_bytes(b"")
+                    stdout.write_bytes(self.output(scalar)+b"unexpected marker\n")
+                    with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_inert_facts(context,data["artifact"],data["identity"],scalar=scalar)
+
+    def test_scalar_original_run_failure_or_writer_close_failure_never_seals_success(self):
+        data=WindowsNormalUiPrerequisiteTests.probe_data()
+        class CloseFailure(io.StringIO):
+            def __exit__(self,*args):
+                self.close()
+                raise OSError("inert original close failure")
+        for failure in (None,"metadata","compile","regression","output","identity","close"):
+            with self.subTest(failure=failure),tempfile.TemporaryDirectory() as directory:
+                context={**data["context"],"root":directory,"source":str(SOURCE)}
+                artifact={**data["artifact"],"path":directory+"/target/x86_64-pc-windows-msvc/debug/deps/mobile_release_desktop-"+"a"*16+".exe"}
+                writers=[]; calls=[]; original_open=helper.Path.open
+                def opened(path,*args,**kwargs):
+                    if failure=="close" and path.name=="normal-ui-scalar.stdout": return CloseFailure()
+                    return original_open(path,*args,**kwargs)
+                def invoked(argv,*,check,output,diagnostics,timeout,**kwargs):
+                    role={"windows-normal-ui-scalar-metadata":"metadata","windows-normal-ui-scalar-compile-only":"compile",
+                          "windows-normal-ui-scalar-regression":"regression"}[check]
+                    calls.append(role); writers.extend((output,diagnostics))
+                    self.assertFalse(output.closed); self.assertFalse(diagnostics.closed); self.assertGreater(timeout,0)
+                    if role==failure: raise helper.CheckFailure("inert original nonzero exit")
+                    if role=="regression":
+                        self.assertEqual(argv,helper.windows_normal_ui_inert_argv(artifact,scalar=True))
+                        output.write((b"running 0 tests\n" if failure=="output" else self.output(True)).decode("ascii"))
+                    else:
+                        self.assertIn("--offline",argv); self.assertIn("--no-default-features",argv); self.assertNotIn("--features",argv)
+                        output.write("{}\n")
+                identities=iter((data["identity"],data["after"])) if failure=="identity" else None
+                with ExitStack() as stack:
+                    stack.enter_context(patch.object(helper.Path,"open",opened))
+                    stack.enter_context(patch.object(helper,"run",side_effect=invoked))
+                    stack.enter_context(patch.object(helper,"windows_normal_ui_scalar_metadata",return_value={}))
+                    stack.enter_context(patch.object(helper,"windows_normal_ui_scalar_artifact",return_value=artifact))
+                    stack.enter_context(patch.object(helper,"windows_ordinary_original",side_effect=(lambda *a,**k:next(identities)) if identities else None,return_value=data["identity"]))
+                    stack.enter_context(patch.object(helper,"windows_normal_ui_acquired",return_value=({"cargo":{"path":"/inert/cargo"}},{})))
+                    facts=stack.enter_context(patch.object(helper,"windows_normal_ui_scalar_facts",wraps=helper.windows_normal_ui_scalar_facts))
+                    stack.enter_context(redirect_stdout(io.StringIO()))
+                    if failure is None:
+                        result=helper.windows_normal_ui_scalar_build(context,"/inert/cargo",{},helper.time.monotonic()+60)
+                        self.assertEqual(result["regression"]["result"]["passed"],len(helper.WINDOWS_NORMAL_UI_SCALAR_TESTS))
+                        self.assertEqual(result["regression"]["result"]["tests"],list(helper.WINDOWS_NORMAL_UI_SCALAR_TESTS))
+                    else:
+                        with self.assertRaises((helper.CheckFailure,OSError)):
+                            helper.windows_normal_ui_scalar_build(context,"/inert/cargo",{},helper.time.monotonic()+60)
+                        if failure!="output": facts.assert_not_called()
+                    self.assertTrue(all(stream.closed for stream in writers))
+                    expected=["metadata"] if failure=="metadata" else ["metadata","compile"] if failure=="compile" else ["metadata","compile","regression"]
+                    self.assertEqual(calls,expected)
+
+    def test_scalar_and_native_producers_and_consumers_preserve_exact_epochs_and_closures(self):
+        source=HELPER.read_text()
+        body=lambda name:source.split("def "+name+"(",1)[1].split("\ndef ",1)[0]
+        scalar=body("windows_normal_ui_scalar_build")
+        self.assertIn("windows_normal_ui_absent((*windows_normal_ui_normal_paths(context)",scalar)
+        self.assertIn("windows_installed_app_argv(cargo, context)",scalar)
+        self.assertIn("windows_installed_remaining(deadline, 60)",scalar)
+        self.assertIn("publication=False",body("windows_normal_ui_scalar_metadata"))
+        self.assertIn("helper=False",body("windows_normal_ui_scalar_artifact"))
+        self.assertIn("windows_installed_app_test_path(",body("windows_normal_ui_scalar_artifact"))
+        self.assertIn("same_compile_json(scalar, windows_normal_ui_scalar_facts(context))",body("windows_normal_ui_gui_compile_facts"))
+        self.assertIn('saved.get("inertScalar")',body("windows_normal_ui_gui_compiled"))
+        self.assertIn('"compileOrder": ["scalar", "observer", "normal"]',body("windows_normal_ui_gui_compile_facts"))
+        native=body("windows_normal_ui_phase")
+        self.assertLess(native.index('check="windows-normal-ui-native-compile-only"'),native.index("policy_identity = windows_ordinary_original(artifact)"))
+        self.assertLess(native.index('"Windows UI original native compiler writers did not close"'),native.index('check="windows-normal-ui-native-policy"'))
+        self.assertLess(native.index('"Windows UI original policy writers did not close"'),native.index("policy = windows_normal_ui_inert_facts("))
+        self.assertIn("policy_identity == windows_ordinary_original(artifact)",native)
+        for name in ("windows_normal_ui_probe_preflight","windows_normal_ui_probe_observe_final"):
+            self.assertIn('identity == compiled["inertPolicy"]["artifactNativeIdentity"]',body(name))
+        self.assertIn('saved["inertPolicy"].get("artifactNativeIdentity")',body("windows_normal_ui_compile_binding"))
+        for code in (native,scalar):
+            self.assertNotIn("--ignored",code); self.assertNotIn("time.monotonic() +",code)
+        context={**WindowsNormalUiPrerequisiteTests.context(),"source":str(SOURCE)}
+        argv=helper.windows_installed_app_argv("/inert/cargo",context)
+        self.assertNotIn("--features",argv); self.assertIn("--lib",argv); self.assertIn("--no-run",argv)
+
+    def test_gui_consumer_refuses_changed_scalar_original_or_output_before_later_evidence(self):
+        context=WindowsNormalUiPrerequisiteTests.context()
+        original={"regression":{"artifactNativeIdentity":"original","outputs":{"stdout":{"sha256":"a"*64}}}}
+        for changed in ({"regression":{**original["regression"],"artifactNativeIdentity":"replaced"}},
+                        {"regression":{**original["regression"],"outputs":{"stdout":{"sha256":"b"*64}}}},None):
+            with patch.object(helper,"windows_normal_ui_acquired",return_value=({"cargo":{"path":"/inert/cargo"}},{})), \
+                 patch.object(helper,"windows_normal_ui_scalar_facts",return_value=changed), \
+                 patch.object(helper,"windows_normal_ui_gui_messages",side_effect=AssertionError("changed scalar cannot reach GUI evidence")) as later, \
+                 patch.object(helper,"run",side_effect=AssertionError("DATA consumer must not launch")),self.assertRaises(helper.CheckFailure):
+                try: helper.windows_normal_ui_gui_compile_facts(context,{}, {}, {}, {}, "unused", "unused", {}, original)
+                finally: later.assert_not_called()
 
 
 if __name__ == "__main__":

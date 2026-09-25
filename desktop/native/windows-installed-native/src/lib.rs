@@ -3,8 +3,9 @@
 //! The caller must register this book inside its ORIGINAL retained Resources before
 //! releasing blocking work. Serialize it under that owner's Mutex; keep it and the
 //! actual workers reachable through STOP, document loss, timeout and settlement.
-//! This crate creates no worker, clock, broker, capability or process. It must not
-//! run on the UI/deadline thread. The production Windows profile remains closed.
+//! The facts/publication adapters create no worker, broker or consumer process;
+//! their blocking calls belong off the UI/deadline thread. The separately gated
+//! `desktop-ui` module owns only the original STA shell/document/dialog resources.
 //!
 //! Native output destinations already belong to the pinned book before entry.
 //! Drop never closes a HANDLE; unresolved storage is deliberately not deallocated.
@@ -28,6 +29,29 @@ use windows_sys::Win32::UI::Shell as SH;
 
 mod decode;
 mod security;
+mod loader;
+pub use loader::SystemImage;
+// Pure closed DATA is also used by the headless Windows startup scalar route.
+pub mod ui_startup_data;
+mod project;
+pub use project::{ProjectBook, project_path_hint};
+#[cfg(feature = "desktop-ui")]
+pub mod ui;
+#[cfg(all(test, feature = "desktop-ui"))]
+mod hosted_ui_tests;
+#[cfg(any(test, feature = "qualification-result"))]
+mod qualification_result;
+#[cfg(feature = "qualification-result")]
+pub use qualification_result::{write_fullwalk_result_once, write_passive_result_once, require_passive_qualification, FullwalkFacts, PassiveFacts};
+#[cfg(all(feature = "qualification-result", feature = "windows-installed-observation"))]
+pub use qualification_result::{UiRole, UiCaseFacts, normal_ui_deadline, require_normal_ui_qualification, write_normal_ui_result_once};
+#[cfg(all(feature = "qualification-result", feature = "windows-installed-observation"))]
+pub use qualification_result::{normal_ui_project, mutate_normal_ui_fixture, verify_normal_ui_fixture,
+    UI_FIXTURE_CONFIG, UI_FIXTURE_CONFIG_AFTER, UI_FIXTURE_SOURCE, UI_FIXTURE_VERSION, UI_FIXTURE_KEEP};
+#[cfg(feature = "runtime-publication")]
+mod publication;
+#[cfg(feature = "runtime-publication")]
+pub use publication::{Publication, PublicationFrameObservation, PublicationCopyObservation, PUBLICATION_PAYLOADS};
 pub use decode::{DirectoryEntry, FileIdentity, Metadata};
 pub use security::{AceFact, GroupFact, SecurityFacts, Sid, TokenFacts, TokenIdentity};
 
@@ -35,7 +59,8 @@ pub use security::{AceFact, GroupFact, SecurityFacts, Sid, TokenFacts, TokenIden
 // Win32/System/Com/Urlmon. No Urlmon/COM function or loader dependency is used.
 const HRESULT_PENDING: i32 = 0x8000000a_u32 as i32;
 const BUFFER: usize = 64 * 1024;
-const MAX_LIVE: usize = 48; // Token originals count, too.
+pub const MAX_ORIGINALS: usize = 48; // Token originals count, too; one aggregate book.
+const MAX_LIVE: usize = MAX_ORIGINALS;
 const MAX_RECORDS: usize = 8256;
 const MAX_FILES: usize = 2048;
 const MAX_ENTRIES: usize = 8192;
@@ -57,12 +82,190 @@ pub enum SlotState { Reserved, Acquiring, Owned, NoHandle, Closing, Closed, Unkn
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CloseOutcome { Settled, Unknown }
 
+// Closed, allocation-free DATA from the first returning admission refusal.
+// The recorder lives in the original book, never TLS/a logger/a replacement owner.
+use AdmissionCheck as C;
+
+macro_rules! admission_labels {
+    ($name:ident { $($variant:ident => $label:literal),+ $(,)? }) => {
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        pub(crate) enum $name { $($variant),+ }
+        impl $name {
+            fn label(self) -> &'static str { match self { $(Self::$variant => $label),+ } }
+            #[allow(dead_code)]
+            pub(crate) fn from_label(value: &str) -> Option<Self> {
+                match value { $($label => Some(Self::$variant),)+ _ => None }
+            }
+            #[cfg(test)]
+            const ALL: &'static [Self] = &[$(Self::$variant),+];
+        }
+    };
+}
+pub(crate) use admission_labels;
+admission_labels!(AdmissionRole {
+    Owner => "owner", Installer => "installer", Primary => "primary-token",
+    ThreadBefore => "thread-before", ThreadAfter => "thread-after",
+    StatisticsBefore => "statistics-before", StatisticsAfter => "statistics-after",
+    TokenType => "token-type", Elevation => "elevation", ElevationType => "elevation-type",
+    UiAccess => "ui-access", Virtualization => "virtualization", Restrictions => "has-restrictions",
+    AppContainer => "app-container", User => "user", Integrity => "integrity",
+    Groups => "groups", Privileges => "privileges", Volume => "volume",
+    ProgramFiles => "program-files", Mrk => "mrk", RuntimeInput => "runtime-input",
+    Target => "target", Version => "version", Python => "python", Manifest => "manifest"
+});
+admission_labels!(AdmissionOp {
+    Owner => "owner", Architecture => "architecture", TokenOpen => "token-open",
+    HandleInfo => "handle-info", ThreadToken => "thread-token", TokenData => "token-data",
+    Scalar => "scalar", InstallerPolicy => "installer-policy", Location => "location",
+    Mapping => "mapping", Volume => "volume", Metadata => "metadata", Streams => "streams",
+    SecurityAncestor => "security-ancestor", SecurityVersion => "security-version",
+    Directory => "directory", Identity => "identity",
+    Inventory => "inventory", Read => "read", FinalManifest => "final-manifest",
+    MutationInput => "mutation-input"
+});
+admission_labels!(AdmissionCheck {
+    OutputBytes => "output-bytes", OutputCount => "output-count", TextCount => "text-count",
+    Span => "span", Utf16Width => "utf16-width", Utf16Encoding => "utf16-encoding",
+    Terminator => "terminator", TextLength => "text-length", LocationDrive => "location-drive",
+    LocationComponents => "location-components", MappingSize => "mapping-size",
+    MappingFrame => "mapping-frame", MappingDevice => "mapping-device", MappingDigits => "mapping-digits",
+    Attributes => "attributes", MetadataSize => "metadata-size", AttributeAgreement => "attribute-agreement",
+    DirectoryBoolean => "directory-boolean", DeletePending => "delete-pending", ObjectKind => "object-kind",
+    DirectoryAttribute => "directory-attribute", FileSize => "file-size", AllocationSize => "allocation-size",
+    FileLinks => "file-links", FileId => "file-id", DirectoryOffset => "directory-offset",
+    DirectoryNameLength => "directory-name-length", DirectoryNext => "directory-next",
+    DirectoryName => "directory-name", DirectoryDot => "directory-dot",
+    StreamMissing => "stream-missing", StreamFrame => "stream-frame", StreamName => "stream-name",
+    StreamSize => "stream-size", StreamAllocation => "stream-allocation", StreamPadding => "stream-padding",
+    SidRevision => "sid-revision", SidCount => "sid-count", SidExtent => "sid-extent",
+    DescriptorSize => "descriptor-size", DescriptorRevision => "descriptor-revision",
+    DescriptorReserved => "descriptor-reserved", DescriptorControl => "descriptor-control",
+    DescriptorRequired => "descriptor-required", DescriptorSacl => "descriptor-sacl",
+    OwnerOffset => "owner-offset", AclOffset => "acl-offset", OwnerTrust => "owner-trust",
+    AclRevision => "acl-revision", AclReserved => "acl-reserved", AclSize => "acl-size",
+    AclCount => "acl-count", OwnerAclOverlap => "owner-acl-overlap", GroupOffset => "group-offset",
+    GroupOverlap => "group-overlap", AceType => "ace-type", AceSize => "ace-size",
+    AceSidSize => "ace-sid-size", AceFlags => "ace-flags", AceInheritance => "ace-inheritance",
+    AceMask => "ace-mask", AceDangerousRights => "ace-dangerous-rights",
+    StatisticsSize => "statistics-size", StatisticsType => "statistics-type",
+    StatisticsGroups => "statistics-groups", StatisticsPrivileges => "statistics-privileges",
+    Inherited => "inherited", DriveShape => "drive-shape", DriveType => "drive-type",
+    MappingCount => "mapping-count", LocationChanged => "location-changed",
+    ChildParent => "child-parent", ChildName => "child-name", VolumeName => "volume-name",
+    VolumeDeviceSize => "volume-device-size", VolumeDeviceType => "volume-device-type",
+    VolumeRemote => "volume-remote", FileType => "file-type", CaseSensitive => "case-sensitive",
+    CanonicalName => "canonical-name", AncestorName => "ancestor-name", ReadCount => "read-count",
+    ThreadAbsent => "thread-absent", OrderFresh => "order-fresh", InstallerFresh => "installer-fresh",
+    ArchitectureProcess => "architecture-process", ArchitectureNative => "architecture-native",
+    PrimaryOpen => "primary-open", ScalarWidth => "scalar-width", ScalarCompletion => "scalar-completion",
+    ScalarCanonical => "scalar-canonical", TokenPrimary => "token-primary", Elevated => "elevated",
+    UiAccess => "ui-access", Virtualization => "virtualization", Restricted => "restricted",
+    AppContainer => "app-container", UserBuffer => "user-buffer", IntegrityBuffer => "integrity-buffer",
+    PointerValue => "pointer-value", PointerOffset => "pointer-offset", PointerMinimum => "pointer-minimum",
+    PointerAlignment => "pointer-alignment", UserAttributes => "user-attributes",
+    IntegrityAttributes => "integrity-attributes", SystemIntegrity => "system-integrity",
+    SystemElevation => "system-elevation", AccountShape => "account-shape",
+    AccountIntegrity => "account-integrity", AccountElevation => "account-elevation",
+    GroupCount => "group-count", GroupSize => "group-size", GroupCountMatch => "group-count-match",
+    GroupFlags => "group-flags", GroupDenyEnabled => "group-deny-enabled", GroupDuplicate => "group-duplicate",
+    AdminOwner => "admin-owner", PrivilegesCount => "privileges-count", PrivilegesSize => "privileges-size",
+    PrivilegesCountMatch => "privileges-count-match", PrivilegeLuid => "privilege-luid",
+    PrivilegeDuplicate => "privilege-duplicate", PrivilegeFlags => "privilege-flags",
+    StatisticsChanged => "statistics-changed", LocationOwner => "location-owner",
+    LocationOrdinaryUser => "location-ordinary-user", LocationStarted => "location-started",
+    MappingChanged => "mapping-changed", VolumeSerial => "volume-serial", Links => "links",
+    CreationTime => "creation-time", WriteTime => "write-time", ChangeTime => "change-time",
+    MetadataChanged => "metadata-changed", DirectoryChanged => "directory-changed",
+    VolumeChanged => "volume-changed", IdentityAlias => "identity-alias", Component => "component",
+    DirectoryKind => "directory-kind", SelectedCase => "selected-case", SelectedDuplicate => "selected-duplicate",
+    DotKind => "dot-kind", DotIdentity => "dot-identity", EntryDuplicate => "entry-duplicate",
+    EntryKind => "entry-kind", EntryIdentity => "entry-identity", EntryAttributes => "entry-attributes",
+    SourceEntry => "source-entry", SourceKind => "source-kind", RosterName => "roster-name",
+    RosterKind => "roster-kind", RosterMissing => "roster-missing", ManifestSize => "manifest-size",
+    ManifestLimit => "manifest-limit", ManifestReportedSize => "manifest-reported-size",
+    ManifestFinalSize => "manifest-final-size", ManifestFinalFacts => "manifest-final-facts",
+    MutationData => "mutation-data", MutationDescriptor => "mutation-descriptor"
+});
+
+#[derive(Clone, Copy)]
+pub(crate) enum AdmissionIndex { Directory, Ace, Group, Privilege }
+impl AdmissionIndex {
+    fn limit(self) -> usize { match self { Self::Directory => 8192, Self::Ace => 2048, Self::Group => 256, Self::Privilege => 64 } }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PublicationAdmissionObservation {
+    role: AdmissionRole, operation: AdmissionOp, check: AdmissionCheck, index: Option<u16>,
+}
+impl PublicationAdmissionObservation {
+    /// Already normalized DATA only; no owner, native output, path or clock read.
+    pub fn diagnostic_line(self) -> Option<String> {
+        let mut line = String::with_capacity(256);
+        line.push_str("MRK_WINDOWS_RUNTIME_PUBLISH_ADMISSION_V1=role="); line.push_str(self.role.label());
+        line.push_str(";op="); line.push_str(self.operation.label());
+        line.push_str(";check="); line.push_str(self.check.label()); line.push_str(";index=");
+        if let Some(index) = self.index { line.push_str(&index.to_string()); } else { line.push_str("none"); }
+        line.push('\n'); if line.len() <= 256 { Some(line) } else { None }
+    }
+}
+struct AdmissionTrace {
+    active: Cell<bool>, role: Cell<AdmissionRole>, first: Cell<Option<PublicationAdmissionObservation>>,
+}
+impl AdmissionTrace {
+    fn new() -> Self { Self { active: Cell::new(false), role: Cell::new(AdmissionRole::Owner), first: Cell::new(None) } }
+    fn at(&self, operation: AdmissionOp) -> Refusal<'_> {
+        Refusal { owner: if self.active.get() { Some(self) } else { None }, role: self.role.get(), operation, index: None }
+    }
+}
+#[derive(Clone, Copy)]
+pub(crate) struct Refusal<'a> {
+    owner: Option<&'a AdmissionTrace>, role: AdmissionRole, operation: AdmissionOp, index: Option<u16>,
+}
+impl<'a> Refusal<'a> {
+    pub(crate) fn none() -> Self { Self { owner: None, role: AdmissionRole::Owner, operation: AdmissionOp::Owner, index: None } }
+    pub(crate) fn role(self, role: AdmissionRole) -> Self { Self { role, ..self } }
+    pub(crate) fn index(self, kind: AdmissionIndex, index: usize) -> Self {
+        // Literal zero-based bounds; invalid indices become absent DATA, never a clamp/authority.
+        Self { index: if index < kind.limit() { Some(index as u16) } else { None }, ..self }
+    }
+    pub(crate) fn error(self, error: Error, check: AdmissionCheck) -> Error {
+        if error == Error::Unsafe {
+            if let Some(owner) = self.owner {
+                if owner.first.get().is_none() {
+                    owner.first.set(Some(PublicationAdmissionObservation { role: self.role, operation: self.operation, check, index: self.index }));
+                }
+            }
+        }
+        error
+    }
+    pub(crate) fn unsafe_at(self, check: AdmissionCheck) -> Error { self.error(Error::Unsafe, check) }
+    pub(crate) fn need(self, value: bool, check: AdmissionCheck) -> Result<()> {
+        if value { Ok(()) } else { Err(self.unsafe_at(check)) }
+    }
+    pub(crate) fn result<T>(self, result: Result<T>, check: AdmissionCheck) -> Result<T> {
+        result.map_err(|error| self.error(error, check))
+    }
+}
+
 // The key cannot be constructed or cloned outside the crate. Keeping its Arc
 // prevents an old key from matching a different book after allocator address reuse.
 // It owns NO native handle; dropping it never retires its book's slot.
 pub struct Original { book: Arc<()>, index: usize }
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Kind { Directory, File, ProcessToken, ThreadToken }
+// Metadata policy only, never an admission capability or SystemImage tag.
+// Ordinary payloads retain their existing single-link observation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MetadataObservationProfile { Ordinary, ManagedWebViewImage }
+const MANAGED_WEBVIEW_IMAGE: &str = "msedgewebview2.exe";
+impl MetadataObservationProfile {
+    fn admits(self, kind: Kind, name: &[u16], system_image: bool) -> bool {
+        match self {
+            Self::Ordinary => true,
+            Self::ManagedWebViewImage => kind == Kind::File && !system_image
+                && name == wide(MANAGED_WEBVIEW_IMAGE).as_slice(),
+        }
+    }
+}
 impl From<FileKind> for Kind {
     fn from(value: FileKind) -> Self {
         match value { FileKind::Directory => Self::Directory, FileKind::File => Self::File }
@@ -71,7 +274,7 @@ impl From<FileKind> for Kind {
 // The ORIGINAL directory cursor gets one purpose and one owned selected name.
 // Another mode/name cannot reinterpret earlier batches or restart enumeration.
 #[derive(Debug, Eq, PartialEq)]
-enum DirectoryMode { Unstarted, Strict, Ancestor(String) }
+enum DirectoryMode { Unstarted, Strict, Ancestor(String), Selected(Vec<String>) }
 impl DirectoryMode {
     fn bind(&mut self, requested: Self) -> Result<()> {
         if requested == Self::Unstarted { return Err(Error::State); }
@@ -90,6 +293,8 @@ struct Slot {
     read_ended: bool,
     directory_ended: bool,
     directory_mode: DirectoryMode,
+    // Only open_system_image can attach this role, before the original open.
+    system_image: Option<SystemImage>,
     _pin: PhantomPinned,
 }
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -100,9 +305,28 @@ enum PrivilegeName { ChangeNotify, Shutdown, Undock, IncreaseWorkingSet, TimeZon
 enum Call {
     Architecture, Folder, WindowsDirectory, SystemDirectory, Mapping, DriveType,
     Open(usize), ProcessToken(usize), ThreadToken(usize), Close(usize),
+    #[cfg(test)]
+    QualificationSourceToken(usize),
+    #[cfg(test)]
+    QualificationRestrictedToken(usize),
     Info(FS::FILE_INFO_BY_HANDLE_CLASS, usize), HandleInfo, FinalName, FileType,
     VolumeName, VolumeDevice, Streams, Security,
     Token(S::TOKEN_INFORMATION_CLASS), Privilege(PrivilegeName), Read(usize), Entries,
+}
+impl Call {
+    // Pure slot classification, shared by native and inert registration. The
+    // qualification variants never exist in a production native unit.
+    fn token_output(self) -> Option<usize> {
+        match self {
+            Self::ProcessToken(index) | Self::ThreadToken(index) => Some(index),
+            #[cfg(test)]
+            Self::QualificationSourceToken(index) | Self::QualificationRestrictedToken(index) => Some(index),
+            _ => None,
+        }
+    }
+    fn acquisition_output(self) -> Option<usize> {
+        match self { Self::Open(index) => Some(index), _ => self.token_output() }
+    }
 }
 // A fixed output uses its complete SDK type, not the arena's spare capacity.
 // Variable outputs retain the one bounded buffer; no size-discovery query/retry.
@@ -121,6 +345,11 @@ fn token_information_length(class: S::TOKEN_INFORMATION_CLASS) -> Result<u32> {
 }
 #[derive(Clone, Copy, Debug)]
 enum Returned { Boolean(i32, u32), Count(u32, u32), Hresult(i32), Nt(i32), Scalar(u32) }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CompletionRefusal {
+    OpenInvalidHandle, OpenIoStatus, OpenNotOpened, OpenDuplicate,
+    TokenInvalidHandle, TokenDuplicate,
+}
 #[repr(C, align(8))]
 struct Aligned([u8; BUFFER]);
 struct Arena {
@@ -128,6 +357,7 @@ struct Arena {
     token_length: u32,
     phase: Cell<Phase>,
     returned: Cell<Option<Returned>>,
+    completion_refusal: Cell<Option<CompletionRefusal>>,
     input: Vec<u16>,
     handle: F::HANDLE,
     output_handle: *mut F::HANDLE,
@@ -168,10 +398,14 @@ impl Complete {
             Returned::Scalar(value) | Returned::Count(value, _) => Ok(value), _ => Err(Error::State),
         }
     }
-    fn text(&self, capacity: usize, counted: bool) -> Result<String> {
+    fn bytes_in(&self, length: usize, trace: Refusal<'_>) -> Result<&[u8]> { trace.result(self.bytes(length), C::OutputBytes) }
+    fn count_in(&self, trace: Refusal<'_>) -> Result<usize> { trace.result(self.count(), C::OutputCount) }
+    fn nt_bytes_in(&self, trace: Refusal<'_>) -> Result<&[u8]> { trace.result(self.nt_bytes(), C::OutputBytes) }
+    fn text(&self, capacity: usize, counted: bool) -> Result<String> { self.text_in(capacity, counted, Refusal::none()) }
+    fn text_in(&self, capacity: usize, counted: bool, trace: Refusal<'_>) -> Result<String> {
         let count = if counted { self.scalar()? as usize } else { capacity };
-        if counted && (count == 0 || count >= capacity) { return Err(Error::Unsafe); }
-        decode::terminated(self.bytes(capacity.checked_mul(2).ok_or(Error::Bounds)?)?,
+        if counted && (count == 0 || count >= capacity) { return Err(trace.unsafe_at(C::TextCount)); }
+        decode::Observed::new(trace).terminated(self.bytes_in(capacity.checked_mul(2).ok_or(Error::Bounds)?, trace)?,
             if counted { Some(count) } else { None })
     }
 }
@@ -179,6 +413,7 @@ impl Complete {
 /// Non-cloneable storage book, not runtime authority. Calls are synchronous and
 /// must remain in original retained blocking work; no cancel-by-drop is supported.
 pub struct NativeBook {
+    admission: AdmissionTrace,
     identity: Arc<()>,
     slots: Vec<Held<Slot>>,
     active: Option<Held<Arena>>,
@@ -202,7 +437,7 @@ unsafe impl Send for NativeBook {}
 impl Default for NativeBook { fn default() -> Self { Self::new() } }
 impl NativeBook {
     pub fn new() -> Self {
-        Self { identity: Arc::new(()), slots: Vec::new(), active: None, unknown: false, started: false,
+        Self { admission: AdmissionTrace::new(), identity: Arc::new(()), slots: Vec::new(), active: None, unknown: false, started: false,
             retiring: false, entries: 0, bytes_read: 0, process_token: None,
             user: None, roots_started: false,
             #[cfg(test)]
@@ -260,13 +495,24 @@ impl NativeBook {
         let index = self.slots.len();
         self.slots.push(ManuallyDrop::new(Box::pin(Slot { output: UnsafeCell::new(null_mut()),
             state: SlotState::Reserved, kind, parent, name: encoded, canonical,
-            read_bytes: 0, read_ended: false, directory_ended: false, directory_mode: DirectoryMode::Unstarted, _pin: PhantomPinned })));
+            read_bytes: 0, read_ended: false, directory_ended: false, directory_mode: DirectoryMode::Unstarted,
+            system_image: None, _pin: PhantomPinned })));
         Ok(Original { book: Arc::clone(&self.identity), index })
     }
     fn arena(&self) -> Result<&Arena> {
         self.active.as_ref().map(|a| a.as_ref().get_ref()).ok_or(Error::Unknown)
     }
     fn unknown<T>(&mut self) -> Result<T> { self.unknown = true; Err(Error::Unknown) }
+    fn completion_unknown<T>(&mut self, refusal: CompletionRefusal) -> Result<T> {
+        // Only the six original successful-acquisition refusal branches call
+        // this. Save their first rejecting predicate in the SAME retained arena;
+        // no native output, handle or clock is read by this diagnostic recorder.
+        if let Some(frame) = self.active.as_ref() {
+            let saved = &frame.as_ref().get_ref().completion_refusal;
+            if saved.get().is_none() { saved.set(Some(refusal)); }
+        }
+        self.unknown()
+    }
     fn take_complete(&mut self) -> Result<Complete> {
         self.arena()?.phase.set(Phase::Complete);
         let frame = self.active.take().ok_or(Error::Unknown)?;
@@ -284,6 +530,7 @@ impl NativeBook {
             _ => 0, // never consumed by a non-token dispatch
         };
         let mut frame = Box::pin(Arena { call, token_length, phase: Cell::new(Phase::Prepared), returned: Cell::new(None),
+            completion_refusal: Cell::new(None),
             input, handle, output_handle: null_mut(), unicode: F::UNICODE_STRING::default(),
             attributes: OBJECT_ATTRIBUTES::default(), directory: false,
             bytes: UnsafeCell::new(Aligned([0; BUFFER])), count: UnsafeCell::new(u32::MAX),
@@ -292,7 +539,7 @@ impl NativeBook {
         // SAFETY: frame is pinned but not entered; initialize its self-referential
         // input pointers before publishing the arena and before native effects.
         let setup = unsafe { frame.as_mut().get_unchecked_mut() };
-        if let Call::Open(index) | Call::ProcessToken(index) | Call::ThreadToken(index) = call {
+        if let Some(index) = call.acquisition_output() {
             let slot = self.slot(index)?;
             if slot.state != SlotState::Reserved { return Err(Error::State); }
             setup.output_handle = slot.output.get();
@@ -323,22 +570,18 @@ impl NativeBook {
     // native call. The active arena and every output cell already belong to us.
     fn mark_entered(&mut self, call: Call) -> Result<()> {
         if self.arena()?.phase.get() != Phase::Prepared { return self.unknown(); }
-        match call {
-            Call::Open(i) | Call::ProcessToken(i) | Call::ThreadToken(i) => {
-                if self.slot(i)?.state != SlotState::Reserved { return self.unknown(); }
-                self.slot_mut(i)?.state = SlotState::Acquiring;
-            }
-            Call::Close(i) => {
-                let attempted = self.arena()?.handle;
-                let slot = self.slot_mut(i)?;
-                if slot.state != SlotState::Owned { return self.unknown(); }
-                // SAFETY: no earlier call is outstanding. Retire BEFORE entry;
-                // the arena holds the one attempted value, never an RAII owner.
-                if unsafe { *slot.output.get() } != attempted { return self.unknown(); }
-                slot.state = SlotState::Closing;
-                unsafe { *slot.output.get() = null_mut(); }
-            }
-            _ => {}
+        if let Some(i) = call.acquisition_output() {
+            if self.slot(i)?.state != SlotState::Reserved { return self.unknown(); }
+            self.slot_mut(i)?.state = SlotState::Acquiring;
+        } else if let Call::Close(i) = call {
+            let attempted = self.arena()?.handle;
+            let slot = self.slot_mut(i)?;
+            if slot.state != SlotState::Owned { return self.unknown(); }
+            // SAFETY: no earlier call is outstanding. Retire BEFORE entry;
+            // the arena holds the one attempted value, never an RAII owner.
+            if unsafe { *slot.output.get() } != attempted { return self.unknown(); }
+            slot.state = SlotState::Closing;
+            unsafe { *slot.output.get() = null_mut(); }
         }
         self.started = true;
         self.arena()?.phase.set(Phase::Entered);
@@ -382,16 +625,29 @@ impl NativeBook {
             // SAFETY: STATUS_SUCCESS completes the create; contradictory IOSB is
             // nevertheless retained as Unknown, never offered for ordinary close.
             let (io, info) = unsafe { ((*frame.iosb.get()).Anonymous.Status, (*frame.iosb.get()).Information) };
-            if !valid_handle(handle) || io != F::STATUS_SUCCESS || info != WP::FILE_OPENED as usize
-                || self.duplicate_live(index, handle) { return self.unknown(); }
+            // Preserve the original short-circuit order, including the lazy
+            // duplicate check. Tags describe the already-executed predicate.
+            if !valid_handle(handle) { return self.completion_unknown(CompletionRefusal::OpenInvalidHandle); }
+            if io != F::STATUS_SUCCESS { return self.completion_unknown(CompletionRefusal::OpenIoStatus); }
+            if info != WP::FILE_OPENED as usize { return self.completion_unknown(CompletionRefusal::OpenNotOpened); }
+            if self.duplicate_live(index, handle) { return self.completion_unknown(CompletionRefusal::OpenDuplicate); }
             self.slot_mut(index)?.state = SlotState::Owned;
-        } else if let Call::ProcessToken(index) | Call::ThreadToken(index) = call {
+        } else if let Some(index) = call.token_output() {
             if self.slot(index)?.state != SlotState::Acquiring { return self.unknown(); }
             let (value, _) = match returned { Returned::Boolean(v, e) => (v, e), _ => return self.unknown() };
+            #[cfg(test)]
+            if matches!(call, Call::QualificationSourceToken(_) | Call::QualificationRestrictedToken(_))
+                && !matches!(returned, Returned::Boolean(v, 0) if v != 0)
+                && !matches!(returned, Returned::Boolean(0, e) if e != 0) {
+                // Inconsistent qualification acquisition never authorizes its
+                // output cell. Pending was already refused above.
+                return self.unknown();
+            }
             // SAFETY: synchronous completed BOOL token call, excluding IO_PENDING.
             let handle = unsafe { *self.slot(index)?.output.get() };
             if value != 0 {
-                if !valid_handle(handle) || self.duplicate_live(index, handle) { return self.unknown(); }
+                if !valid_handle(handle) { return self.completion_unknown(CompletionRefusal::TokenInvalidHandle); }
+                if self.duplicate_live(index, handle) { return self.completion_unknown(CompletionRefusal::TokenDuplicate); }
                 self.slot_mut(index)?.state = SlotState::Owned;
             } else {
                 if !handle.is_null() { return self.unknown(); }
@@ -435,7 +691,8 @@ impl NativeBook {
     }
     fn noninherited(&mut self, index: usize) -> Result<()> {
         let result = self.original_call(index, Call::HandleInfo)?;
-        if decode::u32_at(result.bytes(4)?, 0)? & F::HANDLE_FLAG_INHERIT != 0 { return Err(Error::Unsafe); }
+        let trace = self.admission.at(AdmissionOp::HandleInfo);
+        if decode::Observed::new(trace).u32_at(result.bytes_in(4, trace)?, 0)? & F::HANDLE_FLAG_INHERIT != 0 { return Err(trace.unsafe_at(C::Inherited)); }
         Ok(())
     }
     /// Call only after the actual worker has returned, never because a clock
@@ -517,6 +774,12 @@ unsafe fn invoke(a: &Arena) -> Returned {
                 &a.attributes, a.iosb.get(), null(), 0, FS::FILE_SHARE_READ, N::FILE_OPEN,
                 N::FILE_SYNCHRONOUS_IO_NONALERT | if a.directory { N::FILE_DIRECTORY_FILE } else { N::FILE_NON_DIRECTORY_FILE }, null(), 0)),
             Call::ProcessToken(_) => boolean(T::OpenProcessToken(T::GetCurrentProcess(), S::TOKEN_QUERY, a.output_handle)),
+            #[cfg(test)]
+            Call::QualificationSourceToken(_) => boolean(T::OpenProcessToken(T::GetCurrentProcess(),
+                S::TOKEN_QUERY | S::TOKEN_DUPLICATE, a.output_handle)),
+            #[cfg(test)]
+            Call::QualificationRestrictedToken(_) => boolean(S::CreateRestrictedToken(a.handle,
+                S::DISABLE_MAX_PRIVILEGE, 0, null(), 0, null(), 0, null(), a.output_handle)),
             Call::ThreadToken(_) => boolean(T::OpenThreadToken(T::GetCurrentThread(), S::TOKEN_QUERY, 1, a.output_handle)),
             Call::Close(_) => boolean(F::CloseHandle(a.handle)),
             Call::HandleInfo => boolean(F::GetHandleInformation(a.handle, a.buffer().cast())),
@@ -547,6 +810,11 @@ pub struct KnownLocation { book: Arc<()>, kind: LocationKind, path: String, driv
 impl KnownLocation {
     pub fn path(&self) -> &str { &self.path }
     pub fn components(&self) -> &[String] { &self.components }
+    /// DATA comparison of two discoveries in this SAME original book. This is
+    /// not a new mapping observation or permission to reopen a consumed cursor.
+    pub fn same_volume(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.book, &other.book) && self.drive == other.drive && self.device == other.device
+    }
 }
 pub struct KnownLocations { pub program_files: KnownLocation, pub windows: KnownLocation, pub system: KnownLocation }
 impl NativeBook {
@@ -556,19 +824,24 @@ impl NativeBook {
             LocationKind::Windows => (Call::WindowsDirectory, NAME_UNITS, true),
             LocationKind::System => (Call::SystemDirectory, NAME_UNITS, true),
         };
-        let path = self.call(call, null_mut(), Vec::new())?.text(capacity, counted)?;
-        let (drive, components) = decode::dos_location(&path)?;
+        let (path, trace) = {
+            let complete = self.call(call, null_mut(), Vec::new())?;
+            let trace = self.admission.at(AdmissionOp::Location);
+            (complete.text_in(capacity, counted, trace)?, trace)
+        };
+        let (drive, components) = decode::Observed::new(trace).dos_location(&path)?;
         let device = self.mapping(&drive)?;
         Ok(KnownLocation { book: Arc::clone(&self.identity), kind, path, drive, device, components })
     }
     fn mapping(&mut self, drive: &str) -> Result<String> {
-        if drive.len() != 2 || !drive.as_bytes()[0].is_ascii_alphabetic() || drive.as_bytes()[1] != b':' { return Err(Error::Unsafe); }
+        if drive.len() != 2 || !drive.as_bytes()[0].is_ascii_alphabetic() || drive.as_bytes()[1] != b':' { return Err(self.admission.at(AdmissionOp::Mapping).unsafe_at(C::DriveShape)); }
         let root = format!("{drive}\\");
-        if self.call(Call::DriveType, null_mut(), wide(&root))?.scalar()? != WP::DRIVE_FIXED { return Err(Error::Unsafe); }
+        if self.call(Call::DriveType, null_mut(), wide(&root))?.scalar()? != WP::DRIVE_FIXED { return Err(self.admission.at(AdmissionOp::Mapping).unsafe_at(C::DriveType)); }
         let result = self.call(Call::Mapping, null_mut(), wide(drive))?;
         let count = result.scalar()? as usize;
-        if count < 2 || count > MAP_UNITS { return Err(Error::Unsafe); }
-        decode::mapping(result.bytes(count * 2)?)
+        let trace = self.admission.at(AdmissionOp::Mapping);
+        if count < 2 || count > MAP_UNITS { return Err(trace.unsafe_at(C::MappingCount)); }
+        decode::Observed::new(trace).mapping(result.bytes_in(count * 2, trace)?)
     }
     pub fn known_locations_once(&mut self) -> Result<KnownLocations> {
         self.clear()?;
@@ -581,7 +854,7 @@ impl NativeBook {
         self.clear()?;
         if !Arc::ptr_eq(&self.identity, &location.book) { return Err(Error::State); }
         let now = self.location(location.kind)?;
-        if now.path != location.path || now.drive != location.drive || now.device != location.device { return Err(Error::Unsafe); }
+        if now.path != location.path || now.drive != location.drive || now.device != location.device { return Err(self.admission.at(AdmissionOp::Location).unsafe_at(C::LocationChanged)); }
         Ok(())
     }
     /// Opens only the volume from this book's actual OS discovery. This creates
@@ -602,7 +875,8 @@ impl NativeBook {
         self.clear()?;
         let index = self.index(parent)?;
         let parent = self.slot(index)?;
-        if parent.kind != Kind::Directory || !decode::component(name) { return Err(Error::Unsafe); }
+        if parent.kind != Kind::Directory { return Err(self.admission.at(AdmissionOp::Directory).unsafe_at(C::ChildParent)); }
+        if !decode::component(name) { return Err(self.admission.at(AdmissionOp::Directory).unsafe_at(C::ChildName)); }
         let canonical = format!("{}{}{}", parent.canonical, if parent.canonical.ends_with('\\') { "" } else { "\\" }, name);
         if canonical.encode_utf16().count() >= NAME_UNITS { return Err(Error::Bounds); }
         let original = self.reserve(kind.into(), Some(index), name, canonical)?;
@@ -611,44 +885,79 @@ impl NativeBook {
     }
     pub fn local_ntfs(&mut self, original: &Original) -> Result<()> {
         self.clear()?; let index = self.index(original)?;
-        let name = self.original_call(index, Call::VolumeName)?.text(261, false)?;
-        if name != "NTFS" { return Err(Error::Unsafe); }
+        let (name, trace) = {
+            let complete = self.original_call(index, Call::VolumeName)?;
+            let trace = self.admission.at(AdmissionOp::Volume);
+            (complete.text_in(261, false, trace)?, trace)
+        };
+        if name != "NTFS" { return Err(trace.unsafe_at(C::VolumeName)); }
         let result = self.original_call(index, Call::VolumeDevice)?;
-        let bytes = result.nt_bytes()?;
-        if bytes.len() != size_of::<NS::FILE_FS_DEVICE_INFORMATION>()
-            || decode::u32_at(bytes, offset_of!(NS::FILE_FS_DEVICE_INFORMATION, DeviceType))? != FS::FILE_DEVICE_DISK
-            || decode::u32_at(bytes, offset_of!(NS::FILE_FS_DEVICE_INFORMATION, Characteristics))? & NS::FILE_REMOTE_DEVICE != 0 { return Err(Error::Unsafe); }
+        let trace = self.admission.at(AdmissionOp::Volume);
+        let d = decode::Observed::new(trace);
+        let bytes = result.nt_bytes_in(trace)?;
+        if bytes.len() != size_of::<NS::FILE_FS_DEVICE_INFORMATION>() { return Err(trace.unsafe_at(C::VolumeDeviceSize)); }
+        if d.u32_at(bytes, offset_of!(NS::FILE_FS_DEVICE_INFORMATION, DeviceType))? != FS::FILE_DEVICE_DISK { return Err(trace.unsafe_at(C::VolumeDeviceType)); }
+        if d.u32_at(bytes, offset_of!(NS::FILE_FS_DEVICE_INFORMATION, Characteristics))? & NS::FILE_REMOTE_DEVICE != 0 { return Err(trace.unsafe_at(C::VolumeRemote)); }
         Ok(())
     }
     pub fn metadata(&mut self, original: &Original) -> Result<Metadata> {
+        self.metadata_with_profile(original, MetadataObservationProfile::Ordinary)
+    }
+    pub(crate) fn managed_webview_image_metadata(&mut self, original: &Original) -> Result<Metadata> {
+        self.metadata_with_profile(original, MetadataObservationProfile::ManagedWebViewImage)
+    }
+    fn metadata_with_profile(&mut self, original: &Original, profile: MetadataObservationProfile) -> Result<Metadata> {
         self.clear()?; let index = self.index(original)?;
-        let kind = match self.slot(index)?.kind { Kind::Directory => FileKind::Directory, Kind::File => FileKind::File, _ => return Err(Error::State) };
-        if self.original_call(index, Call::FileType)?.scalar()? != FS::FILE_TYPE_DISK { return Err(Error::Unsafe); }
+        let slot = self.slot(index)?;
+        // Reject role mixing BEFORE FileType or any native metadata call.
+        if !profile.admits(slot.kind, &slot.name, slot.system_image.is_some()) {
+            return Err(self.admission.at(AdmissionOp::Metadata).unsafe_at(C::ObjectKind));
+        }
+        let kind = match slot.kind { Kind::Directory => FileKind::Directory, Kind::File => FileKind::File, _ => return Err(Error::State) };
+        if self.original_call(index, Call::FileType)?.scalar()? != FS::FILE_TYPE_DISK { return Err(self.admission.at(AdmissionOp::Metadata).unsafe_at(C::FileType)); }
         let basic = self.original_call(index, Call::Info(FS::FileBasicInfo, size_of::<FS::FILE_BASIC_INFO>()))?;
         let standard = self.original_call(index, Call::Info(FS::FileStandardInfo, size_of::<FS::FILE_STANDARD_INFO>()))?;
         let tag = self.original_call(index, Call::Info(FS::FileAttributeTagInfo, size_of::<FS::FILE_ATTRIBUTE_TAG_INFO>()))?;
         let id = self.original_call(index, Call::Info(FS::FileIdInfo, size_of::<FS::FILE_ID_INFO>()))?;
-        let facts = decode::metadata(kind, basic.bytes(size_of::<FS::FILE_BASIC_INFO>())?,
-            standard.bytes(size_of::<FS::FILE_STANDARD_INFO>())?, tag.bytes(size_of::<FS::FILE_ATTRIBUTE_TAG_INFO>())?, id.bytes(size_of::<FS::FILE_ID_INFO>())?)?;
+        let trace = self.admission.at(AdmissionOp::Metadata);
+        let basic = basic.bytes_in(size_of::<FS::FILE_BASIC_INFO>(), trace)?;
+        let standard = standard.bytes_in(size_of::<FS::FILE_STANDARD_INFO>(), trace)?;
+        let tag = tag.bytes_in(size_of::<FS::FILE_ATTRIBUTE_TAG_INFO>(), trace)?;
+        let id = id.bytes_in(size_of::<FS::FILE_ID_INFO>(), trace)?;
+        let facts = if profile == MetadataObservationProfile::ManagedWebViewImage {
+            decode::Observed::new(trace).managed_webview_image_metadata(kind, basic, standard, tag, id)?
+        } else if self.slot(index)?.system_image.is_some() {
+            decode::Observed::new(trace).system_image_metadata(kind, basic, standard, tag, id)?
+        } else { decode::Observed::new(trace).metadata(kind, basic, standard, tag, id)? };
         if kind == FileKind::Directory {
             let case = self.original_call(index, Call::Info(FS::FileCaseSensitiveInfo, size_of::<FS::FILE_CASE_SENSITIVE_INFO>()))?;
-            if decode::u32_at(case.bytes(4)?, 0)? != 0 { return Err(Error::Unsafe); }
+            let trace = self.admission.at(AdmissionOp::Metadata);
+            if decode::Observed::new(trace).u32_at(case.bytes_in(4, trace)?, 0)? != 0 { return Err(trace.unsafe_at(C::CaseSensitive)); }
         }
-        let name = self.original_call(index, Call::FinalName)?.text(NAME_UNITS, true)?;
-        if name != self.slot(index)?.canonical { return Err(Error::Unsafe); }
+        let (name, trace) = {
+            let complete = self.original_call(index, Call::FinalName)?;
+            let trace = self.admission.at(AdmissionOp::Metadata);
+            (complete.text_in(NAME_UNITS, true, trace)?, trace)
+        };
+        if name != self.slot(index)?.canonical { return Err(trace.unsafe_at(C::CanonicalName)); }
         Ok(facts)
     }
     pub fn security(&mut self, original: &Original, scope: AuthorityScope) -> Result<SecurityFacts> {
         self.clear()?; let index = self.index(original)?;
         let kind = match self.slot(index)?.kind { Kind::Directory => FileKind::Directory, Kind::File => FileKind::File, _ => return Err(Error::State) };
         let result = self.original_call(index, Call::Security)?;
-        security::descriptor(result.bytes(result.count()?)?, kind, scope)
+        { let trace = self.admission.at(match scope {
+                AuthorityScope::AncestorOutsideVersion => AdmissionOp::SecurityAncestor,
+                AuthorityScope::ImmutableVersion => AdmissionOp::SecurityVersion,
+            });
+            security::Observed::new(trace).descriptor(result.bytes_in(result.count_in(trace)?, trace)?, kind, scope) }
     }
     pub fn no_alternate_streams(&mut self, original: &Original) -> Result<()> {
         self.clear()?; let index = self.index(original)?;
         let kind = match self.slot(index)?.kind { Kind::Directory => FileKind::Directory, Kind::File => FileKind::File, _ => return Err(Error::State) };
         let result = self.original_call(index, Call::Streams)?;
-        decode::streams(result.nt_bytes()?, kind)
+        { let trace = self.admission.at(AdmissionOp::Streams);
+            decode::Observed::new(trace).streams(result.nt_bytes_in(trace)?, kind) }
     }
     /// One sequential bounded batch on the ORIGINAL directory. Never restart.
     /// None means actual ERROR_NO_MORE_FILES, not an empty/malformed batch.
@@ -661,8 +970,16 @@ impl NativeBook {
     /// the caller owes exact-name EOF matching and original canonical/full-ID checks.
     pub fn next_ancestor_entries(&mut self, original: &Original, selected_name: &str) -> Result<Option<Vec<DirectoryEntry>>> {
         self.clear()?; // absorbing native Unknown precedes even argument refusal
-        if !decode::component(selected_name) { return Err(Error::Unsafe); }
+        if !decode::component(selected_name) { return Err(self.admission.at(AdmissionOp::Directory).unsafe_at(C::AncestorName)); }
         self.directory_entries(original, DirectoryMode::Ancestor(selected_name.to_owned()))
+    }
+    /// One finite selection fixed on the ORIGINAL cursor's first call. Shared
+    /// native location branches and the fixed OS-image roster are its only
+    /// installed caller. Unrelated siblings remain DATA, never open authority.
+    pub fn next_selected_entries(&mut self, original: &Original, names: &[String]) -> Result<Option<Vec<DirectoryEntry>>> {
+        self.clear()?;
+        loader::selected_names(names)?;
+        self.directory_entries(original, DirectoryMode::Selected(names.to_vec()))
     }
     fn directory_entries(&mut self, original: &Original, mode: DirectoryMode) -> Result<Option<Vec<DirectoryEntry>>> {
         self.clear()?; let index = self.index(original)?;
@@ -678,9 +995,12 @@ impl NativeBook {
         if matches!(result.arena.returned()?, Returned::Boolean(0, F::ERROR_NO_MORE_FILES)) {
             self.slot_mut(index)?.directory_ended = true; return Ok(None);
         }
+        let trace = self.admission.at(AdmissionOp::Directory);
+        let d = decode::Observed::new(trace);
         let entries = match &self.slot(index)?.directory_mode {
-            DirectoryMode::Strict => decode::directory(result.bytes(BUFFER)?)?,
-            DirectoryMode::Ancestor(name) => decode::ancestor_directory(result.bytes(BUFFER)?, name)?,
+            DirectoryMode::Strict => d.directory(result.bytes_in(BUFFER, trace)?)?,
+            DirectoryMode::Ancestor(name) => d.ancestor_directory(result.bytes_in(BUFFER, trace)?, name)?,
+            DirectoryMode::Selected(names) => d.selected_directory(result.bytes_in(BUFFER, trace)?, names)?,
             DirectoryMode::Unstarted => return Err(Error::State),
         };
         self.entries = self.entries.checked_add(entries.len()).ok_or(Error::Bounds)?;
@@ -703,22 +1023,23 @@ impl NativeBook {
         let request = count.min(remaining.min(BUFFER as u64 - 1) as usize + 1);
         self.slot_mut(index)?.read_ended = true; // an error never authorizes retry
         let result = self.original_call(index, Call::Read(request))?;
-        let consumed = result.count()?;
-        if consumed > request { return Err(Error::Unsafe); }
+        let trace = self.admission.at(AdmissionOp::Read);
+        let consumed = result.count_in(trace)?;
+        if consumed > request { return Err(trace.unsafe_at(C::ReadCount)); }
         self.bytes_read = self.bytes_read.checked_add(consumed as u64).ok_or(Error::Bounds)?;
         if self.bytes_read > MAX_TOTAL_BYTES { return Err(Error::Bounds); }
         let slot = self.slot_mut(index)?;
         slot.read_bytes = slot.read_bytes.checked_add(consumed as u64).ok_or(Error::Bounds)?;
         if slot.read_bytes > MAX_FILE_BYTES { return Err(Error::Bounds); }
         slot.read_ended = consumed == 0;
-        Ok(result.bytes(consumed)?.to_vec())
+        Ok(result.bytes_in(consumed, self.admission.at(AdmissionOp::Read))?.to_vec())
     }
     fn absent_thread_token(&mut self) -> Result<()> {
         let key = self.reserve(Kind::ThreadToken, None, "", String::new())?;
         let result = self.call(Call::ThreadToken(key.index), null_mut(), Vec::new())?;
         match result.arena.returned()? {
             Returned::Boolean(0, F::ERROR_NO_TOKEN) if self.slot(key.index)?.state == SlotState::NoHandle => Ok(()),
-            _ => Err(Error::Unsafe), // any acquired impersonation token stays owned
+            _ => Err(self.admission.at(AdmissionOp::ThreadToken).unsafe_at(C::ThreadAbsent)), // any acquired impersonation token stays owned
         }
     }
     fn token(&mut self, index: usize, class: S::TOKEN_INFORMATION_CLASS) -> Result<Complete> {
@@ -795,3 +1116,9 @@ impl NativeBook {
 mod tests;
 #[cfg(test)]
 mod hosted_tests;
+
+#[cfg(test)]
+mod ordinary_owner;
+
+#[cfg(test)]
+mod qualification_fixture;

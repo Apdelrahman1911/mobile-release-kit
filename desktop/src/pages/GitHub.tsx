@@ -129,7 +129,11 @@ export function GitHub({ info, session, state, controller, loading, onReload, on
           <div><dt>source.productionBranch</dt><dd><code>{draftBranch(session, 'source.productionBranch')}</code></dd></div>
         </dl>
         <p>Draft fields only, not validated here or observed branch protection. Your unsaved configuration is retained unchanged.</p>
-        <button type="button" className="button small secondary" onClick={() => onNavigate('settings')}>Review project settings<Icon name="arrow" size={15} /></button>
+        <div className="button-row">
+          <button type="button" className="button small secondary" onClick={() => onNavigate('settings')}>Review project settings<Icon name="arrow" size={15} /></button>
+          <button type="button" className="button small secondary" onClick={() => onNavigate('credentials')}>Open Credentials &amp; Signing<Icon name="arrow" size={15} /></button>
+        </div>
+        <p className="github-scope-note">Credentials &amp; Signing shows current native input availability and scope. Local session assets are not GitHub secrets. This page never selects files, uploads assets or provisions secrets.</p>
       </div>
       {state.helpState !== 'current' && <div className="notice notice-warning" role="status"><Icon name="info" /><div><strong>{state.help ? 'Previously loaded core guidance' : 'Core setup guidance unavailable'}</strong><p>{state.help ? 'This admitted guidance is retained only in memory. It is not evidence that the latest service request succeeded or that the service is currently available.' : 'Restore the packaged service and reload guidance. No substitute policy, template source or proposal is generated in this screen.'}</p><button type="button" className="button small secondary" disabled={loading} onClick={onReload}>Reload service and guidance</button></div></div>}
       <div className="form-grid">

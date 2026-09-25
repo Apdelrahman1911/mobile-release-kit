@@ -17,7 +17,7 @@ export function Releases({ info, offlineChecks, androidBuild }: { info: AppInfo 
 
 const editAttentionHelp: HelpContent = {
   label: 'Retained file-edit alerts', requiredness: 'conditional',
-  what: 'A settings, workflow, or public-text save previously reported that its file transaction needs recovery.',
+  what: 'A settings, workflow, public-text, or saved-version save previously reported that its file transaction needs recovery.',
   why: 'Keeping this alert visible prevents a later operation or project switch from hiding that earlier problem.',
   where: 'These alerts come from edit results already observed in this app session. No journal or remote service is inspected by this list.',
   format: 'Nothing to enter. A loaded project can be opened in its usual editor; this does not reopen the original result or repair files.',

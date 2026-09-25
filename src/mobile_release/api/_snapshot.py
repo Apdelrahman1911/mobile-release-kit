@@ -2,8 +2,8 @@
 
 Only the selected root is admitted. No repository inference, project execution,
 credential probing or arbitrary file-content export occurs here. Independent
-reads are NOT an atomic snapshot or hostile-same-user containment. The staged
-original-parent Windows reader remains disabled pending independent qualification.
+reads are NOT an atomic snapshot or hostile-same-user containment. Windows uses
+the original-parent reader and retains its separate native ABI/platform refusal.
 """
 from __future__ import annotations
 
@@ -56,8 +56,11 @@ _EXCLUDED = {name.casefold() for name in IGNORED_PARTS} | {
     "private", "secrets", "credentials",
 }
 _SOURCE_NAMES = {"build.gradle", "build.gradle.kts", "project.pbxproj", "project.yml"}
-# Source presence is not ABI/native evidence. No environment/request opt-in.
-_WINDOWS_SNAPSHOT_QUALIFIED = False
+# Fixed successor activation, never an environment/request opt-in. This source
+# bit is not a receipt for packaged-core, GUI or native-platform verification.
+# The compiled desktop selector and original runtime owner gate its UI use;
+# the native reader still independently admits the actual ABI/architecture.
+_WINDOWS_SNAPSHOT_QUALIFIED = True
 
 
 def posix_snapshot_available() -> bool:
@@ -634,7 +637,7 @@ def project_snapshot(root: object, config_path: object = "release/mobile-release
         from ._snapshot_windows import project_snapshot as windows_snapshot
         return windows_snapshot(root, config_path)
     if not posix_snapshot_available():
-        raise ApiError("platform_unavailable", "Static filesystem snapshots are unavailable on this profile; the staged Windows reader is not qualified")
+        raise ApiError("platform_unavailable", "Static filesystem snapshots are unavailable on this platform/profile")
     selected_root = validate_root(root)
     selected_config = validate_config_path(config_path)
     observed_at = datetime.now(timezone.utc).isoformat()

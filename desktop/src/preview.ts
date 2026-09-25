@@ -6,6 +6,8 @@ import githubSetupResource from '../../src/mobile_release/api/data/github-setup-
 import credentialGuideResource from '../../src/mobile_release/api/data/credential-guide-v1.json' with { type: 'json' };
 import githubConnectionResource from '../../src/mobile_release/api/data/github-connection-v1.json' with { type: 'json' };
 import metadataTextResource from '../../src/mobile_release/api/data/metadata-text-help-v1.json' with { type: 'json' };
+import versionEditResource from '../../src/mobile_release/api/data/release-version-help-v1.json' with { type: 'json' };
+import { parseVersionEditGuide, versionEditError } from './releaseVersionEdit.ts';
 import { githubSetupError, parseGitHubSetupHelp } from './githubSetupProtocol.ts';
 import { parseCredentialGuide } from './credentialGuide.ts';
 import { assetError } from './assetSessionProtocol.ts';
@@ -36,6 +38,7 @@ const catalog: Catalog = {
   credentialGuide: parseCredentialGuide(credentialGuideResource),
   githubConnection: parseGitHubConnectionHelp(githubConnectionResource),
   metadataText: parseMetadataTextGuide(metadataTextResource),
+  releaseVersionEdit: parseVersionEditGuide(versionEditResource),
   // TypeScript adds optional `undefined` properties when inferring heterogeneous
   // JSON arrays. The exact core-owned JSON resource cannot contain undefined.
   schemaVersion: 1, schema: projectSchema as unknown as JsonObject, fields: fieldHelp as FieldHelp[],
@@ -72,6 +75,7 @@ const editUnavailable = async (): Promise<never> => {
 const assetUnavailable = async (): Promise<never> => { throw assetError({ code: 'AssetSessionUnavailable' }); };
 const workflowUnavailable = async (): Promise<never> => { throw workflowEditError({ code: 'PreviewOnly' }); };
 const connectionUnavailable = (): Promise<never> => Promise.reject(githubConnectionError({ code: 'github_connection_refused_unqualified' }));
+const versionEditUnavailable = (): Promise<never> => Promise.reject(versionEditError(null));
 const metadataUnavailable = (): Promise<never> => Promise.reject(metadataTextError(null));
 const offlineUnavailable = (): Promise<never> => Promise.reject(offlinePreflightError({ code: 'offline_preflight_unavailable' }));
 const androidUnavailable = (): Promise<never> => Promise.reject(androidBuildError({ code: 'android_build_unavailable' }));
@@ -180,6 +184,12 @@ export const previewApi: DesktopApi = {
   closeGitHubWorkflowEdit: workflowUnavailable,
   githubWorkflowEditStatus: workflowUnavailable,
   subscribeGitHubWorkflowEdit: workflowUnavailable,
+  openReleaseVersionEdit: versionEditUnavailable,
+  prepareReleaseVersionEdit: versionEditUnavailable,
+  applyReleaseVersionEdit: versionEditUnavailable,
+  closeReleaseVersionEdit: versionEditUnavailable,
+  releaseVersionEditStatus: versionEditUnavailable,
+  subscribeReleaseVersionEdit: versionEditUnavailable,
   observeMetadataText: metadataUnavailable,
   validateMetadataText: metadataUnavailable,
   openMetadataTextEdit: metadataUnavailable,

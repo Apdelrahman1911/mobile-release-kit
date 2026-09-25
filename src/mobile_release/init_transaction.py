@@ -34,7 +34,12 @@ METADATA_CLEANUP = ".mobile-release-metadata-text-cleanup"
 METADATA_STATE_NAMES = (METADATA_PREPARING, METADATA_READY, METADATA_CLEANUP)
 # Admission/exclusion only. Legacy recovery must NEVER treat another domain's
 # empty or header.tmp-only preparation as its own cleanup candidate.
-ALL_STATE_NAMES = (*STATE_NAMES, *METADATA_STATE_NAMES)
+VERSION_PREPARING = ".mobile-release-version-prepare"
+VERSION_READY = ".mobile-release-version"
+VERSION_CLEANUP = ".mobile-release-version-cleanup"
+VERSION_STATE_NAMES = (VERSION_PREPARING, VERSION_READY, VERSION_CLEANUP)
+METADATA_IGNORE_LINES = (".mobile-release/", *(name + "/" for name in (*STATE_NAMES, *METADATA_STATE_NAMES)))
+ALL_STATE_NAMES = (*STATE_NAMES, *METADATA_STATE_NAMES, *VERSION_STATE_NAMES)
 IGNORE_LINES = (".mobile-release/", *(name + "/" for name in ALL_STATE_NAMES))
 MAX_FILES = 256
 MAX_FILE_BYTES = 8 * 1024**2
@@ -47,11 +52,12 @@ PROBES = {"probe-a", "probe-b", "probe-c"}
 
 
 class TypedEditProfile(Enum):
-    """Three internal native domains, never a caller-supplied path inventory."""
+    """Four internal native domains, never a caller-supplied path inventory."""
 
     CONFIGURATION = "configuration"
     GITHUB_WORKFLOWS = "github-workflows"
     METADATA_TEXT = "metadata-text"
+    RELEASE_VERSION = "release-version"
 
     @property
     def paths(self) -> tuple[str, ...]:
@@ -59,7 +65,7 @@ class TypedEditProfile(Enum):
             return ("release/mobile-release.json", ".gitignore")
         if self is TypedEditProfile.GITHUB_WORKFLOWS:
             return tuple(path for _, path in WORKFLOWS)
-        raise ValueError("metadata targets require the original configuration-bound descriptor")
+        raise ValueError("saved-text targets require the original configuration-bound descriptor")
 
     @property
     def observation_limits(self) -> tuple[int, ...]:
@@ -67,7 +73,7 @@ class TypedEditProfile(Enum):
             return (512 * 1024, 1024 * 1024)
         if self is TypedEditProfile.GITHUB_WORKFLOWS:
             return (1024 * 1024,) * 4
-        raise ValueError("metadata observations require the original target descriptor")
+        raise ValueError("saved-text observations require the original target descriptor")
 
     @property
     def payload_limits(self) -> tuple[int, ...]:
@@ -75,7 +81,7 @@ class TypedEditProfile(Enum):
             return self.observation_limits
         if self is TypedEditProfile.GITHUB_WORKFLOWS:
             return (16 * 1024,) * 4
-        raise ValueError("metadata payloads require the original target descriptor")
+        raise ValueError("saved-text payloads require the original target descriptor")
 
     @property
     def directories(self) -> tuple[str, ...]:
@@ -83,7 +89,7 @@ class TypedEditProfile(Enum):
             return ("release",)
         if self is TypedEditProfile.GITHUB_WORKFLOWS:
             return (".github", ".github/workflows")
-        raise ValueError("metadata directories require the original target descriptor")
+        raise ValueError("saved-text directories require the original target descriptor")
 
 
 class InitInterrupted(KeyboardInterrupt):
@@ -373,9 +379,10 @@ class InitWorkspace:
         self._typed_claimed = False
         self._typed_profile: TypedEditProfile | None = None
         self._metadata_targets: Any = None
+        self._version_targets: Any = None
         self._rooted_revision: Any = None
         # Strong typed domains have original, in-memory authority. The legacy
-        # workflow-prefixed storage/method names are shared only by the two
+        # workflow-prefixed storage/method names are shared only by the three
         # explicit original-control profiles, not by persisted CLI recovery.
         # A syntactically
         # valid on-disk journal cannot supply another roster or cleanup target.
@@ -410,6 +417,7 @@ class InitWorkspace:
         workspace._guard, workspace._scope = scope.lease.guard, scope
         workspace._typed_profile = scope.lease.profile
         workspace._metadata_targets = scope.lease._metadata_targets
+        workspace._version_targets = scope.lease._version_targets
         workspace.fd = scope.fd
         workspace.flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
         workspace.root_identity = _dir_identity(os.fstat(workspace.fd))
@@ -419,11 +427,38 @@ class InitWorkspace:
     def _state_names(self) -> tuple[str, str, str]:
         if self._typed_profile is TypedEditProfile.METADATA_TEXT:
             return METADATA_STATE_NAMES
+        if self._typed_profile is TypedEditProfile.RELEASE_VERSION:
+            return VERSION_STATE_NAMES
         return STATE_NAMES
 
     @property
     def _original_controls_required(self) -> bool:
-        return self._typed_profile in (TypedEditProfile.GITHUB_WORKFLOWS, TypedEditProfile.METADATA_TEXT)
+        return self._typed_profile in (TypedEditProfile.GITHUB_WORKFLOWS, TypedEditProfile.METADATA_TEXT, TypedEditProfile.RELEASE_VERSION)
+
+
+    @property
+    def _saved_text_profile(self) -> bool:
+        return self._typed_profile in (TypedEditProfile.METADATA_TEXT, TypedEditProfile.RELEASE_VERSION)
+
+    def _saved_text_targets(self):
+        from .init_workspace_custody import MetadataTargets, VersionTargets
+        if self._typed_profile is TypedEditProfile.METADATA_TEXT:
+            targets, kind = self._metadata_targets, MetadataTargets
+        elif self._typed_profile is TypedEditProfile.RELEASE_VERSION:
+            targets, kind = self._version_targets, VersionTargets
+        else:
+            raise InitOperationFailure(InitApplyOutcome("not_started", "not_created", "settled", "invalid_params"))
+        _require(type(targets) is kind, "original saved-text targets are required")
+        targets._check_workspace(self)
+        return targets
+
+    @property
+    def _saved_text_domain(self) -> str:
+        if self._typed_profile is TypedEditProfile.METADATA_TEXT:
+            return "metadata_text"
+        if self._typed_profile is TypedEditProfile.RELEASE_VERSION:
+            return "release_version"
+        raise ValueError("no saved-text journal domain")
 
     def _expect_unchanged(self, condition: bool, message: str) -> None:
         """Only an actual comparison mismatch is a metadata stale conflict.
@@ -431,8 +466,8 @@ class InitWorkspace:
         Do not catch/relabel generic ValidationError or IO failures. Legacy
         domains retain their exact existing comparison exception behavior.
         """
-        if not condition and self._typed_profile is TypedEditProfile.METADATA_TEXT:
-            raise InitConflict("metadata text: " + message)
+        if not condition and self._saved_text_profile:
+            raise InitConflict("saved text: " + message)
         _require(condition, message)
 
     def _original_target_check(self, item: ObservedFile, message: str) -> None:
@@ -443,7 +478,7 @@ class InitWorkspace:
         """
         self._last_read_facts = None
         self._expect_unchanged(self._current(item.path) == item.before, message)
-        if self._typed_profile is TypedEditProfile.METADATA_TEXT:
+        if self._saved_text_profile:
             _require(self._rooted_revision is not None, "original metadata revision is required")
             original = dict(self._rooted_revision._raw)
             _require(item.path in original, "original metadata raw observation is required")
@@ -456,15 +491,12 @@ class InitWorkspace:
         Keep dependencies out of the staged/writable roster. Their original
         parent identities still constrain every effect and original recovery.
         """
-        if self._typed_profile is not TypedEditProfile.METADATA_TEXT:
+        if not self._saved_text_profile:
             return
-        from .init_workspace_custody import MetadataTargets
-        from .metadata_text import DEPENDENCY_LIMITS
-        targets = self._metadata_targets
-        _require(type(targets) is MetadataTargets, "original metadata targets are required")
-        targets._check_workspace(self)
+        targets = self._saved_text_targets()
+        dependency_limits = targets.observation_limits[:2]
         original_raw = dict(targets._raw)
-        for (path, before, raw), limit in zip(targets._dependencies, DEPENDENCY_LIMITS):
+        for (path, before, raw), limit in zip(targets._dependencies, dependency_limits):
             self._last_read_facts = None
             with self._parent(path) as parent:
                 current = self._read(parent, path.split("/")[-1], limit) if parent is not None else None
@@ -476,12 +508,9 @@ class InitWorkspace:
                                    "original metadata dependency parent facts changed")
 
     def _dependency_only_parents(self) -> dict[str, dict[str, Any] | None]:
-        if self._typed_profile is not TypedEditProfile.METADATA_TEXT:
+        if not self._saved_text_profile:
             return {}
-        from .init_workspace_custody import MetadataTargets
-        targets = self._metadata_targets
-        _require(type(targets) is MetadataTargets, "original metadata targets are required")
-        targets._check_workspace(self)
+        targets = self._saved_text_targets()
         return targets.dependency_only_parents
 
     def _checkpoint(self) -> None:
@@ -706,7 +735,7 @@ class InitWorkspace:
                     if self._guard is not None:
                         from .build_inputs import _directory
                         facts = tuple(sorted(_directory(value).items())) if value is not None else None
-                        if self._typed_profile is TypedEditProfile.METADATA_TEXT and self._rooted_revision is not None:
+                        if self._saved_text_profile and self._rooted_revision is not None:
                             original = dict(self._rooted_revision._parent_facts).get(relative)
                             if original is not None:
                                 self._expect_unchanged(facts == original, "original metadata ancestor facts changed")
@@ -754,7 +783,7 @@ class InitWorkspace:
 
     def _current(self, path: str, *, directory: bool = False) -> dict[str, Any] | None:
         with self._parent(path) as parent:
-            if directory and self._typed_profile is TypedEditProfile.METADATA_TEXT and self._rooted_revision is not None:
+            if directory and self._saved_text_profile and self._rooted_revision is not None:
                 from .build_inputs import _directory
                 expected = dict(self._rooted_revision._parent_facts).get(path)
                 if expected is not None:
@@ -826,7 +855,7 @@ class InitWorkspace:
                     self.rename(destination_fd, destination, source_fd, source)
                     self._fsync(source_fd)
                     self._fsync(destination_fd)
-                if self._typed_profile is TypedEditProfile.METADATA_TEXT and isinstance(error, InitConflict):
+                if self._saved_text_profile and isinstance(error, InitConflict):
                     raise
                 raise ValidationError("init transaction: source changed during move; captured user object preserved, reconcile before recovery") from error
         if failure is not None:
@@ -884,9 +913,9 @@ class InitWorkspace:
             self._expect_unchanged(item[1] == self._workflow_header, "original workflow header changed")
         header = _parse(item[1])
         header_keys = {"schemaVersion", "transactionId", "root"}
-        if self._typed_profile is TypedEditProfile.METADATA_TEXT:
+        if self._saved_text_profile:
             header_keys.add("domain")
-            _require(header.get("domain") == "metadata_text", "metadata journal domain differs")
+            _require(header.get("domain") == self._saved_text_domain, "metadata journal domain differs")
         _require(set(header) == header_keys
                  and type(header["schemaVersion"]) is int and header["schemaVersion"] == 1
                  and isinstance(header["transactionId"], str)
@@ -948,16 +977,13 @@ class InitWorkspace:
                      and tuple(e["path"] for e in plan["directories"]) == self._typed_profile.directories
                      and all((e["before"] is None) != (e["after"] is None) for e in plan["files"]),
                      "workflow recovery cannot replace or adopt another inventory")
-        elif self._typed_profile is TypedEditProfile.METADATA_TEXT:
-            from .init_workspace_custody import MetadataTargets
-            from .metadata_text import MAX_TEXT_BYTES
-            targets = self._metadata_targets
-            _require(type(targets) is MetadataTargets, "metadata journal lacks original targets")
-            targets._check_workspace(self)
+        elif self._saved_text_profile:
+            targets = self._saved_text_targets()
+            target_limit = targets.observation_limits[2]
             _require(tuple(e["path"] for e in plan["files"]) == targets.paths
                      and tuple(e["path"] for e in plan["directories"]) == targets.directories
                      and all(e["before"] == self._captured[e["path"]].before
-                             and all(v is None or v["size"] <= MAX_TEXT_BYTES for v in (e["before"], e["after"]))
+                             and all(v is None or v["size"] <= target_limit for v in (e["before"], e["after"]))
                              for e in plan["files"]),
                      "metadata recovery cannot adopt another target or dependency inventory")
         self.parents = {**self._dependency_only_parents(),
@@ -1064,7 +1090,7 @@ class InitWorkspace:
             before, after = entry["before"], entry["after"]
             if after is None:
                 self._expect_unchanged(current == before, "preserved input changed")
-                if self._typed_profile is TypedEditProfile.METADATA_TEXT:
+                if self._saved_text_profile:
                     self._original_target_check(self._captured[entry["path"]], "preserved metadata input changed")
                 continue
             staged, backup = self._binding(fd, f"new-{i}"), self._binding(fd, f"old-{i}")
@@ -1095,8 +1121,8 @@ class InitWorkspace:
         self._mkdir(self._state_names[0], 0o700, dir_fd=self.fd)
         with self._private(self._state_names[0]) as fd:
             header = {"schemaVersion": 1, "transactionId": uuid.uuid4().hex, "root": self.root_identity}
-            if self._typed_profile is TypedEditProfile.METADATA_TEXT:
-                header["domain"] = "metadata_text"
+            if self._saved_text_profile:
+                header["domain"] = self._saved_text_domain
             self._write(fd, "header.tmp", _json(header))
             self._control_rename(fd, "header.tmp", fd, "header.json")
             self._fsync(fd)
@@ -1114,7 +1140,7 @@ class InitWorkspace:
             self._unlink("probe-c", dir_fd=fd, directory=True)
             self._unlink("probe-b", dir_fd=fd, directory=True)
             directories = []
-            target_parents = (self._metadata_targets.directories if self._typed_profile is TypedEditProfile.METADATA_TEXT
+            target_parents = (self._saved_text_targets().directories if self._saved_text_profile
                               else tuple(sorted(self.parents, key=lambda p: (p.count("/"), p))))
             for i, path in enumerate(target_parents):
                 before, after = self.parents[path], None
@@ -1165,7 +1191,7 @@ class InitWorkspace:
                     _require(parent is not None, "file parent is missing")
                     leaf = entry["path"].split("/")[-1]
                     self._expect_unchanged(self._binding(parent, leaf) == entry["before"], "destination changed before installation")
-                    if self._typed_profile is TypedEditProfile.METADATA_TEXT:
+                    if self._saved_text_profile:
                         self._original_target_check(self._captured[entry["path"]], "metadata destination changed before installation")
                     if entry["before"]:
                         self._move(parent, leaf, fd, f"old-{i}", entry["before"])
@@ -1258,7 +1284,7 @@ class InitWorkspace:
                                         ROLLED_BACK=workflow_entries["rollback.pending"])
                 workflow_entries.update({f"new-{i}": (False, entry["after"])
                                          for i, entry in enumerate(original["files"]) if entry["after"]})
-                if self._typed_profile is TypedEditProfile.METADATA_TEXT:
+                if self._saved_text_profile:
                     workflow_entries.update({f"old-{i}": (False, entry["before"])
                                              for i, entry in enumerate(original["files"])
                                              if entry["before"] is not None and entry["after"] is not None})
@@ -1448,6 +1474,10 @@ class InitWorkspace:
         """Only original config-bound public text targets; never dependencies."""
         return self._apply_typed(changes, TypedEditProfile.METADATA_TEXT)
 
+    def apply_version_typed(self, changes: list[tuple[ObservedFile, bytes | None]]) -> InitApplyOutcome:
+        """Exactly one original config-derived version source, never dependencies."""
+        return self._apply_typed(changes, TypedEditProfile.RELEASE_VERSION)
+
     def _apply_typed(self, changes: list[tuple[ObservedFile, bytes | None]],
                      profile: TypedEditProfile) -> InitApplyOutcome:
         if self._scope is None or self._guard is None or self._typed_claimed:
@@ -1457,17 +1487,16 @@ class InitWorkspace:
             raise InitOperationFailure(InitApplyOutcome("not_started", "not_created", "settled", "invalid_params"))
         try:
             self._checkpoint()
-            if profile is TypedEditProfile.METADATA_TEXT:
-                from .init_workspace_custody import MetadataTargets, RootedRevision
-                from .metadata_text import MAX_TEXT_BYTES
-                targets = self._metadata_targets
-                _require(type(targets) is MetadataTargets, "original metadata targets are required")
-                targets._check_workspace(self)
+            if profile in (TypedEditProfile.METADATA_TEXT, TypedEditProfile.RELEASE_VERSION):
+                from .init_workspace_custody import RootedRevision
+                targets = self._saved_text_targets()
+                original_targets = (self._rooted_revision._metadata_targets if profile is TypedEditProfile.METADATA_TEXT
+                                    else self._rooted_revision._version_targets) if type(self._rooted_revision) is RootedRevision else None
                 _require(type(self._rooted_revision) is RootedRevision
                          and self._scope.lease._revision is self._rooted_revision
-                         and self._rooted_revision._metadata_targets is targets,
+                         and original_targets is targets,
                          "metadata Apply requires its original rechecked revision")
-                paths, limits = targets.paths, (MAX_TEXT_BYTES,) * len(targets.paths)
+                paths, limits = targets.paths, targets.observation_limits[2:]
             elif profile in (TypedEditProfile.CONFIGURATION, TypedEditProfile.GITHUB_WORKFLOWS):
                 paths, limits = profile.paths, profile.payload_limits
             else:
@@ -1484,14 +1513,14 @@ class InitWorkspace:
                     _require((item.before is not None and payload is None)
                              or (item.before is None and item.data is None and type(payload) is bytes and 0 < len(payload)),
                              "workflow changes cannot replace existing files or omit absent callers")
-                elif profile is TypedEditProfile.METADATA_TEXT:
+                elif profile in (TypedEditProfile.METADATA_TEXT, TypedEditProfile.RELEASE_VERSION):
                     _require((item.before is not None and payload is None)
                              or type(payload) is bytes and 0 < len(payload),
                              "metadata changes cannot omit an absent required field")
             if profile is TypedEditProfile.GITHUB_WORKFLOWS:
                 _require(set(self._captured) == set(paths) and tuple(sorted(self.parents)) == profile.directories,
                          "workflow capture is not the exact fixed domain")
-            elif profile is TypedEditProfile.METADATA_TEXT:
+            elif profile in (TypedEditProfile.METADATA_TEXT, TypedEditProfile.RELEASE_VERSION):
                 _require(set(self._captured) == set(targets.observation_paths)
                          and set(self.parents) == {"release", *targets.directories},
                          "metadata capture is not the original target/dependency domain")
@@ -1530,7 +1559,7 @@ class InitWorkspace:
         return self.current_outcome()
 
     def recover(self) -> str:
-        if self._typed_profile is TypedEditProfile.METADATA_TEXT:
+        if self._saved_text_profile:
             _require(self._scope is not None and self._cleanup_mode and self._recovery_claimed
                      and self._creation["state"] == "CREATED" and self._workflow_complete,
                      "metadata recovery belongs only to the original one-use transaction")
@@ -1562,7 +1591,7 @@ class InitWorkspace:
         return result
 
     def apply(self, changes: list[tuple[ObservedFile, bytes | None]]) -> None:
-        _require(self._typed_profile is not TypedEditProfile.METADATA_TEXT,
+        _require(not self._saved_text_profile,
                  "metadata requires its original typed target facade, not legacy apply")
         validate_paths([item.path for item, _ in changes])
         _require(all(payload is None or type(payload) is bytes for _, payload in changes), "invalid staged content")

@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Reuse-only Mac engineering package DATA staging; never execute the payload.
+"""Mac engineering package DATA staging; never execute the payload.
 
 Every output is fresh. No extraction API, subprocess, chmod of an existing
 ancestor, replacement, deletion, network, core import or interpreter rebuild is
-present. `describe-runtime` is the separate DATA step that supplies the proposed
-successor digest for independent review BEFORE app compilation. Other commands
-require an explicit digest, not a discovered adjacent-manifest authority.
+present. The describe commands supply proposed successor digests for independent
+review BEFORE app compilation; current-source preparation uses a fresh private
+projection and reuses only the accepted Mac interpreter supplier. Final staging
+requires explicit digests, not a discovered adjacent-manifest authority.
 Installer-log actions only collect bounded nonroot diagnostics from one fixed
 physical log; they never give those bytes installation/readback authority.
 """
@@ -15,6 +16,7 @@ import argparse
 import contextlib
 import errno
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -60,6 +62,9 @@ NOTICES = {
 }
 BOOTSTRAPS = {"engine_bootstrap.py", "config_edit_bootstrap.py", "github_connection_bootstrap.py",
               "environment_bootstrap.py", "offline_preflight_bootstrap.py", "android_build_bootstrap.py"}
+CURRENT_CA_SOURCE = "desktop/cpython-source-inputs/github-ca.pem"
+CURRENT_HELPER_SOURCE = "desktop/tools/prepare_runtime.py"
+CURRENT_CORE_BYTES = 32 * 1024 * 1024
 MAX_FILES = 2048
 MAX_BYTES = 512 * 1024 * 1024
 READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
@@ -285,9 +290,13 @@ def packager_ids():
     return uid, gid
 
 
-def tree(path, *, installed=False, packager=False):
+def tree(path, *, installed=False, packager=False, max_bytes=MAX_BYTES, current_root_mode=None):
     need(not (installed and packager), "conflicting-tree-owner")
+    need(type(max_bytes) is int and 0 <= max_bytes <= MAX_BYTES, "tree-byte-bound")
+    need(current_root_mode is None or (not installed and not packager
+         and type(current_root_mode) is int and current_root_mode in (0o555, 0o700)), "current-tree-policy")
     owner = packager_ids() if packager else None
+    current_owner = packager_ids() if current_root_mode is not None else None
     found = {}
     observed_directories = set()
     count = total = 0
@@ -301,6 +310,10 @@ def tree(path, *, installed=False, packager=False):
         if owner is not None:
             need((before.st_uid, before.st_gid) == owner and stat.S_IMODE(before.st_mode) == (0o755 if depth == 0 else 0o555),
                  "packager-directory-mode-owner")
+        if current_owner is not None:
+            need((before.st_uid, before.st_gid) == current_owner
+                 and stat.S_IMODE(before.st_mode) == (current_root_mode if depth == 0 else 0o555),
+                 "current-directory-mode-owner")
         no_xattrs(fd)
         names = sorted(os.listdir(fd))
         need(len(names) <= MAX_FILES, "directory-entry-bound")
@@ -320,13 +333,15 @@ def tree(path, *, installed=False, packager=False):
                 finally:
                     close_once(child)
             else:
-                body, info = read_at(fd, name, MAX_BYTES - total)
+                body, info = read_at(fd, name, max_bytes - total)
                 total += len(body)
                 need(len(found) < MAX_FILES and relative not in found, "tree-file-bound")
                 if installed:
                     need(info.st_uid == 0 and info.st_gid == 0, "installed-file-owner")
                 if owner is not None:
                     need((info.st_uid, info.st_gid) == owner and stat.S_IMODE(info.st_mode) in (0o444, 0o555), "packager-file-mode-owner")
+                if current_owner is not None:
+                    need((info.st_uid, info.st_gid) == current_owner, "current-file-owner")
                 found[relative] = (body, stat.S_IMODE(info.st_mode))
         need(signature(os.fstat(fd)) == signature(before), "tree-root-changed")
 
@@ -344,8 +359,10 @@ def tree(path, *, installed=False, packager=False):
     return found
 
 
-def write_tree(output, files, *, root_mode=0o555, app_signing=False):
+def write_tree(output, files, *, root_mode=0o555, app_signing=False, current_owned=False):
     need(os.getuid() != 0 and os.getuid() == os.geteuid(), "builder-must-be-nonroot")
+    need(type(current_owned) is bool and (not current_owned or (not app_signing and root_mode in (0o555, 0o700))),
+         "current-output-policy")
     need(0 < len(files) <= MAX_FILES and sum(len(v[0]) for v in files.values()) <= MAX_BYTES, "output-bound")
     dirs = directories(files)
     with parent(output) as (outer, name):
@@ -384,7 +401,8 @@ def write_tree(output, files, *, root_mode=0o555, app_signing=False):
             os.fsync(outer)
         finally:
             close_once(root)
-    need(tree(output) == files, "complete-output-readback")
+    actual = tree(output, current_root_mode=root_mode) if current_owned else tree(output)
+    need(actual == files, "complete-output-readback")
 
 
 def manifest_files(body, expected):
@@ -467,6 +485,207 @@ def runtime_command(args):
         write_tree(args.output, files)
         result["qualification"] = "reused-bytes-staged-no-native-execution"
     return result
+
+
+def current_source():
+    """Capture DATA, including the committed CA's one explicit projection map."""
+    source = DESKTOP.parent
+    core = tree(source / "src/mobile_release", max_bytes=CURRENT_CORE_BYTES)
+    need(core and all(Path(name).suffix in {".py", ".json", ".pem"} for name in core), "current-core-inputs")
+    need({"__init__.py", "_desktop_engine.py"} <= set(core), "current-core-required-inputs")
+    captured = {"src/mobile_release/" + name: value for name, value in core.items()}
+    fixed = {"desktop/" + name: 64 * 1024 for name in BOOTSTRAPS}
+    fixed[CURRENT_CA_SOURCE] = 512 * 1024
+    fixed[CURRENT_HELPER_SOURCE] = 64 * 1024
+    for name, limit in sorted(fixed.items()):
+        with parent(source / name) as (fd, leaf):
+            body, info = read_at(fd, leaf, limit)
+        captured[name] = (body, stat.S_IMODE(info.st_mode))
+    need(captured[CURRENT_CA_SOURCE][0], "current-ca-empty")
+    rows = [{"path": name, "size": len(body), "sha256": digest(body)}
+            for name, (body, _) in sorted(captured.items())]
+    projection = {}
+    for name, (body, _) in captured.items():
+        if name != CURRENT_HELPER_SOURCE:
+            target = "desktop/github-ca.pem" if name == CURRENT_CA_SOURCE else name
+            need(target not in projection, "current-source-projection-collision")
+            projection[target] = (body, 0o444)
+    directories(projection)
+    return captured, projection, digest(canonical(rows))
+
+
+def current_directory_identity(info):
+    # Child creation legitimately changes a directory's nlink/times. Preserve
+    # its original object/owner/mode, then take stable full snapshots at POST.
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
+
+
+def current_output_absent(path, expected_parent=None):
+    owner = packager_ids()
+    with parent(path) as (fd, leaf):
+        info = os.fstat(fd)
+        need((info.st_uid, info.st_gid) == owner and stat.S_IMODE(info.st_mode) == 0o700,
+             "current-output-parent-owner-mode")
+        no_xattrs(fd)
+        identity = current_directory_identity(info)
+        need(expected_parent is None or identity == expected_parent, "current-output-parent-changed")
+        try:
+            os.stat(leaf, dir_fd=fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return identity
+        raise Refused("current-output-occupied")
+
+
+def current_paths(args):
+    outputs = [args.work] + ([args.output] if args.command == "current-runtime" else [])
+    inputs = [DESKTOP.parent, args.archive]
+    # Components are later admitted without following links. Case folding also
+    # refuses an alias on default case-insensitive Mac filesystems.
+    folded = lambda path: tuple(part.casefold() for part in path.parts)
+    for index, output in enumerate(outputs):
+        a = folded(output)
+        for other in inputs + outputs[:index]:
+            b = folded(other)
+            need(a[:len(b)] != b and b[:len(a)] != a, "current-path-overlap")
+    return {path: current_output_absent(path) for path in outputs}
+
+
+@contextlib.contextmanager
+def current_work_root(path, expected_parent):
+    current_output_absent(path, expected_parent)
+    with parent(path) as (outer, leaf):
+        need(current_directory_identity(os.fstat(outer)) == expected_parent, "current-output-parent-changed")
+        os.mkdir(leaf, 0o700, dir_fd=outer)
+        before = os.stat(leaf, dir_fd=outer, follow_symlinks=False)
+        original = os.open(leaf, READ_FLAGS | os.O_DIRECTORY, dir_fd=outer)
+        try:
+            need(signature(os.fstat(original)) == signature(before)
+                 and (before.st_uid, before.st_gid) == packager_ids()
+                 and stat.S_IMODE(before.st_mode) == 0o700, "current-work-root-identity")
+            no_xattrs(original)
+            os.fsync(original)
+            os.fsync(outer)
+            yield
+            post = os.fstat(original)
+            need(current_directory_identity(post) == current_directory_identity(before)
+                 and sorted(os.listdir(original)) == ["runtime", "source"], "current-work-root-changed")
+            os.fsync(original)
+            os.fsync(outer)
+            need(signature(os.fstat(original)) == signature(post)
+                 and signature(os.stat(leaf, dir_fd=outer, follow_symlinks=False)) == signature(post),
+                 "current-work-root-post-changed")
+        finally:
+            close_once(original)
+
+
+def current_preparer(captured):
+    # This fixed reviewed publisher helper is code; source/core/payload files
+    # remain DATA. Its import is covered by the separate COMMAND admission.
+    path = DESKTOP.parent / CURRENT_HELPER_SOURCE
+    expected = captured[CURRENT_HELPER_SOURCE][0]
+    need(read(path, 64 * 1024) == expected, "current-helper-changed")
+    try:
+        spec = importlib.util.spec_from_file_location("mrk_macos_current_runtime_preparer", path)
+        need(spec is not None and spec.loader is not None, "current-helper-loader")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    except (ImportError, AttributeError, SyntaxError) as error:
+        raise Refused("current-helper-loader") from error
+    need(read(path, 64 * 1024) == expected, "current-helper-changed")
+    return module
+
+
+def current_core_matches(body, projection):
+    expected = {name[len("src/"):]: content for name, (content, _) in projection.items()
+                if name.startswith("src/mobile_release/")}
+    need(len(body) <= CURRENT_CORE_BYTES + MAX_FILES * 2048, "current-core-archive-bound")
+    with zipfile.ZipFile(io.BytesIO(body)) as archive:
+        rows = archive.infolist()
+        need([row.filename for row in rows] == sorted(expected), "current-core-complete-roster")
+        for row in rows:
+            content = expected[row.filename]
+            need(not row.flag_bits & 1 and row.file_size == len(content)
+                 and row.compress_type == zipfile.ZIP_DEFLATED
+                 and row.date_time == (1980, 1, 1, 0, 0, 0)
+                 and row.create_system == 3 and row.external_attr == (stat.S_IFREG | 0o644) << 16,
+                 "current-core-member-shape")
+            with archive.open(row) as stream:
+                need(stream.read(len(content) + 1) == content, "current-core-byte-correspondence")
+
+
+def current_runtime_files(runtime, projection, supplier):
+    files = tree(runtime, current_root_mode=0o700)
+    required = set(supplier) | BOOTSTRAPS | {"core.zip", "github-ca.pem", "manifest.json"}
+    need(set(files) == required, "current-runtime-complete-roster")
+    for name, value in supplier.items():
+        need(files[name] == value, "current-supplier-changed")
+    for name in required - set(supplier):
+        need(files[name][1] == 0o600, "current-generated-mode")
+    manifest_body = files["manifest.json"][0]
+    manifest, rows = manifest_files(manifest_body, digest(manifest_body))
+    need(set(rows) | {"manifest.json"} == set(files), "current-runtime-manifest-roster")
+    for name, row in rows.items():
+        need(row["size"] == len(files[name][0]) and row["sha256"] == digest(files[name][0]),
+             "current-runtime-manifest-correspondence")
+    for name in BOOTSTRAPS | {"github-ca.pem"}:
+        need(files[name][0] == projection["desktop/" + name][0], "current-entrypoint-byte-correspondence")
+    current_core_matches(files["core.zip"][0], projection)
+    return files, manifest
+
+
+def current_runtime_command(args):
+    packager_ids()
+    need(args.command in ("describe-current-runtime", "current-runtime"), "current-runtime-command")
+    final = args.command == "current-runtime"
+    if final:
+        need(sha(args.expected_source) and sha(args.expected_manifest), "current-reviewed-digests")
+    parents = current_paths(args)
+    captured, projection, source_digest = current_source()
+    if final:
+        need(source_digest == args.expected_source, "current-reviewed-source-mismatch")
+    historical, provenance = reused_runtime(args.archive)
+    supplier = {name: (body, 0o555 if name == "python/bin/python3" else 0o444)
+                for name, body in historical.items() if name.startswith("python/")}
+    del historical
+    need("python/bin/python3" in supplier, "current-supplier-missing")
+    supplier_rows = [{"path": name, "size": len(body), "sha256": digest(body), "mode": mode}
+                     for name, (body, mode) in sorted(supplier.items())]
+    preparer = current_preparer(captured)
+    with current_work_root(args.work, parents[args.work]):
+        source, runtime = args.work / "source", args.work / "runtime"
+        write_tree(source, projection, current_owned=True)
+        write_tree(runtime, supplier, root_mode=0o700, current_owned=True)
+        old_mask = os.umask(0o077)
+        try:
+            prepared = preparer.prepare(source, runtime, "aarch64-apple-darwin")
+        finally:
+            os.umask(old_mask)
+        files, manifest = current_runtime_files(runtime, projection, supplier)
+        manifest_digest = digest(files["manifest.json"][0])
+        need(prepared == {"manifestSha256": manifest_digest, "protocolSha256": PROTOCOL,
+                          "qualification": "prepared-not-native-verified"}, "current-preparer-result")
+        need(tree(source, current_root_mode=0o555) == projection and current_source() == (captured, projection, source_digest),
+             "current-source-post-changed")
+        core = [body for name, (body, _) in captured.items() if name.startswith("src/mobile_release/")]
+        result = {"schemaVersion": 1, "release": RELEASE, "target": "aarch64-apple-darwin",
+                  "acceptedArchiveSha256": provenance["acceptedArchiveSha256"],
+                  "acceptedTarSha256": provenance["acceptedTarSha256"],
+                  "originalManifestSha256": provenance["originalManifestSha256"], "supplierOnlyReuse": True,
+                  "successorManifestSha256": manifest_digest, "protocolSha256": PROTOCOL,
+                  "inventorySha256": manifest["inventorySha256"], "coreSha256": manifest["coreSha256"],
+                  "sourceInputsSha256": source_digest, "sourceInputCount": len(captured),
+                  "supplierInventorySha256": digest(canonical(supplier_rows)), "supplierFileCount": len(supplier),
+                  "currentCoreFileCount": len(core), "currentCoreBytes": sum(map(len, core)),
+                  "addedNotices": provenance["addedNotices"],
+                  "qualification": "current-source-description-only-not-build-or-install-authority"}
+        if final:
+            need(manifest_digest == args.expected_manifest, "current-reviewed-manifest-mismatch")
+            current_output_absent(args.output, parents[args.output])
+            normalized = {name: (body, 0o555 if name == "python/bin/python3" else 0o444)
+                          for name, (body, _) in files.items()}
+            write_tree(args.output, normalized, current_owned=True)
+            result["qualification"] = "current-source-staged-no-native-execution"
+        return result
 
 
 def macho(body):
@@ -1288,6 +1507,14 @@ def main(argv=None):
         if name == "runtime":
             command.add_argument("--expected-manifest", required=True)
             command.add_argument("--output", required=True, type=Path)
+    for name in ("describe-current-runtime", "current-runtime"):
+        command = commands.add_parser(name)
+        command.add_argument("--archive", required=True, type=Path)
+        command.add_argument("--work", required=True, type=Path)
+        if name == "current-runtime":
+            command.add_argument("--expected-source", required=True)
+            command.add_argument("--expected-manifest", required=True)
+            command.add_argument("--output", required=True, type=Path)
     app = commands.add_parser("app")
     app.add_argument("--binary", required=True, type=Path)
     app.add_argument("--output", required=True, type=Path)
@@ -1344,7 +1571,8 @@ def main(argv=None):
         result, status = installer_log_diagnostic(args)
         print(canonical(result).decode("utf-8"))
         return status
-    action = {"describe-runtime": runtime_command, "runtime": runtime_command, "app": app_command,
+    action = {"describe-runtime": runtime_command, "runtime": runtime_command,
+              "describe-current-runtime": current_runtime_command, "current-runtime": current_runtime_command, "app": app_command,
               "input": input_command, "scripts": scripts_command, "package-format-input": package_format_input_command,
               "prepare-package": prepare_package_command, "audit-package": audit_command,
               "check-installer-result-absent": installer_result_absent_command,

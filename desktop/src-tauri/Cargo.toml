@@ -27,6 +27,11 @@ name = "mrk-macos-install"
 path = "src/bin/macos_install.rs"
 required-features = ["macos-installed-installer"]
 
+[[bin]]
+name = "mrk-windows-runtime-publish"
+path = "src/bin/windows_runtime_publish.rs"
+required-features = ["windows-runtime-publisher"]
+
 [[test]]
 name = "session-gtk-qualification"
 path = "tests/session_gtk_qualification.rs"
@@ -41,23 +46,25 @@ required-features = ["desktop-shell", "custom-protocol"]
 
 [features]
 default = []
-desktop-shell = ["dep:tauri", "dep:tauri-build", "dep:rfd", "dep:webkit2gtk", "dep:gtk"]
+desktop-shell = ["dep:tauri", "dep:tauri-build", "dep:rfd", "dep:webkit2gtk", "dep:gtk", "mrk-windows-installed-native/desktop-ui-dialogs"]
 custom-protocol = ["tauri/custom-protocol"]
 development-runtime = []
 # Selects the standalone privileged publisher, not any execution qualification.
 ubuntu-runtime-publisher = []
+windows-runtime-publisher = ["mrk-windows-installed-native/runtime-publication"]
 macos-installed-installer = []
 # Separate fixed seven-case package only; absent from ordinary Installer/app.
 macos-installed-installer-fixture = ["macos-installed-installer"]
 # Explicit engineering observer controls; absent from every shipping profile.
 macos-installed-observation = ["mrk-macos-installed-native/installed-observation"]
+windows-installed-observation = ["mrk-windows-installed-native/windows-installed-observation"]
 
 [dependencies]
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.145"
 sha2 = "=0.10.9"
 getrandom = "=0.3.4"
-tokio = { version = "=1.48.0", features = ["io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "=1.48.0", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 tauri = { version = "=2.11.5", optional = true, default-features = false, features = ["wry", "compression"] }
 rfd = { version = "=0.15.4", optional = true, default-features = false, features = ["xdg-portal", "tokio"] }
 
@@ -71,10 +78,17 @@ mrk-macos-installed-native = { path = "../native/macos-installed-native" }
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))'.dev-dependencies]
 nix = { version = "=0.30.1", default-features = false, features = ["time"] }
+zbus = { version = "=5.19.0", default-features = false, features = ["tokio", "mrk-owned-test-support"] }
+secret-service = { version = "=5.2.0", path = "../vendor/secret-service-5.2.0", default-features = false, features = ["rt-tokio-crypto-rust", "mrk-retrieval-test-support"] }
 
 # Native facts only: this dependency does not enable a Windows runtime profile.
 [target.'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'.dependencies]
 mrk-windows-installed-native = { path = "../native/windows-installed-native" }
+
+# The fixed headless app libtest alone gets the qualification result seam.
+# Normal publisher/native units do not acquire this dev-only feature.
+[target.'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'.dev-dependencies]
+mrk-windows-installed-native = { path = "../native/windows-installed-native", features = ["qualification-result"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { version = "=0.18.2", optional = true, default-features = false, features = [] }
@@ -83,20 +97,28 @@ webkit2gtk = { version = "=2.0.2", optional = true, default-features = false, fe
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))'.dependencies]
 rustix = { version = "=1.1.5", default-features = false, features = ["std", "fs", "process", "thread", "system"] }
 mrk-linux-mount-observation = { path = "../native/linux-mount-observation" }
+secret-service = { version = "=5.2.0", path = "../vendor/secret-service-5.2.0", default-features = false, features = ["rt-tokio-crypto-rust"] }
+zbus = { version = "=5.19.0", default-features = false, features = ["tokio"] }
+ordered-stream = "=0.2.0"
+
+# One maintained zbus identity for both the application and secret-service.
+# Its additive owned client does not enable native qualification/persistence.
+[patch.crates-io]
+zbus = { path = "../vendor/zbus-5.19.0" }
 
 [build-dependencies]
 tauri-build = { version = "=2.6.3", optional = true, features = [] }
 
 # Keep complete runtime byte hashing inside the original test admission clocks:
 # optimize the existing hash implementation, never omit checks or widen deadlines.
-[profile.test.package.sha2]
+[profile.test.package."sha2:0.10.9"]
 opt-level = 3
 debug-assertions = true
 overflow-checks = true
 
 # The shared normal/observer connection build uses the dev profile. Preserve
 # complete byte hashing under the same original runtime admission deadlines.
-[profile.dev.package.sha2]
+[profile.dev.package."sha2:0.10.9"]
 opt-level = 3
 debug-assertions = true
 overflow-checks = true

@@ -21,8 +21,8 @@ const EOF_SCOPE: &str = "configuration-transaction-eof-hosted-v1";
 const OBSERVATION: Duration = Duration::from_secs(45);
 const NOT_VERIFIED: &[&str] = &["production-runtime-custody", "production-save-enablement", "native-gui", "window-reload-crash",
     "parent-death", "native-stuck-wait-close", "windows-filesystem", "stores", "mobile-builds", "installers"];
-const IGNORE: &[u8] = b".mobile-release/\n.mobile-release-init-prepare/\n.mobile-release-init/\n.mobile-release-init-cleanup/\n.mobile-release-metadata-text-prepare/\n.mobile-release-metadata-text/\n.mobile-release-metadata-text-cleanup/\n";
-const NOOP_IGNORE: &[u8] = b"# fixed synthetic comment\r\n/.mobile-release/\r\n/.mobile-release-init-prepare/\r\n/.mobile-release-init/\r\n/.mobile-release-init-cleanup/\r\n/.mobile-release-metadata-text-prepare/\r\n/.mobile-release-metadata-text/\r\n/.mobile-release-metadata-text-cleanup/\r\n";
+const IGNORE: &[u8] = b".mobile-release/\n.mobile-release-init-prepare/\n.mobile-release-init/\n.mobile-release-init-cleanup/\n.mobile-release-metadata-text-prepare/\n.mobile-release-metadata-text/\n.mobile-release-metadata-text-cleanup/\n.mobile-release-version-prepare/\n.mobile-release-version/\n.mobile-release-version-cleanup/\n";
+const NOOP_IGNORE: &[u8] = b"# fixed synthetic comment\r\n/.mobile-release/\r\n/.mobile-release-init-prepare/\r\n/.mobile-release-init/\r\n/.mobile-release-init-cleanup/\r\n/.mobile-release-metadata-text-prepare/\r\n/.mobile-release-metadata-text/\r\n/.mobile-release-metadata-text-cleanup/\r\n/.mobile-release-version-prepare/\r\n/.mobile-release-version/\r\n/.mobile-release-version-cleanup/\r\n";
 const UNRELATED: &[u8] = b"fixed synthetic unrelated content\n";
 const EOF_IGNORE_BASE: &[u8] = b"# fixed synthetic EOF ignore\n";
 static BATCH_CLAIMED: AtomicBool = AtomicBool::new(false);
@@ -116,30 +116,33 @@ impl BlockingGate {
 // is admitted before this Schedule can be queued for an original Session.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum EofCase { Precommit, Postcommit, WorkflowPrecommit, WorkflowPostcommit, WorkflowConflict,
-    MetadataPrecommit, MetadataPostcommit, MetadataConflict }
+    MetadataPrecommit, MetadataPostcommit, MetadataConflict, VersionPrecommit, VersionPostcommit, VersionConflict }
 impl EofCase {
     pub(super) fn name(self) -> &'static str {
-        match self { Self::Precommit | Self::WorkflowPrecommit | Self::MetadataPrecommit => "precommit-eof",
-            Self::Postcommit | Self::WorkflowPostcommit | Self::MetadataPostcommit => "postcommit-eof",
-            Self::WorkflowConflict | Self::MetadataConflict => "precommit-conflict-eof" }
+        match self { Self::Precommit | Self::WorkflowPrecommit | Self::MetadataPrecommit | Self::VersionPrecommit => "precommit-eof",
+            Self::Postcommit | Self::WorkflowPostcommit | Self::MetadataPostcommit | Self::VersionPostcommit => "postcommit-eof",
+            Self::WorkflowConflict | Self::MetadataConflict | Self::VersionConflict => "precommit-conflict-eof" }
     }
     pub(super) fn domain(self) -> EditDomain {
         match self { Self::Precommit | Self::Postcommit => EditDomain::Configuration,
             Self::WorkflowPrecommit | Self::WorkflowPostcommit | Self::WorkflowConflict => EditDomain::GitHubWorkflows,
-            Self::MetadataPrecommit | Self::MetadataPostcommit | Self::MetadataConflict => EditDomain::MetadataText }
+            Self::MetadataPrecommit | Self::MetadataPostcommit | Self::MetadataConflict => EditDomain::MetadataText,
+            Self::VersionPrecommit | Self::VersionPostcommit | Self::VersionConflict => EditDomain::ReleaseVersion }
     }
     fn project(self) -> &'static str {
         match self { Self::Precommit => "project-config-precommit-eof", Self::Postcommit => "project-config-postcommit-eof",
             Self::WorkflowPrecommit => "project-workflow-precommit-eof", Self::WorkflowPostcommit => "project-workflow-postcommit-eof",
             Self::WorkflowConflict => "project-workflow-precommit-conflict-eof",
             Self::MetadataPrecommit => "project-metadata-precommit-eof", Self::MetadataPostcommit => "project-metadata-postcommit-eof",
-            Self::MetadataConflict => "project-metadata-precommit-conflict-eof" }
+            Self::MetadataConflict => "project-metadata-precommit-conflict-eof",
+            Self::VersionPrecommit => "project-version-precommit-eof", Self::VersionPostcommit => "project-version-postcommit-eof",
+            Self::VersionConflict => "project-version-precommit-conflict-eof" }
     }
     fn boundary(self) -> &'static str {
-        match self { Self::Postcommit | Self::WorkflowPostcommit | Self::MetadataPostcommit => "after-durable-COMMITTED", _ => "before-COMMITTED" }
+        match self { Self::Postcommit | Self::WorkflowPostcommit | Self::MetadataPostcommit | Self::VersionPostcommit => "after-durable-COMMITTED", _ => "before-COMMITTED" }
     }
     fn checkpoint(self) -> &'static str {
-        match self { Self::Postcommit | Self::WorkflowPostcommit | Self::MetadataPostcommit => "descriptor-close", _ => "publisher-entry" }
+        match self { Self::Postcommit | Self::WorkflowPostcommit | Self::MetadataPostcommit | Self::VersionPostcommit => "descriptor-close", _ => "publisher-entry" }
     }
     fn marker(self) -> &'static [u8] {
         match self {
@@ -149,8 +152,11 @@ impl EofCase {
             Self::WorkflowPostcommit => b"MRK_WORKFLOW_EOF_V1 postcommit-eof boundary=after-durable-COMMITTED\n",
             Self::WorkflowConflict => b"MRK_WORKFLOW_EOF_V1 precommit-conflict-eof boundary=before-COMMITTED\n",
             Self::MetadataPrecommit => b"MRK_METADATA_TEXT_EOF_V1 precommit-eof boundary=before-COMMITTED\n",
+            Self::VersionPrecommit => b"MRK_RELEASE_VERSION_EOF_V1 precommit-eof boundary=before-COMMITTED\n",
             Self::MetadataPostcommit => b"MRK_METADATA_TEXT_EOF_V1 postcommit-eof boundary=after-durable-COMMITTED\n",
+            Self::VersionPostcommit => b"MRK_RELEASE_VERSION_EOF_V1 postcommit-eof boundary=after-durable-COMMITTED\n",
             Self::MetadataConflict => b"MRK_METADATA_TEXT_EOF_V1 precommit-conflict-eof boundary=before-COMMITTED\n",
+            Self::VersionConflict => b"MRK_RELEASE_VERSION_EOF_V1 precommit-conflict-eof boundary=before-COMMITTED\n",
         }
     }
     fn summary(self) -> &'static [u8] {
@@ -161,8 +167,11 @@ impl EofCase {
             Self::WorkflowPostcommit => b"MRK_WORKFLOW_EOF_V1 postcommit-eof eof=1 nonempty=0 readErrors=0 checkpoint=descriptor-close applied=1 committed=1 rolledBack=0 terminal=COMMITTED durable=1 recovery=1 clean=1 settled=1 cancelled=1\n",
             Self::WorkflowConflict => b"MRK_WORKFLOW_EOF_V1 precommit-conflict-eof eof=1 nonempty=0 readErrors=0 checkpoint=publisher-entry applied=1 committed=0 rolledBack=0 terminal=UNKNOWN durable=0 recovery=1 clean=0 settled=1 cancelled=1\n",
             Self::MetadataPrecommit => b"MRK_METADATA_TEXT_EOF_V1 precommit-eof eof=1 nonempty=0 readErrors=0 checkpoint=publisher-entry applied=1 committed=0 rolledBack=1 terminal=ROLLED_BACK durable=1 recovery=1 clean=1 settled=1 cancelled=1\n",
+            Self::VersionPrecommit => b"MRK_RELEASE_VERSION_EOF_V1 precommit-eof eof=1 nonempty=0 readErrors=0 checkpoint=publisher-entry applied=1 committed=0 rolledBack=1 terminal=ROLLED_BACK durable=1 recovery=1 clean=1 settled=1 cancelled=1\n",
             Self::MetadataPostcommit => b"MRK_METADATA_TEXT_EOF_V1 postcommit-eof eof=1 nonempty=0 readErrors=0 checkpoint=descriptor-close applied=1 committed=1 rolledBack=0 terminal=COMMITTED durable=1 recovery=1 clean=1 settled=1 cancelled=1\n",
+            Self::VersionPostcommit => b"MRK_RELEASE_VERSION_EOF_V1 postcommit-eof eof=1 nonempty=0 readErrors=0 checkpoint=descriptor-close applied=1 committed=1 rolledBack=0 terminal=COMMITTED durable=1 recovery=1 clean=1 settled=1 cancelled=1\n",
             Self::MetadataConflict => b"MRK_METADATA_TEXT_EOF_V1 precommit-conflict-eof eof=1 nonempty=0 readErrors=0 checkpoint=publisher-entry applied=1 committed=0 rolledBack=0 terminal=UNKNOWN durable=0 recovery=1 clean=0 settled=1 cancelled=1\n",
+            Self::VersionConflict => b"MRK_RELEASE_VERSION_EOF_V1 precommit-conflict-eof eof=1 nonempty=0 readErrors=0 checkpoint=publisher-entry applied=1 committed=0 rolledBack=0 terminal=UNKNOWN durable=0 recovery=1 clean=0 settled=1 cancelled=1\n",
         }
     }
     fn stderr_bytes(self) -> usize { self.marker().len() + self.summary().len() }
@@ -242,6 +251,7 @@ impl Schedule {
             ChildFrame::Terminal(sequence, terminal) => Some((*sequence, terminal.outcome())),
             ChildFrame::WorkflowTerminal(sequence, terminal) => Some((*sequence, terminal.outcome())),
             ChildFrame::MetadataTextTerminal(sequence, terminal) => Some((*sequence, terminal.outcome())),
+            ChildFrame::ReleaseVersionTerminal(sequence, terminal) => Some((*sequence, terminal.outcome())),
             _ => None,
         };
         if let Some((sequence, outcome)) = terminal {
@@ -293,6 +303,7 @@ impl GateGuard {
                 EditDomain::Configuration => { let _ = self.owner.close("main", &id); },
                 EditDomain::GitHubWorkflows => { let _ = self.owner.close_workflow("main", &id); },
                 EditDomain::MetadataText => { let _ = self.owner.close_metadata_text("main", &id); },
+                EditDomain::ReleaseVersion => { let _ = self.owner.close_release_version("main", &id); },
             }
         }
         self.schedule.release();
@@ -1972,7 +1983,7 @@ mod workflow {
             let project = self.document.workflow_fixture_publish(proof, generation).map_err(|_| Failure::NativeCommandRejected)?;
             let (_, registered) = self.bridge.native_project(&project.id).map_err(|_| Failure::NativeCommandRejected)?;
             let actual = fs::symlink_metadata(root).map_err(|_| Failure::FixtureIo)?;
-            let identity = registered.identity.workflow_identity();
+            let identity = registered.identity.posix().map_err(|_| Failure::PayloadMismatch)?.workflow_identity();
             require(registered.path == root && identity.device == actual.dev().to_string() && identity.inode == actual.ino().to_string()
                 && identity.mode == actual.mode() && identity.uid == actual.uid() && identity.gid == actual.gid(), Failure::PayloadMismatch)?;
             Ok(project)
@@ -2234,7 +2245,7 @@ mod workflow {
             fs::rename(&root,input.inputs.root.join("root-before-open-retired")).map_err(|_| Failure::FixtureIo)?;
             mkdir(&root)?; write_new(&root.join("unrelated.txt"),UNRELATED,0o600)?;
             require(fs::symlink_metadata(&root).map_err(|_| Failure::FixtureIo)?.ino().to_string()
-                != registered.1.identity.workflow_identity().inode, Failure::PayloadMismatch)?;
+                != registered.1.identity.posix().map_err(|_| Failure::PayloadMismatch)?.workflow_identity().inode, Failure::PayloadMismatch)?;
         }
         let before = snapshot(&root)?;
         let session = original.open(&project)?;
@@ -2575,6 +2586,8 @@ fn workflow_eof_records_are_domain_distinct_and_exact() {
 // Its payloads are literal synthetic DATA, not output of the product renderer.
 #[cfg(all(debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 mod metadata {
+    // Deliberately retain the original seven-rule prerequisite in this domain.
+    const IGNORE: &[u8] = b".mobile-release/\n.mobile-release-init-prepare/\n.mobile-release-init/\n.mobile-release-init-cleanup/\n.mobile-release-metadata-text-prepare/\n.mobile-release-metadata-text/\n.mobile-release-metadata-text-cleanup/\n";
     use super::*;
     use crate::{asset_session::DocumentBinding, asset_source::{self, SourceBook}, bridge::{DesktopBridge, Project},
         metadata_text_commands, metadata_text_edit_protocol::Platform, protocol::Method,
@@ -2629,6 +2642,12 @@ mod metadata {
         Source { id:"snapshot", relative:"src/mobile_release/api/_snapshot.py", compiled:include_bytes!("../../../src/mobile_release/api/_snapshot.py") },
         Source { id:"metadataResource", relative:"src/mobile_release/api/data/metadata-text-help-v1.json", compiled:RESOURCE },
         Source { id:"schemaResource", relative:"src/mobile_release/api/data/project.schema.json", compiled:SCHEMA },
+        // Transitive shared SOURCE only; this fixture still grants no version-write permit.
+        Source { id:"versionProtocol", relative:"desktop/src-tauri/src/release_version_edit_protocol.rs", compiled:include_bytes!("release_version_edit_protocol.rs") },
+        Source { id:"versionCommands", relative:"desktop/src-tauri/src/release_version_edit_commands.rs", compiled:include_bytes!("release_version_edit_commands.rs") },
+        Source { id:"versionEdit", relative:"src/mobile_release/release_version_edit.py", compiled:include_bytes!("../../../src/mobile_release/release_version_edit.py") },
+        Source { id:"versionText", relative:"src/mobile_release/version_text.py", compiled:include_bytes!("../../../src/mobile_release/version_text.py") },
+        Source { id:"versionResource", relative:"src/mobile_release/api/data/release-version-help-v1.json", compiled:include_bytes!("../../../src/mobile_release/api/data/release-version-help-v1.json") },
     ];
     static PROBES: Mutex<Vec<SourceBook>> = Mutex::new(Vec::new());
     fn probes_settled() -> bool { PROBES.lock().is_ok_and(|books| books.iter().all(SourceBook::settled)) }
@@ -2859,7 +2878,7 @@ mod metadata {
                 .map_err(|_| Failure::NativeCommandRejected)?;
             let (_,registered)=self.bridge.native_project(&project.id).map_err(|_| Failure::UnexpectedStatus)?;
             let stat=fs::symlink_metadata(root).map_err(|_| Failure::FixtureIo)?;
-            let identity=registered.identity.workflow_identity();
+            let identity=registered.identity.posix().map_err(|_| Failure::PayloadMismatch)?.workflow_identity();
             require(registered.path == root && identity.device == stat.dev().to_string() && identity.inode == stat.ino().to_string()
                 && identity.mode == stat.mode() && identity.uid == stat.uid() && identity.gid == stat.gid(),Failure::PayloadMismatch)?;
             Ok(project)
@@ -2923,6 +2942,9 @@ mod metadata {
                 match domain {
                     EditDomain::MetadataText => { let _=self.batch.owner.close_metadata_text("main",&id); let _=observed_metadata(&self.batch.owner,&id,Phase::Final,false).await; },
                     EditDomain::Configuration => self.batch.stop_original().await,
+                    // Metadata fixture never admits this writer. A foreign arm
+                    // still stops through the SAME owner, not a metadata receipt.
+                    EditDomain::ReleaseVersion => { let _=self.batch.owner.close_release_version("main",&id); let _=self.batch.owner.shutdown().await; },
                     EditDomain::GitHubWorkflows => { let _=self.batch.owner.close_workflow("main",&id); let _=workflow_observed(&self.batch.owner,&id,Phase::Final).await; },
                 }
             }
@@ -3712,10 +3734,10 @@ mod metadata {
         for case in [EofCase::Precommit,EofCase::Postcommit,EofCase::WorkflowPrecommit,EofCase::WorkflowPostcommit,EofCase::WorkflowConflict] {
             assert!(!MetadataFixturePermit::bootstrap_case(true,&Path::new("/inert").join(case.name()),Some(case)));
         }
-        assert_eq!(EXTRA_SOURCES.len(),23);
+        assert_eq!(EXTRA_SOURCES.len(),28);
         let mut keys=BTreeSet::new();
         for source in SOURCES.iter().chain(EXTRA_SOURCES) { assert!(keys.insert(source.id)); }
-        assert_eq!(keys.len(),49);
+        assert_eq!(keys.len(),54);
     }
 }
 
@@ -3736,6 +3758,1164 @@ fn metadata_eof_records_are_domain_distinct_and_exact() {
         EofCase::MetadataPrecommit,EofCase::MetadataPostcommit,EofCase::MetadataConflict];
     for case in [EofCase::MetadataPrecommit,EofCase::MetadataPostcommit,EofCase::MetadataConflict] {
         assert!(case.domain()==EditDomain::MetadataText);
+        let bytes=[case.marker(),case.summary()].concat();
+        for width in [1,2,7,case.marker().len(),bytes.len()] {
+            let mut control=EofControl::default();
+            for chunk in bytes.chunks(width) { assert!(control.observe(case,chunk)); }
+            assert!(control.complete(case)); assert_eq!(control.records(case),2); assert!(!control.observe(case,b"\n"));
+        }
+        for other in all {
+            if other==case { continue; }
+            let mut control=EofControl::default(); assert!(!control.observe(case,other.marker()));
+        }
+        for end in 0..bytes.len() {
+            let mut control=EofControl::default(); assert!(control.observe(case,&bytes[..end])); assert!(!control.complete(case));
+        }
+        for index in 0..bytes.len() {
+            let mut wrong=bytes.clone(); wrong[index]=b'!';
+            let mut control=EofControl::default(); assert!(!control.observe(case,&wrong));
+        }
+    }
+}
+
+// One finite release-version branch of the existing original-owner fixture.
+// SOURCE-only preparation does not enable installed or general editing.
+#[cfg(all(debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+mod version {
+    use super::*;
+    use crate::{asset_session::DocumentBinding, asset_source::{self, SourceBook}, bridge::{DesktopBridge, Project},
+        release_version_edit_commands, protocol::Method, supervisor::metadata_fixture_probe::Probe};
+
+    const OWNER_SCOPE: &str = "release-version-owner-hosted-v1";
+    const TRANSACTION_SCOPE: &str = "release-version-transaction-eof-hosted-v1";
+    const DOMAIN: &str = "release_version";
+    const REFERENCE: &str = "refs/heads/verify/desktop-release-version-apply-native";
+    const WORKFLOW_PATH: &str = ".github/workflows/desktop-github-workflow-apply-native.yml";
+    const WORKFLOW_SOURCE: &[u8] = include_bytes!("../../../.github/workflows/desktop-github-workflow-apply-native.yml");
+    const RESOURCE: &[u8] = include_bytes!("../../../src/mobile_release/api/data/release-version-help-v1.json");
+    const SCHEMA: &[u8] = include_bytes!("../../../src/mobile_release/api/data/project.schema.json");
+    const UMASK_PROBE: &[u8] = b"fixed version fixture umask\n";
+    const CONFIG_PUBLIC: &[u8] = concat!(r#"{"android":{"applicationId":"org.fixture.app","enabled":true,"identityStatus":"unverified"},"ios":{"bundleId":"org.fixture.app","enabled":true,"identityStatus":"unverified"},"metadata":{"androidLocales":["en-US","fr-FR"],"iosLocales":["en-US"],"root":"public/store"},"projectChecks":{"androidArtifact":[],"iosArtifact":[],"preflight":[]},"schemaVersion":1,"services":{"androidFirebase":"disabled","iosFirebase":"disabled"},"source":{"candidateBranch":"main","productionBranch":"production"},"version":{"buildKey":"BUILD_NUMBER","nameKey":"VERSION_NAME","source":"public/version.properties"}}"#, "\n").as_bytes();
+    const CONFIG_RELEASE: &[u8] = concat!(r#"{"android":{"applicationId":"org.fixture.app","enabled":true,"identityStatus":"unverified"},"ios":{"bundleId":"org.fixture.app","enabled":true,"identityStatus":"unverified"},"metadata":{"androidLocales":["en-US","fr-FR"],"iosLocales":["en-US"],"root":"public/store"},"projectChecks":{"androidArtifact":[],"iosArtifact":[],"preflight":[]},"schemaVersion":1,"services":{"androidFirebase":"disabled","iosFirebase":"disabled"},"source":{"candidateBranch":"main","productionBranch":"production"},"version":{"buildKey":"BUILD_NUMBER","nameKey":"VERSION_NAME","source":"release/version.properties"}}"#, "\n").as_bytes();
+    const CONFIG_NESTED: &[u8] = concat!(r#"{"android":{"applicationId":"org.fixture.app","enabled":true,"identityStatus":"unverified"},"ios":{"bundleId":"org.fixture.app","enabled":true,"identityStatus":"unverified"},"metadata":{"androidLocales":["en-US","fr-FR"],"iosLocales":["en-US"],"root":"public/store"},"projectChecks":{"androidArtifact":[],"iosArtifact":[],"preflight":[]},"schemaVersion":1,"services":{"androidFirebase":"disabled","iosFirebase":"disabled"},"source":{"candidateBranch":"main","productionBranch":"production"},"version":{"buildKey":"BUILD_NUMBER","nameKey":"VERSION_NAME","source":"public/version-tree/version.properties"}}"#, "\n").as_bytes();
+    const ORIGINAL: &[u8] = "# Café\r\n VERSION_NAME = '1.2.3' \nBUILD_NUMBER = \"7\"\r\nOTHER = keep".as_bytes();
+    const EDITED: &[u8] = "# Café\r\n VERSION_NAME = '2.3.4' \nBUILD_NUMBER = \"8\"\r\nOTHER = keep".as_bytes();
+    const CREATED: &[u8] = "VERSION_NAME=2.3.4\nBUILD_NUMBER=8\n".as_bytes();
+    const EOF_ORIGINAL: &[u8] = "# Keep this comment\r\n VERSION_NAME = '1.2.3' \nBUILD_NUMBER = \"7\"\r\nOTHER = keep".as_bytes();
+    const EOF_EDITED: &[u8] = "# Keep this comment\r\n VERSION_NAME = '2.3.4' \nBUILD_NUMBER = \"8\"\r\nOTHER = keep".as_bytes();
+
+    const NOT_VERIFIED: &[&str] = &["production-runtime-custody","production-version-save-enablement","native-gui",
+        "webview-callbacks-or-crash-hook","parent-death","native-stuck-wait-close","persisted-recovery",
+        "macos-windows-version-writes","credentials","remote-github","stores","mobile-builds","installers"];
+    const EXTRA_SOURCES: &[Source] = &[
+        Source { id:"metadataProtocol", relative:"desktop/src-tauri/src/metadata_text_edit_protocol.rs", compiled:include_bytes!("metadata_text_edit_protocol.rs") },
+        Source { id:"metadataCommands", relative:"desktop/src-tauri/src/metadata_text_commands.rs", compiled:include_bytes!("metadata_text_commands.rs") },
+        Source { id:"workflowProtocol", relative:"desktop/src-tauri/src/github_workflow_edit_protocol.rs", compiled:include_bytes!("github_workflow_edit_protocol.rs") },
+        Source { id:"bridge", relative:"desktop/src-tauri/src/bridge.rs", compiled:include_bytes!("bridge.rs") },
+        Source { id:"documentBinding", relative:"desktop/src-tauri/src/asset_session.rs", compiled:include_bytes!("asset_session.rs") },
+        Source { id:"documentLifetime", relative:"desktop/src-tauri/src/document_lifetime.rs", compiled:include_bytes!("document_lifetime.rs") },
+        Source { id:"assetSource", relative:"desktop/src-tauri/src/asset_source.rs", compiled:include_bytes!("asset_source.rs") },
+        Source { id:"assetCommands", relative:"desktop/src-tauri/src/asset_commands.rs", compiled:include_bytes!("asset_commands.rs") },
+        Source { id:"supervisor", relative:"desktop/src-tauri/src/supervisor.rs", compiled:include_bytes!("supervisor.rs") },
+        Source { id:"passiveFixture", relative:"desktop/src-tauri/src/hosted_tests.rs", compiled:include_bytes!("hosted_tests.rs") },
+        Source { id:"editCommands", relative:"desktop/src-tauri/src/edit_commands.rs", compiled:include_bytes!("edit_commands.rs") },
+        Source { id:"githubCommands", relative:"desktop/src-tauri/src/github_commands.rs", compiled:include_bytes!("github_commands.rs") },
+        Source { id:"workflowEdit", relative:"src/mobile_release/github_workflow_edit.py", compiled:include_bytes!("../../../src/mobile_release/github_workflow_edit.py") },
+        Source { id:"metadataEdit", relative:"src/mobile_release/metadata_text_edit.py", compiled:include_bytes!("../../../src/mobile_release/metadata_text_edit.py") },
+        Source { id:"metadataText", relative:"src/mobile_release/metadata_text.py", compiled:include_bytes!("../../../src/mobile_release/metadata_text.py") },
+        Source { id:"metadataPolicy", relative:"src/mobile_release/metadata.py", compiled:include_bytes!("../../../src/mobile_release/metadata.py") },
+        Source { id:"metadataApi", relative:"src/mobile_release/api/_metadata_text.py", compiled:include_bytes!("../../../src/mobile_release/api/_metadata_text.py") },
+        Source { id:"passiveEngine", relative:"src/mobile_release/_desktop_engine.py", compiled:include_bytes!("../../../src/mobile_release/_desktop_engine.py") },
+        Source { id:"catalogue", relative:"src/mobile_release/api/_catalog.py", compiled:include_bytes!("../../../src/mobile_release/api/_catalog.py") },
+        Source { id:"apiContracts", relative:"src/mobile_release/api/contracts.py", compiled:include_bytes!("../../../src/mobile_release/api/contracts.py") },
+        Source { id:"snapshot", relative:"src/mobile_release/api/_snapshot.py", compiled:include_bytes!("../../../src/mobile_release/api/_snapshot.py") },
+        Source { id:"metadataResource", relative:"src/mobile_release/api/data/metadata-text-help-v1.json", compiled:include_bytes!("../../../src/mobile_release/api/data/metadata-text-help-v1.json") },
+        Source { id:"schemaResource", relative:"src/mobile_release/api/data/project.schema.json", compiled:SCHEMA },
+        Source { id:"versionProtocol", relative:"desktop/src-tauri/src/release_version_edit_protocol.rs", compiled:include_bytes!("release_version_edit_protocol.rs") },
+        Source { id:"versionCommands", relative:"desktop/src-tauri/src/release_version_edit_commands.rs", compiled:include_bytes!("release_version_edit_commands.rs") },
+        Source { id:"versionEdit", relative:"src/mobile_release/release_version_edit.py", compiled:include_bytes!("../../../src/mobile_release/release_version_edit.py") },
+        Source { id:"versionText", relative:"src/mobile_release/version_text.py", compiled:include_bytes!("../../../src/mobile_release/version_text.py") },
+        Source { id:"versionResource", relative:"src/mobile_release/api/data/release-version-help-v1.json", compiled:RESOURCE },
+        Source { id:"versionObservation", relative:"desktop/src-tauri/src/release_version_protocol.rs", compiled:include_bytes!("release_version_protocol.rs") },
+        Source { id:"versionObservationApi", relative:"src/mobile_release/api/_release_version.py", compiled:include_bytes!("../../../src/mobile_release/api/_release_version.py") },
+    ];
+    static PROBES: Mutex<Vec<SourceBook>> = Mutex::new(Vec::new());
+    fn probes_settled() -> bool { PROBES.lock().is_ok_and(|books| books.iter().all(SourceBook::settled)) }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Mode { Source, Zip }
+    impl Mode { fn name(self) -> &'static str { if self == Self::Source { "source" } else { "zip" } } }
+
+    #[derive(Clone,Copy,PartialEq,Eq)]
+    enum Case { Create, Edit, Noop, Stale, Isolation, Registration, HeldTerminal, DocumentLost }
+    impl Case {
+        fn name(self) -> &'static str {
+            match self { Self::Create=>"explicit-absent-create", Self::Edit=>"observe-edit-two-spans-preserve",
+                Self::Noop=>"observe-noop-original-leaf", Self::Stale=>"stale-passive-baseline-refused",
+                Self::Isolation=>"four-domain-owner-and-token-isolation", Self::Registration=>"registration-changed-before-apply",
+                Self::HeldTerminal=>"version-terminal-held-after-stop", Self::DocumentLost=>"version-document-loss-before-apply" }
+        }
+        fn selection(self) -> Selection { if self==Self::Create { Selection::Nested } else { Selection::Public } }
+    }
+    const SOURCE_CASES: [Case;8]=[Case::Create,Case::Edit,Case::Noop,Case::Stale,Case::Isolation,Case::Registration,Case::HeldTerminal,Case::DocumentLost];
+    const EOF_CASES: [EofCase;3]=[EofCase::VersionPrecommit,EofCase::VersionPostcommit,EofCase::VersionConflict];
+    #[derive(Clone,Copy,PartialEq,Eq)]
+    enum Selection { Public, Release, Nested }
+    impl Selection {
+        fn source(self) -> &'static str { match self { Self::Public=>"public/version.properties",
+            Self::Release=>"release/version.properties",Self::Nested=>"public/version-tree/version.properties" } }
+        fn parent(self) -> &'static str { match self { Self::Public=>"public",Self::Release=>"release",Self::Nested=>"public/version-tree" } }
+        fn config(self) -> &'static [u8] { match self { Self::Public=>CONFIG_PUBLIC,Self::Release=>CONFIG_RELEASE,Self::Nested=>CONFIG_NESTED } }
+    }
+    fn eof_selection(case:EofCase) -> Selection { if case==EofCase::VersionPostcommit { Selection::Release } else { Selection::Public } }
+    fn values() -> version_wire::Values { version_wire::Values { name:"2.3.4".into(),build:"8".into() } }
+    fn open_args(project:&Project) -> release_version_edit_commands::Open { release_version_edit_commands::Open { project_id:project.id.clone() } }
+    fn payload_bindings() -> Value {
+        json!({"configHashes":{"publicVersion":hash(CONFIG_PUBLIC),"releaseVersion":hash(CONFIG_RELEASE),"nestedVersion":hash(CONFIG_NESTED)},
+            "ignoreSha256":hash(IGNORE),"versionHashes":{"original":hash(ORIGINAL),"edited":hash(EDITED),"created":hash(CREATED),
+                "eofOriginal":hash(EOF_ORIGINAL),"eofEdited":hash(EOF_EDITED)},
+            "unrelatedSha256":hash(UNRELATED),"umaskProbeSha256":hash(UMASK_PROBE)})
+    }
+    struct Admitted { inputs:Inputs,mode:Mode,eof:bool,python:PathBuf,core:PathBuf,repository:PathBuf,roots:Vec<PathBuf> }
+    fn source_entry(path:&str) -> bool {
+        path.starts_with("mobile_release/") && path.len() <= 256 && path.is_ascii()
+            && path.split('/').all(|part| !part.is_empty() && part != "." && part != ".."
+                && part.bytes().all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c)))
+            && [".py",".json",".pem"].iter().any(|suffix| path.ends_with(suffix))
+    }
+    fn core_binding(repository:&Path,task:&Path,sha:&str) -> Check<Value> {
+        require(canonical_input("MRK_DESKTOP_RELEASE_VERSION_CORE_ZIP",true)? == task.join("core.zip")
+            && canonical_input("MRK_DESKTOP_RELEASE_VERSION_CORE_METADATA",true)? == task.join("version.json"), Failure::SourceBindingMismatch)?;
+        let raw = read_regular(&task.join("version.json"),2*1024*1024)?;
+        let value:Value = serde_json::from_slice(&raw.bytes).map_err(|_| Failure::SourceBindingMismatch)?;
+        let run = environment("GITHUB_RUN_ID")?;
+        let attempt = environment("GITHUB_RUN_ATTEMPT")?;
+        let github_repository = environment("GITHUB_REPOSITORY")?;
+        require(value.as_object().is_some_and(|fields| fields.len() == 8) && value["sourceSha"].as_str() == Some(sha)
+            && value["sourceTree"].as_str().is_some_and(|tree| tree.len() == 40 && tree != "0".repeat(40)
+                && tree.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)))
+            && !run.is_empty() && run.len() <= 20 && !run.starts_with('0') && run.bytes().all(|c| c.is_ascii_digit())
+            && attempt == "1" && environment("GITHUB_EVENT_NAME")? == "push" && environment("MRK_PUSH_EVENT_AFTER")? == sha
+            && environment("GITHUB_REF")? == REFERENCE
+            && environment("GITHUB_WORKFLOW_SHA")? == sha
+            && environment("GITHUB_WORKFLOW_REF")? == format!("{github_repository}/{WORKFLOW_PATH}@{REFERENCE}")
+            && value["runId"].as_str() == Some(run.as_str()) && value["attempt"].as_str() == Some(attempt.as_str())
+            && value["ref"] == REFERENCE, Failure::SourceBindingMismatch)?;
+        let workflow_hash = hash(WORKFLOW_SOURCE);
+        require(hash(&read_regular(&repository.join(WORKFLOW_PATH),2*1024*1024)?.bytes) == workflow_hash
+            && value["workflowSha256"].as_str() == Some(workflow_hash.as_str()), Failure::SourceBindingMismatch)?;
+        let rows = value["coreFiles"].as_array().ok_or(Failure::SourceBindingMismatch)?;
+        require(!rows.is_empty() && rows.len() <= 2048,Failure::SourceBindingMismatch)?;
+        let mut previous = ""; let mut total = 0usize;
+        for row in rows {
+            let path = row["path"].as_str().ok_or(Failure::SourceBindingMismatch)?;
+            require(row.as_object().is_some_and(|fields| fields.len() == 3) && source_entry(path) && path > previous,Failure::SourceBindingMismatch)?;
+            let file = read_regular(&repository.join("src").join(path),8*1024*1024)?;
+            total = total.checked_add(file.bytes.len()).ok_or(Failure::SourceBindingMismatch)?;
+            require(total <= 32*1024*1024 && row["size"].as_u64() == Some(file.bytes.len() as u64)
+                && row["sha256"].as_str() == Some(hash(&file.bytes).as_str()),Failure::SourceBindingMismatch)?;
+            previous = path;
+        }
+        let zip_hash = hash(&read_regular(&task.join("core.zip"),32*1024*1024)?.bytes);
+        require(value["coreZipSha256"].as_str() == Some(zip_hash.as_str()),Failure::SourceBindingMismatch)?;
+        // The helper owns original Git/inventory/ZIP construction. This binds
+        // its exact version and bytes; it does not parse/extract another ZIP.
+        Ok(json!({"sourceTree":value["sourceTree"],"workflowSha256":workflow_hash,"runId":run,"attempt":attempt,"ref":REFERENCE,
+            "coreZipSha256":zip_hash,"coreInventorySha256":hash(&serde_json::to_vec(rows).map_err(|_| Failure::SourceBindingMismatch)?)}))
+    }
+    impl Admitted {
+        fn admit(eof:bool) -> Check<Self> {
+            FIXTURE_FILES.admit()?;
+            require(environment("MRK_DESKTOP_RELEASE_VERSION_HOSTED_CHECKS")? == "release-version-v1"
+                && environment("GITHUB_ACTIONS")? == "true" && environment("RUNNER_ENVIRONMENT")? == "github-hosted"
+                && environment("RUNNER_OS")? == "Linux" && environment("RUNNER_ARCH")? == "X64"
+                && crate::runtime::COMPILED_TARGET == "x86_64-unknown-linux-gnu"
+                && rustix::process::getuid().as_raw() != 0 && rustix::process::getuid() == rustix::process::geteuid(),Failure::HostedGuardRefused)?;
+            let mode = match environment("MRK_DESKTOP_RELEASE_VERSION_INPUT")?.as_str() {
+                "source" => Mode::Source,"zip" if !eof => Mode::Zip,_ => return Err(Failure::HostedGuardRefused),
+            };
+            let temporary = canonical_input("RUNNER_TEMP",false)?;
+            let root = canonical_input("MRK_DESKTOP_EDIT_TEST_ROOT",true)?;
+            let task = root.parent().ok_or(Failure::HostedGuardRefused)?;
+            let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).canonicalize().map_err(|_| Failure::HostedGuardRefused)?;
+            let repository = manifest.parent().and_then(Path::parent).ok_or(Failure::HostedGuardRefused)?.to_path_buf();
+            let name = if eof { "version-transaction-eof" } else if mode == Mode::Source { "version-owner-source" } else { "version-owner-zip" };
+            require(root.file_name().and_then(|name| name.to_str()) == Some(name) && task != temporary && task.starts_with(&temporary)
+                && std::env::current_dir().map_err(|_| Failure::HostedGuardRefused)? == manifest
+                && !root.starts_with(&repository) && !repository.starts_with(&root),Failure::HostedGuardRefused)?;
+            let stat = fs::symlink_metadata(&root).map_err(|_| Failure::HostedGuardRefused)?;
+            require(stat.is_dir() && stat.mode() & 0o7777 == 0o700 && stat.uid() == rustix::process::geteuid().as_raw()
+                && stat.gid() == rustix::process::getegid().as_raw()
+                && fs::read_dir(&root).map_err(|_| Failure::HostedGuardRefused)?.next().is_none(),Failure::HostedGuardRefused)?;
+            let python = canonical_input("MRK_DESKTOP_DEV_PYTHON",true)?;
+            let core = canonical_input("MRK_DESKTOP_DEV_CORE",true)?;
+            require(core == if mode == Mode::Source { repository.join("src") } else { task.join("core.zip") }
+                && !python.starts_with(task) && !python.starts_with(&repository),Failure::HostedGuardRefused)?;
+            let sha = environment("GITHUB_SHA")?;
+            require(sha.len() == 40 && sha != "0".repeat(40) && sha.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+                && environment("MRK_DESKTOP_EDIT_SOURCE_SHA")? == sha && option_env!("GITHUB_SHA") == Some(sha.as_str()),Failure::SourceBindingMismatch)?;
+            let mut sources = serde_json::Map::new();
+            for item in SOURCES.iter().chain(EXTRA_SOURCES).chain(if eof { std::slice::from_ref(&EOF_SOURCE) } else { &[] }) {
+                let expected = hash(item.compiled);
+                require(hash(&read_regular(&repository.join(item.relative),2*1024*1024)?.bytes) == expected
+                    && sources.insert(item.id.into(),json!(expected)).is_none(),Failure::SourceBindingMismatch)?;
+            }
+            let mut bindings = core_binding(&repository,task,&sha)?;
+            bindings["sourceSha"] = json!(sha); bindings["domain"] = json!(DOMAIN); bindings["host"] = json!("linux");
+            bindings["target"] = json!(crate::runtime::COMPILED_TARGET); bindings["runtimeMode"] = json!("trusted-development-only");
+            bindings["runtimeInput"] = json!(mode.name()); bindings["pythonSha256"] = json!(hash(&read_regular(&python,64*1024*1024)?.bytes));
+            bindings["sourceHashes"] = json!(sources); bindings["payloadHashes"] = payload_bindings();
+            bindings["versionResourceSha256"] = json!(hash(RESOURCE)); bindings["schemaResourceSha256"] = json!(hash(SCHEMA));
+            bindings["inheritedFileMaskObserved"] = json!(true); bindings["requestedCreateMode"] = json!(420);
+            bindings["observedCreateMode"] = json!(384); bindings["newDirectoryMode"] = json!(493);
+            bindings["documentEvidence"] = json!("controlled-original-lifetime-not-gui-callbacks");
+            let roots=if eof { EOF_CASES.iter().map(|case| root.join(case.name())).collect() }
+                else if mode==Mode::Zip { vec![root.join(Case::Edit.name())] }
+                else { SOURCE_CASES.iter().map(|case| root.join(case.name())).chain([root.join("registration-apply-extra")]).collect() };
+            let mut probe = fs::OpenOptions::new().create_new(true).write(true).mode(0o644).open(root.join("umask-check")).map_err(|_| Failure::FixtureIo)?;
+            FIXTURE_FILES.acquired(); let wrote=probe.write_all(UMASK_PROBE); FIXTURE_FILES.close_original(probe)?;
+            require(wrote.is_ok(),Failure::FixtureIo)?;
+            let observed=read_regular(&root.join("umask-check"),128)?;
+            require(observed.bytes == UMASK_PROBE && observed.identity.mode & 0o7777 == 0o600,Failure::HostedGuardRefused)?;
+            Ok(Self { inputs:Inputs { root,identity:Identity::of(&stat),bindings },mode,eof,python,core,repository,roots })
+        }
+        fn permit(&self,owner:&EditOwner) -> Check<()> {
+            self.inputs.same_root()?;
+            require(owner.can_exit() && !owner.disabled() && !owner.inner.hosted_qualified(EditDomain::ReleaseVersion),Failure::HostedGuardRefused)?;
+            let mut slot=owner.inner.fixture_version.lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+            require(slot.is_none(),Failure::HostedGuardRefused)?;
+            *slot=Some(Arc::new(VersionFixturePermit { owner:Arc::downgrade(&owner.inner),roots:self.roots.clone(),
+                python:self.python.clone(),core:self.core.clone(),bootstrap:self.repository.join("desktop/config_edit_bootstrap.py"),
+                cwd:self.repository.join("desktop"),binding_sha256:hash(&serde_json::to_vec(&self.inputs.bindings).map_err(|_| Failure::SourceBindingMismatch)?),
+                zip:self.mode==Mode::Zip,eof:self.eof }));
+            Ok(())
+        }
+    }
+    struct Original { batch:Batch,bridge:Arc<DesktopBridge>,document:DocumentBinding,passive:Arc<Probe>,queries:Vec<Value>,consumed_plan:Option<(String,String)> }
+    impl Original {
+        fn new(input:&Admitted) -> Check<Self> {
+            let bridge=Arc::new(DesktopBridge::new(input.inputs.root.clone()));
+            let owner=bridge.edits.clone();
+            let passive=Arc::new(Probe::attach(&bridge.supervisor).map_err(|_| Failure::OriginalCustodyUnknown)?);
+            {
+                let mut retained=RETAINED.lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+                require(retained.is_none(),Failure::OriginalCustodyUnknown)?;
+                let mut retention=Retention::new(&owner);
+                retention.metadata_passive=Some((bridge.clone(),passive.clone()));
+                *retained=Some(retention); // Before any real passive/edit query.
+            }
+            input.permit(&owner)?;
+            let document=DocumentBinding::new(bridge.clone());
+            require(document.navigation(true),Failure::NativeCommandRejected)?;
+            document.observe(|life| life.started(true)); document.hook_installed(); document.observe(|life| life.finished(true));
+            require(owner.release_version_status().is_ok_and(|status| status.capability.available)
+                && !owner.inner.hosted_qualified(EditDomain::Configuration) && !owner.inner.hosted_qualified(EditDomain::GitHubWorkflows)
+                && !owner.inner.hosted_qualified(EditDomain::MetadataText),Failure::NativeCommandRejected)?;
+            Ok(Self { batch:Batch { owner,originals:Vec::new(),missing_original:false,cases:Vec::new() },bridge,document,passive,queries:Vec::new(),consumed_plan:None })
+        }
+        fn settled(&self) -> bool {
+            FIXTURE_FILES.all_settled() && probes_settled() && self.passive.settled() && !self.batch.missing_original
+                && self.batch.owner.can_exit() && self.batch.originals.iter().all(|original| match original.fixture_schedule.eof_case() {
+                    Some(case) => original_eof_facts(original,case).is_ok(),None => original_facts(original).is_ok(),
+                })
+        }
+        fn register(&self,root:&Path) -> Check<Project> {
+            require(FIXTURE_FILES.all_settled() && probes_settled() && self.passive.settled(),Failure::OriginalCustodyUnknown)?;
+            let generation=self.bridge.native_generation().map_err(|_| Failure::NativeCommandRejected)?;
+            let (proof,settled)={
+                let mut books=PROBES.lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+                require(books.len() < 16,Failure::OriginalCustodyUnknown)?;
+                books.push(SourceBook::new()); // Retain the original before acquisition.
+                let book=books.last_mut().ok_or(Failure::OriginalCustodyUnknown)?;
+                let proof=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+                    asset_source::probe_project(book,root.to_path_buf(),&[],&mut || false))).map_err(|_| Failure::OriginalCustodyUnknown)?;
+                (proof,book.settled())
+            };
+            require(settled,Failure::OriginalCustodyUnknown)?;
+            let project=self.document.version_fixture_publish(proof.map_err(|_| Failure::NativeCommandRejected)?,generation)
+                .map_err(|_| Failure::NativeCommandRejected)?;
+            let (_,registered)=self.bridge.native_project(&project.id).map_err(|_| Failure::UnexpectedStatus)?;
+            let stat=fs::symlink_metadata(root).map_err(|_| Failure::FixtureIo)?;
+            let identity=registered.identity.posix().map_err(|_| Failure::PayloadMismatch)?.workflow_identity();
+            require(registered.path == root && identity.device == stat.dev().to_string() && identity.inode == stat.ino().to_string()
+                && identity.mode == stat.mode() && identity.uid == stat.uid() && identity.gid == stat.gid(),Failure::PayloadMismatch)?;
+            Ok(project)
+        }
+        fn retain_open(&mut self) -> Check<Arc<Session>> {
+            let original={
+                let registry=self.batch.owner.inner.lock();
+                if registry.last.as_ref().is_some_and(|last| !self.batch.originals.iter().any(|original| original.id == last.session_id)) {
+                    self.batch.missing_original=true;
+                }
+                registry.active.as_ref().map(|active| active.session.clone())
+            };
+            let original=original.ok_or_else(|| { self.batch.missing_original=true; Failure::OriginalCustodyUnknown })?;
+            self.batch.originals.push(original.clone());
+            RETAINED.lock().map_err(|_| Failure::OriginalCustodyUnknown)?.as_mut().ok_or(Failure::OriginalCustodyUnknown)?.originals.push(original.clone());
+            Ok(original)
+        }
+        fn open(&mut self,project:&Project) -> Check<Arc<Session>> {
+            require(self.settled() && !self.batch.owner.disabled(),Failure::OriginalCustodyUnknown)?;
+            let reply=self.bridge.open_release_version_edit(&self.document,"main",open_args(project));
+            let original=self.retain_open()?;
+            let status=reply.map_err(|_| Failure::NativeCommandRejected)?;
+            require(select(&status,&original.id)?.phase == Phase::Opening && original.domain == EditDomain::ReleaseVersion,Failure::UnexpectedStatus)?;
+            Ok(original)
+        }
+
+        async fn observe(&mut self,project:&Project) -> Check<Value> {
+            require(self.settled() && !self.batch.owner.disabled(),Failure::OriginalCustodyUnknown)?;
+            let reply=self.bridge.observe_release_version(&self.document,crate::release_version_protocol::Request { project_id:project.id.clone() }).await;
+            self.queries.push(self.passive.next(Method::ReleaseVersionObserve,None).await.map_err(|_| Failure::OriginalCustodyUnknown)?);
+            serde_json::to_value(reply.map_err(|_| Failure::UnexpectedOutcome)?).map_err(|_| Failure::PayloadMismatch)
+        }
+        async fn stop(&self) {
+            let _=self.batch.owner.shutdown().await;
+            if !self.passive.settled() { let _=self.bridge.supervisor.shutdown().await; }
+        }
+    }
+    fn select(status:&ReleaseVersionEditStatus,id:&str) -> Check<version_wire::Projection> {
+        require(status.domain == DOMAIN,Failure::UnexpectedStatus)?;
+        status.active.as_ref().filter(|p| p.session_id == id).or_else(|| status.last_terminal.as_ref().filter(|p| p.session_id == id))
+            .cloned().ok_or(Failure::UnexpectedStatus)
+    }
+    async fn observed_version(owner:&EditOwner,id:&str,desired:Phase,expected_unknown:bool) -> Check<version_wire::Projection> {
+        let end=Instant::now()+OBSERVATION; let mut revisions=owner.subscribe();
+        loop {
+            let status=owner.release_version_status().map_err(|_| Failure::OriginalCustodyUnknown)?;
+            let current=select(&status,id)?;
+            if !expected_unknown {
+                require(!owner.disabled() && current.phase != Phase::Unknown && current.native_finality != NativeFinality::Unknown
+                    && !current.late_settled,Failure::OriginalCustodyUnknown)?;
+            }
+            if current.phase == desired && (!expected_unknown || status.active.is_none()) { return Ok(current); }
+            require(current.phase != Phase::Final,Failure::UnexpectedStatus)?;
+            tokio::select! {
+                result=revisions.changed() => { result.map_err(|_| Failure::UnexpectedStatus)?; },
+                _=tokio::time::sleep_until(tokio::time::Instant::from_std(end)) => return Err(Failure::ObservationTimeout),
+            }
+        }
+    }
+
+    #[derive(Clone,Copy,PartialEq,Eq)]
+    struct Stamp { modified:i64,modified_ns:i64,changed:i64,changed_ns:i64 }
+    impl Stamp { fn of(value:&fs::Metadata) -> Self { Self { modified:value.mtime(),modified_ns:value.mtime_nsec(),changed:value.ctime(),changed_ns:value.ctime_nsec() } } }
+    #[derive(PartialEq,Eq)]
+    struct RawFile { original:OriginalFile,stamp:Stamp }
+    #[derive(PartialEq,Eq)]
+    struct Snapshot { files:std::collections::BTreeMap<String,RawFile>,directories:std::collections::BTreeMap<String,Identity> }
+    fn raw_file(path:&Path,limit:u64) -> Check<RawFile> {
+        FIXTURE_FILES.admit()?;
+        let before=fs::symlink_metadata(path).map_err(|_| Failure::FixtureIo)?;
+        let original=read_regular(path,limit)?;
+        let after=fs::symlink_metadata(path).map_err(|_| Failure::FixtureIo)?;
+        require(Identity::of(&before) == original.identity && Identity::of(&after) == original.identity
+            && Stamp::of(&before) == Stamp::of(&after),Failure::PayloadMismatch)?;
+        Ok(RawFile { original,stamp:Stamp::of(&before) })
+    }
+    fn mkdir(path:&Path) -> Check<()> {
+        FIXTURE_FILES.admit()?; fs::DirBuilder::new().mode(0o700).create(path).map_err(|_| Failure::FixtureIo)
+    }
+    fn ancestors(relative:&str) -> Vec<String> {
+        let mut result=Vec::new(); let mut path=String::new();
+        for part in relative.split('/') { if !path.is_empty() { path.push('/'); } path.push_str(part); result.push(path.clone()); }
+        result
+    }
+    fn seed_parent(root:&Path,parent:&str) -> Check<()> {
+        for name in ancestors(parent) {
+            FIXTURE_FILES.admit()?;
+            match fs::symlink_metadata(root.join(&name)) {
+                Ok(stat) => require(stat.is_dir(),Failure::FixtureIo)?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => mkdir(&root.join(name))?,
+                Err(_) => return Err(Failure::FixtureIo),
+            }
+        }
+        Ok(())
+    }
+
+    fn fixture_roster() -> (BTreeSet<String>,BTreeSet<String>) {
+        let directories=["","release",".github",".github/workflows","public","public/version-tree"]
+            .into_iter().map(str::to_owned).collect();
+        let leaves=[".gitignore","unrelated.txt","release/mobile-release.json","release/other.txt",".github/workflows/unrelated.txt",
+            "public/version.properties","public/version-tree/version.properties","release/version.properties","public/unrelated.txt"]
+            .into_iter().map(str::to_owned).collect();
+        (directories,leaves)
+    }
+    fn snapshot(root:&Path) -> Check<Snapshot> {
+        let (allowed_directories,allowed_files)=fixture_roster();
+        let mut directories=std::collections::BTreeMap::new(); let mut files=std::collections::BTreeMap::new();
+        let mut pending=vec![String::new()];
+        while let Some(relative)=pending.pop() {
+            FIXTURE_FILES.admit()?;
+            require(allowed_directories.contains(&relative) && directories.len() < 6,Failure::PayloadMismatch)?;
+            let path=root.join(&relative); let stat=fs::symlink_metadata(&path).map_err(|_| Failure::FixtureIo)?;
+            require(stat.is_dir(),Failure::PayloadMismatch)?; directories.insert(relative.clone(),Identity::of(&stat));
+            let mut count=0;
+            for entry in fs::read_dir(path).map_err(|_| Failure::FixtureIo)? {
+                count+=1; require(count <= 12,Failure::PayloadMismatch)?;
+                let name=entry.map_err(|_| Failure::FixtureIo)?.file_name().into_string().map_err(|_| Failure::PayloadMismatch)?;
+                let child=if relative.is_empty() { name } else { format!("{relative}/{name}") };
+                let stat=fs::symlink_metadata(root.join(&child)).map_err(|_| Failure::FixtureIo)?;
+                if stat.is_dir() { require(allowed_directories.contains(&child),Failure::PayloadMismatch)?; pending.push(child); }
+                else {
+                    require(allowed_files.contains(&child) && files.len() < 9,Failure::PayloadMismatch)?;
+                    let file=raw_file(&root.join(&child),1024*1024)?;
+                    require(files.insert(child,file).is_none(),Failure::PayloadMismatch)?;
+                }
+            }
+        }
+        Ok(Snapshot { files,directories })
+    }
+
+    fn seed_common(root:&Path,selection:Selection) -> Check<()> {
+        mkdir(root)?; mkdir(&root.join("release"))?;
+        write_new(&root.join("release/mobile-release.json"),selection.config(),0o440)?;
+        write_new(&root.join(".gitignore"),IGNORE,0o400)?;
+        write_new(&root.join("unrelated.txt"),UNRELATED,0o400)?; write_new(&root.join("release/other.txt"),UNRELATED,0o400)?;
+        mkdir(&root.join(".github"))?; mkdir(&root.join(".github/workflows"))?;
+        write_new(&root.join(".github/workflows/unrelated.txt"),UNRELATED,0o400)
+    }
+    fn seed(input:&Admitted,case:Case) -> Check<PathBuf> {
+        input.inputs.same_root()?; let selection=case.selection(); let root=input.inputs.root.join(case.name());
+        seed_common(&root,selection)?;
+        if case!=Case::Create {
+            seed_parent(&root,selection.parent())?;
+            write_new(&root.join(selection.source()),if case==Case::Noop { EDITED } else { ORIGINAL },0o640)?;
+        }
+        Ok(root)
+    }
+    fn rewrite_original(path:&Path,old:&RawFile,bytes:&[u8]) -> Check<()> {
+        FIXTURE_FILES.admit()?;
+        let mut file=fs::OpenOptions::new().write(true).custom_flags(nix::libc::O_NOFOLLOW).open(path).map_err(|_| Failure::FixtureIo)?;
+        FIXTURE_FILES.acquired();
+        let result=(|| {
+            let opened=file.metadata().map_err(|_| Failure::FixtureIo)?;
+            require(Identity::of(&opened) == old.original.identity && Stamp::of(&opened) == old.stamp,Failure::PayloadMismatch)?;
+            file.set_len(0).map_err(|_| Failure::FixtureIo)?; file.write_all(bytes).map_err(|_| Failure::FixtureIo)
+        })();
+        FIXTURE_FILES.close_original(file)?; result
+    }
+
+    fn baseline(before:&Snapshot,selection:Selection) -> Check<version_wire::Baseline> {
+        let config=&before.files.get("release/mobile-release.json").ok_or(Failure::PayloadMismatch)?.original;
+        let saved_version=match before.files.get(selection.source()) {
+            Some(file)=>version_wire::BaselineFile::Present { bytes:file.original.bytes.len() as u32,sha256:hash(&file.original.bytes) },
+            None=>version_wire::BaselineFile::Absent {},
+        };
+        Ok(version_wire::Baseline { saved_config:version_wire::ContentDigest { bytes:config.bytes.len() as u32,sha256:hash(&config.bytes) },saved_version })
+    }
+    fn observed_pair(before:&Snapshot,selection:Selection,value:&Value) -> Check<version_wire::Baseline> {
+        let expected=baseline(before,selection)?;
+        let saved=&before.files.get(selection.source()).ok_or(Failure::PayloadMismatch)?.original.bytes;
+        let current=if saved==ORIGINAL || saved==EOF_ORIGINAL { json!({"name":"1.2.3","build":7}) }
+            else if saved==EDITED || saved==EOF_EDITED || saved==CREATED { json!({"name":"2.3.4","build":8}) }
+            else { return Err(Failure::PayloadMismatch); };
+        require(*value==json!({"schemaVersion":2,"source":selection.source(),"version":current,
+            "savedConfig":expected.saved_config,"savedVersion":{"bytes":saved.len(),"sha256":hash(saved)},
+            "observationScope":"single-request-non-atomic","assurance":{"basis":"static-text","projectCodeExecuted":false,
+                "toolsProbed":false,"credentialsRead":false,"gitObserved":false,"storeContacted":false,"writesPerformed":false,"releaseReadiness":"unknown"}}),
+            Failure::UnexpectedOutcome)?;
+        Ok(expected)
+    }
+    fn prepare_args(id:&str,revision:&str,expected:&version_wire::Baseline) -> PrepareReleaseVersionEdit {
+        PrepareReleaseVersionEdit { session_id:id.into(),revision:revision.into(),expected_baseline:expected.clone(),
+            intent:expected.saved_version.intent(),values:values(),draft_revision:1,baseline_generation:0 }
+    }
+    async fn prepare(original:&Original,id:&str,checkout:&version_wire::Checkout,expected:&version_wire::Baseline) -> Check<version_wire::Prepared> {
+        let reply=original.bridge.prepare_release_version_edit(&original.document,"main",prepare_args(id,&checkout.revision,expected))
+            .map_err(|_| Failure::NativeCommandRejected)?;
+        require(select(&reply,id)?.phase==Phase::Preparing,Failure::UnexpectedStatus)?;
+        observed_version(&original.batch.owner,id,Phase::Reviewing,false).await?.prepared.ok_or(Failure::UnexpectedOutcome)
+    }
+    fn desired(before:&Snapshot,selection:Selection) -> Check<&'static [u8]> {
+        Ok(match before.files.get(selection.source()) {
+            None=>CREATED,
+            Some(file) if file.original.bytes==ORIGINAL || file.original.bytes==EDITED=>EDITED,
+            Some(file) if file.original.bytes==EOF_ORIGINAL=>EOF_EDITED,
+            _=>return Err(Failure::PayloadMismatch),
+        })
+    }
+    fn verify_plan(before:&Snapshot,selection:Selection,checkout:&version_wire::Checkout,plan:&version_wire::Prepared) -> Check<Vec<String>> {
+        let old=before.files.get(selection.source()); let after=desired(before,selection)?;
+        let action=match old { None=>version_wire::Action::Create,Some(file) if file.original.bytes==after=>version_wire::Action::Preserve,
+            Some(_)=>version_wire::Action::Replace };
+        let before_matches=match (&plan.view.file.before,old) {
+            (version_wire::Before::Absent {},None)=>true,
+            (version_wire::Before::Present { text,bytes,sha256 },Some(file))=>text.as_bytes()==file.original.bytes
+                && *bytes as usize==file.original.bytes.len() && *sha256==hash(&file.original.bytes),_=>false,
+        };
+        let created:Vec<String>=ancestors(selection.parent()).into_iter().filter(|name| !before.directories.contains_key(name)).collect();
+        let expected_styles=if old.is_some() { vec![version_wire::LineStyle::Crlf,version_wire::LineStyle::Lf] } else { vec![] };
+        require(checkout.baseline==baseline(before,selection)? && checkout.source==selection.source()
+            && checkout.name_key=="VERSION_NAME" && checkout.build_key=="BUILD_NUMBER" && checkout.ios_enabled
+            && plan.revision==checkout.revision && plan.draft_revision==1 && plan.baseline_generation==0
+            && plan.view.schema_version==1 && plan.view.source==checkout.source && plan.view.name_key==checkout.name_key
+            && plan.view.build_key==checkout.build_key && plan.view.ios_enabled==checkout.ios_enabled
+            && plan.view.intent==checkout.baseline.saved_version.intent() && plan.view.values==values()
+            && plan.view.file.path==selection.source() && plan.view.file.action==action && before_matches
+            && plan.view.file.after.text.as_bytes()==after && plan.view.file.after.bytes as usize==after.len()
+            && plan.view.file.after.sha256==hash(after) && plan.view.file.preserve_mode==old.is_some()
+            && plan.view.file.requested_mode==old.map_or(0o644,|file| file.original.identity.mode&0o777)
+            && plan.view.create_directories==created && plan.view.line_endings.before==expected_styles
+            && plan.view.line_endings.after==if old.is_some() { expected_styles } else { vec![version_wire::LineStyle::Lf] }
+            && !plan.view.line_endings.final_newline_before && plan.view.line_endings.final_newline_after==old.is_none()
+            && plan.view.line_endings.preserved==old.is_some() && plan.view.validation.valid
+            && plan.view.validation.state=="format-valid" && plan.view.validation.issues.is_empty(),Failure::UnexpectedOutcome)?;
+        Ok(created)
+    }
+    fn installed(root:&Path,before:&Snapshot,selection:Selection,created:&[String]) -> Check<()> {
+        let after=snapshot(root)?;
+        require(before.directories.iter().all(|(name,old)| after.directories.get(name)==Some(old)),Failure::PayloadMismatch)?;
+        for (name,old) in &before.files {
+            if name!=selection.source() { require(after.files.get(name)==Some(old),Failure::PayloadMismatch)?; }
+        }
+        let file=after.files.get(selection.source()).ok_or(Failure::PayloadMismatch)?; let bytes=desired(before,selection)?;
+        require(file.original.bytes==bytes,Failure::PayloadMismatch)?;
+        match before.files.get(selection.source()) {
+            Some(old) if old.original.bytes==bytes=>require(file==old,Failure::PayloadMismatch)?,
+            Some(old)=>require(file.original.identity.device==old.original.identity.device && file.original.identity.inode!=old.original.identity.inode
+                && file.original.identity.mode==old.original.identity.mode && file.original.identity.owner==old.original.identity.owner
+                && file.original.identity.group==old.original.identity.group,Failure::PayloadMismatch)?,
+            None=>require(file.original.identity.mode&0o7777==0o600 && file.original.identity.owner==rustix::process::geteuid().as_raw()
+                && file.original.identity.group==rustix::process::getegid().as_raw(),Failure::PayloadMismatch)?,
+        }
+        for name in created { require(after.directories.get(name).is_some_and(|id| id.mode&0o7777==0o755
+            && id.owner==rustix::process::geteuid().as_raw() && id.group==rustix::process::getegid().as_raw()),Failure::PayloadMismatch)?; }
+        require(after.files.len()==before.files.len()+usize::from(!before.files.contains_key(selection.source()))
+            && after.directories.len()==before.directories.len()+created.len(),Failure::PayloadMismatch)
+    }
+    fn restored(root:&Path,before:&Snapshot) -> Check<()> {
+        let after=snapshot(root)?;
+        // Own rename/restore may change ctime. Compare original identity, mode,
+        // owner, group, bytes and mtime, not a false old-ctime requirement.
+        require(after.directories == before.directories && after.files.len() == before.files.len()
+            && before.files.iter().all(|(name,old)| after.files.get(name).is_some_and(|new| new.original == old.original
+                && new.stamp.modified == old.stamp.modified && new.stamp.modified_ns == old.stamp.modified_ns)),Failure::PayloadMismatch)
+    }
+
+    fn settled_terminal(owner:&EditOwner,terminal:&version_wire::Projection) -> Check<()> {
+        require(terminal.phase == Phase::Final && terminal.native_finality == NativeFinality::Settled && !terminal.late_settled
+            && owner.can_exit() && !owner.disabled(),Failure::OriginalCustodyUnknown)
+    }
+    fn correlated(terminal:&version_wire::Projection,editing:&version_wire::Projection,plan:&version_wire::Prepared) -> Check<()> {
+        require(terminal.domain == DOMAIN && terminal.owner_generation == editing.owner_generation && terminal.session_id == editing.session_id
+            && terminal.project_id == editing.project_id
+            && terminal.checkout.as_ref().is_some_and(|checkout| editing.checkout.as_ref().is_some_and(|old|
+                checkout.revision == old.revision && checkout.source == old.source && checkout.baseline == old.baseline))
+            && terminal.prepared.as_ref().is_some_and(|retained| retained.plan_token == plan.plan_token && retained.revision == plan.revision
+                && retained.draft_revision == plan.draft_revision && retained.baseline_generation == plan.baseline_generation
+                && matches!((serde_json::to_value(&retained.view),serde_json::to_value(&plan.view)),(Ok(actual),Ok(expected)) if actual==expected)),Failure::UnexpectedOutcome)
+    }
+    fn native_data(session:&Session,terminal:&version_wire::Projection,eof:Option<EofCase>) -> Check<Value> {
+        let facts=if let Some(case)=eof { original_eof_facts(session,case)? } else { original_facts(session)? };
+        require(terminal.session_id == session.id && session.domain == EditDomain::ReleaseVersion,Failure::UnexpectedStatus)?;
+        let mut value=serde_json::to_value(facts).map_err(|_| Failure::ReceiptIo)?;
+        value["domain"]=json!(DOMAIN); value["nativePhase"]=json!(terminal.phase); value["nativeFinality"]=json!(terminal.native_finality);
+        value["nativeReason"]=json!(terminal.native_reason); value["applySubmitted"]=json!(terminal.apply_submitted);
+        value["lateSettled"]=json!(terminal.late_settled); value["outcome"]=json!(terminal.core_outcome);
+        value["terminalSeq"]=json!(session.fixture_schedule.sequence());
+        value["checkoutRetained"]=json!(terminal.checkout.is_some()); value["preparedRetained"]=json!(terminal.prepared.is_some());
+        Ok(value)
+    }
+
+    fn row(original:&mut Original,name:&str,selection:Selection,native:Value,observations:Value) -> Check<()> {
+        require(original.settled(),Failure::OriginalCustodyUnknown)?;
+        original.batch.cases.push(json!({"name":name,"domain":DOMAIN,"source":selection.source(),
+            "native":native,"passive":std::mem::take(&mut original.queries),"observations":observations}));
+        Ok(())
+    }
+    fn statuses(original:&Original,id:&str,domain:EditDomain) -> Check<()> {
+        let config=original.batch.owner.status().map_err(|_| Failure::UnexpectedStatus)?;
+        let workflow=original.batch.owner.workflow_status().map_err(|_| Failure::UnexpectedStatus)?;
+        let metadata=original.batch.owner.metadata_text_status().map_err(|_| Failure::UnexpectedStatus)?;
+        let version=original.batch.owner.release_version_status().map_err(|_| Failure::UnexpectedStatus)?;
+        require(config.status_revision==workflow.status_revision && workflow.status_revision==metadata.status_revision
+            && metadata.status_revision==version.status_revision && config.window_generation==workflow.window_generation
+            && workflow.window_generation==metadata.window_generation && metadata.window_generation==version.window_generation
+            && config.active.as_ref().map(|p| p.session_id.as_str())==(domain==EditDomain::Configuration).then_some(id)
+            && workflow.active.as_ref().map(|p| p.session_id.as_str())==(domain==EditDomain::GitHubWorkflows).then_some(id)
+            && metadata.active.as_ref().map(|p| p.session_id.as_str())==(domain==EditDomain::MetadataText).then_some(id)
+            && version.active.as_ref().map(|p| p.session_id.as_str())==(domain==EditDomain::ReleaseVersion).then_some(id),Failure::UnexpectedStatus)?;
+        for (candidate,capability) in [(EditDomain::Configuration,config.capability),(EditDomain::GitHubWorkflows,workflow.capability),
+            (EditDomain::MetadataText,metadata.capability),(EditDomain::ReleaseVersion,version.capability)] {
+            require(capability.reason==if candidate==domain { EditAvailability::Available } else { EditAvailability::OtherEditActive },Failure::UnexpectedStatus)?;
+        }
+        let last=original.batch.owner.inner.lock().last.as_ref().map(|p| (p.domain,p.session_id.clone()));
+        require(config.last_terminal.as_ref().map(|p| p.session_id.as_str())==last.as_ref().filter(|(d,_)| *d==EditDomain::Configuration).map(|(_,id)| id.as_str())
+            && workflow.last_terminal.as_ref().map(|p| p.session_id.as_str())==last.as_ref().filter(|(d,_)| *d==EditDomain::GitHubWorkflows).map(|(_,id)| id.as_str())
+            && metadata.last_terminal.as_ref().map(|p| p.session_id.as_str())==last.as_ref().filter(|(d,_)| *d==EditDomain::MetadataText).map(|(_,id)| id.as_str())
+            && version.last_terminal.as_ref().map(|p| p.session_id.as_str())==last.as_ref().filter(|(d,_)| *d==EditDomain::ReleaseVersion).map(|(_,id)| id.as_str()),Failure::UnexpectedStatus)
+    }
+    fn opposite_commands(original:&Original,project:&Project,session:&Arc<Session>,revision:&str,
+        expected:&version_wire::Baseline,domain:EditDomain) -> Check<()> {
+        const TOKEN:&str="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        statuses(original,&session.id,domain)?;
+        if domain!=EditDomain::Configuration {
+            require(original.bridge.open_config_edit("main",project.id.clone()).is_err()
+                && original.batch.owner.prepare("main",PrepareConfigEdit { session_id:session.id.clone(),revision:revision.into(),expected_base:Value::Null,
+                    draft:document(),draft_revision:1,baseline_generation:0 }).is_err()
+                && original.batch.owner.apply("main",&session.id,TOKEN).is_err(),Failure::UnexpectedStatus)?;
+        }
+        if domain!=EditDomain::GitHubWorkflows {
+            require(original.bridge.open_workflow_edit(&original.document,"main",project.id.clone()).is_err()
+                && original.bridge.prepare_workflow_edit(&original.document,"main",PrepareWorkflowEdit { session_id:session.id.clone(),revision:revision.into(),
+                    draft:document(),tooling_repository:"Example/mobile-release-kit".into(),tooling_sha:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                    draft_revision:1,baseline_generation:0 }).is_err()
+                && original.bridge.apply_workflow_edit(&original.document,"main",&session.id,TOKEN).is_err(),Failure::UnexpectedStatus)?;
+        }
+        if domain!=EditDomain::MetadataText {
+            let platform=metadata_wire::Platform::Android;
+            let fields=platform.ids().iter().map(|id| metadata_wire::TextField { id:*id,text:"Fixed public value".into() }).collect();
+            require(original.bridge.open_metadata_text_edit(&original.document,"main",crate::metadata_text_commands::Open {
+                    project_id:project.id.clone(),platform,locale:"en-US".into() }).is_err()
+                && original.bridge.prepare_metadata_text_edit(&original.document,"main",PrepareMetadataTextEdit {
+                    session_id:session.id.clone(),revision:revision.into(),expected_baseline:metadata_wire::Baseline {
+                        config:metadata_wire::ContentDigest { byte_length:expected.saved_config.bytes,sha256:expected.saved_config.sha256.clone() },
+                        fields:platform.ids().iter().map(|id| metadata_wire::BaselineField::Absent { id:*id }).collect() },
+                    fields,draft_revision:1,baseline_generation:0 }).is_err()
+                && original.bridge.apply_metadata_text_edit(&original.document,"main",&session.id,TOKEN).is_err(),Failure::UnexpectedStatus)?;
+        }
+        if domain!=EditDomain::ReleaseVersion {
+            require(original.bridge.open_release_version_edit(&original.document,"main",open_args(project)).is_err()
+                && original.bridge.prepare_release_version_edit(&original.document,"main",prepare_args(&session.id,revision,expected)).is_err()
+                && original.bridge.apply_release_version_edit(&original.document,"main",&session.id,TOKEN).is_err(),Failure::UnexpectedStatus)?;
+        }
+        let registry=original.batch.owner.inner.lock(); let active=registry.active.as_ref().ok_or(Failure::OriginalCustodyUnknown)?;
+        require(Arc::ptr_eq(&active.session,session) && active.session.domain==domain && active.claimed_seq==0
+            && active.prepare_counters.is_none() && !active.prepared && !active.projection.apply_submitted && active.cleanup_start.is_none(),Failure::UnexpectedStatus)
+    }
+
+    fn select_metadata(status:&MetadataTextEditStatus,id:&str) -> Check<metadata_wire::Projection> {
+        require(status.domain == "metadata_text",Failure::UnexpectedStatus)?;
+        status.active.as_ref().filter(|p| p.session_id == id).or_else(|| status.last_terminal.as_ref().filter(|p| p.session_id == id))
+            .cloned().ok_or(Failure::UnexpectedStatus)
+    }
+    async fn observed_metadata(owner:&EditOwner,id:&str,desired:Phase,expected_unknown:bool) -> Check<metadata_wire::Projection> {
+        let end=Instant::now()+OBSERVATION; let mut revisions=owner.subscribe();
+        loop {
+            let status=owner.metadata_text_status().map_err(|_| Failure::OriginalCustodyUnknown)?;
+            let current=select_metadata(&status,id)?;
+            if !expected_unknown {
+                require(!owner.disabled() && current.phase != Phase::Unknown && current.native_finality != NativeFinality::Unknown
+                    && !current.late_settled,Failure::OriginalCustodyUnknown)?;
+            }
+            if current.phase == desired && (!expected_unknown || status.active.is_none()) { return Ok(current); }
+            require(current.phase != Phase::Final,Failure::UnexpectedStatus)?;
+            tokio::select! {
+                result=revisions.changed() => { result.map_err(|_| Failure::UnexpectedStatus)?; },
+                _=tokio::time::sleep_until(tokio::time::Instant::from_std(end)) => return Err(Failure::ObservationTimeout),
+            }
+        }
+    }
+    async fn workflow_observed(owner:&EditOwner,id:&str,desired:Phase) -> Check<workflow_wire::Projection> {
+        let end=Instant::now()+OBSERVATION; let mut revisions=owner.subscribe();
+        loop {
+            let status=owner.workflow_status().map_err(|_| Failure::OriginalCustodyUnknown)?;
+            let current=status.active.as_ref().filter(|p| p.session_id == id).or_else(|| status.last_terminal.as_ref().filter(|p| p.session_id == id))
+                .cloned().ok_or(Failure::UnexpectedStatus)?;
+            require(!owner.disabled() && current.native_finality != NativeFinality::Unknown && !current.late_settled,Failure::OriginalCustodyUnknown)?;
+            if current.phase == desired { return Ok(current); }
+            require(current.phase != Phase::Final,Failure::UnexpectedStatus)?;
+            tokio::select! { result=revisions.changed() => { result.map_err(|_| Failure::UnexpectedStatus)?; },
+                _=tokio::time::sleep_until(tokio::time::Instant::from_std(end)) => return Err(Failure::ObservationTimeout), }
+        }
+    }
+    fn legacy_data(session:&Session,phase:Phase,finality:NativeFinality,native:Reason,applied:bool,late:bool,core:&wire::CoreEditOutcome) -> Check<Value> {
+        let facts=original_facts(session)?;
+        require((facts.request_frames,facts.response_frames)==(1,2) && session.fixture_schedule.sequence()==Some(0)
+            && phase == Phase::Final && finality == NativeFinality::Settled && native == Reason::Discarded && !applied && !late
+            && core.effect == Effect::NotStarted && core.journal == Journal::NotCreated && core.resources == ResourceState::Settled
+            && matches!(core.reason,CoreReason::Cancelled|CoreReason::None),Failure::UnexpectedOutcome)?;
+        let mut value=serde_json::to_value(facts).map_err(|_| Failure::ReceiptIo)?;
+        value["domain"]=json!(match session.domain { EditDomain::Configuration=>"configuration",EditDomain::GitHubWorkflows=>"github_workflows",
+            EditDomain::MetadataText=>"metadata_text",EditDomain::ReleaseVersion=>return Err(Failure::UnexpectedStatus) });
+        value["nativePhase"]=json!(phase); value["nativeFinality"]=json!(finality); value["nativeReason"]=json!(native);
+        value["applySubmitted"]=json!(applied); value["lateSettled"]=json!(late); value["outcome"]=json!(core); value["terminalSeq"]=json!(0);
+        Ok(value)
+    }
+
+    async fn foreign_isolation(original:&mut Original,input:&Admitted,root:&Path,project:&Project,expected:&version_wire::Baseline) -> Check<Vec<Value>> {
+        require(original.settled(),Failure::OriginalCustodyUnknown)?;
+        let version_permit=original.batch.owner.inner.fixture_version.lock().map_err(|_| Failure::OriginalCustodyUnknown)?.take()
+            .ok_or(Failure::HostedGuardRefused)?;
+        require(version_permit.root(&original.batch.owner.inner,root) && !original.batch.owner.inner.hosted_qualified(EditDomain::ReleaseVersion),
+            Failure::HostedGuardRefused)?;
+        original.batch.owner.inner.fixture_authorized.store(true,Ordering::SeqCst);
+        require(original.batch.owner.inner.hosted_qualified(EditDomain::Configuration)
+            && !original.batch.owner.inner.hosted_qualified(EditDomain::ReleaseVersion),Failure::HostedGuardRefused)?;
+        let reply=original.bridge.open_config_edit("main",project.id.clone()); let session=original.retain_open()?;
+        require(projection(&reply.map_err(|_| Failure::NativeCommandRejected)?,&session.id)?.phase==Phase::Opening,Failure::UnexpectedStatus)?;
+        let editing=observed(&original.batch.owner,&session.id,Phase::Editing).await?;
+        let checkout=editing.checkout.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+        opposite_commands(original,project,&session,&checkout.revision,expected,EditDomain::Configuration)?;
+        original.batch.owner.close("main",&session.id).map_err(|_| Failure::NativeCommandRejected)?;
+        let terminal=observed(&original.batch.owner,&session.id,Phase::Final).await?;
+        let config=legacy_data(&session,terminal.phase,terminal.native_finality,terminal.native_reason,terminal.apply_submitted,terminal.late_settled,
+            terminal.core_outcome.as_ref().ok_or(Failure::UnexpectedOutcome)?)?;
+        require(original.settled(),Failure::OriginalCustodyUnknown)?;
+        original.batch.owner.inner.fixture_authorized.store(false,Ordering::SeqCst);
+        {
+            let mut slot=original.batch.owner.inner.fixture_workflow.lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+            require(slot.is_none(),Failure::HostedGuardRefused)?;
+            *slot=Some(Arc::new(WorkflowFixturePermit { owner:Arc::downgrade(&original.batch.owner.inner),roots:vec![root.to_path_buf()],
+                python:input.python.clone(),core:input.core.clone(),bootstrap:input.repository.join("desktop/config_edit_bootstrap.py"),
+                cwd:input.repository.join("desktop"),binding_sha256:hash(&serde_json::to_vec(&input.inputs.bindings).map_err(|_| Failure::SourceBindingMismatch)?),eof:false }));
+        }
+        let workflow_ticket=original.batch.owner.workflow_open_ticket("main").map_err(|_| Failure::NativeCommandRejected)?;
+        let reply=original.bridge.open_workflow_edit(&original.document,"main",project.id.clone()); let session=original.retain_open()?;
+        require(reply.map_err(|_| Failure::NativeCommandRejected)?.active.is_some_and(|p| p.session_id==session.id && p.phase==Phase::Opening),Failure::UnexpectedStatus)?;
+        let editing=workflow_observed(&original.batch.owner,&session.id,Phase::Editing).await?;
+        let checkout=editing.checkout.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+        opposite_commands(original,project,&session,&checkout.revision,expected,EditDomain::GitHubWorkflows)?;
+        original.batch.owner.close_workflow("main",&session.id).map_err(|_| Failure::NativeCommandRejected)?;
+        let terminal=workflow_observed(&original.batch.owner,&session.id,Phase::Final).await?;
+        let workflow=legacy_data(&session,terminal.phase,terminal.native_finality,terminal.native_reason,terminal.apply_submitted,terminal.late_settled,
+            terminal.core_outcome.as_ref().ok_or(Failure::UnexpectedOutcome)?)?;
+        require(original.settled(),Failure::OriginalCustodyUnknown)?;
+        original.batch.owner.inner.fixture_workflow.lock().map_err(|_| Failure::OriginalCustodyUnknown)?.take();
+        {
+            let mut slot=original.batch.owner.inner.fixture_metadata.lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+            require(slot.is_none(),Failure::HostedGuardRefused)?;
+            *slot=Some(Arc::new(MetadataFixturePermit { owner:Arc::downgrade(&original.batch.owner.inner),
+                selections:vec![(root.to_path_buf(),metadata_wire::Platform::Android,"en-US".into())],
+                python:input.python.clone(),core:input.core.clone(),bootstrap:input.repository.join("desktop/config_edit_bootstrap.py"),
+                cwd:input.repository.join("desktop"),binding_sha256:hash(&serde_json::to_vec(&input.inputs.bindings).map_err(|_| Failure::SourceBindingMismatch)?),
+                zip:false,eof:false }));
+        }
+        let metadata_ticket=original.batch.owner.metadata_text_open_ticket("main").map_err(|_| Failure::NativeCommandRejected)?;
+        let reply=original.bridge.open_metadata_text_edit(&original.document,"main",crate::metadata_text_commands::Open {
+            project_id:project.id.clone(),platform:metadata_wire::Platform::Android,locale:"en-US".into() });
+        let session=original.retain_open()?;
+        require(reply.map_err(|_| Failure::NativeCommandRejected)?.active.is_some_and(|p| p.session_id==session.id && p.phase==Phase::Opening),Failure::UnexpectedStatus)?;
+        let editing=observed_metadata(&original.batch.owner,&session.id,Phase::Editing,false).await?;
+        let checkout=editing.checkout.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+        opposite_commands(original,project,&session,&checkout.revision,expected,EditDomain::MetadataText)?;
+        original.batch.owner.close_metadata_text("main",&session.id).map_err(|_| Failure::NativeCommandRejected)?;
+        let terminal=observed_metadata(&original.batch.owner,&session.id,Phase::Final,false).await?;
+        let metadata=legacy_data(&session,terminal.phase,terminal.native_finality,terminal.native_reason,terminal.apply_submitted,terminal.late_settled,
+            terminal.core_outcome.as_ref().ok_or(Failure::UnexpectedOutcome)?)?;
+        require(original.settled(),Failure::OriginalCustodyUnknown)?;
+        original.batch.owner.inner.fixture_metadata.lock().map_err(|_| Failure::OriginalCustodyUnknown)?.take();
+        {
+            let mut slot=original.batch.owner.inner.fixture_version.lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+            require(slot.is_none() && version_permit.owns(&original.batch.owner.inner),Failure::HostedGuardRefused)?;
+            *slot=Some(version_permit); // Exact original permit, never a foreign authority.
+        }
+        require(original.batch.owner.inner.hosted_qualified(EditDomain::ReleaseVersion)
+            && !original.batch.owner.inner.hosted_qualified(EditDomain::Configuration)
+            && !original.batch.owner.inner.hosted_qualified(EditDomain::GitHubWorkflows)
+            && !original.batch.owner.inner.hosted_qualified(EditDomain::MetadataText),Failure::HostedGuardRefused)?;
+        let (generation,registered)=original.bridge.native_project(&project.id).map_err(|_| Failure::UnexpectedStatus)?;
+        for ticket in [workflow_ticket,metadata_ticket] {
+            require(original.batch.owner.open_release_version("main",project.id.clone(),RegisteredEditRoot {
+                generation,root:registered.clone() },ticket).is_err() && original.batch.owner.inner.lock().active.is_none(),
+                Failure::UnexpectedStatus)?;
+        }
+        Ok(vec![config,workflow,metadata])
+    }
+
+    async fn consumed_plan_refusal(original:&mut Original,project:&Project,root:&Path,before:&Snapshot,
+        selection:Selection,expected:&version_wire::Baseline) -> Check<Value> {
+        require(original.settled(),Failure::OriginalCustodyUnknown)?;
+        let (old_id,old_token)=original.consumed_plan.clone().ok_or(Failure::UnexpectedStatus)?;
+        let session=original.open(project)?;
+        let editing=observed_version(&original.batch.owner,&session.id,Phase::Editing,false).await?;
+        let checkout=editing.checkout.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+        require(checkout.baseline==*expected,Failure::UnexpectedOutcome)?;
+        let plan=prepare(original,&session.id,checkout,expected).await?;
+        verify_plan(before,selection,checkout,&plan)?;
+        require(old_id!=session.id && old_token!=plan.plan_token && snapshot(root)?==*before,Failure::UnexpectedStatus)?;
+        // A wrong consumed token MUST retire this original review. Do not try
+        // to preserve/reuse it after the owner's native CallerLost boundary.
+        require(original.bridge.apply_release_version_edit(&original.document,"main",&session.id,&old_token)
+            .is_err_and(|error| error.code=="invalid_edit_owner") && *session.stop.borrow(),Failure::UnexpectedStatus)?;
+        let terminal=observed_version(&original.batch.owner,&session.id,Phase::Final,false).await?;
+        settled_terminal(&original.batch.owner,&terminal)?; correlated(&terminal,&editing,&plan)?;
+        let facts=original_facts(&session)?; let core=terminal.core_outcome.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+        require((facts.request_frames,facts.response_frames)==(2,3) && session.fixture_schedule.sequence()==Some(1)
+            && terminal.native_reason==Reason::CallerLost && !terminal.apply_submitted
+            && core.effect==Effect::NotStarted && core.journal==Journal::NotCreated && core.resources==ResourceState::Settled
+            && matches!(core.reason,CoreReason::Cancelled|CoreReason::None) && snapshot(root)?==*before,
+            Failure::UnexpectedOutcome)?;
+        require(original.settled(),Failure::OriginalCustodyUnknown)?;
+        native_data(&session,&terminal,None)
+    }
+
+    async fn exercise_owner(original:&mut Original,input:&Admitted,case:Case) -> Check<()> {
+        require(original.settled() && !original.batch.owner.disabled() && original.queries.is_empty(),Failure::OriginalCustodyUnknown)?;
+        let selection=case.selection(); let root=seed(input,case)?; let project=original.register(&root)?;
+        let mut before=snapshot(&root)?; let edit_count=original.batch.originals.len();
+        // Passive v2 observes only PRESENT saved values. Explicit absent Create
+        // uses the genuine native checkout; no missing-source success is forged.
+        let expected=if case==Case::Create { baseline(&before,selection)? }
+            else { observed_pair(&before,selection,&original.observe(&project).await?)? };
+        require(snapshot(&root)?==before,Failure::PayloadMismatch)?;
+        let mut domains=Vec::new(); let mut spent_refusal=Value::Null;
+        if case==Case::Stale {
+            rewrite_original(&root.join(selection.source()),before.files.get(selection.source()).ok_or(Failure::PayloadMismatch)?,EDITED)?;
+            before=snapshot(&root)?;
+            require(baseline(&before,selection)?!=expected,Failure::PayloadMismatch)?;
+        } else if case==Case::Isolation {
+            domains=foreign_isolation(original,input,&root,&project,&expected).await?;
+            spent_refusal=consumed_plan_refusal(original,&project,&root,&before,selection,&expected).await?;
+            require(snapshot(&root)?==before,Failure::PayloadMismatch)?;
+        }
+        let registration=original.bridge.native_project(&project.id).map_err(|_| Failure::UnexpectedStatus)?;
+        let session=original.open(&project)?;
+        require(session.registration.as_ref().is_some_and(|r| r.generation==registration.0 && r.root==registration.1)
+            && session.fixture_version.as_ref().is_some_and(|permit| original.batch.owner.inner.fixture_version.lock()
+                .is_ok_and(|current| current.as_ref().is_some_and(|current| Arc::ptr_eq(permit,current)))),Failure::UnexpectedStatus)?;
+        let editing=observed_version(&original.batch.owner,&session.id,Phase::Editing,false).await?;
+        let checkout=editing.checkout.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+        require(checkout.baseline==baseline(&before,selection)? && checkout.source==selection.source()
+            && checkout.name_key=="VERSION_NAME" && checkout.build_key=="BUILD_NUMBER" && checkout.ios_enabled
+            && editing.project_id==project.id,Failure::UnexpectedOutcome)?;
+        if case==Case::Isolation { opposite_commands(original,&project,&session,&checkout.revision,&expected,EditDomain::ReleaseVersion)?; }
+        if case==Case::Stale {
+            let reply=original.bridge.prepare_release_version_edit(&original.document,"main",prepare_args(&session.id,&checkout.revision,&expected))
+                .map_err(|_| Failure::NativeCommandRejected)?;
+            require(select(&reply,&session.id)?.phase==Phase::Preparing,Failure::UnexpectedStatus)?;
+            let terminal=observed_version(&original.batch.owner,&session.id,Phase::Final,false).await?;
+            settled_terminal(&original.batch.owner,&terminal)?;
+            let facts=original_facts(&session)?; let core=terminal.core_outcome.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+            require((facts.request_frames,facts.response_frames)==(2,2) && session.fixture_schedule.sequence()==Some(1)
+                && terminal.prepared.is_none() && !terminal.apply_submitted && terminal.native_reason==Reason::None
+                && terminal.checkout.as_ref().is_some_and(|saved| saved.revision==checkout.revision && saved.baseline==checkout.baseline)
+                && core.effect==Effect::NotStarted && core.journal==Journal::NotCreated && core.resources==ResourceState::Settled
+                && core.reason==CoreReason::StaleRevision && snapshot(&root)?==before,Failure::UnexpectedOutcome)?;
+            return row(original,case.name(),selection,native_data(&session,&terminal,None)?,json!({"olderPassiveBaselineRejected":true,
+                "newerNativeCheckoutRetained":true,"noPlanOrRebase":true,"externalChangeRetained":true,"treeUnchanged":true,
+                "sourceProbesSettled":probes_settled(),"passiveOriginalsSettled":original.passive.settled()}));
+        }
+        require(checkout.baseline==expected,Failure::UnexpectedOutcome)?;
+        let plan=prepare(original,&session.id,checkout,&expected).await?;
+        let directories=verify_plan(&before,selection,checkout,&plan)?;
+        require(snapshot(&root)?==before,Failure::PayloadMismatch)?;
+        if matches!(case,Case::Registration|Case::DocumentLost) {
+            if case==Case::Registration {
+                let extra=input.inputs.root.join("registration-apply-extra"); mkdir(&extra)?; original.register(&extra)?;
+                require(original.bridge.apply_release_version_edit(&original.document,"main",&session.id,&plan.plan_token).is_err(),Failure::UnexpectedStatus)?;
+            } else {
+                original.document.lost();
+                require(!original.document.navigation(true),Failure::DocumentOriginalNavigationAccepted)?;
+                require(original.bridge.apply_release_version_edit(&original.document,"main",&session.id,&plan.plan_token)
+                    .is_err_and(|error| error.code=="invalid_edit_owner"),Failure::DocumentOriginalApplyNotRefused)?;
+                require(original.bridge.open_release_version_edit(&original.document,"main",open_args(&project))
+                    .is_err_and(|error| error.code=="invalid_edit_owner"),Failure::DocumentOriginalOpenNotRefused)?;
+                let replacement=DocumentBinding::new(original.bridge.clone());
+                // Initial navigation is allowed, not an edit capability. Only
+                // Finished asks the SAME registry to bind; its loss is final.
+                require(replacement.navigation(true),Failure::DocumentReplacementNavigationRefused)?;
+                replacement.observe(|life| life.started(true)); replacement.hook_installed();
+                let mut bound=true;
+                replacement.observe(|life| { bound=life.original_bound(); crate::document_lifetime::DocumentAction::None });
+                require(!bound,Failure::DocumentReplacementPrematurelyBound)?;
+                replacement.observe(|life| life.finished(true));
+                replacement.observe(|life| { bound=life.original_bound(); crate::document_lifetime::DocumentAction::None });
+                require(!bound,Failure::DocumentReplacementRebound)?;
+                require(original.bridge.apply_release_version_edit(&replacement,"main",&session.id,&plan.plan_token)
+                    .is_err_and(|error| error.code=="invalid_edit_owner"),Failure::DocumentReplacementApplyNotRefused)?;
+                require(original.bridge.open_release_version_edit(&replacement,"main",open_args(&project))
+                    .is_err_and(|error| error.code=="invalid_edit_owner"),Failure::DocumentReplacementOpenNotRefused)?;
+            }
+            let terminal=observed_version(&original.batch.owner,&session.id,Phase::Final,false).await?;
+            settled_terminal(&original.batch.owner,&terminal)?; correlated(&terminal,&editing,&plan)?;
+            let facts=original_facts(&session)?; let core=terminal.core_outcome.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+            require((facts.request_frames,facts.response_frames)==(2,3) && session.fixture_schedule.sequence()==Some(1)
+                && !terminal.apply_submitted && terminal.native_reason==if case==Case::Registration { Reason::CallerLost } else { Reason::WindowLost }
+                && core.effect==Effect::NotStarted && core.journal==Journal::NotCreated && core.resources==ResourceState::Settled
+                && matches!(core.reason,CoreReason::Cancelled|CoreReason::None) && snapshot(&root)?==before,Failure::UnexpectedOutcome)?;
+            return row(original,case.name(),selection,native_data(&session,&terminal,None)?,json!({"preparedCorrelationRetained":true,
+                "treeUnchanged":true,"staleCommandNotSent":true,"newRegistrationPublishedUnderDocumentLock":case==Case::Registration,
+                "controlledOriginalDocumentLoss":case==Case::DocumentLost,"replacementDocumentRefused":case==Case::DocumentLost,
+                "guiCallbacksNotClaimed":true,"sourceProbesSettled":probes_settled(),"passiveOriginalsSettled":original.passive.settled()}));
+        }
+        let mut gate=if case==Case::HeldTerminal {
+            let guard=GateGuard::new(&original.batch.owner,session.fixture_schedule.clone()); session.fixture_schedule.terminal.hold()?; Some(guard)
+        } else { None };
+        let reply=original.bridge.apply_release_version_edit(&original.document,"main",&session.id,&plan.plan_token).map_err(|_| Failure::NativeCommandRejected)?;
+        require(select(&reply,&session.id)?.apply_submitted,Failure::UnexpectedStatus)?;
+        if case==Case::Create {
+            let duplicate=original.bridge.apply_release_version_edit(&original.document,"main",&session.id,&plan.plan_token).map_err(|_| Failure::NativeCommandRejected)?;
+            require(select(&duplicate,&session.id)?.apply_submitted && original.batch.originals.len()==edit_count+1,Failure::UnexpectedStatus)?;
+        }
+        if let Some(guard)=gate.as_mut() {
+            let (active,cleanup)=original_clock(&original.batch,&session)?; let endpoint=active.ok_or(Failure::UnexpectedStatus)?;
+            require(cleanup.is_none(),Failure::UnexpectedStatus)?;
+            until(OBSERVATION,|| {
+                require(!session.fixture_schedule.failed.load(Ordering::SeqCst),Failure::OriginalCustodyUnknown)?;
+                Ok(session.fixture_schedule.terminal.entered.load(Ordering::SeqCst))
+            }).await?;
+            let held=session.fixture_schedule.held_terminal.lock().map_err(|_| Failure::OriginalCustodyUnknown)?.clone().ok_or(Failure::UnexpectedStatus)?;
+            require(held.0==2 && held.1.effect==Effect::Committed && held.1.journal==Journal::Clean && held.1.resources==ResourceState::Settled
+                && held.1.reason==CoreReason::None && session.fixture_schedule.sequence().is_none()
+                && Instant::now()<endpoint && !*session.stop.borrow(),Failure::UnexpectedOutcome)?;
+            let closing=original.batch.owner.close_release_version("main",&session.id).map_err(|_| Failure::NativeCommandRejected)?;
+            require(select(&closing,&session.id)?.native_reason==Reason::Cancelled && *session.stop.borrow(),Failure::UnexpectedStatus)?;
+            guard.release(); // Real Close precedes release of that same reader.
+        }
+        let terminal=observed_version(&original.batch.owner,&session.id,Phase::Final,false).await?;
+        settled_terminal(&original.batch.owner,&terminal)?; correlated(&terminal,&editing,&plan)?;
+        let facts=original_facts(&session)?; let core=terminal.core_outcome.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+        let noop=case==Case::Noop;
+        require((facts.request_frames,facts.response_frames)==(3,3) && session.fixture_schedule.sequence()==Some(2)
+            && terminal.apply_submitted && terminal.native_reason==if case==Case::HeldTerminal { Reason::Cancelled } else { Reason::None }
+            && core.effect==if noop { Effect::Unchanged } else { Effect::Committed }
+            && core.journal==if noop { Journal::NotCreated } else { Journal::Clean }
+            && core.resources==ResourceState::Settled && core.reason==CoreReason::None
+            && session.fixture_schedule.released(),Failure::UnexpectedOutcome)?;
+        installed(&root,&before,selection,&directories)?;
+
+        if noop { require(snapshot(&root)?==before,Failure::PayloadMismatch)?; }
+        let after=snapshot(&root)?;
+        observed_pair(&after,selection,&original.observe(&project).await?)?;
+        require(snapshot(&root)?==after,Failure::PayloadMismatch)?;
+        if case==Case::Create { original.consumed_plan=Some((session.id.clone(),plan.plan_token.clone())); }
+        let config=original.batch.owner.status().map_err(|_| Failure::UnexpectedStatus)?;
+        let workflow=original.batch.owner.workflow_status().map_err(|_| Failure::UnexpectedStatus)?;
+        let metadata=original.batch.owner.metadata_text_status().map_err(|_| Failure::UnexpectedStatus)?;
+        let version=original.batch.owner.release_version_status().map_err(|_| Failure::UnexpectedStatus)?;
+        require(config.last_terminal.is_none() && workflow.last_terminal.is_none() && metadata.last_terminal.is_none()
+            && version.last_terminal.as_ref().is_some_and(|p| p.session_id==session.id)
+            && config.status_revision==workflow.status_revision && workflow.status_revision==metadata.status_revision
+            && metadata.status_revision==version.status_revision,Failure::UnexpectedStatus)?;
+        let observations=json!({"action":plan.view.file.action,"directoriesCreated":directories,"explicitAbsentCreate":case==Case::Create,
+            "completePreparedBytes":true,"passiveBaselineMatchedCheckout":case!=Case::Create,"preparedCorrelationRetained":true,
+            "capturePrepareRawFactsUnchanged":true,"dependenciesAndUnrelatedPreserved":true,"existingModePreserved":true,
+            "createModeMasked":true,"directoryModesExact":true,"unicodeCommentsAndOnlyTwoSpansPreserved":case!=Case::Create,
+            "rawNoopUnchanged":noop,"duplicateApplyObservation":case==Case::Create,"savedPairReadback":true,
+            "sharedStatusRevision":true,"sharedLastTerminalDomainCorrect":true,"fourDomainIsolation":case==Case::Isolation,
+            "foreignOriginalTicketsRefused":case==Case::Isolation,"consumedPlanRefused":case==Case::Isolation,"consumedPlanRefusal":spent_refusal,"domains":domains,
+            "heldBeforeAcceptance":case==Case::HeldTerminal,"realStopBeforeRelease":case==Case::HeldTerminal,"cancelledNotSaved":case==Case::HeldTerminal,
+            "sourceProbesSettled":probes_settled(),"passiveOriginalsSettled":original.passive.settled()});
+        row(original,case.name(),selection,native_data(&session,&terminal,None)?,observations)
+    }
+
+    fn eof_seed(input:&Admitted,case:EofCase) -> Check<PathBuf> {
+        let selection=eof_selection(case); let root=input.inputs.root.join(case.name());
+        seed_common(&root,selection)?;
+        if case!=EofCase::VersionConflict {
+            seed_parent(&root,selection.parent())?;
+            write_new(&root.join(selection.source()),EOF_ORIGINAL,0o640)?;
+        }
+        Ok(root)
+    }
+    fn introduce_sibling(root:&Path,selection:Selection) -> Check<RawFile> {
+        FIXTURE_FILES.admit()?;
+        let path=root.join(format!("{}/unrelated.txt",selection.parent()));
+        let mut file=fs::OpenOptions::new().create_new(true).write(true).mode(0o600).custom_flags(nix::libc::O_NOFOLLOW)
+            .open(&path).map_err(|_| Failure::FixtureIo)?;
+        FIXTURE_FILES.acquired(); let wrote=file.write_all(UNRELATED); let stat=file.metadata();
+        FIXTURE_FILES.close_original(file)?;
+        require(wrote.is_ok(),Failure::FixtureIo)?; let stat=stat.map_err(|_| Failure::FixtureIo)?;
+        require(stat.is_file() && stat.len()==UNRELATED.len() as u64 && stat.mode()&0o7777==0o600,Failure::FixtureIo)?;
+        // No extra reader while the original transaction is held. These are
+        // the creating descriptor's own bytes and actual metadata return.
+        Ok(RawFile { original:OriginalFile { identity:Identity::of(&stat),bytes:UNRELATED.to_vec() },stamp:Stamp::of(&stat) })
+    }
+    async fn exercise_eof(original:&mut Original,input:&Admitted,case:EofCase) -> Check<()> {
+        require(input.eof && input.mode==Mode::Source && EOF_CASES.contains(&case) && original.queries.is_empty()
+            && original.settled() && !original.batch.owner.disabled(),Failure::OriginalCustodyUnknown)?;
+        input.inputs.same_root()?;
+        let selection=eof_selection(case); let root=eof_seed(input,case)?; let before=snapshot(&root)?;
+        let project=original.register(&root)?;
+        let expected=if case==EofCase::VersionConflict { baseline(&before,selection)? }
+            else { observed_pair(&before,selection,&original.observe(&project).await?)? };
+        let schedule=Arc::new(Schedule { eof:Some(case),..Schedule::default() });
+        {
+            let mut next=original.batch.owner.inner.fixture_next_schedule.lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+            require(next.is_none(),Failure::UnexpectedStatus)?; *next=Some(schedule.clone());
+        }
+        let mut guard=GateGuard::new(&original.batch.owner,schedule.clone());
+        let session=original.open(&project)?;
+        require(Arc::ptr_eq(&session.fixture_schedule,&schedule),Failure::OriginalCustodyUnknown)?;
+        let editing=observed_version(&original.batch.owner,&session.id,Phase::Editing,false).await?;
+        let checkout=editing.checkout.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+        let plan=prepare(original,&session.id,checkout,&expected).await?;
+        let directories=verify_plan(&before,selection,checkout,&plan)?;
+        let unknown=case==EofCase::VersionConflict; let committed=case==EofCase::VersionPostcommit;
+        require(snapshot(&root)?==before && if unknown { directories==ancestors(selection.parent()) }
+            else { directories.is_empty() && plan.view.file.action==version_wire::Action::Replace },Failure::PayloadMismatch)?;
+        let reply=original.bridge.apply_release_version_edit(&original.document,"main",&session.id,&plan.plan_token).map_err(|_| Failure::NativeCommandRejected)?;
+        require(select(&reply,&session.id)?.apply_submitted,Failure::UnexpectedStatus)?;
+        let (active,cleanup)=original_clock(&original.batch,&session)?; let endpoint=active.ok_or(Failure::UnexpectedStatus)?;
+        require(cleanup.is_none(),Failure::UnexpectedStatus)?;
+        until(OBSERVATION,|| {
+            require(!original.batch.owner.disabled() && !schedule.failed.load(Ordering::SeqCst),Failure::OriginalCustodyUnknown)?;
+            Ok(schedule.eof_control.lock().map_err(|_| Failure::OriginalCustodyUnknown)?.boundary_only(case))
+        }).await?;
+        let introduced=if unknown { Some(introduce_sibling(&root,selection)?) } else { None };
+        require(Instant::now()<endpoint && !*session.stop.borrow(),Failure::UnexpectedStatus)?;
+        let closing=original.batch.owner.close_release_version("main",&session.id).map_err(|_| Failure::NativeCommandRejected)?;
+        let closing=select(&closing,&session.id)?;
+        require(closing.phase==Phase::Finalizing && closing.native_reason==Reason::Cancelled && closing.apply_submitted,Failure::UnexpectedStatus)?;
+        guard.release(); // Only the original owner closes the original stdin.
+        let terminal=observed_version(&original.batch.owner,&session.id,if unknown { Phase::Unknown } else { Phase::Final },unknown).await?;
+        let facts=original_eof_facts(&session,case)?;
+        correlated(&terminal,&editing,&plan)?;
+        let core=terminal.core_outcome.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+        require(original.settled() && (facts.request_frames,facts.response_frames)==(3,3) && schedule.sequence()==Some(2)
+            && terminal.apply_submitted && terminal.native_reason==Reason::Cancelled
+            && core.effect==if unknown { Effect::Unknown } else if committed { Effect::Committed } else { Effect::RolledBack }
+            && core.journal==if unknown { Journal::RecoveryRequired } else { Journal::Clean }
+            && core.resources==ResourceState::Settled && core.reason==CoreReason::Cancelled
+            && schedule.eof_control.lock().is_ok_and(|control| control.complete(case) && control.records(case)==2)
+            && schedule.released(),Failure::UnexpectedOutcome)?;
+        if unknown {
+            // Effect Unknown remains disabled and is NOT ordinary Final. The
+            // original resource proof above admits only these fixed DATA reads
+            // and the existing receipt return, never another native operation.
+            require(terminal.phase==Phase::Unknown && terminal.native_finality==NativeFinality::Unknown && terminal.late_settled
+                && original.batch.owner.disabled() && original.batch.owner.inner.lock().blocked_projects.contains(&project.id),Failure::UnexpectedOutcome)?;
+            let config=original.batch.owner.status().map_err(|_| Failure::UnexpectedStatus)?;
+            let workflow=original.batch.owner.workflow_status().map_err(|_| Failure::UnexpectedStatus)?;
+            let metadata=original.batch.owner.metadata_text_status().map_err(|_| Failure::UnexpectedStatus)?;
+            let version=original.batch.owner.release_version_status().map_err(|_| Failure::UnexpectedStatus)?;
+            require(config.active.is_none() && workflow.active.is_none() && metadata.active.is_none() && version.active.is_none()
+                && config.capability.reason==EditAvailability::CleanupUnknown && workflow.capability.reason==EditAvailability::CleanupUnknown
+                && metadata.capability.reason==EditAvailability::CleanupUnknown && version.capability.reason==EditAvailability::CleanupUnknown
+                && config.status_revision==workflow.status_revision && workflow.status_revision==metadata.status_revision
+                && metadata.status_revision==version.status_revision,Failure::UnexpectedStatus)?;
+            let sibling=raw_file(&root.join(format!("{}/unrelated.txt",selection.parent())),1024)?;
+            require(introduced.as_ref()==Some(&sibling),Failure::PayloadMismatch)?;
+            let saved=read_regular(&root.join(selection.source()),64*1024)?;
+            require(saved.bytes==CREATED && saved.identity.mode&0o7777==0o600,Failure::PayloadMismatch)?;
+            require(fs::symlink_metadata(root.join(".mobile-release-version")).is_ok_and(|stat| stat.is_dir()),Failure::PayloadMismatch)?;
+            for (path,file) in &before.files { require(raw_file(&root.join(path),1024*1024)?==*file,Failure::PayloadMismatch)?; }
+            for (path,identity) in &before.directories {
+                require(Identity::of(&fs::symlink_metadata(root.join(path)).map_err(|_| Failure::FixtureIo)?)==*identity,Failure::PayloadMismatch)?;
+            }
+        } else {
+            settled_terminal(&original.batch.owner,&terminal)?;
+            if committed { installed(&root,&before,selection,&directories)?; } else { restored(&root,&before)?; }
+        }
+        let observations=json!({"evidenceKind":"real-stdin-eof-at-controlled-transaction-boundary","bootstrapMode":"instrumented-genuine-engine",
+            "boundary":case.boundary(),"originalCheckpoint":case.checkpoint(),"closeBeforeActiveDeadline":true,"controlRecords":2,
+            "actualStdinEof":true,"eofReadCount":1,"nonemptyReadCount":0,"readErrorCount":0,"preparedCorrelationRetained":true,
+            "versionProfileAndControlProof":true,"committedPublication":committed,"rolledBackPublication":!committed&&!unknown,
+            "terminalDurable":!unknown,"fixedRecovery":true,"journalClean":!unknown,"journalAbsent":!unknown,
+            "originalTreeRestored":!committed&&!unknown,"selectedPayloadsRemain":committed||unknown,"unselectedAndDependenciesPreserved":true,
+            "unrelatedIntroducedBeforeEof":unknown,"introducedOriginalPreserved":unknown,"recoveryEvidenceRetained":unknown,
+            "sharedBlockedProject":unknown,"allFourDomainsDisabled":unknown,"noFurtherAdmission":unknown,
+            "sourceProbesSettled":probes_settled(),"passiveOriginalsSettled":original.passive.settled(),"fixtureFilesSettled":FIXTURE_FILES.all_settled()});
+        row(original,case.name(),selection,native_data(&session,&terminal,Some(case))?,observations)
+    }
+    fn receipt(input:&Admitted,cases:&[Value],passed:bool,resources:bool,disabled:bool,failure:Option<Failure>) -> Check<()> {
+        let expected=if input.eof { EOF_CASES.len() } else if input.mode==Mode::Source { SOURCE_CASES.len() } else { 1 };
+        require(!passed || resources && cases.len()==expected && failure.is_none() && disabled==input.eof,Failure::ReceiptIo)?;
+        receipt_document(&input.inputs,json!({"schemaVersion":1,"scope":if input.eof { TRANSACTION_SCOPE } else { OWNER_SCOPE },"domain":DOMAIN,
+            "status":if passed { "passed" } else { "failed" },"allOwnersSettled":resources&&!disabled,
+            "originalResourcesSettled":resources,"ownerDisabled":disabled,"retainedEffectUnknown":passed&&input.eof,
+            "failureCode":failure,"bindings":input.inputs.bindings,"cases":cases,"notVerified":NOT_VERIFIED}))
+    }
+    pub(super) async fn run(eof:bool) {
+        if BATCH_CLAIMED.swap(true,Ordering::SeqCst) {
+            if !FIXTURE_FILES.all_settled() || !probes_settled() { retain_unknown_runtime().await; return; }
+            panic!("hosted release-version batch already claimed");
+        }
+        let input=match Admitted::admit(eof) {
+            Ok(input)=>input,Err(code)=> {
+                if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+                panic!("hosted release-version admission refused: {code:?}");
+            },
+        };
+        if receipt(&input,&[],false,false,false,Some(Failure::NotCompleted)).is_err() {
+            if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+            panic!("hosted release-version partial receipt unavailable before native work");
+        }
+        let mut original=match Original::new(&input) {
+            Ok(original)=>original,Err(code)=> {
+                if !FIXTURE_FILES.all_settled() || !probes_settled() { retain_unknown_runtime().await; return; }
+                panic!("hosted release-version original document refused before native work: {code:?}");
+            },
+        };
+        let count=if eof { EOF_CASES.len() } else if input.mode==Mode::Source { SOURCE_CASES.len() } else { 1 };
+        for ordinal in 0..count {
+            let case_name=if eof { EOF_CASES[ordinal].name() } else if input.mode==Mode::Zip { Case::Edit.name() } else { SOURCE_CASES[ordinal].name() };
+            let result=if eof { exercise_eof(&mut original,&input,EOF_CASES[ordinal]).await }
+                else { exercise_owner(&mut original,&input,if input.mode==Mode::Zip { Case::Edit } else { SOURCE_CASES[ordinal] }).await };
+            let expected_unknown=eof && ordinal==EOF_CASES.len()-1 && result.is_ok();
+            if result.is_err() || !original.settled() || original.batch.owner.disabled()&&!expected_unknown { original.stop().await; }
+            if !original.settled() || original.batch.owner.disabled()&&!expected_unknown
+                || matches!(result,Err(Failure::OriginalCustodyUnknown|Failure::FixtureCustodyUnknown)) {
+                if FIXTURE_FILES.all_settled() && probes_settled() && original.passive.settled() {
+                    let _=receipt(&input,&original.batch.cases,false,false,original.batch.owner.disabled(),Some(Failure::OriginalCustodyUnknown));
+                }
+                retain_unknown_runtime().await; return;
+            }
+            if let Err(code)=result {
+                let _=receipt(&input,&original.batch.cases,false,true,original.batch.owner.disabled(),Some(code));
+                if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+                panic!("hosted release-version {case_name} failed after original resource settlement: {code:?}");
+            }
+            if !expected_unknown && receipt(&input,&original.batch.cases,false,false,false,Some(Failure::NotCompleted)).is_err() {
+                if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+                panic!("hosted release-version progress receipt failed after original settlement");
+            }
+        }
+        // No shutdown, fixture change, recovery or next native operation after
+        // EOF's expected effect Unknown. Retain those exact original books.
+        if !eof && (original.batch.owner.shutdown().await.is_err() || original.bridge.supervisor.shutdown().await.is_err())
+            || !original.settled() { retain_unknown_runtime().await; return; }
+        if receipt(&input,&original.batch.cases,true,true,original.batch.owner.disabled(),None).is_err() {
+            if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+            panic!("hosted release-version final receipt failed after original settlement");
+        }
+    }
+
+    #[test]
+    fn version_fixture_literal_and_scope_contract_is_closed() {
+        // Pure finite DATA. Native admission is not inferred from these checks.
+        assert!(!qualified(EditDomain::ReleaseVersion,false)); assert!(!qualified(EditDomain::ReleaseVersion,true));
+        assert_eq!(SOURCE_CASES.len(),8);
+        assert_eq!(SOURCE_CASES.last().map(|case| case.name()),Some("version-document-loss-before-apply"));
+        assert_eq!(Case::Edit.name(),"observe-edit-two-spans-preserve");
+        assert_eq!(EOF_CASES.last().map(|case| case.name()),Some("precommit-conflict-eof"));
+        assert_eq!(hash(IGNORE),"cdf75f09188ea0e3712fcd26c9dbb42819dd467e9744676c6448b2a29a789c5b");
+        assert_eq!(hash(ORIGINAL),"d8453785b2637e76d1b7456dd0e5ea0d343cfd5f7d409a06dc38ab791aa6334a");
+        assert_eq!(hash(EDITED),"bc7f934bcf5f4fcf0b1b9c814613bd773ec4a9f579376f1dca01929d4e9e3732");
+        assert_eq!(hash(CREATED),"3b8dbd6b58e9f42a0ed893e73020cf2f8ddde787e2b1a153da49d382b1e7a9d4");
+        assert_eq!(hash(CONFIG_PUBLIC),"1dcd101a440da3c950903bca1b54f926aa63ce36ae5ed1eead5fb24f7813dfbd");
+        assert_eq!(hash(CONFIG_RELEASE),"1b0b02e48d03cca36aaf36e5d8a8daf15f59924803bd4a5c0ec2e655828d3f94");
+        assert_eq!(hash(CONFIG_NESTED),"8db69de9d4a3c83d312ee37e8952531f71b633f0f7f36b042b5d143cc2357de9");
+        assert!(VersionFixturePermit::bootstrap_case(false,Path::new("/inert/owner"),None));
+        assert!(!VersionFixturePermit::bootstrap_case(true,Path::new("/inert/owner"),None));
+        for case in EOF_CASES {
+            let path=Path::new("/inert").join(case.name());
+            assert!(VersionFixturePermit::bootstrap_case(true,&path,Some(case)));
+            assert!(!VersionFixturePermit::bootstrap_case(false,&path,Some(case)));
+            assert!(!VersionFixturePermit::bootstrap_case(true,Path::new("/inert/wrong"),Some(case)));
+            assert!(!WorkflowFixturePermit::bootstrap_case(true,&path,Some(case)));
+            assert!(!MetadataFixturePermit::bootstrap_case(true,&path,Some(case)));
+        }
+        for case in [EofCase::Precommit,EofCase::Postcommit,EofCase::WorkflowPrecommit,EofCase::WorkflowPostcommit,EofCase::WorkflowConflict,
+            EofCase::MetadataPrecommit,EofCase::MetadataPostcommit,EofCase::MetadataConflict] {
+            assert!(!VersionFixturePermit::bootstrap_case(true,&Path::new("/inert").join(case.name()),Some(case)));
+        }
+        assert_eq!(EXTRA_SOURCES.len(),30);
+        let mut keys=BTreeSet::new();
+        for source in SOURCES.iter().chain(EXTRA_SOURCES) { assert!(keys.insert(source.id)); }
+        assert_eq!(keys.len(),56);
+    }
+}
+
+#[cfg(all(debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "only the reviewed disposable source-or-ZIP Linux release-version-owner process"]
+async fn hosted_release_version_edit_owner_original_resources() { version::run(false).await; }
+
+#[cfg(all(debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "only the reviewed disposable Linux release-version transaction EOF process"]
+async fn hosted_release_version_transaction_eof_original_resources() { version::run(true).await; }
+
+#[test]
+fn version_eof_records_are_domain_distinct_and_exact() {
+    let all=[EofCase::Precommit,EofCase::Postcommit,EofCase::WorkflowPrecommit,EofCase::WorkflowPostcommit,EofCase::WorkflowConflict,
+        EofCase::MetadataPrecommit,EofCase::MetadataPostcommit,EofCase::MetadataConflict,
+        EofCase::VersionPrecommit,EofCase::VersionPostcommit,EofCase::VersionConflict];
+    for case in [EofCase::VersionPrecommit,EofCase::VersionPostcommit,EofCase::VersionConflict] {
+        assert!(case.domain()==EditDomain::ReleaseVersion);
         let bytes=[case.marker(),case.summary()].concat();
         for width in [1,2,7,case.marker().len(),bytes.len()] {
             let mut control=EofControl::default();

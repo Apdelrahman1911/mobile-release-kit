@@ -1,14 +1,16 @@
-//! Retained NTFS sealed-version inspection DATA and original settlement only.
+//! Retained NTFS version/loader custody for the existing passive query owner.
 //!
 //! Register this entire book in the caller's original retained resources before
-//! releasing blocking work. It creates no worker, clock, process or capability.
+//! releasing blocking work. It creates no worker, clock or process; only the
+//! private passive slots can move its originals into a one-use capability.
 //! A method may remain blocked after STOP/deadline; that original borrower/book
 //! must remain reachable. Do not call interruption/settlement concurrently.
 //! Closed ordinary payload handles cannot authorize future pathname consumption.
-//! Publication, loaded-image admission and the producing owner join remain closed.
+//! Normal Windows Desktop, project snapshot, edits and MSI/session remain closed.
 #![forbid(unsafe_code)]
 
-use std::{collections::BTreeSet, time::Instant};
+use std::{collections::{BTreeMap, BTreeSet}, path::PathBuf, time::Instant};
+pub(crate) use mrk_windows_installed_native::CloseOutcome;
 use mrk_windows_installed_native as native;
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
@@ -21,7 +23,7 @@ pub(crate) enum InspectionFailure {
 }
 type Result<T> = std::result::Result<T, InspectionFailure>;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Phase { New, Inspecting, Inspected, Refused, Settling, Settled, Unknown }
+enum Phase { New, Inspecting, Inspected, Transferred, Preparing, Prepared, Refused, Settling, Settled, Unknown }
 
 struct Record {
     original: native::Original,
@@ -32,11 +34,16 @@ struct Record {
     closed: bool,
     metadata: Option<native::Metadata>,
     security: Option<native::SecurityFacts>,
+    volume: u8,
+    path: Vec<String>,
+    entries: Option<Vec<native::DirectoryEntry>>,
+    enumeration_strict: bool,
 }
 impl Record {
     fn new(original: native::Original, parent: Option<usize>, scope: native::AuthorityScope,
         protected_boundary: bool, keep: bool) -> Self {
-        Self { original, parent, scope, protected_boundary, keep, closed: false, metadata: None, security: None }
+        Self { original, parent, scope, protected_boundary, keep, closed: false, metadata: None, security: None,
+            volume: 0, path: Vec::new(), entries: None, enumeration_strict: false }
     }
 }
 
@@ -45,6 +52,10 @@ impl Record {
 pub(crate) struct VersionObservation {
     pub(crate) target: &'static str,
     pub(crate) manifest_sha256: String,
+    #[cfg(test)]
+    protocol_sha256: String,
+    #[cfg(test)]
+    account_sid_sha256: String,
     pub(crate) inventory_sha256: String,
     pub(crate) core_sha256: String,
     pub(crate) files: usize,
@@ -65,6 +76,9 @@ pub(crate) struct WindowsVersionBook {
     selected: [Option<usize>; 3],
     entries: usize,
     observation: Option<VersionObservation>,
+    loader: Option<LoaderPlan>,
+    volumes: [Option<usize>; 3],
+    loader_ready: bool,
 }
 
 fn checkpoint(end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
@@ -101,7 +115,7 @@ fn method<T>(book: &mut native::NativeBook, phase: &mut Phase, pending: &mut boo
     if book.is_unknown() || *pending || *phase == Phase::Unknown {
         *phase = Phase::Unknown; return Err(InspectionFailure::Unknown);
     }
-    if *phase != Phase::Inspecting { return Err(InspectionFailure::AlreadyUsed); }
+    if !matches!(*phase, Phase::Inspecting | Phase::Preparing) { return Err(InspectionFailure::AlreadyUsed); }
     checkpoint(end, stop)?;
     *pending = true;
     let returned = invoke(book);
@@ -111,21 +125,100 @@ fn retained_path(path: &str) -> bool {
     SELECTED.iter().any(|selected| *selected == path || selected.strip_prefix(path).is_some_and(|tail| tail.starts_with('/')))
 }
 
+fn location_at(locations: &native::KnownLocations, index: usize) -> Result<&native::KnownLocation> {
+    match index { 0 => Ok(&locations.program_files), 1 => Ok(&locations.windows),
+        2 => Ok(&locations.system), _ => Err(InspectionFailure::Binding) }
+}
+
+// Bounded path/selector DATA prepared before namespace effects. It cannot mint
+// a capability; that requires the same book's actual native admission below.
+struct LoaderPlan {
+    roots: [u8; 3],
+    selectors: BTreeMap<(u8, Vec<String>), Vec<String>>,
+    selection: crate::runtime::VerifiedRuntime,
+    system_root: String,
+}
+impl LoaderPlan {
+    fn new(locations: &native::KnownLocations, spec: &VersionSpec) -> Result<Self> {
+        let locations_array = [&locations.program_files, &locations.windows, &locations.system];
+        let mut roots = [0, 1, 2];
+        for index in 0..3 { for prior in 0..index {
+            if locations_array[index].same_volume(locations_array[prior]) { roots[index] = roots[prior]; break; }
+        } }
+        let windows = locations.windows.components().to_vec();
+        let system = locations.system.components().to_vec();
+        if !locations.windows.same_volume(&locations.system) || system.len() != windows.len().checked_add(1).ok_or(InspectionFailure::Bounds)?
+            || !system.iter().zip(&windows).all(|(a, b)| a.eq_ignore_ascii_case(b))
+            || !system.last().is_some_and(|n| n.eq_ignore_ascii_case("System32")) {
+            return Err(InspectionFailure::Binding);
+        }
+        let layout = windows_version::launch_layout(locations.program_files.path(), spec).map_err(|_| InspectionFailure::Bounds)?;
+        let mut version = locations.program_files.components().to_vec();
+        version.extend(spec.components().into_iter().map(str::to_owned));
+        let mut python = version.clone(); python.push("python".to_owned());
+        let mut legacy = windows.to_vec(); legacy.push("System".to_owned());
+        let mut selectors = BTreeMap::new();
+        let mut directories = BTreeSet::new();
+        for (root, branch) in [(roots[0], &python), (roots[1], &windows),
+            (roots[2], &system), (roots[1], &legacy)] {
+            directories.insert(Self::key(root, &[]));
+            let mut path = Vec::new();
+            for component in branch {
+                Self::select(&mut selectors, (root, path.clone()), component)?;
+                path.push(component.clone()); directories.insert(Self::key(root, &path));
+                if directories.len() > native::MAX_ORIGINALS { return Err(InspectionFailure::Bounds); }
+            }
+        }
+        // Every future OS image open and the acquisition-thread token check
+        // already has space. NativeBook also enforces the real peak per reserve.
+        Self::peak(directories.len())?;
+        for image in native::SystemImage::ALL {
+            Self::select(&mut selectors, (roots[2], system.to_vec()), image.name())?;
+        }
+        let root = PathBuf::from(&layout.root);
+        let selection = crate::runtime::VerifiedRuntime { python: PathBuf::from(layout.python),
+            bootstrap: root.join("engine_bootstrap.py"), core: root.join("core.zip"), cwd: root };
+        Ok(Self { roots, selectors, selection, system_root: locations.windows.path().to_owned() })
+    }
+    fn select(selectors: &mut BTreeMap<(u8, Vec<String>), Vec<String>>, key: (u8, Vec<String>), name: &str) -> Result<()> {
+        let names = selectors.entry(Self::key(key.0, &key.1)).or_default();
+        // Known-location APIs can disagree about case in a shared prefix. That
+        // is one selector, not two actual directory entries. Actual aliases are
+        // rejected by the single native cursor's case-folded seen-name set.
+        if names.iter().any(|prior| prior.eq_ignore_ascii_case(name)) { return Ok(()); }
+        if names.len() >= 35 { return Err(InspectionFailure::Bounds); }
+        names.push(name.to_owned()); names.sort(); Ok(())
+    }
+    fn key(volume: u8, path: &[String]) -> (u8, Vec<String>) {
+        (volume, path.iter().map(|part| part.to_ascii_lowercase()).collect())
+    }
+    fn peak(directories: usize) -> Result<usize> {
+        let peak = directories.checked_add(SELECTED.len())
+            .and_then(|n| n.checked_add(native::SystemImage::ALL.len()))
+            .and_then(|n| n.checked_add(2)).ok_or(InspectionFailure::Bounds)?;
+        if peak > native::MAX_ORIGINALS { Err(InspectionFailure::Bounds) } else { Ok(peak) }
+    }
+}
+
 impl WindowsVersionBook {
     pub(crate) fn new() -> Self {
         Self { native: native::NativeBook::new(), phase: Phase::New, call_pending: false,
             settlement_attempted: false, records: Vec::new(), identities: BTreeSet::new(), locations: None,
-            selected: [None; 3], entries: 0, observation: None }
+            selected: [None; 3], entries: 0, observation: None, loader: None, volumes: [None; 3], loader_ready: false }
     }
     pub(crate) fn never_started(&self) -> bool {
         self.phase == Phase::New && !self.call_pending && !self.settlement_attempted
             && self.native.never_started() && self.records.is_empty() && self.observation.is_none()
+            && self.loader.is_none() && !self.loader_ready && self.volumes == [None; 3]
     }
     pub(crate) fn inspect_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<&VersionObservation> {
+        self.inspect_kind(false, end, stop)
+    }
+    fn inspect_kind(&mut self, passive: bool, end: Instant, stop: &watch::Receiver<bool>) -> Result<&VersionObservation> {
         if self.phase == Phase::Unknown || self.native.is_unknown() { return Err(InspectionFailure::Unknown); }
         if self.phase != Phase::New { return Err(InspectionFailure::AlreadyUsed); }
         self.phase = Phase::Inspecting;
-        match self.inspect(end, stop) {
+        match self.inspect(passive, end, stop) {
             Ok(observation) => {
                 self.observation = Some(observation); self.phase = Phase::Inspected;
                 self.observation.as_ref().ok_or(InspectionFailure::Unknown)
@@ -137,15 +230,27 @@ impl WindowsVersionBook {
             },
         }
     }
-    fn inspect(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<VersionObservation> {
+    fn inspect(&mut self, passive: bool, end: Instant, stop: &watch::Receiver<bool>) -> Result<VersionObservation> {
         checkpoint(end, stop)?;
         let spec = VersionSpec::compiled().map_err(|_| InspectionFailure::Binding)?;
-        method(&mut self.native, &mut self.phase, &mut self.call_pending, end, stop,
-            |book| book.observe_user_once().map(|_| ()))?;
+        #[cfg(test)]
+        let mut account_sid_sha256 = None;
+        method(&mut self.native, &mut self.phase, &mut self.call_pending, end, stop, |book| {
+            let actual = book.observe_user_once()?;
+            // Copy DATA from this existing borrower, never a second token query.
+            #[cfg(test)]
+            { account_sid_sha256 = Some(Sha256::digest(actual.user.bytes()).iter().map(|b| format!("{b:02x}")).collect()); }
+            #[cfg(not(test))]
+            let _ = actual;
+            Ok(())
+        })?;
         let locations = &mut self.locations;
         method(&mut self.native, &mut self.phase, &mut self.call_pending, end, stop, |book| {
             *locations = Some(book.known_locations_once()?); Ok(())
         })?;
+        if passive {
+            self.loader = Some(LoaderPlan::new(self.locations.as_ref().ok_or(InspectionFailure::Unknown)?, &spec)?);
+        }
         let mut components = self.locations.as_ref().ok_or(InspectionFailure::Unknown)?.program_files.components().to_vec();
         components.extend(spec.components().into_iter().map(str::to_owned));
         let mut current = self.open_volume(end, stop)?;
@@ -174,11 +279,13 @@ impl WindowsVersionBook {
         // Includes exact byte hash before strict JSON, supplier pins and the
         // manifest's own share of NativeBook's file/read budgets.
         let inventory = spec.decode(&bytes).map_err(|_| InspectionFailure::Manifest)?;
+        if passive { inventory.passive_loader_inventory().map_err(|_| InspectionFailure::Inventory)?; }
         checkpoint(end, stop)?;
         self.close_record(manifest, end, stop)?;
         let mut progress = inventory.progress();
         self.walk(version, "", entries, manifest, &inventory, &mut progress, end, stop)?;
         if !progress.complete() { return Err(InspectionFailure::Inventory); }
+        if passive { self.inspect_loader(end, stop)?; }
         // Retained prefix, version, selected images and selected ancestors all
         // get final canonical-name/identity/ACL/stream/filesystem observations.
         for index in 0..self.records.len() {
@@ -193,7 +300,12 @@ impl WindowsVersionBook {
         let selected_identities = [self.metadata(selected[0]?)?.identity,
             self.metadata(selected[1]?)?.identity, self.metadata(selected[2]?)?.identity];
         checkpoint(end, stop)?;
+        self.loader_ready = passive;
         Ok(VersionObservation { target: windows_version::TARGET, manifest_sha256: spec.manifest_sha256().to_owned(),
+            #[cfg(test)]
+            protocol_sha256: inventory.manifest.protocol_sha256.clone(),
+            #[cfg(test)]
+            account_sid_sha256: account_sid_sha256.ok_or(InspectionFailure::Unknown)?,
             inventory_sha256: inventory.manifest.inventory_sha256.clone(), core_sha256: inventory.manifest.core_sha256.clone(),
             files: inventory.manifest.files.len(), entries: self.entries, payload_bytes: inventory.payload_bytes,
             version_identity: self.metadata(version)?.identity, selected_identities })
@@ -201,14 +313,114 @@ impl WindowsVersionBook {
     fn metadata(&self, index: usize) -> Result<&native::Metadata> {
         self.records.get(index).and_then(|record| record.metadata.as_ref()).ok_or(InspectionFailure::Unknown)
     }
+    fn open_location_chain(&mut self, location: usize, end: Instant, stop: &watch::Receiver<bool>) -> Result<usize> {
+        let components = location_at(self.locations.as_ref().ok_or(InspectionFailure::Unknown)?, location)?.components().to_vec();
+        let mut parent = self.open_volume_for(location, end, stop)?;
+        for (ordinal, name) in components.iter().enumerate() {
+            let entries = self.enumerate(parent, Some(name), end, stop)?;
+            let entry = entries.iter().find(|entry| entry.name.eq_ignore_ascii_case(name)).ok_or(InspectionFailure::Inventory)?;
+            if entry.kind != native::FileKind::Directory { return Err(InspectionFailure::Inventory); }
+            let existing = self.records.iter().position(|record| record.parent == Some(parent)
+                && record.path.last().is_some_and(|p| p.eq_ignore_ascii_case(&entry.name)));
+            let scope = if ordinal + 1 == components.len() { native::AuthorityScope::ImmutableVersion }
+                else { native::AuthorityScope::AncestorOutsideVersion };
+            parent = if let Some(index) = existing {
+                if self.records[index].closed || self.metadata(index)?.identity.file_id != entry.file_id {
+                    return Err(InspectionFailure::Identity);
+                }
+                // A shared Windows root may have been an ancestor of another
+                // branch. Strengthen it to a loader-search root, never weaken it.
+                if scope == native::AuthorityScope::ImmutableVersion { self.records[index].scope = scope; }
+                self.postcheck(index, end, stop)?; index
+            } else { self.open_child(parent, entry, scope, false, true, end, stop)? };
+        }
+        Ok(parent)
+    }
+    fn inspect_loader(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
+        if self.loader.is_none() || self.loader_ready { return Err(InspectionFailure::AlreadyUsed); }
+        let windows = self.open_location_chain(1, end, stop)?;
+        let entries = self.enumerate(windows, Some("System"), end, stop)?;
+        // The Windows root's immutable ACL + actual original EOF establishes
+        // absence too; never probe a second name by pathname after this scan.
+        if let Some(entry) = entries.iter().find(|entry| entry.name.eq_ignore_ascii_case("System")) {
+            if entry.kind != native::FileKind::Directory { return Err(InspectionFailure::Inventory); }
+            if self.records.iter().any(|record| record.parent == Some(windows)
+                && record.path.last().is_some_and(|name| name.eq_ignore_ascii_case(&entry.name))) {
+                // Unsupported overlap is a refusal, never a second original
+                // or a restarted directory cursor.
+                return Err(InspectionFailure::Identity);
+            }
+            self.open_child(windows, entry, native::AuthorityScope::ImmutableVersion, false, true, end, stop)?;
+        }
+        let system = self.open_location_chain(2, end, stop)?;
+        let entries = self.enumerate(system, Some("kernel32.dll"), end, stop)?;
+        for image in native::SystemImage::ALL {
+            checkpoint(end, stop)?;
+            let entry = entries.iter().find(|entry| entry.name.eq_ignore_ascii_case(image.name()))
+                .ok_or(InspectionFailure::Inventory)?;
+            if entry.kind != native::FileKind::File { return Err(InspectionFailure::Inventory); }
+            self.records.try_reserve(1).map_err(|_| InspectionFailure::Bounds)?;
+            let volume = self.records[system].volume;
+            let mut path = self.records[system].path.clone(); path.push(entry.name.clone());
+            let locations = self.locations.as_ref().ok_or(InspectionFailure::Unknown)?;
+            let records = &mut self.records;
+            let index = records.len();
+            method(&mut self.native, &mut self.phase, &mut self.call_pending, end, stop, |book| {
+                let original = book.open_system_image(&locations.system, &records[system].original, *image, &entry.name)?;
+                let mut record = Record::new(original, Some(system), native::AuthorityScope::ImmutableVersion, false, true);
+                record.volume = volume; record.path = path; records.push(record); Ok(())
+            })?;
+            self.admit(index, Some(entry), end, stop)?;
+        }
+        Ok(())
+    }
+    fn prepare_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
+        if self.phase != Phase::Transferred || !self.loader_ready || self.loader.is_none()
+            || self.settlement_attempted || self.call_pending || self.native.is_unknown() {
+            return Err(InspectionFailure::AlreadyUsed);
+        }
+        self.phase = Phase::Preparing;
+        let returned = (|| {
+            method(&mut self.native, &mut self.phase, &mut self.call_pending, end, stop, |book| book.recheck_user())?;
+            for index in 0..self.records.len() { if !self.records[index].closed { self.postcheck(index, end, stop)?; } }
+            let locations = self.locations.as_ref().ok_or(InspectionFailure::Unknown)?;
+            for location in [&locations.program_files, &locations.windows, &locations.system] {
+                method(&mut self.native, &mut self.phase, &mut self.call_pending, end, stop, |book| book.recheck_location(location))?;
+            }
+            let loader = self.loader.as_ref().ok_or(InspectionFailure::Unknown)?;
+            // Same fixed strings; this is not a new selection or pathname reopen.
+            if !windows_version::python_path_fits(loader.selection.python.to_str().ok_or(InspectionFailure::Binding)?) {
+                return Err(InspectionFailure::Bounds);
+            }
+            checkpoint(end, stop)
+        })();
+        match returned {
+            Ok(()) => { self.phase = Phase::Prepared; Ok(()) },
+            Err(error) => {
+                if self.phase == Phase::Unknown || self.native.is_unknown() || self.call_pending || error == InspectionFailure::Unknown {
+                    self.mark_interrupted(); Err(InspectionFailure::Unknown)
+                } else { self.phase = Phase::Refused; Err(error) }
+            },
+        }
+    }
     fn open_volume(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<usize> {
+        self.open_volume_for(0, end, stop)
+    }
+    fn open_volume_for(&mut self, location: usize, end: Instant, stop: &watch::Receiver<bool>) -> Result<usize> {
+        let root = self.loader.as_ref().map_or(location as u8, |p| p.roots[location]);
+        if let Some(index) = self.volumes[root as usize] {
+            self.postcheck(index, end, stop)?; return Ok(index);
+        }
         self.records.try_reserve(1).map_err(|_| InspectionFailure::Bounds)?;
-        let locations = self.locations.as_ref().ok_or(InspectionFailure::Unknown)?;
+        let selected = location_at(self.locations.as_ref().ok_or(InspectionFailure::Unknown)?, location)?;
         let records = &mut self.records;
+        let volumes = &mut self.volumes;
         let index = records.len();
         method(&mut self.native, &mut self.phase, &mut self.call_pending, end, stop, |book| {
-            let original = book.open_volume(&locations.program_files)?;
-            records.push(Record::new(original, None, native::AuthorityScope::AncestorOutsideVersion, false, true));
+            let original = book.open_volume(selected)?;
+            let mut record = Record::new(original, None, native::AuthorityScope::AncestorOutsideVersion, false, true);
+            record.volume = root;
+            records.push(record); volumes[root as usize] = Some(index);
             Ok(()) // original key is retained before any post-call interruption
         })?;
         self.admit(index, None, end, stop)?; Ok(index)
@@ -216,12 +428,16 @@ impl WindowsVersionBook {
     fn open_child(&mut self, parent: usize, entry: &native::DirectoryEntry, scope: native::AuthorityScope,
         protected: bool, keep: bool, end: Instant, stop: &watch::Receiver<bool>) -> Result<usize> {
         self.records.try_reserve(1).map_err(|_| InspectionFailure::Bounds)?;
+        let parent_record = self.records.get(parent).ok_or(InspectionFailure::Unknown)?;
+        let volume = parent_record.volume;
+        let mut path = parent_record.path.clone(); path.push(entry.name.clone());
         let records = &mut self.records;
         let index = records.len();
         method(&mut self.native, &mut self.phase, &mut self.call_pending, end, stop, |book| {
             let parent_original = &records.get(parent).ok_or(native::Error::State)?.original;
             let original = book.open_child(parent_original, &entry.name, entry.kind)?;
-            records.push(Record::new(original, Some(parent), scope, protected, keep)); Ok(())
+            let mut record = Record::new(original, Some(parent), scope, protected, keep);
+            record.volume = volume; record.path = path; records.push(record); Ok(())
         })?;
         self.admit(index, Some(entry), end, stop)?; Ok(index)
     }
@@ -265,14 +481,25 @@ impl WindowsVersionBook {
     }
     fn enumerate(&mut self, index: usize, ancestor_name: Option<&str>, end: Instant,
         stop: &watch::Receiver<bool>) -> Result<Vec<native::DirectoryEntry>> {
+        let original = self.records.get(index).ok_or(InspectionFailure::Unknown)?;
+        if let Some(entries) = &original.entries {
+            if original.enumeration_strict != ancestor_name.is_none() { return Err(InspectionFailure::AlreadyUsed); }
+            let entries = entries.clone();
+            self.postcheck(index, end, stop)?; return Ok(entries);
+        }
+        let selected = if ancestor_name.is_some() {
+            self.loader.as_ref().map(|p| p.selectors.get(&LoaderPlan::key(original.volume, &original.path))
+                .cloned().ok_or(InspectionFailure::Inventory)).transpose()?
+        } else { None };
         let mut entries = Vec::new();
         let mut names = BTreeSet::new();
         loop {
             let record = self.records.get(index).ok_or(InspectionFailure::Unknown)?;
             let batch = method(&mut self.native, &mut self.phase, &mut self.call_pending, end, stop, |book| {
-                match ancestor_name {
-                    Some(name) => book.next_ancestor_entries(&record.original, name),
-                    None => book.next_entries(&record.original),
+                match (&selected, ancestor_name) {
+                    (Some(names), Some(_)) => book.next_selected_entries(&record.original, names),
+                    (None, Some(name)) => book.next_ancestor_entries(&record.original, name),
+                    (_, None) => book.next_entries(&record.original),
                 }
             })?;
             let Some(batch) = batch else { break }; // actual native EOF only
@@ -293,6 +520,8 @@ impl WindowsVersionBook {
             }
         }
         self.postcheck(index, end, stop)?;
+        self.records[index].entries = Some(entries.clone());
+        self.records[index].enumeration_strict = ancestor_name.is_none();
         Ok(entries)
     }
     fn read(&mut self, index: usize, expected: u64, mut capture: Option<&mut Vec<u8>>,
@@ -376,7 +605,7 @@ impl WindowsVersionBook {
             self.mark_interrupted(); return native::CloseOutcome::Unknown;
         }
         self.settlement_attempted = true;
-        if self.call_pending || self.phase == Phase::Inspecting { self.mark_interrupted(); }
+        if self.call_pending || matches!(self.phase, Phase::Inspecting | Phase::Preparing) { self.mark_interrupted(); }
         let unknown = self.phase == Phase::Unknown || self.native.is_unknown();
         self.phase = Phase::Settling;
         let result = self.native.settle_once();
@@ -389,10 +618,187 @@ impl WindowsVersionBook {
     }
 }
 
+/// Storage in the existing query Owner, registered before inspection starts.
+/// A selection, manifest hash or completed inspection DATA cannot construct the
+/// private capability; the complete still-live book must move here exactly once.
+pub(crate) struct PassiveRuntimeSlots {
+    inspection: Option<WindowsVersionBook>,
+    profile: Option<crate::runtime::PassiveInstalledProfile>,
+    acquisition: Option<PassiveInstalledRuntime>,
+    inspection_started: bool,
+    settlement_started: bool,
+}
+pub(crate) struct PassiveInstalledRuntime {
+    original: WindowsVersionBook,
+    _profile: crate::runtime::PassiveInstalledProfile,
+    claimed: bool,
+    refused_before_effect: bool,
+}
+impl WindowsVersionBook {
+    fn transfer_ready(&self) -> bool {
+        self.phase == Phase::Inspected && self.loader_ready && self.loader.is_some()
+            && self.observation.is_some() && self.selected.iter().all(Option::is_some)
+            && !self.call_pending && !self.settlement_attempted && !self.native.is_unknown()
+            && self.records.iter().filter(|r| r.keep).all(|r| !r.closed && r.metadata.is_some() && r.security.is_some())
+    }
+}
+impl PassiveInstalledRuntime {
+    pub(crate) fn prepare_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<&crate::runtime::VerifiedRuntime> {
+        if self.claimed || self.refused_before_effect { return Err(InspectionFailure::AlreadyUsed); }
+        self.original.prepare_once(end, stop)?;
+        self.original.loader.as_ref().map(|loader| &loader.selection).ok_or(InspectionFailure::Unknown)
+    }
+    /// This is native-known Windows DATA from THIS retained book, not ambient
+    /// SystemRoot. It is borrowed only while preparing the fixed command.
+    pub(crate) fn system_root(&self) -> Result<&str> {
+        if !self.ready() { return Err(InspectionFailure::AlreadyUsed); }
+        self.original.loader.as_ref().map(|loader| loader.system_root.as_str()).ok_or(InspectionFailure::Unknown)
+    }
+    fn ready(&self) -> bool {
+        self.original.phase == Phase::Prepared && self.original.loader_ready
+            && self.original.loader.is_some() && !self.original.native.is_unknown()
+            && !self.original.call_pending && !self.original.settlement_attempted
+            && !self.claimed && !self.refused_before_effect
+    }
+    pub(crate) fn claim_once(&mut self) -> Result<()> {
+        if !self.ready() { return Err(InspectionFailure::AlreadyUsed); }
+        self.claimed = true; Ok(())
+    }
+    // Only the unconditional closed-profile no-effect stub may call this.
+    // A real Command::spawn error is opaque and NEVER sets this receipt.
+    #[cfg(not(all(not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell"))))]
+    pub(crate) fn record_closed_spawn_gate(&mut self) { self.refused_before_effect = true; }
+}
+impl PassiveRuntimeSlots {
+    pub(crate) fn new() -> Self {
+        Self { inspection: Some(WindowsVersionBook::new()), profile: None, acquisition: None,
+            inspection_started: false, settlement_started: false }
+    }
+    pub(crate) fn never_started(&self) -> bool {
+        !self.inspection_started && !self.settlement_started && self.profile.is_none() && self.acquisition.is_none()
+            && self.inspection.as_ref().is_some_and(WindowsVersionBook::never_started)
+    }
+    pub(crate) fn inspect_once(&mut self, profile: crate::runtime::PassiveInstalledProfile,
+        end: Instant, stop: &watch::Receiver<bool>) -> std::result::Result<crate::runtime::VerifiedRuntime, crate::error::BridgeError> {
+        use crate::error::BridgeError;
+        if !self.never_started() { return Err(BridgeError::cleanup_unknown()); }
+        profile.compiled()?; // Compile-bound DATA, before any native operation.
+        self.profile = Some(profile); self.inspection_started = true;
+        let original = self.inspection.as_mut().ok_or_else(BridgeError::cleanup_unknown)?;
+        match original.inspect_kind(true, end, stop) {
+            Ok(_) => {
+                let loader = original.loader.as_ref().ok_or_else(BridgeError::cleanup_unknown)?;
+                let data = &loader.selection;
+                Ok(crate::runtime::VerifiedRuntime { python: data.python.clone(), bootstrap: data.bootstrap.clone(),
+                    core: data.core.clone(), cwd: data.cwd.clone() }) // DATA only.
+            },
+            Err(InspectionFailure::Unknown) => Err(BridgeError::cleanup_unknown()),
+            Err(InspectionFailure::Deadline) => Err(BridgeError::timeout()),
+            Err(_) => Err(BridgeError::unavailable("The Windows payload/loader originals failed admission.")),
+        }
+    }
+    pub(crate) fn transfer_once(&mut self) -> Result<()> {
+        if self.acquisition.is_some() || !self.inspection_started || self.settlement_started || self.profile.is_none()
+            || !self.inspection.as_ref().is_some_and(WindowsVersionBook::transfer_ready) {
+            return Err(InspectionFailure::AlreadyUsed);
+        }
+        let profile = self.profile.take().ok_or(InspectionFailure::AlreadyUsed)?;
+        let Some(mut original) = self.inspection.take() else {
+            self.profile = Some(profile); return Err(InspectionFailure::AlreadyUsed);
+        };
+        original.phase = Phase::Transferred;
+        self.acquisition = Some(PassiveInstalledRuntime { original, _profile: profile,
+            claimed: false, refused_before_effect: false });
+        Ok(()) // No native call, allocation, await or fallible work after take.
+    }
+    pub(crate) fn capability(&mut self) -> Result<&mut PassiveInstalledRuntime> {
+        if self.settlement_started { return Err(InspectionFailure::AlreadyUsed); }
+        self.acquisition.as_mut().ok_or(InspectionFailure::AlreadyUsed)
+    }
+    pub(crate) fn no_child_effect(&self) -> bool {
+        match (&self.inspection, &self.acquisition) {
+            (Some(_), None) => true,
+            (None, Some(runtime)) => !runtime.claimed || runtime.refused_before_effect,
+            _ => false,
+        }
+    }
+    pub(crate) fn mark_interrupted(&mut self) {
+        if let Some(original) = &mut self.inspection { original.mark_interrupted(); }
+        if let Some(runtime) = &mut self.acquisition { runtime.original.mark_interrupted(); }
+    }
+    pub(crate) fn settle_originals(&mut self) -> CloseOutcome {
+        if self.settlement_started { self.mark_interrupted(); return CloseOutcome::Unknown; }
+        self.settlement_started = true;
+        let mut count = 0; let mut positive = true;
+        if let Some(original) = &mut self.inspection { count += 1; positive &= original.settle_originals() == CloseOutcome::Settled; }
+        if let Some(runtime) = &mut self.acquisition { count += 1; positive &= runtime.original.settle_originals() == CloseOutcome::Settled; }
+        if count == 1 && positive && self.settled() { CloseOutcome::Settled } else { CloseOutcome::Unknown }
+    }
+    pub(crate) fn settled(&self) -> bool {
+        self.settlement_started && match (&self.inspection, &self.acquisition) {
+            (Some(original), None) => original.settled(),
+            (None, Some(runtime)) => runtime.original.settled(),
+            _ => false,
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn settled_observation(&self) -> Option<(native::FullwalkFacts, crate::runtime::VerifiedRuntime, String, bool)> {
+        if !self.settled() { return None; }
+        let (original, claimed) = match (&self.inspection, &self.acquisition) {
+            (Some(original), None) => (original, false),
+            (None, Some(runtime)) => (&runtime.original, runtime.claimed),
+            _ => return None,
+        };
+        if !original.loader_ready { return None; }
+        let actual = original.observation.as_ref()?;
+        let loader = original.loader.as_ref()?;
+        let data = &loader.selection;
+        Some((native::FullwalkFacts {
+            target: actual.target.to_owned(), manifest_sha256: actual.manifest_sha256.clone(),
+            protocol_sha256: actual.protocol_sha256.clone(), account_sid_sha256: actual.account_sid_sha256.clone(),
+            inventory_sha256: actual.inventory_sha256.clone(), core_sha256: actual.core_sha256.clone(),
+            files: actual.files, entries: actual.entries, payload_bytes: actual.payload_bytes,
+            version_identity: actual.version_identity, selected_identities: actual.selected_identities,
+        }, crate::runtime::VerifiedRuntime { python: data.python.clone(), bootstrap: data.bootstrap.clone(),
+            core: data.core.clone(), cwd: data.cwd.clone() }, loader.system_root.clone(), claimed))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn passive_slots_cannot_transfer_partial_inspection_or_settled_books() {
+        let mut slots = PassiveRuntimeSlots::new();
+        assert!(slots.never_started() && slots.no_child_effect());
+        assert!(slots.transfer_once().is_err() && slots.capability().is_err());
+        slots.inspection_started = true;
+        for phase in [Phase::New, Phase::Inspecting, Phase::Inspected, Phase::Refused, Phase::Preparing, Phase::Prepared, Phase::Unknown] {
+            slots.inspection.as_mut().unwrap().phase = phase;
+            assert!(!slots.inspection.as_ref().unwrap().transfer_ready());
+            assert!(slots.transfer_once().is_err() && slots.acquisition.is_none());
+        }
+        let mut slots = PassiveRuntimeSlots::new();
+        assert_eq!(slots.settle_originals(), CloseOutcome::Settled);
+        assert!(slots.settled() && slots.transfer_once().is_err() && slots.capability().is_err());
+        assert_eq!(slots.settle_originals(), CloseOutcome::Unknown);
+        assert!(!slots.settled());
+        let mut book = WindowsVersionBook::new();
+        book.phase = Phase::Preparing; // No actual native borrower in this DATA test.
+        assert_eq!(book.settle_originals(), CloseOutcome::Unknown);
+        assert!(!book.settled());
+        let mut selectors = BTreeMap::new();
+        let key = (0, Vec::new());
+        assert!(LoaderPlan::select(&mut selectors, key.clone(), "Windows").is_ok());
+        assert!(LoaderPlan::select(&mut selectors, key.clone(), "Windows").is_ok());
+        assert_eq!(LoaderPlan::select(&mut selectors, key.clone(), "WINDOWS"), Ok(()));
+        assert_eq!(selectors.get(&key).unwrap().as_slice(), &["Windows".to_owned()]);
+        assert_eq!(LoaderPlan::peak(12), Ok(native::MAX_ORIGINALS));
+        assert_eq!(LoaderPlan::peak(13), Err(InspectionFailure::Bounds));
+        assert_eq!(LoaderPlan::peak(usize::MAX), Err(InspectionFailure::Bounds));
+    }
 
     #[test]
     fn stopped_expired_and_lost_channel_inspection_never_enters_native_work() {
@@ -466,16 +872,28 @@ mod tests {
         let mut book = WindowsVersionBook::new();
         let (_sender, stop) = watch::channel(false);
         let original_end = Instant::now() + Duration::from_secs(10);
-        let inspected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
-            book.inspect_once(original_end, &stop).is_ok()));
-        let good = match inspected {
-            Ok(good) => good,
-            Err(_) => { book.mark_interrupted(); false },
+        let reporting_end = original_end + Duration::from_secs(2); // no restarted reporting clock
+        let inspected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            book.inspect_once(original_end, &stop).map(|actual| native::FullwalkFacts {
+                target: actual.target.to_owned(), manifest_sha256: actual.manifest_sha256.clone(),
+                protocol_sha256: actual.protocol_sha256.clone(), inventory_sha256: actual.inventory_sha256.clone(),
+                core_sha256: actual.core_sha256.clone(), account_sid_sha256: actual.account_sid_sha256.clone(),
+                files: actual.files, entries: actual.entries, payload_bytes: actual.payload_bytes,
+                version_identity: actual.version_identity, selected_identities: actual.selected_identities,
+            }) // owned bounded DATA copied before this actual borrow ends
+        }));
+        let actual = match inspected {
+            Ok(Ok(actual)) => Some(actual),
+            Ok(Err(_)) => None,
+            Err(_) => { book.mark_interrupted(); None },
         };
-        let closed = book.settle_originals(); // always before any assertion/report
-        assert!(good, "the actual protected version was not completely inspected");
+        let closed = book.settle_originals(); // always after borrower return/unwind, before assertion/report
+        assert!(actual.is_some(), "the actual protected version was not completely inspected");
         assert!(closed == native::CloseOutcome::Settled && book.settled(), "original settlement is unconfirmed");
-        assert!(Instant::now() <= original_end + Duration::from_secs(2), "original observation/settlement window exceeded");
+        assert!(Instant::now() <= reporting_end, "original observation/settlement window exceeded");
+        let Some(actual) = actual else { unreachable!() };
+        assert!(native::write_fullwalk_result_once(&actual, reporting_end).is_ok(),
+            "the fixed original result write/close did not complete within the original boundary");
     }
 
     #[test]

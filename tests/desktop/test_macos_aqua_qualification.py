@@ -2279,7 +2279,7 @@ class AquaDataTests(unittest.TestCase):
                           "native_roster(", ".reconcile(", ".join", ".poll", ".await", "Record", "self.record(", "metadata("):
             self.assertNotIn(forbidden, capture)
         projection = asset.split("fn recorded_identity(", 1)[1].split("fn saved_project_selection(", 1)[0]
-        for required in ("root.identity.preflight_identity()", "identity.device.parse().ok()?", "identity.inode.parse().ok()?",
+        for required in ("root.identity.posix().ok()?.preflight_identity()", "identity.device.parse().ok()?", "identity.inode.parse().ok()?",
                          "u64::from(identity.mode)", "u64::from(identity.uid)", "u64::from(identity.gid)"):
             self.assertIn(required, projection)
         for forbidden in ("metadata(", "std::fs", "as f64", "unwrap_or(0)", "canonicalize"):
@@ -2301,7 +2301,15 @@ class AquaDataTests(unittest.TestCase):
         command = shell.split("async fn choose_project(webview:", 1)[1].split("async fn choose_project_path(", 1)[0]
         self.assertEqual(command.count("state.document.installed_macos_project_result(id, &mut selection).await"), 1)
         self.assertEqual(command.count("state.document.project_result(id).await"), 1)  # Ordinary/Linux return is unchanged.
-        self.assertIn("q.project_result(&result);", command)  # Linux hook signature is unchanged.
+        self.assertIn("q.project_result(&result);", command)  # Linux/Windows hook signature is unchanged.
+        one_arg_gate = command.split("if let Some(q) = &state.observation { q.project_result(&result); }", 1)[0].rsplit("#[cfg(", 1)[1]
+        self.assertIn('target_os = "linux"', one_arg_gate)
+        self.assertIn('target_os = "windows"', one_arg_gate)
+        self.assertNotIn('target_os = "macos"', one_arg_gate)
+        two_arg_gate = command.split("if let Some(q) = &state.observation { q.project_result(&result, selection.as_ref()); }", 1)[0].rsplit("#[cfg(", 1)[1]
+        self.assertIn('target_os = "macos"', two_arg_gate)
+        self.assertNotIn('target_os = "linux"', two_arg_gate)
+        self.assertNotIn('target_os = "windows"', two_arg_gate)
         self.assertLess(command.index("}.await;"), command.index("q.project_result(&result, selection.as_ref())"))
         for source in (result, command):
             self.assertIn('feature = "macos-installed-observation"', source)
@@ -2313,6 +2321,22 @@ class AquaDataTests(unittest.TestCase):
         self.assertLess(handler.index("latch_project_selection("), handler.index("r.project_returned = true; r.project = Some(project.clone());"))
         for forbidden in ("state.document", "installed_macos_project(", "r.project_witness =", "observe_panel", "metadata("):
             self.assertNotIn(forbidden, handler)
+
+    def test_navigation_observer_cfg_preserves_all_platform_callbacks(self):
+        shell = (PATH.parents[1] / "src-tauri/src/shell.rs").read_text(encoding="utf-8")
+        def gate(marker):
+            return shell.split(marker, 1)[0].rsplit("#[cfg(", 1)[1].split(")]", 1)[0]
+        page = gate("let page_observation = observation.clone();")
+        self.assertEqual(gate("let navigation_observation = observation.clone();"), page)
+        self.assertEqual(gate("if let Some(q) = &navigation_observation {"), page)
+        for platform in ("linux", "macos", "windows"):
+            self.assertIn('target_os = "' + platform + '"', page)
+        navigation = shell.split(".on_navigation(move |url| {", 1)[1].split(".on_page_load(", 1)[0]
+        self.assertIn("let route = navigation_windows.navigation(url);", navigation)
+        self.assertIn("route != owned_windows::EventRoute::Controlled", navigation)
+        self.assertIn("let allowed = navigation.navigation(_trusted);", navigation)
+        self.assertIn("if _observed.0 { q.navigation(_observed.1, allowed); }", navigation)
+        self.assertIn("qualification::EventKind::Navigation, u32::from(_trusted && allowed)", navigation)
 
     def test_project_selection_labels_identity_axes_and_first_winner_are_bounded(self):
         source_root = PATH.parents[1] / "src-tauri" / "src"

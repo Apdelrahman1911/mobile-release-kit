@@ -361,7 +361,7 @@ class ConfigPreviewTests(unittest.TestCase):
              patch.object(ReleaseConfig, "release_version", side_effect=AssertionError("version read")):
             methods = {item["method"]: item["available"] for item in execute("capabilities", {})["methods"]}
             self.assertTrue(methods["config.preview"] and methods["config.suggest"])
-            self.assertFalse(methods["project.snapshot"])
+            self.assertEqual(methods["project.snapshot"], os.name == "nt")
             self.assertTrue(compare(None, value)["validation"]["valid"])
             execute("config.suggest", {"hints": {"platforms": ["android"]}})
             self.assertTrue(all(not item["available"] for item in execute("capabilities", {})["actions"]))

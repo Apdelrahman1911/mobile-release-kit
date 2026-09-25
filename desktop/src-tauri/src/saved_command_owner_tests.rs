@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use serde_json::{json, Value};
 
 fn project() -> RegisteredRoot { RegisteredRoot { path: PathBuf::from("/unopened-saved-command-project"),
-    identity: crate::asset_source::DirectoryIdentity::synthetic_evidence_identity() } }
+    identity: crate::asset_source::ProjectIdentity::Posix(crate::asset_source::DirectoryIdentity::synthetic_evidence_identity()) } }
 fn application(domain: SavedCommandDomain) -> SavedCommandOwner {
     SavedCommandOwner::new(RuntimeConfig::packaged(PathBuf::from("/unopened-saved-command-runtime")), domain)
 }
@@ -269,6 +269,98 @@ async fn missing_android_tool_custody_refuses_before_inspection_or_acquisition()
     let r = application.inner.lock(); let a = r.active.as_ref().unwrap();
     assert_eq!((a.projection.reason, a.projection.outcome), (Reason::ToolchainUnavailable, Some(Outcome::Refused)));
     assert!(a.first_stop.is_some() && !a.terminal && !a.final_join_seen && r.last.is_none());
+}
+
+#[test]
+fn offline_installed_closer_requires_original_core_lifetime_not_policy_pass() {
+    for mode in ["missing", "unsettled", "negative", "cancelled"] {
+        let (application, owner) = active(SavedCommandDomain::OfflinePreflight); let now = owner.clocks.admitted;
+        {
+            let r = application.inner.lock();
+            assert!(!offline_installed_closure_ready(&r, &owner, true, true));
+            assert!(offline_installed_closure_ready(&r, &owner, false, true));
+            assert!(!offline_installed_closure_ready(&r, &owner, false, false));
+        }
+        application.inner.accept_at(&owner, Frame::OfflinePreflight(wire::Frame::Accepted), now);
+        if mode != "missing" {
+            let Context::OfflinePreflight(context) = &owner.context else { panic!("offline DATA") };
+            // Existing complete fixture contains a FAIL finding. Policy
+            // failure is not unresolved C/A/W lifetime or a runtime borrower.
+            let wire::Frame::Terminal(terminal) = wire::tests::terminal_frame(context) else { panic!("terminal DATA") };
+            let mut value = serde_json::to_value(terminal).unwrap();
+            if mode == "unsettled" {
+                value["outcome"] = json!("unknown"); value["reason"] = json!("cleanup-unknown");
+                value["result"] = Value::Null; value["lifetime"]["invocationClosed"] = json!(false);
+            } else if mode == "cancelled" {
+                value["outcome"] = json!("cancelled"); value["reason"] = json!("cancelled");
+                value["result"] = Value::Null; value["lifetime"]["stopObserved"] = json!("cancelled");
+            }
+            let parsed = wire::decode(&frame(owner.domain, 1, "terminal", value), &owner.id, &owner.generation, context).unwrap();
+            application.inner.accept_at(&owner, Frame::OfflinePreflight(parsed), now);
+        }
+        let (_, foreign) = active(SavedCommandDomain::OfflinePreflight);
+        let (_, android) = active(SavedCommandDomain::AndroidBuild);
+        let mut r = application.inner.lock();
+        // Direct engine0/IO-return DATA is deliberately insufficient by itself.
+        assert_eq!(offline_installed_closure_ready(&r, &owner, true, true), matches!(mode, "negative" | "cancelled"));
+        assert!(!offline_installed_closure_ready(&r, &owner, true, false));
+        assert!(!offline_installed_closure_ready(&r, &foreign, true, true));
+        assert!(!offline_installed_closure_ready(&r, &android, true, true));
+        if mode == "unsettled" { assert!(r.active.as_ref().unwrap().unknown); }
+        if mode == "negative" {
+            // Even wrong-domain settled terminal DATA cannot qualify Offline's
+            // closer. Real transport routing refuses this earlier as well.
+            r.active.as_mut().unwrap().projection.result = Some(Terminal::AndroidBuild(
+                android_terminal(&android_wire::tests::complete_with_failed_inspection())));
+            assert!(!offline_installed_closure_ready(&r, &owner, true, true));
+        }
+    }
+}
+
+#[test]
+fn selected_offline_runtime_cannot_use_the_unselected_native_finality_shortcut() {
+    let mut book = Resources::default();
+    assert!(native_final(&book, SavedCommandDomain::OfflinePreflight));
+    book.offline_selected = true;
+    assert!(!native_final(&book, SavedCommandDomain::OfflinePreflight));
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    {
+        book.offline_installed = Some(Arc::new(Mutex::new(OfflinePreflightRuntimeSlots::new())));
+        assert!(!native_final(&book, SavedCommandDomain::OfflinePreflight));
+        book.offline_selected = false; // Stray original slot is not a dev/headless exemption either.
+        assert!(!native_final(&book, SavedCommandDomain::OfflinePreflight));
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[tokio::test]
+async fn offline_preclaim_workers_need_actual_ready_and_spawn_failure_never_means_no_child() {
+    let (application, owner) = active(SavedCommandDomain::OfflinePreflight);
+    {
+        let mut book = owner.resources.lock().await;
+        book.inspection_started = true; book.acquisition_started = true;
+        book.inspection = Some(tokio::spawn(pending::<Result<VerifiedRuntime, BridgeError>>()));
+        book.acquisition = Some(tokio::spawn(pending::<()>()));
+        book.write_end = Some(WriteEnd { sent: false, closed: false, failed: false });
+        book.out_end = Some(ReadEnd { frames: 0, eof: false, closed: false, failed: false, decoder_settled: false });
+        book.err_end = Some(ReadEnd { frames: 0, eof: false, closed: false, failed: false, decoder_settled: false });
+        assert!(!offline_consumers_returned(&book, &owner.startup.lock().unwrap(), true));
+        book.inspection_failed = true; book.acquisition_failed = true;
+        assert!(!offline_consumers_returned(&book, &owner.startup.lock().unwrap(), true));
+        book.inspection_failed = false; book.acquisition_failed = false;
+        book.inspection.as_ref().unwrap().abort(); book.acquisition.as_ref().unwrap().abort();
+    }
+    continue_original(&application.inner, &owner).await;
+    continue_original(&application.inner, &owner).await;
+    let book = owner.resources.lock().await;
+    assert!(book.inspection_error.as_ref().is_some_and(|e| e.is_cancelled())
+        && book.acquisition_error.as_ref().is_some_and(|e| e.is_cancelled()));
+    assert!(book.inspection.is_some() && book.acquisition.is_some());
+    assert!(offline_consumers_returned(&book, &owner.startup.lock().unwrap(), true));
+    assert!(!offline_consumers_returned(&book, &owner.startup.lock().unwrap(), false));
+    let mut startup = owner.startup.lock().unwrap(); startup.attempted = true; startup.failed = true;
+    assert!(!offline_consumers_returned(&book, &startup, true));
+    assert!(!book.offline_started && book.offline_settlement.is_none() && book.offline_return.is_none());
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]

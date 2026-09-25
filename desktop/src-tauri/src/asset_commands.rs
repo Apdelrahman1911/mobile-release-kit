@@ -85,6 +85,15 @@ enum Failure { Native(AssetError), Assessment(crate::credential_assessment::Asse
 // an original owner/result. No serde `rc` feature or R1 DTO change is needed.
 #[derive(Clone)]
 pub(crate) struct CommandError(Arc<Failure>);
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl CommandError {
+    pub(crate) fn installed_assessment_failure(&self) -> crate::credential_assessment::InstalledAssessmentFailure {
+        match self.0.as_ref() {
+            Failure::Assessment(error) => error.installed_failure(),
+            Failure::Native(_) => crate::credential_assessment::InstalledAssessmentFailure::none(),
+        }
+    }
+}
 impl Serialize for CommandError {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> { self.0.serialize(serializer) }
 }
@@ -177,6 +186,12 @@ pub(crate) struct Fields { kind: Kind, values: Vec<Option<String>> }
 impl Fields {
     pub(crate) fn empty_firebase() -> Self { Self { kind: Kind::AndroidFirebase, values: Vec::new() } }
     pub(crate) fn byte_count(&self) -> usize { self.values.iter().flatten().map(String::capacity).sum() }
+    // Lookup admission counts retained allocation capacity, including empty
+    // value cells. Keep the independent committed-record charge unchanged.
+    pub(crate) fn retained_bytes(&self) -> Option<usize> {
+        let cells = self.values.capacity().checked_mul(std::mem::size_of::<Option<String>>())?;
+        self.values.iter().flatten().try_fold(cells, |bytes, value| bytes.checked_add(value.capacity()))
+    }
     pub(crate) fn into_value(&self) -> Value {
         let mut object = Map::new();
         for (name, value) in field_names(self.kind).iter().zip(&self.values) {
@@ -419,7 +434,7 @@ pub(crate) fn assert_project_path_wiring_contract() {
         source.split_once(start).expect("source start").1.split_once(end).expect("source end").0
     }
     let commands = section(include_str!("../build.rs"), "const COMMANDS: &[&str] = &[", "];");
-    let handlers = section(include_str!("shell.rs"), ".invoke_handler(tauri::generate_handler![", "])");
+    let handlers = section(include_str!("shell.rs"), "tauri::generate_handler![", "];");
     let capability: Value = serde_json::from_str(include_str!("../capabilities/main.json")).expect("fixed main capability DATA");
     assert_eq!(commands.matches("\"choose_project_path\"").count(), 1);
     assert_eq!(handlers.split(',').filter(|name| name.trim() == "choose_project_path").count(), 1);
@@ -438,6 +453,16 @@ pub(crate) fn assert_project_path_wiring_contract() {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn lookup_fields_charge_keeps_empty_cells_and_string_capacity() {
+        let mut value = String::with_capacity(79); value.push_str("data"); value.truncate(1);
+        let mut values = Vec::with_capacity(7); values.push(Some(value)); values.push(None);
+        let fields = Fields { kind: Kind::GoogleWif, values };
+        let cells = fields.values.capacity() * std::mem::size_of::<Option<String>>();
+        assert_eq!(fields.retained_bytes(), Some(cells + fields.byte_count()));
+        assert!(cells > 0 && fields.byte_count() > 1);
+        assert_eq!(Fields::empty_firebase().retained_bytes(), Some(0));
+    }
     #[test]
     fn project_path_command_is_registered_once_for_the_fixed_main_local_capability() { assert_project_path_wiring_contract(); }
     #[test]

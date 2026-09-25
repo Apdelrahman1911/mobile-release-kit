@@ -60,6 +60,8 @@ fn main() {
             "github_workflow_edit_close", "github_workflow_edit_status",
             "metadata_text_observe", "metadata_text_validate", "metadata_text_edit_open", "metadata_text_edit_prepare",
             "metadata_text_edit_apply", "metadata_text_edit_close", "metadata_text_edit_status",
+            "release_version_edit_open", "release_version_edit_prepare", "release_version_edit_apply",
+            "release_version_edit_close", "release_version_edit_status",
             "github_connection_status", "github_connection_connect_token", "github_connection_refresh", "github_connection_disconnect",
             "vault_status", "vault_open", "asset_context", "asset_choose", "credential_prepare",
             "vault_prepare_delete", "vault_commit", "vault_bind", "vault_discard", "vault_lock",
@@ -68,6 +70,14 @@ fn main() {
             .app_manifest(tauri_build::AppManifest::new().commands(COMMANDS));
         if let Err(error) = tauri_build::try_build(attributes) {
             panic!("Tauri context generation failed: {error}");
+        }
+        // tauri-build 2.6.3 -> tauri-winres 0.3.6 -> embed-resource 3.0.11
+        // generates OUT_DIR/resource.lib for MSVC but links only Cargo bins.
+        // Reuse that same resource for the harness=false observation test.
+        if target == "x86_64-pc-windows-msvc" && cfg!(feature = "windows-installed-observation") {
+            let out_dir = env::var_os("OUT_DIR").expect("Windows observation resource linking requires OUT_DIR");
+            let resource = std::path::PathBuf::from(out_dir).join("resource.lib");
+            println!("cargo:rustc-link-arg-tests={}", resource.display());
         }
     }
 }

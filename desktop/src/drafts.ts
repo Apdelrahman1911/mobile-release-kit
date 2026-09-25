@@ -74,8 +74,8 @@ export const initialWorkspace: WorkspaceState = { selectedId: null, projects: {}
 export interface RetainedEditAttention {
   projectId: string;
   projectName: string | null;
-  domain: 'Project settings' | 'GitHub workflow files' | 'Public Store text';
-  page: 'settings' | 'github' | 'metadata';
+  domain: 'Project settings' | 'GitHub workflow files' | 'Public Store text' | 'Saved version values';
+  page: 'settings' | 'github' | 'metadata' | 'dashboard';
 }
 
 // A session-only view of existing negative attention, not a recovery assessment
@@ -86,6 +86,7 @@ export function retainedEditAttention(
   configuration: readonly { projectId: string }[],
   workflows: readonly { projectId: string }[],
   metadataProjects: readonly string[],
+  versionProjects: readonly string[] = [],
 ): RetainedEditAttention[] {
   const row = (projectId: string, domain: RetainedEditAttention['domain'], page: RetainedEditAttention['page']): RetainedEditAttention => {
     const loaded = Object.hasOwn(projects, projectId) ? projects[projectId] : undefined;
@@ -95,6 +96,7 @@ export function retainedEditAttention(
     ...configuration.map(({ projectId }) => row(projectId, 'Project settings', 'settings')),
     ...workflows.map(({ projectId }) => row(projectId, 'GitHub workflow files', 'github')),
     ...metadataProjects.map((projectId) => row(projectId, 'Public Store text', 'metadata')),
+    ...versionProjects.map((projectId) => row(projectId, 'Saved version values', 'dashboard')),
   ];
 }
 

@@ -14,7 +14,7 @@ use crate::{asset_source::RegisteredRoot, offline_preflight_protocol as wire, an
     error::BridgeError, runtime::{RuntimeConfig, VerifiedRuntime}, android_toolchain::AndroidToolchainProfile};
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 use crate::{android_toolchain::AndroidToolchainCustody,
-    installed_runtime::{AdmissionFailure, AndroidDescriptorBudget, CloseOutcome, InstalledRuntimeCustody}};
+    installed_runtime::{AdmissionFailure, AndroidDescriptorBudget, CloseOutcome, InstalledRuntimeCustody, OfflinePreflightRuntimeSlots}};
 
 // Qualification is domain-local. No environment/GitHub/offline permit, parsed
 // tool binding, hash, mode or host profile can qualify Android build custody.
@@ -241,7 +241,11 @@ impl Clocks {
 }
 #[derive(Clone)]
 pub(crate) struct SavedCommandOwner { inner: Arc<Inner> }
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+struct InstalledObservation { control: Arc<crate::shell::installed_observation::commands::Control>, original: Option<Arc<Session>>, retired: bool, core_settled: bool }
 struct Inner {
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    observation: Mutex<Option<InstalledObservation>>,
     domain: SavedCommandDomain, runtime: RuntimeConfig, toolchain: Option<AndroidToolchainProfile>, registry: Mutex<Registry>, changes: watch::Sender<u32>, changed: Notify, poisoned: AtomicBool,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
         any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
@@ -333,9 +337,17 @@ impl<T> Default for Pipe<T> { fn default() -> Self { Self { io: None, close: Clo
 #[derive(Default)]
 struct Resources {
     inspection: Option<JoinHandle<Result<VerifiedRuntime, BridgeError>>>, inspection_joined: bool, inspection_failed: bool,
-    inspection_error: Option<tokio::task::JoinError>,
+    inspection_started: bool, inspection_error: Option<tokio::task::JoinError>,
     acquisition: Option<JoinHandle<()>>, acquisition_joined: bool, acquisition_failed: bool,
-    acquisition_error: Option<tokio::task::JoinError>,
+    acquisition_started: bool, acquisition_error: Option<tokio::task::JoinError>,
+    offline_selected: bool,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    offline_installed: Option<Arc<Mutex<OfflinePreflightRuntimeSlots>>>,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    offline_settlement: Option<JoinHandle<CloseOutcome>>,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    offline_return: Option<Result<CloseOutcome, tokio::task::JoinError>>,
+    offline_started: bool, offline_joined: bool, offline_failed: bool,
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     native: Option<Arc<Mutex<AndroidNativeBooks>>>,
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -430,6 +442,13 @@ fn final_clock_clear(r: &Registry, owner: &Session, now: Instant) -> bool {
         && r.active.as_ref().is_some_and(|a| !a.unknown && now < owner.clocks.settlement(a.first_stop))
 }
 fn native_worker_lost(book: &Resources, owner: &Session) {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if owner.domain == SavedCommandDomain::OfflinePreflight {
+        if let Some(native) = &book.offline_installed {
+            match native.lock() { Ok(mut slots) => slots.mark_interrupted(), Err(error) => error.into_inner().mark_interrupted() }
+        }
+        return;
+    }
     if owner.domain != SavedCommandDomain::AndroidBuild { return; }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     if let Some(native) = &book.native {
@@ -438,7 +457,7 @@ fn native_worker_lost(book: &Resources, owner: &Session) {
     }
 }
 fn native_final(book: &Resources, domain: SavedCommandDomain) -> bool {
-    if domain == SavedCommandDomain::OfflinePreflight { return true; }
+    if domain == SavedCommandDomain::OfflinePreflight { return offline_installed_final(book); }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     {
         book.native_started && book.native_joined && !book.native_failed && book.native_settlement.is_none()
@@ -531,7 +550,10 @@ impl SavedCommandOwner {
     fn new(runtime: RuntimeConfig, domain: SavedCommandDomain) -> Self { Self::new_selected(runtime, domain, None) }
     fn new_selected(runtime: RuntimeConfig, domain: SavedCommandDomain, toolchain: Option<AndroidToolchainProfile>) -> Self {
         let (changes, _) = watch::channel(0);
-        Self { inner: Arc::new(Inner { domain, runtime, toolchain, registry: Mutex::new(Registry { revision: 0, exhausted: false,
+        Self { inner: Arc::new(Inner {
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            observation: Mutex::new(None),
+            domain, runtime, toolchain, registry: Mutex::new(Registry { revision: 0, exhausted: false,
             disabled: false, stopping: false, document_lost: false, capability: Availability::RuntimeUnqualified,
             prepared: None, active: None, last: None }), changes, changed: Notify::new(), poisoned: AtomicBool::new(false),
             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
@@ -561,6 +583,10 @@ impl SavedCommandOwner {
         self.reconcile(); let mut r = self.inner.lock();
         let reason = self.inner.availability(&r, gate);
         if reason != Availability::Available { return Err(prepare_refusal(self.inner.domain, reason)); }
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(observation) = self.inner.observation.lock().map_err(|_| BridgeError::cleanup_unknown())?.as_ref() {
+            observation.control.claim(crate::shell::installed_observation::commands::Domain::Offline)?;
+        }
         let id = nonce(self.inner.domain)?; let generation = nonce(self.inner.domain)?;
         if r.last.as_ref().is_some_and(|last| last.operation_id == id || last.owner_generation == generation) { return Err(self.inner.domain.unavailable()); }
         let projection = RunProjection { operation_id: id, owner_generation: generation, context,
@@ -613,6 +639,9 @@ impl SavedCommandOwner {
             driver_joined: AtomicBool::new(false), driver_failed: AtomicBool::new(false), watchdog_joined: AtomicBool::new(false),
             watchdog_failed: AtomicBool::new(false), manager_failed: AtomicBool::new(false), startup: Mutex::new(Startup::default()),
             resources: AsyncMutex::new(Resources { frames: Some(receiver),
+                offline_selected: self.inner.offline_installed_selected(),
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                offline_installed: self.inner.offline_installed_selected().then(|| Arc::new(Mutex::new(OfflinePreflightRuntimeSlots::new()))),
                 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
                 native: if self.inner.domain == SavedCommandDomain::AndroidBuild {
                     self.inner.toolchain.clone().map(|profile| Arc::new(Mutex::new(AndroidNativeBooks::new(profile, audit_cutoff))))
@@ -632,6 +661,11 @@ impl SavedCommandOwner {
         if let Some(permit) = &owner.fixture {
             if owner.domain != SavedCommandDomain::OfflinePreflight { return Err(self.inner.domain.unavailable()); }
             permit.bind(&owner)?;
+        }
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(observation) = self.inner.observation.lock().map_err(|_| BridgeError::cleanup_unknown())?.as_mut() {
+            if observation.original.is_some() { return Err(self.inner.domain.unavailable()); }
+            observation.original = Some(owner.clone());
         }
         let (release, enter) = oneshot::channel();
         // Every new roster slot precedes publication/spawn. No hosted-fixture
@@ -732,6 +766,13 @@ impl SavedCommandOwner {
                 if !Arc::ptr_eq(&active.owner, &owner) { r.active = Some(active); return; }
                 active.projection.phase = if active.unknown { Phase::Unknown } else { Phase::Terminal };
                 if active.projection.outcome.is_none() { set_failure_outcome(&mut active.projection); }
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                if let Ok(mut observation) = self.inner.observation.lock() {
+                    if let Some(observation) = observation.as_mut().filter(|o| o.original.as_ref().is_some_and(|s| Arc::ptr_eq(s, &owner))) {
+                        observation.retired = true;
+                        observation.core_settled = active.accepted && active.terminal && active.projection.result.as_ref().is_some_and(Terminal::settled);
+                    }
+                }
                 r.last = Some(active.projection.public()); self.inner.bump(&mut r);
             }
         } else {
@@ -767,13 +808,19 @@ fn set_failure_outcome(p: &mut RunProjection) {
     });
 }
 impl Inner {
+    fn offline_installed_selected(&self) -> bool {
+        let qualified = OFFLINE_NATIVE_QUALIFIED && OFFLINE_RUNTIME_QUALIFIED;
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let qualified = qualified || self.observation.lock().is_ok_and(|o| o.is_some());
+        self.domain == SavedCommandDomain::OfflinePreflight && qualified && self.runtime.offline_preflight_installed_profile_available()
+    }
     fn qualified(&self) -> bool {
         #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
             any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
         if self.domain == SavedCommandDomain::OfflinePreflight && self.fixture.lock().ok().and_then(|slot| slot.as_ref().and_then(std::sync::Weak::upgrade))
             .is_some_and(|permit| permit.permits(self)) { return true; }
         match self.domain {
-            SavedCommandDomain::OfflinePreflight => OFFLINE_NATIVE_QUALIFIED && OFFLINE_RUNTIME_QUALIFIED,
+            SavedCommandDomain::OfflinePreflight => self.offline_installed_selected(),
             SavedCommandDomain::AndroidBuild => ANDROID_NATIVE_QUALIFIED && ANDROID_RUNTIME_QUALIFIED && ANDROID_TOOLCHAIN_QUALIFIED && self.toolchain.is_some(),
         }
     }
@@ -1137,6 +1184,160 @@ async fn join_with_clock<T>(slot: &mut Option<JoinHandle<T>>, inner: &Inner, own
         tokio::select! { result = join_slot(slot) => return result, _ = wake => {}, _ = clock_wait(end) => {} }
     }
 }
+fn offline_installed_final(book: &Resources) -> bool {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    {
+        if !book.offline_selected {
+            return book.offline_installed.is_none() && !book.offline_started && !book.offline_joined && !book.offline_failed
+                && book.offline_settlement.is_none() && book.offline_return.is_none();
+        }
+        book.offline_started && book.offline_joined && !book.offline_failed && book.offline_settlement.is_none()
+            && matches!(book.offline_return.as_ref(), Some(Ok(CloseOutcome::Settled)))
+            && book.offline_installed.as_ref().is_some_and(|native| native.try_lock().is_ok_and(|slots| slots.settled()))
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    { !book.offline_selected && !book.offline_started && !book.offline_joined && !book.offline_failed }
+}
+fn offline_worker_returned(started: bool, joined: bool, failed: bool, handle: bool, error: bool) -> bool {
+    if !started { !joined && !failed && !handle && !error }
+    else if failed { !joined && handle && error }
+    else { joined && !handle && !error }
+}
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn offline_consumers_returned(book: &Resources, startup: &Startup, no_child_effect: bool) -> bool {
+    if !offline_worker_returned(book.inspection_started, book.inspection_joined, book.inspection_failed,
+            book.inspection.is_some(), book.inspection_error.is_some())
+        || !offline_worker_returned(book.acquisition_started, book.acquisition_joined, book.acquisition_failed,
+            book.acquisition.is_some(), book.acquisition_error.is_some()) { return false; }
+    let io_returned = book.writer.is_none() && book.stdout.is_none() && book.stderr.is_none()
+        && !book.write_failed && !book.out_failed && !book.err_failed
+        && book.write_end.is_some() && book.out_end.is_some() && book.err_end.is_some();
+    if !io_returned || startup.child.is_some() { return false; }
+    if !startup.attempted {
+        return no_child_effect && !startup.returned && !startup.failed && book.child.is_none() && book.waited.is_none() && !book.wait_failed;
+    }
+    startup.returned && !startup.failed && book.inspection_joined && !book.inspection_failed
+        && book.acquisition_joined && !book.acquisition_failed && book.child.is_some() && !book.wait_failed
+        && book.waited.as_ref().is_some_and(ExitStatus::success)
+        && book.write_end.as_ref().is_some_and(|e| e.sent && e.closed && !e.failed)
+        && book.out_end.as_ref().is_some_and(|e| e.eof && e.closed && !e.failed && e.decoder_settled && e.frames == 2)
+        && book.err_end.as_ref().is_some_and(|e| e.eof && e.closed && !e.failed && e.frames == 0)
+}
+fn offline_installed_closure_ready(r: &Registry, owner: &Session, claimed: bool, direct_returned: bool) -> bool {
+    direct_returned && owner.domain == SavedCommandDomain::OfflinePreflight && original_session(r, owner)
+        && (!claimed || r.active.as_ref().is_some_and(|a| a.accepted && a.terminal
+            && matches!(a.projection.result.as_ref(), Some(Terminal::OfflinePreflight(t)) if t.lifetime.settled())))
+}
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn offline_installed_claim_clear(inner: &Inner, r: &Registry, owner: &Session, now: Instant) -> bool {
+    owner.domain == SavedCommandDomain::OfflinePreflight && inner.offline_installed_selected()
+        && final_clock_clear(r, owner, now) && !inner.poisoned.load(Ordering::SeqCst)
+        && !r.stopping && !r.document_lost && !*owner.stop.borrow() && now < owner.clocks.work
+        && Profile::current(owner.domain) == Some(owner.profile)
+}
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn transfer_offline_installed(book: &Resources, inner: &Inner, owner: &Session) -> Result<(), BridgeError> {
+    if !book.offline_selected || !book.inspection_started || !book.inspection_joined || book.inspection_failed
+        || book.inspection.is_some() || book.inspection_error.is_some() || book.acquisition_started
+        || book.acquisition_joined || book.acquisition_failed || book.acquisition.is_some() || book.acquisition_error.is_some() {
+        return Err(BridgeError::cleanup_unknown());
+    }
+    let native = book.offline_installed.as_ref().ok_or_else(BridgeError::cleanup_unknown)?;
+    let mut slots = native.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
+    let mut r = inner.lock(); let now = Instant::now(); inner.advance_locked(&mut r, owner, now);
+    if !offline_installed_claim_clear(inner, &r, owner, now) { return Err(owner.domain.unavailable()); }
+    slots.transfer_once().map_err(|_| BridgeError::cleanup_unknown())
+}
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn acquire_offline_installed(inner: &Inner, owner: &Session, native: &Arc<Mutex<OfflinePreflightRuntimeSlots>>) {
+    if owner.domain != SavedCommandDomain::OfflinePreflight || !inner.offline_installed_selected() {
+        inner.stop(owner, Reason::RuntimeUnavailable); return;
+    }
+    let mut slots = match native.lock() { Ok(slots) => slots, Err(_) => { inner.unknown(owner); return; } };
+    let capability = match slots.capability() { Ok(capability) => capability, Err(_) => { inner.unknown(owner); return; } };
+    let stop = owner.stop.subscribe();
+    let selected = match capability.prepare_once(owner.clocks.work, &stop) {
+        Ok(selected) => selected, Err(_) => { inner.stop(owner, Reason::RuntimeUnavailable); return; }
+    };
+    let mut command = Command::new(&selected.python);
+    command.args(["-I", "-S", "-B"]).arg(&selected.bootstrap).arg(&selected.core)
+        .current_dir(&selected.cwd).env_clear().env("LANG", "C").env("LC_ALL", "C")
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
+    let mut startup = match owner.startup.lock() { Ok(startup) => startup, Err(_) => { inner.unknown(owner); return; } };
+    let mut r = inner.lock(); let now = Instant::now(); inner.advance_locked(&mut r, owner, now);
+    if !offline_installed_claim_clear(inner, &r, owner, now) { return; }
+    if startup.attempted || startup.returned || startup.failed || startup.child.is_some() || capability.claim_once().is_err() {
+        owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown_locked(&mut r, owner); return;
+    }
+    startup.attempted = true;
+    drop(r);
+    match command.spawn() {
+        Ok(child) => { startup.child = Some(child); startup.returned = true; },
+        Err(_) => { startup.failed = true; owner.resource_unknown.store(true, Ordering::SeqCst); drop(startup);
+            inner.stop(owner, Reason::RuntimeUnavailable); inner.unknown(owner); },
+    }
+}
+async fn settle_offline_installed(book: &mut Resources, inner: &Arc<Inner>, owner: &Arc<Session>) {
+    if owner.domain != SavedCommandDomain::OfflinePreflight { return; }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    { let _ = (book, inner, owner); }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    {
+        let Some(native) = book.offline_installed.clone() else {
+            if book.offline_selected { inner.unknown(owner); }
+            return;
+        };
+        if !book.offline_started {
+            let returned = (|| {
+                let slots = match native.try_lock() {
+                    Ok(slots) => slots, Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                    Err(std::sync::TryLockError::WouldBlock) => return false,
+                };
+                let startup = match owner.startup.try_lock() {
+                    Ok(startup) => startup, Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                    Err(std::sync::TryLockError::WouldBlock) => return false,
+                };
+                let r = inner.lock();
+                offline_installed_closure_ready(&r, owner, startup.attempted,
+                    offline_consumers_returned(book, &startup, slots.no_child_effect()))
+            })();
+            if !book.offline_selected || !returned { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner); return; }
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            let hold = inner.observation.lock().ok().and_then(|o| o.as_ref().map(|o| o.control.clone()))
+                .filter(|c| c.case == crate::shell::installed_observation::commands::Case::OfflineSettlement);
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            let hold = hold.filter(|control| match installed_observation_facts(inner, owner, book, false, false) {
+                Some(facts) => control.prepare_hold(facts), None => { control.unavailable_witness(); false },
+            }); // Observer failure cannot prevent the original physical closes.
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            let hold_end = {
+                let r = inner.lock(); owner.clocks.settlement(r.active.as_ref().filter(|a| Arc::ptr_eq(&a.owner, owner)).and_then(|a| a.first_stop))
+            };
+            let (release, enter) = oneshot::channel();
+            book.offline_started = true;
+            book.offline_settlement = Some(tokio::task::spawn_blocking(move || {
+                if enter.blocking_recv().is_err() { return CloseOutcome::Unknown; }
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                if let Some(control) = hold { let _ = control.hold_settlement(hold_end); }
+                match native.lock() {
+                    Ok(mut slots) => slots.settle_originals(),
+                    Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals() },
+                }
+            }));
+            let _ = release.send(());
+        }
+        if !book.offline_joined && !book.offline_failed {
+            if book.offline_settlement.is_none() { inner.unknown(owner); return; }
+            let result = join_with_clock(&mut book.offline_settlement, inner, owner).await;
+            let joined = result.is_ok();
+            if book.offline_return.is_some() { book.offline_failed = true; }
+            else { book.offline_return = Some(result); book.offline_joined = joined; book.offline_failed = !joined; }
+            if joined { book.offline_settlement.take(); } else { native_worker_lost(book, owner); }
+        }
+        if !offline_installed_final(book) { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner); }
+    }
+}
+
 fn spawn_original(inner: &Inner, owner: &Session, runtime: VerifiedRuntime) {
     if owner.domain == SavedCommandDomain::AndroidBuild {
         inner.stop(owner, Reason::ToolchainUnavailable); return;
@@ -1277,12 +1478,22 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     let runtime = inner.runtime.clone(); let end = owner.clocks.work; let domain = owner.domain;
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     let native = book.native.clone();
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let offline_installed = book.offline_installed.clone();
     let stop = owner.stop.subscribe();
     let (inspect_start, inspect_enter) = oneshot::channel();
+    book.inspection_started = true;
     book.inspection = Some(tokio::task::spawn_blocking(move || {
         inspect_enter.blocking_recv().map_err(|_| domain.unavailable())?;
         match domain {
-            SavedCommandDomain::OfflinePreflight => runtime.resolve_offline_preflight(end),
+            SavedCommandDomain::OfflinePreflight => {
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                if let Some(native) = offline_installed {
+                    let mut slots = native.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+                    return runtime.resolve_offline_preflight_installed(&mut slots, end, &stop);
+                }
+                runtime.resolve_offline_preflight(end)
+            },
             SavedCommandDomain::AndroidBuild => {
                 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
                 {
@@ -1328,11 +1539,25 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     let acquisition_owner = owner.clone(); let acquisition_inner = inner.clone();
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     let acquisition_native = book.native.clone();
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let offline_installed = book.offline_installed.clone();
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if offline_installed.is_some() && transfer_offline_installed(&book, inner, owner).is_err() {
+        inner.stop(owner, Reason::RuntimeUnavailable); return;
+    }
     let (acquire_start, acquire_enter) = oneshot::channel();
+    book.acquisition_started = true;
     book.acquisition = Some(tokio::task::spawn_blocking(move || {
         if acquire_enter.blocking_recv().is_ok() {
             match acquisition_owner.domain {
-                SavedCommandDomain::OfflinePreflight => spawn_original(&acquisition_inner, &acquisition_owner, runtime),
+                SavedCommandDomain::OfflinePreflight => {
+                    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    if let Some(native) = offline_installed {
+                        drop(runtime);
+                        acquire_offline_installed(&acquisition_inner, &acquisition_owner, &native); return;
+                    }
+                    spawn_original(&acquisition_inner, &acquisition_owner, runtime);
+                },
                 SavedCommandDomain::AndroidBuild => {
                     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
                     spawn_android_original(&acquisition_inner, &acquisition_owner, runtime, acquisition_native);
@@ -1453,6 +1678,7 @@ async fn continue_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     if expected { require_terminal(inner, owner); }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     if owner.domain == SavedCommandDomain::AndroidBuild { settle_native(&mut book, inner, owner).await; }
+    settle_offline_installed(&mut book, inner, owner).await;
     // No broad signal or PID discovery. EOF is cooperative STOP; an unreturned
     // original child stays retained at H, even if its terminal was once positive.
 }
@@ -1556,3 +1782,63 @@ pub(crate) mod offline_tests;
 #[cfg(test)]
 #[path = "saved_command_owner_tests.rs"]
 mod tests;
+
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl SavedCommandOwner {
+    pub(crate) fn admit_installed_observation(&self, token: crate::shell::installed_observation::commands::OfflineAdmission) -> Result<(), BridgeError> {
+        let r = self.inner.lock();
+        if self.inner.domain != SavedCommandDomain::OfflinePreflight || r.revision != 0 || r.active.is_some() || r.prepared.is_some() || r.last.is_some()
+            || r.disabled || r.stopping || r.document_lost || r.exhausted || self.inner.poisoned.load(Ordering::SeqCst)
+            || !self.inner.runtime.offline_preflight_installed_profile_available() { return Err(self.inner.domain.unavailable()); }
+        let mut slot = self.inner.observation.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+        if slot.is_some() { return Err(self.inner.domain.unavailable()); }
+        *slot = Some(InstalledObservation { control: token.consume()?, original: None, retired: false, core_settled: false }); Ok(())
+    }
+    pub(crate) fn installed_observation_snapshot(&self) -> Option<crate::shell::installed_observation::commands::Snapshot> {
+        let (owner, retired, core_settled) = {
+            let book = self.inner.observation.lock().ok()?; let book = book.as_ref()?;
+            (book.original.as_ref()?.clone(), book.retired, book.core_settled)
+        };
+        let book = owner.resources.try_lock().ok()?;
+        let facts = installed_observation_facts(&self.inner, &owner, &book, retired, core_settled)?;
+        let r = self.inner.lock();
+        let projection = r.active.as_ref().filter(|a| Arc::ptr_eq(&a.owner, &owner)).map(|a| &a.projection)
+            .or_else(|| r.last.as_ref().filter(|p| p.operation_id == owner.id && p.owner_generation == owner.generation))?;
+        Some(crate::shell::installed_observation::commands::Snapshot { facts, terminal: serde_json::to_value(projection.public().offline().ok()?).ok()? })
+    }
+}
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn installed_observation_facts(inner: &Inner, owner: &Session, book: &Resources, retired: bool, final_core: bool)
+    -> Option<crate::shell::installed_observation::commands::OriginalFacts> {
+    use crate::shell::installed_observation::commands::OriginalFacts;
+    if owner.domain != SavedCommandDomain::OfflinePreflight { return None; }
+    let startup = owner.startup.try_lock().ok()?;
+    let native = book.offline_installed.as_ref()?.try_lock().ok()?;
+    let r = inner.lock();
+    let active = r.active.as_ref().filter(|a| std::ptr::eq(Arc::as_ptr(&a.owner), owner));
+    let no_child = !startup.attempted && !startup.returned && !startup.failed && startup.child.is_none()
+        && !book.acquisition_started && book.acquisition.is_none() && book.child.is_none() && native.no_child_effect();
+    Some(OriginalFacts {
+        domain: "offline", id: owner.id.clone(), generation: owner.generation.clone(),
+        inspection_joined: book.inspection_started && book.inspection_joined && !book.inspection_failed && book.inspection.is_none() && book.inspection_error.is_none(),
+        acquisition_joined: book.acquisition_started && book.acquisition_joined && !book.acquisition_failed && book.acquisition.is_none() && book.acquisition_error.is_none(),
+        attempted: startup.attempted, no_child,
+        child_waited_success: startup.returned && !startup.failed && book.child.is_some() && !book.wait_failed && book.waited.as_ref().is_some_and(ExitStatus::success),
+        stdin_closed: book.write_end.as_ref().is_some_and(|v| v.sent && v.closed && !v.failed),
+        stdout_eof_closed: book.out_end.as_ref().is_some_and(|v| v.frames == 2 && v.eof && v.closed && !v.failed),
+        stderr_eof_closed: book.err_end.as_ref().is_some_and(|v| v.frames == 0 && v.eof && v.closed && !v.failed),
+        io_joined: book.writer.is_none() && book.stdout.is_none() && book.stderr.is_none() && !book.write_failed && !book.out_failed && !book.err_failed
+            && book.write_end.is_some() && book.out_end.is_some() && book.err_end.is_some(),
+        core_lifetime_settled: if retired { final_core } else { active.is_some_and(|a| a.accepted && a.terminal && a.projection.result.as_ref().is_some_and(Terminal::settled)) },
+        runtime_ledger_settled: native.settled(),
+        runtime_settlement_joined: book.offline_selected && book.offline_started && book.offline_joined && !book.offline_failed && book.offline_settlement.is_none()
+            && matches!(book.offline_return.as_ref(), Some(Ok(CloseOutcome::Settled))),
+        driver_joined: owner.driver_joined.load(Ordering::SeqCst) && matches!(owner.driver_return.try_lock().ok()?.as_ref(), Some(Ok(()))),
+        manager_joined: !owner.manager_failed.load(Ordering::SeqCst) && matches!(owner.manager_return.try_lock().ok()?.as_ref(), Some(Ok(()))),
+        observer_joined: matches!(owner.observer_return.try_lock().ok()?.as_ref(), Some(Ok(true))),
+        watchdog_joined: owner.watchdog_joined.load(Ordering::SeqCst) && !owner.watchdog_failed.load(Ordering::SeqCst)
+            && matches!(owner.watchdog_return.try_lock().ok()?.as_ref(), Some(Ok(true))),
+        retired_before_cutoff: retired, active_retained: active.is_some(),
+        resource_unknown: owner.resource_unknown.load(Ordering::SeqCst) || active.is_some_and(|a| a.unknown) || inner.poisoned.load(Ordering::SeqCst),
+    })
+}

@@ -21,7 +21,9 @@ jobs:
     env:
       MRK_EXPECTED_SHA: ${{ github.sha }}
       MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
-      MRK_BUNDLED_RUNTIME_MANIFEST_SHA256: 2cbf9b45a1a7189e28654f62707f10705ba71d29df93e8eee7cf66b436a9abef
+      # Deliberately non-runnable until the new DATA originals are accepted.
+      MRK_BUNDLED_RUNTIME_MANIFEST_SHA256: 071bbdd31b1a9c690a80f4f72e7d18343edc252dc282b4043b00c133bc0e7127
+      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: eee96fd283f9fc072a359d54b4def56219c23ee4f3ffc9852a936e3e978e951d
       MRK_BUNDLED_PROTOCOL_SHA256: 860d1cee0072730a487ac8e632206c69e3ba676cab849b144a61755c4b84e41e
       MACOSX_DEPLOYMENT_TARGET: '26.0'
       DEVELOPER_DIR: /Library/Developer/CommandLineTools
@@ -36,8 +38,9 @@ jobs:
           [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/verify/desktop-macos-aqua ]]
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" && "$MRK_MACOS_INSTALL_SOURCE_COMMIT" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
           [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-aqua.yml@$GITHUB_REF" ]]
-          # Independently accepted DATA01 M-plus-two-notices description; no rebuild.
-          [[ "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" == 2cbf9b45a1a7189e28654f62707f10705ba71d29df93e8eee7cf66b436a9abef ]]
+          # Supplier reuse does not qualify a historical core as current source.
+          [[ "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" == 071bbdd31b1a9c690a80f4f72e7d18343edc252dc282b4043b00c133bc0e7127 ]]
+          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == eee96fd283f9fc072a359d54b4def56219c23ee4f3ffc9852a936e3e978e951d ]]
           [[ "$(/usr/bin/uname -m)" == arm64 && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]]
           [[ "$(/usr/bin/id -u)" != 0 && -d "$DEVELOPER_DIR" ]]
       - name: Check out exact reviewed source without retained credentials
@@ -89,8 +92,10 @@ jobs:
               tools[name] = {"command": command, "output": result.stdout.decode("utf-8", "strict").strip()}
           value = {"schemaVersion": 1, "source": os.environ["GITHUB_SHA"], "workflowSource": os.environ["GITHUB_WORKFLOW_SHA"],
                    "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
-                   "runtimeManifestSha256": os.environ["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"],
-                   "reusedRun": "35602474108/1", "reusedArtifactId": "10639324707",
+                    "runtimeManifestSha256": os.environ["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"],
+                    "runtimeSourceInputsSha256": os.environ["MRK_BUNDLED_RUNTIME_SOURCE_SHA256"],
+                    "reusedRun": "35602474108/1", "reusedArtifactId": "10639324707",
+                    "reusedSupplierOnly": True,
                    "scope": "four-fixed-genuine-Aqua-engineering-cases", "instrumentedEngineeringApp": True,
                    "caseNames": ["first-save", "noop-stale", "picker-loss", "save-loss"], "developerDir": os.environ["DEVELOPER_DIR"], "tools": tools,
                    "actualAquaSaveGate": "not-yet-executed", "shippingBinaryQualified": False, "distributionQualified": False}
@@ -208,14 +213,17 @@ jobs:
           set -euo pipefail
           set -o noclobber
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/10639324707/zip" > "$MRK_MACOS_WORK/accepted-native-evidence.zip"
-      - name: Reuse complete M bytes and add the two pinned notices
+      - name: Reuse accepted Mac supplier and prepare only the current source payload
         timeout-minutes: 3
         shell: bash
         run: |
           set -euo pipefail
           set -o noclobber
-          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py runtime \
+          umask 077
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py current-runtime \
             --archive "$MRK_MACOS_WORK/accepted-native-evidence.zip" \
+            --work "$MRK_MACOS_WORK/current-runtime-preparation" \
+            --expected-source "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" \
             --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" \
             --output "$MRK_MACOS_WORK/runtime" > "$MRK_MACOS_WORK/runtime-result.json"
       - name: Compile the fixed debug actual-main observer and normal embedded frontend once
@@ -267,7 +275,7 @@ jobs:
             --output "$MRK_MACOS_WORK/app/Mobile Release Kit.app" > "$MRK_MACOS_WORK/app-result.json"
           /usr/bin/codesign --force --sign - --timestamp=none "$MRK_MACOS_WORK/app/Mobile Release Kit.app"
           /usr/bin/codesign --verify --strict "$MRK_MACOS_WORK/app/Mobile Release Kit.app"
-      - name: Bind this completed signed app and unchanged runtime into fresh Installer DATA
+      - name: Bind this signed app and current-source runtime into fresh Installer DATA
         timeout-minutes: 3
         shell: bash
         run: |

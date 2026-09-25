@@ -51,7 +51,17 @@ def _safe_name(name: str) -> bool:
             and name.split(".", 1)[0].lower() not in _RESERVED)
 
 
+def _windows_identity(value: os.stat_result, mode: int) -> tuple[int, ...]:
+    return (value.st_dev, value.st_ino, mode, value.st_nlink, value.st_size,
+            value.st_mtime_ns, value.st_birthtime_ns, value.st_file_attributes,
+            value.st_reparse_tag)
+
+
 def _state(value: os.stat_result) -> tuple[int, ...]:
+    if os.name == "nt":
+        # Same-API snapshots retain raw mode and ctime (descriptor ChangeTime)
+        # plus every comparable Windows field. Only cross-API checks differ.
+        return _windows_identity(value, value.st_mode) + (value.st_ctime_ns,)
     return (value.st_dev, value.st_ino, value.st_mode, value.st_nlink,
             value.st_size, value.st_mtime_ns, value.st_ctime_ns)
 
@@ -123,14 +133,30 @@ def read_checked(path: Path, *, limit: int) -> bytes:
     if before.st_size > limit:
         raise PreparationError("Payload file byte limit exceeded")
     with path.open("rb") as stream:
-        if _state(os.fstat(stream.fileno())) != _state(before):
+        opened = os.fstat(stream.fileno())
+        if os.name == "nt":
+            # CPython 3.14 Windows pathname stat decorates these suffixes with
+            # 0111 and exposes birthtime as ctime; fstat keeps raw mode and
+            # ChangeTime. Normalize only the named suffix decoration, compare
+            # birthtime across APIs, and retain both raw same-API snapshots.
+            named_mode = before.st_mode
+            if path.name.lower().endswith((".exe", ".bat", ".cmd", ".com")):
+                named_mode &= ~0o111
+            matches = (_windows_identity(before, named_mode)
+                       == _windows_identity(opened, opened.st_mode))
+        else:
+            matches = _state(opened) == _state(before)
+        if not matches:
             raise PreparationError("Payload file changed before reading")
         # The ceiling is not the expected allocation. Reading a tiny file with
         # read(512 MiB) can reserve that much memory before seeing EOF. One byte
         # beyond the admitted size still detects growth without that overhead.
         content = stream.read(before.st_size + 1)
         after = os.fstat(stream.fileno())
-    if len(content) > limit or len(content) != before.st_size or _state(after) != _state(before) or _state(path.lstat()) != _state(before):
+    descriptor_before = opened if os.name == "nt" else before
+    if (len(content) > limit or len(content) != before.st_size
+            or _state(after) != _state(descriptor_before)
+            or _state(path.lstat()) != _state(before)):
         raise PreparationError("Payload file changed during reading")
     return content
 

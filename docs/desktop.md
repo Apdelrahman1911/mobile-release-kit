@@ -33,8 +33,14 @@ original runtime settlement. Its installed native check is also pending.
 A separately sealed workflow profile now connects the existing GitHub review
 and confirmation UI to that same installed edit owner. It can create absent
 callers or preserve exact originals, never save the configuration draft. This
-is **prepared source, not installed workflow qualification**; the five-case
-installed check and independent original-finality review are still required.
+is **prepared source, not installed workflow qualification**; the installed
+check and independent original-finality review are still required.
+A third sealed profile connects public locale-text Review/Save to the same
+installed owner. It requires the registered project root, a complete file
+preview, acknowledgment and typed `SAVE`; it never saves the configuration
+draft. Its new sixth installed `metadata-save` case and independent integration
+verification are still pending. This is prepared implementation, not a native
+or production-readiness claim.
 Credentials, tools, network and Store actions remain unavailable on that path. Trusted development builds
 remain a separate explicit mode, never a fallback. Android still needs a compatible JDK/Android SDK and
 project Gradle wrapper. iOS native work requires macOS/Xcode locally or on a
@@ -45,7 +51,7 @@ disappear. No complete installer or clean-machine qualification is claimed here.
 
 This table describes implemented surfaces, not a grant to execute them. The
 installed path above admits its twelve passive core methods, separate
-project/evidence-folder pickers and separately sealed configuration/workflow edit profiles; the UI shows an explicit
+project/evidence-folder pickers and separately sealed configuration/workflow/metadata edit profiles; the UI shows an explicit
 reason for unavailable actions.
 Choosing a project does not enable the credential/asset session. Draft changes
 stay in memory until a separately reviewed and confirmed native Save.
@@ -60,7 +66,7 @@ stay in memory until a separately reviewed and confirmed native Save.
 | GitHub setup proposal | Guided toolkit pin inputs, core-generated read-only workflow previews, contextual help and environment/credential-name checklist | GitHub login/contact, repository observation, compatibility verification, file writes, secret provisioning or workflow dispatch |
 | Local workflow Apply implementation (installed verification pending) | Existing four-caller review, complete text, separate confirmation and one-use Apply through the original shared edit owner; create absent or preserve exact bytes | Configuration Save, overwrite/pin upgrades, remote setup, Mac/Windows workflow writes, or completed installed qualification |
 | Public locale text | Saved-config-derived named observations, in-memory drafts, shared core validation and contextual help | Private review/TestFlight access, whole-metadata validation, translation, Store acceptance or writes |
-| Public locale text save implementation (disabled) | Separate metadata domain, complete one-locale file review and original one-use typed Save | Enabled saving, native transaction/process qualification, screenshot editing, locale deletion or packaged-runtime readiness |
+| Public locale text save implementation (installed verification pending) | Separate fixed Linux metadata profile, complete one-locale file review and original one-use typed Save; close retains the draft | Completed installed qualification, Mac/Windows writes, screenshot editing, locale deletion or packaged-runtime readiness |
 | Pure credential assessment (internal only) | Core policy over explicitly supplied scalars and finite file observations, with a private result-sanitizing adapter | Renderer secret entry, file acquisition/parser qualification, password verification, native custody, storage or assignment |
 | Environment requirements | Current-draft prerequisites, fixed baseline guidance and missing-feature explanations | Observing installed tools, running doctor or native admission |
 | Build-tool diagnostics implementation (disabled) | Explicit, cancellable version observations through a separate native owner and the ordinary core command owner | Enabled diagnostics, complete SDK checks, native document/runtime qualification or release readiness |
@@ -195,6 +201,20 @@ walking them. It uses anchored no-follow descriptor reads with traversal/read
 budgets and explicit partial/error results. It does not infer an enclosing
 repository above the selected directory or read arbitrary file contents for the
 renderer.
+
+### Edit or create saved version values (separately gated)
+
+Dashboard has an app-managed **Open → edit name/build strings → review complete
+original/after bytes → confirm Save** implementation, with explicit **Create
+version file** only for a source observed absent. It does not apply unsaved
+Settings, rewrite unrelated bytes or perform an automatic version bump. This
+new writer's independent gate is false and its installed source binding is None;
+no native/platform/recovery/shipping qualification is claimed. Browser preview
+never fabricates a load or Save. A new source-bound runtime and distinct Linux
+original-owner verification are required, not another edit domain's old payload.
+See [saved-version VALUE editing](desktop-release-version-edit.md) for the
+ordinary UI flow, ten-rule ignore prerequisite, lifecycle and uncertainty rules.
+The existing Read action below stays a separate, unchanged read-only service.
 
 ### Read the saved release version
 
@@ -610,6 +630,15 @@ unchanged confirmation, and native Quit with a pending review. Its original
 45-second, 128-evaluation and 2048-byte receipt limits remain unchanged.
 Source, compilation or prior headless checks do not establish that this path
 works in an installed window. The full Desktop remains incomplete.
+
+The separate sixth `metadata-save` case uses the actual editor and two explicit
+Reviews: close the first without applying, retain the text, then reopen and
+acknowledge/type `SAVE` for one Apply. It requires genuine original session,
+plan, revision, runtime/child/stream finality and fresh Load correspondence.
+Independent post-exit inventories require one replacement, one new text file,
+and preservation of the title, unrelated sentinel, configuration and inputs.
+The same 45-second/128-evaluation/2048-byte receipt limits apply. This case is
+source-authored and awaiting installed verification; no Store is contacted.
 
 Read [repository verification](verification.md) first. The historical native/
 process suites and CI controller must not run on a shared VPS. Desktop filenames

@@ -5,10 +5,13 @@ write an installation, construct a panel, or fabricate an operation permit.
 """
 import contextlib
 import importlib.util
+import io
+import os
 from pathlib import Path
 import stat
 import struct
 import sys
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -292,7 +295,7 @@ class MacInstalledData(unittest.TestCase):
         path = Path(__file__).absolute().parents[2] / ".github/workflows/desktop-macos-installed.yml"
         workflow = path.read_text(encoding="utf-8")
         probe = workflow.index("- name: Fail fast on native Scripts ownership and package format")
-        sdk = workflow.index("- name: Fail fast on the selected SDK public native API")
+        sdk = workflow.index("- name: Fail fast on the selected SDK actual no-ACL and ACE-refusal primitive")
         self.assertLess(probe, sdk)
         self.assertLess(sdk, workflow.index("cargo build --locked --release"))
         self.assertNotIn("/usr/sbin/installer", workflow[probe:sdk])
@@ -880,6 +883,276 @@ class MacInstalledData(unittest.TestCase):
         for changed in (log + log, b"MRK_MACOS_INSTALL_RESULT={}\n" + log):
             with self.assertRaises(TOOL.Refused):
                 TOOL.fixture_record(changed, "a" * 40, "b" * 64, "c" * 64)
+
+
+@contextlib.contextmanager
+def current_data_fixture():
+    """Fresh synthetic DATA only; no real supplier archive or executable core."""
+    helper = (Path(__file__).absolute().parents[2] / "desktop/tools/prepare_runtime.py").read_bytes()
+    with tempfile.TemporaryDirectory(prefix="mrk-macos-current-data-") as directory:
+        root = Path(directory)
+        checkout = root / "checkout"
+        engine = b"# Inert protocol DATA, never imported.\n"
+        inputs = {"src/mobile_release/__init__.py": b'__version__ = "0.1.0"\n',
+                  "src/mobile_release/_desktop_engine.py": engine,
+                  TOOL.CURRENT_CA_SOURCE: b"SYNTHETIC CA DATA, not a trust store\n",
+                  TOOL.CURRENT_HELPER_SOURCE: helper}
+        inputs.update({"desktop/" + name: ("# current inert " + name + "\n").encode() for name in TOOL.BOOTSTRAPS})
+        for name, body in inputs.items():
+            path = checkout / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("xb") as stream:
+                stream.write(body)
+        archive = root / "supplier.zip"
+        archive.write_bytes(b"No actual archive; supplier decoder is mocked.\n")
+        supplier = {"python/bin/python3": b"INERT SUPPLIER DATA; NEVER EXECUTED\n",
+                    "python/licenses/notice.txt": b"synthetic supplier notice\n"}
+        historical = {**supplier, "core.zip": b"historical core, not used", "github-ca.pem": b"historical CA",
+                      "manifest.json": b"historical manifest"}
+        historical.update({name: b"historical bootstrap" for name in TOOL.BOOTSTRAPS})
+        provenance = {"acceptedArchiveSha256": "1" * 64, "acceptedTarSha256": "2" * 64,
+                      "originalManifestSha256": "3" * 64, "addedNotices": ["synthetic notice only"]}
+        with (mock.patch.object(TOOL, "DESKTOP", checkout / "desktop"),
+              mock.patch.object(TOOL, "PROTOCOL", TOOL.digest(engine)),
+              mock.patch.object(TOOL, "reused_runtime", return_value=(historical, provenance))):
+            yield SimpleNamespace(root=root, checkout=checkout, archive=archive, supplier=supplier, inputs=inputs)
+
+
+@unittest.skipUnless(sys.platform in ("darwin", "linux"), "POSIX DATA stager")
+class MacCurrentRuntimeData(unittest.TestCase):
+    def args(self, fixture, command="describe-current-runtime", suffix="description"):
+        return SimpleNamespace(command=command, archive=fixture.archive, work=fixture.root / ("work-" + suffix),
+                               output=fixture.root / ("output-" + suffix), expected_source="0" * 64,
+                               expected_manifest="0" * 64)
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0, "requires the reviewed nonroot POSIX DATA test owner")
+    def test_current_projection_and_final_payload_preserve_only_supplier(self):
+        with current_data_fixture() as fixture:
+            captured, projection, source_digest = TOOL.current_source()
+            self.assertEqual(set(captured), set(fixture.inputs))
+            self.assertEqual(len(projection) + 1, len(captured))
+            self.assertNotIn(TOOL.CURRENT_HELPER_SOURCE, projection)
+            self.assertNotIn(TOOL.CURRENT_CA_SOURCE, projection)
+            self.assertEqual(projection["desktop/github-ca.pem"], (fixture.inputs[TOOL.CURRENT_CA_SOURCE], 0o444))
+            description = TOOL.current_runtime_command(self.args(fixture))
+            args = self.args(fixture, "current-runtime", "final")
+            args.expected_source = source_digest
+            args.expected_manifest = description["successorManifestSha256"]
+            result = TOOL.current_runtime_command(args)
+            self.assertEqual(result["qualification"], "current-source-staged-no-native-execution")
+            self.assertTrue(result["supplierOnlyReuse"])
+            self.assertEqual(result["sourceInputCount"], len(fixture.inputs))
+            self.assertEqual(result["currentCoreFileCount"], 2)
+            self.assertEqual(result["supplierInventorySha256"], description["supplierInventorySha256"])
+            final = TOOL.tree(args.output, current_root_mode=0o555)
+            self.assertEqual(set(final), set(fixture.supplier) | TOOL.BOOTSTRAPS | {"core.zip", "manifest.json", "github-ca.pem"})
+            for name, body in fixture.supplier.items():
+                self.assertEqual(final[name], (body, 0o555 if name == "python/bin/python3" else 0o444))
+            for name in TOOL.BOOTSTRAPS | {"github-ca.pem"}:
+                self.assertEqual(final[name], projection["desktop/" + name])
+            TOOL.current_core_matches(final["core.zip"][0], projection)
+            self.assertEqual(TOOL.tree(args.work / "source", current_root_mode=0o555), projection)
+            self.assertEqual(TOOL.current_source(), (captured, projection, source_digest))
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0, "requires the reviewed nonroot POSIX DATA test owner")
+    def test_source_pin_and_output_conflicts_fail_before_helper_or_writes(self):
+        with current_data_fixture() as fixture, mock.patch.object(TOOL, "current_preparer") as prepare:
+            args = self.args(fixture, "current-runtime", "stale")
+            with self.assertRaisesRegex(TOOL.Refused, "current-reviewed-source-mismatch"):
+                TOOL.current_runtime_command(args)
+            self.assertFalse(args.work.exists())
+            self.assertFalse(args.output.exists())
+            args.expected_source = TOOL.current_source()[2]
+            extra = fixture.checkout / "src/mobile_release/extra.py"
+            extra.write_bytes(b"# extra current source must change S\n")
+            with self.assertRaisesRegex(TOOL.Refused, "current-reviewed-source-mismatch"):
+                TOOL.current_runtime_command(args)
+            extra.unlink()
+            for output in (args.work, args.work / "nested", fixture.checkout / "new-output"):
+                args.output = output
+                with self.assertRaisesRegex(TOOL.Refused, "current-path-overlap"):
+                    TOOL.current_runtime_command(args)
+            args = self.args(fixture, "current-runtime", "occupied")
+            args.work.mkdir(mode=0o700)
+            with self.assertRaisesRegex(TOOL.Refused, "current-output-occupied"):
+                TOOL.current_runtime_command(args)
+            self.assertTrue(args.work.is_dir())
+            args = self.args(fixture, "current-runtime", "parent-mode")
+            fixture.root.chmod(0o755)
+            try:
+                with self.assertRaisesRegex(TOOL.Refused, "current-output-parent-owner-mode"):
+                    TOOL.current_runtime_command(args)
+            finally:
+                fixture.root.chmod(0o700)
+            prepare.assert_not_called()
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0, "requires the reviewed nonroot POSIX DATA test owner")
+    def test_current_source_rejects_missing_unknown_or_linked_inputs(self):
+        with current_data_fixture() as fixture:
+            invalid = fixture.checkout / "src/mobile_release/generated.pyc"
+            invalid.write_bytes(b"not source")
+            with self.assertRaisesRegex(TOOL.Refused, "current-core-inputs"):
+                TOOL.current_source()
+            invalid.unlink()
+            ca = fixture.checkout / TOOL.CURRENT_CA_SOURCE
+            original = fixture.root / "original-ca"
+            ca.rename(original)
+            with self.assertRaises(FileNotFoundError):
+                TOOL.current_source()
+            ca.symlink_to(original)
+            with self.assertRaisesRegex(TOOL.Refused, "ordinary-file-bound"):
+                TOOL.current_source()
+            ca.unlink()
+            original.rename(ca)
+            captured = TOOL.current_source()[0]
+            helper = fixture.checkout / TOOL.CURRENT_HELPER_SOURCE
+            helper.write_bytes(b"# changed helper DATA must not be evaluated\n")
+            with mock.patch.object(TOOL.importlib.util, "spec_from_file_location") as loader:
+                with self.assertRaisesRegex(TOOL.Refused, "current-helper-changed"):
+                    TOOL.current_preparer(captured)
+                loader.assert_not_called()
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0, "requires the reviewed nonroot POSIX DATA test owner")
+    def test_complete_runtime_and_core_correspondence_reject_mutations(self):
+        with current_data_fixture() as fixture:
+            args = self.args(fixture)
+            TOOL.current_runtime_command(args)
+            _, projection, _ = TOOL.current_source()
+            supplier = {name: (body, 0o555 if name == "python/bin/python3" else 0o444)
+                        for name, body in fixture.supplier.items()}
+            files = TOOL.tree(args.work / "runtime")
+            changed = []
+            missing = dict(files)
+            del missing["python/licenses/notice.txt"]
+            changed.append(missing)
+            changed.append({**files, "unexpected.py": (b"extra", 0o600)})
+            changed.append({**files, "python/bin/python3": (b"changed supplier", 0o555)})
+            changed.append({**files, "python/bin/python3": (fixture.supplier["python/bin/python3"], 0o644)})
+            changed.append({**files, "github-ca.pem": (b"stale CA", 0o600)})
+            changed.append({**files, "core.zip": (files["core.zip"][0], 0o644)})
+            for field, value in (("target", "x86_64-unknown-linux-gnu"), ("protocolSha256", "f" * 64)):
+                manifest = TOOL.decode(files["manifest.json"][0])
+                manifest[field] = value
+                changed.append({**files, "manifest.json": (TOOL.canonical(manifest) + b"\n", 0o600)})
+            for candidate in changed:
+                with mock.patch.object(TOOL, "tree", return_value=candidate), self.assertRaises(TOOL.Refused):
+                    TOOL.current_runtime_files(args.work / "runtime", projection, supplier)
+            python_directory = args.work / "runtime/python"
+            python_directory.chmod(0o700)
+            try:
+                with self.assertRaisesRegex(TOOL.Refused, "current-directory-mode-owner"):
+                    TOOL.current_runtime_files(args.work / "runtime", projection, supplier)
+            finally:
+                python_directory.chmod(0o555)
+            for candidate in ({name: value for name, value in projection.items() if not name.endswith("_desktop_engine.py")},
+                              {**projection, "src/mobile_release/extra.py": (b"extra", 0o444)},
+                              {**projection, "src/mobile_release/_desktop_engine.py":
+                               (b"x" * len(projection["src/mobile_release/_desktop_engine.py"][0]), 0o444)}):
+                with self.assertRaises(TOOL.Refused):
+                    TOOL.current_core_matches(files["core.zip"][0], candidate)
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0, "requires the reviewed nonroot POSIX DATA test owner")
+    def test_manifest_mismatch_preserves_preparation_but_never_creates_final(self):
+        with current_data_fixture() as fixture:
+            args = self.args(fixture, "current-runtime", "wrong-manifest")
+            args.expected_source = TOOL.current_source()[2]
+            with self.assertRaisesRegex(TOOL.Refused, "current-reviewed-manifest-mismatch"):
+                TOOL.current_runtime_command(args)
+            self.assertTrue((args.work / "runtime/manifest.json").is_file())
+            self.assertTrue((args.work / "source/desktop/github-ca.pem").is_file())
+            self.assertFalse(args.output.exists())
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0, "requires the reviewed nonroot POSIX DATA test owner")
+    def test_preparation_source_post_and_final_write_failures_stay_failed(self):
+        with current_data_fixture() as fixture:
+            captured, projection, source_digest = TOOL.current_source()
+            preparer = TOOL.current_preparer(captured)
+            args = self.args(fixture, "current-runtime", "prepare-failure")
+            args.expected_source = source_digest
+            def incomplete(source, runtime, target):
+                (runtime / "partial-data").write_bytes(b"retained")
+                raise ValueError("injected preparation failure")
+            with mock.patch.object(TOOL, "current_preparer", return_value=SimpleNamespace(prepare=incomplete)):
+                with self.assertRaises(ValueError):
+                    TOOL.current_runtime_command(args)
+            self.assertEqual((args.work / "runtime/partial-data").read_bytes(), b"retained")
+            self.assertFalse(args.output.exists())
+            self.assertEqual(TOOL.current_source(), (captured, projection, source_digest))
+            args = self.args(fixture, "current-runtime", "projection-mode")
+            args.expected_source = source_digest
+            def writable_projection(source, runtime, target):
+                result = preparer.prepare(source, runtime, target)
+                (source / "desktop").chmod(0o700)
+                return result
+            with mock.patch.object(TOOL, "current_preparer", return_value=SimpleNamespace(prepare=writable_projection)):
+                with self.assertRaisesRegex(TOOL.Refused, "current-directory-mode-owner"):
+                    TOOL.current_runtime_command(args)
+            self.assertFalse(args.output.exists())
+            args = self.args(fixture, "current-runtime", "source-post")
+            args.expected_source = source_digest
+            original = fixture.checkout / "desktop/engine_bootstrap.py"
+            def changed_source(source, runtime, target):
+                result = preparer.prepare(source, runtime, target)
+                original.write_bytes(b"# changed after captured source\n")
+                return result
+            with mock.patch.object(TOOL, "current_preparer", return_value=SimpleNamespace(prepare=changed_source)):
+                with self.assertRaisesRegex(TOOL.Refused, "current-source-post-changed"):
+                    TOOL.current_runtime_command(args)
+            self.assertFalse(args.output.exists())
+            original.write_bytes(fixture.inputs["desktop/engine_bootstrap.py"])
+            description = TOOL.current_runtime_command(self.args(fixture))
+            args = self.args(fixture, "current-runtime", "final-write")
+            args.expected_source = source_digest
+            args.expected_manifest = description["successorManifestSha256"]
+            writer = TOOL.write_tree
+            def incomplete_final(output, files, **options):
+                if output == args.output:
+                    output.mkdir(mode=0o700)
+                    (output / "partial-data").write_bytes(b"retained final output")
+                    raise OSError("injected final publication failure")
+                return writer(output, files, **options)
+            with mock.patch.object(TOOL, "write_tree", side_effect=incomplete_final):
+                with self.assertRaises(OSError):
+                    TOOL.current_runtime_command(args)
+            self.assertEqual((args.output / "partial-data").read_bytes(), b"retained final output")
+            self.assertTrue((args.work / "runtime/manifest.json").is_file())
+
+    def test_new_cli_is_nonroot_and_does_not_change_historical_runtime_route(self):
+        with mock.patch.object(TOOL.os, "getuid", return_value=0), mock.patch.object(TOOL, "current_runtime_command") as action:
+            with self.assertRaisesRegex(TOOL.Refused, "only-installer-is-privileged"):
+                TOOL.main(["describe-current-runtime", "--archive", "/a", "--work", "/w"])
+            action.assert_not_called()
+        with (mock.patch.object(TOOL.os, "getuid", return_value=501),
+              mock.patch.object(TOOL.os, "geteuid", return_value=501),
+              mock.patch.object(TOOL, "current_runtime_command", return_value={"data": True}) as current,
+              mock.patch.object(TOOL, "runtime_command", return_value={"historical": True}) as historical,
+              contextlib.redirect_stdout(io.StringIO())):
+            TOOL.main(["current-runtime", "--archive", "/a", "--work", "/w", "--expected-source", "a" * 64,
+                       "--expected-manifest", "b" * 64, "--output", "/o"])
+            args = current.call_args.args[0]
+            self.assertEqual((args.archive, args.work, args.output), (Path("/a"), Path("/w"), Path("/o")))
+            self.assertEqual((args.expected_source, args.expected_manifest), ("a" * 64, "b" * 64))
+            historical.assert_not_called()
+            TOOL.main(["runtime", "--archive", "/a", "--expected-manifest", "c" * 64, "--output", "/o"])
+            historical.assert_called_once()
+            current.assert_called_once()
+
+    def test_aqua_uses_reviewed_current_source_data_before_compilation(self):
+        workflow = (Path(__file__).absolute().parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
+        stage = workflow.index("desktop/tools/stage_macos_installed.py current-runtime")
+        self.assertLess(stage, workflow.index("npm ci --ignore-scripts"))
+        self.assertLess(stage, workflow.index("cargo test --locked"))
+        self.assertIn('--work "$MRK_MACOS_WORK/current-runtime-preparation"', workflow)
+        self.assertIn('--expected-source "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256"', workflow)
+        self.assertIn('--expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"', workflow)
+        for variable in ("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256", "MRK_BUNDLED_RUNTIME_SOURCE_SHA256"):
+            literal = TOOL.re.search(r"^      " + variable + r": ([a-z0-9-]+)$", workflow, TOOL.re.M).group(1)
+            self.assertTrue(TOOL.sha(literal) or literal.startswith("pending-independent-current-"))
+            self.assertIn('"$' + variable + '" =~ ^[0-9a-f]{64}$', workflow)
+            self.assertIn('"$' + variable + '" == ' + literal, workflow)
+        self.assertIn('actions/artifacts/10639324707/zip', workflow)
+        self.assertIn('"reusedSupplierOnly": True', workflow)
+        self.assertIn('"first-save", "noop-stale", "picker-loss", "save-loss"', workflow)
 
 
 if __name__ == "__main__":
