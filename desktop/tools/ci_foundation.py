@@ -13033,21 +13033,145 @@ def windows_installed_helper_metadata(context: dict) -> dict:
     return windows_installed_app_graph(value, lock, source=source, root=root, publication=True)
 
 
-def windows_installed_app_unit_features(graph: dict, *, helper: bool = False) -> dict:
-    """One source-locked platform unit, not a general Cargo feature resolver.
+def windows_installed_fixed_normal_features(graph: dict) -> dict:
+    """Three source-locked Windows target/host units; never a Cargo resolver."""
+    packages, nodes = graph["packages"], graph["nodes"]
+    registry = "registry+https://github.com/rust-lang/crates.io-index"
 
-    Filtered metadata can retain features unified through inactive platforms.
-    Derive windows-sys' exact normal-unit closure from its active incoming
-    declarations; keep ordinary metadata equality for every other package.
-    """
+    def package(name, version, *, local=False):
+        found = [key for key in nodes if packages[key]["name"] == name]
+        require(len(found) == 1, "Windows fixed normal unit identity is missing/ambiguous: " + name)
+        key = found[0]
+        value = packages[key]
+        require(value["version"] == version and value.get("source") == (None if local else registry),
+                "Windows fixed normal unit version/source differs: " + name)
+        return key, value
+
+    def feature_data(key, value):
+        mapping, selected = value["features"], nodes[key]["features"]
+        require(type(mapping) is dict and len(mapping) <= 512
+                and all(type(name) is str and re.fullmatch(r"[A-Za-z0-9_+\-]{1,128}", name) for name in mapping)
+                and type(selected) is list and len(selected) <= 512
+                and all(type(name) is str and name in mapping for name in selected)
+                and selected == sorted(set(selected)),
+                "Windows fixed normal unit feature data differs: " + value["name"])
+        for name in selected:
+            refs = mapping[name]
+            require(type(refs) is list and len(refs) <= 128
+                    and all(type(ref) is str and 0 < len(ref) <= 256 for ref in refs),
+                    "Windows fixed normal unit feature expressions differ: " + value["name"])
+        return mapping, selected
+
+    def library(value, *, macro=False):
+        kind = ["proc-macro"] if macro else ["lib"]
+        primary = [target for target in value["targets"] if type(target) is dict
+                   and target.get("kind") in (["lib"], ["proc-macro"])]
+        require(len(primary) == 1 and primary[0].get("kind") == kind
+                and primary[0].get("crate_types") == kind
+                and primary[0].get("name") == value["name"].replace("-", "_")
+                and primary[0].get("src_path") == str(Path(value["manifest_path"]).parent / "src/lib.rs"),
+                "Windows fixed normal unit target/host role differs: " + value["name"])
+
+    tokio_definitions = {
+        "default": [], "io-util": ["bytes"], "macros": ["tokio-macros"],
+        "net": ["libc", "mio/os-poll", "mio/os-ext", "mio/net", "socket2",
+                "windows-sys/Win32_Foundation", "windows-sys/Win32_Security",
+                "windows-sys/Win32_Storage_FileSystem", "windows-sys/Win32_System_Pipes",
+                "windows-sys/Win32_System_SystemServices"],
+        "process": ["bytes", "libc", "mio/os-poll", "mio/os-ext", "mio/net",
+                    "signal-hook-registry", "windows-sys/Win32_Foundation",
+                    "windows-sys/Win32_System_Threading", "windows-sys/Win32_System_WindowsProgramming"],
+        "rt": [], "rt-multi-thread": ["rt"], "sync": [], "time": [],
+        **{name: ["dep:" + name] for name in
+           ("bytes", "libc", "mio", "signal-hook-registry", "socket2", "tokio-macros", "windows-sys")},
+    }
+    syn_definitions = {
+        "clone-impls": [], "default": ["derive", "parsing", "printing", "clone-impls", "proc-macro"],
+        "derive": [], "full": [], "parsing": [], "printing": ["dep:quote"],
+        "proc-macro": ["proc-macro2/proc-macro", "quote?/proc-macro"],
+    }
+    contracts = (
+        ("typenum", "1.20.1", {}, (
+            ("crypto-common", "0.1.7", "^1.14", True, []),
+            ("generic-array", "0.14.7", "^1.12", True, []))),
+        ("tokio", "1.48.0", tokio_definitions, (
+            ("mobile-release-kit-desktop", "0.1.0", "=1.48.0", True,
+             ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"]),)),
+        ("syn", "2.0.119", syn_definitions, (
+            ("serde_derive", "1.0.228", "^2.0.81", False,
+             ["clone-impls", "derive", "parsing", "printing", "proc-macro"]),
+            ("tokio-macros", "2.6.1", "^2.0", True, ["full"]))),
+    )
+    corrected = {}
+    for name, version, definitions, parents in contracts:
+        key, value = package(name, version)
+        library(value)
+        mapping, metadata_features = feature_data(key, value)
+        require(all(same_compile_json(mapping.get(feature), refs) for feature, refs in definitions.items())
+                and (name != "typenum" or "default" not in mapping),
+                "Windows fixed normal unit selected feature definitions differ: " + name)
+        expected_parents = {}
+        for parent_name, parent_version, requirement, defaults, requested in parents:
+            parent_key, parent = package(parent_name, parent_version, local=parent_name == "mobile-release-kit-desktop")
+            require(parent_key not in expected_parents, "Windows fixed normal unit parent is duplicated: " + name)
+            expected_parents[parent_key] = {
+                "name": name, "source": registry, "req": requirement, "kind": None, "rename": None,
+                "optional": False, "uses_default_features": defaults, "features": requested,
+                "target": None, "registry": None,
+            }
+            feature_map, selected = feature_data(parent_key, parent)
+            if name == "syn":
+                library(parent, macro=True)
+            elif name == "typenum":
+                library(parent)
+            # No selected parent feature in these exact declarations forwards
+            # more features into this unit. Unknown new forwarding needs review.
+            require(not any(ref.startswith(name + "/") or ref.startswith(name + "?/")
+                            for feature in selected for ref in feature_map[feature]),
+                    "Windows fixed normal unit parent forwarding differs: " + name)
+        seen = set()
+        for parent_key, node in nodes.items():
+            for edge in node["deps"]:
+                if edge["pkg"] != key:
+                    continue
+                require(parent_key in expected_parents and parent_key not in seen
+                        and edge["name"] == name.replace("-", "_")
+                        and same_compile_json(edge["dep_kinds"], [{"kind": None, "target": None}]),
+                        "Windows fixed normal unit incoming role/edge differs: " + name)
+                seen.add(parent_key)
+                declarations = packages[parent_key].get("dependencies")
+                require(type(declarations) is list and 0 < len(declarations) <= 512
+                        and all(type(declaration) is dict for declaration in declarations),
+                        "Windows fixed normal unit incoming declarations differ: " + name)
+                matching = [declaration for declaration in declarations if declaration.get("name") == name]
+                require(len(matching) == 1 and same_compile_json(matching[0], expected_parents[parent_key]),
+                        "Windows fixed normal unit incoming declaration differs: " + name)
+        require(seen == set(expected_parents), "Windows fixed normal unit incoming parent is missing: " + name)
+        expected = sorted(definitions)
+        # This is metadata consistency, NOT compiler subset acceptance. The
+        # compiler row still has to match this derived list exactly.
+        require(set(expected) <= set(metadata_features),
+                "Windows fixed normal unit required features are missing from metadata: " + name)
+        corrected[key] = expected
+    return corrected
+
+
+def windows_installed_app_unit_features(graph: dict, *, helper: bool = False) -> dict:
+    """Exact fixed Windows normal units, including separate native dev admission."""
     packages, nodes = graph["packages"], graph["nodes"]
     expected = {key: node["features"] for key, node in nodes.items()}
     require(type(helper) is bool and (not helper or graph.get("publication") is True),
             "Windows normal helper feature role differs")
+    expected.update(windows_installed_fixed_normal_features(graph))
     if helper:
-        # Cargo metadata includes the app's dev edge. The normal helper MUST
-        # instead produce the exact normal native unit, without its test seam.
+        # Normal publisher never acquires the app libtest's qualification seam.
         expected[graph["localIds"]["mrk-windows-installed-native"]] = ["runtime-publication"]
+    return windows_installed_platform_unit_features(graph, expected)
+
+
+def windows_installed_platform_unit_features(graph: dict, expected: dict) -> dict:
+    """Existing windows-sys closure, using already role-corrected parent features."""
+    packages, nodes = graph["packages"], graph["nodes"]
     selected = [key for key in nodes if (packages[key]["name"], packages[key]["version"], packages[key].get("source"))
                 == ("windows-sys", "0.61.2", "registry+https://github.com/rust-lang/crates.io-index")]
     require(len(selected) == 1, "Windows app platform feature package is missing/ambiguous")
@@ -13099,7 +13223,7 @@ def windows_installed_app_unit_features(graph: dict, *, helper: bool = False) ->
                 seeds.update(dep["features"])
                 if dep["uses_default_features"] and "default" in feature_map:
                     seeds.add("default")
-                for feature in node["features"]:
+                for feature in expected[parent_key]:
                     refs = parent["features"][feature]
                     require(type(refs) is list and len(refs) <= 512
                             and all(type(ref) is str and 0 < len(ref) <= 256 for ref in refs),

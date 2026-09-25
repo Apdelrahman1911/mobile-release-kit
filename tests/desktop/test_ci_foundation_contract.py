@@ -7978,7 +7978,7 @@ class WindowsReaderGateTests(unittest.TestCase):
                                  (stage, True, "unavailable" if missing else "admitted-errors"))
 
     @classmethod
-    def graph_data(cls, publication=False):
+    def graph_data(cls, publication=False, *, normal_units=True):
         context = cls.context()
         if publication:
             context["qualificationProfile"] = helper.WINDOWS_RUNTIME_PUBLICATION_PROFILE
@@ -8065,7 +8065,92 @@ class WindowsReaderGateTests(unittest.TestCase):
         value = {"version": 1, "packages": packages, "workspace_root": str(source / "desktop/src-tauri"),
                  "workspace_members": [app], "workspace_default_members": [app], "target_directory": str(root / "target"),
                  "resolve": {"root": app, "nodes": nodes}}
-        return value, {"version": 4, "package": locked}, context
+        result = (value, {"version": 4, "package": locked}, context)
+        return cls.normal_unit_graph_data(*result) if normal_units else result
+
+    @classmethod
+    def normal_unit_graph_data(cls, value, lock, context):
+        """Source-shaped incoming roles, not native metadata or compiler receipts."""
+        root = Path(context["root"])
+        registry = "registry+https://github.com/rust-lang/crates.io-index"
+        packages = {row["name"]: row for row in value["packages"]}
+        nodes = {row["id"]: row for row in value["resolve"]["nodes"]}
+        tokio_features = {
+            "default": [], "io-util": ["bytes"], "macros": ["tokio-macros"],
+            "net": ["libc", "mio/os-poll", "mio/os-ext", "mio/net", "socket2",
+                    "windows-sys/Win32_Foundation", "windows-sys/Win32_Security",
+                    "windows-sys/Win32_Storage_FileSystem", "windows-sys/Win32_System_Pipes",
+                    "windows-sys/Win32_System_SystemServices"],
+            "process": ["bytes", "libc", "mio/os-poll", "mio/os-ext", "mio/net",
+                        "signal-hook-registry", "windows-sys/Win32_Foundation",
+                        "windows-sys/Win32_System_Threading", "windows-sys/Win32_System_WindowsProgramming"],
+            "rt": [], "rt-multi-thread": ["rt"], "sync": [], "time": [],
+            **{name: ["dep:" + name] for name in
+               ("bytes", "libc", "mio", "signal-hook-registry", "socket2", "tokio-macros", "windows-sys")},
+            "fs": [], "tracing": ["dep:tracing"],
+        }
+        syn_features = {
+            "clone-impls": [], "default": ["derive", "parsing", "printing", "clone-impls", "proc-macro"],
+            "derive": [], "full": [], "parsing": [], "printing": ["dep:quote"],
+            "proc-macro": ["proc-macro2/proc-macro", "quote?/proc-macro"],
+            "extra-traits": [], "visit-mut": [],
+        }
+        specifications = (
+            ("typenum", "1.20.1", {"const-generics": [], "scale_info": ["scale-info/derive"]}, ["const-generics"]),
+            ("generic-array", "0.14.7", {"more_lengths": []}, ["more_lengths"]),
+            ("crypto-common", "0.1.7", {"std": []}, ["std"]),
+            ("digest", "0.10.7", {}, []),
+            ("block-buffer", "0.10.4", {}, []),
+            ("serde_derive", "1.0.228", {"default": []}, ["default"]),
+            ("tokio-macros", "2.6.1", {}, []),
+            ("syn", "2.0.119", syn_features, sorted(syn_features)),
+        )
+        for name, version, features, selected in specifications:
+            directory = root / "cargo/registry/src/index.crates.io-fixed" / (name + "-" + version)
+            kind = ["proc-macro"] if name in {"serde_derive", "tokio-macros"} else ["lib"]
+            package = {"id": name + "@" + version, "name": name, "version": version, "source": registry,
+                "manifest_path": str(directory / "Cargo.toml"), "features": features, "dependencies": [],
+                "targets": [{"name": name.replace("-", "_"), "kind": kind, "crate_types": kind,
+                             "src_path": str(directory / "src/lib.rs")}]}
+            node = {"id": package["id"], "features": selected, "dependencies": [], "deps": []}
+            value["packages"].append(package); value["resolve"]["nodes"].append(node)
+            lock["package"].append({"name": name, "version": version, "source": registry, "checksum": "3" * 64})
+            packages[name], nodes[node["id"]] = package, node
+        tokio, platform = packages["tokio"], packages["windows-sys"]
+        tokio["features"] = tokio_features
+        nodes[tokio["id"]]["features"] = sorted(tokio_features)
+        platform["features"] = {name: [] for name in (
+            "Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Pipes",
+            "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_WindowsProgramming")}
+        nodes[platform["id"]]["features"] = sorted(platform["features"])
+        declaration = next(dep for dep in packages["mobile-release-kit-desktop"]["dependencies"] if dep["name"] == "tokio")
+        declaration["features"] = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"]
+        # The additional paths make the two typenum parents and two host macro
+        # consumers reachable without adding an application direct dependency.
+        def edge(parent_name, name, requirement, features=(), defaults=True, optional=False, target=None):
+            parent, child = packages[parent_name], packages[name]
+            parent.setdefault("dependencies", []).append({
+                "name": name, "source": registry, "req": requirement, "kind": None, "rename": None,
+                "optional": optional, "uses_default_features": defaults, "features": list(features),
+                "target": target, "registry": None})
+            node = nodes[parent["id"]]
+            node["dependencies"].append(child["id"])
+            node["deps"].append({"name": name.replace("-", "_"), "pkg": child["id"],
+                                 "dep_kinds": [{"kind": None, "target": target}]})
+        edge("sha2", "digest", "^0.10.7")
+        edge("digest", "block-buffer", "^0.10", optional=True)
+        edge("digest", "crypto-common", "^0.1.3")
+        edge("block-buffer", "generic-array", "^0.14")
+        edge("crypto-common", "generic-array", "=0.14.7", ("more_lengths",))
+        edge("crypto-common", "typenum", "^1.14")
+        edge("generic-array", "typenum", "^1.12")
+        edge("serde", "serde_derive", "^1", optional=True)
+        edge("tokio", "tokio-macros", "~2.6.0", optional=True)
+        edge("tokio", "windows-sys", "^0.61", optional=True, target="cfg(windows)")
+        edge("serde_derive", "syn", "^2.0.81",
+             ("clone-impls", "derive", "parsing", "printing", "proc-macro"), defaults=False)
+        edge("tokio-macros", "syn", "^2.0", ("full",))
+        return value, lock, context
 
     def test_windows_reader_active_graph_binds_declared_locals_and_locked_resolution(self):
         value, lock, context = self.graph_data()
@@ -8202,7 +8287,8 @@ class WindowsReaderGateTests(unittest.TestCase):
                 parse([{**native_unit, "features": features}, *rows])
         dependency = next(package for package in graph["packages"].values() if package["name"] == "tokio")
         dependency_unit = {**compiled, "package_id": dependency["id"], "manifest_path": dependency["manifest_path"],
-                           "target": dependency["targets"][1], "profile": {"test": True, "debug_assertions": True}}
+                           "target": dependency["targets"][1], "profile": {"test": True, "debug_assertions": True},
+                           "features": helper.windows_installed_app_unit_features(graph)[dependency["id"]]}
         mutations = {
             "declared-but-unselected-dependency-test": lambda data: data.insert(0, deepcopy(dependency_unit)),
             "dependency-library-test-profile": lambda data: data.insert(0, {**deepcopy(dependency_unit), "target": dependency["targets"][0]}),
@@ -8223,7 +8309,11 @@ class WindowsReaderGateTests(unittest.TestCase):
         for label, change in mutations.items():
             with self.subTest(case=label):
                 altered = deepcopy(rows); change(altered)
-                with self.assertRaises(helper.CheckFailure): parse(altered)
+                if label == "dependency-library-test-profile":
+                    with self.assertRaisesRegex(helper.CheckFailure, "Windows app dependency became an unrelated test unit"):
+                        parse(altered)
+                else:
+                    with self.assertRaises(helper.CheckFailure): parse(altered)
 
     def test_windows_reader_publication_graph_and_three_compile_roles_never_select_a_helper_libtest(self):
         value, lock, context = self.graph_data(publication=True)
@@ -8308,7 +8398,7 @@ class WindowsReaderGateTests(unittest.TestCase):
 
     def test_windows_reader_unit_refusal_is_bounded_and_preserves_original_first_failure(self):
         value, lock, context = self.graph_data(publication=True)
-        dependency = next(package for package in value["packages"] if package["name"] == "tokio")
+        dependency = next(package for package in value["packages"] if package["name"] == "serde_json")
         # Legal source-admitted feature surplus in metadata, not a new unit policy.
         next(node for node in value["resolve"]["nodes"] if node["id"] == dependency["id"])["features"] = ["allowed"]
         source, root = Path(context["source"]), Path(context["root"])
@@ -8368,7 +8458,7 @@ class WindowsReaderGateTests(unittest.TestCase):
             diagnostic = json.loads(marker[len(prefix):])
             self.assertEqual((diagnostic["role"], diagnostic["unitKind"], diagnostic["first"]), ("helper", "lib", first))
             self.assertEqual(diagnostic["checks"], dict(zip(labels, checks, strict=True)))
-            self.assertEqual(diagnostic["package"], {"state": "admitted", "name": "tokio", "version": "1.48.0"})
+            self.assertEqual(diagnostic["package"], {"state": "admitted", "name": "serde_json", "version": "1.0.145"})
             self.assertEqual(diagnostic["expectedFeatures"], {"state": "admitted", "values": ["allowed"]})
             self.assertEqual(diagnostic["actualFeatures"]["state"], feature_state)
             self.assertNotIn("PRIVATE-COMPILER-TEXT", marker)
@@ -8440,7 +8530,7 @@ class WindowsReaderGateTests(unittest.TestCase):
 
     @classmethod
     def feature_graph_data(cls):
-        value, lock, context = cls.graph_data()
+        value, lock, context = cls.graph_data(normal_units=False)
         packages = {row["name"]: row for row in value["packages"]}
         nodes = {row["id"]: row for row in value["resolve"]["nodes"]}
         native, tokio, platform = (packages[name] for name in ("mrk-windows-installed-native", "tokio", "windows-sys"))
@@ -8463,7 +8553,7 @@ class WindowsReaderGateTests(unittest.TestCase):
         graph = helper.windows_installed_app_graph(value, lock, source=source, root=root)
         platform, tokio = packages["windows-sys"], packages["tokio"]
         expected = ["Base", "Declared", "Forwarded", "Weak", "Win32", "default"]
-        unit_features = helper.windows_installed_app_unit_features(graph)
+        unit_features = helper.windows_installed_platform_unit_features(graph, {key: node["features"] for key, node in graph["nodes"].items()})
         self.assertEqual(unit_features[platform["id"]], expected)
         self.assertIn("Inactive", graph["nodes"][platform["id"]]["features"])
         self.assertEqual(unit_features[tokio["id"]], ["process"])
@@ -8471,7 +8561,7 @@ class WindowsReaderGateTests(unittest.TestCase):
         tokio["dependencies"][0]["rename"] = "platform-api"
         tokio["features"]["process"] = ["platform-api/Forwarded", "platform-api?/Weak"]
         graph["nodes"][tokio["id"]]["deps"][0]["name"] = "platform_api"
-        self.assertEqual(helper.windows_installed_app_unit_features(graph)[platform["id"]], expected)
+        self.assertEqual(helper.windows_installed_platform_unit_features(graph, {key: node["features"] for key, node in graph["nodes"].items()})[platform["id"]], expected)
         app = packages["mobile-release-kit-desktop"]
         executable = root / "target/x86_64-pc-windows-msvc/debug/deps/mobile_release_desktop-fixed.exe"
         unit = {"reason": "compiler-artifact", "package_id": platform["id"], "manifest_path": platform["manifest_path"],
@@ -8481,7 +8571,10 @@ class WindowsReaderGateTests(unittest.TestCase):
         for features in (expected, expected[:-1], sorted(expected + ["Inactive"]), expected + ["Base"]):
             raw = b"\n".join(json.dumps(row).encode("ascii") for row in (
                 {**unit, "features": features}, libtest, {"reason": "build-finished", "success": True}))
-            with patch.object(helper, "ordinary_windows_executable", side_effect=lambda path, **_: Path(path)):
+            # This fixture isolates the platform closure; complete normal-role
+            # integration is exercised by the fixed-unit regression below.
+            with patch.object(helper, "ordinary_windows_executable", side_effect=lambda path, **_: Path(path)), \
+                 patch.object(helper, "windows_installed_app_unit_features", return_value=unit_features):
                 if features == expected:
                     self.assertEqual(helper.windows_installed_app_test_path(raw, graph, source=source, root=root), executable)
                 else:
@@ -8496,7 +8589,7 @@ class WindowsReaderGateTests(unittest.TestCase):
                 with self.assertRaises(helper.CheckFailure):
                     graph = helper.windows_installed_app_graph(value, lock,
                         source=Path(context["source"]), root=Path(context["root"]))
-                    helper.windows_installed_app_unit_features(graph)
+                    helper.windows_installed_platform_unit_features(graph, {key: node["features"] for key, node in graph["nodes"].items()})
         for field, changed in (("target", "cfg(unix)"), ("source", "git+https://example.invalid/other"),
                                ("rename", "foreign"), ("uses_default_features", 1), ("optional", 0),
                                ("features", ["Unknown"]), ("features", ()), ("kind", "build")):
@@ -8514,6 +8607,152 @@ class WindowsReaderGateTests(unittest.TestCase):
             invalid(expression, lambda p, n, e=expression: p["windows-sys"]["features"].update(Base=[e]))
         invalid("feature-map-bound", lambda p, n: p["windows-sys"]["features"].update({"extra_" + str(i): [] for i in range(512)}))
         invalid("feature-list-bound", lambda p, n: p["windows-sys"]["features"].update(Base=["Win32"] * 129))
+
+    def test_windows_reader_fixed_normal_units_match_target_and_host_contracts(self):
+        wanted = {
+            "typenum": [],
+            "tokio": ["bytes", "default", "io-util", "libc", "macros", "mio", "net", "process",
+                      "rt", "rt-multi-thread", "signal-hook-registry", "socket2", "sync", "time",
+                      "tokio-macros", "windows-sys"],
+            "syn": ["clone-impls", "default", "derive", "full", "parsing", "printing", "proc-macro"],
+        }
+        for publication, helper_role in ((False, False), (True, False), (True, True)):
+            value, lock, context = self.graph_data(publication=publication)
+            source, root = Path(context["source"]), Path(context["root"])
+            graph = helper.windows_installed_app_graph(value, lock, source=source, root=root, publication=publication)
+            packages = {row["name"]: row for row in graph["packages"].values()}
+            selected = helper.windows_installed_app_unit_features(graph, helper=helper_role)
+            for name, expected in wanted.items():
+                key = packages[name]["id"]
+                self.assertEqual(selected[key], expected)
+                self.assertNotEqual(graph["nodes"][key]["features"], expected)
+            # A valid unselected nonlocal feature is not a normal-unit grant.
+            self.assertEqual(packages["typenum"]["features"]["scale_info"], ["scale-info/derive"])
+            app, native = packages["mobile-release-kit-desktop"], packages["mrk-windows-installed-native"]
+            expected_native = ["runtime-publication"] if helper_role else (
+                ["qualification-result", "runtime-publication"] if publication else ["qualification-result"])
+            self.assertEqual(selected[native["id"]], expected_native)
+            row = {"reason": "compiler-artifact", "profile": {"test": False, "debug_assertions": True},
+                   "fresh": False, "executable": None}
+            def unit(package, features):
+                return {**row, "package_id": package["id"], "manifest_path": package["manifest_path"],
+                        "target": package["targets"][0], "features": features}
+            rows = [unit(packages[name], features) for name, features in wanted.items()]
+            rows.append(unit(native, expected_native))
+            app_features = ["windows-runtime-publisher"] if publication else []
+            library = unit(app, app_features)
+            if helper_role:
+                executable = root / "target/x86_64-pc-windows-msvc/debug/mrk-windows-runtime-publish.exe"
+                rows += [library, {**library, "target": app["targets"][2], "executable": str(executable)}]
+            else:
+                executable = root / "target/x86_64-pc-windows-msvc/debug/deps/mobile_release_desktop-fixed.exe"
+                rows.append({**library, "profile": {"test": True, "debug_assertions": True},
+                             "executable": str(executable)})
+            rows.append({"reason": "build-finished", "success": True})
+            def parse(items):
+                raw = b"\n".join(helper.canonical_json(item) for item in items)
+                with patch.object(helper, "ordinary_windows_executable", side_effect=lambda path, **_: Path(path)), \
+                     patch.object(helper.Path, "lstat", side_effect=AssertionError("no parser filesystem admission")), \
+                     patch.object(helper.Path, "open", side_effect=AssertionError("no parser filesystem effects")):
+                    return helper.windows_installed_app_test_path(raw, graph, source=source, root=root, helper=helper_role)
+            with self.subTest(publication=publication, helper=helper_role):
+                self.assertEqual(parse(rows), executable)
+            if helper_role:
+                # Shared equality needs one mutation cycle, not three copies.
+                for index, (name, expected) in enumerate(wanted.items()):
+                    surplus = graph["nodes"][packages[name]["id"]]["features"]
+                    invalid = [surplus]
+                    if expected:
+                        invalid += [expected[:-1], list(reversed(expected)), expected + [expected[0]]]
+                    for features in invalid:
+                        altered = deepcopy(rows); altered[index]["features"] = features
+                        with self.subTest(unit=name, features=features), redirect_stdout(io.StringIO()), \
+                             self.assertRaisesRegex(helper.CheckFailure, "compiler unit features/source differ"):
+                            parse(altered)
+        # Corrected parent features, not inactive metadata forwarding, drive the
+        # existing windows-sys closure. The incoming normal contract stays exact.
+        value, lock, context = self.graph_data()
+        packages = {row["name"]: row for row in value["packages"]}
+        nodes = {row["id"]: row for row in value["resolve"]["nodes"]}
+        packages["tokio"]["features"]["fs"] = ["windows-sys/MetadataOnly"]
+        packages["windows-sys"]["features"]["MetadataOnly"] = []
+        nodes[packages["windows-sys"]["id"]]["features"].append("MetadataOnly")
+        nodes[packages["windows-sys"]["id"]]["features"].sort()
+        graph = helper.windows_installed_app_graph(value, lock, source=Path(context["source"]), root=Path(context["root"]))
+        self.assertNotIn("MetadataOnly", helper.windows_installed_app_unit_features(graph)[packages["windows-sys"]["id"]])
+        packages["tokio"]["features"]["process"].append("windows-sys/MetadataOnly")
+        with self.assertRaisesRegex(helper.CheckFailure, "selected feature definitions differ"):
+            helper.windows_installed_app_unit_features(graph)
+
+    def test_windows_reader_fixed_normal_unit_declarations_and_metadata_fail_closed(self):
+        def reject(label, change):
+            value, lock, context = self.graph_data(publication=True)
+            graph = helper.windows_installed_app_graph(value, lock, source=Path(context["source"]),
+                                                      root=Path(context["root"]), publication=True)
+            packages = {row["name"]: row for row in graph["packages"].values()}
+            nodes = {graph["packages"][key]["name"]: row for key, row in graph["nodes"].items()}
+            change(graph, packages, nodes)
+            with self.subTest(case=label), self.assertRaises(helper.CheckFailure):
+                helper.windows_installed_app_unit_features(graph, helper=True)
+        def declaration(packages, parent, child):
+            return next(row for row in packages[parent]["dependencies"] if row["name"] == child)
+        for name in ("typenum", "tokio", "syn"):
+            reject("version-" + name, lambda g, p, n, name=name: p[name].update(version="0.0.0"))
+            reject("source-" + name, lambda g, p, n, name=name: p[name].update(source="git+https://example.invalid/other"))
+            reject("missing-" + name, lambda g, p, n, name=name: g["nodes"].pop(p[name]["id"]))
+        def duplicate_unit(graph, packages, nodes):
+            copy = deepcopy(packages["typenum"]); copy["id"] = "duplicate-typenum"
+            graph["packages"][copy["id"]] = copy
+            graph["nodes"][copy["id"]] = {**deepcopy(nodes["typenum"]), "id": copy["id"]}
+        reject("duplicated-unit", duplicate_unit)
+        for parent, child in (("crypto-common", "typenum"), ("generic-array", "typenum"),
+                              ("mobile-release-kit-desktop", "tokio"), ("serde_derive", "syn"), ("tokio-macros", "syn")):
+            for field, value in (("req", "*"), ("rename", "alias"), ("kind", "build"), ("target", "cfg(unix)"),
+                                 ("optional", True), ("optional", 0), ("uses_default_features", 1),
+                                 ("features", ()), ("features", ["const-generics"]), ("registry", "other")):
+                reject(parent + "-" + field + "-" + str(value),
+                       lambda g, p, n, parent=parent, child=child, field=field, value=value:
+                           declaration(p, parent, child).update({field: value}))
+            reject(parent + "-defaults",
+                   lambda g, p, n, parent=parent, child=child:
+                       declaration(p, parent, child).update(
+                           uses_default_features=not declaration(p, parent, child)["uses_default_features"]))
+            reject(parent + "-missing-field",
+                   lambda g, p, n, parent=parent, child=child: declaration(p, parent, child).pop("optional"))
+            reject(parent + "-duplicate-declaration",
+                   lambda g, p, n, parent=parent, child=child:
+                       p[parent]["dependencies"].append(deepcopy(declaration(p, parent, child))))
+        reject("missing-parent-edge", lambda g, p, n: n["generic-array"].update(deps=[]))
+        reject("duplicate-parent-edge", lambda g, p, n:
+               n["generic-array"]["deps"].append(deepcopy(n["generic-array"]["deps"][0])))
+        for kind in ("dev", "build"):
+            reject("incoming-" + kind, lambda g, p, n, kind=kind:
+                   n["generic-array"]["deps"][0]["dep_kinds"][0].update(kind=kind))
+        reject("incoming-target", lambda g, p, n:
+               n["serde_derive"]["deps"][0]["dep_kinds"][0].update(target="cfg(windows)"))
+        reject("incoming-alias", lambda g, p, n: n["serde_derive"]["deps"][0].update(name="other"))
+        reject("additional-parent", lambda g, p, n:
+               n["serde_json"]["deps"].append({"name": "typenum", "pkg": p["typenum"]["id"],
+                                              "dep_kinds": [{"kind": None, "target": None}]}))
+        reject("host-became-library", lambda g, p, n:
+               p["serde_derive"]["targets"][0].update(kind=["lib"], crate_types=["lib"]))
+        reject("target-became-macro", lambda g, p, n:
+               p["typenum"]["targets"][0].update(kind=["proc-macro"], crate_types=["proc-macro"]))
+        reject("target-source", lambda g, p, n: p["syn"]["targets"][0].update(src_path="/unrelated/lib.rs"))
+        reject("typenum-default", lambda g, p, n: p["typenum"]["features"].update(default=[]))
+        for ref in ("typenum/const-generics", "typenum?/const-generics"):
+            reject("parent-forward-" + ref, lambda g, p, n, ref=ref:
+                   p["generic-array"]["features"]["more_lengths"].append(ref))
+        for name, feature in (("tokio", "time"), ("syn", "full")):
+            reject(name + "-selected-definition", lambda g, p, n, name=name, feature=feature:
+                   p[name]["features"].update({feature: ["unreviewed"]}))
+            # Independent PLAN review: required normal features must be present
+            # in metadata too; compiler equality alone cannot repair bad DATA.
+            reject(name + "-missing-required-metadata", lambda g, p, n, name=name, feature=feature:
+                   n[name]["features"].remove(feature))
+        reject("metadata-feature-type", lambda g, p, n: n["tokio"].update(features=True))
+        reject("metadata-feature-duplicate", lambda g, p, n: n["syn"]["features"].append("full"))
+        reject("declaration-list-type", lambda g, p, n: p["crypto-common"].update(dependencies=None))
 
     def test_windows_reader_selected_eleven_and_compile_argv_are_closed(self):
         names = (
