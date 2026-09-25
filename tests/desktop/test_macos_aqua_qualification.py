@@ -250,6 +250,77 @@ def inert_created_directory(gid=GID):
 
 
 class AquaDataTests(unittest.TestCase):
+    def test_current_owner_pins_match_checkout_and_refuse_stale_before_import(self):
+        root = PATH.parents[2]
+        names = ("owned_process.py", "_command_process.py", "_native_process.py", "cancellation.py")
+        self.assertEqual(tuple(M.OWNER_PINS), names)
+        for name, expected in M.OWNER_PINS.items():
+            path = root / "src" / "mobile_release" / name
+            info = path.lstat()
+            self.assertTrue(stat.S_ISREG(info.st_mode), name)
+            self.assertLessEqual(info.st_size, 256 * 1024, name)
+            self.assertEqual(M.digest(path.read_bytes()), expected, name)
+
+        # The positive check above reads only DATA. The actual loader is entered
+        # only with the known stale pin, under a blocker installed before entry.
+        def core_modules():
+            return {name: module for name, module in sys.modules.items()
+                    if name == "mobile_release" or name.startswith("mobile_release.")}
+        before_modules, before_path, before_pins = core_modules(), sys.path, dict(M.OWNER_PINS)
+        before_path_values = list(before_path)
+        self.assertEqual(before_modules, {})  # Never delete preexisting modules to make this pass.
+        attempted_imports = []
+        original_import = __import__
+
+        def no_core_import(name, globals=None, locals=None, fromlist=(), level=0):
+            package = globals.get("__package__") if type(globals) is dict else None
+            if (name == "mobile_release" or name.startswith("mobile_release.")
+                    or level and type(package) is str
+                    and (package == "mobile_release" or package.startswith("mobile_release."))):
+                attempted_imports.append(name)
+                raise AssertionError("core import attempted before stale owner refusal")
+            return original_import(name, globals, locals, fromlist, level)
+
+        # Contexts restore the original dictionaries/path even if an assertion
+        # fails; the inner assertions detect drift before that restoration.
+        with patch.dict(sys.modules), patch.object(sys, "path", list(before_path)):
+            with patch("builtins.__import__", no_core_import), patch.dict(M.OWNER_PINS, {
+                    "_command_process.py": "075fa6e9838017feb6a1716ab3a75074e3a65dffe8b217613aff7e87c0201f68"}):
+                with self.assertRaisesRegex(M.Refused, "^owner-source-pin$") as refused:
+                    M.load_owner(root)
+                self.assertIs(type(refused.exception), M.Refused)
+                self.assertEqual(attempted_imports, [])
+                self.assertEqual(sys.path, before_path_values)
+                self.assertEqual(core_modules(), before_modules)
+            self.assertEqual(M.OWNER_PINS, before_pins)
+        self.assertIs(sys.path, before_path)
+        self.assertEqual(sys.path, before_path_values)
+        self.assertEqual(core_modules(), before_modules)
+        self.assertEqual(M.OWNER_PINS, before_pins)
+
+        workflow = (root / ".github/workflows/desktop-macos-aqua.yml").read_text()
+        label = "      - name: Check current owner pins before native preparation\n"
+        self.assertEqual(workflow.count(label), 1)
+        position = workflow.index(label)
+        self.assertLess(workflow.index("      - name: Bind the complete reviewed first-party checkout before compilation\n"), position)
+        for later in ("Fail fast on native Scripts ownership and package format (never Installer)",
+                      "Download only the exact accepted M archive (no rebuild or fallback)",
+                      "Compile the fixed debug actual-main observer and normal embedded frontend once",
+                      "Standard Installer only is privileged; never execute the app or Python as root"):
+            self.assertLess(position, workflow.index("      - name: " + later + "\n"))
+        step = workflow.split(label, 1)[1].split("\n      - name:", 1)[0]
+        for required in (
+                "timeout-minutes: 1", '"$MRK_PYTHON" -I -S -B -',
+                'path = pathlib.Path("tests/desktop/test_macos_aqua_qualification.py").absolute()',
+                'suite = unittest.TestSuite([module.AquaDataTests("test_current_owner_pins_match_checkout_and_refuse_stale_before_import")])',
+                "unittest.TextTestRunner(verbosity=2, failfast=True).run(suite)",
+                "result.testsRun != 1", "not result.wasSuccessful()",
+                "result.failures, result.errors, result.skipped, result.expectedFailures, result.unexpectedSuccesses",
+                "raise SystemExit(1)"):
+            self.assertIn(required, step)
+        self.assertNotIn("discover(", step)
+        self.assertNotIn("loadTestsFrom", step)
+
     def test_new_directory_group_normalization_precedes_widening(self):
         for gid in (GID, 0):
             for mode in (0o700, 0o755):

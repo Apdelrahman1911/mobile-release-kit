@@ -201,7 +201,7 @@ CONFIG = b'''{
 '''
 OWNER_PINS = {
     "owned_process.py": "430a596c5069b7acf248334d1f60fdd12ad8212cf9c2e9dfef717c9ba2179c02",
-    "_command_process.py": "075fa6e9838017feb6a1716ab3a75074e3a65dffe8b217613aff7e87c0201f68",
+    "_command_process.py": "803226dd3252d97763758a20222ec41bdfc3f9a75021bf6412d1c5590eb1e75b",
     "_native_process.py": "70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4",
     "cancellation.py": "1840232213e877e26c4cebd1434b3b851f9fa4c6961baa26eeaae9fa1442db78",
 }

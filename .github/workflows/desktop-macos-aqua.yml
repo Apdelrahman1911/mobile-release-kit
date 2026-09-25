@@ -154,6 +154,24 @@ jobs:
               stream.flush()
               os.fsync(stream.fileno())
           PY_SOURCE
+      - name: Check current owner pins before native preparation
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$MRK_PYTHON" -I -S -B - <<'PY_OWNER_PINS'
+          import importlib.util, pathlib, sys, unittest
+          path = pathlib.Path("tests/desktop/test_macos_aqua_qualification.py").absolute()
+          spec = importlib.util.spec_from_file_location("_mrk_macos_owner_pin_preflight", path)
+          module = importlib.util.module_from_spec(spec)
+          sys.modules[spec.name] = module
+          spec.loader.exec_module(module)
+          suite = unittest.TestSuite([module.AquaDataTests("test_current_owner_pins_match_checkout_and_refuse_stale_before_import")])
+          result = unittest.TextTestRunner(verbosity=2, failfast=True).run(suite)
+          if (result.testsRun != 1 or not result.wasSuccessful()
+                  or any((result.failures, result.errors, result.skipped, result.expectedFailures, result.unexpectedSuccesses))):
+              raise SystemExit(1)
+          PY_OWNER_PINS
       - name: Fail fast on native Scripts ownership and package format (never Installer)
         timeout-minutes: 2
         shell: bash
