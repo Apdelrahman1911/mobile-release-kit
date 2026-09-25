@@ -13126,6 +13126,59 @@ def windows_installed_app_unit_features(graph: dict, *, helper: bool = False) ->
     return expected
 
 
+WINDOWS_COMPILER_UNIT_REFUSAL_LIMIT = 4096
+
+
+def windows_installed_app_unit_refused(package: dict, target: dict, expected: object, actual: object,
+                                      *, helper: bool, checks: tuple) -> None:
+    """Failure-only source projection; None means that original check was not evaluated."""
+    try:
+        labels = ("features", "manifest", "profile-object", "test-boolean")
+        if type(helper) is not bool or type(checks) is not tuple or len(checks) != len(labels):
+            return
+        first = next((index for index, value in enumerate(checks) if value is False), None)
+        if (first is None
+                or any(value is not True for value in checks[:first])
+                or any(value is not None for value in checks[first + 1:])):
+            return
+        name, version = package.get("name"), package.get("version")
+        identity = {"state": "unavailable"}
+        if (type(name) is str and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", name) is not None
+                and type(version) is str and re.fullmatch(r"[A-Za-z0-9.+-]{1,128}", version) is not None):
+            identity = {"state": "admitted", "name": name, "version": version}
+        kind = target.get("kind")
+        unit = kind[0] if type(kind) is list and len(kind) == 1 and kind[0] in {
+            "lib", "proc-macro", "custom-build", "bin"} else "unavailable"
+        feature_map = package.get("features")
+
+        def features(values):
+            if type(values) is not list:
+                return {"state": "malformed"}
+            if len(values) > 64:
+                return {"state": "overbound"}
+            if any(type(value) is not str for value in values):
+                return {"state": "malformed"}
+            if (any(len(value) > 128 for value in values)
+                    or sum(len(value) + 3 for value in values) + 2 > 1536):
+                return {"state": "overbound"}
+            if any(re.fullmatch(r"[A-Za-z0-9_+\-]{1,128}", value) is None for value in values):
+                return {"state": "malformed"}
+            if type(feature_map) is not dict or len(feature_map) > 512:
+                return {"state": "unavailable-source-map"}
+            if any(value not in feature_map for value in values):
+                return {"state": "unknown"}
+            return {"state": "admitted", "values": list(values)}
+
+        row = {"diagnosticOnly": True, "role": "helper" if helper else "app", "package": identity,
+               "unitKind": unit, "first": labels[first], "checks": dict(zip(labels, checks, strict=True)),
+               "expectedFeatures": features(expected), "actualFeatures": features(actual)}
+        marker = b"MRK_WINDOWS_COMPILER_UNIT_REFUSED=" + canonical_json(row) + b"\n"
+        if len(marker) <= WINDOWS_COMPILER_UNIT_REFUSAL_LIMIT:
+            print(marker.decode("ascii"), end="", flush=True)
+    except BaseException:
+        pass  # Even interrupted/failed diagnostics cannot replace the original refusal.
+
+
 def windows_installed_app_test_path(raw: bytes, graph: dict, *, source: Path, root: Path, helper: bool = False) -> Path:
     require(type(raw) is bytes and 0 < len(raw) <= 16 << 20, "Windows app compiler output exceeds its bound")
     found, finished, script_units, normal_native_units = None, False, set(), 0
@@ -13160,9 +13213,23 @@ def windows_installed_app_test_path(raw: bytes, graph: dict, *, source: Path, ro
         if reason == "compiler-message":
             continue
         profile = row.get("profile")
-        require(row.get("features") == unit_features[key] and row.get("manifest_path") == package["manifest_path"]
-                and type(profile) is dict and type(profile.get("test")) is bool,
-                "Windows app compiler unit features/source differ")
+        actual_features, expected_features = row.get("features"), unit_features[key]
+        features_match = manifest_match = profile_object = test_boolean = None
+        # Cache each original predicate exactly once, in its original short-circuit
+        # order. A predicate exception remains outside the diagnostic catch.
+        unit_matches = ((features_match := actual_features == expected_features)
+                        and (manifest_match := row.get("manifest_path") == package["manifest_path"])
+                        and (profile_object := type(profile) is dict)
+                        and (test_boolean := type(profile.get("test")) is bool))
+        try:
+            require(unit_matches, "Windows app compiler unit features/source differ")
+        except CheckFailure:
+            try:
+                windows_installed_app_unit_refused(package, target, expected_features, actual_features, helper=helper,
+                    checks=(features_match, manifest_match, profile_object, test_boolean))
+            except BaseException:
+                pass  # Argument/projection failures also leave this first refusal untouched.
+            raise
         require(not helper or profile["test"] is False, "Windows normal helper contains a test-profile compiler unit")
         if key == graph["localIds"]["mrk-windows-installed-native"]:
             require(target.get("kind") == ["lib"] and target.get("crate_types") == ["lib"]

@@ -8305,6 +8305,139 @@ class WindowsReaderGateTests(unittest.TestCase):
         with self.assertRaises(helper.CheckFailure): parse(rows, False)
         with self.assertRaises(helper.CheckFailure): parse(app_rows)
 
+
+    def test_windows_reader_unit_refusal_is_bounded_and_preserves_original_first_failure(self):
+        value, lock, context = self.graph_data(publication=True)
+        dependency = next(package for package in value["packages"] if package["name"] == "tokio")
+        # Legal source-admitted feature surplus in metadata, not a new unit policy.
+        next(node for node in value["resolve"]["nodes"] if node["id"] == dependency["id"])["features"] = ["allowed"]
+        source, root = Path(context["source"]), Path(context["root"])
+        graph = helper.windows_installed_app_graph(value, lock, source=source, root=root, publication=True)
+        app, native = (graph["packages"][graph["localIds"][name]] for name in
+                       ("mobile-release-kit-desktop", "mrk-windows-installed-native"))
+        executable = root / "target/x86_64-pc-windows-msvc/debug/mrk-windows-runtime-publish.exe"
+        unit = {"reason": "compiler-artifact", "package_id": native["id"], "manifest_path": native["manifest_path"],
+                "target": native["targets"][0], "profile": {"test": False, "debug_assertions": True},
+                "features": ["runtime-publication"], "executable": None, "fresh": False}
+        library = {**unit, "package_id": app["id"], "manifest_path": app["manifest_path"], "target": app["targets"][0],
+                   "features": ["windows-runtime-publisher"], "profile": dict(unit["profile"])}
+        binary = {**library, "target": app["targets"][2], "executable": str(executable)}
+        selected = {**unit, "package_id": dependency["id"], "manifest_path": dependency["manifest_path"],
+                    "target": dependency["targets"][0], "features": ["allowed"]}
+        rows = [selected, unit, library, binary, {"reason": "build-finished", "success": True}]
+
+        def parse(items, *, helper_role=True):
+            raw = b"\n".join(json.dumps(item, separators=(",", ":")).encode("ascii") for item in items)
+            with patch.object(helper.Path, "lstat", side_effect=AssertionError("no filesystem admission while parsing")), \
+                 patch.object(helper.Path, "open", side_effect=AssertionError("no filesystem effect while parsing")):
+                return helper.windows_installed_app_test_path(raw, graph, source=source, root=root, helper=helper_role)
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(parse(rows), executable)
+        self.assertEqual(output.getvalue(), "")
+        message = "Windows app compiler unit features/source differ"
+        prefix = "MRK_WINDOWS_COMPILER_UNIT_REFUSED="
+        cases = [
+            ("legal-feature-surplus", {"features": []}, "features", [False, None, None, None], "admitted"),
+            ("first-feature-only", {"features": [], "manifest_path": None, "profile": None},
+             "features", [False, None, None, None], "admitted"),
+            ("missing-manifest", {"manifest_path": None, "profile": None},
+             "manifest", [True, False, None, None], "admitted"),
+            ("malformed-profile", {"profile": []}, "profile-object", [True, True, False, None], "admitted"),
+            ("missing-profile-test", {"profile": {}}, "test-boolean", [True, True, True, False], "admitted"),
+            ("typed-profile-test", {"profile": {"test": 0}}, "test-boolean", [True, True, True, False], "admitted"),
+            ("feature-not-list", {"features": None}, "features", [False, None, None, None], "malformed"),
+            ("feature-not-string", {"features": [{}]}, "features", [False, None, None, None], "malformed"),
+            ("unknown-feature", {"features": ["PRIVATE-COMPILER-TEXT"]},
+             "features", [False, None, None, None], "unknown"),
+            ("feature-path", {"features": ["/PRIVATE-COMPILER-TEXT"]},
+             "features", [False, None, None, None], "malformed"),
+            ("overbound-feature-list", {"features": ["allowed"] * 65},
+             "features", [False, None, None, None], "overbound"),
+        ]
+        labels = ("features", "manifest", "profile-object", "test-boolean")
+        for label, change, first, checks, feature_state in cases:
+            altered = deepcopy(rows); altered[0].update(change)
+            output = io.StringIO()
+            with self.subTest(case=label), redirect_stdout(output), self.assertRaisesRegex(helper.CheckFailure, message):
+                parse(altered)
+            marker = output.getvalue()
+            self.assertTrue(marker.startswith(prefix)); self.assertEqual(marker.count("\n"), 1)
+            self.assertLessEqual(len(marker.encode("ascii")), helper.WINDOWS_COMPILER_UNIT_REFUSAL_LIMIT)
+            diagnostic = json.loads(marker[len(prefix):])
+            self.assertEqual((diagnostic["role"], diagnostic["unitKind"], diagnostic["first"]), ("helper", "lib", first))
+            self.assertEqual(diagnostic["checks"], dict(zip(labels, checks, strict=True)))
+            self.assertEqual(diagnostic["package"], {"state": "admitted", "name": "tokio", "version": "1.48.0"})
+            self.assertEqual(diagnostic["expectedFeatures"], {"state": "admitted", "values": ["allowed"]})
+            self.assertEqual(diagnostic["actualFeatures"]["state"], feature_state)
+            self.assertNotIn("PRIVATE-COMPILER-TEXT", marker)
+            self.assertNotIn(dependency["id"], marker); self.assertNotIn(dependency["manifest_path"], marker)
+        altered = deepcopy(rows); altered[0].pop("manifest_path")
+        with redirect_stdout(io.StringIO()), self.assertRaisesRegex(helper.CheckFailure, message):
+            parse(altered)
+        # The earlier non-None manifest gate and later normal-helper test:false
+        # gate remain separate; this diagnostic cannot relabel either failure.
+        for change, error in (
+            ({"features": [], "manifest_path": "/PRIVATE-COMPILER-TEXT"}, "compiler target differs"),
+            ({"profile": {"test": True}}, "normal helper contains a test-profile")):
+            altered = deepcopy(rows); altered[0].update(change); output = io.StringIO()
+            with redirect_stdout(output), self.assertRaisesRegex(helper.CheckFailure, error):
+                parse(altered)
+            self.assertEqual(output.getvalue(), "")
+
+        altered = deepcopy(rows); altered[0]["features"] = []
+        original_require, original_canonical = helper.require, helper.canonical_json
+        original_projection = helper.windows_installed_app_unit_refused
+        for failure in ("projection", "serialization", "output"):
+            original = helper.CheckFailure(message)
+            def require(condition, text):
+                if not condition and text == message:
+                    raise original
+                return original_require(condition, text)
+            def canonical(data):
+                if type(data) is dict and data.get("diagnosticOnly") is True and "first" in data:
+                    raise OSError("PRIVATE-DIAGNOSTIC-TEXT")
+                return original_canonical(data)
+            with self.subTest(diagnostic_failure=failure), patch.object(helper, "require", side_effect=require), \
+                 patch.object(helper, "windows_installed_app_unit_refused",
+                              side_effect=OSError("PRIVATE-DIAGNOSTIC-TEXT") if failure == "projection" else original_projection), \
+                 patch.object(helper, "canonical_json", side_effect=canonical if failure == "serialization" else original_canonical), \
+                 patch("builtins.print", side_effect=OSError("PRIVATE-DIAGNOSTIC-TEXT") if failure == "output" else None), \
+                 self.assertRaises(helper.CheckFailure) as caught:
+                parse(altered)
+            self.assertIs(caught.exception, original)
+
+        original = helper.CheckFailure("original predicate failure")
+        class RefusedExpected(dict):
+            def __getitem__(self, key):
+                raise original
+        with patch.object(helper, "windows_installed_app_unit_features", return_value=RefusedExpected()), \
+             patch.object(helper, "windows_installed_app_unit_refused") as diagnostic, \
+             self.assertRaises(helper.CheckFailure) as caught:
+            parse(rows)
+        self.assertIs(caught.exception, original); diagnostic.assert_not_called()
+
+        # The same source projection covers the app parser; malformed identities
+        # and long, even admitted feature names never escape the fixed marker cap.
+        package = deepcopy(dependency)
+        names = ["feature_" + str(index).zfill(3) + "_" + "x" * 110 for index in range(64)]
+        package["features"] = dict.fromkeys(names, [])
+        for count, name, version in ((11, "tokio", "1.48.0"), (64, "tokio", "1.48.0"),
+                                     (64, "/PRIVATE-IDENTITY", "1.48.0"), (64, "tokio", "PRIVATE-IDENTITY\n")):
+            package.update(name=name, version=version); output = io.StringIO()
+            with redirect_stdout(output):
+                helper.windows_installed_app_unit_refused(package, selected["target"], names[:count], names[:count - 1],
+                    helper=False, checks=(False, None, None, None))
+            marker = output.getvalue(); diagnostic = json.loads(marker[len(prefix):])
+            self.assertLessEqual(len(marker.encode("ascii")), helper.WINDOWS_COMPILER_UNIT_REFUSAL_LIMIT)
+            self.assertEqual(diagnostic["role"], "app")
+            self.assertEqual(diagnostic["expectedFeatures"], {"state": "admitted", "values": names[:count]}
+                             if count == 11 else {"state": "overbound"})
+            self.assertEqual(diagnostic["actualFeatures"], {"state": "admitted", "values": names[:count - 1]}
+                             if count == 11 else {"state": "overbound"})
+            self.assertNotIn("PRIVATE-IDENTITY", marker)
+
     @classmethod
     def feature_graph_data(cls):
         value, lock, context = cls.graph_data()
