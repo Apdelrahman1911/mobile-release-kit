@@ -3382,6 +3382,7 @@ class ControllerCheckAudit:
         self.native_code = None
         self.native_window = False
         self.native_handles = 0
+        self.version_calls = 0
         self.python_handles = 0
         self.symbols = []
         self.contract_window = False
@@ -3470,6 +3471,23 @@ class ControllerCheckAudit:
             elif args[1] in self.symbols:
                 self.reject("symbol-duplicate")
             self.symbols.append(args[1])
+        elif event == "ctypes.call_function":
+            if (self.first is not None or self.stage != "native-abi" or self.native_window is not True
+                    or self.native_code is None or self.native_handles != 1
+                    or len(self.symbols) != len(CONTROLLER_CHECK_SYMBOLS)
+                    or set(self.symbols) != CONTROLLER_CHECK_SYMBOLS
+                    or type(args) is not tuple or len(args) != 2
+                    or type(args[0]) is not int or args[0] <= 0
+                    or type(args[1]) is not tuple or args[1] or self.version_calls != 0):
+                self.reject(None, event=event)
+            frame = sys._getframe(1)
+            if frame is None or frame.f_code is not self.native_code:
+                self.reject(None, event=event)
+            version, owner = frame.f_locals.get("version"), frame.f_locals.get("self")
+            if version is None or owner is None or version is not getattr(owner, "libc_version_function", None):
+                self.reject(None, event=event)
+            # The immutable constructor's stored version object is the authority.
+            self.version_calls = 1  # Spend before returning to the C target.
         elif event.startswith(("ctypes.", "socket.", "subprocess.", "pty.", "shutil.", "tempfile.")):
             self.reject(None, event=event)
         elif event in ("os.system", "os.exec", "os.posix_spawn", "os.fork", "os.forkpty", "os.kill", "os.killpg",
@@ -3597,7 +3615,7 @@ def _controller_fixed_check_body(receipt, state, mapping_reader):
     # The unchanged constructor's only C call is gnu_get_libc_version. Symbol
     # resolution is not permission to call Acquisition, .call, spawn or libc.
     need(audit.native_handles == 1 and set(audit.symbols) == CONTROLLER_CHECK_SYMBOLS
-         and len(audit.symbols) == len(CONTROLLER_CHECK_SYMBOLS)
+         and len(audit.symbols) == len(CONTROLLER_CHECK_SYMBOLS) and audit.version_calls == 1
          and native.abi.family == "linux-glibc" and native.abi.architecture == "x86_64",
          "controller-check-actual-native-admission")
     state["nativeAdmission"] = {"abi": _native_process._abi_record(native.abi),

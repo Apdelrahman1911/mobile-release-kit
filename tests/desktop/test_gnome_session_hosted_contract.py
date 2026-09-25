@@ -1661,6 +1661,90 @@ class CarrierContracts(unittest.TestCase):
             self.assertEqual(audit.denial, expected)
         install.assert_not_called()
 
+    def test_controller_native_version_call_is_one_direct_inert_admission(self):
+        code, version = object(), object()
+        owner = SimpleNamespace(libc_version_function=version)
+        symbols, arguments = sorted(C.CONTROLLER_CHECK_SYMBOLS), (4097, ())
+        class TupleSubclass(tuple):
+            pass
+        class IntSubclass(int):
+            pass
+        def frame(**changes):
+            return SimpleNamespace(**{"f_code": code, "f_locals": {"self": owner, "version": version},
+                                      "f_back": None, **changes})
+        direct = frame()
+        cases = (
+            ("good", {}),
+            ("closed-window", {"audit": {"native_window": False}}),
+            ("non-bool-window", {"audit": {"native_window": 1}}),
+            ("wrong-stage", {"audit": {"stage": "audit-install"}}),
+            ("missing-code", {"audit": {"native_code": None}, "frame": frame(f_code=None)}),
+            ("missing-frame", {"frame": None}),
+            ("wrong-direct-code", {"frame": frame(f_code=object())}),
+            ("helper-ancestor", {"frame": frame(f_code=object(), f_back=direct)}),
+            ("missing-version", {"frame": frame(f_locals={"self": owner})}),
+            ("null-version", {"frame": frame(f_locals={"self": owner, "version": None})}),
+            ("wrong-version", {"frame": frame(f_locals={"self": owner, "version": object()})}),
+            ("missing-self", {"frame": frame(f_locals={"version": version})}),
+            ("null-self", {"frame": frame(f_locals={"self": None, "version": version})}),
+            ("missing-stored-version", {"frame": frame(f_locals={"self": SimpleNamespace(), "version": version})}),
+            ("no-handle", {"audit": {"native_handles": 0}}),
+            ("extra-handle", {"audit": {"native_handles": 2}}),
+            ("incomplete-symbols", {"audit": {"symbols": symbols[:-1]}}),
+            ("duplicate-symbols", {"audit": {"symbols": symbols + symbols[:1]}}),
+            ("wrong-symbols", {"audit": {"symbols": symbols[:-1] + ["inert-sensitive-symbol"]}}),
+            ("outer-list", {"args": list(arguments)}),
+            ("outer-subclass", {"args": TupleSubclass(arguments)}),
+            ("short-shape", {"args": (4097,)}),
+            ("long-shape", {"args": (4097, (), None)}),
+            ("string-address", {"args": ("inert-sensitive-address", ())}),
+            ("float-address", {"args": (4097.0, ())}),
+            ("bool-address", {"args": (True, ())}),
+            ("int-subclass-address", {"args": (IntSubclass(4097), ())}),
+            ("zero-address", {"args": (0, ())}),
+            ("negative-address", {"args": (-1, ())}),
+            ("argument-list", {"args": (4097, [])}),
+            ("argument-subclass", {"args": (4097, TupleSubclass())}),
+            ("nonempty-arguments", {"args": (4097, ("inert-sensitive-argument",))}),
+            ("prior-denial", {}),
+            ("other-ctypes", {"event": "ctypes.inert-sensitive-event"}),
+        )
+        with patch.object(C.sys, "addaudithook") as install:
+            for name, changes in cases:
+                audit = self.controller_audit_fixture()
+                self.assertEqual(audit.version_calls, 0)
+                audit.stage, audit.native_window, audit.native_code = "native-abi", True, code
+                audit.native_handles, audit.symbols = 1, symbols[:]
+                for key, value in changes.get("audit", {}).items():
+                    setattr(audit, key, value)
+                expected = {"stage": audit.stage, "rule": "denied-ctypes"}
+                if name == "prior-denial":
+                    audit.stage = "audit-install"
+                    with self.assertRaisesRegex(C.Refused, "^controller-check-effect-denied$"):
+                        audit("socket.inert-sensitive-event", ())
+                    expected = {"stage": "audit-install", "rule": "denied-socket"}
+                    self.assertEqual(audit.denial, expected)
+                    audit.stage = "native-abi"
+                with self.subTest(case=name), \
+                     patch.object(C.sys, "_getframe", return_value=changes.get("frame", direct)) as lookup, \
+                     patch.object(audit, "from_code") as ancestor_lookup:
+                    if name == "good":
+                        self.assertIsNone(audit("ctypes.call_function", arguments))
+                        self.assertEqual(audit.version_calls, 1)
+                        self.assertIsNone(audit.first)
+                        self.assertIsNone(audit.denial)
+                    with self.assertRaisesRegex(C.Refused, "^controller-check-effect-denied$"):
+                        audit(changes.get("event", "ctypes.call_function"), changes.get("args", arguments))
+                    self.assertEqual(audit.version_calls, 1 if name == "good" else 0)
+                    self.assertEqual(audit.first, "controller-check-effect-denied")
+                    self.assertEqual(audit.denial, expected)
+                    ancestor_lookup.assert_not_called()
+                    if name == "good":
+                        lookup.assert_called_once_with(1)
+                for private in (b"inert-sensitive", b"4097"):
+                    self.assertNotIn(private, C.canonical(audit.denial))
+        install.assert_not_called()
+
     def test_controller_audit_diagnostic_labels_preserve_original_decisions_and_evaluation(self):
         path = str(C.CONTROLLER_CHECK_SOURCE / "one.py")
         cases = (
@@ -2101,6 +2185,9 @@ class CarrierContracts(unittest.TestCase):
         workflow = (ROOT / C.WORKFLOW).read_text().split("\n  gnome-controller-characterization:\n", 1)[0]
         body = source.split("def controller_check_body(", 1)[1].split("\ndef controller_failure(", 1)[0]
         self.assertEqual(body.count("_native_process._Native()"), 1)
+        native_admission = body.split("need(audit.native_handles == 1", 1)[1].split(
+            '"controller-check-actual-native-admission")', 1)[0]
+        self.assertIn("and audit.version_calls == 1", native_admission)
         self.assertIn('compile(raw, str(path), "exec", dont_inherit=True, optimize=0)', body)
         self.assertNotIn("Acquisition(", body)
         self.assertNotIn("find_library(", body)
