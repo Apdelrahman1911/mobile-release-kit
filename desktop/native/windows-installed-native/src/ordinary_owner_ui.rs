@@ -870,6 +870,13 @@ smoke_labels!(SmokeCheck {
     BrowserPreview => "browser-preview", PostCloseOnce => "post-close-once", PostClose => "post-close",
     QuitDialogIdentity => "quit-dialog-title-or-uniqueness", QuitClassEncoding => "quit-dialog-class-encoding",
     QuitClass => "quit-dialog-class", QuitButtons => "quit-buttons-identity-or-parent",
+    QuitButtonsState => "quit-button-scan-state", QuitButtonsBounds => "quit-button-scan-bounds",
+    QuitButtonsMissing => "quit-button-missing", QuitButtonsDuplicate => "quit-button-duplicate",
+    QuitButtonId => "quit-button-id", QuitButtonClass => "quit-button-class",
+    QuitButtonProcess => "quit-button-process", QuitButtonThread => "quit-button-thread",
+    QuitButtonVisibility => "quit-button-visibility", QuitButtonEnabled => "quit-button-enabled",
+    QuitButtonDescendant => "quit-button-descendant", QuitButtonLineage => "quit-button-lineage",
+    QuitButtonStyle => "quit-button-style", QuitButtonsChanged => "quit-buttons-retained-pair-changed",
     QuitDefault => "quit-default-cancel", QuitDialogHandle => "quit-dialog-element-handle",
     QuitOkIdentity => "quit-ok-identity-or-uniqueness", QuitCancelIdentity => "quit-cancel-identity-or-uniqueness",
     QuitInstruction => "quit-instruction-or-cancel-missing", QuitOkMissing => "quit-ok-missing",
@@ -1050,6 +1057,26 @@ impl SmokeTrace {
             }
         }
         result
+    }
+    fn quit_binding<T>(&self, result: std::result::Result<T, crate::ui::quit_buttons::Failure>) -> Result<T> {
+        use crate::ui::quit_buttons::Failure as Q;
+        match result {
+            Ok(value) => Ok(value),
+            Err(failure) => {
+                let check = match failure {
+                    Q::State => SmokeCheck::QuitButtonsState, Q::Bounds => SmokeCheck::QuitButtonsBounds,
+                    Q::Missing => SmokeCheck::QuitButtonsMissing, Q::Duplicate => SmokeCheck::QuitButtonsDuplicate,
+                    Q::Id => SmokeCheck::QuitButtonId, Q::Class => SmokeCheck::QuitButtonClass,
+                    Q::Process => SmokeCheck::QuitButtonProcess, Q::Thread => SmokeCheck::QuitButtonThread,
+                    Q::Visibility => SmokeCheck::QuitButtonVisibility, Q::Enabled => SmokeCheck::QuitButtonEnabled,
+                    Q::Descendant => SmokeCheck::QuitButtonDescendant, Q::Lineage => SmokeCheck::QuitButtonLineage,
+                    Q::Style => SmokeCheck::QuitButtonStyle, Q::Default => SmokeCheck::QuitDefault,
+                    Q::Changed => SmokeCheck::QuitButtonsChanged,
+                };
+                let error = match failure { Q::State => Error::State, Q::Bounds => Error::Bounds, _ => Error::Unsafe };
+                self.result(check, Err(error), None)
+            }
+        }
     }
     fn need(&self, check: SmokeCheck, value: bool) -> Result<()> { self.result(check, need(value), None) }
     fn initial_main_timeout(&self) -> Result<()> {
@@ -1247,7 +1274,7 @@ impl WindowData {
 struct WindowQuery {
     entries: [WindowData; 32], count: usize, overflow: bool, active: bool, returned: i32, error: u32,
     identity_pid: u32, identity_tid: u32, thread_pid: u32, wait: u32,
-    class: [u16; 256], class_length: i32, ok: F::HWND, cancel: F::HWND, cancel_style: isize,
+    class: [u16; 256], class_length: i32, ok: F::HWND, cancel: F::HWND,
     post_entered: bool, post_return: i32, post_error: u32,
 }
 unsafe extern "system" fn thread_window(hwnd: F::HWND, raw: isize) -> i32 {
@@ -1272,7 +1299,7 @@ impl WindowQuery {
     fn new() -> Self {
         Self { entries: std::array::from_fn(|_| WindowData::new()), count: 0, overflow: false, active: false,
             returned: 0, error: 0, identity_pid: 0, identity_tid: 0, thread_pid: 0, wait: u32::MAX,
-            class: [0; 256], class_length: 0, ok: null_mut(), cancel: null_mut(), cancel_style: 0,
+            class: [0; 256], class_length: 0, ok: null_mut(), cancel: null_mut(),
             post_entered: false, post_return: 0, post_error: 0 }
     }
     fn original_live(&mut self, launch: &Launch, clock: &mut Clock, trace: &SmokeTrace) -> Result<()> {
@@ -1767,13 +1794,15 @@ impl Smoke {
         self.trace.need(SmokeCheck::QuitClass, self.windows.class_length > 0 && self.windows.class_length < 255
             && self.trace.result(SmokeCheck::QuitClassEncoding,
                 String::from_utf16(&self.windows.class[..self.windows.class_length as usize]).map_err(|_| Error::Unsafe), None)? == "#32770")?;
-        self.windows.ok = unsafe { W::GetDlgItem(dialog, W::IDOK) };
-        self.windows.cancel = unsafe { W::GetDlgItem(dialog, W::IDCANCEL) };
-        self.trace.need(SmokeCheck::QuitButtons, !self.windows.ok.is_null() && !self.windows.cancel.is_null() && self.windows.ok != self.windows.cancel
-            && unsafe { W::GetParent(self.windows.ok) } == dialog && unsafe { W::GetParent(self.windows.cancel) } == dialog)?;
-        self.windows.cancel_style = unsafe { W::GetWindowLongPtrW(self.windows.cancel, W::GWL_STYLE) };
-        self.trace.need(SmokeCheck::QuitDefault, self.windows.cancel_style & 0x0f == W::BS_DEFPUSHBUTTON as isize)?;
         self.trace.result(SmokeCheck::Clock, clock.effect(), None)?;
+        let selected = self.trace.quit_binding(crate::ui::quit_buttons::scan(
+            dialog, launch.outputs.dwProcessId, launch.outputs.dwThreadId));
+        // This is one bounded synchronous USER32 observation, like window scan.
+        // Check the original clock even on refusal without replacing first fault.
+        let observed_clock = self.trace.result(SmokeCheck::Clock, clock.effect(), None);
+        let buttons = selected?; observed_clock?;
+        self.windows.ok = buttons.ok(); self.windows.cancel = buttons.cancel();
+        self.trace.quit_binding(buttons.default_cancel())?;
         let dialog_element = self.from_window(dialog, clock)?;
         let dialog_bound = self.native_handle(dialog_element, clock)? == dialog;
         self.trace.need(SmokeCheck::QuitDialogHandle, dialog_bound)?;
@@ -1794,6 +1823,9 @@ impl Smoke {
         }
         self.trace.need(SmokeCheck::QuitInstruction, instruction && cancel.is_some())?;
         let ok = self.trace.result(SmokeCheck::QuitOkMissing, ok.ok_or(Error::Unsafe), None)?;
+        let cancel = self.trace.result(SmokeCheck::QuitCancelIdentity, cancel.ok_or(Error::Unsafe), None)?;
+        let ok_id = self.runtime_id(ok, clock)?; let cancel_id = self.runtime_id(cancel, clock)?;
+        self.trace.need(SmokeCheck::QuitButtons, ok_id != cancel_id && ok_id != dialog_id && cancel_id != dialog_id)?;
         self.bound(launch, clock)?;
         let bound = unsafe { W::GetWindow(dialog, W::GW_OWNER) } == hwnd && self.runtime_id(dialog_element, clock)? == dialog_id
             && self.native_handle(ok, clock)? == self.windows.ok && self.enabled_button(ok, clock)?;
@@ -1805,7 +1837,22 @@ impl Smoke {
         let output = self.trace.result(SmokeCheck::InvokeAcquireState, self.originals[index].begin(), None)?;
         let status = unsafe { (table.GetCurrentPatternAs)(pointer, A::UIA_InvokePatternId, &A::IUIAutomationInvokePattern::IID, output) }.0;
         self.acquire_return(index, status, false, clock, SmokeCheck::InvokeAcquire)?;
-        self.bound(launch, clock)?; self.trace.need(SmokeCheck::InvokeOnce, !self.invoke_entered)?;
+        self.bound(launch, clock)?;
+        // Pattern acquisition can call the provider. Rebind the retained native
+        // pair and the original UIA elements after it, never adopt replacements.
+        let bound = unsafe { W::GetWindow(dialog, W::GW_OWNER) } == hwnd
+            && self.runtime_id(dialog_element, clock)? == dialog_id
+            && self.native_handle(dialog_element, clock)? == dialog
+            && self.runtime_id(ok, clock)? == ok_id && self.runtime_id(cancel, clock)? == cancel_id
+            && self.native_handle(ok, clock)? == buttons.ok() && self.native_handle(cancel, clock)? == buttons.cancel()
+            && self.name(ok, clock)? == "OK" && self.name(cancel, clock)? == "Cancel"
+            && self.enabled_button(ok, clock)? && self.enabled_button(cancel, clock)?;
+        self.trace.need(SmokeCheck::QuitBinding, bound)?;
+        self.trace.result(SmokeCheck::Clock, clock.effect(), None)?;
+        let retained = self.trace.quit_binding(crate::ui::quit_buttons::revalidate(&buttons));
+        let observed_clock = self.trace.result(SmokeCheck::Clock, clock.effect(), None);
+        retained?; observed_clock?;
+        self.trace.need(SmokeCheck::InvokeOnce, !self.invoke_entered)?;
         let pointer = self.pointer(index, ComKind::Invoke)?;
         let table = unsafe { &**pointer.cast::<*const A::IUIAutomationInvokePattern_Vtbl>() };
         self.query.begin(clock, &self.trace)?; self.invoke_entered = true;
@@ -3652,6 +3699,37 @@ mod contract_tests {
         main_window_selection_contract(); initial_main_readiness_contract(); dashboard_main_handle_readiness_contract();
         dashboard_name_observation_contract(); dashboard_stale_name_contract();
         startup_diagnostic_contract();
+        crate::ui::quit_buttons::contract();
+        // Actual finite error routing and action barrier; all results are inert,
+        // no HWND/COM/native clock or cleanup call can be reached by these cases.
+        use crate::ui::quit_buttons::Failure as Q;
+        for (failure, check, error) in [
+            (Q::State, SmokeCheck::QuitButtonsState, Error::State),
+            (Q::Bounds, SmokeCheck::QuitButtonsBounds, Error::Bounds),
+            (Q::Missing, SmokeCheck::QuitButtonsMissing, Error::Unsafe),
+            (Q::Duplicate, SmokeCheck::QuitButtonsDuplicate, Error::Unsafe),
+            (Q::Id, SmokeCheck::QuitButtonId, Error::Unsafe),
+            (Q::Class, SmokeCheck::QuitButtonClass, Error::Unsafe),
+            (Q::Process, SmokeCheck::QuitButtonProcess, Error::Unsafe),
+            (Q::Thread, SmokeCheck::QuitButtonThread, Error::Unsafe),
+            (Q::Visibility, SmokeCheck::QuitButtonVisibility, Error::Unsafe),
+            (Q::Enabled, SmokeCheck::QuitButtonEnabled, Error::Unsafe),
+            (Q::Descendant, SmokeCheck::QuitButtonDescendant, Error::Unsafe),
+            (Q::Lineage, SmokeCheck::QuitButtonLineage, Error::Unsafe),
+            (Q::Style, SmokeCheck::QuitButtonStyle, Error::Unsafe),
+            (Q::Default, SmokeCheck::QuitDefault, Error::Unsafe),
+            (Q::Changed, SmokeCheck::QuitButtonsChanged, Error::Unsafe),
+        ] {
+            let trace = SmokeTrace::new(); trace.phase.set(SmokePhase::QuitDialog);
+            let mut effects = 0;
+            let result: Result<()> = (|| { trace.quit_binding::<()>(Err(failure))?; effects += 1; Ok(()) })();
+            assert_eq!(result, Err(error)); assert_eq!(effects, 0);
+            let first = trace.first.get().expect("actual refusing decision");
+            assert_eq!((first.phase, first.check, first.error), (SmokePhase::QuitDialog, check, error));
+            assert_eq!(first.status, None); assert_eq!(first.dashboard, None);
+            assert_eq!(trace.quit_binding::<()>(Err(Q::Changed)), Err(Error::Unsafe));
+            assert_eq!(trace.first.get(), Some(first));
+        }
         // Actual admission helper, inert Results/counters only: no native clock,
         // output reservation, HWND/COM call or cleanup is entered by these cases.
         for (unknown, settled, count, remaining, expected, check, expected_calls) in [

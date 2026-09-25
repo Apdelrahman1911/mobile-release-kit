@@ -395,6 +395,24 @@ impl Dialog {
             self.folder_readback(0)?; return Ok(true);
         }
         let accept = matches!(action, DialogAction::Accept);
+        if self.kind == DialogKind::Quit {
+            // The same native TaskDialog contract as the external normal owner.
+            // Project retains its existing file-dialog control/readback path.
+            let pair = quit_buttons::scan(window, unsafe { T::GetCurrentProcessId() }, self.thread.get())
+                .map_err(|_| UiError::State)?;
+            self.check()?;
+            if self.native_window()? != Some(window) { return Err(UiError::State); }
+            quit_buttons::revalidate(&pair).map_err(|_| UiError::State)?;
+            self.check()?;
+            if !self.showing.get() || self.show_returned.get() || self.response.get().is_some()
+                || self.control.stopped.load(Ordering::SeqCst) || self.close_entered.get() || self.settled.get() {
+                return Err(UiError::State);
+            }
+            let button = if accept { pair.ok() } else { pair.cancel() };
+            // This is a click request, not a response or finality observation.
+            unsafe { W::SendMessageW(button, W::BM_CLICK, 0, 0); }
+            self.check()?; return Ok(true);
+        }
         if accept && self.kind == DialogKind::Project { self.folder_readback(1)?; }
         let button = unsafe { W::GetDlgItem(window, if accept { W::IDOK } else { W::IDCANCEL }) };
         let mut process = 0;
