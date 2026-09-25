@@ -71,6 +71,9 @@ SHELL_EVIDENCE_PROBLEMS = (b"na", b"none", b"unavailable", b"busy", b"cancelled"
 SHELL_EVIDENCE_ERRORS = (b"none", b"unavailable", b"busy", b"cancelled", b"stale-selection", b"unsafe-selection",
                          b"observation-failed", b"limit", b"deadline", b"cleanup-unknown", b"invalid", b"runtime-unavailable",
                          b"protocol", b"shutdown", b"query-timeout", b"other")
+SHELL_SNAPSHOT_CHECKS = (b"bridge", b"project", b"root", b"scope", b"config-path", b"config-state", b"config-issues",
+                         b"config-data", b"issues", b"discovery-state", b"discovery-partial", b"assurance",
+                         b"request-count", b"already-observed", b"stage", b"other-callback")
 # Literal observer labels only; never a prefix parser or raw-output escape.
 SHELL_FAILURE_STEPS = (
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=Bootstrap\n",
@@ -4123,8 +4126,12 @@ def _shell_label_pair(raw):
     if type(raw) is not bytes or not 0 < len(raw) <= SHELL_FAILURE_LABEL_LIMIT:
         return None
     lines = raw.splitlines(keepends=True)
-    path_detail = evidence_detail = None
-    if lines[0].startswith(b"MRK_INSTALLED_SHELL_EVIDENCE_FAILURE="):
+    path_detail = evidence_detail = snapshot_detail = None
+    if lines[0].startswith(b"MRK_INSTALLED_SHELL_SNAPSHOT_FAILURE="):
+        if len(lines) != 4:
+            return None
+        snapshot_detail, lines = lines[0], lines[1:]
+    elif lines[0].startswith(b"MRK_INSTALLED_SHELL_EVIDENCE_FAILURE="):
         if len(lines) != 4:
             return None
         evidence_detail, lines = lines[0], lines[1:]
@@ -4145,6 +4152,25 @@ def _shell_label_pair(raw):
     result = {"step": lines[0][len(b"MRK_INSTALLED_SHELL_FAILURE_STEP="):-1].decode("ascii"),
               "boundary": lines[1][len(b"MRK_INSTALLED_SHELL_FAILURE_PHASE="):-1].decode("ascii"),
               "bootstrapProgress": lines[2][len(b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS="):-1].decode("ascii")}
+    if snapshot_detail is not None:
+        # This complete frame precedes legacy Session/Path requirements: an
+        # actual wrong-stage rejection must not fabricate their old details.
+        match = re.fullmatch(rb"MRK_INSTALLED_SHELL_SNAPSHOT_FAILURE=v1;site=([1-9][0-9]{0,4});check=([a-z-]{1,20})"
+                             rb";error=([a-z-]{1,20})\n", snapshot_detail)
+        if len(lines) != 3 or match is None:
+            return None
+        site, check, error = match.groups()
+        if int(site) > 65535 or check not in SHELL_SNAPSHOT_CHECKS or error not in SHELL_EVIDENCE_ERRORS:
+            return None
+        selected = result["step"] in {"Selected", "ReadSnapshot"}
+        if check == b"other-callback":
+            if not selected or error != b"none":
+                return None
+        elif (result["boundary"] != "result" or (check == b"bridge") != (error != b"none")
+              or check == b"stage" and selected):
+            return None
+        result["snapshotFailure"] = {"sourceLine": int(site), "check": check.decode("ascii"), "error": error.decode("ascii")}
+        return result  # Diagnostic DATA only; never a success/finality/cleanup receipt.
     session = result["step"].startswith("Session")  # Membership was checked above, not prefix admission.
     if len(lines) != (4 if session else 3):
         return None

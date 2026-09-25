@@ -4929,6 +4929,60 @@ class ToolsOfflineLifecycleContracts(unittest.TestCase):
 
 
 class SessionFixtureContracts(unittest.TestCase):
+    def test_private_fixture_actual_snapshot_matches_installed_session_contract(self):
+        from mobile_release.api._snapshot import project_snapshot
+
+        # Use the actual static reader, not only configuration validation or a
+        # fabricated bridge reply. Nothing here starts a tool or reads a secret.
+        with tempfile.TemporaryDirectory(prefix="mrk-session-snapshot-") as directory:
+            root = Path(directory) / "project"
+            root.mkdir(mode=0o700)
+            (root / "release").mkdir(mode=0o700)
+            files = {
+                "release/mobile-release.json": L.SHELL_SESSION_CONFIG,
+                "version.properties": L.SHELL_PROJECT_VERSION,
+            }
+            for name, data in files.items():
+                fd = os.open(root / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(data)
+
+            def identity(path):
+                value = path.lstat()
+                return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid,
+                        value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+            # Reads may update atime, but may not replace even identical input
+            # bytes or change the original file/directory identities.
+            originals = {path: identity(path) for path in (root, root / "release", *(root / name for name in files))}
+            actual = project_snapshot(str(root))
+            self.assertEqual({path: identity(path) for path in originals}, originals)
+            self.assertEqual(actual["root"], str(root))
+            self.assertEqual(actual["observationScope"], "single-request-non-atomic")
+            config = actual["config"]
+            self.assertEqual(config["path"], "release/mobile-release.json")
+            self.assertEqual(config["state"], "format-valid")
+            self.assertEqual(config["issues"], [])
+            self.assertEqual(config["data"], json.loads(L.SHELL_SESSION_CONFIG))
+            self.assertEqual(config["content"], {
+                "bytes": 608,
+                "sha256": "ce38aeb0676d4221a3054744083162158e5a33afade4e77ca4dcf9e7c96d53c3",
+            })
+            self.assertEqual(actual["issues"], [])
+            self.assertEqual(actual["discovery"]["state"], "unverified")
+            self.assertIs(actual["discovery"]["partial"], False)
+            self.assertEqual(actual["discovery"]["scan"], {
+                "sourceFiles": 2, "sourceBytes": 642, "entries": 3, "excludedEntries": 0,
+            })
+            self.assertEqual(actual["assurance"]["basis"], "static-text")
+            self.assertEqual(actual["assurance"]["releaseReadiness"], "unknown")
+            for field in ("projectCodeExecuted", "toolsProbed", "credentialsRead", "gitObserved",
+                          "storeContacted", "writesPerformed"):
+                self.assertIs(actual["assurance"][field], False)
+            for name, data in files.items():
+                self.assertEqual((root / name).read_bytes(), data)
+                self.assertEqual(stat.S_IMODE((root / name).stat().st_mode), 0o600)
+
     def test_private_fixture_config_is_valid_shared_policy_without_build_commands(self):
         from mobile_release.config import validate_config_data
         draft = json.loads(L.SHELL_SESSION_CONFIG)
@@ -5162,6 +5216,51 @@ class SessionFixtureContracts(unittest.TestCase):
 
 
 class FailureLabelSinkContracts(unittest.TestCase):
+    def test_snapshot_first_origin_is_complete_closed_and_preserves_actual_wrong_stage(self):
+        def frame(site=b"65535", check=b"root", error=b"none", step=b"ReadSnapshot", boundary=b"result"):
+            return (b"MRK_INSTALLED_SHELL_SNAPSHOT_FAILURE=v1;site=" + site + b";check=" + check + b";error=" + error + b"\n"
+                    + b"MRK_INSTALLED_SHELL_FAILURE_STEP=" + step + b"\nMRK_INSTALLED_SHELL_FAILURE_PHASE=" + boundary
+                    + b"\nMRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n")
+        raw = frame()
+        self.assertLessEqual(len(raw), L.SHELL_FAILURE_LABEL_LIMIT)
+        self.assertEqual(L._shell_label_pair(raw), {"step": "ReadSnapshot", "boundary": "result", "bootstrapProgress": "advanced",
+                         "snapshotFailure": {"sourceLine": 65535, "check": "root", "error": "none"}})
+        for check in L.SHELL_SNAPSHOT_CHECKS:
+            step = b"SessionQuitPreserved" if check == b"stage" else b"ReadSnapshot"
+            error = b"query-timeout" if check == b"bridge" else b"none"
+            parsed = L._shell_label_pair(frame(check=check, error=error, step=step))
+            self.assertEqual(parsed["snapshotFailure"]["check"], check.decode("ascii"))
+            self.assertEqual(set(parsed), {"step", "boundary", "bootstrapProgress", "snapshotFailure"})
+        for step in (b"SessionQuitPreserved", b"PathActivate", b"Close"):
+            # No invented legacy Session/Path record, even for a wrong stage.
+            self.assertEqual(L._shell_label_pair(frame(check=b"stage", step=step))["step"], step.decode("ascii"))
+            self.assertIsNotNone(L._shell_label_pair(frame(step=step)))
+        for error in L.SHELL_EVIDENCE_ERRORS:
+            if error != b"none":
+                self.assertEqual(L._shell_label_pair(frame(check=b"bridge", error=error))["snapshotFailure"]["error"], error.decode("ascii"))
+        for step in (b"Selected", b"ReadSnapshot"):
+            for boundary in (b"request", b"result", b"dom"):
+                self.assertIsNotNone(L._shell_label_pair(frame(site=b"1", check=b"other-callback", step=step, boundary=boundary)))
+        for value in (raw, frame(check=b"stage", step=b"SessionQuitPreserved"), frame(check=b"other-callback", boundary=b"dom")):
+            for end in range(len(value)):
+                self.assertIsNone(L._shell_label_pair(value[:end]))
+                if 0 < end < len(value) - 1 and not value[:end].endswith(b"\n"):
+                    self.assertIsNone(L._shell_label_pair(value[:end] + b"\n"))
+        for bad in (frame(site=b"0"), frame(site=b"01"), frame(site=b"65536"), frame(site=b"-1"), frame(site=b"unknown"),
+                    frame(check=b"unknown"), frame(error=b"private-message"), frame(check=b"bridge"),
+                    frame(error=b"other"), frame(boundary=b"dom"), frame(check=b"stage"), frame(step=b"Unknown"),
+                    frame(check=b"other-callback", step=b"Close"), frame(check=b"other-callback", error=b"other"),
+                    raw.replace(b"v1;", b"v2;"), raw.replace(b";check=root", b";site=12;check=root"),
+                    raw + b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=0\n", raw + raw,
+                    raw.replace(b"MRK_INSTALLED_SHELL_FAILURE_STEP=", b"MRK_INSTALLED_SHELL_PATH_FAILURE=v2;index=0\nMRK_INSTALLED_SHELL_FAILURE_STEP=")):
+            self.assertIsNone(L._shell_label_pair(bad))
+        with patch.object(L, "SHELL_FAILURE_LABEL_LIMIT", len(raw) - 1):
+            self.assertIsNone(L._shell_label_pair(raw))
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        tokens = source.split("impl SnapshotCheck {", 1)[1].split("struct SnapshotRejection", 1)[0]
+        import re
+        self.assertEqual(tuple(re.findall(rb'=> b"([a-z-]+)"', tokens.encode())), L.SHELL_SNAPSHOT_CHECKS)
+
     def test_evidence_result_prefix_is_closed_complete_and_not_a_native_receipt(self):
         def frame(callback=b"status", check=b"problem", phase=b"refused", problem=b"deadline", error=b"none",
                   step=b"EvidenceObserved", boundary=b"result"):
@@ -5747,8 +5846,10 @@ class FailureLabelSinkContracts(unittest.TestCase):
         self.assertNotIn("runtime.reason", outstanding)
         self.assertNotIn("r.held", outstanding)
         report = source.split("fn report_failure(&self)", 1)[1].split("pub(super) fn attach", 1)[0]
-        self.assertIn("Ok(r) => (r.trace, r.bootstrap, r.session.diagnostic, r.paths.diagnostic)", report)
-        self.assertIn("failure_pair(trace, progress, session, path)", report)
+        self.assertIn("Ok(r) => (r.trace, r.bootstrap, r.session.diagnostic, r.paths.diagnostic, r.evidence_diagnostic,", report)
+        self.assertIn("r.snapshot_diagnostic, self.failed.site())", report)
+        self.assertIn("snapshot_failure_frame(trace, progress, site, snapshot)", report)
+        self.assertIn("failure_frame(trace, progress, session, path, evidence)", report)
         self.assertEqual(report.count("rustix::io::write"), 1)
         self.assertNotIn("retain_held_app_info", report)
         tick = source.split("pub(super) fn tick(", 1)[1].split("pub(super) fn", 1)[0]
@@ -5756,6 +5857,8 @@ class FailureLabelSinkContracts(unittest.TestCase):
         self.assertIn("(*step, Boundary::Deadline), progress", tick)
         self.assertIn("Duration::from_secs(45)", source)
         self.assertIn("assert_failure_pair_contract();", source)
+        for contract in ("assert_failure_latch_contract();", "assert_snapshot_rejection_contract();", "assert_snapshot_frame_contract();"):
+            self.assertIn(contract, source.split("pub(crate) fn main()", 1)[1])
 
     def test_path_first_rejection_preserves_borrows_guard_order_and_first_winner(self):
         source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
@@ -5781,14 +5884,14 @@ class FailureLabelSinkContracts(unittest.TestCase):
             marker = body(source, name)
             self.assertIn("if self.path_sample(&mut r) {\n            if let Some(diagnostic) = r.paths.diagnostic.as_mut() { " + write + "; }\n        }", marker)
         latch = source.split("fn latch_path_diagnostic(", 1)[1].split("const PROJECT_SOURCE", 1)[0]
-        self.assertIn("if !failed.swap(true, Ordering::SeqCst) { *diagnostic = Some(next); }", latch)
+        self.assertIn("if failed.mark_unknown() { *diagnostic = Some(next); }", latch)
         helper = body(source, "path_fail")
         self.assertIn("PathDiagnostic::sample(r.trace.0,self.start.elapsed().as_millis(),r.paths.diagnostic)", helper)
         self.assertIn("latch_path_diagnostic(&self.failed,&mut r.paths.diagnostic,diagnostic)", helper)
         self.assertNotIn("self.record", helper)
         pure = source.split("fn assert_failure_pair_contract()", 1)[1].split("// Original destruction facts", 1)[0]
         self.assertIn("for order in [[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]]", pure)
-        self.assertIn("0 => failed.store(true,Ordering::SeqCst)", pure)
+        self.assertIn("0 => { failed.mark_unknown(); }", pure)
         self.assertIn("retained == Some(if order[0] == 1 { path_gtk } else { path_plain })", pure)
         self.assertIn("step:PathStep::Activate(4),rejection:PathRejection::GtkReturnState", pure)
 
@@ -5888,7 +5991,7 @@ class FailureLabelSinkContracts(unittest.TestCase):
         self.assertIn("if !self.failed.load(Ordering::SeqCst)", cache)
         self.assertIn("SessionDiagnostic::sample(r.step,r.evaluations,r.session.diagnostic)", cache)
         latch = source.split("fn latch_session_diagnostic(", 1)[1].split("const PROJECT_SOURCE", 1)[0]
-        self.assertIn("if !failed.swap(true, Ordering::SeqCst)", latch)
+        self.assertIn("if failed.mark_unknown()", latch)
         report = source.split("fn report_failure(&self)", 1)[1].split("pub(super) fn attach", 1)[0]
         self.assertNotIn("installed_session_snapshot", report)
         self.assertNotIn("session_wait", report)

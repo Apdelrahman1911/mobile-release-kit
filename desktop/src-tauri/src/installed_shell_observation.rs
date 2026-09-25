@@ -1,7 +1,7 @@
 //! Bounded observations of the NORMAL builder/bridge/packaged selector.
 //! No alternate runtime, document, IPC command, timer, task or shutdown owner.
 //! Only the existing relay drives these steps; failures cannot authorize exit.
-use std::{ffi::OsStr, io::Write, path::{Path, PathBuf}, sync::{Arc, Mutex, MutexGuard, atomic::{AtomicBool, Ordering}},
+use std::{ffi::OsStr, io::Write, path::{Path, PathBuf}, sync::{Arc, Mutex, MutexGuard, atomic::{AtomicBool, AtomicU32, Ordering}},
     thread::ThreadId, time::{Duration, Instant}};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -767,21 +767,60 @@ fn outstanding_info(step: Step, available: bool, capabilities: bool) -> Outstand
     else if matches!(step, Step::Close | Step::Quit | Step::Exit) { OutstandingInfo::ShutdownUnavailable }
     else { OutstandingInfo::ReturnedBeforeHold }
 }
-fn latch_failure(failed: &AtomicBool, trace: &mut (Step, Boundary), progress: &mut BootstrapProgress,
+// One absorbing value publishes both failure and its original source site.
+// 0: no failure; 1: unknown site; 2..=65536: first-party source line + 1.
+// No reset, second publication, extra mutex or shutdown dependency.
+struct FailureLatch(AtomicU32);
+impl FailureLatch {
+    fn new(failed: bool) -> Self { Self(AtomicU32::new(u32::from(failed))) }
+    fn load(&self, order: Ordering) -> bool { self.0.load(order) != 0 }
+    fn mark(&self, value: u32) -> bool {
+        self.0.compare_exchange(0, value, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+    }
+    fn mark_unknown(&self) -> bool { self.mark(1) }
+    fn mark_site(&self, line: u32) -> bool {
+        self.mark(if (1..=u32::from(u16::MAX)).contains(&line) { line + 1 } else { 1 })
+    }
+    #[track_caller]
+    fn mark_caller(&self) -> bool { self.mark_site(std::panic::Location::caller().line()) }
+    fn site(&self) -> Option<u16> {
+        match self.0.load(Ordering::SeqCst) { value @ 2..=65536 => Some((value - 1) as u16), _ => None }
+    }
+}
+fn assert_failure_latch_contract() {
+    let generic = FailureLatch::new(false);
+    let original_line = line!() + 1;
+    assert!(generic.mark_caller());
+    assert!(generic.load(Ordering::SeqCst) && generic.site() == Some(original_line as u16));
+    assert!(!generic.mark_site(1) && !generic.mark_unknown() && generic.site() == Some(original_line as u16));
+    for initial in [false, true] {
+        let typed = FailureLatch::new(initial);
+        assert!(typed.mark_unknown() == !initial);
+        assert!(!typed.mark_site(65535) && typed.load(Ordering::SeqCst) && typed.site().is_none());
+    }
+    for line in [0, 65536, u32::MAX] {
+        let unknown = FailureLatch::new(false);
+        assert!(unknown.mark_site(line) && unknown.load(Ordering::SeqCst) && unknown.site().is_none());
+        assert!(!unknown.mark_site(123));
+    }
+    let upper = FailureLatch::new(false);
+    assert!(upper.mark_site(65535) && upper.site() == Some(65535));
+}
+fn latch_failure(failed: &FailureLatch, trace: &mut (Step, Boundary), progress: &mut BootstrapProgress,
     next_trace: (Step, Boundary), next_progress: BootstrapProgress) -> bool {
     // The caller holds the existing Record mutex. Reporting reads these facts
     // together under that mutex; only the first failure may replace them.
-    if !failed.swap(true, Ordering::SeqCst) { *trace = next_trace; *progress = next_progress; true } else { false }
+    if failed.mark_unknown() { *trace = next_trace; *progress = next_progress; true } else { false }
 }
-fn latch_session_diagnostic(failed: &AtomicBool, diagnostic: &mut Option<SessionDiagnostic>, next: SessionDiagnostic) {
+fn latch_session_diagnostic(failed: &FailureLatch, diagnostic: &mut Option<SessionDiagnostic>, next: SessionDiagnostic) {
     // The existing Record mutex also protects the matching trace. A later
     // callback or deadline cannot relabel this first cached rejection.
-    if !failed.swap(true, Ordering::SeqCst) { *diagnostic = Some(next); }
+    if failed.mark_unknown() { *diagnostic = Some(next); }
 }
-fn latch_path_diagnostic(failed: &AtomicBool, diagnostic: &mut Option<PathDiagnostic>, next: PathDiagnostic) {
+fn latch_path_diagnostic(failed: &FailureLatch, diagnostic: &mut Option<PathDiagnostic>, next: PathDiagnostic) {
     // The caller holds Record, including the matching trace. Generic failure,
     // an earlier callback or a deadline winner cannot be relabelled later.
-    if !failed.swap(true, Ordering::SeqCst) { *diagnostic = Some(next); }
+    if failed.mark_unknown() { *diagnostic = Some(next); }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -895,7 +934,7 @@ fn assert_failure_quit_contract() {
     let step = SessionStep::Read(6, SA::Prepare("android-keystore", "missing"));
     let mut trace = (Step::Session(step), Boundary::Settlement);
     let mut progress = BootstrapProgress::Advanced;
-    let failed = AtomicBool::new(false);
+    let failed = FailureLatch::new(false);
     let first = SessionDiagnostic { step, evaluations: 25, rejection: SessionRejection::ReplyAssessmentUnavailable,
         wait: SessionWait::ReplyPending, first_failure: InstalledSessionFailure::not_recorded(), assessment: InstalledAssessmentFailure::none(), gtk_callbacks:SessionGtkCallbacks::NotApplicable };
     let mut diagnostic = None;
@@ -1334,7 +1373,7 @@ fn assert_failure_pair_contract() {
         }
     }
     for deadline_first in [false, true] {
-        let failed = AtomicBool::new(false);
+        let failed = FailureLatch::new(false);
         let mut trace = (Step::Bootstrap, Boundary::Bootstrap);
         let mut progress = BootstrapProgress::NotSampled;
         let deadline = ((Step::Bootstrap, Boundary::Deadline), BootstrapProgress::NotSampled);
@@ -1389,7 +1428,7 @@ fn assert_failure_pair_contract() {
     let other = SessionStep::Read(62,SA::Prepare("android-keystore","save"));
     assert!(SessionDiagnostic::sample(Step::Session(other),128,Some(first)).unwrap().wait == SessionWait::NotSampled);
     assert!(SessionDiagnostic::sample(Step::Close,128,Some(first)).is_none());
-    let failed = AtomicBool::new(false); let mut retained = None;
+    let failed = FailureLatch::new(false); let mut retained = None;
     latch_session_diagnostic(&failed,&mut retained,first);
     latch_session_diagnostic(&failed,&mut retained,SessionDiagnostic { step:other,wait:SessionWait::ReplyPending,
         first_failure:bound.first_failure,..first });
@@ -1398,7 +1437,7 @@ fn assert_failure_pair_contract() {
     let mut frozen_trace = trace; let mut progress = BootstrapProgress::Advanced;
     assert!(!latch_failure(&failed,&mut frozen_trace,&mut progress,(Step::Session(other),Boundary::Deadline),BootstrapProgress::NotSampled));
     assert!(retained == Some(first) && frozen_trace == trace && progress == BootstrapProgress::Advanced);
-    let failed = AtomicBool::new(false);
+    let failed = FailureLatch::new(false);
     let deadline_diagnostic = SessionDiagnostic::sample(trace.0,127,Some(first));
     let mut retained = None;
     if latch_failure(&failed,&mut frozen_trace,&mut progress,(trace.0,Boundary::Deadline),BootstrapProgress::Advanced) {
@@ -1406,7 +1445,7 @@ fn assert_failure_pair_contract() {
     }
     latch_session_diagnostic(&failed,&mut retained,first);
     assert!(retained == deadline_diagnostic && frozen_trace == (trace.0,Boundary::Deadline));
-    let failed = AtomicBool::new(false); let mut retained = None;
+    let failed = FailureLatch::new(false); let mut retained = None;
     latch_session_diagnostic(&failed,&mut retained,bound);
     latch_session_diagnostic(&failed,&mut retained,first);
     assert!(retained == Some(bound));
@@ -1444,7 +1483,7 @@ fn assert_failure_pair_contract() {
         assert!(!session_file_wait_pending(Step::Session(SessionStep::Capture(3)),pending,3,activating));
     }
     for deadline_first in [false,true] {
-        let failed = AtomicBool::new(false);
+        let failed = FailureLatch::new(false);
         let mut trace = gtk_trace;
         let mut progress = BootstrapProgress::Advanced;
         let mut retained = Some(same);
@@ -1502,7 +1541,7 @@ fn assert_failure_pair_contract() {
     assert!(failure_pair(gtk_trace,BootstrapProgress::Advanced,
         Some(SessionDiagnostic { gtk_callbacks:SessionGtkCallbacks::NotApplicable,..gtk }),None).is_none());
     for deadline_first in [false,true] {
-        let failed = AtomicBool::new(false);
+        let failed = FailureLatch::new(false);
         let mut trace = gtk_trace; let mut progress = BootstrapProgress::Advanced;
         let mut retained = Some(gtk); let mut pending = Some(Pending::Dom(gtk_trace.0));
         if deadline_first { assert!(latch_failure(&failed,&mut trace,&mut progress,(gtk_trace.0,Boundary::Deadline),BootstrapProgress::Advanced)); }
@@ -1548,7 +1587,7 @@ fn assert_failure_pair_contract() {
     }
     let typed = SessionDiagnostic { rejection:SessionRejection::ReplyAssetDeadline,..sampled };
     for deadline_first in [false,true] {
-        let failed = AtomicBool::new(false); let mut retained = Some(sampled);
+        let failed = FailureLatch::new(false); let mut retained = Some(sampled);
         let mut frozen_trace = trace; let mut progress = BootstrapProgress::Advanced;
         for deadline in [deadline_first,!deadline_first] {
             if deadline {
@@ -1591,7 +1630,7 @@ fn assert_failure_pair_contract() {
             length <= SESSION_FAILURE_FRAME_BOUND && bytes.get(..length) == Some(expected.as_slice())));
         assert!(SessionDiagnostic::sample(trace.0,13,Some(rejected)).unwrap().assessment == InstalledAssessmentFailure::none());
         for first in [rejected,SessionDiagnostic { assessment:InstalledAssessmentFailure::none(),..rejected }] {
-            let failed = AtomicBool::new(false); let mut retained = Some(sampled);
+            let failed = FailureLatch::new(false); let mut retained = Some(sampled);
             latch_session_diagnostic(&failed,&mut retained,first);
             latch_session_diagnostic(&failed,&mut retained,SessionDiagnostic { rejection:SessionRejection::LostNativeSnapshot,
                 first_failure:InstalledSessionFailure::contract_sample(),assessment:InstalledAssessmentFailure::contract_result_sample(),..rejected });
@@ -1601,7 +1640,7 @@ fn assert_failure_pair_contract() {
             assert!(retained == Some(first));
         }
         for deadline_first in [false,true] {
-            let failed = AtomicBool::new(false); let mut retained = Some(sampled);
+            let failed = FailureLatch::new(false); let mut retained = Some(sampled);
             let mut frozen_trace = trace; let mut progress = BootstrapProgress::Advanced;
             for deadline in [deadline_first,!deadline_first] {
                 if deadline {
@@ -1680,7 +1719,7 @@ fn assert_failure_pair_contract() {
         let text = std::str::from_utf8(&bytes[..length]).unwrap();
         assert!(length <= PATH_FAILURE_FRAME_BOUND && text.contains(if time == 999_999 { ";start=999999;now=999999;" } else { ";start=over;now=over;" }));
     }
-    let frozen = AtomicBool::new(false); let mut retained = Some(timed);
+    let frozen = FailureLatch::new(false); let mut retained = Some(timed);
     latch_path_diagnostic(&frozen,&mut retained,PathDiagnostic { rejection:PathRejection::GtkDispatch,..timed });
     let first_timed = retained;
     latch_path_diagnostic(&frozen,&mut retained,reset);
@@ -1689,7 +1728,7 @@ fn assert_failure_pair_contract() {
     // record_at runs again. Its complete frame must use the actual new step.
     let mut transition_trace = path_trace;
     let next = PathDiagnostic::sample_trace(&mut transition_trace,Step::Paths(PathStep::Activate(1)),44_010,Some(timed));
-    let generic_failure = AtomicBool::new(false); generic_failure.store(true,Ordering::SeqCst);
+    let generic_failure = FailureLatch::new(false); generic_failure.mark_unknown();
     assert!(generic_failure.load(Ordering::SeqCst) && transition_trace == (Step::Paths(PathStep::Activate(1)),Boundary::Gtk)
         && next == Some(reset) && failure_pair(transition_trace,BootstrapProgress::Advanced,None,next).is_some());
     let leaving = PathDiagnostic::sample_trace(&mut transition_trace,Step::Close,44_020,next);
@@ -1702,13 +1741,13 @@ fn assert_failure_pair_contract() {
     // at another recipe cannot erase a real GTK cause or invent one for generic
     // failure/deadline. The actual callbacks perform these writes under Record.
     for order in [[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]] {
-        let failed = AtomicBool::new(false);
+        let failed = FailureLatch::new(false);
         let original_trace = (path_trace.0,Boundary::Settlement);
         let mut trace = original_trace; let mut progress = BootstrapProgress::Advanced;
         let mut retained = Some(path_plain);
         for event in order {
             match event {
-                0 => failed.store(true,Ordering::SeqCst),
+                0 => { failed.mark_unknown(); },
                 1 => {
                     if !failed.load(Ordering::SeqCst) { trace = path_trace; retained = PathDiagnostic::sample(path_trace.0,0,retained); }
                     latch_path_diagnostic(&failed,&mut retained,path_gtk);
@@ -2508,12 +2547,204 @@ impl EvidenceDiagnostic {
         Some(evidence::Problem::CleanupUnknown) => b"cleanup-unknown",
     } }
 }
-fn latch_evidence_diagnostic(failed: &AtomicBool, trace: &mut (Step, Boundary),
+fn latch_evidence_diagnostic(failed: &FailureLatch, trace: &mut (Step, Boundary),
     retained: &mut Option<EvidenceDiagnostic>, next: EvidenceDiagnostic) {
     // Record is held by the caller. Winning the original failure latch is the
     // only authority to publish both this detail and its matching trace.
-    if !failed.swap(true, Ordering::SeqCst) {
+    if failed.mark_unknown() {
         *trace = (next.step, Boundary::Result); *retained = Some(next);
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SnapshotCheck { Bridge, Project, Root, Scope, ConfigPath, ConfigState, ConfigIssues, ConfigData,
+    Issues, DiscoveryState, DiscoveryPartial, Assurance, RequestCount, AlreadyObserved, Stage, OtherCallback }
+impl SnapshotCheck {
+    fn token(self) -> &'static [u8] { match self {
+        Self::Bridge => b"bridge", Self::Project => b"project", Self::Root => b"root", Self::Scope => b"scope",
+        Self::ConfigPath => b"config-path", Self::ConfigState => b"config-state", Self::ConfigIssues => b"config-issues",
+        Self::ConfigData => b"config-data", Self::Issues => b"issues", Self::DiscoveryState => b"discovery-state",
+        Self::DiscoveryPartial => b"discovery-partial", Self::Assurance => b"assurance", Self::RequestCount => b"request-count",
+        Self::AlreadyObserved => b"already-observed", Self::Stage => b"stage", Self::OtherCallback => b"other-callback",
+    } }
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SnapshotRejection { check: SnapshotCheck, error: EvidenceError }
+impl SnapshotRejection {
+    fn plain(check: SnapshotCheck) -> Self { Self { check, error: EvidenceError::None } }
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SnapshotDiagnostic { step: Step, rejection: SnapshotRejection }
+impl SnapshotDiagnostic {
+    fn valid(self, trace: (Step, Boundary)) -> bool {
+        trace == (self.step, Boundary::Result) && self.rejection.check != SnapshotCheck::OtherCallback
+            && (self.rejection.check == SnapshotCheck::Bridge) == (self.rejection.error != EvidenceError::None)
+            && (self.rejection.check != SnapshotCheck::Stage || !matches!(self.step, Step::Selected | Step::ReadSnapshot))
+    }
+}
+fn session_snapshot_expected() -> Value {
+    serde_json::json!({"android":{"applicationId":"org.assessment.fixture","enabled":true,"identityStatus":"unverified"},"ios":{"enabled":false},
+        "metadata":{"androidLocales":["en-US"],"iosLocales":[],"root":"release/store"},"projectChecks":{"androidArtifact":[],"iosArtifact":[],"preflight":[]},
+        "schemaVersion":1,"services":{"androidFirebase":"required","iosFirebase":"disabled"},"source":{"candidateBranch":"main","productionBranch":"main","projectReadTokenRequired":true},
+        "version":{"buildKey":"BUILD_NUMBER","nameKey":"VERSION_NAME","source":"version.properties"}})
+}
+fn snapshot_require(valid: bool, check: SnapshotCheck) -> Result<(), SnapshotRejection> {
+    if valid { Ok(()) } else { Err(SnapshotRejection::plain(check)) }
+}
+fn session_snapshot_check(project: Option<&Project>, project_id: &str, result: &Result<Value, BridgeError>,
+    requests: u8, observed: bool, step: Step) -> Result<(), SnapshotRejection> {
+    // Same conjunction and short-circuit precedence as the original callback.
+    // Only the rejected predicate is retained; never the supplied DTO or error.
+    let expected = session_snapshot_expected();
+    let value = result.as_ref().map_err(|error| SnapshotRejection {
+        check: SnapshotCheck::Bridge, error: EvidenceError::classify(error) })?;
+    let project = project.filter(|p| p.id == project_id).ok_or(SnapshotRejection::plain(SnapshotCheck::Project))?;
+    snapshot_require(value["root"].as_str() == Some(project.path.as_str()), SnapshotCheck::Root)?;
+    snapshot_require(value["observationScope"] == "single-request-non-atomic", SnapshotCheck::Scope)?;
+    snapshot_require(value["config"]["path"] == "release/mobile-release.json", SnapshotCheck::ConfigPath)?;
+    snapshot_require(value["config"]["state"] == "format-valid", SnapshotCheck::ConfigState)?;
+    snapshot_require(value["config"]["issues"].as_array().is_some_and(Vec::is_empty), SnapshotCheck::ConfigIssues)?;
+    snapshot_require(value["config"]["data"] == expected, SnapshotCheck::ConfigData)?;
+    snapshot_require(value["issues"].as_array().is_some_and(Vec::is_empty), SnapshotCheck::Issues)?;
+    snapshot_require(value["discovery"]["state"] == "unverified", SnapshotCheck::DiscoveryState)?;
+    snapshot_require(value["discovery"]["partial"] == false, SnapshotCheck::DiscoveryPartial)?;
+    snapshot_require(assurance(value, "static-text"), SnapshotCheck::Assurance)?;
+    snapshot_require(requests == 1, SnapshotCheck::RequestCount)?;
+    snapshot_require(!observed, SnapshotCheck::AlreadyObserved)?;
+    snapshot_require(matches!(step, Step::Selected | Step::ReadSnapshot), SnapshotCheck::Stage)
+}
+#[track_caller]
+fn latch_snapshot_diagnostic(failed: &FailureLatch, trace: &mut (Step, Boundary),
+    retained: &mut Option<SnapshotDiagnostic>, next: SnapshotDiagnostic) {
+    // Record is held. The source site and failure become visible in one CAS;
+    // the same first winner alone can publish this matching structured DATA.
+    if failed.mark_caller() { *trace = (next.step, Boundary::Result); *retained = Some(next); }
+}
+fn snapshot_failure_frame(trace: (Step, Boundary), progress: BootstrapProgress, site: Option<u16>,
+    diagnostic: Option<SnapshotDiagnostic>) -> Option<([u8; FAILURE_PAIR_LIMIT], usize)> {
+    let line = site.filter(|line| *line != 0)?;
+    let rejection = match diagnostic {
+        Some(next) if next.valid(trace) => next.rejection,
+        None if matches!(trace.0, Step::Selected | Step::ReadSnapshot) => SnapshotRejection::plain(SnapshotCheck::OtherCallback),
+        _ => return None,
+    };
+    let mut digits = [b'0'; 5]; let mut remainder = line; let mut begin = 4;
+    loop {
+        digits[begin] += (remainder % 10) as u8; remainder /= 10;
+        if remainder == 0 { break; }
+        begin -= 1;
+    }
+    let mut bytes = [0_u8; FAILURE_PAIR_LIMIT]; let mut length = 0_usize;
+    // This four-line frame is independent of legacy Session/Path formatting.
+    // A true wrong-stage rejection must not invent a legacy diagnostic.
+    for part in [b"MRK_INSTALLED_SHELL_SNAPSHOT_FAILURE=v1;site=".as_slice(), &digits[begin..],
+        b";check=", rejection.check.token(), b";error=", rejection.error.token(), b"\n",
+        trace.0.failure_line(), trace.1.failure_line(), progress.failure_line()] {
+        let end = length.checked_add(part.len())?;
+        bytes.get_mut(length..end)?.copy_from_slice(part); length = end;
+    }
+    Some((bytes, length))
+}
+fn assert_snapshot_rejection_contract() {
+    let project = Project { id: "selected".into(), name: "fixture".into(), path: "/private/fixture".into() };
+    let value = serde_json::json!({"root":project.path.as_str(),"observationScope":"single-request-non-atomic",
+        "config":{"path":"release/mobile-release.json","state":"format-valid","issues":[],"data":session_snapshot_expected()},
+        "issues":[],"discovery":{"state":"unverified","partial":false},"assurance":{"basis":"static-text","releaseReadiness":"unknown",
+            "projectCodeExecuted":false,"toolsProbed":false,"credentialsRead":false,"gitObserved":false,"storeContacted":false,"writesPerformed":false}});
+    let legacy = |project: Option<&Project>, id: &str, result: &Result<Value, BridgeError>, requests: u8, observed: bool, step: Step| {
+        let expected = session_snapshot_expected();
+        result.as_ref().is_ok_and(|value| project.is_some_and(|p| p.id == id && value["root"].as_str() == Some(p.path.as_str()))
+            && value["observationScope"] == "single-request-non-atomic" && value["config"]["path"] == "release/mobile-release.json"
+            && value["config"]["state"] == "format-valid" && value["config"]["issues"].as_array().is_some_and(Vec::is_empty)
+            && value["config"]["data"] == expected && value["issues"].as_array().is_some_and(Vec::is_empty)
+            && value["discovery"]["state"] == "unverified" && value["discovery"]["partial"] == false && assurance(value,"static-text"))
+            && requests == 1 && !observed && matches!(step, Step::Selected | Step::ReadSnapshot)
+    };
+    for step in [Step::Selected, Step::ReadSnapshot] {
+        let result = Ok(value.clone());
+        assert!(legacy(Some(&project), "selected", &result, 1, false, step));
+        assert!(session_snapshot_check(Some(&project), "selected", &result, 1, false, step).is_ok());
+    }
+    let mutations: &[(SnapshotCheck, fn(&mut Value))] = &[
+        (SnapshotCheck::Root, |v| v["root"] = Value::Null),
+        (SnapshotCheck::Scope, |v| v["observationScope"] = Value::Null),
+        (SnapshotCheck::ConfigPath, |v| v["config"]["path"] = Value::Null),
+        (SnapshotCheck::ConfigState, |v| v["config"]["state"] = Value::Null),
+        (SnapshotCheck::ConfigIssues, |v| v["config"]["issues"] = Value::Null),
+        (SnapshotCheck::ConfigData, |v| v["config"]["data"] = Value::Null),
+        (SnapshotCheck::Issues, |v| v["issues"] = Value::Null),
+        (SnapshotCheck::DiscoveryState, |v| v["discovery"]["state"] = Value::Null),
+        (SnapshotCheck::DiscoveryPartial, |v| v["discovery"]["partial"] = Value::Null),
+        (SnapshotCheck::Assurance, |v| v["assurance"]["writesPerformed"] = Value::Bool(true)),
+    ];
+    for (check, mutate) in mutations {
+        let mut wrong = value.clone(); mutate(&mut wrong); let result = Ok(wrong);
+        for (requests, observed, step) in [(1, false, Step::Selected), (0, true, Step::Close)] {
+            assert!(!legacy(Some(&project), "selected", &result, requests, observed, step));
+            assert!(session_snapshot_check(Some(&project), "selected", &result, requests, observed, step)
+                == Err(SnapshotRejection::plain(*check)));
+        }
+    }
+    let result = Ok(value);
+    for (selected, id, requests, observed, step, check) in [
+        (None, "selected", 0, true, Step::Close, SnapshotCheck::Project),
+        (Some(&project), "other", 1, false, Step::Selected, SnapshotCheck::Project),
+        (Some(&project), "selected", 0, true, Step::Close, SnapshotCheck::RequestCount),
+        (Some(&project), "selected", 2, false, Step::Selected, SnapshotCheck::RequestCount),
+        (Some(&project), "selected", 1, true, Step::Close, SnapshotCheck::AlreadyObserved),
+        (Some(&project), "selected", 1, false, Step::Close, SnapshotCheck::Stage),
+    ] {
+        assert!(!legacy(selected, id, &result, requests, observed, step));
+        assert!(session_snapshot_check(selected, id, &result, requests, observed, step) == Err(SnapshotRejection::plain(check)));
+    }
+    let error = Err(BridgeError::new("query_timeout", "private error must never enter a failure frame"));
+    assert!(session_snapshot_check(None, "other", &error, 0, true, Step::Close)
+        == Err(SnapshotRejection { check: SnapshotCheck::Bridge, error: EvidenceError::QueryTimeout }));
+}
+fn assert_snapshot_frame_contract() {
+    for step in [Step::ReadSnapshot, Step::Session(SessionStep::QuitPreserved), Step::Paths(PathStep::Activate(0))] {
+        let next = SnapshotDiagnostic { step, rejection: SnapshotRejection::plain(SnapshotCheck::Root) };
+        let trace = (step, Boundary::Result);
+        let (bytes, length) = snapshot_failure_frame(trace, BootstrapProgress::Advanced, Some(65535), Some(next)).unwrap();
+        let expected = [b"MRK_INSTALLED_SHELL_SNAPSHOT_FAILURE=v1;site=65535;check=root;error=none\n".as_slice(),
+            step.failure_line(), Boundary::Result.failure_line(), BootstrapProgress::Advanced.failure_line()].concat();
+        assert_eq!(&bytes[..length], expected.as_slice());
+        assert!(length <= FAILURE_PAIR_LIMIT && bytes[..length].iter().filter(|b| **b == b'\n').count() == 4);
+        assert!(snapshot_failure_frame(trace, BootstrapProgress::Advanced, None, Some(next)).is_none());
+        assert!(snapshot_failure_frame(trace, BootstrapProgress::Advanced, Some(0), Some(next)).is_none());
+        assert!(snapshot_failure_frame((step, Boundary::Dom), BootstrapProgress::Advanced, Some(10), Some(next)).is_none());
+    }
+    let step = Step::Session(SessionStep::QuitPreserved); let trace = (step, Boundary::Result);
+    let wrong_stage = SnapshotDiagnostic { step, rejection: SnapshotRejection::plain(SnapshotCheck::Stage) };
+    assert!(snapshot_failure_frame(trace, BootstrapProgress::Advanced, Some(12), Some(wrong_stage)).is_some());
+    assert!(snapshot_failure_frame((Step::Selected, Boundary::Result), BootstrapProgress::Advanced, Some(12),
+        Some(SnapshotDiagnostic { step: Step::Selected, ..wrong_stage })).is_none());
+    assert!(snapshot_failure_frame(trace, BootstrapProgress::Advanced, Some(12), None).is_none());
+    for boundary in [Boundary::Request, Boundary::Result, Boundary::Dom] {
+        let (bytes, length) = snapshot_failure_frame((Step::ReadSnapshot, boundary), BootstrapProgress::Advanced, Some(9), None).unwrap();
+        assert!(bytes[..length].starts_with(b"MRK_INSTALLED_SHELL_SNAPSHOT_FAILURE=v1;site=9;check=other-callback;error=none\n"));
+    }
+    for rejection in [SnapshotRejection::plain(SnapshotCheck::Bridge), SnapshotRejection::plain(SnapshotCheck::OtherCallback),
+        SnapshotRejection { check: SnapshotCheck::Root, error: EvidenceError::Other }] {
+        assert!(snapshot_failure_frame(trace, BootstrapProgress::Advanced, Some(12), Some(SnapshotDiagnostic { step, rejection })).is_none());
+    }
+    for generic_first in [false, true] {
+        let failed = FailureLatch::new(false); let mut retained = None;
+        let original = (Step::ReadSnapshot, Boundary::Dom); let mut retained_trace = original;
+        if generic_first { assert!(failed.mark_site(17)); }
+        latch_snapshot_diagnostic(&failed, &mut retained_trace, &mut retained, wrong_stage);
+        let first_site = failed.site();
+        assert!(!failed.mark_site(18));
+        let mut evidence = None;
+        latch_evidence_diagnostic(&failed, &mut retained_trace, &mut evidence, EvidenceDiagnostic {
+            step: Step::EvidenceObserved, callback: EvidenceCallback::Status, check: EvidenceCheck::Bridge,
+            phase: None, problem: None, error: EvidenceError::Other });
+        assert!(evidence.is_none() && failed.site() == first_site);
+        assert!(retained == if generic_first { None } else { Some(wrong_stage) });
+        assert!(retained_trace == if generic_first { original } else { trace });
+        let prior_typed = FailureLatch::new(true); let mut absent = None; let mut trace = original;
+        latch_snapshot_diagnostic(&prior_typed, &mut trace, &mut absent, wrong_stage);
+        assert!(absent.is_none() && trace == original && prior_typed.site().is_none());
     }
 }
 #[derive(Default)]
@@ -2707,7 +2938,7 @@ fn assert_evidence_failure_contract() {
         phase: None, problem: None, ..first }.valid(trace));
 
     for already_failed in [false, true] {
-        let failed = AtomicBool::new(already_failed);
+        let failed = FailureLatch::new(already_failed);
         let original_trace = (Step::Bootstrap, Boundary::Bootstrap);
         let mut retained_trace = original_trace; let mut retained = None;
         latch_evidence_diagnostic(&failed, &mut retained_trace, &mut retained, first);
@@ -3505,7 +3736,7 @@ struct Record {
     confirmation_opened: u8, kept_reviewing: bool, acknowledged: bool, saved_visible: bool,
     readback: bool, readback_visible: bool, saved_reads: SavedReads, saved_draft_retained: bool, noop_outstanding: bool, originals_final: bool,
     step: Step, pending: Option<Pending>, evaluations: u16, trace: (Step, Boundary), bootstrap: BootstrapProgress,
-    evidence_diagnostic: Option<EvidenceDiagnostic>,
+    evidence_diagnostic: Option<EvidenceDiagnostic>, snapshot_diagnostic: Option<SnapshotDiagnostic>,
     close_prevented: bool, native_id: Option<u32>, activated: bool,
     responded: bool, disposal_response: bool, destroyed: bool, released: bool, gtk_returned: bool,
     relay_joined: bool, exit: bool, held: Option<HeldAppInfo>, failure_quit: FailureQuit,
@@ -3539,7 +3770,7 @@ fn saved_read_context(r: &Record) -> bool {
         && r.sessions[0].projection.phase == edit::Phase::Final && r.sessions[0].projection.native_finality == edit::NativeFinality::Settled
 }
 pub(super) struct Observation {
-    case: Case, main: ThreadId, start: Instant, end: Instant, project_path: Option<PathBuf>, evidence_path: Option<PathBuf>, failed: AtomicBool,
+    case: Case, main: ThreadId, start: Instant, end: Instant, project_path: Option<PathBuf>, evidence_path: Option<PathBuf>, failed: FailureLatch,
     failure_reported: AtomicBool, failure_sink: rustix::fd::OwnedFd, record: Mutex<Record>, commands: Option<Arc<commands::Control>>,
 }
 impl Observation {
@@ -3555,12 +3786,12 @@ impl Observation {
         let paths = Paths::new((case == Case::ProjectPaths).then_some(project_path.as_deref()).flatten());
         let evidence_path = project_path.as_ref().and_then(|path| path.parent()).map(|root| root.join("candidate-evidence"));
         Self { case, main: std::thread::current().id(), start, end,
-            failed: AtomicBool::new(case != Case::Outstanding && (project_path.is_none() || evidence_path.is_none())
+            failed: FailureLatch::new(case != Case::Outstanding && (project_path.is_none() || evidence_path.is_none())
                 || case == Case::ProjectPaths && paths.fixture.is_none()), project_path, evidence_path,
             failure_reported: AtomicBool::new(false), failure_sink, commands: case.commands().map(commands::Control::new), record: Mutex::new(Record {
                 attached: false, started: false, loaded: false, info: false, methods: 0, catalog: false, environment: false,
                 step: Step::Bootstrap, pending: None, evaluations: 0, trace: (Step::Bootstrap, Boundary::Bootstrap),
-                bootstrap: BootstrapProgress::NotSampled, evidence_diagnostic: None,
+                bootstrap: BootstrapProgress::NotSampled, evidence_diagnostic: None, snapshot_diagnostic: None,
                 pickers: std::array::from_fn(|_| Picker::default()), cancel_returned: false, cancelled: false, project: None, selected: false,
                 project_witness: None, candidate: Candidate::default(), paths, workflow: WorkflowRecord::default(), metadata: MetadataRecord::default(), version: VersionRecord::default(),
                 session: SessionRecord::new(case.session()),
@@ -3575,7 +3806,8 @@ impl Observation {
                 failure_quit: FailureQuit::default(),
             }) }
     }
-    fn fail(&self) { self.failed.store(true, Ordering::SeqCst); }
+    #[track_caller]
+    fn fail(&self) { self.failed.mark_caller(); }
     fn record(&self) -> Option<MutexGuard<'_, Record>> {
         match self.record.lock() { Ok(record) => Some(record), Err(_) => { self.fail(); None } }
     }
@@ -3650,14 +3882,18 @@ impl Observation {
     }
     fn report_failure(&self) {
         if !self.failed.load(Ordering::SeqCst) || self.failure_reported.load(Ordering::SeqCst) { return; }
-        let (trace, progress, session, path, evidence) = match self.record.try_lock() {
-            Ok(r) => (r.trace, r.bootstrap, r.session.diagnostic, r.paths.diagnostic, r.evidence_diagnostic), Err(_) => return };
+        let (trace, progress, session, path, evidence, snapshot, site) = match self.record.try_lock() {
+            Ok(r) => (r.trace, r.bootstrap, r.session.diagnostic, r.paths.diagnostic, r.evidence_diagnostic,
+                r.snapshot_diagnostic, self.failed.site()), Err(_) => return };
         if self.failure_reported.swap(true, Ordering::SeqCst) { return; }
         // Fixed enums and bounded cached counters/recipe indices, outside every
         // record/GTK lock. No identifiers, DTOs, inputs or exception bodies.
         // One unbuffered attempt before stderr: partial/EINTR/error is not
         // retried, formatted or allowed to affect the original failure latch.
-        if let Some((bytes, length)) = failure_frame(trace, progress, session, path, evidence) {
+        let frame = if snapshot.is_some() || site.is_some() && matches!(trace.0, Step::Selected | Step::ReadSnapshot) {
+            snapshot_failure_frame(trace, progress, site, snapshot)
+        } else { failure_frame(trace, progress, session, path, evidence) };
+        if let Some((bytes, length)) = frame {
             if let Some(pair) = bytes.get(..length) { let _ = rustix::io::write(&self.failure_sink, pair); }
         }
         super::diagnostic(trace.0.failure_line()); super::diagnostic(trace.1.failure_line());
@@ -5583,7 +5819,8 @@ impl Observation {
         }
     }
     fn dom(&self, step: Step, raw: &str) {
-        if raw.len() > 262144 || Instant::now() >= self.end { self.fail(); return; }
+        if raw.len() > 262144 { self.fail(); return; }
+        if Instant::now() >= self.end { self.fail(); return; }
         let Ok(value) = crate::protocol::strict_json(raw.as_bytes()) else { self.fail(); return; };
         if let Step::Commands(step) = step {
             if let Some(commands) = &self.commands { commands.dom(step, &value); } else { self.fail(); } return;
@@ -6503,16 +6740,11 @@ impl Observation {
     }
     fn session_snapshot_result(&self, project_id: &str, result: &Result<Value,BridgeError>) {
         let Some(mut r) = self.record_at(Boundary::Result) else { return; };
-        let expected = serde_json::json!({"android":{"applicationId":"org.assessment.fixture","enabled":true,"identityStatus":"unverified"},"ios":{"enabled":false},
-            "metadata":{"androidLocales":["en-US"],"iosLocales":[],"root":"release/store"},"projectChecks":{"androidArtifact":[],"iosArtifact":[],"preflight":[]},
-            "schemaVersion":1,"services":{"androidFirebase":"required","iosFirebase":"disabled"},"source":{"candidateBranch":"main","productionBranch":"main","projectReadTokenRequired":true},
-            "version":{"buildKey":"BUILD_NUMBER","nameKey":"VERSION_NAME","source":"version.properties"}});
-        let valid = result.as_ref().is_ok_and(|value| r.project.as_ref().is_some_and(|p| p.id == project_id && value["root"].as_str() == Some(p.path.as_str()))
-            && value["observationScope"] == "single-request-non-atomic" && value["config"]["path"] == "release/mobile-release.json"
-            && value["config"]["state"] == "format-valid" && value["config"]["issues"].as_array().is_some_and(Vec::is_empty)
-            && value["config"]["data"] == expected && value["issues"].as_array().is_some_and(Vec::is_empty)
-            && value["discovery"]["state"] == "unverified" && value["discovery"]["partial"] == false && assurance(value,"static-text"));
-        if !valid || r.snapshot_requests != 1 || r.snapshot || !matches!(r.step,Step::Selected | Step::ReadSnapshot) { self.fail(); return; }
+        if let Err(rejection) = session_snapshot_check(r.project.as_ref(), project_id, result, r.snapshot_requests, r.snapshot, r.step) {
+            let next = SnapshotDiagnostic { step: r.step, rejection };
+            let Record { trace, snapshot_diagnostic, .. } = &mut *r;
+            latch_snapshot_diagnostic(&self.failed, trace, snapshot_diagnostic, next); return;
+        }
         r.session.draft = result.as_ref().ok().and_then(|v| v["config"].get("data")).cloned(); r.snapshot = true;
     }
     pub(super) fn navigation(&self, trusted: bool, allowed: bool) {
@@ -8272,6 +8504,9 @@ pub(crate) fn main() -> std::process::ExitCode {
     assert_recent_files_suppression_contract();
     assert_failure_pair_contract();
     assert_evidence_failure_contract();
+    assert_failure_latch_contract();
+    assert_snapshot_rejection_contract();
+    assert_snapshot_frame_contract();
     assert_failure_quit_contract();
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     crate::credential_assessment::assert_installed_assessment_failure_contract();
