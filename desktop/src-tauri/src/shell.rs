@@ -1539,7 +1539,7 @@ mod owned_gtk {
             Ok(original) => original,
             Err(reason) => { q.path_failed(reason); return Err(()); },
         };
-        let Some((id,dialog,context,call)) = original else { return Ok(None); };
+        let Some((id,dialog,context,call)) = original else { q.path_wait(installed_observation::PathWait::DialogAbsent); return Ok(None); };
         if !context.upgrade().is_some_and(|actual| Arc::ptr_eq(&actual,q)) { q.path_failed(R::GtkDialogOriginal); return Err(()); }
         let Some(call) = call.upgrade() else { q.path_failed(R::GtkDialogOriginal); return Err(()); };
         let Some(owner) = call.owner() else { q.path_failed(R::GtkOwnerBinding); return Err(()); };
@@ -1566,7 +1566,7 @@ mod owned_gtk {
             || !dialog.property::<bool>("local-only") || dialog.property::<bool>("select-multiple") || dialog.property::<bool>("create-folders")
             || gtk::Settings::default().is_none_or(|settings| settings.is_gtk_recent_files_enabled()) { q.path_failed(R::GtkDialogProperties); return Err(()); }
         if initial {
-            let Some(folder) = dialog.current_folder() else { return Ok(None); };
+            let Some(folder) = dialog.current_folder() else { q.path_wait(installed_observation::PathWait::InitialFolderAbsent); return Ok(None); };
             if Some(folder.as_path()) != q.project_path() { q.path_failed(R::GtkInitialFolder); return Err(()); }
         }
         Ok(Some((id,dialog)))
@@ -1583,13 +1583,15 @@ mod owned_gtk {
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(super) fn activate_observed_path(app: &tauri::AppHandle, q: &Arc<installed_observation::Observation>, index: u8) -> Result<bool,()> {
         use installed_observation::PathRejection as R;
+        use installed_observation::PathWait as W;
         let Some((id,dialog)) = observed_path_dialog(app,q,index)? else { return Ok(false); };
         let target = q.path_target(index);
         let select = target.is_some();
         if let Some(path) = target {
             // Observer-only readiness, not a filename transfer or identity proof.
             // A setter return or sensitive button can precede GTK's selection.
-            if !dialog.file().is_some_and(|file| file.equal(&gtk::gio::File::for_path(&path))) { return Ok(false); }
+            let Some(file) = dialog.file() else { q.path_wait(W::SelectionAbsent); return Ok(false); };
+            if !file.equal(&gtk::gio::File::for_path(&path)) { q.path_wait(W::SelectionDifferent); return Ok(false); }
         }
         let response = if select { gtk::ResponseType::Accept } else { gtk::ResponseType::Cancel };
         let button = match dialog.widget_for_response(response).and_then(|widget| widget.downcast::<gtk::Button>().ok()) {
@@ -1598,7 +1600,7 @@ mod owned_gtk {
         };
         if !button.is_visible() || dialog.response_for_widget(&button) != response
             || button.label().as_deref() != Some(if select { "Select" } else { "Cancel" }) { q.path_failed(R::GtkActionWidget); return Err(()); }
-        if !button.is_sensitive() { return Ok(false); }
+        if !button.is_sensitive() { q.path_wait(W::ResponseInsensitive); return Ok(false); }
         q.path_activation(id,index)?;
         button.emit_clicked(); Ok(true)
     }

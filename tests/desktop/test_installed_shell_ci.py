@@ -3013,9 +3013,12 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertEqual(path_bound, 251)
         self.assertLessEqual(path_bound, lifecycle.SHELL_PATH_FAILURE_FRAME_BOUND)
         self.assertEqual(lifecycle.SHELL_PATH_FAILURE_FRAME_BOUND, 256)
-        self.assertIn("const PATH_FAILURE_FRAME_BOUND: usize = 256;", source)
+        v2_bound = path_bound + len(b";start=999999;now=999999;rsv=m;in=m;out=m;cb=reserved;wait=initial-folder-absent")
+        self.assertLessEqual(v2_bound, lifecycle.SHELL_PATH_FAILURE_V2_FRAME_BOUND)
+        self.assertEqual(lifecycle.SHELL_PATH_FAILURE_V2_FRAME_BOUND, 384)
+        self.assertIn("const PATH_FAILURE_FRAME_BOUND: usize = 384;", source)
         encoder = source.split("fn failure_pair(", 1)[1].split("fn assert_failure_pair_contract", 1)[0]
-        self.assertLess(encoder.index('b"MRK_INSTALLED_SHELL_PATH_FAILURE=v1;index="'), encoder.index("trace.0.failure_line()"))
+        self.assertLess(encoder.index('b"MRK_INSTALLED_SHELL_PATH_FAILURE=v2;index="'), encoder.index("trace.0.failure_line()"))
         self.assertIn("diagnostic.step == step && session.is_none()", encoder)
         self.assertIn("step.recipe_index().is_some_and(|index| index > 10)", encoder)
         self.assertIn("(Step::Paths(_), _) | (_, Some(_)) => return None", encoder)
@@ -3311,7 +3314,7 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertIn("retained == Some(if deadline_first { same } else { gtk })", pure)
         # These inert contracts execute before GTK in the reviewed native route;
         # their source presence here is not executed Rust or native evidence.
-        self.assertIn("let end = Instant::now() + Duration::from_secs(45);", source)
+        self.assertIn("let start = Instant::now(); let end = start + Duration::from_secs(45);", source)
         self.assertEqual(lifecycle.SHELL_WORK_FILE_LIMIT, 64 << 20)
         commands = (SOURCE / "desktop/src-tauri/src/installed_tools_observation.rs").read_text()
         self.assertTrue('#[path = "installed_tools_observation.rs"]\npub(crate) mod commands;' in source,
@@ -3749,8 +3752,7 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
                 activating = source.split("    pub(super) fn activate_observed_" + role + "(", 1)[1].split("    #[cfg(", 1)[0]
                 self.assertEqual(selecting.count("dialog.set_filename("), 1)
                 self.assertEqual(activating.count("dialog.file()"), 1)
-                readiness = ("if !dialog.file().is_some_and(|file| file.equal(&gtk::gio::File::for_path(&path)))"
-                             if role == "path" else "let Some(file) = dialog.file() else")
+                readiness = "let Some(file) = dialog.file() else"
                 self.assertIn(readiness, activating)
                 # None/different selection waits; Cancel does not require a file.
                 self.assertLess(activating.index(guard), activating.index(readiness))
@@ -3766,6 +3768,15 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
                     self.assertIn("W::GtkSelectionDifferent", other_wait)
                     self.assertIn("return Ok(false)", other_wait)
                     self.assertLess(activating.index("q.session_file_target(index)"), activating.index(readiness))
+                else:
+                    different = "if !file.equal(&gtk::gio::File::for_path(&path))"
+                    self.assertEqual(activating.count("file.equal("), 1)
+                    self.assertIn("W::SelectionAbsent", wait)
+                    self.assertLess(activating.index(readiness), activating.index(different))
+                    self.assertLess(activating.index(different), activating.index("dialog.widget_for_response(response)"))
+                    other_wait = activating.split(different, 1)[1].split("}", 1)[0]
+                    self.assertIn("W::SelectionDifferent", other_wait)
+                    self.assertIn("return Ok(false)", other_wait)
                 self.assertLess(activating.index(readiness), activating.index("dialog.widget_for_response(response)"))
                 self.assertLess(activating.index(readiness), activating.index(activation))
                 self.assertLess(activating.index(activation), activating.index("button.emit_clicked()"))
@@ -3846,7 +3857,7 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         winner = "if latch_failure(&self.failed, trace, bootstrap, (*step, Boundary::Deadline), progress) {"
         self.assertIn(winner, deadline)
         self.assertLess(deadline.index("SessionDiagnostic::sample(r.step,r.evaluations,r.session.diagnostic)"), deadline.index(winner))
-        self.assertLess(deadline.index("PathDiagnostic::sample(r.step)"), deadline.index(winner))
+        self.assertLess(deadline.index("PathDiagnostic::sample(r.step,self.start.elapsed().as_millis(),r.paths.diagnostic)"), deadline.index(winner))
         self.assertIn(winner + "\n                    r.session.diagnostic = diagnostic;\n                    r.paths.diagnostic = path_diagnostic;\n                }", deadline)
         latch = source.split("fn latch_failure(", 1)[1].split("fn latch_session_diagnostic(", 1)[0]
         self.assertEqual(latch.count("failed.swap(true, Ordering::SeqCst)"), 1)
@@ -3858,7 +3869,7 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertNotIn("self.end ||", tick)
         cache = source.split("fn record_at(&self", 1)[1].split("fn session_wait(", 1)[0]
         self.assertIn("if !self.failed.load(Ordering::SeqCst) {\n            r.trace = (r.step, boundary);", cache)
-        self.assertIn("r.paths.diagnostic = PathDiagnostic::sample(r.step);\n        }", cache)
+        self.assertIn("self.path_sample(&mut r);\n        }", cache)
 
     def test_failed_observer_handoff_reuses_original_quit_and_keeps_failure(self):
         source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()

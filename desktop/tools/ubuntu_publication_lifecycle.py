@@ -54,6 +54,7 @@ SHELL_PUBLIC_FILE_LIMIT = 165  # Exact twenty-case root roster:163, exported:165
 SHELL_FIXTURE_NAMESPACE_LIMIT = 2048
 SHELL_FAILURE_LABEL_LIMIT = 512
 SHELL_PATH_FAILURE_FRAME_BOUND = 256
+SHELL_PATH_FAILURE_V2_FRAME_BOUND = 384  # Same512B sink; no change to historical v1.
 SHELL_SESSION_FAILURE_FRAME_BOUND = 466  # v3 only; historical v1/v2 admission stays unchanged.
 SHELL_SESSION_FAILURE_V4_FRAME_BOUND = 492  # Same 512B sink; ;af= plus at most 22B.
 SHELL_SESSION_FAILURE_V5_FRAME_BOUND = 509  # v4 plus ;u= and at most 14B; no larger sink.
@@ -4114,7 +4115,9 @@ def _shell_label_pair(raw):
     if lines[0].startswith(b"MRK_INSTALLED_SHELL_PATH_FAILURE="):
         # Prefix first, so no proper prefix of this new frame can masquerade
         # as an old three-line Path result with the detail silently lost.
-        if len(lines) != 4 or len(raw) > SHELL_PATH_FAILURE_FRAME_BOUND:
+        path_bound = (SHELL_PATH_FAILURE_V2_FRAME_BOUND if lines[0].startswith(b"MRK_INSTALLED_SHELL_PATH_FAILURE=v2;")
+                      else SHELL_PATH_FAILURE_FRAME_BOUND)
+        if len(lines) != 4 or len(raw) > path_bound:
             return None
         path_detail, lines = lines[0], lines[1:]
     # Session traces require their complete fourth record. Historical v1/v2
@@ -4130,10 +4133,18 @@ def _shell_label_pair(raw):
     if len(lines) != (4 if session else 3):
         return None
     if path_detail is not None:
+        sample = None
         match = re.fullmatch(rb"MRK_INSTALLED_SHELL_PATH_FAILURE=v1;index=(none|0|[1-9]|10);reject=([a-z-]{1,22})\n", path_detail)
         if match is None:
-            return None
-        index_raw, rejection = match.groups()
+            match = re.fullmatch(rb"MRK_INSTALLED_SHELL_PATH_FAILURE=v2;index=(none|0|[1-9]|10);reject=([a-z-]{1,22})"
+                                 rb";start=(over|0|[1-9][0-9]{0,5});now=(over|0|[1-9][0-9]{0,5})"
+                                 rb";rsv=([01m]);in=([01m]);out=([01m]);cb=(na|idle|reserved|entered|returned)"
+                                 rb";wait=(not-sampled|dialog-absent|initial-folder-absent|selection-absent|selection-different|response-insensitive)\n", path_detail)
+            if match is None:
+                return None
+            index_raw, rejection, *sample = match.groups()
+        else:
+            index_raw, rejection = match.groups()
         index = None if index_raw == b"none" else int(index_raw)
         indexed = {"PathBrowse", "PathSet", "PathActivate", "PathSettlement", "PathField"}
         unindexed = {"PathDraft", "PathPreview", "PathNavigation"}
@@ -4141,6 +4152,29 @@ def _shell_label_pair(raw):
                 or result["step"] in indexed and index is None or result["step"] in unindexed and index is not None):
             return None
         result["path"] = {"recipeIndex": index, "rejection": rejection.decode("ascii")}
+        if sample is not None:
+            start, now, reserved, entered, returned, phase, wait = sample
+            active = result["step"] in {"PathSet", "PathActivate"}
+            counts = {b"0": 0, b"1": 1, b"m": 2}
+            rsv, ent, ret = (counts[item] for item in (reserved, entered, returned))
+            if (start == b"over" and now != b"over" or now != b"over" and int(start) > int(now)
+                    or not ret <= ent <= rsv):
+                return None
+            if not active:
+                if phase != b"na" or (rsv, ent, ret) != (0, 0, 0) or wait != b"not-sampled":
+                    return None
+            elif (phase == b"na" or phase == b"idle" and ((rsv, ent, ret) != (0, 0, 0) or wait != b"not-sampled")
+                    or phase == b"reserved" and (rsv == 0 or ent != ret or (rsv == 1) != (ent == 0))
+                    or phase == b"entered" and (rsv == 0 or rsv != ent or (rsv == 1) != (ret == 0))
+                    or phase == b"returned" and (rsv == 0 or rsv != ent or ent != ret)
+                    or wait != b"not-sampled" and ent == 0
+                    or wait in {b"selection-absent", b"selection-different", b"response-insensitive"} and result["step"] != "PathActivate"):
+                return None
+            result["path"].update({"stepEntryElapsedMs": "over" if start == b"over" else int(start),
+                                   "sampleElapsedMs": "over" if now == b"over" else int(now),
+                                   "callbackReservations": reserved.decode("ascii"), "callbackEntries": entered.decode("ascii"),
+                                   "callbackReturns": returned.decode("ascii"), "callbackPhase": phase.decode("ascii"),
+                                   "lastWait": wait.decode("ascii")})
     if session:
         if lines[3].startswith(b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;"):
             version = b"v1"

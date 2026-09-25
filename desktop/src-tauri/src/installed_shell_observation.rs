@@ -1184,8 +1184,9 @@ const FAILURE_PAIR_LIMIT: usize = 512;
 // v6 keeps every v5 field: eval saves 7B, ;g= plus its closed token adds 5B.
 // Never omit/truncate a field to fit the unchanged 512B sink.
 const SESSION_FAILURE_FRAME_BOUND: usize = 507;
-// At most 174B of existing lines plus a 77B closed prefix, within the same sink.
-const PATH_FAILURE_FRAME_BOUND: usize = 256;
+// Path v2 retains the three lines and adds bounded timing/callback/wait DATA.
+// The historical v1 reader keeps its 256B bound; the common sink is unchanged.
+const PATH_FAILURE_FRAME_BOUND: usize = 384;
 fn failure_pair(trace: (Step, Boundary), progress: BootstrapProgress, session: Option<SessionDiagnostic>,
     path: Option<PathDiagnostic>) -> Option<([u8; FAILURE_PAIR_LIMIT], usize)> {
     fn append(bytes: &mut [u8; FAILURE_PAIR_LIMIT], length: &mut usize, part: &[u8]) -> Option<()> {
@@ -1197,6 +1198,16 @@ fn failure_pair(trace: (Step, Boundary), progress: BootstrapProgress, session: O
         Some(([b'0' + (value / 100) as u8, b'0' + ((value / 10) % 10) as u8, b'0' + (value % 10) as u8],
             if value >= 100 { 0 } else if value >= 10 { 1 } else { 2 }))
     }
+    fn path_millis(bytes: &mut [u8; FAILURE_PAIR_LIMIT], length: &mut usize, value: u128) -> Option<()> {
+        if value > 999_999 { return append(bytes,length,b"over"); }
+        let mut digits = [b'0';6]; let mut remainder = value; let mut begin = 5;
+        loop {
+            digits[begin] += (remainder % 10) as u8; remainder /= 10;
+            if remainder == 0 { break; }
+            begin -= 1;
+        }
+        append(bytes,length,&digits[begin..])
+    }
     let mut bytes = [0_u8; FAILURE_PAIR_LIMIT];
     let mut length = 0;
     match (trace.0, path) {
@@ -1204,12 +1215,24 @@ fn failure_pair(trace: (Step, Boundary), progress: BootstrapProgress, session: O
             if step.recipe_index().is_some_and(|index| index > 10) { return None; }
             // Prefix first: a short write must not look like a complete legacy
             // three-line Path frame with its new diagnostic silently omitted.
-            append(&mut bytes, &mut length, b"MRK_INSTALLED_SHELL_PATH_FAILURE=v1;index=")?;
+            append(&mut bytes, &mut length, b"MRK_INSTALLED_SHELL_PATH_FAILURE=v2;index=")?;
             if let Some(index) = step.recipe_index() {
                 let (digits, begin) = decimal(u16::from(index))?; append(&mut bytes, &mut length, &digits[begin..])?;
             } else { append(&mut bytes, &mut length, b"none")?; }
             append(&mut bytes, &mut length, b";reject=")?;
             append(&mut bytes, &mut length, diagnostic.rejection.token())?;
+            append(&mut bytes, &mut length, b";start=")?;
+            path_millis(&mut bytes,&mut length,diagnostic.step_entry_ms)?;
+            append(&mut bytes, &mut length, b";now=")?;
+            path_millis(&mut bytes,&mut length,diagnostic.sample_ms)?;
+            for (label,count) in [(b";rsv=".as_slice(),diagnostic.reservations),
+                (b";in=".as_slice(),diagnostic.entries),(b";out=".as_slice(),diagnostic.returns)] {
+                append(&mut bytes,&mut length,label)?; append(&mut bytes,&mut length,count.token())?;
+            }
+            append(&mut bytes,&mut length,b";cb=")?;
+            append(&mut bytes,&mut length,diagnostic.callback.token())?;
+            append(&mut bytes,&mut length,b";wait=")?;
+            append(&mut bytes,&mut length,diagnostic.wait.token())?;
             append(&mut bytes, &mut length, b"\n")?;
         },
         (Step::Paths(_), _) | (_, Some(_)) => return None,
@@ -1577,8 +1600,9 @@ fn assert_failure_pair_contract() {
     for index in 0..=10 {
         for step in [PathStep::Browse(index),PathStep::Set(index),PathStep::Activate(index),PathStep::Settled(index),PathStep::ReadField(index)] {
             assert_eq!(step.recipe_index(),Some(index));
-            let diagnostic = PathDiagnostic::sample(Step::Paths(step)).unwrap();
-            let prefix = format!("MRK_INSTALLED_SHELL_PATH_FAILURE=v1;index={index};reject=not-recorded\n");
+            let diagnostic = PathDiagnostic::sample(Step::Paths(step),0,None).unwrap();
+            let callback = if matches!(step,PathStep::Set(_) | PathStep::Activate(_)) { "idle" } else { "na" };
+            let prefix = format!("MRK_INSTALLED_SHELL_PATH_FAILURE=v2;index={index};reject=not-recorded;start=0;now=0;rsv=0;in=0;out=0;cb={callback};wait=not-sampled\n");
             let expected = [prefix.as_bytes(),step.failure_line(),Boundary::Gtk.failure_line(),BootstrapProgress::Advanced.failure_line()].concat();
             assert!(failure_pair((Step::Paths(step),Boundary::Gtk),BootstrapProgress::Advanced,None,Some(diagnostic))
                 .is_some_and(|(bytes,length)|length <= PATH_FAILURE_FRAME_BOUND && bytes.get(..length) == Some(expected.as_slice())));
@@ -1588,17 +1612,17 @@ fn assert_failure_pair_contract() {
         PathStep::ReadPreview(0),PathStep::ReadPreview(1),PathStep::ReadPreview(2),PathStep::Ios,PathStep::Metadata,
         PathStep::Settings,PathStep::General,PathStep::FinalIos] {
         assert_eq!(step.recipe_index(),None);
-        let diagnostic = PathDiagnostic::sample(Step::Paths(step)).unwrap();
-        let expected = [b"MRK_INSTALLED_SHELL_PATH_FAILURE=v1;index=none;reject=not-recorded\n".as_slice(),step.failure_line(),
+        let diagnostic = PathDiagnostic::sample(Step::Paths(step),0,None).unwrap();
+        let expected = [b"MRK_INSTALLED_SHELL_PATH_FAILURE=v2;index=none;reject=not-recorded;start=0;now=0;rsv=0;in=0;out=0;cb=na;wait=not-sampled\n".as_slice(),step.failure_line(),
             Boundary::Settlement.failure_line(),BootstrapProgress::AppInfoReturnedBeforeHold.failure_line()].concat();
         assert!(failure_pair((Step::Paths(step),Boundary::Settlement),BootstrapProgress::AppInfoReturnedBeforeHold,None,Some(diagnostic))
             .is_some_and(|(bytes,length)|length <= PATH_FAILURE_FRAME_BOUND && bytes.get(..length) == Some(expected.as_slice())));
     }
     let path_step = PathStep::Activate(0);
     let path_trace = (Step::Paths(path_step),Boundary::Gtk);
-    let path_plain = PathDiagnostic::sample(path_trace.0).unwrap();
-    let path_gtk = PathDiagnostic { step:path_step,rejection:PathRejection::GtkInitialFolder };
-    let expected = [b"MRK_INSTALLED_SHELL_PATH_FAILURE=v1;index=0;reject=gtk-initial-folder\n".as_slice(),
+    let path_plain = PathDiagnostic::sample(path_trace.0,0,None).unwrap();
+    let path_gtk = PathDiagnostic { rejection:PathRejection::GtkInitialFolder,..path_plain };
+    let expected = [b"MRK_INSTALLED_SHELL_PATH_FAILURE=v2;index=0;reject=gtk-initial-folder;start=0;now=0;rsv=0;in=0;out=0;cb=idle;wait=not-sampled\n".as_slice(),
         path_step.failure_line(),Boundary::Gtk.failure_line(),BootstrapProgress::Advanced.failure_line()].concat();
     assert!(failure_pair(path_trace,BootstrapProgress::Advanced,None,Some(path_gtk))
         .is_some_and(|(bytes,length)|bytes.get(..length) == Some(expected.as_slice()) && bytes[..length].is_ascii()
@@ -1612,12 +1636,51 @@ fn assert_failure_pair_contract() {
     }
     for index in [11,255] {
         for step in [PathStep::Browse(index),PathStep::Set(index),PathStep::Activate(index),PathStep::Settled(index),PathStep::ReadField(index)] {
-            let diagnostic = PathDiagnostic::sample(Step::Paths(step)).unwrap();
+            let diagnostic = PathDiagnostic::sample(Step::Paths(step),0,None).unwrap();
             assert!(failure_pair((Step::Paths(step),Boundary::Gtk),BootstrapProgress::Advanced,None,Some(diagnostic)).is_none());
         }
     }
-    assert!(PathDiagnostic::sample(Step::Close).is_none());
-    assert!(174 + 77 <= PATH_FAILURE_FRAME_BOUND && PATH_FAILURE_FRAME_BOUND < FAILURE_PAIR_LIMIT);
+    assert!(PathDiagnostic::sample(Step::Close,0,None).is_none());
+    let extension = b";start=999999;now=999999;rsv=m;in=m;out=m;cb=reserved;wait=initial-folder-absent";
+    assert!(174 + 77 + extension.len() <= PATH_FAILURE_FRAME_BOUND && PATH_FAILURE_FRAME_BOUND < FAILURE_PAIR_LIMIT);
+    let mut timed = PathDiagnostic::sample(path_trace.0,43_000,None).unwrap();
+    for round in 0..3 {
+        timed.mark(PathCallback::Reserved);
+        assert!(timed.callback == PathCallback::Reserved && timed.reservations == if round == 0 { PathCount::One } else { PathCount::Many });
+        timed.mark(PathCallback::Entered); timed.wait = PathWait::SelectionDifferent;
+        timed.mark(PathCallback::Returned);
+        timed = PathDiagnostic::sample(path_trace.0,44_000 + round,Some(timed)).unwrap();
+    }
+    assert!(timed.step_entry_ms == 43_000 && timed.sample_ms == 44_002 && timed.wait == PathWait::SelectionDifferent
+        && timed.entries == PathCount::Many && timed.returns == PathCount::Many && timed.callback == PathCallback::Returned);
+    let reset = PathDiagnostic::sample(Step::Paths(PathStep::Activate(1)),44_010,Some(timed)).unwrap();
+    assert!(reset.step_entry_ms == 44_010 && reset.sample_ms == 44_010 && reset.wait == PathWait::NotSampled
+        && reset.reservations == PathCount::Zero && reset.entries == PathCount::Zero && reset.returns == PathCount::Zero);
+    for time in [999_999,1_000_000,u128::MAX] {
+        let maximal = PathDiagnostic { step_entry_ms:time,sample_ms:time,wait:PathWait::InitialFolderAbsent,
+            rejection:PathRejection::GtkFixtureTransition,..timed };
+        let (bytes,length) = failure_pair(path_trace,BootstrapProgress::AppInfoReturnedBeforeHold,None,Some(maximal)).unwrap();
+        let text = std::str::from_utf8(&bytes[..length]).unwrap();
+        assert!(length <= PATH_FAILURE_FRAME_BOUND && text.contains(if time == 999_999 { ";start=999999;now=999999;" } else { ";start=over;now=over;" }));
+    }
+    let frozen = AtomicBool::new(false); let mut retained = Some(timed);
+    latch_path_diagnostic(&frozen,&mut retained,PathDiagnostic { rejection:PathRejection::GtkDispatch,..timed });
+    let first_timed = retained;
+    latch_path_diagnostic(&frozen,&mut retained,reset);
+    assert!(retained == first_timed && retained.unwrap().step_entry_ms == 43_000);
+    // A generic failure can arrive immediately after a step transition, before
+    // record_at runs again. Its complete frame must use the actual new step.
+    let mut transition_trace = path_trace;
+    let next = PathDiagnostic::sample_trace(&mut transition_trace,Step::Paths(PathStep::Activate(1)),44_010,Some(timed));
+    let generic_failure = AtomicBool::new(false); generic_failure.store(true,Ordering::SeqCst);
+    assert!(generic_failure.load(Ordering::SeqCst) && transition_trace == (Step::Paths(PathStep::Activate(1)),Boundary::Gtk)
+        && next == Some(reset) && failure_pair(transition_trace,BootstrapProgress::Advanced,None,next).is_some());
+    let leaving = PathDiagnostic::sample_trace(&mut transition_trace,Step::Close,44_020,next);
+    assert!(leaving.is_none() && transition_trace == (Step::Close,Boundary::Gtk)
+        && failure_pair(transition_trace,BootstrapProgress::Advanced,None,leaving).is_some());
+    let mut unrelated = (Step::Environment,Boundary::Dom);
+    assert!(PathDiagnostic::sample_trace(&mut unrelated,Step::ReadEnvironment,20,None).is_none()
+        && unrelated == (Step::Environment,Boundary::Dom));
     // Each possible first winner retains matching trace/reason. A later return
     // at another recipe cannot erase a real GTK cause or invent one for generic
     // failure/deadline. The actual callbacks perform these writes under Record.
@@ -1630,17 +1693,17 @@ fn assert_failure_pair_contract() {
             match event {
                 0 => failed.store(true,Ordering::SeqCst),
                 1 => {
-                    if !failed.load(Ordering::SeqCst) { trace = path_trace; retained = PathDiagnostic::sample(path_trace.0); }
+                    if !failed.load(Ordering::SeqCst) { trace = path_trace; retained = PathDiagnostic::sample(path_trace.0,0,retained); }
                     latch_path_diagnostic(&failed,&mut retained,path_gtk);
                 },
                 2 => {
-                    let next = PathDiagnostic::sample(path_trace.0);
+                    let next = PathDiagnostic::sample(path_trace.0,0,retained);
                     if latch_failure(&failed,&mut trace,&mut progress,(path_trace.0,Boundary::Deadline),BootstrapProgress::Advanced) { retained = next; }
                 },
                 _ => unreachable!(),
             }
         }
-        latch_path_diagnostic(&failed,&mut retained,PathDiagnostic { step:PathStep::Activate(4),rejection:PathRejection::GtkReturnState });
+        latch_path_diagnostic(&failed,&mut retained,PathDiagnostic { step:PathStep::Activate(4),rejection:PathRejection::GtkReturnState,..path_plain });
         assert!(failed.load(Ordering::SeqCst) && progress == BootstrapProgress::Advanced);
         assert!(retained == Some(if order[0] == 1 { path_gtk } else { path_plain }));
         assert!(trace == match order[0] { 0 => original_trace,1 => path_trace,_ => (path_trace.0,Boundary::Deadline) });
@@ -1803,12 +1866,53 @@ impl PathRejection {
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct PathDiagnostic { step: PathStep, rejection: PathRejection }
+struct PathDiagnostic { step: PathStep, rejection: PathRejection, step_entry_ms: u128, sample_ms: u128,
+    reservations: PathCount, entries: PathCount, returns: PathCount, callback: PathCallback, wait: PathWait }
 impl PathDiagnostic {
-    fn sample(step: Step) -> Option<Self> {
-        let Step::Paths(step) = step else { return None; };
-        Some(Self { step, rejection: PathRejection::NotRecorded })
+    fn sample_trace(trace: &mut (Step,Boundary), step: Step, elapsed_ms: u128, previous: Option<Self>) -> Option<Self> {
+        // A real Path transition changes the diagnostic context in this same
+        // Record critical section. Preserve the boundary already observed.
+        if matches!(step,Step::Paths(_)) || matches!(trace.0,Step::Paths(_)) || previous.is_some() { trace.0 = step; }
+        Self::sample(step,elapsed_ms,previous)
     }
+    fn sample(step: Step, elapsed_ms: u128, previous: Option<Self>) -> Option<Self> {
+        let Step::Paths(step) = step else { return None; };
+        if let Some(mut old) = previous.filter(|old| old.step == step) {
+            old.sample_ms = elapsed_ms; return Some(old);
+        }
+        Some(Self { step, rejection: PathRejection::NotRecorded, step_entry_ms: elapsed_ms, sample_ms: elapsed_ms,
+            reservations: PathCount::Zero, entries: PathCount::Zero, returns: PathCount::Zero,
+            callback: if matches!(step,PathStep::Set(_) | PathStep::Activate(_)) { PathCallback::Idle } else { PathCallback::NotApplicable },
+            wait: PathWait::NotSampled })
+    }
+    fn mark(&mut self, callback: PathCallback) {
+        match callback {
+            PathCallback::Reserved => self.reservations.advance(),
+            PathCallback::Entered => self.entries.advance(),
+            PathCallback::Returned => self.returns.advance(),
+            _ => return,
+        }
+        self.callback = callback;
+    }
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PathCount { Zero, One, Many }
+impl PathCount {
+    fn advance(&mut self) { *self = if *self == Self::Zero { Self::One } else { Self::Many }; }
+    fn token(self) -> &'static [u8] { match self { Self::Zero => b"0", Self::One => b"1", Self::Many => b"m" } }
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PathCallback { NotApplicable, Idle, Reserved, Entered, Returned }
+impl PathCallback {
+    fn token(self) -> &'static [u8] { match self { Self::NotApplicable => b"na", Self::Idle => b"idle",
+        Self::Reserved => b"reserved", Self::Entered => b"entered", Self::Returned => b"returned" } }
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PathWait { NotSampled, DialogAbsent, InitialFolderAbsent, SelectionAbsent, SelectionDifferent, ResponseInsensitive }
+impl PathWait {
+    fn token(self) -> &'static [u8] { match self { Self::NotSampled => b"not-sampled", Self::DialogAbsent => b"dialog-absent",
+        Self::InitialFolderAbsent => b"initial-folder-absent", Self::SelectionAbsent => b"selection-absent",
+        Self::SelectionDifferent => b"selection-different", Self::ResponseInsensitive => b"response-insensitive" } }
 }
 #[derive(Clone, Copy)]
 struct PathCase { field: crate::asset_commands::ProjectPathField, name: &'static str, label: &'static str,
@@ -3194,12 +3298,12 @@ fn saved_read_context(r: &Record) -> bool {
         && r.sessions[0].projection.phase == edit::Phase::Final && r.sessions[0].projection.native_finality == edit::NativeFinality::Settled
 }
 pub(super) struct Observation {
-    case: Case, main: ThreadId, end: Instant, project_path: Option<PathBuf>, evidence_path: Option<PathBuf>, failed: AtomicBool,
+    case: Case, main: ThreadId, start: Instant, end: Instant, project_path: Option<PathBuf>, evidence_path: Option<PathBuf>, failed: AtomicBool,
     failure_reported: AtomicBool, failure_sink: rustix::fd::OwnedFd, record: Mutex<Record>, commands: Option<Arc<commands::Control>>,
 }
 impl Observation {
     fn new(case: Case, failure_sink: rustix::fd::OwnedFd) -> Self {
-        let end = Instant::now() + Duration::from_secs(45);
+        let start = Instant::now(); let end = start + Duration::from_secs(45);
         let project_path = (case != Case::Outstanding).then(project_path).flatten().map(|path|
             match case { Case::ProjectPaths => path.with_file_name("path-project"),
                 Case::WorkflowApply => path.with_file_name("workflow-project"),
@@ -3209,7 +3313,7 @@ impl Observation {
                 Case::VersionSave => path.with_file_name("version-project"), _ => path });
         let paths = Paths::new((case == Case::ProjectPaths).then_some(project_path.as_deref()).flatten());
         let evidence_path = project_path.as_ref().and_then(|path| path.parent()).map(|root| root.join("candidate-evidence"));
-        Self { case, main: std::thread::current().id(), end,
+        Self { case, main: std::thread::current().id(), start, end,
             failed: AtomicBool::new(case != Case::Outstanding && (project_path.is_none() || evidence_path.is_none())
                 || case == Case::ProjectPaths && paths.fixture.is_none()), project_path, evidence_path,
             failure_reported: AtomicBool::new(false), failure_sink, commands: case.commands().map(commands::Control::new), record: Mutex::new(Record {
@@ -3239,7 +3343,7 @@ impl Observation {
         if !self.failed.load(Ordering::SeqCst) {
             r.trace = (r.step, boundary);
             r.session.diagnostic = SessionDiagnostic::sample(r.step,r.evaluations,r.session.diagnostic);
-            r.paths.diagnostic = PathDiagnostic::sample(r.step);
+            self.path_sample(&mut r);
         }
         Some(r)
     }
@@ -3267,10 +3371,33 @@ impl Observation {
         } else { self.fail(); }
     }
     fn path_fail(&self, r: &mut Record, rejection: PathRejection) {
-        if let Some(mut diagnostic) = PathDiagnostic::sample(r.trace.0) {
+        if let Some(mut diagnostic) = PathDiagnostic::sample(r.trace.0,self.start.elapsed().as_millis(),r.paths.diagnostic) {
             diagnostic.rejection = rejection;
             latch_path_diagnostic(&self.failed,&mut r.paths.diagnostic,diagnostic);
         } else { self.fail(); }
+    }
+    fn path_sample(&self, r: &mut Record) -> bool {
+        if !self.failed.load(Ordering::SeqCst) {
+            let step = r.step; let previous = r.paths.diagnostic;
+            r.paths.diagnostic = PathDiagnostic::sample_trace(&mut r.trace,step,self.start.elapsed().as_millis(),previous);
+            true
+        } else { false }
+    }
+    fn path_callback(&self, step: PathStep, callback: PathCallback) {
+        let Some(mut r) = self.record() else { return; };
+        if self.failed.load(Ordering::SeqCst) || r.step != Step::Paths(step) { return; }
+        if self.path_sample(&mut r) {
+            if let Some(diagnostic) = r.paths.diagnostic.as_mut() { diagnostic.mark(callback); }
+        }
+    }
+    pub(super) fn path_wait(&self, wait: PathWait) {
+        // Call only after leaving DIALOG/GuiFacts borrows. This is cached DATA,
+        // never a reason to skip the original helper or return bookkeeping.
+        let Some(mut r) = self.record() else { return; };
+        if self.failed.load(Ordering::SeqCst) { return; }
+        if self.path_sample(&mut r) {
+            if let Some(diagnostic) = r.paths.diagnostic.as_mut() { diagnostic.wait = wait; }
+        }
     }
     fn report_failure(&self) {
         if !self.failed.load(Ordering::SeqCst) || self.failure_reported.load(Ordering::SeqCst) { return; }
@@ -4806,6 +4933,7 @@ impl Observation {
                 r.step = Step::Paths(PathStep::Settled(index));
             }, _ => self.path_fail(&mut r,PathRejection::GtkReturnState),
         }
+        self.path_sample(&mut r);
     }
     pub(super) fn preview_request(&self, base: &Value, draft: &Value) {
         let Some(mut r) = self.record_at(Boundary::Request) else { return; };
@@ -4882,6 +5010,7 @@ impl Observation {
             PathStep::FinalIos => Step::Paths(PathStep::Browse(9)),
             _ => { self.fail(); return; },
         };
+        self.path_sample(&mut r);
     }
     fn paths_report(&self) -> Option<Vec<u8>> {
         let r = self.record()?; let p = &r.paths;
@@ -4916,7 +5045,7 @@ impl Observation {
             // this relay was acquiring the record. Report only after unlock.
             if let Some(mut r) = self.record() {
                 let diagnostic = SessionDiagnostic::sample(r.step,r.evaluations,r.session.diagnostic);
-                let path_diagnostic = PathDiagnostic::sample(r.step);
+                let path_diagnostic = PathDiagnostic::sample(r.step,self.start.elapsed().as_millis(),r.paths.diagnostic);
                 let Record { step, trace, bootstrap, .. } = &mut *r;
                 let progress = *bootstrap;
                 if latch_failure(&self.failed, trace, bootstrap, (*step, Boundary::Deadline), progress) {
@@ -5047,7 +5176,8 @@ impl Observation {
             if !op.returned || !op.picker.settled(case.path.is_some())
                 || !state.document.installed_observation_path(project,u32::from(index)+3,case.field,case.reason,case.relative) { return; }
             if op.settled { self.fail(); return; }
-            r.paths.operations[index as usize].settled = true; r.step = Step::Paths(PathStep::ReadField(index)); return;
+            r.paths.operations[index as usize].settled = true; r.step = Step::Paths(PathStep::ReadField(index));
+            self.path_sample(&mut r); return;
         }
         if matches!(step, Step::EvidenceCancelled | Step::EvidenceSelected | Step::EvidenceObserved) {
             let state = app.state::<super::ShellState>();
@@ -5137,9 +5267,13 @@ impl Observation {
             },
             Step::Paths(path @ (PathStep::Set(index) | PathStep::Activate(index))) => {
                 let q = self.clone(); let app = app.clone();
+                // Reservation is not proof that a main-thread callback queued.
+                self.path_callback(path,PathCallback::Reserved);
                 if window.run_on_main_thread(move || {
+                    q.path_callback(path,PathCallback::Entered);
                     let result = if matches!(path,PathStep::Set(_)) { super::owned_gtk::select_observed_path(&app,&q,index) }
                         else { super::owned_gtk::activate_observed_path(&app,&q,index) };
+                    q.path_callback(path,PathCallback::Returned);
                     q.path_gtk_returned(path,result);
                 }).is_err() {
                     if let Some(mut r) = self.record() { self.path_fail(&mut r,PathRejection::GtkDispatch); } else { self.fail(); }
@@ -5384,6 +5518,7 @@ impl Observation {
             Step::ReadNoopReview => { r.sessions[1].review_visible = true; Step::Close },
             _ => { self.fail(); return; },
         };
+        self.path_sample(&mut r);
     }
     pub(super) fn close_prevented(&self) {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return; };

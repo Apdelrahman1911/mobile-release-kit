@@ -5162,6 +5162,42 @@ class SessionFixtureContracts(unittest.TestCase):
 
 
 class FailureLabelSinkContracts(unittest.TestCase):
+    def test_path_v2_timing_callback_wait_preserves_closed_prefix_contract(self):
+        good = (b"MRK_INSTALLED_SHELL_PATH_FAILURE=v2;index=8;reject=not-recorded;start=43000;now=45000;"
+                b"rsv=m;in=m;out=m;cb=returned;wait=selection-different\n"
+                b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathActivate\nMRK_INSTALLED_SHELL_FAILURE_PHASE=deadline\n"
+                b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n")
+        sample = L._shell_label_pair(good)["path"]
+        self.assertEqual(sample, {"recipeIndex": 8, "rejection": "not-recorded", "stepEntryElapsedMs": 43000,
+                                 "sampleElapsedMs": 45000, "callbackReservations": "m", "callbackEntries": "m",
+                                 "callbackReturns": "m", "callbackPhase": "returned", "lastWait": "selection-different"})
+        for end in range(len(good)):
+            self.assertIsNone(L._shell_label_pair(good[:end]))
+        for before, after in ((b"start=43000;now=45000", b"start=over;now=over"),
+                              (b"now=45000", b"now=over"), (b"cb=returned", b"cb=entered"),
+                              (b"cb=returned", b"cb=reserved")):
+            self.assertIsNotNone(L._shell_label_pair(good.replace(before, after)))
+        idle = good.replace(b"rsv=m;in=m;out=m;cb=returned;wait=selection-different", b"rsv=0;in=0;out=0;cb=idle;wait=not-sampled")
+        self.assertIsNotNone(L._shell_label_pair(idle))
+        reserved = idle.replace(b"rsv=0;in=0;out=0;cb=idle", b"rsv=1;in=0;out=0;cb=reserved")
+        self.assertIsNotNone(L._shell_label_pair(reserved))
+        self.assertIsNotNone(L._shell_label_pair(reserved.replace(b"in=0;out=0;cb=reserved", b"in=1;out=0;cb=entered")))
+        navigation = idle.replace(b"index=8", b"index=none").replace(b"PathActivate", b"PathNavigation").replace(b"cb=idle", b"cb=na")
+        self.assertIsNotNone(L._shell_label_pair(navigation))
+        bad = [good.replace(before, after) for before, after in (
+            (b"start=43000", b"start=45001"), (b"start=43000", b"start=over"),
+            (b"now=45000", b"now=1000000"), (b"now=45000", b"now=045000"), (b"now=45000", b"now=-1"),
+            (b"rsv=m", b"rsv=1"), (b"in=m", b"in=0"), (b"out=m", b"out=1"),
+            (b"cb=returned", b"cb=idle"), (b"cb=returned", b"cb=na"), (b"cb=returned", b"cb=queued"),
+            (b"PathActivate", b"PathSet"), (b"wait=selection-different", b"wait=arbitrary"),
+            (b";now=", b";start=1;now="), (b"=v2;", b"=v3;"), (b"\n", b"\r\n"))]
+        bad += [good + b"x", good + b"\n", idle.replace(b"out=0", b"out=1"),
+                reserved.replace(b"rsv=1", b"rsv=m"), navigation.replace(b"cb=na", b"cb=idle")]
+        for raw in bad:
+            self.assertIsNone(L._shell_label_pair(raw))
+        with patch.object(L, "SHELL_PATH_FAILURE_V2_FRAME_BOUND", len(good) - 1):
+            self.assertIsNone(L._shell_label_pair(good))
+
     def test_path_prefix_requires_complete_frame_closed_reason_and_recipe_shape(self):
         def frame(step=b"PathActivate", index=b"0", rejection=b"gtk-initial-folder"):
             return (b"MRK_INSTALLED_SHELL_PATH_FAILURE=v1;index=" + index + b";reject=" + rejection + b"\n"
@@ -5684,17 +5720,27 @@ class FailureLabelSinkContracts(unittest.TestCase):
         def body(text, name):
             return text.split("fn " + name + "(", 1)[1].split("\n    }", 1)[0]
         diagnostic = source.split("struct PathDiagnostic", 1)[1].split("#[derive(Clone, Copy)]", 1)[0]
-        self.assertIn("{ step: PathStep, rejection: PathRejection }", diagnostic)
-        self.assertIn("Some(Self { step, rejection: PathRejection::NotRecorded })", diagnostic)
+        self.assertIn("{ step: PathStep, rejection: PathRejection, step_entry_ms: u128, sample_ms: u128,", diagnostic)
+        self.assertIn("previous.filter(|old| old.step == step)", diagnostic)
+        self.assertIn("old.sample_ms = elapsed_ms; return Some(old);", diagnostic)
+        self.assertIn("step_entry_ms: elapsed_ms, sample_ms: elapsed_ms", diagnostic)
         for forbidden in ("PathBuf", "String", "filename", "Instant", "snapshot"):
             self.assertNotIn(forbidden, diagnostic)
         cache = body(source, "record_at")
-        self.assertIn("r.paths.diagnostic = PathDiagnostic::sample(r.step);", cache)
-        self.assertLess(cache.index("if !self.failed.load(Ordering::SeqCst)"), cache.index("r.paths.diagnostic ="))
+        self.assertIn("self.path_sample(&mut r);", cache)
+        self.assertLess(cache.index("if !self.failed.load(Ordering::SeqCst)"), cache.index("self.path_sample("))
+        sampler = body(source, "path_sample")
+        self.assertLess(sampler.index("if !self.failed.load(Ordering::SeqCst)"), sampler.index("r.paths.diagnostic ="))
+        self.assertIn("PathDiagnostic::sample_trace(&mut r.trace,step,self.start.elapsed().as_millis(),previous)", sampler)
+        self.assertIn("if matches!(step,Step::Paths(_)) || matches!(trace.0,Step::Paths(_)) || previous.is_some() { trace.0 = step; }", diagnostic)
+        self.assertIn("} else { false }", sampler)
+        for name, write in (("path_callback", "diagnostic.mark(callback)"), ("path_wait", "diagnostic.wait = wait")):
+            marker = body(source, name)
+            self.assertIn("if self.path_sample(&mut r) {\n            if let Some(diagnostic) = r.paths.diagnostic.as_mut() { " + write + "; }\n        }", marker)
         latch = source.split("fn latch_path_diagnostic(", 1)[1].split("const PROJECT_SOURCE", 1)[0]
         self.assertIn("if !failed.swap(true, Ordering::SeqCst) { *diagnostic = Some(next); }", latch)
         helper = body(source, "path_fail")
-        self.assertIn("PathDiagnostic::sample(r.trace.0)", helper)
+        self.assertIn("PathDiagnostic::sample(r.trace.0,self.start.elapsed().as_millis(),r.paths.diagnostic)", helper)
         self.assertIn("latch_path_diagnostic(&self.failed,&mut r.paths.diagnostic,diagnostic)", helper)
         self.assertNotIn("self.record", helper)
         pure = source.split("fn assert_failure_pair_contract()", 1)[1].split("// Original destruction facts", 1)[0]
@@ -5716,13 +5762,16 @@ class FailureLabelSinkContracts(unittest.TestCase):
         facts = admitting.split("let original_facts =", 1)[1].split("if !original_facts", 1)[0]
         self.assertTrue(facts.rstrip().endswith("f.refusal.is_none());")); self.assertNotIn("q.", facts)
         self.assertEqual(admitting.count("dialog.current_folder()"), 1)
-        self.assertIn("let Some(folder) = dialog.current_folder() else { return Ok(None); };", admitting)
+        self.assertIn("let Some(folder) = dialog.current_folder() else { q.path_wait(installed_observation::PathWait::InitialFolderAbsent); return Ok(None); };", admitting)
         self.assertIn("if Some(folder.as_path()) != q.project_path() { q.path_failed(R::GtkInitialFolder); return Err(()); }", admitting)
         selecting = body(shell, "select_observed_path"); activating = body(shell, "activate_observed_path")
         self.assertEqual(selecting.count("dialog.set_filename(path)"), 1)
         self.assertLess(selecting.index("q.path_selection(id,index)?"), selecting.index("dialog.set_filename(path)"))
         self.assertIn("if !dialog.set_filename(path) { q.path_failed(R::GtkSelectionSetter); return Err(()); }", selecting)
-        self.assertLess(activating.index("if !button.is_sensitive() { return Ok(false); }"), activating.index("q.path_activation(id,index)?"))
+        self.assertLess(activating.index("if !button.is_sensitive() { q.path_wait(W::ResponseInsensitive); return Ok(false); }"), activating.index("q.path_activation(id,index)?"))
+        self.assertEqual(activating.count("dialog.file()"), 1)
+        self.assertIn("q.path_wait(W::SelectionAbsent); return Ok(false)", activating)
+        self.assertIn("q.path_wait(W::SelectionDifferent); return Ok(false)", activating)
         self.assertLess(activating.index("q.path_activation(id,index)?"), activating.index("button.emit_clicked()"))
         self.assertEqual(activating.count("button.emit_clicked()"), 1)
         for forbidden in (".filename(", ".response(", ".begin_response(", "set_current_folder", "Instant::", "sleep"):
@@ -5755,7 +5804,15 @@ class FailureLabelSinkContracts(unittest.TestCase):
         self.assertEqual(returned.count(".activation_returned(result)"), 1)
         self.assertNotIn(".responded", returned); self.assertNotIn("self.failed.load", returned)
         self.assertIn("self.path_fail(&mut r,PathRejection::GtkReturnState)", returned)
-        self.assertIn("if let Some(mut r) = self.record() { self.path_fail(&mut r,PathRejection::GtkDispatch); } else { self.fail(); }", body(source, "tick"))
+        self.assertIn("self.path_sample(&mut r);", returned)
+        self.assertIn("self.path_sample(&mut r);", body(source, "path_dom"))
+        tick = body(source, "tick")
+        self.assertIn("if let Some(mut r) = self.record() { self.path_fail(&mut r,PathRejection::GtkDispatch); } else { self.fail(); }", tick)
+        dispatch = tick.split("let q = self.clone(); let app = app.clone();\n                // Reservation", 1)[1].split("Step::Cancel |", 1)[0]
+        markers = ["self.path_callback(path,PathCallback::Reserved)", "window.run_on_main_thread", "q.path_callback(path,PathCallback::Entered)",
+                   "let result =", "q.path_callback(path,PathCallback::Returned)", "q.path_gtk_returned(path,result)"]
+        self.assertEqual([dispatch.index(marker) for marker in markers], sorted(dispatch.index(marker) for marker in markers))
+        self.assertNotIn("return;", dispatch.split("}).is_err()", 1)[0])
         for name, reason in (("native_destroyed", "GtkDestroyState"), ("native_released", "GtkReleaseState")):
             path_branch = body(source, name).split("if self.case == Case::ProjectPaths", 1)[1].split("if self.case == Case::Positive", 1)[0]
             self.assertIn("self.path_fail(&mut r,PathRejection::" + reason + ")", path_branch)
