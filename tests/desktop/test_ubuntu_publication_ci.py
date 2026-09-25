@@ -152,7 +152,251 @@ def package_data(data_files, control_files, *, mutate=None, trailing=False, tar_
     return bytes(result)
 
 
+def native_cargo_data(*, candidate=False, source=Path("/source")):
+    """Synthetic graph DATA plus real manifest/lock/notice correspondence.
+
+    This fixture is not a Cargo capture or compilation receipt. The original
+    source-bound metadata for each actual profile is admitted separately.
+    """
+    manifest_paths = (
+        "desktop/src-tauri/Cargo.toml",
+        "desktop/native/linux-mount-observation/Cargo.toml",
+        "desktop/vendor/secret-service-5.2.0/Cargo.toml",
+        "desktop/vendor/zbus-5.19.0/Cargo.toml",
+    )
+    packages = []
+    for relative in manifest_paths:
+        manifest = S.tomllib.loads((SOURCE / relative).read_text(encoding="utf-8"))
+        package = manifest["package"]
+        path = source / relative
+        packages.append({"id": "path+" + path.parent.as_uri() + "#" + package["name"] + "@" + package["version"],
+                         "name": package["name"], "version": package["version"], "license": package["license"],
+                         "source": None, "manifest_path": str(path)})
+    root_manifest = S.tomllib.loads((SOURCE / manifest_paths[0]).read_text(encoding="utf-8"))
+    declarations = []
+    for target, table in [(None, root_manifest), *root_manifest.get("target", {}).items()]:
+        for kind, section in ((None, "dependencies"), ("dev", "dev-dependencies"), ("build", "build-dependencies")):
+            for name, fields in table.get(section, {}).items():
+                if not isinstance(fields, dict) or "path" not in fields and name != "zbus":
+                    continue
+                row = {"name": name, "target": target, "kind": kind, "rename": None, "registry": None,
+                       "req": fields.get("version", "*"), "optional": fields.get("optional", False),
+                       "features": fields.get("features", []), "uses_default_features": fields.get("default-features", True),
+                       "source": None if "path" in fields else "registry+https://github.com/rust-lang/crates.io-index"}
+                if "path" in fields:
+                    row["path"] = os.path.normpath(str((source / manifest_paths[0]).parent / fields["path"]))
+                declarations.append(row)
+    packages[0]["dependencies"] = declarations
+    notices = S.D.decode((SOURCE / "desktop/packaging/debian/native-notices/inputs.json").read_bytes(), 1 << 20)
+    locked = S.tomllib.loads((SOURCE / "desktop/src-tauri/Cargo.lock").read_text(encoding="utf-8"))
+    for crate in notices["crates"]:
+        name, version = crate["name"], crate["version"]
+        packages.append({"id": "registry+https://github.com/rust-lang/crates.io-index#" + name + "@" + version,
+                         "name": name, "version": version, "license": crate["license"],
+                         "source": "registry+https://github.com/rust-lang/crates.io-index",
+                         "manifest_path": "/private/cargo/registry/src/index/" + name + "-" + version + "/Cargo.toml"})
+    nodes = [{"id": row["id"], "features": [], "deps": [], "dependencies": []} for row in packages]
+    nodes[0]["features"] = [] if candidate else ["ubuntu-runtime-publisher"]
+    nodes[0]["deps"] = [{"name": row["name"].replace("-", "_"), "pkg": row["id"],
+                        "dep_kinds": [{"kind": None, "target": None}]} for row in packages[1:4]]
+    nodes[0]["dependencies"] = [row["id"] for row in packages[1:4]]
+    root_id = packages[0]["id"]
+    return {"version": 1, "workspace_root": str(source / "desktop/src-tauri"),
+            "target_directory": str(source / "desktop/src-tauri/target"), "build_directory": str(source / "desktop/src-tauri/target"),
+            "workspace_members": [root_id], "workspace_default_members": [root_id],
+            "packages": packages, "resolve": {"root": root_id, "nodes": nodes}}, notices, locked
+
+
+
 class PublisherCI(unittest.TestCase):
+
+    def test_native_cargo_profiles_bind_current_manifests_lock_and_notices(self):
+        manifest = S.tomllib.loads((SOURCE / "desktop/src-tauri/Cargo.toml").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["features"]["default"], [])
+        self.assertEqual(manifest["features"]["ubuntu-runtime-publisher"], [])
+        self.assertEqual(manifest["patch"], {"crates-io": {"zbus": {"path": "../vendor/zbus-5.19.0"}}})
+        for candidate in (False, True):
+            value, notices, locked = native_cargo_data(candidate=candidate)
+            with self.subTest(candidate=candidate):
+                _, packages, nodes = S.native_cargo_metadata(
+                    S.D.canonical(value), Path("/source"), Path("/source/desktop/src-tauri/target"),
+                    notices["crates"], locked, candidate=candidate)
+                self.assertEqual(len(packages), len(notices["crates"]) + 4)
+                self.assertEqual((len(packages), len(notices["crates"]),
+                                  sum(row["source"] is None for row in packages.values())), (106, 102, 4))
+                self.assertEqual({row["name"] for row in packages.values() if row["source"] is None},
+                                 {"mobile-release-kit-desktop", "mrk-linux-mount-observation", "secret-service", "zbus"})
+                self.assertEqual(nodes[value["resolve"]["root"]]["features"], [] if candidate else ["ubuntu-runtime-publisher"])
+                keys = {(row["name"], row["version"]) for row in notices["crates"]}
+                self.assertLess(keys, {(row["name"], row["version"]) for row in locked["package"] if "source" in row})
+                self.assertTrue({("ordered-stream", "0.2.0"), ("aes", "0.9.2"), ("zbus_macros", "5.19.0"),
+                                 ("sha2", "0.10.9"), ("sha2", "0.11.0")} <= keys)
+                # This is an externally expected metadata target, not necessarily
+                # the separate private compiler output directory.
+                private_target = deepcopy(value)
+                private_target.update(target_directory="/private-metadata-target", build_directory="/private-metadata-target")
+                S.native_cargo_metadata(S.D.canonical(private_target), Path("/source"), Path("/private-metadata-target"),
+                                        notices["crates"], locked, candidate=candidate)
+                with self.assertRaises(S.D.Refused):
+                    S.native_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/private-metadata-target"),
+                                            notices["crates"], locked, candidate=candidate)
+
+    def test_native_inputs_entry_preserves_each_metadata_profile_before_any_tool(self):
+        class BeforeTools(Exception):
+            pass
+
+        class NoCommands:
+            def command(self, *args, **kwargs):
+                raise AssertionError("Native DATA entry test reached an external tool")
+
+        original = S.native_source_notice_inputs
+
+        def stop_after_originals(source, admitted, rows):
+            observed = original(source, admitted, rows)
+            self.assertEqual(len(observed), 6)
+            raise BeforeTools
+
+        for candidate in (False, True):
+            value, notices, _ = native_cargo_data(candidate=candidate, source=SOURCE)
+            with self.subTest(candidate=candidate), tempfile.TemporaryDirectory(prefix="mrk-native-entry-data-") as name:
+                work = Path(name)
+                # Native notice inventory/readback and source admission are real
+                # DATA checks. Suppress duplicate copies, then stop before the
+                # first crate-cache, compiler, package or live-host operation.
+                with patch.object(S.D, "copy") as copies, \
+                     patch.object(S, "native_source_notice_inputs", side_effect=stop_after_originals), \
+                     patch.object(S, "protected_host_file", side_effect=AssertionError("Live host access")):
+                    with self.assertRaises(BeforeTools):
+                        S.native_inputs(NoCommands(), SOURCE, work, {}, "/unused/cargo", "/unused/rustc",
+                                        S.D.canonical(value), candidate=candidate)
+                    self.assertEqual(copies.call_count, len(notices["files"]) + 1)
+        # The existing fixed producer entry must forward its observed profile;
+        # a default argument must not silently turn installed compilation on.
+        owner = (SOURCE / "desktop/tools/ci_ubuntu_publication.py").read_text(encoding="utf-8")
+        self.assertIn("native = native_inputs(check, source, work, environment, cargo, rustc, metadata_raw, candidate=installed_compile)", owner)
+
+    def test_native_cargo_refuses_stale_duplicate_or_substituted_inputs(self):
+        original, notices, locked = native_cargo_data()
+        changes = (
+            ("missing-registry", lambda row: row["packages"].pop()),
+            ("extra-registry", lambda row: row["packages"].append(deepcopy(row["packages"][-1]))),
+            ("duplicate-id", lambda row: row["packages"][-1].update(id=row["packages"][-2]["id"])),
+            ("duplicate-registry-key", lambda row: row["packages"][-1].update(
+                name=row["packages"][-2]["name"], version=row["packages"][-2]["version"])),
+            ("different-registry-key", lambda row: row["packages"][-1].update(version="99.0.0")),
+            ("different-source", lambda row: row["packages"][-1].update(source="registry+https://unreviewed.invalid/index")),
+            ("different-license", lambda row: row["packages"][-1].update(license="not-the-original-license")),
+            ("sdk-registry-fallback", lambda row: row["packages"][3].update(
+                source="registry+https://github.com/rust-lang/crates.io-index")),
+            ("sdk-path-substitution", lambda row: row["packages"][2].update(manifest_path="/elsewhere/Cargo.toml")),
+            ("foreign-platform", lambda row: row["packages"][3].update(name="mrk-windows-installed-native")),
+            ("missing-declaration", lambda row: row["packages"][0]["dependencies"].pop()),
+            ("missing-declaration-role", lambda row: next(item for item in row["packages"][0]["dependencies"]
+                if item["name"] == "mrk-windows-installed-native" and item["kind"] == "dev").update(features=[])),
+            ("relabelled-source-id", lambda row: (
+                row["packages"][-1].update(id="not-the-original-cargo-source-id"),
+                row["resolve"]["nodes"][-1].update(id="not-the-original-cargo-source-id"))),
+        )
+        for label, change in changes:
+            value = deepcopy(original); change(value)
+            with self.subTest(mutation=label), self.assertRaises(S.D.Refused):
+                S.native_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/source/desktop/src-tauri/target"),
+                                        notices["crates"], locked)
+        stale = deepcopy(original)
+        stale["packages"] = stale["packages"][:2] + stale["packages"][4:38]
+        stale["resolve"]["nodes"] = stale["resolve"]["nodes"][:2] + stale["resolve"]["nodes"][4:38]
+        for value, rows in ((original, notices["crates"][:34]), (stale, notices["crates"][:34]),
+                            (original, notices["crates"] + [notices["crates"][-1]]),
+                            (original, notices["crates"][:-1])):
+            with self.subTest(stale_or_duplicate_count=len(rows)), self.assertRaises(S.D.Refused):
+                S.native_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/source/desktop/src-tauri/target"),
+                                        rows, locked)
+        for mutation in ("checksum", "source", "missing", "duplicate"):
+            value = deepcopy(locked)
+            key = (notices["crates"][0]["name"], notices["crates"][0]["version"])
+            row = next(row for row in value["package"] if (row["name"], row["version"]) == key and "source" in row)
+            if mutation == "missing":
+                value["package"].remove(row)
+            elif mutation == "duplicate":
+                value["package"].append(deepcopy(row))
+            else:
+                row[mutation] = "0" * 64 if mutation == "checksum" else "registry+https://unreviewed.invalid/index"
+            with self.subTest(lock=mutation), self.assertRaises(S.D.Refused):
+                S.native_cargo_metadata(S.D.canonical(original), Path("/source"), Path("/source/desktop/src-tauri/target"),
+                                        notices["crates"], value)
+
+    def test_native_cargo_resolve_roots_roles_and_profiles_are_not_interchangeable(self):
+        original, notices, locked = native_cargo_data()
+        changes = (
+            ("workspace", lambda row: row.update(workspace_root="/other")),
+            ("target", lambda row: row.update(target_directory="/private-compile-target")),
+            ("build-target", lambda row: row.update(build_directory="/private-compile-target")),
+            ("members", lambda row: row.update(workspace_members=[row["packages"][1]["id"]])),
+            ("default-members", lambda row: row.update(workspace_default_members=[])),
+            ("root", lambda row: row["resolve"].update(root=row["packages"][1]["id"])),
+            ("profile", lambda row: row["resolve"]["nodes"][0].update(features=[])),
+            ("extra-profile", lambda row: row["resolve"]["nodes"][0].update(features=["ubuntu-runtime-publisher", "development-runtime"])),
+            ("duplicate-node", lambda row: row["resolve"]["nodes"].append(deepcopy(row["resolve"]["nodes"][-1]))),
+            ("foreign-node", lambda row: row["resolve"]["nodes"][-1].update(id="windows")),
+            ("missing-local-node", lambda row: row["resolve"]["nodes"].pop(3)),
+            ("foreign-edge", lambda row: row["resolve"]["nodes"][0]["deps"][0].update(pkg="windows")),
+            ("duplicate-edge", lambda row: row["resolve"]["nodes"][0]["deps"].append(deepcopy(row["resolve"]["nodes"][0]["deps"][0]))),
+            ("missing-edge", lambda row: row["resolve"]["nodes"][0].update(deps=[], dependencies=[])),
+            ("unbound-edge", lambda row: row["resolve"]["nodes"][0].update(dependencies=[])),
+            ("duplicate-role", lambda row: row["resolve"]["nodes"][0]["deps"][0]["dep_kinds"].append({"kind": None, "target": None})),
+            ("unknown-role", lambda row: row["resolve"]["nodes"][0]["deps"][0]["dep_kinds"][0].update(kind="unknown")),
+            ("duplicate-features", lambda row: row["resolve"]["nodes"][1].update(features=["x", "x"])),
+        )
+        for label, change in changes:
+            value = deepcopy(original); change(value)
+            with self.subTest(mutation=label), self.assertRaises(S.D.Refused):
+                S.native_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/source/desktop/src-tauri/target"),
+                                        notices["crates"], locked)
+        for candidate in (False, True):
+            value, _, _ = native_cargo_data(candidate=not candidate)
+            with self.subTest(wrong_profile=candidate), self.assertRaises(S.D.Refused):
+                S.native_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/source/desktop/src-tauri/target"),
+                                        notices["crates"], locked, candidate=candidate)
+        # Conservatively accounted does not mean active or compiled. Retain the
+        # exact registry package while omitting its synthetic resolve node.
+        value = deepcopy(original)
+        inactive = value["resolve"]["nodes"].pop()["id"]
+        _, packages, nodes = S.native_cargo_metadata(
+            S.D.canonical(value), Path("/source"), Path("/source/desktop/src-tauri/target"), notices["crates"], locked)
+        self.assertIn(inactive, packages)
+        self.assertNotIn(inactive, nodes)
+        with self.assertRaises(S.D.Refused):
+            S.shell_compiler_units([{"package_id": inactive, "features": []}], packages, nodes)
+
+    def test_native_notices_bind_archive_members_and_maintained_source_originals(self):
+        _, notices, _ = native_cargo_data()
+        rows = S.D.records(notices["files"])
+        observed = S.native_source_notice_inputs(SOURCE, notices, rows)
+        originals = {row["path"] for row in observed}
+        self.assertEqual(originals, {str(SOURCE / row["sourcePath"]) for row in notices["localSourceNotices"]})
+        self.assertEqual(len(originals), 6)
+        self.assertIn(str(SOURCE / "desktop/vendor/secret-service-5.2.0/MRK-PATCHES.md"), originals)
+        self.assertIn(str(SOURCE / "desktop/vendor/zbus-5.19.0/MRK-MAINTAINED.md"), originals)
+        members = [member for crate in notices["crates"] for member in crate.get("noticeMembers", [])]
+        self.assertEqual(len(members), 127)  # Independently verified new original archive members.
+        self.assertTrue(any(member["member"].endswith("/src/spin/LICENSE") for member in members))
+        self.assertTrue(any(member["member"].endswith("/LICENSE-THIRD-PARTY") for member in members))
+        for field, replacement in (("member", "other/LICENSE"), ("noticePath", "missing/LICENSE"),
+                                   ("size", 0), ("sha256", "0" * 64)):
+            changed = deepcopy(notices)
+            member = next(crate["noticeMembers"][0] for crate in changed["crates"] if "noticeMembers" in crate)
+            member[field] = replacement
+            with self.subTest(member=field), self.assertRaises(S.D.Refused):
+                S.native_source_notice_inputs(SOURCE, changed, rows)
+        binding = next(row for row in notices["localSourceNotices"] if row["sourcePath"].endswith("/zbus-5.19.0/LICENSE"))
+        with tempfile.TemporaryDirectory(prefix="mrk-native-notice-data-") as name:
+            temporary = Path(name)
+            selected = temporary / binding["sourcePath"]
+            selected.parent.mkdir(parents=True)
+            selected.write_bytes(b"Not the maintained SDK's original license.\n")
+            with self.assertRaises(S.D.Refused):
+                S.native_source_notice_inputs(temporary, {"crates": [], "localSourceNotices": [binding]}, rows)
+
     def test_ubuntu_supplier_notice_inventory_and_exact_packages(self):
         root = SOURCE / "desktop/packaging/debian/native-notices"
         raw = S.D.read(root / "inputs.json", 1 << 20)

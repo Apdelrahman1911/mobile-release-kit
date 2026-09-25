@@ -407,7 +407,7 @@ MAX_DEB = 512 << 20
 KERNEL_SELECTOR = "installed_runtime::pure_tests::kernel_scope_is_reviewed_ubuntu"
 F1_MANIFEST_SHA256 = "1270d1d7d9427fff260bb1e79f51c1c3c14145651db87014b0ee9d08d601c112"
 FIXTURE_SOURCE = b"fn main() { std::process::exit(78); }\n"
-NOTICE_INPUTS_SHA256 = "3f20baf909689c105c5b09e19ec79e4e8f49fec33e75315ad44ee0ea134c9169"
+NOTICE_INPUTS_SHA256 = "88405397949e3528141d0b9adb5246b72e4d052e1e802df8855c8bc8c8adbe6c"
 SONAME_PACKAGES = {name: "libc6:amd64" for name in (
     "libc.so.6", "ld-linux-x86-64.so.2", "libm.so.6", "libmvec.so.1", "libdl.so.2",
     "libpthread.so.0", "librt.so.1", "libutil.so.1")}
@@ -1196,7 +1196,182 @@ def ubuntu_package_notice(admitted, rows, notices, actual, owned_files):
             "commonLicenseSource": admitted["ubuntu"]["commonLicenseSource"], "commonLicenses": selected}
 
 
-def native_inputs(check, source, work, environment, cargo, rustc, metadata_raw):
+def linux_local_cargo_sources(packages, nodes, root, source):
+    """The shared four-local/eight-declaration Linux source contract."""
+    # The Linux-filtered graph includes the two maintained SDK sources, not
+    # additional native platforms or arbitrary path/registry replacements.
+    local_paths = {
+        "mobile-release-kit-desktop": ("0.1.0", source / "desktop/src-tauri/Cargo.toml"),
+        "mrk-linux-mount-observation": ("0.1.0", source / "desktop/native/linux-mount-observation/Cargo.toml"),
+        "secret-service": ("5.2.0", source / "desktop/vendor/secret-service-5.2.0/Cargo.toml"),
+        "zbus": ("5.19.0", source / "desktop/vendor/zbus-5.19.0/Cargo.toml"),
+    }
+    local = [row for row in packages if row.get("source") is None]
+    D.need(len(local) == len(local_paths) and {row["name"] for row in local} == set(local_paths)
+           and all((row["version"], row["manifest_path"]) == (local_paths[row["name"]][0], str(local_paths[row["name"]][1]))
+                   for row in local),
+           "Linux Cargo local source roster differs")
+    D.need(all(row["id"] in nodes for row in local), "Linux Cargo active local graph differs")
+    # Other-target helpers remain root dependency declarations, not packages.
+    declarations = root.get("dependencies")
+    D.need(type(declarations) is list
+           and all(type(row) is dict and type(row.get("name")) is str for row in declarations),
+           "Linux Cargo root dependency declarations differ")
+    expected_declarations = [
+        {"name": name, "path": str(source / ("desktop/native/" + directory)), "target": cfg,
+         "source": None, "req": "*", "kind": None, "rename": None, "optional": False,
+         "uses_default_features": True, "features": [], "registry": None}
+        for name, directory, cfg in (
+            ("mrk-linux-mount-observation", "linux-mount-observation",
+             'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))'),
+            ("mrk-macos-installed-native", "macos-installed-native",
+             'cfg(all(target_os = "macos", target_arch = "aarch64"))'),
+            ("mrk-windows-installed-native", "windows-installed-native",
+             'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'),
+        )
+    ]
+    # Cargo retains the other-target dev declaration even in the filtered
+    # Linux graph. It is not an active Windows package or compiler unit.
+    expected_declarations.append({
+        "name": "mrk-windows-installed-native", "path": str(source / "desktop/native/windows-installed-native"),
+        "target": 'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))',
+        "source": None, "req": "*", "kind": "dev", "rename": None, "optional": False,
+        "uses_default_features": True, "features": ["qualification-result"], "registry": None,
+    })
+    for kind, support in ((None, []), ("dev", ["mrk-retrieval-test-support"])):
+        expected_declarations.append({
+            "name": "secret-service", "path": str(source / "desktop/vendor/secret-service-5.2.0"),
+            "target": 'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))',
+            "source": None, "req": "=5.2.0", "kind": kind, "rename": None, "optional": False,
+            "uses_default_features": False, "features": ["rt-tokio-crypto-rust", *support], "registry": None,
+        })
+    # Cargo retains registry declarations for the patched SDK. Both roles must
+    # resolve to the one exact local zbus above; a registry fallback is refused.
+    for kind, support in ((None, []), ("dev", ["mrk-owned-test-support"])):
+        expected_declarations.append({
+            "name": "zbus", "target": 'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))',
+            "source": "registry+https://github.com/rust-lang/crates.io-index", "req": "=5.19.0", "kind": kind,
+            "rename": None, "optional": False, "uses_default_features": False,
+            "features": ["tokio", *support], "registry": None,
+        })
+    local_names = {row["name"] for row in expected_declarations}
+    local_declarations = [row for row in declarations
+                          if row.get("source") is None or "path" in row or row["name"] in local_names]
+    D.need(len(local_declarations) == len(expected_declarations)
+           and sorted(D.canonical(row) for row in local_declarations)
+           == sorted(D.canonical(row) for row in expected_declarations),
+           "Linux Cargo local dependency declarations differ")
+    return local_paths
+
+
+def native_cargo_metadata(raw, source, target, notice_crates, locked, *, candidate=False):
+    """Bind one fixed Linux profile to its exact original-notice input set.
+
+    Package accounting is conservative: an admitted registry input need not
+    have an active resolve node. This is not compiled/linked-unit attribution.
+    """
+    D.need(type(candidate) is bool and type(notice_crates) is list and notice_crates
+           and all(type(row) is dict and all(type(row.get(key)) is str and row[key]
+                   for key in ("name", "version", "license", "archiveSha256"))
+                   and re.fullmatch(r"[0-9a-f]{64}", row["archiveSha256"]) is not None
+                   for row in notice_crates), "Native notice crate roster is invalid")
+    expected = {(row["name"], row["version"]): row for row in notice_crates}
+    D.need(len(expected) == len(notice_crates), "Duplicate native notice crate")
+    metadata = C.bounded_json(raw, LOG_LIMIT)
+    packages, resolve = metadata.get("packages"), metadata.get("resolve")
+    D.need(type(packages) is list and len(packages) == len(expected) + 4
+           and type(resolve) is dict and type(metadata.get("version")) is int and metadata["version"] == 1
+           and metadata.get("workspace_root") == str(source / "desktop/src-tauri")
+           and metadata.get("target_directory") == str(target)
+           and metadata.get("build_directory") == str(target), "Native Cargo roster/root/target differs")
+    D.need(all(type(row) is dict and all(type(row.get(key)) is str and row[key]
+                   for key in ("id", "name", "version", "manifest_path"))
+                   and "source" in row and (row["source"] is None or type(row["source"]) is str)
+                   for row in packages), "Native Cargo package identity is invalid")
+    node_rows = resolve.get("nodes")
+    D.need(type(node_rows) is list and all(type(row) is dict and type(row.get("id")) is str
+           and row["id"] for row in node_rows), "Native Cargo resolve nodes are invalid")
+    by_id = {row["id"]: row for row in packages}
+    nodes = {row["id"]: row for row in node_rows}
+    D.need(len(by_id) == len(packages) and len(nodes) == len(node_rows) and set(nodes) <= set(by_id),
+           "Native Cargo metadata IDs differ/duplicate")
+    roots = [row for row in packages if row["manifest_path"] == str(source / "desktop/src-tauri/Cargo.toml")]
+    D.need(len(roots) == 1 and roots[0]["name"] == "mobile-release-kit-desktop" and roots[0]["version"] == "0.1.0"
+           and resolve.get("root") == roots[0]["id"] and roots[0]["id"] in nodes
+           and metadata.get("workspace_members") == [roots[0]["id"]]
+           and metadata.get("workspace_default_members") == [roots[0]["id"]]
+           and nodes[roots[0]["id"]].get("features") == ([] if candidate else FEATURES),
+           "Native Cargo root/workspace/profile differs")
+    for row in nodes.values():
+        features, deps, dependencies = row.get("features"), row.get("deps"), row.get("dependencies")
+        D.need(type(features) is list and all(type(name) is str for name in features)
+               and len(features) == len(set(features)) and type(deps) is list
+               and all(type(dep) is dict and type(dep.get("name")) is str and dep["name"]
+                       and type(dep.get("pkg")) is str and dep["pkg"] in nodes for dep in deps)
+               and len(deps) == len({(dep["name"], dep["pkg"]) for dep in deps})
+               and type(dependencies) is list and all(type(item) is str for item in dependencies)
+               and len(dependencies) == len(set(dependencies))
+               and set(dependencies) == {dep["pkg"] for dep in deps}, "Native resolved Cargo edge/features differ")
+        for dep in deps:
+            kinds = dep.get("dep_kinds")
+            D.need(type(kinds) is list and kinds and all(type(kind) is dict
+                   and set(kind) == {"kind", "target"} and kind["kind"] in (None, "dev", "build")
+                   and (kind["target"] is None or type(kind["target"]) is str) for kind in kinds)
+                   and len(kinds) == len({D.canonical(kind) for kind in kinds}),
+                   "Native resolved Cargo dependency roles differ")
+    local_paths = linux_local_cargo_sources(packages, nodes, roots[0], source)
+    local_ids = {row["id"] for row in packages if row["source"] is None}
+    D.need(local_ids - {roots[0]["id"]} <= {dep["pkg"] for dep in nodes[roots[0]["id"]]["deps"]},
+           "Native Cargo root lost an active local dependency")
+    registry_rows = [row for row in packages if row["source"] is not None]
+    registry = {(row["name"], row["version"]): row for row in registry_rows}
+    D.need(len(registry) == len(registry_rows) and set(registry) == set(expected)
+           and all(row["name"] not in local_paths for row in registry_rows),
+           "Native Cargo source versions differ from original notices")
+    registry_source = "registry+https://github.com/rust-lang/crates.io-index"
+    D.need(type(locked) is dict and type(locked.get("package")) is list, "Native Cargo lock is invalid")
+    lock_rows = [row for row in locked["package"] if "source" in row]
+    lock = {(row["name"], row["version"]): row for row in lock_rows}
+    D.need(len(lock) == len(lock_rows), "Duplicate native Cargo lock source")
+    for key, row in expected.items():
+        D.need(key in lock and registry[key]["source"] == registry_source
+               and registry[key].get("license") == row["license"] and lock[key]["source"] == registry_source
+               and lock[key].get("checksum") == row["archiveSha256"],
+               "Cargo original notice/checksum correspondence differs")
+    for row in packages:
+        origin = registry_source if row["source"] is not None else "path+" + Path(row["manifest_path"]).parent.as_uri()
+        D.need(row["id"] == origin + "#" + row["name"] + "@" + row["version"],
+               "Native Cargo ID does not identify its exact source")
+    return metadata, by_id, nodes
+
+
+def native_source_notice_inputs(source, admitted, rows):
+    """Bind reviewed archive-member references and maintained local originals."""
+    for crate in admitted["crates"]:
+        for member in crate.get("noticeMembers", []):
+            prefix = crate["name"] + "-" + crate["version"] + "/"
+            path = member["noticePath"]
+            D.need(member["member"].startswith(prefix) and path == "notices/crates/" + member["member"]
+                   and rows.get(path) == {"path": path, "size": member["size"], "sha256": member["sha256"]},
+                   "Native original archive notice member differs")
+    originals = admitted["localSourceNotices"]
+    D.need(type(originals) is list and originals and all(type(row) is dict
+           and set(row) == {"sourcePath", "noticePath"} for row in originals),
+           "Native local source notice roster differs")
+    D.need(len({row["sourcePath"] for row in originals}) == len(originals)
+           and len({row["noticePath"] for row in originals}) == len(originals),
+           "Duplicate native local source notice")
+    inputs = []
+    for row in originals:
+        path = source / D.relative(row["sourcePath"])
+        notice = D.relative(row["noticePath"])
+        D.need(notice in rows, "Native local original notice is missing")
+        D.bound(path, rows[notice])
+        inputs.append({**D.file_record(path, 2 << 20), "path": str(path)})
+    return inputs
+
+
+def native_inputs(check, source, work, environment, cargo, rustc, metadata_raw, *, candidate=False):
     """Standard toolchain/support input provenance, not a linked-object census."""
     notice_source = source / "desktop/packaging/debian/native-notices"
     raw = D.read(notice_source / "inputs.json", 1 << 20)
@@ -1211,21 +1386,14 @@ def native_inputs(check, source, work, environment, cargo, rustc, metadata_raw):
         destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         D.copy(notice_source / name, destination, row, 0o644)
     D.copy(notice_source / "inputs.json", notices / "inputs.json", D.file_record(notice_source / "inputs.json"), 0o644)
-    D.bound(source / "LICENSE", rows["notices/mobile-release-kit/LICENSE"])
-    metadata = C.bounded_json(metadata_raw, LOG_LIMIT)
-    packages = metadata.get("packages")
-    D.need(type(packages) is list and len(packages) == 36, "Native Cargo roster differs")
-    registry = {(p["name"], p["version"]): p for p in packages if p["source"] is not None}
-    expected = {(p["name"], p["version"]): p for p in admitted["crates"]}
-    D.need(set(registry) == set(expected) and len([p for p in packages if p["source"] is None]) == 2,
-           "Native Cargo source versions differ from original notices")
     locked = tomllib.loads(D.read(source / "desktop/src-tauri/Cargo.lock", 256 << 10).decode("utf-8"))
-    lock = {(p["name"], p["version"]): p for p in locked["package"] if "source" in p}
-    inputs = []
-    for key, row in expected.items():
-        D.need(registry[key]["source"] == "registry+https://github.com/rust-lang/crates.io-index"
-               and registry[key]["license"] == row["license"] and lock[key]["checksum"] == row["archiveSha256"],
-               "Cargo original notice/checksum correspondence differs")
+    # Cargo metadata has its own target root. The later compilation command's
+    # private work/target output is a different path, not metadata authority.
+    native_cargo_metadata(metadata_raw, source, source / "desktop/src-tauri/target",
+                          admitted["crates"], locked, candidate=candidate)
+    inputs = native_source_notice_inputs(source, admitted, rows)
+    for row in admitted["crates"]:
+        key = (row["name"], row["version"])
         candidates = list((work / "cargo/registry/cache").glob("*/" + key[0] + "-" + key[1] + ".crate"))
         D.need(len(candidates) == 1, "Native locked crate cache is ambiguous")
         record = D.file_record(candidates[0], 8 << 20)
@@ -2144,69 +2312,7 @@ def shell_cargo_metadata(raw, source, target):
         D.need(type(row.get("features")) is list and all(type(name) is str for name in row["features"])
                and type(row.get("deps")) is list and all(dep.get("pkg") in nodes for dep in row["deps"]),
                "Shell resolved Cargo edge/features differ")
-    # The Linux-filtered graph includes the two maintained SDK sources, not
-    # additional native platforms or arbitrary path/registry replacements.
-    local_paths = {
-        "mobile-release-kit-desktop": ("0.1.0", source / "desktop/src-tauri/Cargo.toml"),
-        "mrk-linux-mount-observation": ("0.1.0", source / "desktop/native/linux-mount-observation/Cargo.toml"),
-        "secret-service": ("5.2.0", source / "desktop/vendor/secret-service-5.2.0/Cargo.toml"),
-        "zbus": ("5.19.0", source / "desktop/vendor/zbus-5.19.0/Cargo.toml"),
-    }
-    local = [row for row in packages if row.get("source") is None]
-    D.need(len(local) == len(local_paths) and {row["name"] for row in local} == set(local_paths)
-           and all((row["version"], row["manifest_path"]) == (local_paths[row["name"]][0], str(local_paths[row["name"]][1]))
-                   for row in local),
-           "Shell Cargo local source roster differs")
-    D.need(all(row["id"] in nodes for row in local), "Shell Cargo active local graph differs")
-    # Other-target helpers remain root dependency declarations, not packages.
-    declarations = roots[0].get("dependencies")
-    D.need(type(declarations) is list
-           and all(type(row) is dict and type(row.get("name")) is str for row in declarations),
-           "Shell Cargo root dependency declarations differ")
-    expected_declarations = [
-        {"name": name, "path": str(source / ("desktop/native/" + directory)), "target": cfg,
-         "source": None, "req": "*", "kind": None, "rename": None, "optional": False,
-         "uses_default_features": True, "features": [], "registry": None}
-        for name, directory, cfg in (
-            ("mrk-linux-mount-observation", "linux-mount-observation",
-             'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))'),
-            ("mrk-macos-installed-native", "macos-installed-native",
-             'cfg(all(target_os = "macos", target_arch = "aarch64"))'),
-            ("mrk-windows-installed-native", "windows-installed-native",
-             'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'),
-        )
-    ]
-    # Cargo retains the other-target dev declaration even in the filtered
-    # Linux graph. It is not an active Windows package or compiler unit.
-    expected_declarations.append({
-        "name": "mrk-windows-installed-native", "path": str(source / "desktop/native/windows-installed-native"),
-        "target": 'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))',
-        "source": None, "req": "*", "kind": "dev", "rename": None, "optional": False,
-        "uses_default_features": True, "features": ["qualification-result"], "registry": None,
-    })
-    for kind, support in ((None, []), ("dev", ["mrk-retrieval-test-support"])):
-        expected_declarations.append({
-            "name": "secret-service", "path": str(source / "desktop/vendor/secret-service-5.2.0"),
-            "target": 'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))',
-            "source": None, "req": "=5.2.0", "kind": kind, "rename": None, "optional": False,
-            "uses_default_features": False, "features": ["rt-tokio-crypto-rust", *support], "registry": None,
-        })
-    # Cargo retains registry declarations for the patched SDK. Both roles must
-    # resolve to the one exact local zbus above; a registry fallback is refused.
-    for kind, support in ((None, []), ("dev", ["mrk-owned-test-support"])):
-        expected_declarations.append({
-            "name": "zbus", "target": 'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))',
-            "source": "registry+https://github.com/rust-lang/crates.io-index", "req": "=5.19.0", "kind": kind,
-            "rename": None, "optional": False, "uses_default_features": False,
-            "features": ["tokio", *support], "registry": None,
-        })
-    local_names = {row["name"] for row in expected_declarations}
-    local_declarations = [row for row in declarations
-                          if row.get("source") is None or "path" in row or row["name"] in local_names]
-    D.need(len(local_declarations) == len(expected_declarations)
-           and sorted(D.canonical(row) for row in local_declarations)
-           == sorted(D.canonical(row) for row in expected_declarations),
-           "Shell Cargo local dependency declarations differ")
+    local_paths = linux_local_cargo_sources(packages, nodes, roots[0], source)
     registry = [row for row in packages if row.get("source") is not None]
     keys = {(row["name"], row["version"]) for row in registry}
     D.need(len(keys) == len(registry) and all(row["name"] not in local_paths
@@ -3088,7 +3194,7 @@ def verify(*, installed_compile=False):
             "--manifest-path", str(source / "desktop/src-tauri/Cargo.toml")], environment, work).stdout
         source_check("acquired")
         check.phase = "native-input-provenance"
-        native = native_inputs(check, source, work, environment, cargo, rustc, metadata_raw)
+        native = native_inputs(check, source, work, environment, cargo, rustc, metadata_raw, candidate=installed_compile)
         environment.update(GITHUB_SHA=sha, MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=C.CONVENTIONAL_SMOKE_INPUTS["manifestSha256"],
                            MRK_BUNDLED_PROTOCOL_SHA256=C.CONVENTIONAL_SMOKE_INPUTS["protocolSha256"])
         originals, exports, export_identities = {}, {}, {}
