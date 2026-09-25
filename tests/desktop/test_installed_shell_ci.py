@@ -72,6 +72,12 @@ def metadata():
              'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'),
         )
     ]
+    packages[0]["dependencies"].append({
+        "name": "mrk-windows-installed-native", "path": "/source/desktop/native/windows-installed-native",
+        "target": 'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))',
+        "source": None, "req": "*", "kind": "dev", "rename": None, "optional": False,
+        "uses_default_features": True, "features": ["qualification-result"], "registry": None,
+    })
     for kind, support in ((None, []), ("dev", ["mrk-retrieval-test-support"])):
         packages[0]["dependencies"].append({
             "name": "secret-service", "path": "/source/desktop/vendor/secret-service-5.2.0",
@@ -552,8 +558,14 @@ class InstalledShellCompilerContracts(unittest.TestCase):
         observer = (root / "tests/installed_shell_observation.rs").read_text()
         production = set(re.findall(r"^(?:pub )?mod ([a-z0-9_]+);$", library, re.MULTILINE))
         observed = set(re.findall(r'^#\[path = "\.\./src/[^"\n]+\.rs"\] mod ([a-z0-9_]+);$', observer, re.MULTILINE))
-        self.assertEqual(production - observed, {"installed_runtime_windows", "runtime_publication"})
+        self.assertEqual(production - observed, {"runtime_publication", "runtime_publication_windows"})
         self.assertEqual(observed - production, set())
+        windows = '#[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]\n'
+        self.assertIn(windows + 'mod installed_runtime_windows;', library)
+        self.assertIn(windows + '#[path = "../src/installed_runtime_windows.rs"] mod installed_runtime_windows;', observer)
+        self.assertEqual(observer.count('mod installed_runtime_windows;'), 1)
+        for publisher in ("runtime_publication", "runtime_publication_windows"):
+            self.assertNotIn('mod ' + publisher + ';', observer)
         guard = '#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]\n'
         self.assertIn(guard + 'mod vault_keyring_linux;', library)
         self.assertIn(guard + '#[path = "../src/vault_keyring_linux.rs"] mod vault_keyring_linux;', observer)
@@ -671,10 +683,13 @@ class InstalledShellCompilerContracts(unittest.TestCase):
         self.assertEqual({row["id"] for row in packages.values() if row["source"] is None}, local_ids)
         self.assertEqual(set(nodes) & (local_ids | {"macos", "windows"}), local_ids)
         declared = packages["root"]["dependencies"]
-        self.assertEqual(len(declared), 7)
+        self.assertEqual(len(declared), 8)
         self.assertEqual({row["name"] for row in declared},
                          {"mrk-linux-mount-observation", "mrk-macos-installed-native", "mrk-windows-installed-native",
                           "secret-service", "zbus"})
+        windows = [row for row in declared if row["name"] == "mrk-windows-installed-native"]
+        self.assertEqual([(row["kind"], row["features"]) for row in windows],
+                         [(None, []), ("dev", ["qualification-result"])])
         # Declaration order and unrelated registry declarations do not change
         # the exact local contract.
         value = metadata()
@@ -737,10 +752,12 @@ class InstalledShellCompilerContracts(unittest.TestCase):
             ("target", None), ("target", 'cfg(target_os = "linux")'), ("target", False),
             ("source", "registry+https://github.com/rust-lang/crates.io-index"),
             ("source", "git+https://unreviewed.invalid/repo"), ("source", False),
-            ("kind", "dev"), ("kind", "build"), ("kind", 0),
+            ("kind", None), ("kind", "dev"), ("kind", "build"), ("kind", 0),
             ("req", "^0.1.0"), ("req", True),
             ("rename", "unreviewed_alias"), ("rename", 0),
             ("registry", "https://unreviewed.invalid/index"), ("registry", False),
+            ("features", []), ("features", ["qualification-result"]),
+            ("features", ["qualification-result", "installed-observation"]),
             ("features", ["installed-observation"]), ("features", {}), ("features", False),
             ("optional", True), ("optional", 0), ("optional", None),
             ("uses_default_features", False), ("uses_default_features", 1), ("uses_default_features", None),

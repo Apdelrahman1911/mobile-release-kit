@@ -2176,6 +2176,14 @@ def shell_cargo_metadata(raw, source, target):
              'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'),
         )
     ]
+    # Cargo retains the other-target dev declaration even in the filtered
+    # Linux graph. It is not an active Windows package or compiler unit.
+    expected_declarations.append({
+        "name": "mrk-windows-installed-native", "path": str(source / "desktop/native/windows-installed-native"),
+        "target": 'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))',
+        "source": None, "req": "*", "kind": "dev", "rename": None, "optional": False,
+        "uses_default_features": True, "features": ["qualification-result"], "registry": None,
+    })
     for kind, support in ((None, []), ("dev", ["mrk-retrieval-test-support"])):
         expected_declarations.append({
             "name": "secret-service", "path": str(source / "desktop/vendor/secret-service-5.2.0"),
