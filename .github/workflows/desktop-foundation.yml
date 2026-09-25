@@ -721,7 +721,7 @@ jobs:
           exit 1
       - name: Prepare the fixed runtime and setup graphs only after positive closed native prerequisites
         id: ui-setup-acquire
-        if: false && (success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-prerequisite-finalize.outcome == 'success' && steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable == 'true')
+        if: success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-prerequisite-finalize.outcome == 'success' && steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable == 'true'
         timeout-minutes: 15
         shell: bash
         env:
@@ -739,7 +739,7 @@ jobs:
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-setup-acquire'
       - name: Compile distinct runtime-only setup and normal publisher; retain the original cheap UI owner
         id: ui-setup-compile
-        if: false && (success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-setup-acquire.outcome == 'success' && steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable == 'true')
+        if: success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-setup-acquire.outcome == 'success' && steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable == 'true'
         timeout-minutes: 12
         shell: bash
         env:
@@ -757,7 +757,7 @@ jobs:
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-setup-compile'
       - name: Bind the runtime-only precheck without claiming an app or GUI build
         id: ui-setup-preflight
-        if: false && (success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-setup-compile.outcome == 'success' && steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable == 'true')
+        if: success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-setup-compile.outcome == 'success' && steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable == 'true'
         timeout-minutes: 2
         shell: bash
         env:
@@ -775,7 +775,7 @@ jobs:
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-setup-preflight'
       - name: Stage the fresh UI runtime input with its distinct runtime-only original
         id: ui-setup-stage
-        if: false && (success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-setup-preflight.outcome == 'success')
+        if: success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-setup-preflight.outcome == 'success'
         timeout-minutes: 4
         shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
         env:
@@ -862,7 +862,7 @@ jobs:
           }
       - name: Validate the closed UI setup stage original as DATA
         id: ui-setup-stage-finalize
-        if: false && (success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-setup-stage.outcome == 'success')
+        if: success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-setup-stage.outcome == 'success'
         timeout-minutes: 2
         shell: bash
         env:
@@ -889,7 +889,7 @@ jobs:
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-setup-stage-finalize'
       - name: Publish once with the fixed normal helper; do not replay producer qualification
         id: ui-setup-publish
-        if: false && (success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-setup-stage-finalize.outcome == 'success')
+        if: success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-setup-stage-finalize.outcome == 'success'
         timeout-minutes: 4
         shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
         env:
@@ -975,7 +975,7 @@ jobs:
           }
       - name: Validate the closed UI setup publish original as DATA
         id: ui-setup-publish-finalize
-        if: false && (success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-setup-publish.outcome == 'success')
+        if: success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-setup-publish.outcome == 'success'
         timeout-minutes: 2
         shell: bash
         env:
@@ -1002,7 +1002,7 @@ jobs:
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-setup-publish-finalize'
       - name: Observe the actually published version and unchanged staged source
         id: ui-setup-publication
-        if: false && (success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-setup-publish-finalize.outcome == 'success')
+        if: success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-setup-publish-finalize.outcome == 'success'
         timeout-minutes: 4
         shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
         env:
@@ -1092,7 +1092,7 @@ jobs:
           }
       - name: Validate the closed UI setup publication original as DATA
         id: ui-setup-publication-finalize
-        if: false && (success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-setup-publication.outcome == 'success')
+        if: success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-setup-publication.outcome == 'success'
         timeout-minutes: 2
         shell: bash
         env:
@@ -1119,13 +1119,13 @@ jobs:
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-setup-publication-finalize'
       - name: Select fixed Node only after the independently observed runtime publication
         id: ui-node
-        if: false && (success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-setup-publication-finalize.outcome == 'success' && steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable == 'true')
+        if: success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-setup-publication-finalize.outcome == 'success' && steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable == 'true'
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '24.20.0'
       - name: Acquire exact normal and observer GUI graphs and hook-free frontend dependencies
         id: ui-gui-acquire
-        if: false && (success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-node.outcome == 'success' && steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable == 'true')
+        if: success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-node.outcome == 'success' && steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable == 'true'
         timeout-minutes: 21
         shell: bash
         env:
@@ -1166,7 +1166,7 @@ jobs:
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-gui-acquire'
       - name: Run inert scalar then build observer and normal last with static loader and singleton provenance
         id: ui-gui-compile
-        if: false && (success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-gui-acquire.outcome == 'success' && steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable == 'true')
+        if: success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-gui-acquire.outcome == 'success' && steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable == 'true'
         timeout-minutes: 42
         shell: bash
         env:
@@ -1207,7 +1207,7 @@ jobs:
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-gui-compile'
       - name: Bind normal-smoke to its exact original compiler and preceding closed ACL epoch
         id: ui-normal-smoke-preflight
-        if: false && (success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-gui-compile.outcome == 'success' && steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable == 'true')
+        if: success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-gui-compile.outcome == 'success' && steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable == 'true'
         timeout-minutes: 2
         shell: bash
         env:
@@ -1248,7 +1248,7 @@ jobs:
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-normal-smoke-preflight'
       - name: Own one normal-smoke application and settle its original ordinary-account resources
         id: ui-normal-smoke-owner
-        if: false && (success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-normal-smoke-preflight.outcome == 'success')
+        if: success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-normal-smoke-preflight.outcome == 'success'
         timeout-minutes: 4
         shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
         env:
@@ -1312,7 +1312,7 @@ jobs:
           }
       - name: Independently finalize normal-smoke only after original owner return and writer closure
         id: ui-normal-smoke-finalize
-        if: false && (success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-normal-smoke-owner.outcome == 'success' && steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable == 'true')
+        if: success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-normal-smoke-owner.outcome == 'success' && steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable == 'true'
         timeout-minutes: 2
         shell: bash
         env:
@@ -1353,7 +1353,7 @@ jobs:
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-normal-smoke-finalize'
       - name: Bind project-draft to its exact original compiler and preceding closed ACL epoch
         id: ui-project-draft-preflight
-        if: false && (success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-normal-smoke-finalize.outcome == 'success' && steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable == 'true')
+        if: success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-normal-smoke-finalize.outcome == 'success' && steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable == 'true'
         timeout-minutes: 2
         shell: bash
         env:
@@ -1394,7 +1394,7 @@ jobs:
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-project-draft-preflight'
       - name: Own one project-draft application and settle its original ordinary-account resources
         id: ui-project-draft-owner
-        if: false && (success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-project-draft-preflight.outcome == 'success')
+        if: success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-project-draft-preflight.outcome == 'success'
         timeout-minutes: 4
         shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
         env:
@@ -1458,7 +1458,7 @@ jobs:
           }
       - name: Independently finalize project-draft only after original owner return and writer closure
         id: ui-project-draft-finalize
-        if: false && (success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-project-draft-owner.outcome == 'success' && steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable == 'true')
+        if: success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-project-draft-owner.outcome == 'success' && steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable == 'true'
         timeout-minutes: 2
         shell: bash
         env:
@@ -1499,7 +1499,7 @@ jobs:
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-project-draft-finalize'
       - name: Bind quit-passive to its exact original compiler and preceding closed ACL epoch
         id: ui-quit-passive-preflight
-        if: false && (success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-project-draft-finalize.outcome == 'success' && steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable == 'true')
+        if: success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-project-draft-finalize.outcome == 'success' && steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable == 'true'
         timeout-minutes: 2
         shell: bash
         env:
@@ -1540,7 +1540,7 @@ jobs:
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-quit-passive-preflight'
       - name: Own one quit-passive application and settle its original ordinary-account resources
         id: ui-quit-passive-owner
-        if: false && (success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-quit-passive-preflight.outcome == 'success')
+        if: success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-quit-passive-preflight.outcome == 'success'
         timeout-minutes: 4
         shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
         env:
@@ -1604,7 +1604,7 @@ jobs:
           }
       - name: Independently finalize quit-passive only after original owner return and writer closure
         id: ui-quit-passive-finalize
-        if: false && (success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-quit-passive-owner.outcome == 'success' && steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable == 'true')
+        if: success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-quit-passive-owner.outcome == 'success' && steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable == 'true'
         timeout-minutes: 2
         shell: bash
         env:
@@ -1645,7 +1645,7 @@ jobs:
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-quit-passive-finalize'
       - name: Bind document-loss to its exact original compiler and preceding closed ACL epoch
         id: ui-document-loss-preflight
-        if: false && (success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-quit-passive-finalize.outcome == 'success' && steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable == 'true')
+        if: success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-quit-passive-finalize.outcome == 'success' && steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable == 'true'
         timeout-minutes: 2
         shell: bash
         env:
@@ -1686,7 +1686,7 @@ jobs:
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-document-loss-preflight'
       - name: Own one document-loss application and settle its original ordinary-account resources
         id: ui-document-loss-owner
-        if: false && (success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-document-loss-preflight.outcome == 'success')
+        if: success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-document-loss-preflight.outcome == 'success'
         timeout-minutes: 4
         shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
         env:
@@ -1750,7 +1750,7 @@ jobs:
           }
       - name: Independently finalize document-loss only after original owner return and writer closure
         id: ui-document-loss-finalize
-        if: false && (success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-document-loss-owner.outcome == 'success' && steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable == 'true')
+        if: success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-document-loss-owner.outcome == 'success' && steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable == 'true'
         timeout-minutes: 2
         shell: bash
         env:

@@ -890,12 +890,6 @@ WINDOWS_FULLWALK_REQUEST_FIELDS = (
 # Additive UI lane: the cheap probe uses the production inspector, but starts no
 # WebView/runtime and carries no historical headless/publication authorization.
 WINDOWS_NORMAL_UI_PROFILE = "windows-normal-project-ui-v1"
-# Source-bound W15 prerequisite diagnostic branch, not a dispatch/input mode.
-# Reopening the setup/runtime/GUI tail requires a distinct focused source review.
-WINDOWS_NORMAL_UI_PREREQUISITE_ONLY = True
-WINDOWS_NORMAL_UI_PREREQUISITE_PHASES = (
-    "acquire", "compile", "windows-normal-ui-prerequisite", "windows-normal-ui-prerequisite-finalize", "retain",
-)
 WINDOWS_NORMAL_UI_DISPATCH = "windows-normal-project-ui"
 WINDOWS_NORMAL_UI_REF = "refs/heads/verify/desktop-windows-normal-project-ui"
 WINDOWS_NORMAL_UI_REQUEST_FIELDS = (*WINDOWS_FULLWALK_REQUEST_FIELDS, "appVersion")
@@ -9269,11 +9263,7 @@ def windows_installed_prepared_profile(context: dict) -> bool:
 
 def windows_normal_ui_profile(context: dict) -> bool:
     windows_installed_prepared_profile(context)
-    selected = context.get("qualificationProfile") == WINDOWS_NORMAL_UI_PROFILE
-    if selected:
-        require(WINDOWS_NORMAL_UI_PREREQUISITE_ONLY is True and context.get("prerequisiteDiagnosticOnly") is True,
-                "Windows UI prerequisite diagnostic source binding differs")
-    return selected
+    return context.get("qualificationProfile") == WINDOWS_NORMAL_UI_PROFILE
 
 
 def windows_normal_ui_features(role: str) -> list[str]:
@@ -11008,7 +10998,6 @@ def windows_installed_binding() -> dict:
         binding["qualificationProfile"] = WINDOWS_INSTALLED_PASSIVE_PROFILE
     elif event == "workflow_dispatch" and dispatch == WINDOWS_NORMAL_UI_DISPATCH:
         binding["qualificationProfile"] = WINDOWS_NORMAL_UI_PROFILE
-        binding["prerequisiteDiagnosticOnly"] = True
     return binding
 
 
@@ -12506,8 +12495,7 @@ def windows_installed_phase_receipt(context: dict, phase: str, **facts) -> dict:
             "sourceSha": context["sourceSha"], "sourceTree": context["sourceTree"],
             "runId": context["runId"], "attempt": 1,
             **({"qualificationProfile": context["qualificationProfile"]}
-               if windows_installed_prepared_profile(context) or windows_normal_ui_profile(context) else {}), **facts,
-            **({"prerequisiteDiagnosticOnly": True} if windows_normal_ui_profile(context) else {})}
+               if windows_installed_prepared_profile(context) or windows_normal_ui_profile(context) else {}), **facts}
 
 
 def windows_installed_libtest(raw: bytes, names: tuple[str, ...], filtered: int, *, native: bool = False) -> dict | None:
@@ -12968,7 +12956,7 @@ def windows_normal_ui_prerequisite_log_data(raw: bytes, *, binding: dict, run: d
                 and all(type(item) is dict and type(item.get("id")) is int and item["id"] > 0 for item in jobs["jobs"])
                 and len({item["id"] for item in jobs["jobs"]}) == len(jobs["jobs"]),
                 "Windows prerequisite original jobs metadata is partial")
-        selected = [job for job in jobs["jobs"] if type(job) is dict and job.get("name") == "windows-installed-native"]
+        selected = [job for job in jobs["jobs"] if type(job) is dict and job.get("name") == "Windows MSVC headless reader and native facts / no runtime enablement"]
         require(len(selected) == 1, "Windows prerequisite original job is absent/duplicated")
         job = selected[0]
         require(type(job.get("id")) is int and job["id"] == binding["jobId"]
@@ -14573,8 +14561,7 @@ def windows_normal_ui_setup_inputs(context: dict, probe: dict) -> dict:
     """Separate fixed setup admission; never alter the original UI context."""
     root = Path(context["root"])
     value = closed_object(read_bounded_json(root / "normal-ui-setup-inputs.private.json", 64 << 10),
-        {"scope", "phase", "status", "sourceSha", "sourceTree", "runId", "attempt", "qualificationProfile",
-         "prerequisiteDiagnosticOnly", "retainedProbe", "inputs"},
+        {"scope", "phase", "status", "sourceSha", "sourceTree", "runId", "attempt", "qualificationProfile", "retainedProbe", "inputs"},
         "Windows UI setup original input admission fields differ")
     inputs = closed_object(value["inputs"], {"pins", "curl"}, "Windows UI setup supplier fields differ")
     system_root = os.environ.get("SystemRoot", "")
@@ -15260,7 +15247,7 @@ def windows_normal_ui_auxiliary(context: dict, *, recheck_original: bool, create
     if not create:
         saved = closed_object(read_bounded_json(receipt, 64 << 10),
             {"scope", "phase", "status", "qualificationProfile", "sourceSha", "sourceTree", "runId", "attempt",
-             "prerequisiteDiagnosticOnly", "role", "messages", "invocationSha256", "original", "launchAuthority"}, "Windows GUI auxiliary receipt fields differ")
+             "role", "messages", "invocationSha256", "original", "launchAuthority"}, "Windows GUI auxiliary receipt fields differ")
         if not recheck_original:
             original = saved["original"]
     if original is not None:
@@ -15560,7 +15547,7 @@ def windows_normal_ui_case_finalize(context: dict, role: str) -> None:
 
 def windows_normal_ui_retain(context: dict) -> None:
     """Bounded public projection after success/failure; no repair or process action."""
-    require(windows_normal_ui_profile(context), "Windows UI prerequisite diagnostic retention binding differs")
+    require(windows_normal_ui_profile(context), "Windows UI retention profile binding differs")
     root = Path(context["root"])
     result = {"status": "unavailable", "facts": None}
     if os.environ.get("MRK_WINDOWS_UI_PREREQUISITE_FINALIZE_STEP_OUTCOME") == "success":
@@ -15576,17 +15563,40 @@ def windows_normal_ui_retain(context: dict) -> None:
         compile_raw = windows_installed_bytes(root / "compile-messages.jsonl", 16 << 20)
     except (OSError, ValueError, CheckFailure):
         compile_raw = None
-    # No downstream original is read or counted, even if its step outcome is
-    # forged as success. This source is not full Windows UI qualification.
     setup = {"status": "unavailable", "facts": None}
+    for through in ("publication", "publish", "stage"):
+        if os.environ.get("MRK_WINDOWS_UI_SETUP_" + through.upper() + "_FINALIZE_STEP_OUTCOME") == "success":
+            try:
+                facts, _, _ = windows_normal_ui_setup_evidence(context, through, finalized=True)
+                setup = {"status": "observed", "facts": facts}
+            except (OSError, ValueError, CheckFailure, KeyError, TypeError):
+                setup = {"status": "invalid", "facts": None}
+            break  # A bad later original is never downgraded into an earlier success.
     gui, cases = {"status": "unavailable", "facts": None}, []
+    for role in reversed(WINDOWS_NORMAL_UI_GUI_ROLES):
+        if os.environ.get("MRK_WINDOWS_UI_" + role.upper().replace("-", "_") + "_FINALIZE_STEP_OUTCOME") == "success":
+            try:
+                compiled, verified, _ = windows_normal_ui_case_chain(context, role, finalized=True)
+                cases = [{key: item[key] for key in ("role", "verifiedMethods", "observation", "evidence", "originalOwner")}
+                         for item in verified]
+                gui = {"status": "observed", "facts": {"originalCompile": compiled["receipt"],
+                    "normalArtifact": {key: compiled["normalApp"][key] for key in ("size", "sha256", "messages")},
+                    "observerArtifact": {key: compiled["observer"][key] for key in ("size", "sha256", "messages")},
+                    "compilerObservations": compiled["compilerObservations"], "normalFeatures": compiled["normalFeatures"],
+                    "observerFeatures": compiled["observerFeatures"], "compileOrder": compiled["compileOrder"]}}
+            except (OSError, ValueError, CheckFailure, KeyError, TypeError):
+                gui = {"status": "invalid", "facts": None}
+            break  # A failed later original is not relabeled as an earlier success.
+    complete = len(cases) == len(WINDOWS_NORMAL_UI_GUI_ROLES)
+    verified_names = dict(zip(WINDOWS_NORMAL_UI_GUI_ROLES, WINDOWS_NORMAL_UI_NOT_VERIFIED[:4], strict=True))
+    completed = {verified_names[item["role"]] for item in cases}
     summary = {"schemaVersion": 1, "scope": WINDOWS_NORMAL_UI_PROFILE,
         **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt", "imageOS", "imageVersion")},
         "rust": RUST, "target": TARGETS["windows"], "nativeFeatures": ["desktop-ui"], "prerequisite": result,
-        "prerequisiteDiagnosticOnly": True, "combinedPassed": False, "verifiedMethods": 0,
-        "guiCasesExecuted": 0, "runtimeSetup": setup, "guiCompilation": gui, "guiCases": cases,
+        "combinedPassed": complete, "verifiedMethods": sum(item["verifiedMethods"] for item in cases),
+        "guiCasesExecuted": len(cases), "runtimeSetup": setup, "guiCompilation": gui, "guiCases": cases,
         "compileDiagnostic": windows_installed_compile_failure_data(compile_raw, context, "standalone"),
-        "notVerified": list(WINDOWS_NORMAL_UI_NOT_VERIFIED)}
+        "notVerified": [name for name in WINDOWS_NORMAL_UI_NOT_VERIFIED if name not in completed]}
     # Never publish raw native accounts/SIDs/paths/ACLs, compiler text, or a
     # pre-close child/owner file. Existing public-bindings contains source DATA.
     windows_fullwalk_write(root / "public/windows-normal-project-ui.json", canonical_json(summary), 64 << 10)
@@ -15596,8 +15606,6 @@ def windows_normal_ui_phase(name: str, context: dict, deadline: float) -> None:
     """Explicit UI stages. The historical raw app path is never a fallback."""
     require(windows_normal_ui_profile(context) and name in ("acquire", "compile", "windows-normal-ui-prerequisite",
         *WINDOWS_NORMAL_UI_DATA_PHASES, *WINDOWS_NORMAL_UI_SETUP_BUILD_PHASES, *WINDOWS_NORMAL_UI_GUI_BUILD_PHASES, "retain"), "Windows normal UI phase is unavailable in this profile")
-    require(WINDOWS_NORMAL_UI_PREREQUISITE_ONLY is True and name in WINDOWS_NORMAL_UI_PREREQUISITE_PHASES,
-            "Windows UI prerequisite-only source forbids runtime/setup/GUI phases")
     root, source = Path(context["root"]), Path(context["source"])
     if name in WINDOWS_NORMAL_UI_GUI_BUILD_PHASES:
         windows_normal_ui_gui_build(name, context, deadline)
