@@ -1431,13 +1431,19 @@ impl Smoke {
         self.trace.phase.get() == SmokePhase::MainBinding && self.main.is_none()
             && self.trace.first.get().is_none() && !self.unknown && !self.settled
     }
+    fn initial_main_timeout_status(status: i32) -> bool {
+        // Only a completed, returned-NULL initial main lookup may consume
+        // either documented timeout representation. This is not a COM retry policy.
+        status == A::UIA_E_TIMEOUT as i32
+            || status == windows::core::HRESULT::from_win32(F::ERROR_TIMEOUT).0
+    }
     fn retire_initial_main_tail(&mut self, index: usize) -> Result<()> {
         self.trace.need(SmokeCheck::InitialMainTail, self.initial_main_admitted()
             && index.checked_add(1) == Some(self.originals.len())
             && self.client.is_none_or(|original| original < index) && self.walker.is_none_or(|original| original < index)
             && self.originals.get(index).is_some_and(|original| original.kind == ComKind::Element
                 && original.state == SlotState::NoHandle && !original.active && original.pointer.is_null()
-                && original.status == A::UIA_E_TIMEOUT as i32))?;
+                && Self::initial_main_timeout_status(original.status)))?;
         // Only this completed, returned-NULL tail has no reference to release.
         // Existing accounting must accept it before its storage is discarded.
         self.release_suffix(index)
@@ -1449,7 +1455,7 @@ impl Smoke {
         let acquiring = original.kind == ComKind::Element && original.state == SlotState::Acquiring && original.active;
         let result = original.returned(status, false);
         self.unknown |= matches!(result, Err(Error::Unknown));
-        let pending = admitted && acquiring && result == Err(Error::Unsafe) && status == A::UIA_E_TIMEOUT as i32
+        let pending = admitted && acquiring && result == Err(Error::Unsafe) && Self::initial_main_timeout_status(status)
             && original.state == SlotState::NoHandle && !original.active && original.pointer.is_null();
         let result = if pending {
             // Record this observed timeout BEFORE a possible post-call clock
@@ -3122,11 +3128,13 @@ mod contract_tests {
             assert!(original.begin().is_ok()); original.pointer = pointer as *mut c_void; index
         }
         let timeout = A::UIA_E_TIMEOUT as i32; assert_eq!(timeout as u32, 0x80131505);
+        let win32_timeout = windows::core::HRESULT::from_win32(F::ERROR_TIMEOUT).0;
+        assert_eq!(win32_timeout as u32, 0x800705b4);
         let mut smoke = fixture(); let calls = Cell::new(0);
         let prefix = [&*smoke.originals[0] as *const ComOriginal, &*smoke.originals[1] as *const ComOriginal];
-        for count in 1..=2 {
+        for (count, status) in [(1, timeout), (2, win32_timeout)] {
             let index = begin(&mut smoke, 0);
-            assert_eq!(smoke.complete_initial_main(index, timeout, || { calls.set(calls.get() + 1); Ok(()) }), Ok(None));
+            assert_eq!(smoke.complete_initial_main(index, status, || { calls.set(calls.get() + 1); Ok(()) }), Ok(None));
             assert_eq!(smoke.originals.len(), 2); assert_eq!(smoke.trace.main_binding_timeouts.get(), count);
             assert_eq!([&*smoke.originals[0] as *const ComOriginal, &*smoke.originals[1] as *const ComOriginal], prefix);
             assert!(smoke.trace.first.get().is_none() && smoke.main.is_none() && !smoke.dashboard_ready);
@@ -3142,7 +3150,9 @@ mod contract_tests {
 
         for (status, pointer, expected, state, active) in [
             (0x80004005u32 as i32, 0, Error::Unsafe, SlotState::NoHandle, false),
+            (F::ERROR_TIMEOUT as i32, 0, Error::Unsafe, SlotState::NoHandle, false),
             (timeout, 1, Error::Unknown, SlotState::Unknown, true),
+            (win32_timeout, 1, Error::Unknown, SlotState::Unknown, true),
             (HRESULT_PENDING, 0, Error::Unknown, SlotState::Unknown, true),
             (0, 0, Error::Unsafe, SlotState::NoHandle, false),
             (1, 0, Error::Unsafe, SlotState::NoHandle, false),
@@ -3156,41 +3166,45 @@ mod contract_tests {
             let fault = smoke.trace.first.get().unwrap(); assert_eq!(fault.check, SmokeCheck::ElementFromWindow);
             assert_eq!(fault.status, Some(SmokeStatus::Hresult(status))); assert_eq!(fault.main_binding_timeouts, Some(0));
         }
-        for denied in 0..8 {
-            let mut smoke = fixture(); let index = begin(&mut smoke, 0);
-            match denied {
-                0 => smoke.trace.phase.set(SmokePhase::Dashboard),
-                1 => smoke.trace.phase.set(SmokePhase::QuitDialog),
-                2 => smoke.trace.phase.set(SmokePhase::QuitInvoke),
-                3 => smoke.main = Some((1usize as F::HWND, 0, vec![1])),
-                4 => smoke.unknown = true,
-                5 => smoke.settled = true,
-                6 => { let _ = smoke.trace.result::<()>(SmokeCheck::Clock, Err(Error::Unsafe), None); },
-                7 => smoke.originals[index].kind = ComKind::Walker,
-                _ => unreachable!(),
+        for timeout in [timeout, win32_timeout] {
+            for denied in 0..8 {
+                let mut smoke = fixture(); let index = begin(&mut smoke, 0);
+                match denied {
+                    0 => smoke.trace.phase.set(SmokePhase::Dashboard),
+                    1 => smoke.trace.phase.set(SmokePhase::QuitDialog),
+                    2 => smoke.trace.phase.set(SmokePhase::QuitInvoke),
+                    3 => smoke.main = Some((1usize as F::HWND, 0, vec![1])),
+                    4 => smoke.unknown = true,
+                    5 => smoke.settled = true,
+                    6 => { let _ = smoke.trace.result::<()>(SmokeCheck::Clock, Err(Error::Unsafe), None); },
+                    7 => smoke.originals[index].kind = ComKind::Walker,
+                    _ => unreachable!(),
+                }
+                let prior = smoke.trace.first.get(); let calls = Cell::new(0);
+                assert_eq!(smoke.complete_initial_main(index, timeout, || { calls.set(calls.get() + 1); Ok(()) }), Err(Error::Unsafe));
+                assert_eq!(calls.get(), 1); assert_eq!(smoke.trace.main_binding_timeouts.get(), 0);
+                assert_eq!(smoke.originals.len(), 3); if prior.is_some() { assert_eq!(smoke.trace.first.get(), prior); }
             }
-            let prior = smoke.trace.first.get(); let calls = Cell::new(0);
-            assert_eq!(smoke.complete_initial_main(index, timeout, || { calls.set(calls.get() + 1); Ok(()) }), Err(Error::Unsafe));
-            assert_eq!(calls.get(), 1); assert_eq!(smoke.trace.main_binding_timeouts.get(), 0);
-            assert_eq!(smoke.originals.len(), 3); if prior.is_some() { assert_eq!(smoke.trace.first.get(), prior); }
+            let mut not_begun = fixture(); not_begun.originals.push(Box::new(ComOriginal::new(ComKind::Element)));
+            assert_eq!(not_begun.complete_initial_main(2, timeout, || Ok(())), Err(Error::Unsafe));
+            assert_eq!(not_begun.trace.main_binding_timeouts.get(), 0);
         }
-        let mut not_begun = fixture(); not_begun.originals.push(Box::new(ComOriginal::new(ComKind::Element)));
-        assert_eq!(not_begun.complete_initial_main(2, timeout, || Ok(())), Err(Error::Unsafe));
-        assert_eq!(not_begun.trace.main_binding_timeouts.get(), 0);
 
         // The completed pending observation is counted before a refusing clock;
         // no tail is discarded on that error and a later fault cannot rewrite it.
-        let mut late = fixture(); let index = begin(&mut late, 0); let calls = Cell::new(0);
-        assert_eq!(late.complete_initial_main(index, timeout, || { calls.set(calls.get() + 1); Err(Error::Unsafe) }), Err(Error::Unsafe));
-        assert_eq!(calls.get(), 1); assert_eq!(late.originals.len(), 3);
-        assert_eq!(late.originals[index].state, SlotState::NoHandle);
-        let first = late.trace.first.get().unwrap(); assert_eq!(first.check, SmokeCheck::Clock);
-        assert_eq!(first.status, None); assert_eq!(first.main_binding_timeouts, Some(1));
-        late.trace.main_binding_timeouts.set(9); late.trace.phase.set(SmokePhase::DriverSettle);
-        let _ = late.trace.result::<()>(SmokeCheck::ComRelease, Err(Error::Unknown), None);
-        assert_eq!(late.trace.first.get(), Some(first)); let mut output = Vec::new(); late.trace.emit_to(&mut output).unwrap();
-        assert!(std::str::from_utf8(&output).unwrap().contains("\"mainBindingTimeouts\":1"));
-        assert_eq!(late.trace.emit_to(&mut Vec::new()).unwrap(), None);
+        for timeout in [timeout, win32_timeout] {
+            let mut late = fixture(); let index = begin(&mut late, 0); let calls = Cell::new(0);
+            assert_eq!(late.complete_initial_main(index, timeout, || { calls.set(calls.get() + 1); Err(Error::Unsafe) }), Err(Error::Unsafe));
+            assert_eq!(calls.get(), 1); assert_eq!(late.originals.len(), 3);
+            assert_eq!(late.originals[index].state, SlotState::NoHandle);
+            let first = late.trace.first.get().unwrap(); assert_eq!(first.check, SmokeCheck::Clock);
+            assert_eq!(first.status, None); assert_eq!(first.main_binding_timeouts, Some(1));
+            late.trace.main_binding_timeouts.set(9); late.trace.phase.set(SmokePhase::DriverSettle);
+            let _ = late.trace.result::<()>(SmokeCheck::ComRelease, Err(Error::Unknown), None);
+            assert_eq!(late.trace.first.get(), Some(first)); let mut output = Vec::new(); late.trace.emit_to(&mut output).unwrap();
+            assert!(std::str::from_utf8(&output).unwrap().contains("\"mainBindingTimeouts\":1"));
+            assert_eq!(late.trace.emit_to(&mut Vec::new()).unwrap(), None);
+        }
         for (status, pointer, expected_state, expected_first) in [
             (0, 1, SlotState::Owned, SmokeCheck::Clock),
             (HRESULT_PENDING, 0, SlotState::Unknown, SmokeCheck::ElementFromWindow),
@@ -3202,11 +3216,13 @@ mod contract_tests {
             assert_eq!(smoke.trace.main_binding_timeouts.get(), 0); assert!(smoke.main.is_none() && !smoke.passed());
         }
 
-        let mut exhausted = fixture(); let index = begin(&mut exhausted, 0);
-        assert_eq!(exhausted.complete_initial_main(index, timeout, || Ok(())), Ok(None));
-        assert_eq!(exhausted.trace.admit_com(false, false, exhausted.originals.len(), || Ok(1000)), Err(Error::Unsafe));
-        let fault = exhausted.trace.first.get().unwrap(); assert_eq!(fault.check, SmokeCheck::ComReserveBudget);
-        assert_eq!(fault.main_binding_timeouts, Some(1)); assert!(!exhausted.initial_main_admitted());
+        for timeout in [timeout, win32_timeout] {
+            let mut exhausted = fixture(); let index = begin(&mut exhausted, 0);
+            assert_eq!(exhausted.complete_initial_main(index, timeout, || Ok(())), Ok(None));
+            assert_eq!(exhausted.trace.admit_com(false, false, exhausted.originals.len(), || Ok(1000)), Err(Error::Unsafe));
+            let fault = exhausted.trace.first.get().unwrap(); assert_eq!(fault.check, SmokeCheck::ComReserveBudget);
+            assert_eq!(fault.main_binding_timeouts, Some(1)); assert!(!exhausted.initial_main_admitted());
+        }
 
         let mut overflow = fixture(); overflow.trace.main_binding_timeouts.set(u16::MAX);
         let index = begin(&mut overflow, 0); let calls = Cell::new(0);
@@ -3218,7 +3234,7 @@ mod contract_tests {
         let size = SmokeTrace::format(fault, &mut raw).unwrap(); assert!(size <= 512);
         assert!(std::str::from_utf8(&raw[..size]).unwrap().contains("\"mainBindingTimeouts\":65535"));
 
-        for denied in 0..4 {
+        for denied in 0..6 {
             let mut smoke = fixture(); let index = begin(&mut smoke, 0);
             assert_eq!(smoke.originals[index].returned(timeout, false), Err(Error::Unsafe));
             let retire = match denied {
@@ -3226,6 +3242,8 @@ mod contract_tests {
                 1 => { smoke.originals.push(Box::new(ComOriginal::new(ComKind::Element))); index },
                 2 => { smoke.originals[index].active = true; index },
                 3 => { smoke.originals[index].state = SlotState::Owned; smoke.originals[index].pointer = 1usize as *mut c_void; index },
+                4 => { smoke.originals[index].status = F::ERROR_TIMEOUT as i32; index },
+                5 => { smoke.originals[index].status = 0x80004005u32 as i32; index },
                 _ => unreachable!(),
             };
             let count = smoke.originals.len(); assert_eq!(smoke.retire_initial_main_tail(retire), Err(Error::Unsafe));
